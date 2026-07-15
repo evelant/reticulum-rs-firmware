@@ -17,7 +17,7 @@ The full product is plausible, but no examined repository is a drop-in firmware 
 
 The broader Rust survey changes the recommended path:
 
-1. Adopt [`rete`](https://github.com/s-retlaw/rete) as the provisional **RNS** foundation and retain Leviculum as an independent protocol oracle and fallback. `rete-core`, `rete-transport`, `rete-stack`, and `rete-lxmf-core` pass a generic bare-metal check; 391 focused host tests pass; and its current ESP32-S3/SX1262/Wi-Fi example compiles with the installed ESP toolchain. It is pre-release, its checked-in Python peer predates Reticulum 1.3.8, and its Resource and failure paths need bounded-memory and backpressure hardening before production acceptance. Leviculum remains available for targeted differential tests and as the alternative if Rete meets an explicit ADR 0002 abandonment criterion.
+1. Adopt [`rete`](https://github.com/s-retlaw/rete) as the provisional **RNS** foundation and retain Leviculum as an independent protocol oracle and fallback. At the reviewed upstream selection snapshot, `rete-core`, `rete-transport`, `rete-stack`, and `rete-lxmf-core` passed a generic bare-metal check, 391 focused host tests passed, and the then-current ESP32-S3/SX1262/Wi-Fi example compiled with the installed ESP toolchain. It is pre-release, its checked-in Python peer predates Reticulum 1.3.8, and its Resource and failure paths need bounded-memory and backpressure hardening before production acceptance. Leviculum remains available for targeted differential tests and as the alternative if Rete meets an explicit ADR 0002 abandonment criterion.
 2. Reuse existing LXMF work instead of starting from an empty crate. `LXMF-rs` contains directly useful constants, announce codecs, message packing/signing, delivery selection, propagation envelopes, paper messages, fixtures, and state semantics. Its full feature graph and runtime are not directly embeddable, so extract/refactor protocol pieces behind an RNS identity adapter rather than importing its Tokio/SQLite runtime. Do **not** use `rete-lxmf-core` as the compatibility authority in its present form: despite compiling `no_std`, it currently uses 2-byte stamps/tickets where current LXMF uses 32-byte stamps and 16-byte tickets, and its `u8 -> bytes` field model cannot preserve arbitrary MessagePack values. `rsLXMF` is the most complete AGPL propagation/router reference found, while `precursor-lxmfchat` is the closest embedded Rust precedent for a combined LXMF, NomadNet and Micron client.
 3. Make two infrastructure roles first-class: Reticulum transport forwarding and an LXMF propagation node. Both are configurable and quota-bound, but neither is defined out of the product merely because the initial board is constrained. An infrastructure profile remains in LoRa receive and processes/forwards traffic whenever the device is powered; only an explicitly selected leaf/standby state opts out and reports that loss of reachability.
 4. Treat onboard LXMF conversation UI, NomadNet browsing, a SPA, and a native mobile app as optional capability modules. They make the device turnkey, but the node is useful without them and constrained builds may omit them.
@@ -59,7 +59,7 @@ The local repositories were inspected at these revisions. These are moving proje
 
 | Reference | Snapshot | License | Useful material | Verdict |
 | --- | ---: | --- | --- | --- |
-| `reference/rete` | `9bcb7d3e` | MIT OR Apache-2.0 declared in Cargo/README; license texts absent | Runtime-agnostic `no_std` RNS, bounded transport storage, RNode LoRa interface, compiling Embassy ESP32-S3/SX1262/Wi-Fi example, and useful LXMF structure | Provisional RNS foundation; pre-release, Resource is whole-buffered and current LXMF is wire-incompatible; missing canonical license files are notice/provenance hygiene, not an evaluation blocker |
+| `reference/rete` | `beb84c3` integration fork, based on `9bcb7d3e` | MIT OR Apache-2.0 declared in Cargo/README; license texts absent | Runtime-agnostic `no_std` RNS, bounded transport storage, RNode LoRa interface, compiling Embassy ESP32-S3/SX1262/Wi-Fi example, plus canonical local LINKREQUEST validation and transactional owned-Link admission | Provisional RNS foundation; pre-release, Resource is whole-buffered, relay admission remains non-transactional and current LXMF is wire-incompatible; missing canonical license files are notice/provenance hygiene, not an evaluation blocker |
 | `reference/leviculum` | `5fb1db0` | AGPL-3.0-or-later | Complete sans-I/O RNS core, strong tests, RNode framing, nRF Embassy firmware, current Micron parser and substantial NomadNet client | Independent RNS oracle and fallback; no LXMF |
 | `reference/LXMF` | `fab12ad9` | accepted Reticulum License | Current authoritative Python LXMF behavior, router, propagation node and fixtures | Primary pinned compatibility peer; source may also be reused when useful with its conditions/notices preserved |
 | `reference/LXMF-rs` | `0859680` | EPL-2.0 | Broad LXMF/RNS behavior, wire formats, parity fixtures, announce codecs, paper messages, stamps/tickets, router semantics | Approved direct-reuse source for the EPL product path; several wire/state modules are extractable, while the full runtime still needs a substantial bare-metal refactor |
@@ -97,7 +97,7 @@ Claims in READMEs were not treated as proof of embedded portability.
 | Check | Result | Meaning |
 | --- | --- | --- |
 | `rete-core`, `rete-transport`, `rete-stack`, and `rete-lxmf-core`, no defaults, `thumbv6m-none-eabi` | Pass | The layers are genuinely bare-metal buildable; compilation does not cure the LXMF correctness gaps documented below |
-| Focused `rete` core/transport/LXMF host suites | 391 pass | Good local confidence in wire, crypto, forwarding, link/resource, and LXMF codec behavior; not a complete Python/RF conformance claim |
+| Focused `rete` core/transport/LXMF host suites at the reviewed upstream snapshot | 391 pass | Historical selection evidence for wire, crypto, forwarding, link/resource, and LXMF codec behavior; the product pin has its own continuously rerun suites and this is not a complete Python/RF conformance claim |
 | `reference/rete/examples/esp32s3`: `cargo +esp check --release` | Pass with warnings | Current bare-metal ESP32-S3/SX1262/Wi-Fi integration compiles with the installed ESP toolchain; it targets Heltec WiFi LoRa 32 V3/V4 pins, not the Tracker BSP |
 | Precursor `reticulum-core`/`lxmf` host suites; `micron` host suite | 70 pass; 17 pass | Strong embedded-client interop and hostile-input evidence, including real Nomad/Micron fixtures; the Xous crates still use `std` and are not a bare-metal dependency as-is |
 | `foxhole-micron` host suite | 24 pass | Focused confirmation of links, fields, colors, sections, literal/comment handling and control-character sanitisation; it remains a ratatui/`std` comparison parser |
@@ -136,6 +136,12 @@ The [Reticulum protocol was dedicated to the public domain](https://reticulum.ne
 
 `rete` is the strongest missed embedded RNS candidate. Its layering closely matches this design: `rete-core` is `no_std`/no-alloc packet and crypto code, `rete-transport` is a sans-I/O `no_std + alloc` state machine with fixed-capacity embedded storage types, `rete-stack` provides runtime-neutral interfaces, and `rete-embassy` supplies the executor integration. Its LoRa adapter implements RNode-compatible 254-byte splitting and CSMA over `lora-phy`. The ESP32-S3 example drives an SX1262 directly, enables Reticulum transport, creates a Wi-Fi AP/HTTP service, persists configuration, and compiled successfully in this environment.
 
+The current product pin composes two focused fixes based directly on the
+reviewed upstream revision: canonical direct/local LINKREQUEST validation in
+[draft PR 7](https://github.com/s-retlaw/rete/pull/7) and transactional owned-Link
+admission in [draft PR 9](https://github.com/s-retlaw/rete/pull/9). They do not
+change Reticulum wire bytes or include the still-open relay-table work.
+
 This is evidence for choosing it as the RNS phase-0 leader, not a production declaration:
 
 - The repository calls itself pre-release, has no releases, and the reviewed snapshot has no `LICENSE`/`LICENSE-APACHE`/`LICENSE-MIT` files even though Cargo and the README declare `MIT OR Apache-2.0`. Record that declaration and include canonical MIT/Apache texts in third-party notices when vendoring; an upstream license-file commit would improve provenance but is not a technical-selection gate.
@@ -147,8 +153,9 @@ Rete now sits behind the owning `EmbeddedNode` boundary in `crates/rns-rete`.
 The raw `NodeCore` and mutable transport do not escape into firmware. The
 adapter caps base-profile ingress at 500 bytes, resolves source-relative
 routing while the source interface is known, quotas additional destinations,
-preflights owned Links and receipt tables, and exposes allocation-free numeric
-metrics. It deliberately rejects Resource contexts and relayed LINKREQUESTs
+preflights product quotas for owned Links and receipt tables, and exposes
+allocation-free numeric metrics. Native owned-Link admission is now also
+transactional. The adapter deliberately rejects Resource contexts and relayed LINKREQUESTs
 until Rete has bounded Resource handling and transactional relay-table
 admission. These are temporary capability gates recorded in the
 [upstream hardening backlog](rete-upstream-backlog.md), not reductions of the

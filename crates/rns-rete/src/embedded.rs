@@ -290,6 +290,7 @@ pub struct AdmissionCounters {
     pub announce_queue_full: u64,
     pub announce_native_rejected: u64,
     pub outbound_link_full: u64,
+    pub outbound_link_collision: u64,
     pub outbound_link_not_retained: u64,
     pub receipt_table_full: u64,
     pub channel_receipt_table_full: u64,
@@ -680,7 +681,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
     }
 
     fn preflight_link_request(
-        &self,
+        &mut self,
         packet: &Packet<'_>,
         raw: &[u8],
     ) -> Result<Option<LinkId>, IngressDropReason> {
@@ -735,6 +736,12 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         let link_id = rete_transport::compute_link_id(raw).map_err(IngressDropReason::Malformed)?;
         let is_existing = self.core.transport.get_link(&link_id).is_some();
         if !is_existing && self.core.transport.link_count() >= LINKS {
+            // Preserve Rete/Python packet-filter semantics without performing
+            // responder ECDH on a saturated node. Once capacity is available,
+            // an exact replay will be rejected by native ingest while a fresh
+            // LINKREQUEST with new ephemeral material can proceed.
+            let packet_hash = packet.compute_hash();
+            let _ = self.core.transport.is_duplicate(&packet_hash);
             return Err(IngressDropReason::OwnedLinkTableFull { limit: LINKS });
         }
         Ok(Some(link_id))
@@ -934,6 +941,10 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                     LinkAdmissionError::LinkTableFull { .. } => {
                         self.admission.outbound_link_full =
                             self.admission.outbound_link_full.saturating_add(1);
+                    }
+                    LinkAdmissionError::LinkIdCollision => {
+                        self.admission.outbound_link_collision =
+                            self.admission.outbound_link_collision.saturating_add(1);
                     }
                     LinkAdmissionError::LinkStateNotRetained => {
                         self.admission.outbound_link_not_retained =
@@ -1274,6 +1285,7 @@ mod tests {
         let responder_identity = identity(9);
         let destination = responder.destination_hash();
         let mut rng = CounterRng::default();
+        let mut first_link_id = None;
         for (tag, now) in [(10, 1), (11, 2)] {
             let mut initiator = TwoLinkNode::new(
                 identity(tag),
@@ -1285,7 +1297,8 @@ mod tests {
             initiator
                 .register_peer(&responder_identity, "reticulum", &["embedded"], 0)
                 .unwrap();
-            let (request, _) = initiator.initiate_link(destination, now, &mut rng).unwrap();
+            let (request, link_id) = initiator.initiate_link(destination, now, &mut rng).unwrap();
+            first_link_id.get_or_insert(link_id);
             let result = responder.ingest(&request.bytes, now, InterfaceId(now as u8), &mut rng);
             assert_eq!(result.disposition, IngressDisposition::Processed);
         }
@@ -1300,7 +1313,10 @@ mod tests {
         overflow
             .register_peer(&responder_identity, "reticulum", &["embedded"], 0)
             .unwrap();
-        let (overflow_request, _) = overflow.initiate_link(destination, 3, &mut rng).unwrap();
+        let (overflow_request, overflow_link_id) =
+            overflow.initiate_link(destination, 3, &mut rng).unwrap();
+        let rng_before_rejection = rng.0;
+        let received_before_rejection = responder.metrics().transport.packets_received;
         let overflow_result =
             responder.ingest(&overflow_request.bytes, 3, InterfaceId(3), &mut rng);
         assert_eq!(
@@ -1309,6 +1325,30 @@ mod tests {
         );
         assert!(overflow_result.actions.events.is_empty());
         assert!(overflow_result.actions.packets.is_empty());
+        let rejected_metrics = responder.metrics();
+        assert_eq!(rng.0, rng_before_rejection);
+        assert_eq!(
+            rejected_metrics.transport.packets_received,
+            received_before_rejection
+        );
+        assert_eq!(rejected_metrics.ingress.owned_link_full, 1);
+        assert_eq!(rejected_metrics.capacity.links.used, 2);
+
+        responder.close_link(&first_link_id.unwrap(), &mut rng);
+        assert_eq!(responder.metrics().capacity.links.used, 1);
+
+        let replay = responder.ingest(&overflow_request.bytes, 4, InterfaceId(3), &mut rng);
+        assert_eq!(replay.disposition, IngressDisposition::NativeDuplicate);
+        assert!(replay.actions.events.is_empty());
+        assert!(replay.actions.packets.is_empty());
+        assert_eq!(responder.metrics().capacity.links.used, 1);
+
+        let (fresh_request, fresh_link_id) =
+            overflow.initiate_link(destination, 5, &mut rng).unwrap();
+        assert_ne!(fresh_link_id, overflow_link_id);
+        let fresh = responder.ingest(&fresh_request.bytes, 5, InterfaceId(3), &mut rng);
+        assert_eq!(fresh.disposition, IngressDisposition::Processed);
+        assert_eq!(fresh.actions.packets.len(), 1);
         assert_eq!(responder.metrics().capacity.links.used, 2);
     }
 
@@ -1625,6 +1665,7 @@ mod tests {
             .unwrap();
         }
         assert_eq!(node.metrics().capacity.links.used, 2);
+        let rng_before_rejection = rng.0;
         assert_eq!(
             node.initiate_link(
                 DestHash::from([3; rete_core::TRUNCATED_HASH_LEN]),
@@ -1633,7 +1674,29 @@ mod tests {
             ),
             Err(LinkAdmissionError::LinkTableFull { limit: 2 })
         );
+        assert_eq!(rng.0, rng_before_rejection);
         assert_eq!(node.metrics().admission.outbound_link_full, 1);
+    }
+
+    #[test]
+    fn outbound_link_id_collision_preserves_state_and_is_counted() {
+        let mut node = node(41);
+        let destination = DestHash::from([0xA5; rete_core::TRUNCATED_HASH_LEN]);
+        let mut first_rng = CounterRng::default();
+        let mut repeated_rng = CounterRng::default();
+
+        let (_, link_id) = node.initiate_link(destination, 1, &mut first_rng).unwrap();
+        let retained_state = node.link_state(&link_id);
+
+        assert_eq!(
+            node.initiate_link(destination, 2, &mut repeated_rng),
+            Err(LinkAdmissionError::LinkIdCollision)
+        );
+        assert_eq!(node.metrics().capacity.links.used, 1);
+        assert_eq!(node.link_state(&link_id), retained_state);
+        assert_eq!(node.metrics().admission.outbound_link_collision, 1);
+        assert_eq!(node.metrics().admission.outbound_link_full, 0);
+        assert_eq!(node.metrics().admission.outbound_link_not_retained, 0);
     }
 
     #[test]

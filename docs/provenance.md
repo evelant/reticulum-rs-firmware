@@ -9,7 +9,7 @@ authoritative in the lockfile.
 | Component | Source | Pin | License used here | Build role |
 | --- | --- | --- | --- | --- |
 | Project-owned crates | This repository | current tree | MIT OR Apache-2.0 | Product and shared tooling |
-| Rete integration fork | <https://github.com/evelant/rete> | `05de2c2b2eda71e9ba6fc64d1f4d7a6f5ec320de` (durable tag `firmware-pin-05de2c2`), based on upstream `9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743` | Apache-2.0 option from retained upstream declaration | Provisional RNS foundation and firmware compile graph; canonical local LINKREQUEST validation submitted in [upstream PR 7](https://github.com/s-retlaw/rete/pull/7) |
+| Rete integration fork | <https://github.com/evelant/rete> | `beb84c370d2ae27209a866093fa1e6b204304384` (durable tag `firmware-pin-beb84c3`), based on upstream `9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743` | Apache-2.0 option from retained upstream declaration | Provisional RNS foundation and firmware compile graph; canonical local LINKREQUEST validation is in [upstream PR 7](https://github.com/s-retlaw/rete/pull/7), and transactional owned-Link admission is in [upstream PR 9](https://github.com/s-retlaw/rete/pull/9) |
 | Leviculum | <https://codeberg.org/Lew_Palm/leviculum> | `5fb1db0e5e5a490291ee5f6b81312cf0c9de622a` | AGPL-3.0-or-later | Separate protocol oracle and fallback package |
 | esp-hal family | <https://github.com/esp-rs/esp-hal> | crates.io versions in lockfile | MIT OR Apache-2.0 | ESP32-S3 platform |
 | lora-phy | <https://github.com/lora-rs/lora-rs> | crates.io version in lockfile | MIT OR Apache-2.0 | Compile-time radio-driver integration; radio is not initialized yet |

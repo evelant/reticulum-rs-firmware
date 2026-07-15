@@ -2,11 +2,11 @@
 //!
 //! Rete's heapless transport uses independent fixed-capacity collections. Some
 //! have recoverable overflow policies (path LRU eviction, dedup FIFO eviction,
-//! and an announce-queue `false` result), while link insertion currently drops
-//! the storage error. The owning `EmbeddedNode` uses the crate-private helpers
-//! here for mandatory outbound admission and performs separate inbound
-//! preflight. Relayed LINKREQUESTs remain fail-closed until upstream exposes
-//! transactional relay-table admission.
+//! and an announce-queue `false` result). The pinned integration revision also
+//! makes owned-Link insertion transactional. The owning `EmbeddedNode` keeps
+//! the crate-private preflight here to enforce product quotas and stable local
+//! diagnostics before native packet construction. Relayed LINKREQUESTs remain
+//! fail-closed until upstream exposes transactional relay-table admission.
 
 use rand_core::{CryptoRng, RngCore};
 use rete_core::{DestHash, LinkId};
@@ -114,6 +114,11 @@ pub(crate) fn probe_capacity_snapshot(node: &ProbeNode) -> ProbeCapacitySnapshot
 pub enum LinkAdmissionError {
     /// The heapless link map is already at capacity.
     LinkTableFull { limit: usize },
+    /// Fresh Link construction reproduced an already-owned Link ID.
+    ///
+    /// This normally indicates repeated cryptographic RNG output. Existing
+    /// state is retained and no request is released.
+    LinkIdCollision,
     /// Rete rejected link construction for a native protocol reason.
     Rete(SendError),
     /// Rete returned success but did not retain the new link in its map.
@@ -130,6 +135,7 @@ impl core::fmt::Display for LinkAdmissionError {
             Self::LinkTableFull { limit } => {
                 write!(f, "local link table is full (limit {limit})")
             }
+            Self::LinkIdCollision => write!(f, "generated link ID already exists"),
             Self::Rete(error) => write!(f, "Rete link initiation failed: {error}"),
             Self::LinkStateNotRetained => {
                 write!(f, "Rete built a link request but did not retain its state")
@@ -138,18 +144,13 @@ impl core::fmt::Display for LinkAdmissionError {
     }
 }
 
-impl From<SendError> for LinkAdmissionError {
-    fn from(value: SendError) -> Self {
-        Self::Rete(value)
-    }
-}
-
 /// Initiate a link only when its heapless session state can be retained.
 ///
-/// The pinned Rete revision ignores the bounded-map insertion result in
-/// `Transport::initiate_link`. Sending the returned packet when that map is
-/// full would start a handshake the local node cannot complete. This guard is
-/// safe because a `NodeCore` is mutably borrowed for the entire operation.
+/// The product preflight reports the configured limit before native packet
+/// construction. The pinned Rete revision independently returns
+/// `SendError::LinkTableFull`, and the retained-state check remains a defensive
+/// invariant. This guard is safe because a `NodeCore` is mutably borrowed for
+/// the entire operation.
 pub(crate) fn try_initiate_heapless_link<
     R: RngCore + CryptoRng,
     const P: usize,
@@ -166,7 +167,14 @@ pub(crate) fn try_initiate_heapless_link<
         return Err(LinkAdmissionError::LinkTableFull { limit: L });
     }
 
-    let result = node.initiate_link(destination, now, rng)?;
+    let result = match node.initiate_link(destination, now, rng) {
+        Ok(result) => result,
+        Err(SendError::LinkTableFull) => {
+            return Err(LinkAdmissionError::LinkTableFull { limit: L });
+        }
+        Err(SendError::LinkAlreadyExists) => return Err(LinkAdmissionError::LinkIdCollision),
+        Err(error) => return Err(LinkAdmissionError::Rete(error)),
+    };
     if node.transport.get_link(&result.1).is_none() {
         return Err(LinkAdmissionError::LinkStateNotRetained);
     }
@@ -193,7 +201,10 @@ pub(crate) fn try_initiate_probe_link<R: RngCore + CryptoRng>(
 mod tests {
     use super::*;
     use crate::probe_capacity;
-    use rete_transport::{Path, PendingAnnounce};
+    use rete_core::{DestType, MTU, PacketBuilder, PacketType};
+    use rete_transport::{
+        IngestResult, Link, LinkTableKind, Path, PendingAnnounce, Transport, compute_link_id,
+    };
 
     #[derive(Default)]
     struct CounterRng(u8);
@@ -242,6 +253,37 @@ mod tests {
             block_rebroadcasts: false,
             received_hops: 0,
         }
+    }
+
+    type TinyResponder = Transport<HeaplessStorage<4, 2, 8, 2>>;
+
+    fn tiny_responder() -> (TinyResponder, crate::Identity, DestHash) {
+        let identity = crate::Identity::from_seed(b"project inbound capacity responder").unwrap();
+        let mut name_buf = [0u8; 128];
+        let expanded = rete_core::expand_name("reticulum", &["capacity"], &mut name_buf).unwrap();
+        let destination = rete_core::destination_hash(expanded, Some(&identity.hash()));
+
+        let mut transport = TinyResponder::new();
+        transport.add_local_destination(destination);
+        (transport, identity, destination)
+    }
+
+    fn native_link_request<R: RngCore + CryptoRng>(
+        destination: DestHash,
+        initiator: &crate::Identity,
+        rng: &mut R,
+    ) -> alloc::vec::Vec<u8> {
+        let (_, payload) = Link::new_initiator(destination, initiator.ed25519_pub(), rng, 100);
+        let mut buffer = [0u8; MTU];
+        let len = PacketBuilder::new(&mut buffer)
+            .packet_type(PacketType::LinkRequest)
+            .dest_type(DestType::Single)
+            .destination_hash(destination.as_ref())
+            .context(0)
+            .payload(&payload)
+            .build()
+            .unwrap();
+        buffer[..len].to_vec()
     }
 
     #[test]
@@ -362,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn pinned_rete_native_link_initiation_can_report_untracked_success() {
+    fn pinned_rete_native_link_initiation_reports_table_full() {
         let mut node = node();
         let mut rng = CounterRng::default();
 
@@ -375,18 +417,126 @@ mod tests {
             .unwrap();
         }
 
-        let (packet, overflow_link) = node
-            .initiate_link(
+        assert!(matches!(
+            node.initiate_link(
                 DestHash::from([0xFE; rete_core::TRUNCATED_HASH_LEN]),
                 100,
                 &mut rng,
-            )
-            .expect("pinned Rete currently drops the bounded-map insertion error");
-        assert!(!packet.data.is_empty());
-        assert!(
-            node.transport.get_link(&overflow_link).is_none(),
-            "Rete returned a packet for a link whose state was not retained"
-        );
+            ),
+            Err(SendError::LinkTableFull)
+        ));
         assert_eq!(node.transport.link_count(), probe_capacity::LINKS);
+    }
+
+    #[test]
+    fn pinned_rete_native_inbound_owned_link_capacity_is_transactional() {
+        let (mut transport, responder, destination) = tiny_responder();
+        let mut rng = CounterRng::default();
+        let mut accepted_ids = alloc::vec::Vec::new();
+
+        for tag in [0x11, 0x22] {
+            let initiator = crate::Identity::from_seed(&[tag; 32]).unwrap();
+            let mut request = native_link_request(destination, &initiator, &mut rng);
+            match transport.ingest(&mut request, 100 + u64::from(tag), &mut rng, &responder) {
+                IngestResult::LinkRequestReceived { link_id, proof_raw } => {
+                    assert!(!proof_raw.is_empty());
+                    accepted_ids.push(link_id);
+                }
+                other => panic!("expected retained LINKREQUEST, got {other:?}"),
+            }
+        }
+        assert_eq!(transport.link_count(), 2);
+
+        let candidate = crate::Identity::from_seed(&[0x33; 32]).unwrap();
+        let rejected_request = native_link_request(destination, &candidate, &mut rng);
+        let rejected_id = compute_link_id(&rejected_request).unwrap();
+        let stats_before_rejection = transport.stats().clone();
+        let mut rejected_attempt = rejected_request.clone();
+
+        // The typed result cannot carry an LRPROOF. Capacity rejection must
+        // retain neither candidate state nor link-success/error counters.
+        assert!(matches!(
+            transport.ingest(&mut rejected_attempt, 200, &mut rng, &responder),
+            IngestResult::LinkTableFull {
+                link_id,
+                table: LinkTableKind::Owned,
+            } if link_id == rejected_id
+        ));
+        assert_eq!(transport.link_count(), 2);
+        assert!(
+            accepted_ids
+                .iter()
+                .all(|link_id| transport.get_link(link_id).is_some())
+        );
+        assert!(transport.get_link(&rejected_id).is_none());
+
+        let stats_after_rejection = transport.stats();
+        assert_eq!(
+            stats_after_rejection.packets_received,
+            stats_before_rejection.packets_received + 1
+        );
+        assert_eq!(
+            stats_after_rejection.link_requests_received,
+            stats_before_rejection.link_requests_received
+        );
+        assert_eq!(
+            stats_after_rejection.packets_dropped_invalid,
+            stats_before_rejection.packets_dropped_invalid
+        );
+        assert_eq!(
+            stats_after_rejection.packets_dropped_dedup,
+            stats_before_rejection.packets_dropped_dedup
+        );
+        assert_eq!(
+            stats_after_rejection.links_established,
+            stats_before_rejection.links_established
+        );
+        assert_eq!(
+            stats_after_rejection.links_failed,
+            stats_before_rejection.links_failed
+        );
+        assert_eq!(
+            stats_after_rejection.crypto_failures,
+            stats_before_rejection.crypto_failures
+        );
+
+        let close_packet = transport
+            .build_linkclose_packet(&accepted_ids[0], &mut rng)
+            .unwrap();
+        assert!(!close_packet.is_empty());
+        assert_eq!(transport.link_count(), 1);
+        assert!(transport.get_link(&accepted_ids[0]).is_none());
+
+        // Releasing capacity does not make the rejected packet reusable: its
+        // hash remains in Rete's packet-level deduplication window.
+        let mut exact_replay = rejected_request.clone();
+        assert!(matches!(
+            transport.ingest(&mut exact_replay, 201, &mut rng, &responder),
+            IngestResult::Duplicate
+        ));
+        assert_eq!(transport.link_count(), 1);
+        assert!(transport.get_link(&rejected_id).is_none());
+
+        // A legitimate retry has fresh ephemeral Link material and can claim
+        // the released slot.
+        let mut fresh_request = native_link_request(destination, &candidate, &mut rng);
+        let fresh_id = compute_link_id(&fresh_request).unwrap();
+        assert_ne!(fresh_id, rejected_id);
+        assert!(matches!(
+            transport.ingest(&mut fresh_request, 202, &mut rng, &responder),
+            IngestResult::LinkRequestReceived { link_id, proof_raw }
+                if link_id == fresh_id && !proof_raw.is_empty()
+        ));
+        assert_eq!(transport.link_count(), 2);
+        assert!(transport.get_link(&fresh_id).is_some());
+        assert!(transport.get_link(&accepted_ids[1]).is_some());
+
+        let final_stats = transport.stats();
+        assert_eq!(final_stats.packets_received, 5);
+        assert_eq!(final_stats.link_requests_received, 3);
+        assert_eq!(final_stats.packets_dropped_dedup, 1);
+        assert_eq!(final_stats.packets_dropped_invalid, 0);
+        assert_eq!(final_stats.links_failed, 0);
+        assert_eq!(final_stats.crypto_failures, 0);
     }
 }

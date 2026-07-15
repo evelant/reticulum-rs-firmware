@@ -45,13 +45,13 @@ sha2 = { version = "=0.10.9", default-features = false }
 
 # Rete is not published as a coherent crates.io release. Keep every crate on
 # the same reviewed fork revision and never replace these with reference/ path
-# deps. The fork commit is based directly on upstream 9bcb7d3e and contains
-# the focused validation change submitted as s-retlaw/rete#7. Fork tag
-# firmware-pin-05de2c2 keeps the exact commit reachable independently of the
-# review branch.
-rete-core = { git = "https://github.com/evelant/rete.git", rev = "05de2c2b2eda71e9ba6fc64d1f4d7a6f5ec320de", default-features = false }
-rete-stack = { git = "https://github.com/evelant/rete.git", rev = "05de2c2b2eda71e9ba6fc64d1f4d7a6f5ec320de", default-features = false }
-rete-transport = { git = "https://github.com/evelant/rete.git", rev = "05de2c2b2eda71e9ba6fc64d1f4d7a6f5ec320de", default-features = false }
+# deps. The integration commit is based directly on upstream 9bcb7d3e and
+# composes the focused validation and transactional owned-Link changes offered
+# as s-retlaw/rete#7 and #9. Fork tag firmware-pin-beb84c3 keeps the exact
+# commit reachable independently of either review branch.
+rete-core = { git = "https://github.com/evelant/rete.git", rev = "beb84c370d2ae27209a866093fa1e6b204304384", default-features = false }
+rete-stack = { git = "https://github.com/evelant/rete.git", rev = "beb84c370d2ae27209a866093fa1e6b204304384", default-features = false }
+rete-transport = { git = "https://github.com/evelant/rete.git", rev = "beb84c370d2ae27209a866093fa1e6b204304384", default-features = false }
 
 [profile.dev]
 opt-level = "s"

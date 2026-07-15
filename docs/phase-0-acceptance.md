@@ -79,6 +79,15 @@ same 65,536-byte reclaimed-DRAM heap reservation. Rete runtime paths are still
 dead-stripped from this probe, so this confirms dependency/link integrity, not
 operational peak memory.
 
+After advancing to combined integration revision
+`beb84c370d2ae27209a866093fa1e6b204304384` on 2026-07-15, the safe-idle probe
+remained byte-for-byte identical in the GNU size summary: 57,869 bytes of text,
+4,044 bytes of data and 468,780 bytes of BSS/reserved address space, including
+the same 132-byte named `.bss`, 327,412-byte stack reservation and 65,536-byte
+reclaimed-DRAM heap reservation. No `lora` or `sx126` defined symbol was
+retained. The two Rete fixes are still dead-stripped until the runtime vertical
+slice constructs the node.
+
 No `lora-phy` or SX126x driver symbols were retained in the linked safe-idle
 ELF. The ESP ROM symbol map still exposes unrelated Wi-Fi/Bluetooth TX symbol
 names; those are absolute ROM declarations, not reachable radio setup in this
@@ -119,28 +128,37 @@ loss/reordering scenarios remain open gates below.
 ### Initial capacity audit
 
 The initial heapless profile is explicitly `P=64` paths, `A=16` pending
-announces, `D=128` deduplication entries and `L=4` owned links. Focused tests
-prove that paths evict the least-recently-used entry, packet deduplication is a
-rolling FIFO window, and a full announce queue rejects the next entry without
-growing. The owning `EmbeddedNode` makes the outbound admission guard
-mandatory, rejects a fifth owned link before returning a packet, applies the
-same preflight to new inbound Links, and verifies retained state before
-releasing LRPROOF or an event. These guards are necessary because the pinned
-Rete revision currently returns native success despite silently failing to
-retain full-table state. Relayed LINKREQUESTs are rejected until Rete exposes
-transactional relay-table admission; ordinary announce/data transport remains
-available. The same audit found that identity, resource, relayed-link, announce-replay,
-announce-rate, path-request-throttle and packet-dedup occupancy are not all
-observable. Insertions into the last two use separate `P`-sized maps and can
-fail silently; path-request timestamp failure can bypass throttling for new
-destinations. Reverse, relay-link, receipt, channel-receipt and several other
-internal insertions can also fail silently. This is provisional evidence, not
-production acceptance: transactional capacity errors, drop metrics, complete
-occupancy APIs, transactional relay admission and bounded NodeCore event/output
-storage remain upstream repair candidates and hard gates below. The adapter
-now preflights the two admitted ordinary DATA-forwarding paths that create
-reverse entries; other unsafe HEADER_2 dispatch classes remain disabled rather
-than reaching those native mutations.
+announces, `D=128` entries per deduplication deque and `L=4` owned links.
+Focused tests prove that paths evict the least-recently-used entry, packet
+deduplication is a rolling FIFO window, and a full announce queue rejects the
+next entry without growing. The owning `EmbeddedNode` makes the outbound
+admission guard mandatory, rejects a fifth owned link before returning a
+packet, applies the same preflight to new inbound Links, and verifies retained
+state before releasing LRPROOF or an event. The pinned Rete integration
+revision now also returns `SendError::LinkTableFull` before releasing an
+outbound request and returns
+`IngestResult::LinkTableFull { table: LinkTableKind::Owned, .. }`
+before signing or releasing an inbound LRPROOF. Capacity rejection does not
+roll back global replay filtering: an exact replay of the rejected request
+remains deduplicated, while a fresh LINKREQUEST succeeds after a slot is
+released. The local preflight remains for stable product quotas and diagnostics
+because `NodeCore` does not yet surface the typed inbound disposition. Relayed
+LINKREQUESTs are rejected until Rete exposes transactional relay-table
+admission; ordinary announce/data transport remains available. The same audit
+found that identity, resource, relayed-link, announce-replay, announce-rate,
+path-request-throttle and packet-dedup occupancy are not all observable. In
+particular, `announce_rate` and `path_request_times` are separate `P`-sized
+maps whose insertions can fail silently; a failed path-request timestamp insert
+can bypass throttling for a new destination. Packet `dedup` and announce-replay
+`announce_dedup` are separate `D`-sized rolling deques, and their occupancy is
+also not exposed. Reverse, relay-link, receipt, channel-receipt and several
+other internal insertions can also fail silently. This is provisional evidence,
+not production acceptance: remaining transactional capacity errors, drop
+metrics, complete occupancy APIs, transactional relay admission and bounded
+NodeCore event/output storage remain upstream repair candidates and hard gates
+below. The adapter now preflights the two admitted ordinary DATA-forwarding
+paths that create reverse entries; other unsafe HEADER_2 dispatch classes
+remain disabled rather than reaching those native mutations.
 
 ### Initial owning embedded boundary
 

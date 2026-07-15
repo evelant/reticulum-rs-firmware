@@ -1,7 +1,7 @@
 # Rete upstream hardening backlog
 
-**Status:** contribution sequence active; the first issue and draft pull
-request are open upstream
+**Status:** contribution sequence active; the first two focused issues and
+draft pull requests are open upstream
 
 This is the contribution queue discovered while integrating Rete revision
 `9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743`. Each item should be submitted as
@@ -13,34 +13,35 @@ bounded-state corrections belong upstream.
 
 **Priority:** blocking relayed Links and production Link acceptance
 
-Observed behavior:
+Owned-Link admission is adopted in integration-fork revision
+`beb84c370d2ae27209a866093fa1e6b204304384` and offered upstream in
+[issue 8](https://github.com/s-retlaw/rete/issues/8) and
+[draft PR 9](https://github.com/s-retlaw/rete/pull/9). It now:
 
-- `Transport::initiate_link()` ignores failure to insert the initiator state,
-  but still returns a LINKREQUEST and Link ID.
-- Inbound local LINKREQUEST handling ignores failure to insert responder
-  state, but still returns LRPROOF and `LinkRequestReceived`.
-- both HEADER_2 and fall-through relay paths ignore failure to insert the
-  relay `link_table` entry;
-- HEADER_2 relay state is inserted before route availability is known.
+- returns distinct outbound `LinkAlreadyExists` and `LinkTableFull` errors
+  without releasing a request or mutating existing Link/path state;
+- admits inbound responder state before signing LRPROOF and rolls it back if
+  proof signing or LRPROOF packet serialization fails;
+- returns typed owned-table capacity without a proof, success event or false
+  success/error counters;
+- retains Reticulum's packet-level dedup behavior after capacity rejection,
+  while admitting a fresh request once capacity is available; and
+- suppresses `NodeCore` proof/event output when responder state is full.
 
-The public API should make each mutation transactional and distinguish
-`Existing`, `Inserted`, and `Full`. A capacity failure must not release a
-packet, proof, establishment event, or forwarding action that depends on the
-missing state. Relay count/lookup should be included in a read-only capacity
-snapshot.
+Relay admission remains open. Both HEADER_2 and fall-through relay paths ignore
+failure to insert the relay `link_table` entry, and HEADER_2 relay state is
+inserted before route availability is known. The public API must distinguish
+`Existing`, `Inserted`, and `Full` before forwarding and expose relay
+count/lookup in a read-only capacity snapshot.
 
-Minimum regression matrix:
+Remaining regression matrix:
 
-1. Fill `HeaplessStorage<..., L=2>` and verify a third outbound initiation
-   returns `Full` with no packet.
-2. Fill a responder table and verify a third inbound request emits neither
-   LRPROOF nor an establishment event.
-3. Fill a relay table and verify a new relayed request is rejected explicitly.
-4. Verify an existing/duplicate Link ID is not misclassified as new capacity.
-5. Verify a missing route cannot leave orphan relay state.
+1. Fill a relay table and verify a new relayed request is rejected explicitly.
+2. Verify an existing relay Link ID is not misclassified as new capacity.
+3. Verify a missing route cannot leave orphan relay state.
 
-The local `EmbeddedNode` now enforces owned outbound/inbound admission and
-rejects relayed LINKREQUESTs until this seam exists.
+The local `EmbeddedNode` retains product-level owned-Link quota preflight and
+rejects relayed LINKREQUESTs until the remaining seam exists.
 
 ## 2. LINKREQUEST validation, HEADER_2 dispatch and reverse admission
 
@@ -107,6 +108,12 @@ Best-effort Link data, identify, request and response traffic can therefore
 trigger unnecessary keepalives. Move outbound timestamp maintenance into the
 common successful packet builder or require `now` in the relevant APIs.
 
+`Transport::tick()` also never expires `Pending` or `Handshake` Links because
+`Link::check_stale()` handles only `Active` and `Stale`. An initiator that never
+receives LRPROOF, or a responder that never receives LRRTT, can therefore hold
+a bounded owned-Link slot indefinitely. Add explicit establishment deadlines,
+timeout results/counters and release-then-fresh-retry coverage.
+
 The local adapter suppresses premature establishment events and records the
 timestamp after best-effort Link data, but the native behavior needs its own
 tests and repair.
@@ -134,11 +141,12 @@ proof removal, reuse after proof, retransmission and wraparound.
 
 **Priority:** diagnostics and recoverable failure
 
-`NodeCore::handle_ingest()` maps native `Invalid` and `Duplicate` to the same
-empty outcome, and several decrypt/unknown-state failures are also empty
-without incrementing a unique counter. Add a disposition or typed drop reason
-alongside events/actions. It should cover parse, dedup, crypto, unknown
-destination/Link, capacity, policy, route and output-backpressure failures.
+`NodeCore::handle_ingest()` maps native `LinkTableFull`, `Invalid` and
+`Duplicate` to the same empty outcome, and several decrypt/unknown-state
+failures are also empty without incrementing a unique counter. Add a
+disposition or typed drop reason alongside events/actions. It should cover
+parse, dedup, crypto, unknown destination/Link, capacity, policy, route and
+output-backpressure failures.
 
 The local adapter can recover `Invalid` and `Duplicate` only when transport
 counter deltas identify them; everything else remains `NoObservableOutcome`.
@@ -192,7 +200,8 @@ project-owned bounded implementation and hostile tests in
 
 1. Exact direct/local LINKREQUEST validation: submitted as upstream draft PR
    7; retain until merged or superseded.
-2. Transactional owned Link admission.
+2. Transactional owned Link admission: submitted as upstream draft PR 9;
+   retain until merged or superseded.
 3. Relay-table admission/visibility and HEADER_2 dispatch.
 4. Link event/timestamp semantics and channel receipts.
 5. Explicit ingress dispositions and full capacity snapshots.
