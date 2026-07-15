@@ -1,0 +1,11 @@
+[package]
+name = "reticulum-board-heltec-tracker-v2"
+description = "Immutable Heltec Wireless Tracker V2.3 board facts and RF safety policy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"

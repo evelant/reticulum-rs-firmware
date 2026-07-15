@@ -1,0 +1,17 @@
+[package]
+name = "reticulum-rns-rete"
+description = "Evaluation-only Rete integration for Phase-0 conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reticulum-rns-conformance = { path = "../rns-conformance" }
+rete-core.workspace = true
+rete-stack = { workspace = true, features = ["alloc"] }
+rete-transport.workspace = true
+
+[lib]
+path = "src/lib.rs"

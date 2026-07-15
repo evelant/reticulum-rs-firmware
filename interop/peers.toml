@@ -1,0 +1,41 @@
+schema = 1
+
+[reticulum.released]
+version = "1.3.8"
+repository = "https://github.com/markqvist/Reticulum.git"
+revision = "dca2a9282935d3dd251f2a1588daa41b5deee8c7"
+
+[reticulum.forward]
+branch = "master"
+repository = "https://github.com/markqvist/Reticulum.git"
+revision = "de0f399a1696895dcb95ad1efa19f3b21a7886ab"
+
+[lxmf.released]
+version = "0.9.6"
+repository = "https://github.com/markqvist/LXMF.git"
+revision = "8499729024a4cddfceb47ca07188bb5b1d11d179"
+
+[lxmf.forward]
+branch = "master"
+repository = "https://github.com/markqvist/LXMF.git"
+revision = "fab12ad9bf9f997797034950f289fe41a79dcf5a"
+
+[nomadnet.released]
+version = "1.2.0"
+repository = "https://github.com/markqvist/NomadNet.git"
+revision = "475c0ee2a0388cf8470e7f1e90d5decb67b579ea"
+
+[nomadnet.forward]
+branch = "master"
+repository = "https://github.com/markqvist/NomadNet.git"
+revision = "ad10301569a39d4f43b3d21ae9fc392602c937ca"
+
+[rnode.released]
+version = "1.86"
+repository = "https://github.com/markqvist/RNode_Firmware.git"
+revision = "9b39b6ce5962007fafefc22034082f354eff3374"
+
+[rnode.forward]
+branch = "master"
+repository = "https://github.com/markqvist/RNode_Firmware.git"
+revision = "d39339f8ecd5145b248c18bac7b6ea0f82faf85a"

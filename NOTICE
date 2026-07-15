@@ -1,0 +1,13 @@
+Reticulum Rust Firmware
+Copyright 2026 Reticulum Rust Firmware contributors
+
+Project-owned source is available under the MIT License or the Apache License,
+Version 2.0, at your option.
+
+The default firmware evaluation graph uses Rete from
+https://github.com/s-retlaw/rete at revision
+9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743. That upstream snapshot declares
+MIT OR Apache-2.0 in its package metadata and README.
+
+The separate Leviculum comparison package is AGPL-3.0-or-later. See
+docs/provenance.md and Cargo.lock for the exact source and dependency graph.

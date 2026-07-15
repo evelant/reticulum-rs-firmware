@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  host:
+    name: Host and portable checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install pinned host toolchain
+        run: rustup show
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Host tests
+        run: cargo test --locked
+
+      - name: Leviculum comparison tests
+        run: cargo test --locked -p reticulum-rns-leviculum
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Generic no-std checks
+        run: >-
+          cargo check --locked
+          -p reticulum-rns-conformance
+          -p reticulum-rns-rete
+          -p reticulum-rns-leviculum
+          -p reticulum-radio-interface
+          -p reticulum-board-heltec-tracker-v2
+          --target riscv32imac-unknown-none-elf
+
+      - name: License graph boundaries
+        run: cargo run --locked -p xtask -- graph-policy
+
+  xtensa:
+    name: ESP32-S3 release link
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install pinned Xtensa toolchain
+        uses: esp-rs/xtensa-toolchain@ec6d36527049a7f4fb2cb0c1a644668c1bb8a2a4
+        with:
+          version: 1.95.0.0
+          buildtargets: esp32s3
+          ldproxy: false
+
+      - name: Link RF-inert Tracker firmware
+        run: >-
+          cargo +esp build --locked --release
+          -p reticulum-heltec-tracker-v2
+          --target xtensa-esp32s3-none-elf

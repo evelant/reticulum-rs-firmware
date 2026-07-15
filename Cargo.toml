@@ -1,0 +1,66 @@
+[workspace]
+resolver = "3"
+members = [
+    "comparisons/rns-leviculum",
+    "crates/board-heltec-tracker-v2",
+    "crates/radio-interface",
+    "crates/rns-conformance",
+    "crates/rns-rete",
+    "firmware/heltec-tracker-v2",
+    "tools/conformance-rete",
+    "xtask",
+]
+default-members = [
+    "crates/board-heltec-tracker-v2",
+    "crates/radio-interface",
+    "crates/rns-conformance",
+    "crates/rns-rete",
+    "tools/conformance-rete",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+embassy-executor = { version = "=0.10.0", default-features = false }
+embassy-time = { version = "=0.5.0", default-features = false }
+esp-alloc = "=0.10.0"
+esp-backtrace = { version = "=0.19.0", default-features = false }
+esp-bootloader-esp-idf = { version = "=0.5.0", default-features = false }
+esp-hal = { version = "=1.1.1", default-features = false }
+esp-println = { version = "=0.17.0", default-features = false }
+esp-rtos = { version = "=0.3.0", default-features = false }
+log = "=0.4.27"
+lora-phy = { version = "=3.0.1", default-features = false }
+rand_core = { version = "=0.6.4", default-features = false }
+
+# Rete is not published as a coherent crates.io release. Keep every crate on
+# the same reviewed revision and never replace these with reference/ path deps.
+rete-core = { git = "https://github.com/s-retlaw/rete.git", rev = "9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743", default-features = false }
+rete-stack = { git = "https://github.com/s-retlaw/rete.git", rev = "9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743", default-features = false }
+rete-transport = { git = "https://github.com/s-retlaw/rete.git", rev = "9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743", default-features = false }
+
+[profile.dev]
+opt-level = "s"
+
+# Leviculum applies these in its own workspace, but dependency workspaces do
+# not inherit profile settings. Keep Phase-0 debug/HIL crypto usable.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+
+[profile.dev.package.x25519-dalek]
+opt-level = 3
+
+[profile.release]
+codegen-units = 1
+debug = 2
+lto = "fat"
+opt-level = "s"
