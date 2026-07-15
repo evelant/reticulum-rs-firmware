@@ -10,3 +10,7 @@ publish.workspace = true
 [[bin]]
 name = "xtask"
 path = "src/main.rs"
+
+[dependencies]
+reticulum-rns-rete = { path = "../crates/rns-rete", default-features = false }
+serde_json.workspace = true

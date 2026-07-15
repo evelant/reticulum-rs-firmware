@@ -32,8 +32,8 @@ pub use rete_core::{DestHash, DestType, Identity, IdentityHash, LinkId, Packet, 
 pub use rete_stack::{DestinationType, Direction, NodeEvent};
 pub use rete_transport::{AnnounceError, AnnounceInfo, LinkState};
 
-/// Reviewed Rete source revision.
-pub const SOURCE_REVISION: &str = "9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743";
+/// Reviewed Rete integration-fork source revision.
+pub const SOURCE_REVISION: &str = "05de2c2b2eda71e9ba6fc64d1f4d7a6f5ec320de";
 
 /// Initial table capacities used only to obtain comparable Phase-0 numbers.
 pub mod probe_capacity {
@@ -73,7 +73,7 @@ pub const MAX_ANNOUNCE_APP_DATA: usize =
 pub const fn metadata() -> CandidateMetadata {
     CandidateMetadata {
         id: "rete",
-        source: "https://github.com/s-retlaw/rete",
+        source: "https://github.com/evelant/rete",
         revision: SOURCE_REVISION,
         license: "Apache-2.0",
         status: CandidateStatus::ProvisionalFoundation,
@@ -276,7 +276,86 @@ mod tests {
     #[test]
     fn candidate_is_explicitly_provisional() {
         assert_eq!(metadata().status, CandidateStatus::ProvisionalFoundation);
+        assert_eq!(metadata().source, "https://github.com/evelant/rete");
+        assert_eq!(metadata().revision, SOURCE_REVISION);
         assert!(!KNOWN_ALLOCATION_GAPS.is_empty());
+    }
+
+    #[test]
+    fn pinned_fork_enforces_native_link_request_shape() {
+        let responder = Identity::from_seed(b"native request responder").unwrap();
+        let initiator = Identity::from_seed(b"native request initiator").unwrap();
+        let mut name_buffer = [0u8; 64];
+        let expanded_name = rete_core::expand_name("testapp", &["link"], &mut name_buffer).unwrap();
+        let destination_hash = rete_core::destination_hash(expanded_name, Some(&responder.hash()));
+
+        for (destination_type, context, payload_length, expected_valid) in [
+            (DestType::Single, 0x00, 64, true),
+            (DestType::Single, 0x00, 67, true),
+            (DestType::Single, 0x00, 0, false),
+            (DestType::Single, 0x00, 63, false),
+            (DestType::Single, 0x00, 65, false),
+            (DestType::Single, 0x00, 66, false),
+            (DestType::Single, 0x00, 68, false),
+            (DestType::Group, 0x00, 67, false),
+            (DestType::Plain, 0x00, 67, false),
+            (DestType::Link, 0x00, 67, false),
+            (DestType::Single, 0x01, 67, false),
+            (DestType::Single, 0xFF, 67, false),
+        ] {
+            let mut transport = Transport::<ProbeStorage>::new();
+            transport.add_local_destination(destination_hash);
+            let mut rng = ZeroRng;
+            let (_, canonical_payload) = rete_transport::Link::new_initiator(
+                destination_hash,
+                initiator.ed25519_pub(),
+                &mut rng,
+                100,
+            );
+            let mut payload = canonical_payload.to_vec();
+            payload.resize(payload_length, 0);
+            payload.truncate(payload_length);
+
+            let mut packet_buffer = [0u8; rete_core::MTU];
+            let packet_length = rete_core::PacketBuilder::new(&mut packet_buffer)
+                .packet_type(PacketType::LinkRequest)
+                .dest_type(destination_type)
+                .destination_hash(destination_hash.as_ref())
+                .context(context)
+                .payload(&payload)
+                .build()
+                .unwrap();
+
+            let result = transport.ingest(
+                &mut packet_buffer[..packet_length],
+                100,
+                &mut rng,
+                &responder,
+            );
+            if expected_valid {
+                match result {
+                    rete_transport::IngestResult::LinkRequestReceived { proof_raw, .. } => {
+                        assert!(!proof_raw.is_empty());
+                    }
+                    other => panic!(
+                        "expected canonical {payload_length}-byte request to be accepted, got {other:?}"
+                    ),
+                }
+                assert_eq!(transport.link_count(), 1);
+                assert_eq!(transport.stats().packets_dropped_invalid, 0);
+                assert_eq!(transport.stats().link_requests_received, 1);
+            } else {
+                assert!(
+                    matches!(result, rete_transport::IngestResult::Invalid),
+                    "expected {destination_type:?}/{context:#04x}/{payload_length} to be invalid"
+                );
+                assert_eq!(transport.link_count(), 0);
+                assert_eq!(transport.stats().packets_dropped_invalid, 1);
+                assert_eq!(transport.stats().link_requests_received, 0);
+            }
+            assert_eq!(transport.stats().links_failed, 0);
+            assert_eq!(transport.stats().crypto_failures, 0);
+        }
     }
 
     #[test]

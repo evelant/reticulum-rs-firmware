@@ -39,7 +39,7 @@ pub enum CandidateStatus {
 pub struct CandidateMetadata {
     /// Stable project-local candidate identifier.
     pub id: &'static str,
-    /// Upstream source repository.
+    /// Source repository containing the reviewed revision.
     pub source: &'static str,
     /// Full reviewed source revision.
     pub revision: &'static str,

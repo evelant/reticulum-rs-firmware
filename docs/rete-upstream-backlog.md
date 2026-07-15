@@ -1,7 +1,7 @@
 # Rete upstream hardening backlog
 
-**Status:** implementation evidence collected; no upstream issues or pull
-requests created yet
+**Status:** contribution sequence active; the first issue and draft pull
+request are open upstream
 
 This is the contribution queue discovered while integrating Rete revision
 `9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743`. Each item should be submitted as
@@ -46,12 +46,22 @@ rejects relayed LINKREQUESTs until this seam exists.
 
 **Priority:** protocol correctness and hostile-input handling
 
-Current inbound handling does not consistently enforce:
+Direct/local HEADER_1 shape validation is adopted from integration-fork commit
+`05de2c2b2eda71e9ba6fc64d1f4d7a6f5ec320de` and is offered upstream in
+[issue 6](https://github.com/s-retlaw/rete/issues/6) and
+[draft PR 7](https://github.com/s-retlaw/rete/pull/7). It accepts exactly the
+legacy 64-byte and current 67-byte requests and rejects non-`Single`, nonzero
+context and non-canonical lengths before responder Link construction/insertion
+or LRPROOF output. The adapter retains the same preflight because Rete still
+flattens this rejection to `Invalid`, while the product API reports a typed
+reason.
 
-- destination type `Single`;
-- context `0x00`;
-- destination direction and `accepts_links`;
-- the Python-compatible request payload lengths of exactly 64 or 67 bytes.
+Remaining local admission does not consult registered-destination direction or
+`accepts_links` policy. Locally terminating HEADER_2 requests also do not yet
+reach the direct/local validator consistently. Relay forwarding is a distinct
+operation: it should decide transport-ID ownership and capacity atomically,
+without treating a relay as the final endpoint responsible for destination
+shape policy.
 
 A HEADER_2 request addressed to the local transport is treated as relayed even
 when its final destination is local. Conversely, a HEADER_2 request addressed
@@ -70,11 +80,12 @@ but its proof can no longer return. Expose lookup/capacity admission as one
 transactional forwarding operation and return a typed `Full` outcome before
 emitting the packet.
 
-Add released-Python differential fixtures for valid 64/67-byte requests and
-negative cases for every type, context, length, destination-policy and
-transport-ID boundary. Add H1/H2 reverse-table exhaustion tests, locally
-terminating H2 DATA/proof cases and an endpoint unmatched-proof case. Dispatch
-should decide HEADER_2 ownership before any local or relay allocation.
+Add released-Python differential fixtures for valid 64/67-byte direct/local
+requests and negative destination-policy and transport-ID boundaries. Add
+H1/H2 reverse-table exhaustion tests, locally terminating H2 request/DATA/proof
+cases and an endpoint unmatched-proof case. Dispatch should decide HEADER_2
+ownership before any local or relay allocation, and locally terminating
+requests should then pass through the same canonical-shape validator.
 
 The local adapter mirrors Python's non-announce transport-ID filter, rejects
 native H2 classes that cannot yet be dispatched safely, suppresses endpoint
@@ -179,12 +190,14 @@ project-owned bounded implementation and hostile tests in
 
 ## Submission order
 
-1. Transactional owned Link admission and exact LINKREQUEST validation.
-2. Relay-table admission/visibility and HEADER_2 dispatch.
-3. Link event/timestamp semantics and channel receipts.
-4. Explicit ingress dispositions and full capacity snapshots.
-5. Bounded output/Resource seams.
-6. LoRa receive API improvements, independently if easier to review.
+1. Exact direct/local LINKREQUEST validation: submitted as upstream draft PR
+   7; retain until merged or superseded.
+2. Transactional owned Link admission.
+3. Relay-table admission/visibility and HEADER_2 dispatch.
+4. Link event/timestamp semantics and channel receipts.
+5. Explicit ingress dispositions and full capacity snapshots.
+6. Bounded output/Resource seams.
+7. LoRa receive API improvements, independently if easier to review.
 
 Do not combine these into one project-specific fork commit. Keep every fix
 small enough to review upstream, retain a regression here against the pinned

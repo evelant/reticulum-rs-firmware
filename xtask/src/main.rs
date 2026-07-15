@@ -129,6 +129,7 @@ fn build_tracker() -> ExitCode {
 }
 
 fn graph_policy() -> ExitCode {
+    let root = workspace_root();
     let product = match capture(
         "cargo",
         ["tree", "--locked", "-p", "reticulum-heltec-tracker-v2"],
@@ -165,12 +166,83 @@ fn graph_policy() -> ExitCode {
         }
     }
 
+    let candidate = reticulum_rns_rete::metadata();
+    let resolved = capture_stdout_at(
+        "cargo",
+        ["metadata", "--locked", "--format-version", "1"],
+        &root,
+    )
+    .and_then(|json| {
+        validate_resolved_rete_pin(&json, candidate.source, candidate.revision)
+            .map_err(|error| format!("Rete pin/report mismatch: {error}"))
+    });
+    if let Err(error) = resolved {
+        eprintln!("error: {error}");
+        failed = true;
+    }
+
     if failed {
         ExitCode::FAILURE
     } else {
-        println!("ok: Rete product and Leviculum comparison graphs are isolated");
+        println!(
+            "ok: Rete product and Leviculum comparison graphs are isolated; \
+             resolved Rete packages match reported source/revision"
+        );
         ExitCode::SUCCESS
     }
+}
+
+fn validate_resolved_rete_pin(
+    metadata_json: &str,
+    reported_source: &str,
+    reported_revision: &str,
+) -> Result<(), String> {
+    if reported_revision.len() != 40
+        || !reported_revision
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(format!(
+            "reported revision {:?} is not a full Git object ID",
+            reported_revision
+        ));
+    }
+
+    let repository = reported_source
+        .strip_suffix(".git")
+        .unwrap_or(reported_source);
+    let expected_source = format!(
+        "git+{repository}.git?rev={revision}#{revision}",
+        revision = reported_revision
+    );
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+
+    for name in ["rete-core", "rete-stack", "rete-transport"] {
+        let matching = packages
+            .iter()
+            .filter(|package| package["name"].as_str() == Some(name))
+            .collect::<Vec<_>>();
+        if matching.len() != 1 {
+            return Err(format!(
+                "expected exactly one resolved {name} package, found {}",
+                matching.len()
+            ));
+        }
+        let source = matching[0]["source"]
+            .as_str()
+            .ok_or_else(|| format!("resolved {name} package has no Git source"))?;
+        if source != expected_source {
+            return Err(format!(
+                "resolved {name} source {source:?} does not match report-derived {expected_source:?}"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn capture<I, S>(program: &str, args: I) -> Result<String, String>
@@ -193,6 +265,30 @@ where
             "{program} exited with {}: {}",
             output.status,
             first_line(&combined)
+        ))
+    }
+}
+
+fn capture_stdout_at<I, S>(program: &str, args: I, current_dir: &Path) -> Result<String, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let output = Command::new(program)
+        .current_dir(current_dir)
+        .args(args)
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| format!("could not run {program}: {error}"))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!(
+            "{program} exited with {}: {}",
+            output.status,
+            first_line(&stderr)
         ))
     }
 }
@@ -243,5 +339,29 @@ mod tests {
     #[test]
     fn workspace_root_contains_the_workspace_manifest() {
         assert!(workspace_root().join("Cargo.toml").is_file());
+    }
+
+    #[test]
+    fn resolved_rete_pin_is_tied_to_reported_metadata() {
+        let source = "https://github.com/example/rete";
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let expected = "git+https://github.com/example/rete.git?rev=\
+                        0123456789abcdef0123456789abcdef01234567#\
+                        0123456789abcdef0123456789abcdef01234567";
+        let metadata = serde_json::json!({
+            "packages": [
+                { "name": "rete-core", "source": expected },
+                { "name": "rete-stack", "source": expected },
+                { "name": "rete-transport", "source": expected },
+            ]
+        });
+
+        validate_resolved_rete_pin(&metadata.to_string(), source, revision).unwrap();
+
+        let mut mismatched = metadata;
+        mismatched["packages"][2]["source"] = serde_json::Value::String(
+            "git+https://github.com/example/rete.git?rev=bad#bad".to_owned(),
+        );
+        assert!(validate_resolved_rete_pin(&mismatched.to_string(), source, revision).is_err());
     }
 }

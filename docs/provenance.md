@@ -9,7 +9,7 @@ authoritative in the lockfile.
 | Component | Source | Pin | License used here | Build role |
 | --- | --- | --- | --- | --- |
 | Project-owned crates | This repository | current tree | MIT OR Apache-2.0 | Product and shared tooling |
-| Rete | <https://github.com/s-retlaw/rete> | `9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743` | Apache-2.0 option from upstream declaration | Provisional RNS foundation and firmware compile graph |
+| Rete integration fork | <https://github.com/evelant/rete> | `05de2c2b2eda71e9ba6fc64d1f4d7a6f5ec320de` (durable tag `firmware-pin-05de2c2`), based on upstream `9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743` | Apache-2.0 option from retained upstream declaration | Provisional RNS foundation and firmware compile graph; canonical local LINKREQUEST validation submitted in [upstream PR 7](https://github.com/s-retlaw/rete/pull/7) |
 | Leviculum | <https://codeberg.org/Lew_Palm/leviculum> | `5fb1db0e5e5a490291ee5f6b81312cf0c9de622a` | AGPL-3.0-or-later | Separate protocol oracle and fallback package |
 | esp-hal family | <https://github.com/esp-rs/esp-hal> | crates.io versions in lockfile | MIT OR Apache-2.0 | ESP32-S3 platform |
 | lora-phy | <https://github.com/lora-rs/lora-rs> | crates.io version in lockfile | MIT OR Apache-2.0 | Compile-time radio-driver integration; radio is not initialized yet |
@@ -27,6 +27,11 @@ Rete's reviewed snapshot declares `MIT OR Apache-2.0` in Cargo metadata and
 its README but does not contain canonical license files. This is release
 packaging hygiene to resolve with upstream or in the corresponding-source
 bundle; it is not being silently inferred from code.
+
+All Rete workspace crates in the product graph move together. The integration
+fork retains upstream history and contains only focused commits intended for
+upstream review. Once a fix is merged, the graph returns atomically to one
+exact upstream revision rather than retaining a parallel implementation.
 
 The full AGPL-3.0 text for the isolated Leviculum comparison is retained at
 `comparisons/rns-leviculum/LICENSE`.

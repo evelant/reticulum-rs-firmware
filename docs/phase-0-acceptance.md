@@ -62,13 +62,22 @@ can issue an SX1262 `SetTx` command.
 
 ### Initial compile-probe baseline
 
-The 2026-07-14 release link, using the pins and revisions in this scaffold,
-produced a GNU size summary of 57,861 bytes of text, 4,076 bytes of data and
-468,748 bytes of BSS/reserved address space. That last number is not live
-application state: the ELF map includes a 327,380-byte stack reservation,
-65,536 bytes of reclaimed DRAM reserved for the heap, and linker gap sections.
-The named `.bss` section itself is 132 bytes. On-device free-heap and stack
-high-water measurements remain authoritative once executable scenarios exist.
+The initial 2026-07-14 release link at upstream Rete revision
+`9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743` produced a GNU size summary of
+57,861 bytes of text, 4,076 bytes of data and 468,748 bytes of BSS/reserved
+address space. That last number is not live application state: the ELF map
+includes a 327,380-byte stack reservation, 65,536 bytes of reclaimed DRAM
+reserved for the heap, and linker gap sections. The named `.bss` section itself
+is 132 bytes. On-device free-heap and stack high-water measurements remain
+authoritative once executable scenarios exist.
+
+After adopting integration-fork revision `05de2c2b2eda71e9ba6fc64d1f4d7a6f5ec320de`,
+the same safe-idle release probe produced 57,869 bytes of text, 4,044 bytes of
+data and 468,780 bytes of BSS/reserved address space. The named `.bss` section
+remained 132 bytes; the map contained a 327,412-byte stack reservation and the
+same 65,536-byte reclaimed-DRAM heap reservation. Rete runtime paths are still
+dead-stripped from this probe, so this confirms dependency/link integrity, not
+operational peak memory.
 
 No `lora-phy` or SX126x driver symbols were retained in the linked safe-idle
 ELF. The ESP ROM symbol map still exposes unrelated Wi-Fi/Bluetooth TX symbol
