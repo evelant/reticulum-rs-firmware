@@ -5,9 +5,11 @@
 **Initial target:** Heltec Wireless Tracker V2.3, ESP32-S3FN8 + SX1262 + KCT8103L<br>
 **Product goal:** an always-on, self-contained Reticulum transport and LXMF store-and-forward node, with optional onboard messaging and NomadNet clients controlled over USB, BLE, or Wi-Fi
 
-Implementation is governed by [ADR 0001](adr/0001-phase-0-scaffold.md) and the
-[Phase-0 acceptance contract](phase-0-acceptance.md). Those documents narrow
-the first workspace without reducing the product scope described here.
+Implementation is governed by [ADR 0001](adr/0001-phase-0-scaffold.md),
+[ADR 0002](adr/0002-rete-provisional-foundation.md) and the
+[Phase-0 validation contract](phase-0-acceptance.md). Those documents narrow
+the first workspace and establish Rete as the provisional RNS foundation
+without reducing the product scope described here.
 
 ## Executive decision
 
@@ -15,7 +17,7 @@ The full product is plausible, but no examined repository is a drop-in firmware 
 
 The broader Rust survey changes the recommended path:
 
-1. Start phase 0 with [`rete`](https://github.com/s-retlaw/rete) as the leading **RNS** foundation and Leviculum as the comparison/fallback. `rete-core`, `rete-transport`, `rete-stack`, and `rete-lxmf-core` pass a generic bare-metal check; 391 focused host tests pass; and its current ESP32-S3/SX1262/Wi-Fi example compiles with the installed ESP toolchain. It is pre-release and its Resource path still needs a flash-streaming/memory audit. Leviculum has the larger established test body and remains a credible alternative.
+1. Adopt [`rete`](https://github.com/s-retlaw/rete) as the provisional **RNS** foundation and retain Leviculum as an independent protocol oracle and fallback. `rete-core`, `rete-transport`, `rete-stack`, and `rete-lxmf-core` pass a generic bare-metal check; 391 focused host tests pass; and its current ESP32-S3/SX1262/Wi-Fi example compiles with the installed ESP toolchain. It is pre-release, its checked-in Python peer predates Reticulum 1.3.8, and its Resource and failure paths need bounded-memory and backpressure hardening before production acceptance. Leviculum remains available for targeted differential tests and as the alternative if Rete meets an explicit ADR 0002 abandonment criterion.
 2. Reuse existing LXMF work instead of starting from an empty crate. `LXMF-rs` contains directly useful constants, announce codecs, message packing/signing, delivery selection, propagation envelopes, paper messages, fixtures, and state semantics. Its full feature graph and runtime are not directly embeddable, so extract/refactor protocol pieces behind an RNS identity adapter rather than importing its Tokio/SQLite runtime. Do **not** use `rete-lxmf-core` as the compatibility authority in its present form: despite compiling `no_std`, it currently uses 2-byte stamps/tickets where current LXMF uses 32-byte stamps and 16-byte tickets, and its `u8 -> bytes` field model cannot preserve arbitrary MessagePack values. `rsLXMF` is the most complete AGPL propagation/router reference found, while `precursor-lxmfchat` is the closest embedded Rust precedent for a combined LXMF, NomadNet and Micron client.
 3. Make two infrastructure roles first-class: Reticulum transport forwarding and an LXMF propagation node. Both are configurable and quota-bound, but neither is defined out of the product merely because the initial board is constrained. An infrastructure profile remains in LoRa receive and processes/forwards traffic whenever the device is powered; only an explicitly selected leaf/standby state opts out and reports that loss of reachability.
 4. Treat onboard LXMF conversation UI, NomadNet browsing, a SPA, and a native mobile app as optional capability modules. They make the device turnkey, but the node is useful without them and constrained builds may omit them.
@@ -57,8 +59,8 @@ The local repositories were inspected at these revisions. These are moving proje
 
 | Reference | Snapshot | License | Useful material | Verdict |
 | --- | ---: | --- | --- | --- |
-| `reference/rete` | `9bcb7d3e` | MIT OR Apache-2.0 declared in Cargo/README; license texts absent | Runtime-agnostic `no_std` RNS, bounded transport storage, RNode LoRa interface, compiling Embassy ESP32-S3/SX1262/Wi-Fi example, and useful LXMF structure | Leading RNS candidate; pre-release, Resource is whole-buffered and current LXMF is wire-incompatible; missing canonical license files are notice/provenance hygiene, not an evaluation blocker |
-| `reference/leviculum` | `5fb1db0` | AGPL-3.0-or-later | Complete sans-I/O RNS core, strong tests, RNode framing, nRF Embassy firmware, current Micron parser and substantial NomadNet client | Strongest comparison/fallback; no LXMF |
+| `reference/rete` | `9bcb7d3e` | MIT OR Apache-2.0 declared in Cargo/README; license texts absent | Runtime-agnostic `no_std` RNS, bounded transport storage, RNode LoRa interface, compiling Embassy ESP32-S3/SX1262/Wi-Fi example, and useful LXMF structure | Provisional RNS foundation; pre-release, Resource is whole-buffered and current LXMF is wire-incompatible; missing canonical license files are notice/provenance hygiene, not an evaluation blocker |
+| `reference/leviculum` | `5fb1db0` | AGPL-3.0-or-later | Complete sans-I/O RNS core, strong tests, RNode framing, nRF Embassy firmware, current Micron parser and substantial NomadNet client | Independent RNS oracle and fallback; no LXMF |
 | `reference/LXMF` | `fab12ad9` | accepted Reticulum License | Current authoritative Python LXMF behavior, router, propagation node and fixtures | Primary pinned compatibility peer; source may also be reused when useful with its conditions/notices preserved |
 | `reference/LXMF-rs` | `0859680` | EPL-2.0 | Broad LXMF/RNS behavior, wire formats, parity fixtures, announce codecs, paper messages, stamps/tickets, router semantics | Approved direct-reuse source for the EPL product path; several wire/state modules are extractable, while the full runtime still needs a substantial bare-metal refactor |
 | `reference/rsReticulum` + `reference/rsLXMF` | `46b699af` / `20ef8342` | AGPL-3.0-or-later | Active Rust RNS/LXMF daemon, complete delivery methods, propagation deposit/retrieve/peering/sync, stamps/tickets, persistence and culling | Best AGPL propagation/router source and host oracle; use directly in an AGPL build, or as an executable interoperability peer for the EPL product build |
@@ -141,7 +143,17 @@ This is evidence for choosing it as the RNS phase-0 leader, not a production dec
 - Transport tables have useful fixed-capacity storage abstractions, but Resource send/receive still clones segments, retains all parts, and materializes an assembled buffer. It needs the same flash-streaming and allocation-failure work required of Leviculum.
 - `rete-lxmf-core` compiles on an MCU but is not a current LXMF correctness base: `STAMP_SIZE` and `TICKET_LENGTH` are both 2 instead of 32 and 16; all field keys are forced to `u8`, all values to MessagePack binary, and already-encoded ticket arrays are wrapped inside binary values. Its tests mostly use empty/simple fields and did not catch this. The hosted outbound queue also explicitly leaves propagated delivery unimplemented.
 
-Adopt `rete` only behind `rns-adapter`, bring its Python interop vectors into this repository, add the missing adversarial/canonical cases, and keep the LXMF implementation independently replaceable. If its RNS parity or memory gates fail, switch the adapter to Leviculum rather than carrying two active cores.
+Rete now sits behind the owning `EmbeddedNode` boundary in `crates/rns-rete`.
+The raw `NodeCore` and mutable transport do not escape into firmware. The
+adapter caps base-profile ingress at 500 bytes, resolves source-relative
+routing while the source interface is known, quotas additional destinations,
+preflights owned Links and receipt tables, and exposes allocation-free numeric
+metrics. It deliberately rejects Resource contexts and relayed LINKREQUESTs
+until Rete has bounded Resource handling and transactional relay-table
+admission. These are temporary capability gates recorded in the
+[upstream hardening backlog](rete-upstream-backlog.md), not reductions of the
+full product requirements. If Rete's RNS parity or memory gates ultimately
+fail, switch the adapter to Leviculum rather than carrying two active cores.
 
 ### Leviculum
 
@@ -435,11 +447,25 @@ The RNS core must cover both the complete endpoint path and an always-on transpo
 
 Recommended runtime model:
 
-- A single `NodeCore` instance owns mutable protocol state.
+- A single project-owned `EmbeddedNode` owns the private Rete `NodeCore` and
+  mutable protocol state; firmware has no `inner_mut`, `Deref`, or raw
+  transport escape hatch.
 - A periodic tick plus input events produces outgoing packets, storage changes, timers, and application events.
+- Ingress resolves Rete's `SourceInterface`/`AllExceptSource` actions into
+  concrete interface identifiers before an action can enter an asynchronous
+  queue.
 - Interface adapters report exact MTU, bitrate estimate, RSSI/SNR metadata, and online state.
 - Path/announce/receipt/resource tables use compile-time or profile bounds and explicit eviction policies.
 - `transport_enabled` is a profile capability. It is on by default for the intended powered node/full-appliance profiles and may be off for a deliberately constrained portable/leaf build.
+
+Ordinary announce/data forwarding is available in the transport role. Link
+relay is currently fail-closed because Rete does not expose relay-table count,
+lookup or insertion failure. `EmbeddedNode` likewise rejects native HEADER_2
+classes that Rete would dispatch to another transport or misroute when the
+final destination terminates locally, and it preflights the reverse table
+before admitted ordinary H1/H2 DATA forwarding. Enabling the full powered-node
+profile requires focused upstream fixes for those gates; silently forwarding a
+packet without retained reverse state is not an acceptable approximation.
 
 Do not persist everything. Identities, ratchets, tickets, durable delivery state, selected paths and the minimum state needed for correct propagation recovery matter. Duplicate caches, live links, transient CSMA state, reverse tables and most routing observations should be rebuilt unless protocol semantics require survival.
 
@@ -515,6 +541,16 @@ The SX1262 accepts at most 255 payload bytes. The standard Reticulum MTU is 500,
 - A 255–508-byte interface frame is sent as two LoRa packets carrying the same header and reassembled before RNS sees it. Normal RNS packets remain bounded by the protocol's 500-byte MTU.
 
 This must be a named `RNodePhyCompat` layer with a timeout, loss behavior, half-duplex locking, and buffer ownership. Test lengths `0`, `1`, `253`, `254`, `255`, `256`, `499`, `500`, `501`, `507`, `508`, `509`, and malformed/duplicate/reordered fragments against real RNode Firmware. The adapter must reject 509; the RNS layer must separately reject packets over 500. Both halves carry the same four-bit sequence and no fragment index, so official framing cannot reliably distinguish every duplicate or reordering; compatibility tests must match official behavior and ensure ambiguous state times out/resets safely rather than promising robust reordering. The local microReticulum example is specifically not an oracle for split packets. If the selected core already contains this framing, keep it behind this explicit boundary and run the same tests rather than reimplementing it gratuitously.
+
+The first receive half of this boundary now lives in `crates/radio-interface`
+as a fixed-capacity `RnodeRxReassembler`. A target radio actor owns that value,
+its monotonic expiry timer, and RSSI/SNR aggregation; Rete `NodeCore` sees only
+a completed packet after the independent 500-byte RNS guard. This small local
+boundary is presently necessary because Rete's `SplitReassembler::feed()`
+uses `None` for empty input, pending continuation, and output-buffer failure,
+and `LoRaInterface::recv()` has no pending-fragment deadline. Those generic
+error/timeout improvements are candidates to contribute upstream before the
+hardware adapter is collapsed onto Rete's interface crate.
 
 [`lora-phy` 3.0.1](https://docs.rs/lora-phy/3.0.1/lora_phy/) is the preferred generic radio crate: it is maintained, `no_std`, asynchronous, built on embedded-hal 1.0, and supports SX1261/2 and SX127x. Its responsibilities stop at the Semtech PHY. The project must add:
 
@@ -607,7 +643,7 @@ Pin compatible versions after the first working lockfile rather than floating ac
 
 Current local esp-hal examples already demonstrate ESP32-S3 Wi-Fi AP with DHCP/TCP, AP+STA, BLE GATT, Wi-Fi/BLE coexistence, USB CDC-ACM, and USB CDC-NCM serving `picoserve` at `10.42.0.1`. Those are feasibility evidence, not an assurance that their combined memory use fits this product.
 
-The user-verified `microReticulum_Firmware` Tracker build establishes that the ESP32-S3/SX1262/FEM hardware path is viable. Phase 0 should spend its comparison budget on the two Rust RNS candidates and on real memory/RF interoperability, not reproduce the same board proof in C++/ESP-IDF. If a future bare-metal dependency presents a specific blocking defect, evaluate that defect and alternatives then; do not maintain a second platform implementation pre-emptively.
+The user-verified `microReticulum_Firmware` Tracker build establishes that the ESP32-S3/SX1262/FEM hardware path is viable. Phase 0 should spend its effort validating and hardening Rete against current Python, embedded memory and real RF interoperability, using Leviculum only where an independent result or fallback spike is useful, rather than reproduce the same board proof in C++/ESP-IDF. If a future bare-metal dependency presents a specific blocking defect, evaluate that defect and alternatives then; do not maintain a second platform implementation pre-emptively.
 
 ## Local Device API
 
@@ -899,15 +935,15 @@ Deliverables:
 
 - establish the project-owned `MIT OR Apache-2.0` policy, EPL-derived crate/file boundary, third-party notice/BOM format and CI feature-graph guard; record `rete`'s declared terms and LXMF-rs as an approved EPL source;
 - pin Rust/ESP tools and create the workspace/CI target matrix;
-- run `rete` and Leviculum through the same ESP32-S3 compile, Python 1.3.8 interop, hostile-input, code-size and peak-memory harness; choose one and wrap it behind `rns-adapter`;
+- run Rete through the ESP32-S3 compile, Python 1.3.8 interop, hostile-input, code-size and peak-memory harness; use Leviculum for targeted differential evidence and retain it as the fallback rather than requiring an equal adapter;
 - add Python-generated LXMF canonical vectors, including arbitrary structured fields, 32-byte stamps and 16-byte tickets, so the known `rete-lxmf-core` errors fail immediately;
-- audit/refactor the selected RNS core's network-controlled allocations, publish per-profile caps and maximum transient bytes, and pass allocator-exhaustion tests;
+- audit/refactor Rete's network-controlled allocations, publish per-profile caps and maximum transient bytes, and pass allocator-exhaustion tests;
 - compile and benchmark encrypted/compressed Resource receive/send on the real target, quantify duplicate full buffers and BZ2 working memory, and scope the flash-streaming refactor;
 - adapt the existing bare-metal Rust ESP/SX1262 proof rather than build a parallel C++/ESP-IDF implementation;
 - produce flash/static-RAM/heap/stack/current numbers for `tracker-core-node` and define the PSRAM full-appliance target criteria;
 - create released and forward-`master` Reticulum/LXMF/Nomad compatibility lanes plus the provenance policy.
 
-Exit: one RNS core passes the real ESP32-S3 target build, independent Python interoperability, allocation/exhaustion tests and a realistic measured memory model; the selected firmware graph also emits a complete license/provenance manifest. The rejected core remains an alternative build or test/reference source.
+Exit: Rete passes the real ESP32-S3 target build, independent Python 1.3.8 interoperability, allocation/exhaustion tests and a realistic measured memory model; its firmware graph also emits a complete license/provenance manifest. If an ADR 0002 abandonment criterion is met instead, Phase 0 preserves the evidence and continues the failing contract and minimum product slice against Leviculum or another qualified fallback rather than weakening the gate.
 
 ### Phase 1 — Tracker BSP and interoperable LoRa interface
 
@@ -1045,7 +1081,7 @@ Exit: enabling location adds a bounded optional capability without changing netw
 
 ## Decisions still required
 
-1. Does `rete` pass the phase-0 RNS conformance and memory gates, or should the separately licensed Leviculum/AGPL build become the foundation?
+1. Does Rete clear the phase-0 production gates without meeting an ADR 0002 abandonment criterion, and what upstreamable hardening is required on that path?
 2. Which regulatory region and antenna are used for initial HIL/RF work?
 3. What measured quotas define the initial `tracker-core-node`, `tracker-headless-infrastructure`, and `tracker-turnkey` compositions?
 4. Which PSRAM board/radio combination should be the first `full-appliance-psram` acceptance target?
@@ -1055,14 +1091,14 @@ Exit: enabling location adds a bounded optional capability without changing netw
 
 ## Recommended immediate next step
 
-Do not begin by porting UI screens. Run a one-to-two-week bare-metal Rust foundation/conformance spike using the user's `reference/rete` checkout as the lead candidate:
+Do not begin by porting UI screens. Start the bare-metal Rust vertical slice with Rete while treating conformance and bounded-memory work as implementation gates:
 
-1. Pin the reviewed `rete` and Leviculum snapshots, record their declared terms in the notice manifest, and place both behind a minimal `rns-adapter` test boundary. Use `rete` + LXMF-rs as the primary multi-license build and Leviculum as the alternative AGPL build.
+1. Keep the reviewed Rete and Leviculum pins and their declared terms in the notice manifest. Integrate Rete through its native APIs; keep the Leviculum package buildable as an independent oracle/fallback without designing a broad universal adapter.
 2. Adapt `rete`'s compiling ESP32-S3/SX1262 example to a Tracker BSP using the proven `microReticulum_Firmware` pin, rail and KCT8103L sequencing. Bring up LoRa plus USB diagnostics only; defer Wi-Fi, BLE and UI.
-3. Run the same released-Python RNS corpus, loss/reordering cases, allocator-failure probes and memory instrumentation against `rete` and Leviculum. Prove the RNode split boundary over real hardware rather than building another C++/ESP-IDF comparison.
+3. Regenerate and run the released-Python 1.3.8 RNS corpus, loss/reordering cases, allocator-failure probes and memory instrumentation against Rete. Use Leviculum for targeted discrepancies and prove the RNode split boundary over real hardware rather than building another C++/ESP-IDF comparison.
 4. Generate canonical LXMF fixtures from released Python and current `master`, including arbitrary MessagePack fields, 32-byte stamps and 16-byte tickets. They should expose the known `rete-lxmf-core` defects before a project-owned bounded LXMF codec is selected or extracted.
-5. Prototype the Precursor constant-memory stamp construction and its bounded Resource/decompression ideas on the host, then measure the selected RNS Resource path and initial Tracker profile budgets on Xtensa.
-6. Publish image/static-RAM/peak-heap/stack/flash/current results, the selected RNS foundation, the LXMF source-reuse decisions, and measurable criteria for the later PSRAM full-appliance board.
+5. Prototype the Precursor constant-memory stamp construction and its bounded Resource/decompression ideas on the host, then measure Rete's Resource path and initial Tracker profile budgets on Xtensa.
+6. Publish image/static-RAM/peak-heap/stack/flash/current results, Rete's production-gate status and required upstream patches, the LXMF source-reuse decisions, and measurable criteria for the later PSRAM full-appliance board.
 
 Exit with one interoperable Rust RNS foundation and a trustworthy memory model. The first implementation phase can then build the Tracker BSP and transport node without prematurely coupling protocol work to the SPA or mobile-client choice.
 

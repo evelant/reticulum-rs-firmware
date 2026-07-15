@@ -14,7 +14,9 @@ external front-end controls low.
 
 - [Architecture](docs/firmware-architecture.md)
 - [Phase-0 scaffold decision](docs/adr/0001-phase-0-scaffold.md)
-- [Phase-0 acceptance contract](docs/phase-0-acceptance.md)
+- [Rete provisional-foundation decision](docs/adr/0002-rete-provisional-foundation.md)
+- [Phase-0 validation contract](docs/phase-0-acceptance.md)
+- [Rete upstream hardening backlog](docs/rete-upstream-backlog.md)
 - [Dependency provenance](docs/provenance.md)
 
 ## Toolchains
@@ -40,6 +42,7 @@ cargo run -p xtask -- doctor
 
 ```sh
 cargo test --locked
+cargo run --locked -p reticulum-conformance-rete
 cargo check --locked \
   -p reticulum-rns-conformance \
   -p reticulum-rns-rete \
@@ -51,6 +54,18 @@ cargo +esp build --locked --release \
   --target xtensa-esp32s3-none-elf
 ```
 
+To regenerate and independently check the released-Python wire corpus, use
+CPython 3.13.7, install `interop/python/requirements-rns-1.3.8.txt` in an
+isolated environment and set `PYTHON` to that environment's interpreter:
+
+```sh
+python3.13 -m pip install \
+  --target artifacts/phase0/rns-1.3.8-python \
+  -r interop/python/requirements-rns-1.3.8.txt
+PYTHONPATH=artifacts/phase0/rns-1.3.8-python PYTHON=python3.13 \
+  cargo run --locked -p xtask -- check-rns-vectors
+```
+
 The Tracker binary must remain TX-disabled until a board revision, antenna,
 region, frequency and conservative power profile are explicitly selected.
 There is intentionally no default LoRa frequency.
@@ -58,8 +73,8 @@ There is intentionally no default LoRa frequency.
 ## Source layout
 
 ```text
-crates/          portable contracts, the Rete candidate, and board data
-comparisons/     separately licensed alternative RNS candidate graphs
+crates/          portable contracts, the provisional Rete foundation, and board data
+comparisons/     separately licensed RNS oracle/fallback graphs
 firmware/        target binaries
 interop/         pinned peer revisions and generated-vector provenance
 tools/           host conformance runners
@@ -68,5 +83,5 @@ reference/       ignored research checkouts; never a build dependency
 ```
 
 Project-owned code is licensed under either MIT or Apache-2.0. Separately
-licensed candidate and future derived-code boundaries are documented in
+licensed fallback and future derived-code boundaries are documented in
 `docs/provenance.md`.

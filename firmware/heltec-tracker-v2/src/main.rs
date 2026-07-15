@@ -64,10 +64,10 @@ async fn main(spawner: Spawner) -> ! {
 
     let candidate = reticulum_rns_rete::metadata();
     info!(
-        "phase0 safe-idle: board={} rns={} accepted={} tx_enabled={} frequency={:?}",
+        "phase0 safe-idle: board={} rns={} status={:?} tx_enabled={} frequency={:?}",
         board::BOARD_REVISION,
         candidate.id,
-        candidate.accepted,
+        candidate.status,
         board::TX_ENABLED_BY_DEFAULT,
         board::DEFAULT_FREQUENCY_HZ,
     );

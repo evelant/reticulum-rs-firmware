@@ -1,0 +1,8 @@
+# Released-Python conformance lane for CPython 3.13.7. These are the complete
+# resolved versions used for the committed corpus; update them as one set.
+cffi==2.0.0
+cryptography==49.0.0
+pycparser==2.23
+pyserial==3.5
+rns @ git+https://github.com/markqvist/Reticulum.git@dca2a9282935d3dd251f2a1588daa41b5deee8c7
+typing-extensions==4.16.0

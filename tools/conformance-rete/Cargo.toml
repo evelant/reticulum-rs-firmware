@@ -1,6 +1,6 @@
 [package]
 name = "reticulum-conformance-rete"
-description = "Host-side Phase-0 report runner for the Rete candidate"
+description = "Host-side released-Python conformance runner for Rete"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,14 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-reticulum-rns-rete = { path = "../../crates/rns-rete" }
+reticulum-radio-interface = { path = "../../crates/radio-interface" }
+reticulum-rns-conformance = { path = "../../crates/rns-conformance" }
+reticulum-rns-rete = { path = "../../crates/rns-rete", features = ["conformance"] }
+hex.workspace = true
+rand_core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 
 [[bin]]
 name = "reticulum-conformance-rete"

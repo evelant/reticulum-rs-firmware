@@ -4,6 +4,9 @@
 - **Date:** 2026-07-14
 - **Decision owners:** project maintainers
 - **Supersedes:** the generated single-package placeholder
+- **Partially superseded by:** [ADR 0002](0002-rete-provisional-foundation.md)
+  for the RNS candidate-selection process and the decision to build a narrow,
+  owning Rete adapter while acceptance gates remain active
 
 ## Context
 
@@ -60,9 +63,10 @@ crate with file-level provenance. The current scaffold does not depend on
 
 The shared conformance crate does not define a production `PacketInterface`,
 `RadioPhy`, `NodeCore`, event enum or storage trait. Phase 0 first records each
-candidate's native input, output, allocation and failure behavior. A narrow
-production command/event seam will be designed only after one foundation has
-passed the acceptance contract.
+candidate's native input, output, allocation and failure behavior. ADR 0002
+subsequently permits a narrow owning Rete seam to be built incrementally while
+the affected capability remains behind its acceptance gates; it does not
+create a universal candidate abstraction or imply production acceptance.
 
 The non-negotiable wire boundaries are recorded now:
 

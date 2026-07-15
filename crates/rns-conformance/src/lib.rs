@@ -22,13 +22,16 @@ pub const RNODE_LORA_HEADER_LEN: usize = 1;
 /// RNode packet bytes available after the one-byte LoRa header.
 pub const RNODE_LORA_DATA_PER_FRAME: usize = SX1262_FRAME_MTU - RNODE_LORA_HEADER_LEN;
 
-/// Candidate's role in the current evaluation.
+/// Current project decision for an RNS candidate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CandidateRole {
-    /// Candidate evaluated first and used by the compile-probe firmware.
-    Lead,
-    /// Independently evaluated fallback/comparison candidate.
-    Comparison,
+pub enum CandidateStatus {
+    /// Candidate used as the working foundation while conformance and bounds
+    /// are still being proven.
+    ProvisionalFoundation,
+    /// Foundation that has passed every documented production gate.
+    ProductionFoundation,
+    /// Candidate retained as an independently implemented fallback.
+    Fallback,
 }
 
 /// Immutable source and status data emitted by every candidate runner.
@@ -42,10 +45,8 @@ pub struct CandidateMetadata {
     pub revision: &'static str,
     /// SPDX license expression governing this candidate graph.
     pub license: &'static str,
-    /// Candidate's current evaluation role.
-    pub role: CandidateRole,
-    /// Whether this integration has passed the Phase-0 acceptance contract.
-    pub accepted: bool,
+    /// Current project decision for this candidate.
+    pub status: CandidateStatus,
 }
 
 /// Rejection from a physical or protocol boundary guard.

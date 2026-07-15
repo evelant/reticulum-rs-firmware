@@ -6,7 +6,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-use reticulum_rns_conformance::{CandidateMetadata, CandidateRole};
+use reticulum_rns_conformance::{CandidateMetadata, CandidateStatus};
 
 /// Reviewed Leviculum source revision.
 pub const SOURCE_REVISION: &str = "5fb1db0e5e5a490291ee5f6b81312cf0c9de622a";
@@ -18,8 +18,7 @@ pub const fn metadata() -> CandidateMetadata {
         source: "https://codeberg.org/Lew_Palm/leviculum",
         revision: SOURCE_REVISION,
         license: "AGPL-3.0-or-later",
-        role: CandidateRole::Comparison,
-        accepted: false,
+        status: CandidateStatus::Fallback,
     }
 }
 
@@ -48,8 +47,8 @@ mod tests {
     }
 
     #[test]
-    fn comparison_is_not_prematurely_marked_accepted() {
-        assert!(!metadata().accepted);
+    fn comparison_is_explicitly_the_fallback() {
+        assert_eq!(metadata().status, CandidateStatus::Fallback);
         assert!(!KNOWN_INTEGRATION_GAPS.is_empty());
     }
 }

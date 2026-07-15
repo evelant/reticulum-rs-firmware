@@ -1,0 +1,57 @@
+{
+  "announce": {
+    "app_name": "testapp",
+    "aspects": [
+      "aspect1"
+    ],
+    "destination_hash_hex": "2b7fa6842783252974dc5fcaff22b808",
+    "fixed_timestamp": 1700000000,
+    "name_hash_hex": "fca709a4818d4e0c78a0",
+    "normalization": "fixed five-byte random prefix and timestamp for reproducibility",
+    "origin": "created and packed by Python RNS 1.3.8",
+    "packet_hash_hex": "b63705cf3ed52d56e32e8e17fbd86f51f391b9ce86a1a38f0f3649c058e74cae",
+    "random_hash_hex": "0000000000006553f100",
+    "raw_hex": "01002b7fa6842783252974dc5fcaff22b8080080ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0fa175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628ffca709a4818d4e0c78a00000000000006553f10050fe696f35b4fc3c4e43e2269372ae2b603ac90dd64757c8ac224bb80f0cabd4e2863f7bc593cd3a785d360ba48485fad67a39617880214dd16086c6e53d8205",
+    "signature_hex": "50fe696f35b4fc3c4e43e2269372ae2b603ac90dd64757c8ac224bb80f0cabd4e2863f7bc593cd3a785d360ba48485fad67a39617880214dd16086c6e53d8205"
+  },
+  "generator": {
+    "command": "python interop/python/generate_rns_vectors.py",
+    "deterministic": true,
+    "notes": "The corpus excludes encrypted packet creation because Python correctly uses a fresh ephemeral key and IV.",
+    "python_version": "3.13.7",
+    "requirements": "interop/python/requirements-rns-1.3.8.txt",
+    "requirements_sha256": "41f5f67517d580539e65a324cb3bbe5bbec24659f3eabe1f06701e3305ff3258",
+    "script": "interop/python/generate_rns_vectors.py",
+    "source_sha256": "6160a811707e829cf85d0e230a4d472e2c1453914e2c21f19654603c9dc5a5ff"
+  },
+  "identity": {
+    "identity_hash_hex": "fd9f121e293bf4a415dd74366ff75f69",
+    "label": "alice",
+    "normalization": "lowercase hexadecimal; no wire-byte normalization",
+    "origin": "created by Python RNS 1.3.8 from the SHA-512 of the test label",
+    "private_key_hex": "408b27d3097eea5a46bf2ab6433a7234a33d5e49957b13ec7acc2ca08e1a13c75272c90c8d3385d47ede5420a7a9623aad817d9f8a70bd100a0acea7400daa59",
+    "public_key_hex": "80ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0fa175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628f",
+    "test_only": true
+  },
+  "lane": "released",
+  "peer": {
+    "package": "rns",
+    "repository": "https://github.com/markqvist/Reticulum.git",
+    "revision": "dca2a9282935d3dd251f2a1588daa41b5deee8c7",
+    "version": "1.3.8"
+  },
+  "plain_data": {
+    "app_name": "reticulum_rs_firmware",
+    "aspects": [
+      "phase0"
+    ],
+    "destination_hash_hex": "58be8093acad86b38ed5ead2c791af53",
+    "normalization": "lowercase hexadecimal; no wire-byte normalization",
+    "origin": "created and packed by Python RNS 1.3.8",
+    "packet_hash_hex": "b655d37573e8238f6feb3d55c0d72163368ed65d85a7cd4a31aa3c9a293fb059",
+    "payload_hex": "7265746520666f756e646174696f6e20636f6e666f726d616e6365",
+    "raw_hex": "080058be8093acad86b38ed5ead2c791af53007265746520666f756e646174696f6e20636f6e666f726d616e6365"
+  },
+  "protocol": "Reticulum",
+  "schema": 1
+}

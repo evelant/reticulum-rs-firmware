@@ -1,6 +1,7 @@
 use std::{
     env,
     ffi::OsStr,
+    path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
 };
 
@@ -14,12 +15,49 @@ fn main() -> ExitCode {
     match args.next().as_deref() {
         Some("doctor") if args.next().is_none() => doctor(),
         Some("build-tracker") if args.next().is_none() => build_tracker(),
+        Some("check-rns-vectors") if args.next().is_none() => check_rns_vectors(),
         Some("graph-policy") if args.next().is_none() => graph_policy(),
         _ => {
-            eprintln!("usage: cargo run -p xtask -- <doctor|build-tracker|graph-policy>");
+            eprintln!(
+                "usage: cargo run -p xtask -- \
+                 <doctor|build-tracker|check-rns-vectors|graph-policy>"
+            );
             ExitCode::from(2)
         }
     }
+}
+
+fn check_rns_vectors() -> ExitCode {
+    let root = workspace_root();
+    let python = env::var_os("PYTHON").unwrap_or_else(|| "python3".into());
+    let script = root.join("interop/python/generate_rns_vectors.py");
+
+    let vector_status = Command::new(&python)
+        .current_dir(&root)
+        .arg(script)
+        .arg("--check")
+        .status();
+    match vector_status {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            eprintln!("Python vector check exited with {status}");
+            eprintln!(
+                "hint: set PYTHON to an environment containing \
+                 interop/python/requirements-rns-1.3.8.txt"
+            );
+            return ExitCode::FAILURE;
+        }
+        Err(error) => {
+            eprintln!("could not run Python vector generator: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
+
+    run_inherited_at(
+        "cargo",
+        &["run", "--locked", "-p", "reticulum-conformance-rete"],
+        &root,
+    )
 }
 
 fn doctor() -> ExitCode {
@@ -160,7 +198,15 @@ where
 }
 
 fn run_inherited(program: &str, args: &[&str]) -> ExitCode {
-    match Command::new(program).args(args).status() {
+    run_inherited_at(program, args, Path::new("."))
+}
+
+fn run_inherited_at(program: &str, args: &[&str], current_dir: &Path) -> ExitCode {
+    match Command::new(program)
+        .current_dir(current_dir)
+        .args(args)
+        .status()
+    {
         Ok(status) if status.success() => ExitCode::SUCCESS,
         Ok(status) => {
             eprintln!("{program} exited with {status}");
@@ -171,6 +217,13 @@ fn run_inherited(program: &str, args: &[&str]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask must live directly below the workspace root")
+        .to_owned()
 }
 
 fn first_line(text: &str) -> &str {
@@ -185,5 +238,10 @@ mod tests {
     fn first_line_handles_empty_and_multiline_output() {
         assert_eq!(first_line(""), "");
         assert_eq!(first_line("one\ntwo"), "one");
+    }
+
+    #[test]
+    fn workspace_root_contains_the_workspace_manifest() {
+        assert!(workspace_root().join("Cargo.toml").is_file());
     }
 }
