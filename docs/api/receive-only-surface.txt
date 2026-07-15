@@ -1,0 +1,185 @@
+board@src/lib.rs const BOARD_REVISION : & str
+board@src/lib.rs const DEFAULT_FREQUENCY_HZ : Option < u32 >
+board@src/lib.rs const FEM_CPS_CONTROL : FemCpsControl
+board@src/lib.rs const FLASH_BYTES : usize
+board@src/lib.rs const HAS_PSRAM : bool
+board@src/lib.rs const INERT_RADIO_STATE : RadioSafeState
+board@src/lib.rs const LAB_RX_FREQUENCY_RANGE : ReceiveFrequencyRange
+board@src/lib.rs const RF_MATCHING_MAX_HZ : u32
+board@src/lib.rs const RF_MATCHING_MIN_HZ : u32
+board@src/lib.rs const TCXO_MILLIVOLTS : u16
+board@src/lib.rs const TX_ENABLED_BY_DEFAULT : bool
+board@src/lib.rs const fn validate_lab_rx_profile (config : LabRxProfileConfig ,) -> Result < LabRxProfile , LabRxProfileError >
+board@src/lib.rs enum FemCpsControl
+board@src/lib.rs enum FemCpsControl attribute # [derive (Clone , Copy , Debug , Eq , PartialEq)]
+board@src/lib.rs enum FemCpsControl variant Sx1262Dio2Direct
+board@src/lib.rs enum SafeLevel
+board@src/lib.rs enum SafeLevel attribute # [derive (Clone , Copy , Debug , Eq , PartialEq)]
+board@src/lib.rs enum SafeLevel variant High
+board@src/lib.rs enum SafeLevel variant Low
+board@src/lib.rs mod pins
+board@src/lib.rs reexport rx_only :: { FEM_CSD_SETTLE_MS , FEM_POWER_SETTLE_MS , RxOnlyFemError , RxOnlyFemFault , TrackerRxInterlock , }
+board@src/lib.rs reexport rx_radio :: { ReceivedFrame , RxEventTimestampCapture , TRACKER_RX_CONFIGURATION , TRACKER_RX_SYNC_WORD , TrackerRadioFaultCode , TrackerRxConfiguration , TrackerRxGain , TrackerRxRadio , TrackerRxRadioError , TrackerRxRadioFault , TrackerRxRadioOperation , TrackerRxRegulator , }
+board@src/lib.rs struct RadioSafeState attribute # [derive (Clone , Copy , Debug , Eq , PartialEq)]
+board@src/lib.rs struct RadioSafeState field fem_csd pub SafeLevel
+board@src/lib.rs struct RadioSafeState field fem_ctx pub SafeLevel
+board@src/lib.rs struct RadioSafeState field fem_power pub SafeLevel
+board@src/lib.rs struct RadioSafeState field sx1262_reset pub SafeLevel
+board@src/lib.rs struct RadioSafeState fields=exposed
+board@src/lib.rs::pins const BATTERY_ADC : u8
+board@src/lib.rs::pins const BATTERY_DIVIDER_ENABLE : u8
+board@src/lib.rs::pins const BUTTON : u8
+board@src/lib.rs::pins const FEM_CSD : u8
+board@src/lib.rs::pins const FEM_CTX : u8
+board@src/lib.rs::pins const FEM_POWER : u8
+board@src/lib.rs::pins const GNSS_MCU_RX : u8
+board@src/lib.rs::pins const GNSS_MCU_TX : u8
+board@src/lib.rs::pins const GNSS_PPS : u8
+board@src/lib.rs::pins const GNSS_RESET : u8
+board@src/lib.rs::pins const HEADER_GPIO46 : u8
+board@src/lib.rs::pins const LORA_BUSY : u8
+board@src/lib.rs::pins const LORA_DIO1 : u8
+board@src/lib.rs::pins const LORA_MISO : u8
+board@src/lib.rs::pins const LORA_MOSI : u8
+board@src/lib.rs::pins const LORA_NSS : u8
+board@src/lib.rs::pins const LORA_RESET : u8
+board@src/lib.rs::pins const LORA_SCLK : u8
+board@src/lib.rs::pins const TFT_BACKLIGHT : u8
+board@src/lib.rs::pins const TFT_CS : u8
+board@src/lib.rs::pins const TFT_DC : u8
+board@src/lib.rs::pins const TFT_MOSI : u8
+board@src/lib.rs::pins const TFT_RESET : u8
+board@src/lib.rs::pins const TFT_SCLK : u8
+board@src/lib.rs::pins const USB_D_MINUS : u8
+board@src/lib.rs::pins const USB_D_PLUS : u8
+board@src/lib.rs::pins const VEXT_ENABLE : u8
+board@src/rx_only.rs const FEM_CSD_SETTLE_MS : u32
+board@src/rx_only.rs const FEM_POWER_SETTLE_MS : u32
+board@src/rx_only.rs enum RxOnlyFemError attribute # [derive (Debug , Eq , PartialEq)]
+board@src/rx_only.rs enum RxOnlyFemError variant ChipEnable (CsdError)
+board@src/rx_only.rs enum RxOnlyFemError variant ContextNotLow
+board@src/rx_only.rs enum RxOnlyFemError variant ContextRead (CtxError)
+board@src/rx_only.rs enum RxOnlyFemError variant ContextWrite (CtxError)
+board@src/rx_only.rs enum RxOnlyFemError variant Power (PowerError)
+board@src/rx_only.rs enum RxOnlyFemError< PowerError , CsdError , CtxError >
+board@src/rx_only.rs enum RxOnlyFemFault
+board@src/rx_only.rs enum RxOnlyFemFault attribute # [derive (Clone , Copy , Debug , Eq , PartialEq)]
+board@src/rx_only.rs enum RxOnlyFemFault variant ChipEnable
+board@src/rx_only.rs enum RxOnlyFemFault variant ContextNotLow
+board@src/rx_only.rs enum RxOnlyFemFault variant ContextRead
+board@src/rx_only.rs enum RxOnlyFemFault variant ContextWrite
+board@src/rx_only.rs enum RxOnlyFemFault variant Power
+board@src/rx_only.rs impl RxOnlyFemError < PowerError , CsdError , CtxError > const fn kind (& self) -> RxOnlyFemFault
+board@src/rx_only.rs impl TrackerRxInterlock < Power , Csd , Ctx > fn new (power : Power , csd : Csd , ctx : Ctx) -> Result < Self , FemErrorFor < Power , Csd , Ctx > >
+board@src/rx_only.rs struct TrackerRxInterlock< Power , Csd , Ctx > fields=opaque
+board@src/rx_radio.rs const TRACKER_RX_CONFIGURATION : TrackerRxConfiguration
+board@src/rx_radio.rs const TRACKER_RX_SYNC_WORD : u16
+board@src/rx_radio.rs enum TrackerRadioFaultCode
+board@src/rx_radio.rs enum TrackerRadioFaultCode attribute # [derive (Clone , Copy , Debug , Eq , PartialEq)]
+board@src/rx_radio.rs enum TrackerRadioFaultCode variant Busy
+board@src/rx_radio.rs enum TrackerRadioFaultCode variant Dio1
+board@src/rx_radio.rs enum TrackerRadioFaultCode variant DutyCycleUnsupported
+board@src/rx_radio.rs enum TrackerRadioFaultCode variant InvalidBandwidthForFrequency
+board@src/rx_radio.rs enum TrackerRadioFaultCode variant InvalidBaseAddress { transmit : usize , receive : usize }
+board@src/rx_radio.rs enum TrackerRadioFaultCode variant InvalidConfiguration
+board@src/rx_radio.rs enum TrackerRadioFaultCode variant InvalidOutputPowerForFrequency
+board@src/rx_radio.rs enum TrackerRadioFaultCode variant InvalidRadioMode
+board@src/rx_radio.rs enum TrackerRadioFaultCode variant InvalidSf6ExplicitHeaderRequest
+board@src/rx_radio.rs enum TrackerRadioFaultCode variant Irq
+board@src/rx_radio.rs enum TrackerRadioFaultCode variant Operation (u8)
+board@src/rx_radio.rs enum TrackerRadioFaultCode variant PayloadSizeMismatch { expected : usize , actual : usize }
+board@src/rx_radio.rs enum TrackerRadioFaultCode variant PayloadSizeUnexpected (usize)
+board@src/rx_radio.rs enum TrackerRadioFaultCode variant ReceiveTimeout
+board@src/rx_radio.rs enum TrackerRadioFaultCode variant Reset
+board@src/rx_radio.rs enum TrackerRadioFaultCode variant RfSwitchRx
+board@src/rx_radio.rs enum TrackerRadioFaultCode variant RfSwitchTx
+board@src/rx_radio.rs enum TrackerRadioFaultCode variant RngUnsupported
+board@src/rx_radio.rs enum TrackerRadioFaultCode variant Spi
+board@src/rx_radio.rs enum TrackerRadioFaultCode variant TransmitTimeout
+board@src/rx_radio.rs enum TrackerRadioFaultCode variant UnavailableBandwidth
+board@src/rx_radio.rs enum TrackerRadioFaultCode variant UnavailableSpreadingFactor
+board@src/rx_radio.rs enum TrackerRxGain
+board@src/rx_radio.rs enum TrackerRxGain attribute # [derive (Clone , Copy , Debug , Eq , PartialEq)]
+board@src/rx_radio.rs enum TrackerRxGain variant Boosted
+board@src/rx_radio.rs enum TrackerRxGain variant Unboosted
+board@src/rx_radio.rs enum TrackerRxRadioFault
+board@src/rx_radio.rs enum TrackerRxRadioFault attribute # [derive (Clone , Copy , Debug , Eq , PartialEq)]
+board@src/rx_radio.rs enum TrackerRxRadioFault variant CaptureTimestampUnavailable
+board@src/rx_radio.rs enum TrackerRxRadioFault variant Faulted
+board@src/rx_radio.rs enum TrackerRxRadioFault variant Fem (RxOnlyFemFault)
+board@src/rx_radio.rs enum TrackerRxRadioFault variant Radio (TrackerRadioFaultCode)
+board@src/rx_radio.rs enum TrackerRxRadioOperation
+board@src/rx_radio.rs enum TrackerRxRadioOperation attribute # [derive (Clone , Copy , Debug , Eq , PartialEq)]
+board@src/rx_radio.rs enum TrackerRxRadioOperation variant ChipInitialization
+board@src/rx_radio.rs enum TrackerRxRadioOperation variant FemEnable
+board@src/rx_radio.rs enum TrackerRxRadioOperation variant InterfaceConstruction
+board@src/rx_radio.rs enum TrackerRxRadioOperation variant InterlockReassertion
+board@src/rx_radio.rs enum TrackerRxRadioOperation variant ModulationConfiguration
+board@src/rx_radio.rs enum TrackerRxRadioOperation variant OwnerState
+board@src/rx_radio.rs enum TrackerRxRadioOperation variant PacketConfiguration
+board@src/rx_radio.rs enum TrackerRxRadioOperation variant PrepareReceive
+board@src/rx_radio.rs enum TrackerRxRadioOperation variant Receive
+board@src/rx_radio.rs enum TrackerRxRadioOperation variant Shutdown
+board@src/rx_radio.rs enum TrackerRxRegulator
+board@src/rx_radio.rs enum TrackerRxRegulator attribute # [derive (Clone , Copy , Debug , Eq , PartialEq)]
+board@src/rx_radio.rs enum TrackerRxRegulator variant DcDc
+board@src/rx_radio.rs enum TrackerRxRegulator variant Ldo
+board@src/rx_radio.rs impl RxEventTimestampCapture const fn new (now_ticks : fn () -> u64) -> Self
+board@src/rx_radio.rs impl TrackerRadioFaultCode const fn class (self) -> RadioRxFaultClass
+board@src/rx_radio.rs impl TrackerRxConfiguration const fn boosted (self) -> bool
+board@src/rx_radio.rs impl TrackerRxConfiguration const fn gain (self) -> TrackerRxGain
+board@src/rx_radio.rs impl TrackerRxConfiguration const fn new (regulator : TrackerRxRegulator , gain : TrackerRxGain) -> Self
+board@src/rx_radio.rs impl TrackerRxConfiguration const fn regulator (self) -> TrackerRxRegulator
+board@src/rx_radio.rs impl TrackerRxConfiguration const fn uses_dcdc (self) -> bool
+board@src/rx_radio.rs impl TrackerRxRadio < Spi , Reset , Dio1 , Busy , RadioDelay , Power , Csd , Ctx > async fn new < FemDelay > (spi : Spi , reset : Reset , dio1 : Dio1 , busy : Busy , radio_delay : RadioDelay , fem_delay : & mut FemDelay , interlock : TrackerRxInterlock < Power , Csd , Ctx > , rx_timestamps : & 'static RxEventTimestampCapture , profile : LabRxProfile , configuration : TrackerRxConfiguration ,) -> Result < Self , TrackerRxRadioError > where FemDelay : DelayNs ,
+board@src/rx_radio.rs impl TrackerRxRadio < Spi , Reset , Dio1 , Busy , RadioDelay , Power , Csd , Ctx > async fn receive (& mut self , buffer : & mut [u8 ; SX1262_FRAME_MTU] ,) -> Result < ReceivedFrame , TrackerRxRadioError >
+board@src/rx_radio.rs impl TrackerRxRadio < Spi , Reset , Dio1 , Busy , RadioDelay , Power , Csd , Ctx > const fn is_active (& self) -> bool
+board@src/rx_radio.rs impl TrackerRxRadio < Spi , Reset , Dio1 , Busy , RadioDelay , Power , Csd , Ctx > fn shutdown (& mut self) -> Result < () , TrackerRxRadioError >
+board@src/rx_radio.rs impl TrackerRxRadioError const fn classification (self) -> RadioRxFaultClassification
+board@src/rx_radio.rs impl TrackerRxRadioFault const fn class (self) -> RadioRxFaultClass
+board@src/rx_radio.rs struct ReceivedFrame attribute # [derive (Clone , Copy , Debug , Eq , PartialEq)]
+board@src/rx_radio.rs struct ReceivedFrame field len pub u8
+board@src/rx_radio.rs struct ReceivedFrame field received_at_ticks pub u64
+board@src/rx_radio.rs struct ReceivedFrame field signal pub FrameSignal
+board@src/rx_radio.rs struct ReceivedFrame fields=exposed
+board@src/rx_radio.rs struct RxEventTimestampCapture fields=opaque
+board@src/rx_radio.rs struct TrackerRxConfiguration attribute # [derive (Clone , Copy , Debug , Eq , PartialEq)]
+board@src/rx_radio.rs struct TrackerRxConfiguration fields=opaque
+board@src/rx_radio.rs struct TrackerRxRadio< Spi , Reset , Dio1 , Busy , RadioDelay , Power , Csd , Ctx > fields=opaque
+board@src/rx_radio.rs struct TrackerRxRadioError attribute # [derive (Clone , Copy , Debug , Eq , PartialEq)]
+board@src/rx_radio.rs struct TrackerRxRadioError field cleanup pub Option < TrackerRxRadioFault >
+board@src/rx_radio.rs struct TrackerRxRadioError field operation pub TrackerRxRadioOperation
+board@src/rx_radio.rs struct TrackerRxRadioError field primary pub TrackerRxRadioFault
+board@src/rx_radio.rs struct TrackerRxRadioError fields=exposed
+rete-rx@src/lib.rs enum ReceiveOnlyIdentityError
+rete-rx@src/lib.rs enum ReceiveOnlyIdentityError attribute # [derive (Clone , Copy , Debug , Eq , PartialEq)]
+rete-rx@src/lib.rs enum ReceiveOnlyIdentityError variant InvalidPrivateKey
+rete-rx@src/lib.rs enum ReceiveOnlyReteError
+rete-rx@src/lib.rs enum ReceiveOnlyReteError attribute # [derive (Clone , Copy , Debug , Eq , PartialEq)]
+rete-rx@src/lib.rs enum ReceiveOnlyReteError variant Construction
+rete-rx@src/lib.rs enum ReceiveOnlyReteError variant PrimaryDestinationUnavailable
+rete-rx@src/lib.rs fn receive_only_identity_from_private_key (private_key : & [u8] ,) -> Result < ReceiveOnlyIdentity , ReceiveOnlyIdentityError >
+rete-rx@src/lib.rs impl AsRef < [u8] > for ReceiveOnlyDestinationHash
+rete-rx@src/lib.rs impl AsRef < [u8] > for ReceiveOnlyIdentityHash
+rete-rx@src/lib.rs impl ReceiveOnlyDestinationHash const fn as_bytes (& self) -> & [u8 ; 16]
+rete-rx@src/lib.rs impl ReceiveOnlyDestinationHash fn as_ref (& self) -> & [u8]
+rete-rx@src/lib.rs impl ReceiveOnlyIdentity fn public_key (& self) -> [u8 ; 64]
+rete-rx@src/lib.rs impl ReceiveOnlyIdentityHash const fn as_bytes (& self) -> & [u8 ; 16]
+rete-rx@src/lib.rs impl ReceiveOnlyIdentityHash fn as_ref (& self) -> & [u8]
+rete-rx@src/lib.rs impl ReceiveOnlyRete < PATHS , ANNOUNCES , DEDUPLICATION , LINKS > const fn fragment_deadline_ticks (& self) -> Option < u64 >
+rete-rx@src/lib.rs impl ReceiveOnlyRete < PATHS , ANNOUNCES , DEDUPLICATION , LINKS > const fn next_wake_ticks (& self) -> u64
+rete-rx@src/lib.rs impl ReceiveOnlyRete < PATHS , ANNOUNCES , DEDUPLICATION , LINKS > fn destination_hash (& self) -> ReceiveOnlyDestinationHash
+rete-rx@src/lib.rs impl ReceiveOnlyRete < PATHS , ANNOUNCES , DEDUPLICATION , LINKS > fn identity_hash (& self) -> ReceiveOnlyIdentityHash
+rete-rx@src/lib.rs impl ReceiveOnlyRete < PATHS , ANNOUNCES , DEDUPLICATION , LINKS > fn metrics (& self) -> ReceiveOnlyIngressMetrics
+rete-rx@src/lib.rs impl ReceiveOnlyRete < PATHS , ANNOUNCES , DEDUPLICATION , LINKS > fn new (identity : ReceiveOnlyIdentity , app_name : & str , aspects : & [& str] , fragment_timeout_ticks : NonZeroU64 , initial_now_ticks : u64 , maintenance_interval_ticks : NonZeroU64 , interface : ReceiveOnlyInterfaceId ,) -> Result < Self , ReceiveOnlyReteError >
+rete-rx@src/lib.rs impl ReceiveOnlyRete < PATHS , ANNOUNCES , DEDUPLICATION , LINKS > fn on_wake < R : RngCore + CryptoRng > (& mut self , wake : ReceiveOnlyWake < '_ > , now : ReceiveOnlyClockSample , rng : & mut R ,) -> ReceiveOnlyStep
+rete-rx@src/lib.rs reexport reticulum_rns_rete :: { IngressDisposition , RETE_MAINTENANCE_INTERVAL_SECONDS , RawFrameDropReason , ReceiveOnlyClockSample , ReceiveOnlyIngressMetrics , ReceiveOnlyIngressOutcome , ReceiveOnlyStep , ReceiveOnlyWake , SuppressedActions , metadata , }
+rete-rx@src/lib.rs struct ReceiveOnlyDestinationHash attribute # [derive (Clone , Copy , Debug , Eq , PartialEq)]
+rete-rx@src/lib.rs struct ReceiveOnlyDestinationHash fields=opaque
+rete-rx@src/lib.rs struct ReceiveOnlyIdentity fields=opaque
+rete-rx@src/lib.rs struct ReceiveOnlyIdentityHash attribute # [derive (Clone , Copy , Debug , Eq , PartialEq)]
+rete-rx@src/lib.rs struct ReceiveOnlyIdentityHash fields=opaque
+rete-rx@src/lib.rs struct ReceiveOnlyInterfaceId attribute # [derive (Clone , Copy , Debug , Eq , PartialEq)]
+rete-rx@src/lib.rs struct ReceiveOnlyInterfaceId field 0 pub u8
+rete-rx@src/lib.rs struct ReceiveOnlyInterfaceId fields=exposed
+rete-rx@src/lib.rs struct ReceiveOnlyRete< const PATHS : usize , const ANNOUNCES : usize , const DEDUPLICATION : usize , const LINKS : usize , > fields=opaque

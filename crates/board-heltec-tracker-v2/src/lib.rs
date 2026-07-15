@@ -7,6 +7,21 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+mod rx_only;
+mod rx_radio;
+
+use reticulum_radio_interface::{
+    LabRxProfile, LabRxProfileConfig, LabRxProfileError, ReceiveFrequencyRange,
+};
+pub use rx_only::{
+    FEM_CSD_SETTLE_MS, FEM_POWER_SETTLE_MS, RxOnlyFemError, RxOnlyFemFault, TrackerRxInterlock,
+};
+pub use rx_radio::{
+    ReceivedFrame, RxEventTimestampCapture, TRACKER_RX_CONFIGURATION, TRACKER_RX_SYNC_WORD,
+    TrackerRadioFaultCode, TrackerRxConfiguration, TrackerRxGain, TrackerRxRadio,
+    TrackerRxRadioError, TrackerRxRadioFault, TrackerRxRadioOperation, TrackerRxRegulator,
+};
+
 /// Exact board revision described by this crate.
 pub const BOARD_REVISION: &str = "2.3";
 
@@ -25,6 +40,26 @@ pub const DEFAULT_FREQUENCY_HZ: Option<u32> = None;
 /// SX1262 DIO3-powered TCXO voltage.
 pub const TCXO_MILLIVOLTS: u16 = 1_800;
 
+/// Lowest frequency supported by this board's fitted 863–928 MHz RF path.
+pub const RF_MATCHING_MIN_HZ: u32 = 863_000_000;
+
+/// Highest frequency supported by this board's fitted 863–928 MHz RF path.
+pub const RF_MATCHING_MAX_HZ: u32 = 928_000_000;
+
+/// Inclusive receive range for this exact board/RF-path revision.
+pub const LAB_RX_FREQUENCY_RANGE: ReceiveFrequencyRange =
+    match ReceiveFrequencyRange::try_new(RF_MATCHING_MIN_HZ, RF_MATCHING_MAX_HZ) {
+        Ok(range) => range,
+        Err(_) => panic!("invalid Tracker V2 RF range"),
+    };
+
+/// Validate explicit lab configuration for this exact board/RF path.
+pub const fn validate_lab_rx_profile(
+    config: LabRxProfileConfig,
+) -> Result<LabRxProfile, LabRxProfileError> {
+    LabRxProfile::validate(config, LAB_RX_FREQUENCY_RANGE)
+}
+
 /// GPIO assignments from the Tracker V2.3 schematic and working reference.
 pub mod pins {
     pub const BUTTON: u8 = 0;
@@ -41,11 +76,8 @@ pub mod pins {
     pub const LORA_RESET: u8 = 12;
     pub const LORA_BUSY: u8 = 13;
     pub const LORA_DIO1: u8 = 14;
-    /// MCU connection to the PA_CPS net also driven by SX1262 DIO2.
-    ///
-    /// Firmware must leave this pin as an input/high-impedance while DIO2 RF
-    /// switch control is enabled; it is not an independent control output.
-    pub const FEM_CPS_SHARED: u8 = 46;
+    /// Separately exposed header GPIO; it is not connected to PA_CPS.
+    pub const HEADER_GPIO46: u8 = 46;
     pub const USB_D_MINUS: u8 = 19;
     pub const USB_D_PLUS: u8 = 20;
     pub const TFT_BACKLIGHT: u8 = 21;
@@ -63,12 +95,12 @@ pub mod pins {
 /// Source controlling the KCT8103L CPS/RF-switch input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FemCpsControl {
-    /// SX1262 DIO2 drives CPS while the shared MCU GPIO remains high-impedance.
-    Sx1262Dio2WithMcuHighImpedance,
+    /// SX1262 DIO2 is wired directly to KCT8103L CPS.
+    Sx1262Dio2Direct,
 }
 
-/// DIO2 is the sole active CPS driver; GPIO46 must never contend with it.
-pub const FEM_CPS_CONTROL: FemCpsControl = FemCpsControl::Sx1262Dio2WithMcuHighImpedance;
+/// DIO2 is the sole active CPS driver; no ESP32 GPIO is present on that net.
+pub const FEM_CPS_CONTROL: FemCpsControl = FemCpsControl::Sx1262Dio2Direct;
 
 /// Logic level to apply to a safety-critical output at inert boot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -111,7 +143,6 @@ mod tests {
             pins::LORA_RESET,
             pins::LORA_BUSY,
             pins::LORA_DIO1,
-            pins::FEM_CPS_SHARED,
         ];
 
         for (index, pin) in pins.iter().enumerate() {
@@ -127,9 +158,37 @@ mod tests {
         assert_eq!(INERT_RADIO_STATE.fem_csd, SafeLevel::Low);
         assert_eq!(INERT_RADIO_STATE.fem_ctx, SafeLevel::Low);
         assert_eq!(INERT_RADIO_STATE.sx1262_reset, SafeLevel::Low);
+        assert_eq!(FEM_CPS_CONTROL, FemCpsControl::Sx1262Dio2Direct);
+    }
+
+    #[test]
+    fn tracker_lab_profile_uses_only_the_fitted_rf_range() {
+        let valid = LabRxProfileConfig {
+            frequency_hz: Some(915_000_000),
+            spreading_factor: 7,
+            bandwidth_hz: 125_000,
+            coding_rate_denominator: 5,
+            preamble_symbols: 18,
+            explicit_header: true,
+            crc: true,
+            iq_inverted: false,
+        };
+        assert!(validate_lab_rx_profile(valid).is_ok());
+
+        let outside = LabRxProfileConfig {
+            frequency_hz: Some(RF_MATCHING_MIN_HZ - 1),
+            ..valid
+        };
         assert_eq!(
-            FEM_CPS_CONTROL,
-            FemCpsControl::Sx1262Dio2WithMcuHighImpedance
+            validate_lab_rx_profile(outside),
+            Err(LabRxProfileError::ChannelOutsideSupportedRange {
+                frequency_hz: RF_MATCHING_MIN_HZ - 1,
+                bandwidth_hz: 125_000,
+                lower_edge_hz: (RF_MATCHING_MIN_HZ - 1 - 62_500) as u64,
+                upper_edge_hz: (RF_MATCHING_MIN_HZ - 1 + 62_500) as u64,
+                minimum_hz: RF_MATCHING_MIN_HZ,
+                maximum_hz: RF_MATCHING_MAX_HZ,
+            })
         );
     }
 }

@@ -7,5 +7,16 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[dependencies]
+critical-section.workspace = true
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
+lora-phy.workspace = true
+reticulum-radio-interface = { path = "../radio-interface" }
+
+[dev-dependencies]
+critical-section = { workspace = true, features = ["std"] }
+reticulum-lab-rx-returned-fault-hil = { path = "../lab-rx-returned-fault-hil" }
+
 [lib]
 path = "src/lib.rs"

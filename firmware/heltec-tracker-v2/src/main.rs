@@ -18,7 +18,7 @@ use embassy_time::{Duration, Timer};
 use esp_backtrace as _;
 use esp_hal::{
     clock::CpuClock,
-    gpio::{Input, InputConfig, Level, Output, OutputConfig},
+    gpio::{Level, Output, OutputConfig},
     timer::timg::TimerGroup,
 };
 use log::info;
@@ -26,6 +26,9 @@ use reticulum_board_heltec_tracker_v2 as board;
 
 #[cfg(not(feature = "safe-idle"))]
 compile_error!("the Phase-0 Tracker scaffold must include the safe-idle feature");
+
+#[cfg(feature = "lab-rx")]
+compile_error!("safe-idle and lab-rx are mutually exclusive firmware modes");
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -44,15 +47,12 @@ async fn main(spawner: Spawner) -> ! {
     // - SX1262 held in reset
     // - KCT8103L power and chip-enable off
     // - KCT8103L CTX held in receive (never transmit)
-    // - shared PA_CPS GPIO46 held as input/high-impedance
+    // - SX1262 DIO2 remains the sole direct KCT8103L CPS connection
     // - SX1262 NSS inactive
     let _sx1262_reset = Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default());
     let _fem_power = Output::new(peripherals.GPIO7, Level::Low, OutputConfig::default());
     let _fem_csd = Output::new(peripherals.GPIO4, Level::Low, OutputConfig::default());
     let _fem_ctx = Output::new(peripherals.GPIO5, Level::Low, OutputConfig::default());
-    // GPIO46 shares the PA_CPS net with SX1262 DIO2. It must never contend
-    // with the radio's hardware RF-switch driver.
-    let _fem_cps_shared = Input::new(peripherals.GPIO46, InputConfig::default());
     let _sx1262_nss = Output::new(peripherals.GPIO8, Level::High, OutputConfig::default());
 
     // Keep the shared display/GNSS rail and battery-divider load disabled.
@@ -66,7 +66,7 @@ async fn main(spawner: Spawner) -> ! {
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timers.timer0, software_interrupts.software_interrupt0);
 
-    let candidate = reticulum_rns_rete::metadata();
+    let candidate = reticulum_rns_rete_rx::metadata();
     info!(
         "phase0 safe-idle: board={} rns={} status={:?} tx_enabled={} frequency={:?}",
         board::BOARD_REVISION,
@@ -74,6 +74,10 @@ async fn main(spawner: Spawner) -> ! {
         candidate.status,
         board::TX_ENABLED_BY_DEFAULT,
         board::DEFAULT_FREQUENCY_HZ,
+    );
+    info!(
+        "phase0 runtime patch: esp_rtos_main_stack_slice={}",
+        env!("RETICULUM_ESP_RTOS_MAIN_STACK_PATCH"),
     );
     info!("RF interlock active; SX1262 reset and KCT8103L controls are held low");
 

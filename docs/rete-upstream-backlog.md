@@ -193,6 +193,13 @@ decompressed output and transient copies; the long-term device path should be
 able to stream through flash-backed storage instead of assembling every
 representation in RAM.
 
+The current `HeaplessStorage<..., L>` also cannot instantiate `L = 0` or
+`L = 1`: its `heapless::IndexMap` capacity path requires greater than one. A
+receive-only endpoint that rejects all Links therefore still reserves at least
+two Link slots. Make a zero-Link storage profile representable (or separate
+Link storage behind an optional capability) instead of forcing constrained
+firmware to pay for unreachable state.
+
 The local adapter caps ingress at 500 bytes, caps destination registration,
 preflights receipt tables and rejects every Resource context until this work is
 complete. That is a capability gate, not a reduction of the full product
@@ -218,6 +225,62 @@ project-owned bounded `RnodeRxReassembler`/`TimedRnodeRx` implementation and
 hostile tests in `crates/radio-interface` provide a differential
 specification.
 
+The generic Embassy runners also race interface `recv()` futures in `select`,
+cancelling whichever future loses. `ReteInterface` does not state a
+cancellation-safety contract, while a complete `lora-phy` receive operation
+cannot safely be treated as cancellable. Either make cancellation an explicit
+interface capability, split readiness from completion, or give each physical
+interface a sole owner and feed a bounded central queue. The firmware uses the
+last model and does not run the Rete Embassy LoRa loop.
+
+The transmit side needs a separate focused audit before reuse. The current
+LoRa adapter ignores its configured TX timeout, begins with a deterministic
+split sequence, and transmits after CSMA attempts are exhausted instead of
+returning a typed busy/deferred result. Generic typed outcomes and randomized
+sequence state belong upstream; regional airtime and retry policy remain
+product-owned.
+
+## 9. Clock domains and restart-safe snapshots
+
+**Priority:** request interoperability and durable-node correctness
+
+`NodeCore::send_request()` supplies one `now` value both as the serialized
+request timestamp, which is wall-clock Unix time in released Python, and as the
+monotonic timeout-registration time. One integer cannot correctly represent
+both clocks on an offline device. Split the API into explicit wall and
+monotonic time types and test boot-without-wall-time behavior rather than
+silently emitting uptime as a Unix timestamp.
+
+Transport snapshots likewise persist `learned_at` and `last_accessed` values
+without recording the monotonic epoch or wall-time quality. Restoring raw
+pre-reboot ticks into a fresh monotonic epoch can extend or prematurely expire
+paths. Add a versioned snapshot-age representation and explicit rebase/drop
+policy. `SnapshotDetail::Full` should not claim broader recovery while it is
+identical to `Standard`.
+
+Rete provides useful snapshot and ratchet-store traits, but no checked-in
+bounded flash implementation. The default ratchet store bounds only previous
+local keys; peer and enforcement maps remain allocation-backed and private-key
+arrays are not zeroized on replacement/drop. Generic bounds and key cleanup
+belong upstream. The power-fail-safe flash schema, identity lifecycle and
+qualified ESP entropy service remain product-owned.
+
+## 10. Interface lifecycle, capacity and observability
+
+**Priority:** multi-interface embedded operation
+
+`ReteInterface` currently exposes only async send/receive. It cannot report
+online state, effective MTU, queue capacity, interface role/mode, PHY metadata
+or typed backpressure, and the bundled embedded runners have fixed one- and
+two-interface shapes. This is enough for examples but not for a dynamic LoRa,
+USB, BLE and Wi-Fi device fabric.
+
+Add small orthogonal interfaces for capabilities/status and explicit bounded
+enqueue outcomes instead of turning the core trait into a product API. Verify
+that AP/Roaming interface mode actually reaches path learning and expiry.
+Transport policy and metadata should be generic; discovery, authentication,
+client sessions and device-API behavior remain in this project.
+
 ## Submission order
 
 1. Exact direct/local LINKREQUEST validation: submitted as upstream draft PR
@@ -231,6 +294,9 @@ specification.
 6. Explicit ingress dispositions and full capacity snapshots.
 7. Bounded output/Resource seams.
 8. LoRa receive API improvements, independently if easier to review.
+9. Clock-domain/request and restart-safe snapshot semantics.
+10. Interface cancellation, capability and backpressure seams as individually
+    reviewable changes.
 
 Do not combine these into one project-specific fork commit. Keep every fix
 small enough to review upstream, retain a regression here against the pinned

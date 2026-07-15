@@ -5,6 +5,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -32,15 +35,26 @@ jobs:
           -r interop/python/requirements-rns-1.3.8.txt
 
       - name: Formatting
-        run: cargo fmt --all -- --check
+        # At a virtual workspace root, this checks every workspace member while
+        # excluding local path dependencies such as the minimally patched,
+        # source-provenance-preserving esp-rtos vendor tree. `--all` would add
+        # those dependencies and require unrelated upstream formatting changes.
+        run: cargo fmt -- --check
 
       - name: Host tests
+        # Includes child-process regressions that poison ambient Git state and
+        # direct raw-tree/archive and common-dir-attributes provenance checks.
         run: cargo test --locked
 
       - name: Released-Python foundation vectors
         env:
           PYTHON: python
         run: cargo run --locked -p xtask -- check-rns-vectors
+
+      - name: RNode HIL corpus and peer tooling
+        env:
+          PYTHON: python
+        run: cargo run --locked -p xtask -- check-rnode-hil-vectors
 
       - name: Leviculum comparison tests
         run: cargo test --locked -p reticulum-rns-leviculum
@@ -53,32 +67,722 @@ jobs:
           cargo check --locked
           -p reticulum-rns-conformance
           -p reticulum-rns-rete
+          -p reticulum-rns-rete-rx
           -p reticulum-rns-leviculum
           -p reticulum-radio-interface
           -p reticulum-board-heltec-tracker-v2
+          -p reticulum-lab-rx-returned-fault-hil
           --target riscv32imac-unknown-none-elf
 
       - name: License graph boundaries
         run: cargo run --locked -p xtask -- graph-policy
 
+      - name: Receive-only public API boundary
+        run: cargo run --locked -p xtask -- rx-api-policy
+
   xtensa:
     name: ESP32-S3 release link
     runs-on: ubuntu-latest
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install pinned Xtensa toolchain
-        uses: esp-rs/xtensa-toolchain@ec6d36527049a7f4fb2cb0c1a644668c1bb8a2a4
-        with:
-          version: 1.95.0.0
-          buildtargets: esp32s3
-          ldproxy: false
+      - name: Install checksum-pinned Xtensa toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # esp-rs/xtensa-toolchain downloads espup from releases/latest even
+          # when the action itself is SHA-pinned. Install the exact espup
+          # release asset instead and skip its GitHub release lookup because
+          # the full four-part Rust toolchain version is already pinned.
+          espup="$RUNNER_TEMP/espup-0.16.0"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --output "$espup" \
+            https://github.com/esp-rs/espup/releases/download/v0.16.0/espup-x86_64-unknown-linux-gnu
+          printf '%s  %s\n' \
+            3f7522db440c84e2ff04cfd08c1822f9186c7ee285792591017cd69cf9701766 \
+            "$espup" | sha256sum --check --strict
+          chmod 0755 "$espup"
+          test "$("$espup" --version)" = "espup 0.16.0"
+
+          export ESPUP_EXPORT_FILE="$RUNNER_TEMP/export-esp.sh"
+          "$espup" install \
+            --targets esp32s3 \
+            --toolchain-version 1.95.0.0 \
+            --skip-version-parse \
+            --crosstool-toolchain-version 15.2.0_20250920 \
+            --name esp
+          # The path is created by the pinned espup invocation above.
+          # shellcheck disable=SC1090
+          source "$ESPUP_EXPORT_FILE"
+          # GitHub's path command accepts one directory per line, not one
+          # colon-separated shell PATH value.
+          printf '%s\n' "$PATH" | tr ':' '\n' >>"$GITHUB_PATH"
+          printf 'LIBCLANG_PATH=%s\n' "$LIBCLANG_PATH" >>"$GITHUB_ENV"
+
+          test "$(rustc +esp --version)" = \
+            "rustc 1.95.0-nightly (95e5bda86 2026-04-15) (1.95.0.0)"
+          test "$(cargo +esp --version)" = \
+            "cargo 1.95.0-nightly (f2d3ce0bd 2026-03-21) (1.95.0.0)"
+          test "$(xtensa-esp32s3-elf-gcc --version | head -n 1)" = \
+            "xtensa-esp-elf-gcc (crosstool-NG esp-15.2.0_20250920) 15.2.0"
+
+      - name: Install pinned offline image tool
+        run: cargo install --locked --force --version 4.5.0 espflash
 
       - name: Link RF-inert Tracker firmware
         run: >-
           cargo +esp build --locked --release
           -p reticulum-heltec-tracker-v2
           --target xtensa-esp32s3-none-elf
+
+      - name: Strict clippy for RF-inert Tracker firmware
+        run: >-
+          cargo +esp clippy --locked --release
+          -p reticulum-heltec-tracker-v2
+          --bin reticulum-heltec-tracker-v2
+          --no-default-features --features safe-idle
+          --target xtensa-esp32s3-none-elf
+          -- -D warnings
+
+      - name: Prepare and verify public normal/backpressure bundle
+        shell: bash
+        env:
+          RETICULUM_LAB_RX_FREQUENCY_HZ: "915000000"
+          RETICULUM_LAB_RX_SPREADING_FACTOR: "7"
+          RETICULUM_LAB_RX_BANDWIDTH_HZ: "125000"
+          RETICULUM_LAB_RX_CODING_RATE_DENOMINATOR: "5"
+          RETICULUM_LAB_RX_PREAMBLE_SYMBOLS: "18"
+          RETICULUM_LAB_RX_EXPLICIT_HEADER: "1"
+          RETICULUM_LAB_RX_CRC: "1"
+          RETICULUM_LAB_RX_IQ_INVERTED: "0"
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/phase1-rx-normal-pressure"
+          test ! -e "$bundle"
+          # Exercise the production hermetic source/archive path on the clean
+          # GitHub merge checkout, not only its host-side negative tests.
+          cargo run --locked -p xtask -- phase1-rx-hil-artifacts prepare \
+            --output "$bundle" \
+            --backpressure-stall-us 7000000
+          cargo run --locked -p xtask -- phase1-rx-hil-artifacts verify \
+            --bundle "$bundle"
+
+      - name: Inspect receive-only Tracker lab ELF
+        run: >-
+          cargo run --locked -p xtask -- phase1-rx-hil-artifacts inspect-elf
+          --mode lab-rx
+          --elf "$RUNNER_TEMP/phase1-rx-normal-pressure/firmware.elf"
+
+      - name: Strict clippy for receive-only Tracker lab firmware
+        env:
+          RETICULUM_LAB_RX_FREQUENCY_HZ: "915000000"
+          RETICULUM_LAB_RX_SPREADING_FACTOR: "7"
+          RETICULUM_LAB_RX_BANDWIDTH_HZ: "125000"
+          RETICULUM_LAB_RX_CODING_RATE_DENOMINATOR: "5"
+          RETICULUM_LAB_RX_PREAMBLE_SYMBOLS: "18"
+          RETICULUM_LAB_RX_EXPLICIT_HEADER: "1"
+          RETICULUM_LAB_RX_CRC: "1"
+          RETICULUM_LAB_RX_IQ_INVERTED: "0"
+        run: >-
+          cargo +esp clippy --locked --release
+          -p reticulum-heltec-tracker-v2
+          --bin reticulum-heltec-tracker-v2-lab-rx
+          --no-default-features --features lab-rx
+          --target xtensa-esp32s3-none-elf
+          -- -D warnings
+
+      - name: Reject absent and invalid lab radio profiles
+        shell: bash
+        run: |
+          set -euo pipefail
+          lab_args=(
+            --locked --release
+            -p reticulum-heltec-tracker-v2
+            --bin reticulum-heltec-tracker-v2-lab-rx
+            --no-default-features --features lab-rx
+            --target xtensa-esp32s3-none-elf
+          )
+
+          if cargo +esp check "${lab_args[@]}" >/tmp/missing-profile.log 2>&1; then
+            echo "::error title=Missing lab profile was accepted::The lab image must have no radio defaults"
+            exit 1
+          fi
+          grep -F \
+            'explicit lab RX configuration is missing RETICULUM_LAB_RX_FREQUENCY_HZ' \
+            /tmp/missing-profile.log
+
+          if RETICULUM_LAB_RX_FREQUENCY_HZ=915000000 \
+             RETICULUM_LAB_RX_SPREADING_FACTOR=6 \
+             RETICULUM_LAB_RX_BANDWIDTH_HZ=125000 \
+             RETICULUM_LAB_RX_CODING_RATE_DENOMINATOR=5 \
+             RETICULUM_LAB_RX_PREAMBLE_SYMBOLS=18 \
+             RETICULUM_LAB_RX_EXPLICIT_HEADER=1 \
+             RETICULUM_LAB_RX_CRC=1 \
+             RETICULUM_LAB_RX_IQ_INVERTED=0 \
+             cargo +esp check "${lab_args[@]}" >/tmp/invalid-profile.log 2>&1; then
+            echo "::error title=Invalid lab profile was accepted::SF6 must fail before producing a radio image"
+            exit 1
+          fi
+          grep -F 'invalid explicit Tracker V2 lab RX profile' /tmp/invalid-profile.log
+
+      - name: Enforce Tracker release image budgets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          check_size() {
+            local label="$1"
+            local elf="$2"
+            local max_text="$3"
+            local max_data="$4"
+            local max_bss="$5"
+            local max_dec="$6"
+            local output text data bss dec
+
+            output="$(xtensa-esp32s3-elf-size "$elf")"
+            printf '%s\n' "$output"
+            read -r text data bss dec <<<"$(awk 'NR == 2 { print $1, $2, $3, $4 }' <<<"$output")"
+
+            if [[ ! "$text" =~ ^[0-9]+$ || ! "$data" =~ ^[0-9]+$ ||
+                  ! "$bss" =~ ^[0-9]+$ || ! "$dec" =~ ^[0-9]+$ ]]; then
+              echo "::error title=Unreadable GNU size output::Could not parse $label image metrics"
+              return 1
+            fi
+
+            local failed=0
+            if (( text > max_text )); then
+              echo "::error title=$label text budget exceeded::$text > $max_text bytes"
+              failed=1
+            fi
+            if (( data > max_data )); then
+              echo "::error title=$label data budget exceeded::$data > $max_data bytes"
+              failed=1
+            fi
+            if (( bss > max_bss )); then
+              echo "::error title=$label BSS budget exceeded::$bss > $max_bss bytes"
+              failed=1
+            fi
+            if (( dec > max_dec )); then
+              echo "::error title=$label total budget exceeded::$dec > $max_dec bytes"
+              failed=1
+            fi
+            return "$failed"
+          }
+
+          # Baselines on 2026-07-15 were safe 57587/4044/468780/530411 and
+          # lab 339011/10356/462544/811911 (text/data/bss/dec). These caps leave
+          # about 5-14% text, 16-34% data, 1-3% BSS and 3-4% total headroom.
+          # BSS includes the linker-reserved stack and moves inversely with
+          # initialized data. The total cap is an aggregate image-growth guard,
+          # not a substitute for section-level or runtime DRAM measurements.
+          release=target/xtensa-esp32s3-none-elf/release
+          check_size safe-idle "$release/reticulum-heltec-tracker-v2" \
+            65536 6144 475136 550000
+          check_size lab-rx \
+            "$RUNNER_TEMP/phase1-rx-normal-pressure/firmware.elf" \
+            360448 12288 475136 840000
+
+      - name: Enforce lab retained-state and startup-stack link contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          release=target/xtensa-esp32s3-none-elf/release
+          safe="$release/reticulum-heltec-tracker-v2"
+          lab="$RUNNER_TEMP/phase1-rx-normal-pressure/firmware.elf"
+
+          safe_symbols="$(xtensa-esp32s3-elf-nm -S --defined-only "$safe")"
+          lab_symbols="$(xtensa-esp32s3-elf-nm -S --defined-only "$lab")"
+
+          if grep -Eq 'RESET_QUARANTINE_JOURNAL|RETICULUM_STACK_WATERMARK_MARKER' \
+            <<<"$safe_symbols"; then
+            echo "::error title=Safe-idle retained lab state::Lab-only state reached the RF-inert image"
+            exit 1
+          fi
+
+          rtc_section="$(xtensa-esp32s3-elf-readelf -SW "$lab" \
+            | awk '{ for (i=1; i<=NF; i++) if ($i == ".rtc_fast.persistent") { print $(i+1), $(i+2), $(i+4) } }')"
+          if [[ "$rtc_section" != "NOBITS 600fe000 000048" ]]; then
+            echo "::error title=Reset journal link contract changed::$rtc_section"
+            exit 1
+          fi
+          if ! awk '$2 == "00000048" && $NF ~ /RESET_QUARANTINE_JOURNAL$/ { found=1 } END { exit !found }' \
+            <<<"$lab_symbols"; then
+            echo "::error title=Reset journal symbol changed::Expected one exact 72-byte retained journal"
+            exit 1
+          fi
+
+          noinit_section="$(xtensa-esp32s3-elf-readelf -SW "$lab" \
+            | awk '{ for (i=1; i<=NF; i++) if ($i == ".noinit") { print $(i+1), $(i+4) } }')"
+          if [[ "$noinit_section" != "NOBITS 000020" ]]; then
+            echo "::error title=Stack marker link contract changed::$noinit_section"
+            exit 1
+          fi
+          if ! awk '$2 == "00000020" && $NF == "RETICULUM_STACK_WATERMARK_MARKER" { found=1 } END { exit !found }' \
+            <<<"$lab_symbols"; then
+            echo "::error title=Stack marker symbol changed::Expected one exact 32-byte noinit marker"
+            exit 1
+          fi
+          if ! awk '$2 == "0000004a" && $NF == "__zero_bss" { found=1 } END { exit !found }' \
+            <<<"$lab_symbols"; then
+            echo "::error title=Stack paint hook changed::Expected the reviewed strong 74-byte leaf hook"
+            exit 1
+          fi
+
+          stack_bottom="$(xtensa-esp32s3-elf-nm -n "$lab" | awk '$NF == "_stack_end_cpu0" { print $1 }')"
+          stack_guard="$(xtensa-esp32s3-elf-nm -n "$lab" | awk '$NF == "__stack_chk_guard" { print $1 }')"
+          if (( 0x$stack_guard - 0x$stack_bottom != 60 )); then
+            echo "::error title=Stack guard placement changed::$stack_guard - $stack_bottom is not 60 bytes"
+            exit 1
+          fi
+
+          hook="$(xtensa-esp32s3-elf-objdump -d "$lab" \
+            | sed -n '/<__zero_bss>:/,/^$/p')"
+          grep -Eq 'entry[[:space:]]+a1, 0' <<<"$hook"
+          grep -Eq 'movi\.n[[:space:]]+a2, 1' <<<"$hook"
+          grep -Eq 'retw\.n' <<<"$hook"
+          if grep -Eq '\bcall(x|[0-9]+)?\b' <<<"$hook"; then
+            echo "::error title=Stack paint hook is no longer leaf::Review startup ABI before qualification"
+            printf '%s\n' "$hook"
+            exit 1
+          fi
+
+          safe_zero="$(xtensa-esp32s3-elf-nm -n "$safe" | awk '$NF == "__zero_bss" { print $1 }')"
+          safe_default="$(xtensa-esp32s3-elf-nm -n "$safe" | awk '$NF == "default_mem_hook" { print $1 }')"
+          if [[ -z "$safe_zero" || "$safe_zero" != "$safe_default" ]]; then
+            echo "::error title=Safe-idle startup hook changed::RF-inert image must retain the runtime default hook"
+            exit 1
+          fi
+
+          normal_strings="$(mktemp)"
+          safe_strings="$(mktemp)"
+          xtensa-esp32s3-elf-strings "$safe" >"$safe_strings"
+          xtensa-esp32s3-elf-strings "$lab" >"$normal_strings"
+          for strings in "$safe_strings" "$normal_strings"; do
+            if ! grep -Fq 'esp-rtos-0.3.0-cpu0-cpu1-main-stack-words-v2' "$strings"; then
+              echo "::error title=Runtime patch identity missing::ELF does not bind the reviewed esp-rtos CPU0/CPU1 main-stack corrections"
+              rm -f "$safe_strings" "$normal_strings"
+              exit 1
+            fi
+          done
+          for forbidden in \
+            'lab-rx-backpressure-hil' \
+            'phase1 backpressure HIL triggered:' \
+            'phase1 backpressure HIL completed:'; do
+            if grep -Fq "$forbidden" "$normal_strings"; then
+              echo "::error title=Normal lab contains backpressure hook::$forbidden"
+              rm -f "$safe_strings" "$normal_strings"
+              exit 1
+            fi
+          done
+          rm -f "$safe_strings" "$normal_strings"
+
+      - name: Inventory prohibited linked TX symbol names
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          inventory_symbols() {
+            local label="$1"
+            local elf="$2"
+            local symbols matches
+            symbols="$(mktemp)"
+
+            # Release dead-code elimination removes unreachable Rust bodies.
+            # Ignore A/a records: ESP toolchains expose many ROM entry points
+            # as absolute aliases even when the firmware does not call them.
+            # This is named-symbol inventory, not TX-safety proof: LTO may
+            # inline or merge a reachable body. The SPI firewall, mock command
+            # tests and powered HIL trace are the behavior-level guards.
+            xtensa-esp32s3-elf-nm --defined-only -C "$elf" \
+              | awk '$2 !~ /^[Aa]$/' >"$symbols"
+
+            local prohibited='LoRa<.*>::tx($|::)|(^|::)do_tx($|::)|(^|::)prepare_for_tx($|::)|continuous[_ -]?(wave|preamble)|SetTxContinuous(Wave|Preamble)|WriteBuffer|ReteInterface.*::send($|::)|(^|::)send_data($|::)|(^|::)send_(link|channel)($|::|_(data|message)($|::))|(^|::)initiate_link($|::)'
+            if matches="$(grep -Ei "$prohibited" "$symbols")"; then
+              echo "::error title=$label retains prohibited TX symbol name::Review linked non-absolute definitions before qualification"
+              printf '%s\n' "$matches"
+              rm -f "$symbols"
+              return 1
+            fi
+            rm -f "$symbols"
+          }
+
+          release=target/xtensa-esp32s3-none-elf/release
+          inventory_symbols safe-idle "$release/reticulum-heltec-tracker-v2"
+          inventory_symbols lab-rx \
+            "$RUNNER_TEMP/phase1-rx-normal-pressure/firmware.elf"
+
+      - name: Reject invalid lab backpressure stall configurations
+        shell: bash
+        env:
+          RETICULUM_LAB_RX_FREQUENCY_HZ: "915000000"
+          RETICULUM_LAB_RX_SPREADING_FACTOR: "7"
+          RETICULUM_LAB_RX_BANDWIDTH_HZ: "125000"
+          RETICULUM_LAB_RX_CODING_RATE_DENOMINATOR: "5"
+          RETICULUM_LAB_RX_PREAMBLE_SYMBOLS: "18"
+          RETICULUM_LAB_RX_EXPLICIT_HEADER: "1"
+          RETICULUM_LAB_RX_CRC: "1"
+          RETICULUM_LAB_RX_IQ_INVERTED: "0"
+        run: |
+          set -euo pipefail
+          backpressure_args=(
+            --locked --release
+            -p reticulum-heltec-tracker-v2
+            --bin reticulum-heltec-tracker-v2-lab-rx-backpressure
+            --no-default-features --features lab-rx-backpressure
+            --target xtensa-esp32s3-none-elf
+          )
+
+          if cargo +esp check "${backpressure_args[@]}" \
+            >/tmp/missing-backpressure-stall.log 2>&1; then
+            echo "::error title=Missing backpressure stall was accepted::The HIL artifact must have no stall default"
+            exit 1
+          fi
+          grep -F \
+            'explicit lab RX backpressure configuration is missing RETICULUM_LAB_RX_BACKPRESSURE_STALL_US' \
+            /tmp/missing-backpressure-stall.log
+
+          if RETICULUM_LAB_RX_BACKPRESSURE_STALL_US=5000000 \
+            cargo +esp check "${backpressure_args[@]}" \
+            >/tmp/short-backpressure-stall.log 2>&1; then
+            echo "::error title=Short backpressure stall was accepted::The stall must pass the active fragment deadline"
+            exit 1
+          fi
+          grep -F \
+            'RETICULUM_LAB_RX_BACKPRESSURE_STALL_US must strictly exceed the configured fragment timeout' \
+            /tmp/short-backpressure-stall.log
+
+          if RETICULUM_LAB_RX_BACKPRESSURE_STALL_US=25000001 \
+            cargo +esp check "${backpressure_args[@]}" \
+            >/tmp/long-backpressure-stall.log 2>&1; then
+            echo "::error title=Over-budget backpressure stall was accepted::The watchdog service margin must be retained"
+            exit 1
+          fi
+          grep -F \
+            'RETICULUM_LAB_RX_BACKPRESSURE_STALL_US exceeds the supervisor watchdog service budget' \
+            /tmp/long-backpressure-stall.log
+
+      - name: Strict clippy for deterministic backpressure HIL artifact
+        env:
+          RETICULUM_LAB_RX_FREQUENCY_HZ: "915000000"
+          RETICULUM_LAB_RX_SPREADING_FACTOR: "7"
+          RETICULUM_LAB_RX_BANDWIDTH_HZ: "125000"
+          RETICULUM_LAB_RX_CODING_RATE_DENOMINATOR: "5"
+          RETICULUM_LAB_RX_PREAMBLE_SYMBOLS: "18"
+          RETICULUM_LAB_RX_EXPLICIT_HEADER: "1"
+          RETICULUM_LAB_RX_CRC: "1"
+          RETICULUM_LAB_RX_IQ_INVERTED: "0"
+          RETICULUM_LAB_RX_BACKPRESSURE_STALL_US: "7000000"
+        run: >-
+          cargo +esp clippy --locked --release
+          -p reticulum-heltec-tracker-v2
+          --bin reticulum-heltec-tracker-v2-lab-rx-backpressure
+          --no-default-features --features lab-rx-backpressure
+          --target xtensa-esp32s3-none-elf
+          -- -D warnings
+
+      - name: Enforce deterministic backpressure artifact contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          elf="$RUNNER_TEMP/phase1-rx-normal-pressure/backpressure-artifact/firmware.elf"
+
+          output="$(xtensa-esp32s3-elf-size "$elf")"
+          printf '%s\n' "$output"
+          read -r text data bss dec <<<"$(awk 'NR == 2 { print $1, $2, $3, $4 }' <<<"$output")"
+          if [[ ! "$text" =~ ^[0-9]+$ || ! "$data" =~ ^[0-9]+$ ||
+                ! "$bss" =~ ^[0-9]+$ || ! "$dec" =~ ^[0-9]+$ ]]; then
+            echo "::error title=Unreadable backpressure artifact size::Could not parse GNU size output"
+            exit 1
+          fi
+          if (( text > 364544 || data > 12288 || bss > 475136 || dec > 845000 )); then
+            echo "::error title=Backpressure artifact budget exceeded::$text/$data/$bss/$dec"
+            exit 1
+          fi
+
+          artifact_strings="$(mktemp)"
+          xtensa-esp32s3-elf-strings "$elf" >"$artifact_strings"
+          for required in \
+            'lab-rx-backpressure-hil' \
+            'first_awaiting_continuation' \
+            'phase1 backpressure HIL triggered:' \
+            'phase1 backpressure HIL completed:'; do
+            if ! grep -Fq "$required" "$artifact_strings"; then
+              echo "::error title=Backpressure evidence surface missing::$required"
+              rm -f "$artifact_strings"
+              exit 1
+            fi
+          done
+          rm -f "$artifact_strings"
+
+          symbols="$(xtensa-esp32s3-elf-nm -S --defined-only "$elf")"
+          rtc_section="$(xtensa-esp32s3-elf-readelf -SW "$elf" \
+            | awk '{ for (i=1; i<=NF; i++) if ($i == ".rtc_fast.persistent") { print $(i+1), $(i+2), $(i+4) } }')"
+          noinit_section="$(xtensa-esp32s3-elf-readelf -SW "$elf" \
+            | awk '{ for (i=1; i<=NF; i++) if ($i == ".noinit") { print $(i+1), $(i+4) } }')"
+          [[ "$rtc_section" == "NOBITS 600fe000 000048" ]]
+          [[ "$noinit_section" == "NOBITS 000020" ]]
+          awk '$2 == "00000048" && $NF ~ /RESET_QUARANTINE_JOURNAL$/ { found=1 } END { exit !found }' \
+            <<<"$symbols"
+          awk '$2 == "00000020" && $NF == "RETICULUM_STACK_WATERMARK_MARKER" { found=1 } END { exit !found }' \
+            <<<"$symbols"
+          awk '$2 == "0000004a" && $NF == "__zero_bss" { found=1 } END { exit !found }' \
+            <<<"$symbols"
+
+          stack_bottom="$(xtensa-esp32s3-elf-nm -n "$elf" | awk '$NF == "_stack_end_cpu0" { print $1 }')"
+          stack_guard="$(xtensa-esp32s3-elf-nm -n "$elf" | awk '$NF == "__stack_chk_guard" { print $1 }')"
+          if (( 0x$stack_guard - 0x$stack_bottom != 60 )); then
+            echo "::error title=Backpressure stack guard placement changed::$stack_guard - $stack_bottom is not 60 bytes"
+            exit 1
+          fi
+
+          hook="$(xtensa-esp32s3-elf-objdump -d "$elf" \
+            | sed -n '/<__zero_bss>:/,/^$/p')"
+          grep -Eq 'entry[[:space:]]+a1, 0' <<<"$hook"
+          grep -Eq 'movi\.n[[:space:]]+a2, 1' <<<"$hook"
+          grep -Eq 'retw\.n' <<<"$hook"
+          if grep -Eq '\bcall(x|[0-9]+)?\b' <<<"$hook"; then
+            echo "::error title=Backpressure stack paint hook is no longer leaf::Review startup ABI before qualification"
+            printf '%s\n' "$hook"
+            exit 1
+          fi
+
+          named_symbols="$(mktemp)"
+          xtensa-esp32s3-elf-nm --defined-only -C "$elf" \
+            | awk '$2 !~ /^[Aa]$/' >"$named_symbols"
+          prohibited='LoRa<.*>::tx($|::)|(^|::)do_tx($|::)|(^|::)prepare_for_tx($|::)|continuous[_ -]?(wave|preamble)|SetTxContinuous(Wave|Preamble)|WriteBuffer|ReteInterface.*::send($|::)|(^|::)send_data($|::)|(^|::)send_(link|channel)($|::|_(data|message)($|::))|(^|::)initiate_link($|::)'
+          if matches="$(grep -Ei "$prohibited" "$named_symbols")"; then
+            echo "::error title=Backpressure artifact retains prohibited TX symbol name::Review linked non-absolute definitions"
+            printf '%s\n' "$matches"
+            rm -f "$named_symbols"
+            exit 1
+          fi
+          rm -f "$named_symbols"
+
+      - name: Inspect deterministic backpressure HIL ELF
+        run: >-
+          cargo run --locked -p xtask -- phase1-rx-hil-artifacts inspect-elf
+          --mode lab-rx-backpressure-hil
+          --elf "$RUNNER_TEMP/phase1-rx-normal-pressure/backpressure-artifact/firmware.elf"
+
+      - name: Reject absent and invalid closure-artifact selections
+        shell: bash
+        env:
+          RETICULUM_LAB_RX_FREQUENCY_HZ: "915000000"
+          RETICULUM_LAB_RX_SPREADING_FACTOR: "7"
+          RETICULUM_LAB_RX_BANDWIDTH_HZ: "125000"
+          RETICULUM_LAB_RX_CODING_RATE_DENOMINATOR: "5"
+          RETICULUM_LAB_RX_PREAMBLE_SYMBOLS: "18"
+          RETICULUM_LAB_RX_EXPLICIT_HEADER: "1"
+          RETICULUM_LAB_RX_CRC: "1"
+          RETICULUM_LAB_RX_IQ_INVERTED: "0"
+        run: |
+          set -euo pipefail
+          common=(
+            --locked --release
+            -p reticulum-heltec-tracker-v2
+            --no-default-features
+            --target xtensa-esp32s3-none-elf
+          )
+
+          electrical=(
+            "${common[@]}"
+            --bin reticulum-heltec-tracker-v2-lab-rx-electrical-hil
+            --features lab-rx-electrical-hil
+          )
+          if cargo +esp check "${electrical[@]}" >/tmp/missing-electrical.log 2>&1; then
+            echo "::error title=Missing electrical selection was accepted::No regulator or gain defaults are allowed"
+            exit 1
+          fi
+          grep -F \
+            'explicit lab RX electrical configuration is missing RETICULUM_LAB_RX_REGULATOR' \
+            /tmp/missing-electrical.log
+          if RETICULUM_LAB_RX_REGULATOR=ldo RETICULUM_LAB_RX_GAIN=turbo \
+            cargo +esp check "${electrical[@]}" >/tmp/invalid-electrical.log 2>&1; then
+            echo "::error title=Invalid electrical selection was accepted::RX gain must be exact"
+            exit 1
+          fi
+          grep -F \
+            'RETICULUM_LAB_RX_GAIN must be exactly unboosted or boosted' \
+            /tmp/invalid-electrical.log
+
+          returned=(
+            "${common[@]}"
+            --bin reticulum-heltec-tracker-v2-lab-rx-returned-fault-hil
+            --features lab-rx-returned-fault-hil
+          )
+          if cargo +esp check "${returned[@]}" >/tmp/missing-returned.log 2>&1; then
+            echo "::error title=Missing returned-fault selection was accepted::No trigger or policy defaults are allowed"
+            exit 1
+          fi
+          grep -F \
+            'explicit returned-fault configuration is missing RETICULUM_LAB_RX_RETURNED_FAULT_TRIGGER' \
+            /tmp/missing-returned.log
+          if RETICULUM_LAB_RX_RETURNED_FAULT_TRIGGER=get-irq-status-after-set-rx \
+             RETICULUM_LAB_RX_RETURNED_FAULT_POLICY=forever \
+            cargo +esp check "${returned[@]}" >/tmp/invalid-returned.log 2>&1; then
+            echo "::error title=Invalid returned-fault policy was accepted::Policy must be one of the two reviewed modes"
+            exit 1
+          fi
+          grep -F \
+            'RETICULUM_LAB_RX_RETURNED_FAULT_POLICY must be exactly one-boot or repeat-until-quarantine' \
+            /tmp/invalid-returned.log
+
+          corrupt=(
+            "${common[@]}"
+            --bin reticulum-heltec-tracker-v2-lab-rx-reset-journal-corrupt
+            --features lab-rx-reset-journal-corrupt-hil
+          )
+          if cargo +esp check "${corrupt[@]}" >/tmp/missing-corrupt.log 2>&1; then
+            echo "::error title=Missing corrupt-journal selection was accepted::Slot and word must be explicit"
+            exit 1
+          fi
+          grep -F \
+            'explicit reset-journal HIL configuration is missing RETICULUM_LAB_RX_RESET_JOURNAL_SLOT' \
+            /tmp/missing-corrupt.log
+          if RETICULUM_LAB_RX_RESET_JOURNAL_SLOT=00 \
+             RETICULUM_LAB_RX_RESET_JOURNAL_WORD=4 \
+            cargo +esp check "${corrupt[@]}" >/tmp/invalid-corrupt.log 2>&1; then
+            echo "::error title=Noncanonical corrupt-journal selection was accepted::Decimal values must be canonical"
+            exit 1
+          fi
+          grep -F \
+            'RETICULUM_LAB_RX_RESET_JOURNAL_SLOT must use canonical unsigned decimal form' \
+            /tmp/invalid-corrupt.log
+
+          torn=(
+            "${common[@]}"
+            --bin reticulum-heltec-tracker-v2-lab-rx-reset-journal-torn
+            --features lab-rx-reset-journal-torn-hil
+          )
+          if cargo +esp check "${torn[@]}" >/tmp/missing-torn.log 2>&1; then
+            echo "::error title=Missing torn-write selection was accepted::The write ordinal must be explicit"
+            exit 1
+          fi
+          grep -F \
+            'explicit reset-journal HIL configuration is missing RETICULUM_LAB_RX_RESET_JOURNAL_WRITE_ORDINAL' \
+            /tmp/missing-torn.log
+          if RETICULUM_LAB_RX_RESET_JOURNAL_WRITE_ORDINAL=10 \
+            cargo +esp check "${torn[@]}" >/tmp/invalid-torn.log 2>&1; then
+            echo "::error title=Out-of-range torn-write selection was accepted::Only transaction writes 1 through 9 are valid"
+            exit 1
+          fi
+          grep -F \
+            'RETICULUM_LAB_RX_RESET_JOURNAL_WRITE_ORDINAL must be a canonical decimal value in 1..=9' \
+            /tmp/invalid-torn.log
+
+      - name: Strict clippy for four electrical HIL selections
+        shell: bash
+        env:
+          RETICULUM_LAB_RX_FREQUENCY_HZ: "915000000"
+          RETICULUM_LAB_RX_SPREADING_FACTOR: "7"
+          RETICULUM_LAB_RX_BANDWIDTH_HZ: "125000"
+          RETICULUM_LAB_RX_CODING_RATE_DENOMINATOR: "5"
+          RETICULUM_LAB_RX_PREAMBLE_SYMBOLS: "18"
+          RETICULUM_LAB_RX_EXPLICIT_HEADER: "1"
+          RETICULUM_LAB_RX_CRC: "1"
+          RETICULUM_LAB_RX_IQ_INVERTED: "0"
+        run: |
+          set -euo pipefail
+          args=(
+            --locked --release
+            -p reticulum-heltec-tracker-v2
+            --bin reticulum-heltec-tracker-v2-lab-rx-electrical-hil
+            --no-default-features --features lab-rx-electrical-hil
+            --target xtensa-esp32s3-none-elf
+          )
+
+          for selection in \
+            ldo-unboosted ldo-boosted dcdc-unboosted dcdc-boosted; do
+            regulator="${selection%%-*}"
+            gain="${selection#*-}"
+            export RETICULUM_LAB_RX_REGULATOR="$regulator"
+            export RETICULUM_LAB_RX_GAIN="$gain"
+
+            cargo +esp clippy "${args[@]}" -- -D warnings
+          done
+
+      - name: Strict clippy for returned-fault HIL policies
+        shell: bash
+        env:
+          RETICULUM_LAB_RX_FREQUENCY_HZ: "915000000"
+          RETICULUM_LAB_RX_SPREADING_FACTOR: "7"
+          RETICULUM_LAB_RX_BANDWIDTH_HZ: "125000"
+          RETICULUM_LAB_RX_CODING_RATE_DENOMINATOR: "5"
+          RETICULUM_LAB_RX_PREAMBLE_SYMBOLS: "18"
+          RETICULUM_LAB_RX_EXPLICIT_HEADER: "1"
+          RETICULUM_LAB_RX_CRC: "1"
+          RETICULUM_LAB_RX_IQ_INVERTED: "0"
+          RETICULUM_LAB_RX_RETURNED_FAULT_TRIGGER: get-irq-status-after-set-rx
+        run: |
+          set -euo pipefail
+          args=(
+            --locked --release
+            -p reticulum-heltec-tracker-v2
+            --bin reticulum-heltec-tracker-v2-lab-rx-returned-fault-hil
+            --no-default-features --features lab-rx-returned-fault-hil
+            --target xtensa-esp32s3-none-elf
+          )
+
+          for policy in one-boot repeat-until-quarantine; do
+            export RETICULUM_LAB_RX_RETURNED_FAULT_POLICY="$policy"
+            cargo +esp clippy "${args[@]}" -- -D warnings
+          done
+
+      - name: Strict clippy for RF-inert retained-journal HIL selections
+        shell: bash
+        run: |
+          set -euo pipefail
+          corrupt_args=(
+            --locked --release
+            -p reticulum-heltec-tracker-v2
+            --bin reticulum-heltec-tracker-v2-lab-rx-reset-journal-corrupt
+            --no-default-features --features lab-rx-reset-journal-corrupt-hil
+            --target xtensa-esp32s3-none-elf
+          )
+          (
+            export RETICULUM_LAB_RX_RESET_JOURNAL_SLOT=0
+            export RETICULUM_LAB_RX_RESET_JOURNAL_WORD=4
+            unset RETICULUM_LAB_RX_RESET_JOURNAL_WRITE_ORDINAL
+            cargo +esp clippy "${corrupt_args[@]}" -- -D warnings
+          )
+
+          torn_args=(
+            --locked --release
+            -p reticulum-heltec-tracker-v2
+            --bin reticulum-heltec-tracker-v2-lab-rx-reset-journal-torn
+            --no-default-features --features lab-rx-reset-journal-torn-hil
+            --target xtensa-esp32s3-none-elf
+          )
+          (
+            export RETICULUM_LAB_RX_RESET_JOURNAL_WRITE_ORDINAL=9
+            unset RETICULUM_LAB_RX_RESET_JOURNAL_SLOT
+            unset RETICULUM_LAB_RX_RESET_JOURNAL_WORD
+            cargo +esp clippy "${torn_args[@]}" -- -D warnings
+          )
+
+      - name: Prepare and verify public eight-artifact closure bundle
+        shell: bash
+        env:
+          RETICULUM_LAB_RX_FREQUENCY_HZ: "915000000"
+          RETICULUM_LAB_RX_SPREADING_FACTOR: "7"
+          RETICULUM_LAB_RX_BANDWIDTH_HZ: "125000"
+          RETICULUM_LAB_RX_CODING_RATE_DENOMINATOR: "5"
+          RETICULUM_LAB_RX_PREAMBLE_SYMBOLS: "18"
+          RETICULUM_LAB_RX_EXPLICIT_HEADER: "1"
+          RETICULUM_LAB_RX_CRC: "1"
+          RETICULUM_LAB_RX_IQ_INVERTED: "0"
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/phase1-rx-closure"
+          test ! -e "$bundle"
+          # This independently binds the same raw project root tree as the
+          # normal/pressure bundle through the production preparation path.
+          cargo run --locked -p xtask -- phase1-rx-closure-artifacts prepare \
+            --output "$bundle" \
+            --journal-corrupt-slot 0 \
+            --journal-corrupt-word 4 \
+            --journal-torn-write-ordinal 9
+          cargo run --locked -p xtask -- phase1-rx-closure-artifacts verify \
+            --bundle "$bundle"

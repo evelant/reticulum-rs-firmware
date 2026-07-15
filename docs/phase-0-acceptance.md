@@ -94,13 +94,17 @@ as a released-Python compatibility error. Integration revision
 the safe-idle size statement above remains the pre-runtime baseline because the
 new Rete path is likewise dead-stripped from that image.
 
-After the Tracker schematic audit identified GPIO46 as an MCU connection to
-the DIO2-owned `PA_CPS` net, the safe-idle image explicitly claimed GPIO46 as
-an input/high-impedance pin. The rebuilt image contained 57,997 bytes of text
-(a reviewed 128-byte safety delta), while data remained 4,044 bytes and
-BSS/reserved address space remained 468,780 bytes. The linked image still had
-no defined text/data symbol matching LoRa, SX126x or SetTx; unrelated absolute
-ESP ROM symbol declarations are not reachable radio code.
+An initial schematic reading incorrectly identified GPIO46 as an MCU connection
+to the DIO2-owned `PA_CPS` net, so the safe-idle image temporarily claimed it as
+an input. That historical build contained 57,997 bytes of text (a reviewed
+128-byte delta), while data remained 4,044 bytes and BSS/reserved address space
+remained 468,780 bytes. A later rendered-PDF and hidden-netlist audit corrected
+the premise: `PA_CPS` connects SX1262 DIO2 directly to KCT8103L CPS, while
+GPIO46 is a separate header breakout. The unnecessary owner was subsequently
+removed; the historical measurement is retained here rather than rewritten.
+The linked image still had no defined text/data symbol matching LoRa, SX126x or
+SetTx; unrelated absolute ESP ROM symbol declarations are not reachable radio
+code.
 
 No `lora-phy` or SX126x driver symbols were retained in the linked safe-idle
 ELF. The ESP ROM symbol map still exposes unrelated Wi-Fi/Bluetooth TX symbol

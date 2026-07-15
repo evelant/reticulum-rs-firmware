@@ -8,7 +8,11 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+lora-modulation.workspace = true
 reticulum-rns-conformance = { path = "../rns-conformance" }
+
+[dev-dependencies]
+embassy-sync.workspace = true
 
 [lib]
 path = "src/lib.rs"

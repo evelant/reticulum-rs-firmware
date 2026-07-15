@@ -3,13 +3,15 @@ use std::cell::Cell;
 
 use rand_core::{CryptoRng, RngCore};
 use reticulum_radio_interface::{
-    FrameSignal, RNODE_HW_MTU, RNODE_LORA_DATA_PER_FRAME, RNS_MTU, RxDiagnostics,
-    TimedReceiveError, TimedReceiveOutcome, TimedRnodeRx,
+    FrameSignal, RNODE_HW_MTU, RNODE_LORA_DATA_PER_FRAME, RNS_MTU, RawReceivedFrame, RxDiagnostics,
+    SX1262_FRAME_MTU, TimedReceiveError, TimedReceiveOutcome, TimedRnodeRx,
 };
 use reticulum_rns_rete::{
-    DestHash, EmbeddedNodeConfig, Identity, IngressDisposition, InitialEmbeddedNode, InterfaceId,
-    NodeEvent, Packet,
+    DestHash, DestType, EmbeddedNodeConfig, Identity, IngressDisposition, IngressDropReason,
+    InitialEmbeddedNode, InterfaceId, NodeEvent, Packet, ReceiveOnlyClockSample,
+    ReceiveOnlyIngress, ReceiveOnlyIngressOutcome, ReceiveOnlyWake,
 };
+use sha2::{Digest, Sha256};
 
 const VECTOR_JSON: &str = include_str!("../../../interop/vectors/rns-1.3.8.json");
 const FRAGMENT_TIMEOUT_TICKS: NonZeroU64 = NonZeroU64::new(100).unwrap();
@@ -78,6 +80,21 @@ fn feed_and_handoff<T>(
         TimedReceiveOutcome::AwaitingContinuation { .. } => None,
     };
     Ok((outcome, handed_off))
+}
+
+fn raw_received_frame(
+    frame: &[u8],
+    signal: FrameSignal,
+    received_at_ticks: u64,
+) -> RawReceivedFrame {
+    let mut bytes = [0; SX1262_FRAME_MTU];
+    bytes[..frame.len()].copy_from_slice(frame);
+    RawReceivedFrame::new(
+        bytes,
+        u8::try_from(frame.len()).unwrap(),
+        signal,
+        received_at_ticks,
+    )
 }
 
 #[test]
@@ -181,50 +198,131 @@ fn python_announce_crosses_rnode_rx_and_embedded_ingress() {
 }
 
 #[test]
-fn completed_501_byte_packet_stops_before_embedded_ingress() {
-    let packet = [0x5A; RNS_MTU + 1];
-    let mut first = [0; RNODE_LORA_DATA_PER_FRAME + 1];
-    first[0] = 0x31; // Sequence 3, split flag.
-    first[1..].copy_from_slice(&packet[..RNODE_LORA_DATA_PER_FRAME]);
+fn completed_exact_500_byte_packet_crosses_receive_only_ingress_before_rete_rejection() {
+    let mut packet = [0x5A; RNS_MTU];
+    // HEADER_1 LINKREQUEST addressed to a GROUP destination is deliberately
+    // invalid at the owning Rete boundary, but remains a complete 500-byte RNS
+    // packet that the independent interface-MTU guard must admit.
+    packet[0] = 0x06;
 
-    let mut second = Vec::with_capacity(packet.len() - RNODE_LORA_DATA_PER_FRAME + 1);
-    second.push(0x31);
+    let mut first = [0; RNODE_LORA_DATA_PER_FRAME + 1];
+    first[0] = 0x71; // Sequence 7, split flag.
+    first[1..].copy_from_slice(&packet[..RNODE_LORA_DATA_PER_FRAME]);
+    let mut second = Vec::with_capacity(RNS_MTU - RNODE_LORA_DATA_PER_FRAME + 1);
+    second.push(0x71);
     second.extend_from_slice(&packet[RNODE_LORA_DATA_PER_FRAME..]);
 
-    let signal = FrameSignal::new(-80, 4);
-    let mut receiver = TimedRnodeRx::new(FRAGMENT_TIMEOUT_TICKS);
-    let mut output = [0; RNODE_HW_MTU];
-    let embedded_ingress_calls = Cell::new(0_u64);
+    let signal = FrameSignal::new(-83, 3);
+    let mut ingress = ReceiveOnlyIngress::<16, 4, 32, 2>::new(
+        Identity::from_seed(b"exact mtu receive-only ingress").unwrap(),
+        "reticulum-rs-firmware",
+        &["rx-exact-mtu"],
+        FRAGMENT_TIMEOUT_TICKS,
+        0,
+        NonZeroU64::new(1_000).unwrap(),
+        InterfaceId(7),
+    )
+    .unwrap();
+    let mut rng = CounterRng::default();
 
-    let (first_outcome, first_handoff) =
-        feed_and_handoff(&mut receiver, &first, 20, signal, &mut output, |_, _| {
-            embedded_ingress_calls.set(embedded_ingress_calls.get() + 1)
-        })
-        .unwrap();
+    let first_frame = raw_received_frame(&first, signal, 20);
+    let first_step = ingress.on_wake(
+        ReceiveOnlyWake::Frame(&first_frame),
+        ReceiveOnlyClockSample {
+            ticks: 20,
+            transport_seconds: 1,
+        },
+        &mut rng,
+    );
     assert!(matches!(
-        first_outcome,
-        TimedReceiveOutcome::AwaitingContinuation { .. }
-    ));
-    assert_eq!(first_handoff, None);
-
-    assert_eq!(
-        feed_and_handoff(&mut receiver, &second, 21, signal, &mut output, |_, _| {
-            embedded_ingress_calls.set(embedded_ingress_calls.get() + 1)
-        },),
-        Err(TimedReceiveError::RnsPacketTooLong {
-            actual: RNS_MTU + 1,
-            maximum: RNS_MTU,
+        first_step.frame,
+        Some(ReceiveOnlyIngressOutcome::AwaitingContinuation {
+            sequence: 7,
+            data_len: RNODE_LORA_DATA_PER_FRAME,
+            ..
         })
-    );
-    assert_eq!(embedded_ingress_calls.get(), 0);
+    ));
+    assert_eq!(ingress.metrics().rete_ingress_calls, 0);
 
-    let diagnostics = receiver.diagnostics();
-    assert_eq!(diagnostics.frames_seen, 2);
-    assert_eq!(diagnostics.packets_completed, 1);
-    assert_eq!(diagnostics.packets_accepted, 0);
-    assert_eq!(diagnostics.packets_too_long, 1);
-    assert_eq!(
-        diagnostics.last_packet_len,
-        u16::try_from(RNS_MTU + 1).unwrap()
+    let second_frame = raw_received_frame(&second, signal, 21);
+    let second_step = ingress.on_wake(
+        ReceiveOnlyWake::Frame(&second_frame),
+        ReceiveOnlyClockSample {
+            ticks: 21,
+            transport_seconds: 1,
+        },
+        &mut rng,
     );
+    let expected_raw_sha256: [u8; 32] = Sha256::digest(packet).into();
+    assert!(matches!(
+        second_step.frame,
+        Some(ReceiveOnlyIngressOutcome::Packet {
+            packet_len: RNS_MTU,
+            raw_packet_sha256,
+            disposition: IngressDisposition::Rejected(
+                IngressDropReason::LinkRequestDestinationType(DestType::Group)
+            ),
+            ..
+        }) if raw_packet_sha256 == expected_raw_sha256
+    ));
+
+    let metrics = ingress.metrics();
+    assert_eq!(metrics.frames_handed_off, 2);
+    assert_eq!(metrics.receive.packets_completed, 1);
+    assert_eq!(metrics.receive.packets_accepted, 1);
+    assert_eq!(metrics.receive.packets_too_long, 0);
+    assert_eq!(metrics.rete_ingress_calls, 1);
+    assert_eq!(metrics.node.ingress.seen, 1);
+    assert_eq!(metrics.last_raw_packet_sha256, Some(expected_raw_sha256));
+}
+
+#[test]
+fn completed_501_through_508_byte_packets_stop_before_embedded_ingress() {
+    for packet_len in (RNS_MTU + 1)..=RNODE_HW_MTU {
+        let packet = vec![0x5A; packet_len];
+        let mut first = [0; RNODE_LORA_DATA_PER_FRAME + 1];
+        first[0] = 0x31; // Sequence 3, split flag.
+        first[1..].copy_from_slice(&packet[..RNODE_LORA_DATA_PER_FRAME]);
+
+        let mut second = Vec::with_capacity(packet_len - RNODE_LORA_DATA_PER_FRAME + 1);
+        second.push(0x31);
+        second.extend_from_slice(&packet[RNODE_LORA_DATA_PER_FRAME..]);
+
+        let signal = FrameSignal::new(-80, 4);
+        let mut receiver = TimedRnodeRx::new(FRAGMENT_TIMEOUT_TICKS);
+        let mut output = [0; RNODE_HW_MTU];
+        let embedded_ingress_calls = Cell::new(0_u64);
+
+        let (first_outcome, first_handoff) =
+            feed_and_handoff(&mut receiver, &first, 20, signal, &mut output, |_, _| {
+                embedded_ingress_calls.set(embedded_ingress_calls.get() + 1)
+            })
+            .unwrap();
+        assert!(matches!(
+            first_outcome,
+            TimedReceiveOutcome::AwaitingContinuation { .. }
+        ));
+        assert_eq!(first_handoff, None);
+
+        assert_eq!(
+            feed_and_handoff(&mut receiver, &second, 21, signal, &mut output, |_, _| {
+                embedded_ingress_calls.set(embedded_ingress_calls.get() + 1)
+            },),
+            Err(TimedReceiveError::RnsPacketTooLong {
+                actual: packet_len,
+                maximum: RNS_MTU,
+            })
+        );
+        assert_eq!(embedded_ingress_calls.get(), 0);
+
+        let diagnostics = receiver.diagnostics();
+        assert_eq!(diagnostics.frames_seen, 2);
+        assert_eq!(diagnostics.packets_completed, 1);
+        assert_eq!(diagnostics.packets_accepted, 0);
+        assert_eq!(diagnostics.packets_too_long, 1);
+        assert_eq!(
+            diagnostics.last_packet_len,
+            u16::try_from(packet_len).unwrap()
+        );
+    }
 }

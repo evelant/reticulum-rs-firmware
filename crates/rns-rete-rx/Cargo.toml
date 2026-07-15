@@ -1,0 +1,18 @@
+[package]
+name = "reticulum-rns-rete-rx"
+description = "Product-only receive façade around the pinned Rete integration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reticulum-rns-rete = { path = "../rns-rete", default-features = false }
+rand_core.workspace = true
+
+[dev-dependencies]
+reticulum-radio-interface = { path = "../radio-interface" }
+
+[lib]
+path = "src/lib.rs"

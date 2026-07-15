@@ -4,6 +4,7 @@ use core::num::NonZeroU64;
 
 use crate::{
     PendingFragment, RNODE_HW_MTU, RNS_MTU, ReceiveError, ReceiveOutcome, RnodeRxReassembler,
+    SX1262_FRAME_MTU,
 };
 
 /// Signal metadata reported for one physical LoRa frame.
@@ -38,6 +39,132 @@ impl FrameSignal {
                 other.snr_db
             },
         }
+    }
+}
+
+/// One complete SX1262 receive buffer handed from the radio owner to ingress.
+///
+/// The buffer moves through the handoff without allocation. Only
+/// [`Self::payload`] exposes bytes, so padding left beyond the radio-reported
+/// length cannot accidentally reach RNode reassembly.
+#[derive(Debug, Eq, PartialEq)]
+pub struct RawReceivedFrame {
+    bytes: [u8; SX1262_FRAME_MTU],
+    len: u8,
+    signal: FrameSignal,
+    received_at_ticks: u64,
+}
+
+impl RawReceivedFrame {
+    /// Package a driver-owned receive buffer for the ingress task.
+    ///
+    /// An `u8` length spans the complete 255-byte SX1262 frame capacity, so
+    /// every representable value is valid for this fixed-size buffer.
+    pub const fn new(
+        bytes: [u8; SX1262_FRAME_MTU],
+        len: u8,
+        signal: FrameSignal,
+        received_at_ticks: u64,
+    ) -> Self {
+        Self {
+            bytes,
+            len,
+            signal,
+            received_at_ticks,
+        }
+    }
+
+    /// Radio-reported bytes, excluding unused buffer padding.
+    pub fn payload(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
+    }
+
+    /// Number of valid physical-frame bytes.
+    pub const fn len(&self) -> u8 {
+        self.len
+    }
+
+    /// Whether the physical frame contains no bytes.
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// PHY metadata sampled for this frame.
+    pub const fn signal(&self) -> FrameSignal {
+        self.signal
+    }
+
+    /// Monotonic receive timestamp supplied by the radio owner.
+    pub const fn received_at_ticks(&self) -> u64 {
+        self.received_at_ticks
+    }
+}
+
+/// Result of a non-blocking raw-frame handoff attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RawFrameHandoffOutcome {
+    /// The bounded ingress queue retained the frame.
+    Queued,
+    /// The queue was full and the newly received frame was discarded.
+    DroppedNew,
+}
+
+/// Fixed-size diagnostics for the radio-to-ingress handoff.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RawFrameHandoffDiagnostics {
+    /// Frames offered to the bounded queue.
+    pub offered: u64,
+    /// Frames retained by the queue.
+    pub queued: u64,
+    /// Newly received frames discarded because the queue was full.
+    pub dropped_new: u64,
+}
+
+/// Project-owned drop-new policy around a target runtime's bounded queue.
+///
+/// The caller supplies a synchronous `try_enqueue` operation. A queue-full
+/// error and its enclosed frame are deliberately dropped, keeping the sole
+/// radio task free to return immediately to receive instead of cancelling or
+/// delaying an in-flight radio operation.
+#[derive(Debug, Default)]
+pub struct RawFrameHandoff {
+    diagnostics: RawFrameHandoffDiagnostics,
+}
+
+impl RawFrameHandoff {
+    /// Construct an empty handoff policy.
+    pub const fn new() -> Self {
+        Self {
+            diagnostics: RawFrameHandoffDiagnostics {
+                offered: 0,
+                queued: 0,
+                dropped_new: 0,
+            },
+        }
+    }
+
+    /// Attempt one non-blocking enqueue and discard the new item on failure.
+    pub fn offer<T, E>(
+        &mut self,
+        item: T,
+        try_enqueue: impl FnOnce(T) -> Result<(), E>,
+    ) -> RawFrameHandoffOutcome {
+        saturating_increment(&mut self.diagnostics.offered);
+        match try_enqueue(item) {
+            Ok(()) => {
+                saturating_increment(&mut self.diagnostics.queued);
+                RawFrameHandoffOutcome::Queued
+            }
+            Err(_) => {
+                saturating_increment(&mut self.diagnostics.dropped_new);
+                RawFrameHandoffOutcome::DroppedNew
+            }
+        }
+    }
+
+    /// Return a fixed-size copy of cumulative handoff diagnostics.
+    pub const fn diagnostics(&self) -> RawFrameHandoffDiagnostics {
+        self.diagnostics
     }
 }
 
@@ -303,6 +430,11 @@ fn saturating_increment(counter: &mut u64) {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
+    use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Channel};
+    use std::collections::VecDeque;
+
     use super::*;
     use crate::{RNODE_LORA_DATA_PER_FRAME, SX1262_FRAME_MTU};
 
@@ -513,7 +645,7 @@ mod tests {
 
     #[test]
     fn physical_packets_above_rns_mtu_are_rejected_independently() {
-        for packet_len in [501, 507, 508] {
+        for packet_len in (RNS_MTU + 1)..=RNODE_HW_MTU {
             assert_packet_len_is_rejected(packet_len);
         }
     }
@@ -563,5 +695,164 @@ mod tests {
         assert_eq!(rx.diagnostics().frames_seen, u64::MAX);
         assert_eq!(rx.diagnostics().pending_started, u64::MAX);
         assert_eq!(rx.diagnostics().pending_expired, u64::MAX);
+    }
+
+    #[test]
+    fn raw_frame_exposes_only_radio_reported_bytes_and_metadata() {
+        let mut bytes = [0xa5; SX1262_FRAME_MTU];
+        bytes[..3].copy_from_slice(&[1, 2, 3]);
+        let frame = RawReceivedFrame::new(bytes, 3, signal(-91, -7), 42);
+
+        assert_eq!(frame.payload(), &[1, 2, 3]);
+        assert_eq!(frame.len(), 3);
+        assert!(!frame.is_empty());
+        assert_eq!(frame.signal(), signal(-91, -7));
+        assert_eq!(frame.received_at_ticks(), 42);
+    }
+
+    #[test]
+    fn saturated_handoff_drops_new_frame_and_preserves_fifo_contents() {
+        let mut policy = RawFrameHandoff::new();
+        let mut queue = VecDeque::new();
+
+        for expected in [
+            RawFrameHandoffOutcome::Queued,
+            RawFrameHandoffOutcome::Queued,
+            RawFrameHandoffOutcome::DroppedNew,
+        ] {
+            let item = u8::try_from(policy.diagnostics().offered + 1).unwrap();
+            let outcome = policy.offer(item, |item| {
+                if queue.len() == 2 {
+                    Err(item)
+                } else {
+                    queue.push_back(item);
+                    Ok(())
+                }
+            });
+            assert_eq!(outcome, expected);
+        }
+
+        assert_eq!(queue.into_iter().collect::<std::vec::Vec<_>>(), [1, 2]);
+        assert_eq!(
+            policy.diagnostics(),
+            RawFrameHandoffDiagnostics {
+                offered: 3,
+                queued: 2,
+                dropped_new: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn embassy_depth_two_handoff_is_fifo_drop_new_and_dropped_continuation_expires() {
+        let channel: Channel<NoopRawMutex, RawReceivedFrame, 2> = Channel::new();
+        let mut handoff = RawFrameHandoff::new();
+        let first_signal = signal(-91, -4);
+        let malformed_signal = signal(-75, 2);
+        let continuation_signal = signal(-80, 1);
+
+        let first = split_frame(3, &[1, 2]);
+        let malformed = [0u8; SX1262_FRAME_MTU];
+        let continuation = split_frame(3, &[3, 4]);
+
+        assert_eq!(
+            handoff.offer(RawReceivedFrame::new(first, 3, first_signal, 10), |frame| {
+                channel.try_send(frame).map_err(|_| ())
+            },),
+            RawFrameHandoffOutcome::Queued
+        );
+        assert_eq!(
+            handoff.offer(
+                RawReceivedFrame::new(malformed, 0, malformed_signal, 11),
+                |frame| channel.try_send(frame).map_err(|_| ()),
+            ),
+            RawFrameHandoffOutcome::Queued
+        );
+        assert_eq!(
+            handoff.offer(
+                RawReceivedFrame::new(continuation, 3, continuation_signal, 12),
+                |frame| channel.try_send(frame).map_err(|_| ()),
+            ),
+            RawFrameHandoffOutcome::DroppedNew
+        );
+
+        let mut rx = TimedRnodeRx::new(TIMEOUT);
+        let mut output = [0u8; RNODE_HW_MTU];
+        let first = channel.try_receive().unwrap();
+        assert_eq!(first.payload(), &[0x31, 1, 2]);
+        assert_eq!(first.received_at_ticks(), 10);
+        assert_eq!(
+            rx.feed(
+                first.payload(),
+                first.received_at_ticks(),
+                first.signal(),
+                &mut output,
+            ),
+            Ok(TimedReceiveOutcome::AwaitingContinuation {
+                sequence: 3,
+                data_len: 2,
+                replaced_pending: false,
+                deadline_ticks: 20,
+            })
+        );
+
+        let malformed = channel.try_receive().unwrap();
+        assert!(malformed.is_empty());
+        assert_eq!(malformed.received_at_ticks(), 11);
+        assert_eq!(
+            rx.feed(
+                malformed.payload(),
+                malformed.received_at_ticks(),
+                malformed.signal(),
+                &mut output,
+            ),
+            Err(TimedReceiveError::Framing(ReceiveError::MissingHeader))
+        );
+        assert!(channel.try_receive().is_err());
+
+        // The third item was the matching continuation. Since drop-new did not
+        // replace either FIFO entry, the first half remains pending until its
+        // original absolute deadline and cannot complete a packet.
+        assert_eq!(rx.pending().unwrap().data_len, 2);
+        assert_eq!(rx.next_deadline(), Some(20));
+        assert_eq!(rx.expire(19), None);
+        assert!(rx.pending().is_some());
+        assert!(rx.expire(20).is_some());
+        assert_eq!(rx.pending(), None);
+        assert_eq!(
+            handoff.diagnostics(),
+            RawFrameHandoffDiagnostics {
+                offered: 3,
+                queued: 2,
+                dropped_new: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn handoff_diagnostics_saturate() {
+        let mut policy = RawFrameHandoff::new();
+        policy.diagnostics = RawFrameHandoffDiagnostics {
+            offered: u64::MAX,
+            queued: u64::MAX,
+            dropped_new: u64::MAX,
+        };
+
+        assert_eq!(
+            policy.offer(1, |_| Ok::<(), u8>(())),
+            RawFrameHandoffOutcome::Queued
+        );
+        assert_eq!(
+            policy.offer(2, Err::<(), u8>),
+            RawFrameHandoffOutcome::DroppedNew
+        );
+        assert_eq!(
+            policy.diagnostics(),
+            RawFrameHandoffDiagnostics {
+                offered: u64::MAX,
+                queued: u64::MAX,
+                dropped_new: u64::MAX,
+            }
+        );
     }
 }

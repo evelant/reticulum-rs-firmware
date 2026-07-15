@@ -1,24 +1,37 @@
 [package]
 name = "reticulum-heltec-tracker-v2"
-description = "RF-inert Phase-0 compile probe for Heltec Wireless Tracker V2.3"
+description = "Bare-metal Reticulum firmware for Heltec Wireless Tracker V2.3"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 build = "build.rs"
+autobins = false
 
 [features]
 default = ["safe-idle"]
 safe-idle = []
+lab-rx = ["esp-alloc/internal-heap-stats"]
+lab-rx-backpressure = ["lab-rx"]
+lab-rx-electrical-hil = ["lab-rx"]
+lab-rx-returned-fault-hil = ["lab-rx", "dep:reticulum-lab-rx-returned-fault-hil"]
+lab-rx-reset-journal-corrupt-hil = []
+lab-rx-reset-journal-torn-hil = []
 
 [dependencies]
 reticulum-board-heltec-tracker-v2 = { path = "../../crates/board-heltec-tracker-v2" }
 reticulum-radio-interface = { path = "../../crates/radio-interface" }
-reticulum-rns-rete = { path = "../../crates/rns-rete" }
+reticulum-rns-rete-rx = { path = "../../crates/rns-rete-rx" }
+reticulum-lab-rx-returned-fault-hil = { path = "../../crates/lab-rx-returned-fault-hil", optional = true }
 
 embassy-executor = { workspace = true, features = ["log"] }
+embassy-futures.workspace = true
+embassy-sync.workspace = true
 embassy-time = { workspace = true, features = ["log"] }
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
+embedded-hal-bus.workspace = true
 esp-alloc.workspace = true
 esp-backtrace = { workspace = true, features = ["esp32s3", "panic-handler", "println"] }
 esp-bootloader-esp-idf = { workspace = true, features = ["esp32s3", "log-04"] }
@@ -38,13 +51,54 @@ esp-rtos = { workspace = true, features = [
     "log-04",
 ] }
 log.workspace = true
-
-# Deliberate compile-time integration probe. The safe-idle binary does not
-# construct a radio driver or call any lora-phy operation.
-lora-phy.workspace = true
+static_cell.workspace = true
+zeroize.workspace = true
 
 [[bin]]
 name = "reticulum-heltec-tracker-v2"
 path = "src/main.rs"
 test = false
 bench = false
+required-features = ["safe-idle"]
+
+[[bin]]
+name = "reticulum-heltec-tracker-v2-lab-rx"
+path = "src/bin/lab_rx_normal.rs"
+test = false
+bench = false
+required-features = ["lab-rx"]
+
+[[bin]]
+name = "reticulum-heltec-tracker-v2-lab-rx-backpressure"
+path = "src/bin/lab_rx_backpressure.rs"
+test = false
+bench = false
+required-features = ["lab-rx-backpressure"]
+
+[[bin]]
+name = "reticulum-heltec-tracker-v2-lab-rx-electrical-hil"
+path = "src/bin/lab_rx_electrical_hil.rs"
+test = false
+bench = false
+required-features = ["lab-rx-electrical-hil"]
+
+[[bin]]
+name = "reticulum-heltec-tracker-v2-lab-rx-returned-fault-hil"
+path = "src/bin/lab_rx_returned_fault_hil.rs"
+test = false
+bench = false
+required-features = ["lab-rx-returned-fault-hil"]
+
+[[bin]]
+name = "reticulum-heltec-tracker-v2-lab-rx-reset-journal-corrupt"
+path = "src/bin/lab_rx_reset_journal_corrupt.rs"
+test = false
+bench = false
+required-features = ["lab-rx-reset-journal-corrupt-hil"]
+
+[[bin]]
+name = "reticulum-heltec-tracker-v2-lab-rx-reset-journal-torn"
+path = "src/bin/lab_rx_reset_journal_torn.rs"
+test = false
+bench = false
+required-features = ["lab-rx-reset-journal-torn-hil"]

@@ -1,6 +1,6 @@
 # Standalone Reticulum LoRa Firmware: Architecture and Feasibility
 
-**Status:** accepted architecture; Phase-0 scaffold complete<br>
+**Status:** accepted architecture; Phase-1 receive-only path target-linked, HIL pending<br>
 **Date:** 2026-07-14<br>
 **Initial target:** Heltec Wireless Tracker V2.3, ESP32-S3FN8 + SX1262 + KCT8103L<br>
 **Product goal:** an always-on, self-contained Reticulum transport and LXMF store-and-forward node, with optional onboard messaging and NomadNet clients controlled over USB, BLE, or Wi-Fi
@@ -59,7 +59,7 @@ The local repositories were inspected at these revisions. These are moving proje
 
 | Reference | Snapshot | License | Useful material | Verdict |
 | --- | ---: | --- | --- | --- |
-| `reference/rete` | `beb84c3` integration fork, based on `9bcb7d3e` | MIT OR Apache-2.0 declared in Cargo/README; license texts absent | Runtime-agnostic `no_std` RNS, bounded transport storage, RNode LoRa interface, compiling Embassy ESP32-S3/SX1262/Wi-Fi example, plus canonical local LINKREQUEST validation and transactional owned-Link admission | Provisional RNS foundation; pre-release, Resource is whole-buffered, relay admission remains non-transactional and current LXMF is wire-incompatible; missing canonical license files are notice/provenance hygiene, not an evaluation blocker |
+| `reference/rete` | `5ce8c4e` integration fork, based on `9bcb7d3e` | MIT OR Apache-2.0 declared in Cargo/README; license texts absent | Runtime-agnostic `no_std` RNS, bounded transport storage, RNode LoRa interface, compiling Embassy ESP32-S3/SX1262/Wi-Fi example, plus canonical local LINKREQUEST validation, transactional owned-Link admission and endpoint announce-rebroadcast policy | Provisional RNS foundation; pre-release, Resource is whole-buffered, relay admission remains non-transactional and current LXMF is wire-incompatible; missing canonical license files are notice/provenance hygiene, not an evaluation blocker |
 | `reference/leviculum` | `5fb1db0` | AGPL-3.0-or-later | Complete sans-I/O RNS core, strong tests, RNode framing, nRF Embassy firmware, current Micron parser and substantial NomadNet client | Independent RNS oracle and fallback; no LXMF |
 | `reference/LXMF` | `fab12ad9` | accepted Reticulum License | Current authoritative Python LXMF behavior, router, propagation node and fixtures | Primary pinned compatibility peer; source may also be reused when useful with its conditions/notices preserved |
 | `reference/LXMF-rs` | `0859680` | EPL-2.0 | Broad LXMF/RNS behavior, wire formats, parity fixtures, announce codecs, paper messages, stamps/tickets, router semantics | Approved direct-reuse source for the EPL product path; several wire/state modules are extractable, while the full runtime still needs a substantial bare-metal refactor |
@@ -114,10 +114,15 @@ Claims in READMEs were not treated as proof of embedded portability.
 The local `rns-rs` ESP-IDF target check did not reach Rust source compilation: its managed ESP-IDF 5.2.3 environment is now deprecated and failed Python dependency setup. That is an ecosystem-maintenance warning, not evidence that ESP-IDF itself is unsuitable.
 
 The research shell originally exposed a moving global nightly toolchain. The
-scaffold now pins host Rust 1.97.0 in `rust-toolchain.toml` and verifies the
-separate Espressif Rust 1.95.0.0 toolchain, `espup` 0.17.1, `espflash` 4.5.0
-and the Xtensa GCC linker through `cargo run -p xtask -- doctor`. Builds no
-longer rely on the developer's global default.
+scaffold now pins host Rust 1.97.0 in `rust-toolchain.toml`. The
+`cargo run -p xtask -- doctor` command verifies the resulting host and
+Espressif Rust 1.95.0.0 compiler fingerprints, `espflash` 4.5.0 and availability
+of the Xtensa GCC linker; it does not verify the version of the `espup` installer
+used to obtain them. CI bootstraps the ESP toolchain with a checksum-pinned
+`espup` 0.16.0 binary and verifies the exact GCC fingerprint. Phase-1
+qualification tooling performs the stricter complete compiler, Cargo,
+`espflash` and Xtensa-binutils fingerprint check before building evidence.
+Builds no longer rely on the developer's global default.
 
 ### Authoritative compatibility targets
 
@@ -283,15 +288,13 @@ Project-owned portable, board and platform crates should start as `MIT OR Apache
 Recommended policy:
 
 - Proceed with `rete` and direct LXMF-rs extraction; neither waits on a philosophical license decision.
-- Add `LICENSE-MIT`, `LICENSE-APACHE-2.0`, `NOTICE`, `THIRD_PARTY_LICENSES/`, a machine-readable dependency/license manifest and per-crate/file SPDX identifiers when implementation begins.
+- The repository now carries `LICENSE-MIT`, `LICENSE-APACHE`, `NOTICE` and `docs/provenance.md`. Keep that source-origin registry current for every imported constant, fixture, behavior translation and board table, including whether material is copied, adapted, independently derived or observed through interoperability.
 - Keep copied/adapted code in traceable files or crates instead of blending origins. Preserve upstream copyright and license headers.
 - Make CI reject a product feature graph that links EPL-only LXMF-rs source with AGPL-only implementation crates. Host interoperability tools can coexist as separate licensed executables.
-- Run a dependency-license allowlist (`cargo-deny` or equivalent) and emit an SPDX/CycloneDX-style SBOM plus exact corresponding-source URL for each release tag.
+- Before the first public firmware distribution, run a dependency-license allowlist (`cargo-deny` or equivalent) and emit a per-binary third-party notice bundle, an SPDX/CycloneDX-style SBOM and exact corresponding-source URLs for each release tag. Add file-level SPDX identifiers wherever copied or adapted source requires a distinct grant.
 - Expose firmware version, source URL, component licenses and notices through the device API and the SPA/native application's About/Licenses view.
 - Record Reticulum-Licensed reuse and its restrictions explicitly; public-domain protocol status does not erase the source-code conditions.
 - A missing or ambiguous license **grant**, as with the reviewed Precursor root, remains a copying blocker for that particular source. A known accepted license family is not.
-
-Create `docs/provenance.md` when implementation begins. Every imported constant, fixture, behavior translation, and board table should name its source, license, and whether it is copied, adapted, independently derived, or observed through interoperability.
 
 This is an engineering compliance plan, not a legal opinion. Audit the exact dependency/source graph before the first public binary, but treat that as a routine release gate rather than a phase-0 technology-selection gate.
 
@@ -381,6 +384,7 @@ firmware/
 crates/
   node-core/                      # orchestration, policy, capabilities
   rns-adapter/                    # selected RNS core integration boundary
+  rns-rete-rx/                    # opaque product receive-only Rete façade
   lxmf-wire/                      # no_std+alloc arbitrary-MessagePack wire model
   lxmf-router/                    # delivery queues, links/resources, retries
   lxmf-propagation/               # deposit/retrieve/peer sync/culling state machine
@@ -555,7 +559,14 @@ The receive boundary now lives in `crates/radio-interface` as a fixed-capacity
 `RnodeRxReassembler` wrapped by `TimedRnodeRx`. The ingress actor owns that
 state, its caller-owned 508-byte scratch buffer, the monotonic expiry timer and
 RSSI/SNR aggregation; Rete `NodeCore` sees only a completed packet after the
-independent 500-byte RNS guard. This small local boundary is presently
+independent 500-byte RNS guard. The Phase 1 `ReceiveOnlyRete` façade and its
+private `ReceiveOnlyIngress` composition
+also owns a five-second Rete maintenance schedule, fixes endpoint/Link policy,
+drops stale queue items and exact-deadline collision frames, and exhaustively
+destroys every Rete action before returning scalar diagnostics. It currently
+sits next to the Rete adapter for the vertical slice; move that RNode-plus-RNS
+composition into the planned `node-core` crate when broader orchestration is
+scaffolded. This small local boundary is presently
 necessary because Rete's `SplitReassembler::feed()`
 uses `None` for empty input, pending continuation, and output-buffer failure,
 and `LoRaInterface::recv()` has no pending-fragment deadline. Those generic
@@ -585,7 +596,7 @@ The first board profile should encode the following rather than scattering pin c
 | SX1262 SCLK / MISO / MOSI / NSS | 9 / 11 / 10 / 8 |
 | SX1262 reset / BUSY / DIO1 IRQ | 12 / 13 / 14 |
 | SX1262 TCXO | DIO3, 1.8 V |
-| SX1262 internal RF switch control | DIO2 enabled and driving `PA_CPS`; shared GPIO46 remains input/high-impedance |
+| SX1262 internal RF switch control | DIO2 wired directly to KCT8103L `PA_CPS`; GPIO46 is a separate header breakout |
 | KCT8103L VFEM power | GPIO 7, active high |
 | KCT8103L chip enable / CSD | GPIO 4, active high |
 | KCT8103L CTX | GPIO 5, low RX / high TX |
@@ -596,6 +607,10 @@ The first board profile should encode the following rather than scattering pin c
 | User/boot button | GPIO 0 |
 | GNSS module TX → MCU RX / module RX ← MCU TX / reset / PPS | GPIO 33 / 34 / 35 / 36 |
 
+The direct DIO2/CPS ownership and separate GPIO46 header route come from the
+rendered schematic hidden netlist and pin map, whose exact digests are recorded
+in [Dependency and source provenance](provenance.md#hardware-reference-evidence).
+
 Radio initialization sequence:
 
 1. Configure the radio SPI and control pins without glitches.
@@ -604,7 +619,7 @@ Radio initialization sequence:
    switching, then configure raw LoRa modulation, CRC, preamble, sync word,
    regulator, calibration and IRQs.
 3. Keep CTX low, assert VFEM power, wait the measured/provisional settle time,
-   assert CSD, and wait again while GPIO46 remains input/high-impedance.
+   assert CSD, and wait again. Header GPIO46 is unrelated to the RF path.
 4. Enter RX only after the external path is stable in RX state.
 5. For TX, acquire the PHY lock, pass region/airtime/power policy, switch CTX to TX, transmit, wait for TX done, return CTX to RX, and re-arm receive even after errors.
 
@@ -966,13 +981,25 @@ safe-idle default and admits no transmit path.
 
 Deliverables:
 
-- board crate for pins, power rails, TFT, battery, button, and revision;
-- `lora-phy` SX1262 adapter with TCXO/DIO2/KCT8103L sequencing;
-- conservative region/power policy;
-- exact RNode framing, split timeout, CSMA/airtime scheduler;
-- USB diagnostics and RF HIL suite.
+- board-owned Tracker V2.3 RF pins, reset and power interlock while unrelated
+  TFT, GNSS, battery and button support remains deferred;
+- opaque RX-only `lora-phy` SX1262 adapter with TCXO, DIO2 and KCT8103L
+  sequencing plus independent interface-hook and SPI-opcode TX barriers;
+- exact RNode receive framing, bounded split reassembly/deadline handling and
+  independent enforcement of the 500-byte RNS MTU;
+- sole non-cancellable radio ownership, bounded raw-frame handoff and
+  endpoint-only Rete ingress with exhaustive project-owned action suppression;
+- host mock-command/saturation tests and powered RF HIL qualification.
 
-Exit: two boards and an official RNode exchange 1–508-byte physical interface frames at all boundary lengths for a long soak with no stuck RX/TX/FEM state; the RNS layer independently enforces its 500-byte protocol MTU.
+Region/power authorization, CSMA/airtime scheduling and USB are later guarded
+transmit and local-interface deliverables, not receive-only Phase 1 work.
+
+Exit: at least two Tracker samples repeatedly receive official RNode single and
+split frames through the 508-byte physical boundary while the RNS layer admits
+at most 500 bytes; malformed, stale and saturated traffic remains bounded over
+a long soak; heap and the shared executor stack remain within measured limits;
+and logic-analyzer, SPI and on-air evidence shows CTX never selects TX and the
+Tracker never issues `SetTx` or emits a packet.
 
 ### Phase 2 — always-on RNS transport node
 
@@ -1108,16 +1135,25 @@ Exit: enabling location adds a bounded optional capability without changing netw
 
 ## Recommended immediate next step
 
-Do not begin by porting UI screens. Start the bare-metal Rust vertical slice with Rete while treating conformance and bounded-memory work as implementation gates:
+Do not begin by porting UI screens. Qualify the now-target-linked receive-only
+slice before designing transmission:
 
-1. Keep the reviewed Rete and Leviculum pins and their declared terms in the notice manifest. Integrate Rete through its native APIs; keep the Leviculum package buildable as an independent oracle/fallback without designing a broad universal adapter.
-2. Adapt `rete`'s compiling ESP32-S3/SX1262 example to a Tracker BSP using the proven `microReticulum_Firmware` pin, rail and KCT8103L sequencing. Bring up LoRa plus USB diagnostics only; defer Wi-Fi, BLE and UI.
-3. Regenerate and run the released-Python 1.3.8 RNS corpus, loss/reordering cases, allocator-failure probes and memory instrumentation against Rete. Use Leviculum for targeted discrepancies and prove the RNode split boundary over real hardware rather than building another C++/ESP-IDF comparison.
-4. Generate canonical LXMF fixtures from released Python and current `master`, including arbitrary MessagePack fields, 32-byte stamps and 16-byte tickets. They should expose the known `rete-lxmf-core` defects before a project-owned bounded LXMF codec is selected or extracted.
-5. Prototype the Precursor constant-memory stamp construction and its bounded Resource/decompression ideas on the host, then measure Rete's Resource path and initial Tracker profile budgets on Xtensa.
-6. Publish image/static-RAM/peak-heap/stack/flash/current results, Rete's production-gate status and required upstream patches, the LXMF source-reuse decisions, and measurable criteria for the later PSRAM full-appliance board.
+1. Flash the explicit lab image with an antenna/load and capture reset, FEM,
+   DIO2/DIO3 and SPI from cold boot through known single/split RNode frames.
+2. Capture target stack high-water marks against the recorded compiler frames
+   and correlate the existing heap/radio/fault heartbeat with analyzer time;
+   treat the Tracker `16/4/32/2` capacity profile as a measured configuration,
+   not the full-appliance ceiling.
+3. Run malformed, stale, duplicate, queue-saturation and local-destination
+   traffic while logic-analyzer and on-air monitoring confirm no `SetTx` or
+   Tracker-originated packet.
+4. Continue the released-Python RNS differential, allocation-failure and
+   upstream Rete hardening lanes in parallel. Only after Phase 1 evidence is
+   recorded should the guarded airtime-governed transmit slice be designed.
 
-Exit with one interoperable Rust RNS foundation and a trustworthy memory model. The first implementation phase can then build the Tracker BSP and transport node without prematurely coupling protocol work to the SPA or mobile-client choice.
+The LXMF wire/resource work can continue on the host, but it should not enlarge
+the first radio HIL image or couple protocol qualification to a SPA/mobile
+client choice.
 
 ## Primary sources
 

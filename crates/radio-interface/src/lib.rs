@@ -18,11 +18,39 @@ pub use reticulum_rns_conformance::{
     RNODE_HW_MTU, RNODE_LORA_DATA_PER_FRAME, RNODE_LORA_HEADER_LEN, RNS_MTU, SX1262_FRAME_MTU,
 };
 
+mod lab_rx_backpressure;
+mod lab_rx_profile;
+mod radio_diagnostics;
+mod reset_quarantine;
 mod rx_pipeline;
+mod stack_watermark;
 
+pub use lab_rx_backpressure::{
+    LAB_RX_BACKPRESSURE_WATCHDOG_MARGIN_US, LabRxBackpressureHook, LabRxBackpressureHookState,
+    LabRxBackpressureStall, LabRxBackpressureTransitionError, LabRxBackpressureValidationError,
+};
+pub use lab_rx_profile::{
+    LabRxProfile, LabRxProfileConfig, LabRxProfileError, RNODE_FRAGMENT_TIMEOUT_GUARD_US,
+    RNODE_MIN_PREAMBLE_SYMBOLS, ReceiveFrequencyRange, ReceiveFrequencyRangeError,
+};
+pub use radio_diagnostics::{
+    RadioRxDiagnostics, RadioRxFaultClass, RadioRxFaultClassification, RadioRxFaultCounters,
+    RadioRxFaultPhase,
+};
+pub use reset_quarantine::{
+    HealthyLeaseCommit, RESET_QUARANTINE_JOURNAL_WORDS, RESET_QUARANTINE_SLOT_WORDS,
+    RESET_STORM_QUARANTINE_THRESHOLD, ResetFaultHistory, ResetQuarantineDecision,
+    ResetQuarantineReason, ResetQuarantineStorage, ResetQuarantineWriteError, RetainedBootReason,
+    complete_healthy_radio_lease, prepare_reset_quarantine_boot, record_radio_fault_before_reset,
+};
 pub use rx_pipeline::{
-    ExpiredFragment, FrameSignal, RxDiagnostics, TimedReceiveError, TimedReceiveOutcome,
-    TimedRnodeRx,
+    ExpiredFragment, FrameSignal, RawFrameHandoff, RawFrameHandoffDiagnostics,
+    RawFrameHandoffOutcome, RawReceivedFrame, RxDiagnostics, TimedReceiveError,
+    TimedReceiveOutcome, TimedRnodeRx,
+};
+pub use stack_watermark::{
+    STACK_WATERMARK_PATTERN_SEED, STACK_WATERMARK_WORD_BYTES, StackWatermarkLayout,
+    StackWatermarkLayoutError, StackWatermarkScan, scan_stack_watermark, stack_watermark_word,
 };
 
 /// Sequence-number bits in an RNode LoRa frame header.

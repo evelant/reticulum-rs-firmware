@@ -20,12 +20,18 @@ use reticulum_rns_conformance::{CandidateMetadata, CandidateStatus};
 
 pub mod capacity;
 pub mod embedded;
+mod receive_only;
 
 pub use embedded::{
     AdmissionCounters, AnnounceAdmissionError, DestinationRegistrationError, EmbeddedNode,
     EmbeddedNodeConfig, EmbeddedNodeMetrics, EmbeddedSendError, IngressCounters,
     IngressDisposition, IngressDropReason, IngressReport, InterfaceId, MAX_CHANNEL_PAYLOAD,
     NodeActions, NodeRole, RouteSnapshot, TransportCounters, TxPacket, TxTarget,
+};
+pub use receive_only::{
+    InitialReceiveOnlyIngress, RETE_MAINTENANCE_INTERVAL_SECONDS, RawFrameDropReason,
+    ReceiveOnlyClockSample, ReceiveOnlyIngress, ReceiveOnlyIngressError, ReceiveOnlyIngressMetrics,
+    ReceiveOnlyIngressOutcome, ReceiveOnlyStep, ReceiveOnlyWake, SuppressedActions,
 };
 
 pub use rete_core::{DestHash, DestType, Identity, IdentityHash, LinkId, Packet, PacketType};
