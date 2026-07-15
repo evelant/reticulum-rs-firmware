@@ -997,6 +997,7 @@ fn copy_built_elf(
 }
 
 fn write_artifact_sidecars(directory: &Path, elf: &Path, image: &Path) -> Result<(), String> {
+    phase1_image::validate_merged_image(image)?;
     write_hash_sidecar(elf, &directory.join("firmware.sha256"), "firmware.elf")?;
     write_hash_sidecar(
         image,
@@ -1944,6 +1945,7 @@ fn regenerate_and_compare_image(
     let espflash_context = phase1_image::OfflineEspflashContext::create(temporary.path())?;
     let elf = resolve_record_path(bundle, &artifact.elf)?;
     let preserved_image = resolve_record_path(bundle, &artifact.flash_image)?;
+    phase1_image::validate_merged_image(&preserved_image)?;
     let regenerated = temporary.path().join("flash-image.bin");
     let log = temporary.path().join("save-image.log");
     let command = save_image_spec(
@@ -1954,6 +1956,7 @@ fn regenerate_and_compare_image(
     );
     validate_offline_artifact_command(&command)?;
     run_logged(&command, espflash_context.workdir(), &log)?;
+    phase1_image::validate_merged_image(&regenerated)?;
     let preserved = fs::read(&preserved_image).map_err(|error| {
         format!(
             "could not read preserved image {}: {error}",

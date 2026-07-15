@@ -12,6 +12,7 @@ name = "xtask"
 path = "src/main.rs"
 
 [dependencies]
+md-5 = "=0.10.6"
 quote = "=1.0.46"
 reticulum-rns-rete = { path = "../crates/rns-rete", default-features = false }
 object = { version = "=0.37.3", default-features = false, features = ["read", "std"] }

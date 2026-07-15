@@ -143,9 +143,14 @@ The verifier is bundle-read-only. It rechecks source provenance, hashes,
 lengths, address records, mode identity, size/link/stack/TX-symbol contracts,
 and regenerates each merged image in a temporary directory for an exact byte
 comparison with its preserved ELF-derived image. It still performs no hardware
-operation. The image recipe explicitly fixes ESP32-S3, QIO, 80 MHz, 8 MB, a
+operation. The image recipe explicitly fixes ESP32-S3, DIO, 80 MHz, 8 MB, a
 40 MHz crystal, minimum chip revision 0.0 and ESP-IDF format while isolating
-local and global `espflash.toml`. There is intentionally no dirty-worktree or
+local and global `espflash.toml`. DIO matches both preserved, bootable Tracker
+V2 baselines; a QIO-built powered smoke image watchdog-reset in ROM flash
+mapping before firmware startup, strongly implicating the mode mismatch pending
+the controlled DIO smoke. Preparation and verification inspect the bootloader
+and partition-table-selected factory-app headers and reject any image that does
+not encode DIO and 8 MB/80 MHz. There is intentionally no dirty-worktree or
 overwrite bypass.
 
 Both v2 preparations start Cargo and its build scripts after clearing the
