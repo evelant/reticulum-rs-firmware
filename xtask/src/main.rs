@@ -81,7 +81,7 @@ fn check_rnode_hil_vectors() -> ExitCode {
             "-s",
             "interop/python",
             "-p",
-            "test_rnode_hil.py",
+            "test_*.py",
             "-v",
         ])
         .env("PYTHONPATH", root.join("interop/python"))

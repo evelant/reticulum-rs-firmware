@@ -54,3 +54,25 @@ airtime and safety arguments on its `send` subcommand; follow
 image, source bundle, copied corpus/tool and per-invocation manifest/transcript
 as powered evidence. The host-generated boot-local DATA corpus is deliberately
 ephemeral and belongs in that ignored evidence tree, not in `vectors/`.
+
+## ESP32-S3 native-USB log capture
+
+`python/esp32s3_usb_serial_capture.py` is a receive-only POSIX recorder for
+supplemental Tracker development logs. It clears DTR and RTS together at the
+first ioctl after opening, configures raw 115200 8N1, preserves already-buffered
+input and exposes no serial write path. Run it with the pinned CPython 3.13.7:
+
+```sh
+python3.13 interop/python/esp32s3_usb_serial_capture.py \
+  --port /dev/cu.usbmodemYOUR_PORT > serial.log 2> serial-recorder.log
+```
+
+The tool is reset-minimizing, not passive. Its descriptor is read/write because
+Darwin's TTY control path requires that mode, but the recorder makes no serial
+write call or host-input read. POSIX cannot set CDC line controls before
+`open(2)`, and opening the Tracker's native USB can reset the ESP32-S3. The tool
+does not follow re-enumeration, since the path could then name another attached
+Tracker. It is suitable for a new USB-reset boot and heartbeat capture, but not
+for proving a preceding cold-power-on boot. Follow the independent RX-only
+UART0 procedure in the Phase-1 HIL runbook whenever the reset reason or
+complete multi-reset sequence is evidence-critical.

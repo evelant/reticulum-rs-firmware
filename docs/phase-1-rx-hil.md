@@ -490,14 +490,43 @@ same absolute path before verification; v2 has no relocation override. None of
 the powered-evidence commands accepts a serial port or performs a flash,
 monitor or RF operation.
 
-## Flash and monitor
+## Flash and capture
 
-Find the actual USB serial port:
+Enumerate the USB serial ports without opening them:
 
 ```sh
 espflash list-ports
-export ESPFLASH_PORT=/dev/cu.usbmodemYOUR_PORT
 ```
+
+With more than one Tracker attached, a `/dev/cu.usbmodem*` name is not a board
+identity. On macOS, bind the callout path to the USB serial descriptor/eFuse MAC
+through IORegistry without opening or resetting either board:
+
+```sh
+export TRACKER_USB_SERIAL=44:1B:F6:F8:E9:44
+export ESPFLASH_PORT="$(
+  ioreg -r -c IOUSBHostDevice -l -w0 |
+  awk -v target="$TRACKER_USB_SERIAL" '
+    /"kUSBSerialNumberString" = / {
+      wanted = index($0, "\"" target "\"") != 0
+    }
+    wanted && /"IOCalloutDevice" = / {
+      line = $0
+      sub(/^.*"IOCalloutDevice" = "/, "", line)
+      sub(/".*$/, "", line)
+      print line
+      exit
+    }
+  '
+)"
+test -n "$ESPFLASH_PORT"
+test -c "$ESPFLASH_PORT"
+printf 'usb_serial=%s port=%s\n' "$TRACKER_USB_SERIAL" "$ESPFLASH_PORT"
+```
+
+On Linux, use the matching `/dev/serial/by-id/` entry. Record the mapping and
+repeat this non-opening lookup after every re-enumeration; do not use a ROM
+connection command merely to discover the MAC.
 
 Qualification must flash the preserved, hash-checked merged image. Do not use
 `cargo run` or `espflash flash`: either can regenerate or select bytes other
@@ -537,23 +566,109 @@ The exact merged image and equal readback make the bootloader and partition
 bytes part of the evidence, which matters when judging ROM/boot pin
 transients. Record both digests, the byte count and address in the manifest.
 
-Attach without resetting the ephemeral identity and retain the complete
-session. Start this recorder before an externally controlled reset when the
-cold-boot trace matters:
+The Tracker's USB connector is the ESP32-S3 native USB Serial/JTAG peripheral,
+not a separate USB/UART bridge. Do not use espflash's monitor subcommand to
+attach to a running image. In espflash 4.5.0 its `--no-reset` option suppresses
+only the monitor's later reset: connection still enters the ROM loader through
+the native-USB DTR/RTS reset strategy first. That can leave the chip in download
+mode with the application interlock registers unowned.
+
+### Supplemental post-boot native-USB capture
+
+For development and post-boot heartbeat evidence, use one new directory per
+attachment. Never append separate boots or ephemeral identities into one
+serial file, and never overwrite the recorder metadata for an earlier attempt.
+Extract the project-owned receive-only recorder from the already verified
+source archive and retain that copy beside its stderr metadata:
 
 ```sh
-espflash monitor \
+set -euo pipefail
+test -n "${TRACKER_USB_SERIAL:?map the Tracker USB serial before capture}"
+test -c "${ESPFLASH_PORT:?map the Tracker callout path before capture}"
+capture_attempt="$normal_run/serial-attempt-$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir "$capture_attempt"
+capture_source="$capture_attempt/source"
+mkdir "$capture_source"
+tar -xf "$normal_artifact/source.tar" \
+  -C "$capture_source" \
+  interop/python/esp32s3_usb_serial_capture.py
+recorder="$capture_source/interop/python/esp32s3_usb_serial_capture.py"
+shasum -a 256 "$recorder" > "$capture_attempt/serial-recorder.sha256"
+printf 'usb_serial=%s port=%s\n' "$TRACKER_USB_SERIAL" "$ESPFLASH_PORT" \
+  > "$capture_attempt/board-port-map.txt"
+
+set +e
+python3.13 "$recorder" \
   --port "$ESPFLASH_PORT" \
-  --chip esp32s3 \
-  --non-interactive --no-reset \
-  --elf "$normal_artifact/firmware.elf" 2>&1 | tee -a "$normal_run/serial.log"
+  --duration-seconds 125 \
+  2> "$capture_attempt/serial-recorder.log" \
+  > "$capture_attempt/serial.log"
+recorder_status=$?
+set -e
+printf '%s\n' "$recorder_status" \
+  > "$capture_attempt/serial-recorder.exit-status.txt"
+test "$recorder_status" -eq 0
+test -s "$capture_attempt/serial.log"
+rg -F 'completed=true duration_seconds=125.0' \
+  "$capture_attempt/serial-recorder.log"
 ```
 
+The recorder uses the read/write descriptor required by Darwin's TTY-control
+API but makes no serial write call, reads no host input, clears DTR and RTS
+together at the first possible ioctl, configures raw 115200 8N1 without flow
+control or `HUPCL`, verifies both controls inactive and never flushes input. It
+is nevertheless **reset-minimizing, not
+passive**: the operating system must open the CDC device before line controls
+can be cleared, and opening native USB is known to reset this board. A capture
+therefore begins a new USB-reset boot and a new ephemeral identity. It cannot
+prove the earlier cold-power-on trace. Map the port to the board's eFuse MAC
+immediately before capture. The recorder exits instead of following USB
+re-enumeration because a `/dev/cu.usbmodem*` path can be reassigned to the other
+Tracker and each reopen can perturb the target again.
+
+For a bounded smoke only, record GPIO output intent immediately before and
+after native-USB attachment through JTAG. The normal receive image should keep
+`GPIO_OUT_REG` (`0x60004004`) masked by `0x10bc` equal to `0x1090` and
+`GPIO_ENABLE_REG` (`0x60004020`) masked by `0x10bc` equal to `0x10bc` after
+activation. A zero or changed normal-image safety mask invalidates that
+supplemental capture. The safe-idle image instead requires the exact whole-
+register values `0x00000100` and `0x000011bc`; any departure invalidates its
+capture. Debugger reads can halt the core and are not formal electrical
+evidence.
+
+### Formal cold-power and retained-reset capture
+
+Native USB cannot prove the first `ChipPowerOn` boot because it does not exist
+until enumeration and host open can itself reset the target. For the
+`cold-boot-and-silence`, returned-fault and reset-journal scenarios, use an
+independent capture path for the exact preserved artifact:
+
+1. Complete the preserved-image flash and exact readback, then disconnect all
+   board power, including USB VBUS and any battery.
+2. Leave native USB **data** disconnected. Power the board from the controlled
+   supply, battery fixture or data-blocked 5 V fixture used by the measurement
+   plan.
+3. Connect a high-impedance logic-analyzer input or isolated USB/UART adapter
+   3.3 V-compatible RX input to J2 pin 20, GPIO43/U0TXD, plus ground. Configure
+   115200 8N1. Leave adapter TX, DTR and RTS physically disconnected and ensure
+   the probe cannot back-power the board.
+4. Arm UART, safety-pin logic, current and independent RF captures before
+   applying power. Keep them continuously armed across every expected digital-
+   core reset in the scenario.
+5. Apply power once and do not attach a native-USB data host until the required
+   boot/reset sequence has finished.
+
+The pinned `esp-println` `auto` backend selects UART0 when no USB start-of-frame
+packet has been observed, so this arrangement captures the existing preserved
+binary; it does not require a logging-only rebuild. The UART trace plus the
+logic/current/RF captures establish the cold sequence. A later native-USB log
+is supplemental and must not be substituted for it.
+
 Each boot generates a new identity. The boot record reports the SoC reset
-reason; a preattached recorder is still required to retain the fatal line that
-precedes an immediate digital-core software reset.
-The first activation snapshot and every 60-second heartbeat repeat the public
-identity, destination hash, heap use and bounded radio/ingress counters.
+reason, while the continuous independent recorder retains the fatal line that
+precedes an immediate digital-core software reset. The first activation
+snapshot and every 60-second heartbeat repeat the public identity, destination
+hash, heap use and bounded radio/ingress counters.
 
 ## Pinned RNode peer and corpus
 
