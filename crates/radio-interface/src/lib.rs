@@ -2,9 +2,9 @@
 //!
 //! This crate prevents callers from conflating the 500-byte RNS MTU, the
 //! 508-byte RNode hardware MTU and the SX1262's 255-byte frame capacity. It
-//! also owns the protocol-level receive reassembly state. A target radio actor
-//! owns the reassembler, expires pending fragments using its monotonic timer,
-//! and passes only completed packets through the separate RNS MTU guard.
+//! also owns the protocol-level receive reassembly state. A target ingress
+//! actor owns the reassembler, expires pending fragments using its monotonic
+//! timer, and passes only completed packets through the separate RNS MTU guard.
 //!
 //! No API in this crate can initialize a radio or authorize transmission.
 
@@ -16,6 +16,13 @@ use reticulum_rns_conformance::{
 };
 pub use reticulum_rns_conformance::{
     RNODE_HW_MTU, RNODE_LORA_DATA_PER_FRAME, RNODE_LORA_HEADER_LEN, RNS_MTU, SX1262_FRAME_MTU,
+};
+
+mod rx_pipeline;
+
+pub use rx_pipeline::{
+    ExpiredFragment, FrameSignal, RxDiagnostics, TimedReceiveError, TimedReceiveOutcome,
+    TimedRnodeRx,
 };
 
 /// Sequence-number bits in an RNode LoRa frame header.

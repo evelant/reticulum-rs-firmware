@@ -1480,7 +1480,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "rete-core"
 version = "0.1.0"
-source = "git+https://github.com/evelant/rete.git?rev=beb84c370d2ae27209a866093fa1e6b204304384#beb84c370d2ae27209a866093fa1e6b204304384"
+source = "git+https://github.com/evelant/rete.git?rev=5ce8c4e437d3f2f07d302bc366ff06bacd6aff2d#5ce8c4e437d3f2f07d302bc366ff06bacd6aff2d"
 dependencies = [
  "aes",
  "cbc",
@@ -1496,7 +1496,7 @@ dependencies = [
 [[package]]
 name = "rete-stack"
 version = "0.1.0"
-source = "git+https://github.com/evelant/rete.git?rev=beb84c370d2ae27209a866093fa1e6b204304384#beb84c370d2ae27209a866093fa1e6b204304384"
+source = "git+https://github.com/evelant/rete.git?rev=5ce8c4e437d3f2f07d302bc366ff06bacd6aff2d#5ce8c4e437d3f2f07d302bc366ff06bacd6aff2d"
 dependencies = [
  "embedded-io-async 0.6.1",
  "heapless 0.8.0",
@@ -1509,7 +1509,7 @@ dependencies = [
 [[package]]
 name = "rete-transport"
 version = "0.1.0"
-source = "git+https://github.com/evelant/rete.git?rev=beb84c370d2ae27209a866093fa1e6b204304384#beb84c370d2ae27209a866093fa1e6b204304384"
+source = "git+https://github.com/evelant/rete.git?rev=5ce8c4e437d3f2f07d302bc366ff06bacd6aff2d#5ce8c4e437d3f2f07d302bc366ff06bacd6aff2d"
 dependencies = [
  "heapless 0.8.0",
  "hkdf",
@@ -1580,11 +1580,14 @@ dependencies = [
 name = "reticulum-rns-rete"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "rand_core 0.6.4",
  "rete-core",
  "rete-stack",
  "rete-transport",
+ "reticulum-radio-interface",
  "reticulum-rns-conformance",
+ "serde_json",
 ]
 
 [[package]]

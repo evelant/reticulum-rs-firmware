@@ -41,6 +41,11 @@ pub mod pins {
     pub const LORA_RESET: u8 = 12;
     pub const LORA_BUSY: u8 = 13;
     pub const LORA_DIO1: u8 = 14;
+    /// MCU connection to the PA_CPS net also driven by SX1262 DIO2.
+    ///
+    /// Firmware must leave this pin as an input/high-impedance while DIO2 RF
+    /// switch control is enabled; it is not an independent control output.
+    pub const FEM_CPS_SHARED: u8 = 46;
     pub const USB_D_MINUS: u8 = 19;
     pub const USB_D_PLUS: u8 = 20;
     pub const TFT_BACKLIGHT: u8 = 21;
@@ -58,12 +63,12 @@ pub mod pins {
 /// Source controlling the KCT8103L CPS/RF-switch input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FemCpsControl {
-    /// The SX1262 drives CPS through its DIO2 RF-switch mode.
-    Sx1262Dio2,
+    /// SX1262 DIO2 drives CPS while the shared MCU GPIO remains high-impedance.
+    Sx1262Dio2WithMcuHighImpedance,
 }
 
-/// CPS is not an ESP32 GPIO on the V2.3 RF path.
-pub const FEM_CPS_CONTROL: FemCpsControl = FemCpsControl::Sx1262Dio2;
+/// DIO2 is the sole active CPS driver; GPIO46 must never contend with it.
+pub const FEM_CPS_CONTROL: FemCpsControl = FemCpsControl::Sx1262Dio2WithMcuHighImpedance;
 
 /// Logic level to apply to a safety-critical output at inert boot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -106,6 +111,7 @@ mod tests {
             pins::LORA_RESET,
             pins::LORA_BUSY,
             pins::LORA_DIO1,
+            pins::FEM_CPS_SHARED,
         ];
 
         for (index, pin) in pins.iter().enumerate() {
@@ -121,5 +127,9 @@ mod tests {
         assert_eq!(INERT_RADIO_STATE.fem_csd, SafeLevel::Low);
         assert_eq!(INERT_RADIO_STATE.fem_ctx, SafeLevel::Low);
         assert_eq!(INERT_RADIO_STATE.sx1262_reset, SafeLevel::Low);
+        assert_eq!(
+            FEM_CPS_CONTROL,
+            FemCpsControl::Sx1262Dio2WithMcuHighImpedance
+        );
     }
 }

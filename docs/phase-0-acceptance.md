@@ -85,8 +85,22 @@ remained byte-for-byte identical in the GNU size summary: 57,869 bytes of text,
 4,044 bytes of data and 468,780 bytes of BSS/reserved address space, including
 the same 132-byte named `.bss`, 327,412-byte stack reservation and 65,536-byte
 reclaimed-DRAM heap reservation. No `lora` or `sx126` defined symbol was
-retained. The two Rete fixes are still dead-stripped until the runtime vertical
-slice constructs the node.
+retained. The first two Rete fixes are still dead-stripped until the runtime
+vertical slice constructs the node.
+
+The receive-only integration tests then exposed endpoint announce rebroadcast
+as a released-Python compatibility error. Integration revision
+`5ce8c4e437d3f2f07d302bc366ff06bacd6aff2d` gates that queue on transport mode;
+the safe-idle size statement above remains the pre-runtime baseline because the
+new Rete path is likewise dead-stripped from that image.
+
+After the Tracker schematic audit identified GPIO46 as an MCU connection to
+the DIO2-owned `PA_CPS` net, the safe-idle image explicitly claimed GPIO46 as
+an input/high-impedance pin. The rebuilt image contained 57,997 bytes of text
+(a reviewed 128-byte safety delta), while data remained 4,044 bytes and
+BSS/reserved address space remained 468,780 bytes. The linked image still had
+no defined text/data symbol matching LoRa, SX126x or SetTx; unrelated absolute
+ESP ROM symbol declarations are not reachable radio code.
 
 No `lora-phy` or SX126x driver symbols were retained in the linked safe-idle
 ELF. The ESP ROM symbol map still exposes unrelated Wi-Fi/Bluetooth TX symbol

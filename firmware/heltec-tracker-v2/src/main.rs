@@ -18,7 +18,7 @@ use embassy_time::{Duration, Timer};
 use esp_backtrace as _;
 use esp_hal::{
     clock::CpuClock,
-    gpio::{Level, Output, OutputConfig},
+    gpio::{Input, InputConfig, Level, Output, OutputConfig},
     timer::timg::TimerGroup,
 };
 use log::info;
@@ -44,11 +44,15 @@ async fn main(spawner: Spawner) -> ! {
     // - SX1262 held in reset
     // - KCT8103L power and chip-enable off
     // - KCT8103L CTX held in receive (never transmit)
+    // - shared PA_CPS GPIO46 held as input/high-impedance
     // - SX1262 NSS inactive
     let _sx1262_reset = Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default());
     let _fem_power = Output::new(peripherals.GPIO7, Level::Low, OutputConfig::default());
     let _fem_csd = Output::new(peripherals.GPIO4, Level::Low, OutputConfig::default());
     let _fem_ctx = Output::new(peripherals.GPIO5, Level::Low, OutputConfig::default());
+    // GPIO46 shares the PA_CPS net with SX1262 DIO2. It must never contend
+    // with the radio's hardware RF-switch driver.
+    let _fem_cps_shared = Input::new(peripherals.GPIO46, InputConfig::default());
     let _sx1262_nss = Output::new(peripherals.GPIO8, Level::High, OutputConfig::default());
 
     // Keep the shared display/GNSS rail and battery-divider load disabled.

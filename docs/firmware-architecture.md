@@ -136,11 +136,13 @@ The [Reticulum protocol was dedicated to the public domain](https://reticulum.ne
 
 `rete` is the strongest missed embedded RNS candidate. Its layering closely matches this design: `rete-core` is `no_std`/no-alloc packet and crypto code, `rete-transport` is a sans-I/O `no_std + alloc` state machine with fixed-capacity embedded storage types, `rete-stack` provides runtime-neutral interfaces, and `rete-embassy` supplies the executor integration. Its LoRa adapter implements RNode-compatible 254-byte splitting and CSMA over `lora-phy`. The ESP32-S3 example drives an SX1262 directly, enables Reticulum transport, creates a Wi-Fi AP/HTTP service, persists configuration, and compiled successfully in this environment.
 
-The current product pin composes two focused fixes based directly on the
+The current product pin composes three focused fixes based directly on the
 reviewed upstream revision: canonical direct/local LINKREQUEST validation in
 [draft PR 7](https://github.com/s-retlaw/rete/pull/7) and transactional owned-Link
-admission in [draft PR 9](https://github.com/s-retlaw/rete/pull/9). They do not
-change Reticulum wire bytes or include the still-open relay-table work.
+admission in [draft PR 9](https://github.com/s-retlaw/rete/pull/9), plus released-
+Python endpoint announce-rebroadcast policy in
+[draft PR 11](https://github.com/s-retlaw/rete/pull/11). They do not change
+Reticulum wire bytes or include the still-open relay-table work.
 
 This is evidence for choosing it as the RNS phase-0 leader, not a production declaration:
 
@@ -549,11 +551,12 @@ The SX1262 accepts at most 255 payload bytes. The standard Reticulum MTU is 500,
 
 This must be a named `RNodePhyCompat` layer with a timeout, loss behavior, half-duplex locking, and buffer ownership. Test lengths `0`, `1`, `253`, `254`, `255`, `256`, `499`, `500`, `501`, `507`, `508`, `509`, and malformed/duplicate/reordered fragments against real RNode Firmware. The adapter must reject 509; the RNS layer must separately reject packets over 500. Both halves carry the same four-bit sequence and no fragment index, so official framing cannot reliably distinguish every duplicate or reordering; compatibility tests must match official behavior and ensure ambiguous state times out/resets safely rather than promising robust reordering. The local microReticulum example is specifically not an oracle for split packets. If the selected core already contains this framing, keep it behind this explicit boundary and run the same tests rather than reimplementing it gratuitously.
 
-The first receive half of this boundary now lives in `crates/radio-interface`
-as a fixed-capacity `RnodeRxReassembler`. A target radio actor owns that value,
-its monotonic expiry timer, and RSSI/SNR aggregation; Rete `NodeCore` sees only
-a completed packet after the independent 500-byte RNS guard. This small local
-boundary is presently necessary because Rete's `SplitReassembler::feed()`
+The receive boundary now lives in `crates/radio-interface` as a fixed-capacity
+`RnodeRxReassembler` wrapped by `TimedRnodeRx`. The ingress actor owns that
+state, its caller-owned 508-byte scratch buffer, the monotonic expiry timer and
+RSSI/SNR aggregation; Rete `NodeCore` sees only a completed packet after the
+independent 500-byte RNS guard. This small local boundary is presently
+necessary because Rete's `SplitReassembler::feed()`
 uses `None` for empty input, pending continuation, and output-buffer failure,
 and `LoRaInterface::recv()` has no pending-fragment deadline. Those generic
 error/timeout improvements are candidates to contribute upstream before the
@@ -582,7 +585,7 @@ The first board profile should encode the following rather than scattering pin c
 | SX1262 SCLK / MISO / MOSI / NSS | 9 / 11 / 10 / 8 |
 | SX1262 reset / BUSY / DIO1 IRQ | 12 / 13 / 14 |
 | SX1262 TCXO | DIO3, 1.8 V |
-| SX1262 internal RF switch control | DIO2 enabled; connected into the board's RF path |
+| SX1262 internal RF switch control | DIO2 enabled and driving `PA_CPS`; shared GPIO46 remains input/high-impedance |
 | KCT8103L VFEM power | GPIO 7, active high |
 | KCT8103L chip enable / CSD | GPIO 4, active high |
 | KCT8103L CTX | GPIO 5, low RX / high TX |
@@ -596,11 +599,14 @@ The first board profile should encode the following rather than scattering pin c
 Radio initialization sequence:
 
 1. Configure the radio SPI and control pins without glitches.
-2. Assert VFEM power, delay, assert CSD, delay, select RX on CTX, delay.
-3. Reset the SX1262, wait for BUSY, configure DIO3 for the 1.8 V TCXO and DIO2 RF switching.
-4. Configure raw LoRa modulation, CRC, preamble, sync word, regulator, calibration, and IRQs.
-5. Enter RX only after the external path is in RX state.
-6. For TX, acquire the PHY lock, pass region/airtime/power policy, switch CTX to TX, transmit, wait for TX done, return CTX to RX, and re-arm receive even after errors.
+2. Reset and initialize the always-powered SX1262 while VFEM and CSD remain
+   disabled; wait for BUSY, configure DIO3 for the 1.8 V TCXO and DIO2 RF
+   switching, then configure raw LoRa modulation, CRC, preamble, sync word,
+   regulator, calibration and IRQs.
+3. Keep CTX low, assert VFEM power, wait the measured/provisional settle time,
+   assert CSD, and wait again while GPIO46 remains input/high-impedance.
+4. Enter RX only after the external path is stable in RX state.
+5. For TX, acquire the PHY lock, pass region/airtime/power policy, switch CTX to TX, transmit, wait for TX done, return CTX to RX, and re-arm receive even after errors.
 
 The native SX1262 is limited to +22 dBm. The board's claimed +28 dBm comes from the external FEM. Adapt [Heltec's MIT-licensed board gain table](https://github.com/HelTecAutomation/Heltec_ESP32/blob/9c034ecd4afa02e624208cb45456f9e09f63ced5/src/driver/sx126x.c#L478-L499) with attribution, representing the API as requested antenna/profile power and mapping it to SX1262 conducted power. Never pass `28` to a plain SX1262 driver. Begin development at or below +22 dBm effective target until conducted/radiated output, harmonics, LNA behavior, current, and temperature are measured.
 
@@ -953,6 +959,10 @@ Deliverables:
 Exit: Rete passes the real ESP32-S3 target build, independent Python 1.3.8 interoperability, allocation/exhaustion tests and a realistic measured memory model; its firmware graph also emits a complete license/provenance manifest. If an ADR 0002 abandonment criterion is met instead, Phase 0 preserves the evidence and continues the failing contract and minimum product slice against Leviculum or another qualified fallback rather than weakening the gate.
 
 ### Phase 1 — Tracker BSP and interoperable LoRa interface
+
+The first radio-bearing increment is specified separately in the
+[receive-only vertical-slice contract](phase-1-rx-slice.md). It preserves the
+safe-idle default and admits no transmit path.
 
 Deliverables:
 

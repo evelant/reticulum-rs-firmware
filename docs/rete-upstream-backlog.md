@@ -1,6 +1,6 @@
 # Rete upstream hardening backlog
 
-**Status:** contribution sequence active; the first two focused issues and
+**Status:** contribution sequence active; the first three focused issues and
 draft pull requests are open upstream
 
 This is the contribution queue discovered while integrating Rete revision
@@ -14,7 +14,7 @@ bounded-state corrections belong upstream.
 **Priority:** blocking relayed Links and production Link acceptance
 
 Owned-Link admission is adopted in integration-fork revision
-`beb84c370d2ae27209a866093fa1e6b204304384` and offered upstream in
+`5ce8c4e437d3f2f07d302bc366ff06bacd6aff2d` and offered upstream in
 [issue 8](https://github.com/s-retlaw/rete/issues/8) and
 [draft PR 9](https://github.com/s-retlaw/rete/pull/9). It now:
 
@@ -93,7 +93,28 @@ native H2 classes that cannot yet be dispatched safely, suppresses endpoint
 forwarding actions, and preflights reverse capacity on the two admitted DATA
 relay paths.
 
-## 3. Link state events and outbound activity
+## 3. Announce retransmission role policy
+
+**Priority:** released-Python compatibility and RF behavior
+
+Endpoint announce admission is adopted in integration-fork revision
+`5ce8c4e437d3f2f07d302bc366ff06bacd6aff2d` and offered upstream in
+[issue 10](https://github.com/s-retlaw/rete/issues/10) and
+[draft PR 11](https://github.com/s-retlaw/rete/pull/11). Rete previously queued
+every valid received announce and `NodeCore` immediately returned it as a
+broadcast, even when `enable_transport()` had never been called. The fix gates
+the received-announce retransmission queue on transport mode while preserving
+endpoint validation, deduplication, path and identity learning, cached bytes,
+ratchet handling, counters and the `AnnounceReceived` event.
+
+Released Python also admits announcements received from a local shared-instance
+client and excludes `PATH_RESPONSE` from ordinary rebroadcast. Rete does not
+yet model that local-client role at this seam, does not apply the path-response
+exclusion, and has additional role-sensitive cached-announce and known-path
+response surfaces. Audit and cover those independently instead of silently
+folding them into the endpoint fix.
+
+## 4. Link state events and outbound activity
 
 **Priority:** application correctness and keepalive behavior
 
@@ -118,7 +139,7 @@ The local adapter suppresses premature establishment events and records the
 timestamp after best-effort Link data, but the native behavior needs its own
 tests and repair.
 
-## 4. Transactional channel receipts
+## 5. Transactional channel receipts
 
 **Priority:** reliable delivery
 
@@ -137,7 +158,7 @@ or preflight/rollback the complete send transaction. A full receipt table must
 return a typed error before sequence/window state changes. Test the boundary,
 proof removal, reuse after proof, retransmission and wraparound.
 
-## 5. Explicit ingress dispositions
+## 6. Explicit ingress dispositions
 
 **Priority:** diagnostics and recoverable failure
 
@@ -156,7 +177,7 @@ close or keepalive packets. Define whether counters represent packet creation,
 interface enqueue or completed transmission, then count that boundary
 consistently.
 
-## 6. Bounded NodeCore outputs and Resources
+## 7. Bounded NodeCore outputs and Resources
 
 **Priority:** full embedded profile
 
@@ -182,7 +203,7 @@ insertion result is ignored. Once it fills, new destination keys can bypass
 the intended throttle. Include it in the capacity snapshot and transactional
 admission/drop telemetry.
 
-## 7. RNode receive outcomes and PHY metadata
+## 8. RNode receive outcomes and PHY metadata
 
 **Priority:** radio robustness; independently useful
 
@@ -193,8 +214,9 @@ is discarded.
 
 Contribute explicit receive outcomes/errors, length checks before copies, a
 caller-driven deadline or timeout contract, and RSSI/SNR preservation. The
-project-owned bounded implementation and hostile tests in
-`crates/radio-interface` provide a differential specification.
+project-owned bounded `RnodeRxReassembler`/`TimedRnodeRx` implementation and
+hostile tests in `crates/radio-interface` provide a differential
+specification.
 
 ## Submission order
 
@@ -202,11 +224,13 @@ project-owned bounded implementation and hostile tests in
    7; retain until merged or superseded.
 2. Transactional owned Link admission: submitted as upstream draft PR 9;
    retain until merged or superseded.
-3. Relay-table admission/visibility and HEADER_2 dispatch.
-4. Link event/timestamp semantics and channel receipts.
-5. Explicit ingress dispositions and full capacity snapshots.
-6. Bounded output/Resource seams.
-7. LoRa receive API improvements, independently if easier to review.
+3. Endpoint announce rebroadcast policy: submitted as upstream draft PR 11;
+   retain until merged or superseded.
+4. Relay-table admission/visibility and HEADER_2 dispatch.
+5. Link event/timestamp semantics and channel receipts.
+6. Explicit ingress dispositions and full capacity snapshots.
+7. Bounded output/Resource seams.
+8. LoRa receive API improvements, independently if easier to review.
 
 Do not combine these into one project-specific fork commit. Keep every fix
 small enough to review upstream, retain a regression here against the pinned

@@ -16,6 +16,7 @@ external front-end controls low.
 - [Phase-0 scaffold decision](docs/adr/0001-phase-0-scaffold.md)
 - [Rete provisional-foundation decision](docs/adr/0002-rete-provisional-foundation.md)
 - [Phase-0 validation contract](docs/phase-0-acceptance.md)
+- [Phase-1 receive-only slice](docs/phase-1-rx-slice.md)
 - [Rete upstream hardening backlog](docs/rete-upstream-backlog.md)
 - [Dependency provenance](docs/provenance.md)
 
