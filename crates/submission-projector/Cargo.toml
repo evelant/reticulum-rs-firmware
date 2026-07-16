@@ -1,0 +1,23 @@
+[package]
+name = "reticulum-submission-projector"
+description = "Persist-before-ack projection from volatile Reticulum TX observations"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+reticulum-node-core = { path = "../node-core", default-features = false }
+reticulum-storage-model = { path = "../storage-model", default-features = false }
+reticulum-tx-dispatch = { path = "../tx-dispatch", default-features = false }
+
+[dev-dependencies]
+rand_core.workspace = true
+reticulum-rns-rete = { path = "../rns-rete", default-features = false }
+
+[lib]
+path = "src/lib.rs"

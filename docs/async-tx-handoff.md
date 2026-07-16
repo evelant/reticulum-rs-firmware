@@ -124,7 +124,7 @@ RoutedTxJob
 NodeCore::complete_tx(TxCompletion)
   -> Next(RoutedTxJob)
    | Available(buffer)
-   | Recovered { buffer, record }
+   | Recovered { buffer, observation }
    | Quarantined(TxQuarantine)
 ```
 
@@ -252,10 +252,11 @@ because issuance already won the race. Before the deadline, only
 `AuthorizedTx::frame(now)` can borrow the encoded packet. That accessor is
 one-shot and also rejects the exact deadline (`now >= deadline`).
 
-A terminal committed before authorization suppresses transmission. Once
-authorization wins the race, RF may occur; later proof/timeout state remains
-retained and terminal acknowledgement remains blocked until the unique buffer
-returns.
+A native in-RAM terminal tombstone established before authorization suppresses
+transmission. Once authorization wins the race, RF may occur; later
+proof/timeout state remains retained and terminal acknowledgement remains
+blocked until the unique buffer returns and the separate durable disposition is
+proved committed.
 
 Cancellation before authorization denies the permit and cancels the RNS
 receipt after cooperative buffer return. Cancellation after authorization
@@ -279,10 +280,11 @@ authoritative. It does not own or fabricate the missing mutable reference.
 Supervisor notifications are observational and may coalesce or drop under
 pressure without losing the retained recovery state. When the exact late owner
 returns with the conservative completion class implied by its prior phase,
-node-core finalizes that record and returns `Recovered { buffer, record }`; the
-buffer binding is then reusable. The node DATA machine nevertheless parks the
-buffer with its complete record until the permanent supervisor durably projects
-and acknowledges that exact instance/slot/dispatch generation. A same-lease
+node-core finalizes that record and returns `Recovered { buffer, observation }`;
+the buffer binding is then reusable. The node DATA machine nevertheless parks
+the buffer with its complete correlated observation until the storage actor
+proves the exact audit committed and the projector unlocks the action; the
+permanent supervisor then acknowledges that observation. A same-lease
 metadata mismatch or reported recovery fault instead returns an owning
 `TxQuarantine` and keeps the scalar record fail-closed. A foreign or stale
 completion is rejected intact, not reclaimed.
@@ -358,7 +360,15 @@ Implemented and host/target-testable without RF:
 - `reticulum-tx-supervisor` permanent ownership of node-core and all three TX
   machines, fresh checked clock samples for every lane, exact deadline/grace
   wake selection, phase-gated cancellation-safe waits, bounded 16-pass yields,
-  retained fault gating, and the RF-denying `RfInertTxPolicy`;
+  retained fault gating, exact terminal/recovery observation and acknowledgement
+  facades, and the RF-denying `RfInertTxPolicy`;
+- `reticulum-storage-model` canonical accepted/transition/audit records,
+  principal-scoped idempotency, poisoned complete replay, fixed-RAM lifecycle
+  indexing, and opaque preflight/apply plans;
+- `reticulum-submission-projector` volatile attempt correlation, the durable
+  pre-preparation barrier, complete-frame metadata projection, conservative
+  terminal/recovery/quarantine mapping, exact retry/readback handling, and
+  independent persist-before-ack actions;
 - stable-address/no-copy, pressure, cancelled-receive, crossed-reply,
   stale-token, delayed-reply, terminal-race, cumulative-authorization, and
   late-recovery tests;
@@ -370,22 +380,21 @@ Implemented and host/target-testable without RF:
 - exact handoff/dispatcher/supervisor dependency contracts plus dependency/
   feature guards that keep Tracker TX unavailable.
 
-The next product slice is the durable intent/final-disposition model and its
-idempotent projector. Queued-hop metadata now includes the generation-scoped
-`AttemptHandle`, but no component yet persists the accepted intent, maps every
-terminal/recovery/quarantine result to a final disposition, or performs durable
-projection before `acknowledge_terminal()` and `acknowledge_recovered()`.
-Ordinary RNS tick/actions, RX ingress, and submission handling must eventually
-join this aggregate under the sole node owner. The handoff, dispatcher, and
-supervisor remain outside every firmware graph, and no driver or radio path
-consumes them.
+The next product slice is the sole physical storage actor and power-fail-safe
+journal. It must turn the projector's exact record requests into real
+append/readback guarantees, reserve mandatory future records, replay every
+authenticated record without skipping errors, and own retention/compaction.
+Ordinary RNS tick/actions, RX ingress, submission handling, projection, and
+acknowledgement must then join this aggregate under the sole node owner. The
+handoff, dispatcher, supervisor, and projector remain outside every firmware
+graph, and no driver or radio path consumes them.
 
 The graph policy checks every current Tracker profile and the Cargo
-`--all-features` closure for both `reticulum-node-core` and
-`reticulum-tx-handoff`, and keeps both `reticulum-tx-dispatch` and
-`reticulum-tx-supervisor` outside every firmware graph. Adding a feature-only
-transitive ownership path therefore fails before a new firmware feature can
-bypass the reviewed list.
+`--all-features` closure, enforces exact reviewed dependency sets for node-core,
+handoff, dispatcher, supervisor, storage-model and submission-projector, and
+keeps the dispatcher, supervisor and projector outside every firmware graph.
+Adding a feature-only transitive ownership path therefore fails before a new
+firmware feature can bypass the reviewed list.
 
 Still requires explicit antenna/load and regional authorization:
 

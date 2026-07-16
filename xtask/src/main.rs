@@ -327,6 +327,10 @@ fn graph_policy() -> ExitCode {
             .map_err(|error| format!("TX handoff dependency boundary: {error}"))?;
         validate_tx_dispatch_dependency_boundary(&json, &root)
             .map_err(|error| format!("TX dispatcher dependency boundary: {error}"))?;
+        validate_storage_model_dependency_boundary(&json, &root)
+            .map_err(|error| format!("durable storage model dependency boundary: {error}"))?;
+        validate_submission_projector_dependency_boundary(&json, &root)
+            .map_err(|error| format!("submission projector dependency boundary: {error}"))?;
         validate_tx_supervisor_dependency_boundary(&json, &root)
             .map_err(|error| format!("TX supervisor dependency boundary: {error}"))
     });
@@ -342,22 +346,27 @@ fn graph_policy() -> ExitCode {
             "ok: all safe, RX, HIL and all-features all-target product graphs and the Leviculum \
              comparison graph are isolated; the returned-fault hook is feature-exclusive; \
              firmware direct dependencies use only the RX façade and every-feature resolution \
-             excludes TX ownership crates; resolved Rete packages match reported \
+             excludes TX ownership and pre-integration durable crates; resolved Rete packages match reported \
              source/revision; esp-rtos resolves only to the reviewed local patch and its \
              checked vendor inventory reconstructs the pristine registry source; the device \
              API and node core remain mutually isolated and free of direct platform dependencies; \
              the TX handoff, dispatcher and supervisor use only their reviewed node-core, \
-             handoff, dispatcher, Embassy Sync/Futures/Time and rand_core dependency edges"
+             handoff, dispatcher, Embassy Sync/Futures/Time, rand_core and SHA-256 dependency \
+             edges; the durable storage model uses only reviewed minicbor and SHA-256 edges; \
+             the submission projector uses only reviewed node-core, storage-model, dispatcher \
+             and test-only rand_core and RNS adapter edges"
         );
         ExitCode::SUCCESS
     }
 }
 
-const PRODUCT_GRAPH_FORBIDDEN: [&str; 7] = [
+const PRODUCT_GRAPH_FORBIDDEN: [&str; 9] = [
     "leviculum-core",
     "rete-lxmf",
     "lxmf-rs",
     "reticulum-node-core",
+    "reticulum-storage-model",
+    "reticulum-submission-projector",
     "reticulum-tx-dispatch",
     "reticulum-tx-handoff",
     "reticulum-tx-supervisor",
@@ -447,6 +456,63 @@ fn validate_portable_layer_dependency_boundary(
                 return Err(format!(
                     "{package_name} directly depends on prohibited platform implementation crate {dependency_name}"
                 ));
+            }
+        }
+        if package_name == "reticulum-node-core" {
+            if dependencies.len() != 3
+                || dependencies
+                    .iter()
+                    .any(|dependency| !dependency["kind"].is_null())
+            {
+                return Err(format!(
+                    "reticulum-node-core must have exactly three reviewed normal dependencies, found {}",
+                    dependencies.len()
+                ));
+            }
+            let rns_path = workspace.join("crates/rns-rete");
+            let rns = dependencies
+                .iter()
+                .filter(|dependency| dependency["name"].as_str() == Some("reticulum-rns-rete"))
+                .collect::<Vec<_>>();
+            if rns.len() != 1
+                || rns[0]["req"].as_str() != Some("*")
+                || rns[0]["path"].as_str().map(Path::new) != Some(rns_path.as_path())
+                || !rns[0]["source"].is_null()
+                || rns[0]["optional"].as_bool() != Some(false)
+                || !rns[0]["rename"].is_null()
+                || !rns[0]["target"].is_null()
+                || rns[0]["uses_default_features"].as_bool() != Some(false)
+                || rns[0]["features"]
+                    .as_array()
+                    .is_none_or(|features| !features.is_empty())
+            {
+                return Err(
+                    "reticulum-node-core must use one feature-free local reticulum-rns-rete dependency"
+                        .to_owned(),
+                );
+            }
+            for (name, requirement) in [("rand_core", "=0.6.4"), ("sha2", "=0.10.9")] {
+                let dependency = dependencies
+                    .iter()
+                    .filter(|dependency| dependency["name"].as_str() == Some(name))
+                    .collect::<Vec<_>>();
+                if dependency.len() != 1
+                    || dependency[0]["req"].as_str() != Some(requirement)
+                    || dependency[0]["source"].as_str()
+                        != Some("registry+https://github.com/rust-lang/crates.io-index")
+                    || !dependency[0]["path"].is_null()
+                    || dependency[0]["optional"].as_bool() != Some(false)
+                    || !dependency[0]["rename"].is_null()
+                    || !dependency[0]["target"].is_null()
+                    || dependency[0]["uses_default_features"].as_bool() != Some(false)
+                    || dependency[0]["features"]
+                        .as_array()
+                        .is_none_or(|features| !features.is_empty())
+                {
+                    return Err(format!(
+                        "reticulum-node-core must use one feature-free registry {name} {requirement} dependency"
+                    ));
+                }
             }
         }
     }
@@ -633,9 +699,9 @@ fn validate_tx_dispatch_dependency_boundary(
     {
         return Err("reticulum-tx-dispatch must not have build dependencies".to_owned());
     }
-    if dependencies.len() != 6 {
+    if dependencies.len() != 7 {
         return Err(format!(
-            "reticulum-tx-dispatch must have exactly six reviewed dependencies, found {}",
+            "reticulum-tx-dispatch must have exactly seven reviewed dependencies, found {}",
             dependencies.len()
         ));
     }
@@ -644,9 +710,9 @@ fn validate_tx_dispatch_dependency_boundary(
         .iter()
         .filter(|dependency| dependency["kind"].is_null())
         .collect::<Vec<_>>();
-    if normal.len() != 4 {
+    if normal.len() != 5 {
         return Err(format!(
-            "reticulum-tx-dispatch must have exactly four normal dependencies, found {}",
+            "reticulum-tx-dispatch must have exactly five normal dependencies, found {}",
             normal.len()
         ));
     }
@@ -725,6 +791,29 @@ fn validate_tx_dispatch_dependency_boundary(
         );
     }
 
+    let sha2 = normal
+        .iter()
+        .filter(|dependency| dependency["name"].as_str() == Some("sha2"))
+        .collect::<Vec<_>>();
+    if sha2.len() != 1
+        || sha2[0]["req"].as_str() != Some("=0.10.9")
+        || sha2[0]["source"].as_str()
+            != Some("registry+https://github.com/rust-lang/crates.io-index")
+        || !sha2[0]["path"].is_null()
+        || sha2[0]["optional"].as_bool() != Some(false)
+        || !sha2[0]["rename"].is_null()
+        || !sha2[0]["target"].is_null()
+        || sha2[0]["uses_default_features"].as_bool() != Some(false)
+        || sha2[0]["features"]
+            .as_array()
+            .is_none_or(|features| !features.is_empty())
+    {
+        return Err(
+            "sha2 must be the unconditional feature-free registry =0.10.9 normal dependency"
+                .to_owned(),
+        );
+    }
+
     let development = dependencies
         .iter()
         .filter(|dependency| dependency["kind"].as_str() == Some("dev"))
@@ -762,6 +851,246 @@ fn validate_tx_dispatch_dependency_boundary(
                 "reticulum-tx-dispatch dev dependency {name} does not match the reviewed pin"
             ));
         }
+    }
+
+    Ok(())
+}
+
+fn validate_storage_model_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let expected_manifest = workspace.join("crates/storage-model/Cargo.toml");
+    let matching = packages
+        .iter()
+        .filter(|package| {
+            package["name"].as_str() == Some("reticulum-storage-model")
+                && package["source"].is_null()
+                && package["manifest_path"].as_str().map(Path::new)
+                    == Some(expected_manifest.as_path())
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err(format!(
+            "expected exactly one local reticulum-storage-model package at {}, found {}",
+            expected_manifest.display(),
+            matching.len()
+        ));
+    }
+    let package = matching[0];
+
+    let features = package["features"]
+        .as_object()
+        .ok_or_else(|| "reticulum-storage-model package has no feature map".to_owned())?;
+    if features.len() != 1
+        || features
+            .get("default")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|default| !default.is_empty())
+    {
+        return Err("reticulum-storage-model must expose only an empty default feature".to_owned());
+    }
+
+    let dependencies = package["dependencies"]
+        .as_array()
+        .ok_or_else(|| "reticulum-storage-model package has no dependency array".to_owned())?;
+    if dependencies
+        .iter()
+        .any(|dependency| !dependency["kind"].is_null())
+    {
+        return Err(
+            "reticulum-storage-model must not have build or development dependencies".to_owned(),
+        );
+    }
+    if dependencies.len() != 2 {
+        return Err(format!(
+            "reticulum-storage-model must have exactly two reviewed normal dependencies, found {}",
+            dependencies.len()
+        ));
+    }
+
+    for (name, requirement) in [("minicbor", "=2.2.2"), ("sha2", "=0.10.9")] {
+        let dependency = dependencies
+            .iter()
+            .filter(|dependency| dependency["name"].as_str() == Some(name))
+            .collect::<Vec<_>>();
+        if dependency.len() != 1
+            || dependency[0]["req"].as_str() != Some(requirement)
+            || dependency[0]["source"].as_str()
+                != Some("registry+https://github.com/rust-lang/crates.io-index")
+            || !dependency[0]["path"].is_null()
+            || dependency[0]["optional"].as_bool() != Some(false)
+            || !dependency[0]["rename"].is_null()
+            || !dependency[0]["target"].is_null()
+            || dependency[0]["uses_default_features"].as_bool() != Some(false)
+            || dependency[0]["features"]
+                .as_array()
+                .is_none_or(|features| !features.is_empty())
+        {
+            return Err(format!(
+                "{name} must be the unconditional feature-free registry {requirement} normal dependency"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_submission_projector_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let expected_manifest = workspace.join("crates/submission-projector/Cargo.toml");
+    let matching = packages
+        .iter()
+        .filter(|package| {
+            package["name"].as_str() == Some("reticulum-submission-projector")
+                && package["source"].is_null()
+                && package["manifest_path"].as_str().map(Path::new)
+                    == Some(expected_manifest.as_path())
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err(format!(
+            "expected exactly one local reticulum-submission-projector package at {}, found {}",
+            expected_manifest.display(),
+            matching.len()
+        ));
+    }
+    let package = matching[0];
+
+    let features = package["features"]
+        .as_object()
+        .ok_or_else(|| "reticulum-submission-projector package has no feature map".to_owned())?;
+    if features.len() != 1
+        || features
+            .get("default")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|default| !default.is_empty())
+    {
+        return Err(
+            "reticulum-submission-projector must expose only an empty default feature".to_owned(),
+        );
+    }
+
+    let dependencies = package["dependencies"].as_array().ok_or_else(|| {
+        "reticulum-submission-projector package has no dependency array".to_owned()
+    })?;
+    if dependencies
+        .iter()
+        .any(|dependency| dependency["kind"].as_str() == Some("build"))
+    {
+        return Err("reticulum-submission-projector must not have build dependencies".to_owned());
+    }
+    if dependencies.len() != 5 {
+        return Err(format!(
+            "reticulum-submission-projector must have exactly five reviewed dependencies, found {}",
+            dependencies.len()
+        ));
+    }
+
+    let normal = dependencies
+        .iter()
+        .filter(|dependency| dependency["kind"].is_null())
+        .collect::<Vec<_>>();
+    if normal.len() != 3 {
+        return Err(format!(
+            "reticulum-submission-projector must have exactly three normal dependencies, found {}",
+            normal.len()
+        ));
+    }
+    for (name, relative_path) in [
+        ("reticulum-node-core", "crates/node-core"),
+        ("reticulum-storage-model", "crates/storage-model"),
+        ("reticulum-tx-dispatch", "crates/tx-dispatch"),
+    ] {
+        let expected_path = workspace.join(relative_path);
+        let dependency = normal
+            .iter()
+            .filter(|dependency| dependency["name"].as_str() == Some(name))
+            .collect::<Vec<_>>();
+        if dependency.len() != 1
+            || dependency[0]["req"].as_str() != Some("*")
+            || dependency[0]["path"].as_str().map(Path::new) != Some(expected_path.as_path())
+            || !dependency[0]["source"].is_null()
+            || dependency[0]["optional"].as_bool() != Some(false)
+            || !dependency[0]["rename"].is_null()
+            || !dependency[0]["target"].is_null()
+            || dependency[0]["uses_default_features"].as_bool() != Some(false)
+            || dependency[0]["features"]
+                .as_array()
+                .is_none_or(|features| !features.is_empty())
+        {
+            return Err(format!(
+                "{name} must be one unconditional feature-free local normal dependency at {}",
+                expected_path.display()
+            ));
+        }
+    }
+
+    let development = dependencies
+        .iter()
+        .filter(|dependency| dependency["kind"].as_str() == Some("dev"))
+        .collect::<Vec<_>>();
+    if development.len() != 2 {
+        return Err(format!(
+            "reticulum-submission-projector must have exactly two reviewed development dependencies, found {}",
+            development.len()
+        ));
+    }
+    let rand_core = development
+        .iter()
+        .filter(|dependency| dependency["name"].as_str() == Some("rand_core"))
+        .collect::<Vec<_>>();
+    if rand_core.len() != 1
+        || rand_core[0]["req"].as_str() != Some("=0.6.4")
+        || rand_core[0]["source"].as_str()
+            != Some("registry+https://github.com/rust-lang/crates.io-index")
+        || !rand_core[0]["path"].is_null()
+        || rand_core[0]["optional"].as_bool() != Some(false)
+        || !rand_core[0]["rename"].is_null()
+        || !rand_core[0]["target"].is_null()
+        || rand_core[0]["uses_default_features"].as_bool() != Some(false)
+        || rand_core[0]["features"]
+            .as_array()
+            .is_none_or(|features| !features.is_empty())
+    {
+        return Err(
+            "rand_core must be one feature-free registry =0.6.4 development dependency".to_owned(),
+        );
+    }
+
+    let rns_path = workspace.join("crates/rns-rete");
+    let rns_rete = development
+        .iter()
+        .filter(|dependency| dependency["name"].as_str() == Some("reticulum-rns-rete"))
+        .collect::<Vec<_>>();
+    if rns_rete.len() != 1
+        || rns_rete[0]["req"].as_str() != Some("*")
+        || rns_rete[0]["path"].as_str().map(Path::new) != Some(rns_path.as_path())
+        || !rns_rete[0]["source"].is_null()
+        || rns_rete[0]["optional"].as_bool() != Some(false)
+        || !rns_rete[0]["rename"].is_null()
+        || !rns_rete[0]["target"].is_null()
+        || rns_rete[0]["uses_default_features"].as_bool() != Some(false)
+        || rns_rete[0]["features"]
+            .as_array()
+            .is_none_or(|features| !features.is_empty())
+    {
+        return Err(
+            "reticulum-rns-rete must be one feature-free local development dependency at crates/rns-rete"
+                .to_owned(),
+        );
     }
 
     Ok(())
@@ -1142,6 +1471,8 @@ fn validate_firmware_dependency_boundary(
         "rete-transport",
         "reticulum-node-core",
         "reticulum-rns-rete",
+        "reticulum-storage-model",
+        "reticulum-submission-projector",
         "reticulum-tx-dispatch",
         "reticulum-tx-handoff",
         "reticulum-tx-supervisor",
@@ -1172,6 +1503,8 @@ fn validate_firmware_dependency_boundary(
                 matches!(
                     *name,
                     "reticulum-node-core"
+                        | "reticulum-storage-model"
+                        | "reticulum-submission-projector"
                         | "reticulum-tx-dispatch"
                         | "reticulum-tx-handoff"
                         | "reticulum-tx-supervisor"
@@ -1179,7 +1512,7 @@ fn validate_firmware_dependency_boundary(
             })
         {
             return Err(format!(
-                "firmware resolved graph reaches prohibited TX ownership package {}",
+                "firmware resolved graph reaches prohibited pre-integration package {}",
                 package_names[package_id]
             ));
         }
@@ -2527,6 +2860,8 @@ mod tests {
             "lora-phy",
             "reticulum-rns-rete",
             "reticulum-node-core",
+            "reticulum-storage-model",
+            "reticulum-submission-projector",
             "reticulum-tx-dispatch",
             "reticulum-tx-handoff",
             "reticulum-tx-supervisor",
@@ -2544,6 +2879,16 @@ mod tests {
 
         for (id, name, relative_path) in [
             ("node-core-id", "reticulum-node-core", "crates/node-core"),
+            (
+                "storage-model-id",
+                "reticulum-storage-model",
+                "crates/storage-model",
+            ),
+            (
+                "submission-projector-id",
+                "reticulum-submission-projector",
+                "crates/submission-projector",
+            ),
             (
                 "tx-dispatch-id",
                 "reticulum-tx-dispatch",
@@ -2563,10 +2908,17 @@ mod tests {
                 .push(package_fixture(id, name, &root.join(relative_path)));
             transitive["resolve"]["nodes"][3]["deps"] =
                 serde_json::json!([resolved_dependency_fixture(id)]);
+            transitive["resolve"]["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({ "id": id, "deps": [] }));
+            let error =
+                validate_firmware_dependency_boundary(&transitive.to_string(), &root).unwrap_err();
             assert!(
-                validate_firmware_dependency_boundary(&transitive.to_string(), &root).is_err(),
-                "transitive {name} firmware dependency was accepted"
+                error.contains("prohibited pre-integration package"),
+                "{error}"
             );
+            assert!(error.contains(name), "{error}");
         }
 
         let mut incomplete_resolve = metadata.clone();
@@ -2594,6 +2946,8 @@ mod tests {
 
         for forbidden in [
             "reticulum-node-core",
+            "reticulum-storage-model",
+            "reticulum-submission-projector",
             "reticulum-tx-dispatch",
             "reticulum-tx-handoff",
             "reticulum-tx-supervisor",
@@ -2617,6 +2971,8 @@ mod tests {
         validate_portable_layer_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_tx_handoff_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_tx_dispatch_dependency_boundary(&metadata.to_string(), &root).unwrap();
+        validate_storage_model_dependency_boundary(&metadata.to_string(), &root).unwrap();
+        validate_submission_projector_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_tx_supervisor_dependency_boundary(&metadata.to_string(), &root).unwrap();
 
         let mut wrong_path = metadata;
@@ -2760,13 +3116,32 @@ mod tests {
             serde_json::Value::String("=0.6.3".to_owned());
         assert!(validate_tx_dispatch_dependency_boundary(&wrong_rand.to_string(), &root).is_err());
 
+        let mut wrong_sha2 = portable_layers_metadata_fixture(&root);
+        wrong_sha2["packages"][3]["dependencies"][4]["req"] =
+            serde_json::Value::String("=0.10.8".to_owned());
+        assert!(validate_tx_dispatch_dependency_boundary(&wrong_sha2.to_string(), &root).is_err());
+
+        let mut sha2_defaults = portable_layers_metadata_fixture(&root);
+        sha2_defaults["packages"][3]["dependencies"][4]["uses_default_features"] =
+            serde_json::Value::Bool(true);
+        assert!(
+            validate_tx_dispatch_dependency_boundary(&sha2_defaults.to_string(), &root).is_err()
+        );
+
+        let mut sha2_feature = portable_layers_metadata_fixture(&root);
+        sha2_feature["packages"][3]["dependencies"][4]["features"] =
+            serde_json::json!(["unreviewed"]);
+        assert!(
+            validate_tx_dispatch_dependency_boundary(&sha2_feature.to_string(), &root).is_err()
+        );
+
         let mut wrong_dev = portable_layers_metadata_fixture(&root);
-        wrong_dev["packages"][3]["dependencies"][4]["req"] =
+        wrong_dev["packages"][3]["dependencies"][5]["req"] =
             serde_json::Value::String("=0.1.1".to_owned());
         assert!(validate_tx_dispatch_dependency_boundary(&wrong_dev.to_string(), &root).is_err());
 
         let mut wrong_dev_defaults = portable_layers_metadata_fixture(&root);
-        wrong_dev_defaults["packages"][3]["dependencies"][5]["uses_default_features"] =
+        wrong_dev_defaults["packages"][3]["dependencies"][6]["uses_default_features"] =
             serde_json::Value::Bool(false);
         assert!(
             validate_tx_dispatch_dependency_boundary(&wrong_dev_defaults.to_string(), &root)
@@ -2786,6 +3161,240 @@ mod tests {
         extra_feature["packages"][3]["features"]["rf"] = serde_json::json!([]);
         assert!(
             validate_tx_dispatch_dependency_boundary(&extra_feature.to_string(), &root).is_err()
+        );
+    }
+
+    #[test]
+    fn storage_model_boundary_rejects_unreviewed_dependencies_features_and_edge_shapes() {
+        let root = workspace_root();
+        const PACKAGE_INDEX: usize = 5;
+
+        let mut wrong_manifest = portable_layers_metadata_fixture(&root);
+        wrong_manifest["packages"][PACKAGE_INDEX]["manifest_path"] =
+            serde_json::Value::String(root.join("elsewhere/Cargo.toml").display().to_string());
+        assert!(
+            validate_storage_model_dependency_boundary(&wrong_manifest.to_string(), &root).is_err()
+        );
+
+        let mut duplicate = portable_layers_metadata_fixture(&root);
+        duplicate["packages"]
+            .as_array_mut()
+            .unwrap()
+            .push(storage_model_package_fixture(&root));
+        assert!(validate_storage_model_dependency_boundary(&duplicate.to_string(), &root).is_err());
+
+        for (dependency_index, wrong_requirement) in [(0, "=2.2.1"), (1, "=0.10.8")] {
+            let mut wrong_version = portable_layers_metadata_fixture(&root);
+            wrong_version["packages"][PACKAGE_INDEX]["dependencies"][dependency_index]["req"] =
+                serde_json::Value::String(wrong_requirement.to_owned());
+            assert!(
+                validate_storage_model_dependency_boundary(&wrong_version.to_string(), &root)
+                    .is_err(),
+                "dependency {dependency_index} accepted {wrong_requirement}"
+            );
+
+            let mut default_features = portable_layers_metadata_fixture(&root);
+            default_features["packages"][PACKAGE_INDEX]["dependencies"][dependency_index]["uses_default_features"] =
+                serde_json::Value::Bool(true);
+            assert!(
+                validate_storage_model_dependency_boundary(&default_features.to_string(), &root)
+                    .is_err(),
+                "dependency {dependency_index} accepted default features"
+            );
+
+            let mut dependency_feature = portable_layers_metadata_fixture(&root);
+            dependency_feature["packages"][PACKAGE_INDEX]["dependencies"][dependency_index]["features"] =
+                serde_json::json!(["unreviewed"]);
+            assert!(
+                validate_storage_model_dependency_boundary(&dependency_feature.to_string(), &root)
+                    .is_err(),
+                "dependency {dependency_index} accepted an unreviewed feature"
+            );
+
+            for (field, value) in [
+                ("optional", serde_json::Value::Bool(true)),
+                (
+                    "rename",
+                    serde_json::Value::String("renamed-dependency".to_owned()),
+                ),
+                (
+                    "target",
+                    serde_json::Value::String("cfg(target_os = \"none\")".to_owned()),
+                ),
+                (
+                    "path",
+                    serde_json::Value::String(root.join("elsewhere").display().to_string()),
+                ),
+            ] {
+                let mut changed = portable_layers_metadata_fixture(&root);
+                changed["packages"][PACKAGE_INDEX]["dependencies"][dependency_index][field] = value;
+                assert!(
+                    validate_storage_model_dependency_boundary(&changed.to_string(), &root)
+                        .is_err(),
+                    "dependency {dependency_index} accepted changed {field}"
+                );
+            }
+        }
+
+        let mut development = portable_layers_metadata_fixture(&root);
+        development["packages"][PACKAGE_INDEX]["dependencies"][0]["kind"] =
+            serde_json::Value::String("dev".to_owned());
+        assert!(
+            validate_storage_model_dependency_boundary(&development.to_string(), &root).is_err()
+        );
+
+        let mut extra = portable_layers_metadata_fixture(&root);
+        extra["packages"][PACKAGE_INDEX]["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(handoff_dependency_fixture("rand_core", "=0.6.4", None));
+        assert!(validate_storage_model_dependency_boundary(&extra.to_string(), &root).is_err());
+
+        let mut extra_feature = portable_layers_metadata_fixture(&root);
+        extra_feature["packages"][PACKAGE_INDEX]["features"]["std"] = serde_json::json!([]);
+        assert!(
+            validate_storage_model_dependency_boundary(&extra_feature.to_string(), &root).is_err()
+        );
+    }
+
+    #[test]
+    fn submission_projector_boundary_rejects_dependency_feature_and_edge_drift() {
+        let root = workspace_root();
+        const PACKAGE_INDEX: usize = 6;
+
+        let mut wrong_manifest = portable_layers_metadata_fixture(&root);
+        wrong_manifest["packages"][PACKAGE_INDEX]["manifest_path"] =
+            serde_json::Value::String(root.join("elsewhere/Cargo.toml").display().to_string());
+        assert!(
+            validate_submission_projector_dependency_boundary(&wrong_manifest.to_string(), &root)
+                .is_err()
+        );
+
+        let mut duplicate = portable_layers_metadata_fixture(&root);
+        duplicate["packages"]
+            .as_array_mut()
+            .unwrap()
+            .push(submission_projector_package_fixture(&root));
+        assert!(
+            validate_submission_projector_dependency_boundary(&duplicate.to_string(), &root)
+                .is_err()
+        );
+
+        for dependency_index in 0..=2 {
+            let mut wrong_path = portable_layers_metadata_fixture(&root);
+            wrong_path["packages"][PACKAGE_INDEX]["dependencies"][dependency_index]["path"] =
+                serde_json::Value::String(root.join("elsewhere").display().to_string());
+            assert!(
+                validate_submission_projector_dependency_boundary(&wrong_path.to_string(), &root)
+                    .is_err(),
+                "local dependency {dependency_index} accepted the wrong path"
+            );
+
+            let mut wrong_requirement = portable_layers_metadata_fixture(&root);
+            wrong_requirement["packages"][PACKAGE_INDEX]["dependencies"][dependency_index]["req"] =
+                serde_json::Value::String("=0.1.0".to_owned());
+            assert!(
+                validate_submission_projector_dependency_boundary(
+                    &wrong_requirement.to_string(),
+                    &root
+                )
+                .is_err(),
+                "local dependency {dependency_index} accepted a registry-like requirement"
+            );
+
+            let mut default_features = portable_layers_metadata_fixture(&root);
+            default_features["packages"][PACKAGE_INDEX]["dependencies"][dependency_index]["uses_default_features"] =
+                serde_json::Value::Bool(true);
+            assert!(
+                validate_submission_projector_dependency_boundary(
+                    &default_features.to_string(),
+                    &root
+                )
+                .is_err(),
+                "local dependency {dependency_index} accepted default features"
+            );
+
+            let mut dependency_feature = portable_layers_metadata_fixture(&root);
+            dependency_feature["packages"][PACKAGE_INDEX]["dependencies"][dependency_index]["features"] =
+                serde_json::json!(["unreviewed"]);
+            assert!(
+                validate_submission_projector_dependency_boundary(
+                    &dependency_feature.to_string(),
+                    &root
+                )
+                .is_err(),
+                "local dependency {dependency_index} accepted an unreviewed feature"
+            );
+
+            for (field, value) in [
+                ("optional", serde_json::Value::Bool(true)),
+                (
+                    "rename",
+                    serde_json::Value::String("renamed-dependency".to_owned()),
+                ),
+                (
+                    "target",
+                    serde_json::Value::String("cfg(target_os = \"none\")".to_owned()),
+                ),
+            ] {
+                let mut changed = portable_layers_metadata_fixture(&root);
+                changed["packages"][PACKAGE_INDEX]["dependencies"][dependency_index][field] = value;
+                assert!(
+                    validate_submission_projector_dependency_boundary(&changed.to_string(), &root)
+                        .is_err(),
+                    "local dependency {dependency_index} accepted changed {field}"
+                );
+            }
+        }
+
+        let mut wrong_dev_version = portable_layers_metadata_fixture(&root);
+        wrong_dev_version["packages"][PACKAGE_INDEX]["dependencies"][3]["req"] =
+            serde_json::Value::String("=0.6.3".to_owned());
+        assert!(
+            validate_submission_projector_dependency_boundary(
+                &wrong_dev_version.to_string(),
+                &root
+            )
+            .is_err()
+        );
+
+        let mut dev_defaults = portable_layers_metadata_fixture(&root);
+        dev_defaults["packages"][PACKAGE_INDEX]["dependencies"][3]["uses_default_features"] =
+            serde_json::Value::Bool(true);
+        assert!(
+            validate_submission_projector_dependency_boundary(&dev_defaults.to_string(), &root)
+                .is_err()
+        );
+
+        let mut dev_feature = portable_layers_metadata_fixture(&root);
+        dev_feature["packages"][PACKAGE_INDEX]["dependencies"][3]["features"] =
+            serde_json::json!(["unreviewed"]);
+        assert!(
+            validate_submission_projector_dependency_boundary(&dev_feature.to_string(), &root)
+                .is_err()
+        );
+
+        let mut build = portable_layers_metadata_fixture(&root);
+        build["packages"][PACKAGE_INDEX]["dependencies"][3]["kind"] =
+            serde_json::Value::String("build".to_owned());
+        assert!(
+            validate_submission_projector_dependency_boundary(&build.to_string(), &root).is_err()
+        );
+
+        let mut extra = portable_layers_metadata_fixture(&root);
+        extra["packages"][PACKAGE_INDEX]["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(handoff_dependency_fixture("sha2", "=0.10.9", None));
+        assert!(
+            validate_submission_projector_dependency_boundary(&extra.to_string(), &root).is_err()
+        );
+
+        let mut extra_feature = portable_layers_metadata_fixture(&root);
+        extra_feature["packages"][PACKAGE_INDEX]["features"]["std"] = serde_json::json!([]);
+        assert!(
+            validate_submission_projector_dependency_boundary(&extra_feature.to_string(), &root)
+                .is_err()
         );
     }
 
@@ -3019,8 +3628,14 @@ mod tests {
                     "source": null,
                     "manifest_path": root.join("crates/node-core/Cargo.toml"),
                     "dependencies": [
-                        portable_dependency_fixture("rand_core"),
-                        portable_dependency_fixture("reticulum-rns-rete"),
+                        handoff_dependency_fixture("rand_core", "=0.6.4", None),
+                        handoff_path_dependency_fixture(
+                            "reticulum-rns-rete",
+                            "*",
+                            &root.join("crates/rns-rete"),
+                            None,
+                        ),
+                        handoff_dependency_fixture("sha2", "=0.10.9", None),
                     ],
                 },
                 {
@@ -3042,6 +3657,8 @@ mod tests {
                 },
                 dispatch_package_fixture(root),
                 supervisor_package_fixture(root),
+                storage_model_package_fixture(root),
+                submission_projector_package_fixture(root),
             ]
         })
     }
@@ -3069,8 +3686,58 @@ mod tests {
                 ),
                 handoff_dependency_fixture("embassy-sync", "=0.8.0", None),
                 handoff_dependency_fixture("rand_core", "=0.6.4", None),
+                handoff_dependency_fixture("sha2", "=0.10.9", None),
                 handoff_dependency_fixture("embassy-futures", "=0.1.2", Some("dev")),
                 static_cell,
+            ],
+        })
+    }
+
+    fn storage_model_package_fixture(root: &Path) -> serde_json::Value {
+        serde_json::json!({
+            "name": "reticulum-storage-model",
+            "source": null,
+            "manifest_path": root.join("crates/storage-model/Cargo.toml"),
+            "features": { "default": [] },
+            "dependencies": [
+                handoff_dependency_fixture("minicbor", "=2.2.2", None),
+                handoff_dependency_fixture("sha2", "=0.10.9", None),
+            ],
+        })
+    }
+
+    fn submission_projector_package_fixture(root: &Path) -> serde_json::Value {
+        serde_json::json!({
+            "name": "reticulum-submission-projector",
+            "source": null,
+            "manifest_path": root.join("crates/submission-projector/Cargo.toml"),
+            "features": { "default": [] },
+            "dependencies": [
+                handoff_path_dependency_fixture(
+                    "reticulum-node-core",
+                    "*",
+                    &root.join("crates/node-core"),
+                    None,
+                ),
+                handoff_path_dependency_fixture(
+                    "reticulum-storage-model",
+                    "*",
+                    &root.join("crates/storage-model"),
+                    None,
+                ),
+                handoff_path_dependency_fixture(
+                    "reticulum-tx-dispatch",
+                    "*",
+                    &root.join("crates/tx-dispatch"),
+                    None,
+                ),
+                handoff_dependency_fixture("rand_core", "=0.6.4", Some("dev")),
+                handoff_path_dependency_fixture(
+                    "reticulum-rns-rete",
+                    "*",
+                    &root.join("crates/rns-rete"),
+                    Some("dev"),
+                ),
             ],
         })
     }

@@ -99,10 +99,12 @@ Claims in READMEs were not treated as proof of embedded portability.
 | `rete-core`, `rete-transport`, `rete-stack`, and `rete-lxmf-core`, no defaults, `thumbv6m-none-eabi` | Pass | The layers are genuinely bare-metal buildable; compilation does not cure the LXMF correctness gaps documented below |
 | Focused `rete` core/transport/LXMF host suites at the reviewed upstream snapshot | 391 pass | Historical selection evidence for wire, crypto, forwarding, link/resource, and LXMF codec behavior; this is not evidence for the later lifecycle patch or a complete Python/RF conformance claim |
 | Exact `f6f5fb0` receipt/LXMF lifecycle library suites | 502 pass | CI checks the pinned fork directly: 151 transport, 124 stack, 143 LXMF and 84 daemon tests, plus all-target host and `thumbv6m-none-eabi` checks |
-| `reticulum-node-core`, generic bare-metal and ESP32-S3 Xtensa | Pass | External-buffer dispatch metadata, exact attempt ledger, deterministic routing, opaque permit/completion typestates, exact deadlines and retained recovery compile without `std` on both targets; 41 focused host tests have no async or radio linkage and the current receive-only firmware intentionally does not link it |
+| `reticulum-node-core`, generic bare-metal and ESP32-S3 Xtensa | Pass | External-buffer dispatch metadata, exact attempt ledger, deterministic routing, opaque permit/completion typestates, exact deadlines and retained recovery compile without `std` on both targets; 43 focused host tests have no async or radio linkage and the current receive-only firmware intentionally does not link it |
 | `reticulum-tx-handoff`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | Static one-time channel-role splitting, exact owner returns, depth-one permit control, and cancellation-safe receive behavior compile on both targets; a host-only manually stepped no-RF harness exercises representative routed DATA paths across the real ports; graph policy keeps the crate outside firmware |
-| `reticulum-tx-dispatch`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The firmware-excluded RF-inert dispatcher, permit server, and exact-owner-bound fixed per-slot node DATA machine retain owners/control values across backpressure, synchronously prepare from parked owners, use cancellation-safe short waits, park recovered owners until exact acknowledgement, and fail closed at the permit recovery grace; 32 tests (15 dispatcher/permit and 17 node DATA-machine) exercise these boundaries and graph policy keeps the crate outside firmware |
-| `reticulum-tx-supervisor`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The firmware-excluded permanent aggregate and async runner own node-core plus all TX machines, require common-origin/full-seed construction, sample the clock separately for every lane, wait on exact owner/grace deadlines, yield after at most 16 productive passes and every selected wake, and use phase-gated cancellation-safe selection; 11 tests cover its RF-inert lifecycle, timing, faults, cancellation, and static construction, and graph policy keeps it outside firmware |
+| `reticulum-tx-dispatch`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The firmware-excluded RF-inert dispatcher, permit server, and exact-owner-bound fixed per-slot node DATA machine retain owners/control values across backpressure, synchronously prepare from parked owners, use cancellation-safe short waits, park recovered owners until exact acknowledgement, and fail closed at the permit recovery grace; 33 focused tests exercise these boundaries and graph policy keeps the crate outside firmware |
+| `reticulum-tx-supervisor`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The firmware-excluded permanent aggregate and async runner own node-core plus all TX machines, require common-origin/full-seed construction, sample the clock separately for every lane, wait on exact owner/grace deadlines, yield after at most 16 productive passes and every selected wake, and use phase-gated cancellation-safe selection; 12 tests cover its RF-inert lifecycle, timing, faults, cancellation, and static construction, and graph policy keeps it outside firmware |
+| `reticulum-storage-model`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The allocation-free semantic journal model enforces canonical bounded records, principal-scoped idempotency, exact preflight/apply plans, monotonic conservative transmission uncertainty, and fail-closed complete replay; 22 integration tests plus one compile-fail doctest cover the boundary, which intentionally makes no physical-durability or flash-capacity claim |
+| `reticulum-submission-projector`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The fixed-capacity projector correlates volatile attempts with semantic records and withholds terminal/recovery acknowledgement behind exact persistence replies; 24 focused tests cover ordering, retries, proof/timeout-before-frame races, faults and conservative reboot behavior, while graph policy keeps it outside firmware |
 | `reference/rete/examples/esp32s3`: `cargo +esp check --release` | Pass with warnings | Current bare-metal ESP32-S3/SX1262/Wi-Fi integration compiles with the installed ESP toolchain; it targets Heltec WiFi LoRa 32 V3/V4 pins, not the Tracker BSP |
 | Precursor `reticulum-core`/`lxmf` host suites; `micron` host suite | 70 pass; 17 pass | Strong embedded-client interop and hostile-input evidence, including real Nomad/Micron fixtures; the Xous crates still use `std` and are not a bare-metal dependency as-is |
 | `foxhole-micron` host suite | 24 pass | Focused confirmation of links, fields, colors, sections, literal/comment handling and control-character sanitisation; it remains a ratatui/`std` comparison parser |
@@ -205,8 +207,10 @@ unique mutable reference to `prepare_data_into_slot()`. A
 `PrepareDataRequest` whose deadline is at or before `owner_now` is rejected
 before reservation, entropy use, or RNS mutation. Node-core reserves dispatch,
 attempt, and hop identifiers before invoking Rete, prepares directly into the
-external array, resolves the target against an enabled-interface snapshot, and
-returns a unique routed `TxJob`. Multi-interface fan-out is deterministic and
+external array, hashes the complete encoded packet, resolves the target against
+an enabled-interface snapshot, and returns a unique routed `TxJob`. A sink later
+independently rehashes the exact authorized frame, and projection requires both
+digests to agree. Multi-interface fan-out is deterministic and
 serialized through the same buffer. Candidate-bound
 proof/timeout reservation changes the exact active ledger slot into a retained
 `Delivered` or `DeliveryTimeout` tombstone before Rete removes its receipt.
@@ -223,9 +227,10 @@ and acknowledgement is blocked until the buffer returns. A layout regression
 guard keeps packet-sized storage outside node-core. Focused tests plus strict
 host Clippy, generic bare-metal, and ESP32-S3 checks cover this portable slice.
 
-This is not yet the product's durable submission model or an authorized RF TX
-graph. The in-RAM ledger cannot rehydrate Rete receipts after reboot and
-ordinary RNS actions are still allocation-backed. The firmware-excluded
+The product now has an allocation-free durable-submission semantic model and
+persist-before-ack projector, but it still has no physical flash journal or
+authorized RF TX graph. The in-RAM node ledger cannot rehydrate Rete receipts
+after reboot and ordinary RNS actions are still allocation-backed. The firmware-excluded
 `reticulum-tx-dispatch` crate now drives the portable typestates and handoff as
 an RF-inert persistent state machine, with cancellation-safe short waits and a
 node-side permit server. Its node DATA-owner machine validates the complete
@@ -253,12 +258,17 @@ authorization. Faults stop fresh
 preparation and policy while owner-draining DATA/dispatcher transitions
 continue where possible.
 
-Queued-hop metadata includes `AttemptHandle`, but the next slice remains the
-durable intent/final-disposition model and its idempotent projector. Ordinary
-RNS tick/actions, RX ingress, terminal/recovery projection and acknowledgement,
-device-API submission, and reboot recovery are not yet part of this owner.
-Every firmware graph remains TX-free and the radio-bearing lab image remains
-RX-only.
+`reticulum-storage-model` now defines canonical accepted intents, lifecycle and
+audit records, complete-replay sealing, and exact preflight/apply plans.
+`reticulum-submission-projector` binds those records to volatile
+`AttemptHandle` values, prepared-frame metadata, terminal outcomes and recovery
+observations; it unlocks exact acknowledgements only after the intended record
+is reported committed or read-back equivalent. Neither crate writes flash.
+The next product-code slice is the sole physical journal actor and device-API adapter,
+followed by integration with ordinary RNS tick/actions and RX ingress in the
+eventual sole node owner. Every project firmware graph remains TX-free, and all
+project radio-bearing firmware artifacts remain RX-only. The separately derived
+RNode peer is an external guarded development artifact, not a project graph.
 
 LXMF message and sibling-attempt state must ultimately be persisted before an
 outward terminal event can be lost. The future device-API intent queue remains
@@ -490,7 +500,8 @@ crates/
   local-clients/                  # optional conversation/Nomad application services
   device-api/                     # request/response/event schema
   device-api-framing/             # COBS/length framing and chunk transfer
-  storage-model/                  # records, journals, migrations, traits
+  storage-model/                  # semantic records, index and complete replay
+  submission-projector/           # persist-before-ack TX correlation
   radio-interface/                # RNode-compatible split framing and CSMA
   radio-lora-phy/                 # generic lora-phy adapter
   board-api/                      # Board, Power, Display, Entropy traits
@@ -516,9 +527,10 @@ docs/
 
 `node-core`, `tx-handoff`, `tx-dispatch`, `tx-supervisor`, `lxmf-wire`,
 `lxmf-router`, `lxmf-propagation`, `nomad-protocol`, `micron-parser`,
-`device-api`, `storage-model`, and `radio-interface` should compile on at least
-one `*-unknown-none-*` target in CI whenever their feature is enabled. ESP
-dependencies appear only in the firmware/platform/BSP crates.
+`device-api`, `storage-model`, `submission-projector`, and `radio-interface`
+should compile on at least one `*-unknown-none-*` target in CI whenever their
+feature is enabled. ESP dependencies appear only in the firmware/platform/BSP
+crates.
 
 The initial `node-core` implementation now owns fixed DATA dispatch metadata
 and the attempt ledger described in
@@ -562,16 +574,18 @@ is explicitly RF-inert, and retained
 faults stop fresh preparation/policy while continuing exact-owner drain where
 possible.
 
-The next product integration is durable intent plus a complete final-
-disposition projector, then merging ordinary RNS tick/actions, RX ingress, and
-submission handling into the eventual sole node owner. Although queued-hop
-metadata now carries `AttemptHandle`, no component yet performs durable
-terminal/recovery projection and acknowledgement or maps it to device API v1.
-Firmware integration, driver/RF behavior, and reboot recovery also remain
-open. The current slice has no firmware or radio connection; its authorized
-completion vocabulary is conservative metadata and does not claim RF occurred.
-Every firmware graph remains TX-free, and the radio-bearing lab image remains
-RX-only.
+The next product integration is a sole physical journal actor with exact
+readback, reservation, replay and compaction semantics, plus the device API
+adapter that publishes acceptance only after commit. The implemented projector
+already maps volatile prepared-frame, terminal and recovery observations to
+planned semantic records and exact post-persistence acknowledgements, but no
+component yet writes those records to flash or maps them to device API v1.
+Ordinary RNS tick/actions, RX ingress and submission handling must then merge
+into the eventual sole node owner. Firmware integration, driver/RF behavior,
+safe projector-slot retirement and powered reboot recovery also remain open.
+Every project firmware graph remains TX-free, and all project radio-bearing
+firmware artifacts remain RX-only. The separately derived RNode peer remains
+outside those graphs and under its own fail-closed radio authorization.
 
 ## Core traits and event model
 
@@ -832,7 +846,7 @@ Pin compatible versions after the first working lockfile rather than floating ac
 | flash | `esp-storage 0.9` | Raw, currently unencrypted flash access; storage/security supplied above it |
 | boot/OTA | `esp-bootloader-esp-idf 0.5` | A/B OTA path used by current examples |
 | radio | `lora-phy 3.0.1` | Maintained generic SX126x/SX127x async driver |
-| durable log/KV | `sequential-storage 8` | Power-fail-aware, wear-levelled map/FIFO; on-flash version and deletion caveats |
+| schema-1 submission journal | project-owned fixed-slot log over `embedded-storage` / reviewed `esp-storage` adapter | Selected two-bank NOR design; exact readback, commit-last records and manifest-proved compaction |
 | optional filesystem | `littlefs2 0.8` | Only if file semantics are truly needed |
 | API serialization | indexed CBOR via `minicbor`, COBS/length framing | Numeric fields can be skipped for mixed-version clients; do not expose a dynamic JSON model on BLE/USB |
 | RNS/LXMF MessagePack | minimal `rmp`-based or project codec | Bound depth/length and avoid dynamic `Value` trees |
@@ -1022,7 +1036,35 @@ Logical stores:
 - `blobs`: content-addressed chunks for attachments, resources, and downloaded pages;
 - `telemetry`: bounded crash/health records with privacy-aware retention.
 
-`sequential-storage` is the best initial no-std candidate for records/queues, but its on-flash major-version format, remnants of deleted bytes, and non-cancellable async writes must be incorporated into the design. A small project-owned blob log can sit beside it. Use littlefs only if later requirements genuinely need mutable file semantics.
+The first project-owned semantic slice is now implemented in
+`reticulum-storage-model` with its persist-before-ack bridge in
+`reticulum-submission-projector`; see
+[Durable submissions and persist-before-ack projection](durable-submissions.md).
+It provides strict canonical records, principal-scoped idempotency, an explicit
+complete-replay typestate, a fixed-RAM index, and preflighted opaque mutations.
+It deliberately provides no flash-capacity estimate, reservation, compaction,
+retention, or durability claim. Those are requirements on the sole physical
+storage actor, not properties of the semantic CBOR model.
+
+The schema-1 backend choice is now a project-owned fixed-slot NOR journal in a
+dedicated 1 MiB `retlog` partition. It reserves two 4 KiB superblocks, splits
+the remainder into two equal banks, and stores canonical records in 640-byte
+physical slots. Each append writes and exactly reads back the versioned header,
+maximum-512-byte body, and integrity fields before writing its commit marker
+last. Boot validates one complete bank against its manifest and fails closed on
+committed corruption rather than exposing a valid-looking prefix. Compaction
+writes and verifies the inactive bank in full, commits a manifest proving that
+generation, and only then makes it selectable. Schema 1 permanently retains
+all submissions and revisions and has no eviction policy.
+
+The sole actor will use NOR semantics through `embedded-storage` and a reviewed
+`esp-storage` adapter. Physical reservation still needs explicit budgets for
+the semantic maximum of five records per submission, torn slots, interrupted
+append/compaction, and superblock failure before device-API acceptance can be
+published. `sequential-storage` remains research/reference material, not an
+open contender for this first journal implementation. A separate small blob
+log can be evaluated later. Use littlefs only if later requirements genuinely
+need mutable file semantics.
 
 [`ekv`](https://github.com/embassy-rs/ekv) is a transactional, fuzzed LSM alternative worth retaining for a later benchmark, especially if the key count grows beyond roughly a thousand. Its erase behavior per write transaction makes it less attractive for the first high-churn message/status journal. Benchmark recovery time, write amplification, RAM, and schema migration with real ESP flash before changing the storage choice.
 
@@ -1033,7 +1075,8 @@ A provisional 8 MB partition plan can copy the proven shape used by rsCardputer,
 | boot metadata/NVS/OTA data | 64–96 KiB | boot state, minimal manufacturing data |
 | application A | 3 MiB | firmware + compressed SPA |
 | application B | 3 MiB | OTA candidate/rollback |
-| durable data/blob log | about 1.8 MiB | identities, configuration, messages, bounded resources |
+| submission `retlog` | 1 MiB | selected two-superblock/two-bank schema-1 journal |
+| other durable data/blob log | about 0.8 MiB | identities, configuration, messages, bounded resources |
 | coredump/health reserve | 64 KiB | crash triage |
 
 This is deliberately not a promise of large attachment storage. The first release should expose a message count and byte quota, garbage-collect acknowledged/expired blobs, and support encrypted export/backup over the local API.
@@ -1316,10 +1359,21 @@ Exit: enabling location adds a bounded optional capability without changing netw
 6. Must identity/message storage resist physical flash extraction in the first hardware release, or can secure manufacturing provisioning follow a developer edition?
 7. Is optional RNode bridge compatibility a product requirement or only a development/recovery aid?
 
-## Recommended immediate next step
+## Recommended immediate next steps
 
-Do not begin by porting UI screens. Qualify the now-target-linked receive-only
-slice before connecting or enabling a firmware/RF transmit path:
+Do not begin by porting UI screens. The next product-code lane is the RF-inert
+physical journal actor and device-API adapter: implement exact append/readback,
+integrity-validated replay to a known end-of-log, admission reservation for the
+schema's maximum five semantic records per submission plus physical failure
+headroom, and host power-cut injection before flashing a storage HIL image.
+
+The independent hardware lane is formal qualification of the already
+target-linked receive-only slice before connecting or enabling a firmware/RF
+transmit path. A clean `fdd6d9e` normal/closure pair is preserved, and the later
+clean `bf23cc5` normal image passed exact flash readback plus a 125-second
+supplemental smoke on E9:44. There is no matching `bf23cc5` closure bundle, and
+formal powered electrical/RF, retention, fault, backpressure, and soak evidence
+remain open:
 
 1. Flash the explicit lab image with an antenna/load and capture reset, FEM,
    DIO2/DIO3 and SPI from cold boot through known single/split RNode frames.

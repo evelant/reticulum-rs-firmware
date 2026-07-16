@@ -27,15 +27,17 @@ use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_time::{Duration, Instant, Timer};
 use rand_core::{CryptoRng, RngCore};
 use reticulum_node_core::{
-    MonotonicMillis, NodeCore, PrepareDataRequest, TxAuthorizationCandidate,
-    TxAuthorizationErrorKind, TxAuthorizationPolicy, TxLeaseDeadline, TxMaintenanceReport,
-    TxPolicyDecision, TxPolicyDenial, TxRecoveryRecord,
+    AcknowledgeError, AttemptHandle, MonotonicMillis, NodeCore, PrepareDataRequest,
+    TerminalAttempt, TxAuthorizationCandidate, TxAuthorizationErrorKind, TxAuthorizationPolicy,
+    TxLeaseDeadline, TxMaintenanceReport, TxPolicyDecision, TxPolicyDenial, TxRecoveryObservation,
+    TxRecoveryRecord,
 };
 use reticulum_tx_dispatch::{
     NoRfTxDispatcher, NoRfTxDispatcherPhase, NoRfTxDispatcherStep, NoRfTxDispatcherWait,
-    NoRfTxMachineSet, NodeTxDataFault, NodeTxDataMachine, NodeTxDataPhase, NodeTxDataStep,
-    NodeTxDataWait, NodeTxParkedCounts, NodeTxPrepareResult, TxDispatcherFault, TxPermitServer,
-    TxPermitServerPhase, TxPermitServerStep, TxPermitServerWait,
+    NoRfTxMachineSet, NodeTxDataFault, NodeTxDataFaultResidueKind, NodeTxDataMachine,
+    NodeTxDataPhase, NodeTxDataStep, NodeTxDataWait, NodeTxParkedCounts, NodeTxPrepareResult,
+    NodeTxRecoveryAckError, TxDispatcherFault, TxPermitServer, TxPermitServerPhase,
+    TxPermitServerStep, TxPermitServerWait,
 };
 
 /// Maximum complete synchronous passes before the permanent runner yields.
@@ -334,14 +336,82 @@ where
         self.data.parked_counts()
     }
 
+    /// Kind of exact owner retained inside a permanently disabled DATA machine.
+    pub fn data_fault_residue_kind(&self) -> Option<NodeTxDataFaultResidueKind> {
+        self.data.fault_residue_kind()
+    }
+
+    /// Correlated recovery observation trapped inside a permanently disabled
+    /// DATA machine, when the residue had already reached recovery.
+    ///
+    /// This owner is not in the acknowledgeable recovered-owner table. A
+    /// durable projector must therefore classify the observation as
+    /// fail-closed quarantine, even when [`Self::data_fault_residue_kind`]
+    /// reports [`NodeTxDataFaultResidueKind::RecoveredBuffer`]. The original
+    /// recovery reason remains useful evidence; [`Self::faults`] separately
+    /// retains the secondary DATA-machine fault that prevented safe parking.
+    pub fn data_fault_quarantine_observation(&self) -> Option<TxRecoveryObservation> {
+        match self.data.fault_residue_kind() {
+            Some(
+                NodeTxDataFaultResidueKind::RecoveredBuffer
+                | NodeTxDataFaultResidueKind::Quarantine,
+            ) => self.data.fault_recovery_observation(),
+            Some(
+                NodeTxDataFaultResidueKind::AvailableBuffer
+                | NodeTxDataFaultResidueKind::Completion
+                | NodeTxDataFaultResidueKind::CompletionFailure
+                | NodeTxDataFaultResidueKind::RollbackFailure,
+            )
+            | None => None,
+        }
+    }
+
     /// Iterate recovered records that remain parked and unacknowledged.
     pub fn recovered_records(&self) -> impl Iterator<Item = TxRecoveryRecord> + '_ {
         self.data.recovered_records()
     }
 
+    /// Iterate correlated recovered owners that remain parked and
+    /// unacknowledged.
+    pub fn recovered_observations(&self) -> impl Iterator<Item = TxRecoveryObservation> + '_ {
+        self.data.recovered_observations()
+    }
+
     /// Iterate fail-closed quarantine records retained by the DATA machine.
     pub fn quarantine_records(&self) -> impl Iterator<Item = TxRecoveryRecord> + '_ {
         self.data.quarantine_records()
+    }
+
+    /// Iterate correlated fail-closed quarantine observations retained by the
+    /// DATA machine.
+    pub fn quarantine_observations(&self) -> impl Iterator<Item = TxRecoveryObservation> + '_ {
+        self.data.quarantine_observations()
+    }
+
+    /// Iterate terminal DATA attempts that remain retained by node-core.
+    pub fn terminal_attempts(&self) -> impl Iterator<Item = TerminalAttempt> + '_ {
+        self.owner.terminal_attempts()
+    }
+
+    /// Release one terminal attempt only after its final disposition is
+    /// durable and its packet owner is no longer bound.
+    pub fn acknowledge_terminal(
+        &mut self,
+        handle: AttemptHandle,
+    ) -> Result<TerminalAttempt, AcknowledgeError> {
+        self.owner.acknowledge_terminal(handle)
+    }
+
+    /// Release one exact recovered owner after its correlated recovery
+    /// observation is durable.
+    ///
+    /// A recovery already parked before a later DATA-machine fault remains
+    /// acknowledgeable; the machine keeps that later fault and stays disabled.
+    pub fn acknowledge_recovered(
+        &mut self,
+        observation: TxRecoveryObservation,
+    ) -> Result<(), NodeTxRecoveryAckError> {
+        self.data.acknowledge_recovered(observation)
     }
 
     /// Earliest absolute wake required by lease maintenance or an outstanding
@@ -771,8 +841,9 @@ mod tests {
 
     use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
     use reticulum_node_core::{
-        DestinationHash, InterfaceSet, MonotonicSeconds, NodeConfig, NodeIdentity, NodeInstanceId,
-        PacketInterfaceId, TxCompletionCode, TxPacketBuffer,
+        AttemptOutcome, AttemptUnsentReason, DestinationHash, InterfaceSet, MonotonicSeconds,
+        NodeConfig, NodeIdentity, NodeInstanceId, PacketInterfaceId, TxCompletionCode,
+        TxPacketBuffer,
     };
     use reticulum_tx_dispatch::{NoRfTxDispatcherConfig, TxDispatcherCompletionCodes};
     use reticulum_tx_handoff::TxHandoff;
@@ -1030,7 +1101,10 @@ mod tests {
                 &mut CounterRng::default(),
             )
             .expect("healthy supervisor must accept preparation");
-        assert!(matches!(queued, NodeTxPrepareResult::Queued(_)));
+        let queued = match queued {
+            NodeTxPrepareResult::Queued(queued) => queued,
+            other => panic!("fresh preparation was not queued: {other:?}"),
+        };
         assert!(drive_to_quiescence(&mut supervisor, &mut clock) <= 16);
 
         assert_eq!(supervisor.policy.calls, 1);
@@ -1040,6 +1114,63 @@ mod tests {
         assert_eq!(supervisor.dispatcher_phase(), NoRfTxDispatcherPhase::Idle);
         assert_eq!(supervisor.next_wake(), None);
         assert!(!supervisor.faults().is_faulted());
+        let terminal = supervisor
+            .terminal_attempts()
+            .next()
+            .expect("policy denial must retain an unsent terminal");
+        assert_eq!(terminal.handle(), queued.attempt_handle());
+        assert_eq!(terminal.token(), queued.attempt());
+        assert_eq!(
+            terminal.outcome(),
+            AttemptOutcome::Unsent(AttemptUnsentReason::PolicyDenied(
+                TxPolicyDenial::RegionalProfileUnavailable
+            ))
+        );
+        assert_eq!(
+            supervisor
+                .acknowledge_terminal(terminal.handle())
+                .expect("returned unsent owner must permit durable terminal acknowledgement"),
+            terminal
+        );
+        assert_eq!(supervisor.terminal_attempts().count(), 0);
+    }
+
+    #[test]
+    fn terminal_facade_withholds_acknowledgement_until_owner_returns() {
+        let (mut supervisor, destination) = build_supervisor(RecordingAllow { calls: 0 }, 25);
+        let mut clock = ManualClock::at(1_000);
+        seed(&mut supervisor, &mut clock);
+        let mut rng = CounterRng::default();
+        let queued = match supervisor
+            .try_prepare_and_submit_data(&mut clock, request(destination, 100_000), &mut rng)
+            .expect("preparation must succeed")
+        {
+            NodeTxPrepareResult::Queued(queued) => queued,
+            other => panic!("fresh preparation was not queued: {other:?}"),
+        };
+
+        let maintenance = supervisor.owner.tick(MonotonicSeconds::new(33), &mut rng);
+        assert_eq!(maintenance.timed_out_attempts, 1);
+        let terminal = supervisor
+            .terminal_attempts()
+            .next()
+            .expect("timeout must be visible through the facade");
+        assert_eq!(terminal.handle(), queued.attempt_handle());
+        assert_eq!(terminal.outcome(), AttemptOutcome::DeliveryTimeout);
+        assert_eq!(
+            supervisor.acknowledge_terminal(terminal.handle()),
+            Err(AcknowledgeError::PacketStillBound)
+        );
+
+        assert!(drive_to_quiescence(&mut supervisor, &mut clock) <= 16);
+        assert_eq!(supervisor.policy.calls, 0);
+        assert_eq!(supervisor.parked_counts().available(), 1);
+        assert_eq!(
+            supervisor
+                .acknowledge_terminal(terminal.handle())
+                .expect("returned owner must make the durable terminal acknowledgeable"),
+            terminal
+        );
     }
 
     #[test]
@@ -1047,16 +1178,17 @@ mod tests {
         let (mut supervisor, destination) = build_supervisor(RfInertTxPolicy, 30);
         let mut clock = ManualClock::at(1_000);
         seed(&mut supervisor, &mut clock);
-        assert!(matches!(
-            supervisor
-                .try_prepare_and_submit_data(
-                    &mut clock,
-                    request(destination, 1_100),
-                    &mut CounterRng::default(),
-                )
-                .expect("preparation must succeed"),
-            NodeTxPrepareResult::Queued(_)
-        ));
+        let queued = match supervisor
+            .try_prepare_and_submit_data(
+                &mut clock,
+                request(destination, 1_100),
+                &mut CounterRng::default(),
+            )
+            .expect("preparation must succeed")
+        {
+            NodeTxPrepareResult::Queued(queued) => queued,
+            other => panic!("fresh preparation was not queued: {other:?}"),
+        };
 
         assert!(supervisor.run_one_pass(&mut clock).progressed());
         assert_eq!(supervisor.next_wake(), Some(MonotonicMillis::new(1_100)));
@@ -1074,8 +1206,19 @@ mod tests {
         assert_eq!(supervisor.parked_counts().available(), 0);
         assert_eq!(supervisor.parked_counts().recovered(), 1);
         assert_eq!(supervisor.recovered_records().count(), 1);
+        let observation = supervisor
+            .recovered_observations()
+            .next()
+            .expect("recovered owner must retain correlated observation");
+        assert_eq!(observation.attempt_handle(), queued.attempt_handle());
+        assert_eq!(observation.attempt(), queued.attempt());
         assert_eq!(supervisor.next_wake(), None);
         assert!(!supervisor.faults().is_faulted());
+        supervisor
+            .acknowledge_recovered(observation)
+            .expect("supervisor must forward exact recovered acknowledgement");
+        assert_eq!(supervisor.parked_counts().available(), 1);
+        assert_eq!(supervisor.recovered_observations().count(), 0);
     }
 
     #[test]
@@ -1279,16 +1422,17 @@ mod tests {
         let (mut supervisor, destination) = build_supervisor(RecordingAllow { calls: 0 }, 57);
         let mut clock = ManualClock::at(1_000);
         seed(&mut supervisor, &mut clock);
-        assert!(matches!(
-            supervisor
-                .try_prepare_and_submit_data(
-                    &mut clock,
-                    request(destination, 1_100),
-                    &mut CounterRng::default(),
-                )
-                .expect("preparation must succeed"),
-            NodeTxPrepareResult::Queued(_)
-        ));
+        let queued = match supervisor
+            .try_prepare_and_submit_data(
+                &mut clock,
+                request(destination, 1_100),
+                &mut CounterRng::default(),
+            )
+            .expect("preparation must succeed")
+        {
+            NodeTxPrepareResult::Queued(queued) => queued,
+            other => panic!("fresh preparation was not queued: {other:?}"),
+        };
         for _ in 0..3 {
             assert_eq!(
                 supervisor.dispatcher.step(MonotonicMillis::new(1_000)),
@@ -1339,6 +1483,12 @@ mod tests {
         assert_eq!(supervisor.parked_counts().recovered(), 0);
         assert_eq!(supervisor.parked_counts().quarantined(), 1);
         assert_eq!(supervisor.quarantine_records().count(), 1);
+        let observation = supervisor
+            .quarantine_observations()
+            .next()
+            .expect("quarantine must remain correlated to its attempt");
+        assert_eq!(observation.attempt_handle(), queued.attempt_handle());
+        assert_eq!(observation.attempt(), queued.attempt());
     }
 
     #[test]

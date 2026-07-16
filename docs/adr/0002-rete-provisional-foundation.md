@@ -91,8 +91,9 @@ source change. That change triggers a project fork retaining upstream history,
 and every Rete crate in a product graph must use the same exact fork revision.
 Do not mix upstream and forked Rete crates.
 
-Generic fixes and tests should be offered upstream as small, independently
-reviewable changes. Examples include current-Python conformance updates,
+With direct user approval for each issue or pull request, generic fixes and
+tests may be offered upstream as small, independently reviewable changes.
+Examples include current-Python conformance updates,
 configurable resource limits, fallible queue/table operations, send-error
 propagation, diagnostics and storage/streaming seams. Tracker pins and FEM
 sequencing, regulatory and airtime policy, product quota values, flash schemas

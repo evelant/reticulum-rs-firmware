@@ -12,11 +12,17 @@ lab binary now owns the Tracker SX1262 through an opaque RX-only wrapper; it has
 no transmit API and hands complete PHY frames from a sole radio task to a
 separate ingress owner through a depth-2, non-blocking drop-new queue. Timed
 RNode reassembly, endpoint-only Rete admission, periodic protocol maintenance
-and unconditional action suppression are target-linked behind that owner. The
-radio-bearing image remains a lab artifact pending actual clean preserved
-qualification bundles and powered heap/stack/electrical/RF evidence. Lab-only
-startup stack watermarking and retained reset-storm quarantine are now linked,
-but their runtime behavior is not yet hardware evidence. A separately named,
+and unconditional action suppression are target-linked behind that owner. A
+clean, matching normal/pressure and eight-artifact closure pair is preserved at
+`artifacts/hil/phase1-rx/20260716T000006Z-fdd6d9e-*-bundle`. A later clean
+`bf23cc5` normal image was flashed to board E9:44, read back byte-for-byte, and
+ran a 125-second supplemental smoke recorded in
+`artifacts/board-flashes/2026-07-16-e944-bf23cc5-rx-refresh/RESULTS.md`, but it
+has no matching `bf23cc5` closure bundle and is not formal powered
+qualification. Powered heap/stack,
+electrical, RX/RF, fault, retention, and soak evidence therefore remain open.
+Lab-only startup stack watermarking and retained reset-storm quarantine are now
+linked. A separately named,
 compile-gated lab artifact provides a one-shot deterministic depth-2 queue-
 pressure stimulus without changing the normal lab image. Deterministic RNode
 1.86 peer/malformed/backpressure/returned-fault stimuli are checked in as a
@@ -71,14 +77,20 @@ authorization. Retained faults stop fresh preparation and further policy calls
 while DATA and dispatcher stepping continue to drain exact owners where their
 APIs permit.
 
-This is still not the final product node owner. It does not run ordinary RNS
-tick/actions, merge RX ingress, persist accepted intents or final dispositions,
-project/acknowledge terminal and recovery records, or serve device-API
-requests. Queued-hop metadata now carries the generation-scoped
-`AttemptHandle`, but the durable intent-to-final-disposition projector remains
-open. The supervisor has no firmware edge, radio/HAL, or RF path. Every
-firmware dependency graph remains TX-free, and the only radio-bearing firmware
-artifact remains RX-only.
+This is still not the final product node owner. The new portable
+`reticulum-storage-model` defines strict canonical submission records,
+principal-scoped idempotency, fail-closed complete replay, lifecycle validation,
+and opaque preflighted mutations. `reticulum-submission-projector` now enforces
+the durable `Queued -> Preparing` barrier and withholds exact terminal and
+recovered-owner acknowledgements until their corresponding transition or audit
+is known committed. Neither crate writes flash: the selected project-owned
+two-bank journal is not implemented, its physical reservation/fault budgets
+remain to be proved, and the device-API adapter, sole runtime owner, and firmware
+edge remain open. The supervisor still has no radio/HAL or RF path.
+Every project firmware graph remains TX-free, and all project radio-bearing
+firmware artifacts remain RX-only. The separately derived RNode image on the
+second board is an external development peer, not part of that project graph;
+its radio authorization remained off during the recorded project smoke.
 
 ## Read first
 
@@ -92,6 +104,7 @@ artifact remains RX-only.
 - [Bounded node-core external-buffer DATA dispatch](docs/node-core-outbox.md)
 - [Owning async TX handoff](docs/async-tx-handoff.md)
 - [RF-inert permanent TX supervisor](docs/tx-supervisor.md)
+- [Durable submissions and persist-before-ack projection](docs/durable-submissions.md)
 - [Rete upstream hardening backlog](docs/rete-upstream-backlog.md)
 - [Dependency provenance](docs/provenance.md)
 
@@ -126,6 +139,8 @@ cargo check --locked \
   -p reticulum-rns-rete-rx \
   -p reticulum-device-api \
   -p reticulum-node-core \
+  -p reticulum-storage-model \
+  -p reticulum-submission-projector \
   -p reticulum-tx-handoff \
   -p reticulum-tx-dispatch \
   -p reticulum-tx-supervisor \
@@ -135,6 +150,8 @@ cargo check --locked \
 cargo +esp check --locked \
   -p reticulum-device-api \
   -p reticulum-node-core \
+  -p reticulum-storage-model \
+  -p reticulum-submission-projector \
   -p reticulum-tx-handoff \
   -p reticulum-tx-dispatch \
   -p reticulum-tx-supervisor \
@@ -290,10 +307,11 @@ project-owned KISS peer tool and the same corpus replayed through the Rust
 receive-only RNode/Rete ingress tests. It does not transmit; RF requires the
 separate explicit `send` command documented in the Phase-1 HIL runbook.
 
-Every Tracker binary remains TX-disabled until a board revision, antenna,
-region, frequency and conservative power profile are explicitly selected and
-the later guarded transmit milestone is qualified. There is intentionally no
-default LoRa frequency.
+Every project Tracker binary remains TX-disabled until a board revision,
+antenna, region, frequency and conservative power profile are explicitly
+selected and the later guarded transmit milestone is qualified. There is
+intentionally no default LoRa frequency. The external derived RNode peer is
+governed separately and remains radio-off unless explicitly authorized.
 
 ## Source layout
 

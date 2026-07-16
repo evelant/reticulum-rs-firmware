@@ -1,6 +1,6 @@
 [package]
-name = "reticulum-node-core"
-description = "Bounded protocol orchestration for standalone Reticulum firmware"
+name = "reticulum-storage-model"
+description = "Portable durable record model for standalone Reticulum firmware"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,8 +11,7 @@ publish.workspace = true
 default = []
 
 [dependencies]
-rand_core.workspace = true
-reticulum-rns-rete = { path = "../rns-rete", default-features = false }
+minicbor.workspace = true
 sha2.workspace = true
 
 [lib]

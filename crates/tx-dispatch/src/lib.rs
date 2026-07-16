@@ -36,8 +36,8 @@ use core::{future::poll_fn, mem, task::Poll};
 
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use reticulum_node_core::{
-    AttemptToken, AuthorizedTx, ExpiredAuthorizedTx, MonotonicMillis, NodeCore, PacketInterfaceId,
-    PermitPendingTx, PermitResolution, RoutedTxJob, TxAuthorizationErrorKind,
+    AttemptHandle, AttemptToken, AuthorizedTx, ExpiredAuthorizedTx, MonotonicMillis, NodeCore,
+    PacketInterfaceId, PermitPendingTx, PermitResolution, RoutedTxJob, TxAuthorizationErrorKind,
     TxAuthorizationFailure, TxAuthorizationPolicy, TxCompletionCode, TxFrameError, TxLeaseDeadline,
     TxPermitReply, TxPermitRequest, UnpermittedTx,
 };
@@ -45,6 +45,10 @@ use reticulum_tx_handoff::{
     DispatcherHandoff, JobSender, NodeHandoff, OwnerReturnReceiver, PairedTxHandoff,
     PermitReplySender, PermitRequestReceiver, TxOwnerReturn,
 };
+use sha2::{Digest, Sha256};
+
+/// SHA-256 of every byte in one complete encoded Reticulum packet.
+pub use reticulum_node_core::EncodedPacketSha256 as TxEncodedPacketSha256;
 
 /// Caller-owned completion-code namespace used by the dispatcher.
 ///
@@ -281,12 +285,19 @@ pub enum TxDispatcherFaultResidueKind {
 /// Scalar observation made by the fixed internal no-RF frame inspector.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NoRfFrameObservation {
+    /// Generation-scoped attempt identity associated with the complete frame.
+    pub attempt_handle: AttemptHandle,
     /// Complete proof-correlation hash bound to the borrowed frame.
     pub attempt: AttemptToken,
     /// Packet interface authorized for this exact hop.
     pub interface: PacketInterfaceId,
     /// Number of encoded Reticulum bytes inspected.
     pub packet_len: usize,
+    /// SHA-256 of every byte in the complete encoded Reticulum packet.
+    ///
+    /// This is deliberately distinct from [`Self::attempt`], which is the
+    /// protocol proof-correlation digest over Reticulum's hashable part.
+    pub encoded_packet_sha256: TxEncodedPacketSha256,
     /// Non-cryptographic wrapping byte sum used only for deterministic tests
     /// and diagnostics.
     pub wrapping_checksum: u8,
@@ -721,9 +732,13 @@ where
     ) -> NoRfTxDispatcherStep {
         let inspected = match owner.frame(now) {
             Ok(frame) => Ok(NoRfFrameObservation {
+                attempt_handle: frame.attempt_handle(),
                 attempt: frame.attempt(),
                 interface: frame.interface(),
                 packet_len: frame.bytes().len(),
+                encoded_packet_sha256: TxEncodedPacketSha256::new(
+                    Sha256::digest(frame.bytes()).into(),
+                ),
                 wrapping_checksum: frame
                     .bytes()
                     .iter()
@@ -1442,6 +1457,7 @@ mod tests {
             &mut rng,
         );
         let attempt = job.attempt();
+        let attempt_handle = job.attempt_handle();
         let packet_len = usize::from(job.packet_len());
         let (node_ports, dispatcher_ports) = FANOUT_HANDOFF.take().split();
         let (mut data, mut permit) = TxPermitServer::from_node_handoff(node_ports);
@@ -1481,10 +1497,22 @@ mod tests {
         assert_eq!(ptr::from_ref(&*returned), pointer);
         assert_eq!(first.interface, PacketInterfaceId::new(1));
         assert_eq!(second.interface, PacketInterfaceId::new(4));
+        assert_eq!(first.attempt_handle, attempt_handle);
+        assert_eq!(second.attempt_handle, attempt_handle);
         assert_eq!(first.attempt, attempt);
         assert_eq!(second.attempt, attempt);
         assert_eq!(first.packet_len, packet_len);
         assert_eq!(second.packet_len, packet_len);
+        assert_eq!(first.encoded_packet_sha256, second.encoded_packet_sha256);
+        assert_eq!(
+            first.encoded_packet_sha256,
+            TxEncodedPacketSha256::new([
+                0x3a, 0x80, 0xce, 0x41, 0x0d, 0xcf, 0x77, 0xe5, 0xdd, 0x28, 0xd7, 0xfd, 0xe5, 0xb7,
+                0x19, 0x3d, 0x96, 0x30, 0xd4, 0x91, 0x5f, 0x42, 0xcc, 0x50, 0x0a, 0xd1, 0x8e, 0xd3,
+                0x28, 0x9c, 0x3f, 0x4c,
+            ])
+        );
+        assert_ne!(first.encoded_packet_sha256.as_bytes(), attempt.as_bytes());
         assert_eq!(first.wrapping_checksum, second.wrapping_checksum);
         assert_eq!(policy.calls, 2);
         assert!(!policy.candidates[0].unwrap().may_have_transmitted);
@@ -1568,15 +1596,19 @@ mod tests {
             NoRfTxDispatcherStep::Advanced
         );
         let completion = completion_from(data.returns.try_receive().expect("expired return"));
-        let (returned, record) = match owner
+        let (returned, observation) = match owner
             .complete_tx(completion, MonotonicMillis::new(1_500))
             .unwrap_or_else(|failure| panic!("expired completion: {:?}", failure.reason()))
         {
-            TxCompletionDisposition::Recovered { buffer, record } => (buffer, record),
+            TxCompletionDisposition::Recovered {
+                buffer,
+                observation,
+            } => (buffer, observation),
             TxCompletionDisposition::Available(_) => panic!("deadline recovery was hidden"),
             TxCompletionDisposition::Next(_) => panic!("expired route fanned out"),
             TxCompletionDisposition::Quarantined(_) => panic!("matching owner quarantined"),
         };
+        let record = observation.record();
         assert_eq!(ptr::from_ref(&*returned), pointer);
         assert_eq!(record.prior_phase(), TxRecoveryPriorPhase::Authorized);
         assert!(record.may_have_transmitted());
@@ -1609,6 +1641,7 @@ mod tests {
             &mut rng,
         );
         let attempt = job.attempt();
+        let attempt_handle = job.attempt_handle();
         let packet_len = usize::from(job.packet_len());
         let (node_ports, dispatcher_ports) = CANCEL_HANDOFF.take().split();
         let (mut data, mut permit) = TxPermitServer::from_node_handoff(node_ports);
@@ -1679,7 +1712,12 @@ mod tests {
             NoRfTxDispatcherStep::Inspected(observation) => observation,
             other => panic!("ready reply did not reach inspection: {other:?}"),
         };
+        assert_eq!(observation.attempt_handle, attempt_handle);
         assert_eq!(observation.attempt, attempt);
+        assert_ne!(
+            observation.encoded_packet_sha256.as_bytes(),
+            attempt.as_bytes()
+        );
         assert_eq!(observation.interface, PacketInterfaceId::new(1));
         assert_eq!(observation.packet_len, packet_len);
         assert_eq!(
@@ -2172,15 +2210,19 @@ mod tests {
         );
         assert_eq!(dispatcher.phase(), NoRfTxDispatcherPhase::Idle);
         let completion = completion_from(data.returns.try_receive().expect("grace reply return"));
-        let (_, record) = match owner
+        let (_, observation) = match owner
             .complete_tx(completion, MonotonicMillis::new(1_600))
             .unwrap_or_else(|failure| panic!("grace reply completion: {:?}", failure.reason()))
         {
-            TxCompletionDisposition::Recovered { buffer, record } => (buffer, record),
+            TxCompletionDisposition::Recovered {
+                buffer,
+                observation,
+            } => (buffer, observation),
             TxCompletionDisposition::Available(_) => panic!("late grant appeared successful"),
             TxCompletionDisposition::Next(_) => panic!("late grant continued fanout"),
             TxCompletionDisposition::Quarantined(_) => panic!("matching late grant quarantined"),
         };
+        let record = observation.record();
         assert_eq!(record.prior_phase(), TxRecoveryPriorPhase::Authorized);
         assert!(record.may_have_transmitted());
         assert_eq!(record.reason(), TxRecoveryReason::DeadlineExpired);
@@ -2255,11 +2297,11 @@ mod tests {
                 .try_receive()
                 .expect("post-threshold reply return"),
         );
-        let record = match owner
+        let observation = match owner
             .complete_tx(completion, MonotonicMillis::new(1_700))
             .unwrap_or_else(|failure| panic!("post-threshold completion: {:?}", failure.reason()))
         {
-            TxCompletionDisposition::Recovered { record, .. } => record,
+            TxCompletionDisposition::Recovered { observation, .. } => observation,
             TxCompletionDisposition::Available(_) => {
                 panic!("post-threshold grant appeared successful")
             }
@@ -2270,6 +2312,7 @@ mod tests {
                 panic!("matching post-threshold grant quarantined")
             }
         };
+        let record = observation.record();
         assert_eq!(record.prior_phase(), TxRecoveryPriorPhase::Authorized);
         assert!(record.may_have_transmitted());
         assert_eq!(record.reason(), TxRecoveryReason::DeadlineExpired);

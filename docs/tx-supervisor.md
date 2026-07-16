@@ -1,8 +1,8 @@
 # RF-inert permanent TX supervisor
 
 **Status:** permanent aggregate and async run loop implemented, target-checked,
-and outside every firmware graph; no radio, RF, device API, durable
-submission, or complete node-owner integration
+and outside every firmware graph; portable durable projection exists beside
+it, but there is no flash actor, device API, or complete node-owner integration
 **RF status:** unavailable until an antenna/load, regional profile, guarded
 driver boundary, and explicit approval exist
 
@@ -87,19 +87,37 @@ A clock regression is stricter because no further clocked transition is safe;
 the permanent runner waits forever for supervised reboot/recovery. No fault
 path fabricates or force-reuses a missing packet-buffer owner.
 
-## Correlation and the remaining final-disposition gap
+## Correlation and durable projection
 
 `NodeTxQueuedHop` now includes the generation-scoped `AttemptHandle` alongside
-slot, complete attempt token, interface, packet length, and deadline. The
-metadata returned for a queued or retained hop can therefore be correlated
-with node-core terminal tombstones without relying on a slot alone.
+slot, complete attempt token, interface, packet length, preparation-time full-
+packet digest, and deadline. The metadata returned for a queued or retained hop
+can therefore be correlated with node-core terminal tombstones without relying
+on a slot alone.
 
-That correlation token is not yet a durable submission model. No implemented
-component persists the accepted local intent, maps every terminal/recovery/
-quarantine result to one final device-facing disposition, projects it
-idempotently, or calls `acknowledge_terminal()` and
-`acknowledge_recovered()` only after that projection is durable. Recovered
-owners deliberately remain parked and unavailable until exact acknowledgement.
+The supervisor now exposes copy-only iterators for terminal attempts, recovered
+owners, and quarantines, plus exact `acknowledge_terminal()` and
+`acknowledge_recovered()` facades. `reticulum-submission-projector` correlates
+those observations to the project-owned durable lifecycle and unlocks an exact
+acknowledgement only after the corresponding transition or transport audit is
+known committed. Recovered owners remain parked and unavailable until that
+acknowledgement succeeds; terminal acknowledgement can remain retryable while
+the packet owner is still bound.
+
+Ordinary parked recoveries and quarantines are consumed through their distinct
+`recovered_observations()` and `quarantine_observations()` iterator paths. A
+recovery-correlated owner trapped as residue inside a permanently disabled DATA
+machine is not acknowledgeable and is therefore exposed only through
+`data_fault_quarantine_observation()`; the caller must project it as quarantine
+even when `data_fault_residue_kind()` says `RecoveredBuffer`. The residue kind
+and retained supervisor DATA fault preserve the original and secondary
+diagnostics without misclassifying that fail-closed owner as releasable.
+
+This is a portable semantic boundary, not powered durability. The projector
+retains an opaque write plan and the caller's live `SubmissionIndex` remains
+authoritative, but no implemented actor yet appends the record to flash,
+reserves its required future records, or drives the projector and supervisor
+from one permanent task. See [Durable submissions](durable-submissions.md).
 
 ## Work still outside the aggregate
 
@@ -107,23 +125,27 @@ The supervisor does not yet:
 
 - own ordinary RNS `tick` output or allocation-backed actions;
 - merge receive ingress with all node-core mutation under one sole node task;
-- accept or replay durable LXMF/device submission intents;
-- persist active-attempt or reboot-recovery state;
-- project and acknowledge terminal or recovered records;
-- map final dispositions into device API v1; or
+- accept device-API/LXMF intents through a physical persist-before-accept edge;
+- own the flash journal, reservations, replay, compaction, and boot recovery;
+- drive the existing projector observations and acknowledgements from the sole
+  node task;
+- safely retire completed volatile projector correlations after every source
+  has been drained;
+- map projected dispositions into device API v1; or
 - provide a driver, packet-interface implementation, radio reset contract, RF
   policy, or firmware dependency edge.
 
-The next product boundary is the durable intent/final-disposition model and its
-idempotent projector, followed by merging RX, RNS tick/actions, and submission
-handling into the eventual sole node owner. Firmware TX integration remains
-later and separately gated.
+The next product boundary is the sole physical storage actor and its
+power-fail-safe journal, followed by merging RX, RNS tick/actions, submission
+projection, and acknowledgement into the eventual sole node owner. Firmware TX
+integration remains later and separately gated.
 
 ## Validation
 
-The focused supervisor suite currently contains 11 host tests covering
+The focused supervisor suite currently contains 12 host tests covering
 separate and deadline-crossing clock samples, a complete RF-denied owner
-lifecycle, exact-deadline recovery retention, permit-grace reply priority and
+lifecycle, exact-deadline recovery retention and acknowledgement, terminal
+acknowledgement before and after owner return, permit-grace reply priority and
 fault draining, monotonic regression, cancellation of the combined wait,
 deadline conversion, common-origin/full-seed construction, and static storage.
 

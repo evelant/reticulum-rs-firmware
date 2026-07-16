@@ -1,8 +1,9 @@
 # Device API v1 logical protocol
 
-Status: initial host-simulation schema. This document freezes the operation and
-field numbers exercised by `reticulum-device-api`; it does not authorize a
-firmware transport or radio transmission.
+Status: initial host-simulation schema plus a separate portable durable
+submission model. This document freezes the operation and field numbers
+exercised by `reticulum-device-api`; no adapter connects that codec to the
+durable model, firmware transport, or radio transmission.
 
 ## Boundary
 
@@ -146,22 +147,31 @@ the dispatcher cannot accidentally substitute the RNS proof-correlation hash.
 No API in this crate can take, drain, or borrow packet bytes.
 
 This encoded-byte digest is deliberately distinct from Reticulum's delivery-
-proof receipt hash, which covers the protocol-defined hashable part. A future
-dispatcher must compute and retain both under distinct types. Its only legal
-packet-byte view is the one-shot frame borrowed from an exactly permitted
-node-core `AuthorizedTx`; it must not substitute `AttemptToken` for this field.
+proof receipt hash, which covers the protocol-defined hashable part. Node-core
+supplies that RNS attempt token and also hashes every encoded packet byte at
+preparation. The RF-inert dispatcher independently rehashes the complete frame
+while its sole packet-byte view is the one-shot frame borrowed from an exactly
+permitted node-core `AuthorizedTx`. The projector requires those lengths and
+digests to agree, retains a planned semantic metadata record without packet
+bytes, and applies it only after the storage actor reports commit or exact
+readback.
 
-Node-core now retains an in-RAM terminal-attempt tombstone until explicit
-acknowledgement. The future dispatcher must first atomically persist/project
-the corresponding `Delivered` or `DeliveryTimeout` submission state, process
-the valid ownership return of any still-bound external TX typestate, and only
-then acknowledge the opaque node-core attempt handle. Node-core rejects
-acknowledgement while that owner still binds its `TxPacketBuffer`. The
-encoded-byte digest remains retained submission metadata, but the v1 response
+Node-core retains an in-RAM terminal-attempt tombstone until explicit
+acknowledgement. The portable projector maps it to the corresponding final
+submission state and exposes the exact acknowledgement only after a storage
+actor reports that record committed or readback-equivalent. Node-core rejects
+acknowledgement while an external TX typestate still binds its
+`TxPacketBuffer`, so the action remains retryable until ownership returns. The
+proof or receipt timeout may become terminal before a dispatcher frame
+observation; delivery uses the preparation-bound digest and length, while a
+timeout remains a metadata-free API failure. The encoded-byte digest remains
+retained submission metadata, but the v1 response
 exposes it only for `AwaitingDelivery` and `Delivered`; a delivery timeout is a
 `Failed` response without keys 2 or 3. Device API v1 does not expose the
 internal attempt handle, packet-slot ID, dispatch generation or deadline, and
-it does not make the current RAM ledger reboot-safe.
+it does not expose volatile attempt correlation. Reboot safety still depends on
+an unimplemented physical journal actor that integrity-validates every
+record through a known end-of-log before completing semantic replay.
 
 ### `experimental.prepare_rns_data` (`0xf001`)
 
@@ -180,19 +190,23 @@ Request body:
 | 1 | bytes(0..383) | yes | borrowed application payload |
 | 2 | bytes(16) | yes | principal-scoped idempotency key |
 
-The decoder returns key 1 as a slice of the caller's input buffer. A dispatcher
-must not retain it past that buffer's lifetime. The future dispatcher/intent
-owner copies accepted input into a separate fixed-capacity queue before calling
-`reticulum-node-core`. Node-core then prepares into one separately registered,
-caller-owned 500-byte `TxPacketBuffer`. It rejects an already-expired owner
+The decoder returns key 1 as a slice of the caller's input buffer. An adapter
+must not retain it past that buffer's lifetime. `reticulum-storage-model`
+defines the owned bounded intent, semantic content digest, principal/key
+idempotency rule, and opaque acceptance plan that a future physical storage
+actor must append before replying. Only after that acceptance and the durable
+`Queued -> Preparing` barrier may the sole node owner prepare into one
+separately registered, caller-owned 500-byte `TxPacketBuffer`. Node-core rejects
+an already-expired owner
 deadline before mutation, resolves the enabled-interface route, and returns a
 unique routed `TxJob`; that prompt dispatch ownership is not client-intent
 storage, and its RNS receipt timeout has already started. Packet bytes remain
 inaccessible until an opaque permit exchange produces `AuthorizedTx`, whose
 `frame(now)` accessor is one-shot and exact-deadline checked. A standalone
-bounded async handoff now carries these typestates, but no device-API intent
-owner or dispatcher invokes it, there is no radio integration, and the
-host-only operation remains disconnected from it.
+bounded async handoff carries these typestates, and the portable projector
+models their persist-before-ack observations, but no device-API/storage/runtime
+adapter invokes that path. There is no radio integration, and the host-only
+operation remains disconnected from it.
 
 Successful host-simulation response body:
 
@@ -200,16 +214,20 @@ Successful host-simulation response body:
 | ---: | --- | --- | --- |
 | 0 | u64 | yes | device-assigned submission ID |
 
-Acceptance means the device has reserved the bounded state needed to own the
-intent. It is not a delivery guarantee; a later status can report no path,
-delivery timeout, downstream rejection, or an internal failure. The ID can be
-queried through `submission.status`. The response contains no destination,
-payload, prepared packet, packet fragment, or packet-borrowing handle.
+In the future firmware adapter, acceptance will mean the exact intent is
+durable and the backend has reserved the physical capacity required by its
+lifecycle contract. The current host simulation does not make that durability
+claim. Acceptance is not a delivery guarantee; a later status can report no
+path, delivery timeout, downstream rejection, or an internal failure. The ID
+can be queried through `submission.status`. The response contains no
+destination, payload, prepared packet, packet fragment, or packet-borrowing
+handle.
 
-The future dispatcher must scope idempotency by the authenticated principal.
-Repeating the same key with identical canonical request content returns the
+The storage model scopes idempotency by the authenticated principal. Repeating
+the same key with identical semantic destination/payload content returns the
 original submission ID. Reusing it for different content returns immediate
-error 10 and must not mutate the original submission.
+error 10 and must not mutate the original submission. The missing adapter must
+derive the principal from `DispatchContext`; it cannot trust request bytes.
 
 ## Responses and errors
 
@@ -247,8 +265,9 @@ framing rules.
 
 Authentication, ownership filtering, rate limiting, idempotency scope, physical
 presence, and high-assurance session encryption are not solved by this codec.
-The future dispatcher must scope status and idempotency by the principal from
-`DispatchContext`, never by bytes supplied in a request.
+The future device-API adapter and session runtime must scope status and
+idempotency by the principal from `DispatchContext`, never by bytes supplied in
+a request.
 
 ## Golden vectors
 

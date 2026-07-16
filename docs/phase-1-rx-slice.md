@@ -1,15 +1,21 @@
 # Phase 1 Tracker receive-only vertical slice
 
 **Status:** implementation contract; steps 1–8 source/static work and clean-tree
-artifact tooling are implemented; actual preserved bundles and all powered HIL
-remain pending
+artifact tooling are implemented; one clean paired bundle and one later
+flash/readback smoke are preserved, while formal powered HIL remains pending
 
 **Target:** Heltec Wireless Tracker V2.3, ESP32-S3FN8, SX1262 and KCT8103L
 
 **Driver baseline:** `lora-phy` 3.0.1 on the pinned workspace graph
 
-As of 2026-07-15, steps 1–8 below are present through source/static evidence and
-clean-tree artifact tooling. Host tests cover the validated profile,
+As of 2026-07-16, steps 1–8 below are present through source/static evidence and
+clean-tree artifact tooling. A matching clean normal/pressure and closure pair
+for commit `fdd6d9e` is preserved at
+`artifacts/hil/phase1-rx/20260716T000006Z-fdd6d9e-normal-pressure-bundle`
+and its `-closure-bundle` sibling. A later clean `bf23cc5` normal image was
+flashed to E9:44, read back exactly, and observed through a bounded 125-second
+supplemental smoke; that commit has no matching closure bundle, and neither run
+is formal powered qualification. Host tests cover the validated profile,
 fail-closed/cancellation sequencing, complete mock cold-start and receive
 commands, the TX-hook interlock and the SPI opcode firewall, deterministic
 depth-2 drop-new handoff behavior, profile-scaled fragment deadlines, exact
@@ -27,8 +33,9 @@ owner after the first split half, leaving the radio task free to produce an
 exact depth-2 queue/drop result; the normal lab image contains no trigger path.
 The lab image now runs the complete PHY receive future in a sole radio-owner
 task and moves completed frames to a separate ingress owner without waiting;
-that owner is connected through `TimedRnodeRx` to Rete. It has not been flashed
-or treated as electrically/RF qualified.
+that owner is connected through `TimedRnodeRx` to Rete. The later normal image
+has been flashed for supplemental smoke, but it has not been treated as
+electrically or formally RX/RF qualified.
 
 The separately named returned-fault, retained-journal and four electrical
 comparison modes are now compile-gated in source. The returned decorator and
@@ -36,8 +43,9 @@ electrical command matrix have focused host tests; all electrical/returned
 selections and representative journal selectors have fresh target links and
 ELF inspection. The clean-tree closure command can prepare and verify the exact
 four electrical modes, both returned-fault policies and representative journal
-slot 0/word 4 and write ordinal 9, but an actual immutable bundle has not yet
-been preserved or flashed. Those software facts do not close their
+slot 0/word 4 and write ordinal 9. The clean `fdd6d9e` closure bundle preserves
+those exact artifacts, but none was flashed for the supplemental `bf23cc5`
+normal-image smoke. Those software facts do not close their
 retained-state, pin, current, sensitivity or RF gates. CI runs host/negative
 tests, strict selector checks and the complete eight-build closure prepare and
 verify pipeline for the GitHub merge commit. It intentionally does not preserve
@@ -518,13 +526,16 @@ Counter overflow saturates instead of wrapping.
 
 ## Current build evidence
 
-On 2026-07-15, clean-tree normal/pressure and exact eight-artifact closure
-preparation runs with the pinned ESP toolchain produced and verified the GNU
-`size` results below. Each bundle's independent fresh-source, fresh-target and
-fresh-Cargo-home canary rebuild matched its selected ELF and merged image
-byte-for-byte, including under a hostile ambient environment. These temporary
-integration bundles were not retained as qualification evidence, and they do
-not replace flash/readback or powered qualification evidence.
+On 2026-07-16, the preserved clean-tree `fdd6d9e` normal/pressure and exact
+eight-artifact closure pair produced and verified the GNU `size` results below
+with the pinned ESP toolchain. Each bundle's independent fresh-source,
+fresh-target and fresh-Cargo-home canary rebuild matched its selected ELF and
+merged image byte-for-byte, including under a hostile ambient environment.
+The later clean `bf23cc5` normal image also passed independent reproducibility,
+exact flash readback, and a 125-second supplemental smoke as recorded in
+`artifacts/board-flashes/2026-07-16-e944-bf23cc5-rx-refresh/RESULTS.md`.
+There is no matching `bf23cc5` closure bundle. These artifacts do not replace
+the formal powered qualification matrix.
 
 | Binary | text | data | bss/reserved | total |
 | --- | ---: | ---: | ---: | ---: |
@@ -843,8 +854,10 @@ power-on history and holds RF-inert after its correlated reset;
 `repeat-until-quarantine` re-arms on authorized boots until the ordinary third
 fault quarantine prevents a fourth radio construction. The closure verifier
 binds each policy's artifact identity, environment, ELF and merged image,
-rejects cross-mode relabeling and inspects the final ELF. An actual preserved
-bundle plus powered sticky-fired, reset and containment evidence remain open.
+rejects cross-mode relabeling and inspects the final ELF. The preserved
+`fdd6d9e` closure bundle supplies source/artifact provenance for that revision;
+powered sticky-fired, reset and containment evidence remain open, as does a
+closure bundle matching the later `bf23cc5` normal-image smoke.
 Physical pin shorts are not an acceptable substitute.
 
 ### Retained-journal failure
@@ -859,10 +872,10 @@ after the selected aligned write. The next retained boot must enter the
 ordinary fail-closed `CorruptOrTornJournal` quarantine before peripheral
 construction. Mutation remains private to these features; the product API does
 not gain a general retained-state corruption escape. Representative target
-links and ELF inspection exist, and the closure tooling preserves exact slot
-0/word 4 and write ordinal 9 artifacts. Only an actual immutable bundle and
-their two-boot powered captures can prove RTC retention and quarantine ordering;
-other selectors are outside that bundle.
+links and ELF inspection exist, and the preserved `fdd6d9e` closure bundle
+contains exact slot 0/word 4 and write ordinal 9 artifacts. Their two-boot
+powered captures are still required to prove RTC retention and quarantine
+ordering; other selectors are outside that bundle.
 
 ### Regulator and receive gain
 
@@ -874,9 +887,9 @@ distinct artifact identities from one code shape. Mock traces prove that DC-DC
 adds only `0x96 0x01` after standby and before DIO2 control, LDO uses the reset
 default without that command, and the gain write ends in `0x94` or `0x96`; all
 other commands remain identical and TX-free. Each final variant still needs
-its own common profile, interlock, stack, memory and no-TX checks. The closure
-tooling preserves and verifies a distinct ELF/image for every variant, but an
-actual immutable bundle and powered measurements have not yet been collected.
+its own common profile, interlock, stack, memory and no-TX checks. The preserved
+`fdd6d9e` closure bundle contains and verifies a distinct ELF/image for every
+variant, but powered measurements have not yet been collected.
 These artifacts enable measurements; they do not select production policy.
 Current, reliability and sensitivity comparisons still require a calibrated
 fixture and more than one board.
@@ -910,19 +923,21 @@ fixture and more than one board.
    The target-linked dual-slot reset-storm quarantine and CPU0/executor stack
    watermark add the previously missing hardening mechanisms; their actual
    retention, inert-state and high-water values remain powered HIL gates.
-7. **Target build and static inspection implemented; powered capture pending:**
+7. **Target build and static inspection implemented; supplemental normal-image
+   flash/readback smoke recorded; formal powered capture pending:**
    retain the safe-idle and normal lab images plus the separately named
    backpressure HIL artifact. Capture the first powered radio initialization
    with the antenna/load and lab instrumentation appropriate for the board,
    then restore the normal lab image after the one pressure scenario.
 8. **Source, focused software/static evidence and clean-tree tooling
-   implemented; actual bundles and powered capture pending:** add the protected
+   implemented; one clean paired bundle preserved and powered capture pending:**
+   add the protected
    returned-fault, retained-journal and four electrical comparison artifacts
    above. Host tests cover the returned-fault path and electrical trace matrix;
    all electrical/returned selections link and pass inspection, as do
-   representative journal selectors. The closure command prepares and verifies
-   those exact eight artifacts. Preserving an actual clean bundle and collecting
-   powered evidence remain open.
+   representative journal selectors. The preserved `fdd6d9e` closure bundle
+   contains those exact eight artifacts. A matching `bf23cc5` closure and all
+   corresponding powered evidence remain open.
 9. Run single-frame, split-frame, malformed-input, backpressure and 24-hour RX
    HIL scenarios against an established RNode/Python peer.
 10. Record FEM timing, regulator and RX-boost evidence. Update board policy only
@@ -938,6 +953,7 @@ bounded through the soak, CTX never leaves RX, and host plus HIL command traces
 show no SX1262 `SetTx` `0x83` in any tested path while correctly allowing the
 non-transmitting `SetTxParams` `0x8e` initialization command.
 
-Completion authorizes design of the guarded transmit slice; it does not itself
-authorize RF transmission or establish production FEM, regulator, RX-boost or
-regional policy.
+Completion permits the next engineering phase: firmware/RF integration and
+qualification of the already-designed guarded transmit slice. It does not
+authorize RF transmission or establish production FEM, regulator, RX-boost,
+airtime, or regional policy.

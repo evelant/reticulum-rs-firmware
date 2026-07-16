@@ -1,7 +1,8 @@
 # Phase 1 Tracker RX hardware qualification
 
 **Status:** deterministic RNode peer/corpus and clean-tree bundle tooling ready;
-preserved qualification runs and powered evidence not yet complete<br>
+one clean paired bundle and a later supplemental flash/readback smoke are
+preserved, while formal powered qualification remains incomplete<br>
 **Target:** Heltec Wireless Tracker V2.3, ESP32-S3FN8, 863–928 MHz RF variant<br>
 **Image:** `reticulum-heltec-tracker-v2-lab-rx`
 
@@ -14,11 +15,17 @@ This runbook does not yet close every Phase 1 gate. Host tests cover the
 returned-SPI fail point and the four electrical command traces. CI strictly
 checks every selector and runs the public clean-tree closure command to build,
 inspect and verify all four electrical selections, both returned-fault policies
-and representative corrupt/torn journal selectors. That ephemeral bundle is a
-software smoke test of GitHub's merge commit; CI does not preserve it as
-qualification evidence. A clean local bundle run and every powered capture
-remain evidence that must actually be collected. A source build, host test, CI
-closure run or ad hoc flash is not qualification evidence.
+and representative corrupt/torn journal selectors. That ephemeral CI bundle is
+a software smoke test of GitHub's merge commit; CI does not preserve it as
+qualification evidence. A matching clean local pair for commit `fdd6d9e` is
+preserved at
+`artifacts/hil/phase1-rx/20260716T000006Z-fdd6d9e-normal-pressure-bundle`
+and its `-closure-bundle` sibling. A later clean `bf23cc5` normal image was
+flashed to E9:44, read back exactly, and observed for 125 seconds as recorded in
+`artifacts/board-flashes/2026-07-16-e944-bf23cc5-rx-refresh/RESULTS.md`, but no
+matching `bf23cc5` closure bundle exists. Neither that supplemental smoke nor
+the older paired software bundle supplies the required formal powered
+electrical/RF, fault, retention, backpressure, or soak captures.
 
 ## Safety and equipment
 
@@ -147,8 +154,10 @@ operation. The image recipe explicitly fixes ESP32-S3, DIO, 80 MHz, 8 MB, a
 40 MHz crystal, minimum chip revision 0.0 and ESP-IDF format while isolating
 local and global `espflash.toml`. DIO matches both preserved, bootable Tracker
 V2 baselines; a QIO-built powered smoke image watchdog-reset in ROM flash
-mapping before firmware startup, strongly implicating the mode mismatch pending
-the controlled DIO smoke. Preparation and verification inspect the bootloader
+mapping before firmware startup. The later clean `bf23cc5` DIO image booted,
+was read back byte-for-byte, and completed a bounded 125-second smoke, supporting
+the mode diagnosis without constituting cold-power qualification. Preparation
+and verification inspect the bootloader
 and partition-table-selected factory-app headers and reject any image that does
 not encode DIO and 8 MB/80 MHz. There is intentionally no dirty-worktree or
 overwrite bypass.
@@ -751,7 +760,9 @@ bundle, exact patch and untracked source archive, pinned toolchain, reproducible
 build outputs, flashed bytes and runtime identity as distinct artifacts. The
 2026-07-16 E0:40 smoke preserved that chain under the ignored
 `artifacts/board-flashes/2026-07-16-e040-rnode-safe-peer/` directory, but it is
-not a sealed powered-evidence run.
+not a sealed powered-evidence run. Its radio authorization remained off and
+fail-closed; this external derived peer is not part of the project firmware
+graph or evidence that a project TX path exists.
 
 Before the first peer invocation, place regular-file copies of the exact peer
 image, a self-contained Git bundle rooted at the official `1.86` release tag,
@@ -1241,10 +1252,13 @@ not produce a digest because they never cross the RNS admission boundary.
    - The compile-gated `lab-rx-returned-fault-hil` source, one-byte sticky
      evidence state, host integration tests and clean-tree preparation and
      verification support for both policies are implemented. The scenario
-     remains `not-run` until the closure bundle has actually been prepared and
-     verified and the images have been exercised on powered hardware. Reverify
-     the complete immutable closure bundle immediately before every closure
-     image flash, including each returned-fault, electrical and journal run:
+     remains `not-run` until the selected source revision has a prepared,
+     verified closure bundle and those images have been exercised on powered
+     hardware. The preserved `fdd6d9e` bundle satisfies the artifact precondition
+     only for that exact revision; no closure bundle matches the later `bf23cc5`
+     normal smoke. Reverify the complete immutable closure bundle immediately
+     before every closure image flash, including each returned-fault,
+     electrical and journal run:
 
      ```sh
      cargo run --locked -p xtask -- phase1-rx-closure-artifacts verify \
@@ -1344,8 +1358,9 @@ not produce a digest because they never cross the RNS admission boundary.
      exact slot/word or write-ordinal selectors. They construct no SPI, radio,
      executor timer or supervisor watchdog. The closure command prepares and
      verifies the exact representative slot 0/word 4 and write-ordinal 9
-     images. This scenario remains `not-run` until that bundle has actually
-     been preserved and both selectors complete their two-boot powered runs.
+     images. The preserved `fdd6d9e` closure contains both, but this scenario
+     remains `not-run` until both selectors complete their two-boot powered
+     runs.
    - From a true-power pristine baseline, run those two preserved representative
      selectors. Preserve the first boot's mutation/torn-write evidence and
      `CoreSw`, then prove that the following boot reports
@@ -1459,10 +1474,11 @@ stimuli to their exact target modes; their hooks are checked as separate
 software artifacts. The local-DATA builder is host-tested against a decrypting
 target. Returned-fault/electrical host tests, all six radio-bearing closure
 links/inspections and the two representative retained-journal links/inspections
-are development evidence only. The local clean-tree commands can preserve and
-verify the eight closure artifacts, but only an actual immutable bundle closes
-artifact provenance, and only the corresponding powered captures close the
-backpressure, fault-injection, retained-state, electrical or soak gates.
+are development evidence only. The preserved `fdd6d9e` pair closes source and
+artifact provenance for its exact revision and eight closure artifacts. It does
+not match the later `bf23cc5` normal-image smoke, and only corresponding formal
+powered captures can close the backpressure, fault-injection, retained-state,
+electrical, RX/RF, or soak gates.
 
 ## Memory and liveness evidence
 
@@ -1493,11 +1509,11 @@ non-transitive static context rather than runtime margin.
 The normal image remains fixed to LDO mode and unboosted RX. The separately
 named electrical binary can now produce all four compile-time combinations and
 prints both selections in its artifact identity. Those variants are measurement
-fixtures, not production policy. The closure command preserves and verifies
-each distinct ELF and merged image, but the electrical gate remains open until
-an actual immutable bundle is used for calibrated powered measurements on more
-than one board. Editing board constants in a dirty worktree remains
-non-evidence.
+fixtures, not production policy. The preserved `fdd6d9e` closure bundle
+contains and verifies each distinct ELF and merged image, but the electrical
+gate remains open until those artifacts are used for calibrated powered
+measurements on more than one board. Editing board constants in a dirty
+worktree remains non-evidence.
 
 ## Pass/fail record
 

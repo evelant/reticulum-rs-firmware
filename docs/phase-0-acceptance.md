@@ -37,6 +37,8 @@ cargo test --locked -p reticulum-rns-leviculum
 cargo check --locked \
   -p reticulum-device-api \
   -p reticulum-node-core \
+  -p reticulum-storage-model \
+  -p reticulum-submission-projector \
   -p reticulum-tx-handoff \
   -p reticulum-tx-dispatch \
   -p reticulum-tx-supervisor \
@@ -48,7 +50,10 @@ cargo check --locked \
   -p reticulum-board-heltec-tracker-v2 \
   --target riscv32imac-unknown-none-elf
 cargo +esp check --locked \
+  -p reticulum-device-api \
   -p reticulum-node-core \
+  -p reticulum-storage-model \
+  -p reticulum-submission-projector \
   -p reticulum-tx-handoff \
   -p reticulum-tx-dispatch \
   -p reticulum-tx-supervisor \
@@ -243,6 +248,14 @@ Together these boundaries currently enforce:
   failure retention;
 - recovered-owner parking until exact generation-scoped record
   acknowledgement and fail-closed retention of completion validation faults;
+- canonical accepted/transition/audit records, principal-scoped idempotency,
+  poisoned complete replay, conservative boot recovery, and an allocation-free
+  fixed-RAM submission index;
+- a portable persist-before-ack projector that plans and retains the exact pre-
+  preparation barrier, permits attempt binding only after the storage backend
+  reports commit or exact readback, correlates complete-frame and every
+  terminal/recovery/quarantine observation, and retains independent exact
+  acknowledgements across retry and ordering races;
 - allocation-free adapter/transport counters and capacity snapshots;
 - suppression of Rete's premature responder `LinkEstablished` event until the
   native Link actually reaches `Active`.
@@ -264,13 +277,16 @@ policy, samples the clock freshly before maintenance/DATA/permit/dispatcher,
 waits for the exact next owner deadline or permit grace, and bounds sustained
 progress to 16 passes before yielding. Its `RfInertTxPolicy` denies RF.
 
-Queued-hop metadata now includes the generation-scoped `AttemptHandle`, but
-durable accepted intent, final-disposition mapping, projection, and exact
-terminal/recovery acknowledgement remain unimplemented. Ordinary RNS
-tick/actions, RX ingress, and device-API submission are not yet merged under
-this owner. There is still no firmware connection, driver, radio integration,
-or claim that RF occurred. All firmware graphs remain TX-free, and the only
-radio-bearing firmware artifact remains RX-only.
+The semantic durable model and idempotent projector are implemented and target-
+checked, but neither writes flash. Physical reservation, append/readback,
+authenticated complete replay, retention/compaction, the device-API adapter,
+and the permanent runtime that drives projection and acknowledgement remain
+unimplemented. Ordinary RNS tick/actions and RX ingress are also not yet merged
+under this owner. There is still no firmware connection, driver, radio
+integration, or claim that RF occurred. Every project firmware graph remains
+TX-free, and all project radio-bearing firmware artifacts remain RX-only. The
+separately derived RNode peer is an external development artifact with its own
+guard; it is not evidence of a project TX path.
 
 ## Rete production hard gates
 

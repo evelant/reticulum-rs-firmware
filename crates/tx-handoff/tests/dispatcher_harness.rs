@@ -10,12 +10,12 @@ use core::ptr;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use rand_core::{CryptoRng, RngCore};
 use reticulum_node_core::{
-    AttemptOutcome, DestinationHash, InterfaceSet, MonotonicMillis, MonotonicSeconds, NodeConfig,
-    NodeCore, NodeIdentity, NodeInstanceId, PacketInterfaceId, PermitResolution,
-    PrepareDataRequest, RoutedTxJob, TxAuthorizationCandidate, TxAuthorizationPolicy,
-    TxCompletionCode, TxCompletionDisposition, TxFrame, TxFrameError, TxLeaseDeadline,
-    TxPacketBuffer, TxPermitDenialReason, TxPolicyDecision, TxPolicyDenial, TxRecoveryPriorPhase,
-    TxRecoveryReason,
+    AttemptOutcome, AttemptUnsentReason, DestinationHash, InterfaceSet, MonotonicMillis,
+    MonotonicSeconds, NodeConfig, NodeCore, NodeIdentity, NodeInstanceId, PacketInterfaceId,
+    PermitResolution, PrepareDataRequest, RoutedTxJob, TxAuthorizationCandidate,
+    TxAuthorizationPolicy, TxCompletionCode, TxCompletionDisposition, TxFrame, TxFrameError,
+    TxLeaseDeadline, TxPacketBuffer, TxPermitDenialReason, TxPolicyDecision, TxPolicyDenial,
+    TxRecoveryPriorPhase, TxRecoveryReason,
 };
 use reticulum_tx_handoff::{ChannelFull, TxHandoff, TxOwnerReturn};
 use static_cell::ConstStaticCell;
@@ -325,6 +325,7 @@ fn policy_denial_crosses_control_plane_without_exposing_frame_bytes() {
         interfaces(&[2]),
         &mut rng,
     );
+    let handle = job.attempt_handle();
 
     let (mut node, mut dispatcher) = DENIED_HANDOFF.take().split();
     node.jobs
@@ -388,6 +389,15 @@ fn policy_denial_crosses_control_plane_without_exposing_frame_bytes() {
     assert!(inspector.observations.is_empty());
     assert_eq!(owner.capacities().dispatches_used, 0);
     assert_eq!(owner.capacities().receipts_used, 0);
+    let terminal = owner
+        .acknowledge_terminal(handle)
+        .expect("returned denied owner must permit terminal acknowledgement");
+    assert_eq!(
+        terminal.outcome(),
+        AttemptOutcome::Unsent(AttemptUnsentReason::PolicyDenied(
+            TxPolicyDenial::RegionalProfileUnavailable
+        ))
+    );
     assert_eq!(owner.capacities().attempts_used, 0);
 }
 
@@ -418,6 +428,8 @@ fn grant_resolved_at_exact_deadline_returns_recovery_without_frame_access() {
         interfaces(&[3]),
         &mut rng,
     );
+    let handle = job.attempt_handle();
+    let attempt = job.attempt();
 
     let (mut node, mut dispatcher) = EXPIRED_HANDOFF.take().split();
     node.jobs
@@ -464,16 +476,22 @@ fn grant_resolved_at_exact_deadline_returns_recovery_without_frame_access() {
         TxOwnerReturn::Completion(completion) => completion,
         TxOwnerReturn::Available(_) => panic!("completion changed variant"),
     };
-    let (returned, record) = match owner
+    let (returned, observation) = match owner
         .complete_tx(completion, MonotonicMillis::new(1_500))
         .unwrap_or_else(|failure| panic!("expired completion failed: {:?}", failure.reason()))
     {
-        TxCompletionDisposition::Recovered { buffer, record } => (buffer, record),
+        TxCompletionDisposition::Recovered {
+            buffer,
+            observation,
+        } => (buffer, observation),
         TxCompletionDisposition::Available(_) => panic!("deadline recovery was hidden"),
         TxCompletionDisposition::Next(_) => panic!("expired grant fanned out"),
         TxCompletionDisposition::Quarantined(_) => panic!("matching late owner quarantined"),
     };
 
+    assert_eq!(observation.attempt_handle(), handle);
+    assert_eq!(observation.attempt(), attempt);
+    let record = observation.record();
     assert_eq!(ptr::from_ref(&*returned), pointer);
     assert_eq!(record.interface(), Some(PacketInterfaceId::new(3)));
     assert_eq!(record.prior_phase(), TxRecoveryPriorPhase::Authorized);

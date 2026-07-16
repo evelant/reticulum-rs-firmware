@@ -390,16 +390,20 @@ safe waits.
 `RfInertTxPolicy` denies RF, and retained faults stop new preparation and policy
 while owner-draining transitions continue where possible.
 
-Queued-hop metadata now includes the generation-scoped `AttemptHandle`, but the
-remaining product blockers are durable intent and final-disposition state, an
-idempotent terminal/recovery projector and acknowledgement path, eventual sole-
-owner integration of RX plus ordinary RNS tick/actions, firmware/driver
-integration, durable reboot recovery, caller-reservable bounded construction
-for those ordinary outbound actions, and higher-level LXMF persistence.
+The allocation-free storage model and submission projector now define canonical
+intent/final-disposition records and gate terminal/recovery acknowledgement on
+an exact persistence result. The remaining product blockers are a sole physical
+journal actor with real reservation, readback, authenticated replay, retention
+and compaction semantics; a device-API adapter; safe projector-slot retirement;
+eventual sole-owner integration of RX plus ordinary RNS tick/actions;
+firmware/driver integration; powered reboot recovery; caller-reservable bounded
+construction for those ordinary outbound actions; and higher-level LXMF
+persistence.
 Until those slices and radio policy are connected, no device-facing/device-API
-host send operation or firmware RF TX graph uses this path. Every current
-firmware graph remains TX-free, and the only radio-bearing lab artifact remains
-RX-only.
+host send operation or firmware RF TX graph uses this path. Every project
+firmware graph remains TX-free, and all project radio-bearing firmware
+artifacts remain RX-only. The separately derived RNode peer remains an external
+guarded development artifact, not a project firmware dependency.
 
 ## 12. LXMF retry and receipt-attempt correlation
 

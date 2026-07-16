@@ -5,11 +5,11 @@ use core::{array, future::poll_fn, mem};
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use rand_core::{CryptoRng, RngCore};
 use reticulum_node_core::{
-    AttemptHandle, AttemptToken, AvailableBufferError, MonotonicMillis, NodeCore,
-    PacketInterfaceId, PacketSlotId, PrepareDataRequest, RollbackErrorKind, RollbackFailure,
-    RoutedTxJob, SubmitError, TxCompletion, TxCompletionDisposition, TxCompletionErrorKind,
-    TxCompletionFailure, TxLeaseDeadline, TxOwnerScope, TxPacketBuffer, TxQuarantine,
-    TxRecoveryRecord,
+    AttemptHandle, AttemptToken, AvailableBufferError, EncodedPacketSha256, MonotonicMillis,
+    NodeCore, PacketInterfaceId, PacketSlotId, PrepareDataRequest, RollbackErrorKind,
+    RollbackFailure, RoutedTxJob, SubmitError, TxCompletion, TxCompletionDisposition,
+    TxCompletionErrorKind, TxCompletionFailure, TxLeaseDeadline, TxOwnerScope, TxPacketBuffer,
+    TxQuarantine, TxRecoveryObservation, TxRecoveryRecord,
 };
 use reticulum_tx_handoff::TxOwnerReturn;
 
@@ -35,7 +35,7 @@ enum ParkCandidate {
     },
     Recovered {
         buffer: &'static mut TxPacketBuffer,
-        record: TxRecoveryRecord,
+        observation: TxRecoveryObservation,
     },
     Quarantined(TxQuarantine<'static>),
 }
@@ -63,22 +63,25 @@ impl ParkCandidate {
             Self::Available { buffer, .. } => owner
                 .validate_available_buffer(buffer)
                 .map_err(NodeTxDataFault::AvailableBuffer),
-            Self::Recovered { buffer, record } => {
+            Self::Recovered {
+                buffer,
+                observation,
+            } => {
                 let slot = owner
                     .validate_available_buffer(buffer)
                     .map_err(NodeTxDataFault::AvailableBuffer)?;
-                if slot == record.slot_id() {
+                if slot == observation.record().slot_id() {
                     Ok(slot)
                 } else {
-                    Err(NodeTxDataFault::RecoveryRecordMismatch)
+                    Err(NodeTxDataFault::RecoveryObservationMismatch)
                 }
             }
             Self::Quarantined(quarantine) => {
                 let slot = quarantine.slot_id();
-                if slot == quarantine.record().slot_id() {
+                if slot == quarantine.observation().record().slot_id() {
                     Ok(slot)
                 } else {
-                    Err(NodeTxDataFault::RecoveryRecordMismatch)
+                    Err(NodeTxDataFault::RecoveryObservationMismatch)
                 }
             }
         }
@@ -90,7 +93,7 @@ enum ParkedOwner {
     Available(&'static mut TxPacketBuffer),
     Recovered {
         buffer: &'static mut TxPacketBuffer,
-        record: TxRecoveryRecord,
+        observation: TxRecoveryObservation,
     },
     Quarantined(TxQuarantine<'static>),
 }
@@ -118,6 +121,19 @@ impl DisabledOwner {
                 let _ = failure.reason();
                 NodeTxDataFaultResidueKind::RollbackFailure
             }
+        }
+    }
+
+    fn recovery_observation(&self) -> Option<TxRecoveryObservation> {
+        match self {
+            Self::Candidate(ParkCandidate::Recovered { observation, .. }) => Some(*observation),
+            Self::Candidate(ParkCandidate::Quarantined(quarantine)) => {
+                Some(quarantine.observation())
+            }
+            Self::Candidate(ParkCandidate::Available { .. })
+            | Self::CompletionFailure(_)
+            | Self::UnexpectedCompletion(_)
+            | Self::RollbackFailure(_) => None,
         }
     }
 }
@@ -162,6 +178,7 @@ pub struct NodeTxQueuedHop {
     attempt: AttemptToken,
     interface: PacketInterfaceId,
     packet_len: u16,
+    encoded_packet_sha256: EncodedPacketSha256,
     deadline: TxLeaseDeadline,
 }
 
@@ -173,6 +190,7 @@ impl NodeTxQueuedHop {
             attempt: job.attempt(),
             interface: job.interface(),
             packet_len: job.packet_len(),
+            encoded_packet_sha256: job.prepared().encoded_packet_sha256(),
             deadline: job.deadline(),
         }
     }
@@ -202,6 +220,11 @@ impl NodeTxQueuedHop {
         self.packet_len
     }
 
+    /// SHA-256 over every complete encoded packet byte.
+    pub const fn encoded_packet_sha256(self) -> EncodedPacketSha256 {
+        self.encoded_packet_sha256
+    }
+
     /// Exact packet-owner lease deadline.
     pub const fn deadline(self) -> TxLeaseDeadline {
         self.deadline
@@ -229,8 +252,8 @@ pub enum NodeTxDataFault {
         /// Stable slot reported by node-core.
         actual: PacketSlotId,
     },
-    /// A recovered or quarantined owner disagreed with its scalar recovery record.
-    RecoveryRecordMismatch,
+    /// A recovered or quarantined owner disagreed with its scalar recovery observation.
+    RecoveryObservationMismatch,
     /// Node-core rejected an owning completion without consuming it.
     Completion(TxCompletionErrorKind),
     /// Node-core rejected rollback without consuming the fresh routed job.
@@ -244,7 +267,7 @@ pub enum NodeTxDataFault {
 pub enum NodeTxDataFaultResidueKind {
     /// A reusable buffer remains retained.
     AvailableBuffer,
-    /// A recovered reusable buffer and its record remain retained.
+    /// A recovered reusable buffer and its correlated observation remain retained.
     RecoveredBuffer,
     /// A recovery quarantine remains retained.
     Quarantine,
@@ -261,7 +284,7 @@ pub enum NodeTxDataFaultResidueKind {
 pub enum NodeTxParkedKind {
     /// A reusable packet buffer is available.
     Available,
-    /// A reusable buffer awaits exact recovery-record acknowledgement.
+    /// A reusable buffer awaits exact recovery-observation acknowledgement.
     Recovered,
     /// A unique buffer remains fail-closed in recovery quarantine.
     Quarantined,
@@ -319,10 +342,10 @@ pub enum NodeTxDataStep {
     },
     /// One final reusable owner was parked.
     AvailableParked(PacketSlotId),
-    /// One recovered buffer and its unacknowledged scalar record were parked.
-    RecoveredParked(TxRecoveryRecord),
+    /// One recovered buffer and its unacknowledged correlated observation were parked.
+    RecoveredParked(TxRecoveryObservation),
     /// One fail-closed quarantine was parked.
-    QuarantinedParked(TxRecoveryRecord),
+    QuarantinedParked(TxRecoveryObservation),
     /// One serialized continuation was accepted by the job channel.
     NextQueued(NodeTxQueuedHop),
     /// The exact serialized continuation remains retained under pressure.
@@ -357,8 +380,8 @@ pub enum NodeTxPrepareResult {
     RejectedQuarantined {
         /// Typed preparation rejection.
         reason: SubmitError,
-        /// Scalar record retained with the parked quarantine.
-        record: TxRecoveryRecord,
+        /// Correlated scalar observation retained with the parked quarantine.
+        observation: TxRecoveryObservation,
     },
     /// No acknowledged available buffer is currently parked.
     NoAvailable,
@@ -384,17 +407,20 @@ pub enum NodeTxDataWait {
     Disabled(NodeTxDataFault),
 }
 
-/// Exact recovered-record acknowledgement failure.
+/// Exact recovered-observation acknowledgement failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NodeTxRecoveryAckError {
-    /// The owner machine is fail-closed and permits no table mutation.
+    /// The owner machine is internally poisoned and permits no table mutation.
+    ///
+    /// An ordinary retained `Disabled` fault does not prohibit acknowledging
+    /// an exact recovery that was already parked before the later fault.
     MachineDisabled,
-    /// The record's slot does not fit this fixed owner table.
+    /// The observation's record names a slot outside this fixed owner table.
     SlotOutsidePool,
     /// The addressed slot does not contain a recovered owner.
     NotRecovered,
-    /// The current recovered record differs from the exact supplied record.
-    RecordMismatch,
+    /// The current recovered observation differs from the exact supplied observation.
+    ObservationMismatch,
 }
 
 /// Persistent fixed-capacity owner-return and serialized-fan-out machine.
@@ -507,6 +533,20 @@ where
         }
     }
 
+    /// Correlated recovery observation retained as the machine's fail-closed
+    /// owning residue, when that residue has already reached recovery.
+    pub fn fault_recovery_observation(&self) -> Option<TxRecoveryObservation> {
+        match &self.state {
+            NodeTxDataState::Disabled { retained, .. } => retained.recovery_observation(),
+            NodeTxDataState::Idle
+            | NodeTxDataState::Returned(_)
+            | NodeTxDataState::Parking(_)
+            | NodeTxDataState::Next(_)
+            | NodeTxDataState::FreshRollback(_)
+            | NodeTxDataState::Poisoned => None,
+        }
+    }
+
     /// Copy-only occupancy counts for the internal fixed owner table.
     pub fn parked_counts(&self) -> NodeTxParkedCounts {
         let mut counts = NodeTxParkedCounts {
@@ -541,7 +581,7 @@ where
     /// Copy the unacknowledged recovery record parked at one slot.
     pub fn recovered_record(&self, slot: PacketSlotId) -> Option<TxRecoveryRecord> {
         match self.parked.get(usize::from(slot.get()))? {
-            ParkedOwner::Recovered { record, .. } => Some(*record),
+            ParkedOwner::Recovered { observation, .. } => Some(observation.record()),
             ParkedOwner::Empty | ParkedOwner::Available(_) | ParkedOwner::Quarantined(_) => None,
         }
     }
@@ -549,7 +589,24 @@ where
     /// Iterate every unacknowledged recovered record in stable slot order.
     pub fn recovered_records(&self) -> impl Iterator<Item = TxRecoveryRecord> + '_ {
         self.parked.iter().filter_map(|owner| match owner {
-            ParkedOwner::Recovered { record, .. } => Some(*record),
+            ParkedOwner::Recovered { observation, .. } => Some(observation.record()),
+            ParkedOwner::Empty | ParkedOwner::Available(_) | ParkedOwner::Quarantined(_) => None,
+        })
+    }
+
+    /// Copy the correlated recovery observation parked at one stable slot.
+    pub fn recovered_observation(&self, slot: PacketSlotId) -> Option<TxRecoveryObservation> {
+        match self.parked.get(usize::from(slot.get()))? {
+            ParkedOwner::Recovered { observation, .. } => Some(*observation),
+            ParkedOwner::Empty | ParkedOwner::Available(_) | ParkedOwner::Quarantined(_) => None,
+        }
+    }
+
+    /// Iterate every correlated, unacknowledged recovery observation in
+    /// stable packet-slot order.
+    pub fn recovered_observations(&self) -> impl Iterator<Item = TxRecoveryObservation> + '_ {
+        self.parked.iter().filter_map(|owner| match owner {
+            ParkedOwner::Recovered { observation, .. } => Some(*observation),
             ParkedOwner::Empty | ParkedOwner::Available(_) | ParkedOwner::Quarantined(_) => None,
         })
     }
@@ -557,7 +614,7 @@ where
     /// Copy the fail-closed quarantine record parked at one slot.
     pub fn quarantine_record(&self, slot: PacketSlotId) -> Option<TxRecoveryRecord> {
         match self.parked.get(usize::from(slot.get()))? {
-            ParkedOwner::Quarantined(quarantine) => Some(quarantine.record()),
+            ParkedOwner::Quarantined(quarantine) => Some(quarantine.observation().record()),
             ParkedOwner::Empty | ParkedOwner::Available(_) | ParkedOwner::Recovered { .. } => None,
         }
     }
@@ -565,33 +622,51 @@ where
     /// Iterate every fail-closed quarantine record in stable slot order.
     pub fn quarantine_records(&self) -> impl Iterator<Item = TxRecoveryRecord> + '_ {
         self.parked.iter().filter_map(|owner| match owner {
-            ParkedOwner::Quarantined(quarantine) => Some(quarantine.record()),
+            ParkedOwner::Quarantined(quarantine) => Some(quarantine.observation().record()),
             ParkedOwner::Empty | ParkedOwner::Available(_) | ParkedOwner::Recovered { .. } => None,
         })
     }
 
-    /// Acknowledge one exact recovered record after durable projection.
+    /// Copy the correlated quarantine observation parked at one stable slot.
+    pub fn quarantine_observation(&self, slot: PacketSlotId) -> Option<TxRecoveryObservation> {
+        match self.parked.get(usize::from(slot.get()))? {
+            ParkedOwner::Quarantined(quarantine) => Some(quarantine.observation()),
+            ParkedOwner::Empty | ParkedOwner::Available(_) | ParkedOwner::Recovered { .. } => None,
+        }
+    }
+
+    /// Iterate every correlated quarantine observation in stable packet-slot
+    /// order.
+    pub fn quarantine_observations(&self) -> impl Iterator<Item = TxRecoveryObservation> + '_ {
+        self.parked.iter().filter_map(|owner| match owner {
+            ParkedOwner::Quarantined(quarantine) => Some(quarantine.observation()),
+            ParkedOwner::Empty | ParkedOwner::Available(_) | ParkedOwner::Recovered { .. } => None,
+        })
+    }
+
+    /// Acknowledge one exact correlated recovery observation after durable projection.
     ///
-    /// The full generation-scoped record must still match the parked owner;
+    /// The full generation-scoped observation must still match the parked owner;
     /// stale slot-only acknowledgements cannot release a later recovery after
     /// slot reuse.
     pub fn acknowledge_recovered(
         &mut self,
-        record: TxRecoveryRecord,
+        observation: TxRecoveryObservation,
     ) -> Result<(), NodeTxRecoveryAckError> {
-        if matches!(
-            self.state,
-            NodeTxDataState::Disabled { .. } | NodeTxDataState::Poisoned
-        ) {
+        if matches!(self.state, NodeTxDataState::Poisoned) {
             return Err(NodeTxRecoveryAckError::MachineDisabled);
         }
-        let Some(owner) = self.parked.get_mut(usize::from(record.slot_id().get())) else {
+        let Some(owner) = self
+            .parked
+            .get_mut(usize::from(observation.record().slot_id().get()))
+        else {
             return Err(NodeTxRecoveryAckError::SlotOutsidePool);
         };
         match owner {
             ParkedOwner::Recovered {
-                record: current, ..
-            } if *current != record => Err(NodeTxRecoveryAckError::RecordMismatch),
+                observation: current,
+                ..
+            } if *current != observation => Err(NodeTxRecoveryAckError::ObservationMismatch),
             ParkedOwner::Recovered { .. } => {
                 let parked = mem::replace(owner, ParkedOwner::Empty);
                 let ParkedOwner::Recovered { buffer, .. } = parked else {
@@ -749,7 +824,7 @@ where
                     }
                     Err(quarantine) => {
                         let actual = quarantine.slot_id();
-                        let record = quarantine.record();
+                        let observation = quarantine.observation();
                         if actual != expected_slot || usize::from(actual.get()) != index {
                             return self.disable_prepare(
                                 NodeTxDataFault::AvailableSlotMismatch {
@@ -759,9 +834,9 @@ where
                                 DisabledOwner::Candidate(ParkCandidate::Quarantined(quarantine)),
                             );
                         }
-                        if actual != record.slot_id() {
+                        if actual != observation.record().slot_id() {
                             return self.disable_prepare(
-                                NodeTxDataFault::RecoveryRecordMismatch,
+                                NodeTxDataFault::RecoveryObservationMismatch,
                                 DisabledOwner::Candidate(ParkCandidate::Quarantined(quarantine)),
                             );
                         }
@@ -772,7 +847,10 @@ where
                             );
                         }
                         self.parked[index] = ParkedOwner::Quarantined(quarantine);
-                        NodeTxPrepareResult::RejectedQuarantined { reason, record }
+                        NodeTxPrepareResult::RejectedQuarantined {
+                            reason,
+                            observation,
+                        }
                     }
                 }
             }
@@ -908,9 +986,14 @@ where
                         });
                         NodeTxDataStep::Advanced
                     }
-                    Ok(TxCompletionDisposition::Recovered { buffer, record }) => {
-                        self.state =
-                            NodeTxDataState::Parking(ParkCandidate::Recovered { buffer, record });
+                    Ok(TxCompletionDisposition::Recovered {
+                        buffer,
+                        observation,
+                    }) => {
+                        self.state = NodeTxDataState::Parking(ParkCandidate::Recovered {
+                            buffer,
+                            observation,
+                        });
                         NodeTxDataStep::Advanced
                     }
                     Ok(TxCompletionDisposition::Quarantined(quarantine)) => {
@@ -981,16 +1064,25 @@ where
                     NodeTxDataMode::Running => NodeTxDataStep::AvailableParked(slot),
                 }
             }
-            ParkCandidate::Recovered { buffer, record } => {
+            ParkCandidate::Recovered {
+                buffer,
+                observation,
+            } => {
                 if !matches!(self.mode, NodeTxDataMode::Running) {
                     return self.disable(
                         NodeTxDataFault::InternalInvariant,
-                        DisabledOwner::Candidate(ParkCandidate::Recovered { buffer, record }),
+                        DisabledOwner::Candidate(ParkCandidate::Recovered {
+                            buffer,
+                            observation,
+                        }),
                     );
                 }
-                self.parked[index] = ParkedOwner::Recovered { buffer, record };
+                self.parked[index] = ParkedOwner::Recovered {
+                    buffer,
+                    observation,
+                };
                 self.state = NodeTxDataState::Idle;
-                NodeTxDataStep::RecoveredParked(record)
+                NodeTxDataStep::RecoveredParked(observation)
             }
             ParkCandidate::Quarantined(quarantine) => {
                 if !matches!(self.mode, NodeTxDataMode::Running) {
@@ -999,10 +1091,10 @@ where
                         DisabledOwner::Candidate(ParkCandidate::Quarantined(quarantine)),
                     );
                 }
-                let record = quarantine.record();
+                let observation = quarantine.observation();
                 self.parked[index] = ParkedOwner::Quarantined(quarantine);
                 self.state = NodeTxDataState::Idle;
-                NodeTxDataStep::QuarantinedParked(record)
+                NodeTxDataStep::QuarantinedParked(observation)
             }
         }
     }
@@ -1045,8 +1137,14 @@ where
                 });
                 NodeTxDataStep::FreshRollbackHandled(metadata)
             }
-            Ok(TxCompletionDisposition::Recovered { buffer, record }) => {
-                self.state = NodeTxDataState::Parking(ParkCandidate::Recovered { buffer, record });
+            Ok(TxCompletionDisposition::Recovered {
+                buffer,
+                observation,
+            }) => {
+                self.state = NodeTxDataState::Parking(ParkCandidate::Recovered {
+                    buffer,
+                    observation,
+                });
                 NodeTxDataStep::FreshRollbackHandled(metadata)
             }
             Ok(TxCompletionDisposition::Quarantined(quarantine)) => {
@@ -1434,6 +1532,11 @@ mod tests {
         assert_eq!(job.slot_id(), first_slot);
         assert_eq!(job.attempt_handle(), queued.attempt_handle());
         assert_eq!(job.attempt(), queued.attempt());
+        assert_eq!(job.packet_len(), queued.packet_len());
+        assert_eq!(
+            job.prepared().encoded_packet_sha256(),
+            queued.encoded_packet_sha256()
+        );
         let completion = job
             .return_unpermitted()
             .complete(TxCompletionCode::new(0x251));
@@ -1671,16 +1774,19 @@ mod tests {
             machine.step(&mut owner, MonotonicMillis::new(100)),
             NodeTxDataStep::FreshRollbackHandled(metadata)
         );
-        let record = match machine.step(&mut owner, MonotonicMillis::new(100)) {
-            NodeTxDataStep::RecoveredParked(record) => record,
+        let observation = match machine.step(&mut owner, MonotonicMillis::new(100)) {
+            NodeTxDataStep::RecoveredParked(observation) => observation,
             other => panic!("deadline rollback was not parked recovered: {other:?}"),
         };
+        let record = observation.record();
+        assert_eq!(observation.attempt_handle(), metadata.attempt_handle());
+        assert_eq!(observation.attempt(), metadata.attempt());
         assert_eq!(record.slot_id(), slot);
         assert_eq!(record.reason(), TxRecoveryReason::DeadlineExpired);
         assert!(!record.may_have_transmitted());
         assert_eq!(parked_buffer_pointer(&machine, slot), Some(pointer));
         assert_eq!(machine.parked_kind(slot), Some(NodeTxParkedKind::Recovered));
-        machine.acknowledge_recovered(record).unwrap();
+        machine.acknowledge_recovered(observation).unwrap();
         assert_eq!(machine.parked_kind(slot), Some(NodeTxParkedKind::Available));
     }
 
@@ -2068,7 +2174,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_deadline_recovery_waits_for_generation_scoped_acknowledgement() {
+    fn exact_deadline_recovery_can_be_acknowledged_after_later_machine_fault() {
         let mut owner = node::<1>(13, "recovery-owner");
         let receiver = node::<0>(14, "recovery-receiver");
         register_peer(&mut owner, 14, "recovery-receiver");
@@ -2086,10 +2192,11 @@ mod tests {
         );
         let completion = authorized_completion(&mut owner, job, 20, 0x231);
         drive_completion_to_parking(&mut machine, &mut dispatcher, &mut owner, completion, 100);
-        let record = match machine.step(&mut owner, MonotonicMillis::new(100)) {
-            NodeTxDataStep::RecoveredParked(record) => record,
+        let observation = match machine.step(&mut owner, MonotonicMillis::new(100)) {
+            NodeTxDataStep::RecoveredParked(observation) => observation,
             other => panic!("deadline owner was not parked recovered: {other:?}"),
         };
+        let record = observation.record();
         assert_eq!(record.slot_id(), slot);
         assert_eq!(record.reason(), TxRecoveryReason::DeadlineExpired);
         assert_eq!(record.prior_phase(), TxRecoveryPriorPhase::Authorized);
@@ -2098,18 +2205,74 @@ mod tests {
         assert_eq!(machine.parked_kind(slot), Some(NodeTxParkedKind::Recovered));
         assert_eq!(machine.recovered_record(slot), Some(record));
         assert_eq!(machine.recovered_records().next(), Some(record));
+        assert_eq!(machine.recovered_observation(slot), Some(observation));
+        assert_eq!(machine.recovered_observations().next(), Some(observation));
         assert_eq!(parked_buffer_pointer(&machine, slot), Some(pointer));
 
+        let unexpected = Box::leak(Box::new(TxPacketBuffer::new()));
+        must_fit(
+            dispatcher
+                .returns
+                .try_send(TxOwnerReturn::Available(unexpected)),
+            "unexpected post-seed owner must fit",
+        );
+        assert_eq!(
+            machine.step(&mut owner, MonotonicMillis::new(101)),
+            NodeTxDataStep::Advanced
+        );
+        assert_eq!(
+            machine.step(&mut owner, MonotonicMillis::new(101)),
+            NodeTxDataStep::Disabled(NodeTxDataFault::AvailableAfterSeeding)
+        );
+        assert_eq!(machine.phase(), NodeTxDataPhase::Disabled);
+
         machine
-            .acknowledge_recovered(record)
-            .expect("exact record must acknowledge");
+            .acknowledge_recovered(observation)
+            .expect("already-parked exact observation must acknowledge after a later fault");
+        assert_eq!(machine.phase(), NodeTxDataPhase::Disabled);
         assert_eq!(machine.parked_kind(slot), Some(NodeTxParkedKind::Available));
         assert_eq!(machine.recovered_record(slot), None);
         assert_eq!(parked_buffer_pointer(&machine, slot), Some(pointer));
         assert_eq!(
-            machine.acknowledge_recovered(record),
+            machine.acknowledge_recovered(observation),
             Err(NodeTxRecoveryAckError::NotRecovered)
         );
+    }
+
+    #[test]
+    fn disabled_recovery_candidate_keeps_correlated_scalar_observation() {
+        let mut owner = node::<1>(41, "recovery-residue-owner");
+        let receiver = node::<0>(42, "recovery-residue-receiver");
+        register_peer(&mut owner, 42, "recovery-residue-receiver");
+        let buffer = Box::leak(Box::new(TxPacketBuffer::new()));
+        let (mut machine, mut dispatcher) = new_machine::<1>(&owner);
+        let (slot, _) = park_seed(&mut machine, &mut dispatcher, &mut owner, buffer, 0);
+        let job = prepare(
+            &mut owner,
+            take_available(&mut machine, slot),
+            receiver.destination_hash(),
+            interfaces(&[1]),
+            100,
+            &mut CounterRng::default(),
+        );
+        let completion = authorized_completion(&mut owner, job, 20, 0x239);
+        drive_completion_to_parking(&mut machine, &mut dispatcher, &mut owner, completion, 100);
+        let expected = match &machine.state {
+            NodeTxDataState::Parking(ParkCandidate::Recovered { observation, .. }) => *observation,
+            _ => panic!("recovery candidate was not retained for parking"),
+        };
+
+        machine.parked[usize::from(slot.get())] =
+            ParkedOwner::Available(Box::leak(Box::new(TxPacketBuffer::new())));
+        assert_eq!(
+            machine.step(&mut owner, MonotonicMillis::new(100)),
+            NodeTxDataStep::Disabled(NodeTxDataFault::SlotOccupied(slot))
+        );
+        assert_eq!(
+            machine.fault_residue_kind(),
+            Some(NodeTxDataFaultResidueKind::RecoveredBuffer)
+        );
+        assert_eq!(machine.fault_recovery_observation(), Some(expected));
     }
 
     #[test]
@@ -2132,10 +2295,11 @@ mod tests {
         let code = TxCompletionCode::new(0x241);
         let completion = job.recovery_fault(code);
         drive_completion_to_parking(&mut machine, &mut dispatcher, &mut owner, completion, 20);
-        let record = match machine.step(&mut owner, MonotonicMillis::new(20)) {
-            NodeTxDataStep::QuarantinedParked(record) => record,
+        let observation = match machine.step(&mut owner, MonotonicMillis::new(20)) {
+            NodeTxDataStep::QuarantinedParked(observation) => observation,
             other => panic!("recovery fault was not quarantined: {other:?}"),
         };
+        let record = observation.record();
         assert_eq!(record.slot_id(), slot);
         assert_eq!(record.reason(), TxRecoveryReason::CompletionFault(code));
         assert_eq!(
@@ -2144,6 +2308,8 @@ mod tests {
         );
         assert_eq!(machine.quarantine_record(slot), Some(record));
         assert_eq!(machine.quarantine_records().next(), Some(record));
+        assert_eq!(machine.quarantine_observation(slot), Some(observation));
+        assert_eq!(machine.quarantine_observations().next(), Some(observation));
         assert_eq!(machine.parked_counts().available(), 0);
         assert_eq!(machine.parked_counts().quarantined(), 1);
         assert_eq!(parked_buffer_pointer(&machine, slot), None);

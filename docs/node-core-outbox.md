@@ -4,7 +4,8 @@
 and firmware-excluded RF-inert persistent dispatcher, permit server, and node
 DATA-owner machine with synchronous parked-owner preparation implemented;
 firmware-excluded permanent RF-inert supervisor and async runner implemented;
-no final-disposition projector, firmware RF TX linkage, or radio driver
+portable durable model/projector implemented; no physical-journal
+implementation, firmware RF TX linkage, or radio driver
 **Rete pin:** `f6f5fb0637d00691e09fa0105be4df902405fee4`
 
 ## Purpose and boundary
@@ -114,10 +115,12 @@ dispatch metadata: Unregistered -> Free -> Reserved -> Routed -> Authorized
                                                     RecoveryRequired -> Free
 
 attempt ledger:                   Free -> Reserved -> Active -> Terminal -> Free
-                                                         \-----------> Free
+                                          \-------> Free
 
-Active -> Free:   exact cancellation only when every hop is definitely unsent
-Terminal -> Free: explicit acknowledgement after unique buffer return
+Reserved -> Free: native preparation failure before an attempt becomes active
+Active -> Terminal: proof, timeout, or exact definitely-unsent cancellation
+Terminal -> Free: durable projection and explicit acknowledgement after unique
+                  buffer return
 ```
 
 `Bound(unique TX owner)` is an ownership statement. Only `AuthorizedTx` means
@@ -158,24 +161,31 @@ available buffer. If that cancellation unexpectedly fails, preparation returns
 an owning `TxQuarantine` and leaves the scalar recovery record retained instead
 of pretending the buffer is reusable.
 
-`TxJob` exposes the stable slot, encoded length, complete RNS proof-correlation
-hash, generation-scoped attempt handle, original interface target, selected
-interface, and deadline. It has no byte accessor. Route selection is ascending
-by `PacketInterfaceId` bit, and each subsequent hop receives a fresh checked
+`TxJob` exposes the stable slot, encoded length, preparation-time SHA-256 over
+the complete encoded packet, distinct RNS proof-correlation token,
+generation-scoped attempt handle, original interface target, selected interface,
+and deadline. It has no byte accessor. Route selection is ascending by
+`PacketInterfaceId` bit, and each subsequent hop receives a fresh checked
 generation. Multi-interface fan-out is serialized through the same unique
 buffer; no packet copy or repeated interface is introduced.
 
-The copy-only `NodeTxQueuedHop` metadata reported by the DATA machine now
-preserves that `AttemptHandle` alongside the slot, full attempt token,
-interface, packet length, and deadline. This makes queued work correlatable to
-the later terminal tombstone, but it is not yet a durable intent or final-
-disposition record.
+The copy-only `NodeTxQueuedHop` metadata reported by the DATA machine preserves
+that `AttemptHandle` alongside the slot, full attempt token, interface, packet
+length, full-packet digest, and deadline. `reticulum-submission-projector`
+retains the handle, token, expected length, and expected digest in volatile
+correlation state; the durable record contains no packet slot, generation,
+deadline, or reference.
 
 The adapter independently preflights the current 383-byte plaintext limit and
 bounded receipt table before encryption. `AttemptToken` is the full Reticulum
 hashable-part digest covered by a proof, not SHA-256 of every encoded interface
-byte. Device-API diagnostics must compute their encoded-byte digest separately
-after the authorized byte-access boundary.
+byte. Node-core computes the distinct complete-packet SHA-256 immediately after
+successful preparation and retains it in authoritative queued metadata. The
+RF-inert dispatch inspector independently rehashes the exact frame while it
+holds the authorized byte borrow. The projector requires the preparation and
+sink digests and lengths to agree before retaining an exact planned record;
+only a storage backend's commit or exact readback result permits the live index
+to apply it.
 
 ## Queue rejection and exact rollback
 
@@ -190,14 +200,17 @@ stable slot, dispatch generation, receipt, attempt handle, target, hop, and
 deadline before changing any state and returns the same
 `TxCompletionDisposition` vocabulary as ordinary completion handling.
 
-For a still-active attempt, rollback cancels the exact full-hash RNS receipt
-before freeing the attempt and dispatch metadata. It then restores the same
-external buffer to `Available` and returns its original unique mutable
-reference. If the receipt is unexpectedly missing, or any binding is stale or
-inconsistent, `RollbackFailure` retains the still-bound `TxJob`; the buffer is
-not silently reused. A rollback observed at or after its deadline first enters
-the exact scalar recovery state, then finalizes that matching late owner as
-`Recovered`; it cannot silently bypass deadline accounting. Rollback is
+For a still-active attempt, rollback cancels the exact full-hash RNS receipt and
+commits a retained `Terminal(Unsent(QueueRollback))` tombstone before freeing
+the dispatch metadata. It restores the same external buffer to `Available` and
+returns its original unique mutable reference, but the attempt ledger does not
+become `Free` until that unsent final disposition is durably projected and the
+exact terminal is explicitly acknowledged. If the receipt is unexpectedly
+missing, or any binding is stale or inconsistent, `RollbackFailure` retains the
+still-bound `TxJob`; the buffer is not silently reused. A rollback observed at
+or after its deadline first enters the exact scalar recovery state, then
+finalizes that matching late owner as `Recovered`; it cannot silently bypass
+deadline accounting. Rollback is
 forbidden once any earlier serialized hop was authorized, even if the current
 hop is again in the routed state. The cumulative possibly-transmitted
 classification cannot be erased.
@@ -249,9 +262,11 @@ classifications.
 authoritative scalar dispatch phase. An unpermitted hop advances to the next
 deterministic route only while the attempt is nonterminal and its deadline is
 still in the future. After the final definitely-unsent hop, the exact receipt
-is cancelled only if no prior hop was authorized. Once any hop was authorized,
-the receipt remains live through all later definitely-unsent returns. A proof
-or timeout terminal stops later fan-out while preserving its tombstone.
+is cancelled only if no prior hop was authorized, and the attempt becomes a
+retained unsent terminal rather than immediately free. Once any hop was
+authorized, the receipt remains live through all later definitely-unsent
+returns. A proof or timeout terminal stops later fan-out while preserving its
+tombstone.
 
 ## Exact deadlines and retained recovery
 
@@ -269,13 +284,16 @@ authoritative. A coherent late completion for the exact owner/incarnation,
 slot, generation, interface, and conservative phase returns
 `TxCompletionDisposition::Recovered`; node-core finalizes the metadata and the
 same buffer binding becomes reusable. `NodeTxDataMachine` parks the recovered
-buffer with its complete record and does not expose it as available until the
-future durable projector acknowledges that exact generation-scoped record
-after publishing its final disposition. The current supervisor exposes the
-parked recovery records but deliberately does not perform that projection or
-acknowledgement.
+buffer with its complete generation-safe observation and does not expose it as
+available until exact acknowledgement. The supervisor exposes both the
+observation and acknowledgement facade. `reticulum-submission-projector`
+withholds that action until the transport audit is known committed, although
+no permanent runtime or flash actor drives the two components yet.
 An internally inconsistent same-lease return or an explicit recovery fault
 returns an owning `TxQuarantine` and retains the fail-closed scalar record.
+Before exposing its `TxRecoveryObservation`, quarantine canonicalizes the
+private buffer binding from that authoritative dispatch record; inconsistent
+buffer-side handle or token metadata cannot redefine durable correlation.
 Wrong-owner or stale completions are rejected intact as `TxCompletionFailure`
 and disable the node DATA machine without losing the completion. Recovery never
 invents ownership, and notification loss cannot make a slot reusable.
@@ -297,7 +315,10 @@ occurred.
 hash before changing Rete receipt or proof-deduplication state. Node-core's
 private reservation matches only an active DATA slot with that full hash. The
 same slot becomes `Terminal { Delivered | DeliveryTimeout }`, so terminal
-commit cannot allocate or fill a second queue.
+commit cannot allocate or fill a second queue. A proof or timeout can establish
+that tombstone before permit resolution or frame observation; the projector
+uses the preparation-bound digest and length for direct delivery and permits a
+timeout to finalize without first writing `AwaitingDelivery`.
 
 Unknown DATA hashes, already-terminal hashes and channel candidates are typed
 `ReceiptCorrelationError` invariants, not retryable capacity failures. Rete
@@ -306,8 +327,9 @@ ordinary actions alongside a fault so unrelated maintenance output is not
 lost.
 
 `terminal_attempts()` observes tombstones without removing them.
-`acknowledge_terminal(handle)` frees one only after the dispatcher has durably
-projected the result and no job remains bound. Node identity,
+`acknowledge_terminal(handle)` frees one only after the storage backend has
+proved the exact final record durable, the projector has unlocked that
+acknowledgement, and no job remains bound. Node identity,
 `NodeInstanceId`, ledger index and monotonic generation scope the opaque handle
 against stale copies and ABA reuse. The ledger remains RAM-only and cannot
 rehydrate active Rete receipts or terminal submissions after reset.
@@ -373,14 +395,15 @@ cargo +esp check --locked -p reticulum-tx-supervisor \
   --target xtensa-esp32s3-none-elf
 ```
 
-The 41-test node-core host suite covers stable one-time registration, pointer-stable
+The 43-test node-core host suite covers stable one-time registration, pointer-stable
 no-copy preparation, deadline-before-mutation rejection, empty and deterministic
 multi-interface routes, per-hop generations, exact queue rollback, cumulative
 prior authorization, opaque permit matching, policy and terminal races, exact-
 deadline authorization/reply/frame/completion/maintenance behavior, serialized
 fan-out, coherent late recovery, fault and invariant quarantine, cross-
-incarnation/stale returns, receipt terminal races, tombstone backpressure, and
-exact acknowledgement reuse. A layout guard keeps packet-sized arrays out of
+incarnation/stale returns, completion-metadata tamper quarantine, receipt
+terminal races, tombstone backpressure, and exact acknowledgement reuse. A
+layout guard keeps packet-sized arrays out of
 dispatch slots. Five handoff unit tests cover production-mutex static
 construction, static-reference identity, FIFO ordering, owner/control pressure,
 exact `ChannelFull<T>` returns and mismatched permit replies. Five host-only
@@ -389,13 +412,13 @@ authorized no-RF frame inspection, policy denial, exact-deadline grant
 expiry/recovery, serialized two-interface fan-out with the same owner, and
 terminal-before-authorization suppression. Generic bare-metal and ESP32-S3
 checks compile node-core, the Embassy edge, the RF-inert dispatcher, and the
-permanent supervisor. The 32-test TX-dispatch suite comprises fifteen
+permanent supervisor. The 33-test TX-dispatch suite comprises fifteen
 dispatcher/permit tests covering persistent serialized fan-out, exact-deadline
 late-grant recovery, cancellation of short waits, terminal suppression, absent
 and mismatched reply fail-closed behavior, one-shot policy invocation under
 reply pressure, exact owner restoration under return pressure, inclusive grace
 threshold observation semantics, authorization/recovery orderings, idle
-orphan-reply wakeup, and production-mutex static layout. Seventeen node
+orphan-reply wakeup, and production-mutex static layout. Eighteen node
 DATA-machine tests cover validated fixed-pool seeding, exact buffer identity,
 lowest-slot synchronous preparation, rejection restoration without entropy,
 return and `Next` priority, queue preflight, before/deadline rollback, rollback
@@ -403,12 +426,14 @@ failure retention, final and recovered parking, generation-scoped recovery
 acknowledgement, quarantine, exact owner binding, completion-failure retention,
 cancelled return waits, `Next` pressure/readiness cancellation, and compact
 production-mutex layout.
-The 11-test supervisor suite covers separate and deadline-crossing fresh clock
+The 12-test supervisor suite covers separate and deadline-crossing fresh clock
 samples, the complete RF-denied lifecycle, exact-deadline recovery retention,
-permit-grace reply priority and fault drain, monotonic regression, combined-
-wait cancellation, deadline conversion, common-origin/full-seed construction,
-and static storage. None of these crates is linked into firmware, and there is
-still no driver, radio, or RF path.
+terminal/recovery acknowledgement facades, permit-grace reply priority and
+fault drain, monotonic regression, combined-wait cancellation, deadline
+conversion, common-origin/full-seed construction, and static storage. The
+focused node-core and dispatch suites contain 43 and 33 tests respectively.
+None of these crates is linked into firmware, and there is still no driver,
+radio, or RF path.
 
 ## Next boundary
 
@@ -422,20 +447,23 @@ channels carry jobs and owner returns, depth-one channels isolate permit
 requests/replies, and every send is a non-awaiting `try_send` that returns the
 unchanged value on pressure. The remaining orchestration work is:
 
-1. Define and persist accepted intent plus every final disposition, then build
-   the idempotent projector that durably emits terminal/recovery results before
-   exact acknowledgement. `NodeTxQueuedHop` now includes `AttemptHandle`, but
-   correlation alone does not close this lifecycle.
-2. Merge RX ingress, ordinary RNS tick/actions, and submission handling into
+1. Implement the sole physical storage actor: exact append/readback,
+   reservations for mandatory later records, authenticated complete replay,
+   retention/compaction, and power-fail testing. The portable model and
+   projector do not make their own durability claim.
+2. Merge RX ingress, ordinary RNS tick/actions, durable submission projection,
+   and exact acknowledgement into
    the eventual sole node owner. The current aggregate drives only TX lease
    maintenance and the three TX machines.
-3. Map durable intents and projected dispositions into device API v1 and
-   define reboot recovery without attempting to persist volatile leases or
-   mutable references.
+3. Map persist-before-accept intents and projected dispositions into device API
+   v1, drive the model's conservative boot recovery, and add a proved safe
+   retirement condition for bounded volatile projector slots without
+   attempting to persist leases or mutable references.
 4. Convert allocation-backed ordinary RNS actions into caller-reservable packet
    ownership; the DATA path alone does not cover proofs, announces, forwarding,
    Links or Resources.
-5. Keep every firmware dependency graph TX-free and the radio-bearing lab
-   image RX-only. Only after these boundaries and explicit antenna/load and
-   regional approval may a guarded driver/radio implementation or RF HIL use
-   this path.
+5. Keep every project firmware graph TX-free and all project radio-bearing
+   firmware artifacts RX-only. The separately derived RNode peer is an external
+   guarded development artifact, not a project dependency. Only after these
+   boundaries and explicit antenna/load and regional approval may a guarded
+   driver/radio implementation or RF HIL use this path.
