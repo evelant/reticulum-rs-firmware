@@ -45,16 +45,20 @@ The separate `reticulum-tx-handoff` crate now carries these unique static
 owners through bounded Embassy channels without exposing raw channel handles
 or an owner-taking async send. The firmware-excluded `reticulum-tx-dispatch`
 crate now owns those ports in an RF-inert persistent packet-interface state
-machine and provides the node-side permit server. Synchronous steps retain
-every owning value under backpressure, while short receive waits store a ready
-channel value in persistent state before returning. Its only byte consumer is an
-internal scalar inspector: it has no executor, clock, TX-capable driver/HAL,
-device-API, or pluggable byte-sink dependency and cannot transmit. Node-core's
-transitive portable RX/framing edge supplies no TX capability. A permanent
-supervisor/clock adapter, persistent node-side completion and `Next`-job
-orchestration, firmware integration, a real driver/RF boundary, and durable
-reboot recovery remain open. Every firmware dependency graph remains TX-free,
-and the only radio-bearing firmware artifact remains RX-only.
+machine, provides the node-side permit server, and owns a node DATA machine
+that validates boot seeds into a fixed per-slot owner table. The DATA machine
+reconciles completions through node-core, parks recovered owners until exact
+generation-scoped acknowledgement, and retains/retries serialized `Next` jobs
+unchanged under pressure. Synchronous steps retain every owning value, while
+short waits store a ready return before completing or wait for job capacity
+without moving the job into a future. Its only byte consumer is an internal
+scalar inspector: it has no executor, clock, TX-capable driver/HAL, device-API,
+or pluggable byte-sink dependency and cannot transmit. Node-core's transitive
+portable RX/framing edge supplies no TX capability. A permanent
+supervisor/clock adapter, synchronous preparation from parked owners, firmware
+integration, a real driver/RF boundary, and durable reboot recovery remain
+open. Every firmware dependency graph remains TX-free, and the only
+radio-bearing firmware artifact remains RX-only.
 
 ## Read first
 

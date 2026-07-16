@@ -7,6 +7,12 @@
 //! byte-sink dependency and cannot transmit. Node-core's transitive portable
 //! RX/framing dependency is not a transmit capability.
 //!
+//! [`NodeTxDataMachine`] owns the node-side job/return ports. It validates and
+//! parks the complete registered buffer pool by stable slot, reconciles owning
+//! completions through node-core, withholds recovered buffers until exact
+//! generation-scoped acknowledgement, and retains every serialized `Next` job
+//! unchanged across job-channel pressure.
+//!
 //! [`TxPermitServer`] owns the node side of the scalar permit exchange. It
 //! invokes the caller's synchronous authorization policy at most once per
 //! request—only for a validated live candidate—and retains a reply unchanged
@@ -15,6 +21,14 @@
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+
+mod node_data;
+
+pub use node_data::{
+    NodeTxDataFault, NodeTxDataFaultResidueKind, NodeTxDataMachine, NodeTxDataPhase,
+    NodeTxDataStep, NodeTxDataWait, NodeTxParkedCounts, NodeTxParkedKind, NodeTxQueuedHop,
+    NodeTxRecoveryAckError,
+};
 
 use core::{future::poll_fn, mem, task::Poll};
 

@@ -101,7 +101,7 @@ Claims in READMEs were not treated as proof of embedded portability.
 | Exact `f6f5fb0` receipt/LXMF lifecycle library suites | 502 pass | CI checks the pinned fork directly: 151 transport, 124 stack, 143 LXMF and 84 daemon tests, plus all-target host and `thumbv6m-none-eabi` checks |
 | `reticulum-node-core`, generic bare-metal and ESP32-S3 Xtensa | Pass | External-buffer dispatch metadata, exact attempt ledger, deterministic routing, opaque permit/completion typestates, exact deadlines and retained recovery compile without `std` on both targets; the focused host suite has no async or radio linkage and the current receive-only firmware intentionally does not link it |
 | `reticulum-tx-handoff`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | Static one-time channel-role splitting, exact owner returns, depth-one permit control, and cancellation-safe receive behavior compile on both targets; a host-only manually stepped no-RF harness exercises representative routed DATA paths across the real ports; graph policy keeps the crate outside firmware |
-| `reticulum-tx-dispatch`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The firmware-excluded RF-inert persistent packet-interface machine and node-side permit server retain exact owners/control values across backpressure, use cancellation-safe short waits, and fail closed at the permit recovery grace; fifteen focused host tests exercise these boundaries and graph policy keeps the crate outside firmware |
+| `reticulum-tx-dispatch`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The firmware-excluded RF-inert dispatcher, permit server, and exact-owner-bound fixed per-slot node DATA machine retain owners/control values across backpressure, use cancellation-safe short waits, park recovered owners until exact acknowledgement, and fail closed at the permit recovery grace; fifteen dispatcher/permit plus ten node DATA-machine tests exercise these boundaries and graph policy keeps the crate outside firmware |
 | `reference/rete/examples/esp32s3`: `cargo +esp check --release` | Pass with warnings | Current bare-metal ESP32-S3/SX1262/Wi-Fi integration compiles with the installed ESP toolchain; it targets Heltec WiFi LoRa 32 V3/V4 pins, not the Tracker BSP |
 | Precursor `reticulum-core`/`lxmf` host suites; `micron` host suite | 70 pass; 17 pass | Strong embedded-client interop and hostile-input evidence, including real Nomad/Micron fixtures; the Xous crates still use `std` and are not a bare-metal dependency as-is |
 | `foxhole-micron` host suite | 24 pass | Focused confirmation of links, fields, colors, sections, literal/comment handling and control-character sanitisation; it remains a ratatui/`std` comparison parser |
@@ -227,15 +227,19 @@ graph. The in-RAM ledger cannot rehydrate Rete receipts after reboot and
 ordinary RNS actions are still allocation-backed. The firmware-excluded
 `reticulum-tx-dispatch` crate now drives the portable typestates and handoff as
 an RF-inert persistent state machine, with cancellation-safe short waits and a
-node-side permit server. It has no executor, clock, TX-capable driver/HAL, or
-pluggable byte sink; node-core's transitive portable RX/framing edge supplies
-no TX capability. The scalar dispatch record remains authoritative when an
-owner misses its deadline; a matching late return finalizes/reclaims the exact
-buffer, while faults and same-lease invariants retain an owning quarantine.
-Missing ownership is never fabricated or force-reused. The next slice must add
-a permanent supervisor/clock adapter, persistent node-side completion and
-`Next`-job orchestration, and durable reboot recovery. Every firmware graph
-remains TX-free and the radio-bearing lab image remains RX-only.
+node-side permit server. Its node DATA-owner machine validates the complete
+registered pool into a fixed per-slot table, reconciles completions, withholds
+recovered buffers until exact record acknowledgement, and retains/retries
+serialized `Next` jobs unchanged. The crate has no executor, clock, TX-capable
+driver/HAL, or pluggable byte sink; node-core's transitive portable RX/framing
+edge supplies no TX capability. The scalar dispatch record remains
+authoritative when an owner misses its deadline; a matching late return
+finalizes/reclaims the exact buffer, while faults and same-lease invariants
+retain an owning quarantine. Missing ownership is never fabricated or
+force-reused. The next slice must add synchronous preparation from parked
+owners, a permanent supervisor/clock adapter, and durable reboot recovery.
+Every firmware graph remains TX-free and the radio-bearing lab image remains
+RX-only.
 
 LXMF message and sibling-attempt state must ultimately be persisted before an
 outward terminal event can be lost. The future device-API intent queue remains
@@ -514,17 +518,19 @@ Its split-once, non-`Clone` capabilities expose only ownership-preserving
 exercises representative DATA owner, permit, one-shot frame, completion,
 recovery, and fan-out paths over those ports. `reticulum-tx-dispatch` now owns
 the dispatcher ports in a compact persistent state enum and provides the
-node-side permit server. Synchronous one-transition steps restore exact values
-under channel pressure; short receive waits store a ready value in persistent
-state before returning. On the first step sampling at or after its configured
-grace threshold, any observable exact reply wins regardless of enqueue time.
-With no observable reply, the machine returns its exact owner as a recovery
-fault, disables/quarantines the path, and never guesses authorization.
+node-side permit server plus `NodeTxDataMachine`. The latter consumes the node
+job/return ports, validates and parks the full registered pool by stable slot,
+reconciles completions through node-core, and retries exact `Next` continuations
+under pressure. Synchronous one-transition steps restore exact values; short
+receive waits store a ready value in persistent state before returning. On the
+first dispatcher step sampling at or after its configured grace threshold, any
+observable exact reply wins regardless of enqueue time. With no observable
+reply, the dispatcher returns its exact owner as a recovery fault,
+disables/quarantines the path, and never guesses authorization.
 
-The next product integration must provide a permanent executor supervisor and
-clock adapter plus persistent node-side completion handling. A `Next` job must
-survive job-channel pressure without definitely-unsent rollback after prior
-authorization. `maintain_tx()`, recovery observation, firmware integration,
+The next product integration must add synchronous preparation/submission from
+the parked owner table, then provide a permanent executor supervisor and clock
+adapter. `maintain_tx()`, recovery/terminal projection, firmware integration,
 driver/RF behavior, and reboot/durable recovery also remain open. The current
 slice has no firmware or radio connection; its authorized completion vocabulary
 is conservative metadata and does not claim RF occurred. Every firmware graph

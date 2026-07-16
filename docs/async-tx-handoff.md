@@ -2,9 +2,9 @@
 
 **Status:** portable route/permit/completion/recovery and owning Embassy
 handoff storage implemented and target-checked; firmware-excluded RF-inert
-persistent packet-interface state machine and node-side permit server
-implemented; no permanent executor supervisor, firmware TX graph, or radio
-driver
+persistent packet-interface state machine, node-side permit server, and fixed
+per-slot DATA-owner machine implemented; no permanent executor supervisor,
+firmware TX graph, or radio driver
 **RF status:** compile-disabled until antenna/load and regional authorization
 
 ## Decision
@@ -24,21 +24,27 @@ graph. It has no executor, timer, device-API, TX-capable radio driver/HAL, or
 pluggable byte-sink dependency and cannot transmit. Node-core's transitive
 portable RX/framing edge supplies no TX capability.
 
+Within that crate, `NodeTxDataMachine` consumes the sole node-side job sender
+and owner-return receiver. It validates the complete registered buffer pool at
+boot, parks owners by stable slot, reconciles completions through node-core,
+and retains serialized continuation jobs without exposing raw owners.
+
 ## Ownership topology
 
 Allocate zero-filled buffers in `.bss` with `ConstStaticCell`, then place each
 unique reference into the available/completion channel before tasks start:
 
 ```text
-available/completion channel
-    -> node-local reservation and RNS preparation
+available/completion channel -> NodeTxDataMachine parked-owner table
+    -> future synchronous node-local reservation and RNS preparation
     -> jobs channel
     -> one persistent packet-interface dispatcher
     -> available/completion channel
 ```
 
 The node actor is the sole consumer of available/completed buffers and the
-sole producer of jobs. One dispatcher owns every enabled packet interface and
+sole producer of jobs; `NodeTxDataMachine` owns both capabilities. One
+dispatcher owns every enabled packet interface and
 has the inverse channel roles; it serializes each route and invokes the
 selected interface internally. Independent per-interface actors would instead
 require per-interface queues or a routing dispatcher in front of them, because
@@ -47,9 +53,10 @@ Both owner-channel capacities equal the pool size. The separate permit-request
 and permit-reply channels each have depth one, matching the single serialized
 dispatcher. While one endpoint owns a buffer, its outbound owner channel can
 contain at most every other buffer; a send is therefore capacity-infallible if
-the endpoints remain encapsulated. An unexpected full result returns the exact
-non-`Copy` value in `ChannelFull<T>` and becomes an invariant fault, never a
-drop or duplication.
+the endpoints remain encapsulated. An unexpected full result always returns
+the exact non-`Copy` value in `ChannelFull<T>`, never a drop or duplication.
+The node DATA machine specifically retains and retries a pressured `Next`
+continuation because an earlier hop may already have been authorized.
 
 `TxHandoff::split(&'static mut self)` consumes the unique reference normally
 obtained from `ConstStaticCell` and creates one `NodeHandoff` plus one
@@ -70,7 +77,10 @@ performs one consuming transition and restores an exact value immediately if a
 `try_send` is full. `wait_for_input()` and the permit server's
 `wait_for_request()` return no owner; once an Embassy receive becomes ready,
 they assign the value to persistent state in the same poll before reporting
-readiness.
+readiness. `NodeTxDataMachine::wait_for_progress()` likewise assigns a ready
+owner return before completing. When a `Next` job is pressured, it polls only
+non-owning job-channel readiness while the exact job remains in persistent
+machine state.
 
 Those helpers make cancellation of a still-pending short wait safe. They do not
 make cancellation of the top-level owner safe: a `StaticCell` cannot reacquire
@@ -243,9 +253,12 @@ Supervisor notifications are observational and may coalesce or drop under
 pressure without losing the retained recovery state. When the exact late owner
 returns with the conservative completion class implied by its prior phase,
 node-core finalizes that record and returns `Recovered { buffer, record }`; the
-buffer is then reusable. A same-lease metadata mismatch or reported recovery
-fault instead returns an owning `TxQuarantine` and keeps the scalar record
-fail-closed. A foreign or stale completion is rejected intact, not reclaimed.
+buffer binding is then reusable. The node DATA machine nevertheless parks the
+buffer with its complete record until the permanent supervisor durably projects
+and acknowledges that exact instance/slot/dispatch generation. A same-lease
+metadata mismatch or reported recovery fault instead returns an owning
+`TxQuarantine` and keeps the scalar record fail-closed. A foreign or stale
+completion is rejected intact, not reclaimed.
 
 - Before authorization: deny later permits and request a definitely-unsent
   cooperative return.
@@ -300,6 +313,10 @@ Implemented and host/target-testable without RF:
   synchronous stepping, exact backpressure restoration, cancellation-safe
   short waits, permit-grace quarantine behavior, and a node-side permit server
   that authorizes once and retains a pressured reply;
+- `NodeTxDataMachine` validated boot seeding into a fixed per-slot owner table,
+  completion reconciliation, exact recovered-record acknowledgement,
+  completion-failure retention, and unchanged retry of pressured serialized
+  `Next` jobs;
 - stable-address/no-copy, pressure, cancelled-receive, crossed-reply,
   stale-token, delayed-reply, terminal-race, cumulative-authorization, and
   late-recovery tests;
@@ -311,14 +328,12 @@ Implemented and host/target-testable without RF:
 - exact handoff/dispatcher dependency contracts plus dependency/feature guards
   that keep Tracker TX unavailable.
 
-The next product slice is a permanent executor supervisor and clock adapter
-around the persistent machine, together with node-side persistent handling of
-owning returns. In particular, a `TxCompletionDisposition::Next` job must be
-retained and retried under job-channel pressure; it cannot use
-`rollback_queued()` after an earlier route was authorized. `maintain_tx()` and
-recovery observations also still need permanent node-owner orchestration. The
-handoff and dispatcher remain outside every firmware graph, and no driver or
-radio path consumes either crate.
+The next product slice is the synchronous preparation/submission operation that
+consumes an internally parked available owner, followed by a permanent executor
+supervisor and clock adapter around all three machines. `maintain_tx()`, exact
+recovery/terminal projection, and durable intent state also still need
+permanent node-owner orchestration. The handoff and dispatcher remain outside
+every firmware graph, and no driver or radio path consumes either crate.
 
 The graph policy checks every current Tracker profile and the Cargo
 `--all-features` closure for both `reticulum-node-core` and

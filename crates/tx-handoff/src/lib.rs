@@ -105,6 +105,17 @@ where
         try_enqueue(self.channel, job)
     }
 
+    /// Poll until the job channel can accept one value without moving a job
+    /// into a send future.
+    ///
+    /// This is intended for a persistent owner machine that already retains a
+    /// non-`Copy` job across backpressure. Readiness remains advisory unless
+    /// that machine owns this sole producer role and immediately retries
+    /// `try_send` after waking.
+    pub fn poll_ready_to_send(&mut self, context: &mut Context<'_>) -> Poll<()> {
+        self.channel.poll_ready_to_send(context)
+    }
+
     /// Configured packet-pool and channel capacity.
     pub const fn capacity(&self) -> usize {
         POOL_SIZE

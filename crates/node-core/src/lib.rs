@@ -124,6 +124,25 @@ impl NodeInstanceId {
     }
 }
 
+/// Opaque scalar binding for one Reticulum identity and in-memory node-owner
+/// incarnation.
+///
+/// This is correlation metadata, not authorization. It lets a persistent
+/// external owner machine reject accidental substitution of another
+/// [`NodeCore`] before consuming a unique return.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TxOwnerScope {
+    owner_identity: [u8; 16],
+    instance: NodeInstanceId,
+}
+
+impl TxOwnerScope {
+    /// Caller-supplied incarnation included in this exact owner binding.
+    pub const fn instance_id(self) -> NodeInstanceId {
+        self.instance
+    }
+}
+
 /// Monotonic time in whole seconds for RNS path and receipt state.
 ///
 /// This is deliberately distinct from executor ticks, milliseconds and Unix
@@ -664,6 +683,30 @@ pub enum BufferRegistrationError {
     },
     /// This buffer is already registered or bound to a dispatch.
     AlreadyRegistered,
+}
+
+/// Read-only validation failure for a supposedly reusable packet buffer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AvailableBufferError {
+    /// The packet buffer was never registered with any node owner.
+    Unregistered,
+    /// The packet buffer belongs to another node owner or incarnation.
+    ForeignOwner,
+    /// The packet buffer is still bound to an active dispatch.
+    Busy,
+    /// Buffer registration and node dispatch metadata disagree.
+    MetadataInvariant,
+}
+
+impl From<AvailableBufferError> for SubmitError {
+    fn from(error: AvailableBufferError) -> Self {
+        match error {
+            AvailableBufferError::Unregistered => Self::UnregisteredPacketBuffer,
+            AvailableBufferError::ForeignOwner => Self::ForeignPacketBuffer,
+            AvailableBufferError::Busy => Self::PacketBufferBusy,
+            AvailableBufferError::MetadataInvariant => Self::PacketBufferInvariant,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1794,6 +1837,14 @@ impl<
         self.instance
     }
 
+    /// Opaque exact-owner binding for persistent TX orchestration.
+    pub const fn tx_owner_scope(&self) -> TxOwnerScope {
+        TxOwnerScope {
+            owner_identity: self.owner_identity,
+            instance: self.instance,
+        }
+    }
+
     /// Cache one peer identity for deterministic direct sending or tests.
     /// Learned announces will eventually drive the same native identity table.
     pub fn register_peer(
@@ -1848,6 +1899,45 @@ impl<
             slot,
         };
         self.next_registration = Self::next_dispatch_index(index);
+        Ok(slot)
+    }
+
+    /// Validate that one external packet buffer is currently reusable by this
+    /// exact node owner without mutating either side.
+    ///
+    /// This is the boot-seed and owner-pool counterpart to preparation's
+    /// transactional validation. Success returns the stable registered slot;
+    /// it does not reserve the buffer or make later preparation infallible.
+    pub fn validate_available_buffer(
+        &self,
+        buffer: &TxPacketBuffer,
+    ) -> Result<PacketSlotId, AvailableBufferError> {
+        let (owner_identity, instance, slot) = match buffer.binding {
+            BufferBinding::Unregistered => return Err(AvailableBufferError::Unregistered),
+            BufferBinding::Available {
+                owner_identity,
+                instance,
+                slot,
+            } => (owner_identity, instance, slot),
+            BufferBinding::Bound { prepared, .. } => {
+                return if prepared.handle.owner_identity == self.owner_identity
+                    && prepared.handle.instance == self.instance
+                {
+                    Err(AvailableBufferError::Busy)
+                } else {
+                    Err(AvailableBufferError::ForeignOwner)
+                };
+            }
+        };
+        if owner_identity != self.owner_identity || instance != self.instance {
+            return Err(AvailableBufferError::ForeignOwner);
+        }
+        if !matches!(
+            self.dispatches.get(slot.index()).map(|entry| entry.state),
+            Some(DispatchState::Free)
+        ) {
+            return Err(AvailableBufferError::MetadataInvariant);
+        }
         Ok(slot)
     }
 
@@ -2569,32 +2659,7 @@ impl<
         &mut self,
         buffer: &TxPacketBuffer,
     ) -> Result<(PacketSlotId, AttemptRef, u64, u64), SubmitError> {
-        let (owner_identity, instance, slot) = match buffer.binding {
-            BufferBinding::Unregistered => return Err(SubmitError::UnregisteredPacketBuffer),
-            BufferBinding::Available {
-                owner_identity,
-                instance,
-                slot,
-            } => (owner_identity, instance, slot),
-            BufferBinding::Bound { prepared, .. } => {
-                return if prepared.handle.owner_identity == self.owner_identity
-                    && prepared.handle.instance == self.instance
-                {
-                    Err(SubmitError::PacketBufferBusy)
-                } else {
-                    Err(SubmitError::ForeignPacketBuffer)
-                };
-            }
-        };
-        if owner_identity != self.owner_identity || instance != self.instance {
-            return Err(SubmitError::ForeignPacketBuffer);
-        }
-        if !matches!(
-            self.dispatches.get(slot.index()).map(|entry| entry.state),
-            Some(DispatchState::Free)
-        ) {
-            return Err(SubmitError::PacketBufferInvariant);
-        }
+        let slot = self.validate_available_buffer(buffer)?;
 
         let mut attempt_slot = self.next_attempt;
         let mut free_attempt = None;
@@ -3248,6 +3313,68 @@ mod tests {
         assert_eq!(second.slot_id().unwrap().get(), 1);
         assert_eq!(extra.slot_id(), None);
         assert_eq!(owner.capacities().packet_buffers_registered, 2);
+    }
+
+    #[test]
+    fn available_buffer_validation_is_read_only_owner_bound_and_state_exact() {
+        let mut owner = node::<2, 1>(73, "validation-owner");
+        let mut other = node::<2, 1>(74, "validation-other");
+        let receiver = node::<2, 0>(75, "validation-receiver");
+        register_receiver(&mut owner, 75, "validation-receiver");
+        let mut buffer = TxPacketBuffer::new();
+        let mut foreign = TxPacketBuffer::new();
+        let unregistered = TxPacketBuffer::new();
+        let slot = owner.register_packet_buffer(&mut buffer).unwrap();
+        other.register_packet_buffer(&mut foreign).unwrap();
+
+        let before = owner.capacities();
+        assert_eq!(owner.validate_available_buffer(&buffer), Ok(slot));
+        assert_eq!(
+            owner.validate_available_buffer(&unregistered),
+            Err(AvailableBufferError::Unregistered)
+        );
+        assert_eq!(
+            owner.validate_available_buffer(&foreign),
+            Err(AvailableBufferError::ForeignOwner)
+        );
+        assert_eq!(owner.capacities(), before);
+
+        let mut rng = CounterRng::default();
+        let job = prepare(
+            &mut owner,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"validation busy",
+            1,
+            &mut rng,
+        );
+        let busy_before = owner.capacities();
+        assert_eq!(
+            owner.validate_available_buffer(job.owner.buffer),
+            Err(AvailableBufferError::Busy)
+        );
+        assert_eq!(owner.capacities(), busy_before);
+        let disposition = match owner.rollback_queued(job, owner_time(1_100)) {
+            Ok(disposition) => disposition,
+            Err(failure) => panic!("fresh job must roll back: {:?}", failure.reason()),
+        };
+        let buffer = match disposition {
+            TxCompletionDisposition::Available(buffer) => buffer,
+            TxCompletionDisposition::Recovered { .. } => panic!("fresh rollback recovered"),
+            TxCompletionDisposition::Next(_) => panic!("fresh rollback continued fanout"),
+            TxCompletionDisposition::Quarantined(_) => panic!("fresh rollback quarantined"),
+        };
+        assert_eq!(owner.validate_available_buffer(buffer), Ok(slot));
+
+        owner.dispatches[slot.index()].state = DispatchState::Unregistered;
+        let invariant_before = owner.capacities();
+        assert_eq!(
+            owner.validate_available_buffer(buffer),
+            Err(AvailableBufferError::MetadataInvariant)
+        );
+        assert_eq!(owner.capacities(), invariant_before);
+        owner.dispatches[slot.index()].state = DispatchState::Free;
+        assert_eq!(owner.validate_available_buffer(buffer), Ok(slot));
     }
 
     #[test]

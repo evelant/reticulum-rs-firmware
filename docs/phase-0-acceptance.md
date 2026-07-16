@@ -231,6 +231,11 @@ Together these boundaries currently enforce:
 - exact-receipt rollback only for a definitely-unsent job with no earlier
   authorized hop, cumulative receipt retention after any authorization, and
   terminal acknowledgement blocked while any typestate still owns its buffer;
+- read-only exact-owner validation of reusable buffers, fixed per-slot boot
+  parking, completion reconciliation, and unchanged retry of every serialized
+  `Next` job under job-channel pressure;
+- recovered-owner parking until exact generation-scoped record
+  acknowledgement and fail-closed retention of completion validation faults;
 - allocation-free adapter/transport counters and capacity snapshots;
 - suppression of Rete's premature responder `LinkEstablished` event until the
   native Link actually reaches `Active`.
@@ -244,11 +249,12 @@ The portable external-buffer route/permit/completion/recovery slice, bounded
 Embassy handoff, and firmware-excluded `reticulum-tx-dispatch` crate have
 focused host suites plus generic RISC-V and ESP32-S3 checks. The dispatcher is
 an RF-inert persistent packet-interface state machine with cancellation-safe
-short waits; its companion permit server owns the node-side scalar exchange.
-There is still no executor-driven permanent supervisor or clock adapter,
-persistent node-side completion/`Next` orchestration, firmware connection,
-driver, radio integration, or claim that RF occurred. All firmware graphs
-remain TX-free, and the only radio-bearing firmware artifact remains RX-only.
+short waits; its companion permit server owns the node-side scalar exchange,
+and its node DATA machine owns the job/return ports plus fixed parked-owner
+table. There is still no executor-driven permanent supervisor or clock
+adapter, synchronous preparation from that table, firmware connection, driver,
+radio integration, or claim that RF occurred. All firmware graphs remain
+TX-free, and the only radio-bearing firmware artifact remains RX-only.
 
 ## Rete production hard gates
 
