@@ -77,6 +77,7 @@ jobs:
           -p reticulum-node-core
           -p reticulum-tx-dispatch
           -p reticulum-tx-handoff
+          -p reticulum-tx-supervisor
           -p reticulum-rns-conformance
           -p reticulum-rns-rete
           -p reticulum-rns-rete-rx
@@ -212,11 +213,12 @@ jobs:
       - name: Install pinned offline image tool
         run: cargo install --locked --force --version 4.5.0 espflash
 
-      - name: Check portable node, dispatcher, handoff and device-API cores for ESP32-S3
+      - name: Check portable node, TX machines and device-API cores for ESP32-S3
         run: >-
           cargo +esp check --locked
           -p reticulum-device-api -p reticulum-node-core
           -p reticulum-tx-dispatch -p reticulum-tx-handoff
+          -p reticulum-tx-supervisor
           --target xtensa-esp32s3-none-elf
 
       - name: Link RF-inert Tracker firmware

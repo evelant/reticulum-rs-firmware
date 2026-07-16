@@ -1,0 +1,26 @@
+[package]
+name = "reticulum-tx-supervisor"
+description = "Permanent RF-inert supervisor for Reticulum TX ownership machines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+embassy-futures.workspace = true
+embassy-sync.workspace = true
+embassy-time.workspace = true
+rand_core.workspace = true
+reticulum-node-core = { path = "../node-core", default-features = false }
+reticulum-tx-dispatch = { path = "../tx-dispatch", default-features = false }
+
+[dev-dependencies]
+reticulum-tx-handoff = { path = "../tx-handoff", default-features = false }
+static_cell.workspace = true
+
+[lib]
+path = "src/lib.rs"

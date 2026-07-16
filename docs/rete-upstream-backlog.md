@@ -381,10 +381,21 @@ acknowledgement, retries `Next` unchanged, synchronously prepares fresh DATA
 from the lowest available parked owner, uses cancellation-safe short waits, and
 fails closed rather than guessing authorization when a recovery step at or
 after its configured grace threshold observes no exact permit reply. The
-remaining product blockers are the permanent executor supervisor/clock
-adapter, `maintain_tx()` and fault/recovery observation, firmware/driver
-integration, durable intent/attempt recovery, bounded ordinary RNS actions, and
-higher-level LXMF persistence.
+firmware-excluded `reticulum-tx-supervisor` crate now owns node-core and those
+three TX machines in one permanent aggregate. Its async runner takes a fresh
+checked clock sample before maintenance/DATA/permit/dispatcher, waits for the
+exact earlier live-owner deadline or permit grace, yields after 16 productive
+passes and every selected wake, and selects only phase-compatible cancellation-
+safe waits.
+`RfInertTxPolicy` denies RF, and retained faults stop new preparation and policy
+while owner-draining transitions continue where possible.
+
+Queued-hop metadata now includes the generation-scoped `AttemptHandle`, but the
+remaining product blockers are durable intent and final-disposition state, an
+idempotent terminal/recovery projector and acknowledgement path, eventual sole-
+owner integration of RX plus ordinary RNS tick/actions, firmware/driver
+integration, durable reboot recovery, caller-reservable bounded construction
+for those ordinary outbound actions, and higher-level LXMF persistence.
 Until those slices and radio policy are connected, no device-facing/device-API
 host send operation or firmware RF TX graph uses this path. Every current
 firmware graph remains TX-free, and the only radio-bearing lab artifact remains

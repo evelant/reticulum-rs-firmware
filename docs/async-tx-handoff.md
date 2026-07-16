@@ -3,8 +3,9 @@
 **Status:** portable route/permit/completion/recovery and owning Embassy
 handoff storage implemented and target-checked; firmware-excluded RF-inert
 persistent packet-interface state machine, node-side permit server, and fixed
-per-slot DATA-owner machine with synchronous preparation implemented; no
-permanent executor supervisor, firmware TX graph, or radio driver
+per-slot DATA-owner machine with synchronous preparation implemented;
+firmware-excluded permanent RF-inert supervisor and async runner implemented;
+no firmware TX graph or radio driver
 **RF status:** compile-disabled until antenna/load and regional authorization
 
 ## Decision
@@ -29,6 +30,13 @@ and owner-return receiver. It validates the complete registered buffer pool at
 boot, parks owners by stable slot, reconciles completions through node-core,
 retains serialized continuation jobs, and synchronously prepares fresh DATA
 from parked owners without exposing raw owners.
+
+The separate firmware-excluded `reticulum-tx-supervisor` crate owns one exact
+node-core, DATA machine, permit server, RF-inert dispatcher, authorization
+policy, and monotonic clock contract in a permanent aggregate. It has no
+firmware, radio/HAL, flash, or device-API dependency. Its initial
+`RfInertTxPolicy` denies every RF authorization. The aggregate/run-loop
+contract is detailed in [RF-inert permanent TX supervisor](tx-supervisor.md).
 
 ## Ownership topology
 
@@ -94,10 +102,14 @@ machine state.
 
 Those helpers make cancellation of a still-pending short wait safe. They do not
 make cancellation of the top-level owner safe: a `StaticCell` cannot reacquire
-a lost unique `&'static mut` runtime reference. Firmware integration therefore
-still needs a permanent, non-cancelled supervisor task plus a monotonic clock
-adapter, or an explicit reboot recovery design. Neither exists in the current
-firmware.
+a lost unique `&'static mut` runtime reference. `TxSupervisor::run()` now
+provides the permanent aggregate-owning async loop. It executes at most 16
+immediately productive complete passes before yielding, yields again after
+every selected wake, and its quiescent `select` includes only waits compatible with the current DATA, permit, and
+dispatcher phases plus the next absolute deadline. Losing waits retain their
+values in channels or persistent state. The task borrowing the aggregate for
+`'static` must itself never be cancelled; explicit reboot recovery remains a
+future product boundary, and no firmware currently spawns this runner.
 
 The return path carries more than the bare reference. Node-core already
 provides non-`Copy` owning typestates whose payload remains one buffer pointer
@@ -300,6 +312,16 @@ never guesses whether authorization occurred. Permit-request pressure follows
 the same fail-closed principle and retains an unsent request when its grace
 expires.
 
+The permanent supervisor samples its monotonic source separately before
+`maintain_tx()`, the DATA machine, the permit server/policy, and the dispatcher;
+no lane receives a stale sample borrowed from another transition. Node-core
+exposes its exact earliest live owner deadline, and the supervisor combines
+that with an active permit-exchange grace deadline for the next absolute wake.
+A monotonic regression is retained as a permanent fault. Other permanent
+faults stop fresh preparation and further policy calls while DATA and
+dispatcher stepping continue to drain exact owners where their state machines
+permit.
+
 `lora-phy` 3.0.1 waits for DIO1 with SX1262 hardware TX timeout disabled and
 warns against cancelling IRQ processing. It enables the RF switch and issues
 `SetTx(0)` before that unbounded wait. MCU reset alone is therefore not an
@@ -333,6 +355,10 @@ Implemented and host/target-testable without RF:
   queue preflight, exact preparation-rejection restoration, clocked fresh-job
   rollback, completion reconciliation, exact recovered-record acknowledgement,
   failure retention, and unchanged retry of pressured serialized `Next` jobs;
+- `reticulum-tx-supervisor` permanent ownership of node-core and all three TX
+  machines, fresh checked clock samples for every lane, exact deadline/grace
+  wake selection, phase-gated cancellation-safe waits, bounded 16-pass yields,
+  retained fault gating, and the RF-denying `RfInertTxPolicy`;
 - stable-address/no-copy, pressure, cancelled-receive, crossed-reply,
   stale-token, delayed-reply, terminal-race, cumulative-authorization, and
   late-recovery tests;
@@ -341,20 +367,25 @@ Implemented and host/target-testable without RF:
   fan-out, and terminal-before-authorization suppression across the real
   handoff ports;
 - generic RISC-V and ESP32-S3 compilation; and
-- exact handoff/dispatcher dependency contracts plus dependency/feature guards
-  that keep Tracker TX unavailable.
+- exact handoff/dispatcher/supervisor dependency contracts plus dependency/
+  feature guards that keep Tracker TX unavailable.
 
-The next product slice is a permanent executor supervisor and monotonic clock
-adapter around all three machines. `maintain_tx()`, exact recovery/terminal
-projection, and durable intent state also still need permanent node-owner
-orchestration. The handoff and dispatcher remain outside every firmware graph,
-and no driver or radio path consumes either crate.
+The next product slice is the durable intent/final-disposition model and its
+idempotent projector. Queued-hop metadata now includes the generation-scoped
+`AttemptHandle`, but no component yet persists the accepted intent, maps every
+terminal/recovery/quarantine result to a final disposition, or performs durable
+projection before `acknowledge_terminal()` and `acknowledge_recovered()`.
+Ordinary RNS tick/actions, RX ingress, and submission handling must eventually
+join this aggregate under the sole node owner. The handoff, dispatcher, and
+supervisor remain outside every firmware graph, and no driver or radio path
+consumes them.
 
 The graph policy checks every current Tracker profile and the Cargo
 `--all-features` closure for both `reticulum-node-core` and
-`reticulum-tx-handoff`, and keeps `reticulum-tx-dispatch` outside every firmware
-graph. Adding a feature-only transitive ownership path therefore fails before a
-new firmware feature can bypass the reviewed list.
+`reticulum-tx-handoff`, and keeps both `reticulum-tx-dispatch` and
+`reticulum-tx-supervisor` outside every firmware graph. Adding a feature-only
+transitive ownership path therefore fails before a new firmware feature can
+bypass the reviewed list.
 
 Still requires explicit antenna/load and regional authorization:
 

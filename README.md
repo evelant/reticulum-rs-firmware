@@ -58,11 +58,27 @@ owning value, while short waits store a ready return before completing or wait
 for `Next` capacity without moving the job into a future. Its only byte consumer
 is an internal scalar inspector: it has no executor, clock, TX-capable
 driver/HAL, device-API, or pluggable byte-sink dependency and cannot transmit.
-Node-core's transitive portable RX/framing edge supplies no TX capability. A
-permanent supervisor/clock adapter, firmware integration, a real driver/RF
-boundary, and durable reboot recovery remain open. Every firmware dependency
-graph remains TX-free, and the only radio-bearing firmware artifact remains
-RX-only.
+Node-core's transitive portable RX/framing edge supplies no TX capability.
+
+A separate firmware-excluded `reticulum-tx-supervisor` crate now owns
+node-core, the DATA machine, permit server, RF-inert dispatcher, authorization
+policy, and monotonic clock contract in one permanent aggregate. Its async
+runner samples the clock separately before maintenance and every machine lane,
+waits for the exact next node-owner deadline or permit-recovery grace, yields
+after at most 16 immediately productive passes and every selected wake, and races only
+phase-compatible cancellation-safe waits. `RfInertTxPolicy` denies every RF
+authorization. Retained faults stop fresh preparation and further policy calls
+while DATA and dispatcher stepping continue to drain exact owners where their
+APIs permit.
+
+This is still not the final product node owner. It does not run ordinary RNS
+tick/actions, merge RX ingress, persist accepted intents or final dispositions,
+project/acknowledge terminal and recovery records, or serve device-API
+requests. Queued-hop metadata now carries the generation-scoped
+`AttemptHandle`, but the durable intent-to-final-disposition projector remains
+open. The supervisor has no firmware edge, radio/HAL, or RF path. Every
+firmware dependency graph remains TX-free, and the only radio-bearing firmware
+artifact remains RX-only.
 
 ## Read first
 
@@ -75,6 +91,7 @@ RX-only.
 - [Device API v1 logical protocol](docs/api/device-api-v1.md)
 - [Bounded node-core external-buffer DATA dispatch](docs/node-core-outbox.md)
 - [Owning async TX handoff](docs/async-tx-handoff.md)
+- [RF-inert permanent TX supervisor](docs/tx-supervisor.md)
 - [Rete upstream hardening backlog](docs/rete-upstream-backlog.md)
 - [Dependency provenance](docs/provenance.md)
 
@@ -111,6 +128,7 @@ cargo check --locked \
   -p reticulum-node-core \
   -p reticulum-tx-handoff \
   -p reticulum-tx-dispatch \
+  -p reticulum-tx-supervisor \
   -p reticulum-radio-interface \
   -p reticulum-board-heltec-tracker-v2 \
   --target riscv32imac-unknown-none-elf
@@ -119,6 +137,7 @@ cargo +esp check --locked \
   -p reticulum-node-core \
   -p reticulum-tx-handoff \
   -p reticulum-tx-dispatch \
+  -p reticulum-tx-supervisor \
   --target xtensa-esp32s3-none-elf
 cargo +esp build --locked --release \
   -p reticulum-heltec-tracker-v2 \

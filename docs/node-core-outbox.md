@@ -2,8 +2,9 @@
 
 **Status:** portable route/permit/completion/recovery, owning handoff storage,
 and firmware-excluded RF-inert persistent dispatcher, permit server, and node
-DATA-owner machine with synchronous parked-owner preparation implemented; no
-executor supervisor, firmware RF TX linkage, or radio driver
+DATA-owner machine with synchronous parked-owner preparation implemented;
+firmware-excluded permanent RF-inert supervisor and async runner implemented;
+no final-disposition projector, firmware RF TX linkage, or radio driver
 **Rete pin:** `f6f5fb0637d00691e09fa0105be4df902405fee4`
 
 ## Purpose and boundary
@@ -32,6 +33,12 @@ clock, TX-capable driver/HAL, or firmware dependency; node-core's transitive
 portable RX/framing edge supplies no TX capability. A future local-session
 dispatcher is a different boundary: it will depend on both node-core and
 device-api and map their types explicitly.
+
+`reticulum-tx-supervisor` is a separate firmware-excluded edge. It owns one
+exact node-core, the DATA machine, permit server, RF-inert dispatcher,
+authorization policy, and monotonic clock contract in a permanent aggregate.
+It provides both complete synchronous passes and a never-returning async run
+loop, but has no firmware, radio/HAL, flash, or device-API dependency.
 
 `TxJob`, permit requests/replies, completions, buffers, and recovery records do
 not expose packet bytes. Only an exactly matched `AuthorizedTx` can borrow the
@@ -64,8 +71,17 @@ Terminal, expired, recovery-required, or invalid requests bypass policy.
 Cancellation while a short wait remains pending leaves the item in its Embassy
 channel. The DATA machine stores a ready return in persistent state before its
 wait completes and waits for `Next` capacity without putting the job into the
-future. The still-missing permanent top-level supervisor must itself never be
-cancelled.
+future. `TxSupervisor::run()` now selects those phase-compatible waits plus the
+next absolute deadline; the permanent top-level task borrowing the aggregate
+must itself never be cancelled.
+
+Each complete supervisor pass takes a fresh checked monotonic sample before
+lease maintenance, DATA processing, permit/policy processing, and dispatcher
+processing. `NodeCore::next_tx_deadline()` supplies the earliest live owner
+deadline; the supervisor combines it with the active permit-recovery grace and
+waits for the exact earlier instant. Sustained progress yields after 16 passes.
+A retained fault blocks fresh preparation and further policy calls while DATA
+and dispatcher stepping continue to drain exact owners where possible.
 
 ## External ownership and registration
 
@@ -148,6 +164,12 @@ interface, and deadline. It has no byte accessor. Route selection is ascending
 by `PacketInterfaceId` bit, and each subsequent hop receives a fresh checked
 generation. Multi-interface fan-out is serialized through the same unique
 buffer; no packet copy or repeated interface is introduced.
+
+The copy-only `NodeTxQueuedHop` metadata reported by the DATA machine now
+preserves that `AttemptHandle` alongside the slot, full attempt token,
+interface, packet length, and deadline. This makes queued work correlatable to
+the later terminal tombstone, but it is not yet a durable intent or final-
+disposition record.
 
 The adapter independently preflights the current 383-byte plaintext limit and
 bounded receipt table before encryption. `AttemptToken` is the full Reticulum
@@ -248,7 +270,10 @@ slot, generation, interface, and conservative phase returns
 `TxCompletionDisposition::Recovered`; node-core finalizes the metadata and the
 same buffer binding becomes reusable. `NodeTxDataMachine` parks the recovered
 buffer with its complete record and does not expose it as available until the
-supervisor acknowledges that exact generation-scoped record after projection.
+future durable projector acknowledges that exact generation-scoped record
+after publishing its final disposition. The current supervisor exposes the
+parked recovery records but deliberately does not perform that projection or
+acknowledgement.
 An internally inconsistent same-lease return or an explicit recovery fault
 returns an owning `TxQuarantine` and retains the fail-closed scalar record.
 Wrong-owner or stale completions are rejected intact as `TxCompletionFailure`
@@ -340,9 +365,15 @@ cargo check --locked -p reticulum-tx-dispatch \
   --target riscv32imac-unknown-none-elf
 cargo +esp check --locked -p reticulum-tx-dispatch \
   --target xtensa-esp32s3-none-elf
+cargo test --locked -p reticulum-tx-supervisor
+cargo clippy --locked -p reticulum-tx-supervisor --all-targets -- -D warnings
+cargo check --locked -p reticulum-tx-supervisor \
+  --target riscv32imac-unknown-none-elf
+cargo +esp check --locked -p reticulum-tx-supervisor \
+  --target xtensa-esp32s3-none-elf
 ```
 
-The focused host suite covers stable one-time registration, pointer-stable
+The 41-test node-core host suite covers stable one-time registration, pointer-stable
 no-copy preparation, deadline-before-mutation rejection, empty and deterministic
 multi-interface routes, per-hop generations, exact queue rollback, cumulative
 prior authorization, opaque permit matching, policy and terminal races, exact-
@@ -357,8 +388,9 @@ integration tests manually step the real job/request/reply/return ports through
 authorized no-RF frame inspection, policy denial, exact-deadline grant
 expiry/recovery, serialized two-interface fan-out with the same owner, and
 terminal-before-authorization suppression. Generic bare-metal and ESP32-S3
-checks compile node-core, the Embassy edge, and the RF-inert dispatcher.
-Fifteen dispatcher/permit tests cover persistent serialized fan-out, exact-deadline
+checks compile node-core, the Embassy edge, the RF-inert dispatcher, and the
+permanent supervisor. The 32-test TX-dispatch suite comprises fifteen
+dispatcher/permit tests covering persistent serialized fan-out, exact-deadline
 late-grant recovery, cancellation of short waits, terminal suppression, absent
 and mismatched reply fail-closed behavior, one-shot policy invocation under
 reply pressure, exact owner restoration under return pressure, inclusive grace
@@ -371,26 +403,35 @@ failure retention, final and recovered parking, generation-scoped recovery
 acknowledgement, quarantine, exact owner binding, completion-failure retention,
 cancelled return waits, `Next` pressure/readiness cancellation, and compact
 production-mutex layout.
-None of these crates is linked into firmware, and there is still no permanent
-executor supervisor, clock adapter, driver, or radio path.
+The 11-test supervisor suite covers separate and deadline-crossing fresh clock
+samples, the complete RF-denied lifecycle, exact-deadline recovery retention,
+permit-grace reply priority and fault drain, monotonic regression, combined-
+wait cancellation, deadline conversion, common-origin/full-seed construction,
+and static storage. None of these crates is linked into firmware, and there is
+still no driver, radio, or RF path.
 
 ## Next boundary
 
-The owning storage/capability layer and RF-inert dispatcher, permit, and node
-DATA-owner machines now exist. `TxHandoff::split()` consumes one unique static
-handoff, pool-sized channels carry jobs and owner returns, depth-one channels
-isolate permit requests/replies, and every send is a non-awaiting `try_send`
-that returns the unchanged value on pressure. The remaining orchestration work
-is:
+The owning storage/capability layer, RF-inert dispatcher, permit and node
+DATA-owner machines, and permanent supervisor now exist.
+`TxHandoff::split_paired()` consumes one unique static handoff; every registered
+owner must seed that inseparable common-origin role set before
+`NoRfTxMachineSet::try_new()` can bind it into the supervisor. Incomplete
+construction returns the paired roles and queued owners unchanged. Pool-sized
+channels carry jobs and owner returns, depth-one channels isolate permit
+requests/replies, and every send is a non-awaiting `try_send` that returns the
+unchanged value on pressure. The remaining orchestration work is:
 
-1. Build the permanent, non-cancelled executor supervisor and monotonic clock
-   adapter around `NoRfTxDispatcher`, `TxPermitServer`, and
-   `NodeTxDataMachine`.
-2. Drive `maintain_tx()` and recovery observation from that node owner while
-   the dispatcher cooperatively returns an exact late owner.
-3. Persist accepted intent, active attempts, and terminal projection policy
-   before mapping tombstones into device API v1; define reboot/durable recovery
-   without attempting to persist volatile leases or references.
+1. Define and persist accepted intent plus every final disposition, then build
+   the idempotent projector that durably emits terminal/recovery results before
+   exact acknowledgement. `NodeTxQueuedHop` now includes `AttemptHandle`, but
+   correlation alone does not close this lifecycle.
+2. Merge RX ingress, ordinary RNS tick/actions, and submission handling into
+   the eventual sole node owner. The current aggregate drives only TX lease
+   maintenance and the three TX machines.
+3. Map durable intents and projected dispositions into device API v1 and
+   define reboot recovery without attempting to persist volatile leases or
+   mutable references.
 4. Convert allocation-backed ordinary RNS actions into caller-reservable packet
    ownership; the DATA path alone does not cover proofs, announces, forwarding,
    Links or Resources.

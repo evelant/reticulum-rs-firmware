@@ -42,8 +42,8 @@ use reticulum_node_core::{
     TxPermitReply, TxPermitRequest, UnpermittedTx,
 };
 use reticulum_tx_handoff::{
-    DispatcherHandoff, JobSender, NodeHandoff, OwnerReturnReceiver, PermitReplySender,
-    PermitRequestReceiver, TxOwnerReturn,
+    DispatcherHandoff, JobSender, NodeHandoff, OwnerReturnReceiver, PairedTxHandoff,
+    PermitReplySender, PermitRequestReceiver, TxOwnerReturn,
 };
 
 /// Caller-owned completion-code namespace used by the dispatcher.
@@ -1048,6 +1048,89 @@ where
                 TxPermitServerWait::NotWaiting
             }
         }
+    }
+}
+
+/// Common-origin persistent TX components ready to bind to one node owner.
+///
+/// This bundle can be constructed only from one [`PairedTxHandoff`], so a
+/// permanent supervisor cannot accidentally combine roles backed by unrelated
+/// channel stores. The node DATA machine is intentionally not created until
+/// the supervisor can bind it to its exact [`NodeCore`] owner.
+#[must_use = "dropping the machine set abandons every unique TX handoff role"]
+pub struct NoRfTxMachineSet<M, const POOL_SIZE: usize>
+where
+    M: RawMutex + 'static,
+{
+    data: NodeTxDataHandoff<M, POOL_SIZE>,
+    permit: TxPermitServer<M>,
+    dispatcher: NoRfTxDispatcher<M, POOL_SIZE>,
+}
+
+/// Incomplete common-origin handoff returned without losing queued owners.
+#[must_use = "recover the paired handoff, finish seeding, and retry construction"]
+pub struct NoRfTxMachineSetBuildError<M, const POOL_SIZE: usize>
+where
+    M: RawMutex + 'static,
+{
+    handoff: PairedTxHandoff<M, POOL_SIZE>,
+    config: NoRfTxDispatcherConfig,
+}
+
+impl<M, const POOL_SIZE: usize> NoRfTxMachineSetBuildError<M, POOL_SIZE>
+where
+    M: RawMutex + 'static,
+{
+    /// Number of fixed-pool owners still required.
+    pub const fn seeds_remaining(&self) -> usize {
+        self.handoff.seeds_remaining()
+    }
+
+    /// Recover the unchanged paired roles, every already queued owner, and the
+    /// copy-only dispatcher configuration for a later retry.
+    pub fn into_parts(self) -> (PairedTxHandoff<M, POOL_SIZE>, NoRfTxDispatcherConfig) {
+        (self.handoff, self.config)
+    }
+}
+
+impl<M, const POOL_SIZE: usize> NoRfTxMachineSet<M, POOL_SIZE>
+where
+    M: RawMutex + 'static,
+{
+    /// Consume one fully seeded common-origin role set into all persistent TX
+    /// machines that do not require a node-owner binding.
+    ///
+    /// Incomplete storage is returned unchanged so queued unique owners and
+    /// the remaining seed capability cannot be silently stranded.
+    pub fn try_new(
+        handoff: PairedTxHandoff<M, POOL_SIZE>,
+        config: NoRfTxDispatcherConfig,
+    ) -> Result<Self, NoRfTxMachineSetBuildError<M, POOL_SIZE>> {
+        if handoff.seeds_remaining() != 0 {
+            return Err(NoRfTxMachineSetBuildError { handoff, config });
+        }
+        let (node, dispatcher) = handoff.into_parts();
+        let (data, permit) = TxPermitServer::from_node_handoff(node);
+        Ok(Self {
+            data,
+            permit,
+            dispatcher: NoRfTxDispatcher::new(dispatcher, config),
+        })
+    }
+
+    /// Consume the common-origin proof into the three persistent components.
+    ///
+    /// The returned parts cannot be recombined into another machine set. This
+    /// method exists for the supervisor crate, which binds `data` to its exact
+    /// node while retaining the other components in the same aggregate.
+    pub fn into_parts(
+        self,
+    ) -> (
+        NodeTxDataHandoff<M, POOL_SIZE>,
+        TxPermitServer<M>,
+        NoRfTxDispatcher<M, POOL_SIZE>,
+    ) {
+        (self.data, self.permit, self.dispatcher)
     }
 }
 

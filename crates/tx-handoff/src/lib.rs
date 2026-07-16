@@ -444,6 +444,59 @@ where
     pub permit_replies: PermitReplyReceiver<M>,
 }
 
+/// One inseparable node/dispatcher role set from a single channel store.
+///
+/// This value is the safe construction input for a permanent supervisor. Its
+/// fields are private, so roles from two different [`TxHandoff`] instances
+/// cannot be recombined into a superficially connected supervisor. Lower-level
+/// users may deliberately consume it with [`Self::into_parts`].
+#[must_use = "dropping paired roles abandons every unique handoff capability"]
+pub struct PairedTxHandoff<M, const POOL_SIZE: usize>
+where
+    M: RawMutex + 'static,
+{
+    node: NodeHandoff<M, POOL_SIZE>,
+    dispatcher: DispatcherHandoff<M, POOL_SIZE>,
+    seeded: usize,
+}
+
+impl<M, const POOL_SIZE: usize> PairedTxHandoff<M, POOL_SIZE>
+where
+    M: RawMutex + 'static,
+{
+    /// Queue one registered packet-buffer owner before the permanent machines
+    /// consume this paired role set.
+    pub fn try_seed_available(
+        &mut self,
+        buffer: &'static mut TxPacketBuffer,
+    ) -> Result<(), ChannelFull<TxOwnerReturn>> {
+        self.dispatcher
+            .returns
+            .try_send(TxOwnerReturn::Available(buffer))
+            .inspect(|()| self.seeded += 1)
+    }
+
+    /// Number of available owners successfully queued through this paired set.
+    pub const fn seeded_count(&self) -> usize {
+        self.seeded
+    }
+
+    /// Number of fixed-pool owners still required before supervisor binding.
+    pub const fn seeds_remaining(&self) -> usize {
+        POOL_SIZE - self.seeded
+    }
+
+    /// Consume the proof of common channel origin into its lower-level roles.
+    ///
+    /// The returned parts cannot be used to construct another
+    /// `PairedTxHandoff`; this is an intentional escape hatch for standalone
+    /// machine tests and integrations that do not use the permanent
+    /// supervisor.
+    pub fn into_parts(self) -> (NodeHandoff<M, POOL_SIZE>, DispatcherHandoff<M, POOL_SIZE>) {
+        (self.node, self.dispatcher)
+    }
+}
+
 /// Fixed-capacity channel storage for one external packet-buffer pool.
 ///
 /// The two owner channels use `POOL_SIZE`; both control channels have depth
@@ -489,8 +542,14 @@ where
     pub fn split(
         &'static mut self,
     ) -> (NodeHandoff<M, POOL_SIZE>, DispatcherHandoff<M, POOL_SIZE>) {
-        (
-            NodeHandoff {
+        self.split_paired().into_parts()
+    }
+
+    /// Split the store into one unforgeable common-origin role set for a
+    /// permanent supervisor.
+    pub fn split_paired(&'static mut self) -> PairedTxHandoff<M, POOL_SIZE> {
+        PairedTxHandoff {
+            node: NodeHandoff {
                 jobs: JobSender {
                     channel: &self.jobs,
                 },
@@ -504,7 +563,7 @@ where
                     channel: &self.permit_replies,
                 },
             },
-            DispatcherHandoff {
+            dispatcher: DispatcherHandoff {
                 jobs: JobReceiver {
                     channel: &self.jobs,
                 },
@@ -518,7 +577,8 @@ where
                     channel: &self.permit_replies,
                 },
             },
-        )
+            seeded: 0,
+        }
     }
 }
 

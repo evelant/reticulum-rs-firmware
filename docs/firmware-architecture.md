@@ -99,9 +99,10 @@ Claims in READMEs were not treated as proof of embedded portability.
 | `rete-core`, `rete-transport`, `rete-stack`, and `rete-lxmf-core`, no defaults, `thumbv6m-none-eabi` | Pass | The layers are genuinely bare-metal buildable; compilation does not cure the LXMF correctness gaps documented below |
 | Focused `rete` core/transport/LXMF host suites at the reviewed upstream snapshot | 391 pass | Historical selection evidence for wire, crypto, forwarding, link/resource, and LXMF codec behavior; this is not evidence for the later lifecycle patch or a complete Python/RF conformance claim |
 | Exact `f6f5fb0` receipt/LXMF lifecycle library suites | 502 pass | CI checks the pinned fork directly: 151 transport, 124 stack, 143 LXMF and 84 daemon tests, plus all-target host and `thumbv6m-none-eabi` checks |
-| `reticulum-node-core`, generic bare-metal and ESP32-S3 Xtensa | Pass | External-buffer dispatch metadata, exact attempt ledger, deterministic routing, opaque permit/completion typestates, exact deadlines and retained recovery compile without `std` on both targets; the focused host suite has no async or radio linkage and the current receive-only firmware intentionally does not link it |
+| `reticulum-node-core`, generic bare-metal and ESP32-S3 Xtensa | Pass | External-buffer dispatch metadata, exact attempt ledger, deterministic routing, opaque permit/completion typestates, exact deadlines and retained recovery compile without `std` on both targets; 41 focused host tests have no async or radio linkage and the current receive-only firmware intentionally does not link it |
 | `reticulum-tx-handoff`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | Static one-time channel-role splitting, exact owner returns, depth-one permit control, and cancellation-safe receive behavior compile on both targets; a host-only manually stepped no-RF harness exercises representative routed DATA paths across the real ports; graph policy keeps the crate outside firmware |
-| `reticulum-tx-dispatch`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The firmware-excluded RF-inert dispatcher, permit server, and exact-owner-bound fixed per-slot node DATA machine retain owners/control values across backpressure, synchronously prepare from parked owners, use cancellation-safe short waits, park recovered owners until exact acknowledgement, and fail closed at the permit recovery grace; fifteen dispatcher/permit plus seventeen node DATA-machine tests exercise these boundaries and graph policy keeps the crate outside firmware |
+| `reticulum-tx-dispatch`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The firmware-excluded RF-inert dispatcher, permit server, and exact-owner-bound fixed per-slot node DATA machine retain owners/control values across backpressure, synchronously prepare from parked owners, use cancellation-safe short waits, park recovered owners until exact acknowledgement, and fail closed at the permit recovery grace; 32 tests (15 dispatcher/permit and 17 node DATA-machine) exercise these boundaries and graph policy keeps the crate outside firmware |
+| `reticulum-tx-supervisor`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The firmware-excluded permanent aggregate and async runner own node-core plus all TX machines, require common-origin/full-seed construction, sample the clock separately for every lane, wait on exact owner/grace deadlines, yield after at most 16 productive passes and every selected wake, and use phase-gated cancellation-safe selection; 11 tests cover its RF-inert lifecycle, timing, faults, cancellation, and static construction, and graph policy keeps it outside firmware |
 | `reference/rete/examples/esp32s3`: `cargo +esp check --release` | Pass with warnings | Current bare-metal ESP32-S3/SX1262/Wi-Fi integration compiles with the installed ESP toolchain; it targets Heltec WiFi LoRa 32 V3/V4 pins, not the Tracker BSP |
 | Precursor `reticulum-core`/`lxmf` host suites; `micron` host suite | 70 pass; 17 pass | Strong embedded-client interop and hostile-input evidence, including real Nomad/Micron fixtures; the Xous crates still use `std` and are not a bare-metal dependency as-is |
 | `foxhole-micron` host suite | 24 pass | Focused confirmation of links, fields, colors, sections, literal/comment handling and control-character sanitisation; it remains a ratatui/`std` comparison parser |
@@ -239,8 +240,23 @@ no TX capability. The scalar dispatch record remains
 authoritative when an owner misses its deadline; a matching late return
 finalizes/reclaims the exact buffer, while faults and same-lease invariants
 retain an owning quarantine. Missing ownership is never fabricated or
-force-reused. The next slice is a permanent supervisor/clock adapter; durable
-reboot recovery remains separately open.
+force-reused.
+
+The firmware-excluded `reticulum-tx-supervisor` now owns one exact node-core,
+DATA machine, permit server, RF-inert dispatcher, authorization policy, and
+monotonic clock contract in a permanent aggregate. Its async runner samples
+the clock freshly before maintenance and every machine lane, combines the
+earliest live owner deadline with permit-recovery grace, yields after at most
+16 productive passes and after every selected wake, and selects only phase-
+compatible cancellation-safe waits. `RfInertTxPolicy` rejects every RF
+authorization. Faults stop fresh
+preparation and policy while owner-draining DATA/dispatcher transitions
+continue where possible.
+
+Queued-hop metadata includes `AttemptHandle`, but the next slice remains the
+durable intent/final-disposition model and its idempotent projector. Ordinary
+RNS tick/actions, RX ingress, terminal/recovery projection and acknowledgement,
+device-API submission, and reboot recovery are not yet part of this owner.
 Every firmware graph remains TX-free and the radio-bearing lab image remains
 RX-only.
 
@@ -481,6 +497,7 @@ crates/
   board-heltec-tracker-v2/        # pins, FEM, display, battery, Vext
   tx-handoff/                     # bounded Embassy TX ownership edge
   tx-dispatch/                    # persistent RF-inert packet-interface edge
+  tx-supervisor/                  # permanent RF-inert TX aggregate/run loop
   platform-esp32s3/               # esp-hal/rtos/USB/radio/flash adapters
   simulator/                      # std host runtime and fault injection
 clients/
@@ -493,13 +510,14 @@ interop/
 xtask/                            # build, size, asset, flash, HIL commands
 docs/
   firmware-architecture.md
+  tx-supervisor.md                # RF-inert aggregate/run-loop boundary
   provenance.md                   # added at implementation start
 ```
 
-`node-core`, `tx-handoff`, `tx-dispatch`, `lxmf-wire`, `lxmf-router`,
-`lxmf-propagation`, `nomad-protocol`, `micron-parser`, `device-api`,
-`storage-model`, and `radio-interface` should compile on at least one
-`*-unknown-none-*` target in CI whenever their feature is enabled. ESP
+`node-core`, `tx-handoff`, `tx-dispatch`, `tx-supervisor`, `lxmf-wire`,
+`lxmf-router`, `lxmf-propagation`, `nomad-protocol`, `micron-parser`,
+`device-api`, `storage-model`, and `radio-interface` should compile on at least
+one `*-unknown-none-*` target in CI whenever their feature is enabled. ESP
 dependencies appear only in the firmware/platform/BSP crates.
 
 The initial `node-core` implementation now owns fixed DATA dispatch metadata
@@ -534,10 +552,23 @@ observable exact reply wins regardless of enqueue time. With no observable
 reply, the dispatcher returns its exact owner as a recovery fault,
 disables/quarantines the path, and never guesses authorization.
 
-The next product integration must provide a permanent executor supervisor and
-clock adapter. `maintain_tx()`, recovery/terminal projection, firmware
-integration, driver/RF behavior, and reboot/durable recovery also remain open.
-The current slice has no firmware or radio connection; its authorized
+`reticulum-tx-supervisor` now provides the permanent aggregate and async run
+loop around those components. Every complete pass takes a distinct checked
+clock sample before `maintain_tx()`, DATA, permit/policy, and dispatcher work.
+The runner waits for the exact earlier node-owner deadline or permit grace,
+uses phase-gated cancellation-safe selection, and yields after at most 16
+immediately productive passes and after every selected wake. Its initial policy
+is explicitly RF-inert, and retained
+faults stop fresh preparation/policy while continuing exact-owner drain where
+possible.
+
+The next product integration is durable intent plus a complete final-
+disposition projector, then merging ordinary RNS tick/actions, RX ingress, and
+submission handling into the eventual sole node owner. Although queued-hop
+metadata now carries `AttemptHandle`, no component yet performs durable
+terminal/recovery projection and acknowledgement or maps it to device API v1.
+Firmware integration, driver/RF behavior, and reboot recovery also remain
+open. The current slice has no firmware or radio connection; its authorized
 completion vocabulary is conservative metadata and does not claim RF occurred.
 Every firmware graph remains TX-free, and the radio-bearing lab image remains
 RX-only.

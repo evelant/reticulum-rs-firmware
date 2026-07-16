@@ -39,6 +39,7 @@ cargo check --locked \
   -p reticulum-node-core \
   -p reticulum-tx-handoff \
   -p reticulum-tx-dispatch \
+  -p reticulum-tx-supervisor \
   -p reticulum-rns-conformance \
   -p reticulum-rns-rete \
   -p reticulum-rns-rete-rx \
@@ -50,6 +51,7 @@ cargo +esp check --locked \
   -p reticulum-node-core \
   -p reticulum-tx-handoff \
   -p reticulum-tx-dispatch \
+  -p reticulum-tx-supervisor \
   --target xtensa-esp32s3-none-elf
 cargo +esp build --locked --release \
   -p reticulum-heltec-tracker-v2 \
@@ -251,18 +253,24 @@ opaque native failures remain possible. The exact upstream repairs and
 regression expectations are tracked in
 [the Rete hardening backlog](rete-upstream-backlog.md).
 The portable external-buffer route/permit/completion/recovery slice, bounded
-Embassy handoff, and firmware-excluded `reticulum-tx-dispatch` crate have
-focused host suites plus generic RISC-V and ESP32-S3 checks. The dispatcher is
-an RF-inert persistent packet-interface state machine with cancellation-safe
-short waits; its companion permit server owns the node-side scalar exchange,
-and its node DATA machine owns the job/return ports plus fixed parked-owner
-table. That machine now synchronously prepares into the lowest available parked
-owner, prioritizes queued returns and retained continuations, and preserves the
-exact owner across rejection, queue pressure, and clocked rollback. There is
-still no executor-driven permanent supervisor or clock adapter, firmware
-connection, driver, radio integration, or claim that RF occurred. All firmware
-graphs remain TX-free, and the only radio-bearing firmware artifact remains
-RX-only.
+Embassy handoff, firmware-excluded `reticulum-tx-dispatch`, and
+firmware-excluded `reticulum-tx-supervisor` have focused host suites plus
+generic RISC-V and ESP32-S3 checks. The dispatcher is an RF-inert persistent
+packet-interface state machine with cancellation-safe short waits; its
+companion permit server owns the node-side scalar exchange, and its node DATA
+machine owns the job/return ports plus fixed parked-owner table. The permanent
+supervisor aggregate owns those machines with node-core and an authorization
+policy, samples the clock freshly before maintenance/DATA/permit/dispatcher,
+waits for the exact next owner deadline or permit grace, and bounds sustained
+progress to 16 passes before yielding. Its `RfInertTxPolicy` denies RF.
+
+Queued-hop metadata now includes the generation-scoped `AttemptHandle`, but
+durable accepted intent, final-disposition mapping, projection, and exact
+terminal/recovery acknowledgement remain unimplemented. Ordinary RNS
+tick/actions, RX ingress, and device-API submission are not yet merged under
+this owner. There is still no firmware connection, driver, radio integration,
+or claim that RF occurred. All firmware graphs remain TX-free, and the only
+radio-bearing firmware artifact remains RX-only.
 
 ## Rete production hard gates
 

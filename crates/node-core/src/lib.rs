@@ -2447,6 +2447,27 @@ impl<
         })
     }
 
+    /// Return the earliest live packet-owner lease deadline.
+    ///
+    /// Dispatches already retained in recovery-required state are excluded;
+    /// they no longer need a deadline wakeup.
+    pub fn next_tx_deadline(&self) -> Option<TxLeaseDeadline> {
+        self.dispatches
+            .iter()
+            .filter_map(|slot| match slot.state {
+                DispatchState::Active(record)
+                    if !matches!(record.phase, DispatchPhase::RecoveryRequired(_)) =>
+                {
+                    Some(record.deadline)
+                }
+                DispatchState::Unregistered
+                | DispatchState::Free
+                | DispatchState::Reserved { .. }
+                | DispatchState::Active(_) => None,
+            })
+            .min()
+    }
+
     /// Move expired routed or authorized dispatches into scalar recovery.
     ///
     /// This never releases or fabricates a packet-buffer owner.
@@ -5138,6 +5159,97 @@ mod tests {
         assert_eq!(cumulative.capacities().dispatches_used, 0);
         assert_eq!(cumulative.capacities().receipts_used, 1);
         assert_eq!(cumulative.capacities().attempts_active, 1);
+    }
+
+    #[test]
+    fn next_tx_deadline_tracks_earliest_live_dispatch_and_excludes_recovery() {
+        let receiver = node::<2, 1>(91, "deadline-schedule-receiver");
+        let mut sender = node::<2, 2>(90, "deadline-schedule-sender");
+        register_receiver(&mut sender, 91, "deadline-schedule-receiver");
+        let mut later_buffer = registered_buffer(&mut sender);
+        let mut earlier_buffer = registered_buffer(&mut sender);
+        let mut rng = CounterRng::default();
+
+        assert_eq!(sender.next_tx_deadline(), None);
+        let later = prepare_with_interfaces(
+            &mut sender,
+            &mut later_buffer,
+            receiver.destination_hash(),
+            b"later routed dispatch",
+            1,
+            1_000,
+            2_500,
+            default_interfaces(),
+            &mut rng,
+        );
+        let earlier = prepare_with_interfaces(
+            &mut sender,
+            &mut earlier_buffer,
+            receiver.destination_hash(),
+            b"earlier authorized dispatch",
+            1,
+            1_000,
+            1_500,
+            default_interfaces(),
+            &mut rng,
+        );
+        let (pending, request) = earlier.begin_permit();
+        let reply = sender
+            .authorize_tx(request, owner_time(1_400), &mut TestPolicy::allowing())
+            .unwrap_or_else(|failure| panic!("authorization failed: {:?}", failure.reason()));
+        let earlier = match pending.resolve(reply, owner_time(1_400)) {
+            Ok(PermitResolution::Authorized(authorized)) => authorized,
+            Ok(PermitResolution::Expired(_)) => panic!("fresh grant expired"),
+            Ok(PermitResolution::Unpermitted(_)) => panic!("fresh grant was denied"),
+            Err(_) => panic!("fresh grant mismatched"),
+        };
+
+        assert_eq!(sender.next_tx_deadline(), Some(deadline(1_500)));
+        assert_eq!(
+            sender.maintain_tx(owner_time(1_499)),
+            TxMaintenanceReport {
+                newly_recovery_required: 0,
+            }
+        );
+        assert_eq!(sender.next_tx_deadline(), Some(deadline(1_500)));
+        assert_eq!(
+            sender.maintain_tx(owner_time(1_500)),
+            TxMaintenanceReport {
+                newly_recovery_required: 1,
+            }
+        );
+        assert_eq!(sender.next_tx_deadline(), Some(deadline(2_500)));
+        assert_eq!(
+            sender.maintain_tx(owner_time(2_500)),
+            TxMaintenanceReport {
+                newly_recovery_required: 1,
+            }
+        );
+        assert_eq!(sender.next_tx_deadline(), None);
+
+        assert!(matches!(
+            sender
+                .complete_tx(
+                    later
+                        .return_unpermitted()
+                        .complete(TxCompletionCode::new(22)),
+                    owner_time(2_501),
+                )
+                .unwrap_or_else(|failure| panic!("routed recovery return: {:?}", failure.reason())),
+            TxCompletionDisposition::Recovered { .. }
+        ));
+        assert!(matches!(
+            sender
+                .complete_tx(
+                    earlier.complete(TxCompletionCode::new(23)),
+                    owner_time(2_501),
+                )
+                .unwrap_or_else(|failure| panic!(
+                    "authorized recovery return: {:?}",
+                    failure.reason()
+                )),
+            TxCompletionDisposition::Recovered { .. }
+        ));
     }
 
     #[test]

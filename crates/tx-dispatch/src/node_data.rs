@@ -5,10 +5,11 @@ use core::{array, future::poll_fn, mem};
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use rand_core::{CryptoRng, RngCore};
 use reticulum_node_core::{
-    AttemptToken, AvailableBufferError, MonotonicMillis, NodeCore, PacketInterfaceId, PacketSlotId,
-    PrepareDataRequest, RollbackErrorKind, RollbackFailure, RoutedTxJob, SubmitError, TxCompletion,
-    TxCompletionDisposition, TxCompletionErrorKind, TxCompletionFailure, TxLeaseDeadline,
-    TxOwnerScope, TxPacketBuffer, TxQuarantine, TxRecoveryRecord,
+    AttemptHandle, AttemptToken, AvailableBufferError, MonotonicMillis, NodeCore,
+    PacketInterfaceId, PacketSlotId, PrepareDataRequest, RollbackErrorKind, RollbackFailure,
+    RoutedTxJob, SubmitError, TxCompletion, TxCompletionDisposition, TxCompletionErrorKind,
+    TxCompletionFailure, TxLeaseDeadline, TxOwnerScope, TxPacketBuffer, TxQuarantine,
+    TxRecoveryRecord,
 };
 use reticulum_tx_handoff::TxOwnerReturn;
 
@@ -157,6 +158,7 @@ pub enum NodeTxDataPhase {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NodeTxQueuedHop {
     slot: PacketSlotId,
+    handle: AttemptHandle,
     attempt: AttemptToken,
     interface: PacketInterfaceId,
     packet_len: u16,
@@ -167,6 +169,7 @@ impl NodeTxQueuedHop {
     fn from_job(job: &RoutedTxJob<'_>) -> Self {
         Self {
             slot: job.slot_id(),
+            handle: job.attempt_handle(),
             attempt: job.attempt(),
             interface: job.interface(),
             packet_len: job.packet_len(),
@@ -177,6 +180,11 @@ impl NodeTxQueuedHop {
     /// Stable packet-buffer slot.
     pub const fn slot_id(self) -> PacketSlotId {
         self.slot
+    }
+
+    /// Generation-checked attempt identity used for terminal acknowledgement.
+    pub const fn attempt_handle(self) -> AttemptHandle {
+        self.handle
     }
 
     /// End-to-end attempt correlation token.
@@ -1424,6 +1432,7 @@ mod tests {
             .try_receive()
             .expect("prepared job must enter dispatcher handoff");
         assert_eq!(job.slot_id(), first_slot);
+        assert_eq!(job.attempt_handle(), queued.attempt_handle());
         assert_eq!(job.attempt(), queued.attempt());
         let completion = job
             .return_unpermitted()
@@ -1817,6 +1826,7 @@ mod tests {
             &mut CounterRng::default(),
         );
         let attempt = first.attempt();
+        let attempt_handle = first.attempt_handle();
         let deadline = first.deadline();
         let completion = authorized_completion(&mut owner, first, 20, 0x211);
 
@@ -1877,6 +1887,7 @@ mod tests {
             other => panic!("Next was not retained under pressure: {other:?}"),
         };
         assert_eq!(metadata.slot_id(), slot);
+        assert_eq!(metadata.attempt_handle(), attempt_handle);
         assert_eq!(metadata.attempt(), attempt);
         assert_eq!(metadata.interface(), PacketInterfaceId::new(2));
         assert_eq!(metadata.deadline(), deadline);
@@ -1918,6 +1929,7 @@ mod tests {
             .try_receive()
             .expect("Next must be queued once");
         assert_eq!(next.slot_id(), slot);
+        assert_eq!(next.attempt_handle(), attempt_handle);
         assert_eq!(next.attempt(), attempt);
         assert_eq!(next.interface(), PacketInterfaceId::new(2));
         assert_eq!(next.deadline(), deadline);
