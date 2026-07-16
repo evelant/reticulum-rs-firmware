@@ -15,6 +15,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+use core::task::{Context, Poll};
+
 use embassy_sync::{
     blocking_mutex::raw::RawMutex,
     channel::{Channel, TrySendError},
@@ -92,8 +94,10 @@ where
 {
     /// Try to enqueue one unique job without awaiting.
     ///
-    /// A full queue returns the unchanged job, which the node owner can pass
-    /// to `NodeCore::rollback_queued`.
+    /// A full queue returns the unchanged job. A fresh job for which no route
+    /// has ever been authorized can be passed to `NodeCore::rollback_queued`.
+    /// A `TxCompletionDisposition::Next` job after prior authorization must
+    /// instead be retained and retried; rollback deliberately rejects it.
     pub fn try_send(
         &mut self,
         job: RoutedTxJob<'static>,
@@ -133,6 +137,15 @@ where
     /// Await the oldest routed job.
     pub async fn receive(&mut self) -> RoutedTxJob<'static> {
         self.channel.receive().await
+    }
+
+    /// Poll for the oldest routed job without constructing a receive future.
+    ///
+    /// `Pending` leaves ownership in the channel. `Ready` transfers the exact
+    /// job to the caller, which must store or consume it before returning from
+    /// the surrounding poll.
+    pub fn poll_receive(&mut self, context: &mut Context<'_>) -> Poll<RoutedTxJob<'static>> {
+        self.channel.poll_receive(context)
     }
 
     /// Receive the oldest routed job immediately, if one is queued.
@@ -355,6 +368,16 @@ where
     /// Await the oldest opaque permit reply.
     pub async fn receive(&mut self) -> TxPermitReply {
         self.channel.receive().await
+    }
+
+    /// Poll for the oldest opaque permit reply without constructing a receive
+    /// future.
+    ///
+    /// `Pending` leaves the reply in the channel. `Ready` transfers the exact
+    /// reply to the caller, which must store or consume it before returning
+    /// from the surrounding poll.
+    pub fn poll_receive(&mut self, context: &mut Context<'_>) -> Poll<TxPermitReply> {
+        self.channel.poll_receive(context)
     }
 
     /// Receive the oldest reply immediately, if one is queued.

@@ -1,8 +1,8 @@
 # Bounded node-core external-buffer DATA dispatch
 
-**Status:** portable route/permit/completion/recovery and owning handoff storage
-implemented; host-only manually stepped no-RF integration harness implemented;
-no dispatcher actor or firmware RF TX linkage
+**Status:** portable route/permit/completion/recovery, owning handoff storage,
+and firmware-excluded RF-inert persistent dispatch implemented; no executor
+supervisor, firmware RF TX linkage, or radio driver
 **Rete pin:** `f6f5fb0637d00691e09fa0105be4df902405fee4`
 
 ## Purpose and boundary
@@ -24,17 +24,36 @@ packet-slot IDs, deadlines, attempt tokens and handles, terminal outcomes,
 errors and capacity snapshots. It has no dependency on the device API,
 Embassy, radio traits, ESP crates, a board support package or durable storage.
 The separate `reticulum-tx-handoff` edge crate depends on node-core and Embassy
-Sync while keeping node-core itself synchronous and executor-free. A future
-local-session dispatcher will depend on both node-core and device-api and map
-their types explicitly.
+Sync while keeping node-core itself synchronous and executor-free.
+`reticulum-tx-dispatch` depends on both portable crates and owns their packet-
+interface roles in persistent state. It has no direct device-API, executor,
+clock, TX-capable driver/HAL, or firmware dependency; node-core's transitive
+portable RX/framing edge supplies no TX capability. A future local-session
+dispatcher is a different boundary: it will depend on both node-core and
+device-api and map their types explicitly.
 
 `TxJob`, permit requests/replies, completions, buffers, and recovery records do
 not expose packet bytes. Only an exactly matched `AuthorizedTx` can borrow the
 encoded frame, once, through `frame(now)` before its deadline. This API proves
 authorization semantics; it does not perform RF transmission. The bounded
-channel storage and capability API now exist, but there is still no dispatcher
-actor, interface implementation, radio implementation, or RF-capable firmware
-connection.
+channel storage and an RF-inert dispatcher now exist, but the dispatcher's only
+frame consumer is a private scalar inspector. It exposes no pluggable byte sink
+and has no interface implementation, radio implementation, or RF-capable
+firmware connection.
+
+`NoRfTxDispatcher` keeps each unique job, permit-pending/authorized owner,
+completion, pressured owner return, and unmatched control value in a compact
+persistent enum. Every `step(now)` completes one synchronous transition, so an
+exact `ChannelFull<T>` value is restored before control returns. Its short
+`wait_for_input()` receives only while idle or waiting for a permit reply and
+stores a ready channel value in persistent state in the same poll.
+`TxPermitServer` does the same for node-side permit requests, invokes policy at
+most once and only for a validated live candidate, and retains a reply under
+pressure.
+Terminal, expired, recovery-required, or invalid requests bypass policy.
+Cancellation while either short wait remains pending leaves the item in its
+Embassy channel; the still-missing permanent top-level supervisor must itself
+never be cancelled.
 
 ## External ownership and registration
 
@@ -212,6 +231,16 @@ fail-closed scalar record. Wrong-owner or stale completions are rejected intact
 as `TxCompletionFailure`. Recovery never invents ownership, and notification
 loss cannot make a slot reusable.
 
+The RF-inert dispatcher adds a configured permit recovery grace after the owner
+deadline because the node may already have authorized a request whose reply is
+delayed. On the first step sampling at or after that threshold it checks for a
+reply first. Any reply observable by that step wins regardless of enqueue time;
+a late grant is resolved as byte-inaccessible `ExpiredAuthorizedTx`. With no
+observable reply, it returns the exact pending owner as a recovery-fault
+completion, permanently disables itself, and requires node-core to
+quarantine/reconcile the return. It never guesses whether authorization
+occurred.
+
 ## Receipt terminal ledger
 
 `EmbeddedNode::ingest_with_receipt_sink()` and
@@ -279,6 +308,12 @@ cargo check --locked -p reticulum-tx-handoff \
   --target riscv32imac-unknown-none-elf
 cargo +esp check --locked -p reticulum-tx-handoff \
   --target xtensa-esp32s3-none-elf
+cargo test --locked -p reticulum-tx-dispatch
+cargo clippy --locked -p reticulum-tx-dispatch --all-targets -- -D warnings
+cargo check --locked -p reticulum-tx-dispatch \
+  --target riscv32imac-unknown-none-elf
+cargo +esp check --locked -p reticulum-tx-dispatch \
+  --target xtensa-esp32s3-none-elf
 ```
 
 The focused host suite covers stable one-time registration, pointer-stable
@@ -296,31 +331,38 @@ integration tests manually step the real job/request/reply/return ports through
 authorized no-RF frame inspection, policy denial, exact-deadline grant
 expiry/recovery, serialized two-interface fan-out with the same owner, and
 terminal-before-authorization suppression. Generic bare-metal and ESP32-S3
-checks compile node-core and the Embassy edge; neither is linked into firmware,
-and there is still no executor-driven dispatcher actor or radio path.
+checks compile node-core, the Embassy edge, and the RF-inert dispatcher.
+Fifteen dispatcher tests cover persistent serialized fan-out, exact-deadline
+late-grant recovery, cancellation of short waits, terminal suppression, absent
+and mismatched reply fail-closed behavior, one-shot policy invocation under
+reply pressure, exact owner restoration under return pressure, inclusive grace
+threshold observation semantics, authorization/recovery orderings, idle
+orphan-reply wakeup, and production-mutex static layout. None of these crates is
+linked into firmware, and there is still no permanent executor supervisor,
+clock adapter, driver, or radio path.
 
 ## Next boundary
 
-The owning storage/capability layer is complete. `TxHandoff::split()` consumes
-one unique static handoff, pool-sized channels carry jobs and owner returns,
-depth-one channels isolate permit requests/replies, and every send is a
-non-awaiting `try_send` that returns the unchanged value on pressure. The next
-slice is actor orchestration, not RF transmission:
+The owning storage/capability layer and RF-inert packet-interface machine now
+exist. `TxHandoff::split()` consumes one unique static handoff, pool-sized
+channels carry jobs and owner returns, depth-one channels isolate permit
+requests/replies, and every send is a non-awaiting `try_send` that returns the
+unchanged value on pressure. The remaining orchestration work is:
 
-1. Implement the sole non-terminating dispatcher as a persistent state machine
-   allocated outside its task future, without exposing raw Embassy handles or
-   holding an owner only in a cancellable async local.
-2. Enforce one outstanding permit exchange, retain every full/mismatched
-   control value, and map fatal control-plane faults into supervised TX
-   disablement.
-3. Drive `maintain_tx()` and recovery observation from the node actor while the
-   dispatcher cooperatively returns an exact late owner.
+1. Build the permanent, non-cancelled executor supervisor and monotonic clock
+   adapter around `NoRfTxDispatcher` and `TxPermitServer`.
+2. Persist node-side owning completion handling. In particular, retain and
+   retry `TxCompletionDisposition::Next` under job-channel pressure without
+   calling `rollback_queued()` after an earlier authorization.
+3. Drive `maintain_tx()` and recovery observation from that node owner while
+   the dispatcher cooperatively returns an exact late owner.
 4. Persist accepted intent, active attempts, and terminal projection policy
-   before mapping tombstones into device API v1.
+   before mapping tombstones into device API v1; define reboot/durable recovery
+   without attempting to persist volatile leases or references.
 5. Convert allocation-backed ordinary RNS actions into caller-reservable packet
    ownership; the DATA path alone does not cover proofs, announces, forwarding,
    Links or Resources.
 6. Keep every firmware dependency graph TX-free and the radio-bearing lab
    image RX-only. Only after these boundaries and explicit antenna/load and
-   regional approval may a guarded radio implementation or RF HIL use this
-   path.
+   regional approval may a guarded driver/radio implementation or RF HIL use
+   this path.

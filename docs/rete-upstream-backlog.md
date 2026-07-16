@@ -373,12 +373,19 @@ attempt into an in-place terminal tombstone before Rete removes the receipt,
 and acknowledgement remains blocked while any typestate owns the buffer. A
 layout guard prevents dispatch slots from regaining embedded packet arrays.
 
-The remaining product blockers are the dispatcher actor and owning
-fault/recovery orchestration, durable intent/attempt recovery, bounded ordinary
-RNS actions, and higher-level LXMF persistence. Until those slices and radio
-policy are connected, no stable host send operation or firmware RF TX graph
-uses this path. Every current firmware graph remains TX-free, and the only
-radio-bearing lab artifact remains RX-only.
+The firmware-excluded `reticulum-tx-dispatch` crate now supplies the RF-inert
+persistent packet-interface machine and node-side permit server. It retains
+exact owning/control values under pressure, uses cancellation-safe short waits,
+and fails closed rather than guessing authorization when a recovery step at or
+after its configured grace threshold observes no exact permit reply. The
+remaining product blockers are the permanent executor supervisor/clock
+adapter, persistent node-side owning completion and `Next`-job orchestration,
+`maintain_tx()` and fault/recovery observation, firmware/driver integration,
+durable intent/attempt recovery, bounded ordinary RNS actions, and higher-level
+LXMF persistence.
+Until those slices and radio policy are connected, no stable host send
+operation or firmware RF TX graph uses this path. Every current firmware graph
+remains TX-free, and the only radio-bearing lab artifact remains RX-only.
 
 ## 12. LXMF retry and receipt-attempt correlation
 

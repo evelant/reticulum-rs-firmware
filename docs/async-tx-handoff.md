@@ -1,9 +1,10 @@
 # Owning async TX handoff
 
 **Status:** portable route/permit/completion/recovery and owning Embassy
-handoff storage implemented and target-checked; host-only manually stepped
-no-RF integration harness implemented; persistent dispatcher actor next; no
-firmware TX graph
+handoff storage implemented and target-checked; firmware-excluded RF-inert
+persistent packet-interface state machine and node-side permit server
+implemented; no permanent executor supervisor, firmware TX graph, or radio
+driver
 **RF status:** compile-disabled until antenna/load and regional authorization
 
 ## Decision
@@ -17,7 +18,11 @@ Node-core remains portable and Embassy-free. It owns attempt/dispatch metadata
 but receives an externally owned buffer for preparation. The implemented
 `reticulum-tx-handoff` crate owns the Embassy channel topology. The Tracker
 firmware does not depend on that crate and gains no TX-capable radio type or
-feature as part of this slice.
+feature as part of this slice. The separate `reticulum-tx-dispatch` crate owns
+the handoff roles in persistent state, but is also excluded from every firmware
+graph. It has no executor, timer, device-API, TX-capable radio driver/HAL, or
+pluggable byte-sink dependency and cannot transmit. Node-core's transitive
+portable RX/framing edge supplies no TX capability.
 
 ## Ownership topology
 
@@ -28,7 +33,7 @@ unique reference into the available/completion channel before tasks start:
 available/completion channel
     -> node-local reservation and RNS preparation
     -> jobs channel
-    -> one interface dispatcher across await
+    -> one persistent packet-interface dispatcher
     -> available/completion channel
 ```
 
@@ -58,11 +63,21 @@ Cancelling a receive future while it is still pending leaves its value in the
 Embassy channel, including when it was woken but not polled again. Once a
 receive returns an owning value, however, cancellation of a surrounding future
 would logically abandon that owner unless it was first moved into persistent
-machine state. The product dispatcher must therefore keep every `TxJob`,
-pending owner, authorized owner, completion, and retained full-channel value in
-a state machine allocated outside the task future. A thin wait helper may
-borrow that machine and store a ready value before returning, but a monolithic
-async operation must not retain an owner only in a local across an await.
+machine state. `NoRfTxDispatcher` therefore keeps every `TxJob`, pending owner,
+authorized owner, completion, and retained full-channel value in a compact
+state enum allocated outside its short wait future. Each synchronous `step()`
+performs one consuming transition and restores an exact value immediately if a
+`try_send` is full. `wait_for_input()` and the permit server's
+`wait_for_request()` return no owner; once an Embassy receive becomes ready,
+they assign the value to persistent state in the same poll before reporting
+readiness.
+
+Those helpers make cancellation of a still-pending short wait safe. They do not
+make cancellation of the top-level owner safe: a `StaticCell` cannot reacquire
+a lost unique `&'static mut` runtime reference. Firmware integration therefore
+still needs a permanent, non-cancelled supervisor task plus a monotonic clock
+adapter, or an explicit reboot recovery design. Neither exists in the current
+firmware.
 
 The return path carries more than the bare reference. Node-core already
 provides non-`Copy` owning typestates whose payload remains one buffer pointer
@@ -156,18 +171,21 @@ The transaction must:
 
 Pool exhaustion is rejected before entropy or RNS mutation. If
 `NodeHandoff::jobs.try_send` reports full, the caller still owns the `TxJob`
-returned by `ChannelFull::into_inner()` and calls `rollback_queued(job, now)`.
-Before its deadline and before any prior
-authorization this cancels the exact receipt; at or after the deadline it
-enters and finalizes exact-owner recovery, returning `Recovered`. It must never
-use a cancellable `send(job).await` that can lose the owner future.
+returned by `ChannelFull::into_inner()`. For a freshly prepared job before any
+route was authorized, `rollback_queued(job, now)` cancels the exact receipt
+before its deadline; at or after the deadline it enters and finalizes
+exact-owner recovery, returning `Recovered`. A `TxCompletionDisposition::Next`
+job after prior authorization must instead remain in persistent node state and
+be retried; rollback deliberately rejects it. Neither path may use a cancellable
+`send(job).await` that can lose the owner future.
 
 ## Authorization boundary
 
-Owning bytes is not authorization to transmit. Immediately before the first
-irreversible hardware action, the future interface dispatcher must split its
-`TxJob` into `PermitPendingTx` plus an opaque non-`Copy` scalar
-`TxPermitRequest`. The node owner already linearizes:
+Owning bytes is not authorization to transmit. The RF-inert dispatcher splits
+its `TxJob` into `PermitPendingTx` plus an opaque non-`Copy` scalar
+`TxPermitRequest` before its only byte inspection. A future driver integration
+must preserve that same gate immediately before the first irreversible
+hardware action. The node owner linearizes:
 
 - stale, terminal, cancelled, expired, recovery-required, wrong-interface or
   policy-denied work: deny without touching radio TX;
@@ -175,16 +193,19 @@ irreversible hardware action, the future interface dispatcher must split its
   reservation: change `Routed -> Authorized`, set `may_have_transmitted`, and
   issue a generation-bound non-`Copy` permit.
 
-Permit requests and replies use separate depth-one scalar channels; they
-never enter either buffer-owning channel or affect its capacity proof. A
-request binds owner, node instance, packet slot, dispatch generation,
-interface, and hop generation. Permit issuance is one single-owner transition
-and is irrevocable: after it succeeds, the dispatch is conservatively
-classified as possibly transmitted even if the actor later reports a driver
-error or misses the deadline. The handoff returns exact full-channel values for
-requests, replies, and cooperative owner returns. The future dispatcher actor
-must keep at most one permit exchange outstanding, retain full or mismatched
-control values, and disable TX on a control-plane invariant instead of
+Permit requests and replies use separate depth-one scalar channels; they never
+enter either buffer-owning channel or affect its capacity proof. A request
+binds owner, node instance, packet slot, dispatch generation, interface, and
+hop generation. Permit issuance is one single-owner transition and is
+irrevocable: after it succeeds, the dispatch is conservatively classified as
+possibly transmitted even if a later driver reports an error or misses the
+deadline. `TxPermitServer` owns the node-side ports, invokes the synchronous
+authorization policy at most once per request and only for a validated live
+candidate, and retains the exact reply without reauthorizing while its channel
+is full. Terminal, expired, recovery-required, or invalid requests bypass
+policy. `NoRfTxDispatcher` keeps at most one exchange outstanding, retains
+exact full or mismatched control values, returns the pending owner as a recovery
+fault, and permanently disables itself on a control-plane invariant instead of
 dropping either side.
 
 `PermitPendingTx::resolve(reply, now)` rejects a mismatched reply while retaining
@@ -238,6 +259,19 @@ fail-closed. A foreign or stale completion is rejected intact, not reclaimed.
   request supervised hardware recovery. Never fabricate or force-reuse the
   missing reference.
 
+The dispatcher separately configures a permit-exchange recovery grace interval
+after the owner deadline. It continues to seek the exact reply because the node
+may already have crossed the irrevocable authorization point. On the first
+step whose clock sample is at or after the grace threshold, it checks the reply
+queue first. Any reply observable by that step wins regardless of its enqueue
+time and is resolved normally; a late grant still becomes byte-inaccessible
+`ExpiredAuthorizedTx`. If no reply is observable, the dispatcher returns the
+exact pending owner as a control-plane recovery-fault completion, permanently
+disables itself, and leaves node-core to quarantine/reconcile that owner. It
+never guesses whether authorization occurred. Permit-request pressure follows
+the same fail-closed principle and retains an unsent request when its grace
+expires.
+
 `lora-phy` 3.0.1 waits for DIO1 with SX1262 hardware TX timeout disabled and
 warns against cancelling IRQ processing. It enables the RF switch and issues
 `SetTx(0)` before that unbounded wait. MCU reset alone is therefore not an
@@ -262,6 +296,10 @@ Implemented and host/target-testable without RF:
 - `reticulum-tx-handoff` static one-time role splitting, pool-depth owner
   channels, depth-one permit channels, exclusive non-`Clone` capabilities, and
   exact `ChannelFull<T>` ownership returns;
+- `reticulum-tx-dispatch` persistent RF-inert ownership phases, one-transition
+  synchronous stepping, exact backpressure restoration, cancellation-safe
+  short waits, permit-grace quarantine behavior, and a node-side permit server
+  that authorizes once and retains a pressured reply;
 - stable-address/no-copy, pressure, cancelled-receive, crossed-reply,
   stale-token, delayed-reply, terminal-race, cumulative-authorization, and
   late-recovery tests;
@@ -270,19 +308,23 @@ Implemented and host/target-testable without RF:
   fan-out, and terminal-before-authorization suppression across the real
   handoff ports;
 - generic RISC-V and ESP32-S3 compilation; and
-- an exact handoff dependency contract plus dependency/feature guards that keep
-  Tracker TX unavailable.
+- exact handoff/dispatcher dependency contracts plus dependency/feature guards
+  that keep Tracker TX unavailable.
 
-The next product slice is the sole persistent, non-terminating dispatcher actor
-using the frozen portable transitions and handoff capabilities. The handoff
-remains outside every firmware graph; only the host harness drives
-representative portable protocol paths, and no production actor or radio path
-consumes it.
+The next product slice is a permanent executor supervisor and clock adapter
+around the persistent machine, together with node-side persistent handling of
+owning returns. In particular, a `TxCompletionDisposition::Next` job must be
+retained and retried under job-channel pressure; it cannot use
+`rollback_queued()` after an earlier route was authorized. `maintain_tx()` and
+recovery observations also still need permanent node-owner orchestration. The
+handoff and dispatcher remain outside every firmware graph, and no driver or
+radio path consumes either crate.
 
 The graph policy checks every current Tracker profile and the Cargo
 `--all-features` closure for both `reticulum-node-core` and
-`reticulum-tx-handoff`. Adding a feature-only transitive ownership path
-therefore fails before a new firmware feature can bypass the reviewed list.
+`reticulum-tx-handoff`, and keeps `reticulum-tx-dispatch` outside every firmware
+graph. Adding a feature-only transitive ownership path therefore fails before a
+new firmware feature can bypass the reviewed list.
 
 Still requires explicit antenna/load and regional authorization:
 

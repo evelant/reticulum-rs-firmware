@@ -43,13 +43,18 @@ acknowledgement, and a missing owner is never fabricated or force-reused.
 
 The separate `reticulum-tx-handoff` crate now carries these unique static
 owners through bounded Embassy channels without exposing raw channel handles
-or an owner-taking async send. A host-only, manually stepped no-RF harness now
-exercises the routed DATA owner lifecycle across the real jobs, permit-request,
-permit-reply, and return ports. It remains disconnected from device API,
-firmware radio tasks, and RF TX; the next product boundary is the sole
-persistent dispatcher actor. Reboot persistence and allocation-backed ordinary
-RNS actions remain open. Every firmware dependency graph remains TX-free, and
-the only radio-bearing firmware artifact remains RX-only.
+or an owner-taking async send. The firmware-excluded `reticulum-tx-dispatch`
+crate now owns those ports in an RF-inert persistent packet-interface state
+machine and provides the node-side permit server. Synchronous steps retain
+every owning value under backpressure, while short receive waits store a ready
+channel value in persistent state before returning. Its only byte consumer is an
+internal scalar inspector: it has no executor, clock, TX-capable driver/HAL,
+device-API, or pluggable byte-sink dependency and cannot transmit. Node-core's
+transitive portable RX/framing edge supplies no TX capability. A permanent
+supervisor/clock adapter, persistent node-side completion and `Next`-job
+orchestration, firmware integration, a real driver/RF boundary, and durable
+reboot recovery remain open. Every firmware dependency graph remains TX-free,
+and the only radio-bearing firmware artifact remains RX-only.
 
 ## Read first
 
@@ -97,6 +102,7 @@ cargo check --locked \
   -p reticulum-device-api \
   -p reticulum-node-core \
   -p reticulum-tx-handoff \
+  -p reticulum-tx-dispatch \
   -p reticulum-radio-interface \
   -p reticulum-board-heltec-tracker-v2 \
   --target riscv32imac-unknown-none-elf
@@ -104,6 +110,7 @@ cargo +esp check --locked \
   -p reticulum-device-api \
   -p reticulum-node-core \
   -p reticulum-tx-handoff \
+  -p reticulum-tx-dispatch \
   --target xtensa-esp32s3-none-elf
 cargo +esp build --locked --release \
   -p reticulum-heltec-tracker-v2 \
