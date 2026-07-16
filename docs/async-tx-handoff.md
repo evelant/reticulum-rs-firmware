@@ -1,7 +1,7 @@
 # Owning async TX handoff
 
-**Status:** external-buffer foundation implemented; portable permit state next;
-no firmware TX graph
+**Status:** portable route/permit/completion/recovery state implemented; owning
+Embassy handoff next; no firmware TX graph
 **RF status:** compile-disabled until antenna/load and regional authorization
 
 ## Decision
@@ -41,32 +41,34 @@ capacity-infallible if the endpoints remain encapsulated. An unexpected full
 result must return the unique reference to the caller and become an invariant
 fault, never drop or duplicate ownership.
 
-The return path carries more than the bare reference. It uses a non-`Copy`
-owned sum type whose payload is still only one buffer pointer plus scalar
-metadata:
+The return path carries more than the bare reference. Node-core already
+provides non-`Copy` owning typestates whose payload remains one buffer pointer
+plus scalar metadata:
 
 ```text
-TxReturn = Available(buffer) | Completed(TxCompletion)
+RoutedTxJob
+  -> PermitPendingTx
+  -> AuthorizedTx | ExpiredAuthorizedTx | UnpermittedTx
+  -> TxCompletion
 
-TxCompletion = {
-  buffer,
-  dispatch_generation,
-  interface,
-  outcome: DefinitelyUnsent | AuthorizedOrPossiblyTransmitted | RecoveryFault,
-}
+NodeCore::complete_tx(TxCompletion)
+  -> Next(RoutedTxJob)
+   | Available(buffer)
+   | Recovered { buffer, record }
+   | Quarantined(TxQuarantine)
 ```
 
-Each outcome also retains the bounded driver/retry reason needed by policy.
-The initial policy permits no same-interface retry: `DefinitelyUnsent` either
-advances once to the next route or cancels the exact receipt when no route
-remains and no earlier route was authorized. Dispatch metadata retains a
-cumulative `may_have_transmitted` bit; once set it never clears, and the receipt
-stays live even if every later route is definitely unsent.
-`AuthorizedOrPossiblyTransmitted` sets that bit even when the driver reports an
-error; `RecoveryFault` quarantines the slot and enters supervisor recovery. The
-node owner validates the completion's generation and interface before
-advancing the serialized route plan. A mismatched completion is an invariant
-fault and cannot silently free or reuse its returned buffer.
+Each completion retains a bounded driver/retry code. The initial policy permits
+no same-interface retry: an unpermitted completion either advances once to the
+next deterministic route or cancels the exact receipt when no route remains
+and no earlier route was authorized. Dispatch metadata retains a cumulative
+`may_have_transmitted` bit; once set it never clears, and the receipt stays live
+even if every later route is definitely unsent. Authorization sets that bit at
+permit issuance, before the reply leaves node-core, even if the driver later
+reports an error or the reply arrives after the deadline. A recovery fault or
+same-lease invariant quarantines the returned unique owner. The node owner
+validates incarnation, dispatch/hop generations, interface, attempt, and
+completion class before advancing the serialized route plan.
 
 Safe `ConstStaticCell` and Embassy channel APIs encapsulate the required unsafe
 internals. Project crates retain `#![forbid(unsafe_code)]`; do not introduce
@@ -74,8 +76,8 @@ internals. Project crates retain `#![forbid(unsafe_code)]`; do not introduce
 
 ## Portable state and types
 
-Node-core now provides the project-owned identifiers and target/set types below;
-`TxRoutePlan` remains part of the next portable state slice:
+Node-core now provides the project-owned identifiers and target/set types
+below, including the resolved `TxRoutePlan`:
 
 ```text
 PacketSlotId(u16)
@@ -88,19 +90,20 @@ InterfaceSet(u64)
 TxRoutePlan { remaining interfaces }
 ```
 
-`TxPacketBuffer` contains its stable slot ID, 500-byte array, encoded length
-and generation-scoped binding. A matching non-Copy owned job plus scalar
-`TxPermit` is required to expose the bytes. Checks bind slot, owner identity,
-`NodeInstanceId`, dispatch generation, selected interface and permit
-generation; stale scalar copies cannot expose a reused buffer.
+`TxPacketBuffer` contains its 500-byte array and private generation-scoped
+binding. A matching non-`Copy` owned job, opaque non-`Copy` permit request and
+reply, and `AuthorizedTx` are required to expose bytes. Checks bind slot, owner
+identity, `NodeInstanceId`, dispatch generation, selected interface, and hop
+generation; stale or foreign control messages cannot expose a reused buffer.
 
-Node-core now preserves `PreparedData::target()` as project-owned `TxTarget`
-metadata on the uniquely owned job. The next slice resolves it synchronously
-against a snapshot of enabled Reticulum packet interfaces. USB, BLE and Wi-Fi
-device-API transports are not automatically RNS packet interfaces.
-Multi-interface fan-out serially reuses the same unique buffer, issuing a new
-interface-bound permit for each hop. An empty resolved route cancels the exact
-newly created receipt and rolls the preparation back.
+Node-core preserves `PreparedData::target()` as project-owned `TxTarget`
+metadata and resolves it synchronously against the request's snapshot of
+enabled Reticulum packet interfaces. USB, BLE, and Wi-Fi device-API transports
+are not automatically RNS packet interfaces. Multi-interface fan-out selects
+ascending interface IDs, serially reuses the same unique buffer, and issues a
+fresh generation-bound permit exchange for each hop. An empty resolved route
+cancels the exact newly created receipt and returns the same available buffer;
+an unexpected cancellation failure enters fail-closed recovery.
 
 ## Transactional preparation
 
@@ -108,45 +111,63 @@ The node actor first removes one free unique buffer from the available channel,
 then calls a portable API equivalent to:
 
 ```text
-prepare_data_into_slot(buffer, destination, plaintext,
-                       rns_seconds, lease_deadline, rng)
+prepare_data_into_slot(buffer,
+                       PrepareDataRequest {
+                         destination, plaintext, rns_now,
+                         owner_now, deadline, enabled_interfaces
+                       },
+                       rng)
 ```
 
 The transaction must:
 
-1. validate that the buffer ID maps to free dispatch metadata;
-2. reserve attempt-ledger and dispatch slots before entropy/RNS mutation;
-3. prepare directly into the external buffer;
-4. restore metadata and leave the buffer free on failure;
-5. bind length, receipt token, target, attempt, instance and generation on
-   success; and
-6. enqueue the unique reference as a job.
+1. reject `deadline <= owner_now` before any reservation or mutation;
+2. validate that the buffer ID maps to free dispatch metadata;
+3. reserve attempt-ledger, dispatch, and hop generations before entropy/RNS
+   mutation;
+4. prepare directly into the external buffer;
+5. restore metadata and leave the buffer free on failure;
+6. resolve the target and bind length, receipt token, route, attempt, instance,
+   and generations on success; and
+7. enqueue the unique routed reference as a job.
 
-Pool exhaustion is rejected before entropy or RNS mutation. If the jobs
-channel invariant fails, node-core must cancel the exact new receipt, roll
-back attempt/dispatch metadata and return the still-owned buffer.
+Pool exhaustion is rejected before entropy or RNS mutation. If the future jobs
+channel `try_send` reports full, the caller still owns the returned `TxJob` and
+calls `rollback_queued(job, now)`. Before its deadline and before any prior
+authorization this cancels the exact receipt; at or after the deadline it
+enters and finalizes exact-owner recovery, returning `Recovered`. It must never
+use a cancellable `send(job).await` that can lose the owner future.
 
 ## Authorization boundary
 
 Owning bytes is not authorization to transmit. Immediately before the first
-irreversible hardware action, the interface actor requests a scalar permit
-from the node owner. The node linearizes:
+irreversible hardware action, the future interface dispatcher must split its
+`TxJob` into `PermitPendingTx` plus an opaque non-`Copy` scalar
+`TxPermitRequest`. The node owner already linearizes:
 
 - stale, terminal, cancelled, expired, recovery-required, wrong-interface or
   policy-denied work: deny without touching radio TX;
-- active work with a valid route, deadline, regional profile and airtime
-  reservation: change `Queued -> Authorized` and issue a generation-bound
-  permit.
+- active work with a valid route, deadline, regional profile, and airtime
+  reservation: change `Routed -> Authorized`, set `may_have_transmitted`, and
+  issue a generation-bound non-`Copy` permit.
 
 Permit requests and replies use a separate bounded scalar control plane; they
 never enter either buffer-owning channel or affect its capacity proof. A
-request binds owner, node instance, packet slot, dispatch generation and
-interface. Permit issuance is one single-owner transition and is irrevocable:
-after it succeeds, the generation is conservatively classified as possibly
-transmitted even if the actor later reports a driver error or deadline. The
-later handoff commit must bind at most one outstanding exchange to each buffer,
-define full-channel behavior for both permit and cooperative-return messages,
-and test every `try_send` ownership/error path.
+request binds owner, node instance, packet slot, dispatch generation,
+interface, and hop generation. Permit issuance is one single-owner transition
+and is irrevocable: after it succeeds, the dispatch is conservatively
+classified as possibly transmitted even if the actor later reports a driver
+error or misses the deadline. The future handoff must bind at most one
+outstanding exchange to each buffer, define full-channel behavior for both
+permit and cooperative-return messages, and test every `try_send`
+ownership/error path.
+
+`PermitPendingTx::resolve(reply, now)` rejects a mismatched reply while retaining
+both owners. A grant resolved at or after its deadline becomes
+`ExpiredAuthorizedTx`: it exposes no bytes but remains possibly transmitted
+because issuance already won the race. Before the deadline, only
+`AuthorizedTx::frame(now)` can borrow the encoded packet. That accessor is
+one-shot and also rejects the exact deadline (`now >= deadline`).
 
 A terminal committed before authorization suppresses transmission. Once
 authorization wins the race, RF may occur; later proof/timeout state remains
@@ -161,22 +182,33 @@ possibly transmitted.
 ## Deadline and recovery
 
 A deadline never frees a slot by itself. The unique reference may still be in
-a channel, driver future, SPI transaction or interface task. Expiry changes
+a channel, driver future, SPI transaction, or interface task. Exact-deadline
+comparison is inclusive throughout the portable API: `now >= deadline` is
+expired during preparation preflight, authorization, permit-reply resolution,
+frame access, completion, rollback, and maintenance. Expiry changes scalar
 metadata once to `RecoveryRequired` and publishes a bounded supervisor record
-containing the lease, interface, prior phase, deadline and whether RF may have
+containing `NodeInstanceId`, slot, dispatch generation, selected interface,
+prior phase, deadline, observation time, reason, and whether RF may have
 started.
 
-The dispatch slot is the authoritative fixed quarantine record; a returned
-recovery or mismatched buffer remains owned by fixed quarantine storage bound
-to that slot. Supervisor notifications are observational and may coalesce or
-drop under pressure without losing the retained recovery state or its unique
-buffer owner.
+While the unique owner is away, the dispatch slot's scalar record is
+authoritative. It does not own or fabricate the missing mutable reference.
+Supervisor notifications are observational and may coalesce or drop under
+pressure without losing the retained recovery state. When the exact late owner
+returns with the conservative completion class implied by its prior phase,
+node-core finalizes that record and returns `Recovered { buffer, record }`; the
+buffer is then reusable. A same-lease metadata mismatch or reported recovery
+fault instead returns an owning `TxQuarantine` and keeps the scalar record
+fail-closed. A foreign or stale completion is rejected intact, not reclaimed.
 
 - Before authorization: deny later permits and request a definitely-unsent
   cooperative return.
 - After authorization: request radio cleanup and classify any return as
   possibly transmitted.
-- On return: finalize metadata and reclaim the exact buffer normally.
+- On a coherent exact return: finalize metadata and reclaim the exact buffer
+  as `Recovered`.
+- On a fault or invariant mismatch: retain both the scalar recovery state and
+  the externally owned `TxQuarantine`; do not reuse the buffer.
 - No return by the recovery grace deadline: disable TX, retain the fault and
   request supervised hardware recovery. Never fabricate or force-reuse the
   missing reference.
@@ -197,16 +229,19 @@ reset regulatory accounting.
 
 ## Implementation boundary before RF approval
 
-Safe to implement and host/target-test now:
+Implemented and host/target-testable without RF:
 
-- the external-buffer node-core refactor and target/deadline preservation are
-  implemented and host/target checked;
-- route resolution, fake-interface authorization/permit state, deadlines,
-  recovery diagnostics and serialized fan-out as the next portable commit;
-- unique-reference Embassy handoff only after those transitions are frozen;
-- stable-address/no-copy, pressure, stale-token and race tests;
+- external-buffer node-core ownership, target resolution, deterministic
+  serialized fan-out, opaque permit state, one-shot authorized byte access,
+  completion, exact deadlines, and recovery diagnostics;
+- stable-address/no-copy, pressure, stale-token, delayed-reply, terminal-race,
+  cumulative-authorization, and late-recovery tests;
 - generic RISC-V and ESP32-S3 compilation; and
 - dependency/feature guards that keep Tracker TX unavailable.
+
+The next implementation slice is the unique-reference Embassy handoff using
+the already frozen portable transitions. It remains outside every firmware
+graph until its channel ownership and cancellation behavior is proven.
 
 The graph policy checks every current Tracker profile and the Cargo
 `--all-features` closure for both `reticulum-node-core` and the future
@@ -223,9 +258,10 @@ Still requires explicit antenna/load and regional authorization:
 
 ## Remaining protocol blocker
 
-The caller-owned path currently covers locally prepared DATA only. Rete
-`NodeActions` still contains allocation-backed proof, announce, forwarding,
-Link and Resource packets. A full bounded node needs a caller-reservable
-outbound-action sink so those bytes are built transactionally into the same
-fixed pool; wrapping the resulting `Vec` after protocol mutation is not an
-equivalent no-copy or backpressure guarantee.
+The caller-owned path currently covers locally prepared DATA only. It is not
+linked into firmware, and no portable completion code claims that RF occurred.
+Rete `NodeActions` still contains allocation-backed proof, announce,
+forwarding, Link and Resource packets. A full bounded node needs a
+caller-reservable outbound-action sink so those bytes are built transactionally
+into the same fixed pool; wrapping the resulting `Vec` after protocol mutation
+is not an equivalent no-copy or backpressure guarantee.

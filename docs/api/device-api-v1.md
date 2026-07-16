@@ -147,15 +147,16 @@ No API in this crate can take, drain, or borrow packet bytes.
 
 This encoded-byte digest is deliberately distinct from Reticulum's delivery-
 proof receipt hash, which covers the protocol-defined hashable part. A future
-dispatcher must compute and retain both under distinct types instead of using a
-node-core `AttemptToken` for this field.
+dispatcher must compute and retain both under distinct types. Its only legal
+packet-byte view is the one-shot frame borrowed from an exactly permitted
+node-core `AuthorizedTx`; it must not substitute `AttemptToken` for this field.
 
 Node-core now retains an in-RAM terminal-attempt tombstone until explicit
 acknowledgement. The future dispatcher must first atomically persist/project
 the corresponding `Delivered` or `DeliveryTimeout` submission state, process
-the valid ownership return of any still-bound external `TxJob`, and only then
-acknowledge the opaque node-core attempt handle. Node-core rejects
-acknowledgement while that job still owns its `TxPacketBuffer`. The
+the valid ownership return of any still-bound external TX typestate, and only
+then acknowledge the opaque node-core attempt handle. Node-core rejects
+acknowledgement while that owner still binds its `TxPacketBuffer`. The
 encoded-byte digest remains retained submission metadata, but the v1 response
 exposes it only for `AwaitingDelivery` and `Delivered`; a delivery timeout is a
 `Failed` response without keys 2 or 3. Device API v1 does not expose the
@@ -183,10 +184,14 @@ The decoder returns key 1 as a slice of the caller's input buffer. A dispatcher
 must not retain it past that buffer's lifetime. The future dispatcher/intent
 owner copies accepted input into a separate fixed-capacity queue before calling
 `reticulum-node-core`. Node-core then prepares into one separately registered,
-caller-owned 500-byte `TxPacketBuffer` and returns a unique `TxJob`; that prompt
-dispatch ownership is not client-intent storage, and its RNS receipt timeout
-has already started. The current node-core slice exposes no packet bytes and
-has no async handoff, permit or radio integration.
+caller-owned 500-byte `TxPacketBuffer`. It rejects an already-expired owner
+deadline before mutation, resolves the enabled-interface route, and returns a
+unique routed `TxJob`; that prompt dispatch ownership is not client-intent
+storage, and its RNS receipt timeout has already started. Packet bytes remain
+inaccessible until an opaque permit exchange produces `AuthorizedTx`, whose
+`frame(now)` accessor is one-shot and exact-deadline checked. This portable
+state has no async handoff or radio integration, and the host-only operation
+does not invoke it.
 
 Successful host-simulation response body:
 

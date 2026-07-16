@@ -248,6 +248,28 @@ impl InterfaceSet {
             None
         }
     }
+
+    const fn without(self, interface: PacketInterfaceId) -> Option<Self> {
+        let index = interface.get();
+        if index < 64 {
+            Some(Self(self.0 & !(1u64 << index)))
+        } else {
+            None
+        }
+    }
+
+    const fn intersect(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+
+    fn take_first(&mut self) -> Option<PacketInterfaceId> {
+        if self.0 == 0 {
+            return None;
+        }
+        let index = self.0.trailing_zeros() as u8;
+        self.0 &= self.0 - 1;
+        Some(PacketInterfaceId::new(index))
+    }
 }
 
 /// Interface authorization retained with one prepared RNS packet.
@@ -271,6 +293,79 @@ impl TxTarget {
             }
         }
     }
+}
+
+/// Failure to resolve an RNS target against the enabled packet interfaces.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TxRouteError {
+    /// A target named an interface outside the compact 0-through-63 profile.
+    InterfaceOutsideProfile {
+        /// Complete interface identifier that could not be represented.
+        interface: PacketInterfaceId,
+    },
+    /// No enabled packet interface satisfies the target.
+    NoEligibleInterface {
+        /// Target that resolved to an empty route.
+        target: TxTarget,
+    },
+}
+
+/// Deterministic remaining interfaces for one serialized packet fan-out.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TxRoutePlan {
+    remaining: InterfaceSet,
+}
+
+impl TxRoutePlan {
+    /// Resolve a target against one synchronous enabled-interface snapshot.
+    pub fn resolve(target: TxTarget, enabled: InterfaceSet) -> Result<Self, TxRouteError> {
+        let remaining = match target {
+            TxTarget::All => enabled,
+            TxTarget::Only(interface) => {
+                let singleton = InterfaceSet::empty()
+                    .with(interface)
+                    .ok_or(TxRouteError::InterfaceOutsideProfile { interface })?;
+                enabled.intersect(singleton)
+            }
+            TxTarget::AllExcept(interface) => enabled
+                .without(interface)
+                .ok_or(TxRouteError::InterfaceOutsideProfile { interface })?,
+        };
+        if remaining.is_empty() {
+            Err(TxRouteError::NoEligibleInterface { target })
+        } else {
+            Ok(Self { remaining })
+        }
+    }
+
+    /// Interfaces not yet selected for this serialized fan-out.
+    pub const fn remaining(self) -> InterfaceSet {
+        self.remaining
+    }
+
+    fn take_next(&mut self) -> Option<PacketInterfaceId> {
+        self.remaining.take_first()
+    }
+}
+
+/// Complete caller-owned inputs for one destination-DATA preparation.
+///
+/// The Reticulum clock and packet-owner clock are deliberately separate. The
+/// owner deadline must be strictly later than `owner_now` when preparation
+/// begins.
+pub struct PrepareDataRequest<'a> {
+    /// Complete destination hash for the encrypted DATA packet.
+    pub destination: DestinationHash,
+    /// Plaintext to encrypt into one base-MTU DATA packet.
+    pub plaintext: &'a [u8],
+    /// Current monotonic whole-second sample supplied to RNS.
+    pub rns_now: MonotonicSeconds,
+    /// Current monotonic millisecond sample for owner-lease validation.
+    pub owner_now: MonotonicMillis,
+    /// Deadline for returning the unique packet-buffer owner.
+    pub deadline: TxLeaseDeadline,
+    /// Synchronous snapshot of packet interfaces eligible for this dispatch.
+    pub enabled_interfaces: InterfaceSet,
 }
 
 /// Whether this node terminates only local traffic or also forwards RNS
@@ -487,6 +582,27 @@ pub enum SubmitError {
     AttemptIdentifierExhausted,
     /// The non-repeating dispatch-generation space has been exhausted.
     DispatchIdentifierExhausted,
+    /// The non-repeating per-hop generation space has been exhausted.
+    HopIdentifierExhausted,
+    /// The packet-owner deadline was already reached when preparation began.
+    LeaseDeadlineExpired {
+        /// Current owner-clock sample.
+        now: MonotonicMillis,
+        /// Supplied owner deadline.
+        deadline: TxLeaseDeadline,
+    },
+    /// No enabled packet interface satisfies the prepared RNS target.
+    NoEligibleInterface {
+        /// Target that resolved to an empty route.
+        target: TxTarget,
+    },
+    /// A prepared target named an interface outside the compact route profile.
+    InterfaceOutsideProfile {
+        /// Complete unsupported interface identifier.
+        interface: PacketInterfaceId,
+    },
+    /// Exact receipt cancellation failed while rejecting an empty route.
+    RouteReceiptCancellationFailed,
     /// Plaintext cannot fit in one encrypted base-MTU DATA packet.
     PayloadTooLarge {
         /// Supplied plaintext length.
@@ -509,6 +625,17 @@ pub enum SubmitError {
     PacketBuild,
     /// The RNS adapter reported an impossible failure class.
     Invariant,
+}
+
+impl From<TxRouteError> for SubmitError {
+    fn from(error: TxRouteError) -> Self {
+        match error {
+            TxRouteError::InterfaceOutsideProfile { interface } => {
+                Self::InterfaceOutsideProfile { interface }
+            }
+            TxRouteError::NoEligibleInterface { target } => Self::NoEligibleInterface { target },
+        }
+    }
 }
 
 impl From<RnsPrepareDataError> for SubmitError {
@@ -540,6 +667,12 @@ pub enum BufferRegistrationError {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct HopBinding {
+    interface: PacketInterfaceId,
+    generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BufferBinding {
     Unregistered,
     Available {
@@ -550,16 +683,16 @@ enum BufferBinding {
     Bound {
         dispatch_generation: u64,
         prepared: PreparedPacket,
+        hop: Option<HopBinding>,
     },
 }
 
 /// One complete externally owned Reticulum packet buffer.
 ///
-/// This value is intentionally neither `Copy` nor `Clone`. Firmware allocates
-/// it in static storage, registers it once, and then moves its unique mutable
-/// reference through the owning handoff. Packet bytes have no public accessor;
-/// a later interface-authorization slice will expose them only with a matching
-/// scalar permit.
+/// This value is intentionally neither Copy nor Clone. Firmware allocates it
+/// in static storage, registers it once, and then moves its unique mutable
+/// reference through the owning handoff. Packet bytes remain private until an
+/// AuthorizedTx exposes one borrowed frame.
 pub struct TxPacketBuffer {
     bytes: [u8; PACKET_CAPACITY],
     binding: BufferBinding,
@@ -590,7 +723,6 @@ impl Default for TxPacketBuffer {
     }
 }
 
-/// Opaque identity of one external-buffer dispatch generation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DispatchHandle {
     instance: NodeInstanceId,
@@ -598,121 +730,741 @@ struct DispatchHandle {
     generation: u64,
 }
 
-/// Unique ownership of one prepared packet awaiting the async handoff.
-///
-/// The job carries the only mutable reference to its packet buffer. It exposes
-/// scalar metadata but deliberately does not expose packet bytes before the
-/// separate interface-authorization state machine exists.
-#[must_use = "dropping a TX job quarantines its packet buffer, dispatch, attempt, and receipt"]
-pub struct TxJob<'a> {
+struct OwnedTx<'a> {
     buffer: &'a mut TxPacketBuffer,
     dispatch: DispatchHandle,
 }
 
-impl TxJob<'_> {
-    fn bound_prepared(&self) -> PreparedPacket {
+impl OwnedTx<'_> {
+    fn bound(&self) -> (PreparedPacket, Option<HopBinding>) {
         match self.buffer.binding {
             BufferBinding::Bound {
                 dispatch_generation,
                 prepared,
+                hop,
             } if dispatch_generation == self.dispatch.generation
                 && prepared.slot_id() == self.dispatch.slot =>
             {
-                prepared
+                (prepared, hop)
             }
             BufferBinding::Unregistered
             | BufferBinding::Available { .. }
             | BufferBinding::Bound { .. } => {
-                unreachable!("private TX job and packet-buffer binding diverged")
+                unreachable!("private TX owner and packet-buffer binding diverged")
             }
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PermitBinding {
+    owner_identity: [u8; 16],
+    instance: NodeInstanceId,
+    slot: PacketSlotId,
+    dispatch_generation: u64,
+    interface: PacketInterfaceId,
+    hop_generation: u64,
+}
+
+impl PermitBinding {
+    fn from_owner(owner: &OwnedTx<'_>) -> Self {
+        let (prepared, hop) = owner.bound();
+        let hop = hop.expect("routed TX owner must retain a selected hop");
+        Self {
+            owner_identity: prepared.handle.owner_identity,
+            instance: prepared.handle.instance,
+            slot: prepared.slot_id(),
+            dispatch_generation: owner.dispatch.generation,
+            interface: hop.interface,
+            hop_generation: hop.generation,
+        }
+    }
+}
+
+/// Unique ownership of one routed packet before permit negotiation.
+#[must_use = "dropping routed TX ownership quarantines its buffer and receipt"]
+pub struct RoutedTxJob<'a> {
+    owner: OwnedTx<'a>,
+}
+
+/// Product-facing name for the routed job produced by DATA preparation.
+pub type TxJob<'a> = RoutedTxJob<'a>;
+
+impl<'a> RoutedTxJob<'a> {
+    fn prepared_inner(&self) -> PreparedPacket {
+        self.owner.bound().0
+    }
+
+    fn hop_inner(&self) -> HopBinding {
+        self.owner
+            .bound()
+            .1
+            .expect("routed TX job must retain a selected hop")
     }
 
     /// Stable slot of the uniquely owned packet buffer.
     pub fn slot_id(&self) -> PacketSlotId {
-        self.bound_prepared().slot_id()
+        self.prepared_inner().slot_id()
     }
 
     /// Encoded packet length retained as scalar metadata.
     pub fn packet_len(&self) -> u16 {
-        self.bound_prepared().packet_len()
+        self.prepared_inner().packet_len()
     }
 
     /// Complete proof-correlation token for this dispatch.
     pub fn attempt(&self) -> AttemptToken {
-        self.bound_prepared().attempt()
+        self.prepared_inner().attempt()
     }
 
     /// Attempt handle used for terminal acknowledgement.
     pub fn attempt_handle(&self) -> AttemptHandle {
-        self.bound_prepared().handle()
+        self.prepared_inner().handle()
     }
 
     /// RNS interface authorization retained at preparation time.
     pub fn target(&self) -> TxTarget {
-        self.bound_prepared().target()
+        self.prepared_inner().target()
     }
 
     /// Deadline bound to this external-buffer owner generation.
     pub fn deadline(&self) -> TxLeaseDeadline {
-        self.bound_prepared().deadline()
+        self.prepared_inner().deadline()
     }
 
-    /// Copy all scalar metadata without separating it from buffer ownership.
+    /// Currently selected interface in the deterministic serialized route.
+    pub fn interface(&self) -> PacketInterfaceId {
+        self.hop_inner().interface
+    }
+
+    /// Copy all scalar packet metadata.
     pub fn prepared(&self) -> PreparedPacket {
-        self.bound_prepared()
+        self.prepared_inner()
+    }
+
+    /// Consume routed ownership into a permit-pending owner and scalar request.
+    pub fn begin_permit(self) -> (PermitPendingTx<'a>, TxPermitRequest) {
+        let binding = PermitBinding::from_owner(&self.owner);
+        (
+            PermitPendingTx { owner: self.owner },
+            TxPermitRequest { binding },
+        )
+    }
+
+    /// Return this hop without requesting authorization.
+    pub fn return_unpermitted(self) -> UnpermittedTx<'a> {
+        UnpermittedTx {
+            owner: self.owner,
+            denial: None,
+        }
+    }
+
+    /// Convert a control-plane or driver fault into an owning recovery return.
+    pub fn recovery_fault(self, code: TxCompletionCode) -> TxCompletion<'a> {
+        TxCompletion {
+            owner: self.owner,
+            kind: CompletionKind::RecoveryFault(code),
+        }
     }
 }
 
-/// Preparation rejection that returns the caller's still-available buffer.
+/// Non-copy scalar request for one exact routed hop.
+#[must_use = "a permit request must be resolved or retained with its pending owner"]
+pub struct TxPermitRequest {
+    binding: PermitBinding,
+}
+
+/// Scalar candidate presented to the authorization policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TxAuthorizationCandidate {
+    /// Selected packet interface.
+    pub interface: PacketInterfaceId,
+    /// Complete encoded packet length.
+    pub packet_len: u16,
+    /// Return/recovery deadline.
+    pub deadline: TxLeaseDeadline,
+    /// Whether an earlier hop may already have transmitted.
+    pub may_have_transmitted: bool,
+}
+
+/// Closed authorization decision vocabulary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TxPolicyDecision {
+    /// Permit this exact routed hop.
+    Authorize,
+    /// Deny this exact routed hop.
+    Deny(TxPolicyDenial),
+}
+
+/// Bounded policy-denial vocabulary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TxPolicyDenial {
+    /// General policy rejected the operation.
+    PolicyDenied,
+    /// No authorized regional profile is available.
+    RegionalProfileUnavailable,
+    /// Airtime could not be reserved.
+    AirtimeUnavailable,
+}
+
+/// Synchronous policy invoked at the node-owner linearization point.
+pub trait TxAuthorizationPolicy {
+    /// Decide whether one fully validated candidate may be authorized.
+    fn authorize(&mut self, candidate: TxAuthorizationCandidate) -> TxPolicyDecision;
+}
+
+/// Reason a valid permit request was denied.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TxPermitDenialReason {
+    /// Policy rejected the otherwise valid request.
+    Policy(TxPolicyDenial),
+    /// The delivery attempt became terminal before authorization.
+    AttemptTerminal(AttemptOutcome),
+    /// The packet-owner deadline expired before authorization.
+    DeadlineExpired,
+    /// The dispatch was already in retained recovery.
+    RecoveryRequired,
+}
+
+/// Non-copy grant for one exact routed hop.
+#[must_use = "a permit grant must resolve its matching pending owner"]
+pub struct TxPermitGrant {
+    binding: PermitBinding,
+}
+
+/// Non-copy denial for one exact routed hop.
+#[must_use = "a permit denial must resolve its matching pending owner"]
+pub struct TxPermitDenial {
+    binding: PermitBinding,
+    reason: TxPermitDenialReason,
+}
+
+impl TxPermitDenial {
+    /// Typed denial reason.
+    pub const fn reason(&self) -> TxPermitDenialReason {
+        self.reason
+    }
+}
+
+/// Non-copy reply to one exact permit request.
+#[must_use = "a permit reply must resolve its matching pending owner"]
+pub enum TxPermitReply {
+    /// Authorization succeeded and is conservatively possibly transmitted.
+    Granted(TxPermitGrant),
+    /// Authorization was denied before RF authorization.
+    Denied(TxPermitDenial),
+}
+
+impl TxPermitReply {
+    fn binding(&self) -> PermitBinding {
+        match self {
+            Self::Granted(grant) => grant.binding,
+            Self::Denied(denial) => denial.binding,
+        }
+    }
+}
+
+/// Scalar request validation failure retaining the unchanged request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TxAuthorizationErrorKind {
+    /// Request belongs to another node owner or incarnation.
+    WrongOwner,
+    /// Slot, dispatch, interface, or hop generation is stale.
+    StaleOrUnknown,
+    /// Private dispatch and receipt metadata disagree.
+    Invariant,
+}
+
+/// Authorization failure retaining the non-copy request.
+#[must_use = "authorization failure retains the exact request"]
+pub struct TxAuthorizationFailure {
+    reason: TxAuthorizationErrorKind,
+    request: TxPermitRequest,
+}
+
+impl TxAuthorizationFailure {
+    /// Typed validation failure.
+    pub const fn reason(&self) -> TxAuthorizationErrorKind {
+        self.reason
+    }
+
+    /// Recover the unchanged request.
+    pub fn into_request(self) -> TxPermitRequest {
+        self.request
+    }
+}
+
+/// Unique packet ownership while a scalar permit reply is outstanding.
+#[must_use = "pending TX ownership must resolve a reply or enter recovery"]
+pub struct PermitPendingTx<'a> {
+    owner: OwnedTx<'a>,
+}
+
+impl<'a> PermitPendingTx<'a> {
+    /// Resolve a matching grant or denial into the corresponding typestate.
+    pub fn resolve(
+        self,
+        reply: TxPermitReply,
+        now: MonotonicMillis,
+    ) -> Result<PermitResolution<'a>, PermitReplyMismatch<'a>> {
+        let expected = PermitBinding::from_owner(&self.owner);
+        if reply.binding() != expected {
+            return Err(PermitReplyMismatch {
+                pending: self,
+                reply,
+            });
+        }
+        match reply {
+            TxPermitReply::Granted(grant) if now >= self.owner.bound().0.deadline().instant() => {
+                Ok(PermitResolution::Expired(ExpiredAuthorizedTx {
+                    owner: self.owner,
+                    grant,
+                }))
+            }
+            TxPermitReply::Granted(grant) => Ok(PermitResolution::Authorized(AuthorizedTx {
+                owner: self.owner,
+                grant,
+                frame_taken: false,
+            })),
+            TxPermitReply::Denied(denial) => Ok(PermitResolution::Unpermitted(UnpermittedTx {
+                owner: self.owner,
+                denial: Some(denial.reason),
+            })),
+        }
+    }
+
+    /// Convert a lost or corrupt control-plane exchange into recovery.
+    pub fn recovery_fault(self, code: TxCompletionCode) -> TxCompletion<'a> {
+        TxCompletion {
+            owner: self.owner,
+            kind: CompletionKind::RecoveryFault(code),
+        }
+    }
+}
+
+/// Successful permit-reply resolution.
+#[must_use = "resolved TX ownership must be completed or retained"]
+pub enum PermitResolution<'a> {
+    /// Authorized owner and its one-shot frame capability.
+    Authorized(AuthorizedTx<'a>),
+    /// Grant arrived at or after its owner deadline and cannot expose bytes.
+    Expired(ExpiredAuthorizedTx<'a>),
+    /// Definitely-unpermitted owner.
+    Unpermitted(UnpermittedTx<'a>),
+}
+
+/// Reply mismatch retaining both unique pending ownership and scalar reply.
+#[must_use = "permit mismatch retains pending ownership and the unmatched reply"]
+pub struct PermitReplyMismatch<'a> {
+    pending: PermitPendingTx<'a>,
+    reply: TxPermitReply,
+}
+
+impl<'a> PermitReplyMismatch<'a> {
+    /// Recover pending ownership and the unchanged unmatched reply.
+    pub fn into_parts(self) -> (PermitPendingTx<'a>, TxPermitReply) {
+        (self.pending, self.reply)
+    }
+}
+
+/// Failure to expose an authorized frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TxFrameError {
+    /// The one-shot frame capability was already consumed.
+    AlreadyTaken,
+    /// The owner deadline was reached before frame bytes were borrowed.
+    DeadlineExpired {
+        /// Deadline that prohibited byte exposure.
+        deadline: TxLeaseDeadline,
+    },
+    /// Grant and uniquely owned buffer metadata disagree.
+    Invariant,
+}
+
+/// Borrowed bytes exposed only by an authorized typestate.
+pub struct TxFrame<'a> {
+    bytes: &'a [u8],
+    attempt: AttemptToken,
+    interface: PacketInterfaceId,
+}
+
+impl TxFrame<'_> {
+    /// Complete encoded Reticulum packet bytes.
+    pub const fn bytes(&self) -> &[u8] {
+        self.bytes
+    }
+
+    /// Proof-correlation token for these bytes.
+    pub const fn attempt(&self) -> AttemptToken {
+        self.attempt
+    }
+
+    /// Interface authorized for this exact frame.
+    pub const fn interface(&self) -> PacketInterfaceId {
+        self.interface
+    }
+}
+
+/// Unique packet ownership after authorization.
+#[must_use = "authorized TX ownership is conservatively possibly transmitted"]
+pub struct AuthorizedTx<'a> {
+    owner: OwnedTx<'a>,
+    grant: TxPermitGrant,
+    frame_taken: bool,
+}
+
+impl<'a> AuthorizedTx<'a> {
+    /// Borrow the authorized packet frame once.
+    pub fn frame(&mut self, now: MonotonicMillis) -> Result<TxFrame<'_>, TxFrameError> {
+        if self.frame_taken {
+            return Err(TxFrameError::AlreadyTaken);
+        }
+        let binding = PermitBinding::from_owner(&self.owner);
+        if binding != self.grant.binding {
+            return Err(TxFrameError::Invariant);
+        }
+        let (prepared, _) = self.owner.bound();
+        if now >= prepared.deadline().instant() {
+            self.frame_taken = true;
+            return Err(TxFrameError::DeadlineExpired {
+                deadline: prepared.deadline(),
+            });
+        }
+        let bytes = self
+            .owner
+            .buffer
+            .bytes
+            .get(..usize::from(prepared.packet_len()))
+            .ok_or(TxFrameError::Invariant)?;
+        self.frame_taken = true;
+        Ok(TxFrame {
+            bytes,
+            attempt: prepared.attempt(),
+            interface: binding.interface,
+        })
+    }
+
+    /// Complete this authorized hop as transmitted or possibly transmitted.
+    pub fn complete(self, code: TxCompletionCode) -> TxCompletion<'a> {
+        TxCompletion {
+            owner: self.owner,
+            kind: CompletionKind::Authorized(code),
+        }
+    }
+
+    /// Complete this authorized hop with a retained recovery fault.
+    pub fn recovery_fault(self, code: TxCompletionCode) -> TxCompletion<'a> {
+        TxCompletion {
+            owner: self.owner,
+            kind: CompletionKind::RecoveryFault(code),
+        }
+    }
+}
+
+/// Authorized owner whose delayed grant can no longer expose packet bytes.
+///
+/// Permit issuance was irrevocable, so this return remains conservatively
+/// possibly transmitted even though this typestate offers no frame accessor.
+#[must_use = "an expired authorized TX owner must return to node-core"]
+pub struct ExpiredAuthorizedTx<'a> {
+    owner: OwnedTx<'a>,
+    grant: TxPermitGrant,
+}
+
+impl<'a> ExpiredAuthorizedTx<'a> {
+    /// Expired deadline that prevented frame exposure.
+    pub fn deadline(&self) -> TxLeaseDeadline {
+        self.owner.bound().0.deadline()
+    }
+
+    /// Complete the expired authorized hop as possibly transmitted.
+    pub fn complete(self, code: TxCompletionCode) -> TxCompletion<'a> {
+        let _ = self.grant.binding;
+        TxCompletion {
+            owner: self.owner,
+            kind: CompletionKind::Authorized(code),
+        }
+    }
+
+    /// Return a control-plane or driver recovery fault.
+    pub fn recovery_fault(self, code: TxCompletionCode) -> TxCompletion<'a> {
+        let _ = self.grant.binding;
+        TxCompletion {
+            owner: self.owner,
+            kind: CompletionKind::RecoveryFault(code),
+        }
+    }
+}
+
+/// Unique packet ownership for a hop that was definitely not authorized.
+#[must_use = "unpermitted TX ownership must return to node-core"]
+pub struct UnpermittedTx<'a> {
+    owner: OwnedTx<'a>,
+    denial: Option<TxPermitDenialReason>,
+}
+
+impl<'a> UnpermittedTx<'a> {
+    /// Permit denial that produced this owner, if it reached policy handling.
+    pub const fn denial(&self) -> Option<TxPermitDenialReason> {
+        self.denial
+    }
+
+    /// Complete this hop as definitely unsent.
+    pub fn complete(self, code: TxCompletionCode) -> TxCompletion<'a> {
+        TxCompletion {
+            owner: self.owner,
+            kind: CompletionKind::Unpermitted(code),
+        }
+    }
+
+    /// Complete this unpermitted hop with a retained recovery fault.
+    pub fn recovery_fault(self, code: TxCompletionCode) -> TxCompletion<'a> {
+        TxCompletion {
+            owner: self.owner,
+            kind: CompletionKind::RecoveryFault(code),
+        }
+    }
+}
+
+/// Bounded driver/control-plane completion code.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TxCompletionCode(u16);
+
+impl TxCompletionCode {
+    /// Construct a project-owned completion code.
+    pub const fn new(code: u16) -> Self {
+        Self(code)
+    }
+
+    /// Raw bounded completion code.
+    pub const fn get(self) -> u16 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CompletionKind {
+    Unpermitted(TxCompletionCode),
+    Authorized(TxCompletionCode),
+    RecoveryFault(TxCompletionCode),
+}
+
+/// Owning return from one exact routed hop.
+#[must_use = "a TX completion retains the unique packet buffer"]
+pub struct TxCompletion<'a> {
+    owner: OwnedTx<'a>,
+    kind: CompletionKind,
+}
+
+/// Phase active when a dispatch entered recovery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TxRecoveryPriorPhase {
+    /// No permit had been issued for the current hop.
+    Unpermitted,
+    /// A permit had been issued and RF may have started.
+    Authorized,
+}
+
+/// Reason retained by one recovery-required dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TxRecoveryReason {
+    /// Packet-owner deadline expired.
+    DeadlineExpired,
+    /// Interface or control plane returned a recovery fault.
+    CompletionFault(TxCompletionCode),
+    /// Exact receipt cancellation unexpectedly failed.
+    ReceiptCancellationFailed,
+    /// Per-hop generation space was exhausted during fan-out.
+    HopIdentifierExhausted,
+    /// Same-owner scalar and unique-owner metadata disagreed.
+    Invariant,
+}
+
+/// Scalar retained recovery record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TxRecoveryRecord {
+    instance: NodeInstanceId,
+    slot: PacketSlotId,
+    dispatch_generation: u64,
+    interface: Option<PacketInterfaceId>,
+    deadline: TxLeaseDeadline,
+    observed_at: MonotonicMillis,
+    prior_phase: TxRecoveryPriorPhase,
+    may_have_transmitted: bool,
+    reason: TxRecoveryReason,
+}
+
+impl TxRecoveryRecord {
+    /// Node-owner incarnation that created this retained lease record.
+    pub const fn instance(self) -> NodeInstanceId {
+        self.instance
+    }
+
+    /// Packet slot retained in recovery.
+    pub const fn slot_id(self) -> PacketSlotId {
+        self.slot
+    }
+
+    /// Generation of the dispatch retained in recovery.
+    pub const fn dispatch_generation(self) -> u64 {
+        self.dispatch_generation
+    }
+
+    /// Interface active at recovery, if routing had selected one.
+    pub const fn interface(self) -> Option<PacketInterfaceId> {
+        self.interface
+    }
+
+    /// Original packet-owner deadline.
+    pub const fn deadline(self) -> TxLeaseDeadline {
+        self.deadline
+    }
+
+    /// Monotonic instant at which recovery was observed.
+    pub const fn observed_at(self) -> MonotonicMillis {
+        self.observed_at
+    }
+
+    /// Phase active before recovery.
+    pub const fn prior_phase(self) -> TxRecoveryPriorPhase {
+        self.prior_phase
+    }
+
+    /// Whether this dispatch may have transmitted on any hop.
+    pub const fn may_have_transmitted(self) -> bool {
+        self.may_have_transmitted
+    }
+
+    /// Retained recovery reason.
+    pub const fn reason(self) -> TxRecoveryReason {
+        self.reason
+    }
+}
+
+/// Unique packet buffer retained in fail-closed recovery.
+#[must_use = "quarantine is the only owner of a recovery buffer"]
+pub struct TxQuarantine<'a> {
+    owner: OwnedTx<'a>,
+    record: TxRecoveryRecord,
+}
+
+impl TxQuarantine<'_> {
+    /// Scalar retained recovery record.
+    pub const fn record(&self) -> TxRecoveryRecord {
+        self.record
+    }
+
+    /// Stable slot of the quarantined buffer.
+    pub fn slot_id(&self) -> PacketSlotId {
+        self.owner.dispatch.slot
+    }
+}
+
+enum PrepareFailureOwner<'a> {
+    Available(&'a mut TxPacketBuffer),
+    Quarantined(TxQuarantine<'a>),
+}
+
+/// Preparation rejection or fail-closed route-cancellation fault.
+#[must_use = "preparation failure retains the exact packet buffer owner"]
 pub struct PrepareFailure<'a> {
     reason: SubmitError,
-    buffer: &'a mut TxPacketBuffer,
+    owner: PrepareFailureOwner<'a>,
 }
 
 impl<'a> PrepareFailure<'a> {
-    /// Typed reason the preparation transaction was rejected.
+    /// Typed reason the preparation transaction failed.
     pub const fn reason(&self) -> SubmitError {
         self.reason
     }
 
-    /// Recover the exact unique packet buffer supplied by the caller.
-    pub fn into_buffer(self) -> &'a mut TxPacketBuffer {
-        self.buffer
+    /// Recover an available buffer, or the owning quarantine when fail-closed.
+    pub fn into_buffer(self) -> Result<&'a mut TxPacketBuffer, TxQuarantine<'a>> {
+        match self.owner {
+            PrepareFailureOwner::Available(buffer) => Ok(buffer),
+            PrepareFailureOwner::Quarantined(quarantine) => Err(quarantine),
+        }
     }
 }
 
-/// Failure while rolling back a queued, definitely-unsent dispatch.
+/// Failure while rolling back a routed, definitely-unsent dispatch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RollbackErrorKind {
     /// The job belongs to another node owner, incarnation, slot, or generation.
     StaleOrUnknown,
     /// Buffer, dispatch, and attempt metadata disagree.
     Invariant,
-    /// The corresponding RNS receipt was already absent. The job remains
-    /// bound so the inconsistency cannot be hidden by buffer reuse.
+    /// An earlier serialized route was already authorized.
+    PriorAuthorization,
+    /// The corresponding RNS receipt was already absent.
     ReceiptMissing {
         /// Attempt whose receipt could not be cancelled.
         attempt: AttemptToken,
     },
 }
 
-/// Rollback failure retaining ownership of the exact bound job.
-#[must_use = "a rollback failure retains the only job capable of recovering the bound buffer"]
+/// Rollback failure retaining the exact routed job.
+#[must_use = "rollback failure retains the unique routed job"]
 pub struct RollbackFailure<'a> {
     reason: RollbackErrorKind,
-    job: TxJob<'a>,
+    job: RoutedTxJob<'a>,
 }
 
 impl<'a> RollbackFailure<'a> {
-    /// Typed invariant or receipt-cancellation failure.
+    /// Typed rollback failure.
     pub const fn reason(&self) -> RollbackErrorKind {
         self.reason
     }
 
-    /// Recover the still-bound unique job for diagnosis or the correct owner.
-    pub fn into_job(self) -> TxJob<'a> {
+    /// Recover the still-bound routed job.
+    pub fn into_job(self) -> RoutedTxJob<'a> {
         self.job
+    }
+}
+
+/// Successful node-owner handling of an owning completion.
+#[must_use = "completion disposition retains or returns the unique packet buffer"]
+pub enum TxCompletionDisposition<'a> {
+    /// Continue serialized fan-out on the next deterministic interface.
+    Next(RoutedTxJob<'a>),
+    /// Packet buffer is available for reuse.
+    Available(&'a mut TxPacketBuffer),
+    /// A matching late owner was finalized and its buffer is reusable.
+    Recovered {
+        /// Reusable packet buffer returned by the exact recovery lease.
+        buffer: &'a mut TxPacketBuffer,
+        /// Recovery record finalized by this return.
+        record: TxRecoveryRecord,
+    },
+    /// Packet buffer remains fail-closed in recovery.
+    Quarantined(TxQuarantine<'a>),
+}
+
+/// Completion validation failure retaining the unchanged owning completion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TxCompletionErrorKind {
+    /// Completion belongs to another node owner or incarnation.
+    WrongOwner,
+    /// Slot or dispatch generation is stale.
+    StaleOrUnknown,
+}
+
+/// Owning completion failure.
+#[must_use = "completion failure retains the unchanged unique owner"]
+pub struct TxCompletionFailure<'a> {
+    reason: TxCompletionErrorKind,
+    completion: TxCompletion<'a>,
+}
+
+impl<'a> TxCompletionFailure<'a> {
+    /// Typed completion validation failure.
+    pub const fn reason(&self) -> TxCompletionErrorKind {
+        self.reason
+    }
+
+    /// Recover the unchanged owning completion.
+    pub fn into_completion(self) -> TxCompletion<'a> {
+        self.completion
     }
 }
 
@@ -772,6 +1524,10 @@ pub struct CapacitySnapshot {
     pub packet_buffers_registered: usize,
     /// Registered buffers currently bound to queued jobs.
     pub dispatches_queued: usize,
+    /// Dispatches whose current hop has been authorized.
+    pub dispatches_authorized: usize,
+    /// Dispatches retained in recovery-required state.
+    pub dispatches_recovery_required: usize,
     /// Registered buffers reserved or queued by a transaction.
     pub dispatches_used: usize,
     /// Configured dispatch-metadata limit.
@@ -797,18 +1553,62 @@ struct AttemptRef {
 }
 
 #[derive(Clone, Copy)]
+enum DispatchPhase {
+    Routed,
+    Authorized,
+    RecoveryRequired(TxRecoveryRecord),
+}
+
+#[derive(Clone, Copy)]
+struct DispatchRecord {
+    prepared: RnsPreparedData,
+    attempt: AttemptRef,
+    generation: u64,
+    deadline: TxLeaseDeadline,
+    selected: Option<HopBinding>,
+    remaining: InterfaceSet,
+    may_have_transmitted: bool,
+    phase: DispatchPhase,
+}
+
+#[derive(Clone, Copy)]
 enum DispatchState {
     Unregistered,
     Free,
-    Reserved {
-        attempt: AttemptRef,
-    },
-    Queued {
-        prepared: RnsPreparedData,
-        attempt: AttemptRef,
-        generation: u64,
-        deadline: TxLeaseDeadline,
-    },
+    Reserved { attempt: AttemptRef },
+    Active(DispatchRecord),
+}
+
+/// Result of one packet-owner deadline maintenance pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[must_use = "new recovery-required transitions must be observed"]
+pub struct TxMaintenanceReport {
+    /// Dispatches newly moved into recovery-required state.
+    pub newly_recovery_required: usize,
+}
+
+/// Iterator over retained scalar TX recovery records.
+pub struct TxRecoveryRecords<'a> {
+    dispatches: &'a [DispatchSlot],
+    next: usize,
+}
+
+impl Iterator for TxRecoveryRecords<'_> {
+    type Item = TxRecoveryRecord;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(slot) = self.dispatches.get(self.next) {
+            self.next += 1;
+            if let DispatchState::Active(DispatchRecord {
+                phase: DispatchPhase::RecoveryRequired(record),
+                ..
+            }) = slot.state
+            {
+                return Some(record);
+            }
+        }
+        None
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -912,6 +1712,7 @@ pub struct NodeCore<
     next_registration: usize,
     next_attempt: usize,
     dispatch_generation: u64,
+    hop_generation: u64,
     attempt_generation: u64,
 }
 
@@ -978,6 +1779,7 @@ impl<
             next_registration: 0,
             next_attempt: 0,
             dispatch_generation: 0,
+            hop_generation: 0,
             attempt_generation: 0,
         })
     }
@@ -985,6 +1787,11 @@ impl<
     /// Primary local destination hash.
     pub fn destination_hash(&self) -> DestinationHash {
         DestinationHash::new(*self.rns.destination_hash().as_bytes())
+    }
+
+    /// Caller-supplied identity of this in-memory node-owner incarnation.
+    pub const fn instance_id(&self) -> NodeInstanceId {
+        self.instance
     }
 
     /// Cache one peer identity for deterministic direct sending or tests.
@@ -1054,22 +1861,33 @@ impl<
     pub fn prepare_data_into_slot<'a, R: RngCore + CryptoRng>(
         &mut self,
         buffer: &'a mut TxPacketBuffer,
-        destination: &DestinationHash,
-        plaintext: &[u8],
-        now: MonotonicSeconds,
-        deadline: TxLeaseDeadline,
+        request: PrepareDataRequest<'_>,
         rng: &mut R,
-    ) -> Result<TxJob<'a>, PrepareFailure<'a>> {
+    ) -> Result<RoutedTxJob<'a>, PrepareFailure<'a>> {
+        if request.owner_now >= request.deadline.instant() {
+            return Err(PrepareFailure {
+                reason: SubmitError::LeaseDeadlineExpired {
+                    now: request.owner_now,
+                    deadline: request.deadline,
+                },
+                owner: PrepareFailureOwner::Available(buffer),
+            });
+        }
         let reservation = self.reserve_external_submission(buffer);
-        let (slot, attempt, dispatch_generation) = match reservation {
+        let (slot, attempt, dispatch_generation, hop_generation) = match reservation {
             Ok(reservation) => reservation,
-            Err(reason) => return Err(PrepareFailure { reason, buffer }),
+            Err(reason) => {
+                return Err(PrepareFailure {
+                    reason,
+                    owner: PrepareFailureOwner::Available(buffer),
+                });
+            }
         };
 
         let result = self.rns.prepare_data_into(
-            &destination.into_rns(),
-            plaintext,
-            now.get(),
+            &request.destination.into_rns(),
+            request.plaintext,
+            request.rns_now.get(),
             rng,
             &mut buffer.bytes,
         );
@@ -1081,7 +1899,7 @@ impl<
                 self.attempts[attempt.slot].state = AttemptState::Free;
                 return Err(PrepareFailure {
                     reason: error.into(),
-                    buffer,
+                    owner: PrepareFailureOwner::Available(buffer),
                 });
             }
         };
@@ -1091,27 +1909,95 @@ impl<
             generation: attempt.generation,
             token,
         };
-        self.dispatches[slot.index()].state = DispatchState::Queued {
+        let scalar =
+            PreparedPacket::from_rns(prepared, self.handle_for(attempt), slot, request.deadline);
+        let mut route = match TxRoutePlan::resolve(scalar.target(), request.enabled_interfaces) {
+            Ok(route) => route,
+            Err(route_error) => {
+                if self.rns.cancel_data_receipt(prepared.receipt()) {
+                    self.dispatches[slot.index()].state = DispatchState::Free;
+                    self.attempts[attempt.slot].state = AttemptState::Free;
+                    return Err(PrepareFailure {
+                        reason: route_error.into(),
+                        owner: PrepareFailureOwner::Available(buffer),
+                    });
+                }
+                let recovery = TxRecoveryRecord {
+                    instance: self.instance,
+                    slot,
+                    dispatch_generation,
+                    interface: None,
+                    deadline: request.deadline,
+                    observed_at: request.owner_now,
+                    prior_phase: TxRecoveryPriorPhase::Unpermitted,
+                    may_have_transmitted: false,
+                    reason: TxRecoveryReason::ReceiptCancellationFailed,
+                };
+                self.dispatches[slot.index()].state = DispatchState::Active(DispatchRecord {
+                    prepared,
+                    attempt,
+                    generation: dispatch_generation,
+                    deadline: request.deadline,
+                    selected: None,
+                    remaining: InterfaceSet::empty(),
+                    may_have_transmitted: false,
+                    phase: DispatchPhase::RecoveryRequired(recovery),
+                });
+                buffer.binding = BufferBinding::Bound {
+                    dispatch_generation,
+                    prepared: scalar,
+                    hop: None,
+                };
+                self.commit_submission_identifiers(attempt, dispatch_generation, None);
+                let quarantine = TxQuarantine {
+                    owner: OwnedTx {
+                        buffer,
+                        dispatch: DispatchHandle {
+                            instance: self.instance,
+                            slot,
+                            generation: dispatch_generation,
+                        },
+                    },
+                    record: recovery,
+                };
+                return Err(PrepareFailure {
+                    reason: SubmitError::RouteReceiptCancellationFailed,
+                    owner: PrepareFailureOwner::Quarantined(quarantine),
+                });
+            }
+        };
+        let selected = route
+            .take_next()
+            .expect("non-empty route must provide its first interface");
+        let hop = HopBinding {
+            interface: selected,
+            generation: hop_generation,
+        };
+        self.dispatches[slot.index()].state = DispatchState::Active(DispatchRecord {
             prepared,
             attempt,
             generation: dispatch_generation,
-            deadline,
-        };
-        let scalar = PreparedPacket::from_rns(prepared, self.handle_for(attempt), slot, deadline);
+            deadline: request.deadline,
+            selected: Some(hop),
+            remaining: route.remaining(),
+            may_have_transmitted: false,
+            phase: DispatchPhase::Routed,
+        });
         buffer.binding = BufferBinding::Bound {
             dispatch_generation,
             prepared: scalar,
+            hop: Some(hop),
         };
-        self.next_attempt = Self::next_attempt_index(attempt.slot);
-        self.attempt_generation = attempt.generation;
-        self.dispatch_generation = dispatch_generation;
+        self.commit_submission_identifiers(attempt, dispatch_generation, Some(hop_generation));
 
-        Ok(TxJob {
-            buffer,
-            dispatch: DispatchHandle {
-                instance: self.instance,
-                slot,
-                generation: dispatch_generation,
+        Ok(RoutedTxJob {
+            owner: OwnedTx {
+                buffer,
+                dispatch: DispatchHandle {
+                    instance: self.instance,
+                    slot,
+                    generation: dispatch_generation,
+                },
             },
         })
     }
@@ -1120,15 +2006,37 @@ impl<
     /// transmission.
     ///
     /// The exact receipt is cancelled before attempt, dispatch or buffer state
-    /// becomes reusable. Any mismatch returns the still-bound unique job.
+    /// becomes reusable. A return at or after the owner deadline follows the
+    /// ordinary recovery path instead of bypassing lease observation. Any
+    /// mismatch returns the still-bound unique job.
     pub fn rollback_queued<'a>(
         &mut self,
-        job: TxJob<'a>,
-    ) -> Result<&'a mut TxPacketBuffer, RollbackFailure<'a>> {
-        let (prepared, attempt) = match self.validate_queued_job(&job) {
+        job: RoutedTxJob<'a>,
+        now: MonotonicMillis,
+    ) -> Result<TxCompletionDisposition<'a>, RollbackFailure<'a>> {
+        let after_deadline = now >= job.deadline().instant();
+        let (prepared, attempt) = match self.validate_queued_job(&job, after_deadline) {
             Ok(values) => values,
             Err(reason) => return Err(RollbackFailure { reason, job }),
         };
+
+        if after_deadline {
+            return match self.complete_tx(
+                job.return_unpermitted().complete(TxCompletionCode::new(0)),
+                now,
+            ) {
+                Ok(disposition) => Ok(disposition),
+                Err(failure) => {
+                    let completion = failure.into_completion();
+                    Err(RollbackFailure {
+                        reason: RollbackErrorKind::StaleOrUnknown,
+                        job: RoutedTxJob {
+                            owner: completion.owner,
+                        },
+                    })
+                }
+            };
+        }
 
         match self.terminal_for(attempt) {
             Some(terminal) if terminal.token().as_bytes() == prepared.receipt().as_bytes() => {}
@@ -1157,13 +2065,329 @@ impl<
             }
         }
 
-        self.dispatches[job.dispatch.slot.index()].state = DispatchState::Free;
-        job.buffer.binding = BufferBinding::Available {
+        self.dispatches[job.owner.dispatch.slot.index()].state = DispatchState::Free;
+        job.owner.buffer.binding = BufferBinding::Available {
             owner_identity: self.owner_identity,
             instance: self.instance,
-            slot: job.dispatch.slot,
+            slot: job.owner.dispatch.slot,
         };
-        Ok(job.buffer)
+        Ok(TxCompletionDisposition::Available(job.owner.buffer))
+    }
+
+    /// Validate one scalar permit request and invoke the authorization policy.
+    ///
+    /// Successful issuance immediately and irrevocably marks the dispatch as
+    /// possibly transmitted. Valid denials retain routed scalar state so the
+    /// matching pending owner can return it as definitely unsent.
+    pub fn authorize_tx<P: TxAuthorizationPolicy>(
+        &mut self,
+        request: TxPermitRequest,
+        now: MonotonicMillis,
+        policy: &mut P,
+    ) -> Result<TxPermitReply, TxAuthorizationFailure> {
+        let binding = request.binding;
+        if binding.owner_identity != self.owner_identity || binding.instance != self.instance {
+            return Err(TxAuthorizationFailure {
+                reason: TxAuthorizationErrorKind::WrongOwner,
+                request,
+            });
+        }
+        let Some(state) = self
+            .dispatches
+            .get(binding.slot.index())
+            .map(|slot| slot.state)
+        else {
+            return Err(TxAuthorizationFailure {
+                reason: TxAuthorizationErrorKind::StaleOrUnknown,
+                request,
+            });
+        };
+        let DispatchState::Active(mut record) = state else {
+            return Err(TxAuthorizationFailure {
+                reason: TxAuthorizationErrorKind::StaleOrUnknown,
+                request,
+            });
+        };
+        if !self.permit_binding_matches(binding, record) {
+            return Err(TxAuthorizationFailure {
+                reason: TxAuthorizationErrorKind::StaleOrUnknown,
+                request,
+            });
+        }
+
+        if now >= record.deadline.instant()
+            && !matches!(record.phase, DispatchPhase::RecoveryRequired(_))
+        {
+            let recovery =
+                self.recovery_for(binding.slot, record, now, TxRecoveryReason::DeadlineExpired);
+            record.phase = DispatchPhase::RecoveryRequired(recovery);
+            self.dispatches[binding.slot.index()].state = DispatchState::Active(record);
+        }
+
+        let denial = match record.phase {
+            DispatchPhase::RecoveryRequired(record) => {
+                Some(if record.reason() == TxRecoveryReason::DeadlineExpired {
+                    TxPermitDenialReason::DeadlineExpired
+                } else {
+                    TxPermitDenialReason::RecoveryRequired
+                })
+            }
+            DispatchPhase::Authorized => {
+                return Err(TxAuthorizationFailure {
+                    reason: TxAuthorizationErrorKind::StaleOrUnknown,
+                    request,
+                });
+            }
+            DispatchPhase::Routed => match self.terminal_for(record.attempt) {
+                Some(terminal)
+                    if terminal.token().as_bytes() == record.prepared.receipt().as_bytes() =>
+                {
+                    Some(TxPermitDenialReason::AttemptTerminal(terminal.outcome()))
+                }
+                Some(_) => {
+                    return Err(TxAuthorizationFailure {
+                        reason: TxAuthorizationErrorKind::Invariant,
+                        request,
+                    });
+                }
+                None if !self.attempt_is_active(record.attempt, record.prepared) => {
+                    return Err(TxAuthorizationFailure {
+                        reason: TxAuthorizationErrorKind::Invariant,
+                        request,
+                    });
+                }
+                None => None,
+            },
+        };
+        if let Some(reason) = denial {
+            return Ok(TxPermitReply::Denied(TxPermitDenial { binding, reason }));
+        }
+
+        let candidate = TxAuthorizationCandidate {
+            interface: binding.interface,
+            packet_len: record.prepared.packet_len(),
+            deadline: record.deadline,
+            may_have_transmitted: record.may_have_transmitted,
+        };
+        match policy.authorize(candidate) {
+            TxPolicyDecision::Deny(reason) => Ok(TxPermitReply::Denied(TxPermitDenial {
+                binding,
+                reason: TxPermitDenialReason::Policy(reason),
+            })),
+            TxPolicyDecision::Authorize => {
+                record.may_have_transmitted = true;
+                record.phase = DispatchPhase::Authorized;
+                self.dispatches[binding.slot.index()].state = DispatchState::Active(record);
+                Ok(TxPermitReply::Granted(TxPermitGrant { binding }))
+            }
+        }
+    }
+
+    /// Consume one owning hop completion and either advance, release, or
+    /// quarantine its unique packet buffer.
+    pub fn complete_tx<'a>(
+        &mut self,
+        completion: TxCompletion<'a>,
+        now: MonotonicMillis,
+    ) -> Result<TxCompletionDisposition<'a>, TxCompletionFailure<'a>> {
+        let (scalar, hop) = completion.owner.bound();
+        if scalar.handle.owner_identity != self.owner_identity
+            || scalar.handle.instance != self.instance
+            || completion.owner.dispatch.instance != self.instance
+        {
+            return Err(TxCompletionFailure {
+                reason: TxCompletionErrorKind::WrongOwner,
+                completion,
+            });
+        }
+        let slot_id = completion.owner.dispatch.slot;
+        let Some(state) = self.dispatches.get(slot_id.index()).map(|slot| slot.state) else {
+            return Err(TxCompletionFailure {
+                reason: TxCompletionErrorKind::StaleOrUnknown,
+                completion,
+            });
+        };
+        let DispatchState::Active(mut record) = state else {
+            return Err(TxCompletionFailure {
+                reason: TxCompletionErrorKind::StaleOrUnknown,
+                completion,
+            });
+        };
+        if record.generation != completion.owner.dispatch.generation {
+            return Err(TxCompletionFailure {
+                reason: TxCompletionErrorKind::StaleOrUnknown,
+                completion,
+            });
+        }
+        let Some(hop) = hop else {
+            return Ok(TxCompletionDisposition::Quarantined(
+                self.quarantine_completion(completion, record, now, TxRecoveryReason::Invariant),
+            ));
+        };
+        if record.selected != Some(hop)
+            || scalar.attempt().as_bytes() != record.prepared.receipt().as_bytes()
+            || scalar.handle() != self.handle_for(record.attempt)
+        {
+            return Ok(TxCompletionDisposition::Quarantined(
+                self.quarantine_completion(completion, record, now, TxRecoveryReason::Invariant),
+            ));
+        }
+
+        let completion_authorized = match completion.kind {
+            CompletionKind::Unpermitted(code) => {
+                let _ = code.get();
+                false
+            }
+            CompletionKind::Authorized(code) => {
+                let _ = code.get();
+                true
+            }
+            CompletionKind::RecoveryFault(code) => {
+                return Ok(TxCompletionDisposition::Quarantined(
+                    self.quarantine_completion(
+                        completion,
+                        record,
+                        now,
+                        TxRecoveryReason::CompletionFault(code),
+                    ),
+                ));
+            }
+        };
+        if now >= record.deadline.instant()
+            && !matches!(record.phase, DispatchPhase::RecoveryRequired(_))
+        {
+            let recovery =
+                self.recovery_for(slot_id, record, now, TxRecoveryReason::DeadlineExpired);
+            record.phase = DispatchPhase::RecoveryRequired(recovery);
+            self.dispatches[slot_id.index()].state = DispatchState::Active(record);
+        }
+        let expected_authorized = match record.phase {
+            DispatchPhase::Routed => false,
+            DispatchPhase::Authorized => true,
+            DispatchPhase::RecoveryRequired(recovery) => {
+                recovery.prior_phase() == TxRecoveryPriorPhase::Authorized
+            }
+        };
+        if completion_authorized != expected_authorized {
+            return Ok(TxCompletionDisposition::Quarantined(
+                self.quarantine_completion(completion, record, now, TxRecoveryReason::Invariant),
+            ));
+        }
+
+        let recovered = match record.phase {
+            DispatchPhase::RecoveryRequired(recovery) => Some(recovery),
+            DispatchPhase::Routed | DispatchPhase::Authorized => None,
+        };
+
+        let terminal = self.terminal_for(record.attempt);
+        if terminal.is_some_and(|terminal| {
+            terminal.token().as_bytes() != record.prepared.receipt().as_bytes()
+        }) {
+            return Ok(TxCompletionDisposition::Quarantined(
+                self.quarantine_completion(completion, record, now, TxRecoveryReason::Invariant),
+            ));
+        }
+        let stop_fanout = recovered.is_some() || terminal.is_some();
+
+        if !stop_fanout && !record.remaining.is_empty() {
+            let Some(next_generation) = self.hop_generation.checked_add(1) else {
+                return Ok(TxCompletionDisposition::Quarantined(
+                    self.quarantine_completion(
+                        completion,
+                        record,
+                        now,
+                        TxRecoveryReason::HopIdentifierExhausted,
+                    ),
+                ));
+            };
+            let next = record
+                .remaining
+                .take_first()
+                .expect("non-empty remaining route must have a first interface");
+            let next_hop = HopBinding {
+                interface: next,
+                generation: next_generation,
+            };
+            record.selected = Some(next_hop);
+            record.phase = DispatchPhase::Routed;
+            self.hop_generation = next_generation;
+            self.dispatches[slot_id.index()].state = DispatchState::Active(record);
+            completion.owner.buffer.binding = BufferBinding::Bound {
+                dispatch_generation: record.generation,
+                prepared: scalar,
+                hop: Some(next_hop),
+            };
+            return Ok(TxCompletionDisposition::Next(RoutedTxJob {
+                owner: completion.owner,
+            }));
+        }
+
+        if terminal.is_none() && !record.may_have_transmitted {
+            if !self.attempt_is_active(record.attempt, record.prepared)
+                || !self.rns.cancel_data_receipt(record.prepared.receipt())
+            {
+                return Ok(TxCompletionDisposition::Quarantined(
+                    self.quarantine_completion(
+                        completion,
+                        record,
+                        now,
+                        TxRecoveryReason::ReceiptCancellationFailed,
+                    ),
+                ));
+            }
+            self.attempts[record.attempt.slot].state = AttemptState::Free;
+        } else if terminal.is_none() && !self.attempt_is_active(record.attempt, record.prepared) {
+            return Ok(TxCompletionDisposition::Quarantined(
+                self.quarantine_completion(completion, record, now, TxRecoveryReason::Invariant),
+            ));
+        }
+
+        self.dispatches[slot_id.index()].state = DispatchState::Free;
+        completion.owner.buffer.binding = BufferBinding::Available {
+            owner_identity: self.owner_identity,
+            instance: self.instance,
+            slot: slot_id,
+        };
+        Ok(match recovered {
+            Some(record) => TxCompletionDisposition::Recovered {
+                buffer: completion.owner.buffer,
+                record,
+            },
+            None => TxCompletionDisposition::Available(completion.owner.buffer),
+        })
+    }
+
+    /// Move expired routed or authorized dispatches into scalar recovery.
+    ///
+    /// This never releases or fabricates a packet-buffer owner.
+    pub fn maintain_tx(&mut self, now: MonotonicMillis) -> TxMaintenanceReport {
+        let mut newly_recovery_required = 0;
+        for index in 0..PACKET_BUFFERS {
+            let DispatchState::Active(mut record) = self.dispatches[index].state else {
+                continue;
+            };
+            if now >= record.deadline.instant()
+                && !matches!(record.phase, DispatchPhase::RecoveryRequired(_))
+            {
+                let slot = PacketSlotId(u16::try_from(index).expect("validated slot capacity"));
+                let recovery =
+                    self.recovery_for(slot, record, now, TxRecoveryReason::DeadlineExpired);
+                record.phase = DispatchPhase::RecoveryRequired(recovery);
+                self.dispatches[index].state = DispatchState::Active(record);
+                newly_recovery_required += 1;
+            }
+        }
+        TxMaintenanceReport {
+            newly_recovery_required,
+        }
+    }
+
+    /// Iterate retained scalar recovery records in stable packet-slot order.
+    pub fn recovery_records(&self) -> TxRecoveryRecords<'_> {
+        TxRecoveryRecords {
+            dispatches: &self.dispatches,
+            next: 0,
+        }
     }
 
     /// Process one inbound packet while committing any proof to the exact
@@ -1257,7 +2481,7 @@ impl<
 
         for slot in &self.dispatches {
             match slot.state {
-                DispatchState::Queued { attempt, .. } if attempt == attempt_ref => {
+                DispatchState::Active(DispatchRecord { attempt, .. }) if attempt == attempt_ref => {
                     return Err(AcknowledgeError::PacketStillBound);
                 }
                 DispatchState::Reserved { attempt, .. } if attempt == attempt_ref => {
@@ -1266,7 +2490,7 @@ impl<
                 DispatchState::Unregistered
                 | DispatchState::Free
                 | DispatchState::Reserved { .. }
-                | DispatchState::Queued { .. } => {}
+                | DispatchState::Active(_) => {}
             }
         }
 
@@ -1285,6 +2509,8 @@ impl<
     pub fn capacities(&self) -> CapacitySnapshot {
         let mut registered = 0;
         let mut queued = 0;
+        let mut authorized = 0;
+        let mut recovery_required = 0;
         let mut used = 0;
         for slot in &self.dispatches {
             match slot.state {
@@ -1294,10 +2520,14 @@ impl<
                     registered += 1;
                     used += 1;
                 }
-                DispatchState::Queued { .. } => {
+                DispatchState::Active(record) => {
                     registered += 1;
-                    queued += 1;
                     used += 1;
+                    match record.phase {
+                        DispatchPhase::Routed => queued += 1,
+                        DispatchPhase::Authorized => authorized += 1,
+                        DispatchPhase::RecoveryRequired(_) => recovery_required += 1,
+                    }
                 }
             }
         }
@@ -1322,6 +2552,8 @@ impl<
         CapacitySnapshot {
             packet_buffers_registered: registered,
             dispatches_queued: queued,
+            dispatches_authorized: authorized,
+            dispatches_recovery_required: recovery_required,
             dispatches_used: used,
             dispatches_limit: PACKET_BUFFERS,
             receipts_used: rns.capacity.receipts.used,
@@ -1336,7 +2568,7 @@ impl<
     fn reserve_external_submission(
         &mut self,
         buffer: &TxPacketBuffer,
-    ) -> Result<(PacketSlotId, AttemptRef, u64), SubmitError> {
+    ) -> Result<(PacketSlotId, AttemptRef, u64, u64), SubmitError> {
         let (owner_identity, instance, slot) = match buffer.binding {
             BufferBinding::Unregistered => return Err(SubmitError::UnregisteredPacketBuffer),
             BufferBinding::Available {
@@ -1382,6 +2614,10 @@ impl<
             .dispatch_generation
             .checked_add(1)
             .ok_or(SubmitError::DispatchIdentifierExhausted)?;
+        let hop_generation = self
+            .hop_generation
+            .checked_add(1)
+            .ok_or(SubmitError::HopIdentifierExhausted)?;
         let attempt = AttemptRef {
             slot: attempt_slot,
             generation: attempt_generation,
@@ -1390,24 +2626,27 @@ impl<
             generation: attempt_generation,
         };
         self.dispatches[slot.index()].state = DispatchState::Reserved { attempt };
-        Ok((slot, attempt, dispatch_generation))
+        Ok((slot, attempt, dispatch_generation, hop_generation))
     }
 
     fn validate_queued_job(
         &self,
-        job: &TxJob<'_>,
+        job: &RoutedTxJob<'_>,
+        allow_deadline_recovery: bool,
     ) -> Result<(RnsPreparedData, AttemptRef), RollbackErrorKind> {
-        if job.dispatch.instance != self.instance {
+        if job.owner.dispatch.instance != self.instance {
             return Err(RollbackErrorKind::StaleOrUnknown);
         }
-        let scalar = match job.buffer.binding {
+        let (scalar, bound_hop) = match job.owner.buffer.binding {
             BufferBinding::Bound {
                 dispatch_generation,
                 prepared,
-            } if dispatch_generation == job.dispatch.generation
-                && prepared.slot_id() == job.dispatch.slot =>
+                hop,
+            } if dispatch_generation == job.owner.dispatch.generation
+                && prepared.slot_id() == job.owner.dispatch.slot
+                && hop.is_some() =>
             {
-                prepared
+                (prepared, hop)
             }
             BufferBinding::Unregistered
             | BufferBinding::Available { .. }
@@ -1415,32 +2654,129 @@ impl<
         };
         if scalar.handle.owner_identity != self.owner_identity
             || scalar.handle.instance != self.instance
-            || scalar.handle.instance != job.dispatch.instance
+            || scalar.handle.instance != job.owner.dispatch.instance
         {
             return Err(RollbackErrorKind::StaleOrUnknown);
         }
-        let Some(slot) = self.dispatches.get(job.dispatch.slot.index()) else {
+        let Some(slot) = self.dispatches.get(job.owner.dispatch.slot.index()) else {
             return Err(RollbackErrorKind::StaleOrUnknown);
         };
         match slot.state {
-            DispatchState::Queued {
+            DispatchState::Active(DispatchRecord {
                 prepared,
                 attempt,
                 generation,
                 deadline,
-            } if generation == job.dispatch.generation
+                selected,
+                may_have_transmitted,
+                phase,
+                ..
+            }) if generation == job.owner.dispatch.generation
                 && prepared.packet_len() == scalar.packet_len()
                 && prepared.receipt().as_bytes() == scalar.attempt().as_bytes()
                 && TxTarget::from_rns(prepared.target()) == scalar.target()
                 && deadline == scalar.deadline()
-                && self.handle_for(attempt) == scalar.handle() =>
+                && selected == bound_hop
+                && self.handle_for(attempt) == scalar.handle()
+                && (matches!(phase, DispatchPhase::Routed)
+                    || matches!(
+                        phase,
+                        DispatchPhase::RecoveryRequired(recovery)
+                            if allow_deadline_recovery
+                                && recovery.reason() == TxRecoveryReason::DeadlineExpired
+                                && recovery.prior_phase()
+                                    == TxRecoveryPriorPhase::Unpermitted
+                    )) =>
             {
-                Ok((prepared, attempt))
+                if may_have_transmitted {
+                    Err(RollbackErrorKind::PriorAuthorization)
+                } else {
+                    Ok((prepared, attempt))
+                }
             }
             DispatchState::Unregistered
             | DispatchState::Free
             | DispatchState::Reserved { .. }
-            | DispatchState::Queued { .. } => Err(RollbackErrorKind::StaleOrUnknown),
+            | DispatchState::Active(_) => Err(RollbackErrorKind::StaleOrUnknown),
+        }
+    }
+
+    fn commit_submission_identifiers(
+        &mut self,
+        attempt: AttemptRef,
+        dispatch_generation: u64,
+        hop_generation: Option<u64>,
+    ) {
+        self.next_attempt = Self::next_attempt_index(attempt.slot);
+        self.attempt_generation = attempt.generation;
+        self.dispatch_generation = dispatch_generation;
+        if let Some(hop_generation) = hop_generation {
+            self.hop_generation = hop_generation;
+        }
+    }
+
+    fn permit_binding_matches(&self, binding: PermitBinding, record: DispatchRecord) -> bool {
+        let attempt_matches = matches!(
+            self.attempts.get(record.attempt.slot).map(|attempt| attempt.state),
+            Some(AttemptState::Active { generation, token }
+                | AttemptState::Terminal { generation, token, .. })
+                if generation == record.attempt.generation
+                    && token.as_bytes() == record.prepared.receipt().as_bytes()
+        );
+        binding.dispatch_generation == record.generation
+            && record.selected.is_some_and(|hop| {
+                hop.interface == binding.interface && hop.generation == binding.hop_generation
+            })
+            && attempt_matches
+    }
+
+    fn recovery_for(
+        &self,
+        slot: PacketSlotId,
+        record: DispatchRecord,
+        observed_at: MonotonicMillis,
+        reason: TxRecoveryReason,
+    ) -> TxRecoveryRecord {
+        TxRecoveryRecord {
+            instance: self.instance,
+            slot,
+            dispatch_generation: record.generation,
+            interface: record.selected.map(|hop| hop.interface),
+            deadline: record.deadline,
+            observed_at,
+            prior_phase: if matches!(record.phase, DispatchPhase::Authorized) {
+                TxRecoveryPriorPhase::Authorized
+            } else {
+                TxRecoveryPriorPhase::Unpermitted
+            },
+            may_have_transmitted: record.may_have_transmitted,
+            reason,
+        }
+    }
+
+    fn quarantine_completion<'a>(
+        &mut self,
+        completion: TxCompletion<'a>,
+        mut record: DispatchRecord,
+        now: MonotonicMillis,
+        reason: TxRecoveryReason,
+    ) -> TxQuarantine<'a> {
+        let recovery = match record.phase {
+            DispatchPhase::RecoveryRequired(mut recovery) => {
+                recovery.observed_at = now;
+                recovery.reason = reason;
+                recovery
+            }
+            DispatchPhase::Routed | DispatchPhase::Authorized => {
+                self.recovery_for(completion.owner.dispatch.slot, record, now, reason)
+            }
+        };
+        record.phase = DispatchPhase::RecoveryRequired(recovery);
+        self.dispatches[completion.owner.dispatch.slot.index()].state =
+            DispatchState::Active(record);
+        TxQuarantine {
+            owner: completion.owner,
+            record: recovery,
         }
     }
 
@@ -1685,6 +3021,90 @@ mod tests {
         TxLeaseDeadline::new(MonotonicMillis::new(milliseconds))
     }
 
+    fn prepare_request(
+        destination: DestinationHash,
+        plaintext: &[u8],
+        rns_now: u64,
+        owner_now_ms: u64,
+        deadline_ms: u64,
+        enabled_interfaces: InterfaceSet,
+    ) -> PrepareDataRequest<'_> {
+        PrepareDataRequest {
+            destination,
+            plaintext,
+            rns_now: time(rns_now),
+            owner_now: owner_time(owner_now_ms),
+            deadline: deadline(deadline_ms),
+            enabled_interfaces,
+        }
+    }
+
+    const fn owner_time(milliseconds: u64) -> MonotonicMillis {
+        MonotonicMillis::new(milliseconds)
+    }
+
+    const fn default_interfaces() -> InterfaceSet {
+        InterfaceSet::from_bits(1 << 1)
+    }
+
+    fn available(failure: PrepareFailure<'_>) -> &mut TxPacketBuffer {
+        match failure.into_buffer() {
+            Ok(buffer) => buffer,
+            Err(_) => panic!("unexpected preparation quarantine"),
+        }
+    }
+
+    fn reusable(disposition: TxCompletionDisposition<'_>) -> &mut TxPacketBuffer {
+        match disposition {
+            TxCompletionDisposition::Available(buffer)
+            | TxCompletionDisposition::Recovered { buffer, .. } => buffer,
+            TxCompletionDisposition::Next(_) => panic!("rollback advanced fanout"),
+            TxCompletionDisposition::Quarantined(_) => panic!("rollback quarantined buffer"),
+        }
+    }
+
+    fn interfaces(ids: &[u8]) -> InterfaceSet {
+        let mut set = InterfaceSet::empty();
+        for id in ids {
+            set = set
+                .with(PacketInterfaceId::new(*id))
+                .expect("test interface must fit compact profile");
+        }
+        set
+    }
+
+    struct TestPolicy {
+        decision: TxPolicyDecision,
+        calls: usize,
+        candidate: Option<TxAuthorizationCandidate>,
+    }
+
+    impl TestPolicy {
+        const fn allowing() -> Self {
+            Self {
+                decision: TxPolicyDecision::Authorize,
+                calls: 0,
+                candidate: None,
+            }
+        }
+
+        const fn denying(reason: TxPolicyDenial) -> Self {
+            Self {
+                decision: TxPolicyDecision::Deny(reason),
+                calls: 0,
+                candidate: None,
+            }
+        }
+    }
+
+    impl TxAuthorizationPolicy for TestPolicy {
+        fn authorize(&mut self, candidate: TxAuthorizationCandidate) -> TxPolicyDecision {
+            self.calls += 1;
+            self.candidate = Some(candidate);
+            self.decision
+        }
+    }
+
     fn register_receiver<const PATHS: usize, const BUFFERS: usize>(
         sender: &mut TestNode<PATHS, BUFFERS>,
         tag: u8,
@@ -1711,12 +3131,41 @@ mod tests {
         now: u64,
         rng: &mut CounterRng,
     ) -> TxJob<'a> {
+        prepare_with_interfaces(
+            sender,
+            buffer,
+            destination,
+            plaintext,
+            now,
+            now * 1_000,
+            now * 1_000 + 500,
+            default_interfaces(),
+            rng,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_with_interfaces<'a, const PATHS: usize, const BUFFERS: usize>(
+        sender: &mut TestNode<PATHS, BUFFERS>,
+        buffer: &'a mut TxPacketBuffer,
+        destination: DestinationHash,
+        plaintext: &[u8],
+        now: u64,
+        owner_now_ms: u64,
+        deadline_ms: u64,
+        enabled_interfaces: InterfaceSet,
+        rng: &mut CounterRng,
+    ) -> RoutedTxJob<'a> {
         match sender.prepare_data_into_slot(
             buffer,
-            &destination,
-            plaintext,
-            time(now),
-            deadline(now * 1_000 + 500),
+            prepare_request(
+                destination,
+                plaintext,
+                now,
+                owner_now_ms,
+                deadline_ms,
+                enabled_interfaces,
+            ),
             rng,
         ) {
             Ok(job) => job,
@@ -1830,13 +3279,16 @@ mod tests {
             1,
             &mut rng,
         );
-        assert!(core::ptr::eq(core::ptr::from_ref(job.buffer), original));
+        assert!(core::ptr::eq(
+            core::ptr::from_ref(job.owner.buffer),
+            original
+        ));
         assert_eq!(job.slot_id().get(), 0);
         assert_eq!(job.target(), TxTarget::All);
         assert_eq!(job.deadline(), deadline(1_500));
         assert_eq!(job.prepared().slot_id(), job.slot_id());
 
-        let bytes = &job.buffer.bytes[..usize::from(job.packet_len())];
+        let bytes = &job.owner.buffer.bytes[..usize::from(job.packet_len())];
         let parsed = reticulum_rns_rete::parse_packet(bytes).unwrap();
         assert_eq!(&parsed.compute_hash(), job.attempt().as_bytes());
         assert_eq!(sender.capacities().dispatches_queued, 1);
@@ -1867,24 +3319,28 @@ mod tests {
 
         let failure = match sender.prepare_data_into_slot(
             &mut buffer,
-            &receiver.destination_hash(),
-            b"must not reuse",
-            time(2),
-            deadline(3_000),
+            prepare_request(
+                receiver.destination_hash(),
+                b"must not reuse",
+                2,
+                2_000,
+                3_000,
+                default_interfaces(),
+            ),
             &mut rng,
         ) {
             Ok(_) => panic!("a bound buffer was reused after its job was lost"),
             Err(failure) => failure,
         };
         assert_eq!(failure.reason(), SubmitError::PacketBufferBusy);
-        assert_eq!(failure.into_buffer().slot_id().unwrap().get(), 0);
+        assert_eq!(available(failure).slot_id().unwrap().get(), 0);
         assert_eq!(rng.0, entropy_before);
         assert_eq!(sender.capacities().dispatches_queued, 1);
         assert_eq!(sender.capacities().attempts_active, 1);
         assert_eq!(sender.capacities().receipts_used, 1);
         assert!(matches!(
             sender.dispatches[0].state,
-            DispatchState::Queued { prepared, .. }
+            DispatchState::Active(DispatchRecord { prepared, .. })
                 if prepared.receipt().as_bytes() == attempt.as_bytes()
         ));
     }
@@ -1915,10 +3371,14 @@ mod tests {
 
         let unregistered_failure = match first.prepare_data_into_slot(
             &mut unregistered,
-            &receiver.destination_hash(),
-            b"no registration",
-            time(1),
-            deadline(2_000),
+            prepare_request(
+                receiver.destination_hash(),
+                b"no registration",
+                1,
+                1_000,
+                2_000,
+                default_interfaces(),
+            ),
             &mut rng,
         ) {
             Ok(_) => panic!("unregistered buffer was accepted"),
@@ -1928,25 +3388,71 @@ mod tests {
             unregistered_failure.reason(),
             SubmitError::UnregisteredPacketBuffer
         );
-        let unregistered = unregistered_failure.into_buffer();
+        let unregistered = available(unregistered_failure);
         assert_eq!(unregistered.slot_id(), None);
 
         let foreign_failure = match first.prepare_data_into_slot(
             &mut foreign,
-            &receiver.destination_hash(),
-            b"wrong owner",
-            time(1),
-            deadline(2_000),
+            prepare_request(
+                receiver.destination_hash(),
+                b"wrong owner",
+                1,
+                1_000,
+                2_000,
+                default_interfaces(),
+            ),
             &mut rng,
         ) {
             Ok(_) => panic!("foreign buffer was accepted"),
             Err(failure) => failure,
         };
         assert_eq!(foreign_failure.reason(), SubmitError::ForeignPacketBuffer);
-        assert_eq!(foreign_failure.into_buffer().slot_id().unwrap().get(), 0);
+        assert_eq!(available(foreign_failure).slot_id().unwrap().get(), 0);
         assert_eq!(rng.0, 0);
         assert_eq!(first.capacities().receipts_used, 0);
         assert_eq!(first.capacities().attempts_used, 0);
+    }
+
+    #[test]
+    fn expired_preparation_rejects_before_entropy_or_state_mutation() {
+        let mut sender = node::<2, 1>(71, "sender");
+        let receiver = node::<2, 1>(72, "receiver");
+        register_receiver(&mut sender, 72, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
+        let pointer = core::ptr::from_ref(&buffer);
+        let mut rng = CounterRng::default();
+
+        let failure = match sender.prepare_data_into_slot(
+            &mut buffer,
+            prepare_request(
+                receiver.destination_hash(),
+                b"already expired",
+                1,
+                1_500,
+                1_500,
+                default_interfaces(),
+            ),
+            &mut rng,
+        ) {
+            Ok(_) => panic!("exact-deadline preparation was accepted"),
+            Err(failure) => failure,
+        };
+        assert_eq!(
+            failure.reason(),
+            SubmitError::LeaseDeadlineExpired {
+                now: owner_time(1_500),
+                deadline: deadline(1_500),
+            }
+        );
+        let returned = available(failure);
+        assert!(core::ptr::eq(core::ptr::from_ref(returned), pointer));
+        assert_eq!(rng.0, 0);
+        assert_eq!(sender.capacities().dispatches_used, 0);
+        assert_eq!(sender.capacities().attempts_used, 0);
+        assert_eq!(sender.capacities().receipts_used, 0);
+        assert_eq!(sender.attempt_generation, 0);
+        assert_eq!(sender.dispatch_generation, 0);
+        assert_eq!(sender.hop_generation, 0);
     }
 
     #[test]
@@ -1959,17 +3465,21 @@ mod tests {
 
         let unknown = match sender.prepare_data_into_slot(
             &mut buffer,
-            &DestinationHash::new([0xa5; 16]),
-            b"unknown",
-            time(1),
-            deadline(2_000),
+            prepare_request(
+                DestinationHash::new([0xa5; 16]),
+                b"unknown",
+                1,
+                1_000,
+                2_000,
+                default_interfaces(),
+            ),
             &mut rng,
         ) {
             Ok(_) => panic!("unknown destination was accepted"),
             Err(failure) => failure,
         };
         assert_eq!(unknown.reason(), SubmitError::UnknownDestination);
-        let returned = unknown.into_buffer();
+        let returned = available(unknown);
         assert!(core::ptr::eq(core::ptr::from_ref(returned), pointer));
         assert_eq!(rng.0, 0);
         assert_eq!(sender.capacities().dispatches_used, 0);
@@ -1979,10 +3489,14 @@ mod tests {
         let oversized = [0x5a; MAX_DATA_PAYLOAD + 1];
         let failure = match sender.prepare_data_into_slot(
             returned,
-            &receiver.destination_hash(),
-            &oversized,
-            time(2),
-            deadline(3_000),
+            prepare_request(
+                receiver.destination_hash(),
+                &oversized,
+                2,
+                2_000,
+                3_000,
+                default_interfaces(),
+            ),
             &mut rng,
         ) {
             Ok(_) => panic!("oversized payload was accepted"),
@@ -1995,7 +3509,7 @@ mod tests {
                 maximum: MAX_DATA_PAYLOAD,
             }
         );
-        let returned = failure.into_buffer();
+        let returned = available(failure);
         assert!(core::ptr::eq(core::ptr::from_ref(returned), pointer));
         assert_eq!(rng.0, 0);
 
@@ -2039,10 +3553,14 @@ mod tests {
         let rng_before = rng.0;
         let failure = match attempt_full.prepare_data_into_slot(
             &mut c,
-            &receiver.destination_hash(),
-            b"c",
-            time(3),
-            deadline(4_000),
+            prepare_request(
+                receiver.destination_hash(),
+                b"c",
+                3,
+                3_000,
+                4_000,
+                default_interfaces(),
+            ),
             &mut rng,
         ) {
             Ok(_) => panic!("full ledger accepted another attempt"),
@@ -2063,10 +3581,14 @@ mod tests {
         let mut rng = CounterRng::default();
         let failure = match exhausted.prepare_data_into_slot(
             &mut buffer,
-            &receiver.destination_hash(),
-            b"no dispatch id",
-            time(1),
-            deadline(2_000),
+            prepare_request(
+                receiver.destination_hash(),
+                b"no dispatch id",
+                1,
+                1_000,
+                2_000,
+                default_interfaces(),
+            ),
             &mut rng,
         ) {
             Ok(_) => panic!("exhausted dispatch generation was accepted"),
@@ -2097,17 +3619,21 @@ mod tests {
 
         let failure = match sender.prepare_data_into_slot(
             &mut second_buffer,
-            &receiver.destination_hash(),
-            b"repeat",
-            time(1),
-            deadline(1_500),
+            prepare_request(
+                receiver.destination_hash(),
+                b"repeat",
+                1,
+                1_000,
+                1_500,
+                default_interfaces(),
+            ),
             &mut repeated_rng,
         ) {
             Ok(_) => panic!("duplicate receipt hash was accepted"),
             Err(failure) => failure,
         };
         assert_eq!(failure.reason(), SubmitError::ReceiptHashAlreadyTracked);
-        let returned = failure.into_buffer();
+        let returned = available(failure);
         assert_eq!(returned.slot_id().unwrap().get(), 1);
         assert_eq!(sender.capacities().dispatches_queued, 1);
         assert_eq!(sender.capacities().attempts_active, 1);
@@ -2133,8 +3659,8 @@ mod tests {
             &mut rng,
         );
         let old_handle = first.attempt_handle();
-        let returned = match sender.rollback_queued(first) {
-            Ok(buffer) => buffer,
+        let returned = match sender.rollback_queued(first, owner_time(1_100)) {
+            Ok(disposition) => reusable(disposition),
             Err(failure) => panic!("rollback failed: {:?}", failure.reason()),
         };
         assert!(core::ptr::eq(core::ptr::from_ref(returned), pointer));
@@ -2159,6 +3685,135 @@ mod tests {
     }
 
     #[test]
+    fn late_queue_rollback_reports_recovery_before_reuse() {
+        let mut sender = node::<2, 1>(80, "sender");
+        let receiver = node::<2, 1>(81, "receiver");
+        register_receiver(&mut sender, 81, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
+        let mut rng = CounterRng::default();
+        let job = prepare(
+            &mut sender,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"late queue rejection",
+            1,
+            &mut rng,
+        );
+
+        let disposition = sender
+            .rollback_queued(job, owner_time(1_500))
+            .unwrap_or_else(|failure| panic!("late rollback failed: {:?}", failure.reason()));
+        let (returned, record) = match disposition {
+            TxCompletionDisposition::Recovered { buffer, record } => (buffer, record),
+            TxCompletionDisposition::Available(_) => panic!("late rollback hid recovery"),
+            TxCompletionDisposition::Next(_) => panic!("late rollback advanced fanout"),
+            TxCompletionDisposition::Quarantined(_) => panic!("matching rollback quarantined"),
+        };
+        assert_eq!(returned.slot_id().unwrap().get(), 0);
+        assert_eq!(record.instance(), sender.instance_id());
+        assert_eq!(record.reason(), TxRecoveryReason::DeadlineExpired);
+        assert_eq!(record.prior_phase(), TxRecoveryPriorPhase::Unpermitted);
+        assert!(!record.may_have_transmitted());
+        assert_eq!(sender.capacities().dispatches_used, 0);
+        assert_eq!(sender.capacities().receipts_used, 0);
+        assert_eq!(sender.capacities().attempts_used, 0);
+
+        let second = prepare(
+            &mut sender,
+            returned,
+            receiver.destination_hash(),
+            b"maintenance won the deadline race",
+            2,
+            &mut rng,
+        );
+        assert_eq!(
+            sender.maintain_tx(owner_time(2_500)),
+            TxMaintenanceReport {
+                newly_recovery_required: 1,
+            }
+        );
+        let disposition = sender
+            .rollback_queued(second, owner_time(2_500))
+            .unwrap_or_else(|failure| {
+                panic!("maintained late rollback failed: {:?}", failure.reason())
+            });
+        assert!(matches!(
+            disposition,
+            TxCompletionDisposition::Recovered {
+                record,
+                ..
+            } if record.reason() == TxRecoveryReason::DeadlineExpired
+                && record.prior_phase() == TxRecoveryPriorPhase::Unpermitted
+                && !record.may_have_transmitted()
+        ));
+        assert_eq!(sender.capacities().dispatches_used, 0);
+        assert_eq!(sender.capacities().receipts_used, 0);
+        assert_eq!(sender.capacities().attempts_used, 0);
+    }
+
+    #[test]
+    fn rollback_cannot_cancel_after_an_earlier_route_was_authorized() {
+        let mut sender = node::<2, 1>(73, "sender");
+        let receiver = node::<2, 1>(74, "receiver");
+        register_receiver(&mut sender, 74, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
+        let mut rng = CounterRng::default();
+        let route = interfaces(&[2, 5]);
+        let first = prepare_with_interfaces(
+            &mut sender,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"authorized before next queue",
+            2,
+            2_000,
+            3_000,
+            route,
+            &mut rng,
+        );
+        let (pending, request) = first.begin_permit();
+        let reply = sender
+            .authorize_tx(request, owner_time(2_100), &mut TestPolicy::allowing())
+            .unwrap_or_else(|failure| panic!("authorization failed: {:?}", failure.reason()));
+        let first = match pending.resolve(reply, owner_time(2_100)) {
+            Ok(PermitResolution::Authorized(authorized)) => authorized,
+            Ok(PermitResolution::Unpermitted(_)) => panic!("first route was denied"),
+            Ok(PermitResolution::Expired(_)) => panic!("first route expired"),
+            Err(_) => panic!("first permit reply mismatched"),
+        };
+        let next = match sender
+            .complete_tx(first.complete(TxCompletionCode::new(40)), owner_time(2_150))
+            .unwrap_or_else(|failure| panic!("first completion failed: {:?}", failure.reason()))
+        {
+            TxCompletionDisposition::Next(next) => next,
+            TxCompletionDisposition::Available(_) => panic!("fanout stopped early"),
+            TxCompletionDisposition::Recovered { .. } => panic!("fresh fanout recovered"),
+            TxCompletionDisposition::Quarantined(_) => panic!("valid fanout quarantined"),
+        };
+
+        let failure = match sender.rollback_queued(next, owner_time(2_200)) {
+            Ok(_) => panic!("rollback cancelled a possibly transmitted attempt"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.reason(), RollbackErrorKind::PriorAuthorization);
+        assert_eq!(sender.capacities().receipts_used, 1);
+        assert_eq!(sender.capacities().attempts_active, 1);
+        let next = failure.into_job();
+        assert!(matches!(
+            sender
+                .complete_tx(
+                    next.return_unpermitted()
+                        .complete(TxCompletionCode::new(41)),
+                    owner_time(2_200),
+                )
+                .unwrap_or_else(|failure| panic!("final return failed: {:?}", failure.reason())),
+            TxCompletionDisposition::Available(_)
+        ));
+        assert_eq!(sender.capacities().dispatches_used, 0);
+        assert_eq!(sender.capacities().receipts_used, 1);
+        assert_eq!(sender.capacities().attempts_active, 1);
+    }
+
+    #[test]
     fn missing_rollback_receipt_retains_the_bound_unique_job() {
         let mut sender = node::<2, 1>(17, "sender");
         let receiver = node::<2, 1>(18, "receiver");
@@ -2174,12 +3829,13 @@ mod tests {
             &mut rng,
         );
         let attempt = job.attempt();
-        let DispatchState::Queued { prepared, .. } = sender.dispatches[0].state else {
+        let DispatchState::Active(DispatchRecord { prepared, .. }) = sender.dispatches[0].state
+        else {
             panic!("expected queued dispatch")
         };
         assert!(sender.rns.cancel_data_receipt(prepared.receipt()));
 
-        let failure = match sender.rollback_queued(job) {
+        let failure = match sender.rollback_queued(job, owner_time(1_100)) {
             Ok(_) => panic!("missing receipt was hidden"),
             Err(failure) => failure,
         };
@@ -2189,7 +3845,10 @@ mod tests {
         );
         let job = failure.into_job();
         assert_eq!(job.attempt(), attempt);
-        assert!(matches!(job.buffer.binding, BufferBinding::Bound { .. }));
+        assert!(matches!(
+            job.owner.buffer.binding,
+            BufferBinding::Bound { .. }
+        ));
         assert_eq!(sender.capacities().dispatches_queued, 1);
         assert_eq!(sender.capacities().attempts_active, 1);
     }
@@ -2212,7 +3871,7 @@ mod tests {
             &mut rng,
         );
 
-        let failure = match reconstructed.rollback_queued(job) {
+        let failure = match reconstructed.rollback_queued(job, owner_time(1_100)) {
             Ok(_) => panic!("cross-incarnation job was accepted"),
             Err(failure) => failure,
         };
@@ -2220,7 +3879,7 @@ mod tests {
         let job = failure.into_job();
         assert_eq!(first.capacities().dispatches_queued, 1);
         assert_eq!(reconstructed.capacities().dispatches_used, 0);
-        assert!(first.rollback_queued(job).is_ok());
+        assert!(first.rollback_queued(job, owner_time(1_100)).is_ok());
     }
 
     #[test]
@@ -2253,7 +3912,7 @@ mod tests {
             outcome: AttemptOutcome::Delivered,
         };
 
-        let failure = match sender.rollback_queued(job) {
+        let failure = match sender.rollback_queued(job, owner_time(1_100)) {
             Ok(_) => panic!("a mismatched terminal token released the packet buffer"),
             Err(failure) => failure,
         };
@@ -2295,9 +3954,13 @@ mod tests {
             Err(AcknowledgeError::PacketStillBound)
         );
 
-        let returned = sender
-            .rollback_queued(job)
-            .unwrap_or_else(|failure| panic!("terminal rollback failed: {:?}", failure.reason()));
+        let returned = reusable(
+            sender
+                .rollback_queued(job, owner_time(1_100))
+                .unwrap_or_else(|failure| {
+                    panic!("terminal rollback failed: {:?}", failure.reason())
+                }),
+        );
         assert_eq!(returned.slot_id().unwrap(), scalar.slot_id());
         assert_eq!(sender.capacities().dispatches_used, 0);
         assert_eq!(sender.acknowledge_terminal(scalar.handle()), Ok(terminal));
@@ -2329,9 +3992,13 @@ mod tests {
             sender.acknowledge_terminal(scalar.handle()),
             Err(AcknowledgeError::PacketStillBound)
         );
-        let returned = sender
-            .rollback_queued(job)
-            .unwrap_or_else(|failure| panic!("terminal rollback failed: {:?}", failure.reason()));
+        let returned = reusable(
+            sender
+                .rollback_queued(job, owner_time(100_100))
+                .unwrap_or_else(|failure| {
+                    panic!("terminal rollback failed: {:?}", failure.reason())
+                }),
+        );
         assert_eq!(returned.slot_id().unwrap(), scalar.slot_id());
         assert_eq!(sender.acknowledge_terminal(scalar.handle()), Ok(terminal));
     }
@@ -2362,9 +4029,13 @@ mod tests {
                 &mut rng,
             )
             .unwrap();
-        let first_buffer = sender.rollback_queued(first).unwrap_or_else(|failure| {
-            panic!("first terminal return failed: {:?}", failure.reason())
-        });
+        let first_buffer = reusable(
+            sender
+                .rollback_queued(first, owner_time(1_100))
+                .unwrap_or_else(|failure| {
+                    panic!("first terminal return failed: {:?}", failure.reason())
+                }),
+        );
 
         let second = prepare(
             &mut sender,
@@ -2382,18 +4053,26 @@ mod tests {
                 &mut rng,
             )
             .unwrap();
-        let _second_buffer = sender.rollback_queued(second).unwrap_or_else(|failure| {
-            panic!("second terminal return failed: {:?}", failure.reason())
-        });
+        let _second_buffer = reusable(
+            sender
+                .rollback_queued(second, owner_time(3_100))
+                .unwrap_or_else(|failure| {
+                    panic!("second terminal return failed: {:?}", failure.reason())
+                }),
+        );
         assert_eq!(sender.capacities().attempts_terminal, 2);
 
         let entropy_before = rng.0;
         let failure = match sender.prepare_data_into_slot(
             first_buffer,
-            &receiver.destination_hash(),
-            b"blocked by tombstones",
-            time(5),
-            deadline(6_000),
+            prepare_request(
+                receiver.destination_hash(),
+                b"blocked by tombstones",
+                5,
+                5_000,
+                6_000,
+                default_interfaces(),
+            ),
             &mut rng,
         ) {
             Ok(_) => panic!("terminal tombstones did not backpressure preparation"),
@@ -2404,7 +4083,7 @@ mod tests {
             SubmitError::AttemptLedgerFull { limit: 2 }
         );
         assert_eq!(rng.0, entropy_before);
-        let first_buffer = failure.into_buffer();
+        let first_buffer = available(failure);
 
         let first_terminal = sender
             .terminal_attempts()
@@ -2465,7 +4144,7 @@ mod tests {
             sender.terminal_attempts().next().unwrap().outcome(),
             AttemptOutcome::Delivered
         );
-        assert!(sender.rollback_queued(job).is_ok());
+        assert!(sender.rollback_queued(job, owner_time(10_100)).is_ok());
     }
 
     #[test]
@@ -2492,9 +4171,13 @@ mod tests {
                 &mut first_rng,
             )
             .unwrap();
-        let buffer = sender.rollback_queued(first).unwrap_or_else(|failure| {
-            panic!("first terminal return failed: {:?}", failure.reason())
-        });
+        let buffer = reusable(
+            sender
+                .rollback_queued(first, owner_time(1_100))
+                .unwrap_or_else(|failure| {
+                    panic!("first terminal return failed: {:?}", failure.reason())
+                }),
+        );
 
         let mut repeated_rng = CounterRng::default();
         let repeated = prepare(
@@ -2611,17 +4294,21 @@ mod tests {
 
         let failure = match sender.prepare_data_into_slot(
             &mut buffer,
-            &receiver.destination_hash(),
-            b"no attempt identifier",
-            time(1),
-            deadline(2_000),
+            prepare_request(
+                receiver.destination_hash(),
+                b"no attempt identifier",
+                1,
+                1_000,
+                2_000,
+                default_interfaces(),
+            ),
             &mut rng,
         ) {
             Ok(_) => panic!("exhausted attempt generation was accepted"),
             Err(failure) => failure,
         };
         assert_eq!(failure.reason(), SubmitError::AttemptIdentifierExhausted);
-        assert_eq!(failure.into_buffer().slot_id().unwrap().get(), 0);
+        assert_eq!(available(failure).slot_id().unwrap().get(), 0);
         assert_eq!(rng.0, 0);
         assert_eq!(sender.dispatch_generation, 0);
         assert_eq!(sender.capacities().dispatches_used, 0);
@@ -2751,25 +4438,15 @@ mod tests {
             generation,
             token: original.attempt(),
         };
-        let DispatchState::Queued {
-            prepared,
-            generation: dispatch_generation,
-            deadline,
-            ..
-        } = sender.dispatches[0].state
-        else {
+        let DispatchState::Active(mut record) = sender.dispatches[0].state else {
             panic!("expected queued dispatch")
         };
         let exact = AttemptRef {
             slot: 1,
             generation,
         };
-        sender.dispatches[0].state = DispatchState::Queued {
-            prepared,
-            attempt: exact,
-            generation: dispatch_generation,
-            deadline,
-        };
+        record.attempt = exact;
+        sender.dispatches[0].state = DispatchState::Active(record);
 
         sender
             .ingest(
@@ -2792,5 +4469,978 @@ mod tests {
             } if token == original.attempt()
         ));
         let _ = job;
+    }
+
+    #[test]
+    fn route_plans_are_explicit_and_ascending_for_every_target_shape() {
+        let enabled = interfaces(&[63, 5, 1]);
+        let mut all = TxRoutePlan::resolve(TxTarget::All, enabled).unwrap();
+        assert_eq!(all.take_next(), Some(PacketInterfaceId::new(1)));
+        assert_eq!(all.take_next(), Some(PacketInterfaceId::new(5)));
+        assert_eq!(all.take_next(), Some(PacketInterfaceId::new(63)));
+        assert_eq!(all.take_next(), None);
+
+        let mut only =
+            TxRoutePlan::resolve(TxTarget::Only(PacketInterfaceId::new(5)), enabled).unwrap();
+        assert_eq!(only.take_next(), Some(PacketInterfaceId::new(5)));
+        assert_eq!(only.take_next(), None);
+
+        let mut except =
+            TxRoutePlan::resolve(TxTarget::AllExcept(PacketInterfaceId::new(5)), enabled).unwrap();
+        assert_eq!(except.take_next(), Some(PacketInterfaceId::new(1)));
+        assert_eq!(except.take_next(), Some(PacketInterfaceId::new(63)));
+        assert_eq!(except.take_next(), None);
+
+        assert_eq!(
+            TxRoutePlan::resolve(TxTarget::Only(PacketInterfaceId::new(7)), enabled),
+            Err(TxRouteError::NoEligibleInterface {
+                target: TxTarget::Only(PacketInterfaceId::new(7)),
+            })
+        );
+        assert_eq!(
+            TxRoutePlan::resolve(TxTarget::All, InterfaceSet::empty()),
+            Err(TxRouteError::NoEligibleInterface {
+                target: TxTarget::All,
+            })
+        );
+        assert_eq!(
+            TxRoutePlan::resolve(TxTarget::Only(PacketInterfaceId::new(64)), enabled),
+            Err(TxRouteError::InterfaceOutsideProfile {
+                interface: PacketInterfaceId::new(64),
+            })
+        );
+        assert_eq!(
+            TxRoutePlan::resolve(TxTarget::AllExcept(PacketInterfaceId::new(255)), enabled),
+            Err(TxRouteError::InterfaceOutsideProfile {
+                interface: PacketInterfaceId::new(255),
+            })
+        );
+    }
+
+    #[test]
+    fn empty_route_cancels_exact_receipt_and_returns_same_available_buffer() {
+        let mut sender = node::<2, 1>(50, "sender");
+        let receiver = node::<2, 1>(51, "receiver");
+        register_receiver(&mut sender, 51, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
+        let pointer = core::ptr::from_ref(&buffer);
+        let mut rng = CounterRng::default();
+
+        let failure = match sender.prepare_data_into_slot(
+            &mut buffer,
+            prepare_request(
+                receiver.destination_hash(),
+                b"nowhere to send",
+                1,
+                1_000,
+                1_500,
+                InterfaceSet::empty(),
+            ),
+            &mut rng,
+        ) {
+            Ok(_) => panic!("empty route was accepted"),
+            Err(failure) => failure,
+        };
+        assert_eq!(
+            failure.reason(),
+            SubmitError::NoEligibleInterface {
+                target: TxTarget::All,
+            }
+        );
+        let returned = available(failure);
+        assert!(core::ptr::eq(core::ptr::from_ref(returned), pointer));
+        assert_ne!(rng.0, 0, "native preparation must precede route resolution");
+        assert_eq!(sender.capacities().dispatches_used, 0);
+        assert_eq!(sender.capacities().attempts_used, 0);
+        assert_eq!(sender.capacities().receipts_used, 0);
+        assert_eq!(sender.attempt_generation, 0);
+        assert_eq!(sender.dispatch_generation, 0);
+        assert_eq!(sender.hop_generation, 0);
+    }
+
+    #[test]
+    fn permit_grant_is_one_shot_and_authorization_keeps_the_receipt_live() {
+        let mut sender = node::<2, 1>(52, "sender");
+        let receiver = node::<2, 1>(53, "receiver");
+        register_receiver(&mut sender, 53, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
+        let pointer = core::ptr::from_ref(&buffer);
+        let mut rng = CounterRng::default();
+        let job = prepare(
+            &mut sender,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"authorized frame",
+            1,
+            &mut rng,
+        );
+        let packet_len = job.packet_len();
+        let attempt = job.attempt();
+        let (pending, request) = job.begin_permit();
+        let mut policy = TestPolicy::allowing();
+        let reply = match sender.authorize_tx(request, owner_time(1_001), &mut policy) {
+            Ok(reply) => reply,
+            Err(failure) => panic!("permit validation failed: {:?}", failure.reason()),
+        };
+        assert_eq!(policy.calls, 1);
+        assert_eq!(
+            policy.candidate,
+            Some(TxAuthorizationCandidate {
+                interface: PacketInterfaceId::new(1),
+                packet_len,
+                deadline: deadline(1_500),
+                may_have_transmitted: false,
+            })
+        );
+        assert_eq!(sender.capacities().dispatches_authorized, 1);
+        assert_eq!(sender.capacities().dispatches_queued, 0);
+        let mut authorized = match pending.resolve(reply, owner_time(1_100)) {
+            Ok(PermitResolution::Authorized(authorized)) => authorized,
+            Ok(PermitResolution::Unpermitted(_)) => panic!("grant resolved as denial"),
+            Ok(PermitResolution::Expired(_)) => panic!("fresh grant resolved as expired"),
+            Err(_) => panic!("matching grant did not resolve"),
+        };
+        {
+            let frame = authorized.frame(owner_time(1_100)).unwrap();
+            assert_eq!(frame.interface(), PacketInterfaceId::new(1));
+            assert_eq!(frame.attempt(), attempt);
+            assert_eq!(frame.bytes().len(), usize::from(packet_len));
+            assert_eq!(
+                reticulum_rns_rete::parse_packet(frame.bytes())
+                    .unwrap()
+                    .compute_hash(),
+                *attempt.as_bytes()
+            );
+        }
+        assert!(matches!(
+            authorized.frame(owner_time(1_100)),
+            Err(TxFrameError::AlreadyTaken)
+        ));
+
+        let disposition = sender
+            .complete_tx(
+                authorized.complete(TxCompletionCode::new(7)),
+                owner_time(1_100),
+            )
+            .unwrap_or_else(|failure| {
+                panic!("authorized completion failed: {:?}", failure.reason())
+            });
+        let returned = match disposition {
+            TxCompletionDisposition::Available(buffer) => buffer,
+            TxCompletionDisposition::Recovered { .. } => panic!("fresh return recovered"),
+            TxCompletionDisposition::Next(_) => panic!("single route fanned out"),
+            TxCompletionDisposition::Quarantined(_) => panic!("valid return quarantined"),
+        };
+        assert!(core::ptr::eq(core::ptr::from_ref(returned), pointer));
+        assert_eq!(sender.capacities().dispatches_used, 0);
+        assert_eq!(sender.capacities().receipts_used, 1);
+        assert_eq!(sender.capacities().attempts_active, 1);
+    }
+
+    #[test]
+    fn policy_denial_returns_unpermitted_owner_and_cancels_final_receipt() {
+        let mut sender = node::<2, 1>(54, "sender");
+        let receiver = node::<2, 1>(55, "receiver");
+        register_receiver(&mut sender, 55, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
+        let pointer = core::ptr::from_ref(&buffer);
+        let mut rng = CounterRng::default();
+        let job = prepare(
+            &mut sender,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"deny",
+            1,
+            &mut rng,
+        );
+        let (pending, request) = job.begin_permit();
+        let mut policy = TestPolicy::denying(TxPolicyDenial::RegionalProfileUnavailable);
+        let reply = sender
+            .authorize_tx(request, owner_time(1_100), &mut policy)
+            .unwrap_or_else(|failure| panic!("denial failed: {:?}", failure.reason()));
+        let unpermitted = match pending.resolve(reply, owner_time(1_100)) {
+            Ok(PermitResolution::Unpermitted(unpermitted)) => unpermitted,
+            Ok(PermitResolution::Authorized(_)) => panic!("denial authorized bytes"),
+            Ok(PermitResolution::Expired(_)) => panic!("denial became expired grant"),
+            Err(_) => panic!("matching denial did not resolve"),
+        };
+        assert_eq!(
+            unpermitted.denial(),
+            Some(TxPermitDenialReason::Policy(
+                TxPolicyDenial::RegionalProfileUnavailable
+            ))
+        );
+        let disposition = sender
+            .complete_tx(
+                unpermitted.complete(TxCompletionCode::new(8)),
+                owner_time(1_200),
+            )
+            .unwrap_or_else(|failure| panic!("denied return failed: {:?}", failure.reason()));
+        let returned = match disposition {
+            TxCompletionDisposition::Available(buffer) => buffer,
+            TxCompletionDisposition::Recovered { .. } => panic!("fresh denial recovered"),
+            TxCompletionDisposition::Next(_) => panic!("single route fanned out"),
+            TxCompletionDisposition::Quarantined(_) => panic!("valid denial quarantined"),
+        };
+        assert!(core::ptr::eq(core::ptr::from_ref(returned), pointer));
+        assert_eq!(policy.calls, 1);
+        assert_eq!(sender.capacities().dispatches_used, 0);
+        assert_eq!(sender.capacities().receipts_used, 0);
+        assert_eq!(sender.capacities().attempts_used, 0);
+    }
+
+    #[test]
+    fn mismatched_permit_reply_retains_pending_owner_and_reply() {
+        let mut sender = node::<2, 2>(56, "sender");
+        let receiver = node::<2, 2>(57, "receiver");
+        register_receiver(&mut sender, 57, "receiver");
+        let mut first_buffer = registered_buffer(&mut sender);
+        let mut second_buffer = registered_buffer(&mut sender);
+        let mut rng = CounterRng::default();
+        let first = prepare_with_interfaces(
+            &mut sender,
+            &mut first_buffer,
+            receiver.destination_hash(),
+            b"first permit",
+            1,
+            1_000,
+            3_000,
+            default_interfaces(),
+            &mut rng,
+        );
+        let second = prepare(
+            &mut sender,
+            &mut second_buffer,
+            receiver.destination_hash(),
+            b"second permit",
+            2,
+            &mut rng,
+        );
+        let (first_pending, first_request) = first.begin_permit();
+        let (second_pending, second_request) = second.begin_permit();
+        let first_reply = sender
+            .authorize_tx(
+                first_request,
+                owner_time(1_100),
+                &mut TestPolicy::allowing(),
+            )
+            .unwrap_or_else(|failure| panic!("first permit failed: {:?}", failure.reason()));
+        let second_reply = sender
+            .authorize_tx(
+                second_request,
+                owner_time(2_100),
+                &mut TestPolicy::denying(TxPolicyDenial::PolicyDenied),
+            )
+            .unwrap_or_else(|failure| panic!("second permit failed: {:?}", failure.reason()));
+
+        let mismatch = match first_pending.resolve(second_reply, owner_time(1_100)) {
+            Err(mismatch) => mismatch,
+            Ok(_) => panic!("reply for another slot resolved pending ownership"),
+        };
+        let (first_pending, second_reply) = mismatch.into_parts();
+        let first_authorized = match first_pending.resolve(first_reply, owner_time(1_100)) {
+            Ok(PermitResolution::Authorized(authorized)) => authorized,
+            Ok(PermitResolution::Unpermitted(_)) => panic!("first grant became denial"),
+            Ok(PermitResolution::Expired(_)) => panic!("first grant expired unexpectedly"),
+            Err(_) => panic!("retained first pending owner did not resolve"),
+        };
+        let second_unpermitted = match second_pending.resolve(second_reply, owner_time(2_100)) {
+            Ok(PermitResolution::Unpermitted(unpermitted)) => unpermitted,
+            Ok(PermitResolution::Authorized(_)) => panic!("second denial became grant"),
+            Ok(PermitResolution::Expired(_)) => panic!("second denial became expired grant"),
+            Err(_) => panic!("retained second reply did not resolve"),
+        };
+
+        assert!(matches!(
+            sender
+                .complete_tx(
+                    first_authorized.complete(TxCompletionCode::new(1)),
+                    owner_time(2_200),
+                )
+                .unwrap_or_else(|failure| panic!("first completion: {:?}", failure.reason())),
+            TxCompletionDisposition::Available(_)
+        ));
+        assert!(matches!(
+            sender
+                .complete_tx(
+                    second_unpermitted.complete(TxCompletionCode::new(2)),
+                    owner_time(2_200),
+                )
+                .unwrap_or_else(|failure| panic!("second completion: {:?}", failure.reason())),
+            TxCompletionDisposition::Available(_)
+        ));
+    }
+
+    #[test]
+    fn terminal_before_permit_denies_and_terminal_after_permit_stops_fanout() {
+        let receiver = node::<2, 1>(59, "receiver");
+        let route = interfaces(&[1, 4]);
+
+        let mut before = node::<2, 1>(58, "before");
+        register_receiver(&mut before, 59, "receiver");
+        let mut before_buffer = registered_buffer(&mut before);
+        let mut rng = CounterRng::default();
+        let before_job = prepare_with_interfaces(
+            &mut before,
+            &mut before_buffer,
+            receiver.destination_hash(),
+            b"terminal first",
+            1,
+            1_000,
+            1_500,
+            route,
+            &mut rng,
+        );
+        let before_attempt = before_job.attempt();
+        let before_handle = before_job.attempt_handle();
+        let (before_pending, before_request) = before_job.begin_permit();
+        before
+            .ingest(
+                &proof_for(59, before_attempt),
+                time(1),
+                PacketInterfaceId::new(1),
+                &mut rng,
+            )
+            .unwrap();
+        let mut policy = TestPolicy::allowing();
+        let before_reply = before
+            .authorize_tx(before_request, owner_time(1_100), &mut policy)
+            .unwrap_or_else(|failure| panic!("terminal denial failed: {:?}", failure.reason()));
+        assert_eq!(policy.calls, 0);
+        let before_unpermitted = match before_pending.resolve(before_reply, owner_time(1_100)) {
+            Ok(PermitResolution::Unpermitted(unpermitted)) => unpermitted,
+            Ok(PermitResolution::Authorized(_)) => panic!("terminal work was authorized"),
+            Ok(PermitResolution::Expired(_)) => panic!("terminal denial became expired grant"),
+            Err(_) => panic!("terminal denial did not resolve"),
+        };
+        assert!(matches!(
+            before_unpermitted.denial(),
+            Some(TxPermitDenialReason::AttemptTerminal(
+                AttemptOutcome::Delivered
+            ))
+        ));
+        let before_return = before
+            .complete_tx(
+                before_unpermitted.complete(TxCompletionCode::new(3)),
+                owner_time(1_200),
+            )
+            .unwrap_or_else(|failure| panic!("terminal return failed: {:?}", failure.reason()));
+        assert!(matches!(
+            before_return,
+            TxCompletionDisposition::Available(_)
+        ));
+        assert_eq!(
+            before
+                .acknowledge_terminal(before_handle)
+                .unwrap()
+                .outcome(),
+            AttemptOutcome::Delivered
+        );
+
+        let mut after = node::<2, 1>(60, "after");
+        register_receiver(&mut after, 59, "receiver");
+        let mut after_buffer = registered_buffer(&mut after);
+        let after_job = prepare_with_interfaces(
+            &mut after,
+            &mut after_buffer,
+            receiver.destination_hash(),
+            b"permit first",
+            1,
+            1_000,
+            1_500,
+            route,
+            &mut rng,
+        );
+        let after_attempt = after_job.attempt();
+        let after_handle = after_job.attempt_handle();
+        let (after_pending, after_request) = after_job.begin_permit();
+        let after_reply = after
+            .authorize_tx(
+                after_request,
+                owner_time(1_100),
+                &mut TestPolicy::allowing(),
+            )
+            .unwrap_or_else(|failure| panic!("permit failed: {:?}", failure.reason()));
+        let after_authorized = match after_pending.resolve(after_reply, owner_time(1_100)) {
+            Ok(PermitResolution::Authorized(authorized)) => authorized,
+            Ok(PermitResolution::Unpermitted(_)) => panic!("valid work denied"),
+            Ok(PermitResolution::Expired(_)) => panic!("valid grant expired unexpectedly"),
+            Err(_) => panic!("grant did not resolve"),
+        };
+        after
+            .ingest(
+                &proof_for(59, after_attempt),
+                time(1),
+                PacketInterfaceId::new(1),
+                &mut rng,
+            )
+            .unwrap();
+        let after_return = after
+            .complete_tx(
+                after_authorized.complete(TxCompletionCode::new(4)),
+                owner_time(1_200),
+            )
+            .unwrap_or_else(|failure| panic!("authorized return failed: {:?}", failure.reason()));
+        assert!(matches!(
+            after_return,
+            TxCompletionDisposition::Available(_)
+        ));
+        assert_eq!(
+            after.acknowledge_terminal(after_handle).unwrap().outcome(),
+            AttemptOutcome::Delivered
+        );
+    }
+
+    #[test]
+    fn serialized_fanout_cancels_all_unsent_but_preserves_cumulative_authorization() {
+        let receiver = node::<2, 1>(62, "receiver");
+        let route = interfaces(&[5, 2]);
+        let mut rng = CounterRng::default();
+
+        let mut unsent = node::<2, 1>(61, "unsent");
+        register_receiver(&mut unsent, 62, "receiver");
+        let mut unsent_buffer = registered_buffer(&mut unsent);
+        let first = prepare_with_interfaces(
+            &mut unsent,
+            &mut unsent_buffer,
+            receiver.destination_hash(),
+            b"all unsent",
+            1,
+            1_000,
+            1_500,
+            route,
+            &mut rng,
+        );
+        assert_eq!(first.interface(), PacketInterfaceId::new(2));
+        let second = match unsent
+            .complete_tx(
+                first
+                    .return_unpermitted()
+                    .complete(TxCompletionCode::new(10)),
+                owner_time(1_100),
+            )
+            .unwrap_or_else(|failure| panic!("first unsent return: {:?}", failure.reason()))
+        {
+            TxCompletionDisposition::Next(next) => next,
+            TxCompletionDisposition::Available(_) => panic!("fanout stopped after first route"),
+            TxCompletionDisposition::Recovered { .. } => panic!("fresh fanout recovered"),
+            TxCompletionDisposition::Quarantined(_) => panic!("valid first return quarantined"),
+        };
+        assert_eq!(second.interface(), PacketInterfaceId::new(5));
+        let returned = match unsent
+            .complete_tx(
+                second
+                    .return_unpermitted()
+                    .complete(TxCompletionCode::new(11)),
+                owner_time(1_200),
+            )
+            .unwrap_or_else(|failure| panic!("second unsent return: {:?}", failure.reason()))
+        {
+            TxCompletionDisposition::Available(buffer) => buffer,
+            TxCompletionDisposition::Recovered { .. } => panic!("fresh final return recovered"),
+            TxCompletionDisposition::Next(_) => panic!("route retried an interface"),
+            TxCompletionDisposition::Quarantined(_) => panic!("valid final return quarantined"),
+        };
+        assert_eq!(returned.slot_id().unwrap().get(), 0);
+        assert_eq!(unsent.capacities().receipts_used, 0);
+        assert_eq!(unsent.capacities().attempts_used, 0);
+
+        let mut cumulative = node::<2, 1>(63, "cumulative");
+        register_receiver(&mut cumulative, 62, "receiver");
+        let mut cumulative_buffer = registered_buffer(&mut cumulative);
+        let first = prepare_with_interfaces(
+            &mut cumulative,
+            &mut cumulative_buffer,
+            receiver.destination_hash(),
+            b"first authorized",
+            2,
+            2_000,
+            2_500,
+            route,
+            &mut rng,
+        );
+        let (pending, request) = first.begin_permit();
+        let reply = cumulative
+            .authorize_tx(request, owner_time(2_100), &mut TestPolicy::allowing())
+            .unwrap_or_else(|failure| panic!("first authorization: {:?}", failure.reason()));
+        let first = match pending.resolve(reply, owner_time(2_100)) {
+            Ok(PermitResolution::Authorized(authorized)) => authorized,
+            Ok(PermitResolution::Unpermitted(_)) => panic!("first hop denied"),
+            Ok(PermitResolution::Expired(_)) => panic!("first hop grant expired"),
+            Err(_) => panic!("first reply mismatch"),
+        };
+        let second = match cumulative
+            .complete_tx(first.complete(TxCompletionCode::new(12)), owner_time(2_150))
+            .unwrap_or_else(|failure| panic!("first authorized return: {:?}", failure.reason()))
+        {
+            TxCompletionDisposition::Next(next) => next,
+            TxCompletionDisposition::Available(_) => panic!("authorized fanout stopped early"),
+            TxCompletionDisposition::Recovered { .. } => panic!("fresh authorization recovered"),
+            TxCompletionDisposition::Quarantined(_) => panic!("authorized return quarantined"),
+        };
+        assert_eq!(second.interface(), PacketInterfaceId::new(5));
+        let (pending, request) = second.begin_permit();
+        let mut policy = TestPolicy::denying(TxPolicyDenial::AirtimeUnavailable);
+        let reply = cumulative
+            .authorize_tx(request, owner_time(2_200), &mut policy)
+            .unwrap_or_else(|failure| panic!("second denial: {:?}", failure.reason()));
+        assert_eq!(
+            policy.candidate,
+            Some(TxAuthorizationCandidate {
+                interface: PacketInterfaceId::new(5),
+                packet_len: policy.candidate.unwrap().packet_len,
+                deadline: deadline(2_500),
+                may_have_transmitted: true,
+            })
+        );
+        let second = match pending.resolve(reply, owner_time(2_200)) {
+            Ok(PermitResolution::Unpermitted(unpermitted)) => unpermitted,
+            Ok(PermitResolution::Authorized(_)) => panic!("second denial authorized"),
+            Ok(PermitResolution::Expired(_)) => panic!("second denial became expired grant"),
+            Err(_) => panic!("second reply mismatch"),
+        };
+        assert!(matches!(
+            cumulative
+                .complete_tx(
+                    second.complete(TxCompletionCode::new(13)),
+                    owner_time(2_300)
+                )
+                .unwrap_or_else(|failure| panic!("second return: {:?}", failure.reason())),
+            TxCompletionDisposition::Available(_)
+        ));
+        assert_eq!(cumulative.capacities().dispatches_used, 0);
+        assert_eq!(cumulative.capacities().receipts_used, 1);
+        assert_eq!(cumulative.capacities().attempts_active, 1);
+    }
+
+    #[test]
+    fn exact_deadline_tie_enters_recovery_and_matching_return_reclaims_buffer() {
+        let receiver = node::<2, 1>(65, "receiver");
+        let mut rng = CounterRng::default();
+
+        let mut before_permit = node::<2, 1>(64, "before-permit");
+        register_receiver(&mut before_permit, 65, "receiver");
+        let mut before_buffer = registered_buffer(&mut before_permit);
+        let job = prepare_with_interfaces(
+            &mut before_permit,
+            &mut before_buffer,
+            receiver.destination_hash(),
+            b"deadline before permit",
+            1,
+            1_000,
+            1_500,
+            default_interfaces(),
+            &mut rng,
+        );
+        let (pending, request) = job.begin_permit();
+        let mut policy = TestPolicy::allowing();
+        let reply = before_permit
+            .authorize_tx(request, owner_time(1_500), &mut policy)
+            .unwrap_or_else(|failure| panic!("deadline validation failed: {:?}", failure.reason()));
+        assert_eq!(policy.calls, 0);
+        let unpermitted = match pending.resolve(reply, owner_time(1_500)) {
+            Ok(PermitResolution::Unpermitted(unpermitted)) => unpermitted,
+            Ok(PermitResolution::Authorized(_)) => panic!("deadline tie authorized TX"),
+            Ok(PermitResolution::Expired(_)) => panic!("deadline denial became grant"),
+            Err(_) => panic!("deadline denial did not resolve"),
+        };
+        assert_eq!(
+            unpermitted.denial(),
+            Some(TxPermitDenialReason::DeadlineExpired)
+        );
+        let record = before_permit.recovery_records().next().unwrap();
+        assert_eq!(record.instance(), before_permit.instance_id());
+        assert_eq!(record.slot_id().get(), 0);
+        assert_eq!(record.dispatch_generation(), 1);
+        assert_eq!(record.interface(), Some(PacketInterfaceId::new(1)));
+        assert_eq!(record.deadline(), deadline(1_500));
+        assert_eq!(record.observed_at(), owner_time(1_500));
+        assert_eq!(record.prior_phase(), TxRecoveryPriorPhase::Unpermitted);
+        assert!(!record.may_have_transmitted());
+        assert_eq!(record.reason(), TxRecoveryReason::DeadlineExpired);
+        let (returned, recovered) = match before_permit
+            .complete_tx(
+                unpermitted.complete(TxCompletionCode::new(20)),
+                owner_time(1_501),
+            )
+            .unwrap_or_else(|failure| panic!("deadline return failed: {:?}", failure.reason()))
+        {
+            TxCompletionDisposition::Recovered { buffer, record } => (buffer, record),
+            TxCompletionDisposition::Next(_) => panic!("recovery continued fanout"),
+            TxCompletionDisposition::Available(_) => panic!("late return lost recovery record"),
+            TxCompletionDisposition::Quarantined(_) => panic!("matching late return quarantined"),
+        };
+        assert_eq!(recovered, record);
+        assert_eq!(returned.slot_id().unwrap().get(), 0);
+        assert_eq!(before_permit.capacities().dispatches_recovery_required, 0);
+        assert_eq!(before_permit.capacities().dispatches_used, 0);
+        assert_eq!(before_permit.capacities().receipts_used, 0);
+
+        let mut after_permit = node::<2, 1>(66, "after-permit");
+        register_receiver(&mut after_permit, 65, "receiver");
+        let mut after_buffer = registered_buffer(&mut after_permit);
+        let job = prepare_with_interfaces(
+            &mut after_permit,
+            &mut after_buffer,
+            receiver.destination_hash(),
+            b"deadline after permit",
+            2,
+            2_000,
+            2_500,
+            default_interfaces(),
+            &mut rng,
+        );
+        let (pending, request) = job.begin_permit();
+        let reply = after_permit
+            .authorize_tx(request, owner_time(2_400), &mut TestPolicy::allowing())
+            .unwrap_or_else(|failure| panic!("authorization failed: {:?}", failure.reason()));
+        let authorized = match pending.resolve(reply, owner_time(2_400)) {
+            Ok(PermitResolution::Authorized(authorized)) => authorized,
+            Ok(PermitResolution::Unpermitted(_)) => panic!("pre-deadline permit denied"),
+            Ok(PermitResolution::Expired(_)) => panic!("pre-deadline grant expired"),
+            Err(_) => panic!("grant did not resolve"),
+        };
+        assert_eq!(
+            after_permit.maintain_tx(owner_time(2_499)),
+            TxMaintenanceReport {
+                newly_recovery_required: 0,
+            }
+        );
+        assert_eq!(after_permit.capacities().dispatches_authorized, 1);
+        assert_eq!(
+            after_permit.maintain_tx(owner_time(2_500)),
+            TxMaintenanceReport {
+                newly_recovery_required: 1,
+            }
+        );
+        assert_eq!(
+            after_permit.maintain_tx(owner_time(2_501)),
+            TxMaintenanceReport {
+                newly_recovery_required: 0,
+            }
+        );
+        let record = after_permit.recovery_records().next().unwrap();
+        assert_eq!(record.instance(), after_permit.instance_id());
+        assert_eq!(record.prior_phase(), TxRecoveryPriorPhase::Authorized);
+        assert!(record.may_have_transmitted());
+        assert_eq!(record.observed_at(), owner_time(2_500));
+        let (returned, recovered) = match after_permit
+            .complete_tx(
+                authorized.complete(TxCompletionCode::new(21)),
+                owner_time(2_600),
+            )
+            .unwrap_or_else(|failure| panic!("authorized recovery return: {:?}", failure.reason()))
+        {
+            TxCompletionDisposition::Recovered { buffer, record } => (buffer, record),
+            TxCompletionDisposition::Next(_) => panic!("authorized recovery fanned out"),
+            TxCompletionDisposition::Available(_) => panic!("late return lost recovery record"),
+            TxCompletionDisposition::Quarantined(_) => panic!("matching late return quarantined"),
+        };
+        assert_eq!(recovered, record);
+        assert_eq!(returned.slot_id().unwrap().get(), 0);
+        assert_eq!(after_permit.capacities().dispatches_recovery_required, 0);
+        assert_eq!(after_permit.capacities().dispatches_used, 0);
+        assert_eq!(after_permit.capacities().receipts_used, 1);
+    }
+
+    #[test]
+    fn delayed_grant_and_late_frame_never_expose_bytes_after_deadline() {
+        let receiver = node::<2, 1>(76, "receiver");
+        let mut rng = CounterRng::default();
+
+        let mut delayed = node::<2, 1>(75, "delayed");
+        register_receiver(&mut delayed, 76, "receiver");
+        let mut delayed_buffer = registered_buffer(&mut delayed);
+        let job = prepare_with_interfaces(
+            &mut delayed,
+            &mut delayed_buffer,
+            receiver.destination_hash(),
+            b"delayed grant",
+            1,
+            1_000,
+            1_500,
+            default_interfaces(),
+            &mut rng,
+        );
+        let (pending, request) = job.begin_permit();
+        let reply = delayed
+            .authorize_tx(request, owner_time(1_499), &mut TestPolicy::allowing())
+            .unwrap_or_else(|failure| panic!("grant failed: {:?}", failure.reason()));
+        let expired = match pending.resolve(reply, owner_time(1_500)) {
+            Ok(PermitResolution::Expired(expired)) => expired,
+            Ok(PermitResolution::Authorized(_)) => panic!("delayed grant exposed a frame owner"),
+            Ok(PermitResolution::Unpermitted(_)) => panic!("issued grant became unpermitted"),
+            Err(_) => panic!("delayed matching grant mismatched"),
+        };
+        assert_eq!(expired.deadline(), deadline(1_500));
+        let recovered = delayed
+            .complete_tx(
+                expired.complete(TxCompletionCode::new(50)),
+                owner_time(1_500),
+            )
+            .unwrap_or_else(|failure| panic!("expired return failed: {:?}", failure.reason()));
+        assert!(matches!(
+            recovered,
+            TxCompletionDisposition::Recovered {
+                record,
+                ..
+            } if record.prior_phase() == TxRecoveryPriorPhase::Authorized
+                && record.may_have_transmitted()
+                && record.reason() == TxRecoveryReason::DeadlineExpired
+        ));
+        assert_eq!(delayed.capacities().dispatches_used, 0);
+        assert_eq!(delayed.capacities().receipts_used, 1);
+
+        let mut late_frame = node::<2, 1>(77, "late-frame");
+        register_receiver(&mut late_frame, 76, "receiver");
+        let mut late_buffer = registered_buffer(&mut late_frame);
+        let job = prepare_with_interfaces(
+            &mut late_frame,
+            &mut late_buffer,
+            receiver.destination_hash(),
+            b"late frame",
+            2,
+            2_000,
+            2_500,
+            default_interfaces(),
+            &mut rng,
+        );
+        let (pending, request) = job.begin_permit();
+        let reply = late_frame
+            .authorize_tx(request, owner_time(2_499), &mut TestPolicy::allowing())
+            .unwrap_or_else(|failure| panic!("grant failed: {:?}", failure.reason()));
+        let mut authorized = match pending.resolve(reply, owner_time(2_499)) {
+            Ok(PermitResolution::Authorized(authorized)) => authorized,
+            Ok(PermitResolution::Expired(_)) => panic!("fresh grant was already expired"),
+            Ok(PermitResolution::Unpermitted(_)) => panic!("fresh grant was denied"),
+            Err(_) => panic!("fresh grant mismatched"),
+        };
+        assert!(matches!(
+            authorized.frame(owner_time(2_500)),
+            Err(TxFrameError::DeadlineExpired { deadline: value })
+                if value == deadline(2_500)
+        ));
+        assert!(matches!(
+            authorized.frame(owner_time(2_499)),
+            Err(TxFrameError::AlreadyTaken)
+        ));
+        assert!(matches!(
+            late_frame
+                .complete_tx(
+                    authorized.complete(TxCompletionCode::new(51)),
+                    owner_time(2_500),
+                )
+                .unwrap_or_else(|failure| panic!("late frame return: {:?}", failure.reason())),
+            TxCompletionDisposition::Recovered {
+                record,
+                ..
+            } if record.prior_phase() == TxRecoveryPriorPhase::Authorized
+                && record.reason() == TxRecoveryReason::DeadlineExpired
+        ));
+        assert_eq!(late_frame.capacities().dispatches_used, 0);
+        assert_eq!(late_frame.capacities().receipts_used, 1);
+    }
+
+    #[test]
+    fn direct_late_unpermitted_return_stops_fanout_and_recovers_buffer() {
+        let mut sender = node::<2, 1>(78, "sender");
+        let receiver = node::<2, 1>(79, "receiver");
+        register_receiver(&mut sender, 79, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
+        let mut rng = CounterRng::default();
+        let job = prepare_with_interfaces(
+            &mut sender,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"late before authorization",
+            1,
+            1_000,
+            1_500,
+            interfaces(&[1, 4]),
+            &mut rng,
+        );
+
+        let disposition = sender
+            .complete_tx(
+                job.return_unpermitted().complete(TxCompletionCode::new(52)),
+                owner_time(1_500),
+            )
+            .unwrap_or_else(|failure| panic!("late return failed: {:?}", failure.reason()));
+        let (returned, record) = match disposition {
+            TxCompletionDisposition::Recovered { buffer, record } => (buffer, record),
+            TxCompletionDisposition::Next(_) => panic!("late return advanced fanout"),
+            TxCompletionDisposition::Available(_) => panic!("late return hid recovery"),
+            TxCompletionDisposition::Quarantined(_) => panic!("matching late return quarantined"),
+        };
+        assert_eq!(returned.slot_id().unwrap().get(), 0);
+        assert_eq!(record.instance(), sender.instance_id());
+        assert_eq!(record.prior_phase(), TxRecoveryPriorPhase::Unpermitted);
+        assert!(!record.may_have_transmitted());
+        assert_eq!(record.reason(), TxRecoveryReason::DeadlineExpired);
+        assert_eq!(sender.capacities().dispatches_used, 0);
+        assert_eq!(sender.capacities().receipts_used, 0);
+        assert_eq!(sender.capacities().attempts_used, 0);
+    }
+
+    #[test]
+    fn explicit_recovery_fault_supersedes_deadline_without_cancelling_receipt() {
+        let mut sender = node::<2, 1>(82, "sender");
+        let receiver = node::<2, 1>(83, "receiver");
+        register_receiver(&mut sender, 83, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
+        let mut rng = CounterRng::default();
+        let job = prepare_with_interfaces(
+            &mut sender,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"fault after deadline",
+            1,
+            1_000,
+            1_500,
+            default_interfaces(),
+            &mut rng,
+        );
+        let (pending, request) = job.begin_permit();
+        let reply = sender
+            .authorize_tx(request, owner_time(1_400), &mut TestPolicy::allowing())
+            .unwrap_or_else(|failure| panic!("authorization failed: {:?}", failure.reason()));
+        let authorized = match pending.resolve(reply, owner_time(1_400)) {
+            Ok(PermitResolution::Authorized(authorized)) => authorized,
+            Ok(PermitResolution::Expired(_)) => panic!("fresh grant expired"),
+            Ok(PermitResolution::Unpermitted(_)) => panic!("fresh grant denied"),
+            Err(_) => panic!("fresh grant mismatched"),
+        };
+        assert_eq!(
+            sender.maintain_tx(owner_time(1_500)),
+            TxMaintenanceReport {
+                newly_recovery_required: 1,
+            }
+        );
+        assert_eq!(
+            sender.recovery_records().next().unwrap().reason(),
+            TxRecoveryReason::DeadlineExpired
+        );
+
+        let code = TxCompletionCode::new(0x55aa);
+        let quarantine = match sender
+            .complete_tx(authorized.recovery_fault(code), owner_time(1_600))
+            .unwrap_or_else(|failure| panic!("fault return failed: {:?}", failure.reason()))
+        {
+            TxCompletionDisposition::Quarantined(quarantine) => quarantine,
+            TxCompletionDisposition::Available(_) => panic!("fault released buffer"),
+            TxCompletionDisposition::Recovered { .. } => panic!("fault became ordinary recovery"),
+            TxCompletionDisposition::Next(_) => panic!("fault advanced fanout"),
+        };
+        let record = quarantine.record();
+        assert_eq!(record.instance(), sender.instance_id());
+        assert_eq!(record.reason(), TxRecoveryReason::CompletionFault(code));
+        assert_eq!(record.observed_at(), owner_time(1_600));
+        assert_eq!(record.prior_phase(), TxRecoveryPriorPhase::Authorized);
+        assert!(record.may_have_transmitted());
+        assert_eq!(sender.recovery_records().next(), Some(record));
+        assert_eq!(sender.capacities().dispatches_recovery_required, 1);
+        assert_eq!(sender.capacities().receipts_used, 1);
+        assert_eq!(sender.capacities().attempts_active, 1);
+    }
+
+    #[test]
+    fn recovery_fault_quarantines_and_wrong_owner_or_stale_returns_retain_ownership() {
+        let receiver = node::<2, 1>(68, "receiver");
+        let mut rng = CounterRng::default();
+
+        let mut faulted = node::<2, 1>(67, "faulted");
+        register_receiver(&mut faulted, 68, "receiver");
+        let mut fault_buffer = registered_buffer(&mut faulted);
+        let fault_job = prepare(
+            &mut faulted,
+            &mut fault_buffer,
+            receiver.destination_hash(),
+            b"control fault",
+            1,
+            &mut rng,
+        );
+        let fault_code = TxCompletionCode::new(0x1234);
+        let quarantine = match faulted
+            .complete_tx(fault_job.recovery_fault(fault_code), owner_time(1_100))
+            .unwrap_or_else(|failure| panic!("fault return rejected: {:?}", failure.reason()))
+        {
+            TxCompletionDisposition::Quarantined(quarantine) => quarantine,
+            TxCompletionDisposition::Next(_) => panic!("fault continued fanout"),
+            TxCompletionDisposition::Available(_) => panic!("fault released buffer"),
+            TxCompletionDisposition::Recovered { .. } => panic!("fault was treated as lateness"),
+        };
+        assert_eq!(
+            quarantine.record().reason(),
+            TxRecoveryReason::CompletionFault(fault_code)
+        );
+        assert_eq!(
+            quarantine.record().prior_phase(),
+            TxRecoveryPriorPhase::Unpermitted
+        );
+        assert_eq!(faulted.capacities().dispatches_recovery_required, 1);
+
+        let mut owner = node::<2, 1>(69, "owner");
+        let mut other = node::<2, 1>(70, "other");
+        register_receiver(&mut owner, 68, "receiver");
+        register_receiver(&mut other, 68, "receiver");
+        let mut buffer = registered_buffer(&mut owner);
+        let job = prepare(
+            &mut owner,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"retained return",
+            2,
+            &mut rng,
+        );
+        let (pending, request) = job.begin_permit();
+        let request_failure =
+            match other.authorize_tx(request, owner_time(2_100), &mut TestPolicy::allowing()) {
+                Ok(_) => panic!("foreign owner authorized request"),
+                Err(failure) => failure,
+            };
+        assert_eq!(
+            request_failure.reason(),
+            TxAuthorizationErrorKind::WrongOwner
+        );
+        let reply = owner
+            .authorize_tx(
+                request_failure.into_request(),
+                owner_time(2_100),
+                &mut TestPolicy::denying(TxPolicyDenial::PolicyDenied),
+            )
+            .unwrap_or_else(|failure| panic!("retained request failed: {:?}", failure.reason()));
+        let unpermitted = match pending.resolve(reply, owner_time(2_100)) {
+            Ok(PermitResolution::Unpermitted(unpermitted)) => unpermitted,
+            Ok(PermitResolution::Authorized(_)) => panic!("denial authorized"),
+            Ok(PermitResolution::Expired(_)) => panic!("denial became expired grant"),
+            Err(_) => panic!("retained request reply mismatch"),
+        };
+        let completion = unpermitted.complete(TxCompletionCode::new(30));
+        let wrong_owner = match other.complete_tx(completion, owner_time(2_200)) {
+            Ok(_) => panic!("foreign owner accepted completion"),
+            Err(failure) => failure,
+        };
+        assert_eq!(wrong_owner.reason(), TxCompletionErrorKind::WrongOwner);
+        let completion = wrong_owner.into_completion();
+
+        let original_state = owner.dispatches[0].state;
+        let DispatchState::Active(mut stale_record) = original_state else {
+            panic!("expected active dispatch")
+        };
+        stale_record.generation += 1;
+        owner.dispatches[0].state = DispatchState::Active(stale_record);
+        let stale = match owner.complete_tx(completion, owner_time(2_200)) {
+            Ok(_) => panic!("stale completion was accepted"),
+            Err(failure) => failure,
+        };
+        assert_eq!(stale.reason(), TxCompletionErrorKind::StaleOrUnknown);
+        owner.dispatches[0].state = original_state;
+        assert!(matches!(
+            owner
+                .complete_tx(stale.into_completion(), owner_time(2_200))
+                .unwrap_or_else(|failure| panic!("retained completion: {:?}", failure.reason())),
+            TxCompletionDisposition::Available(_)
+        ));
+        assert_eq!(owner.capacities().dispatches_used, 0);
     }
 }

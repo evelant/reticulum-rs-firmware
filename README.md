@@ -27,16 +27,25 @@ Tracker boot.
 Separately from the target-linked receive-only image, the portable node-core
 now registers caller-owned 500-byte packet buffers, retains fixed dispatch
 metadata for them, and prepares outbound DATA directly into one supplied
-buffer. Success returns a unique `TxJob` carrying the buffer plus its proof
-token, interface target and return deadline; packet bytes deliberately have no
-public accessor until a separate transmit-permit state machine exists. Exact
-proofs or timeouts become fixed in-place terminal tombstones that require
-explicit acknowledgement.
+buffer. `PrepareDataRequest` rejects an owner deadline at or before its current
+monotonic sample before any reservation, entropy use, or RNS mutation. Success
+resolves the preserved RNS target against an enabled-interface snapshot and
+returns a unique routed `TxJob`; multi-interface fan-out is deterministic,
+serialized, and reuses that same buffer.
 
-This 24-test portable slice remains disconnected from Embassy, firmware radio
-tasks and RF TX; it does not yet implement async handoff, permit issuance,
-transmit completion, lost-owner recovery or reboot persistence, and ordinary
-RNS actions remain allocation-backed.
+The portable typestate now also covers opaque non-`Copy` permit requests and
+replies, deadline-aware authorization, one-shot byte access through
+`AuthorizedTx::frame(now)`, completion, and retained recovery. Permit issuance
+is the conservative linearization point: it irrevocably records that RF may
+have started, even if the reply arrives too late to expose bytes. Exact proofs
+or timeouts remain fixed in-place terminal tombstones until explicit
+acknowledgement, and a missing owner is never fabricated or force-reused.
+
+This portable slice remains disconnected from Embassy, firmware radio tasks,
+and RF TX. The next implementation boundary is the bounded owning Embassy
+handoff; reboot persistence and allocation-backed ordinary RNS actions remain
+open. Every firmware dependency graph remains TX-free, and the only
+radio-bearing firmware artifact remains RX-only.
 
 ## Read first
 

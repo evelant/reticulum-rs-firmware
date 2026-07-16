@@ -208,10 +208,22 @@ Together these boundaries currently enforce:
   synchronous ingress source is still known;
 - pre-entropy dispatch/attempt reservation before caller-owned DATA
   preparation, with failure returning the exact same external buffer;
-- preservation of outbound `All`/`Only`/`AllExcept` target and caller-supplied
-  return deadline in a unique, byte-inaccessible `TxJob`;
-- exact-receipt rollback for a definitely-unsent queued job, and terminal
-  acknowledgement blocked while that job still owns its buffer;
+- rejection of `PrepareDataRequest` when `deadline <= owner_now` before
+  reservation, entropy use, or RNS mutation;
+- deterministic resolution of outbound `All`/`Only`/`AllExcept` against the
+  enabled-interface snapshot and serialized, no-copy fan-out through a unique,
+  byte-inaccessible routed `TxJob`;
+- opaque non-`Copy` permit requests/replies whose grant linearization
+  irrevocably records possible transmission before leaving node-core;
+- one-shot packet-byte access only through an exactly matched
+  `AuthorizedTx::frame(now)`, with delayed grants becoming byte-inaccessible
+  `ExpiredAuthorizedTx`;
+- exact-deadline authorization, completion, rollback and maintenance plus
+  `NodeInstanceId`-scoped recovery records; a coherent late owner returns
+  `Recovered`, while faults/invariants retain an owning quarantine;
+- exact-receipt rollback only for a definitely-unsent job with no earlier
+  authorized hop, cumulative receipt retention after any authorization, and
+  terminal acknowledgement blocked while any typestate still owns its buffer;
 - allocation-free adapter/transport counters and capacity snapshots;
 - suppression of Rete's premature responder `LinkEstablished` event until the
   native Link actually reaches `Active`.
@@ -221,9 +233,10 @@ packets, destinations and several Link paths still contain `Vec` allocations;
 opaque native failures remain possible. The exact upstream repairs and
 regression expectations are tracked in
 [the Rete hardening backlog](rete-upstream-backlog.md).
-The external-buffer slice is synchronous and has 24 focused host tests; it has
-no Embassy channel, permit state, radio integration or transmit-completion
-claim.
+The portable external-buffer route/permit/completion/recovery slice has a
+focused host suite but no Embassy channel, interface actor, radio integration,
+or claim that RF occurred. All firmware graphs remain TX-free, and the only
+radio-bearing firmware artifact remains RX-only.
 
 ## Rete production hard gates
 

@@ -354,22 +354,30 @@ The project adapter and `crates/node-core` now exercise both halves. Node-core
 stores fixed dispatch metadata and the attempt ledger while each 500-byte
 `TxPacketBuffer` remains externally owned and registered once. It reserves
 dispatch and attempt slots before preparation, writes directly into the
-supplied buffer, and returns a unique `TxJob` preserving full receipt hash,
-interface target and return deadline. The job deliberately exposes no packet
-bytes pending a separate permit state. If a future job-channel insertion proves
-definitely unsent, `rollback_queued()` cancels the exact live receipt and
-returns the same buffer; a missing receipt retains the bound job rather than
-hiding the invariant. Its exact candidate sink turns the matching active
+supplied buffer, rejects `deadline <= owner_now` before mutation, and resolves
+the RNS target deterministically against an enabled-interface snapshot. The
+unique routed `TxJob` preserves the full receipt hash and original target but
+exposes no bytes. Opaque non-`Copy` request/reply types bind each serialized hop
+to an exact permit; issuance irrevocably records possible transmission, and
+only the matching `AuthorizedTx::frame(now)` exposes bytes once before the
+deadline. A delayed grant becomes byte-inaccessible `ExpiredAuthorizedTx`.
+
+Completion serializes fan-out through the same buffer. An exact receipt is
+cancelled only when every hop was definitely unsent; any prior authorization
+keeps it live and forbids rollback. Exact-deadline authorization, completion,
+rollback, and maintenance retain a scalar recovery record scoped by
+`NodeInstanceId`. A coherent late exact owner finalizes as `Recovered`; faults
+and same-lease invariants retain an owning quarantine rather than inventing or
+reusing the buffer. The exact candidate sink still turns the matching active
 attempt into an in-place terminal tombstone before Rete removes the receipt,
-and acknowledgement remains blocked while the job still owns its buffer.
-Dropping a job leaves its dispatch quarantined instead of reusable, and a
-layout guard prevents node dispatch slots from regaining embedded packet
-arrays. Twenty-four focused tests cover this synchronous boundary. The
-remaining product blockers are the async owning channel, permit/completion and
-lost-owner state, durable intent/attempt recovery, bounded ordinary RNS actions
-and higher-level LXMF persistence. Until those slices and radio policy are
-connected, no stable host send operation or firmware RF TX graph uses this
-path.
+and acknowledgement remains blocked while any typestate owns the buffer. A
+layout guard prevents dispatch slots from regaining embedded packet arrays.
+
+The remaining product blockers are the async owning Embassy channel, durable
+intent/attempt recovery, bounded ordinary RNS actions, and higher-level LXMF
+persistence. Until those slices and radio policy are connected, no stable host
+send operation or firmware RF TX graph uses this path. Every current firmware
+graph remains TX-free, and the only radio-bearing lab artifact remains RX-only.
 
 ## 12. LXMF retry and receipt-attempt correlation
 
