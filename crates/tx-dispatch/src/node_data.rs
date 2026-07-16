@@ -3,10 +3,12 @@
 use core::{array, future::poll_fn, mem};
 
 use embassy_sync::blocking_mutex::raw::RawMutex;
+use rand_core::{CryptoRng, RngCore};
 use reticulum_node_core::{
     AttemptToken, AvailableBufferError, MonotonicMillis, NodeCore, PacketInterfaceId, PacketSlotId,
-    RoutedTxJob, TxCompletion, TxCompletionDisposition, TxCompletionErrorKind, TxCompletionFailure,
-    TxLeaseDeadline, TxOwnerScope, TxPacketBuffer, TxQuarantine, TxRecoveryRecord,
+    PrepareDataRequest, RollbackErrorKind, RollbackFailure, RoutedTxJob, SubmitError, TxCompletion,
+    TxCompletionDisposition, TxCompletionErrorKind, TxCompletionFailure, TxLeaseDeadline,
+    TxOwnerScope, TxPacketBuffer, TxQuarantine, TxRecoveryRecord,
 };
 use reticulum_tx_handoff::TxOwnerReturn;
 
@@ -22,6 +24,7 @@ enum NodeTxDataMode {
 enum AvailableSource {
     Seed,
     Completion,
+    PreparationFailure,
 }
 
 enum ParkCandidate {
@@ -95,6 +98,7 @@ enum DisabledOwner {
     Candidate(ParkCandidate),
     CompletionFailure(TxCompletionFailure<'static>),
     UnexpectedCompletion(TxCompletion<'static>),
+    RollbackFailure(RollbackFailure<'static>),
 }
 
 impl DisabledOwner {
@@ -109,6 +113,10 @@ impl DisabledOwner {
                 let _ = completion;
                 NodeTxDataFaultResidueKind::Completion
             }
+            Self::RollbackFailure(failure) => {
+                let _ = failure.reason();
+                NodeTxDataFaultResidueKind::RollbackFailure
+            }
         }
     }
 }
@@ -118,6 +126,7 @@ enum NodeTxDataState {
     Returned(TxOwnerReturn),
     Parking(ParkCandidate),
     Next(RoutedTxJob<'static>),
+    FreshRollback(RoutedTxJob<'static>),
     Disabled {
         fault: NodeTxDataFault,
         retained: DisabledOwner,
@@ -138,6 +147,8 @@ pub enum NodeTxDataPhase {
     Parking,
     /// One serialized continuation job is retained until the job channel has capacity.
     NextPending,
+    /// One fresh, definitely unaccepted job awaits rollback with a fresh clock sample.
+    FreshRollbackPending,
     /// The machine failed closed while retaining every unique owner involved.
     Disabled,
 }
@@ -202,10 +213,20 @@ pub enum NodeTxDataFault {
     SlotOutsidePool(PacketSlotId),
     /// A second unique owner claimed an already occupied table slot.
     SlotOccupied(PacketSlotId),
+    /// A validated available owner no longer matches the fixed table entry
+    /// from which it was removed.
+    AvailableSlotMismatch {
+        /// Fixed table index selected for preparation.
+        expected_index: usize,
+        /// Stable slot reported by node-core.
+        actual: PacketSlotId,
+    },
     /// A recovered or quarantined owner disagreed with its scalar recovery record.
     RecoveryRecordMismatch,
     /// Node-core rejected an owning completion without consuming it.
     Completion(TxCompletionErrorKind),
+    /// Node-core rejected rollback without consuming the fresh routed job.
+    Rollback(RollbackErrorKind),
     /// Private mode and transition state disagreed.
     InternalInvariant,
 }
@@ -223,6 +244,8 @@ pub enum NodeTxDataFaultResidueKind {
     Completion,
     /// A node-core completion failure remains retained with its completion.
     CompletionFailure,
+    /// A node-core rollback failure remains retained with its routed job.
+    RollbackFailure,
 }
 
 /// Kind of owner currently parked in one fixed slot.
@@ -296,7 +319,46 @@ pub enum NodeTxDataStep {
     NextQueued(NodeTxQueuedHop),
     /// The exact serialized continuation remains retained under pressure.
     NextBackpressured(NodeTxQueuedHop),
+    /// A definitely unaccepted fresh job was rolled back and its exact
+    /// disposition remains staged for parking or conservative continuation.
+    FreshRollbackHandled(NodeTxQueuedHop),
     /// The machine failed closed and retained the exact non-`Copy` residue.
+    Disabled(NodeTxDataFault),
+}
+
+/// Copy-only result of synchronous preparation and initial job submission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[must_use = "preparation progress, rejection, and rollback requirements must be handled"]
+pub enum NodeTxPrepareResult {
+    /// The fresh routed job entered the dispatcher job channel.
+    Queued(NodeTxQueuedHop),
+    /// The job channel was already full, so no buffer, entropy, or node state changed.
+    QueueBackpressured,
+    /// Authoritative enqueue unexpectedly rejected the prepared job; the exact
+    /// definitely-unsent job awaits rollback on the next fresh-clock step.
+    RollbackPending(NodeTxQueuedHop),
+    /// Node-core rejected preparation and the exact available buffer was
+    /// validated and restored to its parked slot.
+    Rejected {
+        /// Stable buffer slot restored after rejection.
+        slot: PacketSlotId,
+        /// Typed preparation rejection.
+        reason: SubmitError,
+    },
+    /// Node-core rejected preparation fail-closed and the exact quarantine was parked.
+    RejectedQuarantined {
+        /// Typed preparation rejection.
+        reason: SubmitError,
+        /// Scalar record retained with the parked quarantine.
+        record: TxRecoveryRecord,
+    },
+    /// No acknowledged available buffer is currently parked.
+    NoAvailable,
+    /// Another persistent machine transition must run before fresh preparation.
+    ProgressRequired(NodeTxDataPhase),
+    /// The supplied node does not match the owner bound at construction.
+    OwnerMismatch,
+    /// The machine was already disabled or failed closed while restoring a preparation owner.
     Disabled(NodeTxDataFault),
 }
 
@@ -335,9 +397,9 @@ pub enum NodeTxRecoveryAckError {
 /// profile is vacuously seeded, although [`reticulum_tx_handoff::TxHandoff`]
 /// deliberately requires a nonempty product handoff. All reusable, recovered,
 /// and quarantined owners remain in an internal per-slot table; public progress
-/// values expose scalars only. A future synchronous preparation boundary will
-/// consume available table entries without moving raw owners into async
-/// futures.
+/// values expose scalars only. Synchronous preparation consumes the lowest
+/// available table entry and either queues the resulting job or restores its
+/// exact terminal owner without moving raw owners into async futures.
 ///
 /// `TxCompletionDisposition::Next` is never rolled back. It remains in this
 /// machine and is retried unchanged until the sole job channel accepts it.
@@ -391,6 +453,7 @@ where
             NodeTxDataState::Returned(_) => NodeTxDataPhase::Returned,
             NodeTxDataState::Parking(_) => NodeTxDataPhase::Parking,
             NodeTxDataState::Next(_) => NodeTxDataPhase::NextPending,
+            NodeTxDataState::FreshRollback(_) => NodeTxDataPhase::FreshRollbackPending,
             NodeTxDataState::Disabled { .. } | NodeTxDataState::Poisoned => {
                 NodeTxDataPhase::Disabled
             }
@@ -418,7 +481,8 @@ where
             NodeTxDataState::Idle
             | NodeTxDataState::Returned(_)
             | NodeTxDataState::Parking(_)
-            | NodeTxDataState::Next(_) => None,
+            | NodeTxDataState::Next(_)
+            | NodeTxDataState::FreshRollback(_) => None,
         }
     }
 
@@ -430,6 +494,7 @@ where
             | NodeTxDataState::Returned(_)
             | NodeTxDataState::Parking(_)
             | NodeTxDataState::Next(_)
+            | NodeTxDataState::FreshRollback(_)
             | NodeTxDataState::Poisoned => None,
         }
     }
@@ -533,6 +598,179 @@ where
         }
     }
 
+    /// Prepare one destination-DATA packet from the lowest available parked
+    /// owner and try its initial dispatcher handoff synchronously.
+    ///
+    /// Known owner returns and retained transitions take priority over fresh
+    /// work. A queue observed full before preparation leaves the owner table,
+    /// node state, request bytes, and entropy source untouched. If the sole
+    /// producer's authoritative `try_send` nevertheless rejects the prepared
+    /// job, the exact definitely-unsent job remains in persistent state for a
+    /// rollback step using a fresh caller-supplied clock sample.
+    pub fn try_prepare_and_submit_data<
+        R: RngCore + CryptoRng,
+        const PATHS: usize,
+        const ANNOUNCES: usize,
+        const DEDUPLICATION: usize,
+        const LINKS: usize,
+    >(
+        &mut self,
+        owner: &mut NodeCore<PATHS, ANNOUNCES, DEDUPLICATION, LINKS, POOL_SIZE>,
+        request: PrepareDataRequest<'_>,
+        rng: &mut R,
+    ) -> NodeTxPrepareResult {
+        if owner.tx_owner_scope() != self.owner_scope {
+            return NodeTxPrepareResult::OwnerMismatch;
+        }
+        match &self.state {
+            NodeTxDataState::Disabled { fault, .. } => {
+                return NodeTxPrepareResult::Disabled(*fault);
+            }
+            NodeTxDataState::Poisoned => {
+                return NodeTxPrepareResult::Disabled(NodeTxDataFault::InternalInvariant);
+            }
+            NodeTxDataState::Idle => {}
+            NodeTxDataState::Returned(_)
+            | NodeTxDataState::Parking(_)
+            | NodeTxDataState::Next(_)
+            | NodeTxDataState::FreshRollback(_) => {
+                return NodeTxPrepareResult::ProgressRequired(self.phase());
+            }
+        }
+        if !matches!(self.mode, NodeTxDataMode::Running) {
+            return NodeTxPrepareResult::ProgressRequired(NodeTxDataPhase::Seeding);
+        }
+
+        if let Some(returned) = self.handoff.returns.try_receive() {
+            self.state = NodeTxDataState::Returned(returned);
+            return NodeTxPrepareResult::ProgressRequired(NodeTxDataPhase::Returned);
+        }
+        if self.handoff.jobs.len() >= self.handoff.jobs.capacity() {
+            return NodeTxPrepareResult::QueueBackpressured;
+        }
+
+        let Some(index) = self
+            .parked
+            .iter()
+            .position(|owner| matches!(owner, ParkedOwner::Available(_)))
+        else {
+            return NodeTxPrepareResult::NoAvailable;
+        };
+        let parked = mem::replace(&mut self.parked[index], ParkedOwner::Empty);
+        let ParkedOwner::Available(buffer) = parked else {
+            unreachable!("selected available owner changed during synchronous transition")
+        };
+        let expected_slot = match owner.validate_available_buffer(buffer) {
+            Ok(slot) if usize::from(slot.get()) == index => slot,
+            Ok(actual) => {
+                return self.disable_prepare(
+                    NodeTxDataFault::AvailableSlotMismatch {
+                        expected_index: index,
+                        actual,
+                    },
+                    DisabledOwner::Candidate(ParkCandidate::Available {
+                        buffer,
+                        source: AvailableSource::PreparationFailure,
+                    }),
+                );
+            }
+            Err(error) => {
+                return self.disable_prepare(
+                    NodeTxDataFault::AvailableBuffer(error),
+                    DisabledOwner::Candidate(ParkCandidate::Available {
+                        buffer,
+                        source: AvailableSource::PreparationFailure,
+                    }),
+                );
+            }
+        };
+
+        match owner.prepare_data_into_slot(buffer, request, rng) {
+            Ok(job) => {
+                let metadata = NodeTxQueuedHop::from_job(&job);
+                match self.handoff.jobs.try_send(job) {
+                    Ok(()) => NodeTxPrepareResult::Queued(metadata),
+                    Err(full) => {
+                        self.state = NodeTxDataState::FreshRollback(full.into_inner());
+                        NodeTxPrepareResult::RollbackPending(metadata)
+                    }
+                }
+            }
+            Err(failure) => {
+                let reason = failure.reason();
+                match failure.into_buffer() {
+                    Ok(buffer) => {
+                        let actual = match owner.validate_available_buffer(buffer) {
+                            Ok(slot) => slot,
+                            Err(error) => {
+                                return self.disable_prepare(
+                                    NodeTxDataFault::AvailableBuffer(error),
+                                    DisabledOwner::Candidate(ParkCandidate::Available {
+                                        buffer,
+                                        source: AvailableSource::PreparationFailure,
+                                    }),
+                                );
+                            }
+                        };
+                        if actual != expected_slot || usize::from(actual.get()) != index {
+                            return self.disable_prepare(
+                                NodeTxDataFault::AvailableSlotMismatch {
+                                    expected_index: index,
+                                    actual,
+                                },
+                                DisabledOwner::Candidate(ParkCandidate::Available {
+                                    buffer,
+                                    source: AvailableSource::PreparationFailure,
+                                }),
+                            );
+                        }
+                        if !matches!(self.parked[index], ParkedOwner::Empty) {
+                            return self.disable_prepare(
+                                NodeTxDataFault::SlotOccupied(actual),
+                                DisabledOwner::Candidate(ParkCandidate::Available {
+                                    buffer,
+                                    source: AvailableSource::PreparationFailure,
+                                }),
+                            );
+                        }
+                        self.parked[index] = ParkedOwner::Available(buffer);
+                        NodeTxPrepareResult::Rejected {
+                            slot: actual,
+                            reason,
+                        }
+                    }
+                    Err(quarantine) => {
+                        let actual = quarantine.slot_id();
+                        let record = quarantine.record();
+                        if actual != expected_slot || usize::from(actual.get()) != index {
+                            return self.disable_prepare(
+                                NodeTxDataFault::AvailableSlotMismatch {
+                                    expected_index: index,
+                                    actual,
+                                },
+                                DisabledOwner::Candidate(ParkCandidate::Quarantined(quarantine)),
+                            );
+                        }
+                        if actual != record.slot_id() {
+                            return self.disable_prepare(
+                                NodeTxDataFault::RecoveryRecordMismatch,
+                                DisabledOwner::Candidate(ParkCandidate::Quarantined(quarantine)),
+                            );
+                        }
+                        if !matches!(self.parked[index], ParkedOwner::Empty) {
+                            return self.disable_prepare(
+                                NodeTxDataFault::SlotOccupied(actual),
+                                DisabledOwner::Candidate(ParkCandidate::Quarantined(quarantine)),
+                            );
+                        }
+                        self.parked[index] = ParkedOwner::Quarantined(quarantine);
+                        NodeTxPrepareResult::RejectedQuarantined { reason, record }
+                    }
+                }
+            }
+        }
+    }
+
     /// Run exactly one non-awaiting ownership transition with a fresh node
     /// clock sample.
     pub fn step<
@@ -554,6 +792,7 @@ where
             NodeTxDataState::Returned(returned) => self.step_returned(owner, returned, now),
             NodeTxDataState::Parking(candidate) => self.step_parking(owner, candidate),
             NodeTxDataState::Next(job) => self.step_next(job),
+            NodeTxDataState::FreshRollback(job) => self.step_fresh_rollback(owner, job, now),
             NodeTxDataState::Disabled { fault, retained } => {
                 self.state = NodeTxDataState::Disabled { fault, retained };
                 NodeTxDataStep::Disabled(fault)
@@ -590,9 +829,12 @@ where
                 NodeTxDataState::Idle
                 | NodeTxDataState::Returned(_)
                 | NodeTxDataState::Parking(_)
-                | NodeTxDataState::Next(_) => NodeTxDataWait::NotWaiting,
+                | NodeTxDataState::Next(_)
+                | NodeTxDataState::FreshRollback(_) => NodeTxDataWait::NotWaiting,
             },
-            NodeTxDataPhase::Returned | NodeTxDataPhase::Parking => NodeTxDataWait::NotWaiting,
+            NodeTxDataPhase::Returned
+            | NodeTxDataPhase::Parking
+            | NodeTxDataPhase::FreshRollbackPending => NodeTxDataWait::NotWaiting,
         }
     }
 
@@ -771,9 +1013,57 @@ where
         }
     }
 
+    fn step_fresh_rollback<
+        const PATHS: usize,
+        const ANNOUNCES: usize,
+        const DEDUPLICATION: usize,
+        const LINKS: usize,
+    >(
+        &mut self,
+        owner: &mut NodeCore<PATHS, ANNOUNCES, DEDUPLICATION, LINKS, POOL_SIZE>,
+        job: RoutedTxJob<'static>,
+        now: MonotonicMillis,
+    ) -> NodeTxDataStep {
+        let metadata = NodeTxQueuedHop::from_job(&job);
+        match owner.rollback_queued(job, now) {
+            Ok(TxCompletionDisposition::Next(job)) => {
+                self.state = NodeTxDataState::Next(job);
+                NodeTxDataStep::FreshRollbackHandled(metadata)
+            }
+            Ok(TxCompletionDisposition::Available(buffer)) => {
+                self.state = NodeTxDataState::Parking(ParkCandidate::Available {
+                    buffer,
+                    source: AvailableSource::PreparationFailure,
+                });
+                NodeTxDataStep::FreshRollbackHandled(metadata)
+            }
+            Ok(TxCompletionDisposition::Recovered { buffer, record }) => {
+                self.state = NodeTxDataState::Parking(ParkCandidate::Recovered { buffer, record });
+                NodeTxDataStep::FreshRollbackHandled(metadata)
+            }
+            Ok(TxCompletionDisposition::Quarantined(quarantine)) => {
+                self.state = NodeTxDataState::Parking(ParkCandidate::Quarantined(quarantine));
+                NodeTxDataStep::FreshRollbackHandled(metadata)
+            }
+            Err(failure) => {
+                let fault = NodeTxDataFault::Rollback(failure.reason());
+                self.disable(fault, DisabledOwner::RollbackFailure(failure))
+            }
+        }
+    }
+
     fn disable(&mut self, fault: NodeTxDataFault, retained: DisabledOwner) -> NodeTxDataStep {
         self.state = NodeTxDataState::Disabled { fault, retained };
         NodeTxDataStep::Disabled(fault)
+    }
+
+    fn disable_prepare(
+        &mut self,
+        fault: NodeTxDataFault,
+        retained: DisabledOwner,
+    ) -> NodeTxPrepareResult {
+        self.state = NodeTxDataState::Disabled { fault, retained };
+        NodeTxPrepareResult::Disabled(fault)
     }
 }
 
@@ -1090,6 +1380,302 @@ mod tests {
     }
 
     #[test]
+    fn synchronous_preparation_uses_lowest_slot_and_returns_the_exact_owner() {
+        let mut owner = node::<2>(21, "prepare-owner");
+        let receiver = node::<0>(22, "prepare-receiver");
+        register_peer(&mut owner, 22, "prepare-receiver");
+        let first = Box::leak(Box::new(TxPacketBuffer::new()));
+        let second = Box::leak(Box::new(TxPacketBuffer::new()));
+        let (mut machine, mut dispatcher) = new_machine::<2>(&owner);
+        let (first_slot, first_pointer) =
+            park_seed(&mut machine, &mut dispatcher, &mut owner, first, 1);
+        let (second_slot, second_pointer) =
+            park_seed(&mut machine, &mut dispatcher, &mut owner, second, 0);
+        let plaintext = *b"stack plaintext";
+        let mut rng = CounterRng::default();
+
+        let queued = match machine.try_prepare_and_submit_data(
+            &mut owner,
+            PrepareDataRequest {
+                destination: receiver.destination_hash(),
+                plaintext: &plaintext,
+                rns_now: MonotonicSeconds::new(1),
+                owner_now: MonotonicMillis::new(10),
+                deadline: TxLeaseDeadline::new(MonotonicMillis::new(1_000)),
+                enabled_interfaces: interfaces(&[1]),
+            },
+            &mut rng,
+        ) {
+            NodeTxPrepareResult::Queued(metadata) => metadata,
+            other => panic!("fresh preparation did not queue: {other:?}"),
+        };
+        assert_eq!(queued.slot_id(), first_slot);
+        assert!(rng.0 > 0);
+        assert_eq!(machine.phase(), NodeTxDataPhase::Idle);
+        assert_eq!(machine.parked_counts().available(), 1);
+        assert_eq!(parked_buffer_pointer(&machine, first_slot), None);
+        assert_eq!(
+            parked_buffer_pointer(&machine, second_slot),
+            Some(second_pointer)
+        );
+
+        let job = dispatcher
+            .jobs
+            .try_receive()
+            .expect("prepared job must enter dispatcher handoff");
+        assert_eq!(job.slot_id(), first_slot);
+        assert_eq!(job.attempt(), queued.attempt());
+        let completion = job
+            .return_unpermitted()
+            .complete(TxCompletionCode::new(0x251));
+        drive_completion_to_parking(&mut machine, &mut dispatcher, &mut owner, completion, 20);
+        assert_eq!(
+            machine.step(&mut owner, MonotonicMillis::new(20)),
+            NodeTxDataStep::AvailableParked(first_slot)
+        );
+        assert_eq!(
+            parked_buffer_pointer(&machine, first_slot),
+            Some(first_pointer)
+        );
+        assert_eq!(machine.parked_counts().available(), 2);
+    }
+
+    #[test]
+    fn preparation_rejection_restores_same_slot_without_consuming_entropy() {
+        let mut owner = node::<1>(23, "rejection-owner");
+        let unknown = node::<0>(24, "unknown-receiver");
+        let buffer = Box::leak(Box::new(TxPacketBuffer::new()));
+        let (mut machine, mut dispatcher) = new_machine::<1>(&owner);
+        let (slot, pointer) = park_seed(&mut machine, &mut dispatcher, &mut owner, buffer, 0);
+        let mut rng = CounterRng::default();
+
+        assert_eq!(
+            machine.try_prepare_and_submit_data(
+                &mut owner,
+                PrepareDataRequest {
+                    destination: unknown.destination_hash(),
+                    plaintext: b"unknown destination",
+                    rns_now: MonotonicSeconds::new(1),
+                    owner_now: MonotonicMillis::new(10),
+                    deadline: TxLeaseDeadline::new(MonotonicMillis::new(1_000)),
+                    enabled_interfaces: interfaces(&[1]),
+                },
+                &mut rng,
+            ),
+            NodeTxPrepareResult::Rejected {
+                slot,
+                reason: SubmitError::UnknownDestination,
+            }
+        );
+        assert_eq!(rng.0, 0);
+        assert_eq!(machine.phase(), NodeTxDataPhase::Idle);
+        assert_eq!(machine.parked_counts().available(), 1);
+        assert_eq!(parked_buffer_pointer(&machine, slot), Some(pointer));
+        assert!(dispatcher.jobs.try_receive().is_none());
+    }
+
+    #[test]
+    fn queue_preflight_preserves_available_owner_node_state_and_entropy() {
+        let mut owner = node::<1>(25, "pressure-owner");
+        let receiver = node::<0>(26, "pressure-receiver");
+        register_peer(&mut owner, 26, "pressure-receiver");
+        let buffer = Box::leak(Box::new(TxPacketBuffer::new()));
+        let (mut machine, mut dispatcher) = new_machine::<1>(&owner);
+        let (slot, pointer) = park_seed(&mut machine, &mut dispatcher, &mut owner, buffer, 0);
+
+        let mut blocker_owner = node::<1>(27, "preflight-blocker");
+        let blocker_receiver = node::<0>(28, "preflight-blocker-receiver");
+        register_peer(&mut blocker_owner, 28, "preflight-blocker-receiver");
+        let blocker_buffer = Box::leak(Box::new(TxPacketBuffer::new()));
+        blocker_owner
+            .register_packet_buffer(blocker_buffer)
+            .unwrap();
+        let blocker = prepare(
+            &mut blocker_owner,
+            blocker_buffer,
+            blocker_receiver.destination_hash(),
+            interfaces(&[2]),
+            1_000,
+            &mut CounterRng::default(),
+        );
+        must_fit(
+            machine.handoff.jobs.try_send(blocker),
+            "blocker must fill the sole job slot",
+        );
+        let mut rng = CounterRng::default();
+        let capacities_before = owner.capacities();
+
+        assert_eq!(
+            machine.try_prepare_and_submit_data(
+                &mut owner,
+                PrepareDataRequest {
+                    destination: receiver.destination_hash(),
+                    plaintext: b"must remain untouched",
+                    rns_now: MonotonicSeconds::new(1),
+                    owner_now: MonotonicMillis::new(10),
+                    deadline: TxLeaseDeadline::new(MonotonicMillis::new(1_000)),
+                    enabled_interfaces: interfaces(&[1]),
+                },
+                &mut rng,
+            ),
+            NodeTxPrepareResult::QueueBackpressured
+        );
+        assert_eq!(rng.0, 0);
+        assert_eq!(owner.capacities(), capacities_before);
+        assert_eq!(machine.phase(), NodeTxDataPhase::Idle);
+        assert_eq!(parked_buffer_pointer(&machine, slot), Some(pointer));
+
+        let blocker = dispatcher
+            .jobs
+            .try_receive()
+            .expect("blocker must remain queued");
+        let available = match blocker_owner.rollback_queued(blocker, MonotonicMillis::new(20)) {
+            Ok(TxCompletionDisposition::Available(buffer)) => buffer,
+            Ok(_) => panic!("preflight blocker did not roll back available"),
+            Err(failure) => panic!("preflight blocker rollback failed: {:?}", failure.reason()),
+        };
+        assert_eq!(available.slot_id().map(PacketSlotId::get), Some(0));
+    }
+
+    #[test]
+    fn queued_owner_return_takes_priority_over_fresh_preparation() {
+        let mut owner = node::<2>(29, "return-priority-owner");
+        let receiver = node::<0>(30, "return-priority-receiver");
+        register_peer(&mut owner, 30, "return-priority-receiver");
+        let first = Box::leak(Box::new(TxPacketBuffer::new()));
+        let second = Box::leak(Box::new(TxPacketBuffer::new()));
+        let (mut machine, mut dispatcher) = new_machine::<2>(&owner);
+        let (first_slot, _first_pointer) =
+            park_seed(&mut machine, &mut dispatcher, &mut owner, first, 1);
+        park_seed(&mut machine, &mut dispatcher, &mut owner, second, 0);
+
+        assert!(matches!(
+            machine.try_prepare_and_submit_data(
+                &mut owner,
+                PrepareDataRequest {
+                    destination: receiver.destination_hash(),
+                    plaintext: b"first job",
+                    rns_now: MonotonicSeconds::new(1),
+                    owner_now: MonotonicMillis::new(10),
+                    deadline: TxLeaseDeadline::new(MonotonicMillis::new(1_000)),
+                    enabled_interfaces: interfaces(&[1]),
+                },
+                &mut CounterRng::default(),
+            ),
+            NodeTxPrepareResult::Queued(_)
+        ));
+        let job = dispatcher.jobs.try_receive().expect("first job must queue");
+        must_fit(
+            dispatcher.returns.try_send(TxOwnerReturn::Completion(
+                job.return_unpermitted()
+                    .complete(TxCompletionCode::new(0x252)),
+            )),
+            "completion must queue before fresh preparation",
+        );
+        let mut rng = CounterRng::default();
+
+        assert_eq!(
+            machine.try_prepare_and_submit_data(
+                &mut owner,
+                PrepareDataRequest {
+                    destination: receiver.destination_hash(),
+                    plaintext: b"must wait",
+                    rns_now: MonotonicSeconds::new(2),
+                    owner_now: MonotonicMillis::new(20),
+                    deadline: TxLeaseDeadline::new(MonotonicMillis::new(1_000)),
+                    enabled_interfaces: interfaces(&[1]),
+                },
+                &mut rng,
+            ),
+            NodeTxPrepareResult::ProgressRequired(NodeTxDataPhase::Returned)
+        );
+        assert_eq!(rng.0, 0);
+        assert_eq!(machine.phase(), NodeTxDataPhase::Returned);
+        assert_eq!(dispatcher.returns.len(), 0);
+        assert_eq!(
+            machine.step(&mut owner, MonotonicMillis::new(20)),
+            NodeTxDataStep::Advanced
+        );
+        assert_eq!(
+            machine.step(&mut owner, MonotonicMillis::new(20)),
+            NodeTxDataStep::AvailableParked(first_slot)
+        );
+        assert_eq!(machine.parked_counts().available(), 2);
+    }
+
+    #[test]
+    fn retained_fresh_job_rolls_back_with_step_clock_before_deadline() {
+        let mut owner = node::<1>(31, "rollback-owner");
+        let receiver = node::<0>(32, "rollback-receiver");
+        register_peer(&mut owner, 32, "rollback-receiver");
+        let buffer = Box::leak(Box::new(TxPacketBuffer::new()));
+        let (mut machine, mut dispatcher) = new_machine::<1>(&owner);
+        let (slot, pointer) = park_seed(&mut machine, &mut dispatcher, &mut owner, buffer, 0);
+        let job = prepare(
+            &mut owner,
+            take_available(&mut machine, slot),
+            receiver.destination_hash(),
+            interfaces(&[1]),
+            100,
+            &mut CounterRng::default(),
+        );
+        let metadata = NodeTxQueuedHop::from_job(&job);
+        machine.state = NodeTxDataState::FreshRollback(job);
+
+        assert_eq!(machine.phase(), NodeTxDataPhase::FreshRollbackPending);
+        assert_eq!(
+            block_on(machine.wait_for_progress()),
+            NodeTxDataWait::NotWaiting
+        );
+        assert_eq!(
+            machine.step(&mut owner, MonotonicMillis::new(99)),
+            NodeTxDataStep::FreshRollbackHandled(metadata)
+        );
+        assert_eq!(machine.phase(), NodeTxDataPhase::Parking);
+        assert_eq!(
+            machine.step(&mut owner, MonotonicMillis::new(99)),
+            NodeTxDataStep::AvailableParked(slot)
+        );
+        assert_eq!(parked_buffer_pointer(&machine, slot), Some(pointer));
+    }
+
+    #[test]
+    fn retained_fresh_job_at_deadline_requires_recovery_acknowledgement() {
+        let mut owner = node::<1>(33, "rollback-deadline-owner");
+        let receiver = node::<0>(34, "rollback-deadline-receiver");
+        register_peer(&mut owner, 34, "rollback-deadline-receiver");
+        let buffer = Box::leak(Box::new(TxPacketBuffer::new()));
+        let (mut machine, mut dispatcher) = new_machine::<1>(&owner);
+        let (slot, pointer) = park_seed(&mut machine, &mut dispatcher, &mut owner, buffer, 0);
+        let job = prepare(
+            &mut owner,
+            take_available(&mut machine, slot),
+            receiver.destination_hash(),
+            interfaces(&[1]),
+            100,
+            &mut CounterRng::default(),
+        );
+        let metadata = NodeTxQueuedHop::from_job(&job);
+        machine.state = NodeTxDataState::FreshRollback(job);
+
+        assert_eq!(
+            machine.step(&mut owner, MonotonicMillis::new(100)),
+            NodeTxDataStep::FreshRollbackHandled(metadata)
+        );
+        let record = match machine.step(&mut owner, MonotonicMillis::new(100)) {
+            NodeTxDataStep::RecoveredParked(record) => record,
+            other => panic!("deadline rollback was not parked recovered: {other:?}"),
+        };
+        assert_eq!(record.slot_id(), slot);
+        assert_eq!(record.reason(), TxRecoveryReason::DeadlineExpired);
+        assert!(!record.may_have_transmitted());
+        assert_eq!(parked_buffer_pointer(&machine, slot), Some(pointer));
+        assert_eq!(machine.parked_kind(slot), Some(NodeTxParkedKind::Recovered));
+        machine.acknowledge_recovered(record).unwrap();
+        assert_eq!(machine.parked_kind(slot), Some(NodeTxParkedKind::Available));
+    }
+
+    #[test]
     fn foreign_seed_disables_and_retains_the_exact_buffer() {
         let mut owner = node::<1>(2, "machine-owner");
         let mut foreign_owner = node::<1>(3, "foreign-owner");
@@ -1269,6 +1855,23 @@ mod tests {
             NodeTxDataStep::Advanced
         );
         assert_eq!(machine.phase(), NodeTxDataPhase::NextPending);
+        let mut blocked_rng = CounterRng::default();
+        assert_eq!(
+            machine.try_prepare_and_submit_data(
+                &mut owner,
+                PrepareDataRequest {
+                    destination: receiver.destination_hash(),
+                    plaintext: b"next must run first",
+                    rns_now: MonotonicSeconds::new(1),
+                    owner_now: MonotonicMillis::new(21),
+                    deadline: TxLeaseDeadline::new(MonotonicMillis::new(1_000)),
+                    enabled_interfaces: interfaces(&[1]),
+                },
+                &mut blocked_rng,
+            ),
+            NodeTxPrepareResult::ProgressRequired(NodeTxDataPhase::NextPending)
+        );
+        assert_eq!(blocked_rng.0, 0);
         let metadata = match machine.step(&mut owner, MonotonicMillis::new(21)) {
             NodeTxDataStep::NextBackpressured(metadata) => metadata,
             other => panic!("Next was not retained under pressure: {other:?}"),
@@ -1329,6 +1932,59 @@ mod tests {
             NodeTxDataStep::AvailableParked(slot)
         );
         assert_eq!(parked_buffer_pointer(&machine, slot), Some(pointer));
+    }
+
+    #[test]
+    fn rollback_rejection_disables_while_retaining_the_exact_foreign_job() {
+        let mut owner = node::<1>(35, "rollback-failure-owner");
+        let seed = Box::leak(Box::new(TxPacketBuffer::new()));
+        let (mut machine, mut dispatcher) = new_machine::<1>(&owner);
+        park_seed(&mut machine, &mut dispatcher, &mut owner, seed, 0);
+
+        let mut foreign_owner = node::<1>(36, "rollback-foreign-owner");
+        let receiver = node::<0>(37, "rollback-foreign-receiver");
+        register_peer(&mut foreign_owner, 37, "rollback-foreign-receiver");
+        let foreign_buffer = Box::leak(Box::new(TxPacketBuffer::new()));
+        let pointer = ptr::from_ref(&*foreign_buffer);
+        foreign_owner
+            .register_packet_buffer(foreign_buffer)
+            .unwrap();
+        let foreign_job = prepare(
+            &mut foreign_owner,
+            foreign_buffer,
+            receiver.destination_hash(),
+            interfaces(&[1]),
+            1_000,
+            &mut CounterRng::default(),
+        );
+        machine.state = NodeTxDataState::FreshRollback(foreign_job);
+
+        assert_eq!(
+            machine.step(&mut owner, MonotonicMillis::new(20)),
+            NodeTxDataStep::Disabled(NodeTxDataFault::Rollback(RollbackErrorKind::StaleOrUnknown))
+        );
+        assert_eq!(
+            machine.fault_residue_kind(),
+            Some(NodeTxDataFaultResidueKind::RollbackFailure)
+        );
+        let state = mem::replace(&mut machine.state, NodeTxDataState::Poisoned);
+        let NodeTxDataState::Disabled {
+            retained: DisabledOwner::RollbackFailure(failure),
+            ..
+        } = state
+        else {
+            panic!("rollback failure did not retain its exact job")
+        };
+        let available =
+            match foreign_owner.rollback_queued(failure.into_job(), MonotonicMillis::new(20)) {
+                Ok(TxCompletionDisposition::Available(buffer)) => buffer,
+                Ok(_) => panic!("foreign job did not roll back available"),
+                Err(failure) => panic!(
+                    "retained foreign job was not recoverable: {:?}",
+                    failure.reason()
+                ),
+            };
+        assert_eq!(ptr::from_ref(&*available), pointer);
     }
 
     #[test]

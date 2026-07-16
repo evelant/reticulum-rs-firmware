@@ -11,7 +11,9 @@
 //! parks the complete registered buffer pool by stable slot, reconciles owning
 //! completions through node-core, withholds recovered buffers until exact
 //! generation-scoped acknowledgement, and retains every serialized `Next` job
-//! unchanged across job-channel pressure.
+//! unchanged across job-channel pressure. It synchronously prepares fresh DATA
+//! from the lowest available parked owner and preserves exact ownership across
+//! rejection, queue pressure, and clocked rollback.
 //!
 //! [`TxPermitServer`] owns the node side of the scalar permit exchange. It
 //! invokes the caller's synchronous authorization policy at most once per
@@ -26,8 +28,8 @@ mod node_data;
 
 pub use node_data::{
     NodeTxDataFault, NodeTxDataFaultResidueKind, NodeTxDataMachine, NodeTxDataPhase,
-    NodeTxDataStep, NodeTxDataWait, NodeTxParkedCounts, NodeTxParkedKind, NodeTxQueuedHop,
-    NodeTxRecoveryAckError,
+    NodeTxDataStep, NodeTxDataWait, NodeTxParkedCounts, NodeTxParkedKind, NodeTxPrepareResult,
+    NodeTxQueuedHop, NodeTxRecoveryAckError,
 };
 
 use core::{future::poll_fn, mem, task::Poll};

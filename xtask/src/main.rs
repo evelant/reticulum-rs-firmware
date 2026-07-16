@@ -344,8 +344,8 @@ fn graph_policy() -> ExitCode {
              source/revision; esp-rtos resolves only to the reviewed local patch and its \
              checked vendor inventory reconstructs the pristine registry source; the device \
              API and node core remain mutually isolated and free of direct platform dependencies; \
-             the TX handoff and dispatcher use only their reviewed node-core, handoff and Embassy \
-             Sync 0.8 dependency edges"
+             the TX handoff and dispatcher use only their reviewed node-core, handoff, Embassy \
+             Sync 0.8 and rand_core 0.6 dependency edges"
         );
         ExitCode::SUCCESS
     }
@@ -631,9 +631,9 @@ fn validate_tx_dispatch_dependency_boundary(
         .iter()
         .filter(|dependency| dependency["kind"].is_null())
         .collect::<Vec<_>>();
-    if normal.len() != 3 {
+    if normal.len() != 4 {
         return Err(format!(
-            "reticulum-tx-dispatch must have exactly three normal dependencies, found {}",
+            "reticulum-tx-dispatch must have exactly four normal dependencies, found {}",
             normal.len()
         ));
     }
@@ -689,13 +689,35 @@ fn validate_tx_dispatch_dependency_boundary(
         );
     }
 
+    let rand_core = normal
+        .iter()
+        .filter(|dependency| dependency["name"].as_str() == Some("rand_core"))
+        .collect::<Vec<_>>();
+    if rand_core.len() != 1
+        || rand_core[0]["req"].as_str() != Some("=0.6.4")
+        || rand_core[0]["source"].as_str()
+            != Some("registry+https://github.com/rust-lang/crates.io-index")
+        || !rand_core[0]["path"].is_null()
+        || rand_core[0]["optional"].as_bool() != Some(false)
+        || !rand_core[0]["rename"].is_null()
+        || !rand_core[0]["target"].is_null()
+        || rand_core[0]["uses_default_features"].as_bool() != Some(false)
+        || rand_core[0]["features"]
+            .as_array()
+            .is_none_or(|features| !features.is_empty())
+    {
+        return Err(
+            "rand_core must be the unconditional feature-free registry =0.6.4 normal dependency"
+                .to_owned(),
+        );
+    }
+
     let development = dependencies
         .iter()
         .filter(|dependency| dependency["kind"].as_str() == Some("dev"))
         .collect::<Vec<_>>();
     let expected_dev = [
         ("embassy-futures", "=0.1.2", false),
-        ("rand_core", "=0.6.4", false),
         ("static_cell", "=2.1.1", true),
     ];
     if development.len() != expected_dev.len() {
@@ -2524,8 +2546,13 @@ mod tests {
             validate_tx_dispatch_dependency_boundary(&extra_normal.to_string(), &root).is_err()
         );
 
+        let mut wrong_rand = portable_layers_metadata_fixture(&root);
+        wrong_rand["packages"][3]["dependencies"][3]["req"] =
+            serde_json::Value::String("=0.6.3".to_owned());
+        assert!(validate_tx_dispatch_dependency_boundary(&wrong_rand.to_string(), &root).is_err());
+
         let mut wrong_dev = portable_layers_metadata_fixture(&root);
-        wrong_dev["packages"][3]["dependencies"][3]["req"] =
+        wrong_dev["packages"][3]["dependencies"][4]["req"] =
             serde_json::Value::String("=0.1.1".to_owned());
         assert!(validate_tx_dispatch_dependency_boundary(&wrong_dev.to_string(), &root).is_err());
 
@@ -2701,8 +2728,8 @@ mod tests {
                     None,
                 ),
                 handoff_dependency_fixture("embassy-sync", "=0.8.0", None),
+                handoff_dependency_fixture("rand_core", "=0.6.4", None),
                 handoff_dependency_fixture("embassy-futures", "=0.1.2", Some("dev")),
-                handoff_dependency_fixture("rand_core", "=0.6.4", Some("dev")),
                 static_cell,
             ],
         })

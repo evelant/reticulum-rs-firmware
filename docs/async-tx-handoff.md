@@ -3,8 +3,8 @@
 **Status:** portable route/permit/completion/recovery and owning Embassy
 handoff storage implemented and target-checked; firmware-excluded RF-inert
 persistent packet-interface state machine, node-side permit server, and fixed
-per-slot DATA-owner machine implemented; no permanent executor supervisor,
-firmware TX graph, or radio driver
+per-slot DATA-owner machine with synchronous preparation implemented; no
+permanent executor supervisor, firmware TX graph, or radio driver
 **RF status:** compile-disabled until antenna/load and regional authorization
 
 ## Decision
@@ -27,7 +27,8 @@ portable RX/framing edge supplies no TX capability.
 Within that crate, `NodeTxDataMachine` consumes the sole node-side job sender
 and owner-return receiver. It validates the complete registered buffer pool at
 boot, parks owners by stable slot, reconciles completions through node-core,
-and retains serialized continuation jobs without exposing raw owners.
+retains serialized continuation jobs, and synchronously prepares fresh DATA
+from parked owners without exposing raw owners.
 
 ## Ownership topology
 
@@ -36,7 +37,7 @@ unique reference into the available/completion channel before tasks start:
 
 ```text
 available/completion channel -> NodeTxDataMachine parked-owner table
-    -> future synchronous node-local reservation and RNS preparation
+    -> synchronous node-local reservation and RNS preparation
     -> jobs channel
     -> one persistent packet-interface dispatcher
     -> available/completion channel
@@ -57,6 +58,15 @@ the endpoints remain encapsulated. An unexpected full result always returns
 the exact non-`Copy` value in `ChannelFull<T>`, never a drop or duplication.
 The node DATA machine specifically retains and retries a pressured `Next`
 continuation because an earlier hop may already have been authorized.
+Fresh preparation first stores any already queued owner return, then preflights
+job capacity before selecting the lowest available slot. A preparation
+rejection ordinarily validates and reparks the exact buffer; a fail-closed
+route-cancellation fault instead parks the returned owning quarantine. If
+authoritative enqueue unexpectedly rejects a newly prepared, definitely-unsent job, the machine
+retains it and calls node-core rollback on the next synchronous step with a
+fresh clock sample; it never retries that fresh job or reuses the stale request
+timestamp. Exact-deadline rollback therefore enters ordinary recovered-owner
+acknowledgement instead of silently making the buffer available.
 
 `TxHandoff::split(&'static mut self)` consumes the unique reference normally
 obtained from `ConstStaticCell` and creates one `NodeHandoff` plus one
@@ -155,8 +165,10 @@ an unexpected cancellation failure enters fail-closed recovery.
 
 ## Transactional preparation
 
-The node actor first removes one free unique buffer from the available channel,
-then calls a portable API equivalent to:
+`NodeTxDataMachine::try_prepare_and_submit_data` first gives a retained
+transition or already queued owner return priority, then preflights job-channel
+capacity. It selects the lowest validated `Available` owner from its internal
+parked table and calls a portable API equivalent to:
 
 ```text
 prepare_data_into_slot(buffer,
@@ -179,15 +191,18 @@ The transaction must:
    and generations on success; and
 7. enqueue the unique routed reference as a job.
 
-Pool exhaustion is rejected before entropy or RNS mutation. If
-`NodeHandoff::jobs.try_send` reports full, the caller still owns the `TxJob`
-returned by `ChannelFull::into_inner()`. For a freshly prepared job before any
-route was authorized, `rollback_queued(job, now)` cancels the exact receipt
-before its deadline; at or after the deadline it enters and finalizes
-exact-owner recovery, returning `Recovered`. A `TxCompletionDisposition::Next`
-job after prior authorization must instead remain in persistent node state and
-be retried; rollback deliberately rejects it. Neither path may use a cancellable
-`send(job).await` that can lose the owner future.
+Pool exhaustion is rejected before entropy or RNS mutation. An already full job
+channel is also rejected before a buffer is removed, so it consumes neither
+entropy nor node state. If the authoritative `try_send` nevertheless reports
+full, the machine stores the returned exact `TxJob` as `FreshRollbackPending`.
+Its next `step(owner, fresh_now)` invokes `rollback_queued` using that fresh
+clock sample, never the preparation request's stale `owner_now`. Before the
+deadline this cancels the exact receipt; at or after the deadline it enters and
+finalizes exact-owner recovery, returning `Recovered`. A
+`TxCompletionDisposition::Next` job after prior authorization must instead
+remain in persistent node state and be retried; rollback deliberately rejects
+it. Neither path may use a cancellable `send(job).await` that can lose the owner
+future.
 
 ## Authorization boundary
 
@@ -314,9 +329,10 @@ Implemented and host/target-testable without RF:
   short waits, permit-grace quarantine behavior, and a node-side permit server
   that authorizes once and retains a pressured reply;
 - `NodeTxDataMachine` validated boot seeding into a fixed per-slot owner table,
-  completion reconciliation, exact recovered-record acknowledgement,
-  completion-failure retention, and unchanged retry of pressured serialized
-  `Next` jobs;
+  lowest-slot synchronous DATA preparation, return/continuation priority,
+  queue preflight, exact preparation-rejection restoration, clocked fresh-job
+  rollback, completion reconciliation, exact recovered-record acknowledgement,
+  failure retention, and unchanged retry of pressured serialized `Next` jobs;
 - stable-address/no-copy, pressure, cancelled-receive, crossed-reply,
   stale-token, delayed-reply, terminal-race, cumulative-authorization, and
   late-recovery tests;
@@ -328,12 +344,11 @@ Implemented and host/target-testable without RF:
 - exact handoff/dispatcher dependency contracts plus dependency/feature guards
   that keep Tracker TX unavailable.
 
-The next product slice is the synchronous preparation/submission operation that
-consumes an internally parked available owner, followed by a permanent executor
-supervisor and clock adapter around all three machines. `maintain_tx()`, exact
-recovery/terminal projection, and durable intent state also still need
-permanent node-owner orchestration. The handoff and dispatcher remain outside
-every firmware graph, and no driver or radio path consumes either crate.
+The next product slice is a permanent executor supervisor and monotonic clock
+adapter around all three machines. `maintain_tx()`, exact recovery/terminal
+projection, and durable intent state also still need permanent node-owner
+orchestration. The handoff and dispatcher remain outside every firmware graph,
+and no driver or radio path consumes either crate.
 
 The graph policy checks every current Tracker profile and the Cargo
 `--all-features` closure for both `reticulum-node-core` and

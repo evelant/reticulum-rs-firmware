@@ -2,8 +2,8 @@
 
 **Status:** portable route/permit/completion/recovery, owning handoff storage,
 and firmware-excluded RF-inert persistent dispatcher, permit server, and node
-DATA-owner machine implemented; no executor supervisor, firmware RF TX linkage,
-or radio driver
+DATA-owner machine with synchronous parked-owner preparation implemented; no
+executor supervisor, firmware RF TX linkage, or radio driver
 **Rete pin:** `f6f5fb0637d00691e09fa0105be4df902405fee4`
 
 ## Purpose and boundary
@@ -53,8 +53,13 @@ most once and only for a validated live candidate, and retains a reply under
 pressure. `NodeTxDataMachine` consumes the sole node job/return roles, validates
 exactly the registered fixed pool during boot, and parks available, recovered,
 or quarantined owners by stable slot. It processes completions through
-node-core and retains every `Next` continuation unchanged until the job channel
-accepts it.
+node-core, retains every `Next` continuation unchanged until the job channel
+accepts it, and synchronously prepares fresh DATA from the lowest available
+parked slot. Queued returns and retained transitions take priority. Queue
+preflight leaves entropy and node state untouched; an ordinary preparation
+rejection reparks the validated exact owner, while a fail-closed rejection
+parks its owning quarantine; an unexpected authoritative enqueue failure
+retains the definitely-unsent job for rollback with the next fresh clock sample.
 Terminal, expired, recovery-required, or invalid requests bypass policy.
 Cancellation while a short wait remains pending leaves the item in its Embassy
 channel. The DATA machine stores a ready return in persistent state before its
@@ -152,11 +157,15 @@ after the authorized byte-access boundary.
 
 ## Queue rejection and exact rollback
 
-When a fresh, never-authorized job is submitted and `reticulum-tx-handoff` returns
-`ChannelFull<RoutedTxJob<'static>>`, `rollback_queued(job, now)` synchronously
-proves that the recovered routed job was never accepted. It validates the node
-incarnation, stable slot, dispatch generation, receipt, attempt handle, target,
-hop, and deadline before changing any state. It returns the same
+`NodeTxDataMachine` preflights job capacity before removing a parked owner, so
+ordinary queue pressure consumes no buffer, entropy, or node state. If the
+authoritative handoff still returns `ChannelFull<RoutedTxJob<'static>>`, the
+machine retains that exact job as `FreshRollbackPending`. Its next
+`step(owner, fresh_now)` calls `rollback_queued(job, fresh_now)`; it never reuses
+the preparation request's older `owner_now`. Node-core synchronously proves that
+the recovered routed job was never accepted. It validates the node incarnation,
+stable slot, dispatch generation, receipt, attempt handle, target, hop, and
+deadline before changing any state and returns the same
 `TxCompletionDisposition` vocabulary as ordinary completion handling.
 
 For a still-active attempt, rollback cancels the exact full-hash RNS receipt
@@ -354,11 +363,14 @@ late-grant recovery, cancellation of short waits, terminal suppression, absent
 and mismatched reply fail-closed behavior, one-shot policy invocation under
 reply pressure, exact owner restoration under return pressure, inclusive grace
 threshold observation semantics, authorization/recovery orderings, idle
-orphan-reply wakeup, and production-mutex static layout. Ten node DATA-machine
-tests cover validated fixed-pool seeding, exact buffer identity, final and
-recovered parking, generation-scoped recovery acknowledgement, quarantine,
-exact owner binding, completion-failure retention, cancelled return waits,
-`Next` pressure/readiness cancellation, and compact production-mutex layout.
+orphan-reply wakeup, and production-mutex static layout. Seventeen node
+DATA-machine tests cover validated fixed-pool seeding, exact buffer identity,
+lowest-slot synchronous preparation, rejection restoration without entropy,
+return and `Next` priority, queue preflight, before/deadline rollback, rollback
+failure retention, final and recovered parking, generation-scoped recovery
+acknowledgement, quarantine, exact owner binding, completion-failure retention,
+cancelled return waits, `Next` pressure/readiness cancellation, and compact
+production-mutex layout.
 None of these crates is linked into firmware, and there is still no permanent
 executor supervisor, clock adapter, driver, or radio path.
 
@@ -371,21 +383,18 @@ isolate permit requests/replies, and every send is a non-awaiting `try_send`
 that returns the unchanged value on pressure. The remaining orchestration work
 is:
 
-1. Add the synchronous preparation/submission boundary that consumes one
-   internally parked `Available` owner without exposing it across an await and
-   gives a retained `Next` priority over fresh work.
-2. Build the permanent, non-cancelled executor supervisor and monotonic clock
+1. Build the permanent, non-cancelled executor supervisor and monotonic clock
    adapter around `NoRfTxDispatcher`, `TxPermitServer`, and
    `NodeTxDataMachine`.
-3. Drive `maintain_tx()` and recovery observation from that node owner while
+2. Drive `maintain_tx()` and recovery observation from that node owner while
    the dispatcher cooperatively returns an exact late owner.
-4. Persist accepted intent, active attempts, and terminal projection policy
+3. Persist accepted intent, active attempts, and terminal projection policy
    before mapping tombstones into device API v1; define reboot/durable recovery
    without attempting to persist volatile leases or references.
-5. Convert allocation-backed ordinary RNS actions into caller-reservable packet
+4. Convert allocation-backed ordinary RNS actions into caller-reservable packet
    ownership; the DATA path alone does not cover proofs, announces, forwarding,
    Links or Resources.
-6. Keep every firmware dependency graph TX-free and the radio-bearing lab
+5. Keep every firmware dependency graph TX-free and the radio-bearing lab
    image RX-only. Only after these boundaries and explicit antenna/load and
    regional approval may a guarded driver/radio implementation or RF HIL use
    this path.

@@ -232,8 +232,13 @@ Together these boundaries currently enforce:
   authorized hop, cumulative receipt retention after any authorization, and
   terminal acknowledgement blocked while any typestate still owns its buffer;
 - read-only exact-owner validation of reusable buffers, fixed per-slot boot
-  parking, completion reconciliation, and unchanged retry of every serialized
-  `Next` job under job-channel pressure;
+  parking, lowest-slot synchronous preparation, queued-return and retained-
+  `Next` priority, no-mutation queue preflight, ordinary rejection restoration
+  or fail-closed quarantine, completion reconciliation, and unchanged retry of
+  every serialized `Next` job under job-channel pressure;
+- exact retention of an unexpectedly rejected fresh handoff followed by
+  rollback with a fresh step clock, including deadline recovery and rollback-
+  failure retention;
 - recovered-owner parking until exact generation-scoped record
   acknowledgement and fail-closed retention of completion validation faults;
 - allocation-free adapter/transport counters and capacity snapshots;
@@ -251,10 +256,13 @@ focused host suites plus generic RISC-V and ESP32-S3 checks. The dispatcher is
 an RF-inert persistent packet-interface state machine with cancellation-safe
 short waits; its companion permit server owns the node-side scalar exchange,
 and its node DATA machine owns the job/return ports plus fixed parked-owner
-table. There is still no executor-driven permanent supervisor or clock
-adapter, synchronous preparation from that table, firmware connection, driver,
-radio integration, or claim that RF occurred. All firmware graphs remain
-TX-free, and the only radio-bearing firmware artifact remains RX-only.
+table. That machine now synchronously prepares into the lowest available parked
+owner, prioritizes queued returns and retained continuations, and preserves the
+exact owner across rejection, queue pressure, and clocked rollback. There is
+still no executor-driven permanent supervisor or clock adapter, firmware
+connection, driver, radio integration, or claim that RF occurred. All firmware
+graphs remain TX-free, and the only radio-bearing firmware artifact remains
+RX-only.
 
 ## Rete production hard gates
 

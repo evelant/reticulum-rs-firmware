@@ -377,16 +377,18 @@ The firmware-excluded `reticulum-tx-dispatch` crate now supplies the RF-inert
 persistent packet-interface machine, node-side permit server, and fixed
 per-slot DATA-owner machine. It retains exact owning/control values under
 pressure, reconciles completions, withholds recovered owners until exact
-acknowledgement, retries `Next` unchanged, uses cancellation-safe short waits,
-and fails closed rather than guessing authorization when a recovery step at or
+acknowledgement, retries `Next` unchanged, synchronously prepares fresh DATA
+from the lowest available parked owner, uses cancellation-safe short waits, and
+fails closed rather than guessing authorization when a recovery step at or
 after its configured grace threshold observes no exact permit reply. The
-remaining product blockers are synchronous preparation from parked owners, the
-permanent executor supervisor/clock adapter, `maintain_tx()` and fault/recovery
-observation, firmware/driver integration, durable intent/attempt recovery,
-bounded ordinary RNS actions, and higher-level LXMF persistence.
-Until those slices and radio policy are connected, no stable host send
-operation or firmware RF TX graph uses this path. Every current firmware graph
-remains TX-free, and the only radio-bearing lab artifact remains RX-only.
+remaining product blockers are the permanent executor supervisor/clock
+adapter, `maintain_tx()` and fault/recovery observation, firmware/driver
+integration, durable intent/attempt recovery, bounded ordinary RNS actions, and
+higher-level LXMF persistence.
+Until those slices and radio policy are connected, no device-facing/device-API
+host send operation or firmware RF TX graph uses this path. Every current
+firmware graph remains TX-free, and the only radio-bearing lab artifact remains
+RX-only.
 
 ## 12. LXMF retry and receipt-attempt correlation
 

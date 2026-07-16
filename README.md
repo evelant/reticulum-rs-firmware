@@ -49,16 +49,20 @@ machine, provides the node-side permit server, and owns a node DATA machine
 that validates boot seeds into a fixed per-slot owner table. The DATA machine
 reconciles completions through node-core, parks recovered owners until exact
 generation-scoped acknowledgement, and retains/retries serialized `Next` jobs
-unchanged under pressure. Synchronous steps retain every owning value, while
-short waits store a ready return before completing or wait for job capacity
-without moving the job into a future. Its only byte consumer is an internal
-scalar inspector: it has no executor, clock, TX-capable driver/HAL, device-API,
-or pluggable byte-sink dependency and cannot transmit. Node-core's transitive
-portable RX/framing edge supplies no TX capability. A permanent
-supervisor/clock adapter, synchronous preparation from parked owners, firmware
-integration, a real driver/RF boundary, and durable reboot recovery remain
-open. Every firmware dependency graph remains TX-free, and the only
-radio-bearing firmware artifact remains RX-only.
+unchanged under pressure. It also synchronously selects the lowest available
+parked owner, prepares DATA into that exact buffer, and either queues the fresh
+job or restores/retains its exact owner on rejection or handoff failure. Known
+returns and continuations take priority, and queue preflight avoids consuming
+entropy or mutating node state under pressure. Synchronous steps retain every
+owning value, while short waits store a ready return before completing or wait
+for `Next` capacity without moving the job into a future. Its only byte consumer
+is an internal scalar inspector: it has no executor, clock, TX-capable
+driver/HAL, device-API, or pluggable byte-sink dependency and cannot transmit.
+Node-core's transitive portable RX/framing edge supplies no TX capability. A
+permanent supervisor/clock adapter, firmware integration, a real driver/RF
+boundary, and durable reboot recovery remain open. Every firmware dependency
+graph remains TX-free, and the only radio-bearing firmware artifact remains
+RX-only.
 
 ## Read first
 
