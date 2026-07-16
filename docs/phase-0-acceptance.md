@@ -277,20 +277,28 @@ policy, samples the clock freshly before maintenance/DATA/permit/dispatcher,
 waits for the exact next owner deadline or permit grace, and bounds sustained
 progress to 16 passes before yielding. Its `RfInertTxPolicy` denies RF.
 
-The semantic durable model and idempotent projector are implemented and target-
-checked, and the independent physical journal now implements lifetime
-reservation, append/readback, complete integrity-validated replay, and source-
-preserving compaction. A dedicated RF-inert Tracker storage HIL image is target-
+The semantic durable model, idempotent projector, physical journal, and portable
+sole storage actor are implemented and target-checked. The actor owns the NOR
+backend, live replay index, sole projector, one optional pending mutation capped
+at 512 bytes, and a fail-closed fault latch; it completes mount/replay before
+service and can autonomously reconcile an ambiguous backend result. The
+portable authenticated device-API adapter is also implemented: default builds
+serve capabilities and principal-scoped status, while host simulation alone
+enables durable experimental acceptance; the default adapter is target-checked
+and the host-only feature is compile-forbidden there. A dedicated RF-inert
+Tracker storage HIL image is target-
 checked and its isolated clean-path/software-reset powered run passed on board
 E9:44 from source `7b47113`, with strict serial and independent raw-partition
 verification preserved at
 `artifacts/storage-hil/20260716T211318Z-e944-7b47113`. It proves A1 format,
 five appends, mutation-free retry/conflict, B2 compaction, and zero-mutation B2
-replay after software reset. Controlled power cuts, endurance/soak, at-rest
-encryption, the sole storage actor, the device-API adapter, and the permanent
-runtime that drive projection and acknowledgement remain open. Ordinary RNS
-tick/actions and RX ingress are also not yet merged under this owner. There is
-still no product firmware storage connection or product driver/radio
+replay after software reset. That image calls the journal directly and does not
+qualify the actor on hardware. Controlled power cuts, endurance/soak, at-rest
+encryption, the permanent Embassy actor task, product `esp-storage` adapter,
+boot service gating, device-API framing/session/transport linkage, and runtime
+flash/watchdog/OTA/radio coordination remain open. Ordinary RNS tick/actions
+and RX ingress are also not yet merged under a sole node owner. There is still no product
+firmware storage connection or product driver/radio
 integration, so current product-candidate graphs are TX-free. Development TX is
 nevertheless authorized on both attached antenna-equipped boards under NA915;
 the separately named TX HIL and derived RNode peer are development artifacts,

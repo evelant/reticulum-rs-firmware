@@ -108,6 +108,8 @@ Claims in READMEs were not treated as proof of embedded portability.
 | `reticulum-storage-model`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The allocation-free semantic journal model enforces canonical bounded records, principal-scoped idempotency, exact preflight/apply plans, monotonic conservative transmission uncertainty, and fail-closed complete replay; 22 integration tests plus one compile-fail doctest cover the boundary, which intentionally makes no physical-durability or flash-capacity claim |
 | `reticulum-submission-projector`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The fixed-capacity projector correlates volatile attempts with semantic records and withholds terminal/recovery acknowledgement behind exact persistence replies; 24 focused tests cover ordering, retries, proof/timeout-before-frame races, faults and conservative reboot behavior, while graph policy keeps it outside firmware |
 | `reticulum-storage-journal`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The allocation-free physical backend fixes the 1 MiB/two-bank schema-1 format, full-bank replay, commit-last exact-readback append, a 162-acceptance lifetime ceiling, and source-preserving handoff compaction; fake-NOR tests cover torn/lost append and compaction, while the separate powered HIL qualifies only the clean raw-flash path and software-reset replay |
+| `reticulum-storage-actor`, host and ESP32-S3 Xtensa | Pass | The portable sole owner mounts and fully replays before service, owns the NOR journal/live index/sole projector, publishes only after durable append or exact equivalence, autonomously reconciles one ambiguous mutation, and latches invariant faults closed; 12 focused host tests cover acceptance, projector identity, lost replies, compaction recovery and fault retention, with strict host and Xtensa clippy/checks passing |
+| `reticulum-device-api-adapter`, default/host-sim/dependency-unified host and default ESP32-S3 Xtensa | Pass | The allocation-free authenticated dispatcher exposes public capabilities and principal-scoped status by default, fails status closed during actor ambiguity/fault, and restricts advertised operations to its local build; its host-only feature copies experimental borrowed payloads into actor-owned durable acceptance and maps replay/conflict/capacity/ambiguity to stable API results. Focused tests and strict clippy pass in all three host profiles; the default target graph passes Xtensa checks and compile-forbids adapter `host-sim` |
 | `reticulum-heltec-tracker-v2-storage-hil`, ESP32-S3 Xtensa | Pass (target and powered clean-path HIL) | On E9:44, source `7b47113` passed strict continuous two-boot serial verification of A1 format, five appends, no-mutation retry/conflict, B2 compaction and `0/0` B2 replay after `CoreSw`; independent raw-dump replay confirmed generation 2, five records/slots, one revision-4 `Delivered` submission, erased A manifest and erased B tail. Controlled power cuts, endurance/soak, encryption and product-runtime integration remain open |
 | `reticulum-heltec-tracker-v2-tx-hil --features semantic-announce-hil`, ESP32-S3 to RNode 1.86 plus pinned Python RNS 1.3.8 | Pass (powered conformance HIL) | E9 emitted one deterministic signed ANNOUNCE and became radio-inert; E0 delivered exactly one 167-byte ordinary RNode packet and Python validated its first-hop signature and destination binding. This does not exercise a product identity, full Reticulum instance, live transport admission, node-core RX/router ownership or LXMF |
 | `reference/rete/examples/esp32s3`: `cargo +esp check --release` | Pass with warnings | Current bare-metal ESP32-S3/SX1262/Wi-Fi integration compiles with the installed ESP toolchain; it targets Heltec WiFi LoRa 32 V3/V4 pins, not the Tracker BSP |
@@ -232,11 +234,15 @@ and acknowledgement is blocked until the buffer returns. A layout regression
 guard keeps packet-sized storage outside node-core. Focused tests plus strict
 host Clippy, generic bare-metal, and ESP32-S3 checks cover this portable slice.
 
-The product now has an allocation-free durable-submission semantic model,
-persist-before-ack projector, and independent physical flash journal, but it
-still has no actor connecting those pieces or any authorized RF TX graph. The
-in-RAM node ledger cannot rehydrate Rete receipts
-after reboot and ordinary RNS actions are still allocation-backed. The firmware-excluded
+The portable codebase now has an allocation-free durable-submission semantic model,
+persist-before-ack projector, independent physical flash journal, and portable
+sole storage actor connecting those pieces. The actor owns one journal, the
+fully replayed live index, the sole projector, one bounded pending mutation and
+a fail-closed fault latch. It publishes only after commit or exact equivalence
+and can retry ambiguous backend results from its own retained state. It is not
+yet hosted by a permanent firmware task, and there is still no product RF TX
+graph. The in-RAM node ledger cannot rehydrate Rete receipts after reboot, and
+ordinary RNS actions are still allocation-backed. The firmware-excluded
 `reticulum-tx-dispatch` crate now drives the portable typestates and handoff as
 an RF-inert persistent state machine, with cancellation-safe short waits and a
 node-side permit server. Its node DATA-owner machine validates the complete
@@ -286,8 +292,22 @@ records to volatile
 `AttemptHandle` values, prepared-frame metadata, terminal outcomes and recovery
 observations; it unlocks exact acknowledgements only after the intended record
 is reported committed or read-back equivalent. The semantic model and projector
-do not write flash; the journal does, but no permanent actor yet translates
-projector plans into journal operations.
+do not write flash; the journal does. `reticulum-storage-actor` now translates
+acceptance and actor-owned projector requests into those operations, applies the
+live index only after durability, retains one ambiguous mutation for autonomous
+exact reconciliation, and latches invariant failures closed. Its actual
+optional pending cell is compile-time bounded to at most 512 bytes.
+
+`reticulum-device-api-adapter` now supplies allocation-free authenticated
+dispatch over that mounted actor. Its default graph serves current capabilities
+and principal-scoped submission status, returning the same `NotFound` for
+missing and foreign records. Status fails closed while actor state is pending or
+faulted; capabilities remain public. Its dispatcher-owned capability restriction
+prevents a separately unified codec feature from advertising an absent
+operation. Its explicitly host-only `host-sim` feature copies the experimental
+borrowed payload into an owned candidate and publishes an ID only after durable
+acceptance or exact replay; it is compile-forbidden on `target_os = "none"`. It
+performs no framing, session establishment, direct flash, node or radio work.
 
 The journal's isolated powered clean path passed on E9:44 from source
 `7b47113`. Strict serial verification covered A1 format, five appends,
@@ -297,14 +317,17 @@ confirmed the same five-record revision-4 `Delivered` state plus erased retired
 manifest and tail regions. The evidence is preserved at
 `artifacts/storage-hil/20260716T211318Z-e944-7b47113`. This result does not
 qualify controlled power cuts, endurance/soak, at-rest encryption, or a product
-runtime.
+runtime. Because the HIL calls the journal directly, it also does not qualify
+the actor on hardware.
 
-The next product-code slice is the radio-independent sole storage actor and
-persist-before-accept device-API adapter. It is deliberately next because the
-semantic HIL retired packet/RF uncertainty but did not make externally accepted
-submissions durable. This is
-followed by integration with ordinary RNS tick/actions and RX ingress in the
-eventual sole node owner. Current product-candidate graphs remain TX-free only
+The next product-code slice is firmware integration of the radio-independent
+storage actor and authenticated API adapter: a permanent Embassy task, the
+product `esp-storage` partition adapter, boot service gating, framing/session
+and an initial USB transport. The portable core ordering and dispatch are now
+enforceable, but no product transport or runtime serves through them yet. This
+is followed by integration with ordinary
+RNS tick/actions and RX ingress in the eventual sole node owner. Current
+product-candidate graphs remain TX-free only
 because the sole radio-owner path is not integrated. The two attached
 antenna-equipped boards are cleared for NA915 development TX/RX, so a bounded
 integration image may transmit when useful; the semantic TX HIL and derived
@@ -539,9 +562,11 @@ crates/
   micron-parser/                  # bounded safe AST/event parser
   local-clients/                  # optional conversation/Nomad application services
   device-api/                     # request/response/event schema
+  device-api-adapter/             # authenticated dispatch over storage actor
   device-api-framing/             # COBS/length framing and chunk transfer
   storage-model/                  # semantic records, index and complete replay
   submission-projector/           # persist-before-ack TX correlation
+  storage-actor/                  # sole NOR/index/projector persistence owner
   radio-interface/                # RNode-compatible split framing and CSMA
   radio-lora-phy/                 # generic lora-phy adapter
   board-api/                      # Board, Power, Display, Entropy traits
@@ -561,13 +586,15 @@ interop/
 xtask/                            # build, size, asset, flash, HIL commands
 docs/
   firmware-architecture.md
+  storage-actor.md                # portable sole journal/index/projector owner
   tx-supervisor.md                # RF-inert aggregate/run-loop boundary
   provenance.md                   # added at implementation start
 ```
 
 `node-core`, `tx-handoff`, `tx-dispatch`, `tx-supervisor`, `lxmf-wire`,
 `lxmf-router`, `lxmf-propagation`, `nomad-protocol`, `micron-parser`,
-`device-api`, `storage-model`, `submission-projector`, and `radio-interface`
+`device-api`, `device-api-adapter`, `storage-model`, `submission-projector`,
+`storage-actor`, and `radio-interface`
 should compile on at least one `*-unknown-none-*` target in CI whenever their
 feature is enabled. ESP dependencies appear only in the firmware/platform/BSP
 crates.
@@ -614,13 +641,14 @@ is explicitly RF-inert, and retained
 faults stop fresh preparation/policy while continuing exact-owner drain where
 possible.
 
-The chosen next bounded product integration is a sole storage actor around the
-implemented physical journal, plus the device API adapter that publishes
-acceptance only after commit or exact readback equivalence. The projector
-already maps volatile prepared-frame, terminal and recovery observations to
-planned semantic records and exact post-persistence acknowledgements, and the
-journal can persist those records, but no permanent component yet connects
-those boundaries or maps them to device API v1.
+`reticulum-storage-actor` now connects the implemented physical journal, live
+replay index and sole projector. It publishes acceptance and projector progress
+only after commit or exact readback equivalence, retains one bounded ambiguous
+mutation for autonomous retry, and faults closed on invariant contradictions.
+The next bounded product integration hosts it in a permanent Embassy task,
+connects the product `esp-storage` partition and boot gates, and serves it
+through the implemented authenticated device-API adapter. No framing, session
+or firmware transport currently serves through that adapter.
 Ordinary RNS tick/actions, RX ingress and submission handling must then merge
 into the eventual sole node owner. Firmware integration, driver/RF behavior,
 safe projector-slot retirement and product-runtime powered reboot recovery also
@@ -1089,8 +1117,8 @@ The first project-owned semantic slice is now implemented in
 It provides strict canonical records, principal-scoped idempotency, an explicit
 complete-replay typestate, a fixed-RAM index, and preflighted opaque mutations.
 It deliberately provides no flash-capacity estimate, reservation, compaction,
-retention, or durability claim. Those are requirements on the sole physical
-storage actor, not properties of the semantic CBOR model.
+retention, or durability claim. Those are supplied by the physical journal and
+its sole storage actor, not properties of the semantic CBOR model.
 
 The schema-1 backend is now implemented as `reticulum-storage-journal`; its
 complete format and recovery contract are specified in
@@ -1117,12 +1145,35 @@ invalid semantic replay, or inconsistent manifest/baseline fails closed. The
 SHA-256 chain is corruption detection, not keyed tamper authentication or
 encryption.
 
+`reticulum-storage-actor` is the portable sole ownership boundary over that
+journal. Construction completes physical mount and semantic replay before
+returning a live actor. The actor owns the NOR backend, last established journal
+state, live `SubmissionIndex`, sole `SubmissionProjector`, one optional pending
+mutation, and a bounded fault latch. It applies an acceptance or projector plan
+to the live index only after append commit or exact readback equivalence. After
+an ambiguous backend result, public `drive_pending()` resolves the exact actor-
+owned mutation without requiring the caller to reproduce its candidate,
+request, or projector. The actual optional pending cell is compile-time capped
+at 512 bytes; this does not include the index, projector slots or task stack.
+
+`reticulum-device-api-adapter` places the current authenticated logical API over
+that owner without direct flash access. Default target builds expose current
+capabilities and principal-scoped status, with status unavailable while the
+actor has pending ambiguity or a fault. Capability composition is explicitly
+restricted to adapter-local operations despite dependency feature unification.
+The `host-sim` feature additionally
+copies the experimental borrowed RNS DATA payload into an owned acceptance and
+publishes its ID only after actor durability; that feature is deliberately
+forbidden on bare-metal targets and is not the product LXMF send API.
+
 The physical crate uses NOR semantics through `embedded-storage`; the Tracker
 HIL supplies a checked partition-relative `esp-storage` adapter and never uses
-the sector-rewriting byte-storage path. The missing product boundary is the
-sole permanent actor that consumes projector plans, serializes journal access,
-coordinates OTA/watchdogs/other stores, and publishes device-API acceptance
-only after commit or exact equivalence. `sequential-storage` remains research/
+the sector-rewriting byte-storage path. That adapter belongs to the dedicated
+HIL and is not yet a product firmware partition service. The missing product
+boundary is one permanent Embassy task around the portable actor that connects
+the checked product adapter, gates service on mount/replay, coordinates OTA,
+watchdogs, other stores and radio timing, and publishes device-API acceptance.
+`sequential-storage` remains research/
 reference material, not an open contender for this first journal. A separate
 small blob log can be evaluated later. Use littlefs only if later requirements
 genuinely need mutable file semantics.
@@ -1142,7 +1193,11 @@ A provisional 8 MB partition plan can copy the proven shape used by rsCardputer,
 
 This is deliberately not a promise of large attachment storage. The first release should expose a message count and byte quota, garbage-collect acknowledged/expired blobs, and support encrypted export/backup over the local API.
 
-Flash writes are unavailable or hazardous during some execution/cache states on ESP chips. The storage actor must coordinate OTA, GC, radio timing, and watchdog behavior. Test power removal at every record transition and during migration, not only clean reboots.
+Flash writes are unavailable or hazardous during some execution/cache states on
+ESP chips. The portable actor serializes its own journal mutations but does not
+yet coordinate the surrounding runtime. Its permanent task must coordinate OTA,
+GC, other flash users, radio timing, and watchdog behavior. Test power removal
+at every record transition and during migration, not only clean reboots.
 
 ## Entropy, cryptography, and secret handling
 
@@ -1433,13 +1488,15 @@ Exit: enabling location adds a bounded optional capability without changing netw
 
 Do not begin by porting UI screens or by adding another direct packet fixture.
 The Tracker journal clean path and software-reset replay are now qualified on
-powered hardware. The chosen next bounded product-code slice is
-radio-independent: build the sole storage actor and device-API adapter around
-the implemented journal so
-acceptance is published only after commit or exact readback equivalence.
-Connect projector plans, commit/readback replies, replay and acknowledgements
-through that actor before giving the eventual sole node owner an external send
-source. In parallel, extend the isolated storage HIL with separately recorded
+powered hardware, and the portable sole storage actor now enforces mount-before-
+service, persist-before-visible ordering, sole projector ownership, autonomous
+ambiguous-result reconciliation and fail-closed faults. The chosen next bounded
+product-code slice remains radio-independent: host that actor in a permanent
+Embassy task, connect the product `esp-storage` partition adapter and boot gates,
+then attach the implemented authenticated adapter to a framing/session/USB path.
+Complete that service boundary before giving the eventual sole node owner an
+external send source. In parallel, extend the
+isolated storage HIL with separately recorded
 controlled power cuts and endurance/soak runs; neither lane blocks accurately
 documenting the completed clean-path result.
 
@@ -1460,9 +1517,10 @@ close production identity/time/entropy, live node/transport admission,
 forwarding, LXMF, durable submission, airtime policy, formal electrical/RF or
 regional gates.
 
-1. Build the sole storage actor/device-API persist-before-accept edge and extend
-   the completed powered clean-path HIL with controlled power-cut and
-   endurance/soak coverage.
+1. Integrate the portable sole storage actor and authenticated device-API
+   adapter into one permanent firmware task and initial framed transport, then
+   extend the completed powered clean-path HIL with actor-on-target, controlled
+   power-cut and endurance/soak coverage.
 2. Merge RX reassembly, `NodeCore::ingest()`/tick actions, submission projection
    and exact persistence acknowledgements under the sole node owner. Use the
    two authorized NA915 boards for real TX/RX whenever it shortens integration;

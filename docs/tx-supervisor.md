@@ -2,8 +2,9 @@
 
 **Status:** permanent aggregate and async run loop implemented, target-checked,
 and outside every firmware graph; portable durable projection exists beside
-it and the independent physical journal is implemented, but there is no sole
-storage actor, device API, or complete node-owner integration
+it, and the physical journal plus portable sole storage actor are implemented,
+but there is no permanent storage task, firmware device API, or complete node-
+owner integration
 **RF status:** both attached boards have antennas and are authorized for NA915
 development TX; this crate remains RF-inert because its concrete driver/radio
 owner and regional/airtime policy adapter are not implemented
@@ -116,11 +117,11 @@ and retained supervisor DATA fault preserve the original and secondary
 diagnostics without misclassifying that fail-closed owner as releasable.
 
 This is a portable semantic boundary, not powered durability. The projector
-retains an opaque write plan and the caller's live `SubmissionIndex` remains
-authoritative. `reticulum-storage-journal` can now append that canonical record,
-enforce the physical lifetime reservation, replay, and compact, but no
-implemented actor connects the plan to the journal or drives the projector and
-supervisor from one permanent task. See
+retains an opaque write plan. `reticulum-storage-actor` now owns that projector,
+the live `SubmissionIndex`, and `reticulum-storage-journal`; it can append the
+canonical record, enforce physical lifetime reservation, replay, compact, and
+apply the index only after durability. No permanent firmware task yet drives
+that actor and this supervisor together. See
 [Durable submissions](durable-submissions.md) and
 [Physical submission journal](storage-journal.md).
 
@@ -136,14 +137,16 @@ The supervisor does not yet:
   node task;
 - safely retire completed volatile projector correlations after every source
   has been drained;
-- map projected dispositions into device API v1; or
+- connect projected dispositions through the implemented device-API adapter in
+  the permanent firmware task; or
 - provide a driver, packet-interface implementation, radio reset contract, RF
   policy, or firmware dependency edge.
 
-The next product boundary is the sole permanent storage actor around the
-implemented power-fail-safe journal, followed by merging RX, RNS tick/actions,
-submission projection, and acknowledgement into the eventual sole node owner.
-Firmware TX integration remains later and separately gated.
+The next product boundary is a permanent Embassy task around the portable
+storage actor, with product flash adaptation, boot gating and device-API
+dispatch, followed by merging RX, RNS tick/actions, submission projection, and
+acknowledgement into the eventual sole node owner. Firmware TX integration
+remains later and separately gated.
 
 ## Validation
 

@@ -355,6 +355,15 @@ fn submission_lookup_is_principal_owned() {
         accepted
     );
     assert_eq!(index.get_owned(principal(2), accepted.id()), None);
+    assert_eq!(
+        index.get_owned_state(principal(1), accepted.id()),
+        Some(LifecycleState::Queued)
+    );
+    assert_eq!(index.get_owned_state(principal(2), accepted.id()), None);
+    assert_eq!(
+        index.get_owned_state(principal(1), SubmissionId::new(999)),
+        None
+    );
 }
 
 #[test]

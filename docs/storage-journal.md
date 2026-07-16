@@ -1,9 +1,10 @@
 # Physical submission journal
 
-**Status:** physical format and portable implementation complete; host fault
-injection implemented; isolated RF-inert ESP32-S3 clean-path/software-reset HIL
-passed on board E9:44; controlled power cuts, endurance/soak, at-rest
-encryption, and product-runtime integration remain open
+**Status:** physical format, portable implementation, and portable sole-owner
+adapter complete; host fault injection implemented; isolated RF-inert ESP32-S3
+clean-path/software-reset HIL passed on board E9:44; actor-on-firmware,
+controlled power cuts, endurance/soak, at-rest encryption, and product-runtime
+integration remain open
 
 ## Boundary
 
@@ -13,12 +14,17 @@ submission records. It is a `no_std`, allocation-free crate over
 records from `reticulum-storage-model`; it does not define a second semantic
 format.
 
-The crate implements format, complete mount/replay, idempotent append, and
-two-bank compaction. It is not yet the sole async storage actor. In particular,
-it does not currently consume projector write plans, serialize flash access
-with OTA or other stores, publish device-API replies, or drive node/supervisor
-acknowledgements. The dedicated Heltec HIL calls the journal directly and is a
-storage qualification image, not product firmware.
+The journal crate implements format, complete mount/replay, idempotent append,
+and two-bank compaction. The separate `reticulum-storage-actor` now consumes
+projector requests, owns the live replay index and sole projector, serializes
+one exact pending mutation, and applies results only after durable append or
+exact readback. It is a portable synchronous aggregate, not yet the permanent
+Embassy task that coordinates flash with OTA, watchdogs, other stores and radio
+timing. The separate portable authenticated adapter maps actor results to the
+logical device API, but has no framing/session/firmware transport. The dedicated
+Heltec HIL calls the journal directly and is a storage qualification image, not
+actor/adapter qualification or product firmware. See
+[Portable sole storage actor](storage-actor.md).
 
 The journal protects against torn writes and accidental corruption with
 domain-separated SHA-256 chains and commit-last markers. These hashes are not
@@ -198,10 +204,10 @@ five committed records in five consumed slots, one accepted submission at
 revision 4 `Delivered`, no pending compaction, an erased retired-A manifest,
 and an erased unused B tail.
 
-This result qualifies only the isolated clean path and software-reset replay.
-It does not qualify controlled power-cut recovery, erase endurance or soak,
-at-rest protection, the sole async storage actor, the device API, or the product
-runtime. Follow the guarded runbook in
+This result qualifies only the isolated journal clean path and software-reset
+replay. It does not qualify the portable actor on hardware, controlled power-
+cut recovery, erase endurance or soak, at-rest protection, the device API, or
+the product runtime. Follow the guarded runbook in
 [`partitions/README.md`](../partitions/README.md) for later runs and preserve
 each image, readback, hash set, and continuous serial log independently.
 
@@ -220,8 +226,10 @@ messages, propagation payloads, identities, configuration, attachments, OTA,
 and telemetry need separately bounded stores and quotas. Before product use,
 the project still needs:
 
-- one permanent storage actor that owns this journal and projector ordering;
-- device-API persist-before-accept/status integration and safe projector-slot
+- one permanent Embassy task around the implemented portable actor, with the
+  checked product `esp-storage` partition adapter and boot service gating;
+- framing/session/firmware integration for the implemented authenticated
+  device-API persist-before-accept/status adapter, plus safe projector-slot
   retirement;
 - coordination with watchdogs, OTA, other flash users, and radio timing;
 - on-target stack, boot-scan, latency, erase-endurance, and power-cut evidence;

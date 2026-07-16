@@ -1,9 +1,11 @@
 # Device API v1 logical protocol
 
-Status: initial host-simulation schema plus separate portable durable model and
-physical journal. This document freezes the operation and field numbers
-exercised by `reticulum-device-api`; no sole storage adapter connects that codec
-to the durable model/journal, firmware transport, or radio transmission.
+Status: logical codec and portable authenticated dispatch implemented over the
+mounted sole storage actor. This document freezes the operation and field
+numbers exercised by `reticulum-device-api`; `reticulum-device-api-adapter`
+implements capabilities and principal-scoped status in its default build plus
+durable experimental preparation under host simulation. No framing, session,
+firmware transport, node dispatch or radio transmission is connected here.
 
 ## Boundary
 
@@ -19,6 +21,18 @@ codec, and a small common authorization policy. It does not contain:
 Transport framing and authenticated session establishment are later layers.
 Those layers decode a message and supply a trusted `DispatchContext` separately.
 No principal, permission, or session assertion is accepted from CBOR input.
+
+`reticulum-device-api-adapter` is the separate allocation-free `no_std`
+dispatcher over a mounted `StorageActor`. It repeats major-version validation,
+applies the codec's authorization policy to trusted context, always emits the
+current response version, echoes the request ID, and performs no direct flash,
+framing, session, radio or node work. The default feature set handles public
+capabilities and authenticated, principal-scoped status. Missing and cross-
+principal IDs both return `NotFound`, so the adapter does not disclose another
+principal's durable records. Status fails closed with `Internal` while the
+actor has an ambiguous pending mutation or a latched fault; it never publishes
+the deliberately lagging live index as if it were current. Public capabilities
+remain available in either condition.
 
 ## Version and evolution rules
 
@@ -91,7 +105,12 @@ authorization credential.
 Numbers `0xf000..=0xffff` are experimental and can disappear or change without
 API compatibility. `0xf001` is compiled only with the `host-sim` Cargo feature.
 Enabling `host-sim` on `target_os = "none"` is a compile error. A build without
-that feature returns `UnsupportedOperation(0xf001)`.
+that feature returns `UnsupportedOperation(0xf001)`. The adapter mirrors this
+feature boundary. Its capability response restricts the codec snapshot to the
+adapter's own compiled operations, so Cargo feature unification on a separate
+`reticulum-device-api/host-sim` dependency edge cannot make an adapter default
+build advertise the missing host-only dispatch arm. Its target-checked default
+build cannot acquire the operation through a transitive feature.
 
 ### `system.capabilities` (`0x0001`)
 
@@ -111,7 +130,9 @@ Successful response body:
 | 6 | u16 | yes | maximum experimental payload bytes (383) |
 
 `CapabilitySnapshot::current()` is device-owned and cannot advertise packet
-output or radio TX. The host experiment changes only key 3.
+output or radio TX. The host experiment changes only key 3. A higher dispatcher
+uses `CapabilitySnapshot::for_dispatch` to restrict that codec-build snapshot;
+it can disable a capability but cannot enable one omitted from the codec build.
 
 ### `submission.status` (`0x0002`)
 
@@ -156,6 +177,13 @@ digests to agree, retains a planned semantic metadata record without packet
 bytes, and applies it only after the storage actor reports commit or exact
 readback.
 
+The adapter reads only the small principal-owned lifecycle state from the live
+index, not a copied complete intent. Missing and foreign identifiers use the
+same combined ownership lookup. If an exact physical mutation is pending, the
+live index intentionally lags flash; if the actor is faulted, its authority is
+unavailable. In both cases `submission.status` returns `Internal` until the
+owner reconciles the pending mutation or is remounted or recovered.
+
 Node-core retains an in-RAM terminal-attempt tombstone until explicit
 acknowledgement. The portable projector maps it to the corresponding final
 submission state and exposes the exact acknowledgement only after a storage
@@ -170,14 +198,16 @@ exposes it only for `AwaitingDelivery` and `Delivered`; a delivery timeout is a
 `Failed` response without keys 2 or 3. Device API v1 does not expose the
 internal attempt handle, packet-slot ID, dispatch generation or deadline, and
 it does not expose volatile attempt correlation. `reticulum-storage-journal`
-now supplies complete integrity-validated physical replay, but reboot safety at
-this API boundary still depends on the unimplemented sole storage actor that
-mounts it before serving requests.
+supplies complete integrity-validated physical replay, and
+`reticulum-storage-actor` can expose a live index only after full mount and
+semantic replay. Product reboot safety still requires the firmware task to
+finish that mount plus conservative boot recovery before enabling any API
+transport or RF/node service.
 
 ### `experimental.prepare_rns_data` (`0xf001`)
 
-This host-only operation proves strict decode, authentication, idempotency input,
-and a future device-API-to-node boundary. It is deliberately not named
+This host-only operation proves strict decode, authenticated durable acceptance,
+idempotency input, and the API-to-storage boundary. It is deliberately not named
 `rns.send`, is not a stable product operation, and has no firmware integration.
 The future client-facing send operation is `messages.send` through embedded
 LXMF. A separately authorized raw RNS/RNode bridge, if ever implemented, remains
@@ -192,23 +222,23 @@ Request body:
 | 2 | bytes(16) | yes | principal-scoped idempotency key |
 
 The decoder returns key 1 as a slice of the caller's input buffer. An adapter
-must not retain it past that buffer's lifetime. `reticulum-storage-model`
-defines the owned bounded intent, semantic content digest, principal/key
-idempotency rule, and opaque acceptance plan that a future sole storage actor
-must append through the implemented physical journal before replying. Only
-after that acceptance and the durable
+must copy it into the model's owned bounded intent before the input buffer is
+released. `reticulum-storage-model` defines that intent, semantic content
+digest, principal/key idempotency rule, and opaque acceptance plan;
+`reticulum-storage-actor` appends it through the implemented physical journal
+before a successful adapter may reply. Only after that acceptance and the durable
 `Queued -> Preparing` barrier may the sole node owner prepare into one
 separately registered, caller-owned 500-byte `TxPacketBuffer`. Node-core rejects
-an already-expired owner
-deadline before mutation, resolves the enabled-interface route, and returns a
+an already-expired owner deadline before mutation, resolves the enabled-
+interface route, and returns a
 unique routed `TxJob`; that prompt dispatch ownership is not client-intent
 storage, and its RNS receipt timeout has already started. Packet bytes remain
 inaccessible until an opaque permit exchange produces `AuthorizedTx`, whose
 `frame(now)` accessor is one-shot and exact-deadline checked. A standalone
 bounded async handoff carries these typestates, and the portable projector
 models their persist-before-ack observations, but no device-API/storage/runtime
-adapter invokes that path. There is no radio integration, and the host-only
-operation remains disconnected from it.
+firmware path invokes that node/TX path. There is no radio integration, and the
+host-only operation remains disconnected from it.
 
 Successful host-simulation response body:
 
@@ -216,10 +246,17 @@ Successful host-simulation response body:
 | ---: | --- | --- | --- |
 | 0 | u64 | yes | device-assigned submission ID |
 
-In the future firmware adapter, acceptance will mean the exact intent is
-durable and the backend has reserved the physical capacity required by its
-lifecycle contract. The current host simulation does not make that durability
-claim. Acceptance is not a delivery guarantee; a later status can report no
+For any adapter backed by the sole storage actor, acceptance means the exact
+intent is durable and the backend has reserved the physical capacity required
+by its lifecycle contract. The adapter's `host-sim` path enforces that ordering:
+it copies the borrowed payload into the owned intent, invokes `actor.accept`,
+and publishes `Accepted` or exact `Replay` only after durable success. A lost
+backend reply maps to `Internal` while the actor retains the exact mutation;
+after `drive_pending()` reconciles it, retry returns the same durable ID.
+Idempotency conflict and capacity map to their stable API categories, while
+identifier exhaustion, actor busy, backend ambiguity and a latched fault map to
+`Internal`. No firmware transport currently exposes this operation. Acceptance
+is not a delivery guarantee; a later status can report no
 path, delivery timeout, downstream rejection, or an internal failure. The ID
 can be queried through `submission.status`. The response contains no
 destination, payload, prepared packet, packet fragment, or packet-borrowing
@@ -228,8 +265,8 @@ handle.
 The storage model scopes idempotency by the authenticated principal. Repeating
 the same key with identical semantic destination/payload content returns the
 original submission ID. Reusing it for different content returns immediate
-error 10 and must not mutate the original submission. The missing adapter must
-derive the principal from `DispatchContext`; it cannot trust request bytes.
+error 10 and must not mutate the original submission. The portable adapter
+derives the principal from `DispatchContext`; it never trusts request bytes.
 
 ## Responses and errors
 
@@ -267,9 +304,10 @@ framing rules.
 
 Authentication, ownership filtering, rate limiting, idempotency scope, physical
 presence, and high-assurance session encryption are not solved by this codec.
-The future device-API adapter and session runtime must scope status and
-idempotency by the principal from `DispatchContext`, never by bytes supplied in
-a request.
+The portable adapter scopes status and host-simulation idempotency by the
+principal from `DispatchContext`, never by bytes supplied in a request. The
+future session runtime must establish that context, enforce connection-level
+rate limits, and keep its authentication state outside request CBOR.
 
 ## Golden vectors
 
@@ -308,3 +346,35 @@ The first pair validates the default host profile, the second pair validates the
 host-only experiment, and the final command proves the default crate remains
 `no_std` on an installed `target_os = "none"` target. `host-sim` is intentionally
 rejected on that target.
+
+Validate authenticated dispatch independently in both host profiles and the
+default ESP32-S3 graph:
+
+```sh
+cargo test --locked -p reticulum-device-api-adapter
+cargo clippy --locked -p reticulum-device-api-adapter --all-targets -- -D warnings
+
+cargo test --locked -p reticulum-device-api-adapter --features host-sim
+cargo clippy --locked -p reticulum-device-api-adapter --all-targets \
+  --features host-sim -- -D warnings
+
+cargo test --locked -p reticulum-device-api-adapter \
+  --features reticulum-device-api/host-sim
+cargo clippy --locked -p reticulum-device-api-adapter --all-targets \
+  --features reticulum-device-api/host-sim -- -D warnings
+
+cargo +esp check --locked --release -p reticulum-device-api-adapter \
+  --target xtensa-esp32s3-none-elf
+cargo +esp clippy --locked --release -p reticulum-device-api-adapter \
+  --target xtensa-esp32s3-none-elf -- -D warnings
+```
+
+These checks pass. The dependency-only host-simulation profile proves feature
+unification cannot advertise an adapter-local operation that is absent. The
+adapter's focused tests cover exact authorization and zero-mutation rejection,
+request context, version/capability behavior, principal isolation, every durable
+lifecycle mapping, maximum-size owned-payload acceptance/replay/conflict,
+acceptance across remount, stable capacity and identifier-exhaustion errors,
+faulted and pending status gating, and lost-write reconciliation. The target
+commands use the default feature set because adapter `host-sim` is intentionally
+a compile error on bare metal.

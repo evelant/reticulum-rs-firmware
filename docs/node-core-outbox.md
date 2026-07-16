@@ -5,7 +5,9 @@ and firmware-excluded RF-inert persistent dispatcher, permit server, and node
 DATA-owner machine with synchronous parked-owner preparation implemented;
 firmware-excluded permanent RF-inert supervisor and async runner implemented;
 portable durable model/projector and independent physical journal implemented;
-no sole storage actor, firmware RF TX linkage, or radio driver
+portable sole storage actor implemented and target-checked; no permanent
+storage task; portable authenticated device-API adapter implemented but not
+transport/firmware-linked; no firmware RF TX linkage or radio driver
 **Rete pin:** `f6f5fb0637d00691e09fa0105be4df902405fee4`
 
 ## Purpose and boundary
@@ -289,8 +291,11 @@ available until exact acknowledgement. The supervisor exposes both the
 observation and acknowledgement facade. `reticulum-submission-projector`
 withholds that action until the transport audit is known committed, although
 no permanent runtime drives it. `reticulum-storage-journal` now supplies the
-physical append/replay/compaction backend, but no sole storage actor connects
-the projector plan to that backend yet.
+physical append/replay/compaction backend, and `reticulum-storage-actor` now
+owns that journal, the live replay index and the sole projector. It retains one
+bounded exact pending mutation and can autonomously reconcile an ambiguous
+backend result before exposing the acknowledgement. No permanent firmware task
+yet drives that actor and projector from this node/supervisor path.
 An internally inconsistent same-lease return or an explicit recovery fault
 returns an owning `TxQuarantine` and retains the fail-closed scalar record.
 Before exposing its `TxRecoveryObservation`, quarantine canonicalizes the
@@ -439,8 +444,8 @@ radio, or RF path.
 
 ## Next boundary
 
-The owning storage/capability layer, RF-inert dispatcher, permit and node
-DATA-owner machines, and permanent supervisor now exist.
+The portable owning storage layer, RF-inert dispatcher, permit and node DATA-
+owner machines, and permanent RF-inert supervisor aggregate now exist.
 `TxHandoff::split_paired()` consumes one unique static handoff; every registered
 owner must seed that inseparable common-origin role set before
 `NoRfTxMachineSet::try_new()` can bind it into the supervisor. Incomplete
@@ -449,21 +454,21 @@ channels carry jobs and owner returns, depth-one channels isolate permit
 requests/replies, and every send is a non-awaiting `try_send` that returns the
 unchanged value on pressure. The remaining orchestration work is:
 
-1. Wrap the implemented physical journal in the sole permanent storage actor,
-   preserving exact append/readback, lifetime reservation, complete integrity-
-   validated replay, and resumable compaction while adding serialized
-   projector/API ordering. The isolated clean-path/software-reset powered HIL
-   has passed; add controlled power-fail, endurance/soak, and integrated-runtime
-   coverage. The portable model and projector do not make their own durability
-   claim.
+1. Host the implemented portable storage actor in one permanent Embassy task.
+   Connect the checked product `esp-storage` partition adapter, gate all service
+   on complete mount/replay, and coordinate flash with watchdogs, OTA, other
+   stores and radio timing. The isolated journal clean-path/software-reset HIL
+   has passed; actor-on-target, controlled power-fail, endurance/soak, and
+   integrated-runtime coverage remain open.
 2. Merge RX ingress, ordinary RNS tick/actions, durable submission projection,
    and exact acknowledgement into
    the eventual sole node owner. The current aggregate drives only TX lease
    maintenance and the three TX machines.
-3. Map persist-before-accept intents and projected dispositions into device API
-   v1, drive the model's conservative boot recovery, and add a proved safe
-   retirement condition for bounded volatile projector slots without
-   attempting to persist leases or mutable references.
+3. Connect the implemented authenticated device-API adapter to framing,
+   sessions and the permanent actor task; drive the model's conservative boot
+   recovery and node observations through the actor's narrow projector methods;
+   and add a proved safe retirement condition for bounded volatile projector
+   slots without attempting to persist leases or mutable references.
 4. Convert allocation-backed ordinary RNS actions into caller-reservable packet
    ownership; the DATA path alone does not cover proofs, announces, forwarding,
    Links or Resources.

@@ -339,8 +339,32 @@ impl<const SUBMISSIONS: usize> SubmissionIndex<SUBMISSIONS> {
 
     /// Look up one submission only when it belongs to the supplied principal.
     pub fn get_owned(&self, principal: PrincipalId, id: SubmissionId) -> Option<IndexedSubmission> {
-        self.get(id)
-            .filter(|submission| submission.accepted.principal() == principal)
+        self.slots.iter().flatten().copied().find(|submission| {
+            let id_matches = submission.accepted.id() == id;
+            let principal_matches = submission.accepted.principal() == principal;
+            id_matches & principal_matches
+        })
+    }
+
+    /// Look up only the public lifecycle state of a principal-owned submission.
+    ///
+    /// Missing and foreign identifiers both scan the complete fixed slot table
+    /// and return `None`; the large durable intent is not copied into a status
+    /// request's stack frame.
+    pub fn get_owned_state(
+        &self,
+        principal: PrincipalId,
+        id: SubmissionId,
+    ) -> Option<LifecycleState> {
+        self.slots
+            .iter()
+            .flatten()
+            .find(|submission| {
+                let id_matches = submission.accepted.id() == id;
+                let principal_matches = submission.accepted.principal() == principal;
+                id_matches & principal_matches
+            })
+            .map(|submission| submission.state)
     }
 
     /// Iterate submissions in stable fixed-slot order.

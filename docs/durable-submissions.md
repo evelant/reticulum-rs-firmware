@@ -1,10 +1,11 @@
 # Durable submissions and persist-before-ack projection
 
-Status: portable semantic model, host-tested projection boundary, and physical
-two-bank journal implemented; isolated powered clean-path/software-reset HIL
-passed on board E9:44. No sole storage actor or device-API integration exists,
-and controlled power-cut durability, endurance/soak, and at-rest encryption
-remain unqualified.
+Status: portable semantic model, projector, physical two-bank journal, and sole
+storage actor implemented and target-checked; portable authenticated device-API
+dispatch implemented; isolated powered journal clean-path/software-reset HIL
+passed on board E9:44. Permanent task, framing/session/transport and firmware
+integration, controlled power-cut durability, endurance/soak, and at-rest
+encryption remain unqualified.
 
 ## Claim boundary
 
@@ -15,14 +16,27 @@ and a fixed-RAM index. `reticulum-submission-projector` correlates those records
 with volatile node/TX observations and withholds exact terminal or recovered-
 owner acknowledgement until the corresponding record is known durable.
 
-Neither semantic crate writes flash. `reticulum-storage-journal` now supplies
+Neither semantic crate writes flash. `reticulum-storage-journal` supplies
 the physical format, complete replay, commit/readback, lifetime admission, and
 two-bank compaction mechanisms described in
 [Physical submission journal](storage-journal.md). A canonical CBOR record is
 still not durable merely because it encodes successfully, and the in-RAM index
-is not a free-space or wear-level estimate. A later sole storage actor must
-connect an exact projector plan to that journal before an acceptance response
-or TX acknowledgement can be published.
+is not a free-space or wear-level estimate. `reticulum-storage-actor` now owns
+the NOR journal, replayed live index and sole projector, and connects an exact
+plan to physical persistence before making an acceptance or acknowledgement
+visible. See [Portable sole storage actor](storage-actor.md).
+
+`reticulum-device-api-adapter` is the allocation-free authenticated dispatch
+edge over that mounted owner. Default builds expose public capabilities and
+principal-scoped status; missing and foreign IDs are indistinguishable, and
+status returns `Internal` while the actor has ambiguous pending work or is
+faulted rather than exposing a deliberately lagging index. Its
+explicitly host-only `host-sim` feature copies the experimental borrowed payload
+into an owned candidate and returns an ID only after `accept` reports durable
+success or exact replay. Adapter-local capability restriction prevents a
+separately unified codec feature from advertising that operation. The feature
+is compile-forbidden on bare-metal targets. The adapter has no framing, session,
+USB/BLE/Wi-Fi, node or radio path.
 
 The physical backend's qualifying run is preserved at
 `artifacts/storage-hil/20260716T211318Z-e944-7b47113` from source
@@ -31,25 +45,29 @@ covered A1 format, five appends, no-mutation retry/conflict, B2 compaction, a
 software reset, and zero-write/zero-erase B2 replay. Independent raw-dump replay
 confirmed one revision-4 `Delivered` submission across five committed records,
 with the retired A manifest and unused B tail erased. This is isolated journal
-clean-path evidence, not evidence for powered cuts or the unimplemented actor,
-API, and product runtime.
+clean-path evidence, not powered actor, powered-cut, API, or product-runtime
+evidence.
 
 ```mermaid
 flowchart LR
-    Client["authenticated local client"] --> API["device API adapter (not wired)"]
-    API --> Store["sole storage actor (not implemented)"]
+    Client["authenticated local client"] --> Transport["framing/session/transport (not implemented)"]
+    Transport --> API["portable authenticated API adapter (implemented)"]
+    API --> Store["portable sole storage actor (implemented)"]
     Store --> Journal["two-bank physical journal (implemented)"]
     Journal --> Flash["validated raw NOR partition"]
-    Store --> Model["storage-model live index"]
-    Model --> Projector["submission projector"]
+    Store --> Model["actor-owned live replay index"]
+    Store --> Projector["actor-owned sole projector"]
     Projector --> Supervisor["RF-inert TX supervisor"]
     Supervisor --> Projector
 ```
 
 The storage actor is the sole authority allowed to order physical commits and
-mutate the live index. The projector owns only bounded volatile correlation;
-the node supervisor remains the sole owner of native Rete state, packet
-buffers, attempts, and TX typestates.
+mutate the live index. It also owns the one projector that carries bounded
+volatile correlation. Callers receive only immutable projector inspection and
+narrow actor-owned operations such as `begin_preparation`; they cannot obtain,
+replace, or extract the projector. Every durable projector request returns
+through `persist_projector`. The node supervisor remains the sole owner of
+native Rete state, packet buffers, attempts, and TX typestates.
 
 ## Durable identity and records
 
@@ -161,6 +179,16 @@ does not acknowledge. Planning catches revision, lifecycle, token, and index
 errors before bytes are allowed to enter the journal, so a rejected mutation
 cannot poison every later replay.
 
+The implemented actor holds one optional pending mutation. Acceptance retains
+the complete opaque plan; projector persistence retains only a compact handle
+whose exact request remains in the actor-owned projector. Public
+`drive_pending()` can resume either form after an ambiguous backend result
+without receiving the original candidate, request, or another projector. The
+actual `Option<PendingMutation>` layout is exposed as `PENDING_MUTATION_BYTES`
+and compile-time constrained to at most 512 bytes. Unrelated requests receive
+`Busy` until the retained mutation resolves, and invariant violations latch a
+fail-closed bounded fault.
+
 ## Volatile correlation and acknowledgements
 
 After the preparation barrier is durable, the projector binds one
@@ -229,11 +257,13 @@ inject partial and lost-reply writes/erases across append and compaction phases.
 The powered clean-path/software-reset HIL has passed, but powered flash fault
 injection is still a separate acceptance gate.
 
-## Backend contract and implementation status
+## Backend and actor contract
 
-The physical journal implements the record-level portions below. The future
-sole storage actor must preserve them while adding serialization, projector/API
-ordering, watchdog/OTA coordination, and fault latching.
+The physical journal implements the record-level portions below. The portable
+sole storage actor now preserves them while adding one serialization cell,
+projector ownership, exact autonomous retry, live-index ordering, and a bounded
+fault latch. Runtime coordination with device API transports, watchdogs, OTA,
+other flash users, and radio timing still belongs to the future permanent task.
 
 1. **Complete replay before action.** Scan and integrity-validate records to a
    known end-of-log, then consume `SubmissionReplay` into the live index. No queued
@@ -264,9 +294,11 @@ ordering, watchdog/OTA coordination, and fault latching.
    eviction or garbage collection. The manifest and future schema-migration
    rules must preserve that guarantee. The submission journal is not the
    separate long-term message/blob archive.
-6. **Serialized non-cancellable writes.** One actor owns flash, coordinates
-   OTA/GC/watchdogs and radio timing, and never exposes cancellation across a
-   write whose outcome could be ambiguous.
+6. **Serialized non-cancellable writes.** The portable actor owns flash and
+   performs each backend attempt synchronously, retaining an exact pending
+   mutation whenever the result is ambiguous. The future permanent task must
+   additionally coordinate OTA/GC/watchdogs and radio timing and must not expose
+   cancellation across an actor call.
 
 ## Selected schema-1 physical design
 
@@ -326,12 +358,13 @@ large incidental async frame.
 The current projector is also intentionally correctness-first rather than a
 finished Tracker RAM profile: the current ESP32-S3 layout measures about 1,288
 bytes for `SubmissionSlot` and about 640 bytes for its retained
-`PendingRecord`. A sole runtime should serialize physical writes through one
-global pending-write cell
-instead of multiplying a complete plan per submission, then measure the whole
-task's static storage and stack before selecting a Tracker capacity. Completed
-correlations also cannot be retired automatically until the runtime proves that
-every terminal and transport observation source has been drained.
+`PendingRecord`. The actor now serializes physical writes through one global
+pending-mutation cell rather than adding another complete plan per submission;
+its actual optional cell is compile-time capped at 512 bytes. This does not cap
+the projector slots, live index, complete actor, or future task stack. Measure
+that full static layout and stack before selecting a Tracker capacity. Completed
+correlations also cannot be retired automatically until the runtime proves
+that every terminal and transport observation source has been drained.
 
 Profiles on larger boards may enable a larger index and richer clients. The
 semantic feature set remains portable; constrained boards may disable local
@@ -343,12 +376,14 @@ LXMF/NomadNet/UI services without redefining the durable protocol.
    controlled powered cuts at the relevant program/erase boundaries, preserving
    each image, readback, continuous serial capture, and raw-partition result as
    a separate evidence set.
-2. Build the sole permanent storage actor around the journal, including
-   ambiguous-backend fault handling and serialization with other flash users.
-3. Connect acceptance/status through device API v1 and merge projection with
-   the sole node runtime; do not run the current supervisor's pass-discarding
-   convenience loop when projection observations are required. Add a proved
-   retirement handshake before reusing any completed projector slot.
+2. Place the portable sole actor in one permanent Embassy task, connect a
+   checked product `esp-storage` partition adapter, gate service on complete
+   mount/replay, and serialize it with other flash users.
+3. Connect the implemented authenticated device-API adapter to framing,
+   sessions and a firmware transport, then merge projection with the sole node
+   runtime; do not run the current supervisor's pass-discarding convenience loop
+   when projection observations are required. Add a proved retirement handshake
+   before reusing any completed projector slot.
 4. Measure static layout, journal scan/compaction time, stack, erase endurance,
    soak behavior, and watchdog impact on ESP32-S3 and larger profiles.
 5. The two attached antenna-equipped boards are cleared for NA915 development

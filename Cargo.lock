@@ -1630,6 +1630,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "reticulum-device-api-adapter"
+version = "0.1.0"
+dependencies = [
+ "embedded-storage",
+ "reticulum-device-api",
+ "reticulum-storage-actor",
+ "reticulum-storage-model",
+]
+
+[[package]]
 name = "reticulum-heltec-tracker-v2"
 version = "0.1.0"
 dependencies = [
@@ -1764,6 +1774,16 @@ dependencies = [
  "rand_core 0.6.4",
  "reticulum-radio-interface",
  "reticulum-rns-rete",
+]
+
+[[package]]
+name = "reticulum-storage-actor"
+version = "0.1.0"
+dependencies = [
+ "embedded-storage",
+ "reticulum-storage-journal",
+ "reticulum-storage-model",
+ "reticulum-submission-projector",
 ]
 
 [[package]]

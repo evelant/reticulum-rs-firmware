@@ -295,6 +295,18 @@ impl CapabilitySnapshot {
         }
     }
 
+    /// Snapshot restricted to operations implemented by a higher dispatch layer.
+    ///
+    /// `experimental_prepare_rns_data` can disable the codec-build capability,
+    /// but cannot enable an operation omitted from this crate's build. This
+    /// keeps Cargo feature unification in another dependency edge from making a
+    /// dispatcher advertise an operation that it did not compile locally.
+    pub const fn for_dispatch(experimental_prepare_rns_data: bool) -> Self {
+        let mut snapshot = Self::current();
+        snapshot.experimental_prepare_rns_data &= experimental_prepare_rns_data;
+        snapshot
+    }
+
     /// Highest API version spoken by this device.
     pub const fn api_version(self) -> ApiVersion {
         self.api_version

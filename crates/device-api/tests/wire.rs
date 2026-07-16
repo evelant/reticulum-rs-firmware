@@ -632,6 +632,8 @@ fn capability_snapshot_keeps_packet_output_and_radio_tx_unavailable() {
         capabilities.experimental_prepare_rns_data(),
         cfg!(feature = "host-sim")
     );
+    assert!(!CapabilitySnapshot::for_dispatch(false).experimental_prepare_rns_data());
+    assert_eq!(CapabilitySnapshot::for_dispatch(true), capabilities);
 }
 
 #[cfg(feature = "host-sim")]

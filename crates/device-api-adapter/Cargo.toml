@@ -1,0 +1,21 @@
+[package]
+name = "reticulum-device-api-adapter"
+description = "Authenticated device API adapter for durable Reticulum submissions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+host-sim = ["reticulum-device-api/host-sim"]
+
+[dependencies]
+embedded-storage.workspace = true
+reticulum-device-api = { path = "../device-api", default-features = false }
+reticulum-storage-actor = { path = "../storage-actor", default-features = false }
+reticulum-storage-model = { path = "../storage-model", default-features = false }
+
+[lib]
+path = "src/lib.rs"

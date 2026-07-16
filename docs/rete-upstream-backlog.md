@@ -396,9 +396,10 @@ an exact persistence result. The independent physical journal now supplies
 lifetime reservation, exact readback, complete integrity-validated replay, and
 retention-only compaction. Its isolated clean-path/software-reset powered HIL
 has passed; controlled power cuts and product-runtime integration remain open.
-The remaining product blockers are a sole permanent
-actor connecting that journal to projector plans; a device-API adapter; safe
-projector-slot retirement;
+The portable sole storage actor now connects that journal to its live index and
+projector with exact autonomous ambiguity recovery. The remaining product
+blockers are a permanent firmware task/product flash adapter and boot gates;
+device-API/runtime linkage; safe projector-slot retirement;
 eventual sole-owner integration of RX plus ordinary RNS tick/actions;
 firmware/driver integration; product-runtime powered reboot recovery;
 caller-reservable bounded construction for those ordinary outbound actions;

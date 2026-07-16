@@ -97,16 +97,38 @@ authorization. Retained faults stop fresh preparation and further policy calls
 while DATA and dispatcher stepping continue to drain exact owners where their
 APIs permit.
 
-This is still not the final product node owner. The new portable
+This is still not the final product node owner. The portable
 `reticulum-storage-model` defines strict canonical submission records,
 principal-scoped idempotency, fail-closed complete replay, lifecycle validation,
 and opaque preflighted mutations. `reticulum-submission-projector` now enforces
 the durable `Queued -> Preparing` barrier and withholds exact terminal and
 recovered-owner acknowledgements until their corresponding transition or audit
 is known committed. Neither crate writes flash. The project-owned two-bank
-journal now implements the physical format, replay, append and compaction, but
-no permanent storage actor yet connects projector plans, commit/readback
-results, replay and the device API. Its isolated powered storage HIL passed on
+journal implements the physical format, replay, append and compaction.
+`reticulum-storage-actor` now joins those pieces as one portable sole owner: it
+owns the NOR backend, journal state, live replay index, sole projector, one
+bounded pending mutation and a fail-closed fault latch. Construction completes
+the full physical mount and semantic replay before exposing service. Acceptance
+and the currently delegated projector preparation barrier becomes visible only
+after append commit or exact readback equivalence. `drive_pending()` can
+reconcile an ambiguous backend result from actor-owned state without a caller
+reproducing the request. The actual
+optional pending cell is compile-time capped at 512 bytes. Its focused host
+tests and ESP32-S3 Xtensa checks pass.
+
+`reticulum-device-api-adapter` now supplies the portable authenticated dispatch
+edge over that mounted actor. Capabilities and principal-scoped status are
+available in the default build; status fails closed while actor state is pending
+or faulted, while capabilities remain public. Adapter-local capability
+restriction prevents a separately unified codec feature from advertising an
+operation absent from the adapter. The explicitly host-only `host-sim` feature
+copies the borrowed experimental RNS DATA payload into an owned candidate and
+returns an accepted ID only after the actor reports it durable; exact replay,
+conflict, capacity and ambiguous-write outcomes map to stable API results. The
+feature is compile-forbidden on bare-metal targets. Default and host-simulation
+host tests/clippy plus the default ESP32-S3 Xtensa checks pass.
+
+The journal's isolated powered storage HIL passed on
 board E9:44 from clean source `7b47113`: one counted capture spans raw-flash
 format, five appends, mutation-free retry/conflict checks, A1-to-B2 compaction,
 a software reset and zero-write/zero-erase B2 replay. An independent raw dump
@@ -114,12 +136,15 @@ check confirms generation 2, all five committed records, the revision-4
 `Delivered` state, the erased A manifest and the erased B tail. Evidence is at
 `artifacts/storage-hil/20260716T211318Z-e944-7b47113`.
 
-That qualifies only the journal's powered clean path and software-reset replay.
-Controlled power cuts, endurance/soak, at-rest encryption, and integration with
-the sole async storage actor and device API remain open. That actor plus a
-persist-before-accept device-API edge is the next bounded product-code slice.
-The sole runtime owner and firmware edge remain open, and the supervisor still
-has no radio/HAL or RF path.
+That powered run qualifies only the journal's isolated clean path and software-
+reset replay; it did not exercise the portable actor. A permanent Embassy
+storage task, the real product `esp-storage` partition adapter and firmware
+linkage, boot-time service gating, runtime flash/watchdog/OTA/radio
+coordination, controlled power cuts, endurance/soak, and at-rest encryption
+remain open. Device-API dispatch is a separate portable/integration boundary;
+the portable authenticated adapter is implemented, but no framing, session,
+USB/BLE/Wi-Fi transport or product firmware currently serves through it. The
+supervisor likewise still has no radio/HAL or RF path.
 The current product-candidate firmware graphs remain TX-free because that
 radio-owner integration is not implemented, not because development TX is
 prohibited. Both attached Tracker boards have antennas and are cleared for
@@ -143,6 +168,7 @@ product graph.
 - [Owning async TX handoff](docs/async-tx-handoff.md)
 - [RF-inert permanent TX supervisor](docs/tx-supervisor.md)
 - [Durable submissions and persist-before-ack projection](docs/durable-submissions.md)
+- [Portable sole storage actor](docs/storage-actor.md)
 - [Rete upstream hardening backlog](docs/rete-upstream-backlog.md)
 - [Dependency provenance](docs/provenance.md)
 
