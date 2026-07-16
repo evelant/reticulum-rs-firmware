@@ -1,13 +1,24 @@
 # Rete upstream hardening backlog
 
-**Status:** contribution sequence active; the first three focused issues and
-draft pull requests are open upstream
+**Status:** the first three focused issues and draft pull requests predate the
+current local lifecycle work. No additional issue or pull request will be
+opened without direct user approval.
 
-This is the contribution queue discovered while integrating Rete revision
-`9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743`. Each item should be submitted as
-a focused test-first change. Tracker pins, FEM sequencing, regional policy,
-product quotas and the device API stay in this project; generic protocol and
-bounded-state corrections belong upstream.
+This is the possible contribution queue discovered while integrating Rete
+revision `9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743`. If the user directly approves
+publication, each selected item should remain a focused test-first change.
+Tracker pins, FEM sequencing, regional policy, product quotas and the device
+API stay in this project; generic protocol and bounded-state corrections are
+the candidates for upstream review.
+
+The current firmware pin is
+`f6f5fb0637d00691e09fa0105be4df902405fee4` (`firmware-pin-f6f5fb0`). It adds
+caller-owned DATA preparation, explicit receipt-capacity errors, fixed-capacity
+terminal sinks, exact DATA/channel terminal candidates, allocation-atomic
+proof/timeout delivery, full-hash receipt cancellation and core-aware LXMF
+sibling-attempt cleanup. The legacy LXMF
+event handler without mutable core access still leaves siblings to timeout.
+This candidate remains on the project fork; it has not been submitted upstream.
 
 ## 1. Transactional Link admission
 
@@ -148,6 +159,13 @@ capacity `L`. `send_channel_message()` mutates channel state and builds a
 packet before ignoring receipt insertion failure. A valid proof for such a
 packet is then unmatchable and the envelope remains pending.
 
+Channel retransmission rebuilds the encrypted packet with fresh randomness but
+does not replace/register the corresponding full-hash receipt. A proof for the
+retransmission is therefore also unmatchable even when the original insertion
+succeeded. Receipt replacement must be transactional with retransmit state and
+must retain any still-valid sibling hashes until one proof wins or the attempt
+set fails.
+
 It also queues the envelope and advances the channel sequence before packet
 construction. A payload larger than the negotiated Link MDU can therefore
 return an error while leaving an unsent message pending. Validate the per-Link
@@ -281,6 +299,115 @@ that AP/Roaming interface mode actually reaches path learning and expiry.
 Transport policy and metadata should be generic; discovery, authentication,
 client sessions and device-API behavior remain in this project.
 
+## 11. Transactional DATA receipts and terminal reclamation
+
+**Priority:** blocking sustained outbound DATA and the production device API
+
+At the reviewed upstream base, `NodeCore::build_data_packet()` encrypts and
+constructs a DATA packet, touches the selected path, computes the packet hash
+and calls `register_receipt()`. The
+registration result is ignored. A caller can therefore receive apparent
+packet-build success even when no proof can be correlated because the bounded
+receipt map was full.
+
+The opposite lifecycle boundary was also incomplete. Proof validation marks a
+receipt `Delivered`, while `Transport::tick()` marks an expired receipt
+`Failed`. Although the private `ReceiptTable` has a removal primitive,
+`Transport` exposes only `receipt_count()`: neither `NodeCore` nor the
+project-owned `EmbeddedNode` can inspect or reclaim terminal receipts. With the
+current Tracker profile's `P = 16`, any sequence of sixteen delivered or timed-
+out DATA packets permanently fills the table.
+
+Make DATA preparation one transaction:
+
+1. Return a packet/receipt token containing at least the packet hash needed for
+   later correlation.
+2. Propagate receipt insertion failure and avoid path mutation or externally
+   observable packet success when admission fails.
+3. Expose terminal receipt status/removal without leaking the mutable receipt
+   map.
+4. Surface newly failed receipts from maintenance and map validated proofs back
+   to the corresponding product submission.
+5. Test send/proof/reclaim and send/timeout/reclaim cycles for substantially
+   more than `P` operations, plus full-table rejection with unchanged path,
+   receipt and entropy state.
+
+The generic fix is now the project pin
+`f6f5fb0637d00691e09fa0105be4df902405fee4`, reachable at fork tag
+`firmware-pin-f6f5fb0`. It returns caller-owned packet metadata plus a full
+receipt token, reports registration and output-allocation failures, and
+atomically removes validated and timed-out receipts only after reserving their
+exact kind/full-hash terminal candidate. Link-typed channel proofs are resolved
+before ordinary DATA receipts so reservation and mutation agree even if a DATA
+receipt's truncated key equals the Link ID. Channel candidates additionally
+match the stored full outbound hash and destination Link ID, and relayed
+HEADER_2 proofs bypass local terminal reservation. Direct Transport ingest and
+maintenance results are `must_use`; sink-aware NodeCore paths avoid duplicate
+receipt events; and the
+hosted daemon consumes LXMF terminal output. Focused transport, stack, LXMF and
+daemon library suites pass, all workspace targets check on the macOS host, and
+the affected no-default crates compile for `thumbv6m-none-eabi`. This newer
+lifecycle work remains on the user's fork. No issue or pull request was opened,
+and publication elsewhere still requires the user's direct approval.
+
+The project adapter and `crates/node-core` now exercise both halves. Node-core
+reserves fixed 500-byte outbox and attempt slots before preparation, commits
+scalar receipt metadata infallibly, distinguishes definitely-unsent abort from
+possibly-transmitted release, and prevents stale lease/attempt-handle reuse.
+Its exact candidate sink turns the matching active attempt into an in-place
+terminal tombstone before Rete removes the receipt; retained tombstones
+backpressure submission until a dispatcher explicitly acknowledges them. The
+remaining product blockers are durable intent/attempt recovery, async packet
+ownership, bounded ordinary RNS actions and higher-level LXMF persistence.
+Until those slices and radio policy are connected, no stable host send
+operation or firmware RF TX graph uses this path.
+
+## 12. LXMF retry and receipt-attempt correlation
+
+**Priority:** blocking reliable opportunistic LXMF delivery
+
+At the reviewed upstream base, Rete's hosted LXMF outbound queue stores only
+one `packet_hash` per message. `process_outbound()` retries an opportunistic
+message every ten seconds and overwrites that hash, while the underlying DATA
+receipt timeout is thirty seconds. A valid late proof for an earlier attempt is
+therefore ignored even though it proves the LXMF message was delivered. At the
+same time, several obsolete DATA receipts remain live and consume the bounded
+receipt table.
+
+At the upstream base, admission failures are also folded into the same attempt
+counter as a packet that was actually released to an interface. The local
+receipt-lifecycle candidate corrects receipt-table-full and truncated-hash-
+collision handling, with a five-message/four-slot saturation regression. It
+also retains all five in-memory attempt hashes, accepts a delayed proof for any
+one, retires timeouts individually, and emits exactly one final failure after
+the last outstanding attempt fails. Applications using router-managed outbound
+state are now explicitly required to dispatch every proof and failure through
+the mutable router API.
+
+The production LXMF state machine still needs a durable attempt ledger:
+
+1. Persist every released attempt's receipt token until the message reaches a
+   terminal state; preserve the candidate's ability to accept a valid proof
+   for any still-associated attempt across reboot.
+2. Drive retry timing from typed release/delivery state rather than a periodic
+   resend that can overlap the receipt timeout unintentionally.
+3. Preserve typed local admission/backpressure as `not released`, without
+   spending a delivery attempt or losing retry state.
+4. On delivery, cancellation or final failure, reclaim/cancel all associated
+   RNS receipts and persist the LXMF terminal transition atomically.
+5. Test delayed/reordered proofs, repeated local backpressure, reboot between
+   every transition and attempt counts larger than the receipt-table bound.
+
+The pinned hosted LXMF router now cancels sibling Transport receipts
+synchronously when its core-aware event path observes delivery. Its retained
+legacy event method cannot do so because it has no mutable core and therefore
+leaves siblings to bounded timeout. The firmware must use the core-aware
+equivalent and persist its own message/attempt transition; generic receipt
+cleanup does not make the hosted in-memory ledger reboot-safe. Durable queue
+and receipt state belongs in the project-owned bounded LXMF router unless a
+suitably generic upstream API emerges. No issue or pull request has been opened
+for this newer work.
+
 ## Submission order
 
 1. Exact direct/local LINKREQUEST validation: submitted as upstream draft PR
@@ -291,11 +418,13 @@ client sessions and device-API behavior remain in this project.
    retain until merged or superseded.
 4. Relay-table admission/visibility and HEADER_2 dispatch.
 5. Link event/timestamp semantics and channel receipts.
-6. Explicit ingress dispositions and full capacity snapshots.
-7. Bounded output/Resource seams.
-8. LoRa receive API improvements, independently if easier to review.
-9. Clock-domain/request and restart-safe snapshot semantics.
-10. Interface cancellation, capability and backpressure seams as individually
+6. Transactional DATA receipt admission, terminal status and reclamation.
+7. LXMF retry/receipt-attempt correlation.
+8. Explicit ingress dispositions and full capacity snapshots.
+9. Bounded output/Resource seams.
+10. LoRa receive API improvements, independently if easier to review.
+11. Clock-domain/request and restart-safe snapshot semantics.
+12. Interface cancellation, capability and backpressure seams as individually
     reviewable changes.
 
 Do not combine these into one project-specific fork commit. Keep every fix

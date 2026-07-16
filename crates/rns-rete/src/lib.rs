@@ -26,7 +26,10 @@ pub use embedded::{
     AdmissionCounters, AnnounceAdmissionError, DestinationRegistrationError, EmbeddedNode,
     EmbeddedNodeConfig, EmbeddedNodeMetrics, EmbeddedSendError, IngressCounters,
     IngressDisposition, IngressDropReason, IngressReport, InterfaceId, MAX_CHANNEL_PAYLOAD,
-    NodeActions, NodeRole, RouteSnapshot, TransportCounters, TxPacket, TxTarget,
+    MAX_DATA_PAYLOAD, NodeActions, NodeRole, PrepareDataError, PreparedData, RNS_MTU,
+    ReceiptCandidate, ReceiptId, ReceiptKind, ReceiptReservationUnavailable, ReceiptTerminal,
+    ReceiptTerminalCounters, ReceiptTerminalReservation, ReceiptTerminalSink, ReceiptTickReport,
+    RouteSnapshot, TransportCounters, TxPacket, TxTarget,
 };
 pub use receive_only::{
     InitialReceiveOnlyIngress, RETE_MAINTENANCE_INTERVAL_SECONDS, RawFrameDropReason,
@@ -39,7 +42,7 @@ pub use rete_stack::{DestinationType, Direction, NodeEvent};
 pub use rete_transport::{AnnounceError, AnnounceInfo, LinkState};
 
 /// Reviewed Rete integration-fork source revision.
-pub const SOURCE_REVISION: &str = "5ce8c4e437d3f2f07d302bc366ff06bacd6aff2d";
+pub const SOURCE_REVISION: &str = "f6f5fb0637d00691e09fa0105be4df902405fee4";
 
 /// Initial table capacities used only to obtain comparable Phase-0 numbers.
 pub mod probe_capacity {

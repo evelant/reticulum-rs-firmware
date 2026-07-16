@@ -1,0 +1,18 @@
+[package]
+name = "reticulum-node-core"
+description = "Bounded protocol orchestration for standalone Reticulum firmware"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+rand_core.workspace = true
+reticulum-rns-rete = { path = "../rns-rete", default-features = false }
+
+[lib]
+path = "src/lib.rs"

@@ -16,6 +16,7 @@ use rete_core::{
 };
 use rete_stack::{
     DestinationType, Direction, IngestOutcome, NodeCore, NodeEvent, OutboundPacket, PacketRouting,
+    ReceiptToken,
 };
 use rete_transport::{HeaplessStorage, LinkState, SendError};
 
@@ -28,6 +29,12 @@ use crate::capacity::{
 /// envelope without a later packet-build failure.
 pub const MAX_CHANNEL_PAYLOAD: usize =
     rete_transport::LINK_MDU - rete_transport::ENVELOPE_HEADER_SIZE;
+
+/// Base Reticulum packet MTU used by the embedded radio profile.
+pub const RNS_MTU: usize = rete_core::MTU;
+
+/// Largest plaintext accepted by destination-DATA encryption at the base MTU.
+pub const MAX_DATA_PAYLOAD: usize = rete_core::ENCRYPTED_MDU;
 
 /// Interface identifier carried across the synchronous ingest boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -42,6 +49,147 @@ pub enum TxTarget {
     Only(InterfaceId),
     /// Send on every eligible interface except the triggering interface.
     AllExcept(InterfaceId),
+}
+
+/// Stable product-owned identifier for one packet delivery receipt.
+///
+/// The complete hash is retained so cancellation and terminal correlation do
+/// not depend on Rete's truncated receipt-table key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ReceiptId([u8; 32]);
+
+impl ReceiptId {
+    fn from_native(receipt: ReceiptToken) -> Self {
+        Self(*receipt.packet_hash())
+    }
+
+    /// Complete packet hash covered by the delivery proof.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Product-owned class of delivery receipt reaching a terminal state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptKind {
+    /// Receipt for an outbound destination-DATA packet.
+    Data,
+    /// Receipt for an outbound reliable channel message.
+    Channel,
+}
+
+/// Exact delivery receipt presented before native receipt state is mutated.
+///
+/// The complete receipt ID and its class let a bounded application sink
+/// reserve the correct submission record without depending on Rete types or
+/// its truncated receipt-table keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceiptCandidate {
+    kind: ReceiptKind,
+    receipt: ReceiptId,
+}
+
+impl ReceiptCandidate {
+    fn from_native(candidate: rete_stack::ReceiptCandidate) -> Self {
+        let kind = match candidate.kind {
+            rete_stack::ReceiptKind::Data => ReceiptKind::Data,
+            rete_stack::ReceiptKind::Channel => ReceiptKind::Channel,
+        };
+        Self {
+            kind,
+            receipt: ReceiptId(candidate.packet_hash),
+        }
+    }
+
+    /// Class of receipt that may become terminal.
+    pub const fn kind(self) -> ReceiptKind {
+        self.kind
+    }
+
+    /// Complete packet hash identifying the receipt.
+    pub const fn receipt(self) -> ReceiptId {
+        self.receipt
+    }
+}
+
+/// Delivery outcome committed after native proof validation or timeout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptTerminal {
+    /// A valid proof covered the reserved receipt candidate.
+    Delivered(ReceiptCandidate),
+    /// A destination-DATA receipt expired without a valid proof.
+    TimedOut(ReceiptCandidate),
+}
+
+impl ReceiptTerminal {
+    /// Candidate whose state became terminal.
+    pub const fn candidate(self) -> ReceiptCandidate {
+        match self {
+            Self::Delivered(candidate) | Self::TimedOut(candidate) => candidate,
+        }
+    }
+}
+
+/// A terminal sink could not reserve an infallible commit slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceiptReservationUnavailable;
+
+impl core::fmt::Display for ReceiptReservationUnavailable {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("receipt terminal reservation unavailable")
+    }
+}
+
+/// One product-owned terminal slot reserved before native receipt mutation.
+pub trait ReceiptTerminalReservation {
+    /// Commit a terminal outcome without allocation or failure.
+    fn commit(self, terminal: ReceiptTerminal);
+}
+
+/// Reservable product-owned destination for receipt terminal outcomes.
+///
+/// A successful reservation must make its later commit infallible. Dropping
+/// an unused reservation (for example after an invalid proof) must release it.
+pub trait ReceiptTerminalSink {
+    /// Reservation borrowing this sink until commit or drop.
+    type Reservation<'a>: ReceiptTerminalReservation
+    where
+        Self: 'a;
+
+    /// Reserve capacity for one exact candidate before Rete mutates it.
+    fn try_reserve(
+        &mut self,
+        candidate: ReceiptCandidate,
+    ) -> Result<Self::Reservation<'_>, ReceiptReservationUnavailable>;
+}
+
+/// Scalar metadata for encrypted DATA prepared into caller-owned storage.
+///
+/// The packet bytes remain in the caller's exact-size output buffer. Returning
+/// only Copy metadata ends Rete's temporary borrow before the caller commits
+/// its already-reserved outbox slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreparedData {
+    packet_len: u16,
+    target: TxTarget,
+    receipt: ReceiptId,
+}
+
+impl PreparedData {
+    /// Number of complete Reticulum packet bytes written to the output slot.
+    pub const fn packet_len(self) -> u16 {
+        self.packet_len
+    }
+
+    /// Interfaces on which this packet may be transmitted.
+    pub const fn target(self) -> TxTarget {
+        self.target
+    }
+
+    /// Receipt committed transactionally with the packet.
+    pub const fn receipt(self) -> ReceiptId {
+        self.receipt
+    }
 }
 
 /// Owned packet emitted by the protocol core for an interface actor.
@@ -299,6 +447,14 @@ pub struct AdmissionCounters {
     pub link_payload_too_large: u64,
 }
 
+/// Monotonic counters for the bounded receipt-terminal handoff.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReceiptTerminalCounters {
+    /// Proof or timeout processing deferred because the sink could not reserve
+    /// an infallible terminal slot.
+    pub reservation_backpressure: u64,
+}
+
 /// Allocation-free copy of Rete's cumulative transport counters.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TransportCounters {
@@ -361,8 +517,22 @@ pub struct RouteSnapshot {
 pub struct EmbeddedNodeMetrics {
     pub ingress: IngressCounters,
     pub admission: AdmissionCounters,
+    pub receipt_terminals: ReceiptTerminalCounters,
     pub transport: TransportCounters,
     pub capacity: HeaplessCapacitySnapshot,
+}
+
+/// Result of timer maintenance using a bounded receipt-terminal sink.
+#[derive(Debug)]
+#[must_use = "receipt terminal notifications may have been deferred"]
+pub struct ReceiptTickReport {
+    /// Ordinary events and resolved outbound packets produced by maintenance.
+    pub actions: NodeActions,
+    /// Number of destination-DATA timeouts committed to the supplied sink.
+    pub timed_out_receipts: usize,
+    /// At least one expired receipt remains pending because no slot was
+    /// available. The caller must retry maintenance after draining the sink.
+    pub receipt_terminals_deferred: bool,
 }
 
 /// Failure to queue a local announce through the owning runtime.
@@ -409,6 +579,48 @@ impl From<rete_core::Error> for DestinationRegistrationError {
     }
 }
 
+/// Failure to prepare destination DATA into caller-owned packet storage.
+///
+/// This deliberately flattens native error payloads so the firmware-facing
+/// transaction does not expose Rete types as part of its public contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrepareDataError {
+    /// Plaintext cannot fit in one encrypted base-MTU DATA packet.
+    PayloadTooLarge { actual: usize, maximum: usize },
+    /// No cached identity exists for the destination.
+    UnknownDestination,
+    /// The bounded DATA receipt table cannot retain another attempt.
+    ReceiptTableFull { limit: usize },
+    /// A still-live receipt already uses the generated packet hash.
+    ReceiptHashAlreadyTracked,
+    /// Destination encryption failed.
+    Crypto,
+    /// Rete could not build or parse the base-MTU packet.
+    PacketBuild,
+    /// Rete returned an error class that is impossible for this operation.
+    Invariant,
+}
+
+impl core::fmt::Display for PrepareDataError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::PayloadTooLarge { actual, maximum } => {
+                write!(f, "destination DATA length {actual} exceeds {maximum}")
+            }
+            Self::UnknownDestination => write!(f, "destination identity is unknown"),
+            Self::ReceiptTableFull { limit } => {
+                write!(f, "delivery receipt table is full (limit {limit})")
+            }
+            Self::ReceiptHashAlreadyTracked => {
+                write!(f, "delivery receipt hash is already tracked")
+            }
+            Self::Crypto => write!(f, "destination DATA encryption failed"),
+            Self::PacketBuild => write!(f, "destination DATA packet construction failed"),
+            Self::Invariant => write!(f, "unexpected native destination DATA failure"),
+        }
+    }
+}
+
 /// Failure to emit data whose delivery state must be retained locally.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmbeddedSendError {
@@ -449,6 +661,84 @@ impl From<SendError> for EmbeddedSendError {
     }
 }
 
+struct IngressPreflight {
+    inbound_link_id: Option<LinkId>,
+    before_duplicate: u64,
+    before_invalid: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct TerminalCommitCounts {
+    delivered: usize,
+    timed_out: usize,
+}
+
+struct NativeReceiptSink<'a, S> {
+    sink: &'a mut S,
+    committed: TerminalCommitCounts,
+}
+
+impl<'a, S> NativeReceiptSink<'a, S> {
+    fn new(sink: &'a mut S) -> Self {
+        Self {
+            sink,
+            committed: TerminalCommitCounts::default(),
+        }
+    }
+}
+
+struct NativeReceiptReservation<'a, R> {
+    reservation: R,
+    candidate: ReceiptCandidate,
+    committed: &'a mut TerminalCommitCounts,
+}
+
+impl<S: ReceiptTerminalSink> rete_stack::ReceiptTerminalSink for NativeReceiptSink<'_, S> {
+    type Reservation<'a>
+        = NativeReceiptReservation<'a, S::Reservation<'a>>
+    where
+        Self: 'a;
+
+    fn try_reserve(
+        &mut self,
+        candidate: rete_stack::ReceiptCandidate,
+    ) -> Result<Self::Reservation<'_>, rete_stack::ReceiptSinkFull> {
+        let candidate = ReceiptCandidate::from_native(candidate);
+        let reservation = self
+            .sink
+            .try_reserve(candidate)
+            .map_err(|ReceiptReservationUnavailable| rete_stack::ReceiptSinkFull)?;
+        Ok(NativeReceiptReservation {
+            reservation,
+            candidate,
+            committed: &mut self.committed,
+        })
+    }
+}
+
+impl<R: ReceiptTerminalReservation> rete_stack::ReceiptTerminalReservation
+    for NativeReceiptReservation<'_, R>
+{
+    fn commit(self, terminal: rete_stack::ReceiptTerminal) {
+        assert_eq!(
+            terminal.packet_hash(),
+            self.candidate.receipt().as_bytes(),
+            "Rete committed a receipt terminal for a different candidate"
+        );
+        let terminal = match terminal {
+            rete_stack::ReceiptTerminal::Delivered(_) => {
+                self.committed.delivered = self.committed.delivered.saturating_add(1);
+                ReceiptTerminal::Delivered(self.candidate)
+            }
+            rete_stack::ReceiptTerminal::Failed(_) => {
+                self.committed.timed_out = self.committed.timed_out.saturating_add(1);
+                ReceiptTerminal::TimedOut(self.candidate)
+            }
+        };
+        self.reservation.commit(terminal);
+    }
+}
+
 /// Rete node whose mutable core and transport cannot escape into firmware.
 pub struct EmbeddedNode<
     const PATHS: usize,
@@ -462,6 +752,7 @@ pub struct EmbeddedNode<
     additional_destinations: usize,
     ingress: IngressCounters,
     admission: AdmissionCounters,
+    receipt_terminals: ReceiptTerminalCounters,
 }
 
 impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, const LINKS: usize>
@@ -486,6 +777,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             additional_destinations: 0,
             ingress: IngressCounters::default(),
             admission: AdmissionCounters::default(),
+            receipt_terminals: ReceiptTerminalCounters::default(),
         })
     }
     /// Primary destination hash.
@@ -566,6 +858,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         EmbeddedNodeMetrics {
             ingress: self.ingress,
             admission: self.admission,
+            receipt_terminals: self.receipt_terminals,
             transport: self.core.transport.stats().into(),
             capacity: heapless_capacity_snapshot(&self.core),
         }
@@ -579,48 +872,112 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         interface: InterfaceId,
         rng: &mut R,
     ) -> IngressReport {
+        let preflight = match self.preflight_ingest(raw) {
+            Ok(preflight) => preflight,
+            Err(report) => return report,
+        };
+        let native = self.core.handle_ingest(raw, now, interface.0, rng);
+        self.finish_ingest(native, preflight, interface, 0)
+    }
+
+    /// Process one complete base-MTU packet with allocation-atomic receipt
+    /// terminal delivery.
+    ///
+    /// Proofs for outstanding DATA or channel receipts reserve the exact
+    /// product-owned terminal candidate before Rete mutates receipt or
+    /// deduplication state. If reservation is unavailable, the caller must
+    /// retain and retry the packet. Invalid proofs drop their unused
+    /// reservation and leave the receipt outstanding.
+    pub fn ingest_with_receipt_sink<R, S>(
+        &mut self,
+        raw: &[u8],
+        now: u64,
+        interface: InterfaceId,
+        rng: &mut R,
+        sink: &mut S,
+    ) -> Result<IngressReport, ReceiptReservationUnavailable>
+    where
+        R: RngCore + CryptoRng,
+        S: ReceiptTerminalSink,
+    {
+        let preflight = match self.preflight_ingest(raw) {
+            Ok(preflight) => preflight,
+            Err(report) => return Ok(report),
+        };
+        let mut native_sink = NativeReceiptSink::new(sink);
+        let native = match self.core.handle_ingest_with_receipt_sink(
+            raw,
+            now,
+            interface.0,
+            rng,
+            &mut native_sink,
+        ) {
+            Ok(native) => native,
+            Err(rete_stack::ReceiptSinkFull) => {
+                self.receipt_terminals.reservation_backpressure = self
+                    .receipt_terminals
+                    .reservation_backpressure
+                    .saturating_add(1);
+                return Err(ReceiptReservationUnavailable);
+            }
+        };
+        let committed = native_sink.committed.delivered + native_sink.committed.timed_out;
+        Ok(self.finish_ingest(native, preflight, interface, committed))
+    }
+
+    fn preflight_ingest(&mut self, raw: &[u8]) -> Result<IngressPreflight, IngressReport> {
         self.ingress.seen = self.ingress.seen.saturating_add(1);
 
         if raw.len() > rete_core::MTU {
-            return self.reject(IngressDropReason::PacketTooLong {
+            return Err(self.reject(IngressDropReason::PacketTooLong {
                 actual: raw.len(),
                 maximum: rete_core::MTU,
-            });
+            }));
         }
 
         let packet = match Packet::parse(raw) {
             Ok(packet) => packet,
-            Err(error) => return self.reject(IngressDropReason::Malformed(error)),
+            Err(error) => return Err(self.reject(IngressDropReason::Malformed(error))),
         };
 
         if packet.dest_type == DestType::Link && is_resource_context(packet.context) {
-            return self.reject(IngressDropReason::ResourceIngressDisabled {
+            return Err(self.reject(IngressDropReason::ResourceIngressDisabled {
                 context: packet.context,
-            });
+            }));
         }
 
         if let Err(reason) = self.preflight_header2(&packet) {
-            return self.reject(reason);
+            return Err(self.reject(reason));
         }
 
         if let Err(reason) = self.preflight_h1_reverse_admission(&packet) {
-            return self.reject(reason);
+            return Err(self.reject(reason));
         }
 
         let inbound_link_id = if packet.packet_type == PacketType::LinkRequest {
             match self.preflight_link_request(&packet, raw) {
                 Ok(link_id) => link_id,
-                Err(reason) => return self.reject(reason),
+                Err(reason) => return Err(self.reject(reason)),
             }
         } else {
             None
         };
 
-        let before_duplicate = self.core.transport.stats().packets_dropped_dedup;
-        let before_invalid = self.core.transport.stats().packets_dropped_invalid;
-        let mut native = self.core.handle_ingest(raw, now, interface.0, rng);
+        Ok(IngressPreflight {
+            inbound_link_id,
+            before_duplicate: self.core.transport.stats().packets_dropped_dedup,
+            before_invalid: self.core.transport.stats().packets_dropped_invalid,
+        })
+    }
 
-        if let Some(link_id) = inbound_link_id {
+    fn finish_ingest(
+        &mut self,
+        mut native: IngestOutcome,
+        preflight: IngressPreflight,
+        interface: InterfaceId,
+        terminal_commits: usize,
+    ) -> IngressReport {
+        if let Some(link_id) = preflight.inbound_link_id {
             let announced_establishment = native.events.iter().any(|event| {
                 matches!(event, NodeEvent::LinkEstablished { link_id: event_id } if *event_id == link_id)
             });
@@ -661,13 +1018,13 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
 
         self.ingress.admitted = self.ingress.admitted.saturating_add(1);
         let after = self.core.transport.stats();
-        let disposition = if after.packets_dropped_dedup > before_duplicate {
+        let disposition = if after.packets_dropped_dedup > preflight.before_duplicate {
             self.ingress.native_duplicate = self.ingress.native_duplicate.saturating_add(1);
             IngressDisposition::NativeDuplicate
-        } else if after.packets_dropped_invalid > before_invalid {
+        } else if after.packets_dropped_invalid > preflight.before_invalid {
             self.ingress.native_invalid = self.ingress.native_invalid.saturating_add(1);
             IngressDisposition::NativeInvalid
-        } else if native.events.is_empty() && native.packets.is_empty() {
+        } else if native.events.is_empty() && native.packets.is_empty() && terminal_commits == 0 {
             self.ingress.native_no_outcome = self.ingress.native_no_outcome.saturating_add(1);
             IngressDisposition::NoObservableOutcome
         } else {
@@ -900,8 +1257,78 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         }
     }
 
+    /// Prepare encrypted destination DATA directly into caller-reserved
+    /// storage and transactionally retain its delivery receipt.
+    ///
+    /// Callers should reserve their final outbox slot before invoking this
+    /// method. On success the returned bytes already live in that slot and the
+    /// returned receipt can be cancelled or correlated without exposing Rete
+    /// types. On failure no receipt is retained.
+    pub fn prepare_data_into<R: RngCore + CryptoRng>(
+        &mut self,
+        destination: &DestHash,
+        plaintext: &[u8],
+        now: u64,
+        rng: &mut R,
+        output: &mut [u8; RNS_MTU],
+    ) -> Result<PreparedData, PrepareDataError> {
+        if plaintext.len() > MAX_DATA_PAYLOAD {
+            self.admission.data_payload_too_large =
+                self.admission.data_payload_too_large.saturating_add(1);
+            return Err(PrepareDataError::PayloadTooLarge {
+                actual: plaintext.len(),
+                maximum: MAX_DATA_PAYLOAD,
+            });
+        }
+        if self.core.transport.receipt_count() >= PATHS {
+            self.admission.receipt_table_full = self.admission.receipt_table_full.saturating_add(1);
+            return Err(PrepareDataError::ReceiptTableFull { limit: PATHS });
+        }
+
+        let prepared = self
+            .core
+            .prepare_data_packet_into(destination, plaintext, rng, now, output)
+            .map_err(|error| match error {
+                SendError::UnknownDestination => PrepareDataError::UnknownDestination,
+                SendError::ReceiptTableFull => {
+                    self.admission.receipt_table_full =
+                        self.admission.receipt_table_full.saturating_add(1);
+                    PrepareDataError::ReceiptTableFull { limit: PATHS }
+                }
+                SendError::ReceiptHashAlreadyTracked => PrepareDataError::ReceiptHashAlreadyTracked,
+                SendError::Crypto(_) => PrepareDataError::Crypto,
+                SendError::PacketBuild(_) => PrepareDataError::PacketBuild,
+                SendError::LinkAlreadyExists
+                | SendError::LinkTableFull
+                | SendError::LinkNotFound
+                | SendError::LinkNotActive
+                | SendError::WindowFull
+                | SendError::OutputAllocationFailed
+                | SendError::ResourceLimit => PrepareDataError::Invariant,
+            })?;
+        Ok(PreparedData {
+            packet_len: prepared.data.len() as u16,
+            target: TxTarget::All,
+            receipt: ReceiptId::from_native(prepared.receipt),
+        })
+    }
+
+    /// Cancel an outstanding destination-DATA receipt by its complete packet
+    /// hash.
+    ///
+    /// Cancellation is appropriate whenever a higher-level transaction no
+    /// longer needs proof correlation, including a packet proven unsent or a
+    /// redundant retry superseded by a sibling proof.
+    pub fn cancel_data_receipt(&mut self, receipt: ReceiptId) -> bool {
+        self.core.transport.cancel_receipt(receipt.as_bytes())
+    }
+
     /// Build encrypted destination DATA only when its delivery receipt can be
     /// retained.
+    ///
+    /// This allocation-backed compatibility method does not return the
+    /// receipt token. New firmware code should reserve its final queue slot and
+    /// call [`Self::prepare_data_into`].
     pub fn send_data<R: RngCore + CryptoRng>(
         &mut self,
         destination: &DestHash,
@@ -909,12 +1336,12 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         now: u64,
         rng: &mut R,
     ) -> Result<TxPacket, EmbeddedSendError> {
-        if plaintext.len() > rete_core::ENCRYPTED_MDU {
+        if plaintext.len() > MAX_DATA_PAYLOAD {
             self.admission.data_payload_too_large =
                 self.admission.data_payload_too_large.saturating_add(1);
             return Err(EmbeddedSendError::DataPayloadTooLarge {
                 actual: plaintext.len(),
-                maximum: rete_core::ENCRYPTED_MDU,
+                maximum: MAX_DATA_PAYLOAD,
             });
         }
         if self.core.transport.receipt_count() >= PATHS {
@@ -1070,6 +1497,43 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
     /// than guessed onto an interface.
     pub fn tick<R: RngCore + CryptoRng>(&mut self, now: u64, rng: &mut R) -> NodeActions {
         let native = self.core.handle_tick(now, rng);
+        self.finish_tick(native)
+    }
+
+    /// Run timer maintenance with allocation-atomic DATA timeout delivery.
+    ///
+    /// If the sink cannot reserve a candidate, that receipt remains
+    /// outstanding and [`ReceiptTickReport::receipt_terminals_deferred`] asks
+    /// the caller to retry after draining terminal capacity.
+    pub fn tick_with_receipt_sink<R, S>(
+        &mut self,
+        now: u64,
+        rng: &mut R,
+        sink: &mut S,
+    ) -> ReceiptTickReport
+    where
+        R: RngCore + CryptoRng,
+        S: ReceiptTerminalSink,
+    {
+        let mut native_sink = NativeReceiptSink::new(sink);
+        let native = self
+            .core
+            .handle_tick_with_receipt_sink(now, rng, &mut native_sink);
+        debug_assert_eq!(native.failed_receipts, native_sink.committed.timed_out);
+        if native.receipt_notifications_deferred {
+            self.receipt_terminals.reservation_backpressure = self
+                .receipt_terminals
+                .reservation_backpressure
+                .saturating_add(1);
+        }
+        ReceiptTickReport {
+            actions: self.finish_tick(native.outcome),
+            timed_out_receipts: native.failed_receipts,
+            receipt_terminals_deferred: native.receipt_notifications_deferred,
+        }
+    }
+
+    fn finish_tick(&mut self, native: IngestOutcome) -> NodeActions {
         let actions = resolve_tick_actions(native);
         self.ingress.routing_invariant_drops = self
             .ingress
@@ -1178,6 +1642,56 @@ mod tests {
     }
 
     impl CryptoRng for CounterRng {}
+
+    #[derive(Default)]
+    struct RecordingReceiptSink {
+        refuse: bool,
+        attempted: Vec<ReceiptCandidate>,
+        terminals: Vec<ReceiptTerminal>,
+        active_reservations: usize,
+    }
+
+    struct RecordingReceiptReservation<'a> {
+        candidate: ReceiptCandidate,
+        terminals: &'a mut Vec<ReceiptTerminal>,
+        active_reservations: &'a mut usize,
+    }
+
+    impl ReceiptTerminalSink for RecordingReceiptSink {
+        type Reservation<'a>
+            = RecordingReceiptReservation<'a>
+        where
+            Self: 'a;
+
+        fn try_reserve(
+            &mut self,
+            candidate: ReceiptCandidate,
+        ) -> Result<Self::Reservation<'_>, ReceiptReservationUnavailable> {
+            self.attempted.push(candidate);
+            if self.refuse {
+                return Err(ReceiptReservationUnavailable);
+            }
+            self.active_reservations += 1;
+            Ok(RecordingReceiptReservation {
+                candidate,
+                terminals: &mut self.terminals,
+                active_reservations: &mut self.active_reservations,
+            })
+        }
+    }
+
+    impl ReceiptTerminalReservation for RecordingReceiptReservation<'_> {
+        fn commit(self, terminal: ReceiptTerminal) {
+            assert_eq!(terminal.candidate(), self.candidate);
+            self.terminals.push(terminal);
+        }
+    }
+
+    impl Drop for RecordingReceiptReservation<'_> {
+        fn drop(&mut self) {
+            *self.active_reservations -= 1;
+        }
+    }
 
     type TestNode = EmbeddedNode<4, 2, 8, 2>;
     type TwoLinkNode = EmbeddedNode<4, 2, 8, 2>;
@@ -1773,6 +2287,247 @@ mod tests {
             })
         );
         assert_eq!(sender.metrics().admission.data_payload_too_large, 1);
+    }
+
+    #[test]
+    fn caller_owned_data_preparation_returns_scalar_metadata_and_can_cancel() {
+        type ReceiptNode = EmbeddedNode<2, 2, 8, 2>;
+        let mut sender = ReceiptNode::new(
+            identity(80),
+            "reticulum",
+            &["sender"],
+            EmbeddedNodeConfig::endpoint(),
+        )
+        .unwrap();
+        let receiver = ReceiptNode::new(
+            identity(81),
+            "reticulum",
+            &["receiver"],
+            EmbeddedNodeConfig::endpoint(),
+        )
+        .unwrap();
+        sender
+            .register_peer(&identity(81), "reticulum", &["receiver"], 0)
+            .unwrap();
+
+        let mut rng = CounterRng::default();
+        let mut output = [0u8; RNS_MTU];
+        let prepared = sender
+            .prepare_data_into(
+                &receiver.destination_hash(),
+                b"caller-owned",
+                1,
+                &mut rng,
+                &mut output,
+            )
+            .unwrap();
+
+        let packet = Packet::parse(&output[..usize::from(prepared.packet_len())]).unwrap();
+        assert_eq!(&packet.compute_hash(), prepared.receipt().as_bytes());
+        assert_eq!(prepared.target(), TxTarget::All);
+        assert_eq!(sender.metrics().capacity.receipts.used, 1);
+
+        assert!(sender.cancel_data_receipt(prepared.receipt()));
+        assert!(!sender.cancel_data_receipt(prepared.receipt()));
+        assert_eq!(sender.metrics().capacity.receipts.used, 0);
+    }
+
+    #[test]
+    fn receipt_sink_preserves_full_data_candidate_and_proof_retry_state() {
+        let mut sender = node(84);
+        let receiver = node(85);
+        sender
+            .register_peer(&identity(85), "reticulum", &["embedded"], 100)
+            .unwrap();
+        let mut rng = CounterRng::default();
+        let mut output = [0u8; RNS_MTU];
+        let prepared = sender
+            .prepare_data_into(
+                &receiver.destination_hash(),
+                b"terminal bridge",
+                100,
+                &mut rng,
+                &mut output,
+            )
+            .unwrap();
+        let proof = rete_transport::Transport::<
+            rete_transport::HeaplessStorage<4, 2, 8, 2>,
+        >::build_proof_packet(&identity(85), prepared.receipt().as_bytes())
+        .unwrap();
+        let expected = ReceiptCandidate {
+            kind: ReceiptKind::Data,
+            receipt: prepared.receipt(),
+        };
+
+        let mut invalid_proof = proof.clone();
+        *invalid_proof.last_mut().unwrap() ^= 0xff;
+        let mut sink = RecordingReceiptSink::default();
+        let invalid = sender
+            .ingest_with_receipt_sink(&invalid_proof, 101, InterfaceId(1), &mut rng, &mut sink)
+            .unwrap();
+        assert_eq!(invalid.disposition, IngressDisposition::NoObservableOutcome);
+        assert_eq!(sink.attempted, [expected]);
+        assert!(sink.terminals.is_empty());
+        assert_eq!(sink.active_reservations, 0);
+        assert_eq!(sender.metrics().capacity.receipts.used, 1);
+
+        sink.refuse = true;
+        let transport_before_refusal = sender.metrics().transport;
+        assert!(matches!(
+            sender.ingest_with_receipt_sink(&proof, 102, InterfaceId(1), &mut rng, &mut sink,),
+            Err(ReceiptReservationUnavailable)
+        ));
+        assert_eq!(sender.metrics().transport, transport_before_refusal);
+        assert_eq!(sender.metrics().capacity.receipts.used, 1);
+        assert_eq!(
+            sender.metrics().receipt_terminals.reservation_backpressure,
+            1
+        );
+
+        sink.refuse = false;
+        let delivered = sender
+            .ingest_with_receipt_sink(&proof, 103, InterfaceId(1), &mut rng, &mut sink)
+            .unwrap();
+        assert_eq!(delivered.disposition, IngressDisposition::Processed);
+        assert!(delivered.actions.events.is_empty());
+        assert_eq!(sink.attempted, [expected, expected, expected]);
+        assert_eq!(sink.terminals, [ReceiptTerminal::Delivered(expected)]);
+        assert_eq!(sink.active_reservations, 0);
+        assert_eq!(sender.metrics().capacity.receipts.used, 0);
+    }
+
+    #[test]
+    fn receipt_timeout_defers_until_product_sink_can_reserve() {
+        let mut sender = node(86);
+        let receiver = node(87);
+        sender
+            .register_peer(&identity(87), "reticulum", &["embedded"], 100)
+            .unwrap();
+        let mut rng = CounterRng::default();
+        let mut output = [0u8; RNS_MTU];
+        let prepared = sender
+            .prepare_data_into(
+                &receiver.destination_hash(),
+                b"eventual timeout",
+                100,
+                &mut rng,
+                &mut output,
+            )
+            .unwrap();
+        let expected = ReceiptCandidate {
+            kind: ReceiptKind::Data,
+            receipt: prepared.receipt(),
+        };
+        let mut sink = RecordingReceiptSink {
+            refuse: true,
+            ..RecordingReceiptSink::default()
+        };
+
+        let deferred = sender.tick_with_receipt_sink(131, &mut rng, &mut sink);
+        assert_eq!(deferred.timed_out_receipts, 0);
+        assert!(deferred.receipt_terminals_deferred);
+        assert_eq!(sink.attempted, [expected]);
+        assert!(sink.terminals.is_empty());
+        assert_eq!(sender.metrics().capacity.receipts.used, 1);
+        assert_eq!(
+            sender.metrics().receipt_terminals.reservation_backpressure,
+            1
+        );
+
+        sink.refuse = false;
+        let completed = sender.tick_with_receipt_sink(132, &mut rng, &mut sink);
+        assert_eq!(completed.timed_out_receipts, 1);
+        assert!(!completed.receipt_terminals_deferred);
+        assert!(
+            completed
+                .actions
+                .events
+                .iter()
+                .all(|event| !matches!(event, NodeEvent::ReceiptFailed { .. }))
+        );
+        assert_eq!(sink.attempted, [expected, expected]);
+        assert_eq!(sink.terminals, [ReceiptTerminal::TimedOut(expected)]);
+        assert_eq!(sink.active_reservations, 0);
+        assert_eq!(sender.metrics().capacity.receipts.used, 0);
+    }
+
+    #[test]
+    fn receipt_sink_maps_channel_proof_candidate_without_native_types() {
+        let mut initiator = node(1);
+        let mut responder = node(2);
+        let mut rng = CounterRng::default();
+        let (request, link_id) = link_request(&mut initiator, &responder, &mut rng);
+        let response = responder.ingest(request.bytes(), 100, InterfaceId(1), &mut rng);
+        let established = initiator.ingest(
+            response.actions.packets[0].bytes(),
+            101,
+            InterfaceId(2),
+            &mut rng,
+        );
+        responder.ingest(
+            established.actions.packets[0].bytes(),
+            102,
+            InterfaceId(1),
+            &mut rng,
+        );
+
+        let message = initiator
+            .send_channel_message(&link_id, 7, b"bounded channel proof", 110, &mut rng)
+            .unwrap();
+        let receipt = ReceiptId(Packet::parse(message.bytes()).unwrap().compute_hash());
+        let proof_actions = responder.ingest(message.bytes(), 110, InterfaceId(1), &mut rng);
+        let proof = proof_actions
+            .actions
+            .packets
+            .iter()
+            .find(|packet| {
+                Packet::parse(packet.bytes())
+                    .is_ok_and(|packet| packet.packet_type == PacketType::Proof)
+            })
+            .unwrap();
+        let mut sink = RecordingReceiptSink::default();
+
+        let report = initiator
+            .ingest_with_receipt_sink(proof.bytes(), 111, InterfaceId(2), &mut rng, &mut sink)
+            .unwrap();
+        let expected = ReceiptCandidate {
+            kind: ReceiptKind::Channel,
+            receipt,
+        };
+        assert_eq!(report.disposition, IngressDisposition::Processed);
+        assert_eq!(sink.attempted, [expected]);
+        assert_eq!(sink.terminals, [ReceiptTerminal::Delivered(expected)]);
+        assert_eq!(initiator.metrics().capacity.channel_receipts.used, 0);
+    }
+
+    #[test]
+    fn caller_owned_data_preflight_rejects_before_entropy_or_receipt_mutation() {
+        let mut sender = node(82);
+        let receiver = node(83);
+        sender
+            .register_peer(&identity(83), "reticulum", &["embedded"], 0)
+            .unwrap();
+        let mut rng = CounterRng::default();
+        let rng_before = rng.0;
+        let mut output = [0xA5; RNS_MTU];
+        let oversized = [0x5A; MAX_DATA_PAYLOAD + 1];
+
+        assert_eq!(
+            sender.prepare_data_into(
+                &receiver.destination_hash(),
+                &oversized,
+                1,
+                &mut rng,
+                &mut output,
+            ),
+            Err(PrepareDataError::PayloadTooLarge {
+                actual: MAX_DATA_PAYLOAD + 1,
+                maximum: MAX_DATA_PAYLOAD,
+            })
+        );
+        assert_eq!(rng.0, rng_before);
+        assert!(output.iter().all(|byte| *byte == 0xA5));
+        assert_eq!(sender.metrics().capacity.receipts.used, 0);
     }
 
     #[test]

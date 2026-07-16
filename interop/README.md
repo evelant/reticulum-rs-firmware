@@ -72,7 +72,10 @@ Darwin's TTY control path requires that mode, but the recorder makes no serial
 write call or host-input read. POSIX cannot set CDC line controls before
 `open(2)`, and opening the Tracker's native USB can reset the ESP32-S3. The tool
 does not follow re-enumeration, since the path could then name another attached
-Tracker. It is suitable for a new USB-reset boot and heartbeat capture, but not
-for proving a preceding cold-power-on boot. Follow the independent RX-only
-UART0 procedure in the Phase-1 HIL runbook whenever the reset reason or
-complete multi-reset sequence is evidence-critical.
+Tracker. Opening does not guarantee a reset: a capture can attach to an already
+running activation, start in the middle of a buffered record and omit the boot
+lines. It is suitable for supplemental post-boot heartbeats or for a documented
+reset issued only after the recorder is armed, but not for proving a preceding
+cold-power-on boot. Follow the independent RX-only UART0 procedure in the
+Phase-1 HIL runbook whenever the reset reason or complete multi-reset sequence
+is evidence-critical.

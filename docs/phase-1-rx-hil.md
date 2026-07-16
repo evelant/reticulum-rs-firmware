@@ -504,21 +504,22 @@ through IORegistry without opening or resetting either board:
 
 ```sh
 export TRACKER_USB_SERIAL=44:1B:F6:F8:E9:44
-export ESPFLASH_PORT="$(
+map_tracker_port() {
   ioreg -r -c IOUSBHostDevice -l -w0 |
   awk -v target="$TRACKER_USB_SERIAL" '
     /"kUSBSerialNumberString" = / {
       wanted = index($0, "\"" target "\"") != 0
     }
-    wanted && /"IOCalloutDevice" = / {
+    wanted && /"IOCalloutDevice" = / && !emitted {
       line = $0
       sub(/^.*"IOCalloutDevice" = "/, "", line)
       sub(/".*$/, "", line)
       print line
-      exit
+      emitted = 1
     }
   '
-)"
+}
+export ESPFLASH_PORT="$(map_tracker_port)"
 test -n "$ESPFLASH_PORT"
 test -c "$ESPFLASH_PORT"
 printf 'usb_serial=%s port=%s\n' "$TRACKER_USB_SERIAL" "$ESPFLASH_PORT"
@@ -526,7 +527,10 @@ printf 'usb_serial=%s port=%s\n' "$TRACKER_USB_SERIAL" "$ESPFLASH_PORT"
 
 On Linux, use the matching `/dev/serial/by-id/` entry. Record the mapping and
 repeat this non-opening lookup after every re-enumeration; do not use a ROM
-connection command merely to discover the MAC.
+connection command merely to discover the MAC. The macOS mapper deliberately
+consumes the complete IORegistry stream instead of exiting `awk` after the
+match: an early exit sends `SIGPIPE` to `ioreg` and aborts a shell running with
+`pipefail` before any flash operation begins.
 
 Qualification must flash the preserved, hash-checked merged image. Do not use
 `cargo run` or `espflash flash`: either can regenerate or select bytes other
@@ -536,7 +540,8 @@ than the preserved image.
 set -euo pipefail
 normal_artifact="$hil_bundle"
 normal_run="$run/captures/normal"
-mkdir -p "$normal_run"
+test ! -e "$normal_run"
+mkdir "$normal_run"
 cargo run --locked -p xtask -- phase1-rx-hil-artifacts verify \
   --bundle "$hil_bundle"
 (cd "$normal_artifact" && shasum -a 256 -c firmware.sha256)
@@ -545,16 +550,34 @@ test "$(cat "$normal_artifact/flash-image-address.txt")" = 0x00000000
 test "$(cat "$normal_artifact/flash-image-bytes.txt")" = \
   "$(wc -c < "$normal_artifact/flash-image.bin" | tr -d ' ')"
 
+export ESPFLASH_PORT="$(map_tracker_port)"
+test -n "$ESPFLASH_PORT"
+test -c "$ESPFLASH_PORT"
+printf 'usb_serial=%s port=%s\n' "$TRACKER_USB_SERIAL" "$ESPFLASH_PORT" \
+  > "$normal_run/flash-board-port-map.txt"
 espflash write-bin \
   --port "$ESPFLASH_PORT" \
   --chip esp32s3 \
   --non-interactive \
+  --skip-update-check \
+  --baud 115200 \
+  --before default-reset \
+  --after hard-reset \
   0x00000000 "$normal_artifact/flash-image.bin" 2>&1 | tee "$normal_run/flash.log"
 
+export ESPFLASH_PORT="$(map_tracker_port)"
+test -n "$ESPFLASH_PORT"
+test -c "$ESPFLASH_PORT"
+printf 'usb_serial=%s port=%s\n' "$TRACKER_USB_SERIAL" "$ESPFLASH_PORT" \
+  > "$normal_run/readback-board-port-map.txt"
 espflash read-flash \
   --port "$ESPFLASH_PORT" \
   --chip esp32s3 \
   --non-interactive \
+  --skip-update-check \
+  --baud 115200 \
+  --before default-reset \
+  --after hard-reset \
   0x00000000 "$(cat "$normal_artifact/flash-image-bytes.txt")" \
   "$normal_run/flash-readback.bin" 2>&1 | tee "$normal_run/readback.log"
 cmp "$normal_artifact/flash-image.bin" "$normal_run/flash-readback.bin"
@@ -565,6 +588,10 @@ shasum -a 256 "$normal_run/flash-readback.bin" \
 The exact merged image and equal readback make the bootloader and partition
 bytes part of the evidence, which matters when judging ROM/boot pin
 transients. Record both digests, the byte count and address in the manifest.
+The explicit hard reset after each normal-image operation is intentional: the
+GPIO and heartbeat checks below require the application to be running. Images
+that must remain inert until a later controlled-power sequence use the
+scenario-specific no-reset procedure instead.
 
 The Tracker's USB connector is the ESP32-S3 native USB Serial/JTAG peripheral,
 not a separate USB/UART bridge. Do not use espflash's monitor subcommand to
@@ -584,7 +611,6 @@ source archive and retain that copy beside its stderr metadata:
 ```sh
 set -euo pipefail
 test -n "${TRACKER_USB_SERIAL:?map the Tracker USB serial before capture}"
-test -c "${ESPFLASH_PORT:?map the Tracker callout path before capture}"
 capture_attempt="$normal_run/serial-attempt-$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir "$capture_attempt"
 capture_source="$capture_attempt/source"
@@ -594,6 +620,18 @@ tar -xf "$normal_artifact/source.tar" \
   interop/python/esp32s3_usb_serial_capture.py
 recorder="$capture_source/interop/python/esp32s3_usb_serial_capture.py"
 shasum -a 256 "$recorder" > "$capture_attempt/serial-recorder.sha256"
+
+probe_selector="303a:1001:$TRACKER_USB_SERIAL"
+probe-rs read --chip esp32s3 --protocol jtag \
+  --probe "$probe_selector" --non-interactive \
+  b32 0x60004004 1 | tee "$capture_attempt/gpio-out-before.txt"
+probe-rs read --chip esp32s3 --protocol jtag \
+  --probe "$probe_selector" --non-interactive \
+  b32 0x60004020 1 | tee "$capture_attempt/gpio-enable-before.txt"
+
+export ESPFLASH_PORT="$(map_tracker_port)"
+test -n "$ESPFLASH_PORT"
+test -c "$ESPFLASH_PORT"
 printf 'usb_serial=%s port=%s\n' "$TRACKER_USB_SERIAL" "$ESPFLASH_PORT" \
   > "$capture_attempt/board-port-map.txt"
 
@@ -607,6 +645,14 @@ recorder_status=$?
 set -e
 printf '%s\n' "$recorder_status" \
   > "$capture_attempt/serial-recorder.exit-status.txt"
+
+probe-rs read --chip esp32s3 --protocol jtag \
+  --probe "$probe_selector" --non-interactive \
+  b32 0x60004004 1 | tee "$capture_attempt/gpio-out-after.txt"
+probe-rs read --chip esp32s3 --protocol jtag \
+  --probe "$probe_selector" --non-interactive \
+  b32 0x60004020 1 | tee "$capture_attempt/gpio-enable-after.txt"
+
 test "$recorder_status" -eq 0
 test -s "$capture_attempt/serial.log"
 rg -F 'completed=true duration_seconds=125.0' \
@@ -619,12 +665,23 @@ together at the first possible ioctl, configures raw 115200 8N1 without flow
 control or `HUPCL`, verifies both controls inactive and never flushes input. It
 is nevertheless **reset-minimizing, not
 passive**: the operating system must open the CDC device before line controls
-can be cleared, and opening native USB is known to reset this board. A capture
-therefore begins a new USB-reset boot and a new ephemeral identity. It cannot
-prove the earlier cold-power-on trace. Map the port to the board's eFuse MAC
-immediately before capture. The recorder exits instead of following USB
-re-enumeration because a `/dev/cu.usbmodem*` path can be reassigned to the other
-Tracker and each reopen can perturb the target again.
+can be cleared, and opening native USB can reset this board. It does not always
+do so: a reset-minimizing open can attach to an already running activation,
+begin in the middle of a buffered log record and omit the boot/activation
+lines. Never infer either a new boot or continuity with the preceding cold boot
+from the open itself. In all cases the capture cannot prove the earlier
+cold-power-on trace. Map the port to the board's eFuse MAC immediately before
+capture. The recorder exits instead of following USB re-enumeration because a
+`/dev/cu.usbmodem*` path can be reassigned to the other Tracker and each reopen
+can perturb the target again.
+
+If a complete boot trace is needed for a normal-image supplemental smoke, arm
+the recorder first and only after its `opened=` line issue one documented reset
+through the identity-qualified JTAG selector. Preserve the reset command,
+status and time beside the capture, and choose a bounded duration long enough
+for the post-reset heartbeat interval. This is a debugger-induced retained
+reset, not cold-power evidence. Do not use this shortcut for returned-fault,
+reset-journal or any other scenario whose reset sequence is itself under test.
 
 For a bounded smoke only, record GPIO output intent immediately before and
 after native-USB attachment through JTAG. The normal receive image should keep
@@ -633,8 +690,11 @@ after native-USB attachment through JTAG. The normal receive image should keep
 activation. A zero or changed normal-image safety mask invalidates that
 supplemental capture. The safe-idle image instead requires the exact whole-
 register values `0x00000100` and `0x000011bc`; any departure invalidates its
-capture. Debugger reads can halt the core and are not formal electrical
-evidence.
+capture. The exact probe serial is mandatory when two identical Trackers are
+attached. Debugger reads can halt the core and are not formal electrical
+evidence. Treat the serial output as a byte stream: attachment in the middle of
+a record can make the first heartbeat prefix incomplete even when its following
+stack, radio and ingress lines are intact.
 
 ### Formal cold-power and retained-reset capture
 
@@ -680,6 +740,19 @@ built image, flash log and, where supported, flash readback separately. A
 reported `1.86` version alone does not prove that source revision or peer
 binary.
 
+The Heltec Tracker V2 smoke peer is a locally derived target on top of that
+commit, not an opaque official 1.86 release image. Its fail-closed boot and
+explicit radio-authorization gates make it suitable for supplemental board
+development, but the current operator-v2 provenance schema accepts only the
+exact official source tree. Do not label a derived Tracker image as formal
+official-peer evidence merely because it reports version `1.86`. Before using
+this target for a closure run, extend the evidence contract to bind the base
+bundle, exact patch and untracked source archive, pinned toolchain, reproducible
+build outputs, flashed bytes and runtime identity as distinct artifacts. The
+2026-07-16 E0:40 smoke preserved that chain under the ignored
+`artifacts/board-flashes/2026-07-16-e040-rnode-safe-peer/` directory, but it is
+not a sealed powered-evidence run.
+
 Before the first peer invocation, place regular-file copies of the exact peer
 image, a self-contained Git bundle rooted at the official `1.86` release tag,
 and the project-owned corpus and peer tool below
@@ -702,7 +775,8 @@ test "$(git -C "$RNODE_SOURCE_REPO" rev-parse "$peer_revision^{tree}")" = \
   "$peer_root_tree"
 
 peer_provenance="$run/captures/peer-provenance"
-mkdir -p "$peer_provenance"
+test ! -e "$peer_provenance"
+mkdir "$peer_provenance"
 peer_provenance="$(cd "$peer_provenance" && pwd -P)"
 peer_image="$peer_provenance/RNode_Firmware-1.86.bin"
 peer_source="$peer_provenance/RNode_Firmware-1.86.bundle"
@@ -742,7 +816,9 @@ through the complete receive-only RNode/Rete ingress before a run:
 PYTHON=python3.13 cargo run --locked -p xtask -- check-rnode-hil-vectors
 tooling_run="$run/captures/tooling"
 plan_run="$run/captures/plans"
-mkdir -p "$tooling_run" "$plan_run"
+test ! -e "$tooling_run"
+test ! -e "$plan_run"
+mkdir "$tooling_run" "$plan_run"
 python3.13 --version | tee "$tooling_run/python-version.txt"
 python3.13 -c 'import serial; print(serial.__version__)' \
   | tee "$tooling_run/pyserial-version.txt"
@@ -878,7 +954,8 @@ Generate a one-scenario corpus addressed to that destination:
 : "${TARGET_DESTINATION_HASH_HEX:?copy destination_hash from the same record}"
 
 local_data_run="$run/captures/boot-local-data"
-mkdir -p "$local_data_run"
+test ! -e "$local_data_run"
+mkdir "$local_data_run"
 local_data_corpus="$local_data_run/boot-local-data.json"
 cargo run --locked -p reticulum-phase1-rx-local-data -- \
   --target-public-key-hex "$TARGET_PUBLIC_KEY_HEX" \
@@ -968,7 +1045,8 @@ bundle, then hash-check and flash only those preserved pressure bytes:
 ```sh
 bp_artifact="$hil_bundle/backpressure-artifact"
 bp_run="$run/captures/backpressure"
-mkdir -p "$bp_run"
+test ! -e "$bp_run"
+mkdir "$bp_run"
 cargo run --locked -p xtask -- phase1-rx-hil-artifacts verify \
   --bundle "$hil_bundle"
 (cd "$bp_artifact" && shasum -a 256 -c firmware.sha256)
@@ -977,11 +1055,25 @@ test "$(cat "$bp_artifact/flash-image-address.txt")" = 0x00000000
 test "$(cat "$bp_artifact/flash-image-bytes.txt")" = \
   "$(wc -c < "$bp_artifact/flash-image.bin" | tr -d ' ')"
 
+export ESPFLASH_PORT="$(map_tracker_port)"
+test -n "$ESPFLASH_PORT"
+test -c "$ESPFLASH_PORT"
+printf 'usb_serial=%s port=%s\n' "$TRACKER_USB_SERIAL" "$ESPFLASH_PORT" \
+  > "$bp_run/flash-board-port-map.txt"
 espflash write-bin \
   --port "$ESPFLASH_PORT" --chip esp32s3 --non-interactive \
+  --skip-update-check --baud 115200 \
+  --before default-reset --after hard-reset \
   0x00000000 "$bp_artifact/flash-image.bin" 2>&1 | tee "$bp_run/flash.log"
+export ESPFLASH_PORT="$(map_tracker_port)"
+test -n "$ESPFLASH_PORT"
+test -c "$ESPFLASH_PORT"
+printf 'usb_serial=%s port=%s\n' "$TRACKER_USB_SERIAL" "$ESPFLASH_PORT" \
+  > "$bp_run/readback-board-port-map.txt"
 espflash read-flash \
   --port "$ESPFLASH_PORT" --chip esp32s3 --non-interactive \
+  --skip-update-check --baud 115200 \
+  --before default-reset --after hard-reset \
   0x00000000 "$(cat "$bp_artifact/flash-image-bytes.txt")" \
   "$bp_run/flash-readback.bin" 2>&1 | tee "$bp_run/readback.log"
 cmp "$bp_artifact/flash-image.bin" "$bp_run/flash-readback.bin"
@@ -1276,14 +1368,16 @@ not produce a digest because they never cross the RNS admission boundary.
 
      ```sh
      set -euo pipefail
-     : "${ESPFLASH_PORT:?set the Tracker serial port}"
+     : "${TRACKER_USB_SERIAL:?set the Tracker eFuse MAC/USB serial}"
      board_sample=tracker-v23-a # repeat with at least one other physical board
      electrical_mode=electrical-ldo-unboosted
      # Repeat exactly: electrical-ldo-boosted, electrical-dcdc-unboosted,
      # electrical-dcdc-boosted.
      electrical_artifact="$closure_bundle/artifacts/$electrical_mode"
      electrical_run="$run/captures/electrical-matrix/$board_sample/$electrical_mode"
-     mkdir -p "$electrical_run"
+     mkdir -p "$(dirname "$electrical_run")"
+     test ! -e "$electrical_run"
+     mkdir "$electrical_run"
 
      cargo run --locked -p xtask -- phase1-rx-closure-artifacts verify \
        --bundle "$closure_bundle"
@@ -1293,13 +1387,25 @@ not produce a digest because they never cross the RNS admission boundary.
      test "$(cat "$electrical_artifact/flash-image-bytes.txt")" = \
        "$(wc -c < "$electrical_artifact/flash-image.bin" | tr -d ' ')"
 
+     export ESPFLASH_PORT="$(map_tracker_port)"
+     test -n "$ESPFLASH_PORT"
+     test -c "$ESPFLASH_PORT"
+     printf 'usb_serial=%s port=%s\n' "$TRACKER_USB_SERIAL" "$ESPFLASH_PORT" \
+       > "$electrical_run/flash-board-port-map.txt"
      espflash write-bin \
        --port "$ESPFLASH_PORT" --chip esp32s3 --non-interactive \
+       --skip-update-check --baud 115200 --before default-reset \
        --after no-reset \
        0x00000000 "$electrical_artifact/flash-image.bin" \
        2>&1 | tee "$electrical_run/flash.log"
+     export ESPFLASH_PORT="$(map_tracker_port)"
+     test -n "$ESPFLASH_PORT"
+     test -c "$ESPFLASH_PORT"
+     printf 'usb_serial=%s port=%s\n' "$TRACKER_USB_SERIAL" "$ESPFLASH_PORT" \
+       > "$electrical_run/readback-board-port-map.txt"
      espflash read-flash \
        --port "$ESPFLASH_PORT" --chip esp32s3 --non-interactive \
+       --skip-update-check --baud 115200 --before default-reset \
        --after no-reset \
        0x00000000 "$(cat "$electrical_artifact/flash-image-bytes.txt")" \
        "$electrical_run/flash-readback.bin" \

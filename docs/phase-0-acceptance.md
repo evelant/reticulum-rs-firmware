@@ -35,8 +35,11 @@ cargo test --locked
 cargo run --locked -p reticulum-conformance-rete
 cargo test --locked -p reticulum-rns-leviculum
 cargo check --locked \
+  -p reticulum-device-api \
+  -p reticulum-node-core \
   -p reticulum-rns-conformance \
   -p reticulum-rns-rete \
+  -p reticulum-rns-rete-rx \
   -p reticulum-rns-leviculum \
   -p reticulum-radio-interface \
   -p reticulum-board-heltec-tracker-v2 \
@@ -169,20 +172,24 @@ particular, `announce_rate` and `path_request_times` are separate `P`-sized
 maps whose insertions can fail silently; a failed path-request timestamp insert
 can bypass throttling for a new destination. Packet `dedup` and announce-replay
 `announce_dedup` are separate `D`-sized rolling deques, and their occupancy is
-also not exposed. Reverse, relay-link, receipt, channel-receipt and several
-other internal insertions can also fail silently. This is provisional evidence,
-not production acceptance: remaining transactional capacity errors, drop
-metrics, complete occupancy APIs, transactional relay admission and bounded
-NodeCore event/output storage remain upstream repair candidates and hard gates
-below. The adapter now preflights the two admitted ordinary DATA-forwarding
-paths that create reverse entries; other unsafe HEADER_2 dispatch classes
-remain disabled rather than reaching those native mutations.
+also not exposed. Reverse, relay-link, channel-receipt and several other
+internal insertions can also fail silently. Destination-DATA receipt insertion
+is no longer in that set at the current pin: caller-owned preparation reports
+bounded admission and hash collision transactionally. This is provisional
+evidence, not production acceptance: remaining transactional capacity errors,
+drop metrics, complete occupancy APIs, transactional relay admission and
+bounded NodeCore event/output storage remain upstream repair candidates and
+hard gates below. The adapter now preflights the two admitted ordinary DATA-
+forwarding paths that create reverse entries; other unsafe HEADER_2 dispatch
+classes remain disabled rather than reaching those native mutations.
 
 ### Initial owning embedded boundary
 
-Firmware no longer receives a public raw `NodeCore` alias. `EmbeddedNode`
-privately owns Rete state and is the only construction path in the default
-product feature set. It currently enforces:
+Firmware no longer receives a public raw Rete `NodeCore` alias. The adapter's
+`EmbeddedNode` privately owns Rete state and remains the protocol construction
+boundary. The newer `reticulum-node-core::NodeCore` owns an `EmbeddedNode` for
+the fixed outbound-DATA outbox slice; the current receive-only firmware still
+uses its narrower opaque façade. Together these boundaries currently enforce:
 
 - a 500-byte ingress ceiling before Rete's hosted 300-KiB allocation path;
 - project-owned endpoint/transport roles and an additional-destination quota;
@@ -300,9 +307,9 @@ not allowed to reduce protocol truth to make a result fit.
 2. Do not enable an affected production path while it has a wire mismatch,
    target-build failure, malformed-input panic, silent correctness-critical
    state loss or unbounded network-controlled memory path.
-3. Make focused generic repairs in the project fork and offer them upstream.
-   The first required source patch triggers that fork; all Rete crates in the
-   graph must remain pinned to the same exact revision.
+3. Make focused generic repairs in the project fork. They become candidates
+   for upstream contribution only after direct user approval; all Rete crates
+   in the graph must remain pinned to the same exact revision.
 4. Keep Leviculum compiling as the independent oracle/fallback. Run targeted
    differential scenarios when they help localize a discrepancy; do not delay
    Rete integration for a feature-complete Leviculum adapter.

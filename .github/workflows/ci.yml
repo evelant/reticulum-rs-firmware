@@ -46,6 +46,9 @@ jobs:
         # direct raw-tree/archive and common-dir-attributes provenance checks.
         run: cargo test --locked
 
+      - name: Device API host-simulation tests
+        run: cargo test --locked -p reticulum-device-api --features host-sim
+
       - name: Released-Python foundation vectors
         env:
           PYTHON: python
@@ -62,9 +65,16 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Device API host-simulation Clippy
+        run: >-
+          cargo clippy --locked -p reticulum-device-api
+          --all-targets --features host-sim -- -D warnings
+
       - name: Generic no-std checks
         run: >-
           cargo check --locked
+          -p reticulum-device-api
+          -p reticulum-node-core
           -p reticulum-rns-conformance
           -p reticulum-rns-rete
           -p reticulum-rns-rete-rx
@@ -79,6 +89,75 @@ jobs:
 
       - name: Receive-only public API boundary
         run: cargo run --locked -p xtask -- rx-api-policy
+
+  rete-pin:
+    name: Exact Rete lifecycle candidate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out firmware repository
+        uses: actions/checkout@v4
+
+      - name: Install pinned host toolchain and bare-metal target
+        run: |
+          rustup show
+          rustup target add thumbv6m-none-eabi
+
+      - name: Resolve exact Rete source from the locked product graph
+        id: rete
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >>"$GITHUB_OUTPUT"
+          import json
+          import pathlib
+          import subprocess
+
+          metadata = json.loads(subprocess.check_output(
+              ["cargo", "metadata", "--locked", "--format-version", "1"],
+              text=True,
+          ))
+          packages = [
+              package for package in metadata["packages"]
+              if package["name"] == "rete-core"
+          ]
+          if len(packages) != 1:
+              raise SystemExit(f"expected one locked rete-core, found {len(packages)}")
+          package = packages[0]
+          source = package.get("source") or ""
+          if "#" not in source:
+              raise SystemExit(f"locked rete-core source has no revision: {source!r}")
+          revision = source.rsplit("#", 1)[1]
+          root = pathlib.Path(package["manifest_path"]).resolve().parents[2]
+          actual = subprocess.check_output(
+              ["git", "-C", str(root), "rev-parse", "HEAD"],
+              text=True,
+          ).strip()
+          if actual != revision:
+              raise SystemExit(f"Rete checkout {actual} does not match lock {revision}")
+          print(f"root={root}")
+          print(f"revision={revision}")
+          PY
+
+      - name: Receipt and LXMF lifecycle library suites
+        run: >-
+          cargo test --locked
+          --manifest-path ${{ steps.rete.outputs.root }}/Cargo.toml
+          --target x86_64-unknown-linux-gnu
+          -p rete-transport -p rete-stack -p rete-lxmf -p rete-daemon --lib
+
+      - name: Check every Rete workspace target
+        run: >-
+          cargo check --locked
+          --manifest-path ${{ steps.rete.outputs.root }}/Cargo.toml
+          --target x86_64-unknown-linux-gnu --workspace --all-targets
+
+      - name: Check portable Rete foundation without defaults
+        run: >-
+          cargo check --locked
+          --manifest-path ${{ steps.rete.outputs.root }}/Cargo.toml
+          --target thumbv6m-none-eabi --no-default-features
+          -p rete-core -p rete-transport -p rete-stack
+          --features rete-stack/alloc
 
   xtensa:
     name: ESP32-S3 release link
@@ -130,6 +209,12 @@ jobs:
 
       - name: Install pinned offline image tool
         run: cargo install --locked --force --version 4.5.0 espflash
+
+      - name: Check portable node and device-API cores for ESP32-S3
+        run: >-
+          cargo +esp check --locked
+          -p reticulum-device-api -p reticulum-node-core
+          --target xtensa-esp32s3-none-elf
 
       - name: Link RF-inert Tracker firmware
         run: >-

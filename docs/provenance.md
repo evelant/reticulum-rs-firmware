@@ -9,7 +9,7 @@ authoritative in the lockfile.
 | Component | Source | Pin | License used here | Build role |
 | --- | --- | --- | --- | --- |
 | Project-owned crates | This repository | current tree | MIT OR Apache-2.0 | Product and shared tooling |
-| Rete integration fork | <https://github.com/evelant/rete> | `5ce8c4e437d3f2f07d302bc366ff06bacd6aff2d` (durable tag `firmware-pin-5ce8c4e`), based on upstream `9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743` | Apache-2.0 option from retained upstream declaration | Provisional RNS foundation and firmware compile graph; canonical local LINKREQUEST validation is in [upstream PR 7](https://github.com/s-retlaw/rete/pull/7), transactional owned-Link admission is in [upstream PR 9](https://github.com/s-retlaw/rete/pull/9), and endpoint announce rebroadcast policy is in [upstream PR 11](https://github.com/s-retlaw/rete/pull/11) |
+| Rete integration fork | <https://github.com/evelant/rete> | `f6f5fb0637d00691e09fa0105be4df902405fee4` (durable tag `firmware-pin-f6f5fb0`), based on upstream `9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743` | Apache-2.0 option from retained upstream declaration | Provisional RNS foundation and firmware compile graph; includes canonical local LINKREQUEST validation, transactional owned-Link admission, endpoint announce policy, caller-owned DATA preparation, bounded receipt backpressure, allocation-atomic proof/timeout terminals, full-hash/Link-ID-bound DATA/channel terminal candidates, relay-safe proof preflight and LXMF attempt correlation. The first three generic changes were already offered in upstream PRs 7, 9 and 11; the newer lifecycle candidate remains fork-local unless the user directly approves an upstream issue or PR. |
 | Leviculum | <https://codeberg.org/Lew_Palm/leviculum> | `5fb1db0e5e5a490291ee5f6b81312cf0c9de622a` | AGPL-3.0-or-later | Separate protocol oracle and fallback package |
 | esp-hal family | <https://github.com/esp-rs/esp-hal> | crates.io versions in lockfile | MIT OR Apache-2.0 | ESP32-S3 platform |
 | esp-rtos | Published crates.io 0.3.0 source vendored at `vendor/esp-rtos-0.3.0` | archive SHA-256 `551f90766e1527edaa0c91e8d559e9e2a60397b545e93357ac61fb31845e5712`; crate-recorded upstream commit `347003de8a48320bb7724f53045be3afa9204411`; exact tree and pristine/patched hashes in `VENDOR-HASHES.json` | MIT OR Apache-2.0, with canonical license texts added as project provenance files | Local CPU0 and CPU1 main-stack slice unit corrections; exact edits, mechanical integrity guard and removal condition are recorded in `PATCHES.md` |
@@ -92,9 +92,10 @@ packaging hygiene to resolve with upstream or in the corresponding-source
 bundle; it is not being silently inferred from code.
 
 All Rete workspace crates in the product graph move together. The integration
-fork retains upstream history and contains only focused commits intended for
-upstream review. Once a fix is merged, the graph returns atomically to one
-exact upstream revision rather than retaining a parallel implementation.
+fork retains upstream history and contains only focused commits that may be
+considered for upstream review after direct user approval. If an approved fix
+is later merged, the graph returns atomically to one exact upstream revision
+rather than retaining a parallel implementation.
 
 The full AGPL-3.0 text for the isolated Leviculum comparison is retained at
 `comparisons/rns-leviculum/LICENSE`.

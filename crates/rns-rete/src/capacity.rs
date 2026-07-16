@@ -53,7 +53,8 @@ pub struct HeaplessCapacitySnapshot {
     pub links: CapacityUse,
     /// Reverse-routing entries. Rete currently drops insertion failures.
     pub reverse_entries: CapacityUse,
-    /// Pending delivery-proof receipts. Some Rete send paths ignore rejection.
+    /// Pending DATA delivery-proof receipts. The pinned DATA path rejects full
+    /// admission transactionally.
     pub receipts: CapacityUse,
     /// Pending channel receipts. Rete currently drops insertion failures.
     pub channel_receipts: CapacityUse,

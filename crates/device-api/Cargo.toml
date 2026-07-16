@@ -1,0 +1,18 @@
+[package]
+name = "reticulum-device-api"
+description = "Portable logical protocol for the local Reticulum device API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+host-sim = []
+
+[dependencies]
+minicbor.workspace = true
+
+[lib]
+path = "src/lib.rs"

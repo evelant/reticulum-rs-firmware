@@ -3,7 +3,9 @@ resolver = "3"
 members = [
     "comparisons/rns-leviculum",
     "crates/board-heltec-tracker-v2",
+    "crates/device-api",
     "crates/lab-rx-returned-fault-hil",
+    "crates/node-core",
     "crates/radio-interface",
     "crates/rns-conformance",
     "crates/rns-rete",
@@ -16,7 +18,9 @@ members = [
 exclude = ["vendor/esp-rtos-0.3.0"]
 default-members = [
     "crates/board-heltec-tracker-v2",
+    "crates/device-api",
     "crates/lab-rx-returned-fault-hil",
+    "crates/node-core",
     "crates/radio-interface",
     "crates/rns-conformance",
     "crates/rns-rete",
@@ -56,6 +60,7 @@ esp-rtos = { path = "vendor/esp-rtos-0.3.0", version = "=0.3.0", default-feature
 log = "=0.4.27"
 lora-phy = { version = "=3.0.1", default-features = false }
 lora-modulation = { version = "=0.1.5", default-features = false }
+minicbor = { version = "=2.2.2", default-features = false }
 rand_core = { version = "=0.6.4", default-features = false }
 hex = "=0.4.3"
 serde = { version = "=1.0.228", features = ["derive"] }
@@ -66,14 +71,15 @@ zeroize = { version = "=1.9.0", default-features = false }
 
 # Rete is not published as a coherent crates.io release. Keep every crate on
 # the same reviewed fork revision and never replace these with reference/ path
-# deps. The integration commit is based directly on upstream 9bcb7d3e and
-# composes the focused validation, transactional owned-Link and endpoint
-# announce-policy changes offered as s-retlaw/rete#7, #9 and #11. Fork tag
-# firmware-pin-5ce8c4e keeps the exact commit reachable independently of the
-# review branches.
-rete-core = { git = "https://github.com/evelant/rete.git", rev = "5ce8c4e437d3f2f07d302bc366ff06bacd6aff2d", default-features = false }
-rete-stack = { git = "https://github.com/evelant/rete.git", rev = "5ce8c4e437d3f2f07d302bc366ff06bacd6aff2d", default-features = false }
-rete-transport = { git = "https://github.com/evelant/rete.git", rev = "5ce8c4e437d3f2f07d302bc366ff06bacd6aff2d", default-features = false }
+# deps. The integration history is based on upstream 9bcb7d3e and composes the
+# earlier focused validation, transactional owned-Link and endpoint announce
+# policy changes with caller-owned DATA preparation, allocation-atomic receipt
+# terminals and exact DATA/channel terminal candidates. Fork tag
+# firmware-pin-f6f5fb0 keeps this exact candidate reachable independently of its
+# development branch.
+rete-core = { git = "https://github.com/evelant/rete.git", rev = "f6f5fb0637d00691e09fa0105be4df902405fee4", default-features = false }
+rete-stack = { git = "https://github.com/evelant/rete.git", rev = "f6f5fb0637d00691e09fa0105be4df902405fee4", default-features = false }
+rete-transport = { git = "https://github.com/evelant/rete.git", rev = "f6f5fb0637d00691e09fa0105be4df902405fee4", default-features = false }
 
 [profile.dev]
 opt-level = "s"

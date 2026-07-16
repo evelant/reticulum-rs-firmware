@@ -24,6 +24,14 @@ pressure stimulus without changing the normal lab image. Deterministic RNode
 host-tested generator creates encrypted local DATA for one exact ephemeral
 Tracker boot.
 
+Separately from the target-linked receive-only image, the portable node-core
+now prepares outbound DATA into a fixed packet pool and correlates exact proofs
+or timeouts into a fixed in-place attempt ledger. Terminal tombstones require
+explicit acknowledgement and safely backpressure new preparation. This path is
+host/bare-metal compiled but remains disconnected from firmware TX: its ledger
+is not reboot-persistent, ordinary RNS actions are still allocation-backed and
+the current borrowed packet lease cannot cross an async radio wait.
+
 ## Read first
 
 - [Architecture](docs/firmware-architecture.md)
@@ -32,6 +40,9 @@ Tracker boot.
 - [Phase-0 validation contract](docs/phase-0-acceptance.md)
 - [Phase-1 receive-only slice](docs/phase-1-rx-slice.md)
 - [Phase-1 Tracker RX hardware qualification](docs/phase-1-rx-hil.md)
+- [Device API v1 logical protocol](docs/api/device-api-v1.md)
+- [Bounded node-core DATA outbox](docs/node-core-outbox.md)
+- [Owning async TX handoff](docs/async-tx-handoff.md)
 - [Rete upstream hardening backlog](docs/rete-upstream-backlog.md)
 - [Dependency provenance](docs/provenance.md)
 
@@ -58,14 +69,21 @@ cargo run -p xtask -- doctor
 
 ```sh
 cargo test --locked
+cargo test --locked -p reticulum-device-api --features host-sim
 cargo run --locked -p reticulum-conformance-rete
 cargo check --locked \
   -p reticulum-rns-conformance \
   -p reticulum-rns-rete \
   -p reticulum-rns-rete-rx \
+  -p reticulum-device-api \
+  -p reticulum-node-core \
   -p reticulum-radio-interface \
   -p reticulum-board-heltec-tracker-v2 \
   --target riscv32imac-unknown-none-elf
+cargo +esp check --locked \
+  -p reticulum-device-api \
+  -p reticulum-node-core \
+  --target xtensa-esp32s3-none-elf
 cargo +esp build --locked --release \
   -p reticulum-heltec-tracker-v2 \
   --target xtensa-esp32s3-none-elf

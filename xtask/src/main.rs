@@ -302,7 +302,9 @@ fn graph_policy() -> ExitCode {
         validate_resolved_esp_rtos_patch(&json, &root)
             .map_err(|error| format!("esp-rtos patch boundary: {error}"))?;
         validate_firmware_dependency_boundary(&json, &root)
-            .map_err(|error| format!("firmware receive-only dependency boundary: {error}"))
+            .map_err(|error| format!("firmware receive-only dependency boundary: {error}"))?;
+        validate_portable_layer_dependency_boundary(&json, &root)
+            .map_err(|error| format!("portable layer dependency boundary: {error}"))
     });
     if let Err(error) = resolved {
         eprintln!("error: {error}");
@@ -317,10 +319,123 @@ fn graph_policy() -> ExitCode {
              are isolated; the returned-fault hook is feature-exclusive; firmware direct \
              dependencies use only the RX façade; resolved Rete packages match reported \
              source/revision; esp-rtos resolves only to the reviewed local patch and its \
-             checked vendor inventory reconstructs the pristine registry source"
+             checked vendor inventory reconstructs the pristine registry source; the device \
+             API and node core remain mutually isolated and free of direct platform dependencies"
         );
         ExitCode::SUCCESS
     }
+}
+
+fn validate_portable_layer_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+
+    for (package_name, relative_path, peer_name) in [
+        (
+            "reticulum-device-api",
+            "crates/device-api",
+            "reticulum-node-core",
+        ),
+        (
+            "reticulum-node-core",
+            "crates/node-core",
+            "reticulum-device-api",
+        ),
+    ] {
+        let expected_manifest = workspace.join(relative_path).join("Cargo.toml");
+        let matching = packages
+            .iter()
+            .filter(|package| {
+                package["name"].as_str() == Some(package_name)
+                    && package["source"].is_null()
+                    && package["manifest_path"].as_str().map(Path::new)
+                        == Some(expected_manifest.as_path())
+            })
+            .collect::<Vec<_>>();
+        if matching.len() != 1 {
+            return Err(format!(
+                "expected exactly one local {package_name} package at {}, found {}",
+                expected_manifest.display(),
+                matching.len()
+            ));
+        }
+
+        let dependencies = matching[0]["dependencies"]
+            .as_array()
+            .ok_or_else(|| format!("{package_name} package has no dependency array"))?;
+        for dependency in dependencies {
+            let dependency_name = dependency["name"]
+                .as_str()
+                .ok_or_else(|| format!("{package_name} has a dependency without a name"))?;
+            if dependency_name == peer_name {
+                return Err(format!(
+                    "{package_name} directly depends on peer portable layer {peer_name}"
+                ));
+            }
+            if package_name == "reticulum-device-api"
+                && is_rete_implementation_dependency(dependency_name)
+            {
+                return Err(format!(
+                    "{package_name} directly depends on prohibited Rete implementation crate {dependency_name}"
+                ));
+            }
+            if is_platform_implementation_dependency(dependency, workspace) {
+                return Err(format!(
+                    "{package_name} directly depends on prohibited platform implementation crate {dependency_name}"
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn is_rete_implementation_dependency(name: &str) -> bool {
+    name == "reticulum-rns-rete"
+        || name.starts_with("reticulum-rns-rete-")
+        || name.starts_with("rete-")
+}
+
+fn is_platform_implementation_dependency(dependency: &serde_json::Value, workspace: &Path) -> bool {
+    let Some(name) = dependency["name"].as_str() else {
+        return false;
+    };
+    if name == "reticulum-heltec-tracker-v2"
+        || name.starts_with("reticulum-board-")
+        || name.starts_with("reticulum-radio-")
+        || name.starts_with("radio-")
+        || name.starts_with("lora-")
+        || name.starts_with("sx126")
+        || name.starts_with("esp-")
+        || name.starts_with("esp32")
+        || name.starts_with("embassy-")
+    {
+        return true;
+    }
+
+    dependency["path"]
+        .as_str()
+        .and_then(|path| Path::new(path).strip_prefix(workspace).ok())
+        .is_some_and(|relative| {
+            let mut components = relative.components();
+            match (components.next(), components.next()) {
+                (Some(Component::Normal(first)), _) if first == OsStr::new("firmware") => true,
+                (Some(Component::Normal(first)), Some(Component::Normal(second)))
+                    if first == OsStr::new("crates") =>
+                {
+                    second.to_str().is_some_and(|name| {
+                        name.starts_with("board-") || name.starts_with("radio-")
+                    })
+                }
+                _ => false,
+            }
+        })
 }
 
 fn validate_firmware_dependency_boundary(
@@ -1811,6 +1926,136 @@ mod tests {
         let mut optional = metadata;
         optional["packages"][0]["dependencies"][2]["optional"] = serde_json::Value::Bool(true);
         assert!(validate_firmware_dependency_boundary(&optional.to_string(), &root).is_err());
+    }
+
+    #[test]
+    fn portable_layer_boundary_accepts_generic_dependencies_and_node_rete_adapter() {
+        let root = workspace_root();
+        let metadata = portable_layers_metadata_fixture(&root);
+
+        validate_portable_layer_dependency_boundary(&metadata.to_string(), &root).unwrap();
+
+        let mut wrong_path = metadata;
+        wrong_path["packages"][0]["manifest_path"] =
+            serde_json::Value::String(root.join("elsewhere/Cargo.toml").display().to_string());
+        assert!(
+            validate_portable_layer_dependency_boundary(&wrong_path.to_string(), &root).is_err()
+        );
+    }
+
+    #[test]
+    fn portable_layer_boundary_rejects_dependencies_between_the_layers() {
+        let root = workspace_root();
+        for (package_index, peer) in [(0, "reticulum-node-core"), (1, "reticulum-device-api")] {
+            let mut metadata = portable_layers_metadata_fixture(&root);
+            metadata["packages"][package_index]["dependencies"]
+                .as_array_mut()
+                .unwrap()
+                .push(portable_dependency_fixture(peer));
+
+            let error = validate_portable_layer_dependency_boundary(&metadata.to_string(), &root)
+                .unwrap_err();
+            assert!(error.contains("peer portable layer"), "{error}");
+        }
+    }
+
+    #[test]
+    fn portable_layer_boundary_rejects_platform_implementation_dependencies() {
+        let root = workspace_root();
+        for package_index in 0..=1 {
+            for prohibited in [
+                "reticulum-heltec-tracker-v2",
+                "reticulum-board-example",
+                "reticulum-radio-interface",
+                "radio-sx1262",
+                "lora-phy",
+                "sx1262-driver",
+                "esp-hal",
+                "esp32-nimble",
+                "embassy-sync",
+            ] {
+                let mut metadata = portable_layers_metadata_fixture(&root);
+                metadata["packages"][package_index]["dependencies"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(portable_dependency_fixture(prohibited));
+
+                let error =
+                    validate_portable_layer_dependency_boundary(&metadata.to_string(), &root)
+                        .unwrap_err();
+                assert!(
+                    error.contains("platform implementation crate"),
+                    "{prohibited}: {error}"
+                );
+            }
+        }
+
+        for relative_path in [
+            "firmware/example",
+            "crates/board-example",
+            "crates/radio-example",
+        ] {
+            let mut metadata = portable_layers_metadata_fixture(&root);
+            let mut dependency = portable_dependency_fixture("renamed-platform-layer");
+            dependency["path"] =
+                serde_json::Value::String(root.join(relative_path).display().to_string());
+            metadata["packages"][0]["dependencies"]
+                .as_array_mut()
+                .unwrap()
+                .push(dependency);
+            assert!(
+                validate_portable_layer_dependency_boundary(&metadata.to_string(), &root).is_err(),
+                "local platform path {relative_path} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn portable_layer_boundary_rejects_rete_dependencies_from_device_api() {
+        let root = workspace_root();
+        for prohibited in ["reticulum-rns-rete", "reticulum-rns-rete-rx", "rete-core"] {
+            let mut metadata = portable_layers_metadata_fixture(&root);
+            metadata["packages"][0]["dependencies"]
+                .as_array_mut()
+                .unwrap()
+                .push(portable_dependency_fixture(prohibited));
+
+            let error = validate_portable_layer_dependency_boundary(&metadata.to_string(), &root)
+                .unwrap_err();
+            assert!(
+                error.contains("Rete implementation crate"),
+                "{prohibited}: {error}"
+            );
+        }
+    }
+
+    fn portable_layers_metadata_fixture(root: &Path) -> serde_json::Value {
+        serde_json::json!({
+            "packages": [
+                {
+                    "name": "reticulum-device-api",
+                    "source": null,
+                    "manifest_path": root.join("crates/device-api/Cargo.toml"),
+                    "dependencies": [portable_dependency_fixture("minicbor")],
+                },
+                {
+                    "name": "reticulum-node-core",
+                    "source": null,
+                    "manifest_path": root.join("crates/node-core/Cargo.toml"),
+                    "dependencies": [
+                        portable_dependency_fixture("rand_core"),
+                        portable_dependency_fixture("reticulum-rns-rete"),
+                    ],
+                },
+            ]
+        })
+    }
+
+    fn portable_dependency_fixture(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "path": null,
+        })
     }
 
     fn dependency_fixture(name: &str, path: &Path) -> serde_json::Value {

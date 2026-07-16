@@ -59,7 +59,7 @@ The local repositories were inspected at these revisions. These are moving proje
 
 | Reference | Snapshot | License | Useful material | Verdict |
 | --- | ---: | --- | --- | --- |
-| `reference/rete` | `5ce8c4e` integration fork, based on `9bcb7d3e` | MIT OR Apache-2.0 declared in Cargo/README; license texts absent | Runtime-agnostic `no_std` RNS, bounded transport storage, RNode LoRa interface, compiling Embassy ESP32-S3/SX1262/Wi-Fi example, plus canonical local LINKREQUEST validation, transactional owned-Link admission and endpoint announce-rebroadcast policy | Provisional RNS foundation; pre-release, Resource is whole-buffered, relay admission remains non-transactional and current LXMF is wire-incompatible; missing canonical license files are notice/provenance hygiene, not an evaluation blocker |
+| `reference/rete` | `f6f5fb0` integration fork, based on `9bcb7d3e` | MIT OR Apache-2.0 declared in Cargo/README; license texts absent | Runtime-agnostic `no_std` RNS, bounded transport storage, RNode LoRa interface, compiling Embassy ESP32-S3/SX1262/Wi-Fi example, canonical local LINKREQUEST validation, transactional owned-Link admission, endpoint announce policy, caller-owned DATA preparation, allocation-atomic receipt terminals and full-hash/Link-ID-bound DATA/channel terminal candidates | Provisional RNS foundation; pre-release, Resource is whole-buffered, relay admission remains non-transactional, channel receipt capacity/retransmission is not yet reliable, and current LXMF is wire-incompatible; missing canonical license files are notice/provenance hygiene, not an evaluation blocker |
 | `reference/leviculum` | `5fb1db0` | AGPL-3.0-or-later | Complete sans-I/O RNS core, strong tests, RNode framing, nRF Embassy firmware, current Micron parser and substantial NomadNet client | Independent RNS oracle and fallback; no LXMF |
 | `reference/LXMF` | `fab12ad9` | accepted Reticulum License | Current authoritative Python LXMF behavior, router, propagation node and fixtures | Primary pinned compatibility peer; source may also be reused when useful with its conditions/notices preserved |
 | `reference/LXMF-rs` | `0859680` | EPL-2.0 | Broad LXMF/RNS behavior, wire formats, parity fixtures, announce codecs, paper messages, stamps/tickets, router semantics | Approved direct-reuse source for the EPL product path; several wire/state modules are extractable, while the full runtime still needs a substantial bare-metal refactor |
@@ -97,7 +97,9 @@ Claims in READMEs were not treated as proof of embedded portability.
 | Check | Result | Meaning |
 | --- | --- | --- |
 | `rete-core`, `rete-transport`, `rete-stack`, and `rete-lxmf-core`, no defaults, `thumbv6m-none-eabi` | Pass | The layers are genuinely bare-metal buildable; compilation does not cure the LXMF correctness gaps documented below |
-| Focused `rete` core/transport/LXMF host suites at the reviewed upstream snapshot | 391 pass | Historical selection evidence for wire, crypto, forwarding, link/resource, and LXMF codec behavior; the product pin has its own continuously rerun suites and this is not a complete Python/RF conformance claim |
+| Focused `rete` core/transport/LXMF host suites at the reviewed upstream snapshot | 391 pass | Historical selection evidence for wire, crypto, forwarding, link/resource, and LXMF codec behavior; this is not evidence for the later lifecycle patch or a complete Python/RF conformance claim |
+| Exact `f6f5fb0` receipt/LXMF lifecycle library suites | 502 pass | CI checks the pinned fork directly: 151 transport, 124 stack, 143 LXMF and 84 daemon tests, plus all-target host and `thumbv6m-none-eabi` checks |
+| `reticulum-node-core`, generic bare-metal and ESP32-S3 Xtensa | Pass | The fixed outbox, exact attempt ledger and generation-checked lease/terminal owner compile without `std` on both targets; the current receive-only firmware intentionally does not link it yet |
 | `reference/rete/examples/esp32s3`: `cargo +esp check --release` | Pass with warnings | Current bare-metal ESP32-S3/SX1262/Wi-Fi integration compiles with the installed ESP toolchain; it targets Heltec WiFi LoRa 32 V3/V4 pins, not the Tracker BSP |
 | Precursor `reticulum-core`/`lxmf` host suites; `micron` host suite | 70 pass; 17 pass | Strong embedded-client interop and hostile-input evidence, including real Nomad/Micron fixtures; the Xous crates still use `std` and are not a bare-metal dependency as-is |
 | `foxhole-micron` host suite | 24 pass | Focused confirmation of links, fields, colors, sections, literal/comment handling and control-character sanitisation; it remains a ratatui/`std` comparison parser |
@@ -168,6 +170,56 @@ admission. These are temporary capability gates recorded in the
 [upstream hardening backlog](rete-upstream-backlog.md), not reductions of the
 full product requirements. If Rete's RNS parity or memory gates ultimately
 fail, switch the adapter to Leviculum rather than carrying two active cores.
+
+The reviewed upstream base had a sustained outbound-DATA blocker:
+`NodeCore::build_data_packet()` could release a packet after silently failing
+to retain its receipt, and proof/timeout terminal state was not reclaimed
+through a caller-reservable boundary. The current project pin
+`f6f5fb0637d00691e09fa0105be4df902405fee4` closes that generic lifecycle. DATA
+preparation can write into caller-owned storage, returns a full receipt token,
+and rejects bounded-table admission transactionally. Valid-proof processing
+first identifies the exact DATA or channel candidate, while destination-DATA
+timeout processing identifies the exact DATA candidate. Both reserve terminal
+capacity; if reservation fails the receipt and proof/dedup state remain unchanged, while
+a successful candidate-bound reservation makes removal and notification commit
+infallible. Link-typed channel proofs are disambiguated before ordinary DATA
+receipts, so even a colliding truncated DATA key cannot bind the wrong terminal
+record. A channel terminal also requires the stored full outbound hash and
+destination Link ID, while HEADER_2 proofs handled by the relay path do not
+reserve local terminal capacity. Channel timeout/retransmission reliability is
+still blocked on bounded receipt admission and hash re-registration. The hosted LXMF
+router retains every live retry hash and accepts delayed sibling proofs. Its
+core-aware handler, used by the daemon, cancels remaining receipts after
+delivery and emits one final failure only after the last live attempt fails;
+the legacy handler without mutable core access leaves siblings to timeout.
+
+The project adapter exposes the new path without native Rete receipt or error
+types. `EmbeddedNode::prepare_data_into()` accepts exactly one 500-byte output
+array and returns Copy length/target/receipt metadata. `crates/node-core` now
+reserves final fixed outbox and attempt-ledger slots before invoking it,
+commits `Reserved -> Ready` plus `Reserved -> Active` without allocation, and
+uses generation-checked interface leases and attempt handles. Candidate-bound
+proof/timeout reservation changes the exact active ledger slot into a retained
+`Delivered` or `DeliveryTimeout` tombstone before Rete removes its receipt. A
+definitely-unsent abort cancels the exact receipt before freeing its attempt;
+transmitted or uncertain outcomes free only packet storage and keep proof
+correlation live. Ready packets are discarded if their attempt becomes
+terminal; leased bytes remain uniquely held until the actor releases them, and
+the tombstone cannot be acknowledged first. Thirty focused tests plus
+strict host Clippy, generic bare-metal and ESP32-S3 checks pass.
+
+This is not yet the product's durable submission model or an authorized RF TX
+graph. The in-RAM ledger cannot rehydrate Rete receipts after reboot, ordinary
+RNS actions are still allocation-backed, and the borrowed packet lease cannot
+cross an async radio await safely. The next slice must move unique static
+packet buffers through an owning handoff, preserve per-packet interface target
+authorization, quarantine rather than force-reuse lost buffers, and define
+reboot recovery. LXMF message and sibling-attempt state must ultimately be
+persisted before an outward terminal event can be lost. The future device-API
+intent queue remains
+separate from the prepared packet pool: it copies an accepted request before
+RNS mutation and must drain prepared packets promptly because Rete starts the
+receipt timeout at preparation, not at radio completion.
 
 ### Leviculum
 
@@ -415,6 +467,19 @@ docs/
 
 `node-core`, `lxmf-wire`, `lxmf-router`, `lxmf-propagation`, `nomad-protocol`, `micron-parser`, `device-api`, `storage-model`, and `radio-interface` should compile on at least one `*-unknown-none-*` target in CI whenever their feature is enabled. ESP dependencies appear only in the firmware/platform/BSP crates.
 
+The initial `node-core` implementation now owns the fixed caller-reserved DATA
+outbox and guarded interface leases described in
+[Bounded node-core DATA outbox](node-core-outbox.md). It intentionally remains
+independent of `device-api`: a later dispatcher maps authenticated wire
+requests into node-owned bounded intents, while packet bytes remain accessible
+only to an interface actor holding a current lease.
+
+That current lease is a synchronous borrowed-packet proof, not yet the owning
+`RadioTxFrame` handle in the model below. Before async integration, move the
+fixed pool behind an ownership/synchronization boundary and add supervised
+lease-loss recovery; otherwise awaiting LoRa TX would hold the protocol owner
+borrowed and a lost actor message could strand a slot indefinitely.
+
 ## Core traits and event model
 
 The exact Rust syntax should follow the chosen core, but the dependency direction should resemble:
@@ -460,15 +525,19 @@ The RNS core must cover both the complete endpoint path and an always-on transpo
 
 Recommended runtime model:
 
-- A single project-owned `EmbeddedNode` owns the private Rete `NodeCore` and
-  mutable protocol state; firmware has no `inner_mut`, `Deref`, or raw
-  transport escape hatch.
+- A single project-owned `reticulum-node-core::NodeCore` owns the adapter's
+  private `EmbeddedNode`, which in turn owns Rete's mutable protocol state;
+  firmware has no `inner_mut`, `Deref`, or raw transport escape hatch.
 - A periodic tick plus input events produces outgoing packets, storage changes, timers, and application events.
 - Ingress resolves Rete's `SourceInterface`/`AllExceptSource` actions into
   concrete interface identifiers before an action can enter an asynchronous
   queue.
 - Interface adapters report exact MTU, bitrate estimate, RSSI/SNR metadata, and online state.
 - Path/announce/receipt/resource tables use compile-time or profile bounds and explicit eviction policies.
+- Outbound intent admission reserves both the product queue and a prepared-
+  packet slot before protocol mutation. A successful RNS packet build commits
+  into that reservation without a fallible second enqueue; queue-full paths do
+  not consume entropy, touch paths or register receipts.
 - `transport_enabled` is a profile capability. It is on by default for the intended powered node/full-appliance profiles and may be off for a deliberately constrained portable/leaf build.
 
 Ordinary announce/data forwarding is available in the transport role. Link
@@ -494,6 +563,14 @@ The LXMF crate should be a first-class state machine, not a thin `pack()` helper
 - tickets, stamps, ratchets, propagation-node selection, and versioned persistence;
 - propagation-node deposit/retrieve endpoints, peer offers/synchronisation, message culling, access policy, size/stamp enforcement and recovery after reboot;
 - user-visible delivery states that survive reboot.
+
+Delivery state is message-scoped but receipt state is attempt-scoped. A
+message may have several released attempts under loss, so its durable record
+contains a bounded set of receipt tokens and accepts a proof for any member.
+Queue-full, receipt-full and interface-backpressure results do not create an
+attempt. Retry deadlines must not overlap outstanding receipts unless policy
+explicitly permits redundant transmission, and delivery/cancellation/final
+failure reclaims every associated receipt.
 
 LXMF signatures and message IDs depend on exact serialized bytes. A convenient Serde/MessagePack encoding is not automatically canonical or compatible. The fields map must preserve arbitrary MessagePack keys/values and unknown extensions; forcing every key to `u8` or every value to binary corrupts current tickets and structured fields. Use a protocol-specific bounded encoder/decoder, or prove every encoding choice against golden Python bytes, including integer width, array shape, map ordering, optional fields, 32-byte stamps, 16-byte tickets and unknown values. Add explicit regression vectors for the current `rete-lxmf-core` failures so a merely self-consistent Rust round trip cannot pass.
 
@@ -674,6 +751,18 @@ Current local esp-hal examples already demonstrate ESP32-S3 Wi-Fi AP with DHCP/T
 The user-verified `microReticulum_Firmware` Tracker build establishes that the ESP32-S3/SX1262/FEM hardware path is viable. Phase 0 should spend its effort validating and hardening Rete against current Python, embedded memory and real RF interoperability, using Leviculum only where an independent result or fallback spike is useful, rather than reproduce the same board proof in C++/ESP-IDF. If a future bare-metal dependency presents a specific blocking defect, evaluate that defect and alternatives then; do not maintain a second platform implementation pre-emptively.
 
 ## Local Device API
+
+The initial allocation-free logical slice is implemented in
+`reticulum-device-api` and frozen in
+[`docs/api/device-api-v1.md`](api/device-api-v1.md). It currently proves the
+bounded indexed-CBOR envelope, capability/status responses, trusted out-of-
+band authorization context and a host-simulation-only accepted-submission
+shape. Immediate capacity exhaustion and principal-scoped idempotency conflict
+are distinct from an accepted submission's later delivery timeout, and the
+awaiting-delivery state does not imply that private outbox bytes still exist.
+Its encoded-packet SHA-256 type is deliberately distinct from node-core's RNS
+proof-correlation token. It has no framing, dispatcher, Rete dependency,
+packet-byte output or radio-TX path; those boundaries remain later milestones.
 
 All transports carry the same logical protocol:
 
