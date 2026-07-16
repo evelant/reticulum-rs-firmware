@@ -25,12 +25,18 @@ host-tested generator creates encrypted local DATA for one exact ephemeral
 Tracker boot.
 
 Separately from the target-linked receive-only image, the portable node-core
-now prepares outbound DATA into a fixed packet pool and correlates exact proofs
-or timeouts into a fixed in-place attempt ledger. Terminal tombstones require
-explicit acknowledgement and safely backpressure new preparation. This path is
-host/bare-metal compiled but remains disconnected from firmware TX: its ledger
-is not reboot-persistent, ordinary RNS actions are still allocation-backed and
-the current borrowed packet lease cannot cross an async radio wait.
+now registers caller-owned 500-byte packet buffers, retains fixed dispatch
+metadata for them, and prepares outbound DATA directly into one supplied
+buffer. Success returns a unique `TxJob` carrying the buffer plus its proof
+token, interface target and return deadline; packet bytes deliberately have no
+public accessor until a separate transmit-permit state machine exists. Exact
+proofs or timeouts become fixed in-place terminal tombstones that require
+explicit acknowledgement.
+
+This 24-test portable slice remains disconnected from Embassy, firmware radio
+tasks and RF TX; it does not yet implement async handoff, permit issuance,
+transmit completion, lost-owner recovery or reboot persistence, and ordinary
+RNS actions remain allocation-backed.
 
 ## Read first
 
@@ -41,7 +47,7 @@ the current borrowed packet lease cannot cross an async radio wait.
 - [Phase-1 receive-only slice](docs/phase-1-rx-slice.md)
 - [Phase-1 Tracker RX hardware qualification](docs/phase-1-rx-hil.md)
 - [Device API v1 logical protocol](docs/api/device-api-v1.md)
-- [Bounded node-core DATA outbox](docs/node-core-outbox.md)
+- [Bounded node-core external-buffer DATA dispatch](docs/node-core-outbox.md)
 - [Owning async TX handoff](docs/async-tx-handoff.md)
 - [Rete upstream hardening backlog](docs/rete-upstream-backlog.md)
 - [Dependency provenance](docs/provenance.md)

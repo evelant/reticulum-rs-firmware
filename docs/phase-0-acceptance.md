@@ -187,9 +187,11 @@ classes remain disabled rather than reaching those native mutations.
 
 Firmware no longer receives a public raw Rete `NodeCore` alias. The adapter's
 `EmbeddedNode` privately owns Rete state and remains the protocol construction
-boundary. The newer `reticulum-node-core::NodeCore` owns an `EmbeddedNode` for
-the fixed outbound-DATA outbox slice; the current receive-only firmware still
-uses its narrower opaque façade. Together these boundaries currently enforce:
+boundary. The newer `reticulum-node-core::NodeCore` owns an `EmbeddedNode`,
+fixed external-buffer dispatch metadata and the DATA attempt ledger; each
+500-byte outbound `TxPacketBuffer` remains caller-owned and is registered once.
+The current receive-only firmware still uses its narrower opaque façade.
+Together these boundaries currently enforce:
 
 - a 500-byte ingress ceiling before Rete's hosted 300-KiB allocation path;
 - project-owned endpoint/transport roles and an additional-destination quota;
@@ -204,6 +206,12 @@ uses its narrower opaque façade. Together these boundaries currently enforce:
 - suppression of forwarding actions in endpoint profiles;
 - resolved `Only(interface)` and `AllExcept(interface)` actions while the
   synchronous ingress source is still known;
+- pre-entropy dispatch/attempt reservation before caller-owned DATA
+  preparation, with failure returning the exact same external buffer;
+- preservation of outbound `All`/`Only`/`AllExcept` target and caller-supplied
+  return deadline in a unique, byte-inaccessible `TxJob`;
+- exact-receipt rollback for a definitely-unsent queued job, and terminal
+  acknowledgement blocked while that job still owns its buffer;
 - allocation-free adapter/transport counters and capacity snapshots;
 - suppression of Rete's premature responder `LinkEstablished` event until the
   native Link actually reaches `Active`.
@@ -213,6 +221,9 @@ packets, destinations and several Link paths still contain `Vec` allocations;
 opaque native failures remain possible. The exact upstream repairs and
 regression expectations are tracked in
 [the Rete hardening backlog](rete-upstream-backlog.md).
+The external-buffer slice is synchronous and has 24 focused host tests; it has
+no Embassy channel, permit state, radio integration or transmit-completion
+claim.
 
 ## Rete production hard gates
 

@@ -351,16 +351,25 @@ lifecycle work remains on the user's fork. No issue or pull request was opened,
 and publication elsewhere still requires the user's direct approval.
 
 The project adapter and `crates/node-core` now exercise both halves. Node-core
-reserves fixed 500-byte outbox and attempt slots before preparation, commits
-scalar receipt metadata infallibly, distinguishes definitely-unsent abort from
-possibly-transmitted release, and prevents stale lease/attempt-handle reuse.
-Its exact candidate sink turns the matching active attempt into an in-place
-terminal tombstone before Rete removes the receipt; retained tombstones
-backpressure submission until a dispatcher explicitly acknowledges them. The
-remaining product blockers are durable intent/attempt recovery, async packet
-ownership, bounded ordinary RNS actions and higher-level LXMF persistence.
-Until those slices and radio policy are connected, no stable host send
-operation or firmware RF TX graph uses this path.
+stores fixed dispatch metadata and the attempt ledger while each 500-byte
+`TxPacketBuffer` remains externally owned and registered once. It reserves
+dispatch and attempt slots before preparation, writes directly into the
+supplied buffer, and returns a unique `TxJob` preserving full receipt hash,
+interface target and return deadline. The job deliberately exposes no packet
+bytes pending a separate permit state. If a future job-channel insertion proves
+definitely unsent, `rollback_queued()` cancels the exact live receipt and
+returns the same buffer; a missing receipt retains the bound job rather than
+hiding the invariant. Its exact candidate sink turns the matching active
+attempt into an in-place terminal tombstone before Rete removes the receipt,
+and acknowledgement remains blocked while the job still owns its buffer.
+Dropping a job leaves its dispatch quarantined instead of reusable, and a
+layout guard prevents node dispatch slots from regaining embedded packet
+arrays. Twenty-four focused tests cover this synchronous boundary. The
+remaining product blockers are the async owning channel, permit/completion and
+lost-owner state, durable intent/attempt recovery, bounded ordinary RNS actions
+and higher-level LXMF persistence. Until those slices and radio policy are
+connected, no stable host send operation or firmware RF TX graph uses this
+path.
 
 ## 12. LXMF retry and receipt-attempt correlation
 

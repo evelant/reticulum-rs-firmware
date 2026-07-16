@@ -1,16 +1,17 @@
 //! Bounded orchestration between the Reticulum protocol owner and interface
 //! actors.
 //!
-//! This slice owns a concrete RNS node, a fixed packet outbox, and a fixed DATA
-//! attempt ledger. A receipt is registered only after both final slots have
-//! been reserved. Proofs and timeouts become acknowledged terminal tombstones
-//! before RNS releases its receipt state. The crate deliberately has no
-//! device-API, executor, radio, board, or persistence dependency.
+//! This slice owns a concrete RNS node, fixed external-buffer dispatch
+//! metadata, and a fixed DATA attempt ledger. A receipt is registered only
+//! after both final metadata slots have been reserved. Proofs and timeouts
+//! become acknowledged terminal tombstones before RNS releases its receipt
+//! state. The crate deliberately has no device-API, executor, radio, board, or
+//! persistence dependency.
 //!
 //! Construction and unrelated RNS paths may still allocate inside the current
-//! Rete integration. The DATA-to-outbox transaction implemented here uses only
-//! caller-owned arrays; it is not a claim that the entire node is allocation
-//! free.
+//! Rete integration. The external-buffer DATA transaction implemented here
+//! uses only caller-owned arrays; it is not a claim that the entire node is
+//! allocation free.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -19,10 +20,11 @@
 use rand_core::{CryptoRng, RngCore};
 use reticulum_rns_rete::{
     DestHash as RnsDestinationHash, EmbeddedNode as RnsNode, EmbeddedNodeConfig as RnsNodeConfig,
-    Identity as RnsIdentity, IngressReport, InterfaceId, NodeActions, NodeRole as RnsNodeRole,
-    PrepareDataError as RnsPrepareDataError, PreparedData as RnsPreparedData, RNS_MTU,
-    ReceiptCandidate, ReceiptKind, ReceiptReservationUnavailable, ReceiptTerminal,
-    ReceiptTerminalReservation, ReceiptTerminalSink,
+    Identity as RnsIdentity, IngressReport, InterfaceId as RnsInterfaceId, NodeActions,
+    NodeRole as RnsNodeRole, PrepareDataError as RnsPrepareDataError,
+    PreparedData as RnsPreparedData, RNS_MTU, ReceiptCandidate, ReceiptKind,
+    ReceiptReservationUnavailable, ReceiptTerminal, ReceiptTerminalReservation,
+    ReceiptTerminalSink, TxTarget as RnsTxTarget,
 };
 
 /// Complete packet storage reserved for one base-MTU Reticulum transmission.
@@ -36,7 +38,8 @@ pub const MAX_DATA_PAYLOAD: usize = reticulum_rns_rete::MAX_DATA_PAYLOAD;
 ///
 /// Path and Link maps use `FnvIndexMap`, whose capacity must be a power of two
 /// greater than one. Announce and deduplication storage use non-empty deques.
-/// The packet outbox is independent and may have zero slots.
+/// External packet-buffer dispatch metadata is independent and may have zero
+/// slots.
 pub const fn capacity_profile_is_supported(
     paths: usize,
     announces: usize,
@@ -137,6 +140,136 @@ impl MonotonicSeconds {
     /// Raw whole seconds supplied to RNS.
     pub const fn get(self) -> u64 {
         self.0
+    }
+}
+
+/// Executor-independent monotonic time in whole milliseconds.
+///
+/// This clock scopes packet-owner deadlines. It is deliberately distinct
+/// from RNS's whole-second protocol clock and from Unix wall time.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct MonotonicMillis(u64);
+
+impl MonotonicMillis {
+    /// Construct a monotonic-millisecond sample.
+    pub const fn new(milliseconds: u64) -> Self {
+        Self(milliseconds)
+    }
+
+    /// Raw whole milliseconds supplied by the platform monotonic clock.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Deadline by which an externally owned packet buffer should return to the
+/// node owner or enter retained recovery.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct TxLeaseDeadline(MonotonicMillis);
+
+impl TxLeaseDeadline {
+    /// Construct a packet-owner deadline from a monotonic instant.
+    pub const fn new(deadline: MonotonicMillis) -> Self {
+        Self(deadline)
+    }
+
+    /// Monotonic instant represented by this deadline.
+    pub const fn instant(self) -> MonotonicMillis {
+        self.0
+    }
+}
+
+/// Product-owned packet-interface identifier.
+///
+/// RNS interface identifiers are one byte. The initial compact
+/// [`InterfaceSet`] can represent identifiers zero through 63; larger values
+/// remain representable here so a native target is never truncated while a
+/// later route-resolution step can reject an unsupported profile explicitly.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PacketInterfaceId(u8);
+
+impl PacketInterfaceId {
+    /// Construct a packet-interface identifier from its complete wire value.
+    pub const fn new(value: u8) -> Self {
+        Self(value)
+    }
+
+    /// Raw one-byte interface identifier.
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+
+    fn into_rns(self) -> RnsInterfaceId {
+        RnsInterfaceId(self.0)
+    }
+}
+
+/// Fixed set of the first 64 packet interfaces.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct InterfaceSet(u64);
+
+impl InterfaceSet {
+    /// Empty interface set.
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// Construct a set from its complete bit representation.
+    pub const fn from_bits(bits: u64) -> Self {
+        Self(bits)
+    }
+
+    /// Complete bit representation of this set.
+    pub const fn bits(self) -> u64 {
+        self.0
+    }
+
+    /// Whether this set contains no interfaces.
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Whether this compact set contains an interface.
+    ///
+    /// Identifiers above 63 are outside this profile and return `false`.
+    pub const fn contains(self, interface: PacketInterfaceId) -> bool {
+        let index = interface.get();
+        index < 64 && self.0 & (1u64 << index) != 0
+    }
+
+    /// Add an interface when it fits the compact set.
+    ///
+    /// `None` reports an identifier above 63 without altering the set.
+    pub const fn with(self, interface: PacketInterfaceId) -> Option<Self> {
+        let index = interface.get();
+        if index < 64 {
+            Some(Self(self.0 | (1u64 << index)))
+        } else {
+            None
+        }
+    }
+}
+
+/// Interface authorization retained with one prepared RNS packet.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TxTarget {
+    /// Send on every eligible packet interface.
+    All,
+    /// Send only on one packet interface.
+    Only(PacketInterfaceId),
+    /// Send on every eligible interface except one packet interface.
+    AllExcept(PacketInterfaceId),
+}
+
+impl TxTarget {
+    fn from_rns(target: RnsTxTarget) -> Self {
+        match target {
+            RnsTxTarget::All => Self::All,
+            RnsTxTarget::Only(interface) => Self::Only(PacketInterfaceId::new(interface.0)),
+            RnsTxTarget::AllExcept(interface) => {
+                Self::AllExcept(PacketInterfaceId::new(interface.0))
+            }
+        }
     }
 }
 
@@ -259,16 +392,34 @@ impl TerminalAttempt {
     }
 }
 
-/// Scalar metadata for one packet committed to the private outbox.
+/// Stable identifier assigned to one externally owned packet buffer.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PacketSlotId(u16);
+
+impl PacketSlotId {
+    /// Numeric slot index assigned by the node owner.
+    pub const fn get(self) -> u16 {
+        self.0
+    }
+
+    fn index(self) -> usize {
+        usize::from(self.0)
+    }
+}
+
+/// Scalar metadata for one packet committed to an external buffer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PreparedPacket {
     packet_len: u16,
     attempt: AttemptToken,
     handle: AttemptHandle,
+    slot: PacketSlotId,
+    target: TxTarget,
+    deadline: TxLeaseDeadline,
 }
 
 impl PreparedPacket {
-    /// Encoded packet length in the fixed outbox slot.
+    /// Encoded packet length in the external packet buffer.
     pub const fn packet_len(self) -> u16 {
         self.packet_len
     }
@@ -283,11 +434,34 @@ impl PreparedPacket {
         self.handle
     }
 
-    fn from_rns(prepared: RnsPreparedData, handle: AttemptHandle) -> Self {
+    /// Stable external packet-buffer slot containing these bytes.
+    pub const fn slot_id(self) -> PacketSlotId {
+        self.slot
+    }
+
+    /// RNS interface authorization retained from packet preparation.
+    pub const fn target(self) -> TxTarget {
+        self.target
+    }
+
+    /// Monotonic return/recovery deadline bound to this dispatch.
+    pub const fn deadline(self) -> TxLeaseDeadline {
+        self.deadline
+    }
+
+    fn from_rns(
+        prepared: RnsPreparedData,
+        handle: AttemptHandle,
+        slot: PacketSlotId,
+        deadline: TxLeaseDeadline,
+    ) -> Self {
         Self {
             packet_len: prepared.packet_len(),
             attempt: AttemptToken(*prepared.receipt().as_bytes()),
             handle,
+            slot,
+            target: TxTarget::from_rns(prepared.target()),
+            deadline,
         }
     }
 }
@@ -295,11 +469,14 @@ impl PreparedPacket {
 /// Failure to reserve and prepare one DATA packet.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SubmitError {
-    /// Every fixed packet slot is ready or leased.
-    OutboxFull {
-        /// Configured packet-slot limit.
-        limit: usize,
-    },
+    /// The supplied packet buffer was never registered with this node owner.
+    UnregisteredPacketBuffer,
+    /// The supplied packet buffer belongs to another node incarnation.
+    ForeignPacketBuffer,
+    /// The supplied packet buffer is already bound to an active dispatch.
+    PacketBufferBusy,
+    /// The registered packet slot and node dispatch metadata disagree.
+    PacketBufferInvariant,
     /// Every attempt slot is active or retained as an unacknowledged
     /// terminal tombstone.
     AttemptLedgerFull {
@@ -308,6 +485,8 @@ pub enum SubmitError {
     },
     /// The non-repeating attempt-generation space has been exhausted.
     AttemptIdentifierExhausted,
+    /// The non-repeating dispatch-generation space has been exhausted.
+    DispatchIdentifierExhausted,
     /// Plaintext cannot fit in one encrypted base-MTU DATA packet.
     PayloadTooLarge {
         /// Supplied plaintext length.
@@ -348,50 +527,193 @@ impl From<RnsPrepareDataError> for SubmitError {
     }
 }
 
-/// Opaque, generation-checked authorization to inspect and complete one
-/// leased packet slot.
+/// Failure to register one external packet buffer with a node owner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TxLease {
-    owner_identity: [u8; 16],
+pub enum BufferRegistrationError {
+    /// Every configured dispatch slot already has a registered buffer.
+    PoolFull {
+        /// Configured external packet-buffer limit.
+        limit: usize,
+    },
+    /// This buffer is already registered or bound to a dispatch.
+    AlreadyRegistered,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BufferBinding {
+    Unregistered,
+    Available {
+        owner_identity: [u8; 16],
+        instance: NodeInstanceId,
+        slot: PacketSlotId,
+    },
+    Bound {
+        dispatch_generation: u64,
+        prepared: PreparedPacket,
+    },
+}
+
+/// One complete externally owned Reticulum packet buffer.
+///
+/// This value is intentionally neither `Copy` nor `Clone`. Firmware allocates
+/// it in static storage, registers it once, and then moves its unique mutable
+/// reference through the owning handoff. Packet bytes have no public accessor;
+/// a later interface-authorization slice will expose them only with a matching
+/// scalar permit.
+pub struct TxPacketBuffer {
+    bytes: [u8; PACKET_CAPACITY],
+    binding: BufferBinding,
+}
+
+impl TxPacketBuffer {
+    /// Construct one zero-filled, unregistered packet buffer.
+    pub const fn new() -> Self {
+        Self {
+            bytes: [0; PACKET_CAPACITY],
+            binding: BufferBinding::Unregistered,
+        }
+    }
+
+    /// Stable slot assigned during registration, if any.
+    pub const fn slot_id(&self) -> Option<PacketSlotId> {
+        match self.binding {
+            BufferBinding::Unregistered => None,
+            BufferBinding::Available { slot, .. } => Some(slot),
+            BufferBinding::Bound { prepared, .. } => Some(prepared.slot_id()),
+        }
+    }
+}
+
+impl Default for TxPacketBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Opaque identity of one external-buffer dispatch generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DispatchHandle {
     instance: NodeInstanceId,
-    slot: usize,
+    slot: PacketSlotId,
     generation: u64,
 }
 
-/// Failure while operating on a packet lease.
+/// Unique ownership of one prepared packet awaiting the async handoff.
+///
+/// The job carries the only mutable reference to its packet buffer. It exposes
+/// scalar metadata but deliberately does not expose packet bytes before the
+/// separate interface-authorization state machine exists.
+#[must_use = "dropping a TX job quarantines its packet buffer, dispatch, attempt, and receipt"]
+pub struct TxJob<'a> {
+    buffer: &'a mut TxPacketBuffer,
+    dispatch: DispatchHandle,
+}
+
+impl TxJob<'_> {
+    fn bound_prepared(&self) -> PreparedPacket {
+        match self.buffer.binding {
+            BufferBinding::Bound {
+                dispatch_generation,
+                prepared,
+            } if dispatch_generation == self.dispatch.generation
+                && prepared.slot_id() == self.dispatch.slot =>
+            {
+                prepared
+            }
+            BufferBinding::Unregistered
+            | BufferBinding::Available { .. }
+            | BufferBinding::Bound { .. } => {
+                unreachable!("private TX job and packet-buffer binding diverged")
+            }
+        }
+    }
+
+    /// Stable slot of the uniquely owned packet buffer.
+    pub fn slot_id(&self) -> PacketSlotId {
+        self.bound_prepared().slot_id()
+    }
+
+    /// Encoded packet length retained as scalar metadata.
+    pub fn packet_len(&self) -> u16 {
+        self.bound_prepared().packet_len()
+    }
+
+    /// Complete proof-correlation token for this dispatch.
+    pub fn attempt(&self) -> AttemptToken {
+        self.bound_prepared().attempt()
+    }
+
+    /// Attempt handle used for terminal acknowledgement.
+    pub fn attempt_handle(&self) -> AttemptHandle {
+        self.bound_prepared().handle()
+    }
+
+    /// RNS interface authorization retained at preparation time.
+    pub fn target(&self) -> TxTarget {
+        self.bound_prepared().target()
+    }
+
+    /// Deadline bound to this external-buffer owner generation.
+    pub fn deadline(&self) -> TxLeaseDeadline {
+        self.bound_prepared().deadline()
+    }
+
+    /// Copy all scalar metadata without separating it from buffer ownership.
+    pub fn prepared(&self) -> PreparedPacket {
+        self.bound_prepared()
+    }
+}
+
+/// Preparation rejection that returns the caller's still-available buffer.
+pub struct PrepareFailure<'a> {
+    reason: SubmitError,
+    buffer: &'a mut TxPacketBuffer,
+}
+
+impl<'a> PrepareFailure<'a> {
+    /// Typed reason the preparation transaction was rejected.
+    pub const fn reason(&self) -> SubmitError {
+        self.reason
+    }
+
+    /// Recover the exact unique packet buffer supplied by the caller.
+    pub fn into_buffer(self) -> &'a mut TxPacketBuffer {
+        self.buffer
+    }
+}
+
+/// Failure while rolling back a queued, definitely-unsent dispatch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LeaseError {
-    /// The slot is absent, no longer leased, or belongs to a newer lease.
+pub enum RollbackErrorKind {
+    /// The job belongs to another node owner, incarnation, slot, or generation.
     StaleOrUnknown,
-    /// The non-repeating lease-generation space has been exhausted.
-    IdentifierExhausted,
-    /// Private slot metadata violates the fixed-packet invariant.
+    /// Buffer, dispatch, and attempt metadata disagree.
     Invariant,
-}
-
-/// Failure to borrow bytes from a currently leased packet.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LeasedFrameError {
-    /// The supplied packet lease is stale or violates packet-pool invariants.
-    Lease(LeaseError),
-    /// The attempt became terminal while the interface held its lease. The
-    /// interface must release the lease without transmitting these bytes.
-    AttemptTerminal(TerminalAttempt),
-}
-
-/// Failure to abort a packet that an interface proves was never transmitted.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AbortError {
-    /// The supplied lease is stale or invalid.
-    Lease(LeaseError),
-    /// The corresponding RNS receipt was already absent; the slot remains
-    /// leased so the inconsistency cannot be hidden by reuse.
+    /// The corresponding RNS receipt was already absent. The job remains
+    /// bound so the inconsistency cannot be hidden by buffer reuse.
     ReceiptMissing {
         /// Attempt whose receipt could not be cancelled.
         attempt: AttemptToken,
     },
-    /// The packet lease references an absent or mismatched attempt record.
-    AttemptInvariant,
+}
+
+/// Rollback failure retaining ownership of the exact bound job.
+#[must_use = "a rollback failure retains the only job capable of recovering the bound buffer"]
+pub struct RollbackFailure<'a> {
+    reason: RollbackErrorKind,
+    job: TxJob<'a>,
+}
+
+impl<'a> RollbackFailure<'a> {
+    /// Typed invariant or receipt-cancellation failure.
+    pub const fn reason(&self) -> RollbackErrorKind {
+        self.reason
+    }
+
+    /// Recover the still-bound unique job for diagnosis or the correct owner.
+    pub fn into_job(self) -> TxJob<'a> {
+        self.job
+    }
 }
 
 /// Failure to acknowledge a terminal DATA attempt.
@@ -402,8 +724,8 @@ pub enum AcknowledgeError {
     StaleOrUnknown,
     /// The attempt is still awaiting a proof or timeout.
     NotTerminal,
-    /// An interface still holds the packet bytes for this terminal attempt.
-    StillLeased,
+    /// An external job still owns the packet bytes for this terminal attempt.
+    PacketStillBound,
     /// Private packet/attempt state violates the fixed-pool invariant.
     Invariant,
 }
@@ -443,39 +765,17 @@ pub struct MaintenanceReport {
     pub correlation_fault: Option<ReceiptCorrelationError>,
 }
 
-/// Borrowed packet bytes available only while a matching lease is active.
-///
-/// A lease is packet-pool bookkeeping, not RF transmit authorization. This
-/// slice intentionally does not expose the prepared packet's interface target.
-#[derive(Debug, Eq, PartialEq)]
-pub struct TxFrame<'a> {
-    bytes: &'a [u8],
-    attempt: AttemptToken,
-}
-
-impl TxFrame<'_> {
-    /// Complete encoded Reticulum packet bytes.
-    pub const fn bytes(&self) -> &[u8] {
-        self.bytes
-    }
-
-    /// Proof-correlation token for this leased attempt.
-    pub const fn attempt(&self) -> AttemptToken {
-        self.attempt
-    }
-}
-
-/// Scalar occupancy snapshot for the fixed packet pool and DATA receipts.
+/// Scalar occupancy snapshot for external dispatch metadata and DATA receipts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CapacitySnapshot {
-    /// Ready packets awaiting an interface lease.
-    pub outbox_ready: usize,
-    /// Packets currently leased to an interface actor.
-    pub outbox_leased: usize,
-    /// Total non-free packet slots.
-    pub outbox_used: usize,
-    /// Configured packet-slot limit.
-    pub outbox_limit: usize,
+    /// Packet buffers registered with this owner incarnation.
+    pub packet_buffers_registered: usize,
+    /// Registered buffers currently bound to queued jobs.
+    pub dispatches_queued: usize,
+    /// Registered buffers reserved or queued by a transaction.
+    pub dispatches_used: usize,
+    /// Configured dispatch-metadata limit.
+    pub dispatches_limit: usize,
     /// Outstanding destination-DATA receipts retained by RNS.
     pub receipts_used: usize,
     /// Configured destination-DATA receipt limit.
@@ -497,30 +797,28 @@ struct AttemptRef {
 }
 
 #[derive(Clone, Copy)]
-enum SlotState {
+enum DispatchState {
+    Unregistered,
     Free,
-    Reserved(AttemptRef),
-    Ready {
-        prepared: RnsPreparedData,
+    Reserved {
         attempt: AttemptRef,
     },
-    Leased {
+    Queued {
         prepared: RnsPreparedData,
         attempt: AttemptRef,
         generation: u64,
+        deadline: TxLeaseDeadline,
     },
 }
 
 #[derive(Clone, Copy)]
-struct OutboxSlot {
-    bytes: [u8; PACKET_CAPACITY],
-    state: SlotState,
+struct DispatchSlot {
+    state: DispatchState,
 }
 
-impl OutboxSlot {
+impl DispatchSlot {
     const EMPTY: Self = Self {
-        bytes: [0; PACKET_CAPACITY],
-        state: SlotState::Free,
+        state: DispatchState::Unregistered,
     };
 }
 
@@ -591,29 +889,29 @@ impl Iterator for TerminalAttempts<'_> {
     }
 }
 
-/// Single owner of a concrete bounded RNS node and fixed packet handoff pool.
+/// Single owner of a concrete bounded RNS node and external-buffer metadata.
 ///
 /// `PATHS` also bounds destination-DATA receipts in the current Rete storage
 /// backend and this owner's attempt ledger. `PATHS` and `LINKS` must be powers
 /// of two greater than one; `ANNOUNCES` and `DEDUPLICATION` must be nonzero.
-/// `OUTBOX` independently bounds packets waiting for or held by an interface
-/// actor and may be zero.
+/// `PACKET_BUFFERS` independently bounds registered external packet buffers
+/// and their dispatch metadata and may be zero. The 500-byte arrays live
+/// outside this value.
 pub struct NodeCore<
     const PATHS: usize,
     const ANNOUNCES: usize,
     const DEDUPLICATION: usize,
     const LINKS: usize,
-    const OUTBOX: usize,
+    const PACKET_BUFFERS: usize,
 > {
     rns: RnsNode<PATHS, ANNOUNCES, DEDUPLICATION, LINKS>,
     owner_identity: [u8; 16],
     instance: NodeInstanceId,
-    outbox: [OutboxSlot; OUTBOX],
+    dispatches: [DispatchSlot; PACKET_BUFFERS],
     attempts: [AttemptSlot; PATHS],
-    next_reserve: usize,
-    next_lease_slot: usize,
+    next_registration: usize,
     next_attempt: usize,
-    lease_generation: u64,
+    dispatch_generation: u64,
     attempt_generation: u64,
 }
 
@@ -622,10 +920,10 @@ impl<
     const ANNOUNCES: usize,
     const DEDUPLICATION: usize,
     const LINKS: usize,
-    const OUTBOX: usize,
-> NodeCore<PATHS, ANNOUNCES, DEDUPLICATION, LINKS, OUTBOX>
+    const PACKET_BUFFERS: usize,
+> NodeCore<PATHS, ANNOUNCES, DEDUPLICATION, LINKS, PACKET_BUFFERS>
 {
-    /// Construct the concrete RNS owner and an empty fixed packet pool.
+    /// Construct the concrete RNS owner and empty external-buffer metadata.
     pub fn new(
         identity: NodeIdentity,
         app_name: &str,
@@ -650,6 +948,10 @@ impl<
                 LINKS > 1 && LINKS.is_power_of_two(),
                 "node-core LINKS must be a power of two greater than one"
             );
+            assert!(
+                PACKET_BUFFERS <= (u16::MAX as usize) + 1,
+                "node-core PACKET_BUFFERS must fit the 16-bit packet-slot namespace"
+            );
         }
         let role = match config.role {
             NodeRole::Endpoint => RnsNodeRole::Endpoint,
@@ -671,12 +973,11 @@ impl<
             rns,
             owner_identity,
             instance,
-            outbox: [OutboxSlot::EMPTY; OUTBOX],
+            dispatches: [DispatchSlot::EMPTY; PACKET_BUFFERS],
             attempts: [AttemptSlot::EMPTY; PATHS],
-            next_reserve: 0,
-            next_lease_slot: 0,
+            next_registration: 0,
             next_attempt: 0,
-            lease_generation: 0,
+            dispatch_generation: 0,
             attempt_generation: 0,
         })
     }
@@ -700,56 +1001,169 @@ impl<
             .map_err(|_| PeerRegistrationError::InvalidPeer)
     }
 
-    /// Reserve a final outbox slot and prepare encrypted destination DATA
-    /// directly into it.
+    /// Register one externally allocated packet buffer with this owner.
     ///
-    /// Capacity rejection happens before entropy or RNS state mutation. Once
-    /// RNS commits the receipt, changing `Reserved` to `Ready` cannot fail.
-    pub fn enqueue_data<R: RngCore + CryptoRng>(
+    /// Registration assigns the next stable slot exactly once. A buffer must
+    /// be registered before it can enter the available/completion channel.
+    pub fn register_packet_buffer(
         &mut self,
+        buffer: &mut TxPacketBuffer,
+    ) -> Result<PacketSlotId, BufferRegistrationError> {
+        if !matches!(buffer.binding, BufferBinding::Unregistered) {
+            return Err(BufferRegistrationError::AlreadyRegistered);
+        }
+        if PACKET_BUFFERS == 0 {
+            return Err(BufferRegistrationError::PoolFull {
+                limit: PACKET_BUFFERS,
+            });
+        }
+
+        let mut index = self.next_registration;
+        let mut free = None;
+        for _ in 0..PACKET_BUFFERS {
+            if matches!(self.dispatches[index].state, DispatchState::Unregistered) {
+                free = Some(index);
+                break;
+            }
+            index = Self::next_dispatch_index(index);
+        }
+        let index = free.ok_or(BufferRegistrationError::PoolFull {
+            limit: PACKET_BUFFERS,
+        })?;
+        let raw = u16::try_from(index).map_err(|_| BufferRegistrationError::PoolFull {
+            limit: PACKET_BUFFERS,
+        })?;
+        let slot = PacketSlotId(raw);
+        self.dispatches[index].state = DispatchState::Free;
+        buffer.binding = BufferBinding::Available {
+            owner_identity: self.owner_identity,
+            instance: self.instance,
+            slot,
+        };
+        self.next_registration = Self::next_dispatch_index(index);
+        Ok(slot)
+    }
+
+    /// Prepare encrypted destination DATA directly into one registered
+    /// external buffer and bind it to a unique job.
+    ///
+    /// Buffer, dispatch and attempt capacity plus identifier exhaustion are
+    /// rejected before entropy or RNS state mutation. Native preparation
+    /// errors restore both metadata reservations and return the same available
+    /// buffer. On success no packet bytes move or copy.
+    pub fn prepare_data_into_slot<'a, R: RngCore + CryptoRng>(
+        &mut self,
+        buffer: &'a mut TxPacketBuffer,
         destination: &DestinationHash,
         plaintext: &[u8],
         now: MonotonicSeconds,
+        deadline: TxLeaseDeadline,
         rng: &mut R,
-    ) -> Result<PreparedPacket, SubmitError> {
-        let (slot_index, attempt_ref) = self.reserve_submission()?;
-        let rns_destination = destination.into_rns();
-        let result = {
-            let (rns, outbox) = (&mut self.rns, &mut self.outbox);
-            rns.prepare_data_into(
-                &rns_destination,
-                plaintext,
-                now.get(),
-                rng,
-                &mut outbox[slot_index].bytes,
-            )
+    ) -> Result<TxJob<'a>, PrepareFailure<'a>> {
+        let reservation = self.reserve_external_submission(buffer);
+        let (slot, attempt, dispatch_generation) = match reservation {
+            Ok(reservation) => reservation,
+            Err(reason) => return Err(PrepareFailure { reason, buffer }),
         };
 
-        match result {
-            Ok(prepared) => {
-                let token = AttemptToken(*prepared.receipt().as_bytes());
-                self.attempts[attempt_ref.slot].state = AttemptState::Active {
-                    generation: attempt_ref.generation,
-                    token,
-                };
-                self.outbox[slot_index].state = SlotState::Ready {
-                    prepared,
-                    attempt: attempt_ref,
-                };
-                self.next_reserve = Self::next_outbox_index(slot_index);
-                self.next_attempt = Self::next_attempt_index(attempt_ref.slot);
-                self.attempt_generation = attempt_ref.generation;
-                Ok(PreparedPacket::from_rns(
-                    prepared,
-                    self.handle_for(attempt_ref),
-                ))
-            }
+        let result = self.rns.prepare_data_into(
+            &destination.into_rns(),
+            plaintext,
+            now.get(),
+            rng,
+            &mut buffer.bytes,
+        );
+
+        let prepared = match result {
+            Ok(prepared) => prepared,
             Err(error) => {
-                self.outbox[slot_index].state = SlotState::Free;
-                self.attempts[attempt_ref.slot].state = AttemptState::Free;
-                Err(error.into())
+                self.dispatches[slot.index()].state = DispatchState::Free;
+                self.attempts[attempt.slot].state = AttemptState::Free;
+                return Err(PrepareFailure {
+                    reason: error.into(),
+                    buffer,
+                });
+            }
+        };
+
+        let token = AttemptToken(*prepared.receipt().as_bytes());
+        self.attempts[attempt.slot].state = AttemptState::Active {
+            generation: attempt.generation,
+            token,
+        };
+        self.dispatches[slot.index()].state = DispatchState::Queued {
+            prepared,
+            attempt,
+            generation: dispatch_generation,
+            deadline,
+        };
+        let scalar = PreparedPacket::from_rns(prepared, self.handle_for(attempt), slot, deadline);
+        buffer.binding = BufferBinding::Bound {
+            dispatch_generation,
+            prepared: scalar,
+        };
+        self.next_attempt = Self::next_attempt_index(attempt.slot);
+        self.attempt_generation = attempt.generation;
+        self.dispatch_generation = dispatch_generation;
+
+        Ok(TxJob {
+            buffer,
+            dispatch: DispatchHandle {
+                instance: self.instance,
+                slot,
+                generation: dispatch_generation,
+            },
+        })
+    }
+
+    /// Roll back a queued job after a handoff proves it was never accepted for
+    /// transmission.
+    ///
+    /// The exact receipt is cancelled before attempt, dispatch or buffer state
+    /// becomes reusable. Any mismatch returns the still-bound unique job.
+    pub fn rollback_queued<'a>(
+        &mut self,
+        job: TxJob<'a>,
+    ) -> Result<&'a mut TxPacketBuffer, RollbackFailure<'a>> {
+        let (prepared, attempt) = match self.validate_queued_job(&job) {
+            Ok(values) => values,
+            Err(reason) => return Err(RollbackFailure { reason, job }),
+        };
+
+        match self.terminal_for(attempt) {
+            Some(terminal) if terminal.token().as_bytes() == prepared.receipt().as_bytes() => {}
+            Some(_) => {
+                return Err(RollbackFailure {
+                    reason: RollbackErrorKind::Invariant,
+                    job,
+                });
+            }
+            None => {
+                if !self.attempt_is_active(attempt, prepared) {
+                    return Err(RollbackFailure {
+                        reason: RollbackErrorKind::Invariant,
+                        job,
+                    });
+                }
+                if !self.rns.cancel_data_receipt(prepared.receipt()) {
+                    return Err(RollbackFailure {
+                        reason: RollbackErrorKind::ReceiptMissing {
+                            attempt: AttemptToken(*prepared.receipt().as_bytes()),
+                        },
+                        job,
+                    });
+                }
+                self.attempts[attempt.slot].state = AttemptState::Free;
             }
         }
+
+        self.dispatches[job.dispatch.slot.index()].state = DispatchState::Free;
+        job.buffer.binding = BufferBinding::Available {
+            owner_identity: self.owner_identity,
+            instance: self.instance,
+            slot: job.dispatch.slot,
+        };
+        Ok(job.buffer)
     }
 
     /// Process one inbound packet while committing any proof to the exact
@@ -761,21 +1175,19 @@ impl<
         &mut self,
         raw: &[u8],
         now: MonotonicSeconds,
-        interface: InterfaceId,
+        interface: PacketInterfaceId,
         rng: &mut R,
     ) -> Result<IngressReport, ReceiptCorrelationError> {
         let (result, fault) = {
             let (rns, attempts) = (&mut self.rns, &mut self.attempts);
             let mut sink = AttemptReceiptSink::new(attempts);
-            let result = rns.ingest_with_receipt_sink(raw, now.get(), interface, rng, &mut sink);
+            let result =
+                rns.ingest_with_receipt_sink(raw, now.get(), interface.into_rns(), rng, &mut sink);
             (result, sink.fault)
         };
 
         match (result, fault) {
-            (Ok(report), None) => {
-                self.reconcile_terminal_packets();
-                Ok(report)
-            }
+            (Ok(report), None) => Ok(report),
             (Ok(_), Some(fault)) | (Err(ReceiptReservationUnavailable), Some(fault)) => Err(fault),
             (Err(ReceiptReservationUnavailable), None) => {
                 Err(ReceiptCorrelationError::ReservationInvariant)
@@ -798,7 +1210,6 @@ impl<
             let report = rns.tick_with_receipt_sink(now.get(), rng, &mut sink);
             (report, sink.fault)
         };
-        self.reconcile_terminal_packets();
         MaintenanceReport {
             actions: report.actions,
             timed_out_attempts: report.timed_out_receipts,
@@ -808,125 +1219,6 @@ impl<
                     .then_some(ReceiptCorrelationError::ReservationInvariant)
             }),
         }
-    }
-
-    /// Lease the next ready packet to an interface actor.
-    ///
-    /// Each lease receives a globally non-repeating generation. Returning a
-    /// transiently unsent packet and leasing it again therefore cannot make an
-    /// old copied lease valid.
-    pub fn lease_next(&mut self) -> Result<Option<TxLease>, LeaseError> {
-        self.reconcile_terminal_packets();
-        let Some(slot_index) = self.find_ready_slot() else {
-            return Ok(None);
-        };
-        let generation = self
-            .lease_generation
-            .checked_add(1)
-            .ok_or(LeaseError::IdentifierExhausted)?;
-        let SlotState::Ready { prepared, attempt } = self.outbox[slot_index].state else {
-            return Err(LeaseError::Invariant);
-        };
-        if !self.attempt_is_active(attempt, prepared) {
-            return Err(LeaseError::Invariant);
-        }
-
-        self.lease_generation = generation;
-        self.outbox[slot_index].state = SlotState::Leased {
-            prepared,
-            attempt,
-            generation,
-        };
-        self.next_lease_slot = Self::next_outbox_index(slot_index);
-        Ok(Some(TxLease {
-            owner_identity: self.owner_identity,
-            instance: self.instance,
-            slot: slot_index,
-            generation,
-        }))
-    }
-
-    /// Borrow packet bytes while a matching interface lease remains active.
-    pub fn leased_frame(&self, lease: &TxLease) -> Result<TxFrame<'_>, LeasedFrameError> {
-        let (prepared, attempt_ref) = self.leased_entry(lease).map_err(LeasedFrameError::Lease)?;
-        if let Some(terminal) = self.terminal_for(attempt_ref) {
-            return Err(LeasedFrameError::AttemptTerminal(terminal));
-        }
-        if !self.attempt_is_active(attempt_ref, prepared) {
-            return Err(LeasedFrameError::Lease(LeaseError::Invariant));
-        }
-        let slot = self
-            .outbox
-            .get(lease.slot)
-            .ok_or(LeasedFrameError::Lease(LeaseError::StaleOrUnknown))?;
-        let bytes = slot
-            .bytes
-            .get(..usize::from(prepared.packet_len()))
-            .ok_or(LeasedFrameError::Lease(LeaseError::Invariant))?;
-        Ok(TxFrame {
-            bytes,
-            attempt: AttemptToken(*prepared.receipt().as_bytes()),
-        })
-    }
-
-    /// Return a transiently rejected, definitely unsent packet to `Ready`.
-    ///
-    /// The same bytes and receipt are retained. RNS starts its timeout at
-    /// preparation, so callers must not use this as an unbounded dwell queue.
-    /// If a proof or timeout won the race while the packet was leased, the
-    /// bytes are discarded instead and the terminal tombstone is preserved.
-    pub fn return_unsent(&mut self, lease: TxLease) -> Result<(), LeaseError> {
-        let (prepared, attempt) = self.leased_entry(&lease)?;
-        if self.terminal_for(attempt).is_some() {
-            self.outbox[lease.slot].state = SlotState::Free;
-        } else if self.attempt_is_active(attempt, prepared) {
-            self.outbox[lease.slot].state = SlotState::Ready { prepared, attempt };
-        } else {
-            return Err(LeaseError::Invariant);
-        }
-        Ok(())
-    }
-
-    /// Release packet storage after transmission or any outcome where
-    /// transmission may have occurred.
-    ///
-    /// The receipt deliberately remains live so a later proof or timeout can
-    /// resolve the attempt.
-    pub fn complete_tx(&mut self, lease: TxLease) -> Result<PreparedPacket, LeaseError> {
-        let (prepared, attempt) = self.leased_entry(&lease)?;
-        if !self.attempt_matches(attempt, prepared) {
-            return Err(LeaseError::Invariant);
-        }
-        let handle = self.handle_for(attempt);
-        self.outbox[lease.slot].state = SlotState::Free;
-        Ok(PreparedPacket::from_rns(prepared, handle))
-    }
-
-    /// Cancel and release a leased packet that the interface proves never
-    /// reached a transmission path.
-    ///
-    /// Receipt cancellation happens before slot reuse. If the exact receipt is
-    /// unexpectedly absent, the slot remains leased and the caller receives an
-    /// invariant error. If the attempt already became terminal, the bytes are
-    /// discarded without cancellation and the tombstone remains available for
-    /// acknowledgement.
-    pub fn abort_unsent(&mut self, lease: TxLease) -> Result<PreparedPacket, AbortError> {
-        let (prepared, attempt_ref) = self.leased_entry(&lease).map_err(AbortError::Lease)?;
-        let attempt = AttemptToken(*prepared.receipt().as_bytes());
-        let handle = self.handle_for(attempt_ref);
-        if self.terminal_for(attempt_ref).is_some() {
-            self.outbox[lease.slot].state = SlotState::Free;
-            return Ok(PreparedPacket::from_rns(prepared, handle));
-        }
-        if !self.attempt_is_active(attempt_ref, prepared) {
-            return Err(AbortError::AttemptInvariant);
-        }
-        if !self.rns.cancel_data_receipt(prepared.receipt()) {
-            return Err(AbortError::ReceiptMissing { attempt });
-        }
-        self.outbox[lease.slot].state = SlotState::Free;
-        self.attempts[attempt_ref.slot].state = AttemptState::Free;
-        Ok(PreparedPacket::from_rns(prepared, handle))
     }
 
     /// Iterate terminal attempt tombstones in stable ledger-slot order.
@@ -963,20 +1255,18 @@ impl<
             };
         };
 
-        for slot in &self.outbox {
+        for slot in &self.dispatches {
             match slot.state {
-                SlotState::Leased { attempt, .. } if attempt == attempt_ref => {
-                    return Err(AcknowledgeError::StillLeased);
+                DispatchState::Queued { attempt, .. } if attempt == attempt_ref => {
+                    return Err(AcknowledgeError::PacketStillBound);
                 }
-                SlotState::Ready { attempt, .. } | SlotState::Reserved(attempt)
-                    if attempt == attempt_ref =>
-                {
+                DispatchState::Reserved { attempt, .. } if attempt == attempt_ref => {
                     return Err(AcknowledgeError::Invariant);
                 }
-                SlotState::Free
-                | SlotState::Reserved(_)
-                | SlotState::Ready { .. }
-                | SlotState::Leased { .. } => {}
+                DispatchState::Unregistered
+                | DispatchState::Free
+                | DispatchState::Reserved { .. }
+                | DispatchState::Queued { .. } => {}
             }
         }
 
@@ -990,22 +1280,23 @@ impl<
         Ok(terminal)
     }
 
-    /// Read scalar fixed-pool and receipt occupancy without exposing RNS
+    /// Read scalar dispatch and receipt occupancy without exposing RNS
     /// internals.
     pub fn capacities(&self) -> CapacitySnapshot {
-        let mut ready = 0;
-        let mut leased = 0;
+        let mut registered = 0;
+        let mut queued = 0;
         let mut used = 0;
-        for slot in &self.outbox {
+        for slot in &self.dispatches {
             match slot.state {
-                SlotState::Free => {}
-                SlotState::Reserved(_) => used += 1,
-                SlotState::Ready { .. } => {
-                    ready += 1;
+                DispatchState::Unregistered => {}
+                DispatchState::Free => registered += 1,
+                DispatchState::Reserved { .. } => {
+                    registered += 1;
                     used += 1;
                 }
-                SlotState::Leased { .. } => {
-                    leased += 1;
+                DispatchState::Queued { .. } => {
+                    registered += 1;
+                    queued += 1;
                     used += 1;
                 }
             }
@@ -1029,10 +1320,10 @@ impl<
         }
         let rns = self.rns.metrics();
         CapacitySnapshot {
-            outbox_ready: ready,
-            outbox_leased: leased,
-            outbox_used: used,
-            outbox_limit: OUTBOX,
+            packet_buffers_registered: registered,
+            dispatches_queued: queued,
+            dispatches_used: used,
+            dispatches_limit: PACKET_BUFFERS,
             receipts_used: rns.capacity.receipts.used,
             receipts_limit: rns.capacity.receipts.limit,
             attempts_active,
@@ -1042,20 +1333,36 @@ impl<
         }
     }
 
-    fn reserve_submission(&mut self) -> Result<(usize, AttemptRef), SubmitError> {
-        if OUTBOX == 0 {
-            return Err(SubmitError::OutboxFull { limit: OUTBOX });
-        }
-        let mut outbox_slot = self.next_reserve;
-        let mut free_outbox = None;
-        for _ in 0..OUTBOX {
-            if matches!(self.outbox[outbox_slot].state, SlotState::Free) {
-                free_outbox = Some(outbox_slot);
-                break;
+    fn reserve_external_submission(
+        &mut self,
+        buffer: &TxPacketBuffer,
+    ) -> Result<(PacketSlotId, AttemptRef, u64), SubmitError> {
+        let (owner_identity, instance, slot) = match buffer.binding {
+            BufferBinding::Unregistered => return Err(SubmitError::UnregisteredPacketBuffer),
+            BufferBinding::Available {
+                owner_identity,
+                instance,
+                slot,
+            } => (owner_identity, instance, slot),
+            BufferBinding::Bound { prepared, .. } => {
+                return if prepared.handle.owner_identity == self.owner_identity
+                    && prepared.handle.instance == self.instance
+                {
+                    Err(SubmitError::PacketBufferBusy)
+                } else {
+                    Err(SubmitError::ForeignPacketBuffer)
+                };
             }
-            outbox_slot = Self::next_outbox_index(outbox_slot);
+        };
+        if owner_identity != self.owner_identity || instance != self.instance {
+            return Err(SubmitError::ForeignPacketBuffer);
         }
-        let outbox_slot = free_outbox.ok_or(SubmitError::OutboxFull { limit: OUTBOX })?;
+        if !matches!(
+            self.dispatches.get(slot.index()).map(|entry| entry.state),
+            Some(DispatchState::Free)
+        ) {
+            return Err(SubmitError::PacketBufferInvariant);
+        }
 
         let mut attempt_slot = self.next_attempt;
         let mut free_attempt = None;
@@ -1067,51 +1374,73 @@ impl<
             attempt_slot = Self::next_attempt_index(attempt_slot);
         }
         let attempt_slot = free_attempt.ok_or(SubmitError::AttemptLedgerFull { limit: PATHS })?;
-        let generation = self
+        let attempt_generation = self
             .attempt_generation
             .checked_add(1)
             .ok_or(SubmitError::AttemptIdentifierExhausted)?;
+        let dispatch_generation = self
+            .dispatch_generation
+            .checked_add(1)
+            .ok_or(SubmitError::DispatchIdentifierExhausted)?;
         let attempt = AttemptRef {
             slot: attempt_slot,
-            generation,
+            generation: attempt_generation,
         };
-        self.attempts[attempt_slot].state = AttemptState::Reserved { generation };
-        self.outbox[outbox_slot].state = SlotState::Reserved(attempt);
-        Ok((outbox_slot, attempt))
+        self.attempts[attempt_slot].state = AttemptState::Reserved {
+            generation: attempt_generation,
+        };
+        self.dispatches[slot.index()].state = DispatchState::Reserved { attempt };
+        Ok((slot, attempt, dispatch_generation))
     }
 
-    fn find_ready_slot(&self) -> Option<usize> {
-        if OUTBOX == 0 {
-            return None;
+    fn validate_queued_job(
+        &self,
+        job: &TxJob<'_>,
+    ) -> Result<(RnsPreparedData, AttemptRef), RollbackErrorKind> {
+        if job.dispatch.instance != self.instance {
+            return Err(RollbackErrorKind::StaleOrUnknown);
         }
-        let mut slot_index = self.next_lease_slot;
-        for _ in 0..OUTBOX {
-            if matches!(self.outbox[slot_index].state, SlotState::Ready { .. }) {
-                return Some(slot_index);
+        let scalar = match job.buffer.binding {
+            BufferBinding::Bound {
+                dispatch_generation,
+                prepared,
+            } if dispatch_generation == job.dispatch.generation
+                && prepared.slot_id() == job.dispatch.slot =>
+            {
+                prepared
             }
-            slot_index = Self::next_outbox_index(slot_index);
+            BufferBinding::Unregistered
+            | BufferBinding::Available { .. }
+            | BufferBinding::Bound { .. } => return Err(RollbackErrorKind::Invariant),
+        };
+        if scalar.handle.owner_identity != self.owner_identity
+            || scalar.handle.instance != self.instance
+            || scalar.handle.instance != job.dispatch.instance
+        {
+            return Err(RollbackErrorKind::StaleOrUnknown);
         }
-        None
-    }
-
-    fn leased_entry(&self, lease: &TxLease) -> Result<(RnsPreparedData, AttemptRef), LeaseError> {
-        if lease.owner_identity != self.owner_identity || lease.instance != self.instance {
-            return Err(LeaseError::StaleOrUnknown);
-        }
-        let slot = self
-            .outbox
-            .get(lease.slot)
-            .ok_or(LeaseError::StaleOrUnknown)?;
+        let Some(slot) = self.dispatches.get(job.dispatch.slot.index()) else {
+            return Err(RollbackErrorKind::StaleOrUnknown);
+        };
         match slot.state {
-            SlotState::Leased {
+            DispatchState::Queued {
                 prepared,
                 attempt,
                 generation,
-            } if generation == lease.generation => Ok((prepared, attempt)),
-            SlotState::Free
-            | SlotState::Reserved(_)
-            | SlotState::Ready { .. }
-            | SlotState::Leased { .. } => Err(LeaseError::StaleOrUnknown),
+                deadline,
+            } if generation == job.dispatch.generation
+                && prepared.packet_len() == scalar.packet_len()
+                && prepared.receipt().as_bytes() == scalar.attempt().as_bytes()
+                && TxTarget::from_rns(prepared.target()) == scalar.target()
+                && deadline == scalar.deadline()
+                && self.handle_for(attempt) == scalar.handle() =>
+            {
+                Ok((prepared, attempt))
+            }
+            DispatchState::Unregistered
+            | DispatchState::Free
+            | DispatchState::Reserved { .. }
+            | DispatchState::Queued { .. } => Err(RollbackErrorKind::StaleOrUnknown),
         }
     }
 
@@ -1119,16 +1448,6 @@ impl<
         matches!(
             self.attempts.get(attempt.slot).map(|slot| slot.state),
             Some(AttemptState::Active { generation, token })
-                if generation == attempt.generation
-                    && token.as_bytes() == prepared.receipt().as_bytes()
-        )
-    }
-
-    fn attempt_matches(&self, attempt: AttemptRef, prepared: RnsPreparedData) -> bool {
-        matches!(
-            self.attempts.get(attempt.slot).map(|slot| slot.state),
-            Some(AttemptState::Active { generation, token }
-                | AttemptState::Terminal { generation, token, .. })
                 if generation == attempt.generation
                     && token.as_bytes() == prepared.receipt().as_bytes()
         )
@@ -1148,20 +1467,6 @@ impl<
             token,
             outcome,
         })
-    }
-
-    fn reconcile_terminal_packets(&mut self) {
-        for slot in &mut self.outbox {
-            if let SlotState::Ready { attempt, .. } = slot.state
-                && matches!(
-                    self.attempts.get(attempt.slot).map(|entry| entry.state),
-                    Some(AttemptState::Terminal { generation, .. })
-                        if generation == attempt.generation
-                )
-            {
-                slot.state = SlotState::Free;
-            }
-        }
     }
 
     fn handle_for(&self, attempt: AttemptRef) -> AttemptHandle {
@@ -1198,8 +1503,12 @@ impl<
         })
     }
 
-    fn next_outbox_index(index: usize) -> usize {
-        if index + 1 == OUTBOX { 0 } else { index + 1 }
+    fn next_dispatch_index(index: usize) -> usize {
+        if index + 1 == PACKET_BUFFERS {
+            0
+        } else {
+            index + 1
+        }
     }
 
     fn next_attempt_index(index: usize) -> usize {
@@ -1340,24 +1649,24 @@ mod tests {
 
     impl CryptoRng for CounterRng {}
 
-    type TestNode<const PATHS: usize, const OUTBOX: usize> = NodeCore<PATHS, 2, 8, 2, OUTBOX>;
+    type TestNode<const PATHS: usize, const BUFFERS: usize> = NodeCore<PATHS, 2, 8, 2, BUFFERS>;
 
     fn identity(tag: u8) -> NodeIdentity {
         NodeIdentity::from_private_key(&[tag; 64]).unwrap()
     }
 
-    fn node<const PATHS: usize, const OUTBOX: usize>(
+    fn node<const PATHS: usize, const BUFFERS: usize>(
         tag: u8,
         aspect: &str,
-    ) -> TestNode<PATHS, OUTBOX> {
+    ) -> TestNode<PATHS, BUFFERS> {
         node_with_instance(tag, aspect, tag.wrapping_add(0x80))
     }
 
-    fn node_with_instance<const PATHS: usize, const OUTBOX: usize>(
+    fn node_with_instance<const PATHS: usize, const BUFFERS: usize>(
         tag: u8,
         aspect: &str,
         instance_tag: u8,
-    ) -> TestNode<PATHS, OUTBOX> {
+    ) -> TestNode<PATHS, BUFFERS> {
         TestNode::new(
             identity(tag),
             "reticulum",
@@ -1372,14 +1681,47 @@ mod tests {
         MonotonicSeconds::new(seconds)
     }
 
-    fn register_receiver<const PATHS: usize, const OUTBOX: usize>(
-        sender: &mut TestNode<PATHS, OUTBOX>,
+    const fn deadline(milliseconds: u64) -> TxLeaseDeadline {
+        TxLeaseDeadline::new(MonotonicMillis::new(milliseconds))
+    }
+
+    fn register_receiver<const PATHS: usize, const BUFFERS: usize>(
+        sender: &mut TestNode<PATHS, BUFFERS>,
         tag: u8,
         aspect: &str,
     ) {
         sender
             .register_peer(&identity(tag), "reticulum", &[aspect], time(0))
             .unwrap();
+    }
+
+    fn registered_buffer<const PATHS: usize, const BUFFERS: usize>(
+        owner: &mut TestNode<PATHS, BUFFERS>,
+    ) -> TxPacketBuffer {
+        let mut buffer = TxPacketBuffer::new();
+        owner.register_packet_buffer(&mut buffer).unwrap();
+        buffer
+    }
+
+    fn prepare<'a, const PATHS: usize, const BUFFERS: usize>(
+        sender: &mut TestNode<PATHS, BUFFERS>,
+        buffer: &'a mut TxPacketBuffer,
+        destination: DestinationHash,
+        plaintext: &[u8],
+        now: u64,
+        rng: &mut CounterRng,
+    ) -> TxJob<'a> {
+        match sender.prepare_data_into_slot(
+            buffer,
+            &destination,
+            plaintext,
+            time(now),
+            deadline(now * 1_000 + 500),
+            rng,
+        ) {
+            Ok(job) => job,
+            Err(failure) => panic!("preparation failed: {:?}", failure.reason()),
+        }
     }
 
     fn proof_for(receiver_tag: u8, attempt: AttemptToken) -> Vec<u8> {
@@ -1402,968 +1744,927 @@ mod tests {
     }
 
     #[test]
-    fn capacity_profile_contract_matches_rete_heapless_requirements() {
+    fn capacity_and_project_routing_types_have_explicit_bounds() {
         assert!(capacity_profile_is_supported(2, 1, 1, 2));
         assert!(capacity_profile_is_supported(16, 4, 32, 4));
-        for (paths, announces, deduplication, links) in [
-            (0, 1, 1, 2),
-            (1, 1, 1, 2),
-            (3, 1, 1, 2),
-            (2, 0, 1, 2),
-            (2, 1, 0, 2),
-            (2, 1, 1, 0),
-            (2, 1, 1, 1),
-            (2, 1, 1, 3),
-        ] {
-            assert!(!capacity_profile_is_supported(
-                paths,
-                announces,
-                deduplication,
-                links
-            ));
-        }
-    }
+        assert!(!capacity_profile_is_supported(3, 1, 1, 2));
+        assert!(!capacity_profile_is_supported(2, 0, 1, 2));
+        assert!(!capacity_profile_is_supported(2, 1, 0, 2));
+        assert!(!capacity_profile_is_supported(2, 1, 1, 3));
 
-    #[test]
-    fn successful_enqueue_writes_a_parseable_packet_with_matching_receipt_hash() {
-        let mut sender = node::<2, 1>(1, "sender");
-        let receiver = node::<2, 1>(2, "receiver");
-        register_receiver(&mut sender, 2, "receiver");
-        let mut rng = CounterRng::default();
-
-        let prepared = sender
-            .enqueue_data(
-                &receiver.destination_hash(),
-                b"bounded packet",
-                time(1),
-                &mut rng,
-            )
+        let first = PacketInterfaceId::new(0);
+        let last = PacketInterfaceId::new(63);
+        let outside = PacketInterfaceId::new(64);
+        let set = InterfaceSet::empty()
+            .with(first)
+            .unwrap()
+            .with(last)
             .unwrap();
-        assert_eq!(sender.capacities().outbox_ready, 1);
-        assert_eq!(sender.capacities().receipts_used, 1);
+        assert!(set.contains(first));
+        assert!(set.contains(last));
+        assert!(!set.contains(outside));
+        assert_eq!(set.with(outside), None);
+        assert_eq!(InterfaceSet::from_bits(set.bits()), set);
 
-        let lease = sender.lease_next().unwrap().unwrap();
-        let frame = sender.leased_frame(&lease).unwrap();
-        let parsed = reticulum_rns_rete::parse_packet(frame.bytes()).unwrap();
-        assert_eq!(&parsed.compute_hash(), frame.attempt().as_bytes());
-        assert_eq!(frame.attempt(), prepared.attempt());
-        assert_eq!(frame.bytes().len(), usize::from(prepared.packet_len()));
+        assert_eq!(TxTarget::from_rns(RnsTxTarget::All), TxTarget::All);
+        assert_eq!(
+            TxTarget::from_rns(RnsTxTarget::Only(RnsInterfaceId(7))),
+            TxTarget::Only(PacketInterfaceId::new(7))
+        );
+        assert_eq!(
+            TxTarget::from_rns(RnsTxTarget::AllExcept(RnsInterfaceId(9))),
+            TxTarget::AllExcept(PacketInterfaceId::new(9))
+        );
+        assert_eq!(deadline(123).instant().get(), 123);
     }
 
     #[test]
-    fn full_outbox_rejects_before_entropy_or_receipt_mutation() {
+    fn registration_assigns_stable_unique_slots_exactly_once() {
+        let mut owner = node::<2, 2>(1, "owner");
+        let mut first = TxPacketBuffer::new();
+        let mut second = TxPacketBuffer::new();
+        let mut extra = TxPacketBuffer::new();
+
+        assert_eq!(owner.register_packet_buffer(&mut first).unwrap().get(), 0);
+        assert_eq!(owner.register_packet_buffer(&mut second).unwrap().get(), 1);
+        assert_eq!(
+            owner.register_packet_buffer(&mut first),
+            Err(BufferRegistrationError::AlreadyRegistered)
+        );
+        assert_eq!(
+            owner.register_packet_buffer(&mut extra),
+            Err(BufferRegistrationError::PoolFull { limit: 2 })
+        );
+        assert_eq!(first.slot_id().unwrap().get(), 0);
+        assert_eq!(second.slot_id().unwrap().get(), 1);
+        assert_eq!(extra.slot_id(), None);
+        assert_eq!(owner.capacities().packet_buffers_registered, 2);
+    }
+
+    #[test]
+    fn zero_capacity_owner_rejects_registration_without_mutating_buffer() {
+        let mut owner = node::<2, 0>(2, "owner");
+        let mut buffer = TxPacketBuffer::new();
+        assert_eq!(
+            owner.register_packet_buffer(&mut buffer),
+            Err(BufferRegistrationError::PoolFull { limit: 0 })
+        );
+        assert_eq!(buffer.slot_id(), None);
+        assert_eq!(owner.capacities().packet_buffers_registered, 0);
+    }
+
+    #[test]
+    fn successful_preparation_is_no_copy_parseable_and_preserves_scalar_metadata() {
         let mut sender = node::<2, 1>(3, "sender");
         let receiver = node::<2, 1>(4, "receiver");
         register_receiver(&mut sender, 4, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
+        let original = core::ptr::from_ref(&buffer);
         let mut rng = CounterRng::default();
-        let first = sender
-            .enqueue_data(&receiver.destination_hash(), b"first", time(1), &mut rng)
-            .unwrap();
-        let rng_before = rng.0;
 
-        assert_eq!(
-            sender.enqueue_data(&receiver.destination_hash(), b"second", time(2), &mut rng,),
-            Err(SubmitError::OutboxFull { limit: 1 })
+        let job = prepare(
+            &mut sender,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"external packet",
+            1,
+            &mut rng,
         );
-        assert_eq!(rng.0, rng_before);
+        assert!(core::ptr::eq(core::ptr::from_ref(job.buffer), original));
+        assert_eq!(job.slot_id().get(), 0);
+        assert_eq!(job.target(), TxTarget::All);
+        assert_eq!(job.deadline(), deadline(1_500));
+        assert_eq!(job.prepared().slot_id(), job.slot_id());
+
+        let bytes = &job.buffer.bytes[..usize::from(job.packet_len())];
+        let parsed = reticulum_rns_rete::parse_packet(bytes).unwrap();
+        assert_eq!(&parsed.compute_hash(), job.attempt().as_bytes());
+        assert_eq!(sender.capacities().dispatches_queued, 1);
         assert_eq!(sender.capacities().receipts_used, 1);
-        let lease = sender.lease_next().unwrap().unwrap();
-        assert_eq!(
-            sender.leased_frame(&lease).unwrap().attempt(),
-            first.attempt()
+        assert_eq!(sender.capacities().attempts_active, 1);
+    }
+
+    #[test]
+    fn dropping_a_job_quarantines_its_buffer_and_dispatch() {
+        let mut sender = node::<2, 1>(40, "sender");
+        let receiver = node::<2, 1>(41, "receiver");
+        register_receiver(&mut sender, 41, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
+        let mut rng = CounterRng::default();
+
+        let attempt = {
+            let job = prepare(
+                &mut sender,
+                &mut buffer,
+                receiver.destination_hash(),
+                b"lost owner",
+                1,
+                &mut rng,
+            );
+            job.attempt()
+        };
+        let entropy_before = rng.0;
+
+        let failure = match sender.prepare_data_into_slot(
+            &mut buffer,
+            &receiver.destination_hash(),
+            b"must not reuse",
+            time(2),
+            deadline(3_000),
+            &mut rng,
+        ) {
+            Ok(_) => panic!("a bound buffer was reused after its job was lost"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.reason(), SubmitError::PacketBufferBusy);
+        assert_eq!(failure.into_buffer().slot_id().unwrap().get(), 0);
+        assert_eq!(rng.0, entropy_before);
+        assert_eq!(sender.capacities().dispatches_queued, 1);
+        assert_eq!(sender.capacities().attempts_active, 1);
+        assert_eq!(sender.capacities().receipts_used, 1);
+        assert!(matches!(
+            sender.dispatches[0].state,
+            DispatchState::Queued { prepared, .. }
+                if prepared.receipt().as_bytes() == attempt.as_bytes()
+        ));
+    }
+
+    #[test]
+    fn node_dispatch_slots_do_not_embed_packet_arrays() {
+        let no_dispatch = core::mem::size_of::<TestNode<2, 0>>();
+        let one_dispatch = core::mem::size_of::<TestNode<2, 1>>();
+        let dispatch_metadata = one_dispatch - no_dispatch;
+
+        assert!(core::mem::size_of::<TxPacketBuffer>() >= PACKET_CAPACITY);
+        assert!(
+            dispatch_metadata < PACKET_CAPACITY,
+            "one node dispatch slot unexpectedly embeds packet-sized storage"
         );
     }
 
     #[test]
-    fn preparation_failures_release_the_reserved_slot() {
-        let mut sender = node::<2, 1>(5, "sender");
-        let receiver = node::<2, 1>(6, "receiver");
+    fn unregistered_and_foreign_buffers_reject_before_entropy_or_rns_mutation() {
+        let mut first = node::<2, 1>(5, "sender");
+        let mut second = node::<2, 1>(6, "other");
+        let receiver = node::<2, 1>(7, "receiver");
+        register_receiver(&mut first, 7, "receiver");
+        register_receiver(&mut second, 7, "receiver");
+        let mut unregistered = TxPacketBuffer::new();
+        let mut foreign = registered_buffer(&mut second);
         let mut rng = CounterRng::default();
-        let rng_before_unknown = rng.0;
 
+        let unregistered_failure = match first.prepare_data_into_slot(
+            &mut unregistered,
+            &receiver.destination_hash(),
+            b"no registration",
+            time(1),
+            deadline(2_000),
+            &mut rng,
+        ) {
+            Ok(_) => panic!("unregistered buffer was accepted"),
+            Err(failure) => failure,
+        };
         assert_eq!(
-            sender.enqueue_data(
-                &DestinationHash::new([0xA5; 16]),
-                b"unknown",
-                time(1),
-                &mut rng,
-            ),
-            Err(SubmitError::UnknownDestination)
+            unregistered_failure.reason(),
+            SubmitError::UnregisteredPacketBuffer
         );
-        assert_eq!(rng.0, rng_before_unknown);
-        assert_eq!(sender.capacities().outbox_used, 0);
+        let unregistered = unregistered_failure.into_buffer();
+        assert_eq!(unregistered.slot_id(), None);
 
-        register_receiver(&mut sender, 6, "receiver");
-        let oversized = [0x5A; MAX_DATA_PAYLOAD + 1];
-        let rng_before_oversized = rng.0;
+        let foreign_failure = match first.prepare_data_into_slot(
+            &mut foreign,
+            &receiver.destination_hash(),
+            b"wrong owner",
+            time(1),
+            deadline(2_000),
+            &mut rng,
+        ) {
+            Ok(_) => panic!("foreign buffer was accepted"),
+            Err(failure) => failure,
+        };
+        assert_eq!(foreign_failure.reason(), SubmitError::ForeignPacketBuffer);
+        assert_eq!(foreign_failure.into_buffer().slot_id().unwrap().get(), 0);
+        assert_eq!(rng.0, 0);
+        assert_eq!(first.capacities().receipts_used, 0);
+        assert_eq!(first.capacities().attempts_used, 0);
+    }
+
+    #[test]
+    fn native_preparation_failures_return_the_same_available_buffer() {
+        let mut sender = node::<2, 1>(8, "sender");
+        let receiver = node::<2, 1>(9, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
+        let pointer = core::ptr::from_ref(&buffer);
+        let mut rng = CounterRng::default();
+
+        let unknown = match sender.prepare_data_into_slot(
+            &mut buffer,
+            &DestinationHash::new([0xa5; 16]),
+            b"unknown",
+            time(1),
+            deadline(2_000),
+            &mut rng,
+        ) {
+            Ok(_) => panic!("unknown destination was accepted"),
+            Err(failure) => failure,
+        };
+        assert_eq!(unknown.reason(), SubmitError::UnknownDestination);
+        let returned = unknown.into_buffer();
+        assert!(core::ptr::eq(core::ptr::from_ref(returned), pointer));
+        assert_eq!(rng.0, 0);
+        assert_eq!(sender.capacities().dispatches_used, 0);
+        assert_eq!(sender.capacities().attempts_used, 0);
+
+        register_receiver(&mut sender, 9, "receiver");
+        let oversized = [0x5a; MAX_DATA_PAYLOAD + 1];
+        let failure = match sender.prepare_data_into_slot(
+            returned,
+            &receiver.destination_hash(),
+            &oversized,
+            time(2),
+            deadline(3_000),
+            &mut rng,
+        ) {
+            Ok(_) => panic!("oversized payload was accepted"),
+            Err(failure) => failure,
+        };
         assert_eq!(
-            sender.enqueue_data(&receiver.destination_hash(), &oversized, time(2), &mut rng,),
-            Err(SubmitError::PayloadTooLarge {
+            failure.reason(),
+            SubmitError::PayloadTooLarge {
                 actual: MAX_DATA_PAYLOAD + 1,
                 maximum: MAX_DATA_PAYLOAD,
-            })
+            }
         );
-        assert_eq!(rng.0, rng_before_oversized);
-        assert_eq!(sender.capacities().outbox_used, 0);
+        let returned = failure.into_buffer();
+        assert!(core::ptr::eq(core::ptr::from_ref(returned), pointer));
+        assert_eq!(rng.0, 0);
 
-        sender
-            .enqueue_data(&receiver.destination_hash(), b"valid", time(3), &mut rng)
-            .unwrap();
-        assert_eq!(sender.capacities().outbox_ready, 1);
+        let job = prepare(
+            &mut sender,
+            returned,
+            receiver.destination_hash(),
+            b"valid after failures",
+            3,
+            &mut rng,
+        );
+        assert_eq!(job.slot_id().get(), 0);
     }
 
     #[test]
-    fn complete_tx_frees_packet_storage_but_keeps_the_receipt_live() {
-        let mut sender = node::<2, 1>(7, "sender");
-        let receiver = node::<2, 1>(8, "receiver");
-        register_receiver(&mut sender, 8, "receiver");
+    fn attempt_and_dispatch_exhaustion_reject_before_entropy() {
+        let receiver = node::<2, 3>(11, "receiver");
+
+        let mut attempt_full = node::<2, 3>(10, "sender");
+        register_receiver(&mut attempt_full, 11, "receiver");
+        let mut a = registered_buffer(&mut attempt_full);
+        let mut b = registered_buffer(&mut attempt_full);
+        let mut c = registered_buffer(&mut attempt_full);
         let mut rng = CounterRng::default();
-        sender
-            .enqueue_data(&receiver.destination_hash(), b"released", time(1), &mut rng)
-            .unwrap();
-        let lease = sender.lease_next().unwrap().unwrap();
-        sender.complete_tx(lease).unwrap();
-
-        sender
-            .enqueue_data(
-                &receiver.destination_hash(),
-                b"released again",
-                time(2),
-                &mut rng,
-            )
-            .unwrap();
-        let lease = sender.lease_next().unwrap().unwrap();
-        sender.complete_tx(lease).unwrap();
-
-        assert_eq!(sender.capacities().outbox_used, 0);
-        assert_eq!(sender.capacities().receipts_used, 2);
+        let first = prepare(
+            &mut attempt_full,
+            &mut a,
+            receiver.destination_hash(),
+            b"a",
+            1,
+            &mut rng,
+        );
+        let second = prepare(
+            &mut attempt_full,
+            &mut b,
+            receiver.destination_hash(),
+            b"b",
+            2,
+            &mut rng,
+        );
         let rng_before = rng.0;
+        let failure = match attempt_full.prepare_data_into_slot(
+            &mut c,
+            &receiver.destination_hash(),
+            b"c",
+            time(3),
+            deadline(4_000),
+            &mut rng,
+        ) {
+            Ok(_) => panic!("full ledger accepted another attempt"),
+            Err(failure) => failure,
+        };
         assert_eq!(
-            sender.enqueue_data(&receiver.destination_hash(), b"blocked", time(3), &mut rng,),
-            Err(SubmitError::AttemptLedgerFull { limit: 2 })
+            failure.reason(),
+            SubmitError::AttemptLedgerFull { limit: 2 }
         );
         assert_eq!(rng.0, rng_before);
-        assert_eq!(sender.capacities().outbox_used, 0);
-    }
+        assert_eq!(attempt_full.capacities().dispatches_queued, 2);
+        let _ = (first, second);
 
-    #[test]
-    fn abort_unsent_cancels_the_receipt_before_reusing_the_slot() {
-        let mut sender = node::<2, 1>(9, "sender");
-        let receiver = node::<2, 1>(10, "receiver");
-        register_receiver(&mut sender, 10, "receiver");
+        let mut exhausted = node::<2, 1>(12, "sender");
+        register_receiver(&mut exhausted, 11, "receiver");
+        let mut buffer = registered_buffer(&mut exhausted);
+        exhausted.dispatch_generation = u64::MAX;
         let mut rng = CounterRng::default();
-        let first = sender
-            .enqueue_data(&receiver.destination_hash(), b"abort", time(1), &mut rng)
-            .unwrap();
-        let lease = sender.lease_next().unwrap().unwrap();
-        assert_eq!(sender.abort_unsent(lease).unwrap(), first);
-        assert_eq!(sender.capacities().outbox_used, 0);
-        assert_eq!(sender.capacities().receipts_used, 0);
-
-        sender
-            .enqueue_data(&receiver.destination_hash(), b"reuse", time(2), &mut rng)
-            .unwrap();
-        assert_eq!(sender.capacities().outbox_ready, 1);
-        assert_eq!(sender.capacities().receipts_used, 1);
+        let failure = match exhausted.prepare_data_into_slot(
+            &mut buffer,
+            &receiver.destination_hash(),
+            b"no dispatch id",
+            time(1),
+            deadline(2_000),
+            &mut rng,
+        ) {
+            Ok(_) => panic!("exhausted dispatch generation was accepted"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.reason(), SubmitError::DispatchIdentifierExhausted);
+        assert_eq!(rng.0, 0);
+        assert_eq!(exhausted.capacities().dispatches_used, 0);
     }
 
     #[test]
-    fn return_unsent_preserves_bytes_and_invalidates_the_old_lease() {
-        let mut sender = node::<2, 1>(11, "sender");
-        let receiver = node::<2, 1>(12, "receiver");
-        register_receiver(&mut sender, 12, "receiver");
-        let mut rng = CounterRng::default();
-        sender
-            .enqueue_data(&receiver.destination_hash(), b"retry", time(1), &mut rng)
-            .unwrap();
-        let first_lease = sender.lease_next().unwrap().unwrap();
-        let mut first_bytes = [0u8; PACKET_CAPACITY];
-        let first_len;
-        let first_attempt;
-        {
-            let frame = sender.leased_frame(&first_lease).unwrap();
-            first_len = frame.bytes().len();
-            first_attempt = frame.attempt();
-            first_bytes[..first_len].copy_from_slice(frame.bytes());
-        }
-
-        sender.return_unsent(first_lease).unwrap();
-        assert_eq!(
-            sender.leased_frame(&first_lease),
-            Err(LeasedFrameError::Lease(LeaseError::StaleOrUnknown))
-        );
-        let second_lease = sender.lease_next().unwrap().unwrap();
-        assert_ne!(first_lease, second_lease);
-        let frame = sender.leased_frame(&second_lease).unwrap();
-        assert_eq!(frame.bytes(), &first_bytes[..first_len]);
-        assert_eq!(frame.attempt(), first_attempt);
-        assert_eq!(sender.capacities().receipts_used, 1);
-    }
-
-    #[test]
-    fn copied_stale_lease_cannot_touch_a_reused_slot() {
-        let mut sender = node::<2, 1>(13, "sender");
-        let receiver = node::<2, 1>(14, "receiver");
+    fn receipt_hash_collision_rolls_back_only_the_rejected_transaction() {
+        let mut sender = node::<2, 2>(13, "sender");
+        let receiver = node::<2, 2>(14, "receiver");
         register_receiver(&mut sender, 14, "receiver");
-        let mut rng = CounterRng::default();
-        sender
-            .enqueue_data(&receiver.destination_hash(), b"first", time(1), &mut rng)
-            .unwrap();
-        let stale = sender.lease_next().unwrap().unwrap();
-        sender.complete_tx(stale).unwrap();
+        let mut first_buffer = registered_buffer(&mut sender);
+        let mut second_buffer = registered_buffer(&mut sender);
+        let mut first_rng = CounterRng::default();
+        let first = prepare(
+            &mut sender,
+            &mut first_buffer,
+            receiver.destination_hash(),
+            b"repeat",
+            1,
+            &mut first_rng,
+        );
+        let mut repeated_rng = CounterRng::default();
 
-        sender
-            .enqueue_data(&receiver.destination_hash(), b"second", time(2), &mut rng)
-            .unwrap();
-        let current = sender.lease_next().unwrap().unwrap();
-        assert_ne!(stale, current);
-        assert_eq!(
-            sender.leased_frame(&stale),
-            Err(LeasedFrameError::Lease(LeaseError::StaleOrUnknown))
-        );
-        assert_eq!(sender.return_unsent(stale), Err(LeaseError::StaleOrUnknown));
-        assert_eq!(
-            sender.abort_unsent(stale),
-            Err(AbortError::Lease(LeaseError::StaleOrUnknown))
-        );
-        assert_eq!(sender.complete_tx(stale), Err(LeaseError::StaleOrUnknown));
-        assert!(sender.leased_frame(&current).is_ok());
+        let failure = match sender.prepare_data_into_slot(
+            &mut second_buffer,
+            &receiver.destination_hash(),
+            b"repeat",
+            time(1),
+            deadline(1_500),
+            &mut repeated_rng,
+        ) {
+            Ok(_) => panic!("duplicate receipt hash was accepted"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.reason(), SubmitError::ReceiptHashAlreadyTracked);
+        let returned = failure.into_buffer();
+        assert_eq!(returned.slot_id().unwrap().get(), 1);
+        assert_eq!(sender.capacities().dispatches_queued, 1);
+        assert_eq!(sender.capacities().attempts_active, 1);
+        assert_eq!(sender.capacities().receipts_used, 1);
+        assert_eq!(first.slot_id().get(), 0);
     }
 
     #[test]
-    fn missing_abort_receipt_retains_the_lease_as_an_invariant_failure() {
+    fn queue_handoff_failure_rolls_back_exact_receipt_and_reuses_same_buffer() {
         let mut sender = node::<2, 1>(15, "sender");
         let receiver = node::<2, 1>(16, "receiver");
         register_receiver(&mut sender, 16, "receiver");
-        let mut rng = CounterRng::default();
-        sender
-            .enqueue_data(
-                &receiver.destination_hash(),
-                b"invariant",
-                time(1),
-                &mut rng,
-            )
-            .unwrap();
-        let lease = sender.lease_next().unwrap().unwrap();
-        let native = sender.leased_entry(&lease).unwrap().0;
-        let attempt = AttemptToken(*native.receipt().as_bytes());
-        assert!(sender.rns.cancel_data_receipt(native.receipt()));
-
-        assert_eq!(
-            sender.abort_unsent(lease),
-            Err(AbortError::ReceiptMissing { attempt })
-        );
-        assert_eq!(sender.capacities().outbox_leased, 1);
-        assert_eq!(sender.capacities().receipts_used, 0);
-        assert!(sender.leased_frame(&lease).is_ok());
-    }
-
-    #[test]
-    fn zero_capacity_outbox_fails_without_touching_rns_or_entropy() {
-        let mut sender = node::<2, 0>(17, "sender");
-        let receiver = node::<2, 0>(18, "receiver");
-        register_receiver(&mut sender, 18, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
+        let pointer = core::ptr::from_ref(&buffer);
         let mut rng = CounterRng::default();
 
-        assert_eq!(
-            sender.enqueue_data(&receiver.destination_hash(), b"no slot", time(1), &mut rng,),
-            Err(SubmitError::OutboxFull { limit: 0 })
+        let first = prepare(
+            &mut sender,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"queue full",
+            1,
+            &mut rng,
         );
-        assert_eq!(rng.0, 0);
-        assert_eq!(sender.capacities().receipts_used, 0);
-        assert_eq!(sender.lease_next(), Ok(None));
-    }
-
-    #[test]
-    fn lease_generation_exhaustion_does_not_mutate_a_ready_slot() {
-        let mut sender = node::<2, 1>(19, "sender");
-        let receiver = node::<2, 1>(20, "receiver");
-        register_receiver(&mut sender, 20, "receiver");
-        let mut rng = CounterRng::default();
-        sender
-            .enqueue_data(&receiver.destination_hash(), b"ready", time(1), &mut rng)
-            .unwrap();
-        sender.lease_generation = u64::MAX;
-
-        assert_eq!(sender.lease_next(), Err(LeaseError::IdentifierExhausted));
-        assert_eq!(sender.capacities().outbox_ready, 1);
-        assert_eq!(sender.capacities().outbox_leased, 0);
-        assert_eq!(sender.capacities().receipts_used, 1);
-    }
-
-    #[test]
-    fn rejected_preparation_does_not_reorder_later_committed_packets() {
-        let mut sender = node::<4, 2>(21, "sender");
-        let receiver = node::<4, 2>(22, "receiver");
-        let mut rng = CounterRng::default();
-
-        assert_eq!(
-            sender.enqueue_data(
-                &DestinationHash::new([0xA5; 16]),
-                b"rejected",
-                time(1),
-                &mut rng,
-            ),
-            Err(SubmitError::UnknownDestination)
-        );
-        register_receiver(&mut sender, 22, "receiver");
-        let first = sender
-            .enqueue_data(&receiver.destination_hash(), b"first", time(2), &mut rng)
-            .unwrap();
-        let second = sender
-            .enqueue_data(&receiver.destination_hash(), b"second", time(3), &mut rng)
-            .unwrap();
-
-        let first_lease = sender.lease_next().unwrap().unwrap();
-        assert_eq!(
-            sender.leased_frame(&first_lease).unwrap().attempt(),
-            first.attempt()
-        );
-        sender.complete_tx(first_lease).unwrap();
-        let second_lease = sender.lease_next().unwrap().unwrap();
-        assert_eq!(
-            sender.leased_frame(&second_lease).unwrap().attempt(),
-            second.attempt()
-        );
-    }
-
-    #[test]
-    fn lease_from_another_owner_incarnation_is_always_rejected() {
-        let receiver = node::<2, 1>(24, "receiver");
-        let mut first = node_with_instance::<2, 1>(23, "sender", 1);
-        let mut reconstructed = node_with_instance::<2, 1>(23, "sender", 2);
-        register_receiver(&mut first, 24, "receiver");
-        register_receiver(&mut reconstructed, 24, "receiver");
-        let mut first_rng = CounterRng::default();
-        let mut reconstructed_rng = CounterRng::default();
-        first
-            .enqueue_data(
-                &receiver.destination_hash(),
-                b"same packet",
-                time(1),
-                &mut first_rng,
-            )
-            .unwrap();
-        reconstructed
-            .enqueue_data(
-                &receiver.destination_hash(),
-                b"same packet",
-                time(1),
-                &mut reconstructed_rng,
-            )
-            .unwrap();
-        let old_lease = first.lease_next().unwrap().unwrap();
-        let current_lease = reconstructed.lease_next().unwrap().unwrap();
-
-        assert_eq!(
-            reconstructed.leased_frame(&old_lease),
-            Err(LeasedFrameError::Lease(LeaseError::StaleOrUnknown))
-        );
-        assert_eq!(
-            reconstructed.complete_tx(old_lease),
-            Err(LeaseError::StaleOrUnknown)
-        );
-        assert_eq!(
-            reconstructed.abort_unsent(old_lease),
-            Err(AbortError::Lease(LeaseError::StaleOrUnknown))
-        );
-        assert!(reconstructed.leased_frame(&current_lease).is_ok());
-        assert!(first.leased_frame(&old_lease).is_ok());
-    }
-
-    #[test]
-    fn receipt_hash_collision_rolls_back_only_the_second_reserved_slot() {
-        let mut sender = node::<2, 2>(25, "sender");
-        let receiver = node::<2, 2>(26, "receiver");
-        register_receiver(&mut sender, 26, "receiver");
-        let mut first_rng = CounterRng::default();
-        let first = sender
-            .enqueue_data(
-                &receiver.destination_hash(),
-                b"repeat entropy",
-                time(1),
-                &mut first_rng,
-            )
-            .unwrap();
-        let mut repeated_rng = CounterRng::default();
-
-        assert_eq!(
-            sender.enqueue_data(
-                &receiver.destination_hash(),
-                b"repeat entropy",
-                time(1),
-                &mut repeated_rng,
-            ),
-            Err(SubmitError::ReceiptHashAlreadyTracked)
-        );
-        assert!(repeated_rng.0 > 0);
-        assert_eq!(sender.capacities().outbox_ready, 1);
-        assert_eq!(sender.capacities().outbox_used, 1);
-        assert_eq!(sender.capacities().receipts_used, 1);
-        let lease = sender.lease_next().unwrap().unwrap();
-        assert_eq!(
-            sender.leased_frame(&lease).unwrap().attempt(),
-            first.attempt()
-        );
-    }
-
-    #[test]
-    fn valid_proof_commits_exact_terminal_and_reconciles_a_ready_packet() {
-        let mut sender = node::<2, 1>(31, "sender");
-        let receiver = node::<2, 1>(32, "receiver");
-        register_receiver(&mut sender, 32, "receiver");
-        let mut rng = CounterRng::default();
-        let prepared = sender
-            .enqueue_data(
-                &receiver.destination_hash(),
-                b"proof terminal",
-                time(1),
-                &mut rng,
-            )
-            .unwrap();
-        let proof = proof_for(32, prepared.attempt());
-
-        sender
-            .ingest(&proof, time(3), InterfaceId(2), &mut rng)
-            .unwrap();
-
-        let terminal = sender.terminal_attempts().next().unwrap();
-        assert_eq!(terminal.handle(), prepared.handle());
-        assert_eq!(terminal.token(), prepared.attempt());
-        assert_eq!(terminal.outcome(), AttemptOutcome::Delivered);
-        assert_eq!(sender.terminal_attempts().count(), 1);
-        assert_eq!(sender.capacities().outbox_used, 0);
-        assert_eq!(sender.capacities().receipts_used, 0);
-        assert_eq!(sender.capacities().attempts_active, 0);
-        assert_eq!(sender.capacities().attempts_terminal, 1);
-        assert_eq!(sender.lease_next(), Ok(None));
-        assert_eq!(sender.acknowledge_terminal(prepared.handle()), Ok(terminal));
+        let old_handle = first.attempt_handle();
+        let returned = match sender.rollback_queued(first) {
+            Ok(buffer) => buffer,
+            Err(failure) => panic!("rollback failed: {:?}", failure.reason()),
+        };
+        assert!(core::ptr::eq(core::ptr::from_ref(returned), pointer));
+        assert_eq!(sender.capacities().dispatches_used, 0);
         assert_eq!(sender.capacities().attempts_used, 0);
+        assert_eq!(sender.capacities().receipts_used, 0);
+        assert_eq!(
+            sender.acknowledge_terminal(old_handle),
+            Err(AcknowledgeError::StaleOrUnknown)
+        );
+
+        let second = prepare(
+            &mut sender,
+            returned,
+            receiver.destination_hash(),
+            b"reused",
+            2,
+            &mut rng,
+        );
+        assert_eq!(second.slot_id().get(), 0);
+        assert_ne!(second.attempt_handle(), old_handle);
     }
 
     #[test]
-    fn invalid_proof_releases_its_reservation_and_the_valid_proof_can_retry() {
-        let mut sender = node::<2, 1>(33, "sender");
-        let receiver = node::<2, 1>(34, "receiver");
-        register_receiver(&mut sender, 34, "receiver");
+    fn missing_rollback_receipt_retains_the_bound_unique_job() {
+        let mut sender = node::<2, 1>(17, "sender");
+        let receiver = node::<2, 1>(18, "receiver");
+        register_receiver(&mut sender, 18, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
         let mut rng = CounterRng::default();
-        let prepared = sender
-            .enqueue_data(
-                &receiver.destination_hash(),
-                b"proof retry",
-                time(10),
+        let job = prepare(
+            &mut sender,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"invariant",
+            1,
+            &mut rng,
+        );
+        let attempt = job.attempt();
+        let DispatchState::Queued { prepared, .. } = sender.dispatches[0].state else {
+            panic!("expected queued dispatch")
+        };
+        assert!(sender.rns.cancel_data_receipt(prepared.receipt()));
+
+        let failure = match sender.rollback_queued(job) {
+            Ok(_) => panic!("missing receipt was hidden"),
+            Err(failure) => failure,
+        };
+        assert_eq!(
+            failure.reason(),
+            RollbackErrorKind::ReceiptMissing { attempt }
+        );
+        let job = failure.into_job();
+        assert_eq!(job.attempt(), attempt);
+        assert!(matches!(job.buffer.binding, BufferBinding::Bound { .. }));
+        assert_eq!(sender.capacities().dispatches_queued, 1);
+        assert_eq!(sender.capacities().attempts_active, 1);
+    }
+
+    #[test]
+    fn cross_incarnation_rollback_returns_job_to_the_correct_owner() {
+        let receiver = node::<2, 1>(20, "receiver");
+        let mut first = node_with_instance::<2, 1>(19, "sender", 1);
+        let mut reconstructed = node_with_instance::<2, 1>(19, "sender", 2);
+        register_receiver(&mut first, 20, "receiver");
+        register_receiver(&mut reconstructed, 20, "receiver");
+        let mut buffer = registered_buffer(&mut first);
+        let mut rng = CounterRng::default();
+        let job = prepare(
+            &mut first,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"owned by first",
+            1,
+            &mut rng,
+        );
+
+        let failure = match reconstructed.rollback_queued(job) {
+            Ok(_) => panic!("cross-incarnation job was accepted"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.reason(), RollbackErrorKind::StaleOrUnknown);
+        let job = failure.into_job();
+        assert_eq!(first.capacities().dispatches_queued, 1);
+        assert_eq!(reconstructed.capacities().dispatches_used, 0);
+        assert!(first.rollback_queued(job).is_ok());
+    }
+
+    #[test]
+    fn terminal_token_mismatch_retains_the_bound_job() {
+        let mut sender = node::<2, 1>(42, "sender");
+        let receiver = node::<2, 1>(43, "receiver");
+        register_receiver(&mut sender, 43, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
+        let mut rng = CounterRng::default();
+        let job = prepare(
+            &mut sender,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"terminal invariant",
+            1,
+            &mut rng,
+        );
+        let handle = job.attempt_handle();
+        sender
+            .ingest(
+                &proof_for(43, job.attempt()),
+                time(2),
+                PacketInterfaceId::new(2),
                 &mut rng,
             )
             .unwrap();
-        let proof = proof_for(34, prepared.attempt());
+        sender.attempts[handle.slot].state = AttemptState::Terminal {
+            generation: handle.generation,
+            token: AttemptToken([0xa5; 32]),
+            outcome: AttemptOutcome::Delivered,
+        };
+
+        let failure = match sender.rollback_queued(job) {
+            Ok(_) => panic!("a mismatched terminal token released the packet buffer"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.reason(), RollbackErrorKind::Invariant);
+        let job = failure.into_job();
+        assert_eq!(job.attempt_handle(), handle);
+        assert_eq!(sender.capacities().dispatches_queued, 1);
+        assert_eq!(sender.capacities().attempts_terminal, 1);
+    }
+
+    #[test]
+    fn valid_proof_commits_terminal_while_job_ownership_remains_bound() {
+        let mut sender = node::<2, 1>(21, "sender");
+        let receiver = node::<2, 1>(22, "receiver");
+        register_receiver(&mut sender, 22, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
+        let mut rng = CounterRng::default();
+        let job = prepare(
+            &mut sender,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"proof race",
+            1,
+            &mut rng,
+        );
+        let scalar = job.prepared();
+        let proof = proof_for(22, job.attempt());
+
+        sender
+            .ingest(&proof, time(2), PacketInterfaceId::new(2), &mut rng)
+            .unwrap();
+        let terminal = sender.terminal_attempts().next().unwrap();
+        assert_eq!(terminal.handle(), scalar.handle());
+        assert_eq!(terminal.outcome(), AttemptOutcome::Delivered);
+        assert_eq!(sender.capacities().receipts_used, 0);
+        assert_eq!(sender.capacities().dispatches_queued, 1);
+        assert_eq!(
+            sender.acknowledge_terminal(scalar.handle()),
+            Err(AcknowledgeError::PacketStillBound)
+        );
+
+        let returned = sender
+            .rollback_queued(job)
+            .unwrap_or_else(|failure| panic!("terminal rollback failed: {:?}", failure.reason()));
+        assert_eq!(returned.slot_id().unwrap(), scalar.slot_id());
+        assert_eq!(sender.capacities().dispatches_used, 0);
+        assert_eq!(sender.acknowledge_terminal(scalar.handle()), Ok(terminal));
+    }
+
+    #[test]
+    fn timeout_commits_terminal_while_job_ownership_remains_bound() {
+        let mut sender = node::<2, 1>(23, "sender");
+        let receiver = node::<2, 1>(24, "receiver");
+        register_receiver(&mut sender, 24, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
+        let mut rng = CounterRng::default();
+        let job = prepare(
+            &mut sender,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"timeout race",
+            100,
+            &mut rng,
+        );
+        let scalar = job.prepared();
+
+        let report = sender.tick(time(132), &mut rng);
+        assert_eq!(report.timed_out_attempts, 1);
+        assert_eq!(report.correlation_fault, None);
+        let terminal = sender.terminal_attempts().next().unwrap();
+        assert_eq!(terminal.outcome(), AttemptOutcome::DeliveryTimeout);
+        assert_eq!(
+            sender.acknowledge_terminal(scalar.handle()),
+            Err(AcknowledgeError::PacketStillBound)
+        );
+        let returned = sender
+            .rollback_queued(job)
+            .unwrap_or_else(|failure| panic!("terminal rollback failed: {:?}", failure.reason()));
+        assert_eq!(returned.slot_id().unwrap(), scalar.slot_id());
+        assert_eq!(sender.acknowledge_terminal(scalar.handle()), Ok(terminal));
+    }
+
+    #[test]
+    fn terminal_tombstones_backpressure_until_exact_acknowledgement() {
+        let mut sender = node::<2, 2>(44, "sender");
+        let receiver = node::<2, 2>(45, "receiver");
+        register_receiver(&mut sender, 45, "receiver");
+        let mut first_buffer = registered_buffer(&mut sender);
+        let mut second_buffer = registered_buffer(&mut sender);
+        let mut rng = CounterRng::default();
+
+        let first = prepare(
+            &mut sender,
+            &mut first_buffer,
+            receiver.destination_hash(),
+            b"first tombstone",
+            1,
+            &mut rng,
+        );
+        let first_scalar = first.prepared();
+        sender
+            .ingest(
+                &proof_for(45, first.attempt()),
+                time(2),
+                PacketInterfaceId::new(2),
+                &mut rng,
+            )
+            .unwrap();
+        let first_buffer = sender.rollback_queued(first).unwrap_or_else(|failure| {
+            panic!("first terminal return failed: {:?}", failure.reason())
+        });
+
+        let second = prepare(
+            &mut sender,
+            &mut second_buffer,
+            receiver.destination_hash(),
+            b"second tombstone",
+            3,
+            &mut rng,
+        );
+        sender
+            .ingest(
+                &proof_for(45, second.attempt()),
+                time(4),
+                PacketInterfaceId::new(2),
+                &mut rng,
+            )
+            .unwrap();
+        let _second_buffer = sender.rollback_queued(second).unwrap_or_else(|failure| {
+            panic!("second terminal return failed: {:?}", failure.reason())
+        });
+        assert_eq!(sender.capacities().attempts_terminal, 2);
+
+        let entropy_before = rng.0;
+        let failure = match sender.prepare_data_into_slot(
+            first_buffer,
+            &receiver.destination_hash(),
+            b"blocked by tombstones",
+            time(5),
+            deadline(6_000),
+            &mut rng,
+        ) {
+            Ok(_) => panic!("terminal tombstones did not backpressure preparation"),
+            Err(failure) => failure,
+        };
+        assert_eq!(
+            failure.reason(),
+            SubmitError::AttemptLedgerFull { limit: 2 }
+        );
+        assert_eq!(rng.0, entropy_before);
+        let first_buffer = failure.into_buffer();
+
+        let first_terminal = sender
+            .terminal_attempts()
+            .find(|terminal| terminal.handle() == first_scalar.handle())
+            .unwrap();
+        assert_eq!(
+            sender.acknowledge_terminal(first_scalar.handle()),
+            Ok(first_terminal)
+        );
+        assert_eq!(
+            sender.acknowledge_terminal(first_scalar.handle()),
+            Err(AcknowledgeError::StaleOrUnknown)
+        );
+
+        let replacement = prepare(
+            &mut sender,
+            first_buffer,
+            receiver.destination_hash(),
+            b"after exact acknowledgement",
+            6,
+            &mut rng,
+        );
+        assert_ne!(replacement.attempt_handle(), first_scalar.handle());
+        assert_eq!(sender.capacities().attempts_active, 1);
+        assert_eq!(sender.capacities().attempts_terminal, 1);
+    }
+
+    #[test]
+    fn invalid_proof_can_retry_without_releasing_job_or_receipt() {
+        let mut sender = node::<2, 1>(25, "sender");
+        let receiver = node::<2, 1>(26, "receiver");
+        register_receiver(&mut sender, 26, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
+        let mut rng = CounterRng::default();
+        let job = prepare(
+            &mut sender,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"proof retry",
+            10,
+            &mut rng,
+        );
+        let proof = proof_for(26, job.attempt());
         let mut invalid = proof.clone();
         *invalid.last_mut().unwrap() ^= 0xff;
 
         sender
-            .ingest(&invalid, time(12), InterfaceId(2), &mut rng)
+            .ingest(&invalid, time(11), PacketInterfaceId::new(2), &mut rng)
             .unwrap();
         assert_eq!(sender.capacities().attempts_active, 1);
-        assert_eq!(sender.capacities().attempts_terminal, 0);
         assert_eq!(sender.capacities().receipts_used, 1);
-        assert!(sender.terminal_attempts().next().is_none());
-        assert_eq!(
-            sender.acknowledge_terminal(prepared.handle()),
-            Err(AcknowledgeError::NotTerminal)
-        );
+        assert_eq!(sender.capacities().dispatches_queued, 1);
 
         sender
-            .ingest(&proof, time(13), InterfaceId(2), &mut rng)
+            .ingest(&proof, time(12), PacketInterfaceId::new(2), &mut rng)
             .unwrap();
         assert_eq!(
             sender.terminal_attempts().next().unwrap().outcome(),
             AttemptOutcome::Delivered
         );
+        assert!(sender.rollback_queued(job).is_ok());
     }
 
     #[test]
-    fn timeout_tombstone_backpressures_then_acknowledgement_allows_reuse() {
-        let mut sender = node::<2, 1>(35, "sender");
-        let receiver = node::<2, 1>(36, "receiver");
-        register_receiver(&mut sender, 36, "receiver");
-        let mut rng = CounterRng::default();
-        let first = sender
-            .enqueue_data(
-                &receiver.destination_hash(),
-                b"eventual timeout",
-                time(100),
-                &mut rng,
-            )
-            .unwrap();
-
-        let report = sender.tick(time(132), &mut rng);
-        assert_eq!(report.timed_out_attempts, 1);
-        assert_eq!(report.correlation_fault, None);
-        let terminal = sender.terminal_attempts().next().unwrap();
-        assert_eq!(terminal.handle(), first.handle());
-        assert_eq!(terminal.outcome(), AttemptOutcome::DeliveryTimeout);
-        assert_eq!(sender.capacities().outbox_used, 0);
-        assert_eq!(sender.capacities().attempts_terminal, 1);
-
-        let second = sender
-            .enqueue_data(
-                &receiver.destination_hash(),
-                b"second tombstone",
-                time(133),
-                &mut rng,
-            )
-            .unwrap();
-        let second_tick = sender.tick(time(165), &mut rng);
-        assert_eq!(second_tick.timed_out_attempts, 1);
-        assert_eq!(sender.capacities().attempts_terminal, 2);
-
-        let rng_before = rng.0;
-        assert_eq!(
-            sender.enqueue_data(
-                &receiver.destination_hash(),
-                b"blocked by tombstone",
-                time(166),
-                &mut rng,
-            ),
-            Err(SubmitError::AttemptLedgerFull { limit: 2 })
-        );
-        assert_eq!(rng.0, rng_before);
-
-        sender.acknowledge_terminal(first.handle()).unwrap();
-        let third = sender
-            .enqueue_data(
-                &receiver.destination_hash(),
-                b"reused capacity",
-                time(167),
-                &mut rng,
-            )
-            .unwrap();
-        assert_ne!(first.handle(), third.handle());
-        assert_ne!(second.handle(), third.handle());
-        assert_eq!(
-            sender.acknowledge_terminal(first.handle()),
-            Err(AcknowledgeError::StaleOrUnknown)
-        );
-    }
-
-    #[test]
-    fn timeout_while_leased_blocks_bytes_until_the_actor_returns() {
-        let mut sender = node::<2, 1>(59, "sender");
-        let receiver = node::<2, 1>(60, "receiver");
-        register_receiver(&mut sender, 60, "receiver");
-        let mut rng = CounterRng::default();
-        let prepared = sender
-            .enqueue_data(
-                &receiver.destination_hash(),
-                b"leased timeout",
-                time(100),
-                &mut rng,
-            )
-            .unwrap();
-        let lease = sender.lease_next().unwrap().unwrap();
-
-        let report = sender.tick(time(132), &mut rng);
-        assert_eq!(report.timed_out_attempts, 1);
-        assert_eq!(report.correlation_fault, None);
-        let terminal = sender.terminal_attempts().next().unwrap();
-        assert_eq!(terminal.outcome(), AttemptOutcome::DeliveryTimeout);
-        assert_eq!(
-            sender.leased_frame(&lease),
-            Err(LeasedFrameError::AttemptTerminal(terminal))
-        );
-        assert_eq!(
-            sender.acknowledge_terminal(prepared.handle()),
-            Err(AcknowledgeError::StillLeased)
-        );
-
-        sender.return_unsent(lease).unwrap();
-        assert_eq!(sender.capacities().outbox_used, 0);
-        assert_eq!(sender.acknowledge_terminal(prepared.handle()), Ok(terminal));
-    }
-
-    #[test]
-    fn repeated_full_hash_selects_the_new_active_attempt_over_an_old_tombstone() {
-        let mut sender = node::<2, 1>(61, "sender");
-        let receiver = node::<2, 1>(62, "receiver");
-        register_receiver(&mut sender, 62, "receiver");
+    fn repeated_full_hash_selects_new_active_attempt_over_old_tombstone() {
+        let mut sender = node::<2, 1>(27, "sender");
+        let receiver = node::<2, 1>(28, "receiver");
+        register_receiver(&mut sender, 28, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
         let mut first_rng = CounterRng::default();
-        let first = sender
-            .enqueue_data(
-                &receiver.destination_hash(),
-                b"repeat after delivery",
-                time(1),
+        let first = prepare(
+            &mut sender,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"repeat after proof",
+            1,
+            &mut first_rng,
+        );
+        let first_scalar = first.prepared();
+        sender
+            .ingest(
+                &proof_for(28, first.attempt()),
+                time(2),
+                PacketInterfaceId::new(2),
                 &mut first_rng,
             )
             .unwrap();
-        let first_proof = proof_for(62, first.attempt());
-        sender
-            .ingest(&first_proof, time(2), InterfaceId(2), &mut first_rng)
-            .unwrap();
+        let buffer = sender.rollback_queued(first).unwrap_or_else(|failure| {
+            panic!("first terminal return failed: {:?}", failure.reason())
+        });
 
         let mut repeated_rng = CounterRng::default();
-        let repeated = sender
-            .enqueue_data(
-                &receiver.destination_hash(),
-                b"repeat after delivery",
-                time(1),
+        let repeated = prepare(
+            &mut sender,
+            buffer,
+            receiver.destination_hash(),
+            b"repeat after proof",
+            1,
+            &mut repeated_rng,
+        );
+        assert_eq!(repeated.attempt(), first_scalar.attempt());
+        assert_ne!(repeated.attempt_handle(), first_scalar.handle());
+        sender
+            .ingest(
+                &implicit_proof_for(28, repeated.attempt()),
+                time(3),
+                PacketInterfaceId::new(2),
                 &mut repeated_rng,
             )
             .unwrap();
-        assert_eq!(repeated.attempt(), first.attempt());
-        assert_ne!(repeated.handle(), first.handle());
 
-        let repeated_proof = implicit_proof_for(62, repeated.attempt());
-        sender
-            .ingest(&repeated_proof, time(3), InterfaceId(2), &mut repeated_rng)
-            .unwrap();
         let terminals = sender.terminal_attempts().collect::<std::vec::Vec<_>>();
         assert_eq!(terminals.len(), 2);
         assert!(
             terminals
                 .iter()
-                .any(|terminal| terminal.handle() == first.handle())
+                .any(|item| item.handle() == first_scalar.handle())
         );
         assert!(
             terminals
                 .iter()
-                .any(|terminal| terminal.handle() == repeated.handle())
+                .any(|item| item.handle() == repeated.attempt_handle())
         );
         assert!(
             terminals
                 .iter()
-                .all(|terminal| terminal.outcome() == AttemptOutcome::Delivered)
+                .all(|item| item.outcome() == AttemptOutcome::Delivered)
         );
     }
 
     #[test]
-    fn proof_while_leased_blocks_bytes_and_return_discards_the_packet() {
-        let mut sender = node::<2, 1>(37, "sender");
-        let receiver = node::<2, 1>(38, "receiver");
-        register_receiver(&mut sender, 38, "receiver");
-        let mut rng = CounterRng::default();
-        let prepared = sender
-            .enqueue_data(
-                &receiver.destination_hash(),
-                b"leased proof",
-                time(1),
-                &mut rng,
-            )
-            .unwrap();
-        let proof = proof_for(38, prepared.attempt());
-        let lease = sender.lease_next().unwrap().unwrap();
+    fn unknown_and_already_terminal_receipts_are_explicit_faults() {
+        let receiver = node::<2, 1>(30, "receiver");
 
-        sender
-            .ingest(&proof, time(3), InterfaceId(2), &mut rng)
-            .unwrap();
-        let terminal = sender.terminal_attempts().next().unwrap();
+        let mut unknown = node::<2, 1>(29, "unknown");
+        register_receiver(&mut unknown, 30, "receiver");
+        let mut unknown_buffer = registered_buffer(&mut unknown);
+        let mut rng = CounterRng::default();
+        let unknown_job = prepare(
+            &mut unknown,
+            &mut unknown_buffer,
+            receiver.destination_hash(),
+            b"orphan",
+            1,
+            &mut rng,
+        );
+        unknown.attempts[unknown_job.attempt_handle().slot].state = AttemptState::Free;
         assert_eq!(
-            sender.leased_frame(&lease),
-            Err(LeasedFrameError::AttemptTerminal(terminal))
+            unknown
+                .ingest(
+                    &proof_for(30, unknown_job.attempt()),
+                    time(2),
+                    PacketInterfaceId::new(2),
+                    &mut rng,
+                )
+                .unwrap_err(),
+            ReceiptCorrelationError::UnknownData {
+                attempt: unknown_job.attempt(),
+            }
         );
+        assert_eq!(unknown.capacities().receipts_used, 1);
+
+        let mut terminal = node::<2, 1>(31, "terminal");
+        register_receiver(&mut terminal, 30, "receiver");
+        let mut terminal_buffer = registered_buffer(&mut terminal);
+        let terminal_job = prepare(
+            &mut terminal,
+            &mut terminal_buffer,
+            receiver.destination_hash(),
+            b"premature",
+            1,
+            &mut rng,
+        );
+        let handle = terminal_job.attempt_handle();
+        terminal.attempts[handle.slot].state = AttemptState::Terminal {
+            generation: handle.generation,
+            token: terminal_job.attempt(),
+            outcome: AttemptOutcome::Delivered,
+        };
         assert_eq!(
-            sender.acknowledge_terminal(prepared.handle()),
-            Err(AcknowledgeError::StillLeased)
+            terminal
+                .ingest(
+                    &proof_for(30, terminal_job.attempt()),
+                    time(2),
+                    PacketInterfaceId::new(2),
+                    &mut rng,
+                )
+                .unwrap_err(),
+            ReceiptCorrelationError::AlreadyTerminal {
+                attempt: terminal_job.attempt(),
+            }
         );
-
-        sender.return_unsent(lease).unwrap();
-        assert_eq!(sender.capacities().outbox_used, 0);
-        assert_eq!(sender.capacities().attempts_terminal, 1);
-        sender.acknowledge_terminal(prepared.handle()).unwrap();
+        assert_eq!(terminal.capacities().receipts_used, 1);
     }
 
     #[test]
-    fn proof_while_leased_allows_complete_without_losing_the_tombstone() {
-        let mut sender = node::<2, 1>(39, "sender");
-        let receiver = node::<2, 1>(40, "receiver");
-        register_receiver(&mut sender, 40, "receiver");
-        let mut rng = CounterRng::default();
-        let prepared = sender
-            .enqueue_data(
-                &receiver.destination_hash(),
-                b"complete race",
-                time(1),
-                &mut rng,
-            )
-            .unwrap();
-        let proof = proof_for(40, prepared.attempt());
-        let lease = sender.lease_next().unwrap().unwrap();
-        sender
-            .ingest(&proof, time(3), InterfaceId(2), &mut rng)
-            .unwrap();
-
-        assert_eq!(sender.complete_tx(lease).unwrap(), prepared);
-        assert_eq!(sender.capacities().outbox_used, 0);
-        assert_eq!(sender.capacities().attempts_terminal, 1);
-        sender.acknowledge_terminal(prepared.handle()).unwrap();
-    }
-
-    #[test]
-    fn proof_while_leased_allows_abort_without_cancelling_terminal_state() {
-        let mut sender = node::<2, 1>(41, "sender");
-        let receiver = node::<2, 1>(42, "receiver");
-        register_receiver(&mut sender, 42, "receiver");
-        let mut rng = CounterRng::default();
-        let prepared = sender
-            .enqueue_data(
-                &receiver.destination_hash(),
-                b"abort race",
-                time(1),
-                &mut rng,
-            )
-            .unwrap();
-        let proof = proof_for(42, prepared.attempt());
-        let lease = sender.lease_next().unwrap().unwrap();
-        sender
-            .ingest(&proof, time(3), InterfaceId(2), &mut rng)
-            .unwrap();
-
-        assert_eq!(sender.abort_unsent(lease).unwrap(), prepared);
-        assert_eq!(sender.capacities().receipts_used, 0);
-        assert_eq!(sender.capacities().attempts_terminal, 1);
-        sender.acknowledge_terminal(prepared.handle()).unwrap();
-    }
-
-    #[test]
-    fn completion_before_proof_frees_bytes_but_leaves_the_attempt_active() {
-        let mut sender = node::<2, 1>(43, "sender");
-        let receiver = node::<2, 1>(44, "receiver");
-        register_receiver(&mut sender, 44, "receiver");
-        let mut rng = CounterRng::default();
-        let prepared = sender
-            .enqueue_data(
-                &receiver.destination_hash(),
-                b"complete first",
-                time(1),
-                &mut rng,
-            )
-            .unwrap();
-        let lease = sender.lease_next().unwrap().unwrap();
-        assert_eq!(sender.complete_tx(lease).unwrap(), prepared);
-        assert_eq!(sender.capacities().outbox_used, 0);
-        assert_eq!(sender.capacities().attempts_active, 1);
-
-        let proof = proof_for(44, prepared.attempt());
-        sender
-            .ingest(&proof, time(3), InterfaceId(2), &mut rng)
-            .unwrap();
-        assert_eq!(sender.capacities().attempts_terminal, 1);
-        assert_eq!(
-            sender.terminal_attempts().next().unwrap().handle(),
-            prepared.handle()
-        );
-    }
-
-    #[test]
-    fn attempt_generation_exhaustion_rejects_before_any_mutation() {
-        let mut sender = node::<2, 1>(45, "sender");
-        let receiver = node::<2, 1>(46, "receiver");
-        register_receiver(&mut sender, 46, "receiver");
+    fn attempt_generation_exhaustion_rejects_before_any_transaction_mutation() {
+        let mut sender = node::<2, 1>(34, "sender");
+        let receiver = node::<2, 1>(35, "receiver");
+        register_receiver(&mut sender, 35, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
         sender.attempt_generation = u64::MAX;
         let mut rng = CounterRng::default();
 
-        assert_eq!(
-            sender.enqueue_data(
-                &receiver.destination_hash(),
-                b"no identifier",
-                time(1),
-                &mut rng,
-            ),
-            Err(SubmitError::AttemptIdentifierExhausted)
-        );
+        let failure = match sender.prepare_data_into_slot(
+            &mut buffer,
+            &receiver.destination_hash(),
+            b"no attempt identifier",
+            time(1),
+            deadline(2_000),
+            &mut rng,
+        ) {
+            Ok(_) => panic!("exhausted attempt generation was accepted"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.reason(), SubmitError::AttemptIdentifierExhausted);
+        assert_eq!(failure.into_buffer().slot_id().unwrap().get(), 0);
         assert_eq!(rng.0, 0);
-        assert_eq!(sender.capacities().outbox_used, 0);
+        assert_eq!(sender.dispatch_generation, 0);
+        assert_eq!(sender.capacities().dispatches_used, 0);
         assert_eq!(sender.capacities().attempts_used, 0);
         assert_eq!(sender.capacities().receipts_used, 0);
-        assert_eq!(sender.next_reserve, 0);
-        assert_eq!(sender.next_attempt, 0);
     }
 
     #[test]
-    fn attempt_handles_are_scoped_to_incarnation_and_invalidated_by_abort() {
-        let receiver = node::<2, 1>(48, "receiver");
-        let mut first = node_with_instance::<2, 1>(47, "sender", 1);
-        let mut reconstructed = node_with_instance::<2, 1>(47, "sender", 2);
-        register_receiver(&mut first, 48, "receiver");
-        register_receiver(&mut reconstructed, 48, "receiver");
+    fn unknown_timeout_preserves_native_receipt_and_returns_tick_actions() {
+        let mut sender = node::<2, 1>(36, "sender");
+        let receiver = node::<2, 1>(37, "receiver");
+        register_receiver(&mut sender, 37, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
         let mut rng = CounterRng::default();
-        let prepared = first
-            .enqueue_data(
-                &receiver.destination_hash(),
-                b"scoped handle",
-                time(1),
-                &mut rng,
-            )
-            .unwrap();
-
-        assert_eq!(
-            first.acknowledge_terminal(prepared.handle()),
-            Err(AcknowledgeError::NotTerminal)
+        let job = prepare(
+            &mut sender,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"orphan timeout",
+            100,
+            &mut rng,
         );
-        assert_eq!(
-            reconstructed.acknowledge_terminal(prepared.handle()),
-            Err(AcknowledgeError::StaleOrUnknown)
-        );
-        let lease = first.lease_next().unwrap().unwrap();
-        first.abort_unsent(lease).unwrap();
-        assert_eq!(
-            first.acknowledge_terminal(prepared.handle()),
-            Err(AcknowledgeError::StaleOrUnknown)
-        );
-    }
-
-    #[test]
-    fn unknown_native_receipt_is_an_explicit_ingress_correlation_fault() {
-        let mut sender = node::<2, 1>(49, "sender");
-        let receiver = node::<2, 1>(50, "receiver");
-        register_receiver(&mut sender, 50, "receiver");
-        let mut rng = CounterRng::default();
-        let prepared = sender
-            .enqueue_data(
-                &receiver.destination_hash(),
-                b"orphan native receipt",
-                time(1),
-                &mut rng,
-            )
-            .unwrap();
-        sender.attempts[prepared.handle().slot].state = AttemptState::Free;
-        let proof = proof_for(50, prepared.attempt());
-
-        assert_eq!(
-            sender
-                .ingest(&proof, time(2), InterfaceId(2), &mut rng)
-                .unwrap_err(),
-            ReceiptCorrelationError::UnknownData {
-                attempt: prepared.attempt(),
-            }
-        );
-        assert_eq!(sender.capacities().receipts_used, 1);
-    }
-
-    #[test]
-    fn already_terminal_native_receipt_is_not_reported_as_capacity_backpressure() {
-        let mut sender = node::<2, 1>(51, "sender");
-        let receiver = node::<2, 1>(52, "receiver");
-        register_receiver(&mut sender, 52, "receiver");
-        let mut rng = CounterRng::default();
-        let prepared = sender
-            .enqueue_data(
-                &receiver.destination_hash(),
-                b"premature tombstone",
-                time(1),
-                &mut rng,
-            )
-            .unwrap();
-        sender.attempts[prepared.handle().slot].state = AttemptState::Terminal {
-            generation: prepared.handle().generation,
-            token: prepared.attempt(),
-            outcome: AttemptOutcome::Delivered,
-        };
-        let proof = proof_for(52, prepared.attempt());
-
-        assert_eq!(
-            sender
-                .ingest(&proof, time(2), InterfaceId(2), &mut rng)
-                .unwrap_err(),
-            ReceiptCorrelationError::AlreadyTerminal {
-                attempt: prepared.attempt(),
-            }
-        );
-        assert_eq!(sender.capacities().receipts_used, 1);
-    }
-
-    #[test]
-    fn unknown_timeout_is_reported_without_dropping_the_tick_report() {
-        let mut sender = node::<2, 1>(53, "sender");
-        let receiver = node::<2, 1>(54, "receiver");
-        register_receiver(&mut sender, 54, "receiver");
-        let mut rng = CounterRng::default();
-        let prepared = sender
-            .enqueue_data(
-                &receiver.destination_hash(),
-                b"orphan timeout",
-                time(100),
-                &mut rng,
-            )
-            .unwrap();
-        sender.attempts[prepared.handle().slot].state = AttemptState::Free;
+        sender.attempts[job.attempt_handle().slot].state = AttemptState::Free;
 
         let report = sender.tick(time(132), &mut rng);
         assert_eq!(report.timed_out_attempts, 0);
         assert_eq!(
             report.correlation_fault,
             Some(ReceiptCorrelationError::UnknownData {
-                attempt: prepared.attempt(),
+                attempt: job.attempt(),
             })
         );
         assert_eq!(report.actions.events.len(), 1);
         assert!(report.actions.packets.is_empty());
         assert_eq!(sender.capacities().receipts_used, 1);
-    }
-
-    #[test]
-    fn full_hash_candidate_selects_the_exact_active_attempt() {
-        let mut sender = node::<2, 1>(55, "sender");
-        let receiver = node::<2, 1>(56, "receiver");
-        register_receiver(&mut sender, 56, "receiver");
-        let mut rng = CounterRng::default();
-        let prepared = sender
-            .enqueue_data(
-                &receiver.destination_hash(),
-                b"full hash selection",
-                time(1),
-                &mut rng,
-            )
-            .unwrap();
-        assert_eq!(prepared.handle().slot, 0);
-        let generation = prepared.handle().generation;
-        let mut colliding = prepared.attempt();
-        colliding.0[31] ^= 0xff;
-        sender.attempts[0].state = AttemptState::Active {
-            generation: generation + 1,
-            token: colliding,
-        };
-        sender.attempts[1].state = AttemptState::Active {
-            generation,
-            token: prepared.attempt(),
-        };
-        let exact_ref = AttemptRef {
-            slot: 1,
-            generation,
-        };
-        let SlotState::Ready {
-            prepared: native, ..
-        } = sender.outbox[0].state
-        else {
-            panic!("expected ready packet")
-        };
-        sender.outbox[0].state = SlotState::Ready {
-            prepared: native,
-            attempt: exact_ref,
-        };
-
-        let proof = proof_for(56, prepared.attempt());
-        sender
-            .ingest(&proof, time(2), InterfaceId(2), &mut rng)
-            .unwrap();
-        assert!(matches!(
-            sender.attempts[0].state,
-            AttemptState::Active { token, .. } if token == colliding
-        ));
-        assert!(matches!(
-            sender.attempts[1].state,
-            AttemptState::Terminal {
-                token,
-                outcome: AttemptOutcome::Delivered,
-                ..
-            } if token == prepared.attempt()
-        ));
-        assert_eq!(sender.capacities().outbox_used, 0);
+        assert_eq!(sender.capacities().dispatches_queued, 1);
     }
 
     #[test]
     fn channel_receipt_candidate_is_an_explicit_unsupported_fault() {
-        let mut initiator = node::<4, 2>(57, "initiator");
-        let mut responder = node::<4, 2>(58, "responder");
-        register_receiver(&mut initiator, 58, "responder");
+        let mut initiator = node::<4, 2>(38, "initiator");
+        let mut responder = node::<4, 2>(39, "responder");
+        register_receiver(&mut initiator, 39, "responder");
         let responder_destination = responder.rns.destination_hash();
         assert!(
             responder
@@ -2377,38 +2678,119 @@ mod tests {
             .unwrap();
         let response = responder
             .rns
-            .ingest(request.bytes(), 100, InterfaceId(1), &mut rng);
+            .ingest(request.bytes(), 100, RnsInterfaceId(1), &mut rng);
         let established = initiator.rns.ingest(
             response.actions.packets[0].bytes(),
             101,
-            InterfaceId(2),
+            RnsInterfaceId(2),
             &mut rng,
         );
         responder.rns.ingest(
             established.actions.packets[0].bytes(),
             102,
-            InterfaceId(1),
+            RnsInterfaceId(1),
             &mut rng,
         );
         let message = initiator
             .rns
-            .send_channel_message(&link_id, 7, b"unsupported channel", 110, &mut rng)
+            .send_channel_message(&link_id, 7, b"channel proof", 110, &mut rng)
             .unwrap();
-        let proof = responder
+        let proof_actions = responder
             .rns
-            .ingest(message.bytes(), 110, InterfaceId(1), &mut rng)
+            .ingest(message.bytes(), 110, RnsInterfaceId(1), &mut rng);
+        let proof = proof_actions
             .actions
             .packets
-            .into_iter()
-            .next()
+            .iter()
+            .find(|packet| {
+                packet
+                    .bytes()
+                    .first()
+                    .is_some_and(|header| header & 0x03 == 0x03)
+            })
             .unwrap();
 
         assert_eq!(
             initiator
-                .ingest(proof.bytes(), time(111), InterfaceId(2), &mut rng)
+                .ingest(
+                    proof.bytes(),
+                    time(111),
+                    PacketInterfaceId::new(2),
+                    &mut rng,
+                )
                 .unwrap_err(),
             ReceiptCorrelationError::UnsupportedChannel
         );
         assert_eq!(initiator.rns.metrics().capacity.channel_receipts.used, 1);
+    }
+
+    #[test]
+    fn full_hash_candidate_selects_the_exact_active_attempt() {
+        let mut sender = node::<2, 1>(32, "sender");
+        let receiver = node::<2, 1>(33, "receiver");
+        register_receiver(&mut sender, 33, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
+        let mut rng = CounterRng::default();
+        let job = prepare(
+            &mut sender,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"full hash selection",
+            1,
+            &mut rng,
+        );
+        let original = job.prepared();
+        let generation = original.handle().generation;
+        let mut colliding = original.attempt();
+        colliding.0[31] ^= 0xff;
+        sender.attempts[0].state = AttemptState::Active {
+            generation: generation + 1,
+            token: colliding,
+        };
+        sender.attempts[1].state = AttemptState::Active {
+            generation,
+            token: original.attempt(),
+        };
+        let DispatchState::Queued {
+            prepared,
+            generation: dispatch_generation,
+            deadline,
+            ..
+        } = sender.dispatches[0].state
+        else {
+            panic!("expected queued dispatch")
+        };
+        let exact = AttemptRef {
+            slot: 1,
+            generation,
+        };
+        sender.dispatches[0].state = DispatchState::Queued {
+            prepared,
+            attempt: exact,
+            generation: dispatch_generation,
+            deadline,
+        };
+
+        sender
+            .ingest(
+                &proof_for(33, original.attempt()),
+                time(2),
+                PacketInterfaceId::new(2),
+                &mut rng,
+            )
+            .unwrap();
+        assert!(matches!(
+            sender.attempts[0].state,
+            AttemptState::Active { token, .. } if token == colliding
+        ));
+        assert!(matches!(
+            sender.attempts[1].state,
+            AttemptState::Terminal {
+                token,
+                outcome: AttemptOutcome::Delivered,
+                ..
+            } if token == original.attempt()
+        ));
+        let _ = job;
     }
 }

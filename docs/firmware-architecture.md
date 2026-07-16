@@ -99,7 +99,7 @@ Claims in READMEs were not treated as proof of embedded portability.
 | `rete-core`, `rete-transport`, `rete-stack`, and `rete-lxmf-core`, no defaults, `thumbv6m-none-eabi` | Pass | The layers are genuinely bare-metal buildable; compilation does not cure the LXMF correctness gaps documented below |
 | Focused `rete` core/transport/LXMF host suites at the reviewed upstream snapshot | 391 pass | Historical selection evidence for wire, crypto, forwarding, link/resource, and LXMF codec behavior; this is not evidence for the later lifecycle patch or a complete Python/RF conformance claim |
 | Exact `f6f5fb0` receipt/LXMF lifecycle library suites | 502 pass | CI checks the pinned fork directly: 151 transport, 124 stack, 143 LXMF and 84 daemon tests, plus all-target host and `thumbv6m-none-eabi` checks |
-| `reticulum-node-core`, generic bare-metal and ESP32-S3 Xtensa | Pass | The fixed outbox, exact attempt ledger and generation-checked lease/terminal owner compile without `std` on both targets; the current receive-only firmware intentionally does not link it yet |
+| `reticulum-node-core`, generic bare-metal and ESP32-S3 Xtensa | Pass | External-buffer dispatch metadata, exact attempt ledger and generation-checked job/terminal ownership compile without `std` on both targets; the 24-test slice has no async or radio linkage and the current receive-only firmware intentionally does not link it |
 | `reference/rete/examples/esp32s3`: `cargo +esp check --release` | Pass with warnings | Current bare-metal ESP32-S3/SX1262/Wi-Fi integration compiles with the installed ESP toolchain; it targets Heltec WiFi LoRa 32 V3/V4 pins, not the Tracker BSP |
 | Precursor `reticulum-core`/`lxmf` host suites; `micron` host suite | 70 pass; 17 pass | Strong embedded-client interop and hostile-input evidence, including real Nomad/Micron fixtures; the Xous crates still use `std` and are not a bare-metal dependency as-is |
 | `foxhole-micron` host suite | 24 pass | Focused confirmation of links, fields, colors, sections, literal/comment handling and control-character sanitisation; it remains a ratatui/`std` comparison parser |
@@ -195,31 +195,41 @@ the legacy handler without mutable core access leaves siblings to timeout.
 
 The project adapter exposes the new path without native Rete receipt or error
 types. `EmbeddedNode::prepare_data_into()` accepts exactly one 500-byte output
-array and returns Copy length/target/receipt metadata. `crates/node-core` now
-reserves final fixed outbox and attempt-ledger slots before invoking it,
-commits `Reserved -> Ready` plus `Reserved -> Active` without allocation, and
-uses generation-checked interface leases and attempt handles. Candidate-bound
+array and returns Copy length/target/receipt metadata. Alongside its RNS owner,
+`crates/node-core` stores fixed dispatch metadata and the fixed attempt ledger;
+firmware allocates each `TxPacketBuffer`, registers it once, and supplies its
+unique mutable reference to `prepare_data_into_slot()`. Node-core reserves
+dispatch and attempt slots before invoking Rete, prepares directly into the
+external array, and returns a unique `TxJob` whose scalar metadata preserves
+the complete receipt hash, interface target and owner-return deadline. Packet bytes have no
+public accessor pending a separate scalar permit state. Candidate-bound
 proof/timeout reservation changes the exact active ledger slot into a retained
-`Delivered` or `DeliveryTimeout` tombstone before Rete removes its receipt. A
-definitely-unsent abort cancels the exact receipt before freeing its attempt;
-transmitted or uncertain outcomes free only packet storage and keep proof
-correlation live. Ready packets are discarded if their attempt becomes
-terminal; leased bytes remain uniquely held until the actor releases them, and
-the tombstone cannot be acknowledged first. Thirty focused tests plus
-strict host Clippy, generic bare-metal and ESP32-S3 checks pass.
+`Delivered` or `DeliveryTimeout` tombstone before Rete removes its receipt.
+If a future job-channel insertion proves definitely unsent,
+`rollback_queued()` cancels the exact live receipt and returns the same buffer;
+a missing receipt retains the bound job instead of permitting reuse. A proof or
+timeout may become terminal while the job remains bound, and acknowledgement
+is blocked until the buffer returns. Dropping a job leaves its buffer and
+dispatch quarantined instead of reusable, and a layout regression guard keeps
+packet-sized storage outside node-core. Twenty-four focused tests plus strict
+host Clippy, generic bare-metal and ESP32-S3 checks cover this synchronous
+slice.
 
 This is not yet the product's durable submission model or an authorized RF TX
 graph. The in-RAM ledger cannot rehydrate Rete receipts after reboot, ordinary
-RNS actions are still allocation-backed, and the borrowed packet lease cannot
-cross an async radio await safely. The next slice must move unique static
-packet buffers through an owning handoff, preserve per-packet interface target
-authorization, quarantine rather than force-reuse lost buffers, and define
-reboot recovery. LXMF message and sibling-attempt state must ultimately be
-persisted before an outward terminal event can be lost. The future device-API
-intent queue remains
-separate from the prepared packet pool: it copies an accepted request before
-RNS mutation and must drain prepared packets promptly because Rete starts the
-receipt timeout at preparation, not at radio completion.
+RNS actions are still allocation-backed, and `TxJob` has not been connected to
+Embassy, an interface actor or a radio. Its preserved target is not yet
+resolved against enabled interfaces, its deadline is not enforced, and no
+permit, possibly-transmitted completion or lost-owner supervisor recovery
+exists beyond the current non-reuse quarantine.
+The next slice must move unique static packet buffers through the owning
+handoff, authorize byte access with a generation-bound scalar permit,
+quarantine rather than force-reuse lost buffers, and define reboot recovery.
+LXMF message and sibling-attempt state must ultimately be persisted before an
+outward terminal event can be lost. The future device-API intent queue remains
+separate from this prompt dispatch path: it copies an accepted request before
+RNS mutation because Rete starts the receipt timeout at preparation, not at
+radio completion.
 
 ### Leviculum
 
@@ -467,18 +477,21 @@ docs/
 
 `node-core`, `lxmf-wire`, `lxmf-router`, `lxmf-propagation`, `nomad-protocol`, `micron-parser`, `device-api`, `storage-model`, and `radio-interface` should compile on at least one `*-unknown-none-*` target in CI whenever their feature is enabled. ESP dependencies appear only in the firmware/platform/BSP crates.
 
-The initial `node-core` implementation now owns the fixed caller-reserved DATA
-outbox and guarded interface leases described in
-[Bounded node-core DATA outbox](node-core-outbox.md). It intentionally remains
-independent of `device-api`: a later dispatcher maps authenticated wire
-requests into node-owned bounded intents, while packet bytes remain accessible
-only to an interface actor holding a current lease.
+The initial `node-core` implementation now owns fixed DATA dispatch metadata
+and the attempt ledger described in
+[Bounded node-core external-buffer DATA dispatch](node-core-outbox.md). The
+500-byte `TxPacketBuffer` is caller-owned: firmware registers it once, supplies
+it to a synchronous preparation transaction, and receives a unique `TxJob`
+whose scalar metadata preserves target and return deadline. Node-core remains
+independent of `device-api`; a later dispatcher maps authenticated wire
+requests into separately bounded intents.
 
-That current lease is a synchronous borrowed-packet proof, not yet the owning
-`RadioTxFrame` handle in the model below. Before async integration, move the
-fixed pool behind an ownership/synchronization boundary and add supervised
-lease-loss recovery; otherwise awaiting LoRa TX would hold the protocol owner
-borrowed and a lost actor message could strand a slot indefinitely.
+`TxJob` deliberately exposes no bytes and is not yet the owning
+`RadioTxFrame`/permit handle in the model below. The next integration must move
+its static mutable buffer reference through bounded Embassy channels, resolve
+the target, authorize byte access immediately before hardware TX, and add
+supervised deadline/lost-owner recovery. The current slice has no async or
+radio connection and makes no transmit-completion claim.
 
 ## Core traits and event model
 
@@ -759,7 +772,8 @@ bounded indexed-CBOR envelope, capability/status responses, trusted out-of-
 band authorization context and a host-simulation-only accepted-submission
 shape. Immediate capacity exhaustion and principal-scoped idempotency conflict
 are distinct from an accepted submission's later delivery timeout, and the
-awaiting-delivery state does not imply that private outbox bytes still exist.
+awaiting-delivery state does not imply that an external packet buffer remains
+bound.
 Its encoded-packet SHA-256 type is deliberately distinct from node-core's RNS
 proof-correlation token. It has no framing, dispatcher, Rete dependency,
 packet-byte output or radio-TX path; those boundaries remain later milestones.

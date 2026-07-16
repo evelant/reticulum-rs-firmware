@@ -138,7 +138,7 @@ state. Key 4 is required only for failed and forbidden for every other state.
 The Rust model mirrors this with state-specific enum variants, so contradictory
 combinations cannot be constructed. Awaiting delivery means the proof or
 application acknowledgement is still pending; it does not claim that encoded
-packet bytes still occupy the private transmit outbox.
+packet bytes still occupy a bound external dispatch buffer.
 
 Length and encoded-packet SHA-256 allow diagnostics and correlation without
 exposing the prepared packet. `EncodedPacketSha256` is a distinct Rust type so
@@ -152,12 +152,15 @@ node-core `AttemptToken` for this field.
 
 Node-core now retains an in-RAM terminal-attempt tombstone until explicit
 acknowledgement. The future dispatcher must first atomically persist/project
-the corresponding `Delivered` or `DeliveryTimeout` submission state and only
-then acknowledge the opaque node-core attempt handle. The encoded-byte digest
-remains retained submission metadata, but the v1 response exposes it only for
-`AwaitingDelivery` and `Delivered`; a delivery timeout is a `Failed` response
-without keys 2 or 3. Device API v1 does not expose the internal attempt handle
-or make the current RAM ledger reboot-safe.
+the corresponding `Delivered` or `DeliveryTimeout` submission state, process
+the valid ownership return of any still-bound external `TxJob`, and only then
+acknowledge the opaque node-core attempt handle. Node-core rejects
+acknowledgement while that job still owns its `TxPacketBuffer`. The
+encoded-byte digest remains retained submission metadata, but the v1 response
+exposes it only for `AwaitingDelivery` and `Delivered`; a delivery timeout is a
+`Failed` response without keys 2 or 3. Device API v1 does not expose the
+internal attempt handle, packet-slot ID, dispatch generation or deadline, and
+it does not make the current RAM ledger reboot-safe.
 
 ### `experimental.prepare_rns_data` (`0xf001`)
 
@@ -179,8 +182,11 @@ Request body:
 The decoder returns key 1 as a slice of the caller's input buffer. A dispatcher
 must not retain it past that buffer's lifetime. The future dispatcher/intent
 owner copies accepted input into a separate fixed-capacity queue before calling
-`reticulum-node-core`; node-core's prepared packet pool is an interface handoff
-queue whose RNS receipt timeout has already started, not client-intent storage.
+`reticulum-node-core`. Node-core then prepares into one separately registered,
+caller-owned 500-byte `TxPacketBuffer` and returns a unique `TxJob`; that prompt
+dispatch ownership is not client-intent storage, and its RNS receipt timeout
+has already started. The current node-core slice exposes no packet bytes and
+has no async handoff, permit or radio integration.
 
 Successful host-simulation response body:
 

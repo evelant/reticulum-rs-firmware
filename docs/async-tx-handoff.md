@@ -1,6 +1,7 @@
 # Owning async TX handoff
 
-**Status:** design accepted for the next portable slice; no firmware TX graph
+**Status:** external-buffer foundation implemented; portable permit state next;
+no firmware TX graph
 **RF status:** compile-disabled until antenna/load and regional authorization
 
 ## Decision
@@ -24,39 +25,48 @@ unique reference into the available/completion channel before tasks start:
 available/completion channel
     -> node-local reservation and RNS preparation
     -> jobs channel
-    -> one interface actor across await
+    -> one interface dispatcher across await
     -> available/completion channel
 ```
 
 The node actor is the sole consumer of available/completed buffers and the
-sole producer of jobs. The interface actor has the inverse roles. Both channel
-capacities equal the pool size. While one endpoint owns a buffer, its outbound
-channel can contain at most every other buffer; a send is therefore
+sole producer of jobs. One dispatcher owns every enabled packet interface and
+has the inverse channel roles; it serializes each route and invokes the
+selected interface internally. Independent per-interface actors would instead
+require per-interface queues or a routing dispatcher in front of them, because
+multiple consumers of one jobs queue could take work for the wrong interface.
+Both channel capacities equal the pool size. While one endpoint owns a buffer,
+its outbound channel can contain at most every other buffer; a send is therefore
 capacity-infallible if the endpoints remain encapsulated. An unexpected full
 result must return the unique reference to the caller and become an invariant
 fault, never drop or duplicate ownership.
 
 The return path carries more than the bare reference. It uses a non-`Copy`
-owned completion whose payload is still only one buffer pointer plus scalar
+owned sum type whose payload is still only one buffer pointer plus scalar
 metadata:
 
 ```text
-TxCompletion {
-    buffer,
-    dispatch_generation,
-    interface,
-    outcome: DefinitelyUnsent | AuthorizedOrPossiblyTransmitted | RecoveryFault,
+TxReturn = Available(buffer) | Completed(TxCompletion)
+
+TxCompletion = {
+  buffer,
+  dispatch_generation,
+  interface,
+  outcome: DefinitelyUnsent | AuthorizedOrPossiblyTransmitted | RecoveryFault,
 }
 ```
 
 Each outcome also retains the bounded driver/retry reason needed by policy.
-`DefinitelyUnsent` permits a same-interface retry, route advance or exact
-receipt cancellation; `AuthorizedOrPossiblyTransmitted` keeps proof
-correlation live even when the driver reports an error; `RecoveryFault`
-quarantines the slot and enters supervisor recovery. The node owner validates
-the completion's generation and interface before advancing the serialized
-route plan. A mismatched completion is an invariant fault and cannot silently
-free or reuse its returned buffer.
+The initial policy permits no same-interface retry: `DefinitelyUnsent` either
+advances once to the next route or cancels the exact receipt when no route
+remains and no earlier route was authorized. Dispatch metadata retains a
+cumulative `may_have_transmitted` bit; once set it never clears, and the receipt
+stays live even if every later route is definitely unsent.
+`AuthorizedOrPossiblyTransmitted` sets that bit even when the driver reports an
+error; `RecoveryFault` quarantines the slot and enters supervisor recovery. The
+node owner validates the completion's generation and interface before
+advancing the serialized route plan. A mismatched completion is an invariant
+fault and cannot silently free or reuse its returned buffer.
 
 Safe `ConstStaticCell` and Embassy channel APIs encapsulate the required unsafe
 internals. Project crates retain `#![forbid(unsafe_code)]`; do not introduce
@@ -64,7 +74,8 @@ internals. Project crates retain `#![forbid(unsafe_code)]`; do not introduce
 
 ## Portable state and types
 
-Node-core will add project-owned identifiers and routing types:
+Node-core now provides the project-owned identifiers and target/set types below;
+`TxRoutePlan` remains part of the next portable state slice:
 
 ```text
 PacketSlotId(u16)
@@ -83,11 +94,13 @@ and generation-scoped binding. A matching non-Copy owned job plus scalar
 `NodeInstanceId`, dispatch generation, selected interface and permit
 generation; stale scalar copies cannot expose a reused buffer.
 
-The current node-core drops `PreparedData::target()`. The refactor must retain
-it and resolve it synchronously against a snapshot of enabled Reticulum packet
-interfaces. USB, BLE and Wi-Fi device-API transports are not automatically RNS
-packet interfaces. Multi-interface fan-out serially reuses the same unique
-buffer, issuing a new interface-bound permit for each hop.
+Node-core now preserves `PreparedData::target()` as project-owned `TxTarget`
+metadata on the uniquely owned job. The next slice resolves it synchronously
+against a snapshot of enabled Reticulum packet interfaces. USB, BLE and Wi-Fi
+device-API transports are not automatically RNS packet interfaces.
+Multi-interface fan-out serially reuses the same unique buffer, issuing a new
+interface-bound permit for each hop. An empty resolved route cancels the exact
+newly created receipt and rolls the preparation back.
 
 ## Transactional preparation
 
@@ -125,6 +138,16 @@ from the node owner. The node linearizes:
   reservation: change `Queued -> Authorized` and issue a generation-bound
   permit.
 
+Permit requests and replies use a separate bounded scalar control plane; they
+never enter either buffer-owning channel or affect its capacity proof. A
+request binds owner, node instance, packet slot, dispatch generation and
+interface. Permit issuance is one single-owner transition and is irrevocable:
+after it succeeds, the generation is conservatively classified as possibly
+transmitted even if the actor later reports a driver error or deadline. The
+later handoff commit must bind at most one outstanding exchange to each buffer,
+define full-channel behavior for both permit and cooperative-return messages,
+and test every `try_send` ownership/error path.
+
 A terminal committed before authorization suppresses transmission. Once
 authorization wins the race, RF may occur; later proof/timeout state remains
 retained and terminal acknowledgement remains blocked until the unique buffer
@@ -143,18 +166,28 @@ metadata once to `RecoveryRequired` and publishes a bounded supervisor record
 containing the lease, interface, prior phase, deadline and whether RF may have
 started.
 
+The dispatch slot is the authoritative fixed quarantine record; a returned
+recovery or mismatched buffer remains owned by fixed quarantine storage bound
+to that slot. Supervisor notifications are observational and may coalesce or
+drop under pressure without losing the retained recovery state or its unique
+buffer owner.
+
 - Before authorization: deny later permits and request a definitely-unsent
   cooperative return.
-- After authorization: request radio cleanup/reset and classify any return as
+- After authorization: request radio cleanup and classify any return as
   possibly transmitted.
 - On return: finalize metadata and reclaim the exact buffer normally.
 - No return by the recovery grace deadline: disable TX, retain the fault and
-  reset the MCU. Never fabricate or force-reuse the missing reference.
+  request supervised hardware recovery. Never fabricate or force-reuse the
+  missing reference.
 
 `lora-phy` 3.0.1 waits for DIO1 with SX1262 hardware TX timeout disabled and
-warns against cancelling IRQ processing. The initial actor must await the
-complete operation; the supervisor watchdog/reset is the recovery boundary
-until a TX wrapper proves bounded hardware timeout and cleanup.
+warns against cancelling IRQ processing. It enables the RF switch and issues
+`SetTx(0)` before that unbounded wait. MCU reset alone is therefore not an
+accepted hung-radio recovery boundary. A future TX-capable BSP must first prove
+an independently assertable SX1262 RESET plus CTX-safe sequence that remains
+available to the supervisor; until then every hardware TX type and feature
+stays absent. MCU reset recovers volatile software state only.
 
 Reset discards volatile references and native receipts. Higher-level durable
 LXMF/submission records must reconstruct fresh attempts under a new
@@ -166,14 +199,19 @@ reset regulatory accounting.
 
 Safe to implement and host/target-test now:
 
-- external-buffer node-core refactor and target preservation;
-- unique-reference Embassy handoff;
-- fake-interface authorization/permit state machine;
-- lease deadlines, recovery diagnostics and supervisor simulation;
-- route resolution and serialized fan-out;
+- the external-buffer node-core refactor and target/deadline preservation are
+  implemented and host/target checked;
+- route resolution, fake-interface authorization/permit state, deadlines,
+  recovery diagnostics and serialized fan-out as the next portable commit;
+- unique-reference Embassy handoff only after those transitions are frozen;
 - stable-address/no-copy, pressure, stale-token and race tests;
 - generic RISC-V and ESP32-S3 compilation; and
 - dependency/feature guards that keep Tracker TX unavailable.
+
+The graph policy checks every current Tracker profile and the Cargo
+`--all-features` closure for both `reticulum-node-core` and the future
+`reticulum-tx-handoff` crate. Adding a feature-only transitive ownership path
+therefore fails before a new firmware feature can bypass the reviewed list.
 
 Still requires explicit antenna/load and regional authorization:
 

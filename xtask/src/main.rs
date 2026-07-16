@@ -245,6 +245,24 @@ fn graph_policy() -> ExitCode {
             }
         }
     }
+    let all_features_product = match capture(
+        "cargo",
+        [
+            "tree",
+            "--locked",
+            "-p",
+            "reticulum-heltec-tracker-v2",
+            "--all-features",
+            "--target",
+            "all",
+        ],
+    ) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!("error: could not inspect product all-features graph: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     let comparison = match capture(
         "cargo",
@@ -266,13 +284,9 @@ fn graph_policy() -> ExitCode {
 
     let mut failed = false;
     for (feature, product) in &product_graphs {
-        for forbidden in ["leviculum-core", "rete-lxmf", "lxmf-rs"] {
-            if product.contains(forbidden) {
-                eprintln!(
-                    "error: product {feature} all-target graph contains forbidden {forbidden}"
-                );
-                failed = true;
-            }
+        if let Err(error) = validate_product_graph_boundary(feature, product) {
+            eprintln!("error: {error}");
+            failed = true;
         }
         let returned_fault_hook = product.contains("reticulum-lab-rx-returned-fault-hil");
         if returned_fault_hook != (*feature == "lab-rx-returned-fault-hil") {
@@ -282,6 +296,10 @@ fn graph_policy() -> ExitCode {
             );
             failed = true;
         }
+    }
+    if let Err(error) = validate_product_graph_boundary("all-features", &all_features_product) {
+        eprintln!("error: {error}");
+        failed = true;
     }
     for forbidden in ["rete-core", "rete-stack", "rete-transport", "rete-lxmf"] {
         if comparison.contains(forbidden) {
@@ -315,15 +333,35 @@ fn graph_policy() -> ExitCode {
         ExitCode::FAILURE
     } else {
         println!(
-            "ok: all safe, RX and HIL all-target product graphs and the Leviculum comparison graph \
-             are isolated; the returned-fault hook is feature-exclusive; firmware direct \
-             dependencies use only the RX façade; resolved Rete packages match reported \
+            "ok: all safe, RX, HIL and all-features all-target product graphs and the Leviculum \
+             comparison graph are isolated; the returned-fault hook is feature-exclusive; \
+             firmware direct dependencies use only the RX façade and every-feature resolution \
+             excludes TX ownership crates; resolved Rete packages match reported \
              source/revision; esp-rtos resolves only to the reviewed local patch and its \
              checked vendor inventory reconstructs the pristine registry source; the device \
              API and node core remain mutually isolated and free of direct platform dependencies"
         );
         ExitCode::SUCCESS
     }
+}
+
+const PRODUCT_GRAPH_FORBIDDEN: [&str; 5] = [
+    "leviculum-core",
+    "rete-lxmf",
+    "lxmf-rs",
+    "reticulum-node-core",
+    "reticulum-tx-handoff",
+];
+
+fn validate_product_graph_boundary(label: &str, tree: &str) -> Result<(), String> {
+    for forbidden in PRODUCT_GRAPH_FORBIDDEN {
+        if tree.contains(forbidden) {
+            return Err(format!(
+                "product {label} all-target graph contains forbidden {forbidden}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_portable_layer_dependency_boundary(
@@ -585,13 +623,52 @@ fn validate_firmware_dependency_boundary(
         "rete-core",
         "rete-stack",
         "rete-transport",
+        "reticulum-node-core",
         "reticulum-rns-rete",
+        "reticulum-tx-handoff",
     ] {
         if dependency_names.contains(&forbidden) {
             return Err(format!(
                 "firmware directly depends on prohibited implementation crate {forbidden}"
             ));
         }
+    }
+
+    let package_names = packages
+        .iter()
+        .filter_map(|package| Some((package["id"].as_str()?, package["name"].as_str()?)))
+        .collect::<BTreeMap<_, _>>();
+    let resolved_nodes = resolve_nodes
+        .iter()
+        .filter_map(|node| Some((node["id"].as_str()?, node)))
+        .collect::<BTreeMap<_, _>>();
+    let mut pending = vec![firmware_id];
+    let mut visited = BTreeSet::new();
+    while let Some(package_id) = pending.pop() {
+        if !visited.insert(package_id) {
+            continue;
+        }
+        if package_id != firmware_id
+            && package_names
+                .get(package_id)
+                .is_some_and(|name| matches!(*name, "reticulum-node-core" | "reticulum-tx-handoff"))
+        {
+            return Err(format!(
+                "firmware resolved graph reaches prohibited TX ownership package {}",
+                package_names[package_id]
+            ));
+        }
+        let node = resolved_nodes
+            .get(package_id)
+            .ok_or_else(|| format!("reachable package {package_id} has no resolved node"))?;
+        let node_dependencies = node["deps"]
+            .as_array()
+            .ok_or_else(|| format!("resolved package {package_id} has no dependency list"))?;
+        pending.extend(
+            node_dependencies
+                .iter()
+                .filter_map(|dependency| dependency["pkg"].as_str()),
+        );
     }
     Ok(())
 }
@@ -1878,7 +1955,7 @@ mod tests {
     }
 
     #[test]
-    fn firmware_dependency_boundary_rejects_direct_tx_and_full_rete_crates() {
+    fn firmware_dependency_boundary_rejects_tx_ownership_and_full_rete_crates() {
         let root = workspace_root();
         let board_path = root.join("crates/board-heltec-tracker-v2");
         let radio_path = root.join("crates/radio-interface");
@@ -1904,28 +1981,90 @@ mod tests {
                 package_fixture("facade-id", "reticulum-rns-rete-rx", &facade_path),
             ],
             "resolve": {
-                "nodes": [{
-                    "id": "firmware-id",
-                    "deps": [
-                        resolved_dependency_fixture("board-id"),
-                        resolved_dependency_fixture("radio-id"),
-                        resolved_dependency_fixture("facade-id"),
-                    ]
-                }]
+                "nodes": [
+                    {
+                        "id": "firmware-id",
+                        "deps": [
+                            resolved_dependency_fixture("board-id"),
+                            resolved_dependency_fixture("radio-id"),
+                            resolved_dependency_fixture("facade-id"),
+                        ]
+                    },
+                    { "id": "board-id", "deps": [] },
+                    { "id": "radio-id", "deps": [] },
+                    { "id": "facade-id", "deps": [] },
+                ]
             }
         });
         validate_firmware_dependency_boundary(&metadata.to_string(), &root).unwrap();
 
-        let mut prohibited = metadata.clone();
-        prohibited["packages"][0]["dependencies"]
+        for forbidden in [
+            "lora-phy",
+            "reticulum-rns-rete",
+            "reticulum-node-core",
+            "reticulum-tx-handoff",
+        ] {
+            let mut prohibited = metadata.clone();
+            prohibited["packages"][0]["dependencies"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({ "name": forbidden }));
+            assert!(
+                validate_firmware_dependency_boundary(&prohibited.to_string(), &root).is_err(),
+                "direct firmware dependency {forbidden} was accepted"
+            );
+        }
+
+        let mut transitive_node = metadata.clone();
+        let node_path = root.join("crates/node-core");
+        transitive_node["packages"]
             .as_array_mut()
             .unwrap()
-            .push(serde_json::json!({ "name": "lora-phy" }));
-        assert!(validate_firmware_dependency_boundary(&prohibited.to_string(), &root).is_err());
+            .push(package_fixture(
+                "node-core-id",
+                "reticulum-node-core",
+                &node_path,
+            ));
+        transitive_node["resolve"]["nodes"][3]["deps"] =
+            serde_json::json!([resolved_dependency_fixture("node-core-id")]);
+        assert!(
+            validate_firmware_dependency_boundary(&transitive_node.to_string(), &root).is_err(),
+            "transitive node-core firmware dependency was accepted"
+        );
+
+        let mut incomplete_resolve = metadata.clone();
+        incomplete_resolve["resolve"]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert!(
+            validate_firmware_dependency_boundary(&incomplete_resolve.to_string(), &root).is_err(),
+            "reachable package without a resolved node was accepted"
+        );
 
         let mut optional = metadata;
         optional["packages"][0]["dependencies"][2]["optional"] = serde_json::Value::Bool(true);
         assert!(validate_firmware_dependency_boundary(&optional.to_string(), &root).is_err());
+    }
+
+    #[test]
+    fn product_graph_boundary_rejects_feature_only_transitive_tx_ownership() {
+        validate_product_graph_boundary(
+            "all-features",
+            "reticulum-heltec-tracker-v2 v0.1.0\n└── optional-rx-wrapper v0.1.0",
+        )
+        .unwrap();
+
+        for forbidden in ["reticulum-node-core", "reticulum-tx-handoff"] {
+            let tree = format!(
+                "reticulum-heltec-tracker-v2 v0.1.0\n\
+                 optional-future-feature-wrapper v0.1.0\n\
+                 {forbidden} v0.1.0"
+            );
+            let error = validate_product_graph_boundary("all-features", &tree).unwrap_err();
+            assert!(error.contains("all-features"));
+            assert!(error.contains(forbidden));
+        }
     }
 
     #[test]
