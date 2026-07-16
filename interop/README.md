@@ -67,6 +67,21 @@ python3.13 interop/python/esp32s3_usb_serial_capture.py \
   --port /dev/cu.usbmodemYOUR_PORT > serial.log 2> serial-recorder.log
 ```
 
+For a counted normal boot from an already opened exclusive descriptor, opt in
+to the same USB-Serial/JTAG hard-reset pulse used by `espflash`:
+
+```sh
+python3.13 interop/python/esp32s3_usb_serial_capture.py \
+  --port /dev/cu.usbmodemYOUR_PORT \
+  --hard-reset-after-open --pre-reset-drain-seconds 1 \
+  --duration-seconds 90 > serial.log 2> serial-recorder.log
+```
+
+That mode preserves the pre-reset bytes, reports their exact
+`counted_reset_offset`, verifies DTR and RTS are inactive after the pulse, and
+then records for the requested post-reset duration. It changes modem-control
+lines but still never writes serial data to the target.
+
 The tool is reset-minimizing, not passive. Its descriptor is read/write because
 Darwin's TTY control path requires that mode, but the recorder makes no serial
 write call or host-input read. POSIX cannot set CDC line controls before
@@ -74,8 +89,8 @@ write call or host-input read. POSIX cannot set CDC line controls before
 does not follow re-enumeration, since the path could then name another attached
 Tracker. Opening does not guarantee a reset: a capture can attach to an already
 running activation, start in the middle of a buffered record and omit the boot
-lines. It is suitable for supplemental post-boot heartbeats or for a documented
-reset issued only after the recorder is armed, but not for proving a preceding
-cold-power-on boot. Follow the independent RX-only UART0 procedure in the
-Phase-1 HIL runbook whenever the reset reason or complete multi-reset sequence
-is evidence-critical.
+lines. Plain mode is suitable for supplemental post-boot heartbeats. The
+explicit hard-reset mode can prove the sequence beginning at its recorded
+offset, but not a preceding cold-power-on boot. Follow the independent RX-only
+UART0 procedure in the Phase-1 HIL runbook whenever the original power-on is
+evidence-critical.

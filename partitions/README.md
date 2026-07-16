@@ -55,7 +55,6 @@ test ! -e "$RUN"
 mkdir -p "$RUN/hardware" "$RUN/provenance" "$RUN/flash"
 
 TRACKER_USB_SERIAL=44:1B:F6:F8:E9:44
-PROBE_SELECTOR="303a:1001:$TRACKER_USB_SERIAL"
 map_tracker_port() {
   ioreg -r -c IOUSBHostDevice -l -w0 |
   awk -v target="$TRACKER_USB_SERIAL" '
@@ -100,7 +99,6 @@ cp interop/python/verify_storage_hil_log.py \
   cargo +esp --version
   xtensa-esp32s3-elf-gcc --version
   espflash --version
-  probe-rs --version
   python3.13 --version
 } > "$RUN/provenance/tool-versions.txt"
 
@@ -115,8 +113,6 @@ rg -q '^Flash size:[[:space:]]+8MB$' \
   "$RUN/hardware/e944-board-info.txt"
 rg -q '^Flash Encryption: Disabled$' \
   "$RUN/hardware/e944-board-info.txt"
-probe-rs list > "$RUN/hardware/probes-before.txt"
-rg -Fi "$PROBE_SELECTOR" "$RUN/hardware/probes-before.txt"
 ```
 
 `board-info` is explicitly left in `no-reset` state. Omitting that option boots
@@ -273,17 +269,21 @@ Do not use whole-chip erase and do not run any command against E0:40.
 
 Do not use `espflash monitor`. In espflash 4.5.0 even `--no-reset` connects
 through the ROM loader before monitoring, while interactive mode does not start
-the application until an unrecorded Ctrl-R. Instead, arm the project-owned
-reset-minimizing recorder first, wait for its `opened=` status, record the
-current serial byte offset, and only then reset the exact E9:44 JTAG probe.
+the application until an unrecorded Ctrl-R. An external `probe-rs reset` is not
+valid after the flash operations leave the target in the ROM loader: on the
+live board it produced `boot:0x0 (DOWNLOAD)` instead of a normal application
+boot. The project-owned recorder must instead own the counted reset.
 
 Opening the ESP32-S3 native-USB TTY can itself reset the target before DTR and
 RTS can be cleared. This image therefore emits a five-second
 `stage=capture-guard` and performs no `FlashStorage`/`retlog` access or flash
 mutation during that interval. Instruction fetches remain ordinary flash
 reads, so the precise evidence fields are `retlog_access=false` and
-`flash_mutation=false`. The coordinator below issues the counted JTAG reset
-inside that guard. Only bytes at or after
+`flash_mutation=false`. The recorder opens and exclusively retains the same
+serial descriptor, drains one second of attachment evidence, durably records
+its byte offset, and performs espflash's normal-boot USB-Serial/JTAG DTR/RTS
+sequence on that already-open descriptor. It makes no serial data writes. Only
+bytes at or after
 `counted-reset-serial-offset.txt` belong to the qualifying two-boot attempt;
 earlier bytes are attachment evidence, not a storage result.
 
@@ -295,82 +295,79 @@ RECORDER="$RUN/provenance/esp32s3_usb_serial_capture.py"
 shasum -a 256 "$RECORDER" > "$capture/serial-recorder.sha256"
 
 record_tracker_port "$capture/e944-port-before-open.txt"
-printf 'probe_selector=%s\n' "$PROBE_SELECTOR" \
-  > "$capture/e944-probe-selector.txt"
-probe-rs list > "$capture/probes-before-reset.txt"
-rg -Fi "$PROBE_SELECTOR" "$capture/probes-before-reset.txt"
-
-recorder_pid=""
-cleanup_recorder() {
-  if [[ -n "$recorder_pid" ]] && kill -0 "$recorder_pid" 2>/dev/null; then
-    kill "$recorder_pid"
-  fi
-  if [[ -n "$recorder_pid" ]]; then
-    wait "$recorder_pid" 2>/dev/null || true
-  fi
-}
-trap cleanup_recorder EXIT INT TERM
-
-python3.13 "$RECORDER" \
-  --port "$PORT" --duration-seconds 90 \
+if python3.13 "$RECORDER" \
+  --port "$PORT" \
+  --hard-reset-after-open \
+  --pre-reset-drain-seconds 1 \
+  --duration-seconds 90 \
   > "$capture/serial.log" \
-  2> "$capture/serial-recorder.log" &
-recorder_pid=$!
-printf '%s\n' "$recorder_pid" > "$capture/serial-recorder.pid.txt"
-
-opened=false
-attempt=0
-while (( attempt < 100 )); do
-  if rg -F "opened=$PORT " "$capture/serial-recorder.log" > /dev/null; then
-    opened=true
-    break
-  fi
-  if ! kill -0 "$recorder_pid" 2>/dev/null; then
-    break
-  fi
-  attempt=$((attempt + 1))
-  sleep 0.1
-done
-test "$opened" = true
-kill -0 "$recorder_pid"
-
-# Drain any attachment-reset boot prefix, but remain inside the 5 s guard.
-sleep 1
-if rg -F 'storage-hil stage=capture-guard status=COMPLETE' \
-  "$capture/serial.log" > /dev/null; then
-  printf '%s\n' 'capture guard completed before counted reset' \
-    > "$capture/coordinator-failure.txt"
-  exit 1
-fi
-
-SERIAL_OFFSET="$(wc -c < "$capture/serial.log" | tr -d ' ')"
-printf '%s\n' "$SERIAL_OFFSET" \
-  > "$capture/counted-reset-serial-offset.txt"
-date -u +%Y-%m-%dT%H:%M:%SZ \
-  > "$capture/counted-reset-requested-at.txt"
-if probe-rs reset \
-  --chip esp32s3 --protocol jtag \
-  --probe "$PROBE_SELECTOR" --non-interactive \
-  > "$capture/counted-reset.log" 2>&1; then
-  reset_status=0
-else
-  reset_status=$?
-fi
-printf '%s\n' "$reset_status" > "$capture/counted-reset.exit-status.txt"
-test "$reset_status" -eq 0
-
-if wait "$recorder_pid"; then
+  2> "$capture/serial-recorder.log"; then
   recorder_status=0
 else
   recorder_status=$?
 fi
-recorder_pid=""
-trap - EXIT INT TERM
 printf '%s\n' "$recorder_status" \
   > "$capture/serial-recorder.exit-status.txt"
 test "$recorder_status" -eq 0
-rg -F 'completed=true duration_seconds=90.0' \
-  "$capture/serial-recorder.log"
+
+OPENED_COUNT="$(awk -v port="$PORT" '
+  index($0, "opened=" port " ") &&
+    /receive_only=true reconnect=false$/ { count++ }
+  END { print count + 0 }
+' "$capture/serial-recorder.log")"
+test "$OPENED_COUNT" -eq 1
+
+ARMED_COUNT="$(awk '
+  /counted_reset_offset=[0-9]+ reset_mode=usb_serial_jtag_hard_reset pre_reset_drain_seconds=1\.0 counted_reset_status=armed duration_seconds=90\.0 duration_scope=post_reset$/ {
+    count++
+  }
+  END { print count + 0 }
+' "$capture/serial-recorder.log")"
+test "$ARMED_COUNT" -eq 1
+
+SERIAL_OFFSET="$(awk '
+  /counted_reset_offset=[0-9]+ reset_mode=usb_serial_jtag_hard_reset pre_reset_drain_seconds=1\.0 counted_reset_status=armed duration_seconds=90\.0 duration_scope=post_reset$/ {
+    for (field = 1; field <= NF; field++) {
+      if ($field ~ /^counted_reset_offset=[0-9]+$/) {
+        split($field, parts, "=")
+        print parts[2]
+      }
+    }
+  }
+' "$capture/serial-recorder.log")"
+case "$SERIAL_OFFSET" in
+  ''|*[!0-9]*) exit 1 ;;
+esac
+
+COMPLETED_COUNT="$(awk -v offset="$SERIAL_OFFSET" '
+  /counted_reset_offset=[0-9]+ reset_mode=usb_serial_jtag_hard_reset counted_reset_status=completed$/ {
+    total++
+  }
+  index($0, "counted_reset_offset=" offset " reset_mode=usb_serial_jtag_hard_reset counted_reset_status=completed") {
+    matching++
+  }
+  END {
+    if (total == 1 && matching == 1) print 1
+    else print 0
+  }
+' "$capture/serial-recorder.log")"
+test "$COMPLETED_COUNT" -eq 1
+
+RESET_MARKER_COUNT="$(awk '
+  /counted_reset_offset=/ { count++ }
+  END { print count + 0 }
+' "$capture/serial-recorder.log")"
+test "$RESET_MARKER_COUNT" -eq 2
+
+CAPTURE_COMPLETED_COUNT="$(awk '
+  /completed=true duration_seconds=90\.0 duration_scope=post_reset$/ {
+    count++
+  }
+  END { print count + 0 }
+' "$capture/serial-recorder.log")"
+test "$CAPTURE_COMPLETED_COUNT" -eq 1
+printf '%s\n' "$SERIAL_OFFSET" \
+  > "$capture/counted-reset-serial-offset.txt"
 
 dd if="$capture/serial.log" \
   of="$capture/serial-after-counted-reset.log" \
@@ -387,11 +384,13 @@ python3.13 "$LOG_VERIFIER" \
 test -s "$capture/storage-hil-log-verification.json"
 ```
 
-The 90-second recorder must remain continuously open across the firmware's own
-software reset. If native USB re-enumerates, the recorder fails instead of
-following a possibly reassigned path. Do not reopen it or append another boot:
-the attempt is invalid, and a new clean attempt must return to the external
-`retlog` erase step with a new evidence directory.
+The 90-second duration starts after the counted reset; it excludes the one-second
+pre-reset drain and reset pulse. The recorder must remain continuously open
+across that counted reset and the firmware's own software reset. If native USB
+re-enumerates, the recorder fails instead of following a possibly reassigned
+path. Do not reopen it or append another boot. An invalid attempt must use a new
+evidence directory and externally re-erase `retlog` before retrying, unless an
+external full-partition readback proves that `retlog` remained entirely erased.
 
 Do not accept the run unless `serial-after-counted-reset.log` contains one
 coherent sequence, without an intervening FAIL or panic:

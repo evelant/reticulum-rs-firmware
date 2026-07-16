@@ -164,6 +164,73 @@ class SerialConfigurationTests(unittest.TestCase):
             )
         self.assertEqual(closed, [23])
 
+
+class HardResetTests(unittest.TestCase):
+    def test_usb_serial_jtag_reset_uses_exact_normal_boot_sequence(self) -> None:
+        events: list[object] = []
+
+        def ioctl_fn(fd: int, request: int, argument, mutate: bool):
+            events.append(("ioctl", fd, request, argument[0], mutate))
+            if request == termios.TIOCMGET:
+                argument[0] = 0
+            return 0
+
+        capture_tool.usb_serial_jtag_hard_reset(
+            29,
+            ioctl_fn=ioctl_fn,
+            sleep_fn=lambda seconds: events.append(("sleep", seconds)),
+        )
+
+        self.assertEqual(
+            events,
+            [
+                ("ioctl", 29, termios.TIOCMBIC, termios.TIOCM_DTR, True),
+                ("sleep", 0.1),
+                ("ioctl", 29, termios.TIOCMBIS, termios.TIOCM_RTS, True),
+                ("sleep", 0.1),
+                ("ioctl", 29, termios.TIOCMBIC, termios.TIOCM_RTS, True),
+                ("ioctl", 29, termios.TIOCMGET, 0, True),
+            ],
+        )
+
+    def test_active_line_after_reset_fails_closed(self) -> None:
+        def ioctl_fn(_fd: int, request: int, argument, _mutate: bool):
+            if request == termios.TIOCMGET:
+                argument[0] = termios.TIOCM_RTS
+            return 0
+
+        with self.assertRaisesRegex(OSError, "left DTR/RTS active"):
+            capture_tool.usb_serial_jtag_hard_reset(
+                29,
+                ioctl_fn=ioctl_fn,
+                sleep_fn=lambda _seconds: None,
+            )
+
+    def test_ioctl_error_aborts_reset_sequence(self) -> None:
+        events: list[object] = []
+
+        def ioctl_fn(_fd: int, request: int, argument, _mutate: bool):
+            events.append((request, argument[0]))
+            if request == termios.TIOCMBIS:
+                raise OSError(errno.EIO, "control transfer failed")
+            return 0
+
+        with self.assertRaisesRegex(OSError, "control transfer failed"):
+            capture_tool.usb_serial_jtag_hard_reset(
+                30,
+                ioctl_fn=ioctl_fn,
+                sleep_fn=lambda seconds: events.append(("sleep", seconds)),
+            )
+        self.assertEqual(
+            events,
+            [
+                (termios.TIOCMBIC, termios.TIOCM_DTR),
+                ("sleep", 0.1),
+                (termios.TIOCMBIS, termios.TIOCM_RTS),
+            ],
+        )
+
+
 class StreamTests(unittest.TestCase):
     def test_binary_input_and_partial_output_writes_are_exact(self) -> None:
         payloads = iter([b"\x00\xff\r", b"\nabc", KeyboardInterrupt()])
@@ -266,6 +333,111 @@ class StreamTests(unittest.TestCase):
             )
         self.assertEqual(closed, [53])
 
+    def test_counted_reset_drains_then_reports_exact_offset_before_reset(self) -> None:
+        output = BytesIO()
+        status = StringIO()
+        events: list[object] = []
+        calls = 0
+
+        def stream_fn(
+            fd: int, sink: BytesIO, duration_seconds: float | None
+        ) -> int:
+            nonlocal calls
+            calls += 1
+            events.append(("stream", fd, duration_seconds))
+            if calls == 1:
+                self.assertEqual(capture_tool._write_all(sink, b"pre\x00reset"), 9)
+                return 9
+            self.assertEqual(capture_tool._write_all(sink, b"post-reset"), 10)
+            return 10
+
+        def hard_reset_fn(fd: int) -> None:
+            events.append(("reset", fd))
+            self.assertIn(
+                "counted_reset_offset=9 "
+                f"reset_mode={capture_tool.USB_SERIAL_JTAG_HARD_RESET_MODE} "
+                "pre_reset_drain_seconds=1.25 counted_reset_status=armed",
+                status.getvalue(),
+            )
+            self.assertEqual(output.getvalue(), b"pre\x00reset")
+
+        capture_tool.capture(
+            "/dev/cu.test",
+            output,
+            status,
+            duration_seconds=90.0,
+            hard_reset_after_open=True,
+            pre_reset_drain_seconds=1.25,
+            open_fn=lambda _port: 61,
+            close_fn=lambda fd: events.append(("close", fd)),
+            stream_fn=stream_fn,
+            hard_reset_fn=hard_reset_fn,
+        )
+
+        self.assertEqual(output.getvalue(), b"pre\x00resetpost-reset")
+        self.assertEqual(
+            events,
+            [
+                ("stream", 61, 1.25),
+                ("reset", 61),
+                ("stream", 61, 90.0),
+                ("close", 61),
+            ],
+        )
+        self.assertIn("counted_reset_status=completed", status.getvalue())
+        self.assertIn("completed=true duration_seconds=90.0", status.getvalue())
+
+    def test_reset_failure_closes_fd_without_starting_counted_capture(self) -> None:
+        closed: list[int] = []
+        stream_durations: list[float | None] = []
+        status = StringIO()
+
+        def stream_fn(
+            _fd: int, _output: BytesIO, duration_seconds: float | None
+        ) -> int:
+            stream_durations.append(duration_seconds)
+            return 0
+
+        with self.assertRaisesRegex(OSError, "reset failed"):
+            capture_tool.capture(
+                "/dev/cu.test",
+                BytesIO(),
+                status,
+                duration_seconds=90.0,
+                hard_reset_after_open=True,
+                open_fn=lambda _port: 67,
+                close_fn=closed.append,
+                stream_fn=stream_fn,
+                hard_reset_fn=lambda _fd: (_ for _ in ()).throw(
+                    OSError(errno.EIO, "reset failed")
+                ),
+            )
+        self.assertEqual(stream_durations, [1.0])
+        self.assertEqual(closed, [67])
+        self.assertIn("counted_reset_status=armed", status.getvalue())
+        self.assertNotIn("counted_reset_status=completed", status.getvalue())
+
+    def test_missing_pre_reset_byte_count_fails_before_reset(self) -> None:
+        reset_called = False
+
+        def reset_fn(_fd: int) -> None:
+            nonlocal reset_called
+            reset_called = True
+
+        with self.assertRaisesRegex(RuntimeError, "valid byte count"):
+            capture_tool.capture(
+                "/dev/cu.test",
+                BytesIO(),
+                StringIO(),
+                duration_seconds=1.0,
+                hard_reset_after_open=True,
+                open_fn=lambda _port: 71,
+                close_fn=lambda _fd: None,
+                stream_fn=lambda _fd, _output, _duration: None,
+                hard_reset_fn=reset_fn,
+            )
+        self.assertFalse(reset_called)
+
 
 class PolicyTests(unittest.TestCase):
     def test_recorder_has_no_serial_write_or_flush_path(self) -> None:
@@ -288,6 +460,37 @@ class PolicyTests(unittest.TestCase):
                 capture_tool.validate_runtime()
         finally:
             capture_tool.EXPECTED_PYTHON = original
+
+    def test_hard_reset_cli_defaults_to_one_second_drain(self) -> None:
+        parsed = capture_tool.parse_args(
+            ["--port", "/dev/cu.test", "--hard-reset-after-open"]
+        )
+        self.assertTrue(parsed.hard_reset_after_open)
+        self.assertEqual(parsed.pre_reset_drain_seconds, 1.0)
+
+    def test_pre_reset_drain_requires_hard_reset_mode(self) -> None:
+        with self.assertRaises(SystemExit):
+            capture_tool.parse_args(
+                [
+                    "--port",
+                    "/dev/cu.test",
+                    "--pre-reset-drain-seconds",
+                    "1",
+                ]
+            )
+
+    def test_pre_reset_drain_must_be_finite_and_positive(self) -> None:
+        for invalid in ("0", "-1", "nan", "inf"):
+            with self.subTest(invalid=invalid), self.assertRaises(SystemExit):
+                capture_tool.parse_args(
+                    [
+                        "--port",
+                        "/dev/cu.test",
+                        "--hard-reset-after-open",
+                        "--pre-reset-drain-seconds",
+                        invalid,
+                    ]
+                )
 
 
 if __name__ == "__main__":

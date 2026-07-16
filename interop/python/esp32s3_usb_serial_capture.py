@@ -10,6 +10,12 @@ Opening a native ESP32-S3 USB CDC device can itself reset the target. POSIX has
 no API that presets DTR/RTS before open(2), so this tool is reset-minimizing,
 not passive. Its output is supplemental post-boot evidence and must not be used
 to claim that the original cold-power-on boot was observed.
+
+An explicit hard-reset-after-open mode is available for tests that need one
+counted normal boot. It preserves all bytes received before the reset, reports
+their exact length as the counted-reset offset, and toggles only the modem
+control lines on the already-open exclusive descriptor. It never writes serial
+data to the target.
 """
 
 from __future__ import annotations
@@ -34,6 +40,9 @@ EXPECTED_PYTHON = (3, 13, 7)
 BAUDRATE = 115_200
 READ_SIZE = 4_096
 SELECT_TIMEOUT_SECONDS = 0.1
+DEFAULT_PRE_RESET_DRAIN_SECONDS = 1.0
+HARD_RESET_STEP_SECONDS = 0.1
+USB_SERIAL_JTAG_HARD_RESET_MODE = "usb_serial_jtag_hard_reset"
 MODEM_INACTIVE_MASK = termios.TIOCM_DTR | termios.TIOCM_RTS
 MODEM_FLOW_CONTROL_NAMES = (
     "CRTSCTS",
@@ -76,6 +85,26 @@ def _clear_modem_lines(
 ) -> None:
     mask = array.array("i", [MODEM_INACTIVE_MASK])
     ioctl_fn(fd, termios.TIOCMBIC, mask, True)
+
+
+def _clear_modem_line(
+    fd: int,
+    line: int,
+    *,
+    ioctl_fn: Callable[..., object] = fcntl.ioctl,
+) -> None:
+    mask = array.array("i", [line])
+    ioctl_fn(fd, termios.TIOCMBIC, mask, True)
+
+
+def _set_modem_line(
+    fd: int,
+    line: int,
+    *,
+    ioctl_fn: Callable[..., object] = fcntl.ioctl,
+) -> None:
+    mask = array.array("i", [line])
+    ioctl_fn(fd, termios.TIOCMBIS, mask, True)
 
 
 def _read_modem_lines(
@@ -179,7 +208,16 @@ def open_capture_port(
     return fd
 
 
-def _write_all(output: BinaryIO, payload: bytes) -> None:
+def _flush_output(output: BinaryIO) -> None:
+    try:
+        output.flush()
+    except BrokenPipeError:
+        raise
+    except OSError as error:
+        raise CaptureOutputError(f"capture output failed: {error}") from error
+
+
+def _write_all(output: BinaryIO, payload: bytes) -> int:
     try:
         remaining = memoryview(payload)
         while remaining:
@@ -189,11 +227,39 @@ def _write_all(output: BinaryIO, payload: bytes) -> None:
             if written <= 0:
                 raise CaptureOutputError("capture output accepted no bytes")
             remaining = remaining[written:]
-        output.flush()
+        _flush_output(output)
     except BrokenPipeError:
         raise
     except OSError as error:
         raise CaptureOutputError(f"capture output failed: {error}") from error
+    return len(payload)
+
+
+def usb_serial_jtag_hard_reset(
+    fd: int,
+    *,
+    ioctl_fn: Callable[..., object] = fcntl.ioctl,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> None:
+    """Perform espflash's normal-boot USB-Serial/JTAG hard-reset pulse.
+
+    The descriptor was already configured with both controls inactive. Clear
+    DTR again immediately before the pulse, hold it inactive while asserting
+    RTS for 100 ms, then release RTS. These are modem-control ioctls only; no
+    serial data is written.
+    """
+
+    _clear_modem_line(fd, termios.TIOCM_DTR, ioctl_fn=ioctl_fn)
+    sleep_fn(HARD_RESET_STEP_SECONDS)
+    _set_modem_line(fd, termios.TIOCM_RTS, ioctl_fn=ioctl_fn)
+    sleep_fn(HARD_RESET_STEP_SECONDS)
+    _clear_modem_line(fd, termios.TIOCM_RTS, ioctl_fn=ioctl_fn)
+    active = _read_modem_lines(fd, ioctl_fn=ioctl_fn) & MODEM_INACTIVE_MASK
+    if active:
+        raise OSError(
+            errno.EIO,
+            f"hard reset left DTR/RTS active (mask=0x{active:x})",
+        )
 
 
 def stream_capture_fd(
@@ -204,7 +270,8 @@ def stream_capture_fd(
     select_fn: Callable[..., tuple[list[int], list[int], list[int]]] = select.select,
     read_fn: Callable[[int, int], bytes] = os.read,
     monotonic_fn: Callable[[], float] = time.monotonic,
-) -> None:
+) -> int:
+    bytes_written = 0
     deadline = (
         None if duration_seconds is None else monotonic_fn() + duration_seconds
     )
@@ -213,7 +280,7 @@ def stream_capture_fd(
         if deadline is not None:
             remaining = deadline - monotonic_fn()
             if remaining <= 0:
-                return
+                return bytes_written
             timeout = min(timeout, remaining)
         readable, _, _ = select_fn([fd], [], [], timeout)
         if not readable:
@@ -224,7 +291,7 @@ def stream_capture_fd(
             continue
         if not payload:
             raise OSError(errno.EIO, "serial device disconnected")
-        _write_all(output, payload)
+        bytes_written += _write_all(output, payload)
 
 
 def capture(
@@ -233,9 +300,12 @@ def capture(
     status: TextIO,
     *,
     duration_seconds: float | None,
+    hard_reset_after_open: bool = False,
+    pre_reset_drain_seconds: float = DEFAULT_PRE_RESET_DRAIN_SECONDS,
     open_fn: Callable[[str], int] = open_capture_port,
     close_fn: Callable[[int], None] = os.close,
-    stream_fn: Callable[[int, BinaryIO, float | None], None] | None = None,
+    stream_fn: Callable[[int, BinaryIO, float | None], int | None] | None = None,
+    hard_reset_fn: Callable[[int], None] = usb_serial_jtag_hard_reset,
 ) -> None:
     fd = open_fn(port)
     try:
@@ -245,12 +315,46 @@ def capture(
             file=status,
             flush=True,
         )
-        if stream_fn is None:
-            stream_capture_fd(fd, output, duration_seconds=duration_seconds)
-        else:
-            stream_fn(fd, output, duration_seconds)
+        def stream(duration: float | None) -> int | None:
+            if stream_fn is None:
+                return stream_capture_fd(
+                    fd,
+                    output,
+                    duration_seconds=duration,
+                )
+            return stream_fn(fd, output, duration)
+
+        if hard_reset_after_open:
+            drained = stream(pre_reset_drain_seconds)
+            if drained is None or drained < 0:
+                raise RuntimeError(
+                    "pre-reset capture did not report a valid byte count"
+                )
+            # This flush is deliberately separate from the per-read flushes:
+            # the evidence bytes must be durable before their offset is armed.
+            _flush_output(output)
+            print(
+                f"{utc_now()} counted_reset_offset={drained} "
+                f"reset_mode={USB_SERIAL_JTAG_HARD_RESET_MODE} "
+                f"pre_reset_drain_seconds={pre_reset_drain_seconds} "
+                f"counted_reset_status=armed duration_seconds={duration_seconds} "
+                "duration_scope=post_reset",
+                file=status,
+                flush=True,
+            )
+            hard_reset_fn(fd)
+            print(
+                f"{utc_now()} counted_reset_offset={drained} "
+                f"reset_mode={USB_SERIAL_JTAG_HARD_RESET_MODE} "
+                "counted_reset_status=completed",
+                file=status,
+                flush=True,
+            )
+        stream(duration_seconds)
+        duration_scope = " duration_scope=post_reset" if hard_reset_after_open else ""
         print(
-            f"{utc_now()} completed=true duration_seconds={duration_seconds}",
+            f"{utc_now()} completed=true duration_seconds={duration_seconds}"
+            f"{duration_scope}",
             file=status,
             flush=True,
         )
@@ -266,13 +370,44 @@ def parse_args(arguments: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--duration-seconds",
         type=float,
-        help="stop successfully after this positive duration; otherwise run until interrupted",
+        help=(
+            "stop successfully after this positive stream duration; in "
+            "--hard-reset-after-open mode it times only the post-reset stream, "
+            "excluding the pre-reset drain and reset pulse"
+        ),
+    )
+    parser.add_argument(
+        "--hard-reset-after-open",
+        action="store_true",
+        help=(
+            "after a bounded pre-reset drain, report its byte offset and perform "
+            "one USB-Serial/JTAG normal-boot hard reset on the capture descriptor"
+        ),
+    )
+    parser.add_argument(
+        "--pre-reset-drain-seconds",
+        type=float,
+        help=(
+            "positive bounded drain before --hard-reset-after-open "
+            f"(default: {DEFAULT_PRE_RESET_DRAIN_SECONDS})"
+        ),
     )
     parsed = parser.parse_args(arguments)
     if parsed.duration_seconds is not None and (
         not math.isfinite(parsed.duration_seconds) or parsed.duration_seconds <= 0
     ):
         parser.error("--duration-seconds must be finite and positive")
+    if parsed.pre_reset_drain_seconds is not None and not parsed.hard_reset_after_open:
+        parser.error(
+            "--pre-reset-drain-seconds requires --hard-reset-after-open"
+        )
+    if parsed.pre_reset_drain_seconds is not None and (
+        not math.isfinite(parsed.pre_reset_drain_seconds)
+        or parsed.pre_reset_drain_seconds <= 0
+    ):
+        parser.error("--pre-reset-drain-seconds must be finite and positive")
+    if parsed.hard_reset_after_open and parsed.pre_reset_drain_seconds is None:
+        parsed.pre_reset_drain_seconds = DEFAULT_PRE_RESET_DRAIN_SECONDS
     return parsed
 
 
@@ -286,11 +421,25 @@ def main(arguments: Sequence[str] | None = None) -> int:
             file=sys.stderr,
             flush=True,
         )
+        if args.hard_reset_after_open:
+            print(
+                f"{utc_now()} hard_reset_after_open=true "
+                f"reset_mode={USB_SERIAL_JTAG_HARD_RESET_MODE} "
+                f"pre_reset_drain_seconds={args.pre_reset_drain_seconds}",
+                file=sys.stderr,
+                flush=True,
+            )
         capture(
             str(args.port),
             sys.stdout.buffer,
             sys.stderr,
             duration_seconds=args.duration_seconds,
+            hard_reset_after_open=args.hard_reset_after_open,
+            pre_reset_drain_seconds=(
+                DEFAULT_PRE_RESET_DRAIN_SECONDS
+                if args.pre_reset_drain_seconds is None
+                else args.pre_reset_drain_seconds
+            ),
         )
     except KeyboardInterrupt:
         print(f"{utc_now()} interrupted=true", file=sys.stderr, flush=True)
