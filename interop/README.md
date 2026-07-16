@@ -52,7 +52,10 @@ transmit. RF use requires the explicit acknowledgements and complete radio,
 airtime and safety arguments on its `send` subcommand; follow
 [`docs/phase-1-rx-hil.md`](../docs/phase-1-rx-hil.md) and preserve the peer
 image, source bundle, copied corpus/tool and per-invocation manifest/transcript
-as powered evidence. The host-generated boot-local DATA corpus is deliberately
+as powered evidence. The attached bench already satisfies the antenna and
+NA915 authorization requirements; these flags preserve per-run provenance and
+configuration rather than requesting new approval. The host-generated
+boot-local DATA corpus is deliberately
 ephemeral and belongs in that ignored evidence tree, not in `vectors/`.
 
 ## ESP32-S3 native-USB log capture

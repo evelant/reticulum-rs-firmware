@@ -1,8 +1,10 @@
 # Durable submissions and persist-before-ack projection
 
 Status: portable semantic model, host-tested projection boundary, and physical
-two-bank journal implemented. No sole storage actor, device-API integration, or
-claim of powered-board durability is included yet.
+two-bank journal implemented; isolated powered clean-path/software-reset HIL
+passed on board E9:44. No sole storage actor or device-API integration exists,
+and controlled power-cut durability, endurance/soak, and at-rest encryption
+remain unqualified.
 
 ## Claim boundary
 
@@ -21,6 +23,16 @@ still not durable merely because it encodes successfully, and the in-RAM index
 is not a free-space or wear-level estimate. A later sole storage actor must
 connect an exact projector plan to that journal before an acceptance response
 or TX acknowledgement can be published.
+
+The physical backend's qualifying run is preserved at
+`artifacts/storage-hil/20260716T211318Z-e944-7b47113` from source
+`7b47113aeec6c7f0549cd5b264eceacef830fb4c`. Its strict two-boot serial check
+covered A1 format, five appends, no-mutation retry/conflict, B2 compaction, a
+software reset, and zero-write/zero-erase B2 replay. Independent raw-dump replay
+confirmed one revision-4 `Delivered` submission across five committed records,
+with the retired A manifest and unused B tail erased. This is isolated journal
+clean-path evidence, not evidence for powered cuts or the unimplemented actor,
+API, and product runtime.
 
 ```mermaid
 flowchart LR
@@ -214,7 +226,8 @@ Host tests inject lost replies, repeated observations, conflicting metadata,
 wrong generation handles, retryable acknowledgement ordering, and terminal /
 recovery arrival in both orders. The physical journal's fake-NOR tests also
 inject partial and lost-reply writes/erases across append and compaction phases.
-Powered flash fault injection is still a separate acceptance gate.
+The powered clean-path/software-reset HIL has passed, but powered flash fault
+injection is still a separate acceptance gate.
 
 ## Backend contract and implementation status
 
@@ -326,9 +339,10 @@ LXMF/NomadNet/UI services without redefining the durable protocol.
 
 ## Remaining implementation gates
 
-1. Complete deterministic host cut coverage at the relevant program/erase
-   boundaries and run the RF-inert Heltec HIL, preserving image, readback,
-   serial, reset, and controlled powered-cut evidence.
+1. Extend the completed clean-path/software-reset Heltec qualification with
+   controlled powered cuts at the relevant program/erase boundaries, preserving
+   each image, readback, continuous serial capture, and raw-partition result as
+   a separate evidence set.
 2. Build the sole permanent storage actor around the journal, including
    ambiguous-backend fault handling and serialization with other flash users.
 3. Connect acceptance/status through device API v1 and merge projection with
@@ -336,6 +350,7 @@ LXMF/NomadNet/UI services without redefining the durable protocol.
    convenience loop when projection observations are required. Add a proved
    retirement handshake before reusing any completed projector slot.
 4. Measure static layout, journal scan/compaction time, stack, erase endurance,
-   and watchdog impact on ESP32-S3 and larger profiles.
-5. Keep RF transmission disabled until antenna/load and regional profile are
-   explicitly confirmed.
+   soak behavior, and watchdog impact on ESP32-S3 and larger profiles.
+5. The two attached antenna-equipped boards are cleared for NA915 development
+   TX. Preserve an explicit regional/airtime profile and sole radio owner when
+   connecting this persistence path to real transmission.

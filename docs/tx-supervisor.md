@@ -4,8 +4,9 @@
 and outside every firmware graph; portable durable projection exists beside
 it and the independent physical journal is implemented, but there is no sole
 storage actor, device API, or complete node-owner integration
-**RF status:** unavailable until an antenna/load, regional profile, guarded
-driver boundary, and explicit approval exist
+**RF status:** both attached boards have antennas and are authorized for NA915
+development TX; this crate remains RF-inert because its concrete driver/radio
+owner and regional/airtime policy adapter are not implemented
 
 ## Boundary
 

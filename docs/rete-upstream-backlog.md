@@ -394,18 +394,21 @@ The allocation-free storage model and submission projector now define canonical
 intent/final-disposition records and gate terminal/recovery acknowledgement on
 an exact persistence result. The independent physical journal now supplies
 lifetime reservation, exact readback, complete integrity-validated replay, and
-retention-only compaction. The remaining product blockers are a sole permanent
+retention-only compaction. Its isolated clean-path/software-reset powered HIL
+has passed; controlled power cuts and product-runtime integration remain open.
+The remaining product blockers are a sole permanent
 actor connecting that journal to projector plans; a device-API adapter; safe
 projector-slot retirement;
 eventual sole-owner integration of RX plus ordinary RNS tick/actions;
-firmware/driver integration; powered reboot recovery; caller-reservable bounded
-construction for those ordinary outbound actions; and higher-level LXMF
-persistence.
+firmware/driver integration; product-runtime powered reboot recovery;
+caller-reservable bounded construction for those ordinary outbound actions;
+and higher-level LXMF persistence.
 Until those slices and radio policy are connected, no device-facing/device-API
-host send operation or firmware RF TX graph uses this path. Every project
-firmware graph remains TX-free, and all project radio-bearing firmware
-artifacts remain RX-only. The separately derived RNode peer remains an external
-guarded development artifact, not a project firmware dependency.
+send operation or product firmware RF TX graph uses this path. That describes
+the current implementation, not a prohibition on development TX: the two
+attached antenna-equipped boards are cleared for NA915 transmission whenever a
+bounded integration test benefits. Separately named RF HILs and the derived
+RNode peer remain development artifacts, not product firmware dependencies.
 
 ## 12. LXMF retry and receipt-attempt correlation
 

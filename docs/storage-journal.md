@@ -1,8 +1,9 @@
 # Physical submission journal
 
 **Status:** physical format and portable implementation complete; host fault
-injection implemented; RF-inert ESP32-S3 HIL image implemented but not yet run
-on the attached board
+injection implemented; isolated RF-inert ESP32-S3 clean-path/software-reset HIL
+passed on board E9:44; controlled power cuts, endurance/soak, at-rest
+encryption, and product-runtime integration remain open
 
 ## Boundary
 
@@ -143,15 +144,17 @@ fallback to the copied baseline. Product recovery must not treat an older
 record bank as a mountable generation or assume it contains records appended
 after the handoff.
 
-This ordering covers power loss during the handoff, target erase, record copy,
-target manifest commit, or superseded-manifest retirement without selecting a
-copied prefix or rolling back a post-retirement suffix. Host tests use a 1 MiB
-NOR model that enforces one-to-zero programming and injects partial or
-lost-reply program/erase failures across append and compaction phases. They
+This ordering is designed to cover power loss during the handoff, target erase,
+record copy, target manifest commit, or superseded-manifest retirement without
+selecting a copied prefix or rolling back a post-retirement suffix. Host tests
+use a 1 MiB NOR model that enforces one-to-zero programming and injects partial
+or lost-reply program/erase failures across append and compaction phases. They
 also corrupt the sole active manifest after retirement to prove fail-closed
 mount and verify that retirement never erases the old record bank. Those tests
-are implementation evidence, not yet powered-device evidence or a flash
-endurance result.
+are implementation evidence for injected faults, not powered-cut or flash-
+endurance evidence. The clean powered run below separately validates ordinary
+raw-flash operations and software-reset replay; it does not turn the host fault
+matrix into a powered-cut claim.
 
 ## RF-inert Heltec storage HIL
 
@@ -183,11 +186,24 @@ without advancing the generation, verifies replay again, and resets before the
 final PASS boot. Unexpected generations, non-erased unformatted contents, and
 integrity or semantic errors fail closed.
 
-The image and partition table are implemented and target-buildable, but no
-statement in this document claims that this sequence has passed on physical
-hardware. Follow the guarded runbook in
-[`partitions/README.md`](../partitions/README.md) and preserve the resulting
-image, readbacks, hashes, and serial log before changing this status.
+This clean sequence passed on board `44:1B:F6:F8:E9:44` from source
+`7b47113aeec6c7f0549cd5b264eceacef830fb4c`; the qualifying evidence is
+preserved at
+`artifacts/storage-hil/20260716T211318Z-e944-7b47113`. The strict serial
+verifier accepted one continuous two-boot capture (`CoreUsbUart` then
+`CoreSw`) containing A1 format, five appends, semantic replay, no-mutation exact
+retry/conflict, B2 compaction, B2 replay at raw counters `0/0`, and two final
+heartbeats. The independent raw-dump verifier confirmed bank B generation 2,
+five committed records in five consumed slots, one accepted submission at
+revision 4 `Delivered`, no pending compaction, an erased retired-A manifest,
+and an erased unused B tail.
+
+This result qualifies only the isolated clean path and software-reset replay.
+It does not qualify controlled power-cut recovery, erase endurance or soak,
+at-rest protection, the sole async storage actor, the device API, or the product
+runtime. Follow the guarded runbook in
+[`partitions/README.md`](../partitions/README.md) for later runs and preserve
+each image, readback, hash set, and continuous serial log independently.
 
 ## Modularity and remaining product work
 

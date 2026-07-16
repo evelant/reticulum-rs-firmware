@@ -452,8 +452,9 @@ unchanged value on pressure. The remaining orchestration work is:
 1. Wrap the implemented physical journal in the sole permanent storage actor,
    preserving exact append/readback, lifetime reservation, complete integrity-
    validated replay, and resumable compaction while adding serialized
-   projector/API ordering. Complete RF-inert powered and controlled power-fail
-   testing. The portable model and projector do not make their own durability
+   projector/API ordering. The isolated clean-path/software-reset powered HIL
+   has passed; add controlled power-fail, endurance/soak, and integrated-runtime
+   coverage. The portable model and projector do not make their own durability
    claim.
 2. Merge RX ingress, ordinary RNS tick/actions, durable submission projection,
    and exact acknowledgement into
@@ -466,8 +467,9 @@ unchanged value on pressure. The remaining orchestration work is:
 4. Convert allocation-backed ordinary RNS actions into caller-reservable packet
    ownership; the DATA path alone does not cover proofs, announces, forwarding,
    Links or Resources.
-5. Keep every project firmware graph TX-free and all project radio-bearing
-   firmware artifacts RX-only. The separately derived RNode peer is an external
-   guarded development artifact, not a project dependency. Only after these
-   boundaries and explicit antenna/load and regional approval may a guarded
-   driver/radio implementation or RF HIL use this path.
+5. Join these boundaries to a concrete policy and sole radio owner before
+   claiming a product TX path. The attached antenna-equipped boards are already
+   cleared for NA915 development TX/RX, so integration firmware may exercise
+   that path as soon as it preserves the ownership and policy contracts.
+   Separately named RF HILs and the derived RNode peer remain development
+   artifacts, not product dependencies.

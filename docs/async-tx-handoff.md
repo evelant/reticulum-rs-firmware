@@ -6,7 +6,9 @@ persistent packet-interface state machine, node-side permit server, and fixed
 per-slot DATA-owner machine with synchronous preparation implemented;
 firmware-excluded permanent RF-inert supervisor and async runner implemented;
 no firmware TX graph or radio driver
-**RF status:** compile-disabled until antenna/load and regional authorization
+**RF status:** the two attached boards are antenna-equipped and authorized for
+NA915 development TX; the portable path remains compile-disabled only until a
+concrete regional/airtime policy and sole radio owner are wired to it
 
 ## Decision
 
@@ -338,7 +340,7 @@ LXMF/submission records must reconstruct fresh attempts under a new
 authorization, charge the entire reservation conservatively so reboot cannot
 reset regulatory accounting.
 
-## Implementation boundary before RF approval
+## Implementation boundary before product RF integration
 
 Implemented and host/target-testable without RF:
 
@@ -397,12 +399,13 @@ keeps the dispatcher, supervisor and projector outside every firmware graph.
 Adding a feature-only transitive ownership path therefore fails before a new
 firmware feature can bypass the reviewed list.
 
-Still requires explicit antenna/load and regional authorization:
+The attached development boards have the required antenna/load and explicit
+NA915 authorization. Integration still requires:
 
 - any TX-capable Tracker BSP surface or firmware feature;
 - CTX/FEM transmit sequencing, `SetTx`, CAD or TX IRQ handling;
 - power, frequency, access and airtime policy selection;
-- flashing a TX-capable image; and
+- an explicitly named TX-capable image/profile; and
 - over-the-air, thermal, harmonic or split-frame TX HIL.
 
 ## Remaining protocol blocker

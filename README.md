@@ -106,15 +106,28 @@ recovered-owner acknowledgements until their corresponding transition or audit
 is known committed. Neither crate writes flash. The project-owned two-bank
 journal now implements the physical format, replay, append and compaction, but
 no permanent storage actor yet connects projector plans, commit/readback
-results, replay and the device API. That RF-inert actor plus a
+results, replay and the device API. Its isolated powered storage HIL passed on
+board E9:44 from clean source `7b47113`: one counted capture spans raw-flash
+format, five appends, mutation-free retry/conflict checks, A1-to-B2 compaction,
+a software reset and zero-write/zero-erase B2 replay. An independent raw dump
+check confirms generation 2, all five committed records, the revision-4
+`Delivered` state, the erased A manifest and the erased B tail. Evidence is at
+`artifacts/storage-hil/20260716T211318Z-e944-7b47113`.
+
+That qualifies only the journal's powered clean path and software-reset replay.
+Controlled power cuts, endurance/soak, at-rest encryption, and integration with
+the sole async storage actor and device API remain open. That actor plus a
 persist-before-accept device-API edge is the next bounded product-code slice.
 The sole runtime owner and firmware edge remain open, and the supervisor still
 has no radio/HAL or RF path.
-Every product-candidate firmware graph remains TX-free. The explicitly named
-TX HIL is the sole lab-only exception and is not linked into the default or
-receive-only firmware. The separately derived RNode image on the second board
-is an external development peer, not part of the product graph; its radio
-authorization remains reset-scoped and host-controlled.
+The current product-candidate firmware graphs remain TX-free because that
+radio-owner integration is not implemented, not because development TX is
+prohibited. Both attached Tracker boards have antennas and are cleared for
+NA915 development transmission. New integration images may therefore use real
+TX/RX whenever it advances the bounded node path, while retaining an explicit
+regional/airtime profile and one radio owner. The separately derived RNode image
+on the second board remains an external development peer, not part of the
+product graph.
 
 ## Read first
 
@@ -332,11 +345,10 @@ project-owned KISS peer tool and the same corpus replayed through the Rust
 receive-only RNode/Rete ingress tests. It does not transmit; RF requires the
 separate explicit `send` command documented in the Phase-1 HIL runbook.
 
-Every project Tracker binary remains TX-disabled until a board revision,
-antenna, region, frequency and conservative power profile are explicitly
-selected and the later guarded transmit milestone is qualified. There is
-intentionally no default LoRa frequency. The external derived RNode peer is
-governed separately and remains radio-off unless explicitly authorized.
+The default and receive-only Tracker binaries remain TX-disabled, and there is
+intentionally no default LoRa frequency. Both antenna-equipped development
+boards are authorized for the explicit NA915 profile; guarded integration
+images and the derived RNode peer may transmit whenever useful.
 
 ## Source layout
 

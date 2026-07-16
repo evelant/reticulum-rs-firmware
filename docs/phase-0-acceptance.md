@@ -281,14 +281,20 @@ The semantic durable model and idempotent projector are implemented and target-
 checked, and the independent physical journal now implements lifetime
 reservation, append/readback, complete integrity-validated replay, and source-
 preserving compaction. A dedicated RF-inert Tracker storage HIL image is target-
-checked, but its powered run remains pending. The sole storage actor, device-API
-adapter, and permanent runtime that drive projection and acknowledgement remain
-unimplemented. Ordinary RNS tick/actions and RX ingress are also not yet merged
-under this owner. There is still no product firmware connection, driver, radio
-integration, or claim that RF occurred. Every project firmware graph remains
-TX-free, and all project radio-bearing firmware artifacts remain RX-only. The
-separately derived RNode peer is an external development artifact with its own
-guard; it is not evidence of a project TX path.
+checked and its isolated clean-path/software-reset powered run passed on board
+E9:44 from source `7b47113`, with strict serial and independent raw-partition
+verification preserved at
+`artifacts/storage-hil/20260716T211318Z-e944-7b47113`. It proves A1 format,
+five appends, mutation-free retry/conflict, B2 compaction, and zero-mutation B2
+replay after software reset. Controlled power cuts, endurance/soak, at-rest
+encryption, the sole storage actor, the device-API adapter, and the permanent
+runtime that drive projection and acknowledgement remain open. Ordinary RNS
+tick/actions and RX ingress are also not yet merged under this owner. There is
+still no product firmware storage connection or product driver/radio
+integration, so current product-candidate graphs are TX-free. Development TX is
+nevertheless authorized on both attached antenna-equipped boards under NA915;
+the separately named TX HIL and derived RNode peer are development artifacts,
+not product paths.
 
 ## Rete production hard gates
 

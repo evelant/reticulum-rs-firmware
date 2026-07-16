@@ -25,6 +25,28 @@ has no radio/LoRa/RNS dependency. See
 [`docs/storage-journal.md`](../docs/storage-journal.md) for the format and
 expected test sequence.
 
+## Latest qualifying run
+
+The first clean powered qualification passed on board
+`44:1B:F6:F8:E9:44` from source
+`7b47113aeec6c7f0549cd5b264eceacef830fb4c`. The complete evidence directory
+is
+`artifacts/storage-hil/20260716T211318Z-e944-7b47113`.
+
+The strict serial verifier accepted one continuous counted capture with two
+boots (`CoreUsbUart` followed by the firmware-issued `CoreSw` reset): A1 format,
+five appends, semantic replay, mutation-free exact retry and conflict, B2
+compaction, zero-write/zero-erase B2 replay, and two final RF-inert heartbeats.
+The independent raw-dump verifier mounted the preserved partition through the
+production journal implementation and confirmed bank B generation 2, five
+committed records in five consumed slots, one accepted submission at revision
+4 `Delivered`, no pending compaction, an erased retired-A manifest, and an
+erased unused B tail.
+
+This is qualification of the isolated journal clean path and software-reset
+replay only. It is not controlled power-cut, endurance/soak, at-rest encryption,
+async storage-actor, device-API, product-runtime, or RF evidence.
+
 ## Guarded E9:44 runbook
 
 The selected storage-test board is the device whose full MAC is
@@ -474,8 +496,9 @@ tail. Its preserved stdout is therefore the semantic counterpart to the raw
 partition hash; the final evidence manifest covers both verifier copies, both
 results, and all of their inputs.
 
-The first clean run validates real raw-flash format/append/replay/compaction and
-a software-reset replay. It does not by itself prove controlled power-cut
-recovery, flash endurance, production encryption, the future async actor, or
-any RF behavior. Add controlled cuts and longer cycling only as separately
-recorded HIL scenarios; keep every such image radio-free.
+The qualifying run recorded above validates real raw-flash
+format/append/replay/compaction and a software-reset replay. It does not by
+itself prove controlled power-cut recovery, flash endurance, production
+encryption, the future async actor, or any RF behavior. Add controlled cuts and
+longer cycling only as separately recorded storage-HIL scenarios; keep those
+images radio-free so their evidence remains isolated from the radio stack.

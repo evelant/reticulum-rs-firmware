@@ -163,12 +163,14 @@ completion flag.
 
 ## Next bounded product slice and remaining gates
 
-The immediate product-code slice remains RF-inert: build the sole permanent
+The immediate product-code slice is radio-independent: build the sole permanent
 storage actor around the implemented two-bank journal, serialize projector
 plans and commit/readback acknowledgements through it, and expose device-API
 acceptance only after the durable transition succeeds. This closes the current
 persist-before-accept gap without confusing a successful RF fixture with a
-durable product send.
+durable product send. Both attached antenna-equipped boards are cleared for
+NA915 development TX/RX, so later integration need not remain inert merely for
+authorization reasons.
 
 1. Merge RX ingress, `NodeCore::ingest()`/tick actions, durable submission
    projection and exact acknowledgements under the eventual sole node owner.
