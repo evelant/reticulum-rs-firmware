@@ -1,33 +1,39 @@
 # Phase 1 exploratory Tracker transmit HIL
 
-**Status:** exact LoRa PHY/RNode framing passed in both directions, and the
-deterministic signed RNS ANNOUNCE passed a powered ordinary-RNode delivery plus
-pinned Python-RNS 1.3.8 first-hop validation; product identity, live node
-admission/routing, LXMF and production TX policy remain open<br>
+**Status:** exact LoRa PHY/RNode framing passed in both directions; the
+historical deterministic ANNOUNCE passed ordinary-RNode/Python validation; and
+one identical Rust/Rete image completed a powered two-board announce, encrypted
+DATA and delivery-proof round trip. Product identity, durability, multi-hop,
+LXMF and production TX policy remain open<br>
 **Target:** two Heltec Wireless Tracker V2.3 boards, ESP32-S3FN8, SX1262 and
 KCT8103L<br>
 **Region/profile:** user-authorized NA915 bench HIL with antennas attached
 
 ## Scope
 
-This lane answers a narrow hardware question: can the Rust Tracker BSP configure
-the SX1262 and external FEM so another RNode-compatible radio decodes the exact
-bytes it transmits? It is separate from the product firmware and from the
-formal receive-only qualification lane.
+This lane first answered a narrow hardware question: can the Rust Tracker BSP
+configure the SX1262 and external FEM so another RNode-compatible radio decodes
+the exact bytes it transmits? It now also supplies a bounded same-image product-
+surface Rete exchange. It remains separate from the product firmware and from
+the formal receive-only qualification lane.
 
-The HIL image is factory-eFuse-MAC gated to the two known lab boards, transmits
-at most one frame per authorized initiator boot, and shuts the radio down after
-its bounded operation. An unknown board never constructs the radio. The normal
-profile is 915 MHz, SF7, 125 kHz, CR 4/5, 24 preamble symbols, explicit header,
-CRC, normal IQ and the private LoRa sync word. The board requests a 14 dBm
-antenna-path estimate while programming the SX1262 for 0 dBm behind the
-Tracker's external PA.
+Every HIL mode is factory-eFuse-MAC gated to the two known lab boards and shuts
+the radio down after its bounded operation. An unknown board never constructs
+the radio. The sentinel and historical semantic-announce modes transmit no more
+than their original one-frame budget; `semantic-roundtrip-hil` permits exactly
+two completed transmissions on each board. The normal profile is 915 MHz, SF7,
+125 kHz, CR 4/5, 24 preamble symbols, explicit header, CRC, normal IQ and the
+private LoRa sync word. The board requests a 14 dBm antenna-path estimate while
+programming the SX1262 for 0 dBm behind the Tracker's external PA.
 
 The default feature-free image retains the 18-byte sentinel exchange,
 deliberately shorter than the minimum valid RNS packet. A default-mode pass
 proves only PHY and RNode physical framing. The mutually exclusive
 `semantic-announce-hil` mode disables the sentinel responder and permits only
 the known E9 initiator to construct, validate and transmit one signed announce.
+The separately explicit `semantic-roundtrip-hil` mode runs the product
+`reticulum-rns-rete` surface on both boards and selects the initiator/responder
+role from the exact authorized eFuse MAC.
 
 ## Result
 
@@ -39,6 +45,7 @@ The observed matrix is now:
 | RNode 1.86 Tracker | Rust Tracker | Exact raw PONG physical frame passed |
 | Rust Tracker | RNode 1.86 Tracker | Exact 19-byte physical frame passed after fixing the peer's host-delivery regression |
 | Rust Tracker semantic fixture | RNode 1.86 Tracker + pinned Python RNS 1.3.8 | Exactly one 167-byte ordinary RNode packet delivered; signed first-hop ANNOUNCE validated |
+| Same Rust/Rete image on both Trackers | Same Rust/Rete image on both Trackers | Two signed ANNOUNCEs established both paths; encrypted DATA was decrypted by E0, which returned a delivery proof; E9's exact current receipt reached `Delivered` |
 
 The decisive Rust-to-RNode pass is preserved at
 `artifacts/board-flashes/2026-07-16-e040-rnode-safe-peer-irq-promisc-delivery-fix-diagnostic/hil/e944-normal-14dbm-to-e040-fixed-promisc/attempt-2-coordinated`.
@@ -52,7 +59,82 @@ The E9 normal image SHA-256 is
 The exact received frame SHA-256 is
 `3d610b820708efb561820c946d7ca2d1cea3a39225e9176fc8e8a3796f31c3de`.
 
-## Deterministic semantic announce slice
+## Same-image Rete semantic round trip
+
+The powered pass is preserved at
+`artifacts/hil/tx-hil/20260716T230849Z-rust-rete-semantic-roundtrip/attempt-02-post-readback`.
+This is a local, gitignored evidence bundle; this section is the committed
+result record for fresh clones.
+The exact same merged image ran on both boards. E9:44 selected the initiator
+role and E0:40 selected the responder role; role selection did not change the
+firmware bytes. Both instances used the product surface of
+`reticulum-rns-rete`, not its conformance helpers. Graph policy verifies that
+this mode includes the Rete core/stack/transport adapter and the board radio
+owner, while excluding node-core, storage, device API and LXMF crates.
+
+The bounded exchange was:
+
+1. E9 sent a signed 167-byte RNS ANNOUNCE in one 168-byte physical frame.
+2. E0 admitted it, learned E9's path and sent its own signed 167-byte ANNOUNCE
+   in one 168-byte physical frame.
+3. E9 admitted E0's announce, prepared encrypted DATA and sent 147 RNS bytes in
+   one 148-byte physical frame. E0 decrypted the exact 36-byte payload:
+   `RRH1` followed by the 16-byte initiator and responder destination hashes.
+4. E0's configured inbound proof policy generated a 115-byte delivery proof in
+   one 116-byte physical frame. E9 correlated it with the current prepared DATA
+   receipt, observed `Delivered`, and ended with zero live receipts.
+
+The strict dual-log validator cross-matched the packet hashes at every TX/RX
+boundary. The DATA packet hash and receipt are
+`4ca4ed5d856f45e1abb351762a3ccb8671c9c675a6bbfa082d73010746587a4d`;
+the proof packet hash is
+`9a46f631f80a129388408f2c9d90ec67c7345f18e1677fb2445227adbf4c42db`.
+Each board reported exactly two driver TX completions, a terminal pass, and
+radio shutdown. This is paired firmware serial and exact-readback evidence; the
+same-image trial did not use an independent RF sniffer.
+
+The application image is 360,208 bytes. Its complete 425,744-byte merged flash
+image has SHA-256
+`93ccac552d75a27f2cec571a9f00900210b4b862f157fca57c0cc50c9641fbc5`;
+full-prefix readback from both E9 and E0 reproduced those bytes and that digest
+exactly. The preserved ELF has SHA-256
+`e85d88a8afbf89ea2392b42505abe637da946ca4448c0b5416a2e3c53925bd11`.
+The decisive counted run followed those two full-prefix readbacks without any
+intervening flash write, and its recorder performed only a normal-boot reset.
+
+Both roles used a 64 KiB allocator and ADC-backed hardware TRNG. The observed
+short-run heap peaks were 548 bytes on E9 and 764 bytes on E0. These figures are
+useful regression checkpoints, not stack qualification, allocator-exhaustion
+evidence, a sustained/soak memory result, or a full-product memory budget.
+Likewise, the fixed public HIL identities are deliberate fixtures rather than
+persisted production identities.
+
+Earlier attempts under the pre-fix artifact root did not pass and remain
+diagnostic only. The uncoordinated attempt missed the peer boot because host
+tool delay exhausted E0's receive windows. The coordinated predecessor
+exchanged both ANNOUNCEs and then exposed a time-domain implementation bug:
+RNode fragment deadlines are expressed in high-resolution ticks while Rete
+protocol time is expressed in seconds. The final image supplies those domains
+separately, which is also the required permanent-runtime design.
+
+Build this mode explicitly with:
+
+```sh
+source ~/export-esp.sh
+cargo +esp build --locked --release \
+  -p reticulum-heltec-tracker-v2-tx-hil \
+  --no-default-features --features semantic-roundtrip-hil \
+  --target xtensa-esp32s3-none-elf
+```
+
+This proves direct endpoint path learning, encryption/decryption, proof
+generation and receipt correlation across the real Rust radio path. It does
+not prove production identity persistence or freshness policy, durable
+submission/receipt state, reboot recovery, forwarding or multi-hop transport,
+Links/Resources, LXMF, sustained memory behavior, formal RF qualification or
+regional certification.
+
+## Historical deterministic semantic announce slice
 
 The explicit semantic build uses `reticulum-rns-rete`'s conformance-only
 announce constructor with the committed Python-RNS 1.3.8 fixture: application
@@ -66,7 +148,7 @@ header, identity fields, destination and packet hash. Any drift returns without
 transmitting. The RNode framer must then produce one 168-byte physical frame;
 a split result is also a no-transmit failure.
 
-### Powered semantic result
+### Powered historical result
 
 The coordinated pass is preserved at
 `artifacts/hil/tx-hil/20260716T183805Z-e944-rete-announce-to-e040-rnode/attempt-02-coordinated`.
@@ -115,7 +197,7 @@ identity, announce scheduling/freshness, transport-role admission or
 forwarding, multi-hop routing, proofs/Links/Resources, LXMF, durable submission
 or a production regional/airtime policy.
 
-Build the semantic image explicitly with:
+Build the historical semantic-announce image explicitly with:
 
 ```sh
 source ~/export-esp.sh
@@ -125,9 +207,10 @@ cargo +esp build --locked --release \
   --target xtensa-esp32s3-none-elf
 ```
 
-This exact mode has now been linked, host-vector tested and accepted for the
+This exact historical mode was linked, host-vector tested and accepted for the
 narrow powered semantic evidence above. It remains a conformance HIL, not a
-product firmware profile.
+product firmware profile; the later same-image round trip is the current
+product-surface semantic result.
 
 ## Why the first Rust-to-RNode trials looked asymmetric
 
@@ -149,42 +232,39 @@ radio owner moves a complete owned `RawReceivedFrame` into a bounded channel,
 and raw monitoring should tap that same stream instead of creating a second
 completion flag.
 
-## Board state after testing
+## Board state at artifact closeout
 
-- E9:44 booted the semantic announce HIL for the preserved run and ended with
-  the radio shut down in its permanent inert hold. This attempt contains no
-  post-run flash readback or restoration record, so it makes no stronger claim
-  about E9's current flash contents.
-- E0:40 ran the safe-peer RNode application in ordinary receive mode; the
-  listener queried firmware 1.86, board 69, platform 128 and MCU 129. The
-  previously preserved application SHA-256 remains
-  `7dcb75daa3c47afedbaab25c4b1e2f2bbf9ea1416ad5fadd1ba8ebe7f19688b9`,
-  but this attempt did not perform a new post-run readback.
+- E9:44 and E0:40 both contain the same `semantic-roundtrip-hil` merged image
+  used for the pass. A 425,744-byte readback from each board matched the source
+  image byte-for-byte with SHA-256
+  `93ccac552d75a27f2cec571a9f00900210b4b862f157fca57c0cc50c9641fbc5`.
+- E9 selected the initiator role and E0 selected the responder role from their
+  exact eFuse MACs. In the counted pass, each finished after two TX completions
+  with the radio shut down. Neither board was running the earlier RNode peer
+  image at closeout.
 
 ## Next bounded product slice and remaining gates
 
-The immediate product-code slice is radio-independent: host the implemented
-portable sole storage actor in one permanent firmware task, connect its product
-flash and boot gates, attach the implemented authenticated device-API adapter to
-a framed session transport, and drive projector work through the actor. This
-closes the current
-firmware persist-before-accept gap without confusing a successful RF fixture
-with a durable product send. Both attached antenna-equipped boards are cleared
-for NA915 development TX/RX, so later integration need not remain inert merely
-for authorization reasons.
+The immediate next slice is to promote the now-proven Rete owner pattern into
+the permanent firmware and connect it to the sole radio owner, storage actor and
+authenticated device API. Another comparison HIL would add less evidence than
+moving the same announce/DATA/proof lifecycle behind the permanent ownership
+and persistence boundaries. Both attached antenna-equipped boards remain
+cleared for NA915 development TX/RX.
 
-1. Merge RX ingress, `NodeCore::ingest()`/tick actions, durable submission
-   projection and exact acknowledgements under the eventual sole node owner.
-2. Then run the first production-path RF slice: learn a peer from a live
-   announce, prepare one bounded encrypted DATA packet in a registered external
-   buffer, and carry it through the existing supervisor, permit typestates,
-   real regional/airtime policy and sole radio owner. The Python peer must
-   decrypt the DATA and return a proof; no conformance constructor or direct
-   frame bypass belongs in that path.
-3. Convert remaining allocation-backed RNS actions into caller-reservable
+1. Give the permanent node task sole ownership of `EmbeddedNode`, the separate
+   RNode-tick and Rete-seconds clocks, timed RX reassembly, ordinary Rete
+   ingress/tick actions and the radio-owner queues.
+2. Host the storage actor on the product flash partition and connect the API
+   adapter so an external send is durable before Rete preparation, while proof
+   and timeout outcomes become durable before terminal acknowledgement.
+3. Carry that accepted DATA through the existing registered-buffer,
+   supervisor/permit and regional/airtime boundaries to the sole radio owner,
+   then reproduce this two-board round trip through the permanent graph.
+4. Convert remaining allocation-backed RNS actions into caller-reservable
    packet ownership before enabling announce/proof/forwarding bursts, then test
    ordered traffic and queue pressure with raw monitoring as an observation tap.
-4. Complete formal powered receive/electrical/fault/retention/soak
+5. Complete formal powered receive/electrical/fault/retention/soak
    qualification. This exploratory semantic pass does not substitute for those
    gates or production regional certification.
 

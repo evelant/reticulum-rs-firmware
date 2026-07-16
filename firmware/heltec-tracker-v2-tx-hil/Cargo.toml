@@ -19,11 +19,18 @@ semantic-announce-hil = [
     "dep:reticulum-rns-rete",
     "reticulum-rns-rete/conformance",
 ]
+semantic-roundtrip-hil = [
+    "dep:rand_core",
+    "dep:reticulum-rns-rete",
+    "dep:static_cell",
+    "esp-alloc/internal-heap-stats",
+]
 
 [dependencies]
 rand_core = { workspace = true, optional = true }
 reticulum-radio-interface = { path = "../../crates/radio-interface" }
 reticulum-rns-rete = { path = "../../crates/rns-rete", default-features = false, optional = true }
+static_cell = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "xtensa")'.dependencies]
 reticulum-board-heltec-tracker-v2-tx-hil = { path = "../../crates/board-heltec-tracker-v2-tx-hil" }

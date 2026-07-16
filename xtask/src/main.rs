@@ -323,6 +323,29 @@ fn graph_policy() -> ExitCode {
         }
     };
 
+    let semantic_roundtrip_tx_hil = match capture(
+        "cargo",
+        [
+            "tree",
+            "--locked",
+            "-p",
+            "reticulum-heltec-tracker-v2-tx-hil",
+            "--no-default-features",
+            "--features",
+            "semantic-roundtrip-hil",
+            "--target",
+            "all",
+            "--format",
+            "{p} features=[{f}]",
+        ],
+    ) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!("error: could not inspect semantic round-trip TX HIL graph: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let comparison = match capture(
         "cargo",
         [
@@ -369,6 +392,12 @@ fn graph_policy() -> ExitCode {
         failed = true;
     }
     if let Err(error) = validate_semantic_tx_hil_graph_boundary(&semantic_tx_hil) {
+        eprintln!("error: {error}");
+        failed = true;
+    }
+    if let Err(error) =
+        validate_semantic_roundtrip_tx_hil_graph_boundary(&semantic_roundtrip_tx_hil)
+    {
         eprintln!("error: {error}");
         failed = true;
     }
@@ -424,7 +453,7 @@ fn graph_policy() -> ExitCode {
         ExitCode::FAILURE
     } else {
         println!(
-            "ok: all safe, RX, HIL and all-features all-target product graphs, the RF-inert physical-storage HIL graph, the separately hazardous default-sentinel and explicit semantic-announce TX HIL graphs and the Leviculum \
+            "ok: all safe, RX, HIL and all-features all-target product graphs, the RF-inert physical-storage HIL graph, the separately hazardous default-sentinel, semantic-announce and semantic-round-trip TX HIL graphs and the Leviculum \
              comparison graph are isolated; the returned-fault hook is feature-exclusive; \
              firmware direct dependencies use only the RX façade and every-feature resolution \
              excludes TX ownership and pre-integration durable crates; resolved Rete packages match reported \
@@ -591,6 +620,54 @@ fn validate_semantic_tx_hil_graph_boundary(tree: &str) -> Result<(), String> {
             "semantic announce TX HIL graph did not activate the Rete adapter conformance surface"
                 .to_owned(),
         );
+    }
+    Ok(())
+}
+
+fn validate_semantic_roundtrip_tx_hil_graph_boundary(tree: &str) -> Result<(), String> {
+    for required in SEMANTIC_TX_HIL_GRAPH_REQUIRED {
+        if !tree.contains(required) {
+            return Err(format!(
+                "semantic round-trip TX HIL graph is missing required {required}"
+            ));
+        }
+    }
+    for forbidden in SEMANTIC_TX_HIL_GRAPH_FORBIDDEN {
+        if tree.contains(forbidden) {
+            return Err(format!(
+                "semantic round-trip TX HIL graph contains forbidden {forbidden}"
+            ));
+        }
+    }
+    if !tree.lines().any(|line| {
+        line.contains("reticulum-heltec-tracker-v2-tx-hil")
+            && line.contains("features=[semantic-roundtrip-hil]")
+    }) {
+        return Err(
+            "semantic round-trip TX HIL graph did not activate only its explicit root feature"
+                .to_owned(),
+        );
+    }
+    if !tree
+        .lines()
+        .any(|line| line.contains("reticulum-rns-rete") && line.contains("features=[]"))
+    {
+        return Err(
+            "semantic round-trip TX HIL graph did not keep the Rete adapter on its product surface"
+                .to_owned(),
+        );
+    }
+    if tree
+        .lines()
+        .any(|line| line.contains("reticulum-rns-rete") && line.contains("conformance"))
+    {
+        return Err(
+            "semantic round-trip TX HIL graph unexpectedly enabled Rete conformance helpers"
+                .to_owned(),
+        );
+    }
+    if !tree.contains("static_cell") {
+        return Err("semantic round-trip TX HIL graph is missing static_cell".to_owned());
     }
     Ok(())
 }
@@ -4138,6 +4215,42 @@ mod tests {
             "reticulum-rns-rete v0.1.0 features=[]",
         );
         assert!(validate_semantic_tx_hil_graph_boundary(&no_conformance).is_err());
+    }
+
+    #[test]
+    fn semantic_roundtrip_tx_hil_graph_requires_product_rete_surface_and_static_owner() {
+        let valid = "reticulum-heltec-tracker-v2-tx-hil v0.1.0 features=[semantic-roundtrip-hil]\n\
+                     ├── reticulum-board-heltec-tracker-v2-tx-hil v0.1.0 features=[]\n\
+                     ├── reticulum-radio-interface v0.1.0 features=[]\n\
+                     ├── reticulum-rns-rete v0.1.0 features=[]\n\
+                     │   ├── rete-core v0.1.0 features=[alloc,default]\n\
+                     │   ├── rete-stack v0.1.0 features=[alloc]\n\
+                     │   └── rete-transport v0.1.0 features=[]\n\
+                     └── static_cell v2.1.1 features=[]";
+        validate_semantic_roundtrip_tx_hil_graph_boundary(valid).unwrap();
+
+        for missing in SEMANTIC_TX_HIL_GRAPH_REQUIRED {
+            let tree = valid.replace(missing, "missing-required-package");
+            let error = validate_semantic_roundtrip_tx_hil_graph_boundary(&tree).unwrap_err();
+            assert!(error.contains(missing), "{error}");
+        }
+        for forbidden in SEMANTIC_TX_HIL_GRAPH_FORBIDDEN {
+            let tree = format!("{valid}\n└── {forbidden} v0.1.0 features=[]");
+            let error = validate_semantic_roundtrip_tx_hil_graph_boundary(&tree).unwrap_err();
+            assert!(error.contains(forbidden), "{error}");
+        }
+
+        let no_root_feature = valid.replace("features=[semantic-roundtrip-hil]", "features=[]");
+        assert!(validate_semantic_roundtrip_tx_hil_graph_boundary(&no_root_feature).is_err());
+
+        let conformance = valid.replace(
+            "reticulum-rns-rete v0.1.0 features=[]",
+            "reticulum-rns-rete v0.1.0 features=[conformance]",
+        );
+        assert!(validate_semantic_roundtrip_tx_hil_graph_boundary(&conformance).is_err());
+
+        let no_static = valid.replace("static_cell", "missing-static-owner");
+        assert!(validate_semantic_roundtrip_tx_hil_graph_boundary(&no_static).is_err());
     }
 
     #[test]

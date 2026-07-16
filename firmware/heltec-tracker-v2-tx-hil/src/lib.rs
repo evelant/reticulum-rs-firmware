@@ -5,8 +5,10 @@
 //! packet header. They prove only LoRa PHY and RNode physical framing
 //! interoperability; they must never be reported as valid RNS. The explicit
 //! `semantic-announce-hil` feature replaces that initiator payload with one
-//! fixed, signed Python-RNS conformance fixture. Its key, time and entropy are
-//! test material and must not be used by product firmware.
+//! fixed, signed Python-RNS conformance fixture. `semantic-roundtrip-hil`
+//! instead runs a four-packet, two-node announce/DATA/proof exchange with
+//! fixed HIL identities and fresh DATA crypto. All identities and deterministic
+//! inputs here are test material and must not be used by product firmware.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -14,11 +16,18 @@
 
 use reticulum_radio_interface::RnodeFrameHeader;
 
-#[cfg(feature = "semantic-announce-hil")]
+#[cfg(any(feature = "semantic-announce-hil", feature = "semantic-roundtrip-hil"))]
 use rand_core::{CryptoRng, RngCore};
+#[cfg(any(feature = "semantic-announce-hil", feature = "semantic-roundtrip-hil"))]
+use reticulum_rns_rete::PacketType;
+#[cfg(feature = "semantic-roundtrip-hil")]
+use reticulum_rns_rete::{
+    AnnounceAdmissionError, DestHash, EmbeddedNode, EmbeddedNodeConfig, InboundProofPolicy, Packet,
+    RNS_MTU, TxTarget,
+};
 #[cfg(feature = "semantic-announce-hil")]
 use reticulum_rns_rete::{
-    DestType, PacketType, build_announce_packet, identity_from_private_key, parse_announce_packet,
+    DestType, build_announce_packet, identity_from_private_key, parse_announce_packet,
 };
 
 /// Factory eFuse base MAC of the dedicated Rust HIL initiator.
@@ -41,6 +50,53 @@ pub const HIL_PING_PAYLOAD: &[u8] = b"RETICULUM-HIL-PING";
 
 /// Recognizable HIL reply body, intentionally too short to be valid RNS.
 pub const HIL_REPLY_PAYLOAD: &[u8] = b"RETICULUM-HIL-PONG";
+
+/// RNode sequence for the initiator's signed announce in the semantic round trip.
+#[cfg(feature = "semantic-roundtrip-hil")]
+pub const SEMANTIC_ROUNDTRIP_INITIATOR_ANNOUNCE_SEQUENCE: u8 = 9;
+
+/// RNode sequence for the responder's signed announce in the semantic round trip.
+#[cfg(feature = "semantic-roundtrip-hil")]
+pub const SEMANTIC_ROUNDTRIP_RESPONDER_ANNOUNCE_SEQUENCE: u8 = 10;
+
+/// RNode sequence for the initiator's encrypted destination-DATA packet.
+#[cfg(feature = "semantic-roundtrip-hil")]
+pub const SEMANTIC_ROUNDTRIP_DATA_SEQUENCE: u8 = 11;
+
+/// RNode sequence for the responder's delivery proof.
+#[cfg(feature = "semantic-roundtrip-hil")]
+pub const SEMANTIC_ROUNDTRIP_PROOF_SEQUENCE: u8 = 12;
+
+/// Committed destination hash of the fixed E9 initiator identity and name.
+#[cfg(feature = "semantic-roundtrip-hil")]
+pub const SEMANTIC_ROUNDTRIP_INITIATOR_DESTINATION_HASH: [u8; 16] = [
+    0xaa, 0x2d, 0x77, 0xf6, 0x55, 0x18, 0xc7, 0x8a, 0xd1, 0x82, 0x1e, 0xe0, 0x56, 0x97, 0x6b, 0x2a,
+];
+
+/// Committed destination hash of the fixed E0 responder identity and name.
+#[cfg(feature = "semantic-roundtrip-hil")]
+pub const SEMANTIC_ROUNDTRIP_RESPONDER_DESTINATION_HASH: [u8; 16] = [
+    0xfd, 0xc1, 0x99, 0x70, 0x55, 0xc1, 0x7c, 0xf3, 0xfb, 0xdb, 0x19, 0x2c, 0x55, 0xce, 0xb3, 0xef,
+];
+
+/// Exact application payload size for the semantic round-trip DATA packet.
+#[cfg(feature = "semantic-roundtrip-hil")]
+pub const SEMANTIC_ROUNDTRIP_PAYLOAD_LEN: usize = 36;
+
+#[cfg(feature = "semantic-roundtrip-hil")]
+const SEMANTIC_ROUNDTRIP_PAYLOAD_TAG: [u8; 4] = *b"RRH1";
+
+#[cfg(feature = "semantic-roundtrip-hil")]
+const SEMANTIC_ROUNDTRIP_INITIATOR_SEED: [u8; 32] = [0xe9; 32];
+
+#[cfg(feature = "semantic-roundtrip-hil")]
+const SEMANTIC_ROUNDTRIP_RESPONDER_SEED: [u8; 32] = [0xe0; 32];
+
+#[cfg(feature = "semantic-roundtrip-hil")]
+const SEMANTIC_ROUNDTRIP_APP_NAME: &str = "reticulum-rs-hil";
+
+#[cfg(feature = "semantic-roundtrip-hil")]
+const SEMANTIC_ROUNDTRIP_ASPECTS: &[&str] = &["semantic-roundtrip"];
 
 /// Exact byte length of the deterministic signed announce fixture.
 #[cfg(feature = "semantic-announce-hil")]
@@ -184,12 +240,355 @@ pub fn build_semantic_announce_packet(out: &mut [u8]) -> Result<usize, SemanticA
     Ok(packet_len)
 }
 
+/// Fixed-capacity Rete node used by both semantic round-trip HIL roles.
+#[cfg(feature = "semantic-roundtrip-hil")]
+pub type SemanticRoundtripNode = EmbeddedNode<4, 2, 8, 2>;
+
+/// Construction or bounded announce-preparation failure in semantic round-trip mode.
+#[cfg(feature = "semantic-roundtrip-hil")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SemanticRoundtripError {
+    /// The supplied MAC is not one of the two dedicated HIL boards.
+    UnknownBaseMac,
+    /// Rete rejected one of the fixed deterministic identity seeds.
+    Identity,
+    /// A fixed identity and expanded destination name drifted from its committed hash.
+    IdentityBinding,
+    /// Rete rejected construction of the fixed endpoint node.
+    Node,
+    /// The bounded native announce queue rejected the request.
+    AnnounceAdmission(AnnounceAdmissionError),
+    /// Flushing the announce queue did not produce exactly one broadcast packet.
+    AnnounceOutput,
+    /// The emitted packet was not the expected local signed announce.
+    AnnounceValidation,
+}
+
+/// One semantic Reticulum packet in the fixed end-to-end exchange.
+#[cfg(feature = "semantic-roundtrip-hil")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticRoundtripStep {
+    /// Signed announce sent by the E9 initiator.
+    InitiatorAnnounce,
+    /// Signed announce sent by the E0 responder.
+    ResponderAnnounce,
+    /// Encrypted destination-DATA sent by the initiator.
+    EncryptedData,
+    /// Delivery proof generated by the responder.
+    DeliveryProof,
+}
+
+#[cfg(feature = "semantic-roundtrip-hil")]
+impl SemanticRoundtripStep {
+    /// Exact four-bit RNode sequence assigned to this semantic packet.
+    pub const fn sequence(self) -> u8 {
+        match self {
+            Self::InitiatorAnnounce => SEMANTIC_ROUNDTRIP_INITIATOR_ANNOUNCE_SEQUENCE,
+            Self::ResponderAnnounce => SEMANTIC_ROUNDTRIP_RESPONDER_ANNOUNCE_SEQUENCE,
+            Self::EncryptedData => SEMANTIC_ROUNDTRIP_DATA_SEQUENCE,
+            Self::DeliveryProof => SEMANTIC_ROUNDTRIP_PROOF_SEQUENCE,
+        }
+    }
+}
+
+/// Local operation required to complete one semantic round-trip step.
+#[cfg(feature = "semantic-roundtrip-hil")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticRoundtripAction {
+    /// Construct, validate, frame and transmit this step.
+    Transmit(SemanticRoundtripStep),
+    /// Receive, reassemble and semantically validate this step.
+    Receive(SemanticRoundtripStep),
+}
+
+/// Role-specific bounded state in the four-packet semantic round trip.
+#[cfg(feature = "semantic-roundtrip-hil")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticRoundtripPhase {
+    /// Initiator must transmit its announce.
+    InitiatorSendAnnounce,
+    /// Initiator must receive the responder announce.
+    InitiatorAwaitResponderAnnounce,
+    /// Initiator must transmit encrypted DATA.
+    InitiatorSendData,
+    /// Initiator must receive and correlate the proof.
+    InitiatorAwaitProof,
+    /// Responder must receive the initiator announce.
+    ResponderAwaitInitiatorAnnounce,
+    /// Responder must transmit its announce.
+    ResponderSendAnnounce,
+    /// Responder must receive and decrypt DATA.
+    ResponderAwaitData,
+    /// Responder must transmit the generated proof.
+    ResponderSendProof,
+    /// Every role-specific action has completed exactly once.
+    Complete,
+}
+
+/// Fail-closed semantic state-machine transition error.
+#[cfg(feature = "semantic-roundtrip-hil")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticRoundtripStateError {
+    /// Unknown boards cannot enter the active semantic exchange.
+    InertRole,
+    /// The observed action was not the sole action allowed in this phase.
+    UnexpectedAction {
+        /// Sole action accepted before the rejected call.
+        expected: Option<SemanticRoundtripAction>,
+        /// Action offered by the caller.
+        observed: SemanticRoundtripAction,
+    },
+}
+
+/// Role-specific state machine admitting only the fixed four-packet order.
+#[cfg(feature = "semantic-roundtrip-hil")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SemanticRoundtripState {
+    phase: SemanticRoundtripPhase,
+}
+
+#[cfg(feature = "semantic-roundtrip-hil")]
+impl SemanticRoundtripState {
+    /// Construct the initial phase for one exact active HIL role.
+    pub const fn new(role: HilRole) -> Result<Self, SemanticRoundtripStateError> {
+        let phase = match role {
+            HilRole::Initiator => SemanticRoundtripPhase::InitiatorSendAnnounce,
+            HilRole::Responder => SemanticRoundtripPhase::ResponderAwaitInitiatorAnnounce,
+            HilRole::Inert => return Err(SemanticRoundtripStateError::InertRole),
+        };
+        Ok(Self { phase })
+    }
+
+    /// Current bounded phase.
+    pub const fn phase(self) -> SemanticRoundtripPhase {
+        self.phase
+    }
+
+    /// Sole operation accepted in the current phase, or `None` after completion.
+    pub const fn expected(self) -> Option<SemanticRoundtripAction> {
+        use SemanticRoundtripAction::{Receive, Transmit};
+        use SemanticRoundtripPhase::{
+            Complete, InitiatorAwaitProof, InitiatorAwaitResponderAnnounce, InitiatorSendAnnounce,
+            InitiatorSendData, ResponderAwaitData, ResponderAwaitInitiatorAnnounce,
+            ResponderSendAnnounce, ResponderSendProof,
+        };
+        use SemanticRoundtripStep::{
+            DeliveryProof, EncryptedData, InitiatorAnnounce, ResponderAnnounce,
+        };
+
+        match self.phase {
+            InitiatorSendAnnounce => Some(Transmit(InitiatorAnnounce)),
+            InitiatorAwaitResponderAnnounce => Some(Receive(ResponderAnnounce)),
+            InitiatorSendData => Some(Transmit(EncryptedData)),
+            InitiatorAwaitProof => Some(Receive(DeliveryProof)),
+            ResponderAwaitInitiatorAnnounce => Some(Receive(InitiatorAnnounce)),
+            ResponderSendAnnounce => Some(Transmit(ResponderAnnounce)),
+            ResponderAwaitData => Some(Receive(EncryptedData)),
+            ResponderSendProof => Some(Transmit(DeliveryProof)),
+            Complete => None,
+        }
+    }
+
+    /// Commit one successfully transmitted or semantically validated operation.
+    ///
+    /// A mismatch returns an error without mutating the phase. The caller must
+    /// invoke this only after the corresponding radio or Rete operation has
+    /// succeeded.
+    pub fn advance(
+        &mut self,
+        completed: SemanticRoundtripAction,
+    ) -> Result<(), SemanticRoundtripStateError> {
+        let expected = self.expected();
+        if expected != Some(completed) {
+            return Err(SemanticRoundtripStateError::UnexpectedAction {
+                expected,
+                observed: completed,
+            });
+        }
+
+        self.phase = match self.phase {
+            SemanticRoundtripPhase::InitiatorSendAnnounce => {
+                SemanticRoundtripPhase::InitiatorAwaitResponderAnnounce
+            }
+            SemanticRoundtripPhase::InitiatorAwaitResponderAnnounce => {
+                SemanticRoundtripPhase::InitiatorSendData
+            }
+            SemanticRoundtripPhase::InitiatorSendData => {
+                SemanticRoundtripPhase::InitiatorAwaitProof
+            }
+            SemanticRoundtripPhase::InitiatorAwaitProof
+            | SemanticRoundtripPhase::ResponderSendProof => SemanticRoundtripPhase::Complete,
+            SemanticRoundtripPhase::ResponderAwaitInitiatorAnnounce => {
+                SemanticRoundtripPhase::ResponderSendAnnounce
+            }
+            SemanticRoundtripPhase::ResponderSendAnnounce => {
+                SemanticRoundtripPhase::ResponderAwaitData
+            }
+            SemanticRoundtripPhase::ResponderAwaitData => {
+                SemanticRoundtripPhase::ResponderSendProof
+            }
+            SemanticRoundtripPhase::Complete => unreachable!("completed phase rejected above"),
+        };
+        Ok(())
+    }
+
+    /// Whether this role has completed every required operation.
+    pub const fn is_complete(self) -> bool {
+        matches!(self.phase, SemanticRoundtripPhase::Complete)
+    }
+}
+
+/// Why a physical frame cannot represent its claimed semantic step.
+#[cfg(feature = "semantic-roundtrip-hil")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticRoundtripFrameError {
+    /// A physical frame did not contain both an RNode header and valid RNS bytes.
+    Length,
+    /// The RNode header contained the wrong sequence or any low-nibble flag.
+    Header,
+}
+
+/// Validate the canonical one-frame RNode envelope for one semantic step.
+#[cfg(feature = "semantic-roundtrip-hil")]
+pub fn validate_semantic_roundtrip_frame(
+    step: SemanticRoundtripStep,
+    frame: &[u8],
+) -> Result<(), SemanticRoundtripFrameError> {
+    if frame.len() < RNS_MINIMUM_PACKET_LEN + 1
+        || frame.len() > reticulum_radio_interface::SX1262_FRAME_MTU
+    {
+        return Err(SemanticRoundtripFrameError::Length);
+    }
+    if frame[0] != RnodeFrameHeader::encode(step.sequence(), false) {
+        return Err(SemanticRoundtripFrameError::Header);
+    }
+    Ok(())
+}
+
+/// Build the compact DATA plaintext binding both exact HIL destinations.
+#[cfg(feature = "semantic-roundtrip-hil")]
+pub fn build_semantic_roundtrip_payload(
+    initiator: &[u8; 16],
+    responder: &[u8; 16],
+) -> [u8; SEMANTIC_ROUNDTRIP_PAYLOAD_LEN] {
+    let mut payload = [0_u8; SEMANTIC_ROUNDTRIP_PAYLOAD_LEN];
+    payload[..4].copy_from_slice(&SEMANTIC_ROUNDTRIP_PAYLOAD_TAG);
+    payload[4..20].copy_from_slice(initiator);
+    payload[20..].copy_from_slice(responder);
+    payload
+}
+
+/// Validate the exact compact DATA plaintext for both HIL destinations.
+#[cfg(feature = "semantic-roundtrip-hil")]
+pub fn validate_semantic_roundtrip_payload(
+    payload: &[u8],
+    initiator: &[u8; 16],
+    responder: &[u8; 16],
+) -> bool {
+    payload == build_semantic_roundtrip_payload(initiator, responder)
+}
+
+/// Construct the fixed identity selected by an exact dedicated board MAC.
+#[cfg(feature = "semantic-roundtrip-hil")]
+pub fn semantic_roundtrip_identity_for_base_mac(
+    mac: &[u8],
+) -> Result<reticulum_rns_rete::Identity, SemanticRoundtripError> {
+    let seed = if mac == INITIATOR_BASE_MAC {
+        &SEMANTIC_ROUNDTRIP_INITIATOR_SEED
+    } else if mac == RESPONDER_BASE_MAC {
+        &SEMANTIC_ROUNDTRIP_RESPONDER_SEED
+    } else {
+        return Err(SemanticRoundtripError::UnknownBaseMac);
+    };
+    reticulum_rns_rete::Identity::from_seed(seed).map_err(|_| SemanticRoundtripError::Identity)
+}
+
+/// Construct the fixed endpoint node selected by an exact dedicated board MAC.
+#[cfg(feature = "semantic-roundtrip-hil")]
+pub fn semantic_roundtrip_node_for_base_mac(
+    mac: &[u8],
+) -> Result<SemanticRoundtripNode, SemanticRoundtripError> {
+    let identity = semantic_roundtrip_identity_for_base_mac(mac)?;
+    let mut node = SemanticRoundtripNode::new(
+        identity,
+        SEMANTIC_ROUNDTRIP_APP_NAME,
+        SEMANTIC_ROUNDTRIP_ASPECTS,
+        EmbeddedNodeConfig::endpoint(),
+    )
+    .map_err(|_| SemanticRoundtripError::Node)?;
+    if node.destination_hash() != semantic_roundtrip_destination_for_base_mac(mac)? {
+        return Err(SemanticRoundtripError::IdentityBinding);
+    }
+    node.set_inbound_proof_policy(InboundProofPolicy::Always);
+    Ok(node)
+}
+
+/// Return the fixed local destination selected by an exact dedicated board MAC.
+#[cfg(feature = "semantic-roundtrip-hil")]
+pub fn semantic_roundtrip_destination_for_base_mac(
+    mac: &[u8],
+) -> Result<DestHash, SemanticRoundtripError> {
+    if mac == INITIATOR_BASE_MAC {
+        Ok(DestHash::new(SEMANTIC_ROUNDTRIP_INITIATOR_DESTINATION_HASH))
+    } else if mac == RESPONDER_BASE_MAC {
+        Ok(DestHash::new(SEMANTIC_ROUNDTRIP_RESPONDER_DESTINATION_HASH))
+    } else {
+        Err(SemanticRoundtripError::UnknownBaseMac)
+    }
+}
+
+/// Return the other dedicated board's fixed semantic HIL destination.
+#[cfg(feature = "semantic-roundtrip-hil")]
+pub fn semantic_roundtrip_peer_destination_for_base_mac(
+    mac: &[u8],
+) -> Result<DestHash, SemanticRoundtripError> {
+    if mac == INITIATOR_BASE_MAC {
+        Ok(DestHash::new(SEMANTIC_ROUNDTRIP_RESPONDER_DESTINATION_HASH))
+    } else if mac == RESPONDER_BASE_MAC {
+        Ok(DestHash::new(SEMANTIC_ROUNDTRIP_INITIATOR_DESTINATION_HASH))
+    } else {
+        Err(SemanticRoundtripError::UnknownBaseMac)
+    }
+}
+
+/// Queue, flush and validate exactly one local signed announce into caller storage.
+#[cfg(feature = "semantic-roundtrip-hil")]
+pub fn prepare_semantic_roundtrip_announce<R: RngCore + CryptoRng>(
+    node: &mut SemanticRoundtripNode,
+    now: u64,
+    rng: &mut R,
+    output: &mut [u8; RNS_MTU],
+) -> Result<usize, SemanticRoundtripError> {
+    node.queue_announce(None, now, rng)
+        .map_err(SemanticRoundtripError::AnnounceAdmission)?;
+    let mut packets = node.flush_announces(now, rng);
+    if packets.len() != 1 {
+        return Err(SemanticRoundtripError::AnnounceOutput);
+    }
+    let packet = packets
+        .pop()
+        .ok_or(SemanticRoundtripError::AnnounceOutput)?;
+    if packet.target() != TxTarget::All || packet.bytes().len() > output.len() {
+        return Err(SemanticRoundtripError::AnnounceOutput);
+    }
+    let parsed =
+        Packet::parse(packet.bytes()).map_err(|_| SemanticRoundtripError::AnnounceValidation)?;
+    if parsed.packet_type != PacketType::Announce
+        || parsed.destination_hash != node.destination_hash().as_ref()
+    {
+        return Err(SemanticRoundtripError::AnnounceValidation);
+    }
+    let packet_len = packet.bytes().len();
+    output[..packet_len].copy_from_slice(packet.bytes());
+    Ok(packet_len)
+}
+
 /// Reset-scoped behavior authorized for an exact factory eFuse base MAC.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HilRole {
-    /// Send one ping after the fixed startup delay, then listen for one reply.
+    /// E9 initiates the selected bounded HIL exchange after its startup delay.
     Initiator,
-    /// Listen for the exact ping and send at most one exact reply.
+    /// E0 listens first and responds within the selected bounded HIL exchange.
     Responder,
     /// Never construct or enable the radio.
     Inert,
@@ -251,9 +650,20 @@ fn is_exact_single_frame(frame: &[u8], sequence: u8, payload: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "semantic-roundtrip-hil")]
+    use core::num::NonZeroU64;
+
+    #[cfg(feature = "semantic-roundtrip-hil")]
+    use reticulum_radio_interface::{FrameSignal, RNODE_HW_MTU, TimedReceiveOutcome, TimedRnodeRx};
     use reticulum_radio_interface::{SX1262_FRAME_MTU, frame_rns_packet};
-    #[cfg(feature = "semantic-announce-hil")]
+    #[cfg(any(feature = "semantic-announce-hil", feature = "semantic-roundtrip-hil"))]
     use reticulum_rns_rete::RNS_MTU;
+    #[cfg(feature = "semantic-roundtrip-hil")]
+    use reticulum_rns_rete::{
+        IngressDisposition, InterfaceId, NodeEvent, ReceiptCandidate,
+        ReceiptReservationUnavailable, ReceiptTerminal, ReceiptTerminalReservation,
+        ReceiptTerminalSink, TxTarget,
+    };
 
     use super::*;
 
@@ -322,6 +732,395 @@ mod tests {
             classify_hil_frame(&exact[..exact.len() - 1]),
             HilFrameKind::Other
         );
+    }
+
+    #[cfg(feature = "semantic-roundtrip-hil")]
+    #[derive(Default)]
+    struct CounterRng(u8);
+
+    #[cfg(feature = "semantic-roundtrip-hil")]
+    impl RngCore for CounterRng {
+        fn next_u32(&mut self) -> u32 {
+            let mut bytes = [0_u8; 4];
+            self.fill_bytes(&mut bytes);
+            u32::from_le_bytes(bytes)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut bytes = [0_u8; 8];
+            self.fill_bytes(&mut bytes);
+            u64::from_le_bytes(bytes)
+        }
+
+        fn fill_bytes(&mut self, destination: &mut [u8]) {
+            for byte in destination {
+                self.0 = self.0.wrapping_add(1);
+                *byte = self.0;
+            }
+        }
+
+        fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), rand_core::Error> {
+            self.fill_bytes(destination);
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "semantic-roundtrip-hil")]
+    impl CryptoRng for CounterRng {}
+
+    #[cfg(feature = "semantic-roundtrip-hil")]
+    #[derive(Default)]
+    struct OneReceiptSink {
+        terminal: Option<ReceiptTerminal>,
+    }
+
+    #[cfg(feature = "semantic-roundtrip-hil")]
+    struct OneReceiptReservation<'a> {
+        candidate: ReceiptCandidate,
+        terminal: &'a mut Option<ReceiptTerminal>,
+    }
+
+    #[cfg(feature = "semantic-roundtrip-hil")]
+    impl ReceiptTerminalSink for OneReceiptSink {
+        type Reservation<'a> = OneReceiptReservation<'a>;
+
+        fn try_reserve(
+            &mut self,
+            candidate: ReceiptCandidate,
+        ) -> Result<Self::Reservation<'_>, ReceiptReservationUnavailable> {
+            if self.terminal.is_some() {
+                return Err(ReceiptReservationUnavailable);
+            }
+            Ok(OneReceiptReservation {
+                candidate,
+                terminal: &mut self.terminal,
+            })
+        }
+    }
+
+    #[cfg(feature = "semantic-roundtrip-hil")]
+    impl ReceiptTerminalReservation for OneReceiptReservation<'_> {
+        fn commit(self, terminal: ReceiptTerminal) {
+            assert_eq!(terminal.candidate(), self.candidate);
+            *self.terminal = Some(terminal);
+        }
+    }
+
+    #[cfg(feature = "semantic-roundtrip-hil")]
+    fn pump_single_frame(
+        packet: &[u8],
+        step: SemanticRoundtripStep,
+        now: u64,
+        receiver: &mut TimedRnodeRx,
+        output: &mut [u8; RNODE_HW_MTU],
+    ) -> usize {
+        let mut first = [0_u8; SX1262_FRAME_MTU];
+        let mut second = [0_u8; SX1262_FRAME_MTU];
+        let frames = frame_rns_packet(packet, step.sequence(), &mut first, &mut second).unwrap();
+        assert_eq!(frames.second(), None, "{step:?} unexpectedly split");
+        validate_semantic_roundtrip_frame(step, frames.first()).unwrap();
+        match receiver
+            .feed(frames.first(), now, FrameSignal::new(-70, 8), output)
+            .unwrap()
+        {
+            TimedReceiveOutcome::Packet {
+                packet_len,
+                discarded_pending,
+                ..
+            } => {
+                assert!(!discarded_pending);
+                assert_eq!(&output[..packet_len], packet);
+                packet_len
+            }
+            TimedReceiveOutcome::AwaitingContinuation { .. } => {
+                panic!("{step:?} unexpectedly awaited a continuation")
+            }
+        }
+    }
+
+    #[cfg(feature = "semantic-roundtrip-hil")]
+    #[test]
+    fn semantic_roundtrip_pumps_two_real_nodes_through_four_single_rnode_frames() {
+        let mut initiator = semantic_roundtrip_node_for_base_mac(&INITIATOR_BASE_MAC).unwrap();
+        let mut responder = semantic_roundtrip_node_for_base_mac(&RESPONDER_BASE_MAC).unwrap();
+        let initiator_destination = initiator.destination_hash();
+        let responder_destination = responder.destination_hash();
+        assert_eq!(
+            *initiator_destination.as_bytes(),
+            SEMANTIC_ROUNDTRIP_INITIATOR_DESTINATION_HASH
+        );
+        assert_eq!(
+            *responder_destination.as_bytes(),
+            SEMANTIC_ROUNDTRIP_RESPONDER_DESTINATION_HASH
+        );
+        assert_eq!(
+            semantic_roundtrip_destination_for_base_mac(&INITIATOR_BASE_MAC).unwrap(),
+            initiator_destination
+        );
+        assert_eq!(
+            semantic_roundtrip_destination_for_base_mac(&RESPONDER_BASE_MAC).unwrap(),
+            responder_destination
+        );
+        assert_eq!(
+            semantic_roundtrip_peer_destination_for_base_mac(&INITIATOR_BASE_MAC).unwrap(),
+            responder_destination
+        );
+        assert_eq!(
+            semantic_roundtrip_peer_destination_for_base_mac(&RESPONDER_BASE_MAC).unwrap(),
+            initiator_destination
+        );
+        assert_ne!(initiator_destination, responder_destination);
+
+        let payload = build_semantic_roundtrip_payload(
+            initiator_destination.as_bytes(),
+            responder_destination.as_bytes(),
+        );
+        assert!(validate_semantic_roundtrip_payload(
+            &payload,
+            initiator_destination.as_bytes(),
+            responder_destination.as_bytes(),
+        ));
+
+        let mut initiator_state = SemanticRoundtripState::new(HilRole::Initiator).unwrap();
+        let mut responder_state = SemanticRoundtripState::new(HilRole::Responder).unwrap();
+        let timeout = NonZeroU64::new(10).unwrap();
+        let mut initiator_rx = TimedRnodeRx::new(timeout);
+        let mut responder_rx = TimedRnodeRx::new(timeout);
+        let mut packet = [0_u8; RNS_MTU];
+        let mut reassembled = [0_u8; RNODE_HW_MTU];
+        let mut rng = CounterRng::default();
+
+        assert_eq!(
+            initiator_state.expected(),
+            Some(SemanticRoundtripAction::Transmit(
+                SemanticRoundtripStep::InitiatorAnnounce
+            ))
+        );
+        let announce_len =
+            prepare_semantic_roundtrip_announce(&mut initiator, 100, &mut rng, &mut packet)
+                .unwrap();
+        initiator_state
+            .advance(SemanticRoundtripAction::Transmit(
+                SemanticRoundtripStep::InitiatorAnnounce,
+            ))
+            .unwrap();
+        let packet_len = pump_single_frame(
+            &packet[..announce_len],
+            SemanticRoundtripStep::InitiatorAnnounce,
+            100,
+            &mut responder_rx,
+            &mut reassembled,
+        );
+        let report = responder.ingest(&reassembled[..packet_len], 100, InterfaceId(1), &mut rng);
+        assert_eq!(report.disposition, IngressDisposition::Processed);
+        assert_eq!(report.actions.events.len(), 1);
+        assert!(matches!(
+            report.actions.events.first(),
+            Some(NodeEvent::AnnounceReceived { dest_hash, .. })
+                if *dest_hash == initiator_destination
+        ));
+        assert!(report.actions.packets.is_empty());
+        assert_eq!(report.actions.unroutable_packets, 0);
+        assert!(responder.route(&initiator_destination).is_some());
+        responder_state
+            .advance(SemanticRoundtripAction::Receive(
+                SemanticRoundtripStep::InitiatorAnnounce,
+            ))
+            .unwrap();
+
+        let announce_len =
+            prepare_semantic_roundtrip_announce(&mut responder, 101, &mut rng, &mut packet)
+                .unwrap();
+        responder_state
+            .advance(SemanticRoundtripAction::Transmit(
+                SemanticRoundtripStep::ResponderAnnounce,
+            ))
+            .unwrap();
+        let packet_len = pump_single_frame(
+            &packet[..announce_len],
+            SemanticRoundtripStep::ResponderAnnounce,
+            101,
+            &mut initiator_rx,
+            &mut reassembled,
+        );
+        let report = initiator.ingest(&reassembled[..packet_len], 101, InterfaceId(1), &mut rng);
+        assert_eq!(report.disposition, IngressDisposition::Processed);
+        assert_eq!(report.actions.events.len(), 1);
+        assert!(matches!(
+            report.actions.events.first(),
+            Some(NodeEvent::AnnounceReceived { dest_hash, .. })
+                if *dest_hash == responder_destination
+        ));
+        assert!(report.actions.packets.is_empty());
+        assert_eq!(report.actions.unroutable_packets, 0);
+        assert!(initiator.route(&responder_destination).is_some());
+        initiator_state
+            .advance(SemanticRoundtripAction::Receive(
+                SemanticRoundtripStep::ResponderAnnounce,
+            ))
+            .unwrap();
+
+        let prepared = initiator
+            .prepare_data_into(&responder_destination, &payload, 102, &mut rng, &mut packet)
+            .unwrap();
+        let data_len = usize::from(prepared.packet_len());
+        initiator_state
+            .advance(SemanticRoundtripAction::Transmit(
+                SemanticRoundtripStep::EncryptedData,
+            ))
+            .unwrap();
+        let packet_len = pump_single_frame(
+            &packet[..data_len],
+            SemanticRoundtripStep::EncryptedData,
+            102,
+            &mut responder_rx,
+            &mut reassembled,
+        );
+        let received = responder.ingest(&reassembled[..packet_len], 102, InterfaceId(1), &mut rng);
+        assert_eq!(received.disposition, IngressDisposition::Processed);
+        assert_eq!(received.actions.events.len(), 1);
+        assert!(matches!(
+            received.actions.events.first(),
+            Some(NodeEvent::DataReceived { dest_hash, payload: received })
+                if *dest_hash == responder_destination && received == &payload
+        ));
+        assert_eq!(received.actions.packets.len(), 1);
+        assert_eq!(received.actions.unroutable_packets, 0);
+        responder_state
+            .advance(SemanticRoundtripAction::Receive(
+                SemanticRoundtripStep::EncryptedData,
+            ))
+            .unwrap();
+        let proof = &received.actions.packets[0];
+        assert_eq!(proof.target(), TxTarget::Only(InterfaceId(1)));
+        assert_eq!(
+            Packet::parse(proof.bytes()).unwrap().packet_type,
+            PacketType::Proof
+        );
+        responder_state
+            .advance(SemanticRoundtripAction::Transmit(
+                SemanticRoundtripStep::DeliveryProof,
+            ))
+            .unwrap();
+
+        let packet_len = pump_single_frame(
+            proof.bytes(),
+            SemanticRoundtripStep::DeliveryProof,
+            103,
+            &mut initiator_rx,
+            &mut reassembled,
+        );
+        let mut sink = OneReceiptSink::default();
+        let proof_report = initiator
+            .ingest_with_receipt_sink(
+                &reassembled[..packet_len],
+                103,
+                InterfaceId(1),
+                &mut rng,
+                &mut sink,
+            )
+            .unwrap();
+        assert_eq!(proof_report.disposition, IngressDisposition::Processed);
+        assert!(proof_report.actions.events.is_empty());
+        assert!(proof_report.actions.packets.is_empty());
+        assert_eq!(proof_report.actions.unroutable_packets, 0);
+        let terminal = sink.terminal.expect("valid proof must deliver the receipt");
+        assert!(matches!(
+            terminal,
+            ReceiptTerminal::Delivered(candidate) if candidate.receipt() == prepared.receipt()
+        ));
+        assert_eq!(initiator.metrics().capacity.receipts.used, 0);
+        initiator_state
+            .advance(SemanticRoundtripAction::Receive(
+                SemanticRoundtripStep::DeliveryProof,
+            ))
+            .unwrap();
+        assert!(initiator_state.is_complete());
+        assert!(responder_state.is_complete());
+        assert_eq!(initiator.metrics().capacity.receipts.used, 0);
+    }
+
+    #[cfg(feature = "semantic-roundtrip-hil")]
+    #[test]
+    fn semantic_roundtrip_policy_rejects_unknown_roles_and_out_of_order_actions() {
+        assert_eq!(
+            SemanticRoundtripState::new(HilRole::Inert),
+            Err(SemanticRoundtripStateError::InertRole)
+        );
+        assert!(matches!(
+            semantic_roundtrip_node_for_base_mac(&[0_u8; 6]),
+            Err(SemanticRoundtripError::UnknownBaseMac)
+        ));
+        assert!(matches!(
+            semantic_roundtrip_destination_for_base_mac(&[0_u8; 6]),
+            Err(SemanticRoundtripError::UnknownBaseMac)
+        ));
+        assert!(matches!(
+            semantic_roundtrip_peer_destination_for_base_mac(&[0_u8; 6]),
+            Err(SemanticRoundtripError::UnknownBaseMac)
+        ));
+        assert_eq!(
+            semantic_roundtrip_destination_for_base_mac(&INITIATOR_BASE_MAC)
+                .unwrap()
+                .as_bytes(),
+            &SEMANTIC_ROUNDTRIP_INITIATOR_DESTINATION_HASH
+        );
+        assert_eq!(
+            semantic_roundtrip_peer_destination_for_base_mac(&INITIATOR_BASE_MAC)
+                .unwrap()
+                .as_bytes(),
+            &SEMANTIC_ROUNDTRIP_RESPONDER_DESTINATION_HASH
+        );
+
+        let expected_payload = build_semantic_roundtrip_payload(
+            &SEMANTIC_ROUNDTRIP_INITIATOR_DESTINATION_HASH,
+            &SEMANTIC_ROUNDTRIP_RESPONDER_DESTINATION_HASH,
+        );
+        let mut changed_payload = expected_payload;
+        changed_payload[SEMANTIC_ROUNDTRIP_PAYLOAD_LEN - 1] ^= 1;
+        assert!(!validate_semantic_roundtrip_payload(
+            &changed_payload,
+            &SEMANTIC_ROUNDTRIP_INITIATOR_DESTINATION_HASH,
+            &SEMANTIC_ROUNDTRIP_RESPONDER_DESTINATION_HASH,
+        ));
+
+        let mut envelope = [0_u8; RNS_MINIMUM_PACKET_LEN + 1];
+        envelope[0] = RnodeFrameHeader::encode(SEMANTIC_ROUNDTRIP_DATA_SEQUENCE, false);
+        validate_semantic_roundtrip_frame(SemanticRoundtripStep::EncryptedData, &envelope).unwrap();
+        envelope[0] = RnodeFrameHeader::encode(SEMANTIC_ROUNDTRIP_DATA_SEQUENCE, true);
+        assert_eq!(
+            validate_semantic_roundtrip_frame(SemanticRoundtripStep::EncryptedData, &envelope),
+            Err(SemanticRoundtripFrameError::Header)
+        );
+        assert_eq!(
+            validate_semantic_roundtrip_frame(
+                SemanticRoundtripStep::EncryptedData,
+                &envelope[..RNS_MINIMUM_PACKET_LEN]
+            ),
+            Err(SemanticRoundtripFrameError::Length)
+        );
+
+        let mut state = SemanticRoundtripState::new(HilRole::Initiator).unwrap();
+        let before = state;
+        let wrong = SemanticRoundtripAction::Receive(SemanticRoundtripStep::DeliveryProof);
+        assert!(matches!(
+            state.advance(wrong),
+            Err(SemanticRoundtripStateError::UnexpectedAction { observed, .. })
+                if observed == wrong
+        ));
+        assert_eq!(state, before);
+
+        let exact = [
+            SemanticRoundtripAction::Transmit(SemanticRoundtripStep::InitiatorAnnounce),
+            SemanticRoundtripAction::Receive(SemanticRoundtripStep::ResponderAnnounce),
+            SemanticRoundtripAction::Transmit(SemanticRoundtripStep::EncryptedData),
+            SemanticRoundtripAction::Receive(SemanticRoundtripStep::DeliveryProof),
+        ];
+        for action in exact {
+            state.advance(action).unwrap();
+        }
+        assert!(state.is_complete());
+        assert!(state.advance(exact[3]).is_err());
     }
 
     #[cfg(feature = "semantic-announce-hil")]

@@ -1700,6 +1700,7 @@ dependencies = [
  "reticulum-board-heltec-tracker-v2-tx-hil",
  "reticulum-radio-interface",
  "reticulum-rns-rete",
+ "static_cell",
 ]
 
 [[package]]

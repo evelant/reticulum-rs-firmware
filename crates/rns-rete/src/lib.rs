@@ -24,12 +24,12 @@ mod receive_only;
 
 pub use embedded::{
     AdmissionCounters, AnnounceAdmissionError, DestinationRegistrationError, EmbeddedNode,
-    EmbeddedNodeConfig, EmbeddedNodeMetrics, EmbeddedSendError, IngressCounters,
-    IngressDisposition, IngressDropReason, IngressReport, InterfaceId, MAX_CHANNEL_PAYLOAD,
-    MAX_DATA_PAYLOAD, NodeActions, NodeRole, PrepareDataError, PreparedData, RNS_MTU,
-    ReceiptCandidate, ReceiptId, ReceiptKind, ReceiptReservationUnavailable, ReceiptTerminal,
-    ReceiptTerminalCounters, ReceiptTerminalReservation, ReceiptTerminalSink, ReceiptTickReport,
-    RouteSnapshot, TransportCounters, TxPacket, TxTarget,
+    EmbeddedNodeConfig, EmbeddedNodeMetrics, EmbeddedSendError, InboundProofPolicy,
+    IngressCounters, IngressDisposition, IngressDropReason, IngressReport, InterfaceId,
+    MAX_CHANNEL_PAYLOAD, MAX_DATA_PAYLOAD, NodeActions, NodeRole, PrepareDataError, PreparedData,
+    RNS_MTU, ReceiptCandidate, ReceiptId, ReceiptKind, ReceiptReservationUnavailable,
+    ReceiptTerminal, ReceiptTerminalCounters, ReceiptTerminalReservation, ReceiptTerminalSink,
+    ReceiptTickReport, RouteSnapshot, TransportCounters, TxPacket, TxTarget,
 };
 pub use receive_only::{
     InitialReceiveOnlyIngress, RETE_MAINTENANCE_INTERVAL_SECONDS, RawFrameDropReason,

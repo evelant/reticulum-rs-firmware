@@ -251,6 +251,25 @@ pub enum NodeRole {
     Transport,
 }
 
+/// Automatic proof behavior for DATA received at the primary destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InboundProofPolicy {
+    /// Never generate delivery proofs automatically.
+    #[default]
+    Never,
+    /// Generate a delivery proof for every successfully decrypted DATA packet.
+    Always,
+}
+
+impl InboundProofPolicy {
+    fn into_rete(self) -> rete_stack::ProofStrategy {
+        match self {
+            Self::Never => rete_stack::ProofStrategy::ProveNone,
+            Self::Always => rete_stack::ProofStrategy::ProveAll,
+        }
+    }
+}
+
 /// Construction policy for the owning embedded node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmbeddedNodeConfig {
@@ -793,6 +812,11 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
     /// Configured endpoint/transport role.
     pub const fn role(&self) -> NodeRole {
         self.role
+    }
+
+    /// Set automatic proof behavior for DATA received at the primary destination.
+    pub fn set_inbound_proof_policy(&mut self, policy: InboundProofPolicy) {
+        self.core.set_proof_strategy(policy.into_rete());
     }
 
     /// Register another destination, subject to the product-owned quota.
@@ -2394,6 +2418,137 @@ mod tests {
         assert_eq!(sink.terminals, [ReceiptTerminal::Delivered(expected)]);
         assert_eq!(sink.active_reservations, 0);
         assert_eq!(sender.metrics().capacity.receipts.used, 0);
+    }
+
+    #[test]
+    fn inbound_proof_policy_completes_announced_encrypted_data_receipt() {
+        let mut sender = node(90);
+        let mut receiver = node(91);
+        receiver.set_inbound_proof_policy(InboundProofPolicy::Always);
+        let mut rng = CounterRng::default();
+
+        receiver.queue_announce(None, 100, &mut rng).unwrap();
+        let announce = receiver
+            .flush_announces(100, &mut rng)
+            .into_iter()
+            .next()
+            .expect("the queued announce must be ready immediately");
+        let learned = sender.ingest(announce.bytes(), 100, InterfaceId(4), &mut rng);
+        assert_eq!(learned.disposition, IngressDisposition::Processed);
+        assert!(sender.route(&receiver.destination_hash()).is_some());
+
+        let mut data = [0u8; RNS_MTU];
+        let prepared = sender
+            .prepare_data_into(
+                &receiver.destination_hash(),
+                b"announced and proven",
+                101,
+                &mut rng,
+                &mut data,
+            )
+            .unwrap();
+        let received = receiver.ingest(
+            &data[..usize::from(prepared.packet_len())],
+            101,
+            InterfaceId(7),
+            &mut rng,
+        );
+        assert_eq!(received.disposition, IngressDisposition::Processed);
+        assert!(received.actions.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::DataReceived { payload, .. } if payload == b"announced and proven"
+        )));
+        assert_eq!(received.actions.packets.len(), 1);
+        let proof = &received.actions.packets[0];
+        assert_eq!(proof.target(), TxTarget::Only(InterfaceId(7)));
+        assert_eq!(
+            Packet::parse(proof.bytes()).unwrap().packet_type,
+            PacketType::Proof
+        );
+
+        let expected = ReceiptCandidate {
+            kind: ReceiptKind::Data,
+            receipt: prepared.receipt(),
+        };
+        let mut sink = RecordingReceiptSink::default();
+        let delivered = sender
+            .ingest_with_receipt_sink(proof.bytes(), 102, InterfaceId(4), &mut rng, &mut sink)
+            .unwrap();
+        assert_eq!(delivered.disposition, IngressDisposition::Processed);
+        assert_eq!(sink.terminals, [ReceiptTerminal::Delivered(expected)]);
+        assert_eq!(sender.metrics().capacity.receipts.used, 0);
+    }
+
+    #[test]
+    fn inbound_proof_policy_defaults_to_never_and_can_be_disabled_again() {
+        let mut sender = node(92);
+        let mut receiver = node(93);
+        let mut rng = CounterRng::default();
+
+        receiver.queue_announce(None, 100, &mut rng).unwrap();
+        let announce = receiver
+            .flush_announces(100, &mut rng)
+            .into_iter()
+            .next()
+            .expect("the queued announce must be ready immediately");
+        let learned = sender.ingest(announce.bytes(), 100, InterfaceId(4), &mut rng);
+        assert_eq!(learned.disposition, IngressDisposition::Processed);
+
+        let mut data = [0u8; RNS_MTU];
+        let first = sender
+            .prepare_data_into(
+                &receiver.destination_hash(),
+                b"default never",
+                101,
+                &mut rng,
+                &mut data,
+            )
+            .unwrap();
+        let received = receiver.ingest(
+            &data[..usize::from(first.packet_len())],
+            101,
+            InterfaceId(7),
+            &mut rng,
+        );
+        assert_eq!(received.disposition, IngressDisposition::Processed);
+        assert!(received.actions.packets.is_empty());
+
+        receiver.set_inbound_proof_policy(InboundProofPolicy::Always);
+        let second = sender
+            .prepare_data_into(
+                &receiver.destination_hash(),
+                b"always",
+                102,
+                &mut rng,
+                &mut data,
+            )
+            .unwrap();
+        let received = receiver.ingest(
+            &data[..usize::from(second.packet_len())],
+            102,
+            InterfaceId(7),
+            &mut rng,
+        );
+        assert_eq!(received.actions.packets.len(), 1);
+
+        receiver.set_inbound_proof_policy(InboundProofPolicy::Never);
+        let third = sender
+            .prepare_data_into(
+                &receiver.destination_hash(),
+                b"disabled again",
+                103,
+                &mut rng,
+                &mut data,
+            )
+            .unwrap();
+        let received = receiver.ingest(
+            &data[..usize::from(third.packet_len())],
+            103,
+            InterfaceId(7),
+            &mut rng,
+        );
+        assert_eq!(received.disposition, IngressDisposition::Processed);
+        assert!(received.actions.packets.is_empty());
     }
 
     #[test]

@@ -5,9 +5,10 @@ target is the ESP32-S3 and SX1262/KCT8103L combination on the Heltec Wireless
 Tracker V2.3, but protocol and application code will remain portable across
 boards and radios.
 
-The repository is in **Phase 1: receive vertical slice plus guarded transmit
-groundwork**. It does not yet provide a complete Reticulum or LXMF node. The
-default firmware binary remains a deliberately RF-disabled safe-idle image. A
+The repository is in **Phase 1: receive vertical slice plus bounded semantic
+transmit integration**. It does not yet provide a complete Reticulum or LXMF
+node. The default firmware binary remains a deliberately RF-disabled safe-idle
+image. A
 separate, explicitly configured lab binary owns the Tracker SX1262 through an
 opaque RX-only wrapper; it has no transmit API and hands complete PHY frames
 from a sole radio task to a
@@ -31,23 +32,35 @@ pressure stimulus without changing the normal lab image. Deterministic RNode
 host-tested generator creates encrypted local DATA for one exact ephemeral
 Tracker boot.
 
-An independently named, eFuse-MAC-gated one-shot TX HIL now proves exact LoRa
-PHY and RNode framing on the two Tracker V2.3 boards. Rust-to-Rust,
-RNode-to-Rust and Rust-to-RNode sentinel exchanges all pass. The explicit
-semantic mode has also completed a powered Rust-to-RNode run: E9 prepared one
-168-byte physical frame, reported exactly one `DRIVER_TX_DONE`, shut the radio
-down and entered its permanent inert hold. E0's RNode 1.86 ordinary
-non-promiscuous receive path delivered exactly one matching 167-byte deframed
-packet, and pinned Python RNS 1.3.8 validated its first-hop ANNOUNCE syntax,
-signature, public identity and destination/name-hash binding. The evidence is
+An independently named, eFuse-MAC-gated TX HIL proves exact LoRa PHY and RNode
+framing on the two Tracker V2.3 boards. Rust-to-Rust, RNode-to-Rust and
+Rust-to-RNode sentinel exchanges all pass. The newer
+`semantic-roundtrip-hil` mode has now run one identical Rust/Rete image on both
+boards: E9 and E0 exchanged signed ANNOUNCEs, learned each other's direct path,
+then carried encrypted DATA and its delivery proof across the real radio path.
+The exact current DATA receipt
+`4ca4ed5d856f45e1abb351762a3ccb8671c9c675a6bbfa082d73010746587a4d`
+ended `Delivered`, the receipt table ended empty, both roles reported exactly
+two TX completions and both shut their radios down. The strict cross-log pass is
 preserved at
-`artifacts/hil/tx-hil/20260716T183805Z-e944-rete-announce-to-e040-rnode/attempt-02-coordinated`.
+`artifacts/hil/tx-hil/20260716T230849Z-rust-rete-semantic-roundtrip/attempt-02-post-readback`.
 
-That pass is deliberately a deterministic conformance HIL: its fixed key, zero
-entropy and old timestamp are not a production identity/clock design, and the
-observer did not start a full Reticulum instance or exercise live transport
-path admission. It establishes neither the product node-core receive/router
-path nor forwarding, LXMF or a production TX policy; see
+Both boards were flashed with and read back the same 425,744-byte merged image,
+SHA-256
+`93ccac552d75a27f2cec571a9f00900210b4b862f157fca57c0cc50c9641fbc5`.
+The mode uses the product `reticulum-rns-rete` surface, ADC-backed TRNG and a
+64 KiB heap, but fixed public HIL identities. Its short-run heap peaks of 548
+bytes on E9 and 764 bytes on E0 are not stack, soak or full-product memory
+qualification. It also establishes neither durable production identity/state,
+the permanent node-core/radio/storage/API ownership graph, forwarding,
+multi-hop, LXMF nor production TX policy.
+
+The earlier deterministic one-way ANNOUNCE-to-RNode/Python result remains
+preserved separately at
+`artifacts/hil/tx-hil/20260716T183805Z-e944-rete-announce-to-e040-rnode/attempt-02-coordinated`.
+That older conformance fixture used a fixed key, zero entropy and old timestamp;
+it should not be confused with the later same-image product-surface round trip.
+See
 [the Phase-1 TX HIL record](docs/phase-1-tx-hil.md).
 
 Separately from the target-linked receive-only image, the portable node-core
@@ -150,9 +163,15 @@ radio-owner integration is not implemented, not because development TX is
 prohibited. Both attached Tracker boards have antennas and are cleared for
 NA915 development transmission. New integration images may therefore use real
 TX/RX whenever it advances the bounded node path, while retaining an explicit
-regional/airtime profile and one radio owner. The separately derived RNode image
-on the second board remains an external development peer, not part of the
-product graph.
+regional/airtime profile and one radio owner. At semantic artifact closeout,
+both boards contained the same completed round-trip image; neither contained the
+earlier derived RNode peer image.
+
+The immediate next slice is to promote the proven sole-Rete-owner and separate
+RNode-tick/Rete-seconds pattern into permanent firmware, then connect that node
+owner to the sole radio owner, storage actor and authenticated API. The next
+evidence should exercise those permanent ownership and persistence boundaries,
+not add another comparison HIL.
 
 ## Read first
 
@@ -249,6 +268,21 @@ Those settings authorize only a local receive experiment with a matching peer;
 they are not a regional transmit profile. Missing, malformed, out-of-hardware-
 range and currently unverified LDRO combinations fail the build before any
 radio-bearing image is produced.
+
+The passed same-image semantic round-trip HIL is an explicit, separately
+guarded build:
+
+```sh
+source ~/export-esp.sh
+cargo +esp build --locked --release \
+  -p reticulum-heltec-tracker-v2-tx-hil \
+  --no-default-features --features semantic-roundtrip-hil \
+  --target xtensa-esp32s3-none-elf
+```
+
+It is a bounded NA915 development fixture, not a product firmware profile. See
+[the TX HIL record](docs/phase-1-tx-hil.md) for its exact image identity,
+readbacks, exchange and limitations.
 
 ## Qualification artifacts
 

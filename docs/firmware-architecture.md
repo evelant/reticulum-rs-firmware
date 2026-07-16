@@ -1,7 +1,8 @@
 # Standalone Reticulum LoRa Firmware: Architecture and Feasibility
 
 **Status:** accepted architecture; Phase-1 receive-only path target-linked;
-physical submission journal implemented; powered semantic ANNOUNCE HIL passed;
+physical submission journal implemented; powered same-image Rete
+ANNOUNCE/DATA/proof HIL passed;
 isolated powered storage clean-path/software-reset HIL passed<br>
 **Date:** 2026-07-16<br>
 **Initial target:** Heltec Wireless Tracker V2.3, ESP32-S3FN8 + SX1262 + KCT8103L<br>
@@ -112,6 +113,7 @@ Claims in READMEs were not treated as proof of embedded portability.
 | `reticulum-device-api-adapter`, default/host-sim/dependency-unified host and default ESP32-S3 Xtensa | Pass | The allocation-free authenticated dispatcher exposes public capabilities and principal-scoped status by default, fails status closed during actor ambiguity/fault, and restricts advertised operations to its local build; its host-only feature copies experimental borrowed payloads into actor-owned durable acceptance and maps replay/conflict/capacity/ambiguity to stable API results. Focused tests and strict clippy pass in all three host profiles; the default target graph passes Xtensa checks and compile-forbids adapter `host-sim` |
 | `reticulum-heltec-tracker-v2-storage-hil`, ESP32-S3 Xtensa | Pass (target and powered clean-path HIL) | On E9:44, source `7b47113` passed strict continuous two-boot serial verification of A1 format, five appends, no-mutation retry/conflict, B2 compaction and `0/0` B2 replay after `CoreSw`; independent raw-dump replay confirmed generation 2, five records/slots, one revision-4 `Delivered` submission, erased A manifest and erased B tail. Controlled power cuts, endurance/soak, encryption and product-runtime integration remain open |
 | `reticulum-heltec-tracker-v2-tx-hil --features semantic-announce-hil`, ESP32-S3 to RNode 1.86 plus pinned Python RNS 1.3.8 | Pass (powered conformance HIL) | E9 emitted one deterministic signed ANNOUNCE and became radio-inert; E0 delivered exactly one 167-byte ordinary RNode packet and Python validated its first-hop signature and destination binding. This does not exercise a product identity, full Reticulum instance, live transport admission, node-core RX/router ownership or LXMF |
+| `reticulum-heltec-tracker-v2-tx-hil --features semantic-roundtrip-hil`, same ESP32-S3 image on E9/E0 | Pass (powered product-surface Rete HIL) | The two roles exchanged signed ANNOUNCEs, encrypted DATA and a delivery proof through RNode framing and the real radio owner; the exact DATA receipt reached `Delivered`, the table ended empty, each board completed two TX operations and both shut down. The mode uses hardware TRNG but fixed public HIL identities, excludes storage/API/node-core/LXMF, and is not durability, multi-hop, sustained-memory or production-policy evidence |
 | `reference/rete/examples/esp32s3`: `cargo +esp check --release` | Pass with warnings | Current bare-metal ESP32-S3/SX1262/Wi-Fi integration compiles with the installed ESP toolchain; it targets Heltec WiFi LoRa 32 V3/V4 pins, not the Tracker BSP |
 | Precursor `reticulum-core`/`lxmf` host suites; `micron` host suite | 70 pass; 17 pass | Strong embedded-client interop and hostile-input evidence, including real Nomad/Micron fixtures; the Xous crates still use `std` and are not a bare-metal dependency as-is |
 | `foxhole-micron` host suite | 24 pass | Focused confirmation of links, fields, colors, sections, literal/comment handling and control-character sanitisation; it remains a ratatui/`std` comparison parser |
@@ -270,18 +272,41 @@ authorization. Faults stop fresh
 preparation and policy while owner-draining DATA/dispatcher transitions
 continue where possible.
 
-Separately, the explicitly hazardous semantic TX HIL has crossed the
-hardware/reference-parser boundary. In the preserved coordinated run at
-`artifacts/hil/tx-hil/20260716T183805Z-e944-rete-announce-to-e040-rnode/attempt-02-coordinated`,
-E9 logged one validated 167-byte deterministic Rete ANNOUNCE, one physical-frame
-transmission and then `radio_active=false`. E0's RNode 1.86 ordinary receive
-path delivered exactly one matching 167-byte packet, and pinned Python RNS
-1.3.8 validated its zero-hop first-hop syntax, signature, public identity and
-destination/name-hash binding. The Python observer explicitly did not start a
-full Reticulum instance. This is conformance-fixture evidence only: it does not
-exercise persisted product identity/time/entropy, live transport admission,
-the product node-core receive/router path, forwarding, LXMF or the supervisor's
-ownership and permit path.
+The explicit semantic TX lane now has two distinct results. The historical
+conformance fixture at
+`artifacts/hil/tx-hil/20260716T183805Z-e944-rete-announce-to-e040-rnode/attempt-02-coordinated`
+sent one deterministic Rete ANNOUNCE from Rust to ordinary RNode 1.86, where
+pinned Python RNS 1.3.8 validated its first-hop signature and destination
+binding. That observer did not start a Reticulum instance, and its fixed key,
+zero entropy and old timestamp remain public test material.
+
+The later powered run at
+`artifacts/hil/tx-hil/20260716T230849Z-rust-rete-semantic-roundtrip/attempt-02-post-readback`
+ran the exact same merged image on both Trackers through the product
+`reticulum-rns-rete` surface. E9 and E0 exchanged signed 167-byte ANNOUNCEs,
+learned each other's direct path, then exchanged 147-byte encrypted DATA with
+the exact 36-byte `RRH1 || initiator destination || responder destination`
+plaintext and a 115-byte delivery proof. The cross-validated DATA receipt
+`4ca4ed5d856f45e1abb351762a3ccb8671c9c675a6bbfa082d73010746587a4d`
+reached `Delivered`; no live receipt remained. Every RNS packet fit one physical
+frame, both roles logged two TX completions, and both radios shut down.
+
+The 425,744-byte merged image, SHA-256
+`93ccac552d75a27f2cec571a9f00900210b4b862f157fca57c0cc50c9641fbc5`,
+was read back byte-for-byte from both boards; the application is 360,208 bytes
+and the preserved ELF SHA-256 is
+`e85d88a8afbf89ea2392b42505abe637da946ca4448c0b5416a2e3c53925bd11`.
+Both roles used ADC-backed TRNG, fixed public HIL identities and a 64 KiB heap.
+Observed heap peaks were 548 bytes on E9 and 764 bytes on E0, which are
+short-path regression data rather than stack, soak or full-product memory
+qualification. The passing implementation also keeps high-resolution RNode
+fragment ticks separate from Rete protocol seconds; an earlier capture exposed
+the unit mismatch after an initial uncoordinated attempt.
+
+This closes the direct Rust/Rete announce, encrypted-DATA and proof path on the
+real radios. It does not close production identity/durability, reboot recovery,
+the permanent node-core/radio/storage/API ownership graph, multi-hop or
+forwarding, Links/Resources, LXMF, formal RF qualification or regional policy.
 
 `reticulum-storage-model` now defines canonical accepted intents, lifecycle and
 audit records, complete-replay sealing, and exact preflight/apply plans.
@@ -320,18 +345,19 @@ qualify controlled power cuts, endurance/soak, at-rest encryption, or a product
 runtime. Because the HIL calls the journal directly, it also does not qualify
 the actor on hardware.
 
-The next product-code slice is firmware integration of the radio-independent
-storage actor and authenticated API adapter: a permanent Embassy task, the
-product `esp-storage` partition adapter, boot service gating, framing/session
-and an initial USB transport. The portable core ordering and dispatch are now
-enforceable, but no product transport or runtime serves through them yet. This
-is followed by integration with ordinary
-RNS tick/actions and RX ingress in the eventual sole node owner. Current
-product-candidate graphs remain TX-free only
-because the sole radio-owner path is not integrated. The two attached
-antenna-equipped boards are cleared for NA915 development TX/RX, so a bounded
-integration image may transmit when useful; the semantic TX HIL and derived
-RNode peer remain development artifacts, not product graphs.
+The next product-code slice promotes the proven Rete-owner pattern into the
+permanent firmware and connects it to the sole radio owner, portable storage
+actor and authenticated API adapter. That permanent node task must own ordinary
+Rete ingress/actions and preserve separate RNode-tick and Rete-seconds time
+domains. The storage task must connect the product `esp-storage` partition and
+boot gates; the API requires framing/session and an initial transport. A send
+becomes visible only after durable acceptance, and proof/timeout acknowledgement
+waits for durable projection. No product transport or runtime serves through
+these boundaries yet. Current product-candidate graphs remain TX-free only
+because this integration is absent. The two antenna-equipped boards remain
+cleared for NA915 development TX/RX, so the permanent-path integration image
+may reproduce the round trip directly; another comparison HIL is not the next
+architecture gate.
 
 LXMF message and sibling-attempt state must ultimately be persisted before an
 outward terminal event can be lost. The future device-API intent queue remains
@@ -647,19 +673,21 @@ only after commit or exact readback equivalence, retains one bounded ambiguous
 mutation for autonomous retry, and faults closed on invariant contradictions.
 The next bounded product integration hosts it in a permanent Embassy task,
 connects the product `esp-storage` partition and boot gates, and serves it
-through the implemented authenticated device-API adapter. No framing, session
-or firmware transport currently serves through that adapter.
-Ordinary RNS tick/actions, RX ingress and submission handling must then merge
-into the eventual sole node owner. Firmware integration, driver/RF behavior,
-safe projector-slot retirement and product-runtime powered reboot recovery also
-remain open. The isolated journal clean-path/software-reset replay is already
-qualified separately and does not close these integration gates.
-Current product-candidate firmware graphs remain TX-free because no concrete
-sole radio owner consumes this path yet. Development TX is authorized on the
-two attached antenna-equipped boards under the explicit NA915 profile; future
-integration images need not remain inert once they preserve the same bounded
-ownership and regional/airtime policy. The semantic TX HIL and derived RNode
-peer remain development artifacts rather than product dependencies.
+through the implemented authenticated device-API adapter. In the same runtime,
+the proven `EmbeddedNode` owner pattern moves behind the permanent sole node and
+radio owners, with high-resolution RNode reassembly ticks kept distinct from
+Rete protocol seconds. No framing, session or firmware transport currently
+serves through the adapter, and the HIL graph deliberately excludes storage,
+API and node-core.
+
+Firmware integration, safe projector-slot retirement and product-runtime
+powered reboot recovery remain open. The isolated journal clean-path/software-
+reset replay is qualified separately, while the same-image Rete HIL separately
+qualifies only the bounded announce/DATA/proof radio path. Neither closes the
+combined product boundary. Development TX is authorized on the two attached
+antenna-equipped boards under the explicit NA915 profile, so the integrated
+runtime can reproduce that exchange without another comparison image once it
+preserves bounded ownership and a regional/airtime policy.
 
 ## Core traits and event model
 
@@ -1343,12 +1371,15 @@ a long soak; heap and the shared executor stack remain within measured limits;
 and logic-analyzer, SPI and on-air evidence shows CTX never selects TX and the
 Tracker never issues `SetTx` or emits a packet.
 
-The separately named semantic TX HIL now supplies complementary exploratory
-evidence: one deterministic Rete ANNOUNCE crossed the real Tracker/RNode link
-and passed pinned Python RNS 1.3.8 first-hop validation. Because that image is
-an explicitly hazardous conformance fixture rather than the receive-only or
-product graph, it does not weaken or satisfy the RX-only Phase 1 exit above and
-does not advance the Phase 2 identity, admission, forwarding or routing gates.
+The separately named semantic TX lane now supplies two complementary results:
+the historical deterministic ANNOUNCE crossed the Tracker/RNode link and passed
+pinned Python RNS 1.3.8 validation, and the later identical-image Rust/Rete run
+completed two signed ANNOUNCEs, encrypted DATA and its delivery proof on the two
+Trackers. The latter exercises the product RNS adapter surface and real radio
+path, but its fixed public identities and intentionally isolated dependency
+graph are still a bounded HIL rather than the permanent firmware. Neither mode
+weakens or satisfies the RX-only Phase 1 exit above, nor closes Phase 2 durable
+identity, forwarding, multi-hop, Resource or routing gates.
 
 ### Phase 2 — always-on RNS transport node
 
@@ -1490,15 +1521,13 @@ Do not begin by porting UI screens or by adding another direct packet fixture.
 The Tracker journal clean path and software-reset replay are now qualified on
 powered hardware, and the portable sole storage actor now enforces mount-before-
 service, persist-before-visible ordering, sole projector ownership, autonomous
-ambiguous-result reconciliation and fail-closed faults. The chosen next bounded
-product-code slice remains radio-independent: host that actor in a permanent
-Embassy task, connect the product `esp-storage` partition adapter and boot gates,
-then attach the implemented authenticated adapter to a framing/session/USB path.
-Complete that service boundary before giving the eventual sole node owner an
-external send source. In parallel, extend the
-isolated storage HIL with separately recorded
-controlled power cuts and endurance/soak runs; neither lane blocks accurately
-documenting the completed clean-path result.
+ambiguous-result reconciliation and fail-closed faults. The same-image Rete HIL
+now also qualifies the bounded direct announce/DATA/proof radio lifecycle. The
+chosen next slice combines those proven ownership patterns in permanent
+firmware: one node owner, one radio owner, one storage actor, and authenticated
+API dispatch. It is no longer useful to defer the Rete/radio connection for
+another comparison HIL. Controlled storage power cuts and endurance/soak remain
+parallel qualification work rather than substitutes for that integration.
 
 The independent hardware lane remains formal qualification of the already
 target-linked receive-only slice before connecting a product-candidate RF
@@ -1508,34 +1537,33 @@ supplemental smoke on E9:44. There is no matching `bf23cc5` closure bundle, and
 formal powered electrical/RF, retention, fault, backpressure, and soak evidence
 remain open.
 
-Exploratory transmit compatibility is no longer open at either the PHY/framing
-or deterministic first-hop ANNOUNCE boundary. After the sentinel matrix passed,
-the semantic HIL delivered exactly one 167-byte ordinary RNode packet and
-pinned Python RNS 1.3.8 validated its signed first-hop ANNOUNCE; E9 logged one
-TX completion, shut the radio down and entered inert hold. This still does not
-close production identity/time/entropy, live node/transport admission,
-forwarding, LXMF, durable submission, airtime policy, formal electrical/RF or
-regional gates.
+Exploratory transmit compatibility is no longer open at the PHY/framing,
+first-hop ANNOUNCE, direct encrypted DATA or delivery-proof boundary. The
+historical Python/RNode result remains the independent first-hop check. In the
+later same-image run, E9 and E0 each completed two transmissions, the current
+DATA receipt reached `Delivered`, the receipt table emptied and both radios
+shut down. Exact readback tied both boards to the same merged image. That run is
+paired firmware serial/readback evidence, not an independent RF capture. It
+still does not close production identity/durability, reboot recovery, the combined
+permanent owner graph, forwarding/multi-hop, Links/Resources, LXMF, sustained
+memory, airtime policy, formal electrical/RF or regional gates.
 
-1. Integrate the portable sole storage actor and authenticated device-API
-   adapter into one permanent firmware task and initial framed transport, then
-   extend the completed powered clean-path HIL with actor-on-target, controlled
-   power-cut and endurance/soak coverage.
-2. Merge RX reassembly, `NodeCore::ingest()`/tick actions, submission projection
-   and exact persistence acknowledgements under the sole node owner. Use the
-   two authorized NA915 boards for real TX/RX whenever it shortens integration;
-   keep one explicit regional/airtime policy and one radio owner.
-3. Finish receive-only stack/heap/electrical/fault/backpressure/soak
+1. Promote `EmbeddedNode` into the permanent sole node task with ordinary Rete
+   ingress/actions, timed RNode reassembly, and separate RNode-tick/Rete-seconds
+   clocks; connect its bounded actions to the sole radio owner.
+2. Host the portable storage actor on the product partition and attach the
+   authenticated API adapter and initial framed transport. Preserve durable
+   acceptance before Rete preparation and durable terminal projection before
+   acknowledgement.
+3. Reproduce the same two-board announce/DATA/proof exchange through that
+   permanent graph, registered external packet owners, supervisor/permit path
+   and one concrete regional/airtime policy. Use the two authorized NA915
+   boards directly rather than adding another comparison image.
+4. Extend powered storage evidence with actor-on-target, controlled power cuts
+   and endurance/soak, and finish receive-only
+   stack/heap/electrical/fault/backpressure/soak
    qualification; treat the Tracker `16/4/32/2` capacity profile as measured,
    not the full-appliance ceiling.
-4. Make the first product-path RF gate a bounded endpoint DATA round trip: a
-   full pinned Python/RNode peer emits a fresh announce, the real RX path admits
-   it through `NodeCore`, one durably accepted small plaintext becomes encrypted
-   DATA in a registered external buffer, and only the existing
-   supervisor/permit plus a concrete region/airtime policy can expose it to the
-   sole radio owner. Python must decrypt the DATA and return a proof that the
-   same node owner correlates. No conformance constructor, fixture private key,
-   direct frame bypass, forwarding or LXMF belongs in this slice.
 
 The LXMF wire/resource work can continue on the host, but it should not enlarge
 the first radio HIL image or couple protocol qualification to a SPA/mobile
