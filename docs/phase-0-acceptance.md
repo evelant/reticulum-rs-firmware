@@ -236,9 +236,11 @@ regression expectations are tracked in
 [the Rete hardening backlog](rete-upstream-backlog.md).
 The portable external-buffer route/permit/completion/recovery slice and the
 standalone bounded Embassy handoff have focused host suites and target checks.
-There is still no dispatcher actor, firmware connection, radio integration, or
-claim that RF occurred. All firmware graphs remain TX-free, and the only
-radio-bearing firmware artifact remains RX-only.
+Those suites now include a manually stepped no-RF end-to-end harness over the
+real handoff ports. There is still no executor-driven dispatcher actor,
+firmware connection, radio integration, or claim that RF occurred. All
+firmware graphs remain TX-free, and the only radio-bearing firmware artifact
+remains RX-only.
 
 ## Rete production hard gates
 

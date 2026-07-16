@@ -1,7 +1,8 @@
 # Owning async TX handoff
 
 **Status:** portable route/permit/completion/recovery and owning Embassy
-handoff storage implemented and target-checked; dispatcher actor next; no
+handoff storage implemented and target-checked; host-only manually stepped
+no-RF integration harness implemented; persistent dispatcher actor next; no
 firmware TX graph
 **RF status:** compile-disabled until antenna/load and regional authorization
 
@@ -52,6 +53,16 @@ obtained from `ConstStaticCell` and creates one `NodeHandoff` plus one
 Embassy channels/senders/receivers, `clear()`, and owner-taking async sends are
 not public. Only receiving may await; all four send directions use
 non-awaiting `try_send` and return the unchanged value on pressure.
+
+Cancelling a receive future while it is still pending leaves its value in the
+Embassy channel, including when it was woken but not polled again. Once a
+receive returns an owning value, however, cancellation of a surrounding future
+would logically abandon that owner unless it was first moved into persistent
+machine state. The product dispatcher must therefore keep every `TxJob`,
+pending owner, authorized owner, completion, and retained full-channel value in
+a state machine allocated outside the task future. A thin wait helper may
+borrow that machine and store a ready value before returning, but a monolithic
+async operation must not retain an owner only in a local across an await.
 
 The return path carries more than the bare reference. Node-core already
 provides non-`Copy` owning typestates whose payload remains one buffer pointer
@@ -254,13 +265,19 @@ Implemented and host/target-testable without RF:
 - stable-address/no-copy, pressure, cancelled-receive, crossed-reply,
   stale-token, delayed-reply, terminal-race, cumulative-authorization, and
   late-recovery tests;
+- a host-only, manually stepped no-RF integration harness covering authorized
+  and denied hops, exact-deadline expiry/recovery, deterministic two-interface
+  fan-out, and terminal-before-authorization suppression across the real
+  handoff ports;
 - generic RISC-V and ESP32-S3 compilation; and
 - an exact handoff dependency contract plus dependency/feature guards that keep
   Tracker TX unavailable.
 
-The next implementation slice is the sole dispatcher actor using the frozen
-portable transitions and handoff capabilities. The handoff remains outside
-every firmware graph; no actor or radio path consumes it yet.
+The next product slice is the sole persistent, non-terminating dispatcher actor
+using the frozen portable transitions and handoff capabilities. The handoff
+remains outside every firmware graph; only the host harness drives
+representative portable protocol paths, and no production actor or radio path
+consumes it.
 
 The graph policy checks every current Tracker profile and the Cargo
 `--all-features` closure for both `reticulum-node-core` and

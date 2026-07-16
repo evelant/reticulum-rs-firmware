@@ -43,11 +43,13 @@ acknowledgement, and a missing owner is never fabricated or force-reused.
 
 The separate `reticulum-tx-handoff` crate now carries these unique static
 owners through bounded Embassy channels without exposing raw channel handles
-or an owner-taking async send. It remains disconnected from device API,
-firmware radio tasks, and RF TX; the next implementation boundary is the sole
-dispatcher actor. Reboot persistence and allocation-backed ordinary RNS
-actions remain open. Every firmware dependency graph remains TX-free, and the
-only radio-bearing firmware artifact remains RX-only.
+or an owner-taking async send. A host-only, manually stepped no-RF harness now
+exercises the routed DATA owner lifecycle across the real jobs, permit-request,
+permit-reply, and return ports. It remains disconnected from device API,
+firmware radio tasks, and RF TX; the next product boundary is the sole
+persistent dispatcher actor. Reboot persistence and allocation-backed ordinary
+RNS actions remain open. Every firmware dependency graph remains TX-free, and
+the only radio-bearing firmware artifact remains RX-only.
 
 ## Read first
 

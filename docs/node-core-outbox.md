@@ -1,7 +1,8 @@
 # Bounded node-core external-buffer DATA dispatch
 
 **Status:** portable route/permit/completion/recovery and owning handoff storage
-implemented; no dispatcher actor or firmware RF TX linkage
+implemented; host-only manually stepped no-RF integration harness implemented;
+no dispatcher actor or firmware RF TX linkage
 **Rete pin:** `f6f5fb0637d00691e09fa0105be4df902405fee4`
 
 ## Purpose and boundary
@@ -288,11 +289,15 @@ deadline authorization/reply/frame/completion/maintenance behavior, serialized
 fan-out, coherent late recovery, fault and invariant quarantine, cross-
 incarnation/stale returns, receipt terminal races, tombstone backpressure, and
 exact acknowledgement reuse. A layout guard keeps packet-sized arrays out of
-dispatch slots. Five handoff tests cover production-mutex static construction,
-static-reference identity, FIFO ordering, owner/control pressure, exact
-`ChannelFull<T>` returns and mismatched permit replies. Generic bare-metal and
-ESP32-S3 checks exercise both node-core and the separate Embassy edge; they do
-not link either into firmware or exercise a dispatcher or radio path.
+dispatch slots. Five handoff unit tests cover production-mutex static
+construction, static-reference identity, FIFO ordering, owner/control pressure,
+exact `ChannelFull<T>` returns and mismatched permit replies. Five host-only
+integration tests manually step the real job/request/reply/return ports through
+authorized no-RF frame inspection, policy denial, exact-deadline grant
+expiry/recovery, serialized two-interface fan-out with the same owner, and
+terminal-before-authorization suppression. Generic bare-metal and ESP32-S3
+checks compile node-core and the Embassy edge; neither is linked into firmware,
+and there is still no executor-driven dispatcher actor or radio path.
 
 ## Next boundary
 
@@ -302,9 +307,9 @@ depth-one channels isolate permit requests/replies, and every send is a
 non-awaiting `try_send` that returns the unchanged value on pressure. The next
 slice is actor orchestration, not RF transmission:
 
-1. Implement the sole non-terminating dispatcher state loop without exposing
-   raw Embassy handles or holding an owner across unrelated cancellation
-   points.
+1. Implement the sole non-terminating dispatcher as a persistent state machine
+   allocated outside its task future, without exposing raw Embassy handles or
+   holding an owner only in a cancellable async local.
 2. Enforce one outstanding permit exchange, retain every full/mismatched
    control value, and map fatal control-plane faults into supervised TX
    disablement.

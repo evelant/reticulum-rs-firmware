@@ -100,7 +100,7 @@ Claims in READMEs were not treated as proof of embedded portability.
 | Focused `rete` core/transport/LXMF host suites at the reviewed upstream snapshot | 391 pass | Historical selection evidence for wire, crypto, forwarding, link/resource, and LXMF codec behavior; this is not evidence for the later lifecycle patch or a complete Python/RF conformance claim |
 | Exact `f6f5fb0` receipt/LXMF lifecycle library suites | 502 pass | CI checks the pinned fork directly: 151 transport, 124 stack, 143 LXMF and 84 daemon tests, plus all-target host and `thumbv6m-none-eabi` checks |
 | `reticulum-node-core`, generic bare-metal and ESP32-S3 Xtensa | Pass | External-buffer dispatch metadata, exact attempt ledger, deterministic routing, opaque permit/completion typestates, exact deadlines and retained recovery compile without `std` on both targets; the focused host suite has no async or radio linkage and the current receive-only firmware intentionally does not link it |
-| `reticulum-tx-handoff`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | Static one-time channel-role splitting, exact owner returns, depth-one permit control, and cancellation-safe receive behavior compile on both targets; graph policy keeps the crate outside firmware |
+| `reticulum-tx-handoff`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | Static one-time channel-role splitting, exact owner returns, depth-one permit control, and cancellation-safe receive behavior compile on both targets; a host-only manually stepped no-RF harness exercises representative routed DATA paths across the real ports; graph policy keeps the crate outside firmware |
 | `reference/rete/examples/esp32s3`: `cargo +esp check --release` | Pass with warnings | Current bare-metal ESP32-S3/SX1262/Wi-Fi integration compiles with the installed ESP toolchain; it targets Heltec WiFi LoRa 32 V3/V4 pins, not the Tracker BSP |
 | Precursor `reticulum-core`/`lxmf` host suites; `micron` host suite | 70 pass; 17 pass | Strong embedded-client interop and hostile-input evidence, including real Nomad/Micron fixtures; the Xous crates still use `std` and are not a bare-metal dependency as-is |
 | `foxhole-micron` host suite | 24 pass | Focused confirmation of links, fields, colors, sections, literal/comment handling and control-character sanitisation; it remains a ratatui/`std` comparison parser |
@@ -223,15 +223,16 @@ host Clippy, generic bare-metal, and ESP32-S3 checks cover this portable slice.
 
 This is not yet the product's durable submission model or an authorized RF TX
 graph. The in-RAM ledger cannot rehydrate Rete receipts after reboot, ordinary
-RNS actions are still allocation-backed, and the portable TX typestates have
-only been connected to the standalone `reticulum-tx-handoff` storage API, not
-to a dispatcher actor, firmware, or a radio. The scalar
+RNS actions are still allocation-backed, and the portable TX typestates and
+handoff are exercised together only by a manually stepped no-RF host harness,
+not by a dispatcher actor, firmware, or radio. The scalar
 dispatch record remains authoritative when an owner misses its deadline; a
 matching late return finalizes/reclaims the exact buffer, while faults and
 same-lease invariants retain an owning quarantine. Missing ownership is never
-fabricated or force-reused. The next slice must implement the sole dispatcher
-actor over the bounded owning Embassy handoff and define reboot recovery. Every
-firmware graph remains TX-free and the radio-bearing lab image remains RX-only.
+fabricated or force-reused. The next slice must implement the sole persistent
+dispatcher actor over the bounded owning Embassy handoff and define reboot
+recovery. Every firmware graph remains TX-free and the radio-bearing lab image
+remains RX-only.
 
 LXMF message and sibling-attempt state must ultimately be persisted before an
 outward terminal event can be lost. The future device-API intent queue remains
@@ -505,9 +506,12 @@ dispatcher maps authenticated wire requests into separately bounded intents.
 `reticulum-tx-handoff` now moves these static owning typestates through
 pool-sized Embassy job/return channels and separate depth-one permit channels.
 Its split-once, non-`Clone` capabilities expose only ownership-preserving
-`try_send` and receive operations. The next integration must implement the sole
-dispatcher actor over those capabilities and enforce one outstanding permit
-exchange. The current slice has no firmware or radio connection; its authorized
+`try_send` and receive operations. A host-only manually stepped no-RF harness
+exercises representative DATA owner, permit, one-shot frame, completion,
+recovery, and fan-out paths over those ports. The next product integration must
+implement the sole persistent dispatcher actor and enforce one outstanding
+permit exchange without storing an owner only in a cancellable future local.
+The current slice has no firmware or radio connection; its authorized
 completion vocabulary is conservative metadata and does not claim RF occurred.
 Every firmware graph remains TX-free, and the radio-bearing lab image remains
 RX-only.
