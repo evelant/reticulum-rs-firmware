@@ -1704,6 +1704,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "reticulum-tx-handoff"
+version = "0.1.0"
+dependencies = [
+ "embassy-futures",
+ "embassy-sync 0.8.0",
+ "rand_core 0.6.4",
+ "reticulum-node-core",
+ "static_cell",
+]
+
+[[package]]
 name = "riscv"
 version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

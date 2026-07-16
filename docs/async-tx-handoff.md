@@ -1,7 +1,8 @@
 # Owning async TX handoff
 
-**Status:** portable route/permit/completion/recovery state implemented; owning
-Embassy handoff next; no firmware TX graph
+**Status:** portable route/permit/completion/recovery and owning Embassy
+handoff storage implemented and target-checked; dispatcher actor next; no
+firmware TX graph
 **RF status:** compile-disabled until antenna/load and regional authorization
 
 ## Decision
@@ -12,9 +13,10 @@ not move or copy, and the radio actor can retain the unique buffer across an
 `await` without borrowing node-core.
 
 Node-core remains portable and Embassy-free. It owns attempt/dispatch metadata
-but receives an externally owned buffer for preparation. A small handoff crate
-owns the Embassy channel topology. The Tracker firmware will not gain a
-TX-capable radio type or feature as part of this slice.
+but receives an externally owned buffer for preparation. The implemented
+`reticulum-tx-handoff` crate owns the Embassy channel topology. The Tracker
+firmware does not depend on that crate and gains no TX-capable radio type or
+feature as part of this slice.
 
 ## Ownership topology
 
@@ -35,11 +37,21 @@ has the inverse channel roles; it serializes each route and invokes the
 selected interface internally. Independent per-interface actors would instead
 require per-interface queues or a routing dispatcher in front of them, because
 multiple consumers of one jobs queue could take work for the wrong interface.
-Both channel capacities equal the pool size. While one endpoint owns a buffer,
-its outbound channel can contain at most every other buffer; a send is therefore
-capacity-infallible if the endpoints remain encapsulated. An unexpected full
-result must return the unique reference to the caller and become an invariant
-fault, never drop or duplicate ownership.
+Both owner-channel capacities equal the pool size. The separate permit-request
+and permit-reply channels each have depth one, matching the single serialized
+dispatcher. While one endpoint owns a buffer, its outbound owner channel can
+contain at most every other buffer; a send is therefore capacity-infallible if
+the endpoints remain encapsulated. An unexpected full result returns the exact
+non-`Copy` value in `ChannelFull<T>` and becomes an invariant fault, never a
+drop or duplication.
+
+`TxHandoff::split(&'static mut self)` consumes the unique reference normally
+obtained from `ConstStaticCell` and creates one `NodeHandoff` plus one
+`DispatcherHandoff`. Their individual port capabilities are non-`Clone`,
+`must_use`, and require `&mut self` for every send or receive operation. Raw
+Embassy channels/senders/receivers, `clear()`, and owner-taking async sends are
+not public. Only receiving may await; all four send directions use
+non-awaiting `try_send` and return the unchanged value on pressure.
 
 The return path carries more than the bare reference. Node-core already
 provides non-`Copy` owning typestates whose payload remains one buffer pointer
@@ -131,9 +143,10 @@ The transaction must:
    and generations on success; and
 7. enqueue the unique routed reference as a job.
 
-Pool exhaustion is rejected before entropy or RNS mutation. If the future jobs
-channel `try_send` reports full, the caller still owns the returned `TxJob` and
-calls `rollback_queued(job, now)`. Before its deadline and before any prior
+Pool exhaustion is rejected before entropy or RNS mutation. If
+`NodeHandoff::jobs.try_send` reports full, the caller still owns the `TxJob`
+returned by `ChannelFull::into_inner()` and calls `rollback_queued(job, now)`.
+Before its deadline and before any prior
 authorization this cancels the exact receipt; at or after the deadline it
 enters and finalizes exact-owner recovery, returning `Recovered`. It must never
 use a cancellable `send(job).await` that can lose the owner future.
@@ -151,16 +164,17 @@ irreversible hardware action, the future interface dispatcher must split its
   reservation: change `Routed -> Authorized`, set `may_have_transmitted`, and
   issue a generation-bound non-`Copy` permit.
 
-Permit requests and replies use a separate bounded scalar control plane; they
+Permit requests and replies use separate depth-one scalar channels; they
 never enter either buffer-owning channel or affect its capacity proof. A
 request binds owner, node instance, packet slot, dispatch generation,
 interface, and hop generation. Permit issuance is one single-owner transition
 and is irrevocable: after it succeeds, the dispatch is conservatively
 classified as possibly transmitted even if the actor later reports a driver
-error or misses the deadline. The future handoff must bind at most one
-outstanding exchange to each buffer, define full-channel behavior for both
-permit and cooperative-return messages, and test every `try_send`
-ownership/error path.
+error or misses the deadline. The handoff returns exact full-channel values for
+requests, replies, and cooperative owner returns. The future dispatcher actor
+must keep at most one permit exchange outstanding, retain full or mismatched
+control values, and disable TX on a control-plane invariant instead of
+dropping either side.
 
 `PermitPendingTx::resolve(reply, now)` rejects a mismatched reply while retaining
 both owners. A grant resolved at or after its deadline becomes
@@ -234,18 +248,23 @@ Implemented and host/target-testable without RF:
 - external-buffer node-core ownership, target resolution, deterministic
   serialized fan-out, opaque permit state, one-shot authorized byte access,
   completion, exact deadlines, and recovery diagnostics;
-- stable-address/no-copy, pressure, stale-token, delayed-reply, terminal-race,
-  cumulative-authorization, and late-recovery tests;
+- `reticulum-tx-handoff` static one-time role splitting, pool-depth owner
+  channels, depth-one permit channels, exclusive non-`Clone` capabilities, and
+  exact `ChannelFull<T>` ownership returns;
+- stable-address/no-copy, pressure, cancelled-receive, crossed-reply,
+  stale-token, delayed-reply, terminal-race, cumulative-authorization, and
+  late-recovery tests;
 - generic RISC-V and ESP32-S3 compilation; and
-- dependency/feature guards that keep Tracker TX unavailable.
+- an exact handoff dependency contract plus dependency/feature guards that keep
+  Tracker TX unavailable.
 
-The next implementation slice is the unique-reference Embassy handoff using
-the already frozen portable transitions. It remains outside every firmware
-graph until its channel ownership and cancellation behavior is proven.
+The next implementation slice is the sole dispatcher actor using the frozen
+portable transitions and handoff capabilities. The handoff remains outside
+every firmware graph; no actor or radio path consumes it yet.
 
 The graph policy checks every current Tracker profile and the Cargo
-`--all-features` closure for both `reticulum-node-core` and the future
-`reticulum-tx-handoff` crate. Adding a feature-only transitive ownership path
+`--all-features` closure for both `reticulum-node-core` and
+`reticulum-tx-handoff`. Adding a feature-only transitive ownership path
 therefore fails before a new firmware feature can bypass the reviewed list.
 
 Still requires explicit antenna/load and regional authorization:

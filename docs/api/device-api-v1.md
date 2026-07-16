@@ -189,9 +189,10 @@ deadline before mutation, resolves the enabled-interface route, and returns a
 unique routed `TxJob`; that prompt dispatch ownership is not client-intent
 storage, and its RNS receipt timeout has already started. Packet bytes remain
 inaccessible until an opaque permit exchange produces `AuthorizedTx`, whose
-`frame(now)` accessor is one-shot and exact-deadline checked. This portable
-state has no async handoff or radio integration, and the host-only operation
-does not invoke it.
+`frame(now)` accessor is one-shot and exact-deadline checked. A standalone
+bounded async handoff now carries these typestates, but no device-API intent
+owner or dispatcher invokes it, there is no radio integration, and the
+host-only operation remains disconnected from it.
 
 Successful host-simulation response body:
 

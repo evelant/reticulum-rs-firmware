@@ -37,6 +37,7 @@ cargo test --locked -p reticulum-rns-leviculum
 cargo check --locked \
   -p reticulum-device-api \
   -p reticulum-node-core \
+  -p reticulum-tx-handoff \
   -p reticulum-rns-conformance \
   -p reticulum-rns-rete \
   -p reticulum-rns-rete-rx \
@@ -233,9 +234,10 @@ packets, destinations and several Link paths still contain `Vec` allocations;
 opaque native failures remain possible. The exact upstream repairs and
 regression expectations are tracked in
 [the Rete hardening backlog](rete-upstream-backlog.md).
-The portable external-buffer route/permit/completion/recovery slice has a
-focused host suite but no Embassy channel, interface actor, radio integration,
-or claim that RF occurred. All firmware graphs remain TX-free, and the only
+The portable external-buffer route/permit/completion/recovery slice and the
+standalone bounded Embassy handoff have focused host suites and target checks.
+There is still no dispatcher actor, firmware connection, radio integration, or
+claim that RF occurred. All firmware graphs remain TX-free, and the only
 radio-bearing firmware artifact remains RX-only.
 
 ## Rete production hard gates

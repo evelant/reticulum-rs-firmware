@@ -322,7 +322,9 @@ fn graph_policy() -> ExitCode {
         validate_firmware_dependency_boundary(&json, &root)
             .map_err(|error| format!("firmware receive-only dependency boundary: {error}"))?;
         validate_portable_layer_dependency_boundary(&json, &root)
-            .map_err(|error| format!("portable layer dependency boundary: {error}"))
+            .map_err(|error| format!("portable layer dependency boundary: {error}"))?;
+        validate_tx_handoff_dependency_boundary(&json, &root)
+            .map_err(|error| format!("TX handoff dependency boundary: {error}"))
     });
     if let Err(error) = resolved {
         eprintln!("error: {error}");
@@ -339,7 +341,8 @@ fn graph_policy() -> ExitCode {
              excludes TX ownership crates; resolved Rete packages match reported \
              source/revision; esp-rtos resolves only to the reviewed local patch and its \
              checked vendor inventory reconstructs the pristine registry source; the device \
-             API and node core remain mutually isolated and free of direct platform dependencies"
+             API and node core remain mutually isolated and free of direct platform dependencies; \
+             the TX handoff depends only on node-core and Embassy Sync 0.8"
         );
         ExitCode::SUCCESS
     }
@@ -429,6 +432,136 @@ fn validate_portable_layer_dependency_boundary(
                 ));
             }
         }
+    }
+
+    Ok(())
+}
+
+fn validate_tx_handoff_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let expected_manifest = workspace.join("crates/tx-handoff/Cargo.toml");
+    let matching = packages
+        .iter()
+        .filter(|package| {
+            package["name"].as_str() == Some("reticulum-tx-handoff")
+                && package["source"].is_null()
+                && package["manifest_path"].as_str().map(Path::new)
+                    == Some(expected_manifest.as_path())
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err(format!(
+            "expected exactly one local reticulum-tx-handoff package at {}, found {}",
+            expected_manifest.display(),
+            matching.len()
+        ));
+    }
+
+    let dependencies = matching[0]["dependencies"]
+        .as_array()
+        .ok_or_else(|| "reticulum-tx-handoff package has no dependency array".to_owned())?;
+    let normal = dependencies
+        .iter()
+        .filter(|dependency| dependency["kind"].is_null())
+        .collect::<Vec<_>>();
+    if normal.len() != 2 {
+        return Err(format!(
+            "reticulum-tx-handoff must have exactly two normal dependencies, found {}",
+            normal.len()
+        ));
+    }
+
+    let node_path = workspace.join("crates/node-core");
+    let node = normal
+        .iter()
+        .filter(|dependency| dependency["name"].as_str() == Some("reticulum-node-core"))
+        .collect::<Vec<_>>();
+    if node.len() != 1
+        || node[0]["path"].as_str().map(Path::new) != Some(node_path.as_path())
+        || !node[0]["source"].is_null()
+        || node[0]["optional"].as_bool() != Some(false)
+        || !node[0]["rename"].is_null()
+        || !node[0]["target"].is_null()
+        || node[0]["uses_default_features"].as_bool() != Some(false)
+        || node[0]["features"]
+            .as_array()
+            .is_none_or(|features| !features.is_empty())
+    {
+        return Err(
+            "reticulum-node-core must be one unconditional local normal dependency with no features"
+                .to_owned(),
+        );
+    }
+
+    let embassy = normal
+        .iter()
+        .filter(|dependency| dependency["name"].as_str() == Some("embassy-sync"))
+        .collect::<Vec<_>>();
+    if embassy.len() != 1
+        || embassy[0]["req"].as_str() != Some("=0.8.0")
+        || embassy[0]["source"].as_str()
+            != Some("registry+https://github.com/rust-lang/crates.io-index")
+        || !embassy[0]["path"].is_null()
+        || embassy[0]["optional"].as_bool() != Some(false)
+        || !embassy[0]["rename"].is_null()
+        || !embassy[0]["target"].is_null()
+        || embassy[0]["uses_default_features"].as_bool() != Some(false)
+        || embassy[0]["features"]
+            .as_array()
+            .is_none_or(|features| !features.is_empty())
+    {
+        return Err(
+            "embassy-sync must be the unconditional feature-free registry =0.8.0 normal dependency"
+                .to_owned(),
+        );
+    }
+
+    let expected_dev = [
+        ("embassy-futures", "=0.1.2"),
+        ("rand_core", "=0.6.4"),
+        ("static_cell", "=2.1.1"),
+    ];
+    let development = dependencies
+        .iter()
+        .filter(|dependency| dependency["kind"].as_str() == Some("dev"))
+        .collect::<Vec<_>>();
+    if development.len() != expected_dev.len() {
+        return Err(format!(
+            "reticulum-tx-handoff must have exactly {} reviewed dev dependencies, found {}",
+            expected_dev.len(),
+            development.len()
+        ));
+    }
+    for (name, requirement) in expected_dev {
+        let dependency = development
+            .iter()
+            .filter(|dependency| dependency["name"].as_str() == Some(name))
+            .collect::<Vec<_>>();
+        if dependency.len() != 1
+            || dependency[0]["req"].as_str() != Some(requirement)
+            || dependency[0]["source"].as_str()
+                != Some("registry+https://github.com/rust-lang/crates.io-index")
+            || dependency[0]["optional"].as_bool() != Some(false)
+            || !dependency[0]["rename"].is_null()
+            || !dependency[0]["target"].is_null()
+        {
+            return Err(format!(
+                "reticulum-tx-handoff dev dependency {name} does not match the reviewed pin"
+            ));
+        }
+    }
+    if dependencies
+        .iter()
+        .any(|dependency| dependency["kind"].as_str() == Some("build"))
+    {
+        return Err("reticulum-tx-handoff must not have build dependencies".to_owned());
     }
 
     Ok(())
@@ -2015,22 +2148,22 @@ mod tests {
             );
         }
 
-        let mut transitive_node = metadata.clone();
-        let node_path = root.join("crates/node-core");
-        transitive_node["packages"]
-            .as_array_mut()
-            .unwrap()
-            .push(package_fixture(
-                "node-core-id",
-                "reticulum-node-core",
-                &node_path,
-            ));
-        transitive_node["resolve"]["nodes"][3]["deps"] =
-            serde_json::json!([resolved_dependency_fixture("node-core-id")]);
-        assert!(
-            validate_firmware_dependency_boundary(&transitive_node.to_string(), &root).is_err(),
-            "transitive node-core firmware dependency was accepted"
-        );
+        for (id, name, relative_path) in [
+            ("node-core-id", "reticulum-node-core", "crates/node-core"),
+            ("tx-handoff-id", "reticulum-tx-handoff", "crates/tx-handoff"),
+        ] {
+            let mut transitive = metadata.clone();
+            transitive["packages"]
+                .as_array_mut()
+                .unwrap()
+                .push(package_fixture(id, name, &root.join(relative_path)));
+            transitive["resolve"]["nodes"][3]["deps"] =
+                serde_json::json!([resolved_dependency_fixture(id)]);
+            assert!(
+                validate_firmware_dependency_boundary(&transitive.to_string(), &root).is_err(),
+                "transitive {name} firmware dependency was accepted"
+            );
+        }
 
         let mut incomplete_resolve = metadata.clone();
         incomplete_resolve["resolve"]["nodes"]
@@ -2073,6 +2206,7 @@ mod tests {
         let metadata = portable_layers_metadata_fixture(&root);
 
         validate_portable_layer_dependency_boundary(&metadata.to_string(), &root).unwrap();
+        validate_tx_handoff_dependency_boundary(&metadata.to_string(), &root).unwrap();
 
         let mut wrong_path = metadata;
         wrong_path["packages"][0]["manifest_path"] =
@@ -2080,6 +2214,50 @@ mod tests {
         assert!(
             validate_portable_layer_dependency_boundary(&wrong_path.to_string(), &root).is_err()
         );
+    }
+
+    #[test]
+    fn tx_handoff_boundary_rejects_wrong_paths_versions_and_extra_dependencies() {
+        let root = workspace_root();
+
+        let mut wrong_path = portable_layers_metadata_fixture(&root);
+        wrong_path["packages"][2]["manifest_path"] =
+            serde_json::Value::String(root.join("elsewhere/Cargo.toml").display().to_string());
+        assert!(validate_tx_handoff_dependency_boundary(&wrong_path.to_string(), &root).is_err());
+
+        let mut wrong_node_path = portable_layers_metadata_fixture(&root);
+        wrong_node_path["packages"][2]["dependencies"][0]["path"] =
+            serde_json::Value::String(root.join("elsewhere").display().to_string());
+        assert!(
+            validate_tx_handoff_dependency_boundary(&wrong_node_path.to_string(), &root).is_err()
+        );
+
+        let mut wrong_embassy = portable_layers_metadata_fixture(&root);
+        wrong_embassy["packages"][2]["dependencies"][1]["req"] =
+            serde_json::Value::String("=0.7.2".to_owned());
+        assert!(
+            validate_tx_handoff_dependency_boundary(&wrong_embassy.to_string(), &root).is_err()
+        );
+
+        let mut extra = portable_layers_metadata_fixture(&root);
+        extra["packages"][2]["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(handoff_dependency_fixture(
+                "reticulum-radio-interface",
+                "*",
+                None,
+            ));
+        assert!(validate_tx_handoff_dependency_boundary(&extra.to_string(), &root).is_err());
+
+        let mut build = portable_layers_metadata_fixture(&root);
+        let mut build_dependency = handoff_dependency_fixture("cc", "=1.0.0", Some("dev"));
+        build_dependency["kind"] = serde_json::Value::String("build".to_owned());
+        build["packages"][2]["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(build_dependency);
+        assert!(validate_tx_handoff_dependency_boundary(&build.to_string(), &root).is_err());
     }
 
     #[test]
@@ -2186,8 +2364,56 @@ mod tests {
                         portable_dependency_fixture("reticulum-rns-rete"),
                     ],
                 },
+                {
+                    "name": "reticulum-tx-handoff",
+                    "source": null,
+                    "manifest_path": root.join("crates/tx-handoff/Cargo.toml"),
+                    "dependencies": [
+                        handoff_path_dependency_fixture(
+                            "reticulum-node-core",
+                            "*",
+                            &root.join("crates/node-core"),
+                            None,
+                        ),
+                        handoff_dependency_fixture("embassy-sync", "=0.8.0", None),
+                        handoff_dependency_fixture("embassy-futures", "=0.1.2", Some("dev")),
+                        handoff_dependency_fixture("rand_core", "=0.6.4", Some("dev")),
+                        handoff_dependency_fixture("static_cell", "=2.1.1", Some("dev")),
+                    ],
+                },
             ]
         })
+    }
+
+    fn handoff_dependency_fixture(
+        name: &str,
+        requirement: &str,
+        kind: Option<&str>,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "source": "registry+https://github.com/rust-lang/crates.io-index",
+            "req": requirement,
+            "kind": kind,
+            "rename": null,
+            "optional": false,
+            "uses_default_features": false,
+            "features": [],
+            "target": null,
+            "path": null,
+        })
+    }
+
+    fn handoff_path_dependency_fixture(
+        name: &str,
+        requirement: &str,
+        path: &Path,
+        kind: Option<&str>,
+    ) -> serde_json::Value {
+        let mut dependency = handoff_dependency_fixture(name, requirement, kind);
+        dependency["source"] = serde_json::Value::Null;
+        dependency["path"] = serde_json::Value::String(path.display().to_string());
+        dependency
     }
 
     fn portable_dependency_fixture(name: &str) -> serde_json::Value {

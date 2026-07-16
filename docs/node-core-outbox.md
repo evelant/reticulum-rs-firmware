@@ -1,13 +1,13 @@
 # Bounded node-core external-buffer DATA dispatch
 
-**Status:** portable route/permit/completion/recovery slice implemented; no
-async or firmware RF TX linkage
+**Status:** portable route/permit/completion/recovery and owning handoff storage
+implemented; no dispatcher actor or firmware RF TX linkage
 **Rete pin:** `f6f5fb0637d00691e09fa0105be4df902405fee4`
 
 ## Purpose and boundary
 
-`reticulum-node-core` proves the portable state transitions on both sides of a
-future owning interface handoff. Firmware supplies a complete 500-byte
+`reticulum-node-core` proves the portable state transitions on both sides of an
+owning interface handoff. Firmware will eventually supply a complete 500-byte
 `TxPacketBuffer`; node-core registers it once, prepares encrypted RNS DATA
 directly into it, resolves the route, and returns a unique routed `TxJob`
 without moving or copying the packet array. The same owner then moves through
@@ -22,15 +22,18 @@ surface uses project-owned identities, destination hashes, interface targets,
 packet-slot IDs, deadlines, attempt tokens and handles, terminal outcomes,
 errors and capacity snapshots. It has no dependency on the device API,
 Embassy, radio traits, ESP crates, a board support package or durable storage.
-The future local-session dispatcher will depend on both node-core and
-device-api and map their types explicitly.
+The separate `reticulum-tx-handoff` edge crate depends on node-core and Embassy
+Sync while keeping node-core itself synchronous and executor-free. A future
+local-session dispatcher will depend on both node-core and device-api and map
+their types explicitly.
 
 `TxJob`, permit requests/replies, completions, buffers, and recovery records do
 not expose packet bytes. Only an exactly matched `AuthorizedTx` can borrow the
 encoded frame, once, through `frame(now)` before its deadline. This API proves
-authorization semantics; it does not perform RF transmission. There is still
-no async channel, interface actor, radio implementation, or RF-capable
-firmware connection.
+authorization semantics; it does not perform RF transmission. The bounded
+channel storage and capability API now exist, but there is still no dispatcher
+actor, interface implementation, radio implementation, or RF-capable firmware
+connection.
 
 ## External ownership and registration
 
@@ -122,8 +125,9 @@ after the authorized byte-access boundary.
 
 ## Queue rejection and exact rollback
 
-`rollback_queued(job, now)` models a future owning-channel insertion that
-synchronously proves a routed job was never accepted. It validates the node
+When `reticulum-tx-handoff` returns
+`ChannelFull<RoutedTxJob<'static>>`, `rollback_queued(job, now)` synchronously
+proves that the recovered routed job was never accepted. It validates the node
 incarnation, stable slot, dispatch generation, receipt, attempt handle, target,
 hop, and deadline before changing any state. It returns the same
 `TxCompletionDisposition` vocabulary as ordinary completion handling.
@@ -235,8 +239,9 @@ rehydrate active Rete receipts or terminal submissions after reset.
 metadata; it no longer multiplies a 500-byte array inside `NodeCore`. Firmware
 must still allocate the actual buffers, so product RAM budgeting includes at
 least `PACKET_BUFFERS * 500` external packet bytes, each buffer's binding
-metadata, node-core dispatch/attempt/Rete state and the async channel items
-that will later carry their references.
+metadata, node-core dispatch/attempt/Rete state and the handoff channel items
+that carry their references. The current firmware allocates none of this TX
+path.
 
 `PATHS` bounds the current Rete path, reverse and destination-DATA receipt maps
 and the node-core attempt ledger. Rete's heapless maps require `PATHS` and
@@ -267,6 +272,12 @@ cargo check --locked -p reticulum-node-core \
   --target riscv32imac-unknown-none-elf
 cargo +esp check --locked -p reticulum-node-core \
   --target xtensa-esp32s3-none-elf
+cargo test --locked -p reticulum-tx-handoff
+cargo clippy --locked -p reticulum-tx-handoff --all-targets -- -D warnings
+cargo check --locked -p reticulum-tx-handoff \
+  --target riscv32imac-unknown-none-elf
+cargo +esp check --locked -p reticulum-tx-handoff \
+  --target xtensa-esp32s3-none-elf
 ```
 
 The focused host suite covers stable one-time registration, pointer-stable
@@ -277,27 +288,34 @@ deadline authorization/reply/frame/completion/maintenance behavior, serialized
 fan-out, coherent late recovery, fault and invariant quarantine, cross-
 incarnation/stale returns, receipt terminal races, tombstone backpressure, and
 exact acknowledgement reuse. A layout guard keeps packet-sized arrays out of
-dispatch slots. The generic bare-metal and ESP32-S3 checks exercise the same
-Embassy-free public slice; they do not link or exercise an async or radio path.
+dispatch slots. Five handoff tests cover production-mutex static construction,
+static-reference identity, FIFO ordering, owner/control pressure, exact
+`ChannelFull<T>` returns and mismatched permit replies. Generic bare-metal and
+ESP32-S3 checks exercise both node-core and the separate Embassy edge; they do
+not link either into firmware or exercise a dispatcher or radio path.
 
 ## Next boundary
 
-The next slice is the owning Embassy handoff, not RF transmission:
+The owning storage/capability layer is complete. `TxHandoff::split()` consumes
+one unique static handoff, pool-sized channels carry jobs and owner returns,
+depth-one channels isolate permit requests/replies, and every send is a
+non-awaiting `try_send` that returns the unchanged value on pressure. The next
+slice is actor orchestration, not RF transmission:
 
-1. Allocate fixed `TxPacketBuffer`s in static storage and move unique
-   `&'static mut` references through bounded Embassy job and return channels.
-2. Carry routed jobs and owning completions without cancellation loss; every
-   full `try_send` path must return the unchanged owner to its caller.
-3. Keep scalar permit traffic separate from the buffer-owning channels and
-   bind at most one outstanding exchange to each unique owner.
-4. Drive `maintain_tx()` and recovery observation from the node actor while the
+1. Implement the sole non-terminating dispatcher state loop without exposing
+   raw Embassy handles or holding an owner across unrelated cancellation
+   points.
+2. Enforce one outstanding permit exchange, retain every full/mismatched
+   control value, and map fatal control-plane faults into supervised TX
+   disablement.
+3. Drive `maintain_tx()` and recovery observation from the node actor while the
    dispatcher cooperatively returns an exact late owner.
-5. Persist accepted intent, active attempts, and terminal projection policy
+4. Persist accepted intent, active attempts, and terminal projection policy
    before mapping tombstones into device API v1.
-6. Convert allocation-backed ordinary RNS actions into caller-reservable packet
+5. Convert allocation-backed ordinary RNS actions into caller-reservable packet
    ownership; the DATA path alone does not cover proofs, announces, forwarding,
    Links or Resources.
-7. Keep every firmware dependency graph TX-free and the radio-bearing lab
+6. Keep every firmware dependency graph TX-free and the radio-bearing lab
    image RX-only. Only after these boundaries and explicit antenna/load and
    regional approval may a guarded radio implementation or RF HIL use this
    path.

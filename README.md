@@ -41,11 +41,13 @@ have started, even if the reply arrives too late to expose bytes. Exact proofs
 or timeouts remain fixed in-place terminal tombstones until explicit
 acknowledgement, and a missing owner is never fabricated or force-reused.
 
-This portable slice remains disconnected from Embassy, firmware radio tasks,
-and RF TX. The next implementation boundary is the bounded owning Embassy
-handoff; reboot persistence and allocation-backed ordinary RNS actions remain
-open. Every firmware dependency graph remains TX-free, and the only
-radio-bearing firmware artifact remains RX-only.
+The separate `reticulum-tx-handoff` crate now carries these unique static
+owners through bounded Embassy channels without exposing raw channel handles
+or an owner-taking async send. It remains disconnected from device API,
+firmware radio tasks, and RF TX; the next implementation boundary is the sole
+dispatcher actor. Reboot persistence and allocation-backed ordinary RNS
+actions remain open. Every firmware dependency graph remains TX-free, and the
+only radio-bearing firmware artifact remains RX-only.
 
 ## Read first
 
@@ -92,12 +94,14 @@ cargo check --locked \
   -p reticulum-rns-rete-rx \
   -p reticulum-device-api \
   -p reticulum-node-core \
+  -p reticulum-tx-handoff \
   -p reticulum-radio-interface \
   -p reticulum-board-heltec-tracker-v2 \
   --target riscv32imac-unknown-none-elf
 cargo +esp check --locked \
   -p reticulum-device-api \
   -p reticulum-node-core \
+  -p reticulum-tx-handoff \
   --target xtensa-esp32s3-none-elf
 cargo +esp build --locked --release \
   -p reticulum-heltec-tracker-v2 \
