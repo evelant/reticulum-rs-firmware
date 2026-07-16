@@ -22,6 +22,7 @@ members = [
     "firmware/heltec-tracker-v2-tx-hil",
     "tools/conformance-rete",
     "tools/phase1-rx-local-data",
+    "tools/storage-hil-verify",
     "xtask",
 ]
 exclude = ["vendor/esp-rtos-0.3.0", "vendor/lora-phy-3.0.1"]
@@ -43,6 +44,7 @@ default-members = [
     "crates/tx-supervisor",
     "tools/conformance-rete",
     "tools/phase1-rx-local-data",
+    "tools/storage-hil-verify",
     "xtask",
 ]
 

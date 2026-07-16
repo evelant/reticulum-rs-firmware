@@ -36,10 +36,14 @@ const RETLOG_LEN: u32 = 0x0010_0000;
 const RETLOG_END: u32 = RETLOG_OFFSET + RETLOG_LEN;
 const DATA_PARTITION_TYPE: u8 = 0x01;
 const UNDEFINED_DATA_SUBTYPE: u8 = 0x06;
+const CAPTURE_GUARD_MS: u32 = 5_000;
+const RESET_LOG_FLUSH_MS: u32 = 100;
 const RETLOG_LABEL: [u8; 16] = [
     b'r', b'e', b't', b'l', b'o', b'g', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ];
 const HEARTBEAT_PERIOD_MS: u32 = 30_000;
+
+const _: () = assert!(CAPTURE_GUARD_MS >= 3_000);
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -70,8 +74,28 @@ fn main() -> ! {
     let _battery_divider = Output::new(peripherals.GPIO2, Level::Low, OutputConfig::default());
 
     esp_println::logger::init_logger_from_env();
+    let base_mac = esp_hal::efuse::base_mac_address();
+    let reset_reason = esp_hal::system::reset_reason();
+    info!(
+        "storage-hil stage=boot status=PASS base_mac={} reset_reason={reset_reason:?} rf_inert=true",
+        base_mac,
+    );
     info!(
         "storage-hil stage=rf-interlock status=PASS sx1262_reset=low fem_power=low fem_csd=low fem_ctx=low sx1262_nss=high vext=low battery_divider=low"
+    );
+
+    // Opening the ESP32-S3 native USB CDC device can itself reset the chip.
+    // Give an armed recorder enough time to report that it is open and issue
+    // one identity-qualified JTAG reset before this boot can access `retlog`.
+    // The counted post-reset segment can then prove one coherent journal run
+    // even if opening the recorder began an uncounted activation.
+    info!(
+        "storage-hil stage=capture-guard status=ARMED duration_ms={CAPTURE_GUARD_MS} retlog_access=false flash_mutation=false"
+    );
+    let capture_guard = Delay::new();
+    capture_guard.delay_millis(CAPTURE_GUARD_MS);
+    info!(
+        "storage-hil stage=capture-guard status=COMPLETE duration_ms={CAPTURE_GUARD_MS} retlog_access=false flash_mutation=false"
     );
 
     if esp_hal::efuse::flash_encryption() {
@@ -309,8 +333,15 @@ where
         flash.write_calls(),
         flash.erase_calls()
     );
+    info!(
+        "storage-hil stage=software-reset status=ARMED reason=post-compaction source_generation=1 target_generation=2 delay_ms=250 rf_inert=true"
+    );
     let delay = Delay::new();
     delay.delay_millis(250);
+    info!(
+        "storage-hil stage=software-reset status=ISSUED reason=post-compaction source_generation=1 target_generation=2 flush_ms={RESET_LOG_FLUSH_MS} rf_inert=true"
+    );
+    delay.delay_millis(RESET_LOG_FLUSH_MS);
     esp_hal::system::software_reset()
 }
 
@@ -359,8 +390,15 @@ where
             flash.write_calls(),
             flash.erase_calls()
         );
+        info!(
+            "storage-hil stage=software-reset status=ARMED reason=post-manifest-retirement source_generation=2 target_generation=2 delay_ms=250 rf_inert=true"
+        );
         let delay = Delay::new();
         delay.delay_millis(250);
+        info!(
+            "storage-hil stage=software-reset status=ISSUED reason=post-manifest-retirement source_generation=2 target_generation=2 flush_ms={RESET_LOG_FLUSH_MS} rf_inert=true"
+        );
+        delay.delay_millis(RESET_LOG_FLUSH_MS);
         esp_hal::system::software_reset()
     }
 

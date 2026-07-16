@@ -1767,6 +1767,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "reticulum-storage-hil-verify"
+version = "0.1.0"
+dependencies = [
+ "embedded-storage",
+ "reticulum-storage-journal",
+ "reticulum-storage-model",
+]
+
+[[package]]
 name = "reticulum-storage-journal"
 version = "0.1.0"
 dependencies = [
