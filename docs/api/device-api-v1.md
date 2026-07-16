@@ -1,9 +1,9 @@
 # Device API v1 logical protocol
 
-Status: initial host-simulation schema plus a separate portable durable
-submission model. This document freezes the operation and field numbers
-exercised by `reticulum-device-api`; no adapter connects that codec to the
-durable model, firmware transport, or radio transmission.
+Status: initial host-simulation schema plus separate portable durable model and
+physical journal. This document freezes the operation and field numbers
+exercised by `reticulum-device-api`; no sole storage adapter connects that codec
+to the durable model/journal, firmware transport, or radio transmission.
 
 ## Boundary
 
@@ -169,9 +169,10 @@ retained submission metadata, but the v1 response
 exposes it only for `AwaitingDelivery` and `Delivered`; a delivery timeout is a
 `Failed` response without keys 2 or 3. Device API v1 does not expose the
 internal attempt handle, packet-slot ID, dispatch generation or deadline, and
-it does not expose volatile attempt correlation. Reboot safety still depends on
-an unimplemented physical journal actor that integrity-validates every
-record through a known end-of-log before completing semantic replay.
+it does not expose volatile attempt correlation. `reticulum-storage-journal`
+now supplies complete integrity-validated physical replay, but reboot safety at
+this API boundary still depends on the unimplemented sole storage actor that
+mounts it before serving requests.
 
 ### `experimental.prepare_rns_data` (`0xf001`)
 
@@ -193,8 +194,9 @@ Request body:
 The decoder returns key 1 as a slice of the caller's input buffer. An adapter
 must not retain it past that buffer's lifetime. `reticulum-storage-model`
 defines the owned bounded intent, semantic content digest, principal/key
-idempotency rule, and opaque acceptance plan that a future physical storage
-actor must append before replying. Only after that acceptance and the durable
+idempotency rule, and opaque acceptance plan that a future sole storage actor
+must append through the implemented physical journal before replying. Only
+after that acceptance and the durable
 `Queued -> Preparing` barrier may the sole node owner prepare into one
 separately registered, caller-owned 500-byte `TxPacketBuffer`. Node-core rejects
 an already-expired owner

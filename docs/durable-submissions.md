@@ -1,8 +1,8 @@
 # Durable submissions and persist-before-ack projection
 
-Status: portable semantic model and host-tested projection boundary. No flash
-backend, device-API adapter, firmware dependency edge, or claim of powered
-durability is included in this slice.
+Status: portable semantic model, host-tested projection boundary, and physical
+two-bank journal implemented. No sole storage actor, device-API integration, or
+claim of powered-board durability is included yet.
 
 ## Claim boundary
 
@@ -13,17 +13,21 @@ and a fixed-RAM index. `reticulum-submission-projector` correlates those records
 with volatile node/TX observations and withholds exact terminal or recovered-
 owner acknowledgement until the corresponding record is known durable.
 
-Neither crate writes flash. In particular, a canonical CBOR record is not
-durable merely because it encodes successfully, and the in-RAM index is not a
-free-space or wear-level estimate. A later sole storage actor must supply the
-physical guarantees in [Backend contract](#backend-contract) before an
-acceptance response or TX acknowledgement can be published.
+Neither semantic crate writes flash. `reticulum-storage-journal` now supplies
+the physical format, complete replay, commit/readback, lifetime admission, and
+two-bank compaction mechanisms described in
+[Physical submission journal](storage-journal.md). A canonical CBOR record is
+still not durable merely because it encodes successfully, and the in-RAM index
+is not a free-space or wear-level estimate. A later sole storage actor must
+connect an exact projector plan to that journal before an acceptance response
+or TX acknowledgement can be published.
 
 ```mermaid
 flowchart LR
     Client["authenticated local client"] --> API["device API adapter (not wired)"]
     API --> Store["sole storage actor (not implemented)"]
-    Store --> Flash["power-fail-safe backend (not implemented)"]
+    Store --> Journal["two-bank physical journal (implemented)"]
+    Journal --> Flash["validated raw NOR partition"]
     Store --> Model["storage-model live index"]
     Model --> Projector["submission projector"]
     Projector --> Supervisor["RF-inert TX supervisor"]
@@ -81,8 +85,10 @@ deadline, cancellation, identifier-exhaustion, or invariant reasons. Decoding
 re-encodes and byte-compares the value, rejecting noncanonical integers,
 trailing data,
 malformed lengths, mismatched semantic digests, and invalid state combinations.
-Physical integrity, optional tamper authentication, atomicity, and torn-write
-detection remain backend responsibilities.
+Physical atomicity, integrity chaining, and torn-write detection are supplied
+by `reticulum-storage-journal`. Its SHA-256 values are unkeyed corruption
+detection, not tamper authentication or confidentiality; either property would
+require a separate reviewed design.
 
 ## Lifecycle
 
@@ -201,16 +207,20 @@ and supervisor fault remain separate diagnostics.
 | after `Preparing` commit | reboot finalizes internal; it never blindly resends |
 | after a later record commit but before storage reply | retry/readback proves the exact logical record; no duplicate semantic transition |
 | after final/audit commit but before node acknowledgement | the exact acknowledgement remains withheld/retried; the owner or tombstone is not reused |
-| while a record is torn or corrupt | backend scan rejects/isolates it and never reports commit |
+| while a record prefix/marker is torn | full scan ignores the uncommitted hole, consumes its physical position, and never reports it committed |
+| while a committed record is corrupt or contradictory | mount fails closed and exposes no valid-looking replay prefix |
 
 Host tests inject lost replies, repeated observations, conflicting metadata,
 wrong generation handles, retryable acknowledgement ordering, and terminal /
-recovery arrival in both orders. Powered flash fault injection is still a
-separate acceptance gate.
+recovery arrival in both orders. The physical journal's fake-NOR tests also
+inject partial and lost-reply writes/erases across append and compaction phases.
+Powered flash fault injection is still a separate acceptance gate.
 
-## Backend contract
+## Backend contract and implementation status
 
-The physical storage implementation must provide all of the following:
+The physical journal implements the record-level portions below. The future
+sole storage actor must preserve them while adding serialization, projector/API
+ordering, watchdog/OTA coordination, and fault latching.
 
 1. **Complete replay before action.** Scan and integrity-validate records to a
    known end-of-log, then consume `SubmissionReplay` into the live index. No queued
@@ -225,12 +235,13 @@ The physical storage implementation must provide all of the following:
    duplicate append is insufficient because it consumes physical space that the
    semantic index cannot see.
 3. **Real admission reservation.** Before publishing `Accepted`, reserve
-   physical space for the complete worst-case lifecycle, a possible transport
-   audit, torn-write loss, and compaction headroom. Schema 1 permits at most five
+   physical space for the complete worst-case lifecycle and a possible
+   transport audit. Schema 1 permits at most five
    committed semantic records per submission: one `Accepted`, at most three
-   state transitions, and at most one transport audit. The model intentionally
-   reports no flash capacity; the backend must reserve physical failure
-   headroom in addition to those five logical records.
+   state transitions, and at most one transport audit. The physical journal
+   contains 812 slots and admits at most 162 acceptances, reserving 810
+   lifetime records and leaving two slots. Torn holes trigger packing compaction
+   rather than consuming semantic reservation permanently.
 4. **Power-fail integrity and order.** Use a cryptographic digest (or another
    explicitly justified corruption-detection code), explicit commit markers,
    monotonically ordered record identity, and scan
@@ -246,15 +257,15 @@ The physical storage implementation must provide all of the following:
 
 ## Selected schema-1 physical design
 
-Schema 1 uses a project-owned fixed-slot, two-bank NOR journal in a dedicated
-1 MiB `retlog` partition. The partition reserves two 4 KiB superblocks and
-divides the remaining erase-aligned space into two equal banks. Each bank uses
-640-byte physical slots: enough for the maximum 512-byte canonical semantic
-record plus a versioned physical header, integrity material, and an explicit
-commit marker. Any tail that cannot hold a complete slot remains unused rather
-than creating a second record shape.
+Schema 1 uses the implemented project-owned fixed-slot, two-bank NOR journal in
+a dedicated 1 MiB `retlog` partition. The partition reserves two 4 KiB manifest
+sectors and divides the remaining erase-aligned space into two 127-sector
+banks. Each bank has 812 640-byte physical slots and a required 512-byte erased
+tail. A slot contains a 64-byte versioned header, maximum 512-byte canonical
+semantic body, 32-byte SHA-256 chain value, and 32-byte commit marker. See
+[Physical submission journal](storage-journal.md) for exact offsets and fields.
 
-For each append, the actor writes the header, canonical body, and integrity
+For each append, the journal writes the header, canonical body, and integrity
 fields, reads those pre-commit bytes back exactly, and writes the commit marker
 last. A record is visible to replay only after that sequence. Boot validates the
 selected bank as a whole against its superblock/manifest and then feeds every
@@ -262,23 +273,28 @@ committed record through the semantic replay builder. A corrupt or
 contradictory committed record fails the bank; replay never salvages a
 valid-looking prefix and starts node/API work from it.
 
-Compaction is also whole-bank and manifest-proved: write all retained records to
-the inactive bank, read back and verify them, commit a manifest proving the
-complete bank image, and only then make that generation selectable. Schema 1
-retains every accepted submission and revision permanently and exposes no
-eviction or garbage-collection policy. Admission fails when the fixed index,
-semantic reservation, or permanent journal capacity cannot support another
+Compaction is record-bank-preserving and manifest-proved. It first commits a
+handoff inside the selected source manifest, then erases and streams every
+retained record into the inactive target, reads each commit back, and commits
+the target manifest last. That seal makes the consecutive newer generation
+authoritative. Append remains blocked until a third erase retires only the old
+manifest sector; the old record bank stays intact. A torn or committed handoff
+blocks append and makes the copy resumable, while a power loss during manifest
+retirement resumes that one erase without creating another generation. Once
+retired, the old bank cannot be selected as fallback, so corruption of the sole
+active manifest fails closed and a later suffix cannot disappear through
+rollback. Schema 1 retains every accepted submission and revision permanently
+and exposes no eviction or garbage-collection policy. Admission fails when the
+fixed index or 162-submission lifetime reservation cannot support another
 submission.
 
-This freezes the first implementation shape, not its physical fault budget.
-The actor still needs explicit per-admission reservation for the maximum five
-semantic records, torn-slot loss, an interrupted append, inactive-bank
-compaction, and superblock failure; those quantities must be proved before the
-device API publishes acceptance. The implementation edge should use NOR-flash
-semantics through `embedded-storage` and a reviewed `esp-storage` adapter. It
-must not assume a generic byte-oriented `Storage::write` or an ESP-IDF
-`FlashRegion` provides the required partition bounds, encryption, multiwrite,
-or commit guarantees.
+The portable implementation uses raw NOR semantics through `embedded-storage`.
+The Tracker HIL adds a checked partition-relative `esp-storage` adapter; it does
+not use generic byte-oriented `Storage::write` or the pinned ESP-IDF
+`FlashRegion`. The current format requires exact 4-byte read/program alignment,
+4 KiB erase alignment, and `MultiwriteNorFlash`. Formatting is explicit and
+only accepts a completely erased partition; it never erases or reformats an
+unknown nonblank partition.
 
 `sequential-storage 8` remains useful research and differential-test material,
 but it is not an open contender for the schema-1 journal implementation.
@@ -310,15 +326,16 @@ LXMF/NomadNet/UI services without redefining the durable protocol.
 
 ## Remaining implementation gates
 
-1. Specify the selected slot/superblock fields and finalize physical
-   reservation, torn-slot, compaction, and superblock fault budgets.
-2. Build a host power-cut harness for every byte/commit boundary, then the sole
-   async two-bank storage actor using the same backend contract.
+1. Complete deterministic host cut coverage at the relevant program/erase
+   boundaries and run the RF-inert Heltec HIL, preserving image, readback,
+   serial, reset, and controlled powered-cut evidence.
+2. Build the sole permanent storage actor around the journal, including
+   ambiguous-backend fault handling and serialization with other flash users.
 3. Connect acceptance/status through device API v1 and merge projection with
    the sole node runtime; do not run the current supervisor's pass-discarding
    convenience loop when projection observations are required. Add a proved
    retirement handshake before reusing any completed projector slot.
-4. Measure static layout and stack on ESP32-S3, then flash an RF-inert image to
-   validate replay and power-cut behavior on a dedicated data partition.
+4. Measure static layout, journal scan/compaction time, stack, erase endurance,
+   and watchdog impact on ESP32-S3 and larger profiles.
 5. Keep RF transmission disabled until antenna/load and regional profile are
    explicitly confirmed.

@@ -4,8 +4,8 @@
 and firmware-excluded RF-inert persistent dispatcher, permit server, and node
 DATA-owner machine with synchronous parked-owner preparation implemented;
 firmware-excluded permanent RF-inert supervisor and async runner implemented;
-portable durable model/projector implemented; no physical-journal
-implementation, firmware RF TX linkage, or radio driver
+portable durable model/projector and independent physical journal implemented;
+no sole storage actor, firmware RF TX linkage, or radio driver
 **Rete pin:** `f6f5fb0637d00691e09fa0105be4df902405fee4`
 
 ## Purpose and boundary
@@ -288,7 +288,9 @@ buffer with its complete generation-safe observation and does not expose it as
 available until exact acknowledgement. The supervisor exposes both the
 observation and acknowledgement facade. `reticulum-submission-projector`
 withholds that action until the transport audit is known committed, although
-no permanent runtime or flash actor drives the two components yet.
+no permanent runtime drives it. `reticulum-storage-journal` now supplies the
+physical append/replay/compaction backend, but no sole storage actor connects
+the projector plan to that backend yet.
 An internally inconsistent same-lease return or an explicit recovery fault
 returns an owning `TxQuarantine` and retains the fail-closed scalar record.
 Before exposing its `TxRecoveryObservation`, quarantine canonicalizes the
@@ -447,10 +449,12 @@ channels carry jobs and owner returns, depth-one channels isolate permit
 requests/replies, and every send is a non-awaiting `try_send` that returns the
 unchanged value on pressure. The remaining orchestration work is:
 
-1. Implement the sole physical storage actor: exact append/readback,
-   reservations for mandatory later records, authenticated complete replay,
-   retention/compaction, and power-fail testing. The portable model and
-   projector do not make their own durability claim.
+1. Wrap the implemented physical journal in the sole permanent storage actor,
+   preserving exact append/readback, lifetime reservation, complete integrity-
+   validated replay, and resumable compaction while adding serialized
+   projector/API ordering. Complete RF-inert powered and controlled power-fail
+   testing. The portable model and projector do not make their own durability
+   claim.
 2. Merge RX ingress, ordinary RNS tick/actions, durable submission projection,
    and exact acknowledgement into
    the eventual sole node owner. The current aggregate drives only TX lease

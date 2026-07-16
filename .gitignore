@@ -4,6 +4,7 @@
 # Local research checkouts and generated conformance evidence
 /artifacts/
 /reference/
+/tmp/
 
 # Local environment and secrets
 .env
@@ -14,6 +15,7 @@ __pycache__/
 *.py[cod]
 
 # OS and editor backup files
+/.idea/
 **/.DS_Store
 **/*.rs.bk
 **/*.swp

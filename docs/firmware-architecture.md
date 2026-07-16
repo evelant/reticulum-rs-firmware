@@ -1,7 +1,9 @@
 # Standalone Reticulum LoRa Firmware: Architecture and Feasibility
 
-**Status:** accepted architecture; Phase-1 receive-only path target-linked, HIL pending<br>
-**Date:** 2026-07-14<br>
+**Status:** accepted architecture; Phase-1 receive-only path target-linked;
+physical submission journal implemented; powered semantic ANNOUNCE HIL passed;
+powered storage HIL pending<br>
+**Date:** 2026-07-16<br>
 **Initial target:** Heltec Wireless Tracker V2.3, ESP32-S3FN8 + SX1262 + KCT8103L<br>
 **Product goal:** an always-on, self-contained Reticulum transport and LXMF store-and-forward node, with optional onboard messaging and NomadNet clients controlled over USB, BLE, or Wi-Fi
 
@@ -105,6 +107,9 @@ Claims in READMEs were not treated as proof of embedded portability.
 | `reticulum-tx-supervisor`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The firmware-excluded permanent aggregate and async runner own node-core plus all TX machines, require common-origin/full-seed construction, sample the clock separately for every lane, wait on exact owner/grace deadlines, yield after at most 16 productive passes and every selected wake, and use phase-gated cancellation-safe selection; 12 tests cover its RF-inert lifecycle, timing, faults, cancellation, and static construction, and graph policy keeps it outside firmware |
 | `reticulum-storage-model`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The allocation-free semantic journal model enforces canonical bounded records, principal-scoped idempotency, exact preflight/apply plans, monotonic conservative transmission uncertainty, and fail-closed complete replay; 22 integration tests plus one compile-fail doctest cover the boundary, which intentionally makes no physical-durability or flash-capacity claim |
 | `reticulum-submission-projector`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The fixed-capacity projector correlates volatile attempts with semantic records and withholds terminal/recovery acknowledgement behind exact persistence replies; 24 focused tests cover ordering, retries, proof/timeout-before-frame races, faults and conservative reboot behavior, while graph policy keeps it outside firmware |
+| `reticulum-storage-journal`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The allocation-free physical backend fixes the 1 MiB/two-bank schema-1 format, full-bank replay, commit-last exact-readback append, a 162-acceptance lifetime ceiling, and source-preserving handoff compaction; fake-NOR fault tests cover torn/lost append and compaction phases, but this is not yet powered-device evidence |
+| `reticulum-heltec-tracker-v2-storage-hil`, ESP32-S3 Xtensa | Pass (target check); powered run pending | The dedicated synchronous image validates the exact raw partition and exercises format, five-record replay, no-write exact retry/conflict, compaction, reset and generation-2 replay while holding radio/FEM controls inactive; it has not yet been flashed for this milestone |
+| `reticulum-heltec-tracker-v2-tx-hil --features semantic-announce-hil`, ESP32-S3 to RNode 1.86 plus pinned Python RNS 1.3.8 | Pass (powered conformance HIL) | E9 emitted one deterministic signed ANNOUNCE and became radio-inert; E0 delivered exactly one 167-byte ordinary RNode packet and Python validated its first-hop signature and destination binding. This does not exercise a product identity, full Reticulum instance, live transport admission, node-core RX/router ownership or LXMF |
 | `reference/rete/examples/esp32s3`: `cargo +esp check --release` | Pass with warnings | Current bare-metal ESP32-S3/SX1262/Wi-Fi integration compiles with the installed ESP toolchain; it targets Heltec WiFi LoRa 32 V3/V4 pins, not the Tracker BSP |
 | Precursor `reticulum-core`/`lxmf` host suites; `micron` host suite | 70 pass; 17 pass | Strong embedded-client interop and hostile-input evidence, including real Nomad/Micron fixtures; the Xous crates still use `std` and are not a bare-metal dependency as-is |
 | `foxhole-micron` host suite | 24 pass | Focused confirmation of links, fields, colors, sections, literal/comment handling and control-character sanitisation; it remains a ratatui/`std` comparison parser |
@@ -227,9 +232,10 @@ and acknowledgement is blocked until the buffer returns. A layout regression
 guard keeps packet-sized storage outside node-core. Focused tests plus strict
 host Clippy, generic bare-metal, and ESP32-S3 checks cover this portable slice.
 
-The product now has an allocation-free durable-submission semantic model and
-persist-before-ack projector, but it still has no physical flash journal or
-authorized RF TX graph. The in-RAM node ledger cannot rehydrate Rete receipts
+The product now has an allocation-free durable-submission semantic model,
+persist-before-ack projector, and independent physical flash journal, but it
+still has no actor connecting those pieces or any authorized RF TX graph. The
+in-RAM node ledger cannot rehydrate Rete receipts
 after reboot and ordinary RNS actions are still allocation-backed. The firmware-excluded
 `reticulum-tx-dispatch` crate now drives the portable typestates and handoff as
 an RF-inert persistent state machine, with cancellation-safe short waits and a
@@ -258,17 +264,38 @@ authorization. Faults stop fresh
 preparation and policy while owner-draining DATA/dispatcher transitions
 continue where possible.
 
+Separately, the explicitly hazardous semantic TX HIL has crossed the
+hardware/reference-parser boundary. In the preserved coordinated run at
+`artifacts/hil/tx-hil/20260716T183805Z-e944-rete-announce-to-e040-rnode/attempt-02-coordinated`,
+E9 logged one validated 167-byte deterministic Rete ANNOUNCE, one physical-frame
+transmission and then `radio_active=false`. E0's RNode 1.86 ordinary receive
+path delivered exactly one matching 167-byte packet, and pinned Python RNS
+1.3.8 validated its zero-hop first-hop syntax, signature, public identity and
+destination/name-hash binding. The Python observer explicitly did not start a
+full Reticulum instance. This is conformance-fixture evidence only: it does not
+exercise persisted product identity/time/entropy, live transport admission,
+the product node-core receive/router path, forwarding, LXMF or the supervisor's
+ownership and permit path.
+
 `reticulum-storage-model` now defines canonical accepted intents, lifecycle and
 audit records, complete-replay sealing, and exact preflight/apply plans.
-`reticulum-submission-projector` binds those records to volatile
+`reticulum-storage-journal` implements the fixed 1 MiB two-bank physical format,
+full scan and semantic replay, exact idempotent append, lifetime admission, and
+source-preserving compaction. `reticulum-submission-projector` binds semantic
+records to volatile
 `AttemptHandle` values, prepared-frame metadata, terminal outcomes and recovery
 observations; it unlocks exact acknowledgements only after the intended record
-is reported committed or read-back equivalent. Neither crate writes flash.
-The next product-code slice is the sole physical journal actor and device-API adapter,
+is reported committed or read-back equivalent. The semantic model and projector
+do not write flash; the journal does, but no permanent actor yet translates
+projector plans into journal operations. The next product-code slice is that
+sole storage actor and persist-before-accept device-API adapter. It remains
+RF-inert and is deliberately next: the semantic HIL retired packet/RF
+uncertainty but did not make externally accepted submissions durable. This is
 followed by integration with ordinary RNS tick/actions and RX ingress in the
-eventual sole node owner. Every project firmware graph remains TX-free, and all
-project radio-bearing firmware artifacts remain RX-only. The separately derived
-RNode peer is an external guarded development artifact, not a project graph.
+eventual sole node owner. Every product-candidate firmware graph remains
+TX-free; the separately named semantic TX HIL is the lab-only exception. The
+derived RNode peer is an external guarded development artifact, not a product
+graph.
 
 LXMF message and sibling-attempt state must ultimately be persisted before an
 outward terminal event can be lost. The future device-API intent queue remains
@@ -574,18 +601,19 @@ is explicitly RF-inert, and retained
 faults stop fresh preparation/policy while continuing exact-owner drain where
 possible.
 
-The next product integration is a sole physical journal actor with exact
-readback, reservation, replay and compaction semantics, plus the device API
-adapter that publishes acceptance only after commit. The implemented projector
+The chosen next bounded product integration is a sole storage actor around the
+implemented physical journal, plus the device API adapter that publishes
+acceptance only after commit or exact readback equivalence. The projector
 already maps volatile prepared-frame, terminal and recovery observations to
-planned semantic records and exact post-persistence acknowledgements, but no
-component yet writes those records to flash or maps them to device API v1.
+planned semantic records and exact post-persistence acknowledgements, and the
+journal can persist those records, but no permanent component yet connects
+those boundaries or maps them to device API v1.
 Ordinary RNS tick/actions, RX ingress and submission handling must then merge
 into the eventual sole node owner. Firmware integration, driver/RF behavior,
 safe projector-slot retirement and powered reboot recovery also remain open.
-Every project firmware graph remains TX-free, and all project radio-bearing
-firmware artifacts remain RX-only. The separately derived RNode peer remains
-outside those graphs and under its own fail-closed radio authorization.
+Every product-candidate firmware graph remains TX-free. The separately named
+semantic TX HIL and derived RNode peer remain outside those product graphs and
+under their own fail-closed reset-scoped authorization.
 
 ## Core traits and event model
 
@@ -1046,25 +1074,40 @@ It deliberately provides no flash-capacity estimate, reservation, compaction,
 retention, or durability claim. Those are requirements on the sole physical
 storage actor, not properties of the semantic CBOR model.
 
-The schema-1 backend choice is now a project-owned fixed-slot NOR journal in a
-dedicated 1 MiB `retlog` partition. It reserves two 4 KiB superblocks, splits
-the remainder into two equal banks, and stores canonical records in 640-byte
-physical slots. Each append writes and exactly reads back the versioned header,
-maximum-512-byte body, and integrity fields before writing its commit marker
-last. Boot validates one complete bank against its manifest and fails closed on
-committed corruption rather than exposing a valid-looking prefix. Compaction
-writes and verifies the inactive bank in full, commits a manifest proving that
-generation, and only then makes it selectable. Schema 1 permanently retains
-all submissions and revisions and has no eviction policy.
+The schema-1 backend is now implemented as `reticulum-storage-journal`; its
+complete format and recovery contract are specified in
+[Physical submission journal](storage-journal.md). The dedicated 1 MiB
+`retlog` contains two 4 KiB manifest sectors and two 127-sector record banks.
+Each bank holds 812 fixed 640-byte slots (64-byte header, maximum-512-byte
+canonical body, 32-byte SHA-256 chain value, and a separately programmed
+32-byte commit marker) plus a 512-byte erased tail. The five-record schema
+budget gives a hard lifetime ceiling of 162 accepted submissions; compaction
+retains that history, and a profile's fixed-RAM semantic index may impose a
+lower ceiling.
 
-The sole actor will use NOR semantics through `embedded-storage` and a reviewed
-`esp-storage` adapter. Physical reservation still needs explicit budgets for
-the semantic maximum of five records per submission, torn slots, interrupted
-append/compaction, and superblock failure before device-API acceptance can be
-published. `sequential-storage` remains research/reference material, not an
-open contender for this first journal implementation. A separate small blob
-log can be evaluated later. Use littlefs only if later requirements genuinely
-need mutable file semantics.
+Append scans the entire selected bank, writes and reads back the protected
+prefix, then commits and reads back the marker. Exact retry is no-write
+idempotent; a conflicting record at the same logical key fails without
+mutation. Compaction first seals a source-side handoff, erases and streaming-
+copies only the inactive bank, and seals the target manifest last. That seal
+makes the newer generation authoritative; append stays blocked until a third
+erase retires only the old manifest sector, leaving its record bank intact. A
+torn or complete handoff can be resumed, and retirement-only recovery keeps
+the same generation. Once retirement permits appends, no older manifest remains
+as a rollback fallback. Committed corruption, duplicate logical keys, an
+invalid semantic replay, or inconsistent manifest/baseline fails closed. The
+SHA-256 chain is corruption detection, not keyed tamper authentication or
+encryption.
+
+The physical crate uses NOR semantics through `embedded-storage`; the Tracker
+HIL supplies a checked partition-relative `esp-storage` adapter and never uses
+the sector-rewriting byte-storage path. The missing product boundary is the
+sole permanent actor that consumes projector plans, serializes journal access,
+coordinates OTA/watchdogs/other stores, and publishes device-API acceptance
+only after commit or exact equivalence. `sequential-storage` remains research/
+reference material, not an open contender for this first journal. A separate
+small blob log can be evaluated later. Use littlefs only if later requirements
+genuinely need mutable file semantics.
 
 [`ekv`](https://github.com/embassy-rs/ekv) is a transactional, fuzzed LSM alternative worth retaining for a later benchmark, especially if the key count grows beyond roughly a thousand. Its erase behavior per write transaction makes it less attractive for the first high-churn message/status journal. Benchmark recovery time, write amplification, RAM, and schema migration with real ESP flash before changing the storage choice.
 
@@ -1227,6 +1270,13 @@ a long soak; heap and the shared executor stack remain within measured limits;
 and logic-analyzer, SPI and on-air evidence shows CTX never selects TX and the
 Tracker never issues `SetTx` or emits a packet.
 
+The separately named semantic TX HIL now supplies complementary exploratory
+evidence: one deterministic Rete ANNOUNCE crossed the real Tracker/RNode link
+and passed pinned Python RNS 1.3.8 first-hop validation. Because that image is
+an explicitly hazardous conformance fixture rather than the receive-only or
+product graph, it does not weaken or satisfy the RX-only Phase 1 exit above and
+does not advance the Phase 2 identity, admission, forwarding or routing gates.
+
 ### Phase 2 — always-on RNS transport node
 
 Deliverables:
@@ -1352,7 +1402,9 @@ Exit: enabling location adds a bounded optional capability without changing netw
 ## Decisions still required
 
 1. Does Rete clear the phase-0 production gates without meeting an ADR 0002 abandonment criterion, and what upstreamable hardening is required on that path?
-2. Which regulatory region and antenna are used for initial HIL/RF work?
+2. What signed production region-policy representation, antenna/gain inventory
+   and measured board power table replaces the user-authorized NA915 bench HIL
+   profile?
 3. What measured quotas define the initial `tracker-core-node`, `tracker-headless-infrastructure`, and `tracker-turnkey` compositions?
 4. Which PSRAM board/radio combination should be the first `full-appliance-psram` acceptance target?
 5. Is browser-over-Wi-Fi the first turnkey client, with BLE/React Native following, or must BLE ship in that first client milestone?
@@ -1361,33 +1413,47 @@ Exit: enabling location adds a bounded optional capability without changing netw
 
 ## Recommended immediate next steps
 
-Do not begin by porting UI screens. The next product-code lane is the RF-inert
-physical journal actor and device-API adapter: implement exact append/readback,
-integrity-validated replay to a known end-of-log, admission reservation for the
-schema's maximum five semantic records per submission plus physical failure
-headroom, and host power-cut injection before flashing a storage HIL image.
+Do not begin by porting UI screens or by adding another direct packet fixture.
+The chosen next bounded product-code slice is RF-inert: complete the Tracker
+physical-journal validation lane, then build the sole storage actor and
+device-API adapter around the implemented journal so acceptance is published
+only after commit or exact readback equivalence. Connect projector plans,
+commit/readback replies, replay and acknowledgements through that actor before
+giving the eventual sole node owner an external send source.
 
-The independent hardware lane is formal qualification of the already
-target-linked receive-only slice before connecting or enabling a firmware/RF
+The independent hardware lane remains formal qualification of the already
+target-linked receive-only slice before connecting a product-candidate RF
 transmit path. A clean `fdd6d9e` normal/closure pair is preserved, and the later
 clean `bf23cc5` normal image passed exact flash readback plus a 125-second
 supplemental smoke on E9:44. There is no matching `bf23cc5` closure bundle, and
 formal powered electrical/RF, retention, fault, backpressure, and soak evidence
-remain open:
+remain open.
 
-1. Flash the explicit lab image with an antenna/load and capture reset, FEM,
-   DIO2/DIO3 and SPI from cold boot through known single/split RNode frames.
-2. Capture target stack high-water marks against the recorded compiler frames
-   and correlate the existing heap/radio/fault heartbeat with analyzer time;
-   treat the Tracker `16/4/32/2` capacity profile as a measured configuration,
+Exploratory transmit compatibility is no longer open at either the PHY/framing
+or deterministic first-hop ANNOUNCE boundary. After the sentinel matrix passed,
+the semantic HIL delivered exactly one 167-byte ordinary RNode packet and
+pinned Python RNS 1.3.8 validated its signed first-hop ANNOUNCE; E9 logged one
+TX completion, shut the radio down and entered inert hold. This still does not
+close production identity/time/entropy, live node/transport admission,
+forwarding, LXMF, durable submission, airtime policy, formal electrical/RF or
+regional gates.
+
+1. Complete the powered storage HIL, controlled power-cut coverage and the sole
+   storage actor/device-API persist-before-accept edge.
+2. Merge RX reassembly, `NodeCore::ingest()`/tick actions, submission projection
+   and exact persistence acknowledgements under the sole node owner while still
+   RF-inert.
+3. Finish receive-only stack/heap/electrical/fault/backpressure/soak
+   qualification; treat the Tracker `16/4/32/2` capacity profile as measured,
    not the full-appliance ceiling.
-3. Run malformed, stale, duplicate, queue-saturation and local-destination
-   traffic while logic-analyzer and on-air monitoring confirm no `SetTx` or
-   Tracker-originated packet.
-4. Continue the released-Python RNS differential, allocation-failure and
-   upstream Rete hardening lanes in parallel. Only after Phase 1 evidence is
-   recorded should the already designed guarded airtime-governed transmit
-   slice be connected to firmware or RF hardware.
+4. Make the first product-path RF gate a bounded endpoint DATA round trip: a
+   full pinned Python/RNode peer emits a fresh announce, the real RX path admits
+   it through `NodeCore`, one durably accepted small plaintext becomes encrypted
+   DATA in a registered external buffer, and only the existing
+   supervisor/permit plus a concrete region/airtime policy can expose it to the
+   sole radio owner. Python must decrypt the DATA and return a proof that the
+   same node owner correlates. No conformance constructor, fixture private key,
+   direct frame bypass, forwarding or LXMF belongs in this slice.
 
 The LXMF wire/resource work can continue on the host, but it should not enlarge
 the first radio HIL image or couple protocol qualification to a SPA/mobile

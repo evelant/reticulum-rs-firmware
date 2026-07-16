@@ -1,0 +1,33 @@
+[package]
+name = "reticulum-heltec-tracker-v2-storage-hil"
+description = "RF-inert ESP32-S3 flash-journal HIL for the Heltec Wireless Tracker V2.3"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[dependencies]
+embedded-storage.workspace = true
+esp-backtrace = { workspace = true, features = ["esp32s3", "panic-handler", "println"] }
+esp-bootloader-esp-idf = { workspace = true, features = ["esp32s3", "log-04", "validation"] }
+esp-hal = { workspace = true, features = [
+    "esp32s3",
+    "exception-handler",
+    "float-save-restore",
+    "log-04",
+    "rt",
+    "unstable",
+] }
+esp-println = { workspace = true, features = ["auto", "esp32s3", "log-04"] }
+esp-storage = { workspace = true, features = ["esp32s3", "critical-section"] }
+log = { version = "=0.4.27", default-features = false }
+reticulum-storage-journal = { path = "../../crates/storage-journal", default-features = false }
+reticulum-storage-model = { path = "../../crates/storage-model", default-features = false }
+
+[[bin]]
+name = "reticulum-heltec-tracker-v2-storage-hil"
+path = "src/main.rs"
+test = false
+bench = false

@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "comparisons/rns-leviculum",
     "crates/board-heltec-tracker-v2",
+    "crates/board-heltec-tracker-v2-tx-hil",
     "crates/device-api",
     "crates/lab-rx-returned-fault-hil",
     "crates/node-core",
@@ -10,19 +11,23 @@ members = [
     "crates/rns-conformance",
     "crates/rns-rete",
     "crates/rns-rete-rx",
+    "crates/storage-journal",
     "crates/storage-model",
     "crates/submission-projector",
     "crates/tx-dispatch",
     "crates/tx-handoff",
     "crates/tx-supervisor",
     "firmware/heltec-tracker-v2",
+    "firmware/heltec-tracker-v2-storage-hil",
+    "firmware/heltec-tracker-v2-tx-hil",
     "tools/conformance-rete",
     "tools/phase1-rx-local-data",
     "xtask",
 ]
-exclude = ["vendor/esp-rtos-0.3.0"]
+exclude = ["vendor/esp-rtos-0.3.0", "vendor/lora-phy-3.0.1"]
 default-members = [
     "crates/board-heltec-tracker-v2",
+    "crates/board-heltec-tracker-v2-tx-hil",
     "crates/device-api",
     "crates/lab-rx-returned-fault-hil",
     "crates/node-core",
@@ -30,6 +35,7 @@ default-members = [
     "crates/rns-conformance",
     "crates/rns-rete",
     "crates/rns-rete-rx",
+    "crates/storage-journal",
     "crates/storage-model",
     "crates/submission-projector",
     "crates/tx-dispatch",
@@ -56,11 +62,13 @@ critical-section = { version = "=1.2.0", default-features = false }
 embedded-hal = "=1.0.0"
 embedded-hal-async = "=1.0.0"
 embedded-hal-bus = { version = "=0.3.0", default-features = false, features = ["async"] }
+embedded-storage = { version = "=0.3.1", default-features = false }
 esp-alloc = "=0.10.0"
 esp-backtrace = { version = "=0.19.0", default-features = false }
 esp-bootloader-esp-idf = { version = "=0.5.0", default-features = false }
 esp-hal = { version = "=1.1.1", default-features = false }
 esp-println = { version = "=0.17.0", default-features = false }
+esp-storage = { version = "=0.9.0", default-features = false }
 # Local source patch over crates.io 0.3.0. Upstream currently constructs both
 # CPU0 and CPU1 main-task `*mut [MaybeUninit<u32>]` slices with byte counts as
 # element counts, making both fat pointers four times too long. Keep this path
@@ -68,6 +76,13 @@ esp-println = { version = "=0.17.0", default-features = false }
 # inventory and exact edits in vendor/esp-rtos-0.3.0/PATCHES.md.
 esp-rtos = { path = "vendor/esp-rtos-0.3.0", version = "=0.3.0", default-features = false }
 log = "=0.4.27"
+# Local source patch over crates.io 3.0.1. The SX126x driver otherwise derives
+# every high-power PA command from requested output power, while the Tracker V2
+# HIL needs one atomic RNode-compatible PA/OCP override at its fixed 0 dBm
+# modem setting plus an opt-in early external-FEM TX preparation hook and
+# post-initialization RF-path hook, plus synchronized public-standby state.
+# Existing variants and interfaces retain upstream behavior; see the checked
+# vendor inventory in vendor/lora-phy-3.0.1/PATCHES.md.
 lora-phy = { version = "=3.0.1", default-features = false }
 lora-modulation = { version = "=0.1.5", default-features = false }
 minicbor = { version = "=2.2.2", default-features = false }
@@ -90,6 +105,11 @@ zeroize = { version = "=1.9.0", default-features = false }
 rete-core = { git = "https://github.com/evelant/rete.git", rev = "f6f5fb0637d00691e09fa0105be4df902405fee4", default-features = false }
 rete-stack = { git = "https://github.com/evelant/rete.git", rev = "f6f5fb0637d00691e09fa0105be4df902405fee4", default-features = false }
 rete-transport = { git = "https://github.com/evelant/rete.git", rev = "f6f5fb0637d00691e09fa0105be4df902405fee4", default-features = false }
+
+[patch.crates-io]
+# Force every current and future graph consumer onto the one reviewed local
+# SX126x policy patch rather than allowing a second registry copy.
+lora-phy = { path = "vendor/lora-phy-3.0.1" }
 
 [profile.dev]
 opt-level = "s"

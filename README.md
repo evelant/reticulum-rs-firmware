@@ -5,11 +5,12 @@ target is the ESP32-S3 and SX1262/KCT8103L combination on the Heltec Wireless
 Tracker V2.3, but protocol and application code will remain portable across
 boards and radios.
 
-The repository is in **Phase 1: receive-only vertical slice**. It does not yet
-provide a complete Reticulum or LXMF node. The default firmware binary remains
-a deliberately RF-disabled safe-idle image. A separate, explicitly configured
-lab binary now owns the Tracker SX1262 through an opaque RX-only wrapper; it has
-no transmit API and hands complete PHY frames from a sole radio task to a
+The repository is in **Phase 1: receive vertical slice plus guarded transmit
+groundwork**. It does not yet provide a complete Reticulum or LXMF node. The
+default firmware binary remains a deliberately RF-disabled safe-idle image. A
+separate, explicitly configured lab binary owns the Tracker SX1262 through an
+opaque RX-only wrapper; it has no transmit API and hands complete PHY frames
+from a sole radio task to a
 separate ingress owner through a depth-2, non-blocking drop-new queue. Timed
 RNode reassembly, endpoint-only Rete admission, periodic protocol maintenance
 and unconditional action suppression are target-linked behind that owner. A
@@ -29,6 +30,25 @@ pressure stimulus without changing the normal lab image. Deterministic RNode
 19-scenario corpus and replayed through the Rust ingress in CI; a separate
 host-tested generator creates encrypted local DATA for one exact ephemeral
 Tracker boot.
+
+An independently named, eFuse-MAC-gated one-shot TX HIL now proves exact LoRa
+PHY and RNode framing on the two Tracker V2.3 boards. Rust-to-Rust,
+RNode-to-Rust and Rust-to-RNode sentinel exchanges all pass. The explicit
+semantic mode has also completed a powered Rust-to-RNode run: E9 prepared one
+168-byte physical frame, reported exactly one `DRIVER_TX_DONE`, shut the radio
+down and entered its permanent inert hold. E0's RNode 1.86 ordinary
+non-promiscuous receive path delivered exactly one matching 167-byte deframed
+packet, and pinned Python RNS 1.3.8 validated its first-hop ANNOUNCE syntax,
+signature, public identity and destination/name-hash binding. The evidence is
+preserved at
+`artifacts/hil/tx-hil/20260716T183805Z-e944-rete-announce-to-e040-rnode/attempt-02-coordinated`.
+
+That pass is deliberately a deterministic conformance HIL: its fixed key, zero
+entropy and old timestamp are not a production identity/clock design, and the
+observer did not start a full Reticulum instance or exercise live transport
+path admission. It establishes neither the product node-core receive/router
+path nor forwarding, LXMF or a production TX policy; see
+[the Phase-1 TX HIL record](docs/phase-1-tx-hil.md).
 
 Separately from the target-linked receive-only image, the portable node-core
 now registers caller-owned 500-byte packet buffers, retains fixed dispatch
@@ -83,14 +103,18 @@ principal-scoped idempotency, fail-closed complete replay, lifecycle validation,
 and opaque preflighted mutations. `reticulum-submission-projector` now enforces
 the durable `Queued -> Preparing` barrier and withholds exact terminal and
 recovered-owner acknowledgements until their corresponding transition or audit
-is known committed. Neither crate writes flash: the selected project-owned
-two-bank journal is not implemented, its physical reservation/fault budgets
-remain to be proved, and the device-API adapter, sole runtime owner, and firmware
-edge remain open. The supervisor still has no radio/HAL or RF path.
-Every project firmware graph remains TX-free, and all project radio-bearing
-firmware artifacts remain RX-only. The separately derived RNode image on the
-second board is an external development peer, not part of that project graph;
-its radio authorization remained off during the recorded project smoke.
+is known committed. Neither crate writes flash. The project-owned two-bank
+journal now implements the physical format, replay, append and compaction, but
+no permanent storage actor yet connects projector plans, commit/readback
+results, replay and the device API. That RF-inert actor plus a
+persist-before-accept device-API edge is the next bounded product-code slice.
+The sole runtime owner and firmware edge remain open, and the supervisor still
+has no radio/HAL or RF path.
+Every product-candidate firmware graph remains TX-free. The explicitly named
+TX HIL is the sole lab-only exception and is not linked into the default or
+receive-only firmware. The separately derived RNode image on the second board
+is an external development peer, not part of the product graph; its radio
+authorization remains reset-scoped and host-controlled.
 
 ## Read first
 
@@ -100,6 +124,7 @@ its radio authorization remained off during the recorded project smoke.
 - [Phase-0 validation contract](docs/phase-0-acceptance.md)
 - [Phase-1 receive-only slice](docs/phase-1-rx-slice.md)
 - [Phase-1 Tracker RX hardware qualification](docs/phase-1-rx-hil.md)
+- [Phase-1 exploratory Tracker transmit HIL](docs/phase-1-tx-hil.md)
 - [Device API v1 logical protocol](docs/api/device-api-v1.md)
 - [Bounded node-core external-buffer DATA dispatch](docs/node-core-outbox.md)
 - [Owning async TX handoff](docs/async-tx-handoff.md)

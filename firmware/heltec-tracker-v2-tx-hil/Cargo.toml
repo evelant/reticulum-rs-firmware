@@ -1,0 +1,63 @@
+[package]
+name = "reticulum-heltec-tracker-v2-tx-hil"
+description = "MAC-guarded bidirectional LoRa HIL for two Heltec Wireless Tracker V2.3 boards"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "build.rs"
+autobins = false
+
+[features]
+default = []
+near-field-attenuation-hil = [
+    "reticulum-board-heltec-tracker-v2-tx-hil/near-field-attenuation-hil",
+]
+semantic-announce-hil = [
+    "dep:rand_core",
+    "dep:reticulum-rns-rete",
+    "reticulum-rns-rete/conformance",
+]
+
+[dependencies]
+rand_core = { workspace = true, optional = true }
+reticulum-radio-interface = { path = "../../crates/radio-interface" }
+reticulum-rns-rete = { path = "../../crates/rns-rete", default-features = false, optional = true }
+
+[target.'cfg(target_arch = "xtensa")'.dependencies]
+reticulum-board-heltec-tracker-v2-tx-hil = { path = "../../crates/board-heltec-tracker-v2-tx-hil" }
+
+embassy-executor = { workspace = true, features = ["log"] }
+embassy-time = { workspace = true, features = ["log"] }
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
+embedded-hal-bus.workspace = true
+esp-alloc.workspace = true
+esp-backtrace = { workspace = true, features = ["esp32s3", "panic-handler", "println"] }
+esp-bootloader-esp-idf = { workspace = true, features = ["esp32s3", "log-04"] }
+esp-hal = { workspace = true, features = [
+    "esp32s3",
+    "exception-handler",
+    "float-save-restore",
+    "log-04",
+    "rt",
+    "unstable",
+] }
+esp-println = { workspace = true, features = ["auto", "esp32s3", "log-04"] }
+esp-rtos = { workspace = true, features = [
+    "embassy",
+    "esp-alloc",
+    "esp32s3",
+    "log-04",
+] }
+log.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "reticulum-heltec-tracker-v2-tx-hil"
+path = "src/main.rs"
+test = false
+bench = false

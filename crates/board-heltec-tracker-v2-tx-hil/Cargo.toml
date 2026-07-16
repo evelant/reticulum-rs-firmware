@@ -1,0 +1,28 @@
+[package]
+name = "reticulum-board-heltec-tracker-v2-tx-hil"
+description = "Explicitly hazardous bidirectional radio owner for Tracker V2 hardware-in-the-loop tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# Diagnostic-only lower modem output for colocated-board overload tests. The
+# external-FEM antenna-path result is intentionally treated as uncalibrated.
+near-field-attenuation-hil = []
+
+[dependencies]
+critical-section.workspace = true
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
+lora-phy.workspace = true
+reticulum-board-heltec-tracker-v2 = { path = "../board-heltec-tracker-v2" }
+reticulum-radio-interface = { path = "../radio-interface" }
+
+[dev-dependencies]
+critical-section = { workspace = true, features = ["std"] }
+
+[lib]
+path = "src/lib.rs"

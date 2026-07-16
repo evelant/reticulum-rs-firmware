@@ -264,6 +264,65 @@ fn graph_policy() -> ExitCode {
         }
     };
 
+    let storage_hil = match capture(
+        "cargo",
+        [
+            "tree",
+            "--locked",
+            "-p",
+            "reticulum-heltec-tracker-v2-storage-hil",
+            "--target",
+            "all",
+        ],
+    ) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!("error: could not inspect physical-storage HIL graph: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let tx_hil = match capture(
+        "cargo",
+        [
+            "tree",
+            "--locked",
+            "-p",
+            "reticulum-heltec-tracker-v2-tx-hil",
+            "--target",
+            "all",
+        ],
+    ) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!("error: could not inspect hazardous TX HIL graph: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let semantic_tx_hil = match capture(
+        "cargo",
+        [
+            "tree",
+            "--locked",
+            "-p",
+            "reticulum-heltec-tracker-v2-tx-hil",
+            "--no-default-features",
+            "--features",
+            "semantic-announce-hil",
+            "--target",
+            "all",
+            "--format",
+            "{p} features=[{f}]",
+        ],
+    ) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!("error: could not inspect semantic announce TX HIL graph: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let comparison = match capture(
         "cargo",
         [
@@ -301,6 +360,18 @@ fn graph_policy() -> ExitCode {
         eprintln!("error: {error}");
         failed = true;
     }
+    if let Err(error) = validate_storage_hil_graph_boundary(&storage_hil) {
+        eprintln!("error: {error}");
+        failed = true;
+    }
+    if let Err(error) = validate_tx_hil_graph_boundary(&tx_hil) {
+        eprintln!("error: {error}");
+        failed = true;
+    }
+    if let Err(error) = validate_semantic_tx_hil_graph_boundary(&semantic_tx_hil) {
+        eprintln!("error: {error}");
+        failed = true;
+    }
     for forbidden in ["rete-core", "rete-stack", "rete-transport", "rete-lxmf"] {
         if comparison.contains(forbidden) {
             eprintln!("error: Leviculum comparison graph contains forbidden {forbidden}");
@@ -319,6 +390,8 @@ fn graph_policy() -> ExitCode {
             .map_err(|error| format!("Rete pin/report mismatch: {error}"))?;
         validate_resolved_esp_rtos_patch(&json, &root)
             .map_err(|error| format!("esp-rtos patch boundary: {error}"))?;
+        validate_resolved_lora_phy_patch(&json, &root)
+            .map_err(|error| format!("lora-phy patch boundary: {error}"))?;
         validate_firmware_dependency_boundary(&json, &root)
             .map_err(|error| format!("firmware receive-only dependency boundary: {error}"))?;
         validate_portable_layer_dependency_boundary(&json, &root)
@@ -329,6 +402,10 @@ fn graph_policy() -> ExitCode {
             .map_err(|error| format!("TX dispatcher dependency boundary: {error}"))?;
         validate_storage_model_dependency_boundary(&json, &root)
             .map_err(|error| format!("durable storage model dependency boundary: {error}"))?;
+        validate_storage_journal_dependency_boundary(&json, &root)
+            .map_err(|error| format!("physical storage journal dependency boundary: {error}"))?;
+        validate_storage_hil_dependency_boundary(&json, &root)
+            .map_err(|error| format!("physical storage HIL dependency boundary: {error}"))?;
         validate_submission_projector_dependency_boundary(&json, &root)
             .map_err(|error| format!("submission projector dependency boundary: {error}"))?;
         validate_tx_supervisor_dependency_boundary(&json, &root)
@@ -343,16 +420,18 @@ fn graph_policy() -> ExitCode {
         ExitCode::FAILURE
     } else {
         println!(
-            "ok: all safe, RX, HIL and all-features all-target product graphs and the Leviculum \
+            "ok: all safe, RX, HIL and all-features all-target product graphs, the RF-inert physical-storage HIL graph, the separately hazardous default-sentinel and explicit semantic-announce TX HIL graphs and the Leviculum \
              comparison graph are isolated; the returned-fault hook is feature-exclusive; \
              firmware direct dependencies use only the RX façade and every-feature resolution \
              excludes TX ownership and pre-integration durable crates; resolved Rete packages match reported \
-             source/revision; esp-rtos resolves only to the reviewed local patch and its \
-             checked vendor inventory reconstructs the pristine registry source; the device \
+             source/revision; esp-rtos and lora-phy resolve only to their reviewed local patches, \
+             and each checked vendor inventory reconstructs the pristine registry source; the device \
              API and node core remain mutually isolated and free of direct platform dependencies; \
              the TX handoff, dispatcher and supervisor use only their reviewed node-core, \
              handoff, dispatcher, Embassy Sync/Futures/Time, rand_core and SHA-256 dependency \
              edges; the durable storage model uses only reviewed minicbor and SHA-256 edges; \
+             the physical storage journal uses only reviewed embedded-storage, storage-model and SHA-256 edges; \
+             the physical-storage HIL has only its reviewed raw-flash, journal, semantic-model, logging and ESP runtime edges and no radio/protocol stack; \
              the submission projector uses only reviewed node-core, storage-model, dispatcher \
              and test-only rand_core and RNS adapter edges"
         );
@@ -360,11 +439,13 @@ fn graph_policy() -> ExitCode {
     }
 }
 
-const PRODUCT_GRAPH_FORBIDDEN: [&str; 9] = [
+const PRODUCT_GRAPH_FORBIDDEN: [&str; 11] = [
     "leviculum-core",
     "rete-lxmf",
     "lxmf-rs",
+    "reticulum-board-heltec-tracker-v2-tx-hil",
     "reticulum-node-core",
+    "reticulum-storage-journal",
     "reticulum-storage-model",
     "reticulum-submission-projector",
     "reticulum-tx-dispatch",
@@ -377,6 +458,134 @@ fn validate_product_graph_boundary(label: &str, tree: &str) -> Result<(), String
         if tree.contains(forbidden) {
             return Err(format!(
                 "product {label} all-target graph contains forbidden {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 16] = [
+    "embassy-executor",
+    "esp-radio",
+    "lora-modulation",
+    "lora-phy",
+    "rete-core",
+    "rete-stack",
+    "rete-transport",
+    "reticulum-board-heltec-tracker-v2-tx-hil",
+    "reticulum-board-heltec-tracker-v2",
+    "reticulum-node-core",
+    "reticulum-radio-interface",
+    "reticulum-rns-rete",
+    "reticulum-submission-projector",
+    "reticulum-tx-dispatch",
+    "reticulum-tx-handoff",
+    "reticulum-tx-supervisor",
+];
+
+const TX_HIL_GRAPH_REQUIRED: [&str; 2] = [
+    "reticulum-board-heltec-tracker-v2-tx-hil",
+    "reticulum-radio-interface",
+];
+
+const TX_HIL_GRAPH_FORBIDDEN: [&str; 14] = [
+    "leviculum-core",
+    "lxmf-rs",
+    "rete-core",
+    "rete-lxmf",
+    "rete-stack",
+    "rete-transport",
+    "reticulum-node-core",
+    "reticulum-rns-rete",
+    "reticulum-storage-journal",
+    "reticulum-storage-model",
+    "reticulum-submission-projector",
+    "reticulum-tx-dispatch",
+    "reticulum-tx-handoff",
+    "reticulum-tx-supervisor",
+];
+
+fn validate_tx_hil_graph_boundary(tree: &str) -> Result<(), String> {
+    for required in TX_HIL_GRAPH_REQUIRED {
+        if !tree.contains(required) {
+            return Err(format!(
+                "hazardous TX HIL graph is missing required {required}"
+            ));
+        }
+    }
+    for forbidden in TX_HIL_GRAPH_FORBIDDEN {
+        if tree.contains(forbidden) {
+            return Err(format!(
+                "hazardous TX HIL graph contains forbidden {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+const SEMANTIC_TX_HIL_GRAPH_REQUIRED: [&str; 6] = [
+    "reticulum-board-heltec-tracker-v2-tx-hil",
+    "reticulum-radio-interface",
+    "reticulum-rns-rete",
+    "rete-core",
+    "rete-stack",
+    "rete-transport",
+];
+
+const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 10] = [
+    "leviculum-core",
+    "lxmf-rs",
+    "rete-lxmf",
+    "reticulum-node-core",
+    "reticulum-storage-journal",
+    "reticulum-storage-model",
+    "reticulum-submission-projector",
+    "reticulum-tx-dispatch",
+    "reticulum-tx-handoff",
+    "reticulum-tx-supervisor",
+];
+
+fn validate_semantic_tx_hil_graph_boundary(tree: &str) -> Result<(), String> {
+    for required in SEMANTIC_TX_HIL_GRAPH_REQUIRED {
+        if !tree.contains(required) {
+            return Err(format!(
+                "semantic announce TX HIL graph is missing required {required}"
+            ));
+        }
+    }
+    for forbidden in SEMANTIC_TX_HIL_GRAPH_FORBIDDEN {
+        if tree.contains(forbidden) {
+            return Err(format!(
+                "semantic announce TX HIL graph contains forbidden {forbidden}"
+            ));
+        }
+    }
+    if !tree.lines().any(|line| {
+        line.contains("reticulum-heltec-tracker-v2-tx-hil")
+            && line.contains("features=[semantic-announce-hil]")
+    }) {
+        return Err(
+            "semantic announce TX HIL graph did not activate only its explicit root feature"
+                .to_owned(),
+        );
+    }
+    if !tree
+        .lines()
+        .any(|line| line.contains("reticulum-rns-rete") && line.contains("features=[conformance]"))
+    {
+        return Err(
+            "semantic announce TX HIL graph did not activate the Rete adapter conformance surface"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_storage_hil_graph_boundary(tree: &str) -> Result<(), String> {
+    for forbidden in STORAGE_HIL_GRAPH_FORBIDDEN {
+        if tree.contains(forbidden) {
+            return Err(format!(
+                "physical-storage HIL all-target graph contains forbidden {forbidden}"
             ));
         }
     }
@@ -941,6 +1150,262 @@ fn validate_storage_model_dependency_boundary(
     Ok(())
 }
 
+fn validate_storage_journal_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let expected_manifest = workspace.join("crates/storage-journal/Cargo.toml");
+    let matching = packages
+        .iter()
+        .filter(|package| {
+            package["name"].as_str() == Some("reticulum-storage-journal")
+                && package["source"].is_null()
+                && package["manifest_path"].as_str().map(Path::new)
+                    == Some(expected_manifest.as_path())
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err(format!(
+            "expected exactly one local reticulum-storage-journal package at {}, found {}",
+            expected_manifest.display(),
+            matching.len()
+        ));
+    }
+    let package = matching[0];
+
+    let features = package["features"]
+        .as_object()
+        .ok_or_else(|| "reticulum-storage-journal package has no feature map".to_owned())?;
+    if features.len() != 1
+        || features
+            .get("default")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|default| !default.is_empty())
+    {
+        return Err(
+            "reticulum-storage-journal must expose only an empty default feature".to_owned(),
+        );
+    }
+
+    let dependencies = package["dependencies"]
+        .as_array()
+        .ok_or_else(|| "reticulum-storage-journal package has no dependency array".to_owned())?;
+    if dependencies
+        .iter()
+        .any(|dependency| !dependency["kind"].is_null())
+    {
+        return Err(
+            "reticulum-storage-journal must not have build or development dependencies".to_owned(),
+        );
+    }
+    if dependencies.len() != 3 {
+        return Err(format!(
+            "reticulum-storage-journal must have exactly three reviewed normal dependencies, found {}",
+            dependencies.len()
+        ));
+    }
+
+    for (name, requirement) in [("embedded-storage", "=0.3.1"), ("sha2", "=0.10.9")] {
+        let dependency = dependencies
+            .iter()
+            .filter(|dependency| dependency["name"].as_str() == Some(name))
+            .collect::<Vec<_>>();
+        if dependency.len() != 1
+            || dependency[0]["req"].as_str() != Some(requirement)
+            || dependency[0]["source"].as_str()
+                != Some("registry+https://github.com/rust-lang/crates.io-index")
+            || !dependency[0]["path"].is_null()
+            || dependency[0]["optional"].as_bool() != Some(false)
+            || !dependency[0]["rename"].is_null()
+            || !dependency[0]["target"].is_null()
+            || dependency[0]["uses_default_features"].as_bool() != Some(false)
+            || dependency[0]["features"]
+                .as_array()
+                .is_none_or(|features| !features.is_empty())
+        {
+            return Err(format!(
+                "{name} must be the unconditional feature-free registry {requirement} normal dependency"
+            ));
+        }
+    }
+
+    let model_path = workspace.join("crates/storage-model");
+    let model = dependencies
+        .iter()
+        .filter(|dependency| dependency["name"].as_str() == Some("reticulum-storage-model"))
+        .collect::<Vec<_>>();
+    if model.len() != 1
+        || model[0]["req"].as_str() != Some("*")
+        || model[0]["path"].as_str().map(Path::new) != Some(model_path.as_path())
+        || !model[0]["source"].is_null()
+        || model[0]["optional"].as_bool() != Some(false)
+        || !model[0]["rename"].is_null()
+        || !model[0]["target"].is_null()
+        || model[0]["uses_default_features"].as_bool() != Some(false)
+        || model[0]["features"]
+            .as_array()
+            .is_none_or(|features| !features.is_empty())
+    {
+        return Err(
+            "reticulum-storage-model must be one unconditional feature-free local normal dependency at crates/storage-model"
+                .to_owned(),
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_storage_hil_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let expected_manifest = workspace.join("firmware/heltec-tracker-v2-storage-hil/Cargo.toml");
+    let matching = packages
+        .iter()
+        .filter(|package| {
+            package["name"].as_str() == Some("reticulum-heltec-tracker-v2-storage-hil")
+                && package["source"].is_null()
+                && package["manifest_path"].as_str().map(Path::new)
+                    == Some(expected_manifest.as_path())
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err(format!(
+            "expected exactly one local physical-storage HIL package at {}, found {}",
+            expected_manifest.display(),
+            matching.len()
+        ));
+    }
+    let package = matching[0];
+    let features = package["features"]
+        .as_object()
+        .ok_or_else(|| "physical-storage HIL package has no feature map".to_owned())?;
+    if !features.is_empty() {
+        return Err("physical-storage HIL must not expose Cargo features".to_owned());
+    }
+
+    let dependencies = package["dependencies"]
+        .as_array()
+        .ok_or_else(|| "physical-storage HIL package has no dependency array".to_owned())?;
+    let expected_names = BTreeSet::from([
+        "embedded-storage",
+        "esp-backtrace",
+        "esp-bootloader-esp-idf",
+        "esp-hal",
+        "esp-println",
+        "esp-storage",
+        "log",
+        "reticulum-storage-journal",
+        "reticulum-storage-model",
+    ]);
+    let actual_names = dependencies
+        .iter()
+        .filter_map(|dependency| dependency["name"].as_str())
+        .collect::<BTreeSet<_>>();
+    if dependencies.len() != expected_names.len() || actual_names != expected_names {
+        return Err(format!(
+            "physical-storage HIL dependency allowlist drifted: {actual_names:?}"
+        ));
+    }
+    if dependencies.iter().any(|dependency| {
+        !dependency["kind"].is_null()
+            || dependency["optional"].as_bool() != Some(false)
+            || !dependency["rename"].is_null()
+            || !dependency["target"].is_null()
+            || dependency["uses_default_features"].as_bool() != Some(false)
+    }) {
+        return Err(
+            "physical-storage HIL dependencies must be unconditional, normal, unrenamed and default-feature-free"
+                .to_owned(),
+        );
+    }
+    for (name, relative_path) in [
+        ("reticulum-storage-journal", "crates/storage-journal"),
+        ("reticulum-storage-model", "crates/storage-model"),
+    ] {
+        let expected_path = workspace.join(relative_path);
+        let dependency = dependencies
+            .iter()
+            .find(|dependency| dependency["name"].as_str() == Some(name))
+            .ok_or_else(|| format!("physical-storage HIL is missing {name}"))?;
+        if dependency["path"].as_str().map(Path::new) != Some(expected_path.as_path())
+            || !dependency["source"].is_null()
+            || dependency["req"].as_str() != Some("*")
+            || dependency["features"]
+                .as_array()
+                .is_none_or(|features| !features.is_empty())
+        {
+            return Err(format!(
+                "physical-storage HIL {name} must be a feature-free local edge resolving to {}",
+                expected_path.display()
+            ));
+        }
+    }
+    let registry_dependencies: [(&str, &str, &[&str]); 7] = [
+        ("embedded-storage", "=0.3.1", &[]),
+        (
+            "esp-backtrace",
+            "=0.19.0",
+            &["esp32s3", "panic-handler", "println"],
+        ),
+        (
+            "esp-bootloader-esp-idf",
+            "=0.5.0",
+            &["esp32s3", "log-04", "validation"],
+        ),
+        (
+            "esp-hal",
+            "=1.1.1",
+            &[
+                "esp32s3",
+                "exception-handler",
+                "float-save-restore",
+                "log-04",
+                "rt",
+                "unstable",
+            ],
+        ),
+        ("esp-println", "=0.17.0", &["auto", "esp32s3", "log-04"]),
+        ("esp-storage", "=0.9.0", &["critical-section", "esp32s3"]),
+        ("log", "=0.4.27", &[]),
+    ];
+    for (name, requirement, expected_features) in registry_dependencies {
+        let dependency = dependencies
+            .iter()
+            .find(|dependency| dependency["name"].as_str() == Some(name))
+            .ok_or_else(|| format!("physical-storage HIL is missing {name}"))?;
+        let actual_features = dependency["features"]
+            .as_array()
+            .ok_or_else(|| format!("physical-storage HIL {name} has no feature list"))?;
+        let actual_features = actual_features
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<BTreeSet<_>>();
+        let expected_features = expected_features.iter().copied().collect::<BTreeSet<_>>();
+        if dependency["req"].as_str() != Some(requirement)
+            || dependency["source"].as_str()
+                != Some("registry+https://github.com/rust-lang/crates.io-index")
+            || !dependency["path"].is_null()
+            || actual_features != expected_features
+        {
+            return Err(format!(
+                "physical-storage HIL {name} does not match reviewed registry pin {requirement} and feature set {expected_features:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_submission_projector_dependency_boundary(
     metadata_json: &str,
     workspace: &Path,
@@ -1469,8 +1934,10 @@ fn validate_firmware_dependency_boundary(
         "rete-core",
         "rete-stack",
         "rete-transport",
+        "reticulum-board-heltec-tracker-v2-tx-hil",
         "reticulum-node-core",
         "reticulum-rns-rete",
+        "reticulum-storage-journal",
         "reticulum-storage-model",
         "reticulum-submission-projector",
         "reticulum-tx-dispatch",
@@ -1502,7 +1969,9 @@ fn validate_firmware_dependency_boundary(
             && package_names.get(package_id).is_some_and(|name| {
                 matches!(
                     *name,
-                    "reticulum-node-core"
+                    "reticulum-board-heltec-tracker-v2-tx-hil"
+                        | "reticulum-node-core"
+                        | "reticulum-storage-journal"
                         | "reticulum-storage-model"
                         | "reticulum-submission-projector"
                         | "reticulum-tx-dispatch"
@@ -2331,6 +2800,48 @@ fn validate_resolved_esp_rtos_patch(metadata_json: &str, workspace: &Path) -> Re
     validate_esp_rtos_vendor_tree(&workspace.join("vendor/esp-rtos-0.3.0"))
 }
 
+fn validate_resolved_lora_phy_patch(metadata_json: &str, workspace: &Path) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let matching = packages
+        .iter()
+        .filter(|package| package["name"].as_str() == Some("lora-phy"))
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err(format!(
+            "expected exactly one resolved lora-phy package, found {}",
+            matching.len()
+        ));
+    }
+
+    let package = matching[0];
+    if package["version"].as_str() != Some("3.0.1") {
+        return Err(format!(
+            "resolved lora-phy version {:?} is not the reviewed 3.0.1 base",
+            package["version"].as_str()
+        ));
+    }
+    if !package["source"].is_null() {
+        return Err(format!(
+            "resolved lora-phy source {:?} is not the reviewed local path",
+            package["source"].as_str()
+        ));
+    }
+    let expected_manifest = workspace.join("vendor/lora-phy-3.0.1/Cargo.toml");
+    if package["manifest_path"].as_str().map(Path::new) != Some(expected_manifest.as_path()) {
+        return Err(format!(
+            "resolved lora-phy manifest {:?} does not match {}",
+            package["manifest_path"].as_str(),
+            expected_manifest.display()
+        ));
+    }
+
+    validate_lora_phy_vendor_tree(&workspace.join("vendor/lora-phy-3.0.1"))
+}
+
 const ESP_RTOS_VENDOR_MANIFEST: &str = "VENDOR-HASHES.json";
 const ESP_RTOS_ARCHIVE_SHA256: &str =
     "551f90766e1527edaa0c91e8d559e9e2a60397b545e93357ac61fb31845e5712";
@@ -2553,6 +3064,269 @@ fn validate_esp_rtos_vendor_tree_with_manifest(
             "reversing the two reviewed edits produced src/lib.rs digest {reconstructed_digest}, expected pristine {}",
             patched_lib.upstream_sha256
         ));
+    }
+
+    Ok(())
+}
+
+const LORA_PHY_VENDOR_MANIFEST: &str = "VENDOR-HASHES.json";
+const LORA_PHY_ARCHIVE_SHA256: &str =
+    "61471c3b2909789e3332083577f6cf6c41a4fcf37674ef15156bcbb20504ac65";
+const LORA_PHY_UPSTREAM_COMMIT: &str = "ca04c2284eb00e015528933ea5159cd1ff36142d";
+const LORA_PHY_PATCHES_SHA256: &str =
+    "6cf20617bf00597361b75cc97e14e0debe5022a048bff60a490397486c614258";
+const LORA_PHY_UNMODIFIED_UPSTREAM_FILES: [&str; 17] = [
+    ".cargo_vcs_info.json",
+    "CHANGELOG.md",
+    "Cargo.toml",
+    "Cargo.toml.orig",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
+    "README.md",
+    "rustfmt.toml",
+    "src/interface.rs",
+    "src/iv.rs",
+    "src/lorawan_radio.rs",
+    "src/mod_params.rs",
+    "src/sx126x/radio_kind_params.rs",
+    "src/sx127x/mod.rs",
+    "src/sx127x/radio_kind_params.rs",
+    "src/sx127x/sx1272.rs",
+    "src/sx127x/sx1276.rs",
+];
+const LORA_PHY_PATCHED_UPSTREAM_FILES: [(&str, &str, &str); 4] = [
+    (
+        "src/lib.rs",
+        "8df0ef81a3a6333a7f528f0bd44204c65d2614ddf5e92a86c1db61bf25f6eccf",
+        "6b936e8546004f87e6003488fd793ad982cda85eec65073c453f412af41824ea",
+    ),
+    (
+        "src/mod_traits.rs",
+        "b95e71ba7a7591364a59ddf1961620f8864103a0991df28d71a07026541f6efd",
+        "78aee410464aa0e85112ddc3fd790456ee38cf9f289757cf6aac783d94e3f618",
+    ),
+    (
+        "src/sx126x/mod.rs",
+        "a1f49190dbb1e5820993bb9e9c1f45481997f047be983017aa2b3c57629faf18",
+        "a11be17de1603ebc796070a2d4a6f30dc23c63a305bc2111843d846d16550c3f",
+    ),
+    (
+        "src/sx126x/variant.rs",
+        "6ba1ab372039da00dbad8096b40fbf614cb8a2cd443783ede8a95eb9565a657a",
+        "daef22e7907e6502e9cb6622e3893fbc492389dcc3b856d88098712aa7262f63",
+    ),
+];
+const LORA_PHY_REVIEWED_EDIT_PATHS: [&str; 16] = [
+    "src/sx126x/mod.rs",
+    "src/sx126x/mod.rs",
+    "src/sx126x/mod.rs",
+    "src/sx126x/mod.rs",
+    "src/sx126x/mod.rs",
+    "src/sx126x/variant.rs",
+    "src/sx126x/variant.rs",
+    "src/mod_traits.rs",
+    "src/mod_traits.rs",
+    "src/lib.rs",
+    "src/sx126x/mod.rs",
+    "src/lib.rs",
+    "src/mod_traits.rs",
+    "src/mod_traits.rs",
+    "src/lib.rs",
+    "src/sx126x/mod.rs",
+];
+
+fn validate_lora_phy_vendor_tree(vendor: &Path) -> Result<(), String> {
+    let manifest_path = vendor.join(LORA_PHY_VENDOR_MANIFEST);
+    let text = fs::read_to_string(&manifest_path).map_err(|error| {
+        format!(
+            "could not read checked lora-phy vendor manifest {}: {error}",
+            manifest_path.display()
+        )
+    })?;
+    let manifest: VendorHashManifest = serde_json::from_str(&text).map_err(|error| {
+        format!(
+            "could not parse checked lora-phy vendor manifest {}: {error}",
+            manifest_path.display()
+        )
+    })?;
+    validate_lora_phy_vendor_tree_with_manifest(vendor, &manifest)
+}
+
+fn validate_lora_phy_vendor_tree_with_manifest(
+    vendor: &Path,
+    manifest: &VendorHashManifest,
+) -> Result<(), String> {
+    if manifest.schema != 1
+        || manifest.crate_name != "lora-phy"
+        || manifest.crate_version != "3.0.1"
+        || manifest.archive_sha256 != LORA_PHY_ARCHIVE_SHA256
+        || manifest.upstream_commit != LORA_PHY_UPSTREAM_COMMIT
+    {
+        return Err(
+            "checked vendor manifest does not identify the reviewed lora-phy 3.0.1 archive"
+                .to_owned(),
+        );
+    }
+
+    if !manifest.omitted_upstream_files.is_empty() {
+        return Err("the published lora-phy 3.0.1 archive has no omitted files".to_owned());
+    }
+    if manifest.project_files.len() != 1
+        || manifest.project_files.get("PATCHES.md").map(String::as_str)
+            != Some(LORA_PHY_PATCHES_SHA256)
+    {
+        return Err(
+            "checked lora-phy vendor manifest must contain only the reviewed PATCHES.md".to_owned(),
+        );
+    }
+
+    let unmodified_paths = manifest
+        .unmodified_upstream_files
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let expected_unmodified_paths = LORA_PHY_UNMODIFIED_UPSTREAM_FILES
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if unmodified_paths != expected_unmodified_paths {
+        return Err("checked lora-phy manifest has the wrong pristine file inventory".to_owned());
+    }
+
+    if manifest.patched_upstream_files.len() != LORA_PHY_PATCHED_UPSTREAM_FILES.len() {
+        return Err(
+            "checked lora-phy manifest must identify exactly four patched files".to_owned(),
+        );
+    }
+    for (relative, upstream_sha256, vendored_sha256) in LORA_PHY_PATCHED_UPSTREAM_FILES {
+        let record = manifest
+            .patched_upstream_files
+            .get(relative)
+            .ok_or_else(|| format!("checked lora-phy manifest is missing patched {relative}"))?;
+        if record.upstream_sha256 != upstream_sha256 || record.vendored_sha256 != vendored_sha256 {
+            return Err(format!(
+                "checked lora-phy manifest does not bind {relative} to its reviewed pristine and patched digests"
+            ));
+        }
+    }
+
+    if manifest.reviewed_source_edits.len() != LORA_PHY_REVIEWED_EDIT_PATHS.len()
+        || manifest
+            .reviewed_source_edits
+            .iter()
+            .zip(LORA_PHY_REVIEWED_EDIT_PATHS)
+            .any(|(edit, path)| {
+                edit.path != path
+                    || edit.upstream.is_empty()
+                    || edit.vendored.is_empty()
+                    || edit.upstream == edit.vendored
+            })
+    {
+        return Err(
+            "checked lora-phy manifest must describe the exact ordered sixteen reviewed edits across the SX126x core, variant, interface traits and public façade"
+                .to_owned(),
+        );
+    }
+
+    let mut expected_files = BTreeMap::new();
+    for (role, files) in [
+        ("unmodified upstream", &manifest.unmodified_upstream_files),
+        ("project provenance", &manifest.project_files),
+    ] {
+        for (relative, digest) in files {
+            validate_vendor_relative_path(relative)?;
+            validate_sha256_digest(digest)?;
+            if expected_files
+                .insert(relative.clone(), digest.clone())
+                .is_some()
+            {
+                return Err(format!(
+                    "checked lora-phy manifest lists {relative:?} in more than one role ({role})"
+                ));
+            }
+        }
+    }
+    for (relative, record) in &manifest.patched_upstream_files {
+        validate_vendor_relative_path(relative)?;
+        validate_sha256_digest(&record.upstream_sha256)?;
+        validate_sha256_digest(&record.vendored_sha256)?;
+        if expected_files
+            .insert(relative.clone(), record.vendored_sha256.clone())
+            .is_some()
+        {
+            return Err(format!(
+                "checked lora-phy manifest lists patched file {relative:?} in more than one role"
+            ));
+        }
+    }
+    if expected_files
+        .insert(LORA_PHY_VENDOR_MANIFEST.to_owned(), String::new())
+        .is_some()
+    {
+        return Err(format!(
+            "checked lora-phy manifest must not classify {LORA_PHY_VENDOR_MANIFEST} as payload"
+        ));
+    }
+
+    let mut actual_files = BTreeSet::new();
+    collect_vendor_files(vendor, vendor, &mut actual_files)?;
+    let expected_paths = expected_files.keys().cloned().collect::<BTreeSet<_>>();
+    if actual_files != expected_paths {
+        let missing = expected_paths
+            .difference(&actual_files)
+            .cloned()
+            .collect::<Vec<_>>();
+        let unexpected = actual_files
+            .difference(&expected_paths)
+            .cloned()
+            .collect::<Vec<_>>();
+        return Err(format!(
+            "lora-phy vendor tree differs from checked inventory; missing={missing:?}, unexpected={unexpected:?}"
+        ));
+    }
+
+    for (relative, expected_digest) in expected_files {
+        if relative == LORA_PHY_VENDOR_MANIFEST {
+            continue;
+        }
+        let actual_digest = sha256_file(&vendor.join(&relative))?;
+        if actual_digest != expected_digest {
+            return Err(format!(
+                "lora-phy vendor file {relative:?} digest {actual_digest} does not match checked {expected_digest}"
+            ));
+        }
+    }
+
+    let mut reconstructed = BTreeMap::new();
+    for (relative, _, _) in LORA_PHY_PATCHED_UPSTREAM_FILES {
+        let source = fs::read_to_string(vendor.join(relative))
+            .map_err(|error| format!("could not read patched {relative}: {error}"))?;
+        reconstructed.insert(relative, source);
+    }
+    for edit in &manifest.reviewed_source_edits {
+        let source = reconstructed
+            .get_mut(edit.path.as_str())
+            .ok_or_else(|| format!("reviewed edit names unpatched file {:?}", edit.path))?;
+        let vendored_occurrences = source.matches(&edit.vendored).count();
+        if vendored_occurrences != 1 {
+            return Err(format!(
+                "reviewed lora-phy edit in {:?} has {vendored_occurrences} vendored occurrences, expected 1",
+                edit.path
+            ));
+        }
+        *source = source.replacen(&edit.vendored, &edit.upstream, 1);
+    }
+    for (relative, upstream_sha256, _) in LORA_PHY_PATCHED_UPSTREAM_FILES {
+        let reconstructed_digest = sha256_bytes(
+            reconstructed
+                .get(relative)
+                .expect("all reviewed patched files were loaded")
+                .as_bytes(),
+        );
+        if reconstructed_digest != upstream_sha256 {
+            return Err(format!(
+                "reversing the reviewed edits produced {relative} digest {reconstructed_digest}, expected pristine {upstream_sha256}"
+            ));
+        }
     }
 
     Ok(())
@@ -2813,6 +3587,64 @@ mod tests {
     }
 
     #[test]
+    fn resolved_lora_phy_is_tied_to_reviewed_local_patch() {
+        let root = workspace_root();
+        let manifest = root.join("vendor/lora-phy-3.0.1/Cargo.toml");
+        let metadata = serde_json::json!({
+            "packages": [{
+                "name": "lora-phy",
+                "version": "3.0.1",
+                "source": null,
+                "manifest_path": manifest,
+            }]
+        });
+
+        validate_resolved_lora_phy_patch(&metadata.to_string(), &root).unwrap();
+
+        let mut crates_io = metadata.clone();
+        crates_io["packages"][0]["source"] = serde_json::Value::String(
+            "registry+https://github.com/rust-lang/crates.io-index".into(),
+        );
+        assert!(validate_resolved_lora_phy_patch(&crates_io.to_string(), &root).is_err());
+
+        let mut wrong_path = metadata;
+        wrong_path["packages"][0]["manifest_path"] =
+            serde_json::Value::String(root.join("elsewhere/Cargo.toml").display().to_string());
+        assert!(validate_resolved_lora_phy_patch(&wrong_path.to_string(), &root).is_err());
+    }
+
+    #[test]
+    fn lora_phy_vendor_tree_matches_checked_registry_inventory_and_reviewed_edits() {
+        let vendor = workspace_root().join("vendor/lora-phy-3.0.1");
+        validate_lora_phy_vendor_tree(&vendor).unwrap();
+
+        let manifest_text = fs::read_to_string(vendor.join(LORA_PHY_VENDOR_MANIFEST)).unwrap();
+        let manifest: VendorHashManifest = serde_json::from_str(&manifest_text).unwrap();
+
+        let mut missing_file = manifest.clone();
+        missing_file.unmodified_upstream_files.remove("README.md");
+        assert!(validate_lora_phy_vendor_tree_with_manifest(&vendor, &missing_file).is_err());
+
+        let mut changed_edit = manifest.clone();
+        changed_edit.reviewed_source_edits[6].vendored.push(' ');
+        assert!(validate_lora_phy_vendor_tree_with_manifest(&vendor, &changed_edit).is_err());
+
+        let mut changed_digest = manifest.clone();
+        changed_digest
+            .patched_upstream_files
+            .get_mut("src/sx126x/mod.rs")
+            .unwrap()
+            .vendored_sha256 = "0".repeat(64);
+        assert!(validate_lora_phy_vendor_tree_with_manifest(&vendor, &changed_digest).is_err());
+
+        let mut changed_patches = manifest;
+        changed_patches
+            .project_files
+            .insert("PATCHES.md".to_owned(), "0".repeat(64));
+        assert!(validate_lora_phy_vendor_tree_with_manifest(&vendor, &changed_patches).is_err());
+    }
+
+    #[test]
     fn firmware_dependency_boundary_rejects_tx_ownership_and_full_rete_crates() {
         let root = workspace_root();
         let board_path = root.join("crates/board-heltec-tracker-v2");
@@ -2860,6 +3692,7 @@ mod tests {
             "lora-phy",
             "reticulum-rns-rete",
             "reticulum-node-core",
+            "reticulum-storage-journal",
             "reticulum-storage-model",
             "reticulum-submission-projector",
             "reticulum-tx-dispatch",
@@ -2879,6 +3712,11 @@ mod tests {
 
         for (id, name, relative_path) in [
             ("node-core-id", "reticulum-node-core", "crates/node-core"),
+            (
+                "storage-journal-id",
+                "reticulum-storage-journal",
+                "crates/storage-journal",
+            ),
             (
                 "storage-model-id",
                 "reticulum-storage-model",
@@ -2945,7 +3783,9 @@ mod tests {
         .unwrap();
 
         for forbidden in [
+            "reticulum-board-heltec-tracker-v2-tx-hil",
             "reticulum-node-core",
+            "reticulum-storage-journal",
             "reticulum-storage-model",
             "reticulum-submission-projector",
             "reticulum-tx-dispatch",
@@ -2964,6 +3804,123 @@ mod tests {
     }
 
     #[test]
+    fn storage_hil_graph_boundary_rejects_radio_protocol_and_tx_packages() {
+        validate_storage_hil_graph_boundary(
+            "reticulum-heltec-tracker-v2-storage-hil v0.1.0\n└── esp-storage v0.9.0",
+        )
+        .unwrap();
+
+        for forbidden in STORAGE_HIL_GRAPH_FORBIDDEN {
+            let tree =
+                format!("reticulum-heltec-tracker-v2-storage-hil v0.1.0\n└── {forbidden} v0.1.0");
+            let error = validate_storage_hil_graph_boundary(&tree).unwrap_err();
+            assert!(error.contains(forbidden), "{error}");
+        }
+    }
+
+    #[test]
+    fn hazardous_default_tx_hil_graph_requires_its_owner_and_excludes_protocol_stack() {
+        let valid = "reticulum-heltec-tracker-v2-tx-hil v0.1.0\n\
+                     ├── reticulum-board-heltec-tracker-v2-tx-hil v0.1.0\n\
+                     └── reticulum-radio-interface v0.1.0";
+        validate_tx_hil_graph_boundary(valid).unwrap();
+
+        for missing in TX_HIL_GRAPH_REQUIRED {
+            let tree = valid.replace(missing, "missing-required-package");
+            let error = validate_tx_hil_graph_boundary(&tree).unwrap_err();
+            assert!(error.contains(missing), "{error}");
+        }
+        for forbidden in TX_HIL_GRAPH_FORBIDDEN {
+            let tree = format!("{valid}\n└── {forbidden} v0.1.0");
+            let error = validate_tx_hil_graph_boundary(&tree).unwrap_err();
+            assert!(error.contains(forbidden), "{error}");
+        }
+    }
+
+    #[test]
+    fn semantic_tx_hil_graph_requires_exact_rete_surface_and_excludes_product_stack() {
+        let valid = "reticulum-heltec-tracker-v2-tx-hil v0.1.0 features=[semantic-announce-hil]\n\
+                     ├── reticulum-board-heltec-tracker-v2-tx-hil v0.1.0 features=[]\n\
+                     ├── reticulum-radio-interface v0.1.0 features=[]\n\
+                     └── reticulum-rns-rete v0.1.0 features=[conformance]\n\
+                         ├── rete-core v0.1.0 features=[alloc,default]\n\
+                         ├── rete-stack v0.1.0 features=[alloc]\n\
+                         └── rete-transport v0.1.0 features=[]";
+        validate_semantic_tx_hil_graph_boundary(valid).unwrap();
+
+        for missing in SEMANTIC_TX_HIL_GRAPH_REQUIRED {
+            let tree = valid.replace(missing, "missing-required-package");
+            let error = validate_semantic_tx_hil_graph_boundary(&tree).unwrap_err();
+            assert!(error.contains(missing), "{error}");
+        }
+        for forbidden in SEMANTIC_TX_HIL_GRAPH_FORBIDDEN {
+            let tree = format!("{valid}\n└── {forbidden} v0.1.0 features=[]");
+            let error = validate_semantic_tx_hil_graph_boundary(&tree).unwrap_err();
+            assert!(error.contains(forbidden), "{error}");
+        }
+
+        let no_root_feature = valid.replace("features=[semantic-announce-hil]", "features=[]");
+        assert!(validate_semantic_tx_hil_graph_boundary(&no_root_feature).is_err());
+
+        let no_conformance = valid.replace(
+            "reticulum-rns-rete v0.1.0 features=[conformance]",
+            "reticulum-rns-rete v0.1.0 features=[]",
+        );
+        assert!(validate_semantic_tx_hil_graph_boundary(&no_conformance).is_err());
+    }
+
+    #[test]
+    fn storage_hil_boundary_rejects_dependency_feature_and_edge_drift() {
+        let root = workspace_root();
+        let metadata = storage_hil_metadata_fixture(&root);
+        validate_storage_hil_dependency_boundary(&metadata.to_string(), &root).unwrap();
+
+        let mut default_features = metadata.clone();
+        default_features["packages"][0]["dependencies"][6]["uses_default_features"] =
+            serde_json::Value::Bool(true);
+        assert!(
+            validate_storage_hil_dependency_boundary(&default_features.to_string(), &root).is_err()
+        );
+
+        let mut unreviewed_feature = metadata.clone();
+        unreviewed_feature["packages"][0]["dependencies"][3]["features"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::Value::String("radio".to_owned()));
+        assert!(
+            validate_storage_hil_dependency_boundary(&unreviewed_feature.to_string(), &root)
+                .is_err()
+        );
+
+        let mut local_feature = metadata.clone();
+        local_feature["packages"][0]["dependencies"][7]["features"] =
+            serde_json::json!(["unreviewed"]);
+        assert!(
+            validate_storage_hil_dependency_boundary(&local_feature.to_string(), &root).is_err()
+        );
+
+        let mut wrong_path = metadata.clone();
+        wrong_path["packages"][0]["dependencies"][8]["path"] =
+            serde_json::Value::String(root.join("elsewhere").display().to_string());
+        assert!(validate_storage_hil_dependency_boundary(&wrong_path.to_string(), &root).is_err());
+
+        let mut extra_dependency = metadata.clone();
+        extra_dependency["packages"][0]["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(handoff_dependency_fixture("heapless", "=0.9.1", None));
+        assert!(
+            validate_storage_hil_dependency_boundary(&extra_dependency.to_string(), &root).is_err()
+        );
+
+        let mut cargo_feature = metadata;
+        cargo_feature["packages"][0]["features"]["rf"] = serde_json::json!([]);
+        assert!(
+            validate_storage_hil_dependency_boundary(&cargo_feature.to_string(), &root).is_err()
+        );
+    }
+
+    #[test]
     fn portable_layer_boundary_accepts_generic_dependencies_and_node_rete_adapter() {
         let root = workspace_root();
         let metadata = portable_layers_metadata_fixture(&root);
@@ -2972,6 +3929,7 @@ mod tests {
         validate_tx_handoff_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_tx_dispatch_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_storage_model_dependency_boundary(&metadata.to_string(), &root).unwrap();
+        validate_storage_journal_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_submission_projector_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_tx_supervisor_dependency_boundary(&metadata.to_string(), &root).unwrap();
 
@@ -3255,6 +4213,43 @@ mod tests {
         assert!(
             validate_storage_model_dependency_boundary(&extra_feature.to_string(), &root).is_err()
         );
+    }
+
+    #[test]
+    fn storage_journal_boundary_rejects_unreviewed_dependencies_features_and_edge_shapes() {
+        const PACKAGE_INDEX: usize = 7;
+        let root = workspace_root();
+
+        let mut extra = portable_layers_metadata_fixture(&root);
+        extra["packages"][PACKAGE_INDEX]["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(handoff_dependency_fixture("heapless", "=0.9.1", None));
+        assert!(validate_storage_journal_dependency_boundary(&extra.to_string(), &root).is_err());
+
+        let mut default_features = portable_layers_metadata_fixture(&root);
+        default_features["packages"][PACKAGE_INDEX]["dependencies"][0]["uses_default_features"] =
+            serde_json::Value::Bool(true);
+        assert!(
+            validate_storage_journal_dependency_boundary(&default_features.to_string(), &root)
+                .is_err()
+        );
+
+        let mut wrong_path = portable_layers_metadata_fixture(&root);
+        wrong_path["packages"][PACKAGE_INDEX]["dependencies"][1]["path"] =
+            serde_json::Value::String(root.join("elsewhere").display().to_string());
+        assert!(
+            validate_storage_journal_dependency_boundary(&wrong_path.to_string(), &root).is_err()
+        );
+
+        let mut build = portable_layers_metadata_fixture(&root);
+        build["packages"][PACKAGE_INDEX]["dependencies"][2]["kind"] =
+            serde_json::Value::String("build".to_owned());
+        assert!(validate_storage_journal_dependency_boundary(&build.to_string(), &root).is_err());
+
+        let mut feature = portable_layers_metadata_fixture(&root);
+        feature["packages"][PACKAGE_INDEX]["features"]["alloc"] = serde_json::json!([]);
+        assert!(validate_storage_journal_dependency_boundary(&feature.to_string(), &root).is_err());
     }
 
     #[test]
@@ -3659,6 +4654,7 @@ mod tests {
                 supervisor_package_fixture(root),
                 storage_model_package_fixture(root),
                 submission_projector_package_fixture(root),
+                storage_journal_package_fixture(root),
             ]
         })
     }
@@ -3704,6 +4700,94 @@ mod tests {
                 handoff_dependency_fixture("sha2", "=0.10.9", None),
             ],
         })
+    }
+
+    fn storage_journal_package_fixture(root: &Path) -> serde_json::Value {
+        serde_json::json!({
+            "name": "reticulum-storage-journal",
+            "source": null,
+            "manifest_path": root.join("crates/storage-journal/Cargo.toml"),
+            "features": { "default": [] },
+            "dependencies": [
+                handoff_dependency_fixture("embedded-storage", "=0.3.1", None),
+                handoff_path_dependency_fixture(
+                    "reticulum-storage-model",
+                    "*",
+                    &root.join("crates/storage-model"),
+                    None,
+                ),
+                handoff_dependency_fixture("sha2", "=0.10.9", None),
+            ],
+        })
+    }
+
+    fn storage_hil_metadata_fixture(root: &Path) -> serde_json::Value {
+        serde_json::json!({
+            "packages": [{
+                "name": "reticulum-heltec-tracker-v2-storage-hil",
+                "source": null,
+                "manifest_path": root.join("firmware/heltec-tracker-v2-storage-hil/Cargo.toml"),
+                "features": {},
+                "dependencies": [
+                    hil_registry_dependency_fixture("embedded-storage", "=0.3.1", &[]),
+                    hil_registry_dependency_fixture(
+                        "esp-backtrace",
+                        "=0.19.0",
+                        &["esp32s3", "panic-handler", "println"],
+                    ),
+                    hil_registry_dependency_fixture(
+                        "esp-bootloader-esp-idf",
+                        "=0.5.0",
+                        &["esp32s3", "log-04", "validation"],
+                    ),
+                    hil_registry_dependency_fixture(
+                        "esp-hal",
+                        "=1.1.1",
+                        &[
+                            "esp32s3",
+                            "exception-handler",
+                            "float-save-restore",
+                            "log-04",
+                            "rt",
+                            "unstable",
+                        ],
+                    ),
+                    hil_registry_dependency_fixture(
+                        "esp-println",
+                        "=0.17.0",
+                        &["auto", "esp32s3", "log-04"],
+                    ),
+                    hil_registry_dependency_fixture(
+                        "esp-storage",
+                        "=0.9.0",
+                        &["critical-section", "esp32s3"],
+                    ),
+                    hil_registry_dependency_fixture("log", "=0.4.27", &[]),
+                    handoff_path_dependency_fixture(
+                        "reticulum-storage-journal",
+                        "*",
+                        &root.join("crates/storage-journal"),
+                        None,
+                    ),
+                    handoff_path_dependency_fixture(
+                        "reticulum-storage-model",
+                        "*",
+                        &root.join("crates/storage-model"),
+                        None,
+                    ),
+                ],
+            }],
+        })
+    }
+
+    fn hil_registry_dependency_fixture(
+        name: &str,
+        requirement: &str,
+        features: &[&str],
+    ) -> serde_json::Value {
+        let mut dependency = handoff_dependency_fixture(name, requirement, None);
+        dependency["features"] = serde_json::json!(features);
+        dependency
     }
 
     fn submission_projector_package_fixture(root: &Path) -> serde_json::Value {

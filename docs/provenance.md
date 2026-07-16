@@ -13,7 +13,7 @@ authoritative in the lockfile.
 | Leviculum | <https://codeberg.org/Lew_Palm/leviculum> | `5fb1db0e5e5a490291ee5f6b81312cf0c9de622a` | AGPL-3.0-or-later | Separate protocol oracle and fallback package |
 | esp-hal family | <https://github.com/esp-rs/esp-hal> | crates.io versions in lockfile | MIT OR Apache-2.0 | ESP32-S3 platform |
 | esp-rtos | Published crates.io 0.3.0 source vendored at `vendor/esp-rtos-0.3.0` | archive SHA-256 `551f90766e1527edaa0c91e8d559e9e2a60397b545e93357ac61fb31845e5712`; crate-recorded upstream commit `347003de8a48320bb7724f53045be3afa9204411`; exact tree and pristine/patched hashes in `VENDOR-HASHES.json` | MIT OR Apache-2.0, with canonical license texts added as project provenance files | Local CPU0 and CPU1 main-stack slice unit corrections; exact edits, mechanical integrity guard and removal condition are recorded in `PATCHES.md` |
-| lora-phy | <https://github.com/lora-rs/lora-rs> | exact crates.io version `3.0.1` in lockfile | MIT OR Apache-2.0 | Opaque receive-only Tracker radio owner; TX-capable upstream surface is not exported |
+| lora-phy | Published crates.io 3.0.1 source vendored at `vendor/lora-phy-3.0.1` | archive SHA-256 `61471c3b2909789e3332083577f6cf6c41a4fcf37674ef15156bcbb20504ac65`; crate-recorded upstream commit `ca04c2284eb00e015528933ea5159cd1ff36142d`; exact tree and pristine/patched hashes in `VENDOR-HASHES.json` | MIT OR Apache-2.0 | SX126x radio owner with an atomic, default-preserving board override for high-power PA/OCP/encoded power, default-no-op post-initialization and early-TX RF-path hooks, and public standby state synchronization; exact edits, integrity guard and removal condition are recorded in `PATCHES.md` |
 | embedded-hal / embedded-hal-async / embedded-hal-bus / lora-modulation | crates.io | exact versions in workspace and lockfile | MIT OR Apache-2.0 | Portable pin/SPI/profile contracts and the target-exclusive async SPI device |
 | Embassy futures/sync/time, static_cell and zeroize | crates.io | exact versions in workspace and lockfile | MIT OR Apache-2.0 | Bounded target coordination, in-place protocol ownership and temporary key cleanup |
 
@@ -63,6 +63,16 @@ Powered-evidence verification pins that archived generator source, regenerates
 the custom corpus from the recorded boot identity and base corpus, and requires
 byte-for-byte equality with the preserved JSON.
 
+The separately hazardous Tracker TX HIL has an opt-in
+`semantic-announce-hil` graph that uses the same pinned Apache-2.0 Rete adapter
+through its conformance-only announce constructor. It embeds the public test
+key, zero RNG, fixed timestamp and `testapp.aspect1` values from the committed
+Python-RNS 1.3.8 announce vector. Host tests require exact 167-byte equality,
+and firmware reparses and cryptographically validates the result before its
+one authorized transmission. The feature-free TX HIL remains the invalid
+sentinel graph and resolves no Rete packages. Neither HIL mode supplies a
+production identity, entropy source, clock, announce scheduler or TX policy.
+
 Published `esp-rtos` 0.3.0 constructs both CPU0 and CPU1 main-task
 `*mut [MaybeUninit<u32>]` slices with stack byte counts as their element counts,
 representing four times each actual stack reservation. The vendored patch
@@ -85,6 +95,30 @@ package-local vendor directory. The canonical texts intentionally added at
 `vendor/esp-rtos-0.3.0/LICENSE-APACHE` and `LICENSE-MIT` are the applicable
 copies. The upstream-marked README remains byte-identical to the registry
 archive so the vendor reconstruction check stays meaningful.
+
+Published `lora-phy` 3.0.1 derives every SX1262 high-power PA command from the
+requested output power. The local patch adds an atomic, default-`None`
+`Sx126xVariant::high_power_pa_override()` policy carrying PA duty cycle,
+`hpMax`, the raw signed `SetTxParams` power byte and optional OCP trim together,
+plus default-no-op post-initialization and early-transmit RF-path hooks. It also
+makes the public standby operation update the software radio mode after the
+hardware command succeeds, so later TX preparation does not issue a redundant
+standby command after an early external-FEM gate is armed. All PA fields are
+validated before PA/OCP commands are written; the existing TxClamp operation
+remains first, and a valid override then emits PA, optional OCP and TX-parameter
+commands in order. Existing variants and interfaces retain upstream behavior.
+The Tracker HIL alone uses the post-initialization hook to enable and settle its
+external FEM with CTX low, then asserts CTX after modem/power/standby
+normalization but before packet/FIFO preparation while preserving the final
+pre-`SetTx` gate. The checked vendor manifest records every published file, the
+exact crates.io archive and crate-recorded source commit, `PATCHES.md`, four
+patched source files and sixteen reviewed source replacements.
+`xtask graph-policy` requires Cargo to resolve the local path, verifies the
+complete inventory and digests, rejects symlinks, and reconstructs each
+pristine source file by reversing only those replacements. Remove the path
+patch after an upstream release provides equivalent atomic PA/OCP,
+post-initialization and early-TX RF-path hooks, preserves public standby state
+synchronization, and the project's regression guard has moved to that release.
 
 Rete's reviewed snapshot declares `MIT OR Apache-2.0` in Cargo metadata and
 its README but does not contain canonical license files. This is release

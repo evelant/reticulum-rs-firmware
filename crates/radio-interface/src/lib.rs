@@ -22,6 +22,7 @@ mod lab_rx_backpressure;
 mod lab_rx_profile;
 mod radio_diagnostics;
 mod reset_quarantine;
+mod rnode_tx;
 mod rx_pipeline;
 mod stack_watermark;
 
@@ -43,6 +44,7 @@ pub use reset_quarantine::{
     ResetQuarantineReason, ResetQuarantineStorage, ResetQuarantineWriteError, RetainedBootReason,
     complete_healthy_radio_lease, prepare_reset_quarantine_boot, record_radio_fault_before_reset,
 };
+pub use rnode_tx::{RnodeTxFrameBuffer, RnodeTxFrames, frame_rns_packet};
 pub use rx_pipeline::{
     ExpiredFragment, FrameSignal, RawFrameHandoff, RawFrameHandoffDiagnostics,
     RawFrameHandoffOutcome, RawReceivedFrame, RxDiagnostics, TimedReceiveError,
@@ -76,6 +78,14 @@ pub struct RnodeFrameHeader {
 }
 
 impl RnodeFrameHeader {
+    /// Encode a canonical header from a packet sequence and split state.
+    ///
+    /// Only the low four sequence bits are carried on the wire. All reserved
+    /// flag bits are emitted as zero.
+    pub const fn encode(sequence: u8, split: bool) -> u8 {
+        ((sequence << 4) & RNODE_LORA_SEQUENCE_MASK) | if split { RNODE_LORA_SPLIT_FLAG } else { 0 }
+    }
+
     /// Decode a header byte received from the radio.
     pub const fn decode(raw: u8) -> Self {
         Self {

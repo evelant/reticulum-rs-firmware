@@ -921,6 +921,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp-storage"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cf2b3f00c9f94b27c62a4f5296b19470c3a083c687c8146e554a459f9bee596"
+dependencies = [
+ "document-features",
+ "embedded-storage",
+ "esp-hal",
+ "esp-hal-procmacros",
+ "esp-metadata-generated",
+ "esp-rom-sys",
+ "esp-sync",
+]
+
+[[package]]
 name = "esp-sync"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1334,8 +1349,6 @@ checksum = "2c96c4a41a1f1ad04de765306e1829c7007a37898fe4033204fa82cf2e055624"
 [[package]]
 name = "lora-phy"
 version = "3.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61471c3b2909789e3332083577f6cf6c41a4fcf37674ef15156bcbb20504ac65"
 dependencies = [
  "defmt 0.3.100",
  "embedded-hal 1.0.0",
@@ -1584,6 +1597,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "reticulum-board-heltec-tracker-v2-tx-hil"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "lora-phy",
+ "reticulum-board-heltec-tracker-v2",
+ "reticulum-radio-interface",
+]
+
+[[package]]
 name = "reticulum-conformance-rete"
 version = "0.1.0"
 dependencies = [
@@ -1628,6 +1653,43 @@ dependencies = [
  "reticulum-rns-rete-rx",
  "static_cell",
  "zeroize",
+]
+
+[[package]]
+name = "reticulum-heltec-tracker-v2-storage-hil"
+version = "0.1.0"
+dependencies = [
+ "embedded-storage",
+ "esp-backtrace",
+ "esp-bootloader-esp-idf",
+ "esp-hal",
+ "esp-println",
+ "esp-storage",
+ "log",
+ "reticulum-storage-journal",
+ "reticulum-storage-model",
+]
+
+[[package]]
+name = "reticulum-heltec-tracker-v2-tx-hil"
+version = "0.1.0"
+dependencies = [
+ "embassy-executor",
+ "embassy-time",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "embedded-hal-bus",
+ "esp-alloc",
+ "esp-backtrace",
+ "esp-bootloader-esp-idf",
+ "esp-hal",
+ "esp-println",
+ "esp-rtos",
+ "log",
+ "rand_core 0.6.4",
+ "reticulum-board-heltec-tracker-v2-tx-hil",
+ "reticulum-radio-interface",
+ "reticulum-rns-rete",
 ]
 
 [[package]]
@@ -1702,6 +1764,15 @@ dependencies = [
  "rand_core 0.6.4",
  "reticulum-radio-interface",
  "reticulum-rns-rete",
+]
+
+[[package]]
+name = "reticulum-storage-journal"
+version = "0.1.0"
+dependencies = [
+ "embedded-storage",
+ "reticulum-storage-model",
+ "sha2",
 ]
 
 [[package]]

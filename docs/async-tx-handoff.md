@@ -380,10 +380,11 @@ Implemented and host/target-testable without RF:
 - exact handoff/dispatcher/supervisor dependency contracts plus dependency/
   feature guards that keep Tracker TX unavailable.
 
-The next product slice is the sole physical storage actor and power-fail-safe
-journal. It must turn the projector's exact record requests into real
-append/readback guarantees, reserve mandatory future records, replay every
-authenticated record without skipping errors, and own retention/compaction.
+The physical power-fail-safe journal now implements exact append/readback,
+lifetime reservation, complete integrity-validated replay, and resumable
+retention-only compaction. The next product slice is the sole permanent storage
+actor that turns projector requests into those journal operations and publishes
+their exact outcomes without weakening the ordering contract.
 Ordinary RNS tick/actions, RX ingress, submission handling, projection, and
 acknowledgement must then join this aggregate under the sole node owner. The
 handoff, dispatcher, supervisor, and projector remain outside every firmware

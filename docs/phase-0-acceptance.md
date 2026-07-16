@@ -278,11 +278,13 @@ waits for the exact next owner deadline or permit grace, and bounds sustained
 progress to 16 passes before yielding. Its `RfInertTxPolicy` denies RF.
 
 The semantic durable model and idempotent projector are implemented and target-
-checked, but neither writes flash. Physical reservation, append/readback,
-authenticated complete replay, retention/compaction, the device-API adapter,
-and the permanent runtime that drives projection and acknowledgement remain
+checked, and the independent physical journal now implements lifetime
+reservation, append/readback, complete integrity-validated replay, and source-
+preserving compaction. A dedicated RF-inert Tracker storage HIL image is target-
+checked, but its powered run remains pending. The sole storage actor, device-API
+adapter, and permanent runtime that drive projection and acknowledgement remain
 unimplemented. Ordinary RNS tick/actions and RX ingress are also not yet merged
-under this owner. There is still no firmware connection, driver, radio
+under this owner. There is still no product firmware connection, driver, radio
 integration, or claim that RF occurred. Every project firmware graph remains
 TX-free, and all project radio-bearing firmware artifacts remain RX-only. The
 separately derived RNode peer is an external development artifact with its own

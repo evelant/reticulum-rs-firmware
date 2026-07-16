@@ -75,6 +75,7 @@ jobs:
           cargo check --locked
           -p reticulum-device-api
           -p reticulum-node-core
+          -p reticulum-storage-journal
           -p reticulum-storage-model
           -p reticulum-submission-projector
           -p reticulum-tx-dispatch
@@ -86,6 +87,7 @@ jobs:
           -p reticulum-rns-leviculum
           -p reticulum-radio-interface
           -p reticulum-board-heltec-tracker-v2
+          -p reticulum-board-heltec-tracker-v2-tx-hil
           -p reticulum-lab-rx-returned-fault-hil
           --target riscv32imac-unknown-none-elf
 
@@ -219,6 +221,7 @@ jobs:
         run: >-
           cargo +esp check --locked
           -p reticulum-device-api -p reticulum-node-core
+          -p reticulum-storage-journal
           -p reticulum-storage-model
           -p reticulum-submission-projector
           -p reticulum-tx-dispatch -p reticulum-tx-handoff
@@ -237,6 +240,32 @@ jobs:
           -p reticulum-heltec-tracker-v2
           --bin reticulum-heltec-tracker-v2
           --no-default-features --features safe-idle
+          --target xtensa-esp32s3-none-elf
+          -- -D warnings
+
+      - name: Link RF-inert Tracker physical-storage HIL
+        run: >-
+          cargo +esp build --locked --release
+          -p reticulum-heltec-tracker-v2-storage-hil
+          --target xtensa-esp32s3-none-elf
+
+      - name: Strict clippy for RF-inert Tracker physical-storage HIL
+        run: >-
+          cargo +esp clippy --locked --release
+          -p reticulum-heltec-tracker-v2-storage-hil
+          --target xtensa-esp32s3-none-elf
+          -- -D warnings
+
+      - name: Link separately hazardous Tracker TX HIL
+        run: >-
+          cargo +esp build --locked --release
+          -p reticulum-heltec-tracker-v2-tx-hil
+          --target xtensa-esp32s3-none-elf
+
+      - name: Strict clippy for separately hazardous Tracker TX HIL
+        run: >-
+          cargo +esp clippy --locked --release
+          -p reticulum-heltec-tracker-v2-tx-hil
           --target xtensa-esp32s3-none-elf
           -- -D warnings
 

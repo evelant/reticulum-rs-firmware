@@ -1,0 +1,130 @@
+{
+  "schema": 1,
+  "crate_name": "lora-phy",
+  "crate_version": "3.0.1",
+  "archive_sha256": "61471c3b2909789e3332083577f6cf6c41a4fcf37674ef15156bcbb20504ac65",
+  "upstream_commit": "ca04c2284eb00e015528933ea5159cd1ff36142d",
+  "unmodified_upstream_files": {
+    ".cargo_vcs_info.json": "aade806963ef3a140e4cf9cc2d667cf8169321208e9e1cd7d95f88f08963850e",
+    "CHANGELOG.md": "fa164e6f5222b52a4589bfd568f5a0bddb2844193978701e66eedaaa33e8e538",
+    "Cargo.toml": "07814d804c982b362ba49f4fba74983f3b8ff77d834e54c8bd85ebc736f0ede3",
+    "Cargo.toml.orig": "3c3deeaeb4ff22fd7a1d7ad10c9b79454393c0514f7ef5b987141126b41bb647",
+    "LICENSE-APACHE": "ed61e03c4787e0afaabd1fd2071c28bb2ed37bee7168c89579d5a65f2371b326",
+    "LICENSE-MIT": "7863450a0666e0dea250f95a05feae04f74ba95eeab9cc91dc95c18b3bdd2f63",
+    "README.md": "95f48da9103fc4e334edd30c7316bdd03c26dc543a89721dd5468428a06faff0",
+    "rustfmt.toml": "b15fd1b8ede2432caec5a15e7db48968d95280b16bb965b165ae275afa6ef025",
+    "src/interface.rs": "4e98b396d1dba74a5142775d4420ae2050a38edcd3749e92e365e63b3d4ce621",
+    "src/iv.rs": "9be7892b6c8f3de3ba9d543907f3ecb961f943fa9e43696957065538fafa96b3",
+    "src/lorawan_radio.rs": "2068cef78703182f717e7930b903c52378818bf5b53cade7b9fe83cdf4789e3a",
+    "src/mod_params.rs": "a951eb981d20ffff8ed40331cac136683bec3b96b34bbd4f974db07034ba0405",
+    "src/sx126x/radio_kind_params.rs": "9ad8207e025e577c40fec559c9eb27c0a61407e6f095c2859761d3d6eb2c807c",
+    "src/sx127x/mod.rs": "540a6ca9d7fce3eea3cf0d850ebefdb5784592ab580d7ea3e894fc1075a67c4f",
+    "src/sx127x/radio_kind_params.rs": "015811b7f8fe8b1882a9e45ffa97b45888077b89797fb7969b17f90e38ae963a",
+    "src/sx127x/sx1272.rs": "b16587769de500556a0cc013b04608c9a30fe913582a301e069a944602995de9",
+    "src/sx127x/sx1276.rs": "fdee14dfd568422ed0f0bc6d9844a34c5414ce06acc6b074e42cde6e7df69ab2"
+  },
+  "patched_upstream_files": {
+    "src/lib.rs": {
+      "upstream_sha256": "8df0ef81a3a6333a7f528f0bd44204c65d2614ddf5e92a86c1db61bf25f6eccf",
+      "vendored_sha256": "6b936e8546004f87e6003488fd793ad982cda85eec65073c453f412af41824ea"
+    },
+    "src/mod_traits.rs": {
+      "upstream_sha256": "b95e71ba7a7591364a59ddf1961620f8864103a0991df28d71a07026541f6efd",
+      "vendored_sha256": "78aee410464aa0e85112ddc3fd790456ee38cf9f289757cf6aac783d94e3f618"
+    },
+    "src/sx126x/mod.rs": {
+      "upstream_sha256": "a1f49190dbb1e5820993bb9e9c1f45481997f047be983017aa2b3c57629faf18",
+      "vendored_sha256": "a11be17de1603ebc796070a2d4a6f30dc23c63a305bc2111843d846d16550c3f"
+    },
+    "src/sx126x/variant.rs": {
+      "upstream_sha256": "6ba1ab372039da00dbad8096b40fbf614cb8a2cd443783ede8a95eb9565a657a",
+      "vendored_sha256": "daef22e7907e6502e9cb6622e3893fbc492389dcc3b856d88098712aa7262f63"
+    }
+  },
+  "omitted_upstream_files": {},
+  "project_files": {
+    "PATCHES.md": "6cf20617bf00597361b75cc97e14e0debe5022a048bff60a490397486c614258"
+  },
+  "reviewed_source_edits": [
+    {
+      "path": "src/sx126x/mod.rs",
+      "upstream": "/// Power amplifier selection\n#[repr(u8)]\npub enum DeviceSel {\n    /// Low power, power amplifier, used by sx1261\n    LowPowerPA = 1,\n    /// High power, power amplifier, used by sx1262\n    HighPowerPA = 0,\n}\n\n/// Configuration for SX126x-based boards\n",
+      "vendored": "/// Power amplifier selection\n#[repr(u8)]\npub enum DeviceSel {\n    /// Low power, power amplifier, used by sx1261\n    LowPowerPA = 1,\n    /// High power, power amplifier, used by sx1262\n    HighPowerPA = 0,\n}\n\nfn validate_high_power_pa_override(settings: HighPowerPaOverride) -> Result<(), RadioError> {\n    const HIGH_POWER_MIN: i8 = -9;\n    const HIGH_POWER_MAX: i8 = 22;\n    const SX1262_MAX_PA_DUTY_CYCLE: u8 = 0x04;\n    const SX1262_MAX_HP_MAX: u8 = 0x07;\n    const SX1262_MAX_OCP: u8 = 0x3f;\n\n    let encoded_power = settings.tx_params_power as i8;\n    let ocp_is_valid = match settings.ocp {\n        Some(ocp) => ocp <= SX1262_MAX_OCP,\n        None => true,\n    };\n    if settings.pa_duty_cycle > SX1262_MAX_PA_DUTY_CYCLE\n        || settings.hp_max > SX1262_MAX_HP_MAX\n        || !(HIGH_POWER_MIN..=HIGH_POWER_MAX).contains(&encoded_power)\n        || !ocp_is_valid\n    {\n        return Err(RadioError::InvalidConfiguration);\n    }\n    Ok(())\n}\n\n/// Configuration for SX126x-based boards\n"
+    },
+    {
+      "path": "src/sx126x/mod.rs",
+      "upstream": "            DeviceSel::HighPowerPA => {\n                const HIGH_POWER_MIN: i32 = -9;\n                const HIGH_POWER_MAX: i32 = 22;\n                // Clamp power between [-9, 22] dBm\n                let txp = output_power.clamp(HIGH_POWER_MIN, HIGH_POWER_MAX);\n                // Provide better resistance of the SX1262 Tx to antenna mismatch (see DS_SX1261-2_V1.2 datasheet chapter 15.2)\n                let mut tx_clamp_cfg = [0x00u8];\n",
+      "vendored": "            DeviceSel::HighPowerPA => {\n                const HIGH_POWER_MIN: i32 = -9;\n                const HIGH_POWER_MAX: i32 = 22;\n                // Clamp power between [-9, 22] dBm\n                let txp = output_power.clamp(HIGH_POWER_MIN, HIGH_POWER_MAX);\n                let pa_override = self.config.chip.high_power_pa_override(output_power, txp);\n                if let Some(settings) = pa_override {\n                    validate_high_power_pa_override(settings)?;\n                }\n                // Provide better resistance of the SX1262 Tx to antenna mismatch (see DS_SX1261-2_V1.2 datasheet chapter 15.2)\n                let mut tx_clamp_cfg = [0x00u8];\n"
+    },
+    {
+      "path": "src/sx126x/mod.rs",
+      "upstream": "\n                // From Table 13-21: PA Operating Modes with Optimal Settings\n                match txp {\n                    21..=HIGH_POWER_MAX => {\n                        self.set_pa_config(0x04, 0x07, DeviceSel::HighPowerPA).await?;\n                        tx_params_power = 22;\n                    }\n                    18..=20 => {\n                        self.set_pa_config(0x03, 0x05, DeviceSel::HighPowerPA).await?;\n                        // table indicates 20 dBm => txp = 22, therefore we add 2 to this range\n                        tx_params_power = txp as u8 + 2;\n                    }\n                    15..=17 => {\n                        self.set_pa_config(0x02, 0x03, DeviceSel::HighPowerPA).await?;\n                        // table indicates 17 dBm => txp = 22, therefore we add 5 to this range\n                        tx_params_power = txp as u8 + 5;\n                    }\n                    HIGH_POWER_MIN..=14 => {\n                        self.set_pa_config(0x02, 0x02, DeviceSel::HighPowerPA).await?;\n                        // table indicates 14 dBm => txp = 22, therefore we add 8 to this range\n                        tx_params_power = txp as u8 + 8;\n                    }\n                    _ => {\n                        unreachable!(\"Invalid output power value for high power PA!\")\n                    }\n                }\n            }\n        }\n",
+      "vendored": "\n                if let Some(settings) = pa_override {\n                    self.set_pa_config(settings.pa_duty_cycle, settings.hp_max, DeviceSel::HighPowerPA)\n                        .await?;\n                    if let Some(ocp) = settings.ocp {\n                        let register_and_ocp = [\n                            OpCode::WriteRegister.value(),\n                            Register::OCP.addr1(),\n                            Register::OCP.addr2(),\n                            ocp,\n                        ];\n                        self.intf.write(&register_and_ocp, false).await?;\n                    }\n                    tx_params_power = settings.tx_params_power;\n                } else {\n                    // From Table 13-21: PA Operating Modes with Optimal Settings\n                    match txp {\n                        21..=HIGH_POWER_MAX => {\n                            self.set_pa_config(0x04, 0x07, DeviceSel::HighPowerPA).await?;\n                            tx_params_power = 22;\n                        }\n                        18..=20 => {\n                            self.set_pa_config(0x03, 0x05, DeviceSel::HighPowerPA).await?;\n                            // table indicates 20 dBm => txp = 22, therefore we add 2 to this range\n                            tx_params_power = txp as u8 + 2;\n                        }\n                        15..=17 => {\n                            self.set_pa_config(0x02, 0x03, DeviceSel::HighPowerPA).await?;\n                            // table indicates 17 dBm => txp = 22, therefore we add 5 to this range\n                            tx_params_power = txp as u8 + 5;\n                        }\n                        HIGH_POWER_MIN..=14 => {\n                            self.set_pa_config(0x02, 0x02, DeviceSel::HighPowerPA).await?;\n                            // table indicates 14 dBm => txp = 22, therefore we add 8 to this range\n                            tx_params_power = txp as u8 + 8;\n                        }\n                        _ => {\n                            unreachable!(\"Invalid output power value for high power PA!\")\n                        }\n                    }\n                }\n            }\n        }\n"
+    },
+    {
+      "path": "src/sx126x/mod.rs",
+      "upstream": "#[cfg(test)]\nmod tests {\n    // use super::*;\n\n    #[test]\n",
+      "vendored": "#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n"
+    },
+    {
+      "path": "src/sx126x/mod.rs",
+      "upstream": "    fn power_level_negative_value_conversion() {\n        let mut i32_val: i32 = -17;\n        assert_eq!(i32_val as u8, 0xefu8);\n        i32_val = -9;\n        assert_eq!(i32_val as u8, 0xf7u8);\n    }\n}\n",
+      "vendored": "    fn power_level_negative_value_conversion() {\n        let mut i32_val: i32 = -17;\n        assert_eq!(i32_val as u8, 0xefu8);\n        i32_val = -9;\n        assert_eq!(i32_val as u8, 0xf7u8);\n    }\n\n    #[test]\n    fn existing_variants_have_no_high_power_pa_override() {\n        assert_eq!(Sx1261.high_power_pa_override(0, 0), None);\n        assert_eq!(Sx1262.high_power_pa_override(0, 0), None);\n        assert_eq!(\n            Stm32wl {\n                use_high_power_pa: true,\n            }\n            .high_power_pa_override(0, 0),\n            None\n        );\n    }\n\n    #[test]\n    fn high_power_pa_override_validation_rejects_each_malformed_field() {\n        let valid = HighPowerPaOverride {\n            pa_duty_cycle: 0x04,\n            hp_max: 0x07,\n            tx_params_power: 0x00,\n            ocp: Some(0x28),\n        };\n        assert_eq!(validate_high_power_pa_override(valid), Ok(()));\n        assert_eq!(\n            validate_high_power_pa_override(HighPowerPaOverride {\n                pa_duty_cycle: 0x05,\n                ..valid\n            }),\n            Err(RadioError::InvalidConfiguration)\n        );\n        assert_eq!(\n            validate_high_power_pa_override(HighPowerPaOverride { hp_max: 0x08, ..valid }),\n            Err(RadioError::InvalidConfiguration)\n        );\n        assert_eq!(\n            validate_high_power_pa_override(HighPowerPaOverride {\n                tx_params_power: 0x17,\n                ..valid\n            }),\n            Err(RadioError::InvalidConfiguration)\n        );\n        assert_eq!(\n            validate_high_power_pa_override(HighPowerPaOverride {\n                tx_params_power: 0xf6,\n                ..valid\n            }),\n            Err(RadioError::InvalidConfiguration)\n        );\n        assert_eq!(\n            validate_high_power_pa_override(HighPowerPaOverride {\n                ocp: Some(0x40),\n                ..valid\n            }),\n            Err(RadioError::InvalidConfiguration)\n        );\n    }\n}\n"
+    },
+    {
+      "path": "src/sx126x/variant.rs",
+      "upstream": "use super::DeviceSel;\n\n/// Implement this trait on your custom variant or use provided impls\n",
+      "vendored": "use super::DeviceSel;\n\n/// Atomic board-specific override for the SX1262 high-power PA command set.\n///\n/// `tx_params_power` is the raw signed two's-complement power byte accepted by\n/// `SetTxParams`. `ocp` is the raw six-bit OCP trim written to register\n/// `0x08E7` after `SetPaConfig`, when present.\n#[derive(Clone, Copy, Debug, Eq, PartialEq)]\npub struct HighPowerPaOverride {\n    /// `SetPaConfig` PA duty-cycle byte (at most `0x04` for SX1262).\n    pub pa_duty_cycle: u8,\n    /// `SetPaConfig` high-power maximum byte (at most `0x07`).\n    pub hp_max: u8,\n    /// Raw signed two's-complement `SetTxParams` power byte.\n    pub tx_params_power: u8,\n    /// Optional raw six-bit OCP trim for register `0x08E7`.\n    pub ocp: Option<u8>,\n}\n\n/// Implement this trait on your custom variant or use provided impls\n"
+    },
+    {
+      "path": "src/sx126x/variant.rs",
+      "upstream": "    /// use dio2 as rf switch output\n    fn use_dio2_as_rfswitch(&self) -> bool {\n        true\n    }\n}\n\n/// Sx1261 uses only LowPowerPA\n",
+      "vendored": "    /// use dio2 as rf switch output\n    fn use_dio2_as_rfswitch(&self) -> bool {\n        true\n    }\n\n    /// Override the complete high-power PA command set for this requested and\n    /// driver-clamped output power.\n    ///\n    /// Existing variants return `None` and retain the driver's original PA,\n    /// OCP and encoded-power behavior.\n    fn high_power_pa_override(\n        &self,\n        _requested_output_power: i32,\n        _clamped_output_power: i32,\n    ) -> Option<HighPowerPaOverride> {\n        None\n    }\n}\n\n/// Sx1261 uses only LowPowerPA\n"
+    },
+    {
+      "path": "src/mod_traits.rs",
+      "upstream": "    /// Enable an antenna used for receive operations, disabling other antennas\n    async fn enable_rf_switch_rx(&mut self) -> Result<(), RadioError>;\n    /// Enable an antenna used for send operations, disabling other antennas\n",
+      "vendored": "    /// Enable an antenna used for receive operations, disabling other antennas\n    async fn enable_rf_switch_rx(&mut self) -> Result<(), RadioError>;\n    /// Prepare a board-specific transmit RF path before packet and FIFO setup.\n    ///\n    /// The default is intentionally a no-op. Boards whose external front end\n    /// must enter its transmit state before packet preparation can override\n    /// this hook while retaining the final [`Self::enable_rf_switch_tx`] gate\n    /// immediately before the radio enters transmit mode.\n    async fn prepare_rf_switch_tx(&mut self) -> Result<(), RadioError> {\n        Ok(())\n    }\n    /// Enable an antenna used for send operations, disabling other antennas\n"
+    },
+    {
+      "path": "src/mod_traits.rs",
+      "upstream": "    /// Set a payload for a subsequent send operation\n    async fn set_payload(&mut self, payload: &[u8]) -> Result<(), RadioError>;\n    /// Perform a transmit operation\n",
+      "vendored": "    /// Set a payload for a subsequent send operation\n    async fn set_payload(&mut self, payload: &[u8]) -> Result<(), RadioError>;\n    /// Prepare any board-specific transmit RF path before packet and FIFO setup.\n    ///\n    /// Radio kinds that do not expose an early board hook retain the original\n    /// no-op behavior.\n    async fn prepare_rf_switch_tx(&mut self) -> Result<(), RadioError> {\n        Ok(())\n    }\n    /// Perform a transmit operation\n"
+    },
+    {
+      "path": "src/lib.rs",
+      "upstream": "        }\n\n        tx_pkt_params.set_payload_length(buffer.len())?;\n",
+      "vendored": "        }\n\n        self.radio_kind.prepare_rf_switch_tx().await?;\n        tx_pkt_params.set_payload_length(buffer.len())?;\n"
+    },
+    {
+      "path": "src/sx126x/mod.rs",
+      "upstream": "    async fn set_payload(&mut self, payload: &[u8]) -> Result<(), RadioError> {\n        let op_code_and_offset = [OpCode::WriteBuffer.value(), 0x00u8];\n        self.intf.write_with_payload(&op_code_and_offset, payload, false).await\n    }\n\n    async fn do_tx(&mut self) -> Result<(), RadioError> {\n",
+      "vendored": "    async fn set_payload(&mut self, payload: &[u8]) -> Result<(), RadioError> {\n        let op_code_and_offset = [OpCode::WriteBuffer.value(), 0x00u8];\n        self.intf.write_with_payload(&op_code_and_offset, payload, false).await\n    }\n\n    async fn prepare_rf_switch_tx(&mut self) -> Result<(), RadioError> {\n        self.intf.iv.prepare_rf_switch_tx().await\n    }\n\n    async fn do_tx(&mut self) -> Result<(), RadioError> {\n"
+    },
+    {
+      "path": "src/lib.rs",
+      "upstream": "    /// Place the LoRa physical layer in standby mode\n    pub async fn enter_standby(&mut self) -> Result<(), RadioError> {\n        self.radio_kind.set_standby().await\n    }\n",
+      "vendored": "    /// Place the LoRa physical layer in standby mode\n    pub async fn enter_standby(&mut self) -> Result<(), RadioError> {\n        self.radio_kind.set_standby().await?;\n        self.radio_mode = RadioMode::Standby;\n        Ok(())\n    }\n"
+    },
+    {
+      "path": "src/mod_traits.rs",
+      "upstream": "    /// Wait for the LoRa chip to indicate an event has occurred\n    async fn await_irq(&mut self) -> Result<(), RadioError>;\n    /// Enable an antenna used for receive operations, disabling other antennas\n",
+      "vendored": "    /// Wait for the LoRa chip to indicate an event has occurred\n    async fn await_irq(&mut self) -> Result<(), RadioError>;\n    /// Complete board RF-path initialization after chip setup.\n    ///\n    /// The default is intentionally a no-op. Boards with an external front\n    /// end that must remain powered between operations can enable and settle\n    /// it here after the radio chip has been initialized.\n    async fn complete_rf_switch_initialization(&mut self) -> Result<(), RadioError> {\n        Ok(())\n    }\n    /// Enable an antenna used for receive operations, disabling other antennas\n"
+    },
+    {
+      "path": "src/mod_traits.rs",
+      "upstream": "        is_tx_prep: bool,\n    ) -> Result<(), RadioError>;\n    /// Set the LoRa chip modulation parameters prior to using a communication channel\n",
+      "vendored": "        is_tx_prep: bool,\n    ) -> Result<(), RadioError>;\n    /// Complete any board-specific RF-path initialization after chip setup.\n    ///\n    /// Radio kinds that do not expose such a board hook retain the original\n    /// no-op behavior.\n    async fn complete_rf_switch_initialization(&mut self) -> Result<(), RadioError> {\n        Ok(())\n    }\n    /// Set the LoRa chip modulation parameters prior to using a communication channel\n"
+    },
+    {
+      "path": "src/lib.rs",
+      "upstream": "        self.radio_kind.set_irq_params(Some(self.radio_mode)).await?;\n        self.cold_start = false;\n",
+      "vendored": "        self.radio_kind.set_irq_params(Some(self.radio_mode)).await?;\n        self.radio_kind.complete_rf_switch_initialization().await?;\n        self.cold_start = false;\n"
+    },
+    {
+      "path": "src/sx126x/mod.rs",
+      "upstream": "        self.intf.write(&op_code_and_tx_params, false).await\n    }\n\n    async fn set_modulation_params(&mut self, mdltn_params: &ModulationParams) -> Result<(), RadioError> {\n",
+      "vendored": "        self.intf.write(&op_code_and_tx_params, false).await\n    }\n\n    async fn complete_rf_switch_initialization(&mut self) -> Result<(), RadioError> {\n        self.intf.iv.complete_rf_switch_initialization().await\n    }\n\n    async fn set_modulation_params(&mut self, mdltn_params: &ModulationParams) -> Result<(), RadioError> {\n"
+    }
+  ]
+}

@@ -392,9 +392,11 @@ while owner-draining transitions continue where possible.
 
 The allocation-free storage model and submission projector now define canonical
 intent/final-disposition records and gate terminal/recovery acknowledgement on
-an exact persistence result. The remaining product blockers are a sole physical
-journal actor with real reservation, readback, authenticated replay, retention
-and compaction semantics; a device-API adapter; safe projector-slot retirement;
+an exact persistence result. The independent physical journal now supplies
+lifetime reservation, exact readback, complete integrity-validated replay, and
+retention-only compaction. The remaining product blockers are a sole permanent
+actor connecting that journal to projector plans; a device-API adapter; safe
+projector-slot retirement;
 eventual sole-owner integration of RX plus ordinary RNS tick/actions;
 firmware/driver integration; powered reboot recovery; caller-reservable bounded
 construction for those ordinary outbound actions; and higher-level LXMF

@@ -2,7 +2,8 @@
 
 **Status:** permanent aggregate and async run loop implemented, target-checked,
 and outside every firmware graph; portable durable projection exists beside
-it, but there is no flash actor, device API, or complete node-owner integration
+it and the independent physical journal is implemented, but there is no sole
+storage actor, device API, or complete node-owner integration
 **RF status:** unavailable until an antenna/load, regional profile, guarded
 driver boundary, and explicit approval exist
 
@@ -115,9 +116,12 @@ diagnostics without misclassifying that fail-closed owner as releasable.
 
 This is a portable semantic boundary, not powered durability. The projector
 retains an opaque write plan and the caller's live `SubmissionIndex` remains
-authoritative, but no implemented actor yet appends the record to flash,
-reserves its required future records, or drives the projector and supervisor
-from one permanent task. See [Durable submissions](durable-submissions.md).
+authoritative. `reticulum-storage-journal` can now append that canonical record,
+enforce the physical lifetime reservation, replay, and compact, but no
+implemented actor connects the plan to the journal or drives the projector and
+supervisor from one permanent task. See
+[Durable submissions](durable-submissions.md) and
+[Physical submission journal](storage-journal.md).
 
 ## Work still outside the aggregate
 
@@ -135,10 +139,10 @@ The supervisor does not yet:
 - provide a driver, packet-interface implementation, radio reset contract, RF
   policy, or firmware dependency edge.
 
-The next product boundary is the sole physical storage actor and its
-power-fail-safe journal, followed by merging RX, RNS tick/actions, submission
-projection, and acknowledgement into the eventual sole node owner. Firmware TX
-integration remains later and separately gated.
+The next product boundary is the sole permanent storage actor around the
+implemented power-fail-safe journal, followed by merging RX, RNS tick/actions,
+submission projection, and acknowledgement into the eventual sole node owner.
+Firmware TX integration remains later and separately gated.
 
 ## Validation
 

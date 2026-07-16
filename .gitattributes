@@ -1,0 +1,2 @@
+# Preserve byte-identical crates.io source. VENDOR-HASHES.json verifies it.
+vendor/lora-phy-3.0.1/** -whitespace
