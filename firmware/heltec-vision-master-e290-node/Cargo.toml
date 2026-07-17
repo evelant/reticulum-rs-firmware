@@ -9,6 +9,10 @@ publish.workspace = true
 build = "build.rs"
 autobins = false
 
+[features]
+default = []
+journal-schema2-dev-reprovision = []
+
 [dependencies]
 reticulum-announce-clock = { path = "../../crates/announce-clock", default-features = false }
 reticulum-board-heltec-vision-master-e290-radio = { path = "../../crates/board-heltec-vision-master-e290-radio" }

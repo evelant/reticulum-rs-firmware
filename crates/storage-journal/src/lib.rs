@@ -31,7 +31,7 @@ pub const SLOT_SIZE: usize = 640;
 pub const BODY_SIZE: usize = MAX_JOURNAL_RECORD_BYTES;
 /// Number of record slots in either bank.
 pub const BANK_SLOT_COUNT: usize = 812;
-/// Maximum accepted submissions whose complete schema-1 lifetime budget fits.
+/// Maximum accepted submissions whose complete semantic lifetime budget fits.
 pub const MAX_ACCEPTED_SUBMISSIONS: usize = BANK_SLOT_COUNT / MAX_DURABLE_RECORDS_PER_SUBMISSION;
 /// Current physical on-flash format version.
 pub const PHYSICAL_FORMAT_VERSION: u16 = 1;
@@ -192,11 +192,11 @@ pub enum JournalError<E> {
     GenerationExhausted,
     /// Handoff metadata, copied record count, or copied chain is inconsistent.
     CompactionInvariant,
-    /// The schema-1 lifetime reservation cannot admit another submission.
+    /// The semantic lifetime reservation cannot admit another submission.
     AcceptanceCapacityExhausted,
     /// Exact program readback did not match the bytes supplied to the backend.
     ReadbackMismatch,
-    /// Committed acceptances exceed the schema-1 lifetime reservation invariant.
+    /// Committed acceptances exceed the semantic lifetime reservation invariant.
     ReservationInvariant,
 }
 
@@ -390,7 +390,10 @@ struct ManifestRecord {
 enum ManifestStatus {
     Absent,
     Uncommitted,
-    Valid(ManifestRecord),
+    Valid {
+        semantic_schema: u16,
+        record: ManifestRecord,
+    },
     CommittedInvalid,
 }
 
@@ -977,7 +980,19 @@ where
     let a = read_manifest(flash, Bank::A)?;
     let b = read_manifest(flash, Bank::B)?;
     match (a, b) {
-        (ManifestStatus::Valid(a), ManifestStatus::Valid(b)) => {
+        (
+            ManifestStatus::Valid {
+                semantic_schema: a_schema,
+                record: a,
+            },
+            ManifestStatus::Valid {
+                semantic_schema: b_schema,
+                record: b,
+            },
+        ) => {
+            if a_schema != b_schema {
+                return Err(JournalError::ManifestConflict);
+            }
             if a.manifest.generation == b.manifest.generation {
                 Err(JournalError::ManifestConflict)
             } else {
@@ -995,25 +1010,36 @@ where
                     return Err(JournalError::ManifestConflict);
                 }
                 newer.retire_manifest = Some(older.manifest.bank);
-                Ok(newer)
+                selected_semantic_manifest(a_schema, newer)
             }
         }
-        (ManifestStatus::Valid(mut record), other) | (other, ManifestStatus::Valid(mut record)) => {
-            match other {
-                ManifestStatus::Absent => Ok(record),
-                ManifestStatus::Uncommitted | ManifestStatus::CommittedInvalid => {
-                    if matches!(record.handoff, HandoffState::Torn | HandoffState::Valid(_)) {
-                        Ok(record)
-                    } else if record.manifest.generation > 1 {
-                        record.retire_manifest = Some(record.manifest.bank.other());
-                        Ok(record)
-                    } else {
-                        Err(JournalError::ManifestCorrupt)
-                    }
+        (
+            ManifestStatus::Valid {
+                semantic_schema,
+                mut record,
+            },
+            other,
+        )
+        | (
+            other,
+            ManifestStatus::Valid {
+                semantic_schema,
+                mut record,
+            },
+        ) => match other {
+            ManifestStatus::Absent => selected_semantic_manifest(semantic_schema, record),
+            ManifestStatus::Uncommitted | ManifestStatus::CommittedInvalid => {
+                if matches!(record.handoff, HandoffState::Torn | HandoffState::Valid(_)) {
+                    selected_semantic_manifest(semantic_schema, record)
+                } else if record.manifest.generation > 1 {
+                    record.retire_manifest = Some(record.manifest.bank.other());
+                    selected_semantic_manifest(semantic_schema, record)
+                } else {
+                    Err(JournalError::ManifestCorrupt)
                 }
-                ManifestStatus::Valid(_) => Err(JournalError::ManifestConflict),
             }
-        }
+            ManifestStatus::Valid { .. } => Err(JournalError::ManifestConflict),
+        },
         (ManifestStatus::CommittedInvalid, _) | (_, ManifestStatus::CommittedInvalid) => {
             Err(JournalError::ManifestCorrupt)
         }
@@ -1027,6 +1053,17 @@ where
                 Err(JournalError::UnformattedNonErased)
             }
         }
+    }
+}
+
+fn selected_semantic_manifest<E>(
+    semantic_schema: u16,
+    record: ManifestRecord,
+) -> Result<ManifestRecord, JournalError<E>> {
+    if semantic_schema == JOURNAL_SCHEMA_VERSION {
+        Ok(record)
+    } else {
+        Err(JournalError::UnsupportedSemanticVersion(semantic_schema))
     }
 }
 
@@ -1065,9 +1102,6 @@ where
         return Ok(ManifestStatus::CommittedInvalid);
     }
     let schema = read_u16(data, 10);
-    if schema != JOURNAL_SCHEMA_VERSION {
-        return Ok(ManifestStatus::CommittedInvalid);
-    }
     let Some(bank) = Bank::from_id(data[12]) else {
         return Ok(ManifestStatus::CommittedInvalid);
     };
@@ -1119,7 +1153,7 @@ where
             .try_into()
             .map_err(|_| JournalError::ManifestCorrupt)?;
         if marker == &HANDOFF_COMMIT {
-            let Some(handoff) = decode_handoff(&handoff_bytes[..HANDOFF_DATA_SIZE]) else {
+            let Some(handoff) = decode_handoff(&handoff_bytes[..HANDOFF_DATA_SIZE], schema) else {
                 return Ok(ManifestStatus::CommittedInvalid);
             };
             let Some(expected_target_generation) = generation.checked_add(1) else {
@@ -1142,7 +1176,7 @@ where
             return Ok(ManifestStatus::CommittedInvalid);
         }
     };
-    Ok(ManifestStatus::Valid(ManifestRecord {
+    let record = ManifestRecord {
         manifest: Manifest {
             bank,
             generation,
@@ -1151,7 +1185,11 @@ where
         },
         handoff,
         retire_manifest: None,
-    }))
+    };
+    Ok(ManifestStatus::Valid {
+        semantic_schema: schema,
+        record,
+    })
 }
 
 fn write_manifest<F>(flash: &mut F, manifest: Manifest) -> Result<(), JournalError<F::Error>>
@@ -1257,11 +1295,11 @@ where
     Ok(())
 }
 
-fn decode_handoff(data: &[u8]) -> Option<Handoff> {
+fn decode_handoff(data: &[u8], expected_schema: u16) -> Option<Handoff> {
     if data.len() != HANDOFF_DATA_SIZE
         || &data[..8] != HANDOFF_MAGIC
         || read_u16(data, 8) != PHYSICAL_FORMAT_VERSION
-        || read_u16(data, 10) != JOURNAL_SCHEMA_VERSION
+        || read_u16(data, 10) != expected_schema
         || data[14..16].iter().any(|byte| *byte != 0)
         || data[72..].iter().any(|byte| *byte != 0)
     {

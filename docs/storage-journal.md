@@ -7,14 +7,15 @@ scoped coordinator and exact authorized-frame request/durable-echo handoff
 integrated with a one-entry accepted-history cap used only for composition
 qualification and no external admission lane; ADR 0005's interface-local
 active-owner fail-stop and the complete LoRa-first software composition pass
-cross-layer host tests; live external admission, product-capacity policy,
+cross-layer host tests; semantic schema 2 authorization provenance passes host
+and target checks; live external admission, product-capacity policy,
 powered fault qualification, controlled power cuts, endurance/soak, and at-rest
 encryption remain open
 
 ## Boundary
 
-`reticulum-storage-journal` is the physical backend for schema-1 durable
-submission records. It is a `no_std`, allocation-free crate over
+`reticulum-storage-journal` is the physical-format-1 backend for semantic-
+schema-2 durable submission records. It is a `no_std`, allocation-free crate over
 `embedded-storage` raw NOR traits. It consumes and reproduces the canonical
 records from `reticulum-storage-model`; it does not define a second semantic
 format.
@@ -29,7 +30,11 @@ and creates one short-lived checked journal view per runtime operation; future
 OTA and other stores must use that same serialization point. The E290
 coordinator implements the narrow target-safe `SubmissionPort`, and the
 separate portable authenticated adapter maps only that semantic vocabulary to
-the logical device API. Portable immutable credential authority, framing, the
+the logical device API. Schema-2 acceptance persists the revalidated credential
+ID/generation, authority revision, policy version, and exact granted permission
+mask. Its content digest is derived from the complete persisted intent instead
+of occupying a second encoded or in-RAM field; the maximum record is 508 bytes.
+Portable immutable credential authority, framing, the
 qualification-session core, and job handoff exist, but durable credential
 state/pairing, an external firmware lane, and a bearer do not compose them with
 this port. The dedicated Heltec HIL calls the journal
@@ -43,7 +48,7 @@ keyed authentication and provide no confidentiality. A party able to rewrite
 raw flash can forge a new internally consistent plaintext journal; production
 at-rest protection remains a separate provisioning and security decision.
 
-## Version-1 geometry
+## Physical version-1 geometry
 
 The physical format accepts exactly a 1 MiB partition with 4-byte reads,
 4-byte programs, and 4 KiB erases. Mutating operations additionally require
@@ -72,7 +77,7 @@ data, a 32-byte digest, and a 32-byte commit marker. Everything else in the
 4 KiB manifest sector must remain erased. A manifest records its bank geometry,
 generation, semantic schema, copied baseline count and copied chain tail.
 
-There are 812 physical slots per generation. Schema 1 reserves at most five
+There are 812 physical slots per generation. Semantic schema 2 reserves at most five
 semantic records for each accepted submission, so the hard physical acceptance
 ceiling is `floor(812 / 5) = 162` submissions. At that ceiling 810 records are
 reserved and two slots remain. The runtime's compile-time
@@ -94,6 +99,15 @@ erased, the commit must remain erased until the prefix is exact, and the
 operation never erases. `Reject` never writes. A valid nonempty journal and all
 off-trajectory data are `MediaNotProvisionable`; normal `mount()` is unchanged
 and fail-closed.
+
+The physical layout version remains 1 while the semantic schema is 2. A
+checksum-valid schema-1 manifest is classified as
+`UnsupportedSemanticVersion(1)` only after its complete manifest geometry,
+reserved fields, digest, handoff metadata, and two-bank generation trajectory
+validate. Mount, append, and compaction then perform zero writes and erases.
+Malformed older media remains corruption, and mixed current/unsupported
+authorities remain a conflict. The journal never fabricates the authorization
+facts absent from schema 1.
 
 Every mount selects a valid manifest and scans all 812 slots in the selected
 bank. It does not stop at the first erased or torn slot, so a later committed
@@ -218,7 +232,7 @@ The image then requires:
 - project-owned partition-relative raw NOR access, not the sector-rewriting
   byte-storage API.
 
-On a completely erased `retlog`, the clean-run fixture formats generation 1,
+On a completely erased `retlog`, the current schema-2 clean-run fixture formats generation 1,
 appends one submission's complete five-record lifetime, verifies semantic
 replay, proves an exact retry causes no program/erase call, proves conflicting
 content at the same key is rejected without mutation, compacts to generation
@@ -231,7 +245,8 @@ without advancing the generation, verifies replay again, and resets before the
 final PASS boot. Unexpected generations, non-erased unformatted contents, and
 integrity or semantic errors fail closed.
 
-This clean sequence passed on board `44:1B:F6:F8:E9:44` from source
+The preceding physical sequence passed on board `44:1B:F6:F8:E9:44` from
+schema-1 source
 `7b47113aeec6c7f0549cd5b264eceacef830fb4c`; the qualifying evidence is
 preserved at
 `artifacts/storage-hil/20260716T211318Z-e944-7b47113`. The strict serial
@@ -243,6 +258,12 @@ five committed records in five consumed slots, one accepted submission at
 revision 4 `Delivered`, no pending compaction, an erased retired-A manifest,
 and an erased unused B tail.
 
+That historical run qualifies the unchanged physical append/compaction/reset
+mechanics at its recorded source. It does not qualify schema-2 acceptance
+encoding or authorization provenance. The current HIL fixture and independent
+verifier now require the exact schema-2 authorization snapshot and must be run
+again after the explicit journal-only development migration.
+
 This result qualifies only the isolated journal clean path and software-reset
 replay. It does not qualify the portable actor on hardware, controlled power-
 cut recovery, erase endurance or soak, at-rest protection, the device API, or
@@ -253,7 +274,7 @@ each image, readback, hash set, and continuous serial log independently.
 ## Modularity and remaining product work
 
 The physical journal is deliberately narrower than the full appliance store.
-It can be linked wherever schema-1 durable submissions are enabled without
+It can be linked wherever schema-2 durable submissions are enabled without
 bringing in Rete, LXMF, a radio, an executor, networking, or a UI. A constrained
 Tracker profile may omit onboard LXMF/NomadNet clients, SPA assets, BLE, or
 propagation service while retaining this exact durability format. A PSRAM/full
@@ -269,8 +290,8 @@ the project still needs:
   around the operation-scoped portable actor/runtime. Its one-entry cap, live
   driver, exact authorized-frame handoff, and ADR 0005 fault behavior now pass
   software composition tests; the cap is not product capacity;
-- durable authorization provenance and persistent credential state/pairing plus
-  firmware composition of the implemented authority/framing/session/handoff and
+- persistent credential state/pairing plus firmware composition of the
+  implemented authority/framing/session/handoff and
   first USB bearer for the authenticated device-API persist-before-accept/status
   adapter,
   plus an exact node-owner quiescence proof and quarantine policy before

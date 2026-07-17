@@ -1,13 +1,16 @@
 use reticulum_storage_model::{
-    AcceptOutcome, AcceptanceCandidate, Accepted, ApplyError, ApplyOutcome, AuditEntry, AuditEvent,
-    BootRecoveryDecision, BootRecoveryMarker, ContentSha256, DestinationHash, EncodedPacketSha256,
-    ExperimentalRnsDataIntent, FinalDisposition, IdempotencyKey, InternalFailure, InterruptedState,
-    JournalEntry, LifecycleState, MAX_DURABLE_RECORDS_PER_SUBMISSION, MAX_ENCODED_PACKET_BYTES,
-    MAX_EXPERIMENTAL_RNS_DATA_BYTES, MAX_JOURNAL_RECORD_BYTES,
-    MAX_STATE_TRANSITIONS_PER_SUBMISSION, MAX_TRANSPORT_AUDITS_PER_SUBMISSION, PlanOutcome,
-    PreparedPacketDetails, PrincipalId, RnsAttemptToken, StateTransition, SubmissionFailure,
-    SubmissionId, SubmissionIndex, SubmissionReplay, TransitionError, TransportRecoveryReason,
-    decode_journal_entry, encode_journal_entry, validate_transition,
+    AUTHORIZATION_KNOWN_PERMISSION_BITS, AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA,
+    AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS, AcceptOutcome, AcceptanceCandidate, Accepted,
+    ApplyError, ApplyOutcome, AuditEntry, AuditEvent, AuthorizationSnapshot,
+    AuthorizationSnapshotError, BootRecoveryDecision, BootRecoveryMarker, ContentSha256,
+    DestinationHash, EncodedPacketSha256, ExperimentalRnsDataIntent, FinalDisposition,
+    IdempotencyKey, InternalFailure, InterruptedState, JournalEntry, LifecycleState,
+    MAX_DURABLE_RECORDS_PER_SUBMISSION, MAX_ENCODED_PACKET_BYTES, MAX_EXPERIMENTAL_RNS_DATA_BYTES,
+    MAX_JOURNAL_RECORD_BYTES, MAX_STATE_TRANSITIONS_PER_SUBMISSION,
+    MAX_TRANSPORT_AUDITS_PER_SUBMISSION, PlanOutcome, PreparedPacketDetails, PrincipalId,
+    RnsAttemptToken, StateTransition, SubmissionFailure, SubmissionId, SubmissionIndex,
+    SubmissionReplay, TransitionError, TransportRecoveryReason, decode_journal_entry,
+    encode_journal_entry, validate_transition,
 };
 
 fn principal(tag: u8) -> PrincipalId {
@@ -20,6 +23,21 @@ fn key(tag: u8) -> IdempotencyKey {
 
 fn intent(destination: u8, payload: &[u8]) -> ExperimentalRnsDataIntent {
     ExperimentalRnsDataIntent::new(DestinationHash::new([destination; 16]), payload).unwrap()
+}
+
+fn authorization(tag: u8) -> AuthorizationSnapshot {
+    let mut credential_id = [tag; 16];
+    credential_id[0] = tag.wrapping_add(1);
+    let generation = u64::from(tag) + 1;
+    AuthorizationSnapshot::new(
+        credential_id,
+        generation,
+        generation + 10,
+        u32::from(tag) + 1,
+        AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA
+            | AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS,
+    )
+    .unwrap()
 }
 
 fn details(tag: u8) -> PreparedPacketDetails {
@@ -45,6 +63,7 @@ fn accepted<const N: usize>(
         principal(principal_tag),
         key(key_tag),
         intent(0x33, payload),
+        authorization(principal_tag),
     );
     match index.plan_accept(candidate) {
         AcceptOutcome::Accepted(planned) => {
@@ -97,18 +116,27 @@ fn maximum_intent_is_owned_hashed_and_fits_one_record() {
     assert_eq!(intent.payload(), payload);
     assert_eq!(intent.content_sha256(), intent.content_sha256());
 
+    let maximum_authorization = AuthorizationSnapshot::new(
+        [0xff; 16],
+        u64::MAX,
+        u64::MAX,
+        u32::MAX,
+        AUTHORIZATION_KNOWN_PERMISSION_BITS,
+    )
+    .unwrap();
     let entry = JournalEntry::Accepted(Accepted::new(
         SubmissionId::new(u64::MAX),
         principal(0xff),
         key(0xee),
         intent,
+        maximum_authorization,
     ));
     let bytes = encoded(entry);
-    assert_eq!(bytes.len(), 495);
+    assert_eq!(bytes.len(), 508);
     assert!(bytes.len() <= MAX_JOURNAL_RECORD_BYTES);
     assert_eq!(decode_journal_entry(&bytes), Ok(entry));
 
-    let mut short = [0_u8; 494];
+    let mut short = [0_u8; 507];
     assert_eq!(
         encode_journal_entry(&entry, &mut short),
         Err(reticulum_storage_model::EncodeError::OutputTooSmall)
@@ -133,20 +161,21 @@ fn accepted_record_golden_and_every_truncated_prefix_are_strict() {
         principal(0x11),
         key(0x22),
         intent(0x33, b"abc"),
+        authorization(0x44),
     ));
     let actual = encoded(entry);
 
     // Filled from this crate's canonical encoder and frozen against accidental
-    // field-number, digest-domain, or integer-encoding drift.
+    // field-number, provenance-shape, or integer-encoding drift.
     const GOLDEN: &[u8] = &[
-        0xa3, 0x00, 0x01, 0x01, 0x00, 0x02, 0xa7, 0x00, 0x07, 0x01, 0x50, // Principal.
+        0xa3, 0x00, 0x02, 0x01, 0x00, 0x02, 0xa7, 0x00, 0x07, 0x01, 0x50, // Principal.
         0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
         0x11, // Idempotency key.
         0x02, 0x50, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
-        0x22, 0x22, 0x22, // Semantic content digest.
-        0x03, 0x58, 0x20, 0x72, 0xc9, 0x6b, 0x00, 0x19, 0x4b, 0xe6, 0x46, 0x8d, 0xcd, 0x62, 0x2e,
-        0xb8, 0x7b, 0xef, 0x0c, 0x8a, 0x4a, 0xec, 0x80, 0x09, 0xed, 0xe9, 0x3a, 0x1c, 0x24, 0xed,
-        0x5c, 0xe9, 0x1a, 0x90, 0x61, // Intent kind, destination, and payload.
+        0x22, 0x22, 0x22, // Authorization snapshot.
+        0x03, 0xa5, 0x00, 0x50, 0x45, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44,
+        0x44, 0x44, 0x44, 0x44, 0x44, 0x01, 0x18, 0x45, 0x02, 0x18, 0x4f, 0x03, 0x18, 0x45, 0x04,
+        0x03, // Intent kind, destination, and payload.
         0x04, 0x00, 0x05, 0x50, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33,
         0x33, 0x33, 0x33, 0x33, 0x33, 0x06, 0x43, 0x61, 0x62, 0x63,
     ];
@@ -186,11 +215,11 @@ fn transition_and_audit_goldens_round_trip() {
     )
     .unwrap();
     const TRANSITION_GOLDEN: &[u8] = &[
-        0xa3, 0x00, 0x01, 0x01, 0x01, 0x02, 0xa8, 0x00, 0x07, 0x01, 0x03, 0x02, 0x04, 0x05, 0x03,
+        0xa3, 0x00, 0x02, 0x01, 0x01, 0x02, 0xa8, 0x00, 0x07, 0x01, 0x03, 0x02, 0x04, 0x05, 0x03,
         0x06, 0x01, 0x07, 0x09, 0x08, 0x01, 0x09, 0x00,
     ];
     const AUDIT_GOLDEN: &[u8] = &[
-        0xa3, 0x00, 0x01, 0x01, 0x02, 0x02, 0xa7, 0x00, 0x07, 0x01, 0x02, 0x02, 0x01, 0x03, 0x58,
+        0xa3, 0x00, 0x02, 0x01, 0x02, 0x02, 0xa7, 0x00, 0x07, 0x01, 0x02, 0x02, 0x01, 0x03, 0x58,
         0x20, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
         0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
         0x55, 0x55, 0x55, 0x04, 0xf5, 0x05, 0x01, 0x06, 0x19, 0x12, 0x34,
@@ -240,34 +269,113 @@ fn transport_audit_codec_retains_every_reason_without_completion_code_collisions
 }
 
 #[test]
-fn noncanonical_and_corrupt_content_digest_are_rejected() {
+fn noncanonical_and_invalid_authorization_are_rejected() {
     let entry = JournalEntry::Accepted(Accepted::new(
         SubmissionId::new(1),
         principal(1),
         key(2),
         intent(3, b"x"),
+        authorization(4),
     ));
     let canonical = encoded(entry);
 
-    // Schema 1 encoded with an unnecessarily wide uint8 representation.
+    // Schema 2 encoded with an unnecessarily wide uint8 representation.
     let mut noncanonical = canonical.clone();
-    assert_eq!(&noncanonical[..3], &[0xa3, 0x00, 0x01]);
-    noncanonical.splice(2..3, [0x18, 0x01]);
+    assert_eq!(&noncanonical[..3], &[0xa3, 0x00, 0x02]);
+    noncanonical.splice(2..3, [0x18, 0x02]);
     assert_eq!(
         decode_journal_entry(&noncanonical),
         Err(reticulum_storage_model::DecodeError::NonCanonical)
     );
 
     let mut corrupt = canonical;
-    let digest_header = corrupt
-        .windows(2)
-        .position(|window| window == [0x58, 0x20])
+    let authorization_header = corrupt
+        .windows(3)
+        .position(|window| window == [0xa5, 0x00, 0x50])
         .unwrap();
-    corrupt[digest_header + 2] ^= 1;
+    corrupt[authorization_header + 3..authorization_header + 19].fill(0);
     assert_eq!(
         decode_journal_entry(&corrupt),
-        Err(reticulum_storage_model::DecodeError::ContentDigestMismatch)
+        Err(reticulum_storage_model::DecodeError::InvalidValue)
     );
+}
+
+#[test]
+fn authorization_snapshot_rejects_noncanonical_or_insufficient_facts() {
+    let submit = AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA;
+    let valid = AuthorizationSnapshot::new([1; 16], 4, 7, 2, submit).unwrap();
+    assert_eq!(valid.credential_id(), &[1; 16]);
+    assert_eq!(valid.credential_generation(), 4);
+    assert_eq!(valid.authority_revision(), 7);
+    assert_eq!(valid.policy_version(), 2);
+    assert_eq!(valid.granted_permission_bits(), submit);
+    assert_eq!(AUTHORIZATION_KNOWN_PERMISSION_BITS, 0b11);
+
+    for (candidate, expected) in [
+        (
+            AuthorizationSnapshot::new([0; 16], 1, 1, 1, submit),
+            AuthorizationSnapshotError::ZeroCredentialId,
+        ),
+        (
+            AuthorizationSnapshot::new([1; 16], 0, 1, 1, submit),
+            AuthorizationSnapshotError::ZeroCredentialGeneration,
+        ),
+        (
+            AuthorizationSnapshot::new([1; 16], 1, 0, 1, submit),
+            AuthorizationSnapshotError::ZeroAuthorityRevision,
+        ),
+        (
+            AuthorizationSnapshot::new([1; 16], 1, 1, 0, submit),
+            AuthorizationSnapshotError::ZeroPolicyVersion,
+        ),
+        (
+            AuthorizationSnapshot::new([1; 16], 2, 1, 1, submit),
+            AuthorizationSnapshotError::GenerationAfterAuthorityRevision {
+                generation: 2,
+                authority_revision: 1,
+            },
+        ),
+        (
+            AuthorizationSnapshot::new([1; 16], 1, 1, 1, submit | (1 << 31)),
+            AuthorizationSnapshotError::UnknownPermissionBits { unknown: 1 << 31 },
+        ),
+        (
+            AuthorizationSnapshot::new(
+                [1; 16],
+                1,
+                1,
+                1,
+                AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS,
+            ),
+            AuthorizationSnapshotError::MissingSubmitPermission,
+        ),
+    ] {
+        assert_eq!(candidate, Err(expected));
+    }
+}
+
+#[test]
+fn accepted_digest_is_recomputed_from_serialized_intent() {
+    let original = JournalEntry::Accepted(Accepted::new(
+        SubmissionId::new(1),
+        principal(1),
+        key(2),
+        intent(3, b"x"),
+        authorization(4),
+    ));
+    let mut bytes = encoded(original);
+    assert_eq!(bytes.last(), Some(&b'x'));
+    *bytes.last_mut().unwrap() = b'y';
+
+    let JournalEntry::Accepted(decoded) = decode_journal_entry(&bytes).unwrap() else {
+        panic!("acceptance kind changed")
+    };
+    assert_eq!(decoded.intent(), intent(3, b"y"));
+    assert_eq!(decoded.content_sha256(), decoded.intent().content_sha256());
+    let JournalEntry::Accepted(original) = original else {
+        unreachable!()
+    };
+    assert_ne!(decoded.content_sha256(), original.content_sha256());
 }
 
 #[test]
@@ -281,7 +389,8 @@ fn idempotency_is_principal_scoped_and_content_checked() {
         index.plan_accept(AcceptanceCandidate::new(
             principal(1),
             key(7),
-            intent(0x33, b"same")
+            intent(0x33, b"same"),
+            authorization(8),
         )),
         AcceptOutcome::Replay(first.id())
     );
@@ -289,14 +398,20 @@ fn idempotency_is_principal_scoped_and_content_checked() {
         index.plan_accept(AcceptanceCandidate::new(
             principal(1),
             key(7),
-            intent(0x33, b"different")
+            intent(0x33, b"different"),
+            authorization(9),
         )),
         AcceptOutcome::IdempotencyConflict {
             existing: first.id()
         }
     );
 
-    let second_candidate = AcceptanceCandidate::new(principal(2), key(7), intent(0x33, b"same"));
+    let second_candidate = AcceptanceCandidate::new(
+        principal(2),
+        key(7),
+        intent(0x33, b"same"),
+        authorization(10),
+    );
     let second = match index.plan_accept(second_candidate) {
         AcceptOutcome::Accepted(planned) => {
             let JournalEntry::Accepted(accepted) = planned.entry() else {
@@ -311,9 +426,87 @@ fn idempotency_is_principal_scoped_and_content_checked() {
 }
 
 #[test]
+fn rotated_retry_replays_original_provenance_but_uncommitted_plans_remain_exact() {
+    let mut index = live::<1>(SubmissionId::new(90));
+    let original_authorization = authorization(20);
+    let rotated_authorization = authorization(21);
+    let original_candidate = AcceptanceCandidate::new(
+        principal(1),
+        key(7),
+        intent(0x33, b"same"),
+        original_authorization,
+    );
+    let rotated_candidate = AcceptanceCandidate::new(
+        principal(1),
+        key(7),
+        intent(0x33, b"same"),
+        rotated_authorization,
+    );
+
+    let AcceptOutcome::Accepted(original_plan) = index.plan_accept(original_candidate) else {
+        panic!("original candidate must be plannable")
+    };
+    let AcceptOutcome::Accepted(rotated_plan) = index.plan_accept(rotated_candidate) else {
+        panic!("rotated candidate must be independently plannable")
+    };
+    assert_ne!(original_plan, rotated_plan);
+
+    index.apply_planned(original_plan).unwrap();
+    assert_eq!(
+        index.plan_accept(rotated_candidate),
+        AcceptOutcome::Replay(SubmissionId::new(90))
+    );
+    assert_eq!(
+        index
+            .get(SubmissionId::new(90))
+            .unwrap()
+            .accepted()
+            .authorization(),
+        original_authorization
+    );
+}
+
+#[test]
+fn replay_rejects_same_submission_id_with_altered_provenance() {
+    let intent = intent(3, b"same-id");
+    let original = Accepted::new(
+        SubmissionId::new(7),
+        principal(1),
+        key(2),
+        intent,
+        authorization(30),
+    );
+    let substituted = Accepted::new(
+        SubmissionId::new(7),
+        principal(1),
+        key(2),
+        intent,
+        authorization(31),
+    );
+    let mut replay = SubmissionReplay::<1>::new(SubmissionId::new(1));
+    assert_eq!(
+        replay.apply_entry(JournalEntry::Accepted(original)),
+        Ok(ApplyOutcome::Applied)
+    );
+    assert_eq!(
+        replay.apply_entry(JournalEntry::Accepted(substituted)),
+        Err(ApplyError::SubmissionConflict)
+    );
+    assert!(matches!(
+        replay.complete(),
+        Err(ApplyError::SubmissionConflict)
+    ));
+}
+
+#[test]
 fn lost_accept_reply_replays_the_committed_identifier_without_allocating_again() {
     let mut index = live::<2>(SubmissionId::new(70));
-    let candidate = AcceptanceCandidate::new(principal(1), key(2), intent(3, b"durable"));
+    let candidate = AcceptanceCandidate::new(
+        principal(1),
+        key(2),
+        intent(3, b"durable"),
+        authorization(11),
+    );
 
     let AcceptOutcome::Accepted(planned) = index.plan_accept(candidate) else {
         panic!("candidate should be plannable")
@@ -373,7 +566,8 @@ fn fixed_index_exhaustion_consumes_no_id_and_accepted_lifecycle_has_no_model_quo
         no_slots.plan_accept(AcceptanceCandidate::new(
             principal(1),
             key(1),
-            intent(1, b"x")
+            intent(1, b"x"),
+            authorization(1),
         )),
         AcceptOutcome::IndexExhausted
     );
@@ -411,7 +605,8 @@ fn fixed_index_exhaustion_consumes_no_id_and_accepted_lifecycle_has_no_model_quo
         index.plan_accept(AcceptanceCandidate::new(
             principal(2),
             key(2),
-            intent(2, b"full")
+            intent(2, b"full"),
+            authorization(2),
         )),
         AcceptOutcome::IndexExhausted
     );
@@ -730,7 +925,7 @@ fn first_transport_audit_checks_token_and_preserves_accumulated_uncertainty() {
 }
 
 #[test]
-fn schema_one_has_an_explicit_one_transport_audit_bound() {
+fn schema_two_has_an_explicit_one_transport_audit_bound() {
     assert_eq!(MAX_STATE_TRANSITIONS_PER_SUBMISSION, 3);
     assert_eq!(MAX_TRANSPORT_AUDITS_PER_SUBMISSION, 1);
     assert_eq!(MAX_DURABLE_RECORDS_PER_SUBMISSION, 5);
@@ -974,6 +1169,7 @@ fn replay_must_be_explicitly_completed_before_live_boot_and_planning() {
         principal(1),
         key(1),
         intent(1, b"persisted"),
+        authorization(1),
     );
     let preparing = transition(accepted.id(), 1, LifecycleState::Preparing);
     let final_state = transition(
@@ -1017,6 +1213,7 @@ fn first_replay_error_poison_prevents_sealing_or_skipping_the_record() {
         principal(1),
         key(1),
         intent(1, b"poison"),
+        authorization(1),
     );
     let mut replay = SubmissionReplay::<1>::new(SubmissionId::new(1));
     assert_eq!(
@@ -1055,6 +1252,7 @@ fn replay_rejects_attempt_substitution_and_preserves_accumulated_uncertainty() {
         principal(1),
         key(1),
         intent(1, b"replay"),
+        authorization(1),
     );
     let packet = details(1);
     let substituted = details(2);
@@ -1162,7 +1360,8 @@ fn identifier_allocation_is_checked_at_u64_max() {
         exhausted.plan_accept(AcceptanceCandidate::new(
             principal(1),
             key(1),
-            intent(1, b"last")
+            intent(1, b"last"),
+            authorization(1),
         )),
         AcceptOutcome::Accepted(_)
     ));
@@ -1170,6 +1369,7 @@ fn identifier_allocation_is_checked_at_u64_max() {
         principal(1),
         key(1),
         intent(1, b"last"),
+        authorization(1),
     )) else {
         panic!("last ID must remain plannable until committed")
     };
@@ -1179,7 +1379,8 @@ fn identifier_allocation_is_checked_at_u64_max() {
         exhausted.plan_accept(AcceptanceCandidate::new(
             principal(2),
             key(2),
-            intent(2, b"none")
+            intent(2, b"none"),
+            authorization(2),
         )),
         AcceptOutcome::IdentifierExhausted
     );
@@ -1188,8 +1389,20 @@ fn identifier_allocation_is_checked_at_u64_max() {
 #[test]
 fn content_digest_is_semantic_and_not_principal_or_key_dependent() {
     let semantic_intent = intent(4, b"semantic");
-    let first = Accepted::new(SubmissionId::new(1), principal(1), key(1), semantic_intent);
-    let second = Accepted::new(SubmissionId::new(2), principal(2), key(2), semantic_intent);
+    let first = Accepted::new(
+        SubmissionId::new(1),
+        principal(1),
+        key(1),
+        semantic_intent,
+        authorization(1),
+    );
+    let second = Accepted::new(
+        SubmissionId::new(2),
+        principal(2),
+        key(2),
+        semantic_intent,
+        authorization(2),
+    );
     let _: ContentSha256 = first.content_sha256();
     assert_eq!(first.content_sha256(), second.content_sha256());
     assert_ne!(

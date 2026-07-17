@@ -125,7 +125,7 @@ pub(crate) struct BootAnnounceEpoch {
 /// Failure while reserving and mirroring the next announce-emission epoch.
 pub(crate) type BootAnnounceEpochError = ReserveError<ProductRegionError>;
 
-/// Successful first-provision scan or repair while identity remained vacant.
+/// Successful factory provision/repair or explicit erased-journal reprovision.
 pub(crate) struct BootJournalProvision {
     pub(crate) state: JournalState,
     pub(crate) raw_write_calls: u32,
@@ -266,28 +266,37 @@ impl ProductFlashOwner {
         })
     }
 
-    /// Establish or resume the exact empty first journal only while the
-    /// independent identity preflight still authorizes factory provisioning.
+    /// Establish the exact empty first journal under the selected boot policy.
     ///
-    /// Existing identities deliberately skip this mutation path. Their journal
-    /// is accepted only by the later strict runtime mount.
+    /// Factory provisioning may resume its own torn first-format trajectory
+    /// while identity remains vacant. The schema-2 development path is
+    /// deliberately narrower: it scans the complete journal partition and
+    /// accepts only erased media before entering `provision_first`. Neither
+    /// path erases any bytes.
     pub(crate) fn provision_node_journal(
         &mut self,
         policy: JournalBootPolicy,
     ) -> Result<Option<BootJournalProvision>, BootJournalProvisionError> {
-        match policy {
-            JournalBootPolicy::MountExisting => Ok(None),
-            JournalBootPolicy::ProvisionFirst => {
-                let mut region =
-                    PartitionNorFlash::new(&mut *self.flash, NODE_JOURNAL_OFFSET, NODE_JOURNAL_LEN);
-                let state = provision_first(&mut region, FreshJournalPolicy::AllowFirstProvision)?;
-                Ok(Some(BootJournalProvision {
-                    state,
-                    raw_write_calls: region.write_calls(),
-                    raw_erase_calls: region.erase_calls(),
-                }))
-            }
+        let erased_only = match policy {
+            JournalBootPolicy::MountExisting => return Ok(None),
+            JournalBootPolicy::ProvisionFactoryFirst => false,
+            JournalBootPolicy::ProvisionErasedSchema2Development => true,
+        };
+
+        let mut region =
+            PartitionNorFlash::new(&mut *self.flash, NODE_JOURNAL_OFFSET, NODE_JOURNAL_LEN);
+        if erased_only
+            && !node_journal_is_erased(&mut region).map_err(FirstProvisionError::Backend)?
+        {
+            return Err(FirstProvisionError::MediaNotProvisionable);
         }
+
+        let state = provision_first(&mut region, FreshJournalPolicy::AllowFirstProvision)?;
+        Ok(Some(BootJournalProvision {
+            state,
+            raw_write_calls: region.write_calls(),
+            raw_erase_calls: region.erase_calls(),
+        }))
     }
 
     /// Strictly mount the journal, reject unsupported history before any
@@ -377,6 +386,24 @@ impl ProductFlashOwner {
             submission_service_enabled,
         }
     }
+}
+
+/// Prove that the complete journal partition is erased without mutation.
+fn node_journal_is_erased(
+    region: &mut PartitionNorFlash<'_, FlashStorage<'static>>,
+) -> Result<bool, ProductRegionError> {
+    const READ_CHUNK: usize = 256;
+
+    let mut bytes = [0_u8; READ_CHUNK];
+    let mut offset = 0_u32;
+    while offset < NODE_JOURNAL_LEN {
+        ReadNorFlash::read(region, offset, &mut bytes)?;
+        if bytes.iter().any(|byte| *byte != 0xff) {
+            return Ok(false);
+        }
+        offset += READ_CHUNK as u32;
+    }
+    Ok(true)
 }
 
 impl ProductStorageCoordinator {

@@ -210,17 +210,16 @@ Production pairing adds an independently confirmed display/code/QR or
 equivalent out-of-band ceremony. Neither policy reuses Reticulum identity
 private material.
 
-### Keep durable authorization provenance as an open gate
+### Close durable authorization provenance in semantic schema 2
 
-The current durable acceptance record persists the authenticated principal,
-principal-scoped idempotency key and operation-specific intent. It does not
-persist the revalidated credential ID/generation, authority revision or policy
-version now available from `DispatchLease`. Before a live external mutating
-bearer is enabled, the project must either add a bounded authorization-policy
-snapshot to the durable acceptance schema with an explicit migration, or
-formally narrow ADR 0006's provenance requirement and justify why the existing
-principal plus operation intent is sufficient. The portable authority does not
-silently claim that decision is complete.
+ADR 0008 advances the durable semantic schema to 2. `DispatchLease` now mints a
+validated non-wire `DispatchProvenance`; after logical authorization, the
+adapter maps it plus the exact granted permission mask into a storage-owned
+`AuthorizationSnapshot`. Every new acceptance persists the credential ID and
+generation, complete authority revision, policy version, and permission mask.
+Retries after rotation preserve the original acceptance evidence. Schema-1
+media is typed unsupported and cannot be silently upgraded because those facts
+never existed.
 
 ## Consequences
 
@@ -236,8 +235,7 @@ silently claim that decision is complete.
 - The first slice is host- and target-checkable without inventing flash,
   pairing, reset or USB behavior.
 - Live external admission remains disabled until persistence, pairing/rate
-  policy, firmware ownership, a physical bearer and the durable authorization-
-  provenance decision are complete.
+  policy, firmware ownership, and a physical bearer are complete.
 
 ## Validation status
 
@@ -248,10 +246,13 @@ silently claim that decision is complete.
   permission vocabularies, non-escaping dispatch context, secret shape and
   bounded E290 RAM.
 - Complete: the session suite contains twelve tests, including one direct
-  authority-to-adapter request/reply path and one revoke-after-admission
+  authority-to-adapter request/reply path with exact durable provenance and one revoke-after-admission
   authority-revalidation rejection. Composed handoff/no-fallback proof remains.
 - Remaining: persistent physical format, operation-scoped binding, ambiguous
   mutation reconciliation and exhaustive power-cut tests.
 - Remaining: pairing protocol, physical-presence UI, timeouts, rate limits,
   rotation, reset and firmware task composition.
-- Remaining: durable authorization-policy provenance and powered bearer tests.
+- Complete: semantic schema 2 persists and replays exact authorization-policy
+  provenance while preserving the 383-byte payload and 512-byte actor pending
+  owner ceiling; see ADR 0008.
+- Remaining: powered bearer tests.

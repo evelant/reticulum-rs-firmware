@@ -120,6 +120,106 @@ impl BitOr for Permissions {
     }
 }
 
+/// Device-owned credential facts that authorized one dispatch attempt.
+///
+/// This value is supplied out of band with the trusted dispatch context and is
+/// never decoded from the device-API wire message. Its public constructor lets
+/// trusted integration code move these scalar facts between portable crates;
+/// it is not an unforgeable authorization capability against linked Rust code.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DispatchProvenance {
+    credential_id: [u8; 16],
+    credential_generation: u64,
+    authority_revision: u64,
+    policy_version: u32,
+}
+
+/// Invalid device-owned facts supplied for dispatch provenance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DispatchProvenanceError {
+    /// The all-zero credential identifier is reserved for erased state.
+    ZeroCredentialId,
+    /// Credential generation zero is reserved for erased state.
+    ZeroCredentialGeneration,
+    /// Authority revision zero is reserved for erased state.
+    ZeroAuthorityRevision,
+    /// Authorization-policy version zero is reserved for erased state.
+    ZeroPolicyVersion,
+    /// A credential generation cannot originate after the observed authority.
+    GenerationExceedsAuthorityRevision {
+        /// Candidate credential generation.
+        credential_generation: u64,
+        /// Candidate complete-authority revision.
+        authority_revision: u64,
+    },
+}
+
+impl DispatchProvenance {
+    /// Validate and construct provenance from credential-authority state.
+    pub const fn new(
+        credential_id: [u8; 16],
+        credential_generation: u64,
+        authority_revision: u64,
+        policy_version: u32,
+    ) -> Result<Self, DispatchProvenanceError> {
+        let mut byte = 0;
+        let mut has_nonzero_id_byte = false;
+        while byte < credential_id.len() {
+            if credential_id[byte] != 0 {
+                has_nonzero_id_byte = true;
+                break;
+            }
+            byte += 1;
+        }
+        if !has_nonzero_id_byte {
+            return Err(DispatchProvenanceError::ZeroCredentialId);
+        }
+        if credential_generation == 0 {
+            return Err(DispatchProvenanceError::ZeroCredentialGeneration);
+        }
+        if authority_revision == 0 {
+            return Err(DispatchProvenanceError::ZeroAuthorityRevision);
+        }
+        if policy_version == 0 {
+            return Err(DispatchProvenanceError::ZeroPolicyVersion);
+        }
+        if credential_generation > authority_revision {
+            return Err(
+                DispatchProvenanceError::GenerationExceedsAuthorityRevision {
+                    credential_generation,
+                    authority_revision,
+                },
+            );
+        }
+        Ok(Self {
+            credential_id,
+            credential_generation,
+            authority_revision,
+            policy_version,
+        })
+    }
+
+    /// Opaque identifier of the credential revalidated for this attempt.
+    pub const fn credential_id(self) -> [u8; 16] {
+        self.credential_id
+    }
+
+    /// Exact credential generation revalidated for this attempt.
+    pub const fn credential_generation(self) -> u64 {
+        self.credential_generation
+    }
+
+    /// Complete credential-authority revision observed at revalidation.
+    pub const fn authority_revision(self) -> u64 {
+        self.authority_revision
+    }
+
+    /// Authorization-policy version applied by the credential record.
+    pub const fn policy_version(self) -> u32 {
+        self.policy_version
+    }
+}
+
 /// Trusted authentication and authorization facts supplied out of band.
 #[derive(Debug, Eq, PartialEq)]
 pub struct DispatchContext {
@@ -127,6 +227,8 @@ pub struct DispatchContext {
     principal: Option<PrincipalId>,
     /// Permissions granted to that authenticated principal.
     permissions: Permissions,
+    /// Credential-authority facts captured by exact pre-dispatch revalidation.
+    provenance: Option<DispatchProvenance>,
 }
 
 impl DispatchContext {
@@ -134,13 +236,19 @@ impl DispatchContext {
     pub const UNAUTHENTICATED: Self = Self {
         principal: None,
         permissions: Permissions::NONE,
+        provenance: None,
     };
 
     /// Construct a trusted context for an authenticated principal.
-    pub const fn authenticated(principal: PrincipalId, permissions: Permissions) -> Self {
+    pub const fn authenticated(
+        principal: PrincipalId,
+        permissions: Permissions,
+        provenance: DispatchProvenance,
+    ) -> Self {
         Self {
             principal: Some(principal),
             permissions,
+            provenance: Some(provenance),
         }
     }
 
@@ -152,6 +260,11 @@ impl DispatchContext {
     /// Device-owned permissions bound to this dispatch attempt.
     pub const fn permissions(&self) -> Permissions {
         self.permissions
+    }
+
+    /// Credential-authority facts for this authenticated attempt, if any.
+    pub const fn provenance(&self) -> Option<DispatchProvenance> {
+        self.provenance
     }
 }
 

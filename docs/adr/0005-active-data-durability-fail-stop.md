@@ -123,12 +123,13 @@ ordinary announce behind it, injects a wrong journal binding, and proves
 `ActiveOwnerFailStopped` emits no acknowledgement, retains all owners, takes the
 LoRa lease offline, and permits no later host-radio TX or RX.
 
-The E290 library therefore has 25 passing tests: 23 focused policy/product tests
+The E290 library therefore has 27 passing tests: 25 focused policy/product tests
 plus those two cross-layer composition tests. This closes software composition
 qualification for the LoRa-first one-entry profile. Portable API framing,
 immutable credential authority, the qualification-session core, and job handoff
-are qualified; live external admission remains blocked on durable authorization
-provenance, credential persistence/pairing, firmware composition, and a bearer. Powered E290
+are qualified, and semantic schema 2 persists exact authorization provenance;
+live external admission remains blocked on credential persistence/pairing,
+firmware composition, and a bearer. Powered E290
 permanent-graph behavior remains unqualified even though the physical
 HF-module gate and isolated semantic HIL are complete; it requires separate
 hardware evidence.

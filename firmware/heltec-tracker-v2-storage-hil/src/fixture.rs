@@ -1,10 +1,12 @@
 //! Deterministic full-budget semantic fixture for the physical HIL.
 
 use reticulum_storage_model::{
-    Accepted, AuditEntry, AuditEvent, DestinationHash, EncodedPacketSha256,
-    ExperimentalRnsDataIntent, FinalDisposition, IdempotencyKey, JournalEntry, LifecycleState,
-    PreparedPacketDetails, PrincipalId, RnsAttemptToken, StateTransition, SubmissionFailure,
-    SubmissionId, TransportRecoveryReason,
+    AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA,
+    AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS, Accepted, AuditEntry, AuditEvent,
+    AuthorizationSnapshot, DestinationHash, EncodedPacketSha256, ExperimentalRnsDataIntent,
+    FinalDisposition, IdempotencyKey, JournalEntry, LifecycleState, PreparedPacketDetails,
+    PrincipalId, RnsAttemptToken, StateTransition, SubmissionFailure, SubmissionId,
+    TransportRecoveryReason,
 };
 
 pub const RECORD_COUNT: usize = reticulum_storage_model::MAX_DURABLE_RECORDS_PER_SUBMISSION;
@@ -19,7 +21,7 @@ pub const fn submission_id() -> SubmissionId {
 pub fn records() -> [JournalEntry; RECORD_COUNT] {
     assert_eq!(
         RECORD_COUNT, 5,
-        "storage HIL fixture must exercise the full schema-1 budget"
+        "storage HIL fixture must exercise the full schema-2 budget"
     );
 
     let intent = ExperimentalRnsDataIntent::new(
@@ -32,6 +34,15 @@ pub fn records() -> [JournalEntry; RECORD_COUNT] {
         PrincipalId::new([0x51; 16]),
         IdempotencyKey::new([0x71; 16]),
         intent,
+        AuthorizationSnapshot::new(
+            [0x61; 16],
+            7,
+            9,
+            1,
+            AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA
+                | AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS,
+        )
+        .expect("fixed storage HIL authorization must be valid"),
     );
     let prepared = PreparedPacketDetails::new(97, EncodedPacketSha256::new([0x6e; 32]), ATTEMPT)
         .expect("fixed storage HIL packet metadata must be valid");

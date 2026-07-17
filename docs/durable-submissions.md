@@ -5,12 +5,13 @@ storage actor, transport-neutral submission runtime, native authorized-frame
 seam, and exact E290 request/durable-echo handoff implemented; portable
 authenticated device-API dispatch implemented; resident E290 operation-scoped
 flash/runtime coordinator implemented; isolated powered journal clean-path/
-software-reset HIL passed on board E9:44; the 25-test E290 host suite qualifies
+software-reset HIL passed on board E9:44; the 27-test E290 host suite qualifies
 the one-entry complete LoRa-first software composition and ADR 0005 active-owner
 fail-stop. Portable API framing, immutable credential authority, the USB-
 qualification session core, and the boot-lifetime job handoff are qualified;
-live external admission remains blocked by durable authorization provenance,
-credential persistence/pairing, firmware composition, and a bearer.
+semantic schema 2 now durably binds exact authorization provenance to every
+acceptance. Live external admission remains blocked by credential persistence/
+pairing, firmware composition, and a bearer.
 Controlled power-cut durability, projector
 retirement, journal retention, endurance/soak, and at-rest encryption remain
 unqualified.
@@ -56,8 +57,9 @@ principal-scoped status; missing and foreign IDs are indistinguishable, and
 status returns `Internal` while the actor has ambiguous pending work or is
 faulted rather than exposing a deliberately lagging index. Its
 target-safe `experimental-rns-data` feature copies the experimental borrowed payload
-into an owned candidate and returns an ID only after `accept` reports durable
-success or exact replay. Adapter-local capability restriction prevents a
+into an owned candidate, maps only trusted dispatch provenance into the
+storage-owned authorization snapshot, and returns an ID only after `accept`
+reports durable success or exact replay. Adapter-local capability restriction prevents a
 separately unified codec feature from advertising that operation. The feature
 is checked on bare-metal targets. The adapter has no framing, session,
 USB/BLE/Wi-Fi, node, or direct-radio ownership; its transport-neutral outbound
@@ -87,7 +89,7 @@ flowchart LR
     API -. "firmware composition absent" .-> Runtime["resident portable submission runtime"]
     Coordinator["E290 sole-flash coordinator (resident)"] <--> Runtime
     Runtime <--> Store["portable sole storage actor (implemented)"]
-    Coordinator --> Journal["operation-scoped bound journal"]
+    Coordinator --> Journal["operation-scoped schema-2 bound journal"]
     Journal --> Flash["validated raw NOR partition"]
     Store --> Model["actor-owned live replay index"]
     Store --> Projector["actor-owned sole projector"]
@@ -151,10 +153,11 @@ the semantic destination and payload, not over API CBOR. Repeating the same
 principal, key, and content returns the original `SubmissionId`; changing the
 content under that key is a conflict and never mutates the original record.
 
-The initial immutable journal vocabulary is:
+The current immutable journal vocabulary is:
 
-- `Accepted`: submission ID, principal, idempotency key, semantic digest, and
-  the complete bounded experimental RNS DATA intent;
+- `Accepted`: submission ID, principal, idempotency key, exact credential ID/
+  generation, authority revision, authorization-policy version, granted
+  permission mask, and the complete bounded experimental RNS DATA intent;
 - `StateTransition`: submission ID, exact next revision, and lifecycle state;
   a reboot-interrupted final transition carries its `BootRecoveryMarker`
   inside `InternalFailure::InterruptedByReset`;
@@ -181,14 +184,16 @@ native receipt object, and every reference remain volatile. Persisting any of
 them would create a false promise that a reset node incarnation can rehydrate
 an old lease or Rust owner.
 
-Records use strict definite-map indexed CBOR with schema version 1 and a
-512-byte ceiling. Transport recovery records contain a semantic reason
+Records use strict definite-map indexed CBOR with semantic schema version 2 and
+a 512-byte ceiling. The domain-separated content SHA-256 remains available but
+is derived from immutable intent rather than serialized or retained as a
+second copy. Transport recovery records contain a semantic reason
 discriminant; only `CompletionFault` carries a separate unrestricted `u16`
 driver/control-plane completion code, so no such code can collide with
 deadline, cancellation, identifier-exhaustion, or invariant reasons. Decoding
 re-encodes and byte-compares the value, rejecting noncanonical integers,
 trailing data,
-malformed lengths, mismatched semantic digests, and invalid state combinations.
+malformed lengths, invalid authorization snapshots, and invalid state combinations.
 Physical atomicity, integrity chaining, and torn-write detection are supplied
 by `reticulum-storage-journal`. Its SHA-256 values are unkeyed corruption
 detection, not tamper authentication or confidentiality; either property would
@@ -303,9 +308,8 @@ The projector cross-checks the preparation and authorized-byte digests and
 lengths; repeated fan-out observations are idempotent only when all durable
 packet metadata is identical. The E290 composition implements this ownership
 path under a host-qualified one-entry cap. Production remains externally
-unreachable because durable authorization provenance, credential persistence/
-pairing, a firmware lane, and a bearer are not composed around the portable
-authority/session core.
+unreachable because credential persistence/pairing, a firmware lane, and a
+bearer are not composed around the portable authority/session core.
 
 Terminal outcomes map as follows:
 
@@ -384,7 +388,7 @@ radio timing still belong to the permanent product task.
    semantic index cannot see.
 3. **Real admission reservation.** Before publishing `Accepted`, reserve
    physical space for the complete worst-case lifecycle and a possible
-   transport audit. Schema 1 permits at most five
+   transport audit. Semantic schema 2 permits at most five
    committed semantic records per submission: one `Accepted`, at most three
    state transitions, and at most one transport audit. The physical journal
    contains 812 slots and admits at most 162 acceptances, reserving 810
@@ -394,7 +398,7 @@ radio timing still belong to the permanent product task.
    explicitly justified corruption-detection code), explicit commit markers,
    monotonically ordered record identity, and scan
    rules for erased, torn, corrupt, duplicate, and stale records.
-5. **Permanent retention and compaction.** Schema 1 compaction copies every
+5. **Permanent retention and compaction.** Semantic schema 2 compaction copies every
    committed record, including principal/idempotency history, and provides no
    eviction or garbage collection. The manifest and future schema-migration
    rules must preserve that guarantee. The submission journal is not the
@@ -407,15 +411,23 @@ radio timing still belong to the permanent product task.
    must additionally order OTA/GC/watchdogs and radio timing and must not expose
    cancellation across an actor call.
 
-## Selected schema-1 physical design
+## Selected physical-format-1, semantic-schema-2 design
 
-Schema 1 uses the implemented project-owned fixed-slot, two-bank NOR journal in
+Semantic schema 2 uses the implemented project-owned fixed-slot, two-bank NOR journal in
 a dedicated 1 MiB `retlog` partition. The partition reserves two 4 KiB manifest
 sectors and divides the remaining erase-aligned space into two 127-sector
 banks. Each bank has 812 640-byte physical slots and a required 512-byte erased
 tail. A slot contains a 64-byte versioned header, maximum 512-byte canonical
 semantic body, 32-byte SHA-256 chain value, and 32-byte commit marker. See
 [Physical submission journal](storage-journal.md) for exact offsets and fields.
+
+The physical version stays at 1 while the semantic schema advances. A valid,
+trajectory-consistent schema-1 authority returns typed
+`UnsupportedSemanticVersion(1)` before record replay and without a write or
+erase; its acceptance records cannot be upgraded truthfully because they never
+contained credential/policy evidence. Development migration therefore erases
+and explicitly reprovisions only `node_journal`, as specified by
+[ADR 0008](adr/0008-durable-authorization-provenance.md).
 
 For each append, the journal writes the header, canonical body, and integrity
 fields, reads those pre-commit bytes back exactly, and writes the commit marker
@@ -435,7 +447,7 @@ blocks append and makes the copy resumable, while a power loss during manifest
 retirement resumes that one erase without creating another generation. Once
 retired, the old bank cannot be selected as fallback, so corruption of the sole
 active manifest fails closed and a later suffix cannot disappear through
-rollback. Schema 1 retains every accepted submission and revision permanently
+rollback. Schema 2 retains every accepted submission and revision permanently
 and exposes no eviction or garbage-collection policy. Admission fails when the
 fixed index or 162-submission lifetime reservation cannot support another
 submission.
@@ -449,12 +461,12 @@ only accepts a completely erased partition; it never erases or reformats an
 unknown nonblank partition.
 
 `sequential-storage 8` remains useful research and differential-test material,
-but it is not an open contender for the schema-1 journal implementation.
+but it is not an open contender for the physical-format-1 journal implementation.
 
 ## Capacity and ESP32-S3 constraints
 
-The current intent owns up to 383 payload bytes; an `Accepted` record is close
-to the 512-byte record ceiling, and each in-RAM indexed submission retains that
+The current intent owns up to 383 payload bytes; a maximum schema-2 `Accepted`
+record uses 508 of the 512 canonical bytes, and each in-RAM indexed submission retains that
 intent plus lifecycle metadata. Submission counts therefore need explicit
 static layout, stack, heap, boot-scan-time, and linked-image measurements on
 the no-PSRAM Tracker profile. The codec currently uses a 512-byte canonical
@@ -493,8 +505,8 @@ LXMF/NomadNet/UI services without redefining the durable protocol.
    the wrong-binding post-frame `ActiveOwnerFailStopped` path with queued
    ordinary work and no later host-radio operation. The one-entry cap is a
    qualified composition profile, not product capacity.
-4. Add durable authorization provenance and persistent credential provisioning/
-   pairing, then compose the implemented authority, framing, qualification-
+4. Add persistent credential provisioning/pairing, then compose the implemented
+   authority, framing, qualification-
    session core, and boot-lifetime job handoff between the authenticated device-
    API adapter and runtime with a firmware USB bearer. Those are the missing
    edges for live external admission.
@@ -505,7 +517,7 @@ LXMF/NomadNet/UI services without redefining the durable protocol.
    completed projector slot. A final record plus terminal acknowledgement is
    insufficient because valid recovery may arrive later; permanent quarantine
    also needs an explicit release or durable suppression mechanism.
-6. Choose an explicit journal-retention/export/migration policy. Schema 1 keeps
+6. Choose an explicit journal-retention/export/migration policy. Schema 2 keeps
    every record and principal/idempotency history, admits at most 162
    submissions for the partition lifetime, and implements no eviction or
    garbage collection.

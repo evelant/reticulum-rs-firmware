@@ -1,10 +1,10 @@
 //! Fixed-capacity acceptance, replay, and lifecycle index.
 
 use crate::model::{
-    Accepted, AuditEntry, AuditEvent, BootRecoveryMarker, ExperimentalRnsDataIntent,
-    FinalDisposition, IdempotencyKey, InternalFailure, InterruptedState, JournalEntry,
-    LifecycleState, PreparedPacketDetails, PrincipalId, RnsAttemptToken, StateTransition,
-    SubmissionFailure, SubmissionId, TransitionError, validate_transition,
+    Accepted, AuditEntry, AuditEvent, AuthorizationSnapshot, BootRecoveryMarker,
+    ExperimentalRnsDataIntent, FinalDisposition, IdempotencyKey, InternalFailure, InterruptedState,
+    JournalEntry, LifecycleState, PreparedPacketDetails, PrincipalId, RnsAttemptToken,
+    StateTransition, SubmissionFailure, SubmissionId, TransitionError, validate_transition,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -92,6 +92,7 @@ pub struct AcceptanceCandidate {
     principal: PrincipalId,
     idempotency_key: IdempotencyKey,
     intent: ExperimentalRnsDataIntent,
+    authorization: AuthorizationSnapshot,
 }
 
 impl AcceptanceCandidate {
@@ -100,11 +101,13 @@ impl AcceptanceCandidate {
         principal: PrincipalId,
         idempotency_key: IdempotencyKey,
         intent: ExperimentalRnsDataIntent,
+        authorization: AuthorizationSnapshot,
     ) -> Self {
         Self {
             principal,
             idempotency_key,
             intent,
+            authorization,
         }
     }
 
@@ -121,6 +124,11 @@ impl AcceptanceCandidate {
     /// Complete fixed-capacity intent content.
     pub const fn intent(self) -> ExperimentalRnsDataIntent {
         self.intent
+    }
+
+    /// Exact authorization facts to persist with a new acceptance.
+    pub const fn authorization(self) -> AuthorizationSnapshot {
+        self.authorization
     }
 }
 
@@ -389,9 +397,7 @@ impl<const SUBMISSIONS: usize> SubmissionIndex<SUBMISSIONS> {
             submission.accepted.principal() == principal
                 && submission.accepted.idempotency_key() == idempotency_key
         }) {
-            return if existing.accepted.intent() == intent
-                && existing.accepted.content_sha256() == intent.content_sha256()
-            {
+            return if existing.accepted.intent() == intent {
                 AcceptOutcome::Replay(existing.accepted.id())
             } else {
                 AcceptOutcome::IdempotencyConflict {
@@ -412,6 +418,7 @@ impl<const SUBMISSIONS: usize> SubmissionIndex<SUBMISSIONS> {
             principal,
             idempotency_key,
             intent,
+            candidate.authorization(),
         ))))
     }
 

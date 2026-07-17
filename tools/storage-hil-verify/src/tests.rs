@@ -96,6 +96,7 @@ fn alternate_fixture() -> [JournalEntry; FIXTURE_RECORD_COUNT] {
         PrincipalId::new([0x52; 16]),
         expected_accepted.idempotency_key(),
         intent,
+        expected_accepted.authorization(),
     );
     let preparing = StateTransition::new(FIXTURE_SUBMISSION_ID, 1, LifecycleState::Preparing)
         .expect("preparing transition is valid");

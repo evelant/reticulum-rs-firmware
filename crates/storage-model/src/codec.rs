@@ -3,11 +3,11 @@
 use minicbor::{Decoder, Encoder, encode::write::Cursor};
 
 use crate::model::{
-    Accepted, AuditEntry, AuditEvent, BootRecoveryMarker, BootRecoveryPolicy, ContentSha256,
-    DestinationHash, EncodedPacketSha256, ExperimentalRnsDataIntent, FinalDisposition,
-    IdempotencyKey, InternalFailure, InterruptedState, JournalEntry, LifecycleState,
-    PreparedPacketDetails, PrincipalId, RnsAttemptToken, StateTransition, SubmissionFailure,
-    SubmissionId, TransportRecoveryReason,
+    Accepted, AuditEntry, AuditEvent, AuthorizationSnapshot, BootRecoveryMarker,
+    BootRecoveryPolicy, DestinationHash, EncodedPacketSha256, ExperimentalRnsDataIntent,
+    FinalDisposition, IdempotencyKey, InternalFailure, InterruptedState, JournalEntry,
+    LifecycleState, PreparedPacketDetails, PrincipalId, RnsAttemptToken, StateTransition,
+    SubmissionFailure, SubmissionId, TransportRecoveryReason,
 };
 use crate::{JOURNAL_SCHEMA_VERSION, MAX_JOURNAL_RECORD_BYTES};
 
@@ -62,8 +62,6 @@ pub enum DecodeError {
     InvalidByteStringLength,
     /// A numeric enum, revision, or modeled combination was invalid.
     InvalidValue,
-    /// Stored semantic digest does not match the decoded intent.
-    ContentDigestMismatch,
     /// A complete CBOR value was followed by additional bytes.
     TrailingData,
     /// Input was semantically decodable but not the one canonical encoding.
@@ -115,13 +113,31 @@ fn encode_accepted(encoder: &mut Encoder<Cursor<&mut [u8]>>, accepted: Accepted)
     put!(encoder.u8(2));
     put!(encoder.bytes(accepted.idempotency_key().as_bytes()));
     put!(encoder.u8(3));
-    put!(encoder.bytes(accepted.content_sha256().as_bytes()));
+    encode_authorization(encoder, accepted.authorization())?;
     put!(encoder.u8(4));
     put!(encoder.u8(0));
     put!(encoder.u8(5));
     put!(encoder.bytes(accepted.intent().destination().as_bytes()));
     put!(encoder.u8(6));
     put!(encoder.bytes(accepted.intent().payload()));
+    Ok(())
+}
+
+fn encode_authorization(
+    encoder: &mut Encoder<Cursor<&mut [u8]>>,
+    authorization: AuthorizationSnapshot,
+) -> Result<(), ()> {
+    put!(encoder.map(5));
+    put!(encoder.u8(0));
+    put!(encoder.bytes(authorization.credential_id()));
+    put!(encoder.u8(1));
+    put!(encoder.u64(authorization.credential_generation()));
+    put!(encoder.u8(2));
+    put!(encoder.u64(authorization.authority_revision()));
+    put!(encoder.u8(3));
+    put!(encoder.u32(authorization.policy_version()));
+    put!(encoder.u8(4));
+    put!(encoder.u32(authorization.granted_permission_bits()));
     Ok(())
 }
 
@@ -346,7 +362,7 @@ fn decode_accepted(decoder: &mut Decoder<'_>) -> Result<Accepted, DecodeError> {
     expect_key(decoder, 2)?;
     let idempotency_key = IdempotencyKey::new(decode_fixed_bytes(decoder)?);
     expect_key(decoder, 3)?;
-    let content_sha256 = ContentSha256::new(decode_fixed_bytes(decoder)?);
+    let authorization = decode_authorization(decoder)?;
     expect_key(decoder, 4)?;
     if decoder.u8().map_err(|_| DecodeError::Malformed)? != 0 {
         return Err(DecodeError::InvalidValue);
@@ -357,8 +373,35 @@ fn decode_accepted(decoder: &mut Decoder<'_>) -> Result<Accepted, DecodeError> {
     let payload = decoder.bytes().map_err(|_| DecodeError::Malformed)?;
     let intent = ExperimentalRnsDataIntent::new(destination, payload)
         .map_err(|_| DecodeError::InvalidByteStringLength)?;
-    Accepted::from_parts(id, principal, idempotency_key, content_sha256, intent)
-        .ok_or(DecodeError::ContentDigestMismatch)
+    Ok(Accepted::from_parts(
+        id,
+        principal,
+        idempotency_key,
+        intent,
+        authorization,
+    ))
+}
+
+fn decode_authorization(decoder: &mut Decoder<'_>) -> Result<AuthorizationSnapshot, DecodeError> {
+    expect_map(decoder, 5)?;
+    expect_key(decoder, 0)?;
+    let credential_id = decode_fixed_bytes(decoder)?;
+    expect_key(decoder, 1)?;
+    let credential_generation = decoder.u64().map_err(|_| DecodeError::Malformed)?;
+    expect_key(decoder, 2)?;
+    let authority_revision = decoder.u64().map_err(|_| DecodeError::Malformed)?;
+    expect_key(decoder, 3)?;
+    let policy_version = decoder.u32().map_err(|_| DecodeError::Malformed)?;
+    expect_key(decoder, 4)?;
+    let granted_permission_bits = decoder.u32().map_err(|_| DecodeError::Malformed)?;
+    AuthorizationSnapshot::new(
+        credential_id,
+        credential_generation,
+        authority_revision,
+        policy_version,
+        granted_permission_bits,
+    )
+    .map_err(|_| DecodeError::InvalidValue)
 }
 
 fn decode_transition(decoder: &mut Decoder<'_>) -> Result<StateTransition, DecodeError> {

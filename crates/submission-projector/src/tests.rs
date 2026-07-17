@@ -10,7 +10,9 @@ use reticulum_node_core::{
     TxPolicyDecision,
 };
 use reticulum_storage_model::{
-    AcceptOutcome, AcceptanceCandidate, ApplyOutcome, DestinationHash as StoredDestinationHash,
+    AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA,
+    AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS, AcceptOutcome, AcceptanceCandidate,
+    ApplyOutcome, AuthorizationSnapshot, DestinationHash as StoredDestinationHash,
     ExperimentalRnsDataIntent, IdempotencyKey, PrincipalId, SubmissionReplay,
 };
 use std::boxed::Box;
@@ -151,12 +153,23 @@ fn proof_for(receiver_tag: u8, attempt: AttemptToken) -> std::vec::Vec<u8> {
 }
 
 fn acceptance_candidate(tag: u8) -> AcceptanceCandidate {
+    let mut credential_id = [0xA5; 16];
+    credential_id[0] = tag;
     AcceptanceCandidate::new(
         PrincipalId::new([tag; 16]),
         IdempotencyKey::new([tag.wrapping_add(1); 16]),
         ExperimentalRnsDataIntent::new(
             StoredDestinationHash::new([tag.wrapping_add(2); 16]),
             b"projector intent",
+        )
+        .unwrap(),
+        AuthorizationSnapshot::new(
+            credential_id,
+            7,
+            9,
+            1,
+            AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA
+                | AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS,
         )
         .unwrap(),
     )
@@ -529,6 +542,14 @@ fn lost_acceptance_reply_replays_the_same_principal_scoped_identifier() {
     let mut replay = SubmissionReplay::<2>::new(SubmissionId::new(70));
     assert_eq!(replay.apply_entry(durable_entry), Ok(ApplyOutcome::Applied));
     let reconstructed = replay.complete().unwrap();
+    assert_eq!(
+        reconstructed
+            .get(SubmissionId::new(70))
+            .unwrap()
+            .accepted()
+            .authorization(),
+        candidate.authorization()
+    );
     assert_eq!(
         reconstructed.plan_accept(candidate),
         AcceptOutcome::Replay(SubmissionId::new(70))

@@ -1,12 +1,12 @@
 use reticulum_device_api::{
     API_VERSION_MAJOR, ApiErrorCode, ApiErrorResponse, ApiVersion, AuthorizationError,
     CapabilityAvailability, CapabilitySnapshot, DecodeError, DeviceRequest, DeviceResponse,
-    DispatchContext, EncodeError, EncodedPacketSha256, MAX_BODY_BYTES, MAX_CBOR_NESTING_DEPTH,
-    MAX_MESSAGE_BYTES, MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES, OP_SUBMISSION_STATUS, Permissions,
-    PreparedPacketDetails, PrincipalId, RequestEnvelope, RequestId, RequiredField,
-    RequiredPermission, ResponseEnvelope, SubmissionFailure, SubmissionId, SubmissionState,
-    SubmissionStatus, authorize_request, decode_request, decode_response, encode_request,
-    encode_response,
+    DispatchContext, DispatchProvenance, DispatchProvenanceError, EncodeError, EncodedPacketSha256,
+    MAX_BODY_BYTES, MAX_CBOR_NESTING_DEPTH, MAX_MESSAGE_BYTES, MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES,
+    OP_SUBMISSION_STATUS, Permissions, PreparedPacketDetails, PrincipalId, RequestEnvelope,
+    RequestId, RequiredField, RequiredPermission, ResponseEnvelope, SubmissionFailure,
+    SubmissionId, SubmissionState, SubmissionStatus, authorize_request, decode_request,
+    decode_response, encode_request, encode_response,
 };
 #[cfg(feature = "experimental-rns-data")]
 use reticulum_device_api::{
@@ -37,6 +37,11 @@ fn capabilities_request() -> RequestEnvelope<'static> {
         request_id: RequestId(42),
         request: DeviceRequest::SystemCapabilities,
     }
+}
+
+fn dispatch_provenance() -> DispatchProvenance {
+    DispatchProvenance::new([0x22; 16], 7, 11, 3)
+        .unwrap_or_else(|fault| panic!("valid dispatch provenance rejected: {fault:?}"))
 }
 
 #[test]
@@ -601,7 +606,7 @@ fn authorization_uses_separate_trusted_context() {
     let principal = PrincipalId([0x44; 16]);
     assert_eq!(
         authorize_request(
-            &DispatchContext::authenticated(principal, Permissions::NONE),
+            &DispatchContext::authenticated(principal, Permissions::NONE, dispatch_provenance(),),
             &status,
         ),
         Err(AuthorizationError::PermissionDenied(
@@ -610,10 +615,60 @@ fn authorization_uses_separate_trusted_context() {
     );
     assert_eq!(
         authorize_request(
-            &DispatchContext::authenticated(principal, Permissions::READ_SUBMISSION_STATUS),
+            &DispatchContext::authenticated(
+                principal,
+                Permissions::READ_SUBMISSION_STATUS,
+                dispatch_provenance(),
+            ),
             &status,
         ),
         Ok(())
+    );
+}
+
+#[test]
+fn authenticated_context_carries_validated_dispatch_provenance() {
+    let provenance = dispatch_provenance();
+    let context = DispatchContext::authenticated(
+        PrincipalId([0x44; 16]),
+        Permissions::READ_SUBMISSION_STATUS,
+        provenance,
+    );
+
+    assert_eq!(context.provenance(), Some(provenance));
+    assert_eq!(provenance.credential_id(), [0x22; 16]);
+    assert_eq!(provenance.credential_generation(), 7);
+    assert_eq!(provenance.authority_revision(), 11);
+    assert_eq!(provenance.policy_version(), 3);
+    assert_eq!(DispatchContext::UNAUTHENTICATED.provenance(), None);
+}
+
+#[test]
+fn dispatch_provenance_rejects_erased_and_impossible_facts() {
+    assert_eq!(
+        DispatchProvenance::new([0; 16], 1, 1, 1),
+        Err(DispatchProvenanceError::ZeroCredentialId)
+    );
+    assert_eq!(
+        DispatchProvenance::new([1; 16], 0, 1, 1),
+        Err(DispatchProvenanceError::ZeroCredentialGeneration)
+    );
+    assert_eq!(
+        DispatchProvenance::new([1; 16], 1, 0, 1),
+        Err(DispatchProvenanceError::ZeroAuthorityRevision)
+    );
+    assert_eq!(
+        DispatchProvenance::new([1; 16], 1, 1, 0),
+        Err(DispatchProvenanceError::ZeroPolicyVersion)
+    );
+    assert_eq!(
+        DispatchProvenance::new([1; 16], 12, 11, 1),
+        Err(
+            DispatchProvenanceError::GenerationExceedsAuthorityRevision {
+                credential_generation: 12,
+                authority_revision: 11,
+            }
+        )
     );
 }
 
@@ -717,7 +772,7 @@ fn experimental_submit_is_mutating_and_requires_auth_and_permission() {
     let principal = PrincipalId([0x55; 16]);
     assert_eq!(
         authorize_request(
-            &DispatchContext::authenticated(principal, Permissions::NONE),
+            &DispatchContext::authenticated(principal, Permissions::NONE, dispatch_provenance(),),
             &request,
         ),
         Err(AuthorizationError::PermissionDenied(
@@ -726,7 +781,11 @@ fn experimental_submit_is_mutating_and_requires_auth_and_permission() {
     );
     assert_eq!(
         authorize_request(
-            &DispatchContext::authenticated(principal, Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA,),
+            &DispatchContext::authenticated(
+                principal,
+                Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA,
+                dispatch_provenance(),
+            ),
             &request,
         ),
         Ok(())

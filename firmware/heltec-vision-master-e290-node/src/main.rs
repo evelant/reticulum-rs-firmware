@@ -54,7 +54,10 @@ use reticulum_board_heltec_vision_master_e290_radio::{
 use reticulum_device_identity_store::IdentityMirrorCoverage;
 use reticulum_heltec_vision_master_e290_node::{
     config,
-    durability_boot::{announce_clock_policy, journal_boot_policy},
+    durability_boot::{
+        BUILD_JOURNAL_REPROVISION_POLICY, JournalReprovisionPolicy, announce_clock_policy,
+        journal_boot_policy,
+    },
     storage_device_id_from_eui48,
 };
 use reticulum_interface_router::InterfaceFabric;
@@ -281,9 +284,22 @@ async fn main(spawner: Spawner) -> ! {
         }
     };
     let fresh_clock_policy = announce_clock_policy(identity_preflight);
-    let journal_policy = journal_boot_policy(identity_preflight);
+    let journal_reprovision_policy = BUILD_JOURNAL_REPROVISION_POLICY;
+    let journal_policy = journal_boot_policy(identity_preflight, journal_reprovision_policy);
     info!(
-        "e290-node stage=identity-preflight status=PASS state={identity_preflight:?} announce_clock_policy={fresh_clock_policy:?} journal_policy={journal_policy:?} writes=0 erases=0"
+        "e290-node stage=journal-reprovision-policy status=SELECTED build_policy={} explicit={} migration_mutation_scope=node_journal erased_media_only={} automatic_erase=false identity_config_preserved=true normal_boot_clock_reservation=unchanged",
+        journal_reprovision_policy.log_label(),
+        matches!(
+            journal_reprovision_policy,
+            JournalReprovisionPolicy::ExplicitErasedSchema2Development
+        ),
+        matches!(
+            journal_policy,
+            reticulum_heltec_vision_master_e290_node::durability_boot::JournalBootPolicy::ProvisionErasedSchema2Development
+        ),
+    );
+    info!(
+        "e290-node stage=identity-preflight status=PASS state={identity_preflight:?} announce_clock_policy={fresh_clock_policy:?} journal_reprovision_policy={journal_reprovision_policy:?} journal_policy={journal_policy:?} writes=0 erases=0"
     );
     match flash_owner.provision_node_journal(journal_policy) {
         Ok(Some(report)) => info!(

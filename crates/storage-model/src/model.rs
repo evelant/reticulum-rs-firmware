@@ -2,7 +2,10 @@
 
 use sha2::{Digest, Sha256};
 
-use crate::{MAX_ENCODED_PACKET_BYTES, MAX_EXPERIMENTAL_RNS_DATA_BYTES};
+use crate::{
+    AUTHORIZATION_KNOWN_PERMISSION_BITS, AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA,
+    MAX_ENCODED_PACKET_BYTES, MAX_EXPERIMENTAL_RNS_DATA_BYTES,
+};
 
 const EXPERIMENTAL_RNS_DATA_DIGEST_DOMAIN: &[u8] =
     b"reticulum-rs-firmware/storage-model/experimental-rns-data/v1\0";
@@ -58,6 +61,8 @@ impl DestinationHash {
 /// SHA-256 of canonical semantic intent content.
 ///
 /// This is neither a digest of API CBOR nor Reticulum's delivery-proof token.
+/// Semantic schema 2 does not store this redundant value in an acceptance;
+/// callers derive it from the immutable intent when needed.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ContentSha256([u8; 32]);
 
@@ -159,13 +164,126 @@ impl SubmissionId {
     }
 }
 
+/// Durable authentication and authorization facts used to admit a submission.
+///
+/// This storage-owned value intentionally contains no secret and no dependency
+/// on the live device-API or credential-authority crates. It records the exact
+/// authority facts applied at acceptance so later replay and audit do not
+/// reinterpret historical work under a rotated credential.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthorizationSnapshot {
+    credential_id: [u8; 16],
+    credential_generation: u64,
+    authority_revision: u64,
+    policy_version: u32,
+    granted_permission_bits: u32,
+}
+
+impl AuthorizationSnapshot {
+    /// Validate and construct one durable authorization snapshot.
+    pub fn new(
+        credential_id: [u8; 16],
+        credential_generation: u64,
+        authority_revision: u64,
+        policy_version: u32,
+        granted_permission_bits: u32,
+    ) -> Result<Self, AuthorizationSnapshotError> {
+        if credential_id == [0; 16] {
+            return Err(AuthorizationSnapshotError::ZeroCredentialId);
+        }
+        if credential_generation == 0 {
+            return Err(AuthorizationSnapshotError::ZeroCredentialGeneration);
+        }
+        if authority_revision == 0 {
+            return Err(AuthorizationSnapshotError::ZeroAuthorityRevision);
+        }
+        if policy_version == 0 {
+            return Err(AuthorizationSnapshotError::ZeroPolicyVersion);
+        }
+        if credential_generation > authority_revision {
+            return Err(
+                AuthorizationSnapshotError::GenerationAfterAuthorityRevision {
+                    generation: credential_generation,
+                    authority_revision,
+                },
+            );
+        }
+        let unknown = granted_permission_bits & !AUTHORIZATION_KNOWN_PERMISSION_BITS;
+        if unknown != 0 {
+            return Err(AuthorizationSnapshotError::UnknownPermissionBits { unknown });
+        }
+        if granted_permission_bits & AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA == 0 {
+            return Err(AuthorizationSnapshotError::MissingSubmitPermission);
+        }
+        Ok(Self {
+            credential_id,
+            credential_generation,
+            authority_revision,
+            policy_version,
+            granted_permission_bits,
+        })
+    }
+
+    /// Opaque credential identifier authenticated for this submission.
+    pub const fn credential_id(&self) -> &[u8; 16] {
+        &self.credential_id
+    }
+
+    /// Credential generation authenticated by the session transcript.
+    pub const fn credential_generation(self) -> u64 {
+        self.credential_generation
+    }
+
+    /// Complete credential-authority revision used for revalidation.
+    pub const fn authority_revision(self) -> u64 {
+        self.authority_revision
+    }
+
+    /// Authorization-policy version applied at dispatch.
+    pub const fn policy_version(self) -> u32 {
+        self.policy_version
+    }
+
+    /// Complete stable permission bitset granted at dispatch.
+    pub const fn granted_permission_bits(self) -> u32 {
+        self.granted_permission_bits
+    }
+}
+
+/// Invalid durable authorization facts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthorizationSnapshotError {
+    /// Credential identifier is the reserved all-zero value.
+    ZeroCredentialId,
+    /// Credential generation is zero rather than globally allocated.
+    ZeroCredentialGeneration,
+    /// Complete authority revision is zero rather than committed.
+    ZeroAuthorityRevision,
+    /// Authorization-policy version is zero rather than assigned.
+    ZeroPolicyVersion,
+    /// Credential generation is newer than the complete authority snapshot.
+    GenerationAfterAuthorityRevision {
+        /// Invalid credential generation.
+        generation: u64,
+        /// Older complete authority revision.
+        authority_revision: u64,
+    },
+    /// Permission bitset contains vocabulary unknown to semantic schema 2.
+    UnknownPermissionBits {
+        /// Bits outside [`crate::AUTHORIZATION_KNOWN_PERMISSION_BITS`].
+        unknown: u32,
+    },
+    /// Admission provenance omits the permission required by this record kind.
+    MissingSubmitPermission,
+}
+
 /// Immutable durable acceptance record at revision zero.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Accepted {
     id: SubmissionId,
     principal: PrincipalId,
     idempotency_key: IdempotencyKey,
-    content_sha256: ContentSha256,
+    authorization: AuthorizationSnapshot,
     intent: ExperimentalRnsDataIntent,
 }
 
@@ -176,12 +294,13 @@ impl Accepted {
         principal: PrincipalId,
         idempotency_key: IdempotencyKey,
         intent: ExperimentalRnsDataIntent,
+        authorization: AuthorizationSnapshot,
     ) -> Self {
         Self {
             id,
             principal,
             idempotency_key,
-            content_sha256: intent.content_sha256(),
+            authorization,
             intent,
         }
     }
@@ -190,16 +309,10 @@ impl Accepted {
         id: SubmissionId,
         principal: PrincipalId,
         idempotency_key: IdempotencyKey,
-        content_sha256: ContentSha256,
         intent: ExperimentalRnsDataIntent,
-    ) -> Option<Self> {
-        (content_sha256 == intent.content_sha256()).then_some(Self {
-            id,
-            principal,
-            idempotency_key,
-            content_sha256,
-            intent,
-        })
+        authorization: AuthorizationSnapshot,
+    ) -> Self {
+        Self::new(id, principal, idempotency_key, intent, authorization)
     }
 
     /// Assigned submission identifier.
@@ -218,8 +331,13 @@ impl Accepted {
     }
 
     /// Canonical semantic request digest.
-    pub const fn content_sha256(self) -> ContentSha256 {
-        self.content_sha256
+    pub fn content_sha256(&self) -> ContentSha256 {
+        self.intent.content_sha256()
+    }
+
+    /// Exact authorization facts durably bound to this acceptance.
+    pub const fn authorization(self) -> AuthorizationSnapshot {
+        self.authorization
     }
 
     /// Complete fixed-capacity intent.

@@ -561,6 +561,8 @@ fn graph_policy() -> ExitCode {
             .map_err(|error| format!("shared lora-phy radio dependency boundary: {error}"))?;
         validate_e290_radio_dependency_boundary(&json, &root)
             .map_err(|error| format!("E290 radio dependency boundary: {error}"))?;
+        validate_e290_node_feature_boundary(&json, &root)
+            .map_err(|error| format!("permanent E290 node feature boundary: {error}"))?;
         validate_radio_tx_dispatch_dependency_boundary(&json, &root)
             .map_err(|error| format!("real radio TX dispatcher dependency boundary: {error}"))?;
         validate_radio_tx_dispatch_resolved_closure(&json, &radio_tx_dispatch_closure, &root)
@@ -1035,9 +1037,9 @@ fn validate_e290_node_graph_boundary(tree: &str) -> Result<(), String> {
         .lines()
         .find(|line| line.starts_with("reticulum-heltec-vision-master-e290-node "))
         .ok_or_else(|| "permanent E290 node graph has no product root".to_owned())?;
-    if !root_line.ends_with("features=[]") {
+    if !root_line.ends_with("features=[default]") {
         return Err(format!(
-            "permanent E290 node must have no hidden product features, observed {root_line}"
+            "permanent E290 node must enable only its empty default feature, observed {root_line}"
         ));
     }
     for package in ["reticulum-device-api ", "reticulum-device-api-adapter "] {
@@ -1050,6 +1052,37 @@ fn validate_e290_node_graph_boundary(tree: &str) -> Result<(), String> {
                 "permanent E290 node must enable only target-safe experimental RNS DATA on {package}, observed {line}"
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_e290_node_feature_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let package_name = "reticulum-heltec-vision-master-e290-node";
+    let package = exact_local_package(
+        packages,
+        workspace,
+        package_name,
+        "firmware/heltec-vision-master-e290-node/Cargo.toml",
+    )?;
+    let features = package["features"]
+        .as_object()
+        .ok_or_else(|| format!("{package_name} package has no feature map"))?;
+    let expected_features = serde_json::json!({
+        "default": [],
+        "journal-schema2-dev-reprovision": []
+    });
+    if serde_json::Value::Object(features.clone()) != expected_features {
+        return Err(format!(
+            "{package_name} must expose only an empty default and an empty opt-in journal-schema2-dev-reprovision feature"
+        ));
     }
     Ok(())
 }
@@ -6718,7 +6751,7 @@ mod tests {
 
     #[test]
     fn permanent_e290_node_graph_is_lora_first_with_transport_neutral_durability() {
-        let valid = "reticulum-heltec-vision-master-e290-node v0.1.0 features=[]\n\
+        let valid = "reticulum-heltec-vision-master-e290-node v0.1.0 features=[default]\n\
                      ├── embedded-storage v0.3.1 features=[]\n\
                      ├── esp-storage v0.9.0 features=[critical-section,esp32s3]\n\
                      ├── reticulum-announce-clock v0.1.0 features=[]\n\
@@ -6760,8 +6793,8 @@ mod tests {
         }
 
         let hidden_feature = valid.replacen(
-            "reticulum-heltec-vision-master-e290-node v0.1.0 features=[]",
-            "reticulum-heltec-vision-master-e290-node v0.1.0 features=[future-transport]",
+            "reticulum-heltec-vision-master-e290-node v0.1.0 features=[default]",
+            "reticulum-heltec-vision-master-e290-node v0.1.0 features=[default,journal-schema2-dev-reprovision]",
             1,
         );
         assert!(validate_e290_node_graph_boundary(&hidden_feature).is_err());
@@ -6774,6 +6807,45 @@ mod tests {
                 validate_e290_node_graph_boundary(&feature_drift).is_err(),
                 "permanent node accepted missing experimental feature on {package}"
             );
+        }
+    }
+
+    #[test]
+    fn permanent_e290_node_migration_feature_remains_empty_and_opt_in() {
+        let root = workspace_root();
+        let manifest = root.join("firmware/heltec-vision-master-e290-node/Cargo.toml");
+        let baseline = serde_json::json!({
+            "packages": [{
+                "name": "reticulum-heltec-vision-master-e290-node",
+                "source": null,
+                "manifest_path": manifest,
+                "features": {
+                    "default": [],
+                    "journal-schema2-dev-reprovision": []
+                }
+            }]
+        });
+        validate_e290_node_feature_boundary(&baseline.to_string(), &root).unwrap();
+
+        for drifted_features in [
+            serde_json::json!({
+                "default": ["journal-schema2-dev-reprovision"],
+                "journal-schema2-dev-reprovision": []
+            }),
+            serde_json::json!({
+                "default": [],
+                "journal-schema2-dev-reprovision": ["dep:unreviewed"]
+            }),
+            serde_json::json!({
+                "default": [],
+                "journal-schema2-dev-reprovision": [],
+                "future-transport": []
+            }),
+            serde_json::json!({"default": []}),
+        ] {
+            let mut drifted = baseline.clone();
+            drifted["packages"][0]["features"] = drifted_features;
+            assert!(validate_e290_node_feature_boundary(&drifted.to_string(), &root).is_err());
         }
     }
 

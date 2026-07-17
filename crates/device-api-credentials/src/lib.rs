@@ -19,7 +19,7 @@
 
 use core::marker::PhantomData;
 
-use reticulum_device_api::{DispatchContext, Permissions, PrincipalId};
+use reticulum_device_api::{DispatchContext, DispatchProvenance, Permissions, PrincipalId};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 use zeroize::Zeroizing;
 
@@ -592,10 +592,6 @@ pub struct CredentialRejected;
 /// ```
 pub struct DispatchLease<'authority, const CAPACITY: usize> {
     context: DispatchContext,
-    credential_id: CredentialId,
-    generation: CredentialGeneration,
-    authority_revision: AuthorityRevision,
-    policy_version: AuthorizationPolicyVersion,
     _authority: PhantomData<&'authority CredentialAuthority<CAPACITY>>,
 }
 
@@ -617,22 +613,29 @@ impl<const CAPACITY: usize> DispatchLease<'_, CAPACITY> {
 
     /// Credential that authorized this dispatch attempt.
     pub const fn credential_id(&self) -> CredentialId {
-        self.credential_id
+        CredentialId::new(self.provenance().credential_id())
     }
 
     /// Exact active credential generation revalidated for this attempt.
     pub const fn generation(&self) -> CredentialGeneration {
-        self.generation
+        CredentialGeneration::new(self.provenance().credential_generation())
     }
 
     /// Complete authority high-water revision observed by this lease.
     pub const fn authority_revision(&self) -> AuthorityRevision {
-        self.authority_revision
+        AuthorityRevision::new(self.provenance().authority_revision())
     }
 
     /// Authorization-policy version applied by this credential record.
     pub const fn policy_version(&self) -> AuthorizationPolicyVersion {
-        self.policy_version
+        AuthorizationPolicyVersion::new(self.provenance().policy_version())
+    }
+
+    const fn provenance(&self) -> DispatchProvenance {
+        match self.context.provenance() {
+            Some(provenance) => provenance,
+            None => panic!("a credential authority minted an unauthenticated dispatch lease"),
+        }
     }
 }
 
@@ -889,12 +892,24 @@ impl<const CAPACITY: usize> CredentialAuthority<CAPACITY> {
         if record.generation != generation {
             return Err(CredentialRejected);
         }
+        let provenance = match DispatchProvenance::new(
+            *record.id.as_bytes(),
+            record.generation.get(),
+            self.revision.get(),
+            record.audit.policy_version.get(),
+        ) {
+            Ok(provenance) => provenance,
+            // The validated authority enforces every provenance invariant. A
+            // rejection here is a defensive fail-closed guard if those owners
+            // ever drift apart.
+            Err(_) => return Err(CredentialRejected),
+        };
         Ok(DispatchLease {
-            context: DispatchContext::authenticated(record.principal, record.permissions),
-            credential_id: record.id,
-            generation: record.generation,
-            authority_revision: self.revision,
-            policy_version: record.audit.policy_version,
+            context: DispatchContext::authenticated(
+                record.principal,
+                record.permissions,
+                provenance,
+            ),
             _authority: PhantomData,
         })
     }

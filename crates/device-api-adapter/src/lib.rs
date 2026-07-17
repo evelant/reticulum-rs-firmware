@@ -168,10 +168,24 @@ where
                 Ok(intent) => intent,
                 Err(_) => return api_error(ApiErrorCode::InvalidRequest, operation),
             };
+            let Some(provenance) = context.provenance() else {
+                return api_error(ApiErrorCode::AuthenticationRequired, operation);
+            };
+            let authorization = match storage::AuthorizationSnapshot::new(
+                provenance.credential_id(),
+                provenance.credential_generation(),
+                provenance.authority_revision(),
+                provenance.policy_version(),
+                context.permissions().bits(),
+            ) {
+                Ok(authorization) => authorization,
+                Err(_) => return api_error(ApiErrorCode::Internal, operation),
+            };
             let candidate = storage::AcceptanceCandidate::new(
                 storage::PrincipalId::new(principal.0),
                 storage::IdempotencyKey::new(idempotency_key.0),
                 intent,
+                authorization,
             );
             acceptance_response(port.accept(candidate), operation)
         }

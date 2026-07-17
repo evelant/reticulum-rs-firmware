@@ -19,12 +19,12 @@ pub use index::{
     IndexedSubmission, PlanOutcome, PlannedMutation, SubmissionIndex, SubmissionReplay,
 };
 pub use model::{
-    Accepted, AuditEntry, AuditEvent, BootRecoveryMarker, BootRecoveryPolicy, ContentSha256,
-    DestinationHash, EncodedPacketSha256, ExperimentalRnsDataIntent, FinalDisposition,
-    IdempotencyKey, IntentTooLarge, InternalFailure, InterruptedState, InvalidPacketLength,
-    JournalEntry, LifecycleState, PreparedPacketDetails, PrincipalId, RnsAttemptToken,
-    StateTransition, SubmissionFailure, SubmissionId, TransitionError, TransportRecoveryReason,
-    validate_transition,
+    Accepted, AuditEntry, AuditEvent, AuthorizationSnapshot, AuthorizationSnapshotError,
+    BootRecoveryMarker, BootRecoveryPolicy, ContentSha256, DestinationHash, EncodedPacketSha256,
+    ExperimentalRnsDataIntent, FinalDisposition, IdempotencyKey, IntentTooLarge, InternalFailure,
+    InterruptedState, InvalidPacketLength, JournalEntry, LifecycleState, PreparedPacketDetails,
+    PrincipalId, RnsAttemptToken, StateTransition, SubmissionFailure, SubmissionId,
+    TransitionError, TransportRecoveryReason, validate_transition,
 };
 
 /// Maximum application bytes in the initial experimental RNS DATA intent.
@@ -43,9 +43,19 @@ pub const MAX_STATE_TRANSITIONS_PER_SUBMISSION: usize = 3;
 pub const MAX_TRANSPORT_AUDITS_PER_SUBMISSION: usize = 1;
 
 /// Maximum committed semantic records, including acceptance, for one
-/// submission under schema 1.
+/// submission under schema 2.
 pub const MAX_DURABLE_RECORDS_PER_SUBMISSION: usize =
     1 + MAX_STATE_TRANSITIONS_PER_SUBMISSION + MAX_TRANSPORT_AUDITS_PER_SUBMISSION;
 
-/// Initial project-owned durable-record schema.
-pub const JOURNAL_SCHEMA_VERSION: u16 = 1;
+/// Current project-owned durable-record semantic schema.
+pub const JOURNAL_SCHEMA_VERSION: u16 = 2;
+
+/// Stable persisted bit granting owned-submission status reads.
+pub const AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS: u32 = 1 << 0;
+
+/// Stable persisted bit granting experimental outbound RNS DATA submission.
+pub const AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA: u32 = 1 << 1;
+
+/// Complete permission mask understood by durable authorization schema 2.
+pub const AUTHORIZATION_KNOWN_PERMISSION_BITS: u32 = AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS
+    | AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA;

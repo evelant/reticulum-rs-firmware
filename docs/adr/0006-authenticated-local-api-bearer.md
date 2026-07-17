@@ -1,7 +1,7 @@
 # ADR 0006: Authenticated local device-API bearer
 
-- **Status:** accepted for the qualification session and portable credential
-  authority; persistence and firmware bearer pending
+- **Status:** accepted for the qualification session, portable credential
+  authority, and durable provenance; persistence and firmware bearer pending
 - **Date:** 2026-07-17
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0003](0003-lora-first-interface-fabric.md) and
@@ -271,11 +271,11 @@ authenticated bearer session; “public” does not mean unauthenticated wire
 access. Immediately before accepting a state-changing request, the same
 serialized owner revalidates the required permission. The durable acceptance
 contract requires the principal, authorized operation/policy snapshot and a
-principal-scoped idempotency key. The current schema persists only the
-principal, idempotency key and operation intent; ADR 0007 keeps the missing
-credential/generation/authority/policy provenance as an explicit gate before a
-live external mutating bearer. Revocation or disconnect prevents work not yet
-accepted but does not undo an already accepted mutation.
+principal-scoped idempotency key. Semantic schema 2 persists the principal,
+operation intent, credential ID/generation, authority revision, policy version,
+and exact granted permission mask. A rotated retry preserves the original
+acceptance evidence. Revocation or disconnect prevents work not yet accepted
+but does not undo an already accepted mutation. See ADR 0008.
 
 The implemented `AuthenticatedGrant::revalidate` returns a non-cloneable
 `DispatchLease` that immutably borrows the current authority. It derives the
@@ -331,6 +331,9 @@ physical attacker and must not be described as tamper-resistant.
   validation, stable permission vocabulary, constant-time active selection,
   zeroizing handoff to session, PSK-free revocation tombstones, grant-to-lease
   revalidation and revoke-after-admission authority rejection.
+- Complete in semantic schema 2: exact authorization provenance is validated,
+  durably encoded, retained across replay/remount, and mapped only after logical
+  authorization succeeds.
 - Remaining: composed handoff proof that rejection never falls back or invokes
   adapter/storage port I/O.
 - Remaining: malformed established-stream policy and logical-CBOR validation in
@@ -350,7 +353,7 @@ physical attacker and must not be described as tamper-resistant.
 
 This ADR does not select the production AEAD construction, implement the
 credential journal/persistent actor, choose pairing timeouts and attempt-rate
-limits, resolve durable authorization-policy provenance, compose the USB bearer
+limits, compose the USB bearer
 manager, define a USB OTG composite descriptor, add WebUSB/NCM, or create any
 non-LoRa Reticulum packet actor. Credential persistence, qualification
 pairing/rate policy, firmware composition and the USB bearer manager are still

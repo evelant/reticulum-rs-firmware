@@ -12,8 +12,9 @@ not a product-capacity commitment. Eight focused runtime tests, two E290
 cross-layer composition tests, strict Clippy, and generic/ESP32-S3 target checks
 pass. Portable API framing, immutable credential authority, the qualification-
 session core, and job handoff are qualified; live external admission remains
-blocked by durable authorization provenance, credential persistence/pairing,
-firmware composition, and a bearer.
+blocked by credential persistence/pairing, firmware composition, and a bearer.
+Semantic schema 2 now preserves exact authorization provenance through runtime
+acceptance, remount, and replay.
 
 ## Boundary
 
@@ -172,14 +173,15 @@ or RF claim.
   sole node owner must eventually mint an exact transport-neutral quiescence
   proof after every possible producer is terminal and drained before a slot can
   be reused.
-- **Journal retention:** schema 1 permanently retains every submission record
+- **Journal retention:** semantic schema 2 permanently retains every submission record
   and idempotency history, has a 162-submission lifetime admission limit, and
   has no eviction or garbage collection. A bounded retention/export/migration
   policy is required before this becomes a long-lived message service.
 - **Client edge:** authenticated API dispatch, immutable credential authority,
   framing, the qualification-session core, and boot-lifetime job handoff exist,
-  but durable authorization provenance, persistent provisioning/pairing,
-  firmware composition, and USB/BLE/Wi-Fi serving are not wired to the runtime.
+  and durable authorization provenance now reaches the journal. Persistent
+  provisioning/pairing, firmware composition, and USB/BLE/Wi-Fi serving are not
+  wired to the runtime.
   `ProductStorageCoordinator`
   implements the target-safe `SubmissionPort` under the one-entry qualification
   cap, but no external caller reaches it.

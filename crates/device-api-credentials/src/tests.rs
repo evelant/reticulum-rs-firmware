@@ -123,6 +123,13 @@ fn only_active_records_select_and_device_owned_facts_mint_the_lease() {
     lease.with_dispatch_context(|context| {
         assert_eq!(context.principal(), Some(PRINCIPAL));
         assert_eq!(context.permissions(), active_permissions);
+        let provenance = context
+            .provenance()
+            .unwrap_or_else(|| panic!("authenticated lease omitted provenance"));
+        assert_eq!(provenance.credential_id(), [1; 16]);
+        assert_eq!(provenance.credential_generation(), 1);
+        assert_eq!(provenance.authority_revision(), 3);
+        assert_eq!(provenance.policy_version(), 1);
     });
     assert_eq!(lease.credential_id(), id(1));
     assert_eq!(lease.generation(), CredentialGeneration::new(1));

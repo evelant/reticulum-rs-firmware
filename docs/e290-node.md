@@ -1,7 +1,7 @@
 # Permanent Vision Master E290 node image
 
 **Status:** the first permanent, LoRa-first image is implemented and passes its
-25-test cross-layer host composition suite, portable-target, ESP32-S3 build,
+27-test cross-layer host composition suite, portable-target, ESP32-S3 build,
 review, and merged-image packaging gates. It has not been flashed; the physical
 modules on both connected boards are now confirmed `HT-RA62-HF`, and a
 separate semantic image passed its powered functional HIL. This permanent image
@@ -24,8 +24,9 @@ cross-layer host qualification. The one-entry accepted-history cap is exercised
 by that harness solely as a composition profile and is not a product-capacity
 commitment. Portable API framing, immutable credential authority, the
 qualification-session core, and the boot-lifetime job handoff are qualified;
-live external admission is blocked by durable authorization provenance,
-credential persistence/pairing, firmware composition, and a bearer. ADR 0005's
+semantic schema 2 persists exact authorization provenance. Live external
+admission is blocked by credential persistence/pairing, firmware composition,
+and a bearer. ADR 0005's
 active-owner policy is implemented:
 a permanent fault
 with an unresolved frame enters interface-local `ActiveOwnerFailStopped`, takes
@@ -303,7 +304,7 @@ cargo +esp clippy --locked --release \
 
 The build script rejects an unreviewed `esp-rtos` main-stack implementation and
 links `linkall.x`. Debug Xtensa builds are compile-time rejected.
-The host library suite has 25 passing tests: 23 focused policy/product tests and
+The host library suite has 27 passing tests: 25 focused policy/product tests and
 two real cross-layer composition tests. The happy path proves unauthenticated
 and permission-denied requests cause zero NOR writes, exactly one authenticated
 acceptance succeeds, and a second novel request reaches capacity without a
@@ -448,6 +449,61 @@ future write:
    format change requires an explicit migration procedure; it is not a normal
    upgrade.
 
+### Explicit schema-1 development-journal migration
+
+Semantic schema 1 did not persist authorization provenance and cannot be
+truthfully upgraded. An ordinary schema-2 image therefore reports
+`UnsupportedSemanticVersion(1)`, performs no journal mutation, closes local
+submission service, and continues route-only LoRa. Development boards may use
+this explicit journal-only procedure; it preserves `node_identity`,
+`announce_clock`, `device_config`, and every unrelated flash range.
+
+1. Take and protect the full-flash backup described above, then leave the board
+   in the serial loader.
+2. Build and package a one-shot image with the non-default migration feature:
+
+   ```sh
+   cargo +esp build --locked --release \
+     -p reticulum-heltec-vision-master-e290-node \
+     --features journal-schema2-dev-reprovision \
+     --target xtensa-esp32s3-none-elf
+   ```
+
+   Package it with the same explicit 16 MiB `espflash save-image` arguments
+   above. Do not distribute or retain this exceptional build as the normal
+   product image.
+3. Erase exactly the 1 MiB journal partition and verify every byte is erased:
+
+   ```sh
+   espflash erase-region --skip-update-check \
+     --port "$PORT" --chip esp32s3 \
+     --before default-reset --after no-reset --non-interactive \
+     0x630000 0x100000
+   espflash read-flash --skip-update-check \
+     --port "$PORT" --chip esp32s3 \
+     --before default-reset --after no-reset --non-interactive \
+     0x630000 0x100000 "$BACKUP_DIR/node-journal-erased.bin"
+   test "$(wc -c < "$BACKUP_DIR/node-journal-erased.bin" | tr -d ' ')" = 1048576
+   test "$(LC_ALL=C tr -d '\377' < "$BACKUP_DIR/node-journal-erased.bin" \
+     | wc -c | tr -d ' ')" = 0
+   ```
+
+4. Flash the one-shot feature image and boot it once. Require the serial log to
+   show `journal-reprovision-policy` with `explicit=true`,
+   `erased_media_only=true`, and `automatic_erase=false`, followed by a passing
+   `node-journal-provision` and schema-2 mount. The firmware scans the complete
+   partition before provisioning and rejects any schema-1, corrupt, torn, or
+   otherwise programmed byte without a write or erase. If this one-shot boot is
+   interrupted during provision, erase and verify the same journal range again;
+   it does not repair programmed migration media.
+5. Reflash the ordinary image without the feature, preserving the complete
+   application-data range. Its next boot must log the migration policy as
+   disabled and strictly mount the existing schema-2 journal with zero
+   provisioning mutation.
+
+No firmware path erases the journal automatically, and the feature never
+authorizes writes outside `node_journal`.
+
 No permanent-image write or product-graph RF test has occurred. The physical
 module gate is satisfied and the separate semantic HIL passed; a same-image
 permanent pair must still verify boot, radio initialization, ordinary announce
@@ -460,8 +516,8 @@ as the bounded qualification fixture for the deterministic DATA/proof exchange.
 
 ## Product blockers after this slice
 
-- Resolve durable authorization provenance, add persistent credential pairing,
-  then compose the implemented immutable authority, bounded COBS framing,
+- Add persistent credential pairing, then compose the implemented immutable
+  authority, bounded COBS framing,
   qualification-session core, and boot-lifetime job/reply handoff with the
   first USB bearer. Persistent state, firmware composition, and the physical
   bearer are the remaining edges for live external admission; the

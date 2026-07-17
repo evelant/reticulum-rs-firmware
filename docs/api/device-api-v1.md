@@ -9,7 +9,9 @@ feature. Separate portable framing, immutable credential-authority, USB-
 qualification session and boot-lifetime authenticated-job handoff crates now
 exist. The session core emits only a credential ID/generation grant; the
 portable authority revalidates it and derives `DispatchContext` through a
-borrowing `DispatchLease`. Credential persistence/pairing and firmware
+borrowing `DispatchLease`. The context carries validated non-wire provenance,
+and semantic journal schema 2 persists its exact credential/policy snapshot on
+acceptance. Credential persistence/pairing and firmware
 composition remain unimplemented, and no physical bearer is composed yet. A
 product port may route an accepted submission through the node after the
 durable barriers.
@@ -29,8 +31,9 @@ Transport framing, job handoff and authenticated session establishment are
 separate layers. They decode and carry the message plus a session-minted
 credential reference. `reticulum-device-api-credentials` implements the fixed-
 capacity device-owned semantic authority: it must revalidate that reference and
-separately derive the trusted `DispatchContext` immediately before dispatch.
-No principal, permission, or session assertion is accepted from CBOR input.
+separately derive the trusted `DispatchContext` and validated
+`DispatchProvenance` immediately before dispatch. No principal, permission,
+provenance, or session assertion is accepted from CBOR input.
 
 `reticulum-device-api-adapter` is the separate allocation-free `no_std`
 dispatcher over a narrow `SubmissionPort`. The port exposes only runtime
@@ -350,13 +353,13 @@ authorization cannot reuse a session generation. A future credential-backed
 firmware runtime must add persistent provisioning/pairing, enforce connection-
 level rate limits, and keep authentication state outside request CBOR.
 
-The current durable acceptance record persists the principal, idempotency key
-and operation-specific intent, but not the lease's credential generation,
-authority revision or authorization-policy version. Before enabling a live
-external mutating bearer, the project must either add that bounded provenance
-through an explicit storage-schema migration or formally narrow ADR 0006's
-durable policy-snapshot requirement. See
-[ADR 0007](../adr/0007-device-api-credential-authority.md).
+Semantic journal schema 2 persists the principal, idempotency key,
+operation-specific intent, credential ID/generation, complete authority
+revision, authorization-policy version, and exact granted permission mask.
+The adapter constructs that storage-owned snapshot only after authorization
+succeeds; a rejected request invokes no port. A retry after credential rotation
+returns the original ID and retains the original evidence. See
+[ADR 0008](../adr/0008-durable-authorization-provenance.md).
 
 ## Golden vectors
 

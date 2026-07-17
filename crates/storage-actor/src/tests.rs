@@ -17,8 +17,10 @@ use reticulum_storage_journal::{
     SLOT_SIZE, format_erased,
 };
 use reticulum_storage_model::{
-    DestinationHash, ExperimentalRnsDataIntent, FinalDisposition, IdempotencyKey, InternalFailure,
-    InterruptedState, LifecycleState, PrincipalId, SubmissionFailure, SubmissionReplay,
+    AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA,
+    AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS, AuthorizationSnapshot, DestinationHash,
+    ExperimentalRnsDataIntent, FinalDisposition, IdempotencyKey, InternalFailure, InterruptedState,
+    LifecycleState, PrincipalId, SubmissionFailure, SubmissionReplay,
 };
 use reticulum_submission_projector::{
     AcknowledgementKind, AcknowledgementReply, PersistenceReply, PreparedFrameObservation,
@@ -279,11 +281,23 @@ fn map_check_error(error: NorFlashErrorKind) -> FakeError {
 }
 
 fn candidate(tag: u8, payload: &[u8]) -> AcceptanceCandidate {
+    let mut credential_id = [0xA5; 16];
+    credential_id[0] = tag;
+    let authorization = AuthorizationSnapshot::new(
+        credential_id,
+        7,
+        9,
+        1,
+        AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA
+            | AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS,
+    )
+    .unwrap();
     AcceptanceCandidate::new(
         PrincipalId::new([tag; 16]),
         IdempotencyKey::new([tag.wrapping_add(1); 16]),
         ExperimentalRnsDataIntent::new(DestinationHash::new([tag.wrapping_add(2); 16]), payload)
             .unwrap(),
+        authorization,
     )
 }
 
@@ -557,6 +571,7 @@ fn accepted_append_replays_after_remount() {
     let replayed = StorageActor::<2, 1>::mount(&mut journal, SubmissionId::new(10)).unwrap();
     let accepted = replayed.index().get(SubmissionId::new(10)).unwrap();
     assert_eq!(accepted.accepted().principal(), exact.principal());
+    assert_eq!(accepted.accepted().authorization(), exact.authorization());
     assert_eq!(replayed.state().committed_records(), 1);
 }
 

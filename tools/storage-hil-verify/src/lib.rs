@@ -9,9 +9,11 @@ use reticulum_storage_journal::{
     BANK_SLOT_COUNT, Bank, ERASE_SIZE, JournalError, PARTITION_SIZE, SLOT_SIZE, mount,
 };
 use reticulum_storage_model::{
-    Accepted, AuditEvent, DestinationHash, EncodedPacketSha256, ExperimentalRnsDataIntent,
-    FinalDisposition, IdempotencyKey, LifecycleState, PreparedPacketDetails, PrincipalId,
-    RnsAttemptToken, SubmissionId, TransportRecoveryReason,
+    AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA,
+    AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS, Accepted, AuditEvent, AuthorizationSnapshot,
+    DestinationHash, EncodedPacketSha256, ExperimentalRnsDataIntent, FinalDisposition,
+    IdempotencyKey, LifecycleState, PreparedPacketDetails, PrincipalId, RnsAttemptToken,
+    SubmissionId, TransportRecoveryReason,
 };
 
 /// Submission identifier assigned to the deterministic storage-HIL fixture.
@@ -320,7 +322,20 @@ fn expected_accepted() -> Result<Accepted, VerificationError> {
         PrincipalId::new([0x51; 16]),
         IdempotencyKey::new([0x71; 16]),
         intent,
+        expected_authorization()?,
     ))
+}
+
+fn expected_authorization() -> Result<AuthorizationSnapshot, VerificationError> {
+    AuthorizationSnapshot::new(
+        [0x61; 16],
+        7,
+        9,
+        1,
+        AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA
+            | AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS,
+    )
+    .map_err(|_| VerificationError::VerifierContract("fixture authorization is invalid"))
 }
 
 fn expected_token() -> RnsAttemptToken {

@@ -9,14 +9,15 @@ and composes the exact authorized-frame request/durable-echo handoff. That
 LoRa-first software composition and ADR 0005's interface-local active-owner
 fail-stop now pass cross-layer host tests. Portable API framing, immutable
 credential authority, the qualification-session core, and job handoff are
-qualified; live external admission remains blocked by durable authorization
-provenance, credential persistence/pairing, firmware composition, and a bearer; integrated
+qualified; durable authorization provenance is now part of semantic schema 2.
+Live external admission remains blocked by credential
+persistence/pairing, firmware composition, and a bearer; integrated
 powered-fault qualification remains open.
 
 ## Ownership boundary
 
 `reticulum-storage-actor` is the only portable component allowed to combine one
-schema-1 NOR journal with its live semantic state. A
+physical-format-1, semantic-schema-2 NOR journal with its live semantic state. A
 `StorageActor<SUBMISSIONS, PROJECTED>` owns:
 
 - the exact `JournalBinding` established at mount and the last completely
@@ -118,7 +119,9 @@ request copy is needed for reconciliation.
 The retained cell is deliberately bounded. `PENDING_MUTATION_BYTES` measures
 the actual `Option<PendingMutation>` layout in each build, and a compile-time
 assertion requires it to remain at or below 512 bytes. An acceptance retains one
-complete opaque model plan; a projector mutation retains only its handle. This
+complete opaque model plan; removing the redundant in-RAM content digest while
+adding authorization provenance keeps that owner inside the existing ceiling.
+A projector mutation retains only its handle. This
 is a ceiling for one serialized ambiguity cell, not the complete actor, index,
 projector, task-stack, or firmware RAM budget.
 
@@ -183,8 +186,8 @@ acceptance and cap, the pre-node preparation barrier, exact LoRa frame
 persistence/echo/completion, timeout, principal isolation, and remount. The
 other injects a wrong bound-journal access after frame exposure and proves
 `ActiveOwnerFailStopped` retains every owner with an ordinary action queued and
-permits no later host-radio operation. Together with 23 focused policy/product
-tests, the 25-test E290 suite closes software composition qualification without
+permits no later host-radio operation. Together with 25 focused policy/product
+tests, the 27-test E290 suite closes software composition qualification without
 claiming powered flash or RF behavior.
 
 Remaining product work includes:
@@ -203,7 +206,7 @@ Remaining product work includes:
   external lane calls it;
 - an exact node-owner quiescence proof before projector-slot retirement, a
   quarantine release/suppression design, and an explicit response to the
-  schema-1 journal's permanent retention, 162-submission lifetime limit, and
+  schema-2 journal's permanent retention, 162-submission lifetime limit, and
   lack of eviction/garbage collection;
 - coordination with flash cache constraints, watchdog feeding, OTA, other
   stores, journal compaction, and radio deadlines;

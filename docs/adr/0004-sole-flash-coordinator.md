@@ -88,8 +88,9 @@ and erase commands are not part of the task protocol.
   used only for composition qualification; it is not product capacity. The
   software ownership path now passes cross-layer host tests. Portable API
   framing, immutable credential authority, the qualification-session core, and
-  job handoff are qualified, while durable authorization provenance, credential
-  persistence/pairing, an external firmware lane, and a bearer remain absent.
+  job handoff are qualified, and schema 2 persists exact authorization
+  provenance; credential persistence/pairing, an external firmware lane, and a
+  bearer remain absent.
 - A journal strict-mount, supported-history, or recovery failure during boot
   occurs before any durability-gated DATA owner can exist and disables only
   local durable submission service. The sole flash owner remains resident and
@@ -103,8 +104,8 @@ and erase commands are not part of the task protocol.
   lease offline, and permits no later radio operation in that boot. The E290
   host composition fault test proves this with a wrong binding after frame
   exposure and an ordinary announce queued behind the owner.
-- Live external LoRa DATA now waits for durable authorization provenance,
-  persistent credential state/pairing, firmware composition of the portable
+- Live external LoRa DATA now waits for persistent credential state/pairing,
+  firmware composition of the portable
   authority/session edge, and a bearer, not another
   storage ownership, durability-policy, cap, or frame-
   handoff qualification. This is the complete primary LoRa software slice; a
@@ -129,8 +130,8 @@ and ADR 0005 fault behavior are implemented and pass cross-layer host
 composition tests. The next live-storage slice is an external API edge plus
 separate powered qualification.
 
-1. Resolve durable authorization provenance, add persistent credential pairing,
-   and compose the implemented authority/framing/session/handoff with the first
+1. Add persistent credential pairing and compose the implemented
+   authority/framing/session/handoff with the first
    local USB bearer. Preserve zero-write authorization rejection and durable
    acceptance before publishing an ID.
 2. With both physical `HT-RA62-HF` markings now confirmed, qualify E290 first provisioning,

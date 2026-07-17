@@ -12,8 +12,8 @@ use embedded_storage::nor_flash::{
 };
 use reticulum_device_api::{
     ApiErrorCode, ApiErrorResponse, ApiVersion, CapabilitySnapshot, DeviceRequest, DeviceResponse,
-    DispatchContext, OP_SUBMISSION_STATUS, Permissions, PrincipalId as ApiPrincipalId,
-    RequestEnvelope, RequestId, SubmissionId as ApiSubmissionId,
+    DispatchContext, DispatchProvenance, OP_SUBMISSION_STATUS, Permissions,
+    PrincipalId as ApiPrincipalId, RequestEnvelope, RequestId, SubmissionId as ApiSubmissionId,
 };
 #[cfg(feature = "experimental-rns-data")]
 use reticulum_device_api::{
@@ -25,7 +25,8 @@ use reticulum_storage_actor::{
 #[cfg(feature = "experimental-rns-data")]
 use reticulum_storage_actor::{PendingKind, PendingProgress};
 use reticulum_storage_model::{
-    AcceptanceCandidate, BootRecoveryMarker, DestinationHash, EncodedPacketSha256,
+    AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA, AcceptanceCandidate,
+    AuthorizationSnapshot, BootRecoveryMarker, DestinationHash, EncodedPacketSha256,
     ExperimentalRnsDataIntent, FinalDisposition, IdempotencyKey, InternalFailure, InterruptedState,
     LifecycleState, PreparedPacketDetails as DurablePreparedPacketDetails, PrincipalId,
     RnsAttemptToken, SubmissionFailure as DurableSubmissionFailure, SubmissionId,
@@ -42,18 +43,18 @@ static OVERSIZED_PAYLOAD: [u8; api::MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES + 1] =
 static MAXIMUM_PAYLOAD: [u8; api::MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES] =
     [0x5a; api::MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES];
 
-// Canonical generation-1 bank-A manifest emitted by storage-journal format 1
-// for an empty schema-1 partition. The actor independently authenticates this
+// Canonical generation-1 bank-A manifest emitted by physical journal format 1
+// for an empty semantic-schema-2 partition. The actor independently authenticates this
 // fixture during every test mount.
 const EMPTY_MANIFEST: [u8; 160] = [
-    0x52, 0x54, 0x4a, 0x52, 0x4d, 0x41, 0x4e, 0x31, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x52, 0x54, 0x4a, 0x52, 0x4d, 0x41, 0x4e, 0x31, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0xf0, 0x07, 0x00,
     0x80, 0x02, 0x00, 0x00, 0x2c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x63, 0xfe, 0xa6, 0xeb, 0xe3, 0x62, 0xc7, 0xcc, 0x37, 0xe8, 0x8b, 0xcf, 0xd5, 0xec, 0x73, 0xa3,
-    0x23, 0x23, 0xb8, 0x90, 0x98, 0x0e, 0xd8, 0xe4, 0x14, 0xe1, 0x62, 0xc0, 0x9e, 0x34, 0xdc, 0x0f,
+    0x62, 0xf5, 0xcb, 0x40, 0xb8, 0x48, 0xd3, 0x79, 0x07, 0xff, 0x11, 0xdc, 0x48, 0x3f, 0x5c, 0x39,
+    0xfc, 0x98, 0x0f, 0xb1, 0xc3, 0xde, 0xc6, 0xfc, 0x53, 0x03, 0x44, 0x71, 0xf2, 0x1b, 0xd5, 0x37,
     0x52, 0x4a, 0x3c, 0xa5, 0x0f, 0x69, 0x96, 0xc3, 0x71, 0x1e, 0xd2, 0x4b, 0x87, 0x58, 0xb4, 0x2d,
     0xca, 0x35, 0x6a, 0x93, 0xe1, 0x0d, 0x7c, 0x46, 0x9b, 0x24, 0xd8, 0x63, 0x15, 0xae, 0x49, 0x72,
 ];
@@ -362,7 +363,39 @@ fn envelope<'a>(request_id: u64, request: DeviceRequest<'a>) -> RequestEnvelope<
 }
 
 fn authenticated(principal: u8, permissions: Permissions) -> DispatchContext {
-    DispatchContext::authenticated(ApiPrincipalId([principal; 16]), permissions)
+    DispatchContext::authenticated(
+        ApiPrincipalId([principal; 16]),
+        permissions,
+        dispatch_provenance(principal),
+    )
+}
+
+fn dispatch_provenance(tag: u8) -> DispatchProvenance {
+    DispatchProvenance::new(
+        [tag.wrapping_add(0x40); 16],
+        u64::from(tag) + 1,
+        u64::from(tag) + 10,
+        u32::from(tag) + 1,
+    )
+    .unwrap()
+}
+
+fn durable_authorization(tag: u8) -> AuthorizationSnapshot {
+    durable_authorization_with_permissions(
+        tag,
+        AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA,
+    )
+}
+
+fn durable_authorization_with_permissions(tag: u8, permissions: u32) -> AuthorizationSnapshot {
+    AuthorizationSnapshot::new(
+        [tag.wrapping_add(0x40); 16],
+        u64::from(tag) + 1,
+        u64::from(tag) + 10,
+        u32::from(tag) + 1,
+        permissions,
+    )
+    .unwrap()
 }
 
 fn error_code(response: DeviceResponse) -> ApiErrorCode {
@@ -377,6 +410,7 @@ fn durable_candidate(principal: u8, key: u8, payload: &[u8]) -> AcceptanceCandid
         PrincipalId::new([principal; 16]),
         IdempotencyKey::new([key; 16]),
         ExperimentalRnsDataIntent::new(DestinationHash::new([0x33; 16]), payload).unwrap(),
+        durable_authorization(principal),
     )
 }
 
@@ -653,9 +687,15 @@ fn submit_request(payload: &[u8], key: u8) -> DeviceRequest<'_> {
 
 #[cfg(feature = "experimental-rns-data")]
 fn submit_context(principal: u8) -> DispatchContext {
-    authenticated(
-        principal,
+    submit_context_with_provenance(principal, principal)
+}
+
+#[cfg(feature = "experimental-rns-data")]
+fn submit_context_with_provenance(principal: u8, provenance_tag: u8) -> DispatchContext {
+    DispatchContext::authenticated(
+        ApiPrincipalId([principal; 16]),
         Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA | Permissions::READ_SUBMISSION_STATUS,
+        dispatch_provenance(provenance_tag),
     )
 }
 
@@ -755,24 +795,48 @@ fn durable_accept_owns_payload_and_replay_conflict_preserve_one_submission() {
     assert_eq!(accepted_id(first.response), ApiSubmissionId(10));
     assert_eq!(actor.state().committed_records(), 1);
     borrowed_payload.fill(b'x');
+    let original = actor.index().get(SubmissionId::new(10)).unwrap().accepted();
+    assert_eq!(original.intent().payload(), b"same");
+    let expected_provenance = dispatch_provenance(1);
+    assert_eq!(
+        original.authorization().credential_id(),
+        &expected_provenance.credential_id()
+    );
+    assert_eq!(
+        original.authorization().credential_generation(),
+        expected_provenance.credential_generation()
+    );
+    assert_eq!(
+        original.authorization().authority_revision(),
+        expected_provenance.authority_revision()
+    );
+    assert_eq!(
+        original.authorization().policy_version(),
+        expected_provenance.policy_version()
+    );
+    assert_eq!(
+        original.authorization().granted_permission_bits(),
+        Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA.bits()
+            | Permissions::READ_SUBMISSION_STATUS.bits()
+    );
+
+    let replay = dispatch(
+        &mut actor,
+        submit_context_with_provenance(1, 9),
+        envelope(21, submit_request(b"same", 2)),
+    );
+    assert_eq!(accepted_id(replay.response), ApiSubmissionId(10));
+    assert_eq!(actor.state().committed_records(), 1);
     assert_eq!(
         actor
             .index()
             .get(SubmissionId::new(10))
             .unwrap()
             .accepted()
-            .intent()
-            .payload(),
-        b"same"
+            .authorization(),
+        original.authorization(),
+        "a rotated retry must preserve the original durable evidence"
     );
-
-    let replay = dispatch(
-        &mut actor,
-        submit_context(1),
-        envelope(21, submit_request(b"same", 2)),
-    );
-    assert_eq!(accepted_id(replay.response), ApiSubmissionId(10));
-    assert_eq!(actor.state().committed_records(), 1);
 
     let conflict = dispatch(
         &mut actor,
@@ -841,6 +905,19 @@ fn accepted_response_survives_remount_and_status_dispatch() {
 
     let flash = actor.into_flash();
     let mut remounted = TestActor::<2>::mount(flash, SubmissionId::new(10));
+    assert_eq!(
+        remounted
+            .index()
+            .get(SubmissionId::new(10))
+            .unwrap()
+            .accepted()
+            .authorization(),
+        durable_authorization_with_permissions(
+            1,
+            Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA.bits()
+                | Permissions::READ_SUBMISSION_STATUS.bits(),
+        )
+    );
     let status = dispatch(
         &mut remounted,
         authenticated(1, Permissions::READ_SUBMISSION_STATUS),

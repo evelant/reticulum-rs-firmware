@@ -16,6 +16,8 @@ use reticulum_storage_journal::{
     ERASE_SIZE, PARTITION_SIZE, PHYSICAL_FORMAT_VERSION, format_erased,
 };
 use reticulum_storage_model::{
+    AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA,
+    AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS, AuthorizationSnapshot,
     DestinationHash as StoredDestinationHash, ExperimentalRnsDataIntent, FinalDisposition,
     IdempotencyKey, PrincipalId, SubmissionFailure,
 };
@@ -405,6 +407,15 @@ fn candidate(destination: DestinationHash) -> AcceptanceCandidate {
         ExperimentalRnsDataIntent::new(
             StoredDestinationHash::new(*destination.as_bytes()),
             b"portable durable submission",
+        )
+        .unwrap(),
+        AuthorizationSnapshot::new(
+            [0x13; 16],
+            7,
+            9,
+            1,
+            AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA
+                | AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS,
         )
         .unwrap(),
     )
@@ -810,6 +821,7 @@ fn frame_offer_retry_classification_excludes_permanent_projector_errors() {
 fn remount_boot_recovery_preserves_a_durable_final_submission() {
     let mut node = TestNode::new();
     let mut access = formatted_access();
+    let expected_authorization = candidate(node.destination).authorization();
     let mut runtime =
         SubmissionRuntime::<4, 2>::mount(&mut access, SubmissionId::new(80), 11).unwrap();
     assert_eq!(
@@ -861,6 +873,15 @@ fn remount_boot_recovery_preserves_a_durable_final_submission() {
         remounted.index().get(id).unwrap().state(),
         LifecycleState::Final(FinalDisposition::Failed(SubmissionFailure::DeliveryTimeout))
     ));
+    assert_eq!(
+        remounted
+            .index()
+            .get(id)
+            .unwrap()
+            .accepted()
+            .authorization(),
+        expected_authorization
+    );
 }
 
 #[test]

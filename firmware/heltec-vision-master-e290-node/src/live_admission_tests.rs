@@ -1,9 +1,9 @@
 use crate::{config, durability_policy::DurabilityServiceState};
 use reticulum_device_api::{
     ApiErrorCode, ApiVersion, DestinationHash as ApiDestinationHash, DeviceRequest, DeviceResponse,
-    DispatchContext, IdempotencyKey, Permissions, PrincipalId as ApiPrincipalId, RequestEnvelope,
-    RequestId, SubmissionFailure as ApiSubmissionFailure, SubmissionId as ApiSubmissionId,
-    SubmissionState,
+    DispatchContext, DispatchProvenance, IdempotencyKey, Permissions,
+    PrincipalId as ApiPrincipalId, RequestEnvelope, RequestId,
+    SubmissionFailure as ApiSubmissionFailure, SubmissionId as ApiSubmissionId, SubmissionState,
 };
 use reticulum_device_api_adapter::dispatch;
 use reticulum_radio_tx_dispatch::{RadioTxDispatcherPhase, RadioTxDispatcherStep};
@@ -46,9 +46,17 @@ fn status_request(request_id: u64, id: ApiSubmissionId) -> RequestEnvelope<'stat
 }
 
 fn full_context(principal: ApiPrincipalId) -> DispatchContext {
-    DispatchContext::authenticated(
+    context(
         principal,
         Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA | Permissions::READ_SUBMISSION_STATUS,
+    )
+}
+
+fn context(principal: ApiPrincipalId, permissions: Permissions) -> DispatchContext {
+    DispatchContext::authenticated(
+        principal,
+        permissions,
+        DispatchProvenance::new(principal.0, 7, 9, 1).unwrap(),
     )
 }
 
@@ -87,7 +95,7 @@ fn authenticated_submission_crosses_lora_policy_and_scripted_radio_durability() 
 
     let denied = dispatch(
         &mut service,
-        &DispatchContext::authenticated(OWNER, Permissions::READ_SUBMISSION_STATUS),
+        &context(OWNER, Permissions::READ_SUBMISSION_STATUS),
         submit_request(2, destination, b"live LoRa submission", 0x31),
     );
     assert_error(denied.response, ApiErrorCode::PermissionDenied);

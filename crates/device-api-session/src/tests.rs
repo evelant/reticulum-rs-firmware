@@ -292,6 +292,7 @@ struct CountingPort {
     availability_calls: usize,
     status_calls: usize,
     acceptance_calls: usize,
+    last_candidate: Option<AcceptanceCandidate>,
 }
 
 impl SubmissionPort for CountingPort {
@@ -311,9 +312,10 @@ impl SubmissionPort for CountingPort {
 
     fn accept(
         &mut self,
-        _candidate: AcceptanceCandidate,
+        candidate: AcceptanceCandidate,
     ) -> Result<SubmissionAcceptance, SubmissionPortError> {
         self.acceptance_calls += 1;
+        self.last_candidate = Some(candidate);
         Ok(SubmissionAcceptance::Accepted(StorageSubmissionId::new(1)))
     }
 }
@@ -804,6 +806,25 @@ fn authority_grant_supplies_adapter_context_and_revoked_grant_does_not_revalidat
     assert_eq!(port.availability_calls, 1);
     assert_eq!(port.status_calls, 0);
     assert_eq!(port.acceptance_calls, 1);
+    let candidate = port
+        .last_candidate
+        .expect("the authorized adapter call supplies one durable candidate");
+    assert_eq!(candidate.principal(), StoragePrincipalId::new(PRINCIPAL.0));
+    let durable_authorization = candidate.authorization();
+    assert_eq!(
+        durable_authorization.credential_id(),
+        CREDENTIAL_ID.as_bytes()
+    );
+    assert_eq!(
+        durable_authorization.credential_generation(),
+        GENERATION.get()
+    );
+    assert_eq!(durable_authorization.authority_revision(), GENERATION.get());
+    assert_eq!(durable_authorization.policy_version(), 1);
+    assert_eq!(
+        durable_authorization.granted_permission_bits(),
+        permissions.bits()
+    );
     assert!(matches!(
         &response.response,
         DeviceResponse::SubmitRnsDataAccepted(_)

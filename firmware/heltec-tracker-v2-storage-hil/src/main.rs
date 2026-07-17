@@ -425,6 +425,12 @@ fn verify_fixture(mounted: &MountedJournal<1>, records: &[JournalEntry; fixture:
         .index()
         .get(fixture::submission_id())
         .unwrap_or_else(|| panic!("storage-hil stage=semantic-replay status=FAIL reason=missing"));
+    let JournalEntry::Accepted(expected_accepted) = records[0] else {
+        panic!("storage-hil first fixture record must be an acceptance")
+    };
+    if indexed.accepted().authorization() != expected_accepted.authorization() {
+        panic!("storage-hil stage=semantic-replay status=FAIL reason=authorization-provenance");
+    }
     let JournalEntry::StateTransition(expected) = records[fixture::RECORD_COUNT - 1] else {
         panic!("storage-hil final fixture record must be a transition")
     };

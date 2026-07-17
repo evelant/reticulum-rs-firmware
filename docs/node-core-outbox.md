@@ -579,8 +579,8 @@ the coordinator. The remaining product work at this boundary is:
    announce epoch before provisioning/loading, requires redundant key mirrors,
    and keeps protocol-monotonic deadlines separate from the 40-bit local
    announce-emission order. Powered reset and power-cut evidence remains open.
-3. Add durable authorization provenance and persistent credential pairing,
-   then connect the implemented immutable authority, authenticated device-API
+3. Add persistent credential pairing, then connect the implemented immutable
+   authority, authenticated device-API
    adapter, USB framing, qualification-session core and permanent actor task;
    drive the model's conservative boot
    recovery and node observations through the actor's narrow projector methods;
