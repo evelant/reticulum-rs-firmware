@@ -1,12 +1,29 @@
 extern crate std;
 
 use rand_core::{CryptoRng, RngCore};
+use reticulum_device_api::{
+    ApiVersion, CapabilityAvailability, DestinationHash, DeviceRequest, DeviceResponse,
+    IdempotencyKey, Permissions, PrincipalId, RequestEnvelope, RequestId, decode_request,
+    decode_response, encode_request, encode_response,
+};
+use reticulum_device_api_adapter::{
+    SubmissionAcceptance, SubmissionPort, SubmissionPortError, dispatch,
+};
+use reticulum_device_api_credentials::{
+    AuthorityRevision, AuthorizationPolicyVersion, CredentialAudit, CredentialAuthority,
+    CredentialAuthorityBuilder, CredentialRecord, CredentialStatus, PairingOrigin,
+    RevocationReason,
+};
 use reticulum_device_api_framing::{
     AUTH_TAG_LENGTH, AUTHENTICATED_DATA_CAPACITY, DecodeEvent, FramedRecord, PAYLOAD_CAPACITY,
     PayloadLength, Record, StreamDecoder,
 };
 use reticulum_device_api_handoff::{
     CorrelationId, LocalApiReply, MessageLength, OwnedMessage, RequestKey, SessionEpoch,
+};
+use reticulum_storage_model::{
+    AcceptanceCandidate, LifecycleState, PrincipalId as StoragePrincipalId,
+    SubmissionId as StorageSubmissionId,
 };
 
 use crate::{
@@ -44,6 +61,7 @@ const PSK: [u8; 32] = [
 ];
 const GENERATION: CredentialGeneration = CredentialGeneration::new(0x0102_0304_0506_0708);
 const EPOCH: SessionEpoch = SessionEpoch::new(1);
+const PRINCIPAL: PrincipalId = PrincipalId([0x31; 16]);
 
 struct FixedRng {
     bytes: [u8; 32],
@@ -191,6 +209,113 @@ fn establish_with_allocator(
         .authenticate(client_proof_record)
         .unwrap_or_else(|error| panic!("client proof failed: {error:?}"));
     (session, schedule, server_hello, observed_server_proof)
+}
+
+fn credential_authority(
+    generation: CredentialGeneration,
+    permissions: Permissions,
+) -> CredentialAuthority<1> {
+    let revision = AuthorityRevision::new(generation.get());
+    let builder = match CredentialAuthorityBuilder::new(revision) {
+        Ok(builder) => builder,
+        Err(fault) => panic!("credential authority revision failed: {:?}", fault.kind()),
+    };
+    let record = CredentialRecord::with_secret(
+        CREDENTIAL_ID,
+        generation,
+        PRINCIPAL,
+        permissions,
+        CredentialStatus::Active,
+        CredentialAudit::new(
+            revision,
+            revision,
+            PairingOrigin::UsbPhysicalPresence,
+            AuthorizationPolicyVersion::new(1),
+        ),
+        PSK,
+    );
+    builder
+        .insert(record)
+        .unwrap_or_else(|fault| panic!("credential authority record failed: {:?}", fault.kind()))
+        .finish()
+}
+
+fn revoked_authority(generation: CredentialGeneration) -> CredentialAuthority<1> {
+    let revision = AuthorityRevision::new(generation.get());
+    let builder = match CredentialAuthorityBuilder::new(revision) {
+        Ok(builder) => builder,
+        Err(fault) => panic!("credential authority revision failed: {:?}", fault.kind()),
+    };
+    let record = CredentialRecord::revoked(
+        CREDENTIAL_ID,
+        generation,
+        PRINCIPAL,
+        CredentialAudit::new(
+            AuthorityRevision::new(GENERATION.get()),
+            revision,
+            PairingOrigin::UsbPhysicalPresence,
+            AuthorizationPolicyVersion::new(1),
+        ),
+        RevocationReason::Explicit,
+    );
+    builder
+        .insert(record)
+        .unwrap_or_else(|fault| panic!("revoked credential record failed: {:?}", fault.kind()))
+        .finish()
+}
+
+fn establish_from_authority(authority: &CredentialAuthority<1>) -> (ServerSession, KeySchedule) {
+    let selected = authority
+        .select_for_handshake(CREDENTIAL_ID)
+        .unwrap_or_else(|_| panic!("active credential was unavailable"));
+    let mut epochs = SessionEpochAllocator::new();
+    let mut rng = FixedRng::new(SERVER_NONCE);
+    let flight = ServerHelloFlight::begin(
+        client_hello(),
+        ActiveCredential::from_selected(selected),
+        ServerParameters::new(DEVICE_ID, BearerBinding::UsbSerialJtag),
+        &mut epochs,
+        &mut rng,
+    )
+    .unwrap_or_else(|error| panic!("authority handshake begin failed: {error:?}"));
+    let (pending, schedule, _, observed_server_proof) = complete_server_flight(flight);
+    let proof = client_proof(&schedule, &observed_server_proof);
+    let record = proof_record(RECORD_KIND_CLIENT_PROOF, schedule.session_id, &proof);
+    let session = pending
+        .authenticate(record)
+        .unwrap_or_else(|error| panic!("authority client proof failed: {error:?}"));
+    (session, schedule)
+}
+
+#[derive(Default)]
+struct CountingPort {
+    availability_calls: usize,
+    status_calls: usize,
+    acceptance_calls: usize,
+}
+
+impl SubmissionPort for CountingPort {
+    fn availability(&mut self) -> CapabilityAvailability {
+        self.availability_calls += 1;
+        CapabilityAvailability::Available
+    }
+
+    fn submission_state(
+        &mut self,
+        _principal: StoragePrincipalId,
+        _id: StorageSubmissionId,
+    ) -> Result<Option<LifecycleState>, SubmissionPortError> {
+        self.status_calls += 1;
+        Ok(None)
+    }
+
+    fn accept(
+        &mut self,
+        _candidate: AcceptanceCandidate,
+    ) -> Result<SubmissionAcceptance, SubmissionPortError> {
+        self.acceptance_calls += 1;
+        Ok(SubmissionAcceptance::Accepted(StorageSubmissionId::new(1)))
+    }
 }
 
 fn tagged_request(schedule: &KeySchedule, sequence: u64, payload: &[u8]) -> Record {
@@ -632,6 +757,97 @@ fn boot_lifetime_epoch_allocator_prevents_old_reply_alias_after_reconnect() {
     };
     assert_eq!(fault.kind(), ReplyRouteFaultKind::WrongEpoch);
     assert_eq!(fault.into_reply().key(), old_request.key());
+}
+
+#[test]
+fn authority_grant_supplies_adapter_context_and_revoked_grant_does_not_revalidate() {
+    let permissions =
+        Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA | Permissions::READ_SUBMISSION_STATUS;
+    let authority = credential_authority(GENERATION, permissions);
+    let (session, schedule) = establish_from_authority(&authority);
+
+    let envelope = RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(77),
+        request: DeviceRequest::SubmitRnsData {
+            destination: DestinationHash([0x44; 16]),
+            payload: b"credential-backed request",
+            idempotency_key: IdempotencyKey([0x55; 16]),
+        },
+    };
+    let mut encoded_request = [0_u8; PAYLOAD_CAPACITY];
+    let request_length = encode_request(&envelope, &mut encoded_request)
+        .unwrap_or_else(|error| panic!("logical request encode failed: {error:?}"));
+    let authenticated = session
+        .authenticate_request(tagged_request(
+            &schedule,
+            0,
+            &encoded_request[..request_length],
+        ))
+        .unwrap_or_else(|error| panic!("request authentication failed: {error:?}"));
+    let (request, waiting) = authenticated.into_parts();
+    let decoded = decode_request(request.message().encoded())
+        .unwrap_or_else(|error| panic!("logical request decode failed: {error:?}"));
+    let lease = request
+        .grant()
+        .revalidate(&authority)
+        .unwrap_or_else(|_| panic!("session grant did not revalidate"));
+    assert_eq!(lease.credential_id(), CREDENTIAL_ID);
+    assert_eq!(lease.generation(), GENERATION);
+    lease.with_dispatch_context(|context| {
+        assert_eq!(context.principal(), Some(PRINCIPAL));
+        assert_eq!(context.permissions(), permissions);
+    });
+
+    let mut port = CountingPort::default();
+    let response = lease.with_dispatch_context(|context| dispatch(&mut port, context, decoded));
+    assert_eq!(port.availability_calls, 1);
+    assert_eq!(port.status_calls, 0);
+    assert_eq!(port.acceptance_calls, 1);
+    assert!(matches!(
+        &response.response,
+        DeviceResponse::SubmitRnsDataAccepted(_)
+    ));
+
+    let mut encoded_response = [0_u8; PAYLOAD_CAPACITY];
+    let response_length = encode_response(&response, &mut encoded_response)
+        .unwrap_or_else(|error| panic!("logical response encode failed: {error:?}"));
+    let mut response_owner = [0_u8; PAYLOAD_CAPACITY];
+    response_owner[..response_length].copy_from_slice(&encoded_response[..response_length]);
+    let reply = LocalApiReply::new(
+        request.key(),
+        OwnedMessage::new(MessageLength::new(response_length).unwrap(), response_owner),
+    );
+    let flight = waiting
+        .frame_reply(reply)
+        .unwrap_or_else(|fault| panic!("response framing failed: {:?}", fault.kind()));
+    let response_record = decode_one(flight.remaining());
+    assert!(verify_server_record_tag(
+        &schedule.server_record_key,
+        &response_record
+    ));
+    let decoded_response = decode_response(response_record.payload())
+        .unwrap_or_else(|error| panic!("logical response decode failed: {error:?}"));
+    assert_eq!(decoded_response, response);
+
+    let (session, schedule) = establish_from_authority(&authority);
+    let authenticated = session
+        .authenticate_request(tagged_request(
+            &schedule,
+            0,
+            &encoded_request[..request_length],
+        ))
+        .unwrap();
+    let (queued_request, queued_waiting) = authenticated.into_parts();
+    assert!(decode_request(queued_request.message().encoded()).is_ok());
+
+    let revoked_generation = CredentialGeneration::new(GENERATION.get() + 1);
+    let revoked = revoked_authority(revoked_generation);
+    let rejected = queued_request.grant().revalidate(&revoked);
+    assert!(rejected.is_err());
+    // The future composed owner must treat this as terminal and prove that it
+    // neither falls back to an unauthenticated context nor invokes its port.
+    drop(queued_waiting);
 }
 
 #[test]

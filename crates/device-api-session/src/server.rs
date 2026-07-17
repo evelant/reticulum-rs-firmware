@@ -1,6 +1,10 @@
 //! Server handshake, authenticated grant, and request/reply typestates.
 
 use rand_core::{CryptoRng, RngCore};
+use reticulum_device_api_credentials::{
+    CredentialAuthority, CredentialGeneration, CredentialId, CredentialRejected, DispatchLease,
+    SelectedCredential,
+};
 use reticulum_device_api_framing::{
     AUTH_TAG_LENGTH, FrameEncodeError, FramedRecord, PayloadLength, Record, TxAdvanceError,
 };
@@ -16,9 +20,9 @@ use crate::{
         verify_client_record_tag,
     },
     protocol::{
-        BearerBinding, ClientHello, CredentialGeneration, CredentialId, DeviceId,
-        HandshakeRecordError, RECORD_KIND_CLIENT_PROOF, RECORD_KIND_REQUEST, RECORD_KIND_RESPONSE,
-        RECORD_KIND_SERVER_PROOF, ServerHello, SessionId, proof_record, take_proof,
+        BearerBinding, ClientHello, DeviceId, HandshakeRecordError, RECORD_KIND_CLIENT_PROOF,
+        RECORD_KIND_REQUEST, RECORD_KIND_RESPONSE, RECORD_KIND_SERVER_PROOF, ServerHello,
+        SessionId, proof_record, take_proof,
     },
 };
 
@@ -64,6 +68,16 @@ impl ActiveCredential {
             id,
             generation,
             psk: Zeroizing::new(psk),
+        }
+    }
+
+    /// Consume one device-authority selection without exposing its PSK.
+    pub fn from_selected(selected: SelectedCredential) -> Self {
+        let (id, generation, psk) = selected.into_parts();
+        Self {
+            id,
+            generation,
+            psk,
         }
     }
 
@@ -391,6 +405,20 @@ impl AuthenticatedGrant {
     /// Authenticated client-to-device record sequence that admitted the request.
     pub const fn admission_sequence(&self) -> u64 {
         self.admission_sequence
+    }
+
+    /// Revalidate this grant against current device-owned credential state.
+    ///
+    /// The returned lease borrows `authority`. Product ownership requires its
+    /// callback to contain the immediate synchronous logical dispatch; the type
+    /// freezes the borrowed authority but does not prevent holding the lease
+    /// across an await. Failure must not be downgraded to an unauthenticated
+    /// context.
+    pub fn revalidate<'authority, const CAPACITY: usize>(
+        &self,
+        authority: &'authority CredentialAuthority<CAPACITY>,
+    ) -> Result<DispatchLease<'authority, CAPACITY>, CredentialRejected> {
+        authority.revalidate(self.credential_id, self.credential_generation)
     }
 }
 

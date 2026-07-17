@@ -29,9 +29,10 @@ and creates one short-lived checked journal view per runtime operation; future
 OTA and other stores must use that same serialization point. The E290
 coordinator implements the narrow target-safe `SubmissionPort`, and the
 separate portable authenticated adapter maps only that semantic vocabulary to
-the logical device API. Portable framing, the qualification-session core, and
-job handoff exist, but no credential authority, external firmware lane, or
-bearer composes them with this port. The dedicated Heltec HIL calls the journal
+the logical device API. Portable immutable credential authority, framing, the
+qualification-session core, and job handoff exist, but durable credential
+state/pairing, an external firmware lane, and a bearer do not compose them with
+this port. The dedicated Heltec HIL calls the journal
 directly and is a storage qualification image, not actor/adapter qualification
 or product firmware. See
 [Portable sole storage actor](storage-actor.md).
@@ -268,9 +269,10 @@ the project still needs:
   around the operation-scoped portable actor/runtime. Its one-entry cap, live
   driver, exact authorized-frame handoff, and ADR 0005 fault behavior now pass
   software composition tests; the cap is not product capacity;
-- credential authority/state plus firmware composition of the implemented
-  framing/session/handoff and first USB bearer for the authenticated device-API
-  persist-before-accept/status adapter,
+- durable authorization provenance and persistent credential state/pairing plus
+  firmware composition of the implemented authority/framing/session/handoff and
+  first USB bearer for the authenticated device-API persist-before-accept/status
+  adapter,
   plus an exact node-owner quiescence proof and quarantine policy before
   projector-slot retirement;
 - coordination with watchdogs, OTA, other flash users, and radio timing;

@@ -1,0 +1,16 @@
+[package]
+name = "reticulum-device-api-credentials"
+description = "Fixed-capacity device-owned credential authority for the local Reticulum API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reticulum-device-api = { path = "../device-api", default-features = false }
+subtle.workspace = true
+zeroize.workspace = true
+
+[lib]
+path = "src/lib.rs"

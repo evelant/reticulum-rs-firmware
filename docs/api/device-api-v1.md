@@ -5,11 +5,13 @@ narrow durable-submission port. This document freezes the operation and field
 numbers exercised by `reticulum-device-api`; `reticulum-device-api-adapter`
 implements capabilities and principal-scoped status in its default build plus
 target-safe durable experimental outbound RNS DATA submission behind an explicit
-feature. Separate portable framing, USB-qualification session and boot-lifetime
-authenticated-job handoff crates now exist. The session core emits only a
-credential ID/generation grant; a still-unimplemented credential authority must
-revalidate it and derive `DispatchContext`. No firmware bearer is composed yet;
-a product port may route an accepted submission through the node after the
+feature. Separate portable framing, immutable credential-authority, USB-
+qualification session and boot-lifetime authenticated-job handoff crates now
+exist. The session core emits only a credential ID/generation grant; the
+portable authority revalidates it and derives `DispatchContext` through a
+borrowing `DispatchLease`. Credential persistence/pairing and firmware
+composition remain unimplemented, and no physical bearer is composed yet. A
+product port may route an accepted submission through the node after the
 durable barriers.
 
 ## Boundary
@@ -25,8 +27,9 @@ codec, and a small common authorization policy. It does not contain:
 
 Transport framing, job handoff and authenticated session establishment are
 separate layers. They decode and carry the message plus a session-minted
-credential reference. A device-owned credential authority must revalidate that
-reference and separately derive the trusted `DispatchContext`.
+credential reference. `reticulum-device-api-credentials` implements the fixed-
+capacity device-owned semantic authority: it must revalidate that reference and
+separately derive the trusted `DispatchContext` immediately before dispatch.
 No principal, permission, or session assertion is accepted from CBOR input.
 
 `reticulum-device-api-adapter` is the separate allocation-free `no_std`
@@ -255,9 +258,10 @@ inaccessible until an opaque permit exchange produces `AuthorizedTx`, whose
 bounded async handoff carries these typestates, and the portable projector
 models their persist-before-ack observations. The E290 host composition test
 exercises that API-to-runtime-to-router-to-LoRa software path; portable framing,
-qualification-session establishment, and job handoff are implemented
-separately, while external live admission still requires credential
-revalidation, firmware composition, and a bearer.
+immutable credential authority, qualification-session establishment, and job
+handoff are implemented separately, while external live admission still
+requires persistent credential provisioning/pairing, firmware composition, and
+a bearer.
 
 Successful experimental response body:
 
@@ -317,19 +321,42 @@ framing rules.
 
 `authorize_request(context, request)` applies the common baseline:
 
-- `system.capabilities` is available before application authentication;
+- `system.capabilities` requires no logical operation permission;
 - `submission.status` requires an authenticated principal and its read bit;
 - experimental outbound RNS DATA submission requires an authenticated principal
   and `EXPERIMENTAL_SUBMIT_RNS_DATA`.
+
+The logical codec can represent an unauthenticated context for internal callers
+and policy tests. ADR 0006's physical device-API bearers are stricter: every
+wire operation crosses an authenticated application session. A stale, missing,
+pending or revoked credential is never converted to
+`DispatchContext::UNAUTHENTICATED`, even for `system.capabilities`.
 
 Authentication, ownership filtering, rate limiting, idempotency scope, physical
 presence, and high-assurance session encryption are not solved by this codec.
 The portable adapter scopes status and experimental-operation idempotency by the
 principal from `DispatchContext`, never by bytes supplied in a request. The
-portable session core deliberately emits only a credential ID/generation grant;
-a future credential-backed firmware runtime must revalidate it, establish the
-dispatch context, enforce connection-level rate limits, and keep authentication
-state outside request CBOR.
+portable session core deliberately emits only a credential ID/generation grant.
+`AuthenticatedGrant::revalidate` checks that reference against the immutable
+device-owned authority and returns a `DispatchLease` whose borrow remains alive
+through immediate synchronous dispatch. Its higher-ranked callback supplies a
+borrow of the non-copyable `DispatchContext`; the exact context value cannot be
+moved out, but trusted linked code can reconstruct equivalent scalar facts with
+the public constructor. Immediate dispatch, no unauthenticated fallback and no
+port call after rejection remain composition rules, not an unforgeable Rust
+capability. Principal and permissions come from the exact active record. Live authority
+replacement must also pass exact-next-revision successor validation so changed
+authorization cannot reuse a session generation. A future credential-backed
+firmware runtime must add persistent provisioning/pairing, enforce connection-
+level rate limits, and keep authentication state outside request CBOR.
+
+The current durable acceptance record persists the principal, idempotency key
+and operation-specific intent, but not the lease's credential generation,
+authority revision or authorization-policy version. Before enabling a live
+external mutating bearer, the project must either add that bounded provenance
+through an explicit storage-schema migration or formally narrow ADR 0006's
+durable policy-snapshot requirement. See
+[ADR 0007](../adr/0007-device-api-credential-authority.md).
 
 ## Golden vectors
 
@@ -399,19 +426,23 @@ physical transport:
 
 ```sh
 cargo test --locked \
+  -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session
 cargo clippy --locked --all-targets \
+  -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session -- -D warnings
 cargo check --locked \
+  -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
   --target riscv32imac-unknown-none-elf
 cargo +esp check --locked \
+  -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \

@@ -600,7 +600,8 @@ fn graph_policy() -> ExitCode {
              API and node core remain mutually isolated and free of direct platform dependencies; the \
              allocation-free device-API framing crate has no dependency or feature surface, while its \
              boot-lifetime job handoff reaches only the logical device API and Embassy Sync, and the \
-             authenticated session layer has only its exact reviewed cryptographic, device-API, framing, handoff and test-only hex edges; \
+             credential authority has only its exact logical device-API, constant-time comparison and zeroization edges; the \
+             authenticated session layer has only its exact reviewed cryptographic, device-API, credentials, framing and handoff normal edges plus its exact test-only hex, semantic-adapter and storage-model fixtures; \
              the Rete integration and node-core normal closures contain no RNode, radio-interface, LoRa or board package; \
              the shared lora-phy owner and E290 radio wrapper have only their exact reviewed HAL, framing, board and test edges; \
              the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the permanent E290 node reaches the LoRa-first node/router/dispatcher graph, exact portable identity, announce-clock, NOR-region and durable-submission layers, and the target-safe experimental device-API semantic port while excluding deferred API bearers, onboard clients and foreign Tracker/HIL packages; \
@@ -650,7 +651,7 @@ fn validate_interface_neutral_rns_closure(label: &str, tree: &str) -> Result<(),
     Ok(())
 }
 
-const PRODUCT_GRAPH_FORBIDDEN: [&str; 21] = [
+const PRODUCT_GRAPH_FORBIDDEN: [&str; 22] = [
     "leviculum-core",
     "rete-lxmf",
     "lxmf-rs",
@@ -658,6 +659,7 @@ const PRODUCT_GRAPH_FORBIDDEN: [&str; 21] = [
     "reticulum-board-heltec-tracker-v2-tx-hil",
     "reticulum-board-heltec-vision-master-e290-radio",
     "reticulum-device-api-adapter",
+    "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
     "reticulum-device-api-session",
@@ -685,7 +687,7 @@ fn validate_product_graph_boundary(label: &str, tree: &str) -> Result<(), String
     Ok(())
 }
 
-const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 26] = [
+const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 27] = [
     "embassy-executor",
     "esp-radio",
     "lora-modulation",
@@ -699,6 +701,7 @@ const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 26] = [
     "reticulum-board-heltec-tracker-v2",
     "reticulum-board-heltec-vision-master-e290-radio",
     "reticulum-device-api-adapter",
+    "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
     "reticulum-device-api-session",
@@ -722,7 +725,7 @@ const TX_HIL_GRAPH_REQUIRED: [&str; 5] = [
     "reticulum-semantic-roundtrip-hil",
 ];
 
-const TX_HIL_GRAPH_FORBIDDEN: [&str; 21] = [
+const TX_HIL_GRAPH_FORBIDDEN: [&str; 22] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-core",
@@ -730,6 +733,7 @@ const TX_HIL_GRAPH_FORBIDDEN: [&str; 21] = [
     "rete-stack",
     "rete-transport",
     "reticulum-device-api-adapter",
+    "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
     "reticulum-device-api-session",
@@ -776,11 +780,12 @@ const SEMANTIC_TX_HIL_GRAPH_REQUIRED: [&str; 9] = [
     "rete-transport",
 ];
 
-const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 17] = [
+const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 18] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
     "reticulum-device-api-adapter",
+    "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
     "reticulum-device-api-session",
@@ -910,7 +915,7 @@ const E290_SEMANTIC_HIL_GRAPH_REQUIRED: [&str; 9] = [
     "rete-transport",
 ];
 
-const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 20] = [
+const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 21] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -919,6 +924,7 @@ const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 20] = [
     "reticulum-board-heltec-tracker-v2 v",
     "reticulum-heltec-tracker-v2-tx-hil",
     "reticulum-device-api-adapter",
+    "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
     "reticulum-device-api-session",
@@ -991,7 +997,7 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 27] = [
     "static_cell",
 ];
 
-const E290_NODE_GRAPH_FORBIDDEN: [&str; 14] = [
+const E290_NODE_GRAPH_FORBIDDEN: [&str; 15] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -999,10 +1005,11 @@ const E290_NODE_GRAPH_FORBIDDEN: [&str; 14] = [
     "reticulum-heltec-tracker-v2",
     "reticulum-heltec-vision-master-e290-qualification",
     "reticulum-heltec-vision-master-e290-semantic-hil",
-    "reticulum-lab-rx-returned-fault-hil",
+    "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
     "reticulum-device-api-session",
+    "reticulum-lab-rx-returned-fault-hil",
     "reticulum-rns-leviculum",
     "reticulum-rns-rete-rx",
     "reticulum-semantic-roundtrip-hil",
@@ -1262,6 +1269,48 @@ fn validate_device_api_edge_dependency_boundary(
         false,
     )?;
 
+    let credentials_name = "reticulum-device-api-credentials";
+    let credentials = exact_local_package(
+        packages,
+        workspace,
+        credentials_name,
+        "crates/device-api-credentials/Cargo.toml",
+    )?;
+    let credentials_features = credentials["features"]
+        .as_object()
+        .ok_or_else(|| format!("{credentials_name} package has no feature map"))?;
+    let credentials_dependencies = credentials["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{credentials_name} package has no dependency array"))?;
+    if !credentials_features.is_empty()
+        || credentials_dependencies.len() != 3
+        || credentials_dependencies
+            .iter()
+            .any(|dependency| !dependency["kind"].is_null())
+    {
+        return Err(format!(
+            "{credentials_name} must expose no features and exactly three reviewed normal dependencies"
+        ));
+    }
+    validate_exact_local_dependency(
+        credentials_dependencies,
+        credentials_name,
+        "reticulum-device-api",
+        &workspace.join("crates/device-api"),
+        false,
+    )?;
+    for (dependency_name, requirement) in [("subtle", "=2.6.1"), ("zeroize", "=1.9.0")] {
+        validate_exact_registry_dependency(
+            credentials_dependencies,
+            credentials_name,
+            dependency_name,
+            requirement,
+            None,
+            false,
+            &[],
+        )?;
+    }
+
     let session_name = "reticulum-device-api-session";
     let session = exact_local_package(
         packages,
@@ -1275,9 +1324,21 @@ fn validate_device_api_edge_dependency_boundary(
     let session_dependencies = session["dependencies"]
         .as_array()
         .ok_or_else(|| format!("{session_name} package has no dependency array"))?;
-    if !session_features.is_empty() || session_dependencies.len() != 9 {
+    let session_normal_dependencies = session_dependencies
+        .iter()
+        .filter(|dependency| dependency["kind"].is_null())
+        .count();
+    let session_dev_dependencies = session_dependencies
+        .iter()
+        .filter(|dependency| dependency["kind"].as_str() == Some("dev"))
+        .count();
+    if !session_features.is_empty()
+        || session_dependencies.len() != 12
+        || session_normal_dependencies != 9
+        || session_dev_dependencies != 3
+    {
         return Err(format!(
-            "{session_name} must expose no features and exactly eight reviewed normal dependencies plus one test-only dependency"
+            "{session_name} must expose no features and exactly nine reviewed normal dependencies plus three test-only dependencies"
         ));
     }
     for (dependency_name, requirement) in [
@@ -1309,6 +1370,11 @@ fn validate_device_api_edge_dependency_boundary(
             "crates/device-api-handoff",
             true,
         ),
+        (
+            "reticulum-device-api-credentials",
+            "crates/device-api-credentials",
+            true,
+        ),
     ] {
         validate_exact_local_dependency(
             session_dependencies,
@@ -1323,6 +1389,24 @@ fn validate_device_api_edge_dependency_boundary(
         session_name,
         "hex",
         "=0.4.3",
+        Some("dev"),
+        true,
+        &[],
+    )?;
+    validate_exact_local_dependency_with_kind(
+        session_dependencies,
+        session_name,
+        "reticulum-device-api-adapter",
+        &workspace.join("crates/device-api-adapter"),
+        Some("dev"),
+        true,
+        &["experimental-rns-data"],
+    )?;
+    validate_exact_local_dependency_with_kind(
+        session_dependencies,
+        session_name,
+        "reticulum-storage-model",
+        &workspace.join("crates/storage-model"),
         Some("dev"),
         true,
         &[],
@@ -2358,7 +2442,34 @@ fn validate_exact_local_dependency(
     expected_path: &Path,
     uses_default_features: bool,
 ) -> Result<(), String> {
-    let dependency = exact_dependency(dependencies, package_name, dependency_name, None)?;
+    validate_exact_local_dependency_with_kind(
+        dependencies,
+        package_name,
+        dependency_name,
+        expected_path,
+        None,
+        uses_default_features,
+        &[],
+    )
+}
+
+fn validate_exact_local_dependency_with_kind(
+    dependencies: &[serde_json::Value],
+    package_name: &str,
+    dependency_name: &str,
+    expected_path: &Path,
+    kind: Option<&str>,
+    uses_default_features: bool,
+    expected_features: &[&str],
+) -> Result<(), String> {
+    let dependency = exact_dependency(dependencies, package_name, dependency_name, kind)?;
+    let features = dependency["features"].as_array().ok_or_else(|| {
+        format!("{package_name} {dependency_name} dependency has no feature list")
+    })?;
+    let actual_features = features
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
     if dependency["req"].as_str() != Some("*")
         || !dependency["source"].is_null()
         || dependency["path"].as_str().map(Path::new) != Some(expected_path)
@@ -2366,12 +2477,10 @@ fn validate_exact_local_dependency(
         || !dependency["rename"].is_null()
         || !dependency["target"].is_null()
         || dependency["uses_default_features"].as_bool() != Some(uses_default_features)
-        || dependency["features"]
-            .as_array()
-            .is_none_or(|features| !features.is_empty())
+        || actual_features != expected_features
     {
         return Err(format!(
-            "{package_name} has an unreviewed local {dependency_name} dependency shape"
+            "{package_name} has an unreviewed {kind:?} local {dependency_name} dependency shape"
         ));
     }
     Ok(())
@@ -4495,6 +4604,7 @@ fn validate_firmware_dependency_boundary(
         "reticulum-board-heltec-tracker-v2-radio",
         "reticulum-board-heltec-tracker-v2-tx-hil",
         "reticulum-device-api-adapter",
+        "reticulum-device-api-credentials",
         "reticulum-device-api-framing",
         "reticulum-device-api-handoff",
         "reticulum-device-api-session",
@@ -4538,6 +4648,7 @@ fn validate_firmware_dependency_boundary(
                     "reticulum-board-heltec-tracker-v2-radio"
                         | "reticulum-board-heltec-tracker-v2-tx-hil"
                         | "reticulum-device-api-adapter"
+                        | "reticulum-device-api-credentials"
                         | "reticulum-device-api-framing"
                         | "reticulum-device-api-handoff"
                         | "reticulum-device-api-session"
@@ -6286,6 +6397,7 @@ mod tests {
             "lora-phy",
             "reticulum-rns-rete",
             "reticulum-device-api-adapter",
+            "reticulum-device-api-credentials",
             "reticulum-device-api-framing",
             "reticulum-device-api-handoff",
             "reticulum-device-api-session",
@@ -6316,6 +6428,11 @@ mod tests {
                 "device-api-adapter-id",
                 "reticulum-device-api-adapter",
                 "crates/device-api-adapter",
+            ),
+            (
+                "device-api-credentials-id",
+                "reticulum-device-api-credentials",
+                "crates/device-api-credentials",
             ),
             (
                 "device-api-framing-id",
@@ -6423,6 +6540,7 @@ mod tests {
             "reticulum-board-heltec-tracker-v2-tx-hil",
             "reticulum-board-heltec-vision-master-e290-radio",
             "reticulum-device-api-adapter",
+            "reticulum-device-api-credentials",
             "reticulum-device-api-framing",
             "reticulum-device-api-handoff",
             "reticulum-device-api-session",
@@ -6776,7 +6894,7 @@ mod tests {
     }
 
     #[test]
-    fn device_api_edge_boundary_locks_framing_handoff_and_session_shapes() {
+    fn device_api_edge_boundary_locks_framing_handoff_credentials_and_session_shapes() {
         let root = workspace_root();
         let metadata = device_api_edge_metadata_fixture(&root);
         validate_device_api_edge_dependency_boundary(&metadata.to_string(), &root).unwrap();
@@ -6831,6 +6949,91 @@ mod tests {
             .is_err()
         );
 
+        for dependency_name in ["subtle", "zeroize"] {
+            let mut wrong_credentials_version = metadata.clone();
+            fixture_dependency_mut(
+                fixture_package_mut(
+                    &mut wrong_credentials_version,
+                    "reticulum-device-api-credentials",
+                ),
+                dependency_name,
+                None,
+            )["req"] = serde_json::Value::String("=0.0.0".to_owned());
+            assert!(
+                validate_device_api_edge_dependency_boundary(
+                    &wrong_credentials_version.to_string(),
+                    &root,
+                )
+                .is_err(),
+                "credentials accepted wrong {dependency_name} version"
+            );
+        }
+
+        let mut wrong_credentials_api_path = metadata.clone();
+        fixture_dependency_mut(
+            fixture_package_mut(
+                &mut wrong_credentials_api_path,
+                "reticulum-device-api-credentials",
+            ),
+            "reticulum-device-api",
+            None,
+        )["path"] = serde_json::Value::String(root.join("elsewhere").display().to_string());
+        assert!(
+            validate_device_api_edge_dependency_boundary(
+                &wrong_credentials_api_path.to_string(),
+                &root,
+            )
+            .is_err(),
+            "credentials accepted the wrong device-API path"
+        );
+
+        for dependency_name in ["reticulum-device-api", "subtle", "zeroize"] {
+            let mut credentials_default_features = metadata.clone();
+            fixture_dependency_mut(
+                fixture_package_mut(
+                    &mut credentials_default_features,
+                    "reticulum-device-api-credentials",
+                ),
+                dependency_name,
+                None,
+            )["uses_default_features"] = serde_json::Value::Bool(true);
+            assert!(
+                validate_device_api_edge_dependency_boundary(
+                    &credentials_default_features.to_string(),
+                    &root,
+                )
+                .is_err(),
+                "credentials accepted {dependency_name} default features"
+            );
+        }
+
+        let mut credentials_dev_dependency = metadata.clone();
+        fixture_dependency_mut(
+            fixture_package_mut(
+                &mut credentials_dev_dependency,
+                "reticulum-device-api-credentials",
+            ),
+            "subtle",
+            None,
+        )["kind"] = serde_json::Value::String("dev".to_owned());
+        assert!(
+            validate_device_api_edge_dependency_boundary(
+                &credentials_dev_dependency.to_string(),
+                &root,
+            )
+            .is_err(),
+            "credentials accepted a dev-only dependency"
+        );
+
+        let mut credentials_feature = metadata.clone();
+        fixture_package_mut(&mut credentials_feature, "reticulum-device-api-credentials")["features"]
+            ["std"] = serde_json::json!([]);
+        assert!(
+            validate_device_api_edge_dependency_boundary(&credentials_feature.to_string(), &root)
+                .is_err(),
+            "credentials accepted a crate feature"
+        );
+
         for (dependency_name, kind) in [
             ("hkdf", None),
             ("hmac", None),
@@ -6852,16 +7055,19 @@ mod tests {
             );
         }
 
-        for dependency_name in [
-            "reticulum-device-api",
-            "reticulum-device-api-framing",
-            "reticulum-device-api-handoff",
+        for (dependency_name, kind) in [
+            ("reticulum-device-api", None),
+            ("reticulum-device-api-credentials", None),
+            ("reticulum-device-api-framing", None),
+            ("reticulum-device-api-handoff", None),
+            ("reticulum-device-api-adapter", Some("dev")),
+            ("reticulum-storage-model", Some("dev")),
         ] {
             let mut wrong_session_path = metadata.clone();
             fixture_dependency_mut(
                 fixture_package_mut(&mut wrong_session_path, "reticulum-device-api-session"),
                 dependency_name,
-                None,
+                kind,
             )["path"] = serde_json::Value::String(root.join("elsewhere").display().to_string());
             assert!(
                 validate_device_api_edge_dependency_boundary(
@@ -6895,22 +7101,42 @@ mod tests {
             "session accepted hkdf default features"
         );
 
-        let mut disabled_framing_defaults = metadata.clone();
+        for (dependency_name, kind) in [
+            ("reticulum-device-api-credentials", None),
+            ("reticulum-device-api-framing", None),
+            ("reticulum-device-api-handoff", None),
+            ("reticulum-device-api-adapter", Some("dev")),
+            ("reticulum-storage-model", Some("dev")),
+        ] {
+            let mut disabled_defaults = metadata.clone();
+            fixture_dependency_mut(
+                fixture_package_mut(&mut disabled_defaults, "reticulum-device-api-session"),
+                dependency_name,
+                kind,
+            )["uses_default_features"] = serde_json::Value::Bool(false);
+            assert!(
+                validate_device_api_edge_dependency_boundary(
+                    &disabled_defaults.to_string(),
+                    &root,
+                )
+                .is_err(),
+                "session accepted {dependency_name} default-feature drift"
+            );
+        }
+
+        let mut missing_adapter_feature = metadata.clone();
         fixture_dependency_mut(
-            fixture_package_mut(
-                &mut disabled_framing_defaults,
-                "reticulum-device-api-session",
-            ),
-            "reticulum-device-api-framing",
-            None,
-        )["uses_default_features"] = serde_json::Value::Bool(false);
+            fixture_package_mut(&mut missing_adapter_feature, "reticulum-device-api-session"),
+            "reticulum-device-api-adapter",
+            Some("dev"),
+        )["features"] = serde_json::json!([]);
         assert!(
             validate_device_api_edge_dependency_boundary(
-                &disabled_framing_defaults.to_string(),
+                &missing_adapter_feature.to_string(),
                 &root,
             )
             .is_err(),
-            "session accepted framing dependency-shape drift"
+            "session accepted an adapter fixture without experimental-rns-data"
         );
 
         let mut session_feature = metadata.clone();
@@ -9315,6 +9541,13 @@ mod tests {
     }
 
     fn device_api_edge_metadata_fixture(root: &Path) -> serde_json::Value {
+        let mut session_credentials = handoff_path_dependency_fixture(
+            "reticulum-device-api-credentials",
+            "*",
+            &root.join("crates/device-api-credentials"),
+            None,
+        );
+        session_credentials["uses_default_features"] = serde_json::Value::Bool(true);
         let mut session_framing = handoff_path_dependency_fixture(
             "reticulum-device-api-framing",
             "*",
@@ -9331,6 +9564,21 @@ mod tests {
         session_handoff["uses_default_features"] = serde_json::Value::Bool(true);
         let mut session_hex = handoff_dependency_fixture("hex", "=0.4.3", Some("dev"));
         session_hex["uses_default_features"] = serde_json::Value::Bool(true);
+        let mut session_adapter = handoff_path_dependency_fixture(
+            "reticulum-device-api-adapter",
+            "*",
+            &root.join("crates/device-api-adapter"),
+            Some("dev"),
+        );
+        session_adapter["uses_default_features"] = serde_json::Value::Bool(true);
+        session_adapter["features"] = serde_json::json!(["experimental-rns-data"]);
+        let mut session_storage = handoff_path_dependency_fixture(
+            "reticulum-storage-model",
+            "*",
+            &root.join("crates/storage-model"),
+            Some("dev"),
+        );
+        session_storage["uses_default_features"] = serde_json::Value::Bool(true);
 
         serde_json::json!({
             "packages": [
@@ -9357,6 +9605,22 @@ mod tests {
                     ],
                 },
                 {
+                    "name": "reticulum-device-api-credentials",
+                    "source": null,
+                    "manifest_path": root.join("crates/device-api-credentials/Cargo.toml"),
+                    "features": {},
+                    "dependencies": [
+                        handoff_path_dependency_fixture(
+                            "reticulum-device-api",
+                            "*",
+                            &root.join("crates/device-api"),
+                            None,
+                        ),
+                        handoff_dependency_fixture("subtle", "=2.6.1", None),
+                        handoff_dependency_fixture("zeroize", "=1.9.0", None),
+                    ],
+                },
+                {
                     "name": "reticulum-device-api-session",
                     "source": null,
                     "manifest_path": root.join("crates/device-api-session/Cargo.toml"),
@@ -9371,11 +9635,14 @@ mod tests {
                             &root.join("crates/device-api"),
                             None,
                         ),
+                        session_credentials,
                         session_framing,
                         session_handoff,
                         handoff_dependency_fixture("sha2", "=0.10.9", None),
                         handoff_dependency_fixture("zeroize", "=1.9.0", None),
                         session_hex,
+                        session_adapter,
+                        session_storage,
                     ],
                 },
             ],

@@ -12,6 +12,7 @@ hkdf.workspace = true
 hmac.workspace = true
 rand_core.workspace = true
 reticulum-device-api = { path = "../device-api", default-features = false }
+reticulum-device-api-credentials = { path = "../device-api-credentials" }
 reticulum-device-api-framing = { path = "../device-api-framing" }
 reticulum-device-api-handoff = { path = "../device-api-handoff" }
 sha2.workspace = true
@@ -19,6 +20,8 @@ zeroize.workspace = true
 
 [dev-dependencies]
 hex.workspace = true
+reticulum-device-api-adapter = { path = "../device-api-adapter", features = ["experimental-rns-data"] }
+reticulum-storage-model = { path = "../storage-model" }
 
 [lib]
 path = "src/lib.rs"

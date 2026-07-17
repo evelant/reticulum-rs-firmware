@@ -350,7 +350,7 @@ fn dispatch<const SUBMISSIONS: usize>(
     context: DispatchContext,
     envelope: RequestEnvelope<'_>,
 ) -> ResponseEnvelope {
-    super::dispatch(actor, context, envelope)
+    super::dispatch(actor, &context, envelope)
 }
 
 fn envelope<'a>(request_id: u64, request: DeviceRequest<'a>) -> RequestEnvelope<'a> {
@@ -474,7 +474,7 @@ fn unavailable_service_is_not_advertised_or_called_for_status() {
     let mut port = UnavailablePort::default();
     let capabilities = super::dispatch(
         &mut port,
-        DispatchContext::UNAUTHENTICATED,
+        &DispatchContext::UNAUTHENTICATED,
         envelope(111, DeviceRequest::SystemCapabilities),
     );
     assert_eq!(
@@ -484,7 +484,7 @@ fn unavailable_service_is_not_advertised_or_called_for_status() {
 
     let status = super::dispatch(
         &mut port,
-        authenticated(1, Permissions::READ_SUBMISSION_STATUS),
+        &authenticated(1, Permissions::READ_SUBMISSION_STATUS),
         envelope(
             112,
             DeviceRequest::SubmissionStatus {
@@ -665,7 +665,7 @@ fn unavailable_service_rejects_mutation_before_acceptance() {
     let mut port = UnavailablePort::default();
     let response = super::dispatch(
         &mut port,
-        submit_context(1),
+        &submit_context(1),
         envelope(118, submit_request(b"unavailable", 2)),
     );
     assert_eq!(
@@ -974,7 +974,7 @@ fn wrong_journal_binding_is_internal_and_touches_no_storage() {
     };
     let response = super::dispatch(
         &mut port,
-        submit_context(1),
+        &submit_context(1),
         envelope(60, submit_request(b"wrong-backend", 2)),
     );
 

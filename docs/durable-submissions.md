@@ -7,9 +7,10 @@ authenticated device-API dispatch implemented; resident E290 operation-scoped
 flash/runtime coordinator implemented; isolated powered journal clean-path/
 software-reset HIL passed on board E9:44; the 25-test E290 host suite qualifies
 the one-entry complete LoRa-first software composition and ADR 0005 active-owner
-fail-stop. Portable API framing, the USB-qualification session core, and the
-boot-lifetime job handoff are qualified; live external admission remains
-blocked by the absent credential authority, firmware composition, and bearer.
+fail-stop. Portable API framing, immutable credential authority, the USB-
+qualification session core, and the boot-lifetime job handoff are qualified;
+live external admission remains blocked by durable authorization provenance,
+credential persistence/pairing, firmware composition, and a bearer.
 Controlled power-cut durability, projector
 retirement, journal retention, endurance/soak, and at-rest encryption remain
 unqualified.
@@ -80,8 +81,9 @@ flowchart LR
     Framing --> Session["portable qualification session (implemented, not composed)"]
     Session --> Handoff["portable job handoff (implemented)"]
     Handoff --> API["portable authenticated API adapter (implemented)"]
-    Authority["credential authority (not implemented)"] --> Session
+    Authority["immutable credential authority (implemented)"] --> Session
     Authority --> API
+    CredentialStore["credential persistence/pairing (not implemented)"] --> Authority
     API -. "firmware composition absent" .-> Runtime["resident portable submission runtime"]
     Coordinator["E290 sole-flash coordinator (resident)"] <--> Runtime
     Runtime <--> Store["portable sole storage actor (implemented)"]
@@ -301,8 +303,9 @@ The projector cross-checks the preparation and authorized-byte digests and
 lengths; repeated fan-out observations are idempotent only when all durable
 packet metadata is identical. The E290 composition implements this ownership
 path under a host-qualified one-entry cap. Production remains externally
-unreachable only because no credential authority, firmware lane, or bearer is
-composed around the portable session core.
+unreachable because durable authorization provenance, credential persistence/
+pairing, a firmware lane, and a bearer are not composed around the portable
+authority/session core.
 
 Terminal outcomes map as follows:
 
@@ -490,10 +493,11 @@ LXMF/NomadNet/UI services without redefining the durable protocol.
    the wrong-binding post-frame `ActiveOwnerFailStopped` path with queued
    ordinary work and no later host-radio operation. The one-entry cap is a
    qualified composition profile, not product capacity.
-4. Compose the implemented framing, qualification-session core, and boot-
-   lifetime job handoff between the authenticated device-API adapter and
-   runtime, then add credential authority/provisioning and a firmware USB
-   bearer. Those are the only missing edges for live external admission.
+4. Add durable authorization provenance and persistent credential provisioning/
+   pairing, then compose the implemented authority, framing, qualification-
+   session core, and boot-lifetime job handoff between the authenticated device-
+   API adapter and runtime with a firmware USB bearer. Those are the missing
+   edges for live external admission.
    Keep the local client API distinct from the node's Reticulum interface
    selection. No second interface is required; later Reticulum transports use
    the same transport-neutral runtime and router contract.

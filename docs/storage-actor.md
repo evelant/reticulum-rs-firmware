@@ -7,10 +7,10 @@ orchestration with the same operation-scoped access. The E290 now hosts both in
 a resident sole-flash coordinator beside the transport-neutral node supervisor
 and composes the exact authorized-frame request/durable-echo handoff. That
 LoRa-first software composition and ADR 0005's interface-local active-owner
-fail-stop now pass cross-layer host tests. Portable API framing, the
-qualification-session core, and job handoff are qualified; live external
-admission remains blocked only by the absent credential authority, firmware
-composition, and a bearer; integrated
+fail-stop now pass cross-layer host tests. Portable API framing, immutable
+credential authority, the qualification-session core, and job handoff are
+qualified; live external admission remains blocked by durable authorization
+provenance, credential persistence/pairing, firmware composition, and a bearer; integrated
 powered-fault qualification remains open.
 
 ## Ownership boundary

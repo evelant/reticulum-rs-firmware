@@ -587,7 +587,7 @@ fn output_buffer_is_bounded() {
 fn authorization_uses_separate_trusted_context() {
     let capabilities = DeviceRequest::SystemCapabilities;
     assert_eq!(
-        authorize_request(DispatchContext::UNAUTHENTICATED, &capabilities),
+        authorize_request(&DispatchContext::UNAUTHENTICATED, &capabilities),
         Ok(())
     );
 
@@ -595,13 +595,13 @@ fn authorization_uses_separate_trusted_context() {
         id: SubmissionId(1),
     };
     assert_eq!(
-        authorize_request(DispatchContext::UNAUTHENTICATED, &status),
+        authorize_request(&DispatchContext::UNAUTHENTICATED, &status),
         Err(AuthorizationError::AuthenticationRequired)
     );
     let principal = PrincipalId([0x44; 16]);
     assert_eq!(
         authorize_request(
-            DispatchContext::authenticated(principal, Permissions::NONE),
+            &DispatchContext::authenticated(principal, Permissions::NONE),
             &status,
         ),
         Err(AuthorizationError::PermissionDenied(
@@ -610,7 +610,7 @@ fn authorization_uses_separate_trusted_context() {
     );
     assert_eq!(
         authorize_request(
-            DispatchContext::authenticated(principal, Permissions::READ_SUBMISSION_STATUS),
+            &DispatchContext::authenticated(principal, Permissions::READ_SUBMISSION_STATUS),
             &status,
         ),
         Ok(())
@@ -711,13 +711,13 @@ fn experimental_submit_is_mutating_and_requires_auth_and_permission() {
     let request = submit_request(b"abc").request;
     assert!(request.is_mutating());
     assert_eq!(
-        authorize_request(DispatchContext::UNAUTHENTICATED, &request),
+        authorize_request(&DispatchContext::UNAUTHENTICATED, &request),
         Err(AuthorizationError::AuthenticationRequired)
     );
     let principal = PrincipalId([0x55; 16]);
     assert_eq!(
         authorize_request(
-            DispatchContext::authenticated(principal, Permissions::NONE),
+            &DispatchContext::authenticated(principal, Permissions::NONE),
             &request,
         ),
         Err(AuthorizationError::PermissionDenied(
@@ -726,7 +726,7 @@ fn experimental_submit_is_mutating_and_requires_auth_and_permission() {
     );
     assert_eq!(
         authorize_request(
-            DispatchContext::authenticated(principal, Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA,),
+            &DispatchContext::authenticated(principal, Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA,),
             &request,
         ),
         Ok(())

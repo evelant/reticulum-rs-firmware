@@ -302,10 +302,14 @@ USB-qualification session server, and a depth-one boot-lifetime authenticated-
 job handoff now define the portable edge, including mutual PSK proofs,
 directional tags, exact sequences, partial-TX ownership, reconnect epochs and
 stale-reply handling. Independent Python vectors freeze the transcript and wire
-records. No credential authority, firmware job lane or USB/BLE/Wi-Fi bearer
-invokes the adapter yet. The accepted authentication and USB ownership contract
-is recorded in
-[ADR 0006](docs/adr/0006-authenticated-local-api-bearer.md). Default and
+records. A separate allocation-free immutable credential authority now owns the
+shared ID/generation types, validates fixed `Pending`/`Active`/PSK-free
+`Revoked` records, selects zeroizing handshake material, and revalidates grants
+through a borrowing dispatch lease. It has no persistent store or pairing
+manager, and no firmware job lane or USB/BLE/Wi-Fi bearer invokes the adapter
+yet. The accepted authentication, authority and USB ownership contracts are
+recorded in [ADR 0006](docs/adr/0006-authenticated-local-api-bearer.md) and
+[ADR 0007](docs/adr/0007-device-api-credential-authority.md). Default and
 experimental host tests/clippy plus the corresponding ESP32-S3 Xtensa checks
 pass.
 
@@ -341,9 +345,10 @@ DATA durability gate, and ADR 0005 failure isolation are now qualified together
 in the host composition harness, but remain unqualified on powered E290
 hardware. Device-API dispatch is a
 separate portable integration boundary: the target-safe authenticated adapter,
-COBS framing, qualification-session core, boot-lifetime job handoff, and E290
-`ProductStorageCoordinator` port implementation are compiled, but no credential
-authority, external firmware lane, or USB/BLE/Wi-Fi bearer serves through them.
+COBS framing, immutable credential authority, qualification-session core, boot-
+lifetime job handoff, and E290 `ProductStorageCoordinator` port implementation
+are compiled, but no persistent credential provisioning/pairing, external
+firmware lane, or USB/BLE/Wi-Fi bearer serves through them.
 The legacy `TxSupervisor` remains a separate RF-inert test aggregate. The permanent
 `NodeInterfaceSupervisor` now owns the router, DATA and ordinary coordinators,
 and both permit-service families; the first permanent E290 image composes it
@@ -397,11 +402,13 @@ The DATA router, both permit-only services and permanent aggregate are now
 connected to the dispatcher, sole-Rete owner, timed RNode RX and one E290 LoRa
 actor in the first permanent build-verified target. Its exact authorized-frame
 durability handoff and ADR 0005 active-owner fail-stop now pass cross-layer host
-composition tests. Live external admission is blocked by the absent credential
-authority, firmware composition, and bearer—not by another session-crypto,
-durability-policy or cap qualification. The next software slice is that
-credential-backed USB-to-LoRa edge, followed by durable configuration/message
-hosting and client delivery.
+composition tests. Live external admission is blocked by credential
+persistence/pairing, firmware composition, and bearer—not by another semantic
+authority, session-crypto, durability-policy or cap qualification. The next
+software slice resolves the durable authorization-provenance schema, then adds
+a recoverable credential store and bounded physical-presence pairing policy,
+followed by that credential-backed USB-to-LoRa edge and durable configuration/
+message hosting and client delivery.
 The node-side routing
 boundary remains interface-neutral so additional Reticulum links can be added
 later through adapters without rewriting the LoRa actor or protocol owner; no
@@ -416,6 +423,9 @@ second transport is required to qualify the first LoRa vertical slice.
 - [Rete provisional-foundation decision](docs/adr/0002-rete-provisional-foundation.md)
 - [LoRa-first heterogeneous-interface decision](docs/adr/0003-lora-first-interface-fabric.md)
 - [Sole-flash coordinator decision](docs/adr/0004-sole-flash-coordinator.md)
+- [Active DATA durability fail-stop decision](docs/adr/0005-active-data-durability-fail-stop.md)
+- [Authenticated local device-API bearer decision](docs/adr/0006-authenticated-local-api-bearer.md)
+- [Device-API credential authority decision](docs/adr/0007-device-api-credential-authority.md)
 - [Transport-neutral interface registry and router](docs/interface-router.md)
 - [Phase-0 validation contract](docs/phase-0-acceptance.md)
 - [Phase-1 receive-only slice](docs/phase-1-rx-slice.md)
@@ -464,6 +474,7 @@ cargo check --locked \
   -p reticulum-rns-rete \
   -p reticulum-rns-rete-rx \
   -p reticulum-device-api \
+  -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
@@ -485,6 +496,7 @@ cargo check --locked \
   --target riscv32imac-unknown-none-elf
 cargo +esp check --locked \
   -p reticulum-device-api \
+  -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \

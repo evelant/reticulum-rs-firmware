@@ -31,12 +31,13 @@ mod protocol;
 mod server;
 
 pub use protocol::{
-    BearerBinding, ClientHello, CredentialGeneration, CredentialId, DeviceId, HandshakeRecordError,
-    PROTOCOL_MAJOR, PROTOCOL_MINOR, QUALIFICATION_SUITE, RECORD_KIND_CLIENT_HELLO,
-    RECORD_KIND_CLIENT_PROOF, RECORD_KIND_CLOSE, RECORD_KIND_REQUEST, RECORD_KIND_RESPONSE,
-    RECORD_KIND_SERVER_HELLO, RECORD_KIND_SERVER_PROOF, SERVER_FLAG_DEVICE_API,
-    SERVER_FLAG_INTEGRITY_ONLY, SERVER_FLAG_QUALIFICATION_ONLY, ServerHello, SessionId,
+    BearerBinding, ClientHello, DeviceId, HandshakeRecordError, PROTOCOL_MAJOR, PROTOCOL_MINOR,
+    QUALIFICATION_SUITE, RECORD_KIND_CLIENT_HELLO, RECORD_KIND_CLIENT_PROOF, RECORD_KIND_CLOSE,
+    RECORD_KIND_REQUEST, RECORD_KIND_RESPONSE, RECORD_KIND_SERVER_HELLO, RECORD_KIND_SERVER_PROOF,
+    SERVER_FLAG_DEVICE_API, SERVER_FLAG_INTEGRITY_ONLY, SERVER_FLAG_QUALIFICATION_ONLY,
+    ServerHello, SessionId,
 };
+pub use reticulum_device_api_credentials::{CredentialGeneration, CredentialId};
 pub use server::{
     ActiveCredential, AuthenticatedGrant, AuthenticatedRequest, AwaitingReply, HandshakeError,
     PendingClientProof, ReplyFlight, ReplyRouteFault, ReplyRouteFaultKind, ServerHelloFlight,

@@ -1676,6 +1676,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "reticulum-device-api-credentials"
+version = "0.1.0"
+dependencies = [
+ "reticulum-device-api",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
 name = "reticulum-device-api-framing"
 version = "0.1.0"
 
@@ -1696,8 +1705,11 @@ dependencies = [
  "hmac",
  "rand_core 0.6.4",
  "reticulum-device-api",
+ "reticulum-device-api-adapter",
+ "reticulum-device-api-credentials",
  "reticulum-device-api-framing",
  "reticulum-device-api-handoff",
+ "reticulum-storage-model",
  "sha2",
  "zeroize",
 ]

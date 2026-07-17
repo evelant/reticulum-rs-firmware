@@ -110,6 +110,7 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: >-
           cargo doc --locked
+          -p reticulum-device-api-credentials
           -p reticulum-device-api-framing
           -p reticulum-device-api-handoff
           -p reticulum-device-api-session
@@ -142,6 +143,7 @@ jobs:
         run: >-
           cargo check --locked
           -p reticulum-device-api
+          -p reticulum-device-api-credentials
           -p reticulum-device-api-framing
           -p reticulum-device-api-handoff
           -p reticulum-device-api-session
@@ -303,6 +305,7 @@ jobs:
         run: >-
           cargo +esp check --locked
           -p reticulum-device-api
+          -p reticulum-device-api-credentials
           -p reticulum-device-api-framing
           -p reticulum-device-api-handoff
           -p reticulum-device-api-session

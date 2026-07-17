@@ -92,7 +92,7 @@ pub trait SubmissionPort {
 /// manually constructed envelope cannot bypass version policy.
 pub fn dispatch<P>(
     port: &mut P,
-    context: DispatchContext,
+    context: &DispatchContext,
     envelope: RequestEnvelope<'_>,
 ) -> ResponseEnvelope
 where
@@ -118,7 +118,7 @@ where
 
 fn dispatch_authorized<P>(
     port: &mut P,
-    context: DispatchContext,
+    context: &DispatchContext,
     request: DeviceRequest<'_>,
     operation: u16,
 ) -> DeviceResponse
@@ -132,7 +132,7 @@ where
             DeviceResponse::SystemCapabilities(api::CapabilitySnapshot::for_dispatch(available))
         }
         DeviceRequest::SubmissionStatus { id } => {
-            let Some(principal) = context.principal else {
+            let Some(principal) = context.principal() else {
                 return api_error(ApiErrorCode::AuthenticationRequired, operation);
             };
             if port.availability() != CapabilityAvailability::Available {
@@ -155,7 +155,7 @@ where
             payload,
             idempotency_key,
         } => {
-            let Some(principal) = context.principal else {
+            let Some(principal) = context.principal() else {
                 return api_error(ApiErrorCode::AuthenticationRequired, operation);
             };
             if port.availability() != CapabilityAvailability::Available {

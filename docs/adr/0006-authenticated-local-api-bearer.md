@@ -1,6 +1,7 @@
 # ADR 0006: Authenticated local device-API bearer
 
-- **Status:** accepted for the qualification session core; firmware bearer pending
+- **Status:** accepted for the qualification session and portable credential
+  authority; persistence and firmware bearer pending
 - **Date:** 2026-07-17
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0003](0003-lora-first-interface-fabric.md) and
@@ -142,6 +143,21 @@ The device derives `DispatchContext` only from that authenticated record.
 Principal and permission bytes arriving from a client are never trusted.
 Reticulum identity keys are not reused for local API authentication.
 
+[ADR 0007](0007-device-api-credential-authority.md) now implements the first
+portable authority slice below the session layer. It owns a fixed 16-record,
+allocation-free immutable snapshot with globally unique nonzero generations,
+stable permission decoding, bounded audit/policy metadata, secret-bearing
+`Pending`/`Active` records and PSK-free `Revoked` tombstones. Complete snapshot
+validation precedes service. The fixed table uses constant-time ID comparison;
+only an active exact ID yields a zeroizing `SelectedCredential` consumed by the
+session handshake. Missing, pending and revoked IDs share one outward failure.
+
+This is semantic authority, not persistence. There is no credential flash
+format, product partition, mutation actor, provisioning or pairing protocol in
+the implemented slice. Replacing the immutable authority remains a future sole
+storage-owner operation performed only after a complete durable snapshot is
+committed and validated.
+
 Physical presence authorizes pairing but does not prove which local host
 process received a secret. The first lab profile explicitly trusts the
 currently connected USB host during a short, exclusive, button-confirmed
@@ -253,20 +269,40 @@ device-owned `DispatchContext`. Public logical operations such as
 `system.capabilities` require no operation permission, but they still cross an
 authenticated bearer session; “public” does not mean unauthenticated wire
 access. Immediately before accepting a state-changing request, the same
-serialized owner revalidates the required permission. Durable
-acceptance records the principal, authorized operation/policy snapshot and a
-principal-scoped idempotency key. Revocation or disconnect prevents work not
-yet accepted but does not undo an already accepted mutation.
+serialized owner revalidates the required permission. The durable acceptance
+contract requires the principal, authorized operation/policy snapshot and a
+principal-scoped idempotency key. The current schema persists only the
+principal, idempotency key and operation intent; ADR 0007 keeps the missing
+credential/generation/authority/policy provenance as an explicit gate before a
+live external mutating bearer. Revocation or disconnect prevents work not yet
+accepted but does not undo an already accepted mutation.
+
+The implemented `AuthenticatedGrant::revalidate` returns a non-cloneable
+`DispatchLease` that immutably borrows the current authority. It derives the
+principal and permissions from the exact active record, exposes them only
+through a higher-ranked synchronous callback, and remains alive through the
+immediate adapter dispatch. `DispatchContext` is no longer cloneable or
+copyable, so the exact value cannot be moved out of that callback. Its scalar
+facts remain reconstructible by trusted linked Rust code; immediate use and no
+fallback are sole-owner integration/review obligations, not an unforgeable
+capability boundary. Revalidation failure must never be downgraded to an
+unauthenticated context or invoke an adapter/storage port. The portable host
+test proves the direct authority-to-reply path and authority rejection after
+request admission; the composed firmware no-fallback/zero-port-I/O path remains
+to be proven. Cross-snapshot successor regressions separately reject
+same-generation authorization changes and silent credential removal. No
+composed firmware task yet exercises this path.
 
 A reply is delivered only to its accepting live session or retrieved later by
 the same authorized principal. Session epochs route replies; they are not
 principal identity. A stale reply is drained and discarded rather than allowed
 to enter a new session's response stream.
 
-Credentials are atomically versioned and recoverable. Rotation enrolls a
-replacement before revoking the old record. Factory reset, revocation, pairing
-timeouts/exclusivity and failure-rate limits receive explicit tests. Until
-secure boot and flash encryption are enabled, a device PSK is extractable by a
+The portable authority defines non-wrapping global revisions and the required
+rotation order: enroll a replacement before revoking the old record. Atomic,
+recoverable persistence, factory reset, pairing timeouts/exclusivity and
+failure-rate limits remain future work and require explicit tests. Until secure
+boot and flash encryption are enabled, a device PSK is extractable by a
 physical attacker and must not be described as tamper-resistant.
 
 ## Consequences
@@ -291,9 +327,16 @@ physical attacker and must not be described as tamper-resistant.
   reset-nonce, sequence gap/duplicate/overflow, wrong-session and bad-tag
   rejection, partial hello/proof/reply acknowledgement typestate, exact
   correlation matching and old-reply/new-session epoch-alias rejection.
+- Complete in the portable authority: immutable fixed-capacity snapshot
+  validation, stable permission vocabulary, constant-time active selection,
+  zeroizing handoff to session, PSK-free revocation tombstones, grant-to-lease
+  revalidation and revoke-after-admission authority rejection.
+- Remaining: composed handoff proof that rejection never falls back or invokes
+  adapter/storage port I/O.
 - Remaining: malformed established-stream policy and logical-CBOR validation in
   the bearer manager.
-- Pairing timeout, exclusive-window, revoke, rotate and factory-reset tests.
+- Remaining: durable revoke/rotate/factory-reset transactions plus pairing
+  timeout, exclusive-window and failure-rate tests.
 - Remaining: cancellation at the concrete USB RX/TX, request-admission and
   reply-channel boundaries.
 - Remaining: concrete stale-reply channel draining and idempotent retry after
@@ -306,10 +349,11 @@ physical attacker and must not be described as tamper-resistant.
 ## Deferred decisions
 
 This ADR does not select the production AEAD construction, implement the
-credential journal/authority, choose pairing timeouts and attempt-rate limits,
-compose the USB bearer manager, define a USB OTG composite descriptor, add
-WebUSB/NCM, or create any non-LoRa Reticulum packet actor. Credential authority,
-qualification pairing/rate policy and the USB bearer manager are still required
-before the authenticated USB-to-LoRa qualification path can run. Production
-AEAD and the later transport/interface decisions are not prerequisites for that
-explicitly integrity-only wired lab profile.
+credential journal/persistent actor, choose pairing timeouts and attempt-rate
+limits, resolve durable authorization-policy provenance, compose the USB bearer
+manager, define a USB OTG composite descriptor, add WebUSB/NCM, or create any
+non-LoRa Reticulum packet actor. Credential persistence, qualification
+pairing/rate policy, firmware composition and the USB bearer manager are still
+required before the authenticated USB-to-LoRa qualification path can run.
+Production AEAD and the later transport/interface decisions are not
+prerequisites for that explicitly integrity-only wired lab profile.

@@ -71,8 +71,12 @@ impl Permissions {
     /// Read submission state belonging to the authenticated principal.
     pub const READ_SUBMISSION_STATUS: Self = Self(1 << 0);
     /// Submit outbound RNS DATA through the node's transport-neutral router.
-    #[cfg(feature = "experimental-rns-data")]
+    ///
+    /// The bit remains part of the stable persisted permission vocabulary even
+    /// when this build omits the experimental operation itself.
     pub const EXPERIMENTAL_SUBMIT_RNS_DATA: Self = Self(1 << 1);
+
+    const KNOWN_BITS: u32 = Self::READ_SUBMISSION_STATUS.0 | Self::EXPERIMENTAL_SUBMIT_RNS_DATA.0;
 
     /// Whether all bits in `required` are present.
     pub const fn contains(self, required: Self) -> bool {
@@ -82,6 +86,29 @@ impl Permissions {
     /// Raw representation for session-policy adapters and diagnostics.
     pub const fn bits(self) -> u32 {
         self.0
+    }
+
+    /// Decode the stable persisted permission vocabulary without feature drift.
+    pub const fn from_bits(bits: u32) -> Result<Self, UnknownPermissionBits> {
+        let unknown = bits & !Self::KNOWN_BITS;
+        if unknown == 0 {
+            Ok(Self(bits))
+        } else {
+            Err(UnknownPermissionBits { unknown })
+        }
+    }
+}
+
+/// Persisted permission bits unknown to this device-API schema.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnknownPermissionBits {
+    unknown: u32,
+}
+
+impl UnknownPermissionBits {
+    /// Bits outside the stable schema-v1 permission vocabulary.
+    pub const fn unknown(self) -> u32 {
+        self.unknown
     }
 }
 
@@ -94,12 +121,12 @@ impl BitOr for Permissions {
 }
 
 /// Trusted authentication and authorization facts supplied out of band.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct DispatchContext {
     /// Principal derived from device-owned authenticated credential state, if any.
-    pub principal: Option<PrincipalId>,
+    principal: Option<PrincipalId>,
     /// Permissions granted to that authenticated principal.
-    pub permissions: Permissions,
+    permissions: Permissions,
 }
 
 impl DispatchContext {
@@ -115,6 +142,16 @@ impl DispatchContext {
             principal: Some(principal),
             permissions,
         }
+    }
+
+    /// Device-owned authenticated principal, if this context has one.
+    pub const fn principal(&self) -> Option<PrincipalId> {
+        self.principal
+    }
+
+    /// Device-owned permissions bound to this dispatch attempt.
+    pub const fn permissions(&self) -> Permissions {
+        self.permissions
     }
 }
 
@@ -223,7 +260,7 @@ pub struct RequestEnvelope<'a> {
 /// The principal is intentionally absent from [`RequestEnvelope`]. Callers
 /// must obtain `context` from their separately authenticated session.
 pub const fn authorize_request(
-    context: DispatchContext,
+    context: &DispatchContext,
     request: &DeviceRequest<'_>,
 ) -> Result<(), AuthorizationError> {
     let Some(required) = request.required_permission() else {

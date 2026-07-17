@@ -1,5 +1,6 @@
 //! Canonical qualification-handshake messages and record validation.
 
+use reticulum_device_api_credentials::{CredentialGeneration, CredentialId};
 use reticulum_device_api_framing::{AUTH_TAG_LENGTH, PAYLOAD_CAPACITY, PayloadLength, Record};
 
 /// Qualification-session protocol major version.
@@ -67,38 +68,6 @@ impl BearerBinding {
 
     pub(crate) const fn wire(self) -> u8 {
         self as u8
-    }
-}
-
-/// Opaque device-owned paired-client credential identifier.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct CredentialId([u8; 16]);
-
-impl CredentialId {
-    /// Construct an opaque 128-bit credential identifier.
-    pub const fn new(bytes: [u8; 16]) -> Self {
-        Self(bytes)
-    }
-
-    /// Borrow the canonical credential identifier bytes.
-    pub const fn as_bytes(&self) -> &[u8; 16] {
-        &self.0
-    }
-}
-
-/// Non-repeating version of one device-owned credential authorization record.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct CredentialGeneration(u64);
-
-impl CredentialGeneration {
-    /// Construct a credential generation.
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    /// Return the generation value.
-    pub const fn get(self) -> u64 {
-        self.0
     }
 }
 
@@ -176,7 +145,7 @@ impl ClientHello {
         nonce.copy_from_slice(&payload[24..56]);
         Ok(Self {
             bearer,
-            credential_id: CredentialId(credential_id),
+            credential_id: CredentialId::new(credential_id),
             nonce,
         })
     }
@@ -269,7 +238,7 @@ impl ServerHello {
         let mut nonce = [0_u8; 32];
         nonce.copy_from_slice(&payload[24..56]);
         let credential_generation =
-            CredentialGeneration(u64::from_le_bytes(payload[56..64].try_into().map_err(
+            CredentialGeneration::new(u64::from_le_bytes(payload[56..64].try_into().map_err(
                 |_| HandshakeRecordError::WrongPayloadLength {
                     expected: SERVER_HELLO_LENGTH,
                     observed: payload.len(),

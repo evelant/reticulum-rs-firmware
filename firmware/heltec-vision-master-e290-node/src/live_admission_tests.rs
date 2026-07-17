@@ -76,7 +76,7 @@ fn authenticated_submission_crosses_lora_policy_and_scripted_radio_durability() 
 
     let unauthenticated = dispatch(
         &mut service,
-        DispatchContext::UNAUTHENTICATED,
+        &DispatchContext::UNAUTHENTICATED,
         submit_request(1, destination, b"live LoRa submission", 0x31),
     );
     assert_error(
@@ -87,7 +87,7 @@ fn authenticated_submission_crosses_lora_policy_and_scripted_radio_durability() 
 
     let denied = dispatch(
         &mut service,
-        DispatchContext::authenticated(OWNER, Permissions::READ_SUBMISSION_STATUS),
+        &DispatchContext::authenticated(OWNER, Permissions::READ_SUBMISSION_STATUS),
         submit_request(2, destination, b"live LoRa submission", 0x31),
     );
     assert_error(denied.response, ApiErrorCode::PermissionDenied);
@@ -95,7 +95,7 @@ fn authenticated_submission_crosses_lora_policy_and_scripted_radio_durability() 
 
     let accepted = dispatch(
         &mut service,
-        full_context(OWNER),
+        &full_context(OWNER),
         submit_request(3, destination, b"live LoRa submission", 0x31),
     );
     let api_id = accepted_id(accepted.response);
@@ -107,7 +107,7 @@ fn authenticated_submission_crosses_lora_policy_and_scripted_radio_durability() 
     let after_accept_writes = service.write_attempts();
     let second_novel = dispatch(
         &mut service,
-        full_context(OWNER),
+        &full_context(OWNER),
         submit_request(4, destination, b"second novel submission", 0x32),
     );
     assert_error(second_novel.response, ApiErrorCode::CapacityExhausted);
@@ -195,7 +195,11 @@ fn authenticated_submission_crosses_lora_policy_and_scripted_radio_durability() 
         Some(LifecycleState::AwaitingDelivery(_))
     ));
 
-    let awaiting = dispatch(&mut service, full_context(OWNER), status_request(5, api_id));
+    let awaiting = dispatch(
+        &mut service,
+        &full_context(OWNER),
+        status_request(5, api_id),
+    );
     assert!(matches!(
         awaiting.response,
         DeviceResponse::SubmissionStatus(status)
@@ -238,7 +242,11 @@ fn authenticated_submission_crosses_lora_policy_and_scripted_radio_durability() 
     );
     assert_eq!(service.pending_acknowledgements(), 0);
 
-    let final_status = dispatch(&mut service, full_context(OWNER), status_request(6, api_id));
+    let final_status = dispatch(
+        &mut service,
+        &full_context(OWNER),
+        status_request(6, api_id),
+    );
     assert!(matches!(
         final_status.response,
         DeviceResponse::SubmissionStatus(status)
@@ -247,7 +255,7 @@ fn authenticated_submission_crosses_lora_policy_and_scripted_radio_durability() 
     ));
     let foreign_status = dispatch(
         &mut service,
-        full_context(FOREIGN),
+        &full_context(FOREIGN),
         status_request(7, api_id),
     );
     assert_error(foreign_status.response, ApiErrorCode::NotFound);
@@ -262,7 +270,7 @@ fn authenticated_submission_crosses_lora_policy_and_scripted_radio_durability() 
     ));
     let after_remount = dispatch(
         &mut remounted,
-        full_context(OWNER),
+        &full_context(OWNER),
         status_request(8, api_id),
     );
     assert!(matches!(
@@ -280,7 +288,7 @@ fn permanent_post_frame_storage_failure_fail_stops_lora_with_all_owners_retained
     let destination = *system.destination.as_bytes();
     let accepted = dispatch(
         &mut service,
-        full_context(OWNER),
+        &full_context(OWNER),
         submit_request(20, destination, b"fail-stop frame", 0x51),
     );
     let api_id = accepted_id(accepted.response);
