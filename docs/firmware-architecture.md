@@ -112,6 +112,7 @@ Claims in READMEs were not treated as proof of embedded portability.
 | `reticulum-storage-actor`, host and ESP32-S3 Xtensa | Pass | The portable sole owner mounts and fully replays before service, owns the NOR journal/live index/sole projector, projects node/TX observations without mutable-projector escape, durably finalizes conservative boot recovery, publishes only after append or exact equivalence, autonomously reconciles one ambiguous mutation, and latches invariant faults closed; 17 focused host tests cover acceptance, boot recovery, observation/acknowledgement ordering, projector identity, lost replies, compaction recovery and fault retention, with strict host and Xtensa clippy/checks passing |
 | `reticulum-device-api-adapter`, default/host-sim/dependency-unified host and default ESP32-S3 Xtensa | Pass | The allocation-free authenticated dispatcher exposes public capabilities and principal-scoped status by default, fails status closed during actor ambiguity/fault, and restricts advertised operations to its local build; its host-only feature copies experimental borrowed payloads into actor-owned durable acceptance and maps replay/conflict/capacity/ambiguity to stable API results. Focused tests and strict clippy pass in all three host profiles; the default target graph passes Xtensa checks and compile-forbids adapter `host-sim` |
 | `reticulum-heltec-tracker-v2-storage-hil`, ESP32-S3 Xtensa | Pass (target and powered clean-path HIL) | On E9:44, source `7b47113` passed strict continuous two-boot serial verification of A1 format, five appends, no-mutation retry/conflict, B2 compaction and `0/0` B2 replay after `CoreSw`; independent raw-dump replay confirmed generation 2, five records/slots, one revision-4 `Delivered` submission, erased A manifest and erased B tail. Controlled power cuts, endurance/soak, encryption and product-runtime integration remain open |
+| `reticulum-board-heltec-tracker-v2-radio`, host and ESP32-S3 Xtensa | Pass (product boundary plus powered regression) | The product-named sibling owns the qualified SX1262/FEM RX, CAD and one-frame TX mechanics under explicitly selected opaque NA915 configurations; its calibrated product value is invariant under Cargo features and the diagnostic near-field value is separately exposed and selected. Nine default-profile tests plus one diagnostic-profile test cover the exact PA path, arm, fail-closed ownership, CAD cleanup and final-IRQ timestamped RX, strict normal/diagnostic Clippy passes, and a post-extraction same-image run repeated the signed-announce/encrypted-DATA/proof exchange on both boards. RNode split dispatch, CSMA/backoff, regional authorization and permanent firmware integration remain outside this crate |
 | `reticulum-heltec-tracker-v2-tx-hil --features semantic-announce-hil`, ESP32-S3 to RNode 1.86 plus pinned Python RNS 1.3.8 | Pass (powered conformance HIL) | E9 emitted one deterministic signed ANNOUNCE and became radio-inert; E0 delivered exactly one 167-byte ordinary RNode packet and Python validated its first-hop signature and destination binding. This does not exercise a product identity, full Reticulum instance, live transport admission, node-core RX/router ownership or LXMF |
 | `reticulum-heltec-tracker-v2-tx-hil --features semantic-roundtrip-hil`, same ESP32-S3 image on E9/E0 | Pass (powered product-surface Rete HIL) | The two roles exchanged signed ANNOUNCEs, encrypted DATA and a delivery proof through RNode framing and the real radio owner; the exact DATA receipt reached `Delivered`, the table ended empty, each board completed two TX operations and both shut down. The mode uses hardware TRNG but fixed public HIL identities, excludes storage/API/node-core/LXMF, and is not durability, multi-hop, sustained-memory or production-policy evidence |
 | `reference/rete/examples/esp32s3`: `cargo +esp check --release` | Pass with warnings | Current bare-metal ESP32-S3/SX1262/Wi-Fi integration compiles with the installed ESP toolchain; it targets Heltec WiFi LoRa 32 V3/V4 pins, not the Tracker BSP |
@@ -351,19 +352,22 @@ qualify controlled power cuts, endurance/soak, at-rest encryption, or a product
 runtime. Because the HIL calls the journal directly, it also does not qualify
 the actor on hardware.
 
-The next product-code slice promotes the proven Rete-owner pattern into the
-permanent firmware and connects it to the sole radio owner, portable storage
-actor and authenticated API adapter. That permanent node task must own ordinary
-Rete ingress/actions and preserve separate RNode-tick and Rete-seconds time
-domains. The storage task must connect the product `esp-storage` partition and
-boot gates; the API requires framing/session and an initial transport. A send
-becomes visible only after durable acceptance, and proof/timeout acknowledgement
-waits for durable projection. No product transport or runtime serves through
-these boundaries yet. Current product-candidate graphs remain TX-free only
-because this integration is absent. The two antenna-equipped boards remain
-cleared for NA915 development TX/RX, so the permanent-path integration image
-may reproduce the round trip directly; another comparison HIL is not the next
-architecture gate.
+The qualified SX1262/FEM mechanics now live in the product-named
+`reticulum-board-heltec-tracker-v2-radio` sibling while the frozen receive-only
+crate remains incapable of TX/CAD under every feature set. The next
+product-code slice gives ordinary Rete actions fixed packet ownership, builds
+the real dispatcher around one CAD contest and one/two-frame atomic dispatch,
+then links that owner with the permanent node task. The permanent runtime must
+preserve separate RNode-tick and Rete-seconds time domains. The storage task
+must connect the product `esp-storage` partition and boot gates; the API
+requires framing/session and an initial transport. A send becomes visible only
+after durable acceptance, and proof/timeout acknowledgement waits for durable
+projection. No product transport or runtime serves through these boundaries
+yet. Current product-candidate graphs remain TX-free only because this
+integration is absent. The two antenna-equipped boards remain cleared for
+NA915 development TX/RX, so the permanent-path integration image may reproduce
+the round trip directly; another comparison HIL is not the next architecture
+gate.
 
 LXMF message and sibling-attempt state must ultimately be persisted before an
 outward terminal event can be lost. The future device-API intent queue remains
@@ -599,10 +603,11 @@ crates/
   storage-model/                  # semantic records, index and complete replay
   submission-projector/           # persist-before-ack TX correlation
   storage-actor/                  # sole NOR/index/projector persistence owner
-  radio-interface/                # RNode-compatible split framing and CSMA
+  radio-interface/                # RNode-compatible framing and timed reassembly
   radio-lora-phy/                 # generic lora-phy adapter
   board-api/                      # Board, Power, Display, Entropy traits
   board-heltec-tracker-v2/        # pins, FEM, display, battery, Vext
+  board-heltec-tracker-v2-radio/  # qualified SX1262/FEM RX, CAD and one-frame TX
   tx-handoff/                     # bounded Embassy TX ownership edge
   tx-dispatch/                    # persistent RF-inert packet-interface edge
   tx-supervisor/                  # permanent RF-inert TX aggregate/run loop

@@ -425,6 +425,8 @@ fn graph_policy() -> ExitCode {
             .map_err(|error| format!("firmware receive-only dependency boundary: {error}"))?;
         validate_portable_layer_dependency_boundary(&json, &root)
             .map_err(|error| format!("portable layer dependency boundary: {error}"))?;
+        validate_tracker_radio_dependency_boundary(&json, &root)
+            .map_err(|error| format!("Tracker bidirectional radio dependency boundary: {error}"))?;
         validate_tx_handoff_dependency_boundary(&json, &root)
             .map_err(|error| format!("TX handoff dependency boundary: {error}"))?;
         validate_tx_dispatch_dependency_boundary(&json, &root)
@@ -460,6 +462,7 @@ fn graph_policy() -> ExitCode {
              source/revision; esp-rtos and lora-phy resolve only to their reviewed local patches, \
              and each checked vendor inventory reconstructs the pristine registry source; the device \
              API and node core remain mutually isolated and free of direct platform dependencies; \
+             the Tracker bidirectional radio has only its reviewed board, framing, HAL, critical-section and patched lora-phy edges while the historical TX-HIL crate is a one-edge compatibility facade; \
              the TX handoff, dispatcher and supervisor use only their reviewed node-core, \
              handoff, dispatcher, Embassy Sync/Futures/Time, rand_core and SHA-256 dependency \
              edges; the durable storage model uses only reviewed minicbor and SHA-256 edges; \
@@ -474,10 +477,11 @@ fn graph_policy() -> ExitCode {
     }
 }
 
-const PRODUCT_GRAPH_FORBIDDEN: [&str; 13] = [
+const PRODUCT_GRAPH_FORBIDDEN: [&str; 14] = [
     "leviculum-core",
     "rete-lxmf",
     "lxmf-rs",
+    "reticulum-board-heltec-tracker-v2-radio",
     "reticulum-board-heltec-tracker-v2-tx-hil",
     "reticulum-device-api-adapter",
     "reticulum-node-core",
@@ -501,7 +505,7 @@ fn validate_product_graph_boundary(label: &str, tree: &str) -> Result<(), String
     Ok(())
 }
 
-const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 18] = [
+const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 19] = [
     "embassy-executor",
     "esp-radio",
     "lora-modulation",
@@ -509,6 +513,7 @@ const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 18] = [
     "rete-core",
     "rete-stack",
     "rete-transport",
+    "reticulum-board-heltec-tracker-v2-radio",
     "reticulum-board-heltec-tracker-v2-tx-hil",
     "reticulum-board-heltec-tracker-v2",
     "reticulum-device-api-adapter",
@@ -522,7 +527,8 @@ const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 18] = [
     "reticulum-tx-supervisor",
 ];
 
-const TX_HIL_GRAPH_REQUIRED: [&str; 2] = [
+const TX_HIL_GRAPH_REQUIRED: [&str; 3] = [
+    "reticulum-board-heltec-tracker-v2-radio",
     "reticulum-board-heltec-tracker-v2-tx-hil",
     "reticulum-radio-interface",
 ];
@@ -564,7 +570,8 @@ fn validate_tx_hil_graph_boundary(tree: &str) -> Result<(), String> {
     Ok(())
 }
 
-const SEMANTIC_TX_HIL_GRAPH_REQUIRED: [&str; 6] = [
+const SEMANTIC_TX_HIL_GRAPH_REQUIRED: [&str; 7] = [
+    "reticulum-board-heltec-tracker-v2-radio",
     "reticulum-board-heltec-tracker-v2-tx-hil",
     "reticulum-radio-interface",
     "reticulum-rns-rete",
@@ -815,6 +822,237 @@ fn validate_portable_layer_dependency_boundary(
                 }
             }
         }
+    }
+
+    Ok(())
+}
+
+fn validate_tracker_radio_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+
+    let radio_name = "reticulum-board-heltec-tracker-v2-radio";
+    let radio_manifest = workspace
+        .join("crates/board-heltec-tracker-v2-radio")
+        .join("Cargo.toml");
+    let radios = packages
+        .iter()
+        .filter(|package| {
+            package["name"].as_str() == Some(radio_name)
+                && package["source"].is_null()
+                && package["manifest_path"].as_str().map(Path::new)
+                    == Some(radio_manifest.as_path())
+        })
+        .collect::<Vec<_>>();
+    if radios.len() != 1 {
+        return Err(format!(
+            "expected exactly one local {radio_name} package at {}, found {}",
+            radio_manifest.display(),
+            radios.len()
+        ));
+    }
+    let radio = radios[0];
+    let features = radio["features"]
+        .as_object()
+        .ok_or_else(|| format!("{radio_name} package has no feature map"))?;
+    if features.len() != 2
+        || features
+            .get("default")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|values| !values.is_empty())
+        || features
+            .get("near-field-attenuation")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|values| !values.is_empty())
+    {
+        return Err(format!(
+            "{radio_name} must expose only empty default and explicit near-field-attenuation features"
+        ));
+    }
+    let dependencies = radio["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{radio_name} package has no dependency array"))?;
+    if dependencies.len() != 7 {
+        return Err(format!(
+            "{radio_name} must have exactly six reviewed normal dependencies and one test-only critical-section edge, found {}",
+            dependencies.len()
+        ));
+    }
+    for (name, requirement, uses_default_features) in [
+        ("critical-section", "=1.2.0", false),
+        ("embedded-hal", "=1.0.0", true),
+        ("embedded-hal-async", "=1.0.0", true),
+        ("lora-phy", "=3.0.1", false),
+    ] {
+        let matches = dependencies
+            .iter()
+            .filter(|dependency| {
+                dependency["name"].as_str() == Some(name) && dependency["kind"].is_null()
+            })
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err(format!(
+                "{radio_name} must have exactly one normal {name} dependency"
+            ));
+        }
+        let dependency = matches[0];
+        if dependency["req"].as_str() != Some(requirement)
+            || dependency["source"].as_str()
+                != Some("registry+https://github.com/rust-lang/crates.io-index")
+            || !dependency["path"].is_null()
+            || dependency["optional"].as_bool() != Some(false)
+            || !dependency["rename"].is_null()
+            || !dependency["target"].is_null()
+            || dependency["uses_default_features"].as_bool() != Some(uses_default_features)
+            || dependency["features"]
+                .as_array()
+                .is_none_or(|values| !values.is_empty())
+        {
+            return Err(format!(
+                "{radio_name} has unreviewed normal {name} dependency shape"
+            ));
+        }
+    }
+    for (name, relative_path) in [
+        (
+            "reticulum-board-heltec-tracker-v2",
+            "crates/board-heltec-tracker-v2",
+        ),
+        ("reticulum-radio-interface", "crates/radio-interface"),
+    ] {
+        let expected_path = workspace.join(relative_path);
+        let matches = dependencies
+            .iter()
+            .filter(|dependency| dependency["name"].as_str() == Some(name))
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err(format!(
+                "{radio_name} must have exactly one local {name} dependency"
+            ));
+        }
+        let dependency = matches[0];
+        if dependency["req"].as_str() != Some("*")
+            || !dependency["source"].is_null()
+            || dependency["path"].as_str().map(Path::new) != Some(expected_path.as_path())
+            || !dependency["kind"].is_null()
+            || dependency["optional"].as_bool() != Some(false)
+            || !dependency["rename"].is_null()
+            || !dependency["target"].is_null()
+            || dependency["uses_default_features"].as_bool() != Some(true)
+            || dependency["features"]
+                .as_array()
+                .is_none_or(|values| !values.is_empty())
+        {
+            return Err(format!(
+                "{radio_name} has unreviewed local {name} dependency shape"
+            ));
+        }
+    }
+    let dev_critical = dependencies
+        .iter()
+        .filter(|dependency| {
+            dependency["name"].as_str() == Some("critical-section")
+                && dependency["kind"].as_str() == Some("dev")
+        })
+        .collect::<Vec<_>>();
+    if dev_critical.len() != 1 {
+        return Err(format!(
+            "{radio_name} must have exactly one test-only critical-section dependency"
+        ));
+    }
+    let dev_critical = dev_critical[0];
+    if dev_critical["req"].as_str() != Some("=1.2.0")
+        || dev_critical["source"].as_str()
+            != Some("registry+https://github.com/rust-lang/crates.io-index")
+        || !dev_critical["path"].is_null()
+        || dev_critical["optional"].as_bool() != Some(false)
+        || !dev_critical["rename"].is_null()
+        || !dev_critical["target"].is_null()
+        || dev_critical["uses_default_features"].as_bool() != Some(false)
+        || dev_critical["features"]
+            .as_array()
+            .is_none_or(|values| values.len() != 1 || values[0].as_str() != Some("std"))
+    {
+        return Err(format!(
+            "{radio_name} has unreviewed test-only critical-section dependency shape"
+        ));
+    }
+
+    let facade_name = "reticulum-board-heltec-tracker-v2-tx-hil";
+    let facade_manifest = workspace
+        .join("crates/board-heltec-tracker-v2-tx-hil")
+        .join("Cargo.toml");
+    let facades = packages
+        .iter()
+        .filter(|package| {
+            package["name"].as_str() == Some(facade_name)
+                && package["source"].is_null()
+                && package["manifest_path"].as_str().map(Path::new)
+                    == Some(facade_manifest.as_path())
+        })
+        .collect::<Vec<_>>();
+    if facades.len() != 1 {
+        return Err(format!(
+            "expected exactly one local {facade_name} package at {}, found {}",
+            facade_manifest.display(),
+            facades.len()
+        ));
+    }
+    let facade = facades[0];
+    let facade_features = facade["features"]
+        .as_object()
+        .ok_or_else(|| format!("{facade_name} package has no feature map"))?;
+    if facade_features.len() != 2
+        || facade_features
+            .get("default")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|values| !values.is_empty())
+        || facade_features
+            .get("near-field-attenuation-hil")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|values| {
+                values.len() != 1
+                    || values[0].as_str()
+                        != Some("reticulum-board-heltec-tracker-v2-radio/near-field-attenuation")
+            })
+    {
+        return Err(format!(
+            "{facade_name} must expose only its exact product-radio feature forward"
+        ));
+    }
+    let facade_dependencies = facade["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{facade_name} package has no dependency array"))?;
+    let radio_path = workspace.join("crates/board-heltec-tracker-v2-radio");
+    if facade_dependencies.len() != 1 {
+        return Err(format!(
+            "{facade_name} must have exactly one product-radio dependency, found {}",
+            facade_dependencies.len()
+        ));
+    }
+    let dependency = &facade_dependencies[0];
+    if dependency["name"].as_str() != Some(radio_name)
+        || dependency["req"].as_str() != Some("*")
+        || !dependency["source"].is_null()
+        || dependency["path"].as_str().map(Path::new) != Some(radio_path.as_path())
+        || !dependency["kind"].is_null()
+        || dependency["optional"].as_bool() != Some(false)
+        || !dependency["rename"].is_null()
+        || !dependency["target"].is_null()
+        || dependency["uses_default_features"].as_bool() != Some(true)
+        || dependency["features"]
+            .as_array()
+            .is_none_or(|values| !values.is_empty())
+    {
+        return Err(format!(
+            "{facade_name} has an unreviewed product-radio dependency shape"
+        ));
     }
 
     Ok(())
@@ -2333,6 +2571,7 @@ fn validate_firmware_dependency_boundary(
         "rete-core",
         "rete-stack",
         "rete-transport",
+        "reticulum-board-heltec-tracker-v2-radio",
         "reticulum-board-heltec-tracker-v2-tx-hil",
         "reticulum-device-api-adapter",
         "reticulum-node-core",
@@ -2370,7 +2609,8 @@ fn validate_firmware_dependency_boundary(
             && package_names.get(package_id).is_some_and(|name| {
                 matches!(
                     *name,
-                    "reticulum-board-heltec-tracker-v2-tx-hil"
+                    "reticulum-board-heltec-tracker-v2-radio"
+                        | "reticulum-board-heltec-tracker-v2-tx-hil"
                         | "reticulum-device-api-adapter"
                         | "reticulum-node-core"
                         | "reticulum-storage-actor"
@@ -4198,6 +4438,7 @@ mod tests {
         .unwrap();
 
         for forbidden in [
+            "reticulum-board-heltec-tracker-v2-radio",
             "reticulum-board-heltec-tracker-v2-tx-hil",
             "reticulum-device-api-adapter",
             "reticulum-node-core",
@@ -4239,6 +4480,7 @@ mod tests {
     fn hazardous_default_tx_hil_graph_requires_its_owner_and_excludes_protocol_stack() {
         let valid = "reticulum-heltec-tracker-v2-tx-hil v0.1.0\n\
                      ├── reticulum-board-heltec-tracker-v2-tx-hil v0.1.0\n\
+                     │   └── reticulum-board-heltec-tracker-v2-radio v0.1.0\n\
                      └── reticulum-radio-interface v0.1.0";
         validate_tx_hil_graph_boundary(valid).unwrap();
 
@@ -4258,6 +4500,7 @@ mod tests {
     fn semantic_tx_hil_graph_requires_exact_rete_surface_and_excludes_product_stack() {
         let valid = "reticulum-heltec-tracker-v2-tx-hil v0.1.0 features=[semantic-announce-hil]\n\
                      ├── reticulum-board-heltec-tracker-v2-tx-hil v0.1.0 features=[]\n\
+                     │   └── reticulum-board-heltec-tracker-v2-radio v0.1.0 features=[]\n\
                      ├── reticulum-radio-interface v0.1.0 features=[]\n\
                      └── reticulum-rns-rete v0.1.0 features=[conformance]\n\
                          ├── rete-core v0.1.0 features=[alloc,default]\n\
@@ -4290,6 +4533,7 @@ mod tests {
     fn semantic_roundtrip_tx_hil_graph_requires_product_rete_surface_and_static_owner() {
         let valid = "reticulum-heltec-tracker-v2-tx-hil v0.1.0 features=[semantic-roundtrip-hil]\n\
                      ├── reticulum-board-heltec-tracker-v2-tx-hil v0.1.0 features=[]\n\
+                     │   └── reticulum-board-heltec-tracker-v2-radio v0.1.0 features=[]\n\
                      ├── reticulum-radio-interface v0.1.0 features=[]\n\
                      ├── reticulum-rns-rete v0.1.0 features=[]\n\
                      │   ├── rete-core v0.1.0 features=[alloc,default]\n\
@@ -4370,6 +4614,47 @@ mod tests {
         cargo_feature["packages"][0]["features"]["rf"] = serde_json::json!([]);
         assert!(
             validate_storage_hil_dependency_boundary(&cargo_feature.to_string(), &root).is_err()
+        );
+    }
+
+    #[test]
+    fn tracker_radio_boundary_locks_product_owner_and_hil_facade_shapes() {
+        let root = workspace_root();
+        let metadata = tracker_radio_metadata_fixture(&root);
+        validate_tracker_radio_dependency_boundary(&metadata.to_string(), &root).unwrap();
+
+        let mut wrong_board_path = metadata.clone();
+        wrong_board_path["packages"][0]["dependencies"][4]["path"] =
+            serde_json::Value::String(root.join("elsewhere").display().to_string());
+        assert!(
+            validate_tracker_radio_dependency_boundary(&wrong_board_path.to_string(), &root)
+                .is_err()
+        );
+
+        let mut arbitrary_power_feature = metadata.clone();
+        arbitrary_power_feature["packages"][0]["features"]["arbitrary-power"] =
+            serde_json::json!([]);
+        assert!(
+            validate_tracker_radio_dependency_boundary(&arbitrary_power_feature.to_string(), &root)
+                .is_err()
+        );
+
+        let mut wrong_feature_forward = metadata.clone();
+        wrong_feature_forward["packages"][1]["features"]["near-field-attenuation-hil"] =
+            serde_json::json!(["reticulum-board-heltec-tracker-v2-radio/default"]);
+        assert!(
+            validate_tracker_radio_dependency_boundary(&wrong_feature_forward.to_string(), &root)
+                .is_err()
+        );
+
+        let mut extra_facade_edge = metadata;
+        extra_facade_edge["packages"][1]["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(handoff_dependency_fixture("lora-phy", "=3.0.1", None));
+        assert!(
+            validate_tracker_radio_dependency_boundary(&extra_facade_edge.to_string(), &root)
+                .is_err()
         );
     }
 
@@ -5766,6 +6051,75 @@ mod tests {
                     Some("dev"),
                 ),
                 static_cell,
+            ],
+        })
+    }
+
+    fn tracker_radio_metadata_fixture(root: &Path) -> serde_json::Value {
+        let critical = handoff_dependency_fixture("critical-section", "=1.2.0", None);
+        let mut embedded_hal = handoff_dependency_fixture("embedded-hal", "=1.0.0", None);
+        embedded_hal["uses_default_features"] = serde_json::Value::Bool(true);
+        let mut embedded_hal_async =
+            handoff_dependency_fixture("embedded-hal-async", "=1.0.0", None);
+        embedded_hal_async["uses_default_features"] = serde_json::Value::Bool(true);
+        let lora_phy = handoff_dependency_fixture("lora-phy", "=3.0.1", None);
+        let mut board = handoff_path_dependency_fixture(
+            "reticulum-board-heltec-tracker-v2",
+            "*",
+            &root.join("crates/board-heltec-tracker-v2"),
+            None,
+        );
+        board["uses_default_features"] = serde_json::Value::Bool(true);
+        let mut framing = handoff_path_dependency_fixture(
+            "reticulum-radio-interface",
+            "*",
+            &root.join("crates/radio-interface"),
+            None,
+        );
+        framing["uses_default_features"] = serde_json::Value::Bool(true);
+        let mut dev_critical =
+            handoff_dependency_fixture("critical-section", "=1.2.0", Some("dev"));
+        dev_critical["features"] = serde_json::json!(["std"]);
+        let mut facade_radio = handoff_path_dependency_fixture(
+            "reticulum-board-heltec-tracker-v2-radio",
+            "*",
+            &root.join("crates/board-heltec-tracker-v2-radio"),
+            None,
+        );
+        facade_radio["uses_default_features"] = serde_json::Value::Bool(true);
+
+        serde_json::json!({
+            "packages": [
+                {
+                    "name": "reticulum-board-heltec-tracker-v2-radio",
+                    "source": null,
+                    "manifest_path": root.join("crates/board-heltec-tracker-v2-radio/Cargo.toml"),
+                    "features": {
+                        "default": [],
+                        "near-field-attenuation": [],
+                    },
+                    "dependencies": [
+                        critical,
+                        embedded_hal,
+                        embedded_hal_async,
+                        lora_phy,
+                        board,
+                        framing,
+                        dev_critical,
+                    ],
+                },
+                {
+                    "name": "reticulum-board-heltec-tracker-v2-tx-hil",
+                    "source": null,
+                    "manifest_path": root.join("crates/board-heltec-tracker-v2-tx-hil/Cargo.toml"),
+                    "features": {
+                        "default": [],
+                        "near-field-attenuation-hil": [
+                            "reticulum-board-heltec-tracker-v2-radio/near-field-attenuation"
+                        ],
+                    },
+                    "dependencies": [facade_radio],
+                },
             ],
         })
     }

@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "comparisons/rns-leviculum",
     "crates/board-heltec-tracker-v2",
+    "crates/board-heltec-tracker-v2-radio",
     "crates/board-heltec-tracker-v2-tx-hil",
     "crates/device-api",
     "crates/device-api-adapter",
@@ -30,6 +31,7 @@ members = [
 exclude = ["vendor/esp-rtos-0.3.0", "vendor/lora-phy-3.0.1"]
 default-members = [
     "crates/board-heltec-tracker-v2",
+    "crates/board-heltec-tracker-v2-radio",
     "crates/board-heltec-tracker-v2-tx-hil",
     "crates/device-api",
     "crates/device-api-adapter",

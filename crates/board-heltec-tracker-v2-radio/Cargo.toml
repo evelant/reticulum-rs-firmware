@@ -1,0 +1,28 @@
+[package]
+name = "reticulum-board-heltec-tracker-v2-radio"
+description = "Bidirectional SX1262 and external-FEM owner for the Heltec Wireless Tracker V2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# Additionally expose an opaque diagnostic configuration for colocated-board
+# overload tests. Enabling this never replaces the calibrated product value.
+near-field-attenuation = []
+
+[dependencies]
+critical-section.workspace = true
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
+lora-phy.workspace = true
+reticulum-board-heltec-tracker-v2 = { path = "../board-heltec-tracker-v2" }
+reticulum-radio-interface = { path = "../radio-interface" }
+
+[dev-dependencies]
+critical-section = { workspace = true, features = ["std"] }
+
+[lib]
+path = "src/lib.rs"

@@ -134,6 +134,35 @@ submission/receipt state, reboot recovery, forwarding or multi-hop transport,
 Links/Resources, LXMF, sustained memory behavior, formal RF qualification or
 regional certification.
 
+### Product-radio extraction regression
+
+On 2026-07-16 EDT (2026-07-17 UTC) the proven SX1262/FEM implementation moved into
+`reticulum-board-heltec-tracker-v2-radio`. The historical TX-HIL board crate
+became a one-dependency compatibility facade; the frozen receive-only board
+crate and its no-TX surface were unchanged. The product owner added an opaque,
+explicitly selected configuration identity, low-level CAD with explicit
+standby cleanup, and a DIO1-boundary RX timestamp without moving HIL role or
+packet policy into the board layer. Its calibrated configuration remains
+invariant under feature unification; the facade selects the separately exposed
+near-field diagnostic value only when its own HIL feature is enabled.
+
+Both boards were flashed with the same rebuilt semantic-roundtrip ELF and
+started from coordinated USB-Serial/JTAG hard resets. The final run was piped
+directly into the strict paired-log verifier, which cross-bound all four
+semantic packets and returned `PASS`. E9 and E0 cross-matched DATA receipt
+`63efcf518492d52597837ec59507c0d19db00e1309859627396c067a01185f00`;
+the proof packet hash was
+`8a5fb398b5f3d7bf003214bdc46312094ab4df14cc4d80c7f7805cb2654572de`.
+Each role reported exactly two `DRIVER_TX_DONE` records, terminal `PASS`, and
+`radio_active=false`. Short-run heap peaks remained 548 bytes on E9 and 764
+bytes on E0. `espflash` reported a 361,728-byte application payload. The
+6,399,116-byte ELF has SHA-256
+`808ad808b0abf407f66399e1079f1fc11587ceaba2c15f038898631d39638392`.
+
+This was a powered refactor regression, not a second readback-qualified
+artifact bundle. It does not qualify CAD on air, a real CSMA dispatcher,
+split-frame atomicity or the permanent firmware graph.
+
 ## Historical deterministic semantic announce slice
 
 The explicit semantic build uses `reticulum-rns-rete`'s conformance-only
@@ -232,25 +261,28 @@ radio owner moves a complete owned `RawReceivedFrame` into a bounded channel,
 and raw monitoring should tap that same stream instead of creating a second
 completion flag.
 
-## Board state at artifact closeout
+## Current board state
 
-- E9:44 and E0:40 both contain the same `semantic-roundtrip-hil` merged image
-  used for the pass. A 425,744-byte readback from each board matched the source
-  image byte-for-byte with SHA-256
-  `93ccac552d75a27f2cec571a9f00900210b4b862f157fca57c0cc50c9641fbc5`.
+- E9:44 and E0:40 now contain the same final explicit-configuration
+  `semantic-roundtrip-hil` image used for the 2026-07-16 EDT powered regression.
+  The earlier readback-qualified 425,744-byte image and its SHA-256 remain
+  preserved in the historical artifact bundle described above; the current
+  image was flash-verified by `espflash` but not independently read back.
 - E9 selected the initiator role and E0 selected the responder role from their
-  exact eFuse MACs. In the counted pass, each finished after two TX completions
-  with the radio shut down. Neither board was running the earlier RNode peer
-  image at closeout.
+  exact eFuse MACs. In the current regression, each finished after two TX
+  completions with the radio shut down. Neither board is running the earlier
+  RNode peer image.
 
 ## Next bounded product slice and remaining gates
 
-The immediate next slice is to promote the now-proven Rete owner pattern into
-the permanent firmware and connect it to the sole radio owner, storage actor and
-authenticated device API. Another comparison HIL would add less evidence than
-moving the same announce/DATA/proof lifecycle behind the permanent ownership
-and persistence boundaries. Both attached antenna-equipped boards remain
-cleared for NA915 development TX/RX.
+The product radio owner now exists. The immediate next slice is fixed ownership
+for allocation-backed ordinary Rete actions, followed by a real dispatcher
+that performs one CAD contest and atomically sends one or two physical frames.
+That path can then join the permanent node owner, storage actor and authenticated
+device API. Another comparison HIL would add less evidence than moving the same
+announce/DATA/proof lifecycle behind the permanent ownership and persistence
+boundaries. Both attached antenna-equipped boards remain cleared for NA915
+development TX/RX.
 
 1. Give the permanent node task sole ownership of `EmbeddedNode`, the separate
    RNode-tick and Rete-seconds clocks, timed RX reassembly, ordinary Rete

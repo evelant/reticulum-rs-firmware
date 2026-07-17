@@ -38,15 +38,28 @@ Rust-to-RNode sentinel exchanges all pass. The newer
 `semantic-roundtrip-hil` mode has now run one identical Rust/Rete image on both
 boards: E9 and E0 exchanged signed ANNOUNCEs, learned each other's direct path,
 then carried encrypted DATA and its delivery proof across the real radio path.
-The exact current DATA receipt
+The exact earlier readback-qualified DATA receipt
 `4ca4ed5d856f45e1abb351762a3ccb8671c9c675a6bbfa082d73010746587a4d`
 ended `Delivered`, the receipt table ended empty, both roles reported exactly
 two TX completions and both shut their radios down. The strict cross-log pass is
 preserved at
 `artifacts/hil/tx-hil/20260716T230849Z-rust-rete-semantic-roundtrip/attempt-02-post-readback`.
 
-Both boards were flashed with and read back the same 425,744-byte merged image,
-SHA-256
+The qualified bidirectional mechanics have since moved out of the HIL-only BSP
+into the product-named `reticulum-board-heltec-tracker-v2-radio` crate. The
+frozen receive-only crate remains incapable of TX/CAD under every feature set;
+the historical TX-HIL crate is now a one-edge compatibility facade. The new
+owner requires an explicitly selected opaque NA915 configuration, keeps its
+calibrated product value feature-invariant, and can additionally expose a
+diagnostic near-field value without silently selecting it. It provides
+one-frame RX, low-level CAD, TX and fail-closed shutdown. A 2026-07-16 EDT
+(2026-07-17 UTC) powered regression of the extracted owner repeated the same
+four-packet exchange on E9/E0 and ended with exact receipt delivery, two TX
+completions per board and both radios inactive. See
+[the product radio boundary](docs/tracker-v2-radio.md).
+
+The earlier pre-extraction semantic-roundtrip qualification flashed and read
+back the same 425,744-byte merged image from both boards, SHA-256
 `93ccac552d75a27f2cec571a9f00900210b4b862f157fca57c0cc50c9641fbc5`.
 The mode uses the product `reticulum-rns-rete` surface, ADC-backed TRNG and a
 64 KiB heap, but fixed public HIL identities. Its short-run heap peaks of 548
@@ -157,21 +170,24 @@ coordination, controlled power cuts, endurance/soak, and at-rest encryption
 remain open. Device-API dispatch is a separate portable/integration boundary;
 the portable authenticated adapter is implemented, but no framing, session,
 USB/BLE/Wi-Fi transport or product firmware currently serves through it. The
-supervisor likewise still has no radio/HAL or RF path.
+supervisor likewise still has no real dispatcher or radio edge, although the
+qualified product-named Tracker RX/CAD/TX owner now exists separately.
 The current product-candidate firmware graphs remain TX-free because that
 radio-owner integration is not implemented, not because development TX is
 prohibited. Both attached Tracker boards have antennas and are cleared for
 NA915 development transmission. New integration images may therefore use real
 TX/RX whenever it advances the bounded node path, while retaining an explicit
-regional/airtime profile and one radio owner. At semantic artifact closeout,
-both boards contained the same completed round-trip image; neither contained the
-earlier derived RNode peer image.
+regional/airtime profile and one radio owner. Both boards currently contain
+the same completed final explicit-configuration semantic-roundtrip image;
+neither contains the earlier derived RNode peer image.
 
-The immediate next slice is to promote the proven sole-Rete-owner and separate
-RNode-tick/Rete-seconds pattern into permanent firmware, then connect that node
-owner to the sole radio owner, storage actor and authenticated API. The next
-evidence should exercise those permanent ownership and persistence boundaries,
-not add another comparison HIL.
+The immediate next slice is fixed packet ownership for ordinary Rete actions,
+then a real dispatcher that binds one permit and CAD contest to an entire
+one/two-frame packet. That dispatcher can connect the proven sole-Rete-owner
+and separate RNode-tick/Rete-seconds pattern to the product radio, after which
+storage and authenticated API edges join the permanent firmware. The next
+evidence should exercise those ownership and persistence boundaries, not add
+another comparison HIL.
 
 ## Read first
 

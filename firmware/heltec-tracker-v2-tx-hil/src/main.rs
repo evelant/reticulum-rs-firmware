@@ -21,7 +21,6 @@ use core::future::Future;
 use core::num::NonZeroU64;
 
 use embassy_executor::Spawner;
-#[cfg(feature = "semantic-roundtrip-hil")]
 use embassy_time::Instant;
 use embassy_time::{Delay, Duration, Timer, with_timeout};
 use embedded_hal::digital::{Error as DigitalError, ErrorKind as DigitalErrorKind, ErrorType};
@@ -42,9 +41,10 @@ use esp_hal::{
 };
 use log::{error, info};
 use reticulum_board_heltec_tracker_v2_tx_hil::{
-    TRACKER_TX_HIL_CTX_ASSERTION, TRACKER_TX_HIL_FEM_POWER_POLICY, TRACKER_TX_HIL_MODEM_OUTPUT_DBM,
-    TRACKER_TX_HIL_POWER_PROFILE, TRACKER_TX_HIL_PROFILE, TRACKER_TX_HIL_RX_SYMBOL_TIMEOUT,
-    TRACKER_TX_HIL_STANDBY_CLOCK, TRACKER_TX_HIL_TARGET_POWER_DBM, TrackerTxArm, TrackerTxHilRadio,
+    TRACKER_TX_HIL_CONFIGURATION, TRACKER_TX_HIL_CTX_ASSERTION, TRACKER_TX_HIL_FEM_POWER_POLICY,
+    TRACKER_TX_HIL_MODEM_OUTPUT_DBM, TRACKER_TX_HIL_POWER_PROFILE, TRACKER_TX_HIL_PROFILE,
+    TRACKER_TX_HIL_RX_SYMBOL_TIMEOUT, TRACKER_TX_HIL_STANDBY_CLOCK,
+    TRACKER_TX_HIL_TARGET_POWER_DBM, TrackerRadio, TrackerRxTimestampCapture, TrackerTxArm,
 };
 #[cfg(not(any(feature = "semantic-announce-hil", feature = "semantic-roundtrip-hil")))]
 use reticulum_heltec_tracker_v2_tx_hil::{
@@ -139,6 +139,7 @@ const _: () =
     assert!(TRACKER_TX_HIL_TARGET_POWER_DBM == 5 && TRACKER_TX_HIL_MODEM_OUTPUT_DBM == -9);
 
 static TX_ARM: TrackerTxArm = TrackerTxArm::new();
+static RX_TIMESTAMPS: TrackerRxTimestampCapture = TrackerRxTimestampCapture::new(radio_event_ticks);
 #[cfg(feature = "semantic-roundtrip-hil")]
 static SEMANTIC_ROUNDTRIP_NODE: StaticCell<Result<SemanticRoundtripNode, SemanticRoundtripError>> =
     StaticCell::new();
@@ -348,7 +349,7 @@ async fn main(spawner: Spawner) -> ! {
     };
     let dio1 = Input::new(peripherals.GPIO14, InputConfig::default());
     let busy = BoundedBusy::new(Input::new(peripherals.GPIO13, InputConfig::default()));
-    let mut radio = match TrackerTxHilRadio::new(
+    let mut radio = match TrackerRadio::new(
         spi_device,
         sx1262_reset,
         dio1,
@@ -359,6 +360,8 @@ async fn main(spawner: Spawner) -> ! {
         Delay,
         Delay,
         &TX_ARM,
+        &RX_TIMESTAMPS,
+        TRACKER_TX_HIL_CONFIGURATION,
     )
     .await
     {
@@ -468,6 +471,10 @@ async fn main(spawner: Spawner) -> ! {
     inert_forever().await
 }
 
+fn radio_event_ticks() -> u64 {
+    Instant::now().as_ticks()
+}
+
 #[cfg(feature = "semantic-roundtrip-hil")]
 #[derive(Clone, Copy, Debug)]
 struct SemanticRoundtripRunError {
@@ -567,11 +574,6 @@ fn log_semantic_roundtrip_heap(stage: &'static str, role: HilRole) {
 }
 
 #[cfg(feature = "semantic-roundtrip-hil")]
-fn semantic_rnode_ticks() -> u64 {
-    Instant::now().as_ticks()
-}
-
-#[cfg(feature = "semantic-roundtrip-hil")]
 fn semantic_transport_seconds() -> u64 {
     Instant::now().as_secs()
 }
@@ -662,7 +664,7 @@ fn log_semantic_packet(
     reason = "the target radio owner has explicit pin and delay type parameters"
 )]
 async fn transmit_semantic_packet<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>(
-    radio: &mut TrackerTxHilRadio<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>,
+    radio: &mut TrackerRadio<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>,
     step: SemanticRoundtripStep,
     sequence: u8,
     raw: &[u8],
@@ -792,7 +794,7 @@ where
     reason = "the target radio owner has explicit pin and delay type parameters"
 )]
 async fn receive_semantic_packet<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>(
-    radio: &mut TrackerTxHilRadio<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>,
+    radio: &mut TrackerRadio<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>,
     receiver: &mut TimedRnodeRx,
     role: HilRole,
     step: SemanticRoundtripStep,
@@ -854,7 +856,7 @@ where
         })?;
         let signal = FrameSignal::new(received.rssi_dbm, received.snr_db);
         let outcome = receiver
-            .feed(frame, semantic_rnode_ticks(), signal, packet_output)
+            .feed(frame, received.received_at_ticks, signal, packet_output)
             .map_err(|error| {
                 error!(
                     "tx-hil stage=semantic-roundtrip-rnode-rx status=FAIL step={step:?} window={} error={error:?}",
@@ -1000,7 +1002,7 @@ async fn run_semantic_roundtrip_inline<
 >(
     role: HilRole,
     base_mac: &[u8],
-    radio: &mut TrackerTxHilRadio<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>,
+    radio: &mut TrackerRadio<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>,
     node: &mut SemanticRoundtripNode,
     rng: &mut Trng,
 ) -> Result<SemanticRoundtripSuccess, SemanticRoundtripRunError>
@@ -1376,7 +1378,7 @@ where
 
 #[cfg(not(any(feature = "semantic-announce-hil", feature = "semantic-roundtrip-hil")))]
 async fn run_initiator_inline<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>(
-    radio: &mut TrackerTxHilRadio<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>,
+    radio: &mut TrackerRadio<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>,
 ) where
     Spi: embedded_hal_async::spi::SpiDevice<u8>,
     Reset: embedded_hal::digital::OutputPin,
@@ -1512,7 +1514,7 @@ async fn run_semantic_announce_initiator_inline<
     FemDelay,
     RadioDelay,
 >(
-    radio: &mut TrackerTxHilRadio<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>,
+    radio: &mut TrackerRadio<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>,
 ) where
     Spi: embedded_hal_async::spi::SpiDevice<u8>,
     Reset: embedded_hal::digital::OutputPin,
@@ -1585,7 +1587,7 @@ async fn run_semantic_announce_initiator_inline<
 
 #[cfg(not(any(feature = "semantic-announce-hil", feature = "semantic-roundtrip-hil")))]
 async fn run_responder_inline<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>(
-    radio: &mut TrackerTxHilRadio<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>,
+    radio: &mut TrackerRadio<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>,
 ) where
     Spi: embedded_hal_async::spi::SpiDevice<u8>,
     Reset: embedded_hal::digital::OutputPin,

@@ -1597,7 +1597,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "reticulum-board-heltec-tracker-v2-tx-hil"
+name = "reticulum-board-heltec-tracker-v2-radio"
 version = "0.1.0"
 dependencies = [
  "critical-section",
@@ -1606,6 +1606,13 @@ dependencies = [
  "lora-phy",
  "reticulum-board-heltec-tracker-v2",
  "reticulum-radio-interface",
+]
+
+[[package]]
+name = "reticulum-board-heltec-tracker-v2-tx-hil"
+version = "0.1.0"
+dependencies = [
+ "reticulum-board-heltec-tracker-v2-radio",
 ]
 
 [[package]]
