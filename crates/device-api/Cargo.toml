@@ -9,7 +9,7 @@ publish.workspace = true
 
 [features]
 default = []
-host-sim = []
+experimental-rns-data = []
 
 [dependencies]
 minicbor.workspace = true

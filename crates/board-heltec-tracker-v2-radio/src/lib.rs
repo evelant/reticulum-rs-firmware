@@ -13,21 +13,28 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use core::cell::{Cell, RefCell};
+use core::{cell::Cell, num::NonZeroU64};
 
 use critical_section::Mutex;
 use embedded_hal::digital::{OutputPin, StatefulOutputPin};
 use embedded_hal_async::{delay::DelayNs, digital::Wait, spi::SpiDevice};
 use lora_phy::{
-    LoRa, RxMode,
-    mod_params::{ModulationParams, PacketParams, RadioError},
+    mod_params::RadioError,
     mod_traits::InterfaceVariant,
-    sx126x::{Config, DeviceSel, HighPowerPaOverride, Sx126x, Sx126xVariant, TcxoCtrlVoltage},
+    sx126x::{DeviceSel, HighPowerPaOverride, Sx126xVariant, TcxoCtrlVoltage},
 };
 use reticulum_board_heltec_tracker_v2::{
     FEM_CSD_SETTLE_MS, FEM_POWER_SETTLE_MS, validate_lab_rx_profile,
 };
-use reticulum_radio_interface::{LabRxProfile, LabRxProfileConfig, SX1262_FRAME_MTU};
+use reticulum_radio_interface::{
+    BoundedRxOutcome, CadObservation, LabRxProfile, LabRxProfileConfig, PacketTxFault,
+    PacketTxObservation, RadioConfigurationFingerprint, RnodeTxFrames, SX1262_FRAME_MTU,
+    SoleRadioFaultSummary, SoleRnodeRadio,
+};
+use reticulum_radio_lora_phy::{
+    IrqTimestampCapture, Sx126xRadioError, Sx126xRadioOperation, Sx126xReceivedFrame,
+    Sx126xRnodeRadio, Sx126xRnodeSettings, Sx126xTxHooks,
+};
 
 /// `lora-phy`'s SX126x private-network sync word selected by this owner.
 pub const TRACKER_PRIVATE_SYNC_WORD: u16 = 0x1424;
@@ -69,6 +76,23 @@ pub enum TrackerRadioConfigurationId {
     /// NA915 development profile with diagnostic near-field attenuation.
     Na915DevDiagnosticNearFieldAttenuation,
 }
+
+/// Full Tracker configuration fingerprint for calibrated NA915 development.
+///
+/// This versioned identity binds the fixed modem/packet profile, power path,
+/// private sync word, network selection, regulator, PA and FEM policy. Any
+/// change to one of those values requires a different fingerprint.
+pub const TRACKER_NA915_DEV_CONFIGURATION_FINGERPRINT: RadioConfigurationFingerprint =
+    RadioConfigurationFingerprint::new([
+        0x54, 0x52, 0x4b, 0x32, 0x4e, 0x41, 0x39, 0x31, 0x35, 0x43, 0x41, 0x4c, 0x30, 0x30, 0x30,
+        0x31,
+    ]);
+
+const TRACKER_NA915_NEAR_FIELD_DIAGNOSTIC_CONFIGURATION_FINGERPRINT: RadioConfigurationFingerprint =
+    RadioConfigurationFingerprint::new([
+        0x54, 0x52, 0x4b, 0x32, 0x4e, 0x41, 0x39, 0x31, 0x35, 0x44, 0x49, 0x41, 0x30, 0x30, 0x30,
+        0x31,
+    ]);
 
 /// Opaque board-validated modem, receive, and power configuration.
 ///
@@ -112,6 +136,18 @@ impl TrackerRadioConfiguration {
     /// Validated RNode-compatible LoRa modulation and packet profile.
     pub const fn profile(self) -> LabRxProfile {
         self.profile
+    }
+
+    /// Opaque full configuration fingerprint used for permit binding.
+    pub const fn fingerprint(self) -> RadioConfigurationFingerprint {
+        match self.id {
+            TrackerRadioConfigurationId::Na915DevCalibratedMinimum => {
+                TRACKER_NA915_DEV_CONFIGURATION_FINGERPRINT
+            }
+            TrackerRadioConfigurationId::Na915DevDiagnosticNearFieldAttenuation => {
+                TRACKER_NA915_NEAR_FIELD_DIAGNOSTIC_CONFIGURATION_FINGERPRINT
+            }
+        }
     }
 
     /// Named, board-qualified power selection.
@@ -245,6 +281,25 @@ pub const TRACKER_NA915_NEAR_FIELD_DIAGNOSTIC_MODEM_OUTPUT_DBM: i32 =
 /// Maximum preamble-search symbol timeout of the calibrated configuration.
 pub const TRACKER_RX_SYMBOL_TIMEOUT: u16 = TRACKER_NA915_DEV_CONFIGURATION.rx_symbol_timeout();
 
+/// Conservative whole-operation RX watchdog for the fixed Tracker profile.
+///
+/// This covers 248 SF7/BW125 preamble-search symbols, a maximum 255-byte LoRa
+/// frame after detection, driver SPI/standby cleanup, and ample executor
+/// margin. Expiry is a fail-closed cancellation and reconstruction event, not
+/// a normal no-preamble timeout. Changing this fingerprint-bound product value
+/// requires a new radio configuration identity.
+pub const TRACKER_MAXIMUM_RECEIVE_OPERATION_US: NonZeroU64 = match NonZeroU64::new(1_500_000) {
+    Some(bound) => bound,
+    None => panic!("Tracker receive watchdog must be non-zero"),
+};
+
+/// Minimum non-airtime margin reserved inside the whole-operation RX watchdog.
+///
+/// This covers IRQ/status SPI work, standby cleanup, and executor scheduling
+/// beyond preamble search plus maximum-frame airtime.
+pub const TRACKER_RX_WATCHDOG_MINIMUM_MARGIN_US: u64 = 100_000;
+const _: () = assert!(TRACKER_RX_WATCHDOG_MINIMUM_MARGIN_US > 0);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TrackerTxArmState {
     Disarmed,
@@ -313,6 +368,16 @@ impl Default for TrackerTxArm {
     }
 }
 
+impl Sx126xTxHooks for TrackerTxArm {
+    fn disarm(&self) {
+        Self::disarm(self);
+    }
+
+    fn arm_for_prepare(&self) {
+        Self::arm_for_prepare(self);
+    }
+}
+
 /// Operation in which the bidirectional radio failed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TrackerRadioOperation {
@@ -342,6 +407,8 @@ pub enum TrackerRadioOperation {
     PrepareReceive,
     /// Bounded receive execution.
     Receive,
+    /// Post-receive standby cleanup.
+    ReceiveCleanup,
     /// A successful receive lacked its DIO1-boundary timestamp.
     ReceiveTimestamp,
 }
@@ -356,60 +423,19 @@ pub struct TrackerRadioError {
 }
 
 impl TrackerRadioError {
-    const fn invalid_frame() -> Self {
-        Self {
-            operation: TrackerRadioOperation::FrameValidation,
-            radio: None,
-        }
-    }
-
     const fn radio(operation: TrackerRadioOperation, radio: RadioError) -> Self {
         Self {
             operation,
             radio: Some(radio),
         }
     }
-
-    const fn missing_receive_timestamp() -> Self {
-        Self {
-            operation: TrackerRadioOperation::ReceiveTimestamp,
-            radio: None,
-        }
-    }
 }
 
 /// Shared capture slot sampled when the radio's DIO1 wait resumes.
 ///
-/// The callback must use the timed RNode reassembly monotonic tick domain.
-/// This is a software observation timestamp rather than a hardware-edge
-/// capture, but it precedes IRQ-status, payload, and packet-status SPI reads.
-pub struct TrackerRxTimestampCapture {
-    now_ticks: fn() -> u64,
-    latest: Mutex<RefCell<Option<u64>>>,
-}
-
-impl TrackerRxTimestampCapture {
-    /// Construct an empty timestamp slot around one monotonic clock callback.
-    pub const fn new(now_ticks: fn() -> u64) -> Self {
-        Self {
-            now_ticks,
-            latest: Mutex::new(RefCell::new(None)),
-        }
-    }
-
-    fn begin_receive(&self) {
-        critical_section::with(|cs| self.latest.borrow(cs).replace(None));
-    }
-
-    fn record_irq_observation(&self) {
-        let ticks = (self.now_ticks)();
-        critical_section::with(|cs| self.latest.borrow(cs).replace(Some(ticks)));
-    }
-
-    fn take_completed_receive(&self) -> Option<u64> {
-        critical_section::with(|cs| self.latest.borrow(cs).take())
-    }
-}
+/// The historical board name remains as a type alias while the implementation
+/// is shared by every `lora-phy` SX126x board owner.
+pub type TrackerRxTimestampCapture = IrqTimestampCapture;
 
 /// One physical frame copied out of a caller-deadline-bounded receive window.
 #[derive(Clone, Copy, Debug)]
@@ -424,39 +450,20 @@ pub struct TrackerReceivedFrame {
     pub received_at_ticks: u64,
 }
 
-type TrackerLoRa<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay> = LoRa<
-    Sx126x<Spi, TrackerInterface<Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay>, TrackerSx1262>,
+type TrackerCore<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay> = Sx126xRnodeRadio<
+    Spi,
+    TrackerInterface<Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay>,
+    TrackerSx1262,
     RadioDelay,
+    TrackerTxArm,
 >;
-
-struct Active<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>
-where
-    Spi: SpiDevice<u8>,
-    Reset: OutputPin,
-    Dio1: Wait,
-    Busy: Wait,
-    Power: OutputPin,
-    Csd: OutputPin,
-    Ctx: StatefulOutputPin,
-    FemDelay: DelayNs,
-    RadioDelay: DelayNs,
-{
-    lora: TrackerLoRa<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>,
-    modulation: ModulationParams,
-    tx_packet: PacketParams,
-    rx_packet: PacketParams,
-}
-
-type OptionalActive<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay> =
-    Option<Active<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>>;
 
 /// Opaque, reset-scoped Tracker V2 RX/CAD/TX owner.
 ///
-/// Every async operation takes the active radio out of this wrapper. If the
-/// future is cancelled, the local owner is dropped and its private interface
-/// first asserts SX1262 reset and disables CSD, then drives CTX and VFEM power
-/// low. The wrapper remains permanently faulted instead of reusing uncertain
-/// hardware state.
+/// Board-specific pin, external-FEM, PA and configuration policy remain here.
+/// The initialized LoRa operation state machine is owned by the shared
+/// reticulum-radio-lora-phy core. Cancelling a core operation drops the
+/// private Tracker interface, which asserts reset and disables the FEM.
 pub struct TrackerRadio<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>
 where
     Spi: SpiDevice<u8>,
@@ -469,10 +476,42 @@ where
     FemDelay: DelayNs,
     RadioDelay: DelayNs,
 {
-    active: OptionalActive<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>,
+    core: TrackerCore<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>,
     configuration: TrackerRadioConfiguration,
-    tx_arm: &'static TrackerTxArm,
-    rx_timestamps: &'static TrackerRxTimestampCapture,
+}
+
+fn map_shared_operation(operation: Sx126xRadioOperation) -> TrackerRadioOperation {
+    match operation {
+        Sx126xRadioOperation::ChipInitialization => TrackerRadioOperation::ChipInitialization,
+        Sx126xRadioOperation::ModulationConfiguration => {
+            TrackerRadioOperation::ModulationConfiguration
+        }
+        Sx126xRadioOperation::PacketConfiguration => TrackerRadioOperation::PacketConfiguration,
+        Sx126xRadioOperation::FrameValidation => TrackerRadioOperation::FrameValidation,
+        Sx126xRadioOperation::PrepareTransmit => TrackerRadioOperation::PrepareTransmit,
+        Sx126xRadioOperation::Transmit => TrackerRadioOperation::Transmit,
+        Sx126xRadioOperation::TransmitCleanup => TrackerRadioOperation::TransmitCleanup,
+        Sx126xRadioOperation::PrepareChannelActivityDetection => {
+            TrackerRadioOperation::PrepareChannelActivityDetection
+        }
+        Sx126xRadioOperation::ChannelActivityDetection => {
+            TrackerRadioOperation::ChannelActivityDetection
+        }
+        Sx126xRadioOperation::ChannelActivityCleanup => {
+            TrackerRadioOperation::ChannelActivityCleanup
+        }
+        Sx126xRadioOperation::PrepareReceive => TrackerRadioOperation::PrepareReceive,
+        Sx126xRadioOperation::Receive => TrackerRadioOperation::Receive,
+        Sx126xRadioOperation::ReceiveCleanup => TrackerRadioOperation::ReceiveCleanup,
+        Sx126xRadioOperation::ReceiveTimestamp => TrackerRadioOperation::ReceiveTimestamp,
+    }
+}
+
+fn map_shared_error(error: Sx126xRadioError) -> TrackerRadioError {
+    TrackerRadioError {
+        operation: map_shared_operation(error.operation),
+        radio: error.radio,
+    }
 }
 
 impl<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>
@@ -490,12 +529,6 @@ where
 {
     /// Establish fail-closed pin levels, initialize the SX1262, then power and
     /// settle the external FEM in receive state.
-    ///
-    /// FEM power-up occurs only after SX1262 initialization has configured
-    /// DIO2 RF-switch control. It then remains powered across operations while
-    /// CTX selects receive or authorized transmit state. The caller must
-    /// explicitly select one opaque configuration constructed inside this
-    /// board-specific boundary.
     #[allow(
         clippy::too_many_arguments,
         reason = "every safety-critical peripheral is consumed exactly once"
@@ -515,7 +548,6 @@ where
         configuration: TrackerRadioConfiguration,
     ) -> Result<Self, TrackerRadioError> {
         tx_arm.disarm();
-        let profile = configuration.profile();
         let interface = TrackerInterface::new(
             reset,
             dio1,
@@ -530,65 +562,32 @@ where
         .map_err(|radio| {
             TrackerRadioError::radio(TrackerRadioOperation::InterfaceConstruction, radio)
         })?;
-        let sx1262 = Sx126x::new(
+        let settings = Sx126xRnodeSettings::new(
+            configuration.profile(),
+            configuration.fingerprint(),
+            configuration.power().modem_output_dbm(),
+            configuration.rx_symbol_timeout(),
+            configuration.public_network(),
+            configuration.uses_dcdc(),
+            configuration.boosted_receive(),
+            TRACKER_MAXIMUM_RECEIVE_OPERATION_US,
+        );
+        let core = Sx126xRnodeRadio::new(
             spi,
             interface,
-            Config {
-                chip: TrackerSx1262::new(configuration.power()),
-                tcxo_ctrl: Some(TcxoCtrlVoltage::Ctrl1V8),
-                use_dcdc: configuration.uses_dcdc(),
-                rx_boost: configuration.boosted_receive(),
-            },
-        );
-        let mut lora = LoRa::new(sx1262, configuration.public_network(), radio_delay)
-            .await
-            .map_err(|radio| {
-                TrackerRadioError::radio(TrackerRadioOperation::ChipInitialization, radio)
-            })?;
-        let modulation = lora
-            .create_modulation_params(
-                profile.spreading_factor(),
-                profile.bandwidth(),
-                profile.coding_rate(),
-                profile.frequency_hz(),
-            )
-            .map_err(|radio| {
-                TrackerRadioError::radio(TrackerRadioOperation::ModulationConfiguration, radio)
-            })?;
-        let tx_packet = lora
-            .create_tx_packet_params(
-                profile.preamble_symbols(),
-                !profile.explicit_header(),
-                profile.crc(),
-                profile.iq_inverted(),
-                &modulation,
-            )
-            .map_err(|radio| {
-                TrackerRadioError::radio(TrackerRadioOperation::PacketConfiguration, radio)
-            })?;
-        let rx_packet = lora
-            .create_rx_packet_params(
-                profile.preamble_symbols(),
-                !profile.explicit_header(),
-                SX1262_FRAME_MTU as u8,
-                profile.crc(),
-                profile.iq_inverted(),
-                &modulation,
-            )
-            .map_err(|radio| {
-                TrackerRadioError::radio(TrackerRadioOperation::PacketConfiguration, radio)
-            })?;
-
-        Ok(Self {
-            active: Some(Active {
-                lora,
-                modulation,
-                tx_packet,
-                rx_packet,
-            }),
-            configuration,
+            TrackerSx1262::new(configuration.power()),
+            radio_delay,
             tx_arm,
             rx_timestamps,
+            settings,
+            Some(TcxoCtrlVoltage::Ctrl1V8),
+        )
+        .await
+        .map_err(map_shared_error)?;
+
+        Ok(Self {
+            core,
+            configuration,
         })
     }
 
@@ -598,166 +597,115 @@ where
     }
 
     /// Transmit exactly one physical frame at the selected named power.
-    ///
-    /// The private interface consumes a one-shot arm and asserts CTX after
-    /// modem/power/standby preparation but before packet parameters and FIFO
-    /// writes. Its final transmit hook consumes the prepared state immediately
-    /// before `SetTx`. Successful `TxDone` is followed by an explicit standby
-    /// call because pinned `lora-phy` does not disable the RF switch on its
-    /// successful TX path.
     pub async fn transmit_frame(&mut self, frame: &[u8]) -> Result<(), TrackerRadioError> {
-        if frame.is_empty() || frame.len() > SX1262_FRAME_MTU {
-            return Err(TrackerRadioError::invalid_frame());
-        }
-        let mut active = self.active.take().ok_or_else(|| {
-            TrackerRadioError::radio(
-                TrackerRadioOperation::Transmit,
-                RadioError::InvalidRadioMode,
-            )
-        })?;
-        self.tx_arm.disarm();
-        self.tx_arm.arm_for_prepare();
-        if let Err(radio) = active
-            .lora
-            .prepare_for_tx(
-                &active.modulation,
-                &mut active.tx_packet,
-                self.configuration.power().modem_output_dbm(),
-                frame,
-            )
+        self.core
+            .transmit_frame(frame)
             .await
-        {
-            return Err(TrackerRadioError::radio(
-                TrackerRadioOperation::PrepareTransmit,
-                radio,
-            ));
-        }
-        if let Err(radio) = active.lora.tx().await {
-            self.tx_arm.disarm();
-            return Err(TrackerRadioError::radio(
-                TrackerRadioOperation::Transmit,
-                radio,
-            ));
-        }
-        self.tx_arm.disarm();
-        if let Err(radio) = active.lora.enter_standby().await {
-            return Err(TrackerRadioError::radio(
-                TrackerRadioOperation::TransmitCleanup,
-                radio,
-            ));
-        }
-        self.active = Some(active);
-        Ok(())
+            .map_err(map_shared_error)
     }
 
     /// Run one low-level LoRa channel activity detection operation.
-    ///
-    /// `Ok(true)` means the configured LoRa signal was detected and the
-    /// channel should be treated as busy. This primitive performs no retry,
-    /// backoff, deadline, or transmit decision; those belong to the sole
-    /// dispatcher. The owner explicitly returns to standby after successful
-    /// CAD because pinned `lora-phy` otherwise retains its CAD software mode.
-    /// Cancellation or any radio/cleanup error drops the active owner
-    /// fail-closed.
     pub async fn channel_activity_detected(&mut self) -> Result<bool, TrackerRadioError> {
-        let mut active = self.active.take().ok_or_else(|| {
-            TrackerRadioError::radio(
-                TrackerRadioOperation::ChannelActivityDetection,
-                RadioError::InvalidRadioMode,
-            )
-        })?;
-        self.tx_arm.disarm();
-        if let Err(radio) = active.lora.prepare_for_cad(&active.modulation).await {
-            return Err(TrackerRadioError::radio(
-                TrackerRadioOperation::PrepareChannelActivityDetection,
-                radio,
-            ));
-        }
-        let detected = active.lora.cad(&active.modulation).await.map_err(|radio| {
-            TrackerRadioError::radio(TrackerRadioOperation::ChannelActivityDetection, radio)
-        })?;
-        if let Err(radio) = active.lora.enter_standby().await {
-            return Err(TrackerRadioError::radio(
-                TrackerRadioOperation::ChannelActivityCleanup,
-                radio,
-            ));
-        }
-        self.active = Some(active);
-        Ok(detected)
+        self.core
+            .channel_activity_detected()
+            .await
+            .map_err(map_shared_error)
     }
 
     /// Run one SX1262 receive operation with a bounded preamble search.
-    ///
-    /// The symbol timeout bounds only detection before a preamble. Firmware
-    /// must wrap this future in an outer monotonic deadline because the SX1262
-    /// stops its timer after preamble detection. Cancelling that outer future
-    /// drops the active owner fail-closed. A normal no-preamble symbol timeout
-    /// returns `Ok(None)` and leaves the owner usable; every other error drops
-    /// it into the fail-closed state.
-    pub async fn receive_frame(
-        &mut self,
-        buffer: &mut [u8; SX1262_FRAME_MTU],
-    ) -> Result<Option<TrackerReceivedFrame>, TrackerRadioError> {
-        let mut active = self.active.take().ok_or_else(|| {
-            TrackerRadioError::radio(TrackerRadioOperation::Receive, RadioError::InvalidRadioMode)
-        })?;
-        self.tx_arm.disarm();
-        self.rx_timestamps.begin_receive();
-        if let Err(radio) = active
-            .lora
-            .prepare_for_rx(
-                RxMode::Single(self.configuration.rx_symbol_timeout()),
-                &active.modulation,
-                &active.rx_packet,
-            )
-            .await
-        {
-            return Err(TrackerRadioError::radio(
-                TrackerRadioOperation::PrepareReceive,
-                radio,
-            ));
-        }
-        let received = active.lora.rx(&active.rx_packet, buffer).await;
-        match received {
-            Ok((len, status)) => {
-                let Some(received_at_ticks) = self.rx_timestamps.take_completed_receive() else {
-                    return Err(TrackerRadioError::missing_receive_timestamp());
-                };
-                if let Err(radio) = active.lora.enter_standby().await {
-                    return Err(TrackerRadioError::radio(
-                        TrackerRadioOperation::Receive,
-                        radio,
-                    ));
-                }
-                self.active = Some(active);
-                Ok(Some(TrackerReceivedFrame {
-                    len,
-                    rssi_dbm: status.rssi,
-                    snr_db: status.snr,
-                    received_at_ticks,
-                }))
-            }
-            Err(RadioError::ReceiveTimeout) => {
-                let _ = self.rx_timestamps.take_completed_receive();
-                self.active = Some(active);
-                Ok(None)
-            }
-            Err(radio) => Err(TrackerRadioError::radio(
-                TrackerRadioOperation::Receive,
-                radio,
-            )),
+    pub fn receive_frame<'a>(
+        &'a mut self,
+        buffer: &'a mut [u8; SX1262_FRAME_MTU],
+    ) -> impl core::future::Future<Output = Result<Option<TrackerReceivedFrame>, TrackerRadioError>> + 'a
+    {
+        let receive = self.core.receive_frame(buffer);
+        async move {
+            receive
+                .await
+                .map(|frame| {
+                    frame.map(
+                        |Sx126xReceivedFrame {
+                             len,
+                             rssi_dbm,
+                             snr_db,
+                             received_at_ticks,
+                         }| TrackerReceivedFrame {
+                            len,
+                            rssi_dbm,
+                            snr_db,
+                            received_at_ticks,
+                        },
+                    )
+                })
+                .map_err(map_shared_error)
         }
     }
 
     /// Drop the active radio owner into its fail-closed state.
     pub fn shutdown(&mut self) {
-        self.tx_arm.disarm();
-        self.active.take();
+        self.core.shutdown();
     }
 
     /// Whether this wrapper still owns initialized radio hardware.
     pub const fn is_active(&self) -> bool {
-        self.active.is_some()
+        self.core.is_active()
+    }
+}
+
+impl<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay> SoleRnodeRadio
+    for TrackerRadio<Spi, Reset, Dio1, Busy, Power, Csd, Ctx, FemDelay, RadioDelay>
+where
+    Spi: SpiDevice<u8>,
+    Reset: OutputPin,
+    Dio1: Wait,
+    Busy: Wait,
+    Power: OutputPin,
+    Csd: OutputPin,
+    Ctx: StatefulOutputPin,
+    FemDelay: DelayNs,
+    RadioDelay: DelayNs,
+{
+    type Fault = SoleRadioFaultSummary;
+
+    fn configuration_fingerprint(&self) -> RadioConfigurationFingerprint {
+        SoleRnodeRadio::configuration_fingerprint(&self.core)
+    }
+
+    fn airtime_profile(&self) -> LabRxProfile {
+        SoleRnodeRadio::airtime_profile(&self.core)
+    }
+
+    fn maximum_receive_operation_us(&self) -> NonZeroU64 {
+        SoleRnodeRadio::maximum_receive_operation_us(&self.core)
+    }
+
+    fn receive_bounded<'a>(
+        &'a mut self,
+        buffer: &'a mut [u8; SX1262_FRAME_MTU],
+    ) -> impl core::future::Future<Output = Result<BoundedRxOutcome, Self::Fault>> + 'a {
+        SoleRnodeRadio::receive_bounded(&mut self.core, buffer)
+    }
+
+    fn cad(
+        &mut self,
+    ) -> impl core::future::Future<Output = Result<CadObservation, Self::Fault>> + '_ {
+        SoleRnodeRadio::cad(&mut self.core)
+    }
+
+    fn transmit<'a>(
+        &'a mut self,
+        frames: RnodeTxFrames<'a>,
+    ) -> impl core::future::Future<Output = Result<PacketTxObservation, PacketTxFault<Self::Fault>>> + 'a
+    {
+        SoleRnodeRadio::transmit(&mut self.core, frames)
+    }
+
+    fn shutdown(&mut self) {
+        self.core.shutdown();
+    }
+
+    fn is_active(&self) -> bool {
+        self.core.is_active()
     }
 }
 
@@ -987,7 +935,11 @@ mod tests {
         digital::{ErrorType, PinState},
         spi::{ErrorType as SpiErrorType, Operation},
     };
-    use lora_phy::sx126x::Sx1262;
+    use lora_phy::{
+        LoRa, RxMode,
+        sx126x::{Config, Sx126x, Sx1262},
+    };
+    use reticulum_radio_interface::{SoleRadioFaultClass, SoleRadioFaultPhase};
 
     use super::*;
 
@@ -1151,6 +1103,7 @@ mod tests {
     type CommandCtxLog = Rc<RefCell<Vec<bool>>>;
     type CadActivityProbe = Rc<core::cell::Cell<bool>>;
     type RxPreambleProbe = Rc<core::cell::Cell<bool>>;
+    type RxTimeoutProbe = Rc<core::cell::Cell<bool>>;
 
     struct MockSpi {
         commands: CommandLog,
@@ -1160,6 +1113,9 @@ mod tests {
         cad_pending: bool,
         rx_preamble: RxPreambleProbe,
         rx_preamble_pending: bool,
+        rx_done_pending: bool,
+        rx_timeout: RxTimeoutProbe,
+        rx_timeout_pending: bool,
     }
 
     impl MockSpi {
@@ -1171,11 +1127,13 @@ mod tests {
             CommandCtxLog,
             CadActivityProbe,
             RxPreambleProbe,
+            RxTimeoutProbe,
         ) {
             let commands = Rc::new(RefCell::new(Vec::new()));
             let command_ctx = Rc::new(RefCell::new(Vec::new()));
             let cad_activity = Rc::new(core::cell::Cell::new(false));
             let rx_preamble = Rc::new(core::cell::Cell::new(false));
+            let rx_timeout = Rc::new(core::cell::Cell::new(false));
             (
                 Self {
                     commands: commands.clone(),
@@ -1185,11 +1143,15 @@ mod tests {
                     cad_pending: false,
                     rx_preamble: rx_preamble.clone(),
                     rx_preamble_pending: false,
+                    rx_done_pending: false,
+                    rx_timeout: rx_timeout.clone(),
+                    rx_timeout_pending: false,
                 },
                 commands,
                 command_ctx,
                 cad_activity,
                 rx_preamble,
+                rx_timeout,
             )
         }
     }
@@ -1216,8 +1178,12 @@ mod tests {
             if command.first() == Some(&0xc5) {
                 self.cad_pending = true;
             }
-            if command.first() == Some(&0x82) && self.rx_preamble.get() {
-                self.rx_preamble_pending = true;
+            if command.first() == Some(&0x82) {
+                if self.rx_preamble.get() {
+                    self.rx_preamble_pending = true;
+                } else if self.rx_timeout.get() {
+                    self.rx_timeout_pending = true;
+                }
             }
             self.commands.borrow_mut().push(command);
             self.command_ctx.borrow_mut().push(self.ctx.is_high());
@@ -1231,7 +1197,14 @@ mod tests {
                 }
             } else if is_get_irq_status && self.rx_preamble_pending {
                 self.rx_preamble_pending = false;
+                self.rx_done_pending = true;
                 0x0004_u16
+            } else if is_get_irq_status && self.rx_done_pending {
+                self.rx_done_pending = false;
+                0x0002_u16
+            } else if is_get_irq_status && self.rx_timeout_pending {
+                self.rx_timeout_pending = false;
+                0x0200_u16
             } else {
                 0x0003_u16
             };
@@ -1267,6 +1240,7 @@ mod tests {
         command_ctx: CommandCtxLog,
         cad_activity: CadActivityProbe,
         rx_preamble: RxPreambleProbe,
+        rx_timeout: RxTimeoutProbe,
         arm: &'static TrackerTxArm,
         rx_timestamps: &'static TrackerRxTimestampCapture,
         ctx: PinProbe,
@@ -1283,7 +1257,9 @@ mod tests {
         C: Sx126xVariant,
     {
         let arm = Box::leak(Box::new(TrackerTxArm::new()));
-        let rx_timestamps = Box::leak(Box::new(TrackerRxTimestampCapture::new(now_ticks)));
+        let rx_timestamps = Box::leak(Box::new(TrackerRxTimestampCapture::new_monotonic_us(
+            now_ticks,
+        )));
         let events = Rc::new(RefCell::new(Vec::new()));
         let (reset, _) = MockOutput::new(PinState::Low, "reset", events.clone());
         let (power, power_probe) = MockOutput::new(PinState::Low, "power", events.clone());
@@ -1302,7 +1278,7 @@ mod tests {
             rx_timestamps,
         )
         .unwrap();
-        let (spi, commands, command_ctx, cad_activity, rx_preamble) =
+        let (spi, commands, command_ctx, cad_activity, rx_preamble, rx_timeout) =
             MockSpi::new(ctx_probe.clone());
         let radio = Sx126x::new(
             spi,
@@ -1321,6 +1297,7 @@ mod tests {
             command_ctx,
             cad_activity,
             rx_preamble,
+            rx_timeout,
             arm,
             rx_timestamps,
             ctx: ctx_probe,
@@ -1347,6 +1324,7 @@ mod tests {
             command_ctx,
             cad_activity,
             rx_preamble,
+            rx_timeout,
             arm,
             rx_timestamps,
             ctx,
@@ -1360,6 +1338,7 @@ mod tests {
             command_ctx,
             cad_activity,
             rx_preamble,
+            rx_timeout,
             arm,
             rx_timestamps,
             ctx,
@@ -1374,6 +1353,75 @@ mod tests {
         C: Sx126xVariant,
     {
         build_lora_with_ticks(chip, test_ticks)
+    }
+
+    type TestTrackerOwner = TrackerRadio<
+        MockSpi,
+        MockOutput,
+        MockWait,
+        MockWait,
+        MockOutput,
+        MockOutput,
+        MockOutput,
+        ProbeDelay,
+        NoopDelay,
+    >;
+
+    struct TestTrackerOwnerRig {
+        radio: TestTrackerOwner,
+        commands: CommandLog,
+        cad_activity: CadActivityProbe,
+        rx_preamble: RxPreambleProbe,
+        rx_timeout: RxTimeoutProbe,
+        ctx: PinProbe,
+        power: PinProbe,
+        csd: PinProbe,
+    }
+
+    fn build_tracker_owner(
+        rx_timestamps: &'static TrackerRxTimestampCapture,
+    ) -> TestTrackerOwnerRig {
+        let arm = Box::leak(Box::new(TrackerTxArm::new()));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let (reset, _) = MockOutput::new(PinState::Low, "reset", events.clone());
+        let (power, power_probe) = MockOutput::new(PinState::Low, "power", events.clone());
+        let (csd, csd_probe) = MockOutput::new(PinState::Low, "csd", events.clone());
+        let (ctx, ctx_probe) = MockOutput::new(PinState::Low, "ctx", events);
+        let (fem_delay, _) = ProbeDelay::new();
+        let (spi, commands, _, cad_activity, rx_preamble, rx_timeout) =
+            MockSpi::new(ctx_probe.clone());
+        let radio = block_on(TrackerRadio::new(
+            spi,
+            reset,
+            MockWait,
+            MockWait,
+            power,
+            csd,
+            ctx,
+            NoopDelay,
+            fem_delay,
+            arm,
+            rx_timestamps,
+            TRACKER_NA915_DEV_CONFIGURATION,
+        ))
+        .unwrap();
+
+        TestTrackerOwnerRig {
+            radio,
+            commands,
+            cad_activity,
+            rx_preamble,
+            rx_timeout,
+            ctx: ctx_probe,
+            power: power_probe,
+            csd: csd_probe,
+        }
+    }
+
+    fn build_tracker_owner_with_ticks(now_ticks: fn() -> u64) -> TestTrackerOwnerRig {
+        build_tracker_owner(Box::leak(Box::new(
+            TrackerRxTimestampCapture::new_monotonic_us(now_ticks),
+        )))
     }
 
     fn prepare_lora<C>(
@@ -1464,6 +1512,10 @@ mod tests {
             TRACKER_NA915_DEV_CONFIGURATION.power(),
             TrackerRadioPower::CalibratedMinimum
         );
+        assert_eq!(
+            TRACKER_NA915_DEV_CONFIGURATION.fingerprint(),
+            TRACKER_NA915_DEV_CONFIGURATION_FINGERPRINT
+        );
 
         #[cfg(feature = "near-field-attenuation")]
         {
@@ -1476,6 +1528,10 @@ mod tests {
             assert_eq!(
                 TRACKER_NA915_NEAR_FIELD_DIAGNOSTIC_CONFIGURATION.power(),
                 TrackerRadioPower::DiagnosticNearFieldAttenuation
+            );
+            assert_ne!(
+                TRACKER_NA915_NEAR_FIELD_DIAGNOSTIC_CONFIGURATION.fingerprint(),
+                TRACKER_NA915_DEV_CONFIGURATION_FINGERPRINT
             );
         }
     }
@@ -1493,6 +1549,7 @@ mod tests {
         assert!(profile.crc());
         assert!(!profile.iq_inverted());
         assert_eq!(configuration.rx_symbol_timeout(), 248);
+        assert_eq!(TRACKER_MAXIMUM_RECEIVE_OPERATION_US.get(), 1_500_000);
         assert!(!configuration.public_network());
         assert_eq!(TRACKER_PRIVATE_SYNC_WORD, 0x1424);
         assert!(!configuration.uses_dcdc());
@@ -1517,6 +1574,23 @@ mod tests {
             );
         }
         assert_eq!(Sx1262.high_power_pa_override(0, 0), None);
+    }
+
+    #[test]
+    fn whole_receive_watchdog_tracks_fixed_profile_airtime_and_search_window() {
+        let profile = TRACKER_NA915_DEV_CONFIGURATION.profile();
+        let symbols_per_chirp = 1_u64 << profile.spreading_factor().factor();
+        let symbol_duration_us = symbols_per_chirp
+            .saturating_mul(1_000_000)
+            .div_ceil(profile.bandwidth().hz() as u64);
+        let search_window_us = symbol_duration_us.saturating_mul(u64::from(
+            TRACKER_NA915_DEV_CONFIGURATION.rx_symbol_timeout(),
+        ));
+        let required_us = search_window_us
+            .saturating_add(profile.maximum_frame_time_on_air_us())
+            .saturating_add(TRACKER_RX_WATCHDOG_MINIMUM_MARGIN_US);
+
+        assert!(TRACKER_MAXIMUM_RECEIVE_OPERATION_US.get() >= required_us);
     }
 
     #[test]
@@ -1799,58 +1873,14 @@ mod tests {
 
     #[test]
     fn cad_clear_and_busy_restore_standby_before_timestamped_receive() {
-        let TestRadio {
-            mut lora,
+        let TestTrackerOwnerRig {
+            mut radio,
             commands,
             cad_activity,
             rx_preamble,
-            arm,
-            rx_timestamps,
             ctx,
             ..
-        } = build_lora_with_ticks(
-            TrackerSx1262::new(TRACKER_NA915_DEV_CONFIGURATION.power()),
-            stepped_ticks,
-        );
-        let profile = TRACKER_NA915_DEV_CONFIGURATION.profile();
-        let modulation = lora
-            .create_modulation_params(
-                profile.spreading_factor(),
-                profile.bandwidth(),
-                profile.coding_rate(),
-                profile.frequency_hz(),
-            )
-            .unwrap();
-        let tx_packet = lora
-            .create_tx_packet_params(
-                profile.preamble_symbols(),
-                !profile.explicit_header(),
-                profile.crc(),
-                profile.iq_inverted(),
-                &modulation,
-            )
-            .unwrap();
-        let rx_packet = lora
-            .create_rx_packet_params(
-                profile.preamble_symbols(),
-                !profile.explicit_header(),
-                SX1262_FRAME_MTU as u8,
-                profile.crc(),
-                profile.iq_inverted(),
-                &modulation,
-            )
-            .unwrap();
-        let mut radio = TrackerRadio {
-            active: Some(Active {
-                lora,
-                modulation,
-                tx_packet,
-                rx_packet,
-            }),
-            configuration: TRACKER_NA915_DEV_CONFIGURATION,
-            tx_arm: arm,
-            rx_timestamps,
-        };
+        } = build_tracker_owner_with_ticks(stepped_ticks);
         assert_eq!(radio.configuration(), TRACKER_NA915_DEV_CONFIGURATION);
 
         commands.borrow_mut().clear();
@@ -1865,19 +1895,231 @@ mod tests {
         );
 
         cad_activity.set(true);
-        assert!(block_on(radio.channel_activity_detected()).unwrap());
+        let cad = block_on(SoleRnodeRadio::cad(&mut radio)).unwrap();
+        assert!(cad.activity_detected());
         assert!(radio.is_active());
         assert!(!ctx.is_high());
 
         STEPPED_TICKS.with(|ticks| ticks.set(200));
         rx_preamble.set(true);
         let mut buffer = [0_u8; SX1262_FRAME_MTU];
-        let received = block_on(radio.receive_frame(&mut buffer))
-            .unwrap()
-            .expect("mock returns RxDone");
-        assert_eq!(received.received_at_ticks, 202);
+        let received = block_on(SoleRnodeRadio::receive_bounded(&mut radio, &mut buffer)).unwrap();
+        let BoundedRxOutcome::Frame(received) = received else {
+            panic!("mock must return RxDone")
+        };
+        assert_eq!(received.received_at_us(), 202);
         assert!(radio.is_active());
         assert!(!ctx.is_high());
+    }
+
+    #[test]
+    fn sole_radio_split_tx_retains_one_owner_and_reports_each_final_irq() {
+        let TestTrackerOwnerRig {
+            mut radio,
+            commands,
+            cad_activity,
+            ctx,
+            ..
+        } = build_tracker_owner_with_ticks(stepped_ticks);
+
+        fn assert_sole_radio_impl<Radio: SoleRnodeRadio>() {}
+        assert_sole_radio_impl::<TestTrackerOwner>();
+        assert_eq!(
+            SoleRnodeRadio::configuration_fingerprint(&radio),
+            TRACKER_NA915_DEV_CONFIGURATION_FINGERPRINT
+        );
+        assert_eq!(
+            SoleRnodeRadio::airtime_profile(&radio),
+            TRACKER_NA915_DEV_CONFIGURATION.profile()
+        );
+        assert_eq!(
+            SoleRnodeRadio::maximum_receive_operation_us(&radio),
+            TRACKER_MAXIMUM_RECEIVE_OPERATION_US
+        );
+
+        STEPPED_TICKS.with(|ticks| ticks.set(300));
+        cad_activity.set(false);
+        let cad = block_on(SoleRnodeRadio::cad(&mut radio)).unwrap();
+        assert!(!cad.activity_detected());
+        assert_eq!(cad.observed_at_us(), 301);
+        assert!(SoleRnodeRadio::is_active(&radio));
+
+        let packet = [0x5a; 255];
+        let mut first_output = [0_u8; SX1262_FRAME_MTU];
+        let mut second_output = [0_u8; SX1262_FRAME_MTU];
+        let frames = reticulum_radio_interface::frame_rns_packet(
+            &packet,
+            7,
+            &mut first_output,
+            &mut second_output,
+        )
+        .unwrap();
+        assert_eq!(frames.frame_count(), 2);
+
+        commands.borrow_mut().clear();
+        STEPPED_TICKS.with(|ticks| ticks.set(400));
+        let transmitted = block_on(SoleRnodeRadio::transmit(&mut radio, frames)).unwrap();
+        assert_eq!(transmitted.progress().completed_frame_count(), 2);
+        assert_eq!(transmitted.progress().frame_completed_at_us(0), Some(401));
+        assert_eq!(transmitted.progress().frame_completed_at_us(1), Some(402));
+        assert_eq!(
+            commands
+                .borrow()
+                .iter()
+                .filter(|command| command.as_slice() == [0x83, 0x00, 0x00, 0x00])
+                .count(),
+            2
+        );
+        assert!(SoleRnodeRadio::is_active(&radio));
+        assert!(!ctx.is_high());
+    }
+
+    #[test]
+    fn dropping_unpolled_sole_radio_futures_fails_closed() {
+        let TestTrackerOwnerRig {
+            mut radio,
+            ctx,
+            power,
+            csd,
+            ..
+        } = build_tracker_owner_with_ticks(stepped_ticks);
+        assert!(power.is_high());
+        assert!(csd.is_high());
+
+        let mut first_output = [0_u8; SX1262_FRAME_MTU];
+        let mut second_output = [0_u8; SX1262_FRAME_MTU];
+        let frames = reticulum_radio_interface::frame_rns_packet(
+            b"cancel-before-poll",
+            1,
+            &mut first_output,
+            &mut second_output,
+        )
+        .unwrap();
+        let transmit = SoleRnodeRadio::transmit(&mut radio, frames);
+        drop(transmit);
+
+        assert!(!SoleRnodeRadio::is_active(&radio));
+        assert!(!ctx.is_high());
+        assert!(!power.is_high());
+        assert!(!csd.is_high());
+
+        let TestTrackerOwnerRig {
+            mut radio,
+            ctx,
+            power,
+            csd,
+            ..
+        } = build_tracker_owner_with_ticks(stepped_ticks);
+        let cad = SoleRnodeRadio::cad(&mut radio);
+        drop(cad);
+
+        assert!(!SoleRnodeRadio::is_active(&radio));
+        assert!(!ctx.is_high());
+        assert!(!power.is_high());
+        assert!(!csd.is_high());
+
+        let TestTrackerOwnerRig {
+            mut radio,
+            ctx,
+            power,
+            csd,
+            ..
+        } = build_tracker_owner_with_ticks(stepped_ticks);
+        let mut buffer = [0_u8; SX1262_FRAME_MTU];
+        let receive = SoleRnodeRadio::receive_bounded(&mut radio, &mut buffer);
+        drop(receive);
+
+        assert!(!SoleRnodeRadio::is_active(&radio));
+        assert!(!ctx.is_high());
+        assert!(!power.is_high());
+        assert!(!csd.is_high());
+    }
+
+    #[test]
+    fn sole_radio_receive_timeout_is_reusable() {
+        let TestTrackerOwnerRig {
+            mut radio,
+            rx_preamble,
+            rx_timeout,
+            ..
+        } = build_tracker_owner_with_ticks(stepped_ticks);
+        let mut buffer = [0xa5_u8; SX1262_FRAME_MTU];
+
+        rx_preamble.set(false);
+        rx_timeout.set(true);
+        assert_eq!(
+            block_on(SoleRnodeRadio::receive_bounded(&mut radio, &mut buffer)).unwrap(),
+            BoundedRxOutcome::NoPreambleTimeout
+        );
+        assert_eq!(buffer, [0xa5; SX1262_FRAME_MTU]);
+        assert!(SoleRnodeRadio::is_active(&radio));
+    }
+
+    #[test]
+    fn legacy_tick_capture_is_rejected_before_sole_radio_operation() {
+        let TestTrackerOwnerRig {
+            mut radio,
+            commands,
+            ctx,
+            power,
+            csd,
+            ..
+        } = build_tracker_owner(Box::leak(Box::new(TrackerRxTimestampCapture::new(
+            test_ticks,
+        ))));
+        commands.borrow_mut().clear();
+
+        let fault = block_on(SoleRnodeRadio::cad(&mut radio)).unwrap_err();
+        assert_eq!(
+            reticulum_radio_interface::SoleRadioFault::phase(fault),
+            SoleRadioFaultPhase::ChannelActivityPreparation
+        );
+        assert_eq!(
+            reticulum_radio_interface::SoleRadioFault::class(fault),
+            SoleRadioFaultClass::Configuration
+        );
+        assert!(
+            !commands
+                .borrow()
+                .iter()
+                .any(|command| command.first() == Some(&0xc5))
+        );
+        assert!(!SoleRnodeRadio::is_active(&radio));
+        assert!(!ctx.is_high());
+        assert!(!power.is_high());
+        assert!(!csd.is_high());
+
+        let TestTrackerOwnerRig {
+            mut radio,
+            commands,
+            ctx,
+            power,
+            csd,
+            ..
+        } = build_tracker_owner(Box::leak(Box::new(TrackerRxTimestampCapture::new(
+            test_ticks,
+        ))));
+        commands.borrow_mut().clear();
+        let mut buffer = [0_u8; SX1262_FRAME_MTU];
+        let fault = block_on(SoleRnodeRadio::receive_bounded(&mut radio, &mut buffer)).unwrap_err();
+        assert_eq!(
+            reticulum_radio_interface::SoleRadioFault::phase(fault),
+            SoleRadioFaultPhase::ReceivePreparation
+        );
+        assert_eq!(
+            reticulum_radio_interface::SoleRadioFault::class(fault),
+            SoleRadioFaultClass::Configuration
+        );
+        assert!(
+            !commands
+                .borrow()
+                .iter()
+                .any(|command| command.first() == Some(&0x82))
+        );
+        assert!(!SoleRnodeRadio::is_active(&radio));
+        assert!(!ctx.is_high());
+        assert!(!power.is_high());
+        assert!(!csd.is_high());
     }
 
     #[test]

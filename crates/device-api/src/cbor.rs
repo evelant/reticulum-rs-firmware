@@ -9,10 +9,10 @@ use crate::model::{
     RequestEnvelope, RequestId, ResponseEnvelope, SubmissionFailure, SubmissionId, SubmissionState,
     SubmissionStatus,
 };
-#[cfg(feature = "host-sim")]
+#[cfg(feature = "experimental-rns-data")]
 use crate::model::{
-    DestinationHash, IdempotencyKey, MAX_PREPARE_RNS_DATA_PAYLOAD_BYTES,
-    OP_EXPERIMENTAL_PREPARE_RNS_DATA, SubmissionAccepted,
+    DestinationHash, IdempotencyKey, MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES,
+    OP_EXPERIMENTAL_SUBMIT_RNS_DATA, SubmissionAccepted,
 };
 
 const MAX_MAP_ENTRIES: u64 = 32;
@@ -37,26 +37,26 @@ pub enum RequiredField {
     VersionMinor,
     /// Submission identifier at body key 0.
     SubmissionId,
-    /// Experimental destination hash at body key 0.
-    PrepareDestination,
-    /// Experimental payload at body key 1.
-    PreparePayload,
-    /// Experimental idempotency key at body key 2.
-    PrepareIdempotencyKey,
+    /// Experimental submission destination hash at body key 0.
+    SubmitDestination,
+    /// Experimental submission payload at body key 1.
+    SubmitPayload,
+    /// Experimental submission idempotency key at body key 2.
+    SubmitIdempotencyKey,
     /// Capability API version at body key 0.
     CapabilityApiVersion,
     /// Capability raw packet-output flag at body key 1.
     CapabilityPacketOutput,
-    /// Capability radio-TX availability at body key 2.
-    CapabilityRadioTx,
-    /// Capability experimental preparation flag at body key 3.
-    CapabilityExperimentalPrepare,
+    /// Capability direct-radio-TX availability at body key 2.
+    CapabilityDirectRadioTx,
+    /// Capability experimental outbound RNS DATA submission flag at body key 3.
+    CapabilityExperimentalSubmit,
     /// Capability logical message limit at body key 4.
     CapabilityMaxMessageBytes,
     /// Capability body limit at body key 5.
     CapabilityMaxBodyBytes,
-    /// Capability experimental payload limit at body key 6.
-    CapabilityMaxPreparePayloadBytes,
+    /// Capability experimental submission payload limit at body key 6.
+    CapabilityMaxSubmitPayloadBytes,
     /// Submission state at body key 1.
     SubmissionState,
     /// State-specific prepared packet length at body key 2.
@@ -175,13 +175,13 @@ pub fn encode_request(
     output: &mut [u8],
 ) -> Result<usize, EncodeError> {
     check_encode_version(envelope.version)?;
-    #[cfg(feature = "host-sim")]
-    if let DeviceRequest::PrepareRnsData { payload, .. } = envelope.request
-        && payload.len() > MAX_PREPARE_RNS_DATA_PAYLOAD_BYTES
+    #[cfg(feature = "experimental-rns-data")]
+    if let DeviceRequest::SubmitRnsData { payload, .. } = envelope.request
+        && payload.len() > MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES
     {
         return Err(EncodeError::PayloadTooLarge {
             actual: payload.len(),
-            max: MAX_PREPARE_RNS_DATA_PAYLOAD_BYTES,
+            max: MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES,
         });
     }
 
@@ -204,8 +204,8 @@ pub fn encode_request(
             put!(encoder.u8(0));
             put!(encoder.u64(id.0));
         }
-        #[cfg(feature = "host-sim")]
-        DeviceRequest::PrepareRnsData {
+        #[cfg(feature = "experimental-rns-data")]
+        DeviceRequest::SubmitRnsData {
             destination,
             payload,
             idempotency_key,
@@ -299,8 +299,8 @@ pub fn encode_response(
         DeviceResponse::SubmissionStatus(status) => {
             encode_submission_status(&mut encoder, status)?;
         }
-        #[cfg(feature = "host-sim")]
-        DeviceResponse::PrepareRnsDataAccepted(accepted) => {
+        #[cfg(feature = "experimental-rns-data")]
+        DeviceResponse::SubmitRnsDataAccepted(accepted) => {
             encode_submission_accepted(&mut encoder, accepted)?;
         }
         DeviceResponse::Error(error) => encode_error(&mut encoder, error)?,
@@ -352,9 +352,9 @@ pub fn decode_response(input: &[u8]) -> Result<ResponseEnvelope, DecodeError> {
     let response = match kind {
         OP_SYSTEM_CAPABILITIES => DeviceResponse::SystemCapabilities(decode_capabilities(body)?),
         OP_SUBMISSION_STATUS => DeviceResponse::SubmissionStatus(decode_submission_status(body)?),
-        #[cfg(feature = "host-sim")]
-        OP_EXPERIMENTAL_PREPARE_RNS_DATA => {
-            DeviceResponse::PrepareRnsDataAccepted(decode_submission_accepted(body)?)
+        #[cfg(feature = "experimental-rns-data")]
+        OP_EXPERIMENTAL_SUBMIT_RNS_DATA => {
+            DeviceResponse::SubmitRnsDataAccepted(decode_submission_accepted(body)?)
         }
         RESPONSE_ERROR => DeviceResponse::Error(decode_error(body)?),
         other => return Err(DecodeError::UnsupportedResponseKind(other)),
@@ -388,15 +388,15 @@ fn encode_capabilities(
     put!(encoder.u8(1));
     put!(encoder.bool(capabilities.packet_output));
     put!(encoder.u8(2));
-    put!(encoder.u8(capabilities.radio_tx.wire_code()));
+    put!(encoder.u8(capabilities.direct_radio_tx.wire_code()));
     put!(encoder.u8(3));
-    put!(encoder.bool(capabilities.experimental_prepare_rns_data));
+    put!(encoder.bool(capabilities.experimental_submit_rns_data));
     put!(encoder.u8(4));
     put!(encoder.u16(capabilities.max_message_bytes));
     put!(encoder.u8(5));
     put!(encoder.u16(capabilities.max_body_bytes));
     put!(encoder.u8(6));
-    put!(encoder.u16(capabilities.max_prepare_rns_data_payload_bytes));
+    put!(encoder.u16(capabilities.max_submit_rns_data_payload_bytes));
     Ok(())
 }
 
@@ -430,7 +430,7 @@ fn encode_submission_status(
     Ok(())
 }
 
-#[cfg(feature = "host-sim")]
+#[cfg(feature = "experimental-rns-data")]
 fn encode_submission_accepted(
     encoder: &mut SliceEncoder<'_>,
     accepted: SubmissionAccepted,
@@ -635,8 +635,8 @@ fn decode_request_body<'a>(
     match operation {
         OP_SYSTEM_CAPABILITIES => decode_capabilities_request(body),
         OP_SUBMISSION_STATUS => decode_status_request(body),
-        #[cfg(feature = "host-sim")]
-        OP_EXPERIMENTAL_PREPARE_RNS_DATA => decode_prepare_request(body),
+        #[cfg(feature = "experimental-rns-data")]
+        OP_EXPERIMENTAL_SUBMIT_RNS_DATA => decode_submit_request(body),
         other => Err(DecodeError::UnsupportedOperation(other)),
     }
 }
@@ -674,8 +674,8 @@ fn decode_status_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError> 
     })
 }
 
-#[cfg(feature = "host-sim")]
-fn decode_prepare_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError> {
+#[cfg(feature = "experimental-rns-data")]
+fn decode_submit_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
     let mut destination = None;
@@ -685,19 +685,19 @@ fn decode_prepare_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError>
         let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
         match key {
             0 => {
-                reject_duplicate(destination.is_some(), RequiredField::PrepareDestination)?;
+                reject_duplicate(destination.is_some(), RequiredField::SubmitDestination)?;
                 destination = Some(DestinationHash(decode_fixed_bytes::<16>(
                     &mut decoder,
-                    RequiredField::PrepareDestination,
+                    RequiredField::SubmitDestination,
                 )?));
             }
             1 => {
-                reject_duplicate(payload.is_some(), RequiredField::PreparePayload)?;
+                reject_duplicate(payload.is_some(), RequiredField::SubmitPayload)?;
                 let bytes = decoder.bytes().map_err(|_| DecodeError::Malformed)?;
-                if bytes.len() > MAX_PREPARE_RNS_DATA_PAYLOAD_BYTES {
+                if bytes.len() > MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES {
                     return Err(DecodeError::PayloadTooLarge {
                         actual: bytes.len(),
-                        max: MAX_PREPARE_RNS_DATA_PAYLOAD_BYTES,
+                        max: MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES,
                     });
                 }
                 payload = Some(bytes);
@@ -705,21 +705,21 @@ fn decode_prepare_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError>
             2 => {
                 reject_duplicate(
                     idempotency_key.is_some(),
-                    RequiredField::PrepareIdempotencyKey,
+                    RequiredField::SubmitIdempotencyKey,
                 )?;
                 idempotency_key = Some(IdempotencyKey(decode_fixed_bytes::<16>(
                     &mut decoder,
-                    RequiredField::PrepareIdempotencyKey,
+                    RequiredField::SubmitIdempotencyKey,
                 )?));
             }
             _ => skip_strict(&mut decoder, 0)?,
         }
     }
     finish_body(&decoder, body)?;
-    Ok(DeviceRequest::PrepareRnsData {
-        destination: require(destination, RequiredField::PrepareDestination)?,
-        payload: require(payload, RequiredField::PreparePayload)?,
-        idempotency_key: require(idempotency_key, RequiredField::PrepareIdempotencyKey)?,
+    Ok(DeviceRequest::SubmitRnsData {
+        destination: require(destination, RequiredField::SubmitDestination)?,
+        payload: require(payload, RequiredField::SubmitPayload)?,
+        idempotency_key: require(idempotency_key, RequiredField::SubmitIdempotencyKey)?,
     })
 }
 
@@ -728,8 +728,8 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
     let entries = decode_map_len(&mut decoder)?;
     let mut api_version = None;
     let mut packet_output = None;
-    let mut radio_tx = None;
-    let mut experimental_prepare = None;
+    let mut direct_radio_tx = None;
+    let mut experimental_submit = None;
     let mut max_message = None;
     let mut max_body = None;
     let mut max_payload = None;
@@ -748,16 +748,19 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
                 packet_output = Some(decoder.bool().map_err(|_| DecodeError::Malformed)?);
             }
             2 => {
-                reject_duplicate(radio_tx.is_some(), RequiredField::CapabilityRadioTx)?;
+                reject_duplicate(
+                    direct_radio_tx.is_some(),
+                    RequiredField::CapabilityDirectRadioTx,
+                )?;
                 let value = decoder.u8().map_err(|_| DecodeError::Malformed)?;
-                radio_tx = Some(decode_capability_availability(value)?);
+                direct_radio_tx = Some(decode_direct_radio_availability(value)?);
             }
             3 => {
                 reject_duplicate(
-                    experimental_prepare.is_some(),
-                    RequiredField::CapabilityExperimentalPrepare,
+                    experimental_submit.is_some(),
+                    RequiredField::CapabilityExperimentalSubmit,
                 )?;
-                experimental_prepare = Some(decoder.bool().map_err(|_| DecodeError::Malformed)?);
+                experimental_submit = Some(decoder.bool().map_err(|_| DecodeError::Malformed)?);
             }
             4 => {
                 reject_duplicate(
@@ -773,7 +776,7 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
             6 => {
                 reject_duplicate(
                     max_payload.is_some(),
-                    RequiredField::CapabilityMaxPreparePayloadBytes,
+                    RequiredField::CapabilityMaxSubmitPayloadBytes,
                 )?;
                 max_payload = Some(decoder.u16().map_err(|_| DecodeError::Malformed)?);
             }
@@ -786,16 +789,16 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
     Ok(CapabilitySnapshot {
         api_version,
         packet_output: require(packet_output, RequiredField::CapabilityPacketOutput)?,
-        radio_tx: require(radio_tx, RequiredField::CapabilityRadioTx)?,
-        experimental_prepare_rns_data: require(
-            experimental_prepare,
-            RequiredField::CapabilityExperimentalPrepare,
+        direct_radio_tx: require(direct_radio_tx, RequiredField::CapabilityDirectRadioTx)?,
+        experimental_submit_rns_data: require(
+            experimental_submit,
+            RequiredField::CapabilityExperimentalSubmit,
         )?,
         max_message_bytes: require(max_message, RequiredField::CapabilityMaxMessageBytes)?,
         max_body_bytes: require(max_body, RequiredField::CapabilityMaxBodyBytes)?,
-        max_prepare_rns_data_payload_bytes: require(
+        max_submit_rns_data_payload_bytes: require(
             max_payload,
-            RequiredField::CapabilityMaxPreparePayloadBytes,
+            RequiredField::CapabilityMaxSubmitPayloadBytes,
         )?,
     })
 }
@@ -858,7 +861,7 @@ fn decode_submission_status(body: &[u8]) -> Result<SubmissionStatus, DecodeError
     })
 }
 
-#[cfg(feature = "host-sim")]
+#[cfg(feature = "experimental-rns-data")]
 fn decode_submission_accepted(body: &[u8]) -> Result<SubmissionAccepted, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -924,13 +927,13 @@ fn decode_fixed_bytes<const N: usize>(
         })
 }
 
-fn decode_capability_availability(value: u8) -> Result<CapabilityAvailability, DecodeError> {
+fn decode_direct_radio_availability(value: u8) -> Result<CapabilityAvailability, DecodeError> {
     match value {
         0 => Ok(CapabilityAvailability::Unavailable),
         1 => Ok(CapabilityAvailability::Disabled),
         2 => Ok(CapabilityAvailability::Available),
         other => Err(DecodeError::InvalidValue {
-            field: RequiredField::CapabilityRadioTx,
+            field: RequiredField::CapabilityDirectRadioTx,
             value: u64::from(other),
         }),
     }

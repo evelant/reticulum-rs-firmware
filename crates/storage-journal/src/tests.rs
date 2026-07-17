@@ -298,6 +298,15 @@ fn assert_backend_write_fault<T>(result: Result<T, JournalError<FakeError>>) {
     );
 }
 
+fn canonical_empty_manifest() -> [u8; MANIFEST_SIZE] {
+    encode_manifest(Manifest {
+        bank: Bank::A,
+        generation: 1,
+        baseline_count: 0,
+        baseline_tail: ZERO_DIGEST,
+    })
+}
+
 #[test]
 fn geometry_exactly_fills_the_fixed_partition_contract() {
     assert_eq!(PARTITION_SIZE, 1024 * 1024);
@@ -429,6 +438,229 @@ fn every_format_manifest_write_byte_cut_never_publishes_a_partial_manifest() {
             } else {
                 assert!(matches!(mounted, Err(JournalError::UnformattedNonErased)));
             }
+        }
+    }
+}
+
+#[test]
+fn first_provision_requires_explicit_authority_and_existing_empty_a1_is_read_only() {
+    let mut flash = FakeNor::erased();
+    let erased = flash.bytes.clone();
+    assert_eq!(
+        provision_first(&mut flash, FreshJournalPolicy::Reject),
+        Err(FirstProvisionError::NotAuthorized)
+    );
+    assert_eq!(flash.bytes, erased);
+    assert_eq!(flash.writes, 0);
+    assert_eq!(flash.erases, 0);
+
+    let state = provision_first(&mut flash, FreshJournalPolicy::AllowFirstProvision)
+        .expect("independently authorized erased media provisions");
+    assert_eq!(state, empty_generation_one_state());
+    assert_eq!(flash.writes, 2);
+    assert_eq!(flash.erases, 0);
+    assert_eq!(
+        mount::<1, _>(&mut flash, SubmissionId::new(1))
+            .unwrap()
+            .state(),
+        state
+    );
+
+    let committed = flash.bytes.clone();
+    let writes = flash.writes;
+    assert_eq!(
+        provision_first(&mut flash, FreshJournalPolicy::Reject),
+        Ok(state)
+    );
+    assert_eq!(flash.bytes, committed);
+    assert_eq!(flash.writes, writes);
+    assert_eq!(flash.erases, 0);
+}
+
+#[test]
+fn every_first_provision_prefix_and_commit_byte_cut_resumes_only_when_authorized() {
+    let writes = [MANIFEST_PREFIX_SIZE, COMMIT_SIZE];
+    for (write_index, write_len) in writes.into_iter().enumerate() {
+        for cut in 0..=write_len {
+            let mut flash = FakeNor::erased();
+            flash.fail_write_after(write_index, WriteFaultKind::Partial(cut));
+            assert_eq!(
+                provision_first(&mut flash, FreshJournalPolicy::AllowFirstProvision),
+                Err(FirstProvisionError::Backend(FakeError::Injected)),
+                "initial fault write={write_index} cut={cut}"
+            );
+
+            let before_reject = flash.bytes.clone();
+            let writes_before_reject = flash.writes;
+            let fully_committed = write_index == 1 && cut == COMMIT_SIZE;
+            let rejected = provision_first(&mut flash, FreshJournalPolicy::Reject);
+            if fully_committed {
+                assert_eq!(rejected, Ok(empty_generation_one_state()));
+            } else {
+                assert_eq!(rejected, Err(FirstProvisionError::NotAuthorized));
+            }
+            assert_eq!(
+                flash.bytes, before_reject,
+                "Reject mutated write={write_index} cut={cut}"
+            );
+            assert_eq!(flash.writes, writes_before_reject);
+            assert_eq!(flash.erases, 0);
+
+            let recovered =
+                provision_first(&mut flash, FreshJournalPolicy::AllowFirstProvision).unwrap();
+            assert_eq!(recovered, empty_generation_one_state());
+            assert_eq!(flash.erases, 0);
+            assert_eq!(
+                mount::<1, _>(&mut flash, SubmissionId::new(1))
+                    .unwrap()
+                    .state(),
+                recovered,
+                "recovery did not mount write={write_index} cut={cut}"
+            );
+
+            let writes_after_recovery = flash.writes;
+            assert_eq!(
+                provision_first(&mut flash, FreshJournalPolicy::AllowFirstProvision),
+                Ok(recovered)
+            );
+            assert_eq!(flash.writes, writes_after_recovery);
+        }
+    }
+}
+
+#[test]
+fn lost_first_provision_write_replies_reconcile_without_duplicate_formatting() {
+    for write_index in 0..2 {
+        let mut flash = FakeNor::erased();
+        flash.fail_write_after(write_index, WriteFaultKind::LostReply);
+        assert_eq!(
+            provision_first(&mut flash, FreshJournalPolicy::AllowFirstProvision),
+            Err(FirstProvisionError::Backend(FakeError::Injected))
+        );
+
+        let recovered =
+            provision_first(&mut flash, FreshJournalPolicy::AllowFirstProvision).unwrap();
+        assert_eq!(recovered, empty_generation_one_state());
+        assert_eq!(flash.erases, 0);
+        assert_eq!(
+            mount::<1, _>(&mut flash, SubmissionId::new(1))
+                .unwrap()
+                .state(),
+            recovered
+        );
+
+        let writes = flash.writes;
+        assert_eq!(
+            provision_first(&mut flash, FreshJournalPolicy::Reject),
+            Ok(recovered)
+        );
+        assert_eq!(flash.writes, writes);
+    }
+}
+
+#[test]
+fn first_provision_accepts_noncontiguous_monotonic_compatible_programming() {
+    let expected = canonical_empty_manifest();
+
+    let mut prefix_torn = FakeNor::erased();
+    for (index, target) in expected[..MANIFEST_PREFIX_SIZE]
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(index, _)| index % 2 == 0)
+    {
+        prefix_torn.bytes[index] &= target;
+    }
+    assert_ne!(
+        prefix_torn.bytes[..MANIFEST_PREFIX_SIZE],
+        expected[..MANIFEST_PREFIX_SIZE]
+    );
+    assert_eq!(
+        provision_first(&mut prefix_torn, FreshJournalPolicy::AllowFirstProvision,),
+        Ok(empty_generation_one_state())
+    );
+
+    let mut commit_torn = FakeNor::erased();
+    commit_torn.bytes[..MANIFEST_PREFIX_SIZE].copy_from_slice(&expected[..MANIFEST_PREFIX_SIZE]);
+    for (index, target) in expected[MANIFEST_PREFIX_SIZE..]
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(index, _)| index % 2 == 0)
+    {
+        commit_torn.bytes[MANIFEST_PREFIX_SIZE + index] &= target;
+    }
+    assert_ne!(commit_torn.bytes[..MANIFEST_SIZE], expected);
+    assert_eq!(
+        provision_first(&mut commit_torn, FreshJournalPolicy::AllowFirstProvision,),
+        Ok(empty_generation_one_state())
+    );
+
+    for flash in [&mut prefix_torn, &mut commit_torn] {
+        assert_eq!(flash.erases, 0);
+        assert_eq!(
+            mount::<1, _>(flash, SubmissionId::new(1)).unwrap().state(),
+            empty_generation_one_state()
+        );
+    }
+}
+
+#[test]
+fn authorized_first_provision_rejects_nonempty_and_off_trajectory_media_without_mutation() {
+    let expected = canonical_empty_manifest();
+
+    let mut outside_manifest = FakeNor::erased();
+    outside_manifest.bytes[BANK_A_OFFSET + 17] = 0xfe;
+
+    let mut incompatible_prefix = FakeNor::erased();
+    let (incompatible_index, incompatible_byte) = expected[..MANIFEST_PREFIX_SIZE]
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|(_, byte)| *byte != 0)
+        .unwrap();
+    let programmed_one_bit = 1_u8 << incompatible_byte.trailing_zeros();
+    incompatible_prefix.bytes[incompatible_index] &= !programmed_one_bit;
+
+    let mut commit_before_prefix = FakeNor::erased();
+    commit_before_prefix.program(0, &expected[..4]);
+    commit_before_prefix.program(
+        MANIFEST_PREFIX_SIZE,
+        &expected[MANIFEST_PREFIX_SIZE..MANIFEST_PREFIX_SIZE + 4],
+    );
+
+    let mut nonempty = formatted();
+    let entry = accepted(1, 0x41, 0x42, b"must not become a fresh journal");
+    assert!(matches!(
+        append::<2, _>(&mut nonempty, SubmissionId::new(1), entry),
+        Ok(AppendOutcome::Appended(_))
+    ));
+
+    for (name, media) in [
+        ("outside-manifest", outside_manifest),
+        ("incompatible-prefix", incompatible_prefix),
+        ("commit-before-prefix", commit_before_prefix),
+        ("valid-nonempty", nonempty),
+    ] {
+        for policy in [
+            FreshJournalPolicy::Reject,
+            FreshJournalPolicy::AllowFirstProvision,
+        ] {
+            let mut flash = media.clone();
+            let before = flash.bytes.clone();
+            let writes = flash.writes;
+            let erases = flash.erases;
+            assert_eq!(
+                provision_first(&mut flash, policy),
+                Err(FirstProvisionError::MediaNotProvisionable),
+                "classification name={name} policy={policy:?}"
+            );
+            assert_eq!(
+                flash.bytes, before,
+                "mutation name={name} policy={policy:?}"
+            );
+            assert_eq!(flash.writes, writes);
+            assert_eq!(flash.erases, erases);
         }
     }
 }

@@ -9,13 +9,15 @@ publish.workspace = true
 
 [features]
 default = []
-host-sim = ["reticulum-device-api/host-sim"]
+experimental-rns-data = ["reticulum-device-api/experimental-rns-data"]
 
 [dependencies]
-embedded-storage.workspace = true
 reticulum-device-api = { path = "../device-api", default-features = false }
-reticulum-storage-actor = { path = "../storage-actor", default-features = false }
 reticulum-storage-model = { path = "../storage-model", default-features = false }
+
+[dev-dependencies]
+embedded-storage.workspace = true
+reticulum-storage-actor = { path = "../storage-actor", default-features = false }
 
 [lib]
 path = "src/lib.rs"

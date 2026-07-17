@@ -14,8 +14,10 @@ Three crates intentionally describe different trust and capability surfaces:
   firewall rejects transmit opcodes. No feature, including `--all-features`,
   can turn that crate into a transmitter.
 - `reticulum-board-heltec-tracker-v2-radio` is the product-capable sibling. It
-  owns the proven SX1262, external-FEM, receive, CAD and one-frame transmit
-  mechanics under product names.
+  owns the proven Tracker configuration, SX1262 PA override, external-FEM and
+  reset policy under product names. Board-neutral bounded receive, CAD and
+  atomic one/two-frame transmit mechanics live in
+  `reticulum-radio-lora-phy` and are shared with independent board wrappers.
 - `reticulum-board-heltec-tracker-v2-tx-hil` is now a one-dependency
   compatibility facade. It retains historical HIL aliases, log labels and the
   diagnostic near-field feature forward, but contains no SPI, radio or FEM
@@ -42,6 +44,7 @@ calibrated value is invariant under every Cargo feature.
 | Sync word | private network (`0x1424`) |
 | Regulator / receive gain | LDO / unboosted |
 | RX preamble-search timeout | 248 symbols |
+| Whole RX operation watchdog | 1,500,000 us; expiry is fail-closed cancellation |
 | Antenna-path target | characterized 14 dBm |
 | SX1262 output | 0 dBm behind the external FEM |
 | PA/OCP override | duty `0x04`, `hp_max=0x07`, OCP `0x28` |
@@ -57,10 +60,11 @@ historical HIL's exact feature forward.
 
 ## Ownership and cancellation
 
-`TrackerRadio` owns every SPI, reset, DIO1, busy and external-FEM resource. An
-`Option<Active>` is taken at the beginning of every async RX, CAD or TX
-operation. If a future is cancelled or an operation fails, the local active
-owner drops: SX1262 reset is asserted, then CSD, CTX and FEM power are driven
+`TrackerRadio` owns every SPI, reset, DIO1, busy and external-FEM resource. Its
+shared `Sx126xRnodeRadio` core takes `Option<Active>` at the beginning of every
+async RX, CAD or atomic logical-packet TX operation. If a future is cancelled
+or an operation fails, the local active owner drops through the private Tracker
+interface: SX1262 reset is asserted, then CSD, CTX and FEM power are driven
 low. The wrapper remains faulted instead of reusing uncertain hardware state.
 
 TX retains the qualified two-stage one-shot arm:
@@ -71,10 +75,13 @@ TX retains the qualified two-stage one-shot arm:
 3. the final hook consumes the prepared state immediately before `SetTx`;
 4. successful `TxDone` is followed by explicit standby so CTX returns low.
 
-The product surface is deliberately one physical frame at a time:
+The low-level product surface is deliberately one physical frame at a time,
+while the portable sole-radio trait owns a complete split-frame TX operation:
 
 - `receive_frame()` performs one bounded SX1262 receive and returns RSSI, SNR
   and the monotonic tick sampled when the final DIO1 wait resumed;
+- `SoleRnodeRadio::receive_bounded()` exposes the same caller-buffer operation
+  with portable signal/final-IRQ metadata and a normal no-preamble result;
 - `channel_activity_detected()` performs exactly one low-level CAD and returns
   `true` for busy, then explicitly restores standby because pinned
   `lora-phy` otherwise retains its CAD software mode;
@@ -82,11 +89,14 @@ The product surface is deliberately one physical frame at a time:
   framing, retry or policy decision;
 - `shutdown()` consumes the active owner and leaves the path inert.
 
-The target still supplies an outer monotonic deadline. The SX1262 receive
-symbol timeout stops after preamble detection, and the pinned TX path has no
-independent hardware deadline. Cancelling an overdue operation is therefore a
-supervised radio fault and reconstruction event, not an ordinary scheduler
-wake.
+The target still supplies an outer monotonic deadline using the board-owned
+`TRACKER_MAXIMUM_RECEIVE_OPERATION_US` value. Its 1.5-second bound covers the
+248-symbol SF7/BW125 search, a maximum 255-byte frame, SPI/standby cleanup and
+board-qualified scheduling margin. The SX1262 receive symbol timeout stops
+after preamble detection, and the pinned TX path has no independent hardware
+deadline. Cancelling an overdue operation is therefore a supervised radio
+fault and reconstruction event, never a normal no-preamble timeout or ordinary
+scheduler wake.
 
 ## Deliberately outside the board owner
 
@@ -114,7 +124,7 @@ Build the calibrated semantic image and verify its ELF identity:
 source ~/export-esp.sh
 cargo +esp build --locked --release \
   -p reticulum-heltec-tracker-v2-tx-hil \
-  --no-default-features --features semantic-roundtrip-hil \
+  --no-default-features --features semantic-roundtrip-hil,tracker-radio \
   --target xtensa-esp32s3-none-elf
 shasum -a 256 \
   target/xtensa-esp32s3-none-elf/release/reticulum-heltec-tracker-v2-tx-hil

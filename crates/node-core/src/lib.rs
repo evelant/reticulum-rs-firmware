@@ -5,17 +5,21 @@
 //! metadata, and a fixed DATA attempt ledger. A receipt is registered only
 //! after both final metadata slots have been reserved. Proofs and timeouts
 //! become acknowledged terminal tombstones before RNS releases its receipt
-//! state. The crate deliberately has no device-API, executor, radio, board, or
-//! persistence dependency.
+//! state. A separate fixed ordinary-action owner can atomically move a complete
+//! allocation-backed `NodeActions` packet batch into caller-owned arrays
+//! without consuming that DATA ledger. The crate deliberately has no
+//! device-API, executor, radio, board, or persistence dependency.
 //!
 //! Construction and unrelated RNS paths may still allocate inside the current
-//! Rete integration. The external-buffer DATA transaction implemented here
-//! uses only caller-owned arrays; it is not a claim that the entire node is
-//! allocation free.
+//! Rete integration. The external-buffer DATA transaction and the post-action
+//! ordinary packet staging implemented here use caller-owned arrays; neither
+//! is a claim that the entire node is allocation free.
 
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+
+use core::num::NonZeroU64;
 
 use rand_core::{CryptoRng, RngCore};
 use reticulum_rns_rete::{
@@ -29,6 +33,25 @@ use reticulum_rns_rete::{
 };
 pub use reticulum_rns_rete::{IngressReport, NodeActions};
 use sha2::{Digest, Sha256};
+
+mod ordinary_actions;
+
+pub use ordinary_actions::{
+    OrdinaryActionAdmissionError, OrdinaryActionAdmissionFailure, OrdinaryActionAdmissionRequest,
+    OrdinaryActionBatch, OrdinaryActionCapacitySnapshot, OrdinaryActionOwner,
+    OrdinaryActionOwnerClaimError, OrdinaryAuthorizationErrorKind, OrdinaryAuthorizationFailure,
+    OrdinaryAuthorizedTx, OrdinaryAvailableBufferError, OrdinaryBufferPool,
+    OrdinaryBufferPoolError, OrdinaryBufferRegistrationError, OrdinaryCompletionDisposition,
+    OrdinaryCompletionError, OrdinaryCompletionFailure, OrdinaryExpiredAuthorizedTx,
+    OrdinaryFrameError, OrdinaryPacketBuffer, OrdinaryPacketGeneration, OrdinaryPacketReturn,
+    OrdinaryPacketReturnParkFailure, OrdinaryPacketReturnReason, OrdinaryPacketSlotId,
+    OrdinaryPermitCancelMismatch, OrdinaryPermitPendingTx, OrdinaryPermitReplyMismatch,
+    OrdinaryPermitResolution, OrdinaryPreparedPacket, OrdinaryQuarantineReason,
+    OrdinaryRegisterAndParkError, OrdinaryRegisterAndParkFailure, OrdinaryTxCompletion,
+    OrdinaryTxFrame, OrdinaryTxJob, OrdinaryTxPermitDenial, OrdinaryTxPermitDenialReason,
+    OrdinaryTxPermitGrant, OrdinaryTxPermitReply, OrdinaryTxPermitRequest, OrdinaryTxQuarantine,
+    OrdinaryUnpermittedTx,
+};
 
 /// Complete packet storage reserved for one base-MTU Reticulum transmission.
 pub const PACKET_CAPACITY: usize = RNS_MTU;
@@ -74,6 +97,11 @@ impl NodeIdentity {
     /// Public X25519-plus-Ed25519 key bytes.
     pub fn public_key(&self) -> [u8; 64] {
         self.0.public_key()
+    }
+
+    /// Public 128-bit Reticulum identity hash.
+    pub fn identity_hash(&self) -> [u8; 16] {
+        *self.0.hash().as_bytes()
     }
 }
 
@@ -166,6 +194,43 @@ impl MonotonicSeconds {
     pub const fn get(self) -> u64 {
         self.0
     }
+}
+
+/// Reticulum's 40-bit announce-emission ordering value.
+///
+/// This is deliberately distinct from [`MonotonicSeconds`]. Reticulum embeds
+/// the low 40 bits of this value in every locally generated announce and peers
+/// use it to reject stale or replayed paths. A persistent identity therefore
+/// needs a value that cannot move backwards across reboot. Unix seconds are
+/// suitable when trustworthy wall time exists; an offline target may instead
+/// use a durably reserved logical epoch.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct AnnounceEmissionTime(u64);
+
+impl AnnounceEmissionTime {
+    /// Largest value representable in the five-byte Reticulum field.
+    pub const MAX: u64 = (1_u64 << 40) - 1;
+
+    /// Construct a checked announce-emission ordering value.
+    pub const fn new(value: u64) -> Result<Self, AnnounceEmissionTimeError> {
+        if value <= Self::MAX {
+            Ok(Self(value))
+        } else {
+            Err(AnnounceEmissionTimeError::OutsideWireRange)
+        }
+    }
+
+    /// Raw value supplied to the RNS implementation.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Failure to construct a Reticulum announce-emission ordering value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AnnounceEmissionTimeError {
+    /// The value would be truncated by Reticulum's five-byte wire field.
+    OutsideWireRange,
 }
 
 /// Executor-independent monotonic time in whole milliseconds.
@@ -559,7 +624,7 @@ pub struct AttemptHandle {
 pub enum AttemptUnsentReason {
     /// A prepared job was proven not to have entered the dispatcher handoff.
     QueueRollback,
-    /// Regional, airtime, or other synchronous policy rejected the final hop.
+    /// The selected interface's synchronous resource policy rejected the final hop.
     PolicyDenied(TxPolicyDenial),
     /// The packet-owner deadline expired before the final hop was permitted.
     PermitDeadlineExpired,
@@ -885,6 +950,118 @@ struct OwnedTx<'a> {
     dispatch: DispatchHandle,
 }
 
+/// Opaque identity for one exact transport-owned authorization resource.
+///
+/// Node core treats both this identity and the associated permit units as
+/// opaque values. The interface actor and authorization policy define their
+/// transport-specific meaning.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TxPermitResourceId([u8; 16]);
+
+impl TxPermitResourceId {
+    /// Construct a resource identity from caller-owned bytes.
+    pub const fn new(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the complete resource identity bytes.
+    pub const fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+}
+
+/// Exact transport-owned resource units required before a packet exposes bytes.
+///
+/// The interface actor chooses the resource identity and unit semantics. The
+/// authorization policy must validate those semantics; node core only requires
+/// a nonzero request and an exact-resource covering reservation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TxPermitRequirements {
+    resource: TxPermitResourceId,
+    required_units: NonZeroU64,
+}
+
+impl TxPermitRequirements {
+    /// Validate a nonzero requirement for one exact authorization resource.
+    pub const fn try_new(
+        resource: TxPermitResourceId,
+        required_units: u64,
+    ) -> Result<Self, TxPermitRequirementsError> {
+        match NonZeroU64::new(required_units) {
+            Some(required_units) => Ok(Self {
+                resource,
+                required_units,
+            }),
+            None => Err(TxPermitRequirementsError::ZeroRequiredUnits),
+        }
+    }
+
+    /// Exact authorization resource requested by the interface actor.
+    pub const fn resource(self) -> TxPermitResourceId {
+        self.resource
+    }
+
+    /// Nonzero transport-defined units required for this packet.
+    pub const fn required_units(self) -> u64 {
+        self.required_units.get()
+    }
+}
+
+/// Invalid transport-neutral permit requirements.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TxPermitRequirementsError {
+    /// An authorization request cannot require zero resource units.
+    ZeroRequiredUnits,
+}
+
+/// Resource units atomically reserved by an authorization policy.
+///
+/// A reservation covers requirements only when its resource identity matches
+/// exactly and it reserves at least the required number of units.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TxPermitReservation {
+    resource: TxPermitResourceId,
+    reserved_units: NonZeroU64,
+}
+
+impl TxPermitReservation {
+    /// Validate a nonzero reservation for one exact authorization resource.
+    pub const fn try_new(
+        resource: TxPermitResourceId,
+        reserved_units: u64,
+    ) -> Result<Self, TxPermitReservationError> {
+        match NonZeroU64::new(reserved_units) {
+            Some(reserved_units) => Ok(Self {
+                resource,
+                reserved_units,
+            }),
+            None => Err(TxPermitReservationError::ZeroReservedUnits),
+        }
+    }
+
+    /// Exact authorization resource reserved by the policy.
+    pub const fn resource(self) -> TxPermitResourceId {
+        self.resource
+    }
+
+    /// Nonzero transport-defined units atomically reserved at authorization.
+    pub const fn reserved_units(self) -> u64 {
+        self.reserved_units.get()
+    }
+
+    fn covers(self, requirements: TxPermitRequirements) -> bool {
+        self.resource == requirements.resource
+            && self.reserved_units.get() >= requirements.required_units.get()
+    }
+}
+
+/// Invalid transport-neutral permit reservation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TxPermitReservationError {
+    /// An authorization policy cannot reserve zero resource units.
+    ZeroReservedUnits,
+}
+
 impl OwnedTx<'_> {
     fn bound(&self) -> (PreparedPacket, Option<HopBinding>) {
         match self.buffer.binding {
@@ -914,10 +1091,11 @@ struct PermitBinding {
     dispatch_generation: u64,
     interface: PacketInterfaceId,
     hop_generation: u64,
+    requirements: TxPermitRequirements,
 }
 
 impl PermitBinding {
-    fn from_owner(owner: &OwnedTx<'_>) -> Self {
+    fn from_owner(owner: &OwnedTx<'_>, requirements: TxPermitRequirements) -> Self {
         let (prepared, hop) = owner.bound();
         let hop = hop.expect("routed TX owner must retain a selected hop");
         Self {
@@ -927,6 +1105,7 @@ impl PermitBinding {
             dispatch_generation: owner.dispatch.generation,
             interface: hop.interface,
             hop_generation: hop.generation,
+            requirements,
         }
     }
 }
@@ -993,10 +1172,16 @@ impl<'a> RoutedTxJob<'a> {
     }
 
     /// Consume routed ownership into a permit-pending owner and scalar request.
-    pub fn begin_permit(self) -> (PermitPendingTx<'a>, TxPermitRequest) {
-        let binding = PermitBinding::from_owner(&self.owner);
+    pub fn begin_permit(
+        self,
+        requirements: TxPermitRequirements,
+    ) -> (PermitPendingTx<'a>, TxPermitRequest) {
+        let binding = PermitBinding::from_owner(&self.owner, requirements);
         (
-            PermitPendingTx { owner: self.owner },
+            PermitPendingTx {
+                owner: self.owner,
+                requirements,
+            },
             TxPermitRequest { binding },
         )
     }
@@ -1031,6 +1216,13 @@ pub struct TxAuthorizationCandidate {
     pub interface: PacketInterfaceId,
     /// Complete encoded packet length.
     pub packet_len: u16,
+    /// Exact transport-owned resource units requested by the dispatcher.
+    pub requirements: TxPermitRequirements,
+    /// Monotonic sample supplied to `authorize_tx` for this policy evaluation.
+    ///
+    /// This is the sample used for the immediately preceding owner-deadline
+    /// check. It does not imply that the policy will authorize the candidate.
+    pub now: MonotonicMillis,
     /// Return/recovery deadline.
     pub deadline: TxLeaseDeadline,
     /// Whether an earlier hop may already have transmitted.
@@ -1041,7 +1233,7 @@ pub struct TxAuthorizationCandidate {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TxPolicyDecision {
     /// Permit this exact routed hop.
-    Authorize,
+    Authorize(TxPermitReservation),
     /// Deny this exact routed hop.
     Deny(TxPolicyDenial),
 }
@@ -1051,10 +1243,10 @@ pub enum TxPolicyDecision {
 pub enum TxPolicyDenial {
     /// General policy rejected the operation.
     PolicyDenied,
-    /// No authorized regional profile is available.
-    RegionalProfileUnavailable,
-    /// Airtime could not be reserved.
-    AirtimeUnavailable,
+    /// The requested authorization resource is unavailable.
+    ResourceUnavailable,
+    /// The requested resource capacity could not be reserved.
+    CapacityUnavailable,
 }
 
 /// Synchronous policy invoked at the node-owner linearization point.
@@ -1080,6 +1272,14 @@ pub enum TxPermitDenialReason {
 #[must_use = "a permit grant must resolve its matching pending owner"]
 pub struct TxPermitGrant {
     binding: PermitBinding,
+    reservation: TxPermitReservation,
+}
+
+impl TxPermitGrant {
+    /// Exact reservation atomically consumed by this grant.
+    pub const fn reservation(&self) -> TxPermitReservation {
+        self.reservation
+    }
 }
 
 /// Non-copy denial for one exact routed hop.
@@ -1101,7 +1301,7 @@ impl TxPermitDenial {
 pub enum TxPermitReply {
     /// Authorization succeeded and is conservatively possibly transmitted.
     Granted(TxPermitGrant),
-    /// Authorization was denied before RF authorization.
+    /// Authorization was denied before transmission authorization.
     Denied(TxPermitDenial),
 }
 
@@ -1148,16 +1348,21 @@ impl TxAuthorizationFailure {
 #[must_use = "pending TX ownership must resolve a reply or enter recovery"]
 pub struct PermitPendingTx<'a> {
     owner: OwnedTx<'a>,
+    requirements: TxPermitRequirements,
 }
 
 impl<'a> PermitPendingTx<'a> {
     /// Resolve a matching grant or denial into the corresponding typestate.
+    // The allocation-free mismatch deliberately retains both unique packet
+    // ownership and the exact non-Copy reply. Boxing or dropping either side
+    // would violate the handoff recovery contract.
+    #[allow(clippy::result_large_err)]
     pub fn resolve(
         self,
         reply: TxPermitReply,
         now: MonotonicMillis,
     ) -> Result<PermitResolution<'a>, PermitReplyMismatch<'a>> {
-        let expected = PermitBinding::from_owner(&self.owner);
+        let expected = PermitBinding::from_owner(&self.owner, self.requirements);
         if reply.binding() != expected {
             return Err(PermitReplyMismatch {
                 pending: self,
@@ -1231,6 +1436,48 @@ pub enum TxFrameError {
     Invariant,
 }
 
+/// Transport-neutral scalar observation of one complete authorized frame.
+///
+/// The full-packet digest is calculated from the exact bytes exposed by the
+/// authorized typestate. It is deliberately distinct from [`AttemptToken`],
+/// which covers Reticulum's proof-correlated hashable portion rather than the
+/// complete encoded interface packet.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthorizedFrameObservation {
+    handle: AttemptHandle,
+    attempt: AttemptToken,
+    interface: PacketInterfaceId,
+    packet_len: usize,
+    encoded_packet_sha256: EncodedPacketSha256,
+}
+
+impl AuthorizedFrameObservation {
+    /// Generation-checked attempt identity associated with these exact bytes.
+    pub const fn attempt_handle(self) -> AttemptHandle {
+        self.handle
+    }
+
+    /// Complete proof-correlation hash associated with these exact bytes.
+    pub const fn attempt(self) -> AttemptToken {
+        self.attempt
+    }
+
+    /// Packet interface authorized for this exact hop.
+    pub const fn interface(self) -> PacketInterfaceId {
+        self.interface
+    }
+
+    /// Complete encoded interface-packet length.
+    pub const fn packet_len(self) -> usize {
+        self.packet_len
+    }
+
+    /// Independently calculated SHA-256 over every encoded packet byte.
+    pub const fn encoded_packet_sha256(self) -> EncodedPacketSha256 {
+        self.encoded_packet_sha256
+    }
+}
+
 /// Borrowed bytes exposed only by an authorized typestate.
 pub struct TxFrame<'a> {
     bytes: &'a [u8],
@@ -1259,6 +1506,21 @@ impl TxFrame<'_> {
     pub const fn interface(&self) -> PacketInterfaceId {
         self.interface
     }
+
+    /// Observe transport-neutral scalar evidence for these exact bytes.
+    ///
+    /// The full-packet digest is recomputed here rather than copied from the
+    /// preparation metadata, allowing a later consumer to compare the two
+    /// independently derived values.
+    pub fn observation(&self) -> AuthorizedFrameObservation {
+        AuthorizedFrameObservation {
+            handle: self.handle,
+            attempt: self.attempt,
+            interface: self.interface,
+            packet_len: self.bytes.len(),
+            encoded_packet_sha256: EncodedPacketSha256::new(Sha256::digest(self.bytes).into()),
+        }
+    }
 }
 
 /// Unique packet ownership after authorization.
@@ -1270,12 +1532,17 @@ pub struct AuthorizedTx<'a> {
 }
 
 impl<'a> AuthorizedTx<'a> {
+    /// Exact reservation atomically consumed by this authorization.
+    pub const fn reservation(&self) -> TxPermitReservation {
+        self.grant.reservation
+    }
+
     /// Borrow the authorized packet frame once.
     pub fn frame(&mut self, now: MonotonicMillis) -> Result<TxFrame<'_>, TxFrameError> {
         if self.frame_taken {
             return Err(TxFrameError::AlreadyTaken);
         }
-        let binding = PermitBinding::from_owner(&self.owner);
+        let binding = PermitBinding::from_owner(&self.owner, self.grant.binding.requirements);
         if binding != self.grant.binding {
             return Err(TxFrameError::Invariant);
         }
@@ -1419,12 +1686,28 @@ pub struct TxCompletion<'a> {
     kind: CompletionKind,
 }
 
+impl TxCompletion<'_> {
+    /// Copy the scalar packet metadata carried by this exact owning return.
+    pub fn prepared(&self) -> PreparedPacket {
+        self.owner.bound().0
+    }
+
+    /// Interface selected for the exact hop carried by this owning return.
+    pub fn interface(&self) -> PacketInterfaceId {
+        self.owner
+            .bound()
+            .1
+            .expect("TX completion must retain a selected hop")
+            .interface
+    }
+}
+
 /// Phase active when a dispatch entered recovery.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TxRecoveryPriorPhase {
     /// No permit had been issued for the current hop.
     Unpermitted,
-    /// A permit had been issued and RF may have started.
+    /// A permit had been issued and transmission may have started.
     Authorized,
 }
 
@@ -1940,6 +2223,7 @@ pub struct NodeCore<
     dispatch_generation: u64,
     hop_generation: u64,
     attempt_generation: u64,
+    ordinary_action_owner_claimed: bool,
 }
 
 impl<
@@ -2007,6 +2291,7 @@ impl<
             dispatch_generation: 0,
             hop_generation: 0,
             attempt_generation: 0,
+            ordinary_action_owner_claimed: false,
         })
     }
 
@@ -2028,6 +2313,24 @@ impl<
         }
     }
 
+    /// Issue this node incarnation's sole ordinary protocol-action owner.
+    ///
+    /// Ordinary slot IDs and generations are local to their fixed pool, so two
+    /// pools sharing one [`TxOwnerScope`] could otherwise accept each other's
+    /// same-slot, same-generation jobs. The claim is intentionally one-shot
+    /// and is not released when the returned owner is dropped. Reconstructing
+    /// a node requires a fresh [`NodeInstanceId`] before another ordinary pool
+    /// may exist for that identity.
+    pub fn take_ordinary_action_owner<const ORDINARY_PACKET_BUFFERS: usize>(
+        &mut self,
+    ) -> Result<OrdinaryActionOwner<ORDINARY_PACKET_BUFFERS>, OrdinaryActionOwnerClaimError> {
+        if self.ordinary_action_owner_claimed {
+            return Err(OrdinaryActionOwnerClaimError::AlreadyClaimed);
+        }
+        self.ordinary_action_owner_claimed = true;
+        Ok(OrdinaryActionOwner::new(self.tx_owner_scope()))
+    }
+
     /// Cache one peer identity for deterministic direct sending or tests.
     /// Learned announces will eventually drive the same native identity table.
     pub fn register_peer(
@@ -2045,8 +2348,8 @@ impl<
     /// Configure automatic delivery proofs for DATA received at this node's
     /// primary local destination.
     ///
-    /// This changes protocol behavior only. Radio transmission remains subject
-    /// to the runtime's action ownership, routing, permit, and regional-policy
+    /// This changes protocol behavior only. Transmission remains subject to the
+    /// runtime's action ownership, routing, permit, and interface-policy
     /// boundaries.
     pub fn set_inbound_proof_policy(&mut self, policy: InboundProofPolicy) {
         self.rns.set_inbound_proof_policy(policy.into_rns());
@@ -2060,11 +2363,11 @@ impl<
     pub fn queue_announce<R: RngCore + CryptoRng>(
         &mut self,
         app_data: Option<&[u8]>,
-        now: MonotonicSeconds,
+        emitted_at: AnnounceEmissionTime,
         rng: &mut R,
     ) -> Result<(), AnnounceAdmissionError> {
         self.rns
-            .queue_announce(app_data, now.get(), rng)
+            .queue_announce(app_data, emitted_at.get(), rng)
             .map_err(AnnounceAdmissionError::from)
     }
 
@@ -2073,7 +2376,7 @@ impl<
     ///
     /// The returned envelope has no application events and no unroutable
     /// packets. Each packet retains the broadcast target assigned by RNS. A
-    /// caller must preserve those owned actions until its radio/dispatcher
+    /// caller must preserve those owned actions until its interface dispatcher
     /// boundary accepts or rejects them.
     pub fn flush_announces<R: RngCore>(
         &mut self,
@@ -2409,7 +2712,10 @@ impl<
     ///
     /// Successful issuance immediately and irrevocably marks the dispatch as
     /// possibly transmitted. Valid denials retain routed scalar state so the
-    /// matching pending owner can return it as definitely unsent.
+    /// matching pending owner can return it as definitely unsent. A valid
+    /// candidate carries the exact `now` sample used for the owner-deadline
+    /// check; node-core does not resample between that check and the
+    /// synchronous policy call.
     pub fn authorize_tx<P: TxAuthorizationPolicy>(
         &mut self,
         request: TxPermitRequest,
@@ -2497,6 +2803,8 @@ impl<
         let candidate = TxAuthorizationCandidate {
             interface: binding.interface,
             packet_len: record.prepared.packet_len(),
+            requirements: binding.requirements,
+            now,
             deadline: record.deadline,
             may_have_transmitted: record.may_have_transmitted,
         };
@@ -2505,12 +2813,21 @@ impl<
                 binding,
                 reason: TxPermitDenialReason::Policy(reason),
             })),
-            TxPolicyDecision::Authorize => {
+            TxPolicyDecision::Authorize(reservation)
+                if reservation.covers(binding.requirements) =>
+            {
                 record.may_have_transmitted = true;
                 record.phase = DispatchPhase::Authorized;
                 self.dispatches[binding.slot.index()].state = DispatchState::Active(record);
-                Ok(TxPermitReply::Granted(TxPermitGrant { binding }))
+                Ok(TxPermitReply::Granted(TxPermitGrant {
+                    binding,
+                    reservation,
+                }))
             }
+            TxPolicyDecision::Authorize(_) => Ok(TxPermitReply::Denied(TxPermitDenial {
+                binding,
+                reason: TxPermitDenialReason::Policy(TxPolicyDenial::CapacityUnavailable),
+            })),
         }
     }
 
@@ -3395,6 +3712,13 @@ mod tests {
         MonotonicSeconds::new(seconds)
     }
 
+    const fn announce_time(value: u64) -> AnnounceEmissionTime {
+        match AnnounceEmissionTime::new(value) {
+            Ok(value) => value,
+            Err(_) => panic!("test announce time must fit the wire field"),
+        }
+    }
+
     const fn deadline(milliseconds: u64) -> TxLeaseDeadline {
         TxLeaseDeadline::new(MonotonicMillis::new(milliseconds))
     }
@@ -3451,6 +3775,16 @@ mod tests {
         set
     }
 
+    const TEST_PERMIT_RESOURCE: TxPermitResourceId = TxPermitResourceId::new([0x54; 16]);
+
+    fn test_permit_requirements() -> TxPermitRequirements {
+        TxPermitRequirements::try_new(TEST_PERMIT_RESOURCE, 1).unwrap()
+    }
+
+    fn test_permit_reservation() -> TxPermitReservation {
+        TxPermitReservation::try_new(TEST_PERMIT_RESOURCE, 1).unwrap()
+    }
+
     struct TestPolicy {
         decision: TxPolicyDecision,
         calls: usize,
@@ -3458,9 +3792,9 @@ mod tests {
     }
 
     impl TestPolicy {
-        const fn allowing() -> Self {
+        fn allowing() -> Self {
             Self {
-                decision: TxPolicyDecision::Authorize,
+                decision: TxPolicyDecision::Authorize(test_permit_reservation()),
                 calls: 0,
                 candidate: None,
             }
@@ -3531,12 +3865,15 @@ mod tests {
         interface: PacketInterfaceId,
         rng: &mut CounterRng,
     ) -> NodeActions {
-        let job = prepare(
+        let job = prepare_with_interfaces(
             sender,
             buffer,
             receiver.destination_hash(),
             plaintext,
             now,
+            now * 1_000,
+            now * 1_000 + 500,
+            InterfaceSet::from_bits(u64::MAX),
             rng,
         );
         let packet_len = usize::from(job.packet_len());
@@ -3555,6 +3892,63 @@ mod tests {
             });
         assert!(matches!(disposition, TxCompletionDisposition::Available(_)));
         received.actions
+    }
+
+    fn assert_noncovering_reservation_is_denied(
+        sender_tag: u8,
+        receiver_tag: u8,
+        requirements: TxPermitRequirements,
+        reservation: TxPermitReservation,
+    ) {
+        let mut sender = node::<2, 1>(sender_tag, "sender");
+        let receiver = node::<2, 1>(receiver_tag, "receiver");
+        register_receiver(&mut sender, receiver_tag, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
+        let mut rng = CounterRng::default();
+        let job = prepare(
+            &mut sender,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"reservation rejection",
+            1,
+            &mut rng,
+        );
+        let (pending, request) = job.begin_permit(requirements);
+        let mut policy = TestPolicy {
+            decision: TxPolicyDecision::Authorize(reservation),
+            calls: 0,
+            candidate: None,
+        };
+        let reply = sender
+            .authorize_tx(request, owner_time(1_100), &mut policy)
+            .unwrap_or_else(|failure| panic!("valid request failed: {:?}", failure.reason()));
+
+        assert_eq!(policy.calls, 1);
+        assert_eq!(policy.candidate.unwrap().requirements, requirements);
+        assert!(matches!(
+            &reply,
+            TxPermitReply::Denied(denial)
+                if denial.reason()
+                    == TxPermitDenialReason::Policy(TxPolicyDenial::CapacityUnavailable)
+        ));
+        assert_eq!(sender.capacities().dispatches_authorized, 0);
+        assert_eq!(sender.capacities().dispatches_queued, 1);
+
+        let unpermitted = match pending.resolve(reply, owner_time(1_101)) {
+            Ok(PermitResolution::Unpermitted(unpermitted)) => unpermitted,
+            Ok(PermitResolution::Authorized(_)) => panic!("non-covering reservation authorized"),
+            Ok(PermitResolution::Expired(_)) => panic!("non-covering reservation expired"),
+            Err(_) => panic!("matching denial reply was rejected"),
+        };
+        assert!(matches!(
+            sender
+                .complete_tx(
+                    unpermitted.complete(TxCompletionCode::new(0x554e)),
+                    owner_time(1_102),
+                )
+                .unwrap_or_else(|failure| panic!("denied return failed: {:?}", failure.reason())),
+            TxCompletionDisposition::Available(_)
+        ));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3647,18 +4041,20 @@ mod tests {
         let oversized = [0u8; MAX_ANNOUNCE_APP_DATA + 1];
 
         assert_eq!(
-            owner.queue_announce(Some(&oversized), time(1), &mut rng),
+            owner.queue_announce(Some(&oversized), announce_time(1), &mut rng),
             Err(AnnounceAdmissionError::AppDataTooLarge {
                 actual: MAX_ANNOUNCE_APP_DATA + 1,
                 maximum: MAX_ANNOUNCE_APP_DATA,
             })
         );
-        owner.queue_announce(None, time(1), &mut rng).unwrap();
         owner
-            .queue_announce(Some(b"product announce"), time(1), &mut rng)
+            .queue_announce(None, announce_time(1), &mut rng)
+            .unwrap();
+        owner
+            .queue_announce(Some(b"product announce"), announce_time(1), &mut rng)
             .unwrap();
         assert_eq!(
-            owner.queue_announce(None, time(1), &mut rng),
+            owner.queue_announce(None, announce_time(1), &mut rng),
             Err(AnnounceAdmissionError::QueueFull { limit: 2 })
         );
 
@@ -3686,7 +4082,9 @@ mod tests {
         let mut rng = CounterRng::default();
 
         assert_eq!(InboundProofPolicy::default(), InboundProofPolicy::Never);
-        receiver.queue_announce(None, time(1), &mut rng).unwrap();
+        receiver
+            .queue_announce(None, announce_time(1), &mut rng)
+            .unwrap();
         let announce = receiver.flush_announces(time(1), &mut rng);
         assert_eq!(announce.packets.len(), 1);
         sender
@@ -3842,6 +4240,20 @@ mod tests {
     }
 
     #[test]
+    fn announce_emission_time_enforces_the_exact_five_byte_wire_range() {
+        assert_eq!(
+            AnnounceEmissionTime::new(AnnounceEmissionTime::MAX)
+                .expect("wire maximum must be accepted")
+                .get(),
+            0x00ff_ffff_ffff
+        );
+        assert_eq!(
+            AnnounceEmissionTime::new(AnnounceEmissionTime::MAX + 1),
+            Err(AnnounceEmissionTimeError::OutsideWireRange)
+        );
+    }
+
+    #[test]
     fn successful_preparation_is_no_copy_parseable_and_preserves_scalar_metadata() {
         let mut sender = node::<2, 1>(3, "sender");
         let receiver = node::<2, 1>(4, "receiver");
@@ -3877,6 +4289,50 @@ mod tests {
         assert_eq!(sender.capacities().dispatches_queued, 1);
         assert_eq!(sender.capacities().receipts_used, 1);
         assert_eq!(sender.capacities().attempts_active, 1);
+    }
+
+    #[test]
+    fn learned_path_routes_local_data_only_to_its_ingress_interface() {
+        let mut sender = node::<4, 1>(5, "sender");
+        let mut receiver = node::<4, 1>(6, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
+        let mut rng = CounterRng::default();
+
+        receiver
+            .queue_announce(None, announce_time(1), &mut rng)
+            .unwrap();
+        let announce = receiver.flush_announces(time(1), &mut rng);
+        assert_eq!(announce.packets.len(), 1);
+        sender
+            .ingest(
+                announce.packets[0].bytes(),
+                time(1),
+                PacketInterfaceId::new(4),
+                &mut rng,
+            )
+            .unwrap();
+
+        let job = prepare_with_interfaces(
+            &mut sender,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"one learned path",
+            2,
+            2_000,
+            2_500,
+            interfaces(&[1, 4, 7]),
+            &mut rng,
+        );
+        assert_eq!(job.target(), TxTarget::Only(PacketInterfaceId::new(4)));
+        assert_eq!(job.interface(), PacketInterfaceId::new(4));
+
+        let returned = job.return_unpermitted().complete(TxCompletionCode::new(0));
+        let disposition = sender
+            .complete_tx(returned, owner_time(2_100))
+            .unwrap_or_else(|failure| {
+                panic!("learned-path packet did not return: {:?}", failure.reason())
+            });
+        assert!(matches!(disposition, TxCompletionDisposition::Available(_)));
     }
 
     #[test]
@@ -4366,7 +4822,7 @@ mod tests {
             route,
             &mut rng,
         );
-        let (pending, request) = first.begin_permit();
+        let (pending, request) = first.begin_permit(test_permit_requirements());
         let reply = sender
             .authorize_tx(request, owner_time(2_100), &mut TestPolicy::allowing())
             .unwrap_or_else(|failure| panic!("authorization failed: {:?}", failure.reason()));
@@ -5155,6 +5611,45 @@ mod tests {
     }
 
     #[test]
+    fn permit_requirements_and_reservations_are_explicit_and_validated() {
+        let resource = TxPermitResourceId::new([0x42; 16]);
+        assert_eq!(resource.as_bytes(), &[0x42; 16]);
+        assert_eq!(
+            TxPermitRequirements::try_new(resource, 0),
+            Err(TxPermitRequirementsError::ZeroRequiredUnits)
+        );
+        let requirements = TxPermitRequirements::try_new(resource, 987_654).unwrap();
+        assert_eq!(requirements.resource(), resource);
+        assert_eq!(requirements.required_units(), 987_654);
+
+        assert_eq!(
+            TxPermitReservation::try_new(resource, 0),
+            Err(TxPermitReservationError::ZeroReservedUnits)
+        );
+        let reservation = TxPermitReservation::try_new(resource, 1_000_000).unwrap();
+        assert_eq!(reservation.resource(), resource);
+        assert_eq!(reservation.reserved_units(), 1_000_000);
+    }
+
+    #[test]
+    fn authorization_rejects_underreserved_and_mismatched_resource_grants() {
+        let required_resource = TxPermitResourceId::new([0x31; 16]);
+        let requirements = TxPermitRequirements::try_new(required_resource, 500_000).unwrap();
+        assert_noncovering_reservation_is_denied(
+            90,
+            91,
+            requirements,
+            TxPermitReservation::try_new(required_resource, 499_999).unwrap(),
+        );
+        assert_noncovering_reservation_is_denied(
+            92,
+            93,
+            requirements,
+            TxPermitReservation::try_new(TxPermitResourceId::new([0x32; 16]), 500_000).unwrap(),
+        );
+    }
+
+    #[test]
     fn permit_grant_is_one_shot_and_authorization_keeps_the_receipt_live() {
         let mut sender = node::<2, 1>(52, "sender");
         let receiver = node::<2, 1>(53, "receiver");
@@ -5173,8 +5668,15 @@ mod tests {
         let packet_len = job.packet_len();
         let handle = job.attempt_handle();
         let attempt = job.attempt();
-        let (pending, request) = job.begin_permit();
-        let mut policy = TestPolicy::allowing();
+        let resource = TxPermitResourceId::new([0xa5; 16]);
+        let requirements = TxPermitRequirements::try_new(resource, 123_456).unwrap();
+        let reservation = TxPermitReservation::try_new(resource, 123_500).unwrap();
+        let (pending, request) = job.begin_permit(requirements);
+        let mut policy = TestPolicy {
+            decision: TxPolicyDecision::Authorize(reservation),
+            calls: 0,
+            candidate: None,
+        };
         let reply = match sender.authorize_tx(request, owner_time(1_001), &mut policy) {
             Ok(reply) => reply,
             Err(failure) => panic!("permit validation failed: {:?}", failure.reason()),
@@ -5185,9 +5687,18 @@ mod tests {
             Some(TxAuthorizationCandidate {
                 interface: PacketInterfaceId::new(1),
                 packet_len,
+                requirements,
+                now: owner_time(1_001),
                 deadline: deadline(1_500),
                 may_have_transmitted: false,
             })
+        );
+        assert_eq!(
+            match &reply {
+                TxPermitReply::Granted(grant) => grant.reservation(),
+                TxPermitReply::Denied(_) => panic!("covering reservation was denied"),
+            },
+            reservation
         );
         assert_eq!(sender.capacities().dispatches_authorized, 1);
         assert_eq!(sender.capacities().dispatches_queued, 0);
@@ -5197,6 +5708,7 @@ mod tests {
             Ok(PermitResolution::Expired(_)) => panic!("fresh grant resolved as expired"),
             Err(_) => panic!("matching grant did not resolve"),
         };
+        assert_eq!(authorized.reservation(), reservation);
         {
             let frame = authorized.frame(owner_time(1_100)).unwrap();
             assert_eq!(frame.interface(), PacketInterfaceId::new(1));
@@ -5252,8 +5764,8 @@ mod tests {
             &mut rng,
         );
         let handle = job.attempt_handle();
-        let (pending, request) = job.begin_permit();
-        let mut policy = TestPolicy::denying(TxPolicyDenial::RegionalProfileUnavailable);
+        let (pending, request) = job.begin_permit(test_permit_requirements());
+        let mut policy = TestPolicy::denying(TxPolicyDenial::ResourceUnavailable);
         let reply = sender
             .authorize_tx(request, owner_time(1_100), &mut policy)
             .unwrap_or_else(|failure| panic!("denial failed: {:?}", failure.reason()));
@@ -5266,7 +5778,7 @@ mod tests {
         assert_eq!(
             unpermitted.denial(),
             Some(TxPermitDenialReason::Policy(
-                TxPolicyDenial::RegionalProfileUnavailable
+                TxPolicyDenial::ResourceUnavailable
             ))
         );
         let disposition = sender
@@ -5289,7 +5801,7 @@ mod tests {
         assert_eq!(
             sender.acknowledge_terminal(handle).unwrap().outcome(),
             AttemptOutcome::Unsent(AttemptUnsentReason::PolicyDenied(
-                TxPolicyDenial::RegionalProfileUnavailable
+                TxPolicyDenial::ResourceUnavailable
             ))
         );
     }
@@ -5321,8 +5833,8 @@ mod tests {
             2,
             &mut rng,
         );
-        let (first_pending, first_request) = first.begin_permit();
-        let (second_pending, second_request) = second.begin_permit();
+        let (first_pending, first_request) = first.begin_permit(test_permit_requirements());
+        let (second_pending, second_request) = second.begin_permit(test_permit_requirements());
         let first_reply = sender
             .authorize_tx(
                 first_request,
@@ -5398,7 +5910,7 @@ mod tests {
         );
         let before_attempt = before_job.attempt();
         let before_handle = before_job.attempt_handle();
-        let (before_pending, before_request) = before_job.begin_permit();
+        let (before_pending, before_request) = before_job.begin_permit(test_permit_requirements());
         before
             .ingest(
                 &proof_for(59, before_attempt),
@@ -5458,7 +5970,7 @@ mod tests {
         );
         let after_attempt = after_job.attempt();
         let after_handle = after_job.attempt_handle();
-        let (after_pending, after_request) = after_job.begin_permit();
+        let (after_pending, after_request) = after_job.begin_permit(test_permit_requirements());
         let after_reply = after
             .authorize_tx(
                 after_request,
@@ -5572,7 +6084,7 @@ mod tests {
             route,
             &mut rng,
         );
-        let (pending, request) = first.begin_permit();
+        let (pending, request) = first.begin_permit(test_permit_requirements());
         let reply = cumulative
             .authorize_tx(request, owner_time(2_100), &mut TestPolicy::allowing())
             .unwrap_or_else(|failure| panic!("first authorization: {:?}", failure.reason()));
@@ -5592,8 +6104,8 @@ mod tests {
             TxCompletionDisposition::Quarantined(_) => panic!("authorized return quarantined"),
         };
         assert_eq!(second.interface(), PacketInterfaceId::new(5));
-        let (pending, request) = second.begin_permit();
-        let mut policy = TestPolicy::denying(TxPolicyDenial::AirtimeUnavailable);
+        let (pending, request) = second.begin_permit(test_permit_requirements());
+        let mut policy = TestPolicy::denying(TxPolicyDenial::CapacityUnavailable);
         let reply = cumulative
             .authorize_tx(request, owner_time(2_200), &mut policy)
             .unwrap_or_else(|failure| panic!("second denial: {:?}", failure.reason()));
@@ -5602,6 +6114,8 @@ mod tests {
             Some(TxAuthorizationCandidate {
                 interface: PacketInterfaceId::new(5),
                 packet_len: policy.candidate.unwrap().packet_len,
+                requirements: test_permit_requirements(),
+                now: owner_time(2_200),
                 deadline: deadline(2_500),
                 may_have_transmitted: true,
             })
@@ -5658,7 +6172,7 @@ mod tests {
             default_interfaces(),
             &mut rng,
         );
-        let (pending, request) = earlier.begin_permit();
+        let (pending, request) = earlier.begin_permit(test_permit_requirements());
         let reply = sender
             .authorize_tx(request, owner_time(1_400), &mut TestPolicy::allowing())
             .unwrap_or_else(|failure| panic!("authorization failed: {:?}", failure.reason()));
@@ -5738,7 +6252,7 @@ mod tests {
         );
         let handle = job.attempt_handle();
         let attempt = job.attempt();
-        let (pending, request) = job.begin_permit();
+        let (pending, request) = job.begin_permit(test_permit_requirements());
         let mut policy = TestPolicy::allowing();
         let reply = before_permit
             .authorize_tx(request, owner_time(1_500), &mut policy)
@@ -5804,7 +6318,7 @@ mod tests {
         );
         let handle = job.attempt_handle();
         let attempt = job.attempt();
-        let (pending, request) = job.begin_permit();
+        let (pending, request) = job.begin_permit(test_permit_requirements());
         let reply = after_permit
             .authorize_tx(request, owner_time(2_400), &mut TestPolicy::allowing())
             .unwrap_or_else(|failure| panic!("authorization failed: {:?}", failure.reason()));
@@ -5884,7 +6398,7 @@ mod tests {
         );
         let handle = job.attempt_handle();
         let attempt = job.attempt();
-        let (pending, request) = job.begin_permit();
+        let (pending, request) = job.begin_permit(test_permit_requirements());
         let reply = delayed
             .authorize_tx(request, owner_time(1_499), &mut TestPolicy::allowing())
             .unwrap_or_else(|failure| panic!("grant failed: {:?}", failure.reason()));
@@ -5931,7 +6445,7 @@ mod tests {
         );
         let handle = job.attempt_handle();
         let attempt = job.attempt();
-        let (pending, request) = job.begin_permit();
+        let (pending, request) = job.begin_permit(test_permit_requirements());
         let reply = late_frame
             .authorize_tx(request, owner_time(2_499), &mut TestPolicy::allowing())
             .unwrap_or_else(|failure| panic!("grant failed: {:?}", failure.reason()));
@@ -6042,7 +6556,7 @@ mod tests {
         );
         let handle = job.attempt_handle();
         let attempt = job.attempt();
-        let (pending, request) = job.begin_permit();
+        let (pending, request) = job.begin_permit(test_permit_requirements());
         let reply = sender
             .authorize_tx(request, owner_time(1_400), &mut TestPolicy::allowing())
             .unwrap_or_else(|failure| panic!("authorization failed: {:?}", failure.reason()));
@@ -6265,7 +6779,7 @@ mod tests {
             2,
             &mut rng,
         );
-        let (pending, request) = job.begin_permit();
+        let (pending, request) = job.begin_permit(test_permit_requirements());
         let request_failure =
             match other.authorize_tx(request, owner_time(2_100), &mut TestPolicy::allowing()) {
                 Ok(_) => panic!("foreign owner authorized request"),

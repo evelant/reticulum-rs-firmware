@@ -4,7 +4,6 @@
 //! supplies its fitted RF range, and construction yields an opaque profile
 //! only after every project-owned check has passed.
 
-use lora_modulation::BaseBandModulationParams;
 pub use lora_modulation::{Bandwidth, CodingRate, SpreadingFactor};
 
 /// Minimum RNode-compatible preamble selected by current RNode firmware.
@@ -144,9 +143,14 @@ impl LabRxProfile {
             value => return Err(LabRxProfileError::UnsupportedCodingRateDenominator(value)),
         };
 
-        let channel_bandwidth_hz = bandwidth.hz();
-        let lower_half_hz = channel_bandwidth_hz / 2;
-        let upper_half_hz = channel_bandwidth_hz - lower_half_hz;
+        let canonical_bandwidth_hz = bandwidth.hz();
+        // The SX126x register codes are exact divisors of its 32 MHz clock;
+        // several public decimal labels are rounded. Use a whole-Hz ceiling
+        // for fitted-path containment so a rounded-down label cannot place a
+        // physical channel edge outside the supported range.
+        let channel_edge_bandwidth_hz = sx126x_bandwidth_ceil_hz(bandwidth);
+        let lower_half_hz = channel_edge_bandwidth_hz / 2;
+        let upper_half_hz = channel_edge_bandwidth_hz - lower_half_hz;
         let frequency_hz_u64 = frequency_hz as u64;
         let lower_edge_hz = frequency_hz_u64.saturating_sub(lower_half_hz as u64);
         let upper_edge_hz = frequency_hz_u64 + upper_half_hz as u64;
@@ -156,7 +160,7 @@ impl LabRxProfile {
         {
             return Err(LabRxProfileError::ChannelOutsideSupportedRange {
                 frequency_hz,
-                bandwidth_hz: channel_bandwidth_hz,
+                bandwidth_hz: canonical_bandwidth_hz,
                 lower_edge_hz,
                 upper_edge_hz,
                 minimum_hz: supported_range.minimum_hz,
@@ -189,7 +193,7 @@ impl LabRxProfile {
         if has_unverified_rnode_ldro(config.spreading_factor, bandwidth) {
             return Err(LabRxProfileError::UnverifiedRnodeLdroCombination {
                 spreading_factor: config.spreading_factor,
-                bandwidth_hz: channel_bandwidth_hz,
+                bandwidth_hz: canonical_bandwidth_hz,
             });
         }
 
@@ -251,18 +255,164 @@ impl LabRxProfile {
             .saturating_add(RNODE_FRAGMENT_TIMEOUT_GUARD_US)
     }
 
-    /// Calculated airtime for a full 255-byte physical LoRa frame.
+    /// Conservative whole-microsecond airtime ceiling for a full 255-byte frame.
     pub const fn maximum_frame_time_on_air_us(self) -> u64 {
-        let modulation =
-            BaseBandModulationParams::new(self.spreading_factor, self.bandwidth, self.coding_rate);
-        let payload_us = modulation.time_on_air_us(None, self.explicit_header, u8::MAX) as u64;
-        let symbol_us = (1_u64 << self.spreading_factor.factor()).saturating_mul(1_000_000)
-            / self.bandwidth.hz() as u64;
-        let preamble_quarter_symbols = (self.preamble_symbols as u64)
-            .saturating_mul(4)
-            .saturating_add(17);
-        let preamble_us = preamble_quarter_symbols.saturating_mul(symbol_us) / 4;
-        payload_us.saturating_add(preamble_us)
+        match conservative_lora_frame_time_on_air_us(self, u8::MAX) {
+            Some(airtime_us) => airtime_us,
+            // Validated profiles cannot reach this path. Remaining
+            // fail-conservative preserves the deadline helper's infallible API.
+            None => u64::MAX,
+        }
+    }
+}
+
+/// Calculate one SX126x frame's LoRa airtime as an exact rational number of
+/// quarter symbols, then round up once to a whole microsecond.
+///
+/// Payload-symbol rounding and the low-data-rate optimization decision match
+/// `lora-modulation`. The SX126x bandwidth-code divisors, rather than their
+/// rounded public decimal labels, define symbol duration. Keeping both that
+/// bandwidth and time rational until the final division avoids
+/// under-reservation.
+pub(crate) const fn conservative_lora_frame_time_on_air_us(
+    profile: LabRxProfile,
+    frame_len: u8,
+) -> Option<u64> {
+    let spreading_factor = profile.spreading_factor.factor();
+    let symbols_per_chirp = match 1_u64.checked_shl(spreading_factor) {
+        Some(symbols) => symbols,
+        None => return None,
+    };
+    let labelled_symbol_time_numerator_us = match symbols_per_chirp.checked_mul(1_000_000) {
+        Some(numerator) => numerator,
+        None => return None,
+    };
+    let labelled_bandwidth_hz = profile.bandwidth.hz() as u64;
+
+    // Preserve `BaseBandModulationParams::new` behavior exactly: it compares
+    // the floor-valued whole-microsecond symbol duration with 16.384 ms.
+    let low_data_rate_optimize =
+        labelled_symbol_time_numerator_us / labelled_bandwidth_hz >= 16_384;
+    let optimization_symbols = if low_data_rate_optimize { 2 } else { 0 };
+    let payload_denominator_base = match (spreading_factor as u64).checked_sub(optimization_symbols)
+    {
+        Some(value) => value,
+        None => return None,
+    };
+    let payload_denominator = match payload_denominator_base.checked_mul(4) {
+        Some(denominator) if denominator != 0 => denominator,
+        _ => return None,
+    };
+
+    let payload_bits = match (frame_len as u64).checked_mul(8) {
+        Some(value) => value,
+        None => return None,
+    };
+    let payload_with_fixed_bits = match payload_bits.checked_add(28) {
+        Some(value) => value,
+        None => return None,
+    };
+    let payload_positive =
+        match payload_with_fixed_bits.checked_add(if profile.crc { 16 } else { 0 }) {
+            Some(value) => value,
+            None => return None,
+        };
+    let spreading_factor_bits = match (spreading_factor as u64).checked_mul(4) {
+        Some(value) => value,
+        None => return None,
+    };
+    let payload_negative =
+        match spreading_factor_bits.checked_add(if profile.explicit_header { 0 } else { 20 }) {
+            Some(value) => value,
+            None => return None,
+        };
+    let payload_ratio = if payload_positive <= payload_negative {
+        0
+    } else {
+        match checked_ceil_div(payload_positive - payload_negative, payload_denominator) {
+            Some(value) => value,
+            None => return None,
+        }
+    };
+    let coded_payload_symbols = match payload_ratio.checked_mul(profile.coding_rate.denom() as u64)
+    {
+        Some(symbols) => symbols,
+        None => return None,
+    };
+    let payload_symbols = match coded_payload_symbols.checked_add(8) {
+        Some(symbols) => symbols,
+        None => return None,
+    };
+
+    let preamble_symbol_quarters = match (profile.preamble_symbols as u64).checked_mul(4) {
+        Some(symbols) => symbols,
+        None => return None,
+    };
+    let preamble_quarter_symbols = match preamble_symbol_quarters.checked_add(17) {
+        Some(symbols) => symbols,
+        None => return None,
+    };
+    let payload_quarter_symbols = match payload_symbols.checked_mul(4) {
+        Some(symbols) => symbols,
+        None => return None,
+    };
+    let total_quarter_symbols = match preamble_quarter_symbols.checked_add(payload_quarter_symbols)
+    {
+        Some(symbols) => symbols,
+        None => return None,
+    };
+    let bandwidth_divisor = sx126x_bandwidth_divisor(profile.bandwidth);
+    let exact_symbol_time_numerator_us =
+        match labelled_symbol_time_numerator_us.checked_mul(bandwidth_divisor) {
+            Some(numerator) => numerator,
+            None => return None,
+        };
+    let total_time_numerator_us =
+        match total_quarter_symbols.checked_mul(exact_symbol_time_numerator_us) {
+            Some(numerator) => numerator,
+            None => return None,
+        };
+    let total_time_denominator = match 32_000_000_u64.checked_mul(4) {
+        Some(denominator) => denominator,
+        None => return None,
+    };
+    checked_ceil_div(total_time_numerator_us, total_time_denominator)
+}
+
+/// Exact denominator `D` for the SX126x bandwidth `32 MHz / D`.
+const fn sx126x_bandwidth_divisor(bandwidth: Bandwidth) -> u64 {
+    match bandwidth {
+        Bandwidth::_7KHz => 4_096,
+        Bandwidth::_10KHz => 3_072,
+        Bandwidth::_15KHz => 2_048,
+        Bandwidth::_20KHz => 1_536,
+        Bandwidth::_31KHz => 1_024,
+        Bandwidth::_41KHz => 768,
+        Bandwidth::_62KHz => 512,
+        Bandwidth::_125KHz => 256,
+        Bandwidth::_250KHz => 128,
+        Bandwidth::_500KHz => 64,
+    }
+}
+
+/// Conservative whole-Hz width for fitted-path edge validation.
+const fn sx126x_bandwidth_ceil_hz(bandwidth: Bandwidth) -> u32 {
+    let divisor = sx126x_bandwidth_divisor(bandwidth);
+    match checked_ceil_div(32_000_000, divisor) {
+        Some(hz) => hz as u32,
+        None => u32::MAX,
+    }
+}
+
+const fn checked_ceil_div(numerator: u64, denominator: u64) -> Option<u64> {
+    if denominator == 0 {
+        return None;
+    }
+    let quotient = numerator / denominator;
+    if numerator.is_multiple_of(denominator) {
+        Some(quotient)
+    } else {
+        quotient.checked_add(1)
     }
 }
 
@@ -321,6 +471,7 @@ const fn has_unverified_rnode_ldro(spreading_factor: u8, bandwidth: Bandwidth) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lora_modulation::BaseBandModulationParams;
 
     const TRACKER_RANGE: ReceiveFrequencyRange =
         match ReceiveFrequencyRange::try_new(863_000_000, 928_000_000) {
@@ -352,6 +503,28 @@ mod tests {
         assert!(profile.explicit_header());
         assert!(profile.crc());
         assert!(!profile.iq_inverted());
+    }
+
+    #[test]
+    fn sx126x_bandwidth_codes_use_exact_divisors_not_decimal_labels() {
+        let cases = [
+            (Bandwidth::_7KHz, 7_813),
+            (Bandwidth::_10KHz, 10_417),
+            (Bandwidth::_15KHz, 15_625),
+            (Bandwidth::_20KHz, 20_834),
+            (Bandwidth::_31KHz, 31_250),
+            (Bandwidth::_41KHz, 41_667),
+            (Bandwidth::_62KHz, 62_500),
+            (Bandwidth::_125KHz, 125_000),
+            (Bandwidth::_250KHz, 250_000),
+            (Bandwidth::_500KHz, 500_000),
+        ];
+        for (bandwidth, conservative_whole_hz) in cases {
+            assert_eq!(sx126x_bandwidth_ceil_hz(bandwidth), conservative_whole_hz);
+            let divisor = sx126x_bandwidth_divisor(bandwidth);
+            assert!((conservative_whole_hz as u64) * divisor >= 32_000_000);
+            assert!((conservative_whole_hz as u64 - 1) * divisor < 32_000_000);
+        }
     }
 
     #[test]

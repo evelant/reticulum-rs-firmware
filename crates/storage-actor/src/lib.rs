@@ -10,24 +10,236 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use embedded_storage::nor_flash::MultiwriteNorFlash;
+use embedded_storage::nor_flash::{ErrorType, MultiwriteNorFlash, NorFlash, ReadNorFlash};
 use reticulum_node_core::{TerminalAttempt, TxRecoveryObservation};
 use reticulum_storage_journal::{
-    AppendOutcome, JournalError, JournalState, SlotCorruption, append, compact, mount,
+    AppendOutcome, JournalError, JournalState, PARTITION_SIZE, PHYSICAL_FORMAT_VERSION,
+    SlotCorruption, append, compact, mount,
 };
 use reticulum_storage_model::{
-    AcceptOutcome, AcceptanceCandidate, ApplyError, BootRecoveryDecision, JournalEntry,
-    PlanOutcome, PlannedMutation, SubmissionId, SubmissionIndex,
+    AcceptOutcome, AcceptanceCandidate, ApplyError, BootRecoveryDecision,
+    ExperimentalRnsDataIntent, JournalEntry, PlanOutcome, PlannedMutation, SubmissionId,
+    SubmissionIndex,
 };
 use reticulum_submission_projector::{
     AcknowledgementAction, AcknowledgementReply, PersistHandle, PersistRequest,
     PersistenceProgress, PersistenceReply, PreparedFrameObservation, ProjectionProgress,
-    ProjectorError, SubmissionProjector,
+    ProjectorError, SubmissionPreparationObservation, SubmissionProjector,
 };
-use reticulum_tx_dispatch::NodeTxPrepareResult;
-
 #[cfg(test)]
 mod tests;
+
+/// Stable physical identity of one storage device.
+///
+/// The identifier is product-supplied and must distinguish devices whose
+/// address spaces can otherwise expose the same journal range.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct StorageDeviceId([u8; 16]);
+
+impl StorageDeviceId {
+    /// Construct a device identifier from its exact bytes.
+    pub const fn new(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    /// Exact identifier bytes.
+    pub const fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+}
+
+/// Physical provenance and format contract for one journal backend view.
+///
+/// Offsets are absolute in the containing physical device even though the
+/// wrapped NOR backend exposes journal-relative offsets beginning at zero.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct JournalBinding {
+    device: StorageDeviceId,
+    absolute_offset: usize,
+    length: usize,
+    layout_version: u16,
+}
+
+impl JournalBinding {
+    /// Construct an exact journal binding.
+    pub const fn new(
+        device: StorageDeviceId,
+        absolute_offset: usize,
+        length: usize,
+        layout_version: u16,
+    ) -> Self {
+        Self {
+            device,
+            absolute_offset,
+            length,
+            layout_version,
+        }
+    }
+
+    /// Physical device containing the journal.
+    pub const fn device(&self) -> StorageDeviceId {
+        self.device
+    }
+
+    /// Absolute byte offset in the physical device.
+    pub const fn absolute_offset(&self) -> usize {
+        self.absolute_offset
+    }
+
+    /// Bound journal range length in bytes.
+    pub const fn length(&self) -> usize {
+        self.length
+    }
+
+    /// Physical journal layout version expected in the range.
+    pub const fn layout_version(&self) -> u16 {
+        self.layout_version
+    }
+}
+
+/// Binding validation failure detected before any physical journal I/O.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JournalBindingError {
+    /// A later backend names a different physical device.
+    DeviceMismatch {
+        /// Device retained by the mounted actor.
+        expected: StorageDeviceId,
+        /// Device presented by the borrowed backend.
+        actual: StorageDeviceId,
+    },
+    /// A later backend names a different absolute journal range.
+    RangeMismatch {
+        /// Absolute offset retained by the mounted actor.
+        expected_absolute_offset: usize,
+        /// Length retained by the mounted actor.
+        expected_length: usize,
+        /// Absolute offset presented by the borrowed backend.
+        actual_absolute_offset: usize,
+        /// Length presented by the borrowed backend.
+        actual_length: usize,
+    },
+    /// Absolute start plus length cannot be represented.
+    RangeOverflow {
+        /// Absolute start of the bound range.
+        absolute_offset: usize,
+        /// Length of the bound range.
+        length: usize,
+    },
+    /// The binding names a different physical format version.
+    LayoutVersionMismatch {
+        /// Required physical format version.
+        expected: u16,
+        /// Version presented by the binding.
+        actual: u16,
+    },
+    /// The binding length is not the exact compiled journal partition size.
+    LengthMismatch {
+        /// Required journal range length.
+        expected: usize,
+        /// Length presented by the binding.
+        actual: usize,
+    },
+    /// The journal-relative backend capacity differs from the bound range.
+    CapacityMismatch {
+        /// Capacity required by the binding.
+        expected: usize,
+        /// Capacity exposed by the backend.
+        actual: usize,
+    },
+    /// The absolute range is incompatible with the backend's I/O geometry.
+    AlignmentMismatch {
+        /// Absolute start of the bound range.
+        absolute_offset: usize,
+        /// Length of the bound range.
+        length: usize,
+        /// Backend read granularity.
+        read_size: usize,
+        /// Backend program granularity.
+        write_size: usize,
+        /// Backend erase granularity.
+        erase_size: usize,
+    },
+}
+
+/// A journal-relative NOR backend carrying explicit physical provenance.
+///
+/// This adapter deliberately delegates offsets unchanged. Range restriction is
+/// the responsibility of the wrapped backend; the binding proves which
+/// physical range that backend view represents.
+pub struct BoundJournal<F> {
+    backend: F,
+    binding: JournalBinding,
+}
+
+impl<F> BoundJournal<F> {
+    /// Attach physical provenance to one journal-relative backend.
+    pub const fn new(backend: F, binding: JournalBinding) -> Self {
+        Self { backend, binding }
+    }
+
+    /// Binding carried by this backend view.
+    pub const fn binding(&self) -> JournalBinding {
+        self.binding
+    }
+
+    /// Immutable access to the wrapped backend.
+    pub const fn backend(&self) -> &F {
+        &self.backend
+    }
+
+    /// Mutable access to the wrapped backend.
+    pub fn backend_mut(&mut self) -> &mut F {
+        &mut self.backend
+    }
+
+    /// Consume the adapter and recover the wrapped backend.
+    pub fn into_backend(self) -> F {
+        self.backend
+    }
+}
+
+impl<F: ErrorType> ErrorType for BoundJournal<F> {
+    type Error = F::Error;
+}
+
+impl<F: ReadNorFlash> ReadNorFlash for BoundJournal<F> {
+    const READ_SIZE: usize = F::READ_SIZE;
+
+    fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
+        self.backend.read(offset, bytes)
+    }
+
+    fn capacity(&self) -> usize {
+        self.backend.capacity()
+    }
+}
+
+impl<F: NorFlash> NorFlash for BoundJournal<F> {
+    const WRITE_SIZE: usize = F::WRITE_SIZE;
+    const ERASE_SIZE: usize = F::ERASE_SIZE;
+
+    fn erase(&mut self, from: u32, to: u32) -> Result<(), Self::Error> {
+        self.backend.erase(from, to)
+    }
+
+    fn write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Self::Error> {
+        self.backend.write(offset, bytes)
+    }
+}
+
+impl<F: MultiwriteNorFlash> MultiwriteNorFlash for BoundJournal<F> {}
+
+/// NOR access that can prove the exact physical journal range it represents.
+pub trait BoundJournalAccess: MultiwriteNorFlash {
+    /// Physical device, range, and layout represented by this backend view.
+    fn journal_binding(&self) -> JournalBinding;
+}
+
+impl<F: MultiwriteNorFlash> BoundJournalAccess for BoundJournal<F> {
+    fn journal_binding(&self) -> JournalBinding {
+        self.binding
+    }
+}
 
 /// Kind of exact mutation currently retained after an ambiguous drive result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -97,6 +309,8 @@ pub enum StorageFault {
 /// Failure while establishing the only live actor state.
 #[derive(Debug, Eq, PartialEq)]
 pub enum MountError<E> {
+    /// Backend provenance, range, layout, or capacity is incompatible.
+    Binding(JournalBindingError),
     /// Underlying NOR operation failed before replay completion.
     Backend(E),
     /// Journal or model validation failed with a bounded diagnostic.
@@ -106,6 +320,10 @@ pub enum MountError<E> {
 /// Recoverable or latched failure while driving one retained mutation.
 #[derive(Debug, Eq, PartialEq)]
 pub enum DriveError<E> {
+    /// Borrowed backend does not exactly match the actor's mounted binding.
+    ///
+    /// This error is non-latching and no physical I/O is attempted.
+    Binding(JournalBindingError),
     /// Underlying NOR operation failed with ambiguous completion.
     ///
     /// The exact mutation remains retained and is safe to retry unchanged.
@@ -217,9 +435,13 @@ impl PendingMutation {
     }
 }
 
-/// Mounted sole owner of one journal partition, live index, and submission projector.
-pub struct StorageActor<F, const SUBMISSIONS: usize, const PROJECTED: usize> {
-    flash: F,
+/// Mounted semantic owner of one bound journal, live index, and submission projector.
+///
+/// Physical storage is borrowed only for individual operations. The actor
+/// retains the exact binding established at mount and rejects every different
+/// backend before I/O.
+pub struct StorageActor<const SUBMISSIONS: usize, const PROJECTED: usize> {
+    binding: JournalBinding,
     state: JournalState,
     index: SubmissionIndex<SUBMISSIONS>,
     projector: SubmissionProjector<PROJECTED>,
@@ -228,22 +450,21 @@ pub struct StorageActor<F, const SUBMISSIONS: usize, const PROJECTED: usize> {
     fault: Option<StorageFault>,
 }
 
-impl<F, const SUBMISSIONS: usize, const PROJECTED: usize> StorageActor<F, SUBMISSIONS, PROJECTED>
-where
-    F: MultiwriteNorFlash,
-{
+impl<const SUBMISSIONS: usize, const PROJECTED: usize> StorageActor<SUBMISSIONS, PROJECTED> {
     /// Scan the complete physical journal and finish semantic replay before
     /// exposing a live actor.
-    pub fn mount(
-        mut flash: F,
+    pub fn mount<A: BoundJournalAccess>(
+        access: &mut A,
         first_submission_id: SubmissionId,
-    ) -> Result<Self, MountError<F::Error>> {
+    ) -> Result<Self, MountError<A::Error>> {
+        validate_binding::<A>(access).map_err(MountError::Binding)?;
+        let binding = access.journal_binding();
         let mounted =
-            mount::<SUBMISSIONS, F>(&mut flash, first_submission_id).map_err(map_mount_error)?;
+            mount::<SUBMISSIONS, A>(access, first_submission_id).map_err(map_mount_error)?;
         let state = mounted.state();
         let index = mounted.into_index();
         Ok(Self {
-            flash,
+            binding,
             state,
             index,
             projector: SubmissionProjector::new(),
@@ -251,6 +472,23 @@ where
             pending: None,
             fault: None,
         })
+    }
+
+    /// Exact physical journal binding established by mount.
+    pub const fn binding(&self) -> JournalBinding {
+        self.binding
+    }
+
+    /// Validate a borrowed backend against the mounted physical binding.
+    ///
+    /// Coordinators can call this before node-side effects in a compound step.
+    /// Failure is non-latching and performs no physical journal I/O.
+    pub fn validate_access<A: BoundJournalAccess>(
+        &self,
+        access: &A,
+    ) -> Result<(), JournalBindingError> {
+        validate_exact_binding(self.binding, access.journal_binding())
+            .and_then(|()| validate_binding::<A>(access))
     }
 
     /// Last completely established physical journal state.
@@ -276,16 +514,34 @@ where
     ///
     /// ```compile_fail
     /// use core::mem;
-    /// use embedded_storage::nor_flash::MultiwriteNorFlash;
     /// use reticulum_storage_actor::StorageActor;
     /// use reticulum_submission_projector::SubmissionProjector;
     ///
-    /// fn replace_projector<F: MultiwriteNorFlash>(actor: &mut StorageActor<F, 1, 1>) {
+    /// fn replace_projector(actor: &mut StorageActor<1, 1>) {
     ///     let _ = mem::replace(actor.projector(), SubmissionProjector::new());
     /// }
     /// ```
     pub const fn projector(&self) -> &SubmissionProjector<PROJECTED> {
         &self.projector
+    }
+
+    /// Copy the durable DATA intent only when node preparation may begin.
+    ///
+    /// Readiness requires the `Queued -> Preparing` barrier to be durably
+    /// committed, no attempt to have been bound, and no actor or projector
+    /// fault or pending mutation. Returning an owned bounded intent lets a
+    /// coordinator call the permanent node owner without borrowing storage
+    /// across that call.
+    pub fn ready_intent(&self, id: SubmissionId) -> Option<ExperimentalRnsDataIntent> {
+        if self.fault.is_some()
+            || self.pending.is_some()
+            || !self.projector.preparation_allowed(&self.index, id)
+        {
+            return None;
+        }
+        self.index
+            .get(id)
+            .map(|submission| submission.accepted().intent())
     }
 
     /// Plan the durable no-replay barrier for one queued submission.
@@ -302,21 +558,18 @@ where
         self.map_projector_operation(result)
     }
 
-    /// Project one synchronous node preparation result against the actor-owned
-    /// live index and volatile correlation state.
+    /// Project one transport-neutral permanent-node preparation observation.
     ///
-    /// Any returned persistence handle still names an exact request retained
-    /// solely by this actor's projector. Physical persistence must flow through
-    /// [`Self::persist_projector`].
-    pub fn observe_preparation_result(
+    /// This is the product integration seam for every interface supervisor.
+    pub fn observe_preparation(
         &mut self,
         id: SubmissionId,
-        result: NodeTxPrepareResult,
+        observation: SubmissionPreparationObservation,
     ) -> Result<ProjectionProgress, ProjectorOperationError> {
         self.ensure_projector_operation()?;
         let result = self
             .projector
-            .observe_preparation_result(&self.index, id, result);
+            .observe_preparation(&self.index, id, observation);
         self.map_projector_operation(result)
     }
 
@@ -406,20 +659,17 @@ where
         }
     }
 
-    /// Consume the actor and recover the owned backend for tests or recovery.
-    pub fn into_flash(self) -> F {
-        self.flash
-    }
-
     /// Durably accept one exact authenticated candidate.
     ///
     /// A backend error retains the exact plan. Retrying the same candidate
     /// reconciles by journal readback; different work receives [`DriveError::Busy`].
-    pub fn accept(
+    pub fn accept<A: BoundJournalAccess>(
         &mut self,
+        access: &mut A,
         candidate: AcceptanceCandidate,
-    ) -> Result<AcceptanceProgress, DriveError<F::Error>> {
+    ) -> Result<AcceptanceProgress, DriveError<A::Error>> {
         self.ensure_healthy()?;
+        self.ensure_binding(access)?;
 
         match self.pending {
             Some(PendingMutation::Acceptance { planned }) => {
@@ -452,7 +702,7 @@ where
             },
         };
 
-        match self.drive_pending()? {
+        match self.drive_pending(access)? {
             PendingProgress::AcceptanceCommitted(id) => Ok(AcceptanceProgress::Accepted(id)),
             PendingProgress::AcceptanceCapacityExhausted => {
                 Ok(AcceptanceProgress::JournalCapacityExhausted)
@@ -475,12 +725,14 @@ where
     /// `boot_sequence`. An exact retry or [`Self::drive_pending`] reconciles
     /// that same record; any different identifier or boot sequence receives
     /// [`DriveError::Busy`] until the retained operation is resolved.
-    pub fn finalize_boot_recovery(
+    pub fn finalize_boot_recovery<A: BoundJournalAccess>(
         &mut self,
+        access: &mut A,
         id: SubmissionId,
         boot_sequence: u64,
-    ) -> Result<BootRecoveryProgress, DriveError<F::Error>> {
+    ) -> Result<BootRecoveryProgress, DriveError<A::Error>> {
         self.ensure_healthy()?;
+        self.ensure_binding(access)?;
 
         match self.pending {
             Some(PendingMutation::BootRecovery {
@@ -525,7 +777,7 @@ where
             }
         }
 
-        match self.drive_pending()? {
+        match self.drive_pending(access)? {
             PendingProgress::BootRecoveryFinalized(finalized) if finalized == id => {
                 Ok(BootRecoveryProgress::Finalized)
             }
@@ -544,11 +796,13 @@ where
     ///
     /// The actor retains only the request handle; the exact request remains in
     /// its sole projector and is resolved again before every flash mutation.
-    pub fn persist_projector(
+    pub fn persist_projector<A: BoundJournalAccess>(
         &mut self,
+        access: &mut A,
         request: PersistRequest,
-    ) -> Result<PersistenceProgress, DriveError<F::Error>> {
+    ) -> Result<PersistenceProgress, DriveError<A::Error>> {
         self.ensure_healthy()?;
+        self.ensure_binding(access)?;
         self.ensure_projector_healthy()?;
         if self.projector.persistence_request(request.handle()) != Some(request) {
             return Err(self.latch(StorageFault::ProjectorRequestMismatch));
@@ -567,7 +821,7 @@ where
             }
         }
 
-        match self.drive_pending()? {
+        match self.drive_pending(access)? {
             PendingProgress::ProjectorCommitted => Ok(PersistenceProgress::Committed),
             PendingProgress::Idle
             | PendingProgress::AcceptanceCommitted(_)
@@ -582,8 +836,12 @@ where
     ///
     /// No caller-owned candidate, request, or projector is needed. A further
     /// backend error leaves the same actor-owned state retained for another call.
-    pub fn drive_pending(&mut self) -> Result<PendingProgress, DriveError<F::Error>> {
+    pub fn drive_pending<A: BoundJournalAccess>(
+        &mut self,
+        access: &mut A,
+    ) -> Result<PendingProgress, DriveError<A::Error>> {
         self.ensure_healthy()?;
+        self.ensure_binding(access)?;
         match self.pending {
             None => Ok(PendingProgress::Idle),
             Some(PendingMutation::Acceptance { planned }) => {
@@ -591,7 +849,7 @@ where
                     JournalEntry::Accepted(accepted) => accepted.id(),
                     _ => return Err(self.latch(StorageFault::LogicalConflict)),
                 };
-                match self.drive_append(planned.entry())? {
+                match self.drive_append(access, planned.entry())? {
                     PhysicalProgress::Durable(_) => {
                         if let Err(error) = self.index.apply_planned(planned) {
                             return Err(self.latch(StorageFault::ModelApplyRejected(error)));
@@ -606,7 +864,7 @@ where
                 }
             }
             Some(PendingMutation::BootRecovery { id, planned, .. }) => {
-                match self.drive_append(planned.entry())? {
+                match self.drive_append(access, planned.entry())? {
                     PhysicalProgress::Durable(_) => {
                         if let Err(error) = self.index.apply_planned(planned) {
                             return Err(self.latch(StorageFault::ModelApplyRejected(error)));
@@ -624,7 +882,7 @@ where
                 let Some(request) = self.projector.persistence_request(handle) else {
                     return Err(self.latch(StorageFault::ProjectorRequestMismatch));
                 };
-                match self.drive_append(request.entry()) {
+                match self.drive_append(access, request.entry()) {
                     Err(DriveError::Backend(error)) => {
                         match self.projector.report_persistence(
                             &mut self.index,
@@ -662,12 +920,14 @@ where
         }
     }
 
-    fn drive_append(
+    fn drive_append<A: BoundJournalAccess>(
         &mut self,
+        access: &mut A,
         entry: JournalEntry,
-    ) -> Result<PhysicalProgress, DriveError<F::Error>> {
+    ) -> Result<PhysicalProgress, DriveError<A::Error>> {
+        self.ensure_binding(access)?;
         let first = self.first_submission_id;
-        match append::<SUBMISSIONS, F>(&mut self.flash, first, entry) {
+        match append::<SUBMISSIONS, A>(access, first, entry) {
             Ok(outcome) => return Ok(self.observe_append(outcome)),
             Err(JournalError::Backend(error)) => return Err(DriveError::Backend(error)),
             Err(JournalError::AcceptanceCapacityExhausted) => {
@@ -677,13 +937,15 @@ where
             Err(error) => return Err(self.latch(map_journal_fault(error))),
         }
 
-        self.state = match compact::<SUBMISSIONS, F>(&mut self.flash, first) {
+        self.ensure_binding(access)?;
+        self.state = match compact::<SUBMISSIONS, A>(access, first) {
             Ok(state) => state,
             Err(JournalError::Backend(error)) => return Err(DriveError::Backend(error)),
             Err(error) => return Err(self.latch(map_journal_fault(error))),
         };
 
-        match append::<SUBMISSIONS, F>(&mut self.flash, first, entry) {
+        self.ensure_binding(access)?;
+        match append::<SUBMISSIONS, A>(access, first, entry) {
             Ok(outcome) => Ok(self.observe_append(outcome)),
             Err(JournalError::Backend(error)) => Err(DriveError::Backend(error)),
             Err(JournalError::AcceptanceCapacityExhausted) => {
@@ -709,14 +971,14 @@ where
         }
     }
 
-    fn ensure_healthy(&self) -> Result<(), DriveError<F::Error>> {
+    fn ensure_healthy<E>(&self) -> Result<(), DriveError<E>> {
         match self.fault {
             Some(fault) => Err(DriveError::Faulted(fault)),
             None => Ok(()),
         }
     }
 
-    fn ensure_projector_healthy(&mut self) -> Result<(), DriveError<F::Error>> {
+    fn ensure_projector_healthy<E>(&mut self) -> Result<(), DriveError<E>> {
         match self.projector.fault() {
             Some(fault) => Err(self.latch(StorageFault::ProjectorRejected(
                 ProjectorError::Faulted(fault),
@@ -751,7 +1013,14 @@ where
         }
     }
 
-    fn latch(&mut self, fault: StorageFault) -> DriveError<F::Error> {
+    fn ensure_binding<A: BoundJournalAccess>(
+        &self,
+        access: &A,
+    ) -> Result<(), DriveError<A::Error>> {
+        self.validate_access(access).map_err(DriveError::Binding)
+    }
+
+    fn latch<E>(&mut self, fault: StorageFault) -> DriveError<E> {
         let fault = *self.fault.get_or_insert(fault);
         DriveError::Faulted(fault)
     }
@@ -768,6 +1037,87 @@ where
 enum PhysicalProgress {
     Durable(PersistenceReply),
     AcceptanceCapacityExhausted,
+}
+
+fn validate_exact_binding(
+    expected: JournalBinding,
+    actual: JournalBinding,
+) -> Result<(), JournalBindingError> {
+    if actual.device != expected.device {
+        return Err(JournalBindingError::DeviceMismatch {
+            expected: expected.device,
+            actual: actual.device,
+        });
+    }
+    if actual.absolute_offset != expected.absolute_offset || actual.length != expected.length {
+        return Err(JournalBindingError::RangeMismatch {
+            expected_absolute_offset: expected.absolute_offset,
+            expected_length: expected.length,
+            actual_absolute_offset: actual.absolute_offset,
+            actual_length: actual.length,
+        });
+    }
+    if actual.layout_version != expected.layout_version {
+        return Err(JournalBindingError::LayoutVersionMismatch {
+            expected: expected.layout_version,
+            actual: actual.layout_version,
+        });
+    }
+    Ok(())
+}
+
+fn validate_binding<A: BoundJournalAccess>(access: &A) -> Result<(), JournalBindingError> {
+    let binding = access.journal_binding();
+    if binding.layout_version != PHYSICAL_FORMAT_VERSION {
+        return Err(JournalBindingError::LayoutVersionMismatch {
+            expected: PHYSICAL_FORMAT_VERSION,
+            actual: binding.layout_version,
+        });
+    }
+    if binding.length != PARTITION_SIZE {
+        return Err(JournalBindingError::LengthMismatch {
+            expected: PARTITION_SIZE,
+            actual: binding.length,
+        });
+    }
+    if binding
+        .absolute_offset
+        .checked_add(binding.length)
+        .is_none()
+    {
+        return Err(JournalBindingError::RangeOverflow {
+            absolute_offset: binding.absolute_offset,
+            length: binding.length,
+        });
+    }
+
+    let read_size = <A as ReadNorFlash>::READ_SIZE;
+    let write_size = <A as NorFlash>::WRITE_SIZE;
+    let erase_size = <A as NorFlash>::ERASE_SIZE;
+    let aligned =
+        |value: usize, alignment: usize| alignment != 0 && value.is_multiple_of(alignment);
+    if !aligned(binding.absolute_offset, read_size)
+        || !aligned(binding.length, read_size)
+        || !aligned(binding.absolute_offset, write_size)
+        || !aligned(binding.length, write_size)
+        || !aligned(binding.absolute_offset, erase_size)
+        || !aligned(binding.length, erase_size)
+    {
+        return Err(JournalBindingError::AlignmentMismatch {
+            absolute_offset: binding.absolute_offset,
+            length: binding.length,
+            read_size,
+            write_size,
+            erase_size,
+        });
+    }
+    if access.capacity() != binding.length {
+        return Err(JournalBindingError::CapacityMismatch {
+            expected: binding.length,
+            actual: access.capacity(),
+        });
+    }
+    Ok(())
 }
 
 fn map_mount_error<E>(error: JournalError<E>) -> MountError<E> {

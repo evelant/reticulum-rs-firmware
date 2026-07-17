@@ -1,0 +1,55 @@
+[package]
+name = "reticulum-heltec-vision-master-e290-semantic-hil"
+description = "MAC-guarded two-board Reticulum semantic LoRa HIL for the Vision Master E290"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "build.rs"
+autobins = false
+
+[dependencies]
+reticulum-radio-interface = { path = "../../crates/radio-interface" }
+reticulum-semantic-roundtrip-hil = { path = "../../crates/semantic-roundtrip-hil", default-features = false, features = ["semantic-roundtrip-hil"] }
+
+[target.'cfg(target_arch = "xtensa")'.dependencies]
+reticulum-board-heltec-vision-master-e290-radio = { path = "../../crates/board-heltec-vision-master-e290-radio" }
+reticulum-radio-lora-phy = { path = "../../crates/radio-lora-phy" }
+reticulum-rns-rete = { path = "../../crates/rns-rete", default-features = false }
+
+embassy-executor = { workspace = true, features = ["log"] }
+embassy-time = { workspace = true, features = ["log"] }
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
+embedded-hal-bus.workspace = true
+esp-alloc = { workspace = true, features = ["internal-heap-stats"] }
+esp-backtrace = { workspace = true, features = ["esp32s3", "panic-handler", "println"] }
+esp-bootloader-esp-idf = { workspace = true, features = ["esp32s3", "log-04"] }
+esp-hal = { workspace = true, features = [
+    "esp32s3",
+    "exception-handler",
+    "float-save-restore",
+    "log-04",
+    "rt",
+    "unstable",
+] }
+esp-println = { workspace = true, features = ["auto", "esp32s3", "log-04"] }
+esp-rtos = { workspace = true, features = [
+    "embassy",
+    "esp-alloc",
+    "esp32s3",
+    "log-04",
+] }
+log.workspace = true
+rand_core.workspace = true
+static_cell.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "reticulum-heltec-vision-master-e290-semantic-hil"
+path = "src/main.rs"
+test = false
+bench = false

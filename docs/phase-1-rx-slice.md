@@ -683,7 +683,10 @@ gates.
   `continuous_wave`, inner-radio escape or CTX-high method, and the target
   symbol inventory finds none retained by name in this image. Firmware directly
   depends on the opaque `rns-rete-rx` façade, the board crate and the radio
-  interface, not full Rete or `lora-phy`. `xtask graph-policy` enforces that
+  interface, not full Rete or `lora-phy`. The façade crate owns the RNode
+  reassembly-plus-Rete receive composition; `reticulum-rns-rete` and
+  `reticulum-node-core` remain independent of radio-interface and LoRa crates.
+  `xtask graph-policy` enforces that
   manifest boundary across all three real feature sets and every target-specific
   dependency graph. A committed all-source AST snapshot records source-level
   public items, modules and re-exports plus inherent and explicit trait impls

@@ -9,9 +9,6 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-#[cfg(all(feature = "host-sim", target_os = "none"))]
-compile_error!("the experimental `host-sim` device API is unavailable on target_os=none");
-
 mod cbor;
 mod model;
 

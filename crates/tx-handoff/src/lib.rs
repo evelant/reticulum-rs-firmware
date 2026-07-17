@@ -1,15 +1,16 @@
 //! Bounded ownership-preserving channels between the Reticulum node owner and
 //! its single packet-interface dispatcher.
 //!
-//! Packet jobs and returns use two channels whose capacity equals the external
-//! packet-buffer pool. Permit requests and replies use separate depth-one
-//! scalar channels sized for the future single dispatcher's required
-//! one-at-a-time permit loop. The actor must enforce that rule; this crate
-//! returns an over-capacity value unchanged for fault handling. Control-plane
-//! pressure cannot consume an owning-channel slot. Sending is deliberately
-//! synchronous: every full path returns the unchanged non-`Copy` value to its
-//! caller. Receiving may await because cancelling an Embassy receive future
-//! does not remove a queued item.
+//! Legacy destination-DATA packet jobs and returns use two channels whose
+//! capacity equals the external packet-buffer pool. The production
+//! heterogeneous graph routes DATA and ordinary packet owners through
+//! `reticulum-interface-router`; this crate supplies independent depth-one
+//! DATA and ordinary permit request/reply stores for each concrete actor. The
+//! actor must enforce the one-at-a-time permit loop. A separate depth-one
+//! authorized-frame observation pair lets the dispatcher retain an exact
+//! observation until the node durably echoes it as an acknowledgement. Every
+//! full send returns the unchanged value for fault handling, and cancelling an
+//! Embassy receive future does not remove a queued scalar message.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -23,6 +24,20 @@ use embassy_sync::{
 };
 use reticulum_node_core::{
     RoutedTxJob, TxCompletion, TxPacketBuffer, TxPermitReply, TxPermitRequest,
+};
+
+mod authorized_frame;
+mod ordinary;
+
+pub use authorized_frame::{
+    AuthorizedFrameAcknowledgementReceiver, AuthorizedFrameAcknowledgementSender,
+    AuthorizedFrameDispatcherHandoff, AuthorizedFrameHandoff, AuthorizedFrameNodeHandoff,
+    AuthorizedFramePairedHandoff, AuthorizedFrameRequestReceiver, AuthorizedFrameRequestSender,
+};
+pub use ordinary::{
+    OrdinaryDispatcherPermitHandoff, OrdinaryNodePermitHandoff, OrdinaryPairedPermitHandoff,
+    OrdinaryPermitHandoff, OrdinaryPermitReplyReceiver, OrdinaryPermitReplySender,
+    OrdinaryPermitRequestReceiver, OrdinaryPermitRequestSender,
 };
 
 /// A bounded channel was full and returned its unchanged message.
@@ -274,6 +289,14 @@ where
         try_enqueue(self.channel, request)
     }
 
+    /// Poll until one request can be retried through [`Self::try_send`].
+    ///
+    /// Readiness is advisory. A persistent interface actor must retain the
+    /// exact request and its packet owner until a later `try_send` succeeds.
+    pub fn poll_ready_to_send(&mut self, context: &mut Context<'_>) -> Poll<()> {
+        self.channel.poll_ready_to_send(context)
+    }
+
     /// Fixed scalar-control channel capacity.
     pub const fn capacity(&self) -> usize {
         1
@@ -306,6 +329,15 @@ where
     /// Await the oldest opaque permit request.
     pub async fn receive(&mut self) -> TxPermitRequest {
         self.channel.receive().await
+    }
+
+    /// Poll for the oldest request without constructing a receive future.
+    ///
+    /// `Pending` leaves the request in the channel. `Ready` transfers the
+    /// exact request to the caller, which must store it before returning from
+    /// the surrounding poll.
+    pub fn poll_receive(&mut self, context: &mut Context<'_>) -> Poll<TxPermitRequest> {
+        self.channel.poll_receive(context)
     }
 
     /// Receive the oldest request immediately, if one is queued.
@@ -345,6 +377,14 @@ where
     /// Try to enqueue one opaque reply without awaiting.
     pub fn try_send(&mut self, reply: TxPermitReply) -> Result<(), ChannelFull<TxPermitReply>> {
         try_enqueue(self.channel, reply)
+    }
+
+    /// Poll until one reply can be retried through [`Self::try_send`].
+    ///
+    /// Readiness is advisory. A persistent permit server must retain the
+    /// exact non-`Copy` reply until a later `try_send` succeeds.
+    pub fn poll_ready_to_send(&mut self, context: &mut Context<'_>) -> Poll<()> {
+        self.channel.poll_ready_to_send(context)
     }
 
     /// Fixed scalar-control channel capacity.
@@ -442,6 +482,207 @@ where
     pub permit_requests: PermitRequestSender<M>,
     /// Consumer for scalar permit replies.
     pub permit_replies: PermitReplyReceiver<M>,
+}
+
+impl<M, const POOL_SIZE: usize> DispatcherHandoff<M, POOL_SIZE>
+where
+    M: RawMutex + 'static,
+{
+    /// Consume this common dispatcher role set into its owning-data and permit
+    /// port groups.
+    ///
+    /// The returned groups contain the exact endpoint values from `self`.
+    /// Their fields are private, so those endpoints cannot be replaced or
+    /// cross-wired after this decomposition.
+    pub fn into_owner_and_permit(
+        self,
+    ) -> (
+        DispatcherOwnerHandoff<M, POOL_SIZE>,
+        DispatcherPermitHandoff<M>,
+    ) {
+        (
+            DispatcherOwnerHandoff {
+                jobs: self.jobs,
+                returns: self.returns,
+            },
+            DispatcherPermitHandoff {
+                requests: self.permit_requests,
+                replies: self.permit_replies,
+            },
+        )
+    }
+}
+
+/// Dispatcher port group that moves uniquely owned packet jobs and returns.
+///
+/// This group can only be obtained by consuming a [`DispatcherHandoff`], so it
+/// retains the two exact owning-channel roles represented by that role set.
+#[must_use = "dropping dispatcher owner roles permanently abandons their channel capabilities"]
+pub struct DispatcherOwnerHandoff<M, const POOL_SIZE: usize>
+where
+    M: RawMutex + 'static,
+{
+    jobs: JobReceiver<M, POOL_SIZE>,
+    returns: OwnerReturnSender<M, POOL_SIZE>,
+}
+
+impl<M, const POOL_SIZE: usize> DispatcherOwnerHandoff<M, POOL_SIZE>
+where
+    M: RawMutex + 'static,
+{
+    /// Borrow the sole dispatcher-side routed-job consumer.
+    pub fn jobs(&mut self) -> &mut JobReceiver<M, POOL_SIZE> {
+        &mut self.jobs
+    }
+
+    /// Borrow the sole dispatcher-side owning-return producer.
+    pub fn returns(&mut self) -> &mut OwnerReturnSender<M, POOL_SIZE> {
+        &mut self.returns
+    }
+}
+
+/// Dispatcher port group for the scalar permit request/reply exchange.
+///
+/// This group can only be obtained by consuming a [`DispatcherHandoff`], so it
+/// retains the two exact control-channel roles represented by that role set.
+#[must_use = "dropping dispatcher permit roles permanently abandons their channel capabilities"]
+pub struct DispatcherPermitHandoff<M>
+where
+    M: RawMutex + 'static,
+{
+    requests: PermitRequestSender<M>,
+    replies: PermitReplyReceiver<M>,
+}
+
+impl<M> DispatcherPermitHandoff<M>
+where
+    M: RawMutex + 'static,
+{
+    /// Borrow the sole dispatcher-side permit-request producer.
+    pub fn requests(&mut self) -> &mut PermitRequestSender<M> {
+        &mut self.requests
+    }
+
+    /// Borrow the sole dispatcher-side permit-reply consumer.
+    pub fn replies(&mut self) -> &mut PermitReplyReceiver<M> {
+        &mut self.replies
+    }
+}
+
+/// Node-side DATA permit ports for one concrete interface actor.
+///
+/// Routed DATA owners and their completion tickets move through
+/// `reticulum-interface-router`; this group therefore contains only the
+/// scalar request/reply exchange required while the actor retains an exact
+/// [`reticulum_node_core::PermitPendingTx`] owner.
+#[must_use = "dropping DATA node permit roles abandons their channel capabilities"]
+pub struct DataNodePermitHandoff<M>
+where
+    M: RawMutex + 'static,
+{
+    requests: PermitRequestReceiver<M>,
+    replies: PermitReplySender<M>,
+}
+
+impl<M> DataNodePermitHandoff<M>
+where
+    M: RawMutex + 'static,
+{
+    /// Borrow the sole node-side DATA permit-request consumer.
+    pub fn requests(&mut self) -> &mut PermitRequestReceiver<M> {
+        &mut self.requests
+    }
+
+    /// Borrow the sole node-side DATA permit-reply producer.
+    pub fn replies(&mut self) -> &mut PermitReplySender<M> {
+        &mut self.replies
+    }
+}
+
+/// One inseparable DATA permit role pair from a single static store.
+///
+/// A permanent node/interface aggregate consumes this proof so node and actor
+/// permit endpoints cannot be accidentally assembled from different stores.
+#[must_use = "dropping paired DATA permit roles abandons both channel capabilities"]
+pub struct DataPairedPermitHandoff<M>
+where
+    M: RawMutex + 'static,
+{
+    node: DataNodePermitHandoff<M>,
+    dispatcher: DispatcherPermitHandoff<M>,
+}
+
+impl<M> DataPairedPermitHandoff<M>
+where
+    M: RawMutex + 'static,
+{
+    /// Consume common-origin proof into the node and actor permit roles.
+    pub fn into_parts(self) -> (DataNodePermitHandoff<M>, DispatcherPermitHandoff<M>) {
+        (self.node, self.dispatcher)
+    }
+}
+
+/// Permit-only channel storage for ticket-routed destination-DATA packets.
+///
+/// Both channels have depth one because one concrete interface actor
+/// serializes one retained packet owner through its permit exchange. Create
+/// one independent store per actor; requests and replies never need a shared
+/// correlation identifier.
+pub struct DataPermitHandoff<M>
+where
+    M: RawMutex,
+{
+    requests: Channel<M, TxPermitRequest, 1>,
+    replies: Channel<M, TxPermitReply, 1>,
+}
+
+impl<M> DataPermitHandoff<M>
+where
+    M: RawMutex + 'static,
+{
+    /// Construct an empty DATA permit handoff store.
+    pub const fn new() -> Self {
+        Self {
+            requests: Channel::new(),
+            replies: Channel::new(),
+        }
+    }
+
+    /// Split the store into its only live node and actor permit roles.
+    pub fn split(&'static mut self) -> (DataNodePermitHandoff<M>, DispatcherPermitHandoff<M>) {
+        self.split_paired().into_parts()
+    }
+
+    /// Split into an unforgeable common-origin DATA permit role pair.
+    pub fn split_paired(&'static mut self) -> DataPairedPermitHandoff<M> {
+        DataPairedPermitHandoff {
+            node: DataNodePermitHandoff {
+                requests: PermitRequestReceiver {
+                    channel: &self.requests,
+                },
+                replies: PermitReplySender {
+                    channel: &self.replies,
+                },
+            },
+            dispatcher: DispatcherPermitHandoff {
+                requests: PermitRequestSender {
+                    channel: &self.requests,
+                },
+                replies: PermitReplyReceiver {
+                    channel: &self.replies,
+                },
+            },
+        }
+    }
+}
+
+impl<M> Default for DataPermitHandoff<M>
+where
+    M: RawMutex + 'static,
+{
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// One inseparable node/dispatcher role set from a single channel store.
@@ -609,16 +850,27 @@ mod tests {
         DestinationHash, InterfaceSet, MonotonicMillis, MonotonicSeconds, NodeConfig, NodeCore,
         NodeIdentity, NodeInstanceId, PermitResolution, PrepareDataRequest, RoutedTxJob,
         TxAuthorizationCandidate, TxAuthorizationPolicy, TxCompletionCode, TxCompletionDisposition,
-        TxLeaseDeadline, TxPacketBuffer, TxPermitReply, TxPolicyDecision,
+        TxLeaseDeadline, TxPacketBuffer, TxPermitReply, TxPermitRequirements, TxPermitReservation,
+        TxPermitResourceId, TxPolicyDecision,
     };
     use static_cell::ConstStaticCell;
 
-    use super::{TxHandoff, TxOwnerReturn};
+    use super::{DataPermitHandoff, TxHandoff, TxOwnerReturn};
 
     type TestNode<const BUFFERS: usize> = NodeCore<4, 2, 8, 2, BUFFERS>;
 
+    const TEST_PERMIT_RESOURCE: TxPermitResourceId = TxPermitResourceId::new([0x48; 16]);
+
+    fn test_permit_requirements() -> TxPermitRequirements {
+        TxPermitRequirements::try_new(TEST_PERMIT_RESOURCE, 1)
+            .expect("test permit units must be nonzero")
+    }
+
     static PRODUCTION_MUTEX_HANDOFF: ConstStaticCell<TxHandoff<CriticalSectionRawMutex, 1>> =
         ConstStaticCell::new(TxHandoff::new());
+    static PRODUCTION_DATA_PERMIT_HANDOFF: ConstStaticCell<
+        DataPermitHandoff<CriticalSectionRawMutex>,
+    > = ConstStaticCell::new(DataPermitHandoff::new());
 
     #[test]
     fn production_mutex_supports_static_storage_and_exclusive_split() {
@@ -631,6 +883,12 @@ mod tests {
         assert_eq!(dispatcher.returns.capacity(), 1);
         assert_eq!(dispatcher.permit_requests.capacity(), 1);
         assert_eq!(dispatcher.permit_replies.capacity(), 1);
+
+        let (mut permit_node, mut permit_actor) = PRODUCTION_DATA_PERMIT_HANDOFF.take().split();
+        assert_eq!(permit_node.requests().capacity(), 1);
+        assert_eq!(permit_node.replies().capacity(), 1);
+        assert_eq!(permit_actor.requests().capacity(), 1);
+        assert_eq!(permit_actor.replies().capacity(), 1);
     }
 
     #[derive(Default)]
@@ -667,8 +925,14 @@ mod tests {
     struct Allow;
 
     impl TxAuthorizationPolicy for Allow {
-        fn authorize(&mut self, _candidate: TxAuthorizationCandidate) -> TxPolicyDecision {
-            TxPolicyDecision::Authorize
+        fn authorize(&mut self, candidate: TxAuthorizationCandidate) -> TxPolicyDecision {
+            TxPolicyDecision::Authorize(
+                TxPermitReservation::try_new(
+                    candidate.requirements.resource(),
+                    candidate.requirements.required_units(),
+                )
+                .expect("test policy must mirror valid requirements"),
+            )
         }
     }
 
@@ -996,7 +1260,7 @@ mod tests {
         assert!(node.jobs.try_send(first).is_ok());
         assert!(node.jobs.try_send(second).is_ok());
         let first = dispatcher.jobs.try_receive().expect("first job was lost");
-        let (first_pending, first_request) = first.begin_permit();
+        let (first_pending, first_request) = first.begin_permit(test_permit_requirements());
         assert!(dispatcher.permit_requests.try_send(first_request).is_ok());
         assert_eq!(dispatcher.jobs.len(), 1);
         assert_eq!(dispatcher.permit_requests.len(), 1);
@@ -1008,7 +1272,7 @@ mod tests {
         );
         assert_eq!(dispatcher.permit_requests.len(), 0);
         let second = dispatcher.jobs.try_receive().expect("second job was lost");
-        let (second_pending, second_request) = second.begin_permit();
+        let (second_pending, second_request) = second.begin_permit(test_permit_requirements());
         assert!(dispatcher.permit_requests.try_send(second_request).is_ok());
         assert_eq!(dispatcher.jobs.len(), 0);
         assert_eq!(dispatcher.permit_requests.len(), 1);
@@ -1068,6 +1332,119 @@ mod tests {
         assert_eq!(ptr::from_ref(&*second), second_pointer);
     }
 
+    static DATA_ONLY_PERMIT_A: ConstStaticCell<TxPacketBuffer> =
+        ConstStaticCell::new(TxPacketBuffer::new());
+    static DATA_ONLY_PERMIT_B: ConstStaticCell<TxPacketBuffer> =
+        ConstStaticCell::new(TxPacketBuffer::new());
+    static DATA_ONLY_PERMIT_HANDOFF: ConstStaticCell<DataPermitHandoff<NoopRawMutex>> =
+        ConstStaticCell::new(DataPermitHandoff::new());
+
+    #[test]
+    fn data_permit_only_pair_retains_exact_control_and_owner_across_pressure() {
+        let mut owner = node::<2>(25, "DATA-permit-only-owner");
+        let receiver = node::<0>(26, "DATA-permit-only-receiver");
+        register_peer(&mut owner, 26, "DATA-permit-only-receiver");
+        let first_buffer = DATA_ONLY_PERMIT_A.take();
+        let second_buffer = DATA_ONLY_PERMIT_B.take();
+        owner.register_packet_buffer(first_buffer).unwrap();
+        owner.register_packet_buffer(second_buffer).unwrap();
+        let first_pointer = ptr::from_ref(&*first_buffer);
+        let second_pointer = ptr::from_ref(&*second_buffer);
+        let mut rng = CounterRng::default();
+        let first = prepare(
+            &mut owner,
+            first_buffer,
+            receiver.destination_hash(),
+            b"DATA-permit-only-first",
+            1,
+            &mut rng,
+        );
+        let second = prepare(
+            &mut owner,
+            second_buffer,
+            receiver.destination_hash(),
+            b"DATA-permit-only-second",
+            2,
+            &mut rng,
+        );
+        let (first_pending, first_request) = first.begin_permit(test_permit_requirements());
+        let (second_pending, second_request) = second.begin_permit(test_permit_requirements());
+        let (mut node, mut dispatcher) = DATA_ONLY_PERMIT_HANDOFF.take().split();
+        let mut context = Context::from_waker(Waker::noop());
+
+        assert!(matches!(
+            node.requests().poll_receive(&mut context),
+            Poll::Pending
+        ));
+        assert!(matches!(
+            node.replies().poll_ready_to_send(&mut context),
+            Poll::Ready(())
+        ));
+        assert!(matches!(
+            dispatcher.requests().poll_ready_to_send(&mut context),
+            Poll::Ready(())
+        ));
+        {
+            let mut receive = pin!(node.requests().receive());
+            assert!(matches!(receive.as_mut().poll(&mut context), Poll::Pending));
+            assert!(dispatcher.requests().try_send(first_request).is_ok());
+        }
+        let second_request = match dispatcher.requests().try_send(second_request) {
+            Err(full) => full.into_inner(),
+            Ok(()) => panic!("depth-one DATA request channel accepted a second request"),
+        };
+        let first_request = node
+            .requests()
+            .try_receive()
+            .expect("cancelled receive future removed the first DATA request");
+        let first_reply = authorize(&mut owner, first_request);
+        assert!(dispatcher.requests().try_send(second_request).is_ok());
+        let second_request = node
+            .requests()
+            .try_receive()
+            .expect("retried second DATA request was lost");
+        let second_reply = authorize(&mut owner, second_request);
+
+        {
+            let mut receive = pin!(dispatcher.replies().receive());
+            assert!(matches!(receive.as_mut().poll(&mut context), Poll::Pending));
+            assert!(node.replies().try_send(first_reply).is_ok());
+        }
+        let second_reply = match node.replies().try_send(second_reply) {
+            Err(full) => full.into_inner(),
+            Ok(()) => panic!("depth-one DATA reply channel accepted a second reply"),
+        };
+        let first_reply = dispatcher
+            .replies()
+            .try_receive()
+            .expect("cancelled reply receive removed the first DATA reply");
+        assert!(node.replies().try_send(second_reply).is_ok());
+        let second_reply = dispatcher
+            .replies()
+            .try_receive()
+            .expect("retried second DATA reply was lost");
+        let first = match first_pending.resolve(first_reply, MonotonicMillis::new(2_500)) {
+            Ok(PermitResolution::Authorized(owner)) => owner,
+            Ok(_) => panic!("matching DATA permit-only reply did not authorize"),
+            Err(_) => panic!("matching DATA permit-only reply was rejected"),
+        };
+        let second = match second_pending.resolve(second_reply, MonotonicMillis::new(2_500)) {
+            Ok(PermitResolution::Authorized(owner)) => owner,
+            Ok(_) => panic!("matching second DATA permit-only reply did not authorize"),
+            Err(_) => panic!("matching second DATA permit-only reply was rejected"),
+        };
+        let first = available(
+            &mut owner,
+            TxOwnerReturn::Completion(first.complete(TxCompletionCode::new(21))),
+        );
+        let second = available(
+            &mut owner,
+            TxOwnerReturn::Completion(second.complete(TxCompletionCode::new(22))),
+        );
+        assert_eq!(ptr::from_ref(&*first), first_pointer);
+        assert_eq!(ptr::from_ref(&*second), second_pointer);
+    }
+
     static PRESSURE_A: ConstStaticCell<TxPacketBuffer> =
         ConstStaticCell::new(TxPacketBuffer::new());
     static PRESSURE_B: ConstStaticCell<TxPacketBuffer> =
@@ -1103,8 +1480,8 @@ mod tests {
             2,
             &mut rng,
         );
-        let (first_pending, first_request) = first.begin_permit();
-        let (second_pending, second_request) = second.begin_permit();
+        let (first_pending, first_request) = first.begin_permit(test_permit_requirements());
+        let (second_pending, second_request) = second.begin_permit(test_permit_requirements());
 
         // Deliberately overdrive capacity one with two owners so every scalar
         // and owning Full path is exercised and then reconciled end to end.
@@ -1169,6 +1546,152 @@ mod tests {
         let second = available(
             &mut owner,
             node.returns.try_receive().expect("second return was lost"),
+        );
+        assert_eq!(ptr::from_ref(&*first), first_pointer);
+        assert_eq!(ptr::from_ref(&*second), second_pointer);
+    }
+
+    static DECOMPOSED_A: ConstStaticCell<TxPacketBuffer> =
+        ConstStaticCell::new(TxPacketBuffer::new());
+    static DECOMPOSED_B: ConstStaticCell<TxPacketBuffer> =
+        ConstStaticCell::new(TxPacketBuffer::new());
+    static DECOMPOSED_HANDOFF: ConstStaticCell<TxHandoff<NoopRawMutex, 1>> =
+        ConstStaticCell::new(TxHandoff::new());
+
+    #[test]
+    fn decomposed_dispatcher_roles_retain_exact_owners_and_control_under_pressure() {
+        let mut owner = node::<2>(40, "decomposed-owner");
+        let receiver = node::<0>(41, "decomposed-receiver");
+        register_peer(&mut owner, 41, "decomposed-receiver");
+        let first_buffer = DECOMPOSED_A.take();
+        let second_buffer = DECOMPOSED_B.take();
+        owner.register_packet_buffer(first_buffer).unwrap();
+        owner.register_packet_buffer(second_buffer).unwrap();
+        let first_pointer = ptr::from_ref(&*first_buffer);
+        let second_pointer = ptr::from_ref(&*second_buffer);
+        let mut rng = CounterRng::default();
+        let first = prepare(
+            &mut owner,
+            first_buffer,
+            receiver.destination_hash(),
+            b"decomposed-first",
+            1,
+            &mut rng,
+        );
+        let second = prepare(
+            &mut owner,
+            second_buffer,
+            receiver.destination_hash(),
+            b"decomposed-second",
+            2,
+            &mut rng,
+        );
+        let first_token = first.attempt();
+        let second_token = second.attempt();
+
+        let (mut node_ports, dispatcher) = DECOMPOSED_HANDOFF.take().split();
+        let (mut owner_ports, mut permit_ports) = dispatcher.into_owner_and_permit();
+        assert_eq!(owner_ports.jobs().capacity(), 1);
+        assert_eq!(owner_ports.returns().capacity(), 1);
+        assert_eq!(permit_ports.requests().capacity(), 1);
+        assert_eq!(permit_ports.replies().capacity(), 1);
+
+        let mut context = Context::from_waker(Waker::noop());
+        {
+            let mut receive = pin!(owner_ports.jobs().receive());
+            assert!(matches!(receive.as_mut().poll(&mut context), Poll::Pending));
+            assert!(node_ports.jobs.try_send(first).is_ok());
+        }
+        let first = owner_ports
+            .jobs()
+            .try_receive()
+            .expect("cancelled grouped receive removed the first owner");
+        assert_eq!(first.attempt(), first_token);
+
+        assert!(node_ports.jobs.try_send(first).is_ok());
+        let second = match node_ports.jobs.try_send(second) {
+            Err(full) => full.into_inner(),
+            Ok(()) => panic!("grouped depth-one owner channel accepted a second job"),
+        };
+        assert_eq!(second.attempt(), second_token);
+        let first = owner_ports
+            .jobs()
+            .try_receive()
+            .expect("first grouped job was lost");
+        assert_eq!(first.attempt(), first_token);
+        assert!(node_ports.jobs.try_send(second).is_ok());
+        let second = owner_ports
+            .jobs()
+            .try_receive()
+            .expect("retried grouped job was lost");
+        assert_eq!(second.attempt(), second_token);
+
+        let (first_pending, first_request) = first.begin_permit(test_permit_requirements());
+        let (second_pending, second_request) = second.begin_permit(test_permit_requirements());
+        assert!(permit_ports.requests().try_send(first_request).is_ok());
+        let second_request = match permit_ports.requests().try_send(second_request) {
+            Err(full) => full.into_inner(),
+            Ok(()) => panic!("grouped depth-one permit channel accepted a second request"),
+        };
+        let first_reply = authorize(
+            &mut owner,
+            node_ports
+                .permit_requests
+                .try_receive()
+                .expect("first grouped request was lost"),
+        );
+        {
+            let mut receive = pin!(permit_ports.replies().receive());
+            assert!(matches!(receive.as_mut().poll(&mut context), Poll::Pending));
+            assert!(node_ports.permit_replies.try_send(first_reply).is_ok());
+        }
+        let first_reply = permit_ports
+            .replies()
+            .try_receive()
+            .expect("cancelled grouped reply receive removed the reply");
+        let first = match first_pending.resolve(first_reply, MonotonicMillis::new(2_500)) {
+            Ok(PermitResolution::Authorized(owner)) => owner,
+            Ok(_) => panic!("first grouped reply did not authorize"),
+            Err(_) => panic!("first grouped reply mismatched"),
+        };
+
+        assert!(permit_ports.requests().try_send(second_request).is_ok());
+        let second_reply = authorize(
+            &mut owner,
+            node_ports
+                .permit_requests
+                .try_receive()
+                .expect("retried grouped request was lost"),
+        );
+        assert!(node_ports.permit_replies.try_send(second_reply).is_ok());
+        let second_reply = block_on(permit_ports.replies().receive());
+        let second = match second_pending.resolve(second_reply, MonotonicMillis::new(2_500)) {
+            Ok(PermitResolution::Authorized(owner)) => owner,
+            Ok(_) => panic!("second grouped reply did not authorize"),
+            Err(_) => panic!("retried grouped request/reply mismatched"),
+        };
+
+        let first = TxOwnerReturn::Completion(first.complete(TxCompletionCode::new(1)));
+        let second = TxOwnerReturn::Completion(second.complete(TxCompletionCode::new(2)));
+        assert!(owner_ports.returns().try_send(first).is_ok());
+        let second = match owner_ports.returns().try_send(second) {
+            Err(full) => full.into_inner(),
+            Ok(()) => panic!("grouped depth-one return channel accepted a second owner"),
+        };
+        let first = available(
+            &mut owner,
+            node_ports
+                .returns
+                .try_receive()
+                .expect("first grouped completion was lost"),
+        );
+        assert!(owner_ports.returns().try_send(second).is_ok());
+        let second = available(
+            &mut owner,
+            node_ports
+                .returns
+                .try_receive()
+                .expect("retried grouped completion was lost"),
         );
         assert_eq!(ptr::from_ref(&*first), first_pointer);
         assert_eq!(ptr::from_ref(&*second), second_pointer);

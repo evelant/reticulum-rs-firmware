@@ -1,5 +1,6 @@
 # Cargo build output
 /target/
+**/target/
 
 # Local research checkouts and generated conformance evidence
 /artifacts/

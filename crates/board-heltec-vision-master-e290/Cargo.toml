@@ -1,0 +1,14 @@
+[package]
+name = "reticulum-board-heltec-vision-master-e290"
+description = "Immutable Heltec Vision Master E290 board facts and RF safety policy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reticulum-radio-interface = { path = "../radio-interface", default-features = false }
+
+[lib]
+path = "src/lib.rs"

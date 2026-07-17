@@ -322,6 +322,39 @@ pub enum AppendOutcome {
     AlreadyEquivalent(JournalState),
 }
 
+/// Cross-store authority for establishing the first empty journal format.
+///
+/// The journal cannot prove that an unauthenticated torn first-prefix write
+/// originated from its own formatter. A product must derive
+/// [`AllowFirstProvision`](Self::AllowFirstProvision) from independent durable
+/// state, such as a still-vacant device-identity store that is committed only
+/// after journal provisioning completes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FreshJournalPolicy {
+    /// Do not mutate erased or recognizably interrupted first-format media.
+    Reject,
+    /// Permit completion of the exact canonical empty generation-1 format.
+    AllowFirstProvision,
+}
+
+/// Failure to establish or recognize the first empty journal format.
+#[derive(Debug, Eq, PartialEq)]
+pub enum FirstProvisionError<E> {
+    /// Underlying NOR operation failed; completion may be ambiguous.
+    Backend(E),
+    /// Capacity or read/program/erase geometry is incompatible with format version 1.
+    IncompatibleFlash,
+    /// Media is erased or on the canonical first-format trajectory, but the
+    /// caller supplied [`FreshJournalPolicy::Reject`].
+    NotAuthorized,
+    /// Media is neither canonical empty generation 1 nor a recognized
+    /// interruption of that exact format. This includes an existing nonempty
+    /// journal and programmed bytes outside the first manifest.
+    MediaNotProvisionable,
+    /// Exact program readback did not establish the canonical empty manifest.
+    ReadbackMismatch,
+}
+
 #[derive(Clone, Copy)]
 struct Manifest {
     bank: Bank,
@@ -400,15 +433,48 @@ where
         baseline_tail: ZERO_DIGEST,
     };
     write_manifest(flash, manifest)?;
-    Ok(JournalState {
+    Ok(empty_generation_one_state())
+}
+
+/// Establish or recognize the canonical empty generation-1 journal.
+///
+/// This is deliberately separate from [`mount`], whose validation and
+/// fail-closed behavior are unchanged. A valid empty generation-1 journal is
+/// returned without mutation under either policy. Erased media and a
+/// monotonic-compatible interruption of the exact manifest prefix/commit
+/// sequence are completed only under
+/// [`FreshJournalPolicy::AllowFirstProvision`].
+///
+/// Provisioning never erases. Every byte outside manifest A's 160-byte
+/// canonical image must remain erased. Before the prefix is exact, the commit
+/// marker must also remain completely erased; after the prefix is exact, only
+/// monotonic programming toward the canonical commit marker is accepted. Thus
+/// a nonempty journal and all off-trajectory programmed media fail without a
+/// write.
+pub fn provision_first<F>(
+    flash: &mut F,
+    policy: FreshJournalPolicy,
+) -> Result<JournalState, FirstProvisionError<F::Error>>
+where
+    F: MultiwriteNorFlash,
+{
+    validate_writable_flash::<F>(flash).map_err(map_first_provision_journal_error)?;
+    let manifest = Manifest {
         bank: Bank::A,
         generation: 1,
-        committed_records: 0,
-        consumed_slots: 0,
-        accepted_submissions: 0,
-        tail_digest: ZERO_DIGEST,
-        compaction_pending: false,
-    })
+        baseline_count: 0,
+        baseline_tail: ZERO_DIGEST,
+    };
+    let expected = encode_manifest(manifest);
+    match classify_first_provision_media(flash, &expected)? {
+        FirstProvisionMedia::ValidEmpty => return Ok(empty_generation_one_state()),
+        FirstProvisionMedia::Erased | FirstProvisionMedia::Repairable => {}
+    }
+    if policy == FreshJournalPolicy::Reject {
+        return Err(FirstProvisionError::NotAuthorized);
+    }
+    write_manifest(flash, manifest).map_err(map_first_provision_journal_error)?;
+    Ok(empty_generation_one_state())
 }
 
 /// Scan every slot, validate the integrity chain, and complete semantic replay.
@@ -789,6 +855,103 @@ where
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FirstProvisionMedia {
+    Erased,
+    Repairable,
+    ValidEmpty,
+}
+
+fn classify_first_provision_media<F>(
+    flash: &mut F,
+    expected: &[u8; MANIFEST_SIZE],
+) -> Result<FirstProvisionMedia, FirstProvisionError<F::Error>>
+where
+    F: ReadNorFlash,
+{
+    let mut first_manifest = [0xff_u8; MANIFEST_SIZE];
+    let mut sector = [0_u8; ERASE_SIZE];
+    let mut outside_manifest_erased = true;
+    let mut offset = 0;
+    while offset < PARTITION_SIZE {
+        flash
+            .read(offset as u32, &mut sector)
+            .map_err(FirstProvisionError::Backend)?;
+        if offset == MANIFEST_A_OFFSET {
+            first_manifest.copy_from_slice(&sector[..MANIFEST_SIZE]);
+            outside_manifest_erased &= sector[MANIFEST_SIZE..].iter().all(|byte| *byte == 0xff);
+        } else {
+            outside_manifest_erased &= sector.iter().all(|byte| *byte == 0xff);
+        }
+        offset += sector.len();
+    }
+
+    if !outside_manifest_erased {
+        return Err(FirstProvisionError::MediaNotProvisionable);
+    }
+    if first_manifest == *expected {
+        return Ok(FirstProvisionMedia::ValidEmpty);
+    }
+    if first_manifest.iter().all(|byte| *byte == 0xff) {
+        return Ok(FirstProvisionMedia::Erased);
+    }
+
+    let prefix = &first_manifest[..MANIFEST_PREFIX_SIZE];
+    let expected_prefix = &expected[..MANIFEST_PREFIX_SIZE];
+    let commit = &first_manifest[MANIFEST_PREFIX_SIZE..];
+    let expected_commit = &expected[MANIFEST_PREFIX_SIZE..];
+    let prefix_exact = prefix == expected_prefix;
+    let commit_erased = commit.iter().all(|byte| *byte == 0xff);
+    let repairable = if prefix_exact {
+        monotonic_programming_compatible(commit, expected_commit)
+    } else {
+        commit_erased && monotonic_programming_compatible(prefix, expected_prefix)
+    };
+    if repairable {
+        Ok(FirstProvisionMedia::Repairable)
+    } else {
+        Err(FirstProvisionError::MediaNotProvisionable)
+    }
+}
+
+fn map_first_provision_journal_error<E>(error: JournalError<E>) -> FirstProvisionError<E> {
+    match error {
+        JournalError::Backend(error) => FirstProvisionError::Backend(error),
+        JournalError::IncompatibleFlash => FirstProvisionError::IncompatibleFlash,
+        JournalError::ReadbackMismatch => FirstProvisionError::ReadbackMismatch,
+        JournalError::UnformattedErased
+        | JournalError::UnformattedNonErased
+        | JournalError::ManifestCorrupt
+        | JournalError::ManifestConflict
+        | JournalError::UnsupportedPhysicalVersion(_)
+        | JournalError::UnsupportedSemanticVersion(_)
+        | JournalError::GeometryMismatch
+        | JournalError::SlotCorrupt { .. }
+        | JournalError::BaselineMismatch
+        | JournalError::DuplicateLogicalKey
+        | JournalError::SemanticReplay(_)
+        | JournalError::LogicalConflict
+        | JournalError::NeedsCompaction
+        | JournalError::CompactionPending
+        | JournalError::GenerationExhausted
+        | JournalError::CompactionInvariant
+        | JournalError::AcceptanceCapacityExhausted
+        | JournalError::ReservationInvariant => FirstProvisionError::MediaNotProvisionable,
+    }
+}
+
+const fn empty_generation_one_state() -> JournalState {
+    JournalState {
+        bank: Bank::A,
+        generation: 1,
+        committed_records: 0,
+        consumed_slots: 0,
+        accepted_submissions: 0,
+        tail_digest: ZERO_DIGEST,
+        compaction_pending: false,
+    }
+}
+
 fn partition_is_erased<F>(flash: &mut F) -> Result<bool, JournalError<F::Error>>
 where
     F: ReadNorFlash,
@@ -996,24 +1159,7 @@ where
     F: MultiwriteNorFlash,
 {
     validate_writable_flash::<F>(flash)?;
-    let mut encoded = [0xff_u8; MANIFEST_SIZE];
-    encoded[..8].copy_from_slice(MANIFEST_MAGIC);
-    put_u16(&mut encoded, 8, PHYSICAL_FORMAT_VERSION);
-    put_u16(&mut encoded, 10, JOURNAL_SCHEMA_VERSION);
-    encoded[12] = manifest.bank.id();
-    encoded[13..16].fill(0);
-    put_u64(&mut encoded, 16, manifest.generation);
-    put_u32(&mut encoded, 24, manifest.bank.offset() as u32);
-    put_u32(&mut encoded, 28, BANK_SIZE as u32);
-    put_u32(&mut encoded, 32, SLOT_SIZE as u32);
-    put_u32(&mut encoded, 36, BANK_SLOT_COUNT as u32);
-    put_u64(&mut encoded, 40, manifest.baseline_count as u64);
-    encoded[48..80].copy_from_slice(&manifest.baseline_tail);
-    put_u16(&mut encoded, 80, MAX_DURABLE_RECORDS_PER_SUBMISSION as u16);
-    encoded[82..MANIFEST_DATA_SIZE].fill(0);
-    let digest = manifest_digest(&encoded[..MANIFEST_DATA_SIZE]);
-    encoded[MANIFEST_DATA_SIZE..MANIFEST_PREFIX_SIZE].copy_from_slice(&digest);
-    encoded[MANIFEST_PREFIX_SIZE..].copy_from_slice(&MANIFEST_COMMIT);
+    let encoded = encode_manifest(manifest);
 
     let offset = manifest.bank.manifest_offset();
     flash
@@ -1040,6 +1186,28 @@ where
         return Err(JournalError::ReadbackMismatch);
     }
     Ok(())
+}
+
+fn encode_manifest(manifest: Manifest) -> [u8; MANIFEST_SIZE] {
+    let mut encoded = [0xff_u8; MANIFEST_SIZE];
+    encoded[..8].copy_from_slice(MANIFEST_MAGIC);
+    put_u16(&mut encoded, 8, PHYSICAL_FORMAT_VERSION);
+    put_u16(&mut encoded, 10, JOURNAL_SCHEMA_VERSION);
+    encoded[12] = manifest.bank.id();
+    encoded[13..16].fill(0);
+    put_u64(&mut encoded, 16, manifest.generation);
+    put_u32(&mut encoded, 24, manifest.bank.offset() as u32);
+    put_u32(&mut encoded, 28, BANK_SIZE as u32);
+    put_u32(&mut encoded, 32, SLOT_SIZE as u32);
+    put_u32(&mut encoded, 36, BANK_SLOT_COUNT as u32);
+    put_u64(&mut encoded, 40, manifest.baseline_count as u64);
+    encoded[48..80].copy_from_slice(&manifest.baseline_tail);
+    put_u16(&mut encoded, 80, MAX_DURABLE_RECORDS_PER_SUBMISSION as u16);
+    encoded[82..MANIFEST_DATA_SIZE].fill(0);
+    let digest = manifest_digest(&encoded[..MANIFEST_DATA_SIZE]);
+    encoded[MANIFEST_DATA_SIZE..MANIFEST_PREFIX_SIZE].copy_from_slice(&digest);
+    encoded[MANIFEST_PREFIX_SIZE..].copy_from_slice(&MANIFEST_COMMIT);
+    encoded
 }
 
 fn write_handoff<F>(flash: &mut F, handoff: Handoff) -> Result<(), JournalError<F::Error>>
@@ -1394,10 +1562,15 @@ fn slot_digest(
 }
 
 fn monotonic_partial(actual: &[u8; COMMIT_SIZE], target: &[u8; COMMIT_SIZE]) -> bool {
-    actual
-        .iter()
-        .zip(target)
-        .all(|(actual, target)| actual & target == *target)
+    monotonic_programming_compatible(actual, target)
+}
+
+fn monotonic_programming_compatible(actual: &[u8], target: &[u8]) -> bool {
+    actual.len() == target.len()
+        && actual
+            .iter()
+            .zip(target)
+            .all(|(actual, target)| actual & target == *target)
 }
 
 const fn logical_key(entry: JournalEntry) -> LogicalKey {

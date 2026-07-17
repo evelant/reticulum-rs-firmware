@@ -1,0 +1,17 @@
+[package]
+name = "reticulum-nor-flash-region"
+description = "Checked partition-relative raw NOR flash view for Reticulum firmware"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+embedded-storage.workspace = true
+
+[lib]
+path = "src/lib.rs"

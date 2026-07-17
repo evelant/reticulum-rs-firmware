@@ -1585,6 +1585,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "reticulum-announce-clock"
+version = "0.1.0"
+dependencies = [
+ "embedded-storage",
+ "sha2",
+]
+
+[[package]]
 name = "reticulum-board-heltec-tracker-v2"
 version = "0.1.0"
 dependencies = [
@@ -1606,6 +1614,7 @@ dependencies = [
  "lora-phy",
  "reticulum-board-heltec-tracker-v2",
  "reticulum-radio-interface",
+ "reticulum-radio-lora-phy",
 ]
 
 [[package]]
@@ -1613,6 +1622,26 @@ name = "reticulum-board-heltec-tracker-v2-tx-hil"
 version = "0.1.0"
 dependencies = [
  "reticulum-board-heltec-tracker-v2-radio",
+]
+
+[[package]]
+name = "reticulum-board-heltec-vision-master-e290"
+version = "0.1.0"
+dependencies = [
+ "reticulum-radio-interface",
+]
+
+[[package]]
+name = "reticulum-board-heltec-vision-master-e290-radio"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "lora-phy",
+ "reticulum-board-heltec-vision-master-e290",
+ "reticulum-radio-interface",
+ "reticulum-radio-lora-phy",
 ]
 
 [[package]]
@@ -1644,6 +1673,28 @@ dependencies = [
  "reticulum-device-api",
  "reticulum-storage-actor",
  "reticulum-storage-model",
+]
+
+[[package]]
+name = "reticulum-device-api-framing"
+version = "0.1.0"
+
+[[package]]
+name = "reticulum-device-api-handoff"
+version = "0.1.0"
+dependencies = [
+ "embassy-sync 0.8.0",
+ "reticulum-device-api",
+]
+
+[[package]]
+name = "reticulum-device-identity-store"
+version = "0.1.0"
+dependencies = [
+ "embedded-storage",
+ "rand_core 0.6.4",
+ "sha2",
+ "zeroize",
 ]
 
 [[package]]
@@ -1683,6 +1734,7 @@ dependencies = [
  "esp-println",
  "esp-storage",
  "log",
+ "reticulum-nor-flash-region",
  "reticulum-storage-journal",
  "reticulum-storage-model",
 ]
@@ -1703,11 +1755,102 @@ dependencies = [
  "esp-println",
  "esp-rtos",
  "log",
- "rand_core 0.6.4",
  "reticulum-board-heltec-tracker-v2-tx-hil",
  "reticulum-radio-interface",
  "reticulum-rns-rete",
+ "reticulum-semantic-roundtrip-hil",
  "static_cell",
+]
+
+[[package]]
+name = "reticulum-heltec-vision-master-e290-node"
+version = "0.1.0"
+dependencies = [
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-sync 0.8.0",
+ "embassy-time",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "embedded-hal-bus",
+ "embedded-storage",
+ "esp-alloc",
+ "esp-backtrace",
+ "esp-bootloader-esp-idf",
+ "esp-hal",
+ "esp-println",
+ "esp-rtos",
+ "esp-storage",
+ "log",
+ "rand_core 0.6.4",
+ "reticulum-announce-clock",
+ "reticulum-board-heltec-vision-master-e290-radio",
+ "reticulum-device-api",
+ "reticulum-device-api-adapter",
+ "reticulum-device-identity-store",
+ "reticulum-interface-router",
+ "reticulum-node-core",
+ "reticulum-nor-flash-region",
+ "reticulum-radio-interface",
+ "reticulum-radio-lora-phy",
+ "reticulum-radio-tx-dispatch",
+ "reticulum-storage-actor",
+ "reticulum-storage-journal",
+ "reticulum-storage-model",
+ "reticulum-submission-runtime",
+ "reticulum-tx-handoff",
+ "reticulum-tx-supervisor",
+ "static_cell",
+]
+
+[[package]]
+name = "reticulum-heltec-vision-master-e290-qualification"
+version = "0.1.0"
+dependencies = [
+ "allocator-api2",
+ "embedded-storage",
+ "esp-alloc",
+ "esp-backtrace",
+ "esp-bootloader-esp-idf",
+ "esp-hal",
+ "esp-println",
+ "esp-storage",
+ "log",
+]
+
+[[package]]
+name = "reticulum-heltec-vision-master-e290-semantic-hil"
+version = "0.1.0"
+dependencies = [
+ "embassy-executor",
+ "embassy-time",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "embedded-hal-bus",
+ "esp-alloc",
+ "esp-backtrace",
+ "esp-bootloader-esp-idf",
+ "esp-hal",
+ "esp-println",
+ "esp-rtos",
+ "log",
+ "rand_core 0.6.4",
+ "reticulum-board-heltec-vision-master-e290-radio",
+ "reticulum-radio-interface",
+ "reticulum-radio-lora-phy",
+ "reticulum-rns-rete",
+ "reticulum-semantic-roundtrip-hil",
+ "static_cell",
+]
+
+[[package]]
+name = "reticulum-interface-router"
+version = "0.1.0"
+dependencies = [
+ "embassy-sync 0.8.0",
+ "rand_core 0.6.4",
+ "reticulum-node-core",
+ "reticulum-rns-rete",
 ]
 
 [[package]]
@@ -1725,6 +1868,13 @@ dependencies = [
  "rand_core 0.6.4",
  "reticulum-rns-rete",
  "sha2",
+]
+
+[[package]]
+name = "reticulum-nor-flash-region"
+version = "0.1.0"
+dependencies = [
+ "embedded-storage",
 ]
 
 [[package]]
@@ -1748,6 +1898,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "reticulum-radio-lora-phy"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "embedded-hal-async",
+ "lora-phy",
+ "reticulum-radio-interface",
+]
+
+[[package]]
+name = "reticulum-radio-tx-dispatch"
+version = "0.1.0"
+dependencies = [
+ "embassy-futures",
+ "embassy-sync 0.8.0",
+ "embassy-time",
+ "rand_core 0.6.4",
+ "reticulum-interface-router",
+ "reticulum-node-core",
+ "reticulum-radio-interface",
+ "reticulum-tx-handoff",
+ "static_cell",
+]
+
+[[package]]
 name = "reticulum-rns-conformance"
 version = "0.1.0"
 
@@ -1768,15 +1943,25 @@ dependencies = [
  "rete-core",
  "rete-stack",
  "rete-transport",
- "reticulum-radio-interface",
  "reticulum-rns-conformance",
+ "sha2",
+]
+
+[[package]]
+name = "reticulum-rns-rete-rx"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "rand_core 0.6.4",
+ "reticulum-radio-interface",
+ "reticulum-rns-rete",
  "serde",
  "serde_json",
  "sha2",
 ]
 
 [[package]]
-name = "reticulum-rns-rete-rx"
+name = "reticulum-semantic-roundtrip-hil"
 version = "0.1.0"
 dependencies = [
  "rand_core 0.6.4",
@@ -1788,15 +1973,12 @@ dependencies = [
 name = "reticulum-storage-actor"
 version = "0.1.0"
 dependencies = [
- "embassy-sync 0.8.0",
  "embedded-storage",
  "rand_core 0.6.4",
  "reticulum-node-core",
  "reticulum-storage-journal",
  "reticulum-storage-model",
  "reticulum-submission-projector",
- "reticulum-tx-dispatch",
- "reticulum-tx-handoff",
 ]
 
 [[package]]
@@ -1833,7 +2015,21 @@ dependencies = [
  "reticulum-node-core",
  "reticulum-rns-rete",
  "reticulum-storage-model",
- "reticulum-tx-dispatch",
+]
+
+[[package]]
+name = "reticulum-submission-runtime"
+version = "0.1.0"
+dependencies = [
+ "embassy-sync 0.8.0",
+ "embedded-storage",
+ "rand_core 0.6.4",
+ "reticulum-node-core",
+ "reticulum-storage-actor",
+ "reticulum-storage-journal",
+ "reticulum-storage-model",
+ "reticulum-submission-projector",
+ "reticulum-tx-supervisor",
 ]
 
 [[package]]
@@ -1868,7 +2064,9 @@ dependencies = [
  "embassy-sync 0.8.0",
  "embassy-time",
  "rand_core 0.6.4",
+ "reticulum-interface-router",
  "reticulum-node-core",
+ "reticulum-rns-rete",
  "reticulum-tx-dispatch",
  "reticulum-tx-handoff",
  "static_cell",

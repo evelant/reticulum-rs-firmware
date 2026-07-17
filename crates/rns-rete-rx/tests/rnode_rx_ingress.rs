@@ -8,8 +8,11 @@ use reticulum_radio_interface::{
 };
 use reticulum_rns_rete::{
     DestHash, DestType, EmbeddedNodeConfig, Identity, IngressDisposition, IngressDropReason,
-    InitialEmbeddedNode, InterfaceId, NodeEvent, Packet, ReceiveOnlyClockSample,
-    ReceiveOnlyIngress, ReceiveOnlyIngressOutcome, ReceiveOnlyWake,
+    InitialEmbeddedNode, InterfaceId, NodeEvent, Packet,
+};
+use reticulum_rns_rete_rx::{
+    ReceiveOnlyClockSample, ReceiveOnlyIngressOutcome, ReceiveOnlyInterfaceId, ReceiveOnlyRete,
+    ReceiveOnlyWake, receive_only_identity_from_private_key,
 };
 use sha2::{Digest, Sha256};
 
@@ -213,14 +216,14 @@ fn completed_exact_500_byte_packet_crosses_receive_only_ingress_before_rete_reje
     second.extend_from_slice(&packet[RNODE_LORA_DATA_PER_FRAME..]);
 
     let signal = FrameSignal::new(-83, 3);
-    let mut ingress = ReceiveOnlyIngress::<16, 4, 32, 2>::new(
-        Identity::from_seed(b"exact mtu receive-only ingress").unwrap(),
+    let mut ingress = ReceiveOnlyRete::<16, 4, 32, 2>::new(
+        receive_only_identity_from_private_key(&[0x42; 64]).unwrap(),
         "reticulum-rs-firmware",
         &["rx-exact-mtu"],
         FRAGMENT_TIMEOUT_TICKS,
         0,
         NonZeroU64::new(1_000).unwrap(),
-        InterfaceId(7),
+        ReceiveOnlyInterfaceId(7),
     )
     .unwrap();
     let mut rng = CounterRng::default();

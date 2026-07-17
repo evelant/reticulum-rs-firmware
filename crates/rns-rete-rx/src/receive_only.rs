@@ -14,7 +14,7 @@ use reticulum_radio_interface::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::{
+use reticulum_rns_rete::{
     EmbeddedNode, EmbeddedNodeConfig, EmbeddedNodeMetrics, Identity, IdentityHash,
     IngressDisposition, IngressReport, InterfaceId, NodeActions,
 };
@@ -28,9 +28,9 @@ pub const RETE_MAINTENANCE_INTERVAL_SECONDS: u64 = 5;
 
 /// Construction failure for the fail-closed receive-only owner.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ReceiveOnlyIngressError {
+pub(crate) enum ReceiveOnlyIngressError {
     /// Rete rejected identity or destination construction.
-    Rete(rete_core::Error),
+    Rete,
     /// The primary destination could not be found to disable Link admission.
     PrimaryDestinationUnavailable,
 }
@@ -38,19 +38,11 @@ pub enum ReceiveOnlyIngressError {
 impl core::fmt::Display for ReceiveOnlyIngressError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Rete(error) => {
-                write!(formatter, "receive-only Rete construction failed: {error}")
-            }
+            Self::Rete => formatter.write_str("receive-only Rete construction failed"),
             Self::PrimaryDestinationUnavailable => {
                 formatter.write_str("receive-only primary destination is unavailable")
             }
         }
-    }
-}
-
-impl From<rete_core::Error> for ReceiveOnlyIngressError {
-    fn from(error: rete_core::Error) -> Self {
-        Self::Rete(error)
     }
 }
 
@@ -225,7 +217,7 @@ impl ReceiveOnlySchedule {
 }
 
 /// RNode reassembly and Rete state that cannot release outbound actions.
-pub struct ReceiveOnlyIngress<
+pub(crate) struct ReceiveOnlyIngress<
     const PATHS: usize,
     const ANNOUNCES: usize,
     const DEDUPLICATION: usize,
@@ -273,7 +265,8 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         interface: InterfaceId,
     ) -> Result<Self, ReceiveOnlyIngressError> {
         let mut node =
-            EmbeddedNode::new(identity, app_name, aspects, EmbeddedNodeConfig::endpoint())?;
+            EmbeddedNode::new(identity, app_name, aspects, EmbeddedNodeConfig::endpoint())
+                .map_err(|_| ReceiveOnlyIngressError::Rete)?;
         let primary = node.destination_hash();
         if !node.set_accepts_links(&primary, false) {
             return Err(ReceiveOnlyIngressError::PrimaryDestinationUnavailable);
@@ -306,7 +299,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
     }
 
     /// Primary local destination, for diagnostics and controlled test setup.
-    pub fn destination_hash(&self) -> rete_core::DestHash {
+    pub fn destination_hash(&self) -> reticulum_rns_rete::DestHash {
         self.node.destination_hash()
     }
 
@@ -522,11 +515,12 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
 /// Initial generic Phase-0/conformance profile for larger-capacity probes.
 ///
 /// Constrained firmware targets should select explicit measured capacities.
-pub type InitialReceiveOnlyIngress = ReceiveOnlyIngress<
-    { crate::probe_capacity::PATHS },
-    { crate::probe_capacity::ANNOUNCES },
-    { crate::probe_capacity::DEDUPLICATION_ENTRIES },
-    { crate::probe_capacity::LINKS },
+#[cfg(test)]
+type InitialReceiveOnlyIngress = ReceiveOnlyIngress<
+    { reticulum_rns_rete::probe_capacity::PATHS },
+    { reticulum_rns_rete::probe_capacity::ANNOUNCES },
+    { reticulum_rns_rete::probe_capacity::DEDUPLICATION_ENTRIES },
+    { reticulum_rns_rete::probe_capacity::LINKS },
 >;
 
 fn usize_to_u64(value: usize) -> u64 {
@@ -569,7 +563,7 @@ mod tests {
     use reticulum_radio_interface::{RNODE_LORA_DATA_PER_FRAME, RNS_MTU, SX1262_FRAME_MTU};
 
     use super::*;
-    use crate::{IngressDropReason, InitialEmbeddedNode, TxPacket};
+    use reticulum_rns_rete::{IngressDropReason, InitialEmbeddedNode, TxPacket};
 
     const TIMEOUT: NonZeroU64 = NonZeroU64::new(100).unwrap();
     const MAINTENANCE: NonZeroU64 = NonZeroU64::new(1_000).unwrap();

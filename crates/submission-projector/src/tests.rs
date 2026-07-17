@@ -6,18 +6,25 @@ use reticulum_node_core::{
     MonotonicMillis, MonotonicSeconds, NodeConfig, NodeCore, NodeIdentity, NodeInstanceId,
     PacketInterfaceId, PermitResolution, PrepareDataRequest, RoutedTxJob, TxAuthorizationCandidate,
     TxAuthorizationPolicy, TxCompletionCode, TxCompletionDisposition, TxLeaseDeadline,
-    TxPacketBuffer, TxPolicyDecision,
+    TxPacketBuffer, TxPermitRequirements, TxPermitReservation, TxPermitResourceId,
+    TxPolicyDecision,
 };
 use reticulum_storage_model::{
     AcceptOutcome, AcceptanceCandidate, ApplyOutcome, DestinationHash as StoredDestinationHash,
     ExperimentalRnsDataIntent, IdempotencyKey, PrincipalId, SubmissionReplay,
 };
-use reticulum_tx_dispatch::TxEncodedPacketSha256;
 use std::boxed::Box;
 
 use super::*;
 
 type TestNode = NodeCore<4, 2, 8, 2, 1>;
+
+const TEST_PERMIT_RESOURCE: TxPermitResourceId = TxPermitResourceId::new([0x50; 16]);
+
+fn test_permit_requirements() -> TxPermitRequirements {
+    TxPermitRequirements::try_new(TEST_PERMIT_RESOURCE, 1)
+        .expect("test permit units must be nonzero")
+}
 
 #[derive(Default)]
 struct CounterRng(u8);
@@ -103,13 +110,19 @@ fn prepared_job(tag: u8, owner_deadline_ms: u64) -> (TestNode, RoutedTxJob<'stat
 struct AllowPolicy;
 
 impl TxAuthorizationPolicy for AllowPolicy {
-    fn authorize(&mut self, _candidate: TxAuthorizationCandidate) -> TxPolicyDecision {
-        TxPolicyDecision::Authorize
+    fn authorize(&mut self, candidate: TxAuthorizationCandidate) -> TxPolicyDecision {
+        TxPolicyDecision::Authorize(
+            TxPermitReservation::try_new(
+                candidate.requirements.resource(),
+                candidate.requirements.required_units(),
+            )
+            .expect("test policy must mirror valid requirements"),
+        )
     }
 }
 
 fn authorize_job(node: &mut TestNode, job: RoutedTxJob<'static>) -> AuthorizedTx<'static> {
-    let (pending, request) = job.begin_permit();
+    let (pending, request) = job.begin_permit(test_permit_requirements());
     let reply = match node.authorize_tx(request, MonotonicMillis::new(100_010), &mut AllowPolicy) {
         Ok(reply) => reply,
         Err(_) => panic!("fresh permit request was rejected"),
@@ -195,17 +208,10 @@ fn bind_job<const N: usize, const P: usize>(
 ) {
     assert_eq!(
         projector
-            .bind_attempt(
+            .observe_preparation(
                 live,
                 id,
-                AttemptBinding {
-                    handle: job.attempt_handle(),
-                    token: job.attempt(),
-                    expected_packet_len: Some(job.packet_len()),
-                    expected_packet_sha256: Some(
-                        *job.prepared().encoded_packet_sha256().as_bytes(),
-                    ),
-                },
+                SubmissionPreparationObservation::Prepared(job.prepared()),
             )
             .unwrap(),
         ProjectionProgress::AttemptBound
@@ -310,15 +316,15 @@ fn preparation_barrier_and_storage_retry_retain_the_exact_plan() {
     assert_eq!(projector.pending_persistence().next(), Some(request));
     assert!(!projector.preparation_allowed(&live, id));
     assert_eq!(
-        projector.observe_preparation_rejected(
+        projector.observe_preparation(
             &live,
             id,
-            SubmitError::AttemptLedgerFull { limit: 4 },
+            SubmissionPreparationObservation::Rejected(SubmitError::AttemptLedgerFull { limit: 4 }),
         ),
         Err(ProjectorError::PreparationBarrierNotDurable)
     );
     assert_eq!(
-        projector.observe_preparation_result(&live, id, NodeTxPrepareResult::QueueBackpressured,),
+        projector.observe_preparation(&live, id, SubmissionPreparationObservation::RetrySameBoot,),
         Err(ProjectorError::PreparationBarrierNotDurable)
     );
     let (_node, job) = prepared_job(11, 200_000);
@@ -370,25 +376,20 @@ fn preparation_barrier_and_storage_retry_retain_the_exact_plan() {
     );
     assert!(!projector.preparation_allowed(&live, id));
     assert_eq!(
-        projector.observe_preparation_result(&live, id, NodeTxPrepareResult::QueueBackpressured,),
+        projector.observe_preparation(&live, id, SubmissionPreparationObservation::RetrySameBoot,),
         Err(ProjectorError::PreparationAlreadyBound)
     );
     assert_eq!(
-        projector.observe_preparation_rejected(&live, id, SubmitError::UnknownDestination),
-        Err(ProjectorError::PreparationAlreadyBound)
-    );
-    assert_eq!(
-        projector.observe_preparation_result(&live, id, NodeTxPrepareResult::OwnerMismatch),
-        Err(ProjectorError::PreparationAlreadyBound)
-    );
-    assert_eq!(
-        projector.observe_preparation_result(
+        projector.observe_preparation(
             &live,
             id,
-            NodeTxPrepareResult::Disabled(
-                reticulum_tx_dispatch::NodeTxDataFault::InternalInvariant,
-            ),
+            SubmissionPreparationObservation::Rejected(SubmitError::UnknownDestination),
         ),
+        Err(ProjectorError::PreparationAlreadyBound)
+    );
+    assert_eq!(
+        projector
+            .observe_preparation(&live, id, SubmissionPreparationObservation::InternalFailure,),
         Err(ProjectorError::PreparationAlreadyBound)
     );
     assert_eq!(projector.pending_persistence().count(), 0);
@@ -407,19 +408,15 @@ fn transient_no_action_requires_a_known_durable_preparation_context() {
     let (live, id) = accepted_index::<2>(12);
     let mut projector = SubmissionProjector::<2>::new();
     assert_eq!(
-        projector.observe_preparation_rejected(
+        projector.observe_preparation(
             &live,
             id,
-            SubmitError::ReceiptTableFull { limit: 4 },
+            SubmissionPreparationObservation::Rejected(SubmitError::ReceiptTableFull { limit: 4 }),
         ),
         Err(ProjectorError::UnknownSubmission)
     );
     assert_eq!(
-        projector.observe_preparation_result(
-            &live,
-            id,
-            NodeTxPrepareResult::ProgressRequired(reticulum_tx_dispatch::NodeTxDataPhase::Seeding,),
-        ),
+        projector.observe_preparation(&live, id, SubmissionPreparationObservation::RetrySameBoot,),
         Err(ProjectorError::UnknownSubmission)
     );
     assert_eq!(projector.fault(), None);
@@ -732,21 +729,20 @@ fn recovery_only_binding_cannot_accept_caller_supplied_frame_metadata() {
 }
 
 #[test]
-fn no_rf_observation_adapts_to_backend_neutral_frame_contract() {
-    let (_node, job) = prepared_job(35, 200_000);
-    let no_rf = NoRfFrameObservation {
-        attempt_handle: job.attempt_handle(),
-        attempt: job.attempt(),
-        interface: PacketInterfaceId::new(1),
-        packet_len: usize::from(job.packet_len()),
-        encoded_packet_sha256: TxEncodedPacketSha256::new([0x77; 32]),
-        wrapping_checksum: 0,
-    };
-    let neutral = PreparedFrameObservation::from(no_rf);
-    assert_eq!(neutral.attempt_handle(), job.attempt_handle());
-    assert_eq!(neutral.attempt(), job.attempt());
-    assert_eq!(neutral.packet_len(), usize::from(job.packet_len()));
-    assert_eq!(neutral.encoded_packet_sha256(), [0x77; 32]);
+fn authorized_native_frame_adapts_to_backend_neutral_frame_contract() {
+    let (mut node, job) = prepared_job(36, 200_000);
+    let expected = job.prepared();
+    let mut authorized = authorize_job(&mut node, job);
+    let exposed = authorized.frame(MonotonicMillis::new(100_020)).unwrap();
+    let neutral = PreparedFrameObservation::from(exposed.observation());
+
+    assert_eq!(neutral.attempt_handle(), expected.handle());
+    assert_eq!(neutral.attempt(), expected.attempt());
+    assert_eq!(neutral.packet_len(), usize::from(expected.packet_len()));
+    assert_eq!(
+        neutral.encoded_packet_sha256(),
+        *expected.encoded_packet_sha256().as_bytes()
+    );
 }
 
 #[test]
@@ -786,13 +782,23 @@ fn synchronous_rejection_distinguishes_retry_no_path_rejected_and_internal() {
     persisted_barrier(&mut projector, &mut live, id);
     assert_eq!(
         projector
-            .observe_preparation_rejected(&live, id, SubmitError::AttemptLedgerFull { limit: 4 },)
+            .observe_preparation(
+                &live,
+                id,
+                SubmissionPreparationObservation::Rejected(SubmitError::AttemptLedgerFull {
+                    limit: 4,
+                }),
+            )
             .unwrap(),
         ProjectionProgress::NoAction
     );
     assert!(projector.preparation_allowed(&live, id));
     let progress = projector
-        .observe_preparation_rejected(&live, id, SubmitError::UnknownDestination)
+        .observe_preparation(
+            &live,
+            id,
+            SubmissionPreparationObservation::Rejected(SubmitError::UnknownDestination),
+        )
         .unwrap();
     persist(&mut projector, &mut live, progress);
     assert_eq!(
@@ -809,13 +815,10 @@ fn rejected_quarantine_persists_audit_then_internal_final() {
     let (mut node, job) = prepared_job(51, 200_000);
     let observation = recovered_observation(&mut node, job);
     let progress = projector
-        .observe_preparation_result(
+        .observe_preparation(
             &live,
             id,
-            NodeTxPrepareResult::RejectedQuarantined {
-                reason: SubmitError::RouteReceiptCancellationFailed,
-                observation,
-            },
+            SubmissionPreparationObservation::Quarantined(observation),
         )
         .unwrap();
     let ProjectionProgress::Persist(handle) = progress else {
@@ -1120,15 +1123,15 @@ fn unknown_and_generation_mismatched_observations_fault_without_ack() {
     assert!(!unknown.preparation_allowed(&live, id));
     assert_eq!(unknown.pending_acknowledgements().count(), 0);
     assert_eq!(
-        unknown.observe_preparation_rejected(
+        unknown.observe_preparation(
             &live,
             id,
-            SubmitError::AttemptLedgerFull { limit: 4 },
+            SubmissionPreparationObservation::Rejected(SubmitError::AttemptLedgerFull { limit: 4 }),
         ),
         Err(ProjectorError::Faulted(ProjectorFault::UnknownAttempt))
     );
     assert_eq!(
-        unknown.observe_preparation_result(&live, id, NodeTxPrepareResult::QueueBackpressured),
+        unknown.observe_preparation(&live, id, SubmissionPreparationObservation::RetrySameBoot,),
         Err(ProjectorError::Faulted(ProjectorFault::UnknownAttempt))
     );
 }

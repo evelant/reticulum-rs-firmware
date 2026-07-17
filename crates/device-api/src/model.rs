@@ -11,8 +11,8 @@ pub const API_VERSION_MINOR: u16 = 0;
 pub const MAX_MESSAGE_BYTES: usize = 512;
 /// Maximum encoded size of the operation-specific body within a message.
 pub const MAX_BODY_BYTES: usize = 448;
-/// Maximum payload accepted by the experimental RNS DATA preparation request.
-pub const MAX_PREPARE_RNS_DATA_PAYLOAD_BYTES: usize = 383;
+/// Maximum payload accepted by the experimental RNS DATA submission request.
+pub const MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES: usize = 383;
 
 /// `system.capabilities` operation number.
 pub const OP_SYSTEM_CAPABILITIES: u16 = 0x0001;
@@ -20,9 +20,9 @@ pub const OP_SYSTEM_CAPABILITIES: u16 = 0x0001;
 pub const OP_SUBMISSION_STATUS: u16 = 0x0002;
 /// Error response kind used instead of a successful operation number.
 pub const RESPONSE_ERROR: u16 = 0x0000;
-/// Host-simulation-only packet-preparation operation in the experimental range.
-#[cfg(feature = "host-sim")]
-pub const OP_EXPERIMENTAL_PREPARE_RNS_DATA: u16 = 0xf001;
+/// Target-safe outbound RNS DATA submission operation in the experimental range.
+#[cfg(feature = "experimental-rns-data")]
+pub const OP_EXPERIMENTAL_SUBMIT_RNS_DATA: u16 = 0xf001;
 
 /// Major/minor logical protocol version.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,9 +70,9 @@ impl Permissions {
     pub const NONE: Self = Self(0);
     /// Read submission state belonging to the authenticated principal.
     pub const READ_SUBMISSION_STATUS: Self = Self(1 << 0);
-    /// Exercise the unstable host-only RNS DATA preparation operation.
-    #[cfg(feature = "host-sim")]
-    pub const EXPERIMENTAL_PREPARE_RNS_DATA: Self = Self(1 << 1);
+    /// Submit outbound RNS DATA through the node's transport-neutral router.
+    #[cfg(feature = "experimental-rns-data")]
+    pub const EXPERIMENTAL_SUBMIT_RNS_DATA: Self = Self(1 << 1);
 
     /// Whether all bits in `required` are present.
     pub const fn contains(self, required: Self) -> bool {
@@ -123,17 +123,17 @@ impl DispatchContext {
 pub enum RequiredPermission {
     /// Read submission status.
     ReadSubmissionStatus,
-    /// Exercise the unstable host-simulation preparation path.
-    #[cfg(feature = "host-sim")]
-    ExperimentalPrepareRnsData,
+    /// Submit outbound RNS DATA through the unstable transport-neutral path.
+    #[cfg(feature = "experimental-rns-data")]
+    ExperimentalSubmitRnsData,
 }
 
 impl RequiredPermission {
     const fn bits(self) -> Permissions {
         match self {
             Self::ReadSubmissionStatus => Permissions::READ_SUBMISSION_STATUS,
-            #[cfg(feature = "host-sim")]
-            Self::ExperimentalPrepareRnsData => Permissions::EXPERIMENTAL_PREPARE_RNS_DATA,
+            #[cfg(feature = "experimental-rns-data")]
+            Self::ExperimentalSubmitRnsData => Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA,
         }
     }
 }
@@ -158,9 +158,9 @@ pub enum DeviceRequest<'a> {
         /// Device-assigned submission identifier.
         id: SubmissionId,
     },
-    /// Prepare RNS DATA in host simulation without exposing packet output.
-    #[cfg(feature = "host-sim")]
-    PrepareRnsData {
+    /// Durably submit outbound RNS DATA without selecting a physical transport.
+    #[cfg(feature = "experimental-rns-data")]
+    SubmitRnsData {
         /// Complete Reticulum destination hash.
         destination: DestinationHash,
         /// Borrowed application data; never allocated or copied by decoding.
@@ -168,7 +168,8 @@ pub enum DeviceRequest<'a> {
         /// Deduplication key scoped by the authenticated principal and content.
         idempotency_key: IdempotencyKey,
     },
-    /// Uninhabited marker keeping the decode lifetime stable without `host-sim`.
+    /// Uninhabited marker keeping the decode lifetime stable without the
+    /// experimental RNS DATA operation.
     #[doc(hidden)]
     __Borrowed(Infallible, PhantomData<&'a [u8]>),
 }
@@ -179,8 +180,8 @@ impl DeviceRequest<'_> {
         match self {
             Self::SystemCapabilities => OP_SYSTEM_CAPABILITIES,
             Self::SubmissionStatus { .. } => OP_SUBMISSION_STATUS,
-            #[cfg(feature = "host-sim")]
-            Self::PrepareRnsData { .. } => OP_EXPERIMENTAL_PREPARE_RNS_DATA,
+            #[cfg(feature = "experimental-rns-data")]
+            Self::SubmitRnsData { .. } => OP_EXPERIMENTAL_SUBMIT_RNS_DATA,
             Self::__Borrowed(never, _) => match *never {},
         }
     }
@@ -189,8 +190,8 @@ impl DeviceRequest<'_> {
     pub const fn is_mutating(&self) -> bool {
         match self {
             Self::SystemCapabilities | Self::SubmissionStatus { .. } => false,
-            #[cfg(feature = "host-sim")]
-            Self::PrepareRnsData { .. } => true,
+            #[cfg(feature = "experimental-rns-data")]
+            Self::SubmitRnsData { .. } => true,
             Self::__Borrowed(never, _) => match *never {},
         }
     }
@@ -199,8 +200,8 @@ impl DeviceRequest<'_> {
         match self {
             Self::SystemCapabilities => None,
             Self::SubmissionStatus { .. } => Some(RequiredPermission::ReadSubmissionStatus),
-            #[cfg(feature = "host-sim")]
-            Self::PrepareRnsData { .. } => Some(RequiredPermission::ExperimentalPrepareRnsData),
+            #[cfg(feature = "experimental-rns-data")]
+            Self::SubmitRnsData { .. } => Some(RequiredPermission::ExperimentalSubmitRnsData),
             Self::__Borrowed(never, _) => match *never {},
         }
     }
@@ -266,44 +267,45 @@ pub struct CapabilitySnapshot {
     pub(crate) api_version: ApiVersion,
     /// Whether any public operation can return raw prepared packet bytes.
     pub(crate) packet_output: bool,
-    /// Availability of physical radio transmission.
-    pub(crate) radio_tx: CapabilityAvailability,
-    /// Whether the unstable host preparation operation is compiled in.
-    pub(crate) experimental_prepare_rns_data: bool,
+    /// Availability of raw/direct physical-radio transmission to local clients.
+    pub(crate) direct_radio_tx: CapabilityAvailability,
+    /// Whether this snapshot advertises transport-neutral outbound RNS DATA submission.
+    pub(crate) experimental_submit_rns_data: bool,
     /// Hard maximum logical CBOR message size.
     pub(crate) max_message_bytes: u16,
     /// Hard maximum encoded operation-body size.
     pub(crate) max_body_bytes: u16,
-    /// Maximum experimental preparation payload.
-    pub(crate) max_prepare_rns_data_payload_bytes: u16,
+    /// Maximum experimental submission payload.
+    pub(crate) max_submit_rns_data_payload_bytes: u16,
 }
 
 impl CapabilitySnapshot {
     /// Snapshot for this crate's current build.
     ///
-    /// Packet output and radio TX remain deliberately unavailable in every
-    /// feature composition of this slice.
+    /// Packet output and direct-radio TX remain deliberately unavailable in
+    /// every feature composition. Outbound RNS submission is a separate,
+    /// transport-neutral capability.
     pub const fn current() -> Self {
         Self {
             api_version: ApiVersion::CURRENT,
             packet_output: false,
-            radio_tx: CapabilityAvailability::Unavailable,
-            experimental_prepare_rns_data: cfg!(feature = "host-sim"),
+            direct_radio_tx: CapabilityAvailability::Unavailable,
+            experimental_submit_rns_data: cfg!(feature = "experimental-rns-data"),
             max_message_bytes: MAX_MESSAGE_BYTES as u16,
             max_body_bytes: MAX_BODY_BYTES as u16,
-            max_prepare_rns_data_payload_bytes: MAX_PREPARE_RNS_DATA_PAYLOAD_BYTES as u16,
+            max_submit_rns_data_payload_bytes: MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES as u16,
         }
     }
 
     /// Snapshot restricted to operations implemented by a higher dispatch layer.
     ///
-    /// `experimental_prepare_rns_data` can disable the codec-build capability,
+    /// `experimental_submit_rns_data` can disable the codec-build capability,
     /// but cannot enable an operation omitted from this crate's build. This
     /// keeps Cargo feature unification in another dependency edge from making a
     /// dispatcher advertise an operation that it did not compile locally.
-    pub const fn for_dispatch(experimental_prepare_rns_data: bool) -> Self {
+    pub const fn for_dispatch(experimental_submit_rns_data: bool) -> Self {
         let mut snapshot = Self::current();
-        snapshot.experimental_prepare_rns_data &= experimental_prepare_rns_data;
+        snapshot.experimental_submit_rns_data &= experimental_submit_rns_data;
         snapshot
     }
 
@@ -317,14 +319,17 @@ impl CapabilitySnapshot {
         self.packet_output
     }
 
-    /// Availability of physical radio transmission.
-    pub const fn radio_tx(self) -> CapabilityAvailability {
-        self.radio_tx
+    /// Availability of raw/direct physical-radio transmission to local clients.
+    ///
+    /// This does not describe transport-neutral RNS submission, which may
+    /// route over LoRa or another enabled Reticulum interface.
+    pub const fn direct_radio_tx(self) -> CapabilityAvailability {
+        self.direct_radio_tx
     }
 
-    /// Whether the unstable host preparation operation is compiled in.
-    pub const fn experimental_prepare_rns_data(self) -> bool {
-        self.experimental_prepare_rns_data
+    /// Whether this snapshot advertises transport-neutral RNS DATA submission.
+    pub const fn experimental_submit_rns_data(self) -> bool {
+        self.experimental_submit_rns_data
     }
 
     /// Hard maximum logical CBOR message size.
@@ -337,9 +342,9 @@ impl CapabilitySnapshot {
         self.max_body_bytes
     }
 
-    /// Maximum experimental preparation payload.
-    pub const fn max_prepare_rns_data_payload_bytes(self) -> u16 {
-        self.max_prepare_rns_data_payload_bytes
+    /// Maximum experimental submission payload.
+    pub const fn max_submit_rns_data_payload_bytes(self) -> u16 {
+        self.max_submit_rns_data_payload_bytes
     }
 }
 
@@ -446,11 +451,11 @@ pub struct SubmissionStatus {
     pub state: SubmissionState,
 }
 
-/// Acceptance result for the host-only experimental preparation operation.
+/// Acceptance result for the experimental outbound RNS DATA submission.
 ///
 /// The response contains only the device-assigned identifier used with
 /// `submission.status`; it never contains prepared packet bytes.
-#[cfg(feature = "host-sim")]
+#[cfg(feature = "experimental-rns-data")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SubmissionAccepted {
     /// Device-assigned submission identifier.
@@ -520,9 +525,9 @@ pub enum DeviceResponse {
     SystemCapabilities(CapabilitySnapshot),
     /// Result of `submission.status`.
     SubmissionStatus(SubmissionStatus),
-    /// Accepted host-only experimental packet-preparation intent.
-    #[cfg(feature = "host-sim")]
-    PrepareRnsDataAccepted(SubmissionAccepted),
+    /// Accepted experimental outbound RNS DATA submission.
+    #[cfg(feature = "experimental-rns-data")]
+    SubmitRnsDataAccepted(SubmissionAccepted),
     /// Typed request failure.
     Error(ApiErrorResponse),
 }
@@ -533,8 +538,8 @@ impl DeviceResponse {
         match self {
             Self::SystemCapabilities(_) => OP_SYSTEM_CAPABILITIES,
             Self::SubmissionStatus(_) => OP_SUBMISSION_STATUS,
-            #[cfg(feature = "host-sim")]
-            Self::PrepareRnsDataAccepted(_) => OP_EXPERIMENTAL_PREPARE_RNS_DATA,
+            #[cfg(feature = "experimental-rns-data")]
+            Self::SubmitRnsDataAccepted(_) => OP_EXPERIMENTAL_SUBMIT_RNS_DATA,
             Self::Error(_) => RESPONSE_ERROR,
         }
     }

@@ -1,11 +1,17 @@
 # Durable submissions and persist-before-ack projection
 
-Status: portable semantic model, projector, physical two-bank journal, and sole
-storage actor implemented and target-checked; portable authenticated device-API
-dispatch implemented; isolated powered journal clean-path/software-reset HIL
-passed on board E9:44. Permanent task, framing/session/transport and firmware
-integration, controlled power-cut durability, endurance/soak, and at-rest
-encryption remain unqualified.
+Status: portable semantic model, projector, physical two-bank journal, sole
+storage actor, transport-neutral submission runtime, native authorized-frame
+seam, and exact E290 request/durable-echo handoff implemented; portable
+authenticated device-API dispatch implemented; resident E290 operation-scoped
+flash/runtime coordinator implemented; isolated powered journal clean-path/
+software-reset HIL passed on board E9:44; the 25-test E290 host suite qualifies
+the one-entry complete LoRa-first software composition and ADR 0005 active-owner
+fail-stop. Portable API framing and the boot-lifetime job handoff are qualified;
+live external admission remains blocked by the absent session/credential owner,
+firmware composition, and bearer. Controlled power-cut durability, projector
+retirement, journal retention, endurance/soak, and at-rest encryption remain
+unqualified.
 
 ## Claim boundary
 
@@ -22,21 +28,39 @@ two-bank compaction mechanisms described in
 [Physical submission journal](storage-journal.md). A canonical CBOR record is
 still not durable merely because it encodes successfully, and the in-RAM index
 is not a free-space or wear-level estimate. `reticulum-storage-actor` now owns
-the NOR journal, replayed live index and sole projector, and connects an exact
-plan to physical persistence before making an acceptance or acknowledgement
-visible. See [Portable sole storage actor](storage-actor.md).
+the exact journal binding, replayed live index and sole projector, and connects
+an exact plan to physical persistence before making an acceptance or
+acknowledgement visible. The physical backend remains outside the actor and is
+borrowed through one bound operation-scoped view. See
+[Portable sole storage actor](storage-actor.md).
+
+`reticulum-submission-runtime` owns that actor and implements the bounded
+durability-first scheduling loop against a narrow `SubmissionNodePort`. Its
+production port implementation uses `NodeInterfaceSupervisor` and contains no
+selected interface in a preparation request: the authoritative node router may
+choose LoRa now and other eligible Reticulum interfaces later without changing
+the durable record vocabulary. The runtime is executor-, board-, radio-, RNode-,
+and local-client-transport-independent. See
+[Transport-neutral durable submission runtime](submission-runtime.md).
 
 `reticulum-device-api-adapter` is the allocation-free authenticated dispatch
-edge over that mounted owner. Default builds expose public capabilities and
+edge over a narrow semantic `SubmissionPort`. The coordinator retains the actor,
+constructs an operation-scoped bound journal only inside durable acceptance,
+and exposes neither capability to the adapter. The port returns the adapter's
+bounded `SubmissionAcceptance` vocabulary, not storage-actor progress or a
+backend type; `reticulum-storage-actor` and `embedded-storage` are test-only
+dependencies of this crate. Default builds expose public capabilities and
 principal-scoped status; missing and foreign IDs are indistinguishable, and
 status returns `Internal` while the actor has ambiguous pending work or is
 faulted rather than exposing a deliberately lagging index. Its
-explicitly host-only `host-sim` feature copies the experimental borrowed payload
+target-safe `experimental-rns-data` feature copies the experimental borrowed payload
 into an owned candidate and returns an ID only after `accept` reports durable
 success or exact replay. Adapter-local capability restriction prevents a
 separately unified codec feature from advertising that operation. The feature
-is compile-forbidden on bare-metal targets. The adapter has no framing, session,
-USB/BLE/Wi-Fi, node or radio path.
+is checked on bare-metal targets. The adapter has no framing, session,
+USB/BLE/Wi-Fi, node, or direct-radio ownership; its transport-neutral outbound
+RNS DATA submission can nevertheless be routed by the product node over LoRa or
+another eligible Reticulum interface after acceptance.
 
 The physical backend's qualifying run is preserved at
 `artifacts/storage-hil/20260716T211318Z-e944-7b47113` from source
@@ -50,15 +74,24 @@ evidence.
 
 ```mermaid
 flowchart LR
-    Client["authenticated local client"] --> Transport["framing/session/transport (not implemented)"]
-    Transport --> API["portable authenticated API adapter (implemented)"]
-    API --> Store["portable sole storage actor (implemented)"]
-    Store --> Journal["two-bank physical journal (implemented)"]
+    Client["authenticated local client"] --> Bearer["USB bearer + session (not implemented)"]
+    Bearer --> Edge["portable framing + job handoff (implemented)"]
+    Edge --> API["portable authenticated API adapter (implemented)"]
+    API -. "firmware composition absent" .-> Runtime["resident portable submission runtime"]
+    Coordinator["E290 sole-flash coordinator (resident)"] <--> Runtime
+    Runtime <--> Store["portable sole storage actor (implemented)"]
+    Coordinator --> Journal["operation-scoped bound journal"]
     Journal --> Flash["validated raw NOR partition"]
     Store --> Model["actor-owned live replay index"]
     Store --> Projector["actor-owned sole projector"]
-    Projector --> Supervisor["RF-inert TX supervisor"]
-    Supervisor --> Projector
+    Runtime <--> Supervisor["transport-neutral node supervisor"]
+    Supervisor --> Fabric["Reticulum interface fabric"]
+    Fabric --> LoRa["LoRa / SX1262 actor (first and primary)"]
+    Fabric -. "later" .-> Other["Wi-Fi, BLE, USB, or other interfaces"]
+    LoRa -->|"exact observation request; DATA owner retained"| FrameHandoff["bounded request / durable-echo handoff"]
+    FrameHandoff --> Runtime
+    Runtime -->|"Durable"| FrameHandoff
+    FrameHandoff -->|"identical acknowledgement"| LoRa
 ```
 
 The storage actor is the sole authority allowed to order physical commits and
@@ -71,6 +104,31 @@ durable projector request returns through `persist_projector`, and every
 mutating observation shares the actor's pending-write/fault gate. The node
 supervisor remains the sole owner of native Rete state, packet buffers,
 attempts, and TX typestates.
+
+The submission runtime now supplies the portable orchestration that was
+previously left to product code. It gates live operations until bounded boot
+recovery completes, reconciles actor ambiguity and pending projection first,
+withholds exact upstream acknowledgement until durable state unlocks it, then
+drains node observations, prepares already-barriered work, and finally begins a
+new `Queued -> Preparing` barrier. The permanent E290 node task now hosts this
+runtime through the resident sole-flash coordinator beside node ingress,
+timers, and `NodeInterfaceSupervisor`, with at most one runtime drive attempt
+per outer loop. The concrete LoRa dispatcher remains a separate actor.
+
+The current E290 profile permits one accepted-history entry solely for host
+composition qualification; that is not product capacity, and no external API
+job/session/bearer admission edge exists. Journal strict-mount, supported-
+history, or recovery failure during
+boot therefore occurs before a durability-gated DATA owner can exist; it leaves
+the coordinator resident without a submission runtime, keeps local durable
+service closed, and permits route-only LoRa to continue. Flash-map, identity,
+announce-clock, and identity-authorized fresh-provisioning failures remain
+boot-fatal. This product policy does not weaken the journal's fail-closed mount:
+no invalid replay prefix is exposed or used. A permanent runtime/storage fault
+after a DATA observation is active is different: ADR 0005 enters
+`ActiveOwnerFailStopped`, retains the observation/completion/router ticket,
+takes the same LoRa lease offline, and permits no later radio operation in that
+boot.
 
 After complete mount/replay, `finalize_boot_recovery` also owns the conservative
 boot edge. It returns queued and already-final decisions without writing, or
@@ -206,12 +264,40 @@ After the preparation barrier is durable, the projector binds one
 it never serializes the handle.
 
 Node-core's queued metadata supplies the preparation-time packet length and
-SHA-256 of all encoded bytes. The current RF-inert dispatcher independently
-rehashes the frame at its one authorized byte boundary and supplies the neutral
-observation: attempt handle, RNS token, packet length, and complete-frame
-SHA-256. A later guarded radio backend must supply the same scalar contract.
-The projector cross-checks the two digests and lengths; repeated fan-out
-observations are idempotent only when all durable packet metadata is identical.
+SHA-256 of all encoded bytes. `TxFrame::observation()` independently rehashes
+the exact native DATA bytes exposed by the authorized frame and produces
+`AuthorizedFrameObservation`: interface, attempt handle, RNS token, packet
+length, and complete-frame SHA-256. This happens before RNode or radio
+fragmentation. The runtime converts the observation to transport-neutral
+projector state, intentionally dropping only the selected interface.
+
+The portable radio dispatcher now gates every post-byte-exposure DATA outcome,
+including TX cancellation and terminal fault paths. It retains the owning
+`TxCompletion`, exact router ticket, expected observation, and any unsent
+request until a bounded handoff delivers the observation to the E290 node task.
+The node retains and re-offers that same value while
+`offer_authorized_frame()` returns `Retain`; after projector persistence makes
+the offer return `Durable`, it echoes the identical observation. Only an exact
+echo advances the dispatcher to completion return. Full request or
+acknowledgement channels and cancellation of capacity/acknowledgement waits do
+not move or forget these owners. An unexpected or non-matching echo disables
+the dispatcher and retains the completion, router ticket, expected observation,
+and actual acknowledgement. `DispatchReport` is a copy-only diagnostic; taking
+or logging it cannot release ownership.
+
+The runtime maps correct transient projector pressure to `Retain`: an actor-
+owned physical mutation, a proof/timeout terminal record planned before the
+frame, or a pending exact recovery acknowledgement. The node keeps the same
+observation while ordinary runtime steps resolve that work. Correlation or
+lifecycle contradictions and fail-closed storage/projector faults remain typed
+errors and never cause an acknowledgement.
+
+The projector cross-checks the preparation and authorized-byte digests and
+lengths; repeated fan-out observations are idempotent only when all durable
+packet metadata is identical. The E290 composition implements this ownership
+path under a host-qualified one-entry cap. Production remains externally
+unreachable only because no session/credential owner, firmware lane, or bearer
+is composed.
 
 Terminal outcomes map as follows:
 
@@ -271,8 +357,10 @@ injection is still a separate acceptance gate.
 The physical journal implements the record-level portions below. The portable
 sole storage actor now preserves them while adding one serialization cell,
 projector ownership, exact autonomous retry, live-index ordering, and a bounded
-fault latch. Runtime coordination with device API transports, watchdogs, OTA,
-other flash users, and radio timing still belongs to the future permanent task.
+fault latch. The transport-neutral submission runtime now implements the
+storage/node lifecycle ordering. Device-API transport serving, executor
+scheduling, checked partition ownership, watchdogs, OTA, other flash users, and
+radio timing still belong to the permanent product task.
 
 1. **Complete replay before action.** Scan and integrity-validate records to a
    known end-of-log, then consume `SubmissionReplay` into the live index. No queued
@@ -303,10 +391,12 @@ other flash users, and radio timing still belongs to the future permanent task.
    eviction or garbage collection. The manifest and future schema-migration
    rules must preserve that guarantee. The submission journal is not the
    separate long-term message/blob archive.
-6. **Serialized non-cancellable writes.** The portable actor owns flash and
-   performs each backend attempt synchronously, retaining an exact pending
-   mutation whenever the result is ambiguous. The future permanent task must
-   additionally coordinate OTA/GC/watchdogs and radio timing and must not expose
+6. **Serialized non-cancellable writes.** The portable actor owns the semantic
+   mutation and borrows one exact bound backend view for each synchronous
+   attempt, retaining an exact pending mutation whenever the result is
+   ambiguous. The resident product coordinator owns flash, and the portable
+   runtime drives that ambiguity before other lifecycle work. That coordinator
+   must additionally order OTA/GC/watchdogs and radio timing and must not expose
    cancellation across an actor call.
 
 ## Selected schema-1 physical design
@@ -372,8 +462,8 @@ pending-mutation cell rather than adding another complete plan per submission;
 its actual optional cell is compile-time capped at 512 bytes. This does not cap
 the projector slots, live index, complete actor, or future task stack. Measure
 that full static layout and stack before selecting a Tracker capacity. Completed
-correlations also cannot be retired automatically until the runtime proves
-that every terminal and transport observation source has been drained.
+correlations also cannot be retired automatically until product integration
+proves that every terminal and transport observation source has been drained.
 
 Profiles on larger boards may enable a larger index and richer clients. The
 semantic feature set remains portable; constrained boards may disable local
@@ -385,17 +475,34 @@ LXMF/NomadNet/UI services without redefining the durable protocol.
    controlled powered cuts at the relevant program/erase boundaries, preserving
    each image, readback, continuous serial capture, and raw-partition result as
    a separate evidence set.
-2. Place the portable sole actor in one permanent Embassy task, connect a
-   checked product `esp-storage` partition adapter, gate service on complete
-   mount/replay and definitive `finalize_boot_recovery` results for every
-   submission, and serialize it with other flash users.
-3. Connect the implemented authenticated device-API adapter to framing,
-   sessions and a firmware transport, then merge projection with the sole node
-   runtime; do not run the current supervisor's pass-discarding convenience loop
-   when projection observations are required. Add a proved retirement handshake
-   before reusing any completed projector slot.
-4. Measure static layout, journal scan/compaction time, stack, erase endurance,
-   soak behavior, and watchdog impact on ESP32-S3 and larger profiles.
-5. The two attached antenna-equipped boards are cleared for NA915 development
-   TX. Preserve an explicit regional/airtime profile and sole radio owner when
-   connecting this persistence path to real transmission.
+2. Extend the implemented E290 first-provision composition with powered cuts.
+   While identity is independently `Vacant`, `provision_first()` now resumes
+   every monotonic-compatible canonical A1 prefix/commit cut without erasing;
+   existing identities skip provisioning and use strict mount only. A future
+   in-field migration needs its own durable config intent.
+3. Preserve the two passing E290 cross-layer host tests: the authenticated
+   zero-write/one-acceptance/barrier/LoRa/durable-echo/timeout/remount path and
+   the wrong-binding post-frame `ActiveOwnerFailStopped` path with queued
+   ordinary work and no later host-radio operation. The one-entry cap is a
+   qualified composition profile, not product capacity.
+4. Compose the implemented framing and boot-lifetime job handoff between the
+   authenticated device-API adapter and runtime, then add sessions,
+   authorization provisioning, and a firmware USB bearer. Those are the only
+   missing edges for live external admission.
+   Keep the local client API distinct from the node's Reticulum interface
+   selection. No second interface is required; later Reticulum transports use
+   the same transport-neutral runtime and router contract.
+5. Add an exact quiescence proof from the sole node owner before reusing a
+   completed projector slot. A final record plus terminal acknowledgement is
+   insufficient because valid recovery may arrive later; permanent quarantine
+   also needs an explicit release or durable suppression mechanism.
+6. Choose an explicit journal-retention/export/migration policy. Schema 1 keeps
+   every record and principal/idempotency history, admits at most 162
+   submissions for the partition lifetime, and implements no eviction or
+   garbage collection.
+7. Measure static layout, journal scan/compaction time, stack, erase endurance,
+   soak behavior, flash/watchdog contention, and radio-deadline impact on
+   ESP32-S3 and larger profiles. The two attached boards have antennas,
+   confirmed `HT-RA62-HF` modules, and a passed isolated NA915 semantic HIL;
+   preserve an explicit regional/airtime profile and sole radio owner during
+   the still-unqualified permanent storage/radio integration.

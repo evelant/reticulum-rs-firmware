@@ -2,9 +2,14 @@
 
 **Status:** physical format, portable implementation, and portable sole-owner
 adapter complete; host fault injection implemented; isolated RF-inert ESP32-S3
-clean-path/software-reset HIL passed on board E9:44; actor-on-firmware,
-controlled power cuts, endurance/soak, at-rest encryption, and product-runtime
-integration remain open
+clean-path/software-reset HIL passed on board E9:44; resident E290 operation-
+scoped coordinator and exact authorized-frame request/durable-echo handoff
+integrated with a one-entry accepted-history cap used only for composition
+qualification and no external admission lane; ADR 0005's interface-local
+active-owner fail-stop and the complete LoRa-first software composition pass
+cross-layer host tests; live external admission, product-capacity policy,
+powered fault qualification, controlled power cuts, endurance/soak, and at-rest
+encryption remain open
 
 ## Boundary
 
@@ -18,12 +23,16 @@ The journal crate implements format, complete mount/replay, idempotent append,
 and two-bank compaction. The separate `reticulum-storage-actor` now consumes
 projector requests, owns the live replay index and sole projector, serializes
 one exact pending mutation, and applies results only after durable append or
-exact readback. It is a portable synchronous aggregate, not yet the permanent
-Embassy task that coordinates flash with OTA, watchdogs, other stores and radio
-timing. The separate portable authenticated adapter maps actor results to the
-logical device API, but has no framing/session/firmware transport. The dedicated
-Heltec HIL calls the journal directly and is a storage qualification image, not
-actor/adapter qualification or product firmware. See
+exact readback. It remains a portable synchronous aggregate. The E290 product
+now hosts it through a resident coordinator that owns the only `FlashStorage`
+and creates one short-lived checked journal view per runtime operation; future
+OTA and other stores must use that same serialization point. The E290
+coordinator implements the narrow target-safe `SubmissionPort`, and the
+separate portable authenticated adapter maps only that semantic vocabulary to
+the logical device API. Portable framing and job handoff exist, but no composed
+session, external firmware lane, or bearer invokes it. The dedicated Heltec HIL calls the journal directly
+and is a storage qualification image, not actor/adapter qualification or
+product firmware. See
 [Portable sole storage actor](storage-actor.md).
 
 The journal protects against torn writes and accidental corruption with
@@ -72,11 +81,17 @@ reclamation for completed submissions.
 
 ## Format, mount, and append
 
-Formatting is explicit. `format_erased()` first reads the complete partition
-and succeeds only if every byte is erased, then writes the generation-1 bank-A
-manifest. The journal never automatically erases or reformats an unknown or
-corrupt partition. An erased unformatted partition and a programmed
-unformatted partition are distinct errors.
+Formatting is explicit. `format_erased()` retains its strict legacy contract:
+it reads the complete partition, succeeds only if every byte is erased, and
+writes the generation-1 bank-A manifest. `provision_first()` adds a separate
+cross-store-authorized path for factory boot. It accepts an already-valid empty
+A1 journal without mutation, or under `AllowFirstProvision` completes erased
+media and monotonic-compatible cuts of the exact canonical 128-byte prefix plus
+32-byte commit sequence. Every byte outside that first manifest must remain
+erased, the commit must remain erased until the prefix is exact, and the
+operation never erases. `Reject` never writes. A valid nonempty journal and all
+off-trajectory data are `MediaNotProvisionable`; normal `mount()` is unchanged
+and fail-closed.
 
 Every mount selects a valid manifest and scans all 812 slots in the selected
 bank. It does not stop at the first erased or torn slot, so a later committed
@@ -91,6 +106,28 @@ slot cannot be hidden behind a power-loss hole. The scan:
   semantic transitions, baseline mismatch, and a programmed bank tail; and
 - exposes the live semantic index only after the physical scan and complete
   semantic replay both succeed.
+
+The journal itself still fails closed on every invalid mount or replay; it does
+not expose a trusted prefix. In the E290 product, a strict-mount, supported-
+history, or recovery failure during boot occurs before a durability-gated DATA
+owner can exist and disables the optional local submission runtime. The
+resident coordinator retains sole flash ownership and route-only LoRa can
+continue without journal access. Physical flash-map validation, identity,
+announce-clock reservation, and identity-authorized fresh provisioning remain
+boot-fatal. A permanent storage/runtime fault after an authorized DATA owner is
+active is not equivalent: ADR 0005 enters `ActiveOwnerFailStopped`, retaining
+the exact observation, completion, and router ticket, marking the same LoRa
+lease offline without a generation change, and stopping fresh LoRa work for the
+rest of the boot. The journal does not define this product/interface policy.
+
+The E290 host composition harness now qualifies both sides of this boundary. Its
+happy path proves zero-write authorization rejection, one durable acceptance and
+cap, the pre-node preparation barrier, exact LoRa frame persistence and echo,
+completion, timeout/status/principal isolation, and final-state remount. Its
+fault path injects a wrong binding after frame exposure and proves
+`ActiveOwnerFailStopped` retains the gated DATA owner plus queued ordinary work
+without a later radio operation. This is software/fake-NOR evidence, not powered
+flash or RF evidence.
 
 Append performs that complete scan before writing. It preflights the requested
 record against replayed semantics and the lifetime reservation, writes the
@@ -226,11 +263,15 @@ messages, propagation payloads, identities, configuration, attachments, OTA,
 and telemetry need separately bounded stores and quotas. Before product use,
 the project still needs:
 
-- one permanent Embassy task around the implemented portable actor, with the
-  checked product `esp-storage` partition adapter and boot service gating;
-- framing/session/firmware integration for the implemented authenticated
-  device-API persist-before-accept/status adapter, plus safe projector-slot
-  retirement;
+- powered qualification of the implemented resident E290 product coordinator
+  around the operation-scoped portable actor/runtime. Its one-entry cap, live
+  driver, exact authorized-frame handoff, and ADR 0005 fault behavior now pass
+  software composition tests; the cap is not product capacity;
+- session/credential state plus firmware composition of the implemented
+  framing/handoff and first USB bearer for the authenticated device-API
+  persist-before-accept/status adapter,
+  plus an exact node-owner quiescence proof and quarantine policy before
+  projector-slot retirement;
 - coordination with watchdogs, OTA, other flash users, and radio timing;
 - on-target stack, boot-scan, latency, erase-endurance, and power-cut evidence;
 - a migration/export decision before physical or semantic format changes; and

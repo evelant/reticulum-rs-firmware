@@ -46,8 +46,64 @@ jobs:
         # direct raw-tree/archive and common-dir-attributes provenance checks.
         run: cargo test --locked
 
-      - name: Device API host-simulation tests
-        run: cargo test --locked -p reticulum-device-api --features host-sim
+      - name: E290 semantic HIL policy tests
+        run: >-
+          cargo test --locked
+          -p reticulum-heltec-vision-master-e290-semantic-hil --lib
+
+      - name: Board-independent semantic HIL fixture tests
+        run: >-
+          cargo test --locked
+          -p reticulum-semantic-roundtrip-hil --all-features
+
+      - name: Permanent E290 node host tests
+        run: >-
+          cargo test --locked
+          -p reticulum-heltec-vision-master-e290-node --lib
+
+      - name: Permanent E290 node host Clippy
+        run: >-
+          cargo clippy --locked
+          -p reticulum-heltec-vision-master-e290-node --lib -- -D warnings
+
+      - name: Permanent E290 node rustdoc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: >-
+          cargo doc --locked
+          -p reticulum-heltec-vision-master-e290-node --lib --no-deps
+
+      - name: Portable durability host tests
+        run: >-
+          cargo test --locked
+          -p reticulum-device-identity-store
+          -p reticulum-announce-clock
+          -p reticulum-nor-flash-region
+
+      - name: Portable durability strict Clippy
+        run: >-
+          cargo clippy --locked
+          -p reticulum-device-identity-store
+          -p reticulum-announce-clock
+          -p reticulum-nor-flash-region
+          --all-targets -- -D warnings
+
+      - name: Portable durability rustdoc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: >-
+          cargo doc --locked
+          -p reticulum-device-identity-store
+          -p reticulum-announce-clock
+          -p reticulum-nor-flash-region
+          --no-deps
+
+      - name: Device API experimental RNS DATA tests
+        run: >-
+          cargo test --locked
+          -p reticulum-device-api
+          -p reticulum-device-api-adapter
+          --features experimental-rns-data
 
       - name: Released-Python foundation vectors
         env:
@@ -65,29 +121,44 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
-      - name: Device API host-simulation Clippy
+      - name: Device API experimental RNS DATA Clippy
         run: >-
-          cargo clippy --locked -p reticulum-device-api
-          --all-targets --features host-sim -- -D warnings
+          cargo clippy --locked
+          -p reticulum-device-api
+          -p reticulum-device-api-adapter
+          --all-targets --features experimental-rns-data -- -D warnings
 
       - name: Generic no-std checks
         run: >-
           cargo check --locked
           -p reticulum-device-api
+          -p reticulum-device-api-framing
+          -p reticulum-device-api-handoff
+          -p reticulum-device-identity-store
+          -p reticulum-announce-clock
+          -p reticulum-interface-router
           -p reticulum-node-core
+          -p reticulum-nor-flash-region
+          -p reticulum-radio-tx-dispatch
+          -p reticulum-radio-lora-phy
           -p reticulum-storage-journal
           -p reticulum-storage-model
           -p reticulum-submission-projector
+          -p reticulum-submission-runtime
           -p reticulum-tx-dispatch
           -p reticulum-tx-handoff
           -p reticulum-tx-supervisor
           -p reticulum-rns-conformance
           -p reticulum-rns-rete
           -p reticulum-rns-rete-rx
+          -p reticulum-semantic-roundtrip-hil
           -p reticulum-rns-leviculum
           -p reticulum-radio-interface
           -p reticulum-board-heltec-tracker-v2
+          -p reticulum-board-heltec-tracker-v2-radio
           -p reticulum-board-heltec-tracker-v2-tx-hil
+          -p reticulum-board-heltec-vision-master-e290
+          -p reticulum-board-heltec-vision-master-e290-radio
           -p reticulum-lab-rx-returned-fault-hil
           --target riscv32imac-unknown-none-elf
 
@@ -220,10 +291,23 @@ jobs:
       - name: Check portable device API, node, storage, projector and TX machines for ESP32-S3
         run: >-
           cargo +esp check --locked
-          -p reticulum-device-api -p reticulum-node-core
+          -p reticulum-device-api
+          -p reticulum-device-api-framing
+          -p reticulum-device-api-handoff
+          -p reticulum-device-identity-store
+          -p reticulum-announce-clock
+          -p reticulum-node-core
+          -p reticulum-nor-flash-region
+          -p reticulum-board-heltec-vision-master-e290
+          -p reticulum-board-heltec-vision-master-e290-radio
+          -p reticulum-board-heltec-tracker-v2-radio
+          -p reticulum-radio-lora-phy
+          -p reticulum-radio-tx-dispatch
           -p reticulum-storage-journal
           -p reticulum-storage-model
           -p reticulum-submission-projector
+          -p reticulum-submission-runtime
+          -p reticulum-semantic-roundtrip-hil
           -p reticulum-tx-dispatch -p reticulum-tx-handoff
           -p reticulum-tx-supervisor
           --target xtensa-esp32s3-none-elf
@@ -240,6 +324,66 @@ jobs:
           -p reticulum-heltec-tracker-v2
           --bin reticulum-heltec-tracker-v2
           --no-default-features --features safe-idle
+          --target xtensa-esp32s3-none-elf
+          -- -D warnings
+
+      - name: Link RF-inert Vision Master E290 qualification image
+        run: >-
+          cargo +esp build --locked --release
+          -p reticulum-heltec-vision-master-e290-qualification
+          --target xtensa-esp32s3-none-elf
+
+      - name: Strict clippy for RF-inert Vision Master E290 qualification image
+        run: >-
+          cargo +esp clippy --locked --release
+          -p reticulum-heltec-vision-master-e290-qualification
+          --target xtensa-esp32s3-none-elf
+          -- -D warnings
+
+      - name: Link hazardous Vision Master E290 semantic HIL
+        run: >-
+          cargo +esp build --locked --release
+          -p reticulum-heltec-vision-master-e290-semantic-hil
+          --target xtensa-esp32s3-none-elf
+
+      - name: Strict clippy for hazardous Vision Master E290 semantic HIL
+        run: >-
+          cargo +esp clippy --locked --release
+          -p reticulum-heltec-vision-master-e290-semantic-hil
+          --target xtensa-esp32s3-none-elf
+          -- -D warnings
+
+      - name: Link permanent LoRa-first Vision Master E290 node
+        run: >-
+          cargo +esp build --locked --release
+          -p reticulum-heltec-vision-master-e290-node
+          --target xtensa-esp32s3-none-elf
+
+      - name: Package permanent LoRa-first Vision Master E290 node
+        shell: bash
+        run: |
+          set -euo pipefail
+          table_bin="$RUNNER_TEMP/e290-node-partitions.bin"
+          image="$RUNNER_TEMP/e290-node.bin"
+          elf="target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node"
+
+          espflash partition-table --skip-update-check --to-binary \
+            --output "$table_bin" \
+            partitions/heltec-vision-master-e290-node.csv
+          espflash partition-table --skip-update-check "$table_bin"
+          espflash save-image --skip-update-check \
+            --chip esp32s3 --merge --skip-padding \
+            --flash-mode dio --flash-freq 80mhz --flash-size 16mb \
+            --xtal-freq 40mhz \
+            --partition-table partitions/heltec-vision-master-e290-node.csv \
+            --target-app-partition factory "$elf" "$image"
+          test -s "$image"
+
+      - name: Strict clippy for permanent LoRa-first Vision Master E290 node
+        run: >-
+          cargo +esp clippy --locked --release
+          -p reticulum-heltec-vision-master-e290-node
+          --bin reticulum-heltec-vision-master-e290-node
           --target xtensa-esp32s3-none-elf
           -- -D warnings
 
@@ -350,7 +494,7 @@ jobs:
           fi
           grep -F 'invalid explicit Tracker V2 lab RX profile' /tmp/invalid-profile.log
 
-      - name: Enforce Tracker release image budgets
+      - name: Enforce release image budgets
         shell: bash
         run: |
           set -euo pipefail
@@ -400,12 +544,19 @@ jobs:
           # BSS includes the linker-reserved stack and moves inversely with
           # initialized data. The total cap is an aggregate image-growth guard,
           # not a substitute for section-level or runtime DRAM measurements.
+          # The 2026-07-17 durable E290 node baseline is
+          # 629335/11176/461652/1102163. Its caps retain about 14% text, 46%
+          # data, 3% BSS and 7% aggregate headroom while the full appliance is
+          # still expected to grow deliberately under reviewed measurements.
           release=target/xtensa-esp32s3-none-elf/release
           check_size safe-idle "$release/reticulum-heltec-tracker-v2" \
             65536 6144 475136 550000
           check_size lab-rx \
             "$RUNNER_TEMP/phase1-rx-normal-pressure/firmware.elf" \
             360448 12288 475136 840000
+          check_size e290-node \
+            "$release/reticulum-heltec-vision-master-e290-node" \
+            720896 16384 475136 1180000
 
       - name: Enforce lab retained-state and startup-stack link contracts
         shell: bash

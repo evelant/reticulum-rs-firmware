@@ -299,6 +299,15 @@ that AP/Roaming interface mode actually reaches path learning and expiry.
 Transport policy and metadata should be generic; discovery, authentication,
 client sessions and device-API behavior remain in this project.
 
+`NodeCore::prepare_data_packet_into()` also returns bytes and a receipt but not
+the selected outbound interface. Python Reticulum sends ordinary destination
+DATA on the receiving interface recorded by the current path and broadcasts
+only when no such interface is known. The project adapter now snapshots Rete's
+`Path.received_on` and emits `Only(interface)` accordingly, retaining `All` for
+a manually registered/unknown-interface path. A generic upstream result should
+carry that route decision directly so sans-I/O callers do not need transport
+storage access or accidentally duplicate directed DATA across every interface.
+
 ## 11. Transactional DATA receipts and terminal reclamation
 
 **Priority:** blocking sustained outbound DATA and the production device API
@@ -358,7 +367,10 @@ supplied buffer, rejects `deadline <= owner_now` before mutation, and resolves
 the RNS target deterministically against an enabled-interface snapshot. The
 unique routed `TxJob` preserves the full receipt hash and original target but
 exposes no bytes. Opaque non-`Copy` request/reply types bind each serialized hop
-to an exact permit; issuance irrevocably records possible transmission, and
+to an exact opaque interface-resource ID and nonzero actor-defined units.
+Node-core does not interpret the resource as radio, stream, or datagram state.
+A policy must supply a matching sufficient reservation; issuance irrevocably
+records possible transmission and burns that reservation, and
 only the matching `AuthorizedTx::frame(now)` exposes bytes once before the
 deadline. A delayed grant becomes byte-inaccessible `ExpiredAuthorizedTx`.
 
@@ -387,8 +399,9 @@ checked clock sample before maintenance/DATA/permit/dispatcher, waits for the
 exact earlier live-owner deadline or permit grace, yields after 16 productive
 passes and every selected wake, and selects only phase-compatible cancellation-
 safe waits. The aggregate now also forwards explicit proof policy, bounded
-announce operations, complete-packet ingress and RNS tick, and exposes its
-short wait publicly for a permanent event loop.
+announce operations, registry-validated exact-owner RNS ingress and RNS tick,
+and exposes its short wait publicly for a permanent event loop. No public
+supervisor method accepts a caller-selected raw interface ID.
 `RfInertTxPolicy` denies RF, and retained faults stop new preparation and policy
 while owner-draining transitions continue where possible.
 
@@ -461,6 +474,33 @@ and receipt state belongs in the project-owned bounded LXMF router unless a
 suitably generic upstream API emerges. No issue or pull request has been opened
 for this newer work.
 
+## 13. Identity capability separation and secret-safe diagnostics
+
+**Priority:** key safety and misuse resistance
+
+Rete's `Identity` stores both private and public key material and derives
+`Debug` across the complete value. An otherwise routine debug log can therefore
+emit the X25519 and Ed25519 private bytes. The permanent firmware keeps its
+durable identity wrapper opaque and non-`Debug`, never logs the imported Rete
+identity, and zeroizes the temporary private-key material after import.
+
+`Identity::from_public_key()` also constructs the same private-capable type with
+zero-filled private fields. The resulting value continues to expose
+`private_key()`, `sign()` and `decrypt()` even though it has no private-key
+capability. This makes invalid private operations representable and can return
+plausible-looking zero key bytes instead of rejecting the operation at the type
+boundary.
+
+Prefer separate public/verification and private/full-identity types, or an
+explicit checked capability state whose private operations return a typed
+unavailable error. Implement a redacted manual `Debug` for every secret-bearing
+identity type and retain zeroization on replacement and drop. Add tests proving
+that public-only identities verify and address correctly but cannot export a
+private key, sign, decrypt or initiate private-key agreement. This is a generic
+Rete improvement; the product-owned flash schema and identity provisioning
+policy stay in this project. No issue or pull request has been opened for this
+item.
+
 ## Submission order
 
 1. Exact direct/local LINKREQUEST validation: submitted as upstream draft PR
@@ -479,6 +519,7 @@ for this newer work.
 11. Clock-domain/request and restart-safe snapshot semantics.
 12. Interface cancellation, capability and backpressure seams as individually
     reviewable changes.
+13. Identity capability separation and redacted secret diagnostics.
 
 Do not combine these into one project-specific fork commit. Keep every fix
 small enough to review upstream, retain a regression here against the pinned

@@ -38,6 +38,10 @@ published wire behavior. It was checked against the retained Rete
 copied into the crate. The four-bit sequence format cannot distinguish a
 same-sequence duplicate from a continuation, so that limitation is documented
 and tested rather than hidden behind a stronger private framing scheme.
+The product-only `crates/rns-rete-rx` adapter owns the local composition of
+that RNode reassembler with the pinned Rete receive owner. The underlying
+`crates/rns-rete` integration and `crates/node-core` do not depend on this
+LoRa/RNode layer.
 
 The Phase-1 schema-3 RNode HIL corpus and `interop/python/rnode_hil.py` KISS
 peer are also independent project-owned implementations of the published

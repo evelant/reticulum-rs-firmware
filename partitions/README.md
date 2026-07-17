@@ -1,5 +1,89 @@
 # Partition tables and storage-HIL runbook
 
+`heltec-vision-master-e290-node.csv` is the first 16 MiB permanent-node layout:
+
+| Partition | Range | Size | Product state |
+| --- | --- | ---: | --- |
+| `nvs` | `0x009000..0x00f000` | 24 KiB | ESP/NVS reserve |
+| `phy_init` | `0x00f000..0x010000` | 4 KiB | ESP PHY reserve |
+| `factory` | `0x010000..0x610000` | 6 MiB | Permanent node image |
+| `node_identity` | `0x610000..0x612000` | 8 KiB | Wired immutable identity mirrors |
+| `announce_clock` | `0x612000..0x614000` | 8 KiB | Wired boot-epoch mirrors |
+| `device_config` | `0x614000..0x630000` | 112 KiB | Reserved, not wired |
+| `node_journal` | `0x630000..0x730000` | 1 MiB | Checked boot provision/mount/recovery probe; live owner deferred |
+| `message_store` | `0x730000..0x930000` | 2 MiB | Reserved, not wired |
+| unpartitioned | `0x930000..0x1000000` | 6.8125 MiB | OTA/layout decision |
+
+The journal and message-store offsets are unchanged. `device_config` is now
+the 112 KiB standard-NVS range after the two new durability partitions. The
+journal and message store use ESP-IDF's standard `data,undefined` subtype until
+their formats are integrated. `node_identity` and `announce_clock` also use
+that standard subtype, but their exact application-owned formats are now
+implemented; no unsupported numeric subtype is used to imply ownership.
+
+`node_identity` contains the same plaintext 64-byte Reticulum private material
+in two commit-last, SHA-256-protected 4 KiB mirrors. Its complete preflight is
+read-only: blank/recognized-torn media is vacant, matching valid media is
+committed, and unknown data without authority, sole committed corruption, or
+conflicting valid keys fails closed. A normal committed reload performs zero
+writes and zero erases. Blank first provisioning uses three program calls per
+mirror and no erase; repair mutates only the peer and never erases the sole
+valid copy.
+
+`announce_clock` is two 4 KiB append-log sectors. Before identity provisioning
+or repair, the product reserves the next 20-bit boot epoch in both sectors. A
+20-bit per-boot ordinal supplies the lower half of the 40-bit local announce
+time. Existing identity plus missing clock high-water fails closed without
+mutation; only a mutation-free vacant-identity preflight permits first clock
+provisioning. Normal boot appends one commit-last record per sector (four
+program calls total and normally no erase). Full or repairable sectors rotate
+one at a time while the other preserves high-water. Power loss can consume or
+skip an epoch, but retries scan committed state and never reuse one.
+
+While identity remains vacant, the product can establish or resume only the
+canonical empty A1 journal trajectory before committing identity. Provisioning
+never erases; after identity is committed, only strict mount is allowed. Boot
+drives the submission runtime through complete conservative recovery and then
+returns the temporary journal borrow before protocol construction. Resident
+journal mutation, device configuration, and message storage remain deferred.
+The product does not start protocol service unless clock reservation, journal
+mount/recovery, and redundant identity coverage all succeed. LoRa is the
+primary first transport slice;
+USB/BLE/Wi-Fi client service and additional Reticulum transports remain
+deferred.
+
+Raw full-flash dumps now contain a private key after provisioning. Set
+`umask 077` before creating them and retain them only with restricted
+permissions on encrypted storage. After the required backup and before the
+first product boot, perform either a full-chip erase or an exact, readback-
+verified erase of `0x610000..0x730000`. The unpadded merged image does not
+initialize those data partitions. Subsequent upgrades must preserve every
+product store; do not repeat the provisioning erase. The exact guarded sequence is in
+[`docs/e290-node.md`](../docs/e290-node.md). This table must not be used through
+the workspace's 8 MiB runner. Both connected modules are confirmed
+`HT-RA62-HF`; neither this permanent-node layout nor its host/build checks
+qualifies the unflashed permanent image on powered hardware.
+
+`heltec-vision-master-e290-semantic-hil.csv` is the explicit hazardous RF HIL
+layout for the qualified 16 MiB E290 pair. It reserves NVS and PHY-init ranges
+and a 4 MiB low-address factory image, defines no writable application-data
+partition, and intentionally leaves the rest unassigned. It is neither a
+product/OTA layout nor general authorization to transmit. The modules were
+confirmed `HT-RA62-HF` before the isolated semantic HIL was flashed; see
+[`docs/e290-semantic-hil.md`](../docs/e290-semantic-hil.md).
+
+`heltec-vision-master-e290-qualification.csv` is a deliberately
+capacity-agnostic, low-address first-flash layout for the E290 identity/PSRAM
+probe. It reserves NVS and PHY-init ranges and gives the one-shot factory image
+`0x10000..0x110000`; it defines no writable test data or high-address
+partition. The E290 host qualification helper derives `--flash-size` from the
+exact physical capacity reported by its immediately preceding `espflash
+board-info` flash-detect result, because that value is encoded into the boot
+image header and observed by the firmware. This table is neither the E290
+product layout nor evidence of 16 MB flash. See
+[`docs/heltec-vision-master-e290.md`](../docs/heltec-vision-master-e290.md) for
+the backup and qualification sequence.
+
 `heltec-tracker-v2-storage-hil.csv` is the explicit 8 MiB development layout
 for the RF-inert physical-journal HIL:
 

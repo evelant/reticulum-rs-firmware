@@ -5,8 +5,14 @@
 //! also owns the protocol-level receive reassembly state. A target ingress
 //! actor owns the reassembler, expires pending fragments using its monotonic
 //! timer, and passes only completed packets through the separate RNS MTU guard.
+//! The portable transmit side provides allocation-free framing, conservative
+//! whole-microsecond aggregate airtime ceilings and deterministic bounded
+//! CAD/backoff decisions for one complete logical packet. It owns no executor,
+//! clock, entropy source or radio.
 //!
-//! No API in this crate can initialize a radio or authorize transmission.
+//! No API in this crate can initialize a radio or grant a regional, airtime or
+//! node-core permit. A channel-access TX action only reports that caller-owned
+//! CAD and reservation inputs allow the already-permitted logical packet now.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -20,10 +26,12 @@ pub use reticulum_rns_conformance::{
 
 mod lab_rx_backpressure;
 mod lab_rx_profile;
+mod logical_packet_access;
 mod radio_diagnostics;
 mod reset_quarantine;
 mod rnode_tx;
 mod rx_pipeline;
+mod sole_radio;
 mod stack_watermark;
 
 pub use lab_rx_backpressure::{
@@ -33,6 +41,11 @@ pub use lab_rx_backpressure::{
 pub use lab_rx_profile::{
     LabRxProfile, LabRxProfileConfig, LabRxProfileError, RNODE_FRAGMENT_TIMEOUT_GUARD_US,
     RNODE_MIN_PREAMBLE_SYMBOLS, ReceiveFrequencyRange, ReceiveFrequencyRangeError,
+};
+pub use logical_packet_access::{
+    LogicalPacketAccessAction, LogicalPacketAccessConfig, LogicalPacketAccessConfigError,
+    LogicalPacketAccessInputError, LogicalPacketAccessPhase, LogicalPacketAccessRejection,
+    LogicalPacketChannelAccess, RnodeAirtimeError, RnodePacketAirtime,
 };
 pub use radio_diagnostics::{
     RadioRxDiagnostics, RadioRxFaultClass, RadioRxFaultClassification, RadioRxFaultCounters,
@@ -49,6 +62,11 @@ pub use rx_pipeline::{
     ExpiredFragment, FrameSignal, RawFrameHandoff, RawFrameHandoffDiagnostics,
     RawFrameHandoffOutcome, RawReceivedFrame, RxDiagnostics, TimedReceiveError,
     TimedReceiveOutcome, TimedRnodeRx,
+};
+pub use sole_radio::{
+    BoundedRxObservation, BoundedRxOutcome, CadObservation, PacketTxFault, PacketTxObservation,
+    PacketTxProgress, RadioConfigurationFingerprint, SoleRadioFault, SoleRadioFaultClass,
+    SoleRadioFaultPhase, SoleRadioFaultSummary, SoleRnodeRadio,
 };
 pub use stack_watermark::{
     STACK_WATERMARK_PATTERN_SEED, STACK_WATERMARK_WORD_BYTES, StackWatermarkLayout,

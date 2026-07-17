@@ -2,29 +2,29 @@ use reticulum_device_api::{
     API_VERSION_MAJOR, ApiErrorCode, ApiErrorResponse, ApiVersion, AuthorizationError,
     CapabilityAvailability, CapabilitySnapshot, DecodeError, DeviceRequest, DeviceResponse,
     DispatchContext, EncodeError, EncodedPacketSha256, MAX_BODY_BYTES, MAX_CBOR_NESTING_DEPTH,
-    MAX_MESSAGE_BYTES, MAX_PREPARE_RNS_DATA_PAYLOAD_BYTES, OP_SUBMISSION_STATUS, Permissions,
+    MAX_MESSAGE_BYTES, MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES, OP_SUBMISSION_STATUS, Permissions,
     PreparedPacketDetails, PrincipalId, RequestEnvelope, RequestId, RequiredField,
     RequiredPermission, ResponseEnvelope, SubmissionFailure, SubmissionId, SubmissionState,
     SubmissionStatus, authorize_request, decode_request, decode_response, encode_request,
     encode_response,
 };
-#[cfg(feature = "host-sim")]
+#[cfg(feature = "experimental-rns-data")]
 use reticulum_device_api::{
-    DestinationHash, IdempotencyKey, OP_EXPERIMENTAL_PREPARE_RNS_DATA, SubmissionAccepted,
+    DestinationHash, IdempotencyKey, OP_EXPERIMENTAL_SUBMIT_RNS_DATA, SubmissionAccepted,
 };
 
 const GOLDEN_CAPABILITIES_REQUEST: &[u8] = &[
     0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa0,
 ];
 
-#[cfg(not(feature = "host-sim"))]
+#[cfg(not(feature = "experimental-rns-data"))]
 const GOLDEN_CAPABILITIES_RESPONSE: &[u8] = &[
     0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa7, 0x00, 0xa2,
     0x00, 0x01, 0x01, 0x00, 0x01, 0xf4, 0x02, 0x00, 0x03, 0xf4, 0x04, 0x19, 0x02, 0x00, 0x05, 0x19,
     0x01, 0xc0, 0x06, 0x19, 0x01, 0x7f,
 ];
 
-#[cfg(feature = "host-sim")]
+#[cfg(feature = "experimental-rns-data")]
 const GOLDEN_CAPABILITIES_RESPONSE: &[u8] = &[
     0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa7, 0x00, 0xa2,
     0x00, 0x01, 0x01, 0x00, 0x01, 0xf4, 0x02, 0x00, 0x03, 0xf5, 0x04, 0x19, 0x02, 0x00, 0x05, 0x19,
@@ -618,30 +618,33 @@ fn authorization_uses_separate_trusted_context() {
 }
 
 #[test]
-fn capability_snapshot_keeps_packet_output_and_radio_tx_unavailable() {
+fn capability_snapshot_separates_direct_radio_from_outbound_rns_submission() {
     let capabilities = CapabilitySnapshot::current();
     assert!(!capabilities.packet_output());
-    assert_eq!(capabilities.radio_tx(), CapabilityAvailability::Unavailable);
+    assert_eq!(
+        capabilities.direct_radio_tx(),
+        CapabilityAvailability::Unavailable
+    );
     assert_eq!(capabilities.max_message_bytes() as usize, MAX_MESSAGE_BYTES);
     assert_eq!(capabilities.max_body_bytes() as usize, MAX_BODY_BYTES);
     assert_eq!(
-        capabilities.max_prepare_rns_data_payload_bytes() as usize,
-        MAX_PREPARE_RNS_DATA_PAYLOAD_BYTES
+        capabilities.max_submit_rns_data_payload_bytes() as usize,
+        MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES
     );
     assert_eq!(
-        capabilities.experimental_prepare_rns_data(),
-        cfg!(feature = "host-sim")
+        capabilities.experimental_submit_rns_data(),
+        cfg!(feature = "experimental-rns-data")
     );
-    assert!(!CapabilitySnapshot::for_dispatch(false).experimental_prepare_rns_data());
+    assert!(!CapabilitySnapshot::for_dispatch(false).experimental_submit_rns_data());
     assert_eq!(CapabilitySnapshot::for_dispatch(true), capabilities);
 }
 
-#[cfg(feature = "host-sim")]
-fn prepare_request(payload: &'static [u8]) -> RequestEnvelope<'static> {
+#[cfg(feature = "experimental-rns-data")]
+fn submit_request(payload: &'static [u8]) -> RequestEnvelope<'static> {
     RequestEnvelope {
         version: ApiVersion::CURRENT,
         request_id: RequestId(9),
-        request: DeviceRequest::PrepareRnsData {
+        request: DeviceRequest::SubmitRnsData {
             destination: DestinationHash([
                 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
                 0x0e, 0x0f,
@@ -655,22 +658,22 @@ fn prepare_request(payload: &'static [u8]) -> RequestEnvelope<'static> {
     }
 }
 
-#[cfg(feature = "host-sim")]
+#[cfg(feature = "experimental-rns-data")]
 #[test]
-fn exact_experimental_prepare_golden_and_borrowed_payload() {
+fn exact_experimental_submit_golden_and_borrowed_payload() {
     const GOLDEN: &[u8] = &[
         0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x00, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa3,
         0x00, 0x50, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
         0x0d, 0x0e, 0x0f, 0x01, 0x43, 0x61, 0x62, 0x63, 0x02, 0x50, 0xf0, 0xf1, 0xf2, 0xf3, 0xf4,
         0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff,
     ];
-    let expected = prepare_request(b"abc");
+    let expected = submit_request(b"abc");
     let mut output = [0u8; MAX_MESSAGE_BYTES];
     let written = encode_request(&expected, &mut output).unwrap();
     assert_eq!(&output[..written], GOLDEN);
 
     let decoded = decode_request(GOLDEN).unwrap();
-    let DeviceRequest::PrepareRnsData { payload, .. } = decoded.request else {
+    let DeviceRequest::SubmitRnsData { payload, .. } = decoded.request else {
         panic!("wrong decoded operation")
     };
     let offset = GOLDEN
@@ -681,9 +684,9 @@ fn exact_experimental_prepare_golden_and_borrowed_payload() {
     assert_eq!(decoded, expected);
 }
 
-#[cfg(feature = "host-sim")]
+#[cfg(feature = "experimental-rns-data")]
 #[test]
-fn exact_experimental_prepare_accepted_response_has_only_submission_id() {
+fn exact_experimental_submit_accepted_response_has_only_submission_id() {
     const GOLDEN: &[u8] = &[
         0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x00, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa1,
         0x00, 0x1b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
@@ -691,21 +694,21 @@ fn exact_experimental_prepare_accepted_response_has_only_submission_id() {
     let envelope = ResponseEnvelope {
         version: ApiVersion::CURRENT,
         request_id: RequestId(9),
-        response: DeviceResponse::PrepareRnsDataAccepted(SubmissionAccepted {
+        response: DeviceResponse::SubmitRnsDataAccepted(SubmissionAccepted {
             id: SubmissionId(0x0102_0304_0506_0708),
         }),
     };
-    assert_eq!(envelope.response.kind(), OP_EXPERIMENTAL_PREPARE_RNS_DATA);
+    assert_eq!(envelope.response.kind(), OP_EXPERIMENTAL_SUBMIT_RNS_DATA);
     let mut output = [0u8; MAX_MESSAGE_BYTES];
     let written = encode_response(&envelope, &mut output).unwrap();
     assert_eq!(&output[..written], GOLDEN);
     assert_eq!(decode_response(GOLDEN).unwrap(), envelope);
 }
 
-#[cfg(feature = "host-sim")]
+#[cfg(feature = "experimental-rns-data")]
 #[test]
-fn experimental_prepare_is_mutating_and_requires_auth_and_permission() {
-    let request = prepare_request(b"abc").request;
+fn experimental_submit_is_mutating_and_requires_auth_and_permission() {
+    let request = submit_request(b"abc").request;
     assert!(request.is_mutating());
     assert_eq!(
         authorize_request(DispatchContext::UNAUTHENTICATED, &request),
@@ -718,29 +721,29 @@ fn experimental_prepare_is_mutating_and_requires_auth_and_permission() {
             &request,
         ),
         Err(AuthorizationError::PermissionDenied(
-            RequiredPermission::ExperimentalPrepareRnsData
+            RequiredPermission::ExperimentalSubmitRnsData
         ))
     );
     assert_eq!(
         authorize_request(
-            DispatchContext::authenticated(principal, Permissions::EXPERIMENTAL_PREPARE_RNS_DATA,),
+            DispatchContext::authenticated(principal, Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA,),
             &request,
         ),
         Ok(())
     );
 }
 
-#[cfg(feature = "host-sim")]
+#[cfg(feature = "experimental-rns-data")]
 #[test]
-fn experimental_prepare_rejects_oversize_payload_on_encode_and_decode() {
-    static PAYLOAD: [u8; MAX_PREPARE_RNS_DATA_PAYLOAD_BYTES + 1] =
-        [0x5a; MAX_PREPARE_RNS_DATA_PAYLOAD_BYTES + 1];
+fn experimental_submit_rejects_oversize_payload_on_encode_and_decode() {
+    static PAYLOAD: [u8; MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES + 1] =
+        [0x5a; MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES + 1];
     let mut output = [0u8; MAX_MESSAGE_BYTES];
     assert_eq!(
-        encode_request(&prepare_request(&PAYLOAD), &mut output),
+        encode_request(&submit_request(&PAYLOAD), &mut output),
         Err(EncodeError::PayloadTooLarge {
             actual: PAYLOAD.len(),
-            max: MAX_PREPARE_RNS_DATA_PAYLOAD_BYTES,
+            max: MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES,
         })
     );
 
@@ -758,14 +761,14 @@ fn experimental_prepare_rejects_oversize_payload_on_encode_and_decode() {
         decode_request(&encoded),
         Err(DecodeError::PayloadTooLarge {
             actual: PAYLOAD.len(),
-            max: MAX_PREPARE_RNS_DATA_PAYLOAD_BYTES,
+            max: MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES,
         })
     );
 }
 
-#[cfg(feature = "host-sim")]
+#[cfg(feature = "experimental-rns-data")]
 #[test]
-fn experimental_prepare_rejects_duplicate_and_wrong_width_fields() {
+fn experimental_submit_rejects_duplicate_and_wrong_width_fields() {
     let duplicate_destination = [
         0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x00, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa4,
         0x00, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x50, 0, 0, 0, 0, 0, 0,
@@ -775,7 +778,7 @@ fn experimental_prepare_rejects_duplicate_and_wrong_width_fields() {
     assert_eq!(
         decode_request(&duplicate_destination),
         Err(DecodeError::DuplicateField(
-            RequiredField::PrepareDestination
+            RequiredField::SubmitDestination
         ))
     );
 
@@ -787,7 +790,7 @@ fn experimental_prepare_rejects_duplicate_and_wrong_width_fields() {
     assert_eq!(
         decode_request(&wrong_destination_width),
         Err(DecodeError::InvalidByteStringLength {
-            field: RequiredField::PrepareDestination,
+            field: RequiredField::SubmitDestination,
             expected: 16,
             actual: 15,
         })
@@ -796,7 +799,7 @@ fn experimental_prepare_rejects_duplicate_and_wrong_width_fields() {
 
 #[test]
 fn experimental_operation_is_unavailable_without_feature() {
-    #[cfg(not(feature = "host-sim"))]
+    #[cfg(not(feature = "experimental-rns-data"))]
     {
         let request = [
             0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x00, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03,

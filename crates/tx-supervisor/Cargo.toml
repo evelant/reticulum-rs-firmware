@@ -15,11 +15,13 @@ embassy-futures.workspace = true
 embassy-sync.workspace = true
 embassy-time.workspace = true
 rand_core.workspace = true
+reticulum-interface-router = { path = "../interface-router", default-features = false }
 reticulum-node-core = { path = "../node-core", default-features = false }
 reticulum-tx-dispatch = { path = "../tx-dispatch", default-features = false }
+reticulum-tx-handoff = { path = "../tx-handoff", default-features = false }
 
 [dev-dependencies]
-reticulum-tx-handoff = { path = "../tx-handoff", default-features = false }
+reticulum-rns-rete = { path = "../rns-rete", default-features = false }
 static_cell.workspace = true
 
 [lib]

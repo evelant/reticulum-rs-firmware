@@ -1,6 +1,6 @@
 [package]
 name = "reticulum-rns-rete-rx"
-description = "Product-only receive façade around the pinned Rete integration"
+description = "Product-only RNode receive adapter and opaque Rete façade"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,11 +8,15 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+reticulum-radio-interface = { path = "../radio-interface" }
 reticulum-rns-rete = { path = "../rns-rete", default-features = false }
 rand_core.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
-reticulum-radio-interface = { path = "../radio-interface" }
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lib]
 path = "src/lib.rs"

@@ -23,8 +23,9 @@
 use core::array;
 
 use reticulum_node_core::{
-    AttemptHandle, AttemptOutcome, AttemptToken, AttemptUnsentReason, PACKET_CAPACITY, SubmitError,
-    TerminalAttempt, TxRecoveryObservation, TxRecoveryReason,
+    AttemptHandle, AttemptOutcome, AttemptToken, AttemptUnsentReason, AuthorizedFrameObservation,
+    PACKET_CAPACITY, PreparedPacket, SubmitError, TerminalAttempt, TxRecoveryObservation,
+    TxRecoveryReason,
 };
 use reticulum_storage_model::{
     ApplyError, AuditEntry, AuditEvent, EncodedPacketSha256, FinalDisposition, InternalFailure,
@@ -32,8 +33,6 @@ use reticulum_storage_model::{
     PreparedPacketDetails, RnsAttemptToken, StateTransition, SubmissionFailure, SubmissionId,
     SubmissionIndex, TransportRecoveryReason,
 };
-use reticulum_tx_dispatch::{NoRfFrameObservation, NodeTxPrepareResult, NodeTxQueuedHop};
-
 const _: () = assert!(
     MAX_ENCODED_PACKET_BYTES == PACKET_CAPACITY,
     "storage-model and node-core encoded packet capacities must match"
@@ -106,15 +105,35 @@ impl PreparedFrameObservation {
     }
 }
 
-impl From<NoRfFrameObservation> for PreparedFrameObservation {
-    fn from(observation: NoRfFrameObservation) -> Self {
+impl From<AuthorizedFrameObservation> for PreparedFrameObservation {
+    fn from(observation: AuthorizedFrameObservation) -> Self {
         Self::new(
-            observation.attempt_handle,
-            observation.attempt,
-            observation.packet_len,
-            *observation.encoded_packet_sha256.as_bytes(),
+            observation.attempt_handle(),
+            observation.attempt(),
+            observation.packet_len(),
+            *observation.encoded_packet_sha256().as_bytes(),
         )
     }
+}
+
+/// Transport-neutral result of asking the permanent node owner to prepare one
+/// durable submission.
+///
+/// This vocabulary deliberately stops at native Reticulum packet metadata. It
+/// contains no dispatcher queue, RNode, LoRa, radio, or board state, so every
+/// interface supervisor can project the same durable lifecycle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubmissionPreparationObservation {
+    /// Node-core prepared one exact native packet and retained its attempt.
+    Prepared(PreparedPacket),
+    /// Same-boot pressure prevented preparation without creating an attempt.
+    RetrySameBoot,
+    /// Node-core rejected the semantic submission without creating an attempt.
+    Rejected(SubmitError),
+    /// Preparation failed closed after creating an exact quarantined attempt.
+    Quarantined(TxRecoveryObservation),
+    /// The permanent owner or its coordinator failed before creating an attempt.
+    InternalFailure,
 }
 
 impl PersistRequest {
@@ -211,7 +230,7 @@ pub enum ProjectionProgress {
 
 /// Durable decision for a synchronous node preparation rejection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PreparationRejectionDecision {
+enum PreparationRejectionDecision {
     /// No attempt was created and the same durable `Preparing` submission may
     /// retry within this boot after local pressure clears.
     RetrySameBoot,
@@ -221,7 +240,7 @@ pub enum PreparationRejectionDecision {
 
 /// Classify one node-core preparation error without collapsing retryable
 /// same-boot pressure into a terminal result.
-pub const fn classify_preparation_rejection(reason: SubmitError) -> PreparationRejectionDecision {
+const fn classify_preparation_rejection(reason: SubmitError) -> PreparationRejectionDecision {
     match reason {
         SubmitError::AttemptLedgerFull { .. }
         | SubmitError::ReceiptTableFull { .. }
@@ -347,12 +366,12 @@ struct AttemptBinding {
 }
 
 impl AttemptBinding {
-    const fn from_queued(queued: NodeTxQueuedHop) -> Self {
+    const fn from_prepared(prepared: PreparedPacket) -> Self {
         Self {
-            handle: queued.attempt_handle(),
-            token: queued.attempt(),
-            expected_packet_len: Some(queued.packet_len()),
-            expected_packet_sha256: Some(*queued.encoded_packet_sha256().as_bytes()),
+            handle: prepared.handle(),
+            token: prepared.attempt(),
+            expected_packet_len: Some(prepared.packet_len()),
+            expected_packet_sha256: Some(*prepared.encoded_packet_sha256().as_bytes()),
         }
     }
 
@@ -572,55 +591,36 @@ impl<const SUBMISSIONS: usize> SubmissionProjector<SUBMISSIONS> {
         Ok(ProjectionProgress::Persist(request.handle()))
     }
 
-    /// Correlate one exact queued attempt after the preparation barrier.
+    /// Project one transport-neutral permanent-node preparation observation.
     ///
-    /// The projector copies only the generation-safe handle, proof token,
-    /// packet length, and full-packet SHA-256. Packet slots and deadlines in
-    /// [`NodeTxQueuedHop`] are not retained.
-    pub fn bind_queued_attempt<const INDEXED: usize>(
+    /// A prepared packet binds only its generation-safe attempt handle, proof
+    /// token, encoded length and complete-byte digest. Same-boot pressure keeps
+    /// the durable `Preparing` barrier active. Semantic rejection or owner
+    /// failure becomes an exact durable final transition, while quarantine is
+    /// correlated before its conservative transport audit is planned.
+    pub fn observe_preparation<const INDEXED: usize>(
         &mut self,
         live: &SubmissionIndex<INDEXED>,
         id: SubmissionId,
-        queued: NodeTxQueuedHop,
-    ) -> Result<ProjectionProgress, ProjectorError> {
-        self.bind_attempt(live, id, AttemptBinding::from_queued(queued))
-    }
-
-    /// Project one synchronous node preparation result.
-    ///
-    /// `Queued` and `RollbackPending` bind the attempt. A `Rejected` result
-    /// becomes a conservative final transition without requiring a frame.
-    /// Transient backpressure/progress results keep the durable preparation
-    /// barrier active for same-boot retry. Owner mismatch or a disabled owner
-    /// becomes an internal final failure.
-    pub fn observe_preparation_result<const INDEXED: usize>(
-        &mut self,
-        live: &SubmissionIndex<INDEXED>,
-        id: SubmissionId,
-        result: NodeTxPrepareResult,
+        observation: SubmissionPreparationObservation,
     ) -> Result<ProjectionProgress, ProjectorError> {
         self.ensure_healthy()?;
-        match result {
-            NodeTxPrepareResult::Queued(queued) | NodeTxPrepareResult::RollbackPending(queued) => {
-                self.bind_queued_attempt(live, id, queued)
+        match observation {
+            SubmissionPreparationObservation::Prepared(prepared) => {
+                self.bind_attempt(live, id, AttemptBinding::from_prepared(prepared))
             }
-            NodeTxPrepareResult::Rejected { reason, .. } => {
-                self.observe_preparation_rejected(live, id, reason)
-            }
-            NodeTxPrepareResult::RejectedQuarantined {
-                reason: _,
-                observation,
-            } => {
-                self.bind_attempt(live, id, AttemptBinding::from_recovery(observation))?;
-                self.observe_quarantined(live, observation)
-            }
-            NodeTxPrepareResult::QueueBackpressured
-            | NodeTxPrepareResult::NoAvailable
-            | NodeTxPrepareResult::ProgressRequired(_) => {
+            SubmissionPreparationObservation::RetrySameBoot => {
                 self.ensure_unbound_preparation_context(live, id)?;
                 Ok(ProjectionProgress::NoAction)
             }
-            NodeTxPrepareResult::OwnerMismatch | NodeTxPrepareResult::Disabled(_) => {
+            SubmissionPreparationObservation::Rejected(reason) => {
+                self.observe_preparation_rejected(live, id, reason)
+            }
+            SubmissionPreparationObservation::Quarantined(observation) => {
+                self.bind_attempt(live, id, AttemptBinding::from_recovery(observation))?;
+                self.observe_quarantined(live, observation)
+            }
+            SubmissionPreparationObservation::InternalFailure => {
                 self.ensure_unbound_preparation_context(live, id)?;
                 self.plan_final(
                     live,
@@ -634,9 +634,9 @@ impl<const SUBMISSIONS: usize> SubmissionProjector<SUBMISSIONS> {
         }
     }
 
-    /// Map a synchronous `NodeTxPrepareResult::Rejected` reason to a final
-    /// disposition without requiring any prepared frame observation.
-    pub fn observe_preparation_rejected<const INDEXED: usize>(
+    /// Map a node-core rejection reason to a final disposition without
+    /// requiring any prepared frame observation.
+    fn observe_preparation_rejected<const INDEXED: usize>(
         &mut self,
         live: &SubmissionIndex<INDEXED>,
         id: SubmissionId,

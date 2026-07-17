@@ -173,7 +173,8 @@ rete-rx@src/lib.rs impl ReceiveOnlyRete < PATHS , ANNOUNCES , DEDUPLICATION , LI
 rete-rx@src/lib.rs impl ReceiveOnlyRete < PATHS , ANNOUNCES , DEDUPLICATION , LINKS > fn metrics (& self) -> ReceiveOnlyIngressMetrics
 rete-rx@src/lib.rs impl ReceiveOnlyRete < PATHS , ANNOUNCES , DEDUPLICATION , LINKS > fn new (identity : ReceiveOnlyIdentity , app_name : & str , aspects : & [& str] , fragment_timeout_ticks : NonZeroU64 , initial_now_ticks : u64 , maintenance_interval_ticks : NonZeroU64 , interface : ReceiveOnlyInterfaceId ,) -> Result < Self , ReceiveOnlyReteError >
 rete-rx@src/lib.rs impl ReceiveOnlyRete < PATHS , ANNOUNCES , DEDUPLICATION , LINKS > fn on_wake < R : RngCore + CryptoRng > (& mut self , wake : ReceiveOnlyWake < '_ > , now : ReceiveOnlyClockSample , rng : & mut R ,) -> ReceiveOnlyStep
-rete-rx@src/lib.rs reexport reticulum_rns_rete :: { IngressDisposition , RETE_MAINTENANCE_INTERVAL_SECONDS , RawFrameDropReason , ReceiveOnlyClockSample , ReceiveOnlyIngressMetrics , ReceiveOnlyIngressOutcome , ReceiveOnlyStep , ReceiveOnlyWake , SuppressedActions , metadata , }
+rete-rx@src/lib.rs reexport receive_only :: { RETE_MAINTENANCE_INTERVAL_SECONDS , RawFrameDropReason , ReceiveOnlyClockSample , ReceiveOnlyIngressMetrics , ReceiveOnlyIngressOutcome , ReceiveOnlyStep , ReceiveOnlyWake , SuppressedActions , }
+rete-rx@src/lib.rs reexport reticulum_rns_rete :: { IngressDisposition , metadata }
 rete-rx@src/lib.rs struct ReceiveOnlyDestinationHash attribute # [derive (Clone , Copy , Debug , Eq , PartialEq)]
 rete-rx@src/lib.rs struct ReceiveOnlyDestinationHash fields=opaque
 rete-rx@src/lib.rs struct ReceiveOnlyIdentity fields=opaque
@@ -183,3 +184,54 @@ rete-rx@src/lib.rs struct ReceiveOnlyInterfaceId attribute # [derive (Clone , Co
 rete-rx@src/lib.rs struct ReceiveOnlyInterfaceId field 0 pub u8
 rete-rx@src/lib.rs struct ReceiveOnlyInterfaceId fields=exposed
 rete-rx@src/lib.rs struct ReceiveOnlyRete< const PATHS : usize , const ANNOUNCES : usize , const DEDUPLICATION : usize , const LINKS : usize , > fields=opaque
+rete-rx@src/receive_only.rs const RETE_MAINTENANCE_INTERVAL_SECONDS : u64
+rete-rx@src/receive_only.rs enum RawFrameDropReason
+rete-rx@src/receive_only.rs enum RawFrameDropReason attribute # [derive (Clone , Copy , Debug , Eq , PartialEq)]
+rete-rx@src/receive_only.rs enum RawFrameDropReason variant FutureTimestamp { received_at_ticks : u64 , now_ticks : u64 , }
+rete-rx@src/receive_only.rs enum RawFrameDropReason variant OutOfOrderTimestamp { received_at_ticks : u64 , previous_received_at_ticks : u64 , }
+rete-rx@src/receive_only.rs enum RawFrameDropReason variant PendingDeadlineElapsed { deadline_ticks : u64 }
+rete-rx@src/receive_only.rs enum RawFrameDropReason variant Stale { age_ticks : u64 , maximum_age_ticks : u64 , }
+rete-rx@src/receive_only.rs enum ReceiveOnlyIngressOutcome
+rete-rx@src/receive_only.rs enum ReceiveOnlyIngressOutcome attribute # [derive (Debug , Eq , PartialEq)]
+rete-rx@src/receive_only.rs enum ReceiveOnlyIngressOutcome variant AwaitingContinuation { sequence : u8 , data_len : usize , replaced_pending : bool , deadline_ticks : u64 , }
+rete-rx@src/receive_only.rs enum ReceiveOnlyIngressOutcome variant DroppedRawFrame (RawFrameDropReason)
+rete-rx@src/receive_only.rs enum ReceiveOnlyIngressOutcome variant Packet { packet_len : usize , # [doc = " SHA-256 of the exact reassembled bytes passed to Rete."] raw_packet_sha256 : [u8 ; 32] , signal : FrameSignal , discarded_pending : bool , disposition : IngressDisposition , suppressed : SuppressedActions , }
+rete-rx@src/receive_only.rs enum ReceiveOnlyIngressOutcome variant Rejected (TimedReceiveError)
+rete-rx@src/receive_only.rs enum ReceiveOnlyWake attribute # [derive (Debug , Eq , PartialEq)]
+rete-rx@src/receive_only.rs enum ReceiveOnlyWake variant Frame (& 'a RawReceivedFrame)
+rete-rx@src/receive_only.rs enum ReceiveOnlyWake variant Timer
+rete-rx@src/receive_only.rs enum ReceiveOnlyWake< 'a >
+rete-rx@src/receive_only.rs struct ReceiveOnlyClockSample attribute # [derive (Clone , Copy , Debug , Eq , PartialEq)]
+rete-rx@src/receive_only.rs struct ReceiveOnlyClockSample field ticks pub u64
+rete-rx@src/receive_only.rs struct ReceiveOnlyClockSample field transport_seconds pub u64
+rete-rx@src/receive_only.rs struct ReceiveOnlyClockSample fields=exposed
+rete-rx@src/receive_only.rs struct ReceiveOnlyIngressMetrics attribute # [derive (Clone , Copy , Debug , Eq , PartialEq)]
+rete-rx@src/receive_only.rs struct ReceiveOnlyIngressMetrics field expired_fragment_watermark_ticks pub Option < u64 >
+rete-rx@src/receive_only.rs struct ReceiveOnlyIngressMetrics field frames_handed_off pub u64
+rete-rx@src/receive_only.rs struct ReceiveOnlyIngressMetrics field future_receive_timestamps pub u64
+rete-rx@src/receive_only.rs struct ReceiveOnlyIngressMetrics field last_handoff_latency_ticks pub u64
+rete-rx@src/receive_only.rs struct ReceiveOnlyIngressMetrics field last_raw_packet_sha256 pub Option < [u8 ; 32] >
+rete-rx@src/receive_only.rs struct ReceiveOnlyIngressMetrics field last_receive_timestamp_ticks pub Option < u64 >
+rete-rx@src/receive_only.rs struct ReceiveOnlyIngressMetrics field last_rete_ingress_seconds pub Option < u64 >
+rete-rx@src/receive_only.rs struct ReceiveOnlyIngressMetrics field last_rete_tick_seconds pub Option < u64 >
+rete-rx@src/receive_only.rs struct ReceiveOnlyIngressMetrics field maximum_handoff_latency_ticks pub u64
+rete-rx@src/receive_only.rs struct ReceiveOnlyIngressMetrics field node pub EmbeddedNodeMetrics
+rete-rx@src/receive_only.rs struct ReceiveOnlyIngressMetrics field out_of_order_receive_timestamps pub u64
+rete-rx@src/receive_only.rs struct ReceiveOnlyIngressMetrics field pending_deadline_collisions pub u64
+rete-rx@src/receive_only.rs struct ReceiveOnlyIngressMetrics field raw_frames_dropped pub u64
+rete-rx@src/receive_only.rs struct ReceiveOnlyIngressMetrics field receive pub RxDiagnostics
+rete-rx@src/receive_only.rs struct ReceiveOnlyIngressMetrics field rete_ingress_calls pub u64
+rete-rx@src/receive_only.rs struct ReceiveOnlyIngressMetrics field rete_tick_calls pub u64
+rete-rx@src/receive_only.rs struct ReceiveOnlyIngressMetrics field stale_raw_frames pub u64
+rete-rx@src/receive_only.rs struct ReceiveOnlyIngressMetrics field suppressed pub SuppressedActions
+rete-rx@src/receive_only.rs struct ReceiveOnlyIngressMetrics fields=exposed
+rete-rx@src/receive_only.rs struct ReceiveOnlyStep attribute # [derive (Debug , Eq , PartialEq)]
+rete-rx@src/receive_only.rs struct ReceiveOnlyStep field expired_fragment pub Option < ExpiredFragment >
+rete-rx@src/receive_only.rs struct ReceiveOnlyStep field frame pub Option < ReceiveOnlyIngressOutcome >
+rete-rx@src/receive_only.rs struct ReceiveOnlyStep field maintenance pub Option < SuppressedActions >
+rete-rx@src/receive_only.rs struct ReceiveOnlyStep fields=exposed
+rete-rx@src/receive_only.rs struct SuppressedActions attribute # [derive (Clone , Copy , Debug , Default , Eq , PartialEq)]
+rete-rx@src/receive_only.rs struct SuppressedActions field events pub u64
+rete-rx@src/receive_only.rs struct SuppressedActions field packets pub u64
+rete-rx@src/receive_only.rs struct SuppressedActions field unroutable_packets pub u64
+rete-rx@src/receive_only.rs struct SuppressedActions fields=exposed

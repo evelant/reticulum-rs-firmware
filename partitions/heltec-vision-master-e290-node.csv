@@ -1,0 +1,10 @@
+# Name,          Type, SubType, Offset,    Size,       Flags
+nvs,             data, nvs,     0x9000,    0x6000,
+phy_init,        data, phy,     0xf000,    0x1000,
+factory,         app,  factory,   0x10000,   0x600000,
+node_identity,   data, undefined, 0x610000,  0x2000,
+announce_clock,  data, undefined, 0x612000,  0x2000,
+device_config,   data, nvs,       0x614000,  0x1c000,
+node_journal,    data, undefined, 0x630000,  0x100000,
+message_store,   data, undefined, 0x730000,  0x200000,
+# 0x930000..0x1000000 intentionally remains unallocated for an OTA/layout decision.

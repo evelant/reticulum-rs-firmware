@@ -12,7 +12,6 @@
 #![deny(clippy::large_stack_frames)]
 
 mod fixture;
-mod region;
 
 use embedded_storage::nor_flash::ReadNorFlash;
 use esp_backtrace as _;
@@ -24,7 +23,7 @@ use esp_hal::{
 };
 use esp_storage::FlashStorage;
 use log::info;
-use region::PartitionNorFlash;
+use reticulum_nor_flash_region::PartitionNorFlash;
 use reticulum_storage_journal::{
     AppendOutcome, JournalError, MountedJournal, append, compact, format_erased, mount,
 };

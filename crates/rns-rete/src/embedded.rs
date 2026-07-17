@@ -1310,6 +1310,19 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             return Err(PrepareDataError::ReceiptTableFull { limit: PATHS });
         }
 
+        // Reticulum sends ordinary destination DATA over the interface on
+        // which its current path was learned. A peer registered without an
+        // observed ingress interface remains an intentional all-interface
+        // fallback, matching unknown-path broadcast behavior.
+        let target = self
+            .core
+            .transport
+            .get_path(destination)
+            .and_then(|path| path.received_on)
+            .map_or(TxTarget::All, |interface| {
+                TxTarget::Only(InterfaceId(interface))
+            });
+
         let prepared = self
             .core
             .prepare_data_packet_into(destination, plaintext, rng, now, output)
@@ -1333,7 +1346,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             })?;
         Ok(PreparedData {
             packet_len: prepared.data.len() as u16,
-            target: TxTarget::All,
+            target,
             receipt: ReceiptId::from_native(prepared.receipt),
         })
     }
@@ -2451,6 +2464,7 @@ mod tests {
                 &mut data,
             )
             .unwrap();
+        assert_eq!(prepared.target(), TxTarget::Only(InterfaceId(4)));
         let received = receiver.ingest(
             &data[..usize::from(prepared.packet_len())],
             101,

@@ -13,7 +13,6 @@ default = []
 [dependencies]
 reticulum-node-core = { path = "../node-core", default-features = false }
 reticulum-storage-model = { path = "../storage-model", default-features = false }
-reticulum-tx-dispatch = { path = "../tx-dispatch", default-features = false }
 
 [dev-dependencies]
 rand_core.workspace = true

@@ -1246,7 +1246,7 @@ mod tests {
 
     impl TxAuthorizationPolicy for Allow {
         fn authorize(&mut self, _candidate: TxAuthorizationCandidate) -> TxPolicyDecision {
-            TxPolicyDecision::Authorize
+            TxPolicyDecision::Authorize(crate::no_rf_inspection_reservation())
         }
     }
 
@@ -1415,7 +1415,7 @@ mod tests {
         now: u64,
         code: u16,
     ) -> TxCompletion<'static> {
-        let (pending, request) = job.begin_permit();
+        let (pending, request) = job.begin_permit(crate::no_rf_inspection_requirements());
         let reply = match owner.authorize_tx(request, MonotonicMillis::new(now), &mut Allow) {
             Ok(reply) => reply,
             Err(failure) => panic!("permit request failed: {:?}", failure.reason()),

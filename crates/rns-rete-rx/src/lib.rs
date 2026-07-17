@@ -1,9 +1,10 @@
-//! Product-only receive façade around the pinned Rete integration.
+//! Product-only RNode receive adapter and opaque Rete façade.
 //!
 //! Firmware targets depend on this crate instead of `reticulum-rns-rete`.
-//! The owning newtype exposes only the scalar receive/maintenance operations
-//! needed by the Phase-1 target. It has no send, announce, Link, channel,
-//! transport-mode, inner-owner or conversion surface.
+//! This crate alone composes physical RNode reassembly with the interface-neutral
+//! Rete owner. The owning newtype exposes only the scalar receive/maintenance
+//! operations needed by the Phase-1 target. It has no send, announce, Link,
+//! channel, transport-mode, inner-owner or conversion surface.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -11,12 +12,16 @@
 use core::num::NonZeroU64;
 
 use rand_core::{CryptoRng, RngCore};
+use receive_only::{ReceiveOnlyIngress, ReceiveOnlyIngressError};
 
-pub use reticulum_rns_rete::{
-    IngressDisposition, RETE_MAINTENANCE_INTERVAL_SECONDS, RawFrameDropReason,
-    ReceiveOnlyClockSample, ReceiveOnlyIngressMetrics, ReceiveOnlyIngressOutcome, ReceiveOnlyStep,
-    ReceiveOnlyWake, SuppressedActions, metadata,
+mod receive_only;
+
+pub use receive_only::{
+    RETE_MAINTENANCE_INTERVAL_SECONDS, RawFrameDropReason, ReceiveOnlyClockSample,
+    ReceiveOnlyIngressMetrics, ReceiveOnlyIngressOutcome, ReceiveOnlyStep, ReceiveOnlyWake,
+    SuppressedActions,
 };
+pub use reticulum_rns_rete::{IngressDisposition, metadata};
 
 /// Opaque identity accepted by the receive-only Rete owner.
 pub struct ReceiveOnlyIdentity(reticulum_rns_rete::Identity);
@@ -98,7 +103,7 @@ pub struct ReceiveOnlyRete<
     const DEDUPLICATION: usize,
     const LINKS: usize,
 > {
-    inner: reticulum_rns_rete::ReceiveOnlyIngress<PATHS, ANNOUNCES, DEDUPLICATION, LINKS>,
+    inner: ReceiveOnlyIngress<PATHS, ANNOUNCES, DEDUPLICATION, LINKS>,
 }
 
 impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, const LINKS: usize>
@@ -118,7 +123,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         maintenance_interval_ticks: NonZeroU64,
         interface: ReceiveOnlyInterfaceId,
     ) -> Result<Self, ReceiveOnlyReteError> {
-        reticulum_rns_rete::ReceiveOnlyIngress::new(
+        ReceiveOnlyIngress::new(
             identity.0,
             app_name,
             aspects,
@@ -129,10 +134,8 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         )
         .map(|inner| Self { inner })
         .map_err(|error| match error {
-            reticulum_rns_rete::ReceiveOnlyIngressError::Rete(_) => {
-                ReceiveOnlyReteError::Construction
-            }
-            reticulum_rns_rete::ReceiveOnlyIngressError::PrimaryDestinationUnavailable => {
+            ReceiveOnlyIngressError::Rete => ReceiveOnlyReteError::Construction,
+            ReceiveOnlyIngressError::PrimaryDestinationUnavailable => {
                 ReceiveOnlyReteError::PrimaryDestinationUnavailable
             }
         })

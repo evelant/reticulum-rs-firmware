@@ -39,13 +39,27 @@ use reticulum_node_core::{
     AttemptHandle, AttemptToken, AuthorizedTx, ExpiredAuthorizedTx, MonotonicMillis, NodeCore,
     PacketInterfaceId, PermitPendingTx, PermitResolution, RoutedTxJob, TxAuthorizationErrorKind,
     TxAuthorizationFailure, TxAuthorizationPolicy, TxCompletionCode, TxFrameError, TxLeaseDeadline,
-    TxPermitReply, TxPermitRequest, UnpermittedTx,
+    TxPermitReply, TxPermitRequest, TxPermitRequirements, TxPermitResourceId, UnpermittedTx,
 };
 use reticulum_tx_handoff::{
     DispatcherHandoff, JobSender, NodeHandoff, OwnerReturnReceiver, PairedTxHandoff,
     PermitReplySender, PermitRequestReceiver, TxOwnerReturn,
 };
 use sha2::{Digest, Sha256};
+
+const NO_RF_INSPECTION_PERMIT_RESOURCE: TxPermitResourceId =
+    TxPermitResourceId::new(*b"no-rf-inspection");
+
+fn no_rf_inspection_requirements() -> TxPermitRequirements {
+    TxPermitRequirements::try_new(NO_RF_INSPECTION_PERMIT_RESOURCE, 1)
+        .expect("fixed no-RF inspection units must be nonzero")
+}
+
+#[cfg(test)]
+fn no_rf_inspection_reservation() -> reticulum_node_core::TxPermitReservation {
+    reticulum_node_core::TxPermitReservation::try_new(NO_RF_INSPECTION_PERMIT_RESOURCE, 1)
+        .expect("fixed no-RF inspection units must be nonzero")
+}
 
 /// SHA-256 of every byte in one complete encoded Reticulum packet.
 pub use reticulum_node_core::EncodedPacketSha256 as TxEncodedPacketSha256;
@@ -611,7 +625,7 @@ where
                 meta,
             };
         } else {
-            let (pending, request) = job.begin_permit();
+            let (pending, request) = job.begin_permit(no_rf_inspection_requirements());
             self.state = DispatcherState::PermitSend {
                 pending,
                 request,
@@ -1248,7 +1262,7 @@ mod tests {
     impl RecordingPolicy {
         fn allowing() -> Self {
             Self {
-                decision: TxPolicyDecision::Authorize,
+                decision: TxPolicyDecision::Authorize(no_rf_inspection_reservation()),
                 candidates: [None; 4],
                 calls: 0,
             }
@@ -1515,6 +1529,14 @@ mod tests {
         assert_ne!(first.encoded_packet_sha256.as_bytes(), attempt.as_bytes());
         assert_eq!(first.wrapping_checksum, second.wrapping_checksum);
         assert_eq!(policy.calls, 2);
+        assert_eq!(
+            policy.candidates[0].unwrap().now,
+            MonotonicMillis::new(1_104)
+        );
+        assert_eq!(
+            policy.candidates[1].unwrap().now,
+            MonotonicMillis::new(1_304)
+        );
         assert!(!policy.candidates[0].unwrap().may_have_transmitted);
         assert!(policy.candidates[1].unwrap().may_have_transmitted);
         assert_eq!(owner.capacities().dispatches_used, 0);
@@ -1937,7 +1959,8 @@ mod tests {
             interfaces(&[1]),
             &mut rng,
         );
-        let (_second_pending, second_request) = second.begin_permit();
+        let (_second_pending, second_request) =
+            second.begin_permit(no_rf_inspection_requirements());
         let (node_ports, mut dispatcher_ports) = REQUEST_CUTOFF_HANDOFF.take().split();
         must_fit(
             dispatcher_ports.permit_requests.try_send(second_request),
@@ -2343,7 +2366,7 @@ mod tests {
             interfaces(&[1]),
             &mut rng,
         );
-        let (_pending, request) = job.begin_permit();
+        let (_pending, request) = job.begin_permit(no_rf_inspection_requirements());
         let mut policy = RecordingPolicy::allowing();
         let reply = owner
             .authorize_tx(request, MonotonicMillis::new(1_100), &mut policy)
@@ -2423,8 +2446,9 @@ mod tests {
             interfaces(&[1]),
             &mut rng,
         );
-        let (first_pending, _first_request) = first.begin_permit();
-        let (_second_pending, second_request) = second.begin_permit();
+        let (first_pending, _first_request) = first.begin_permit(no_rf_inspection_requirements());
+        let (_second_pending, second_request) =
+            second.begin_permit(no_rf_inspection_requirements());
         let second_reply = owner
             .authorize_tx(
                 second_request,
@@ -2514,8 +2538,8 @@ mod tests {
             interfaces(&[1]),
             &mut rng,
         );
-        let (first_pending, first_request) = first.begin_permit();
-        let (second_pending, second_request) = second.begin_permit();
+        let (first_pending, first_request) = first.begin_permit(no_rf_inspection_requirements());
+        let (second_pending, second_request) = second.begin_permit(no_rf_inspection_requirements());
         let (mut node_ports, mut dispatcher_ports) = PERMIT_PRESSURE_HANDOFF.take().split();
         let mut first_policy = RecordingPolicy::allowing();
         let first_reply = owner

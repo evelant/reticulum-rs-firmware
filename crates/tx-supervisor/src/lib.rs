@@ -8,16 +8,73 @@
 //! sustained progress, and otherwise races only phase-compatible,
 //! cancellation-safe waits against the next absolute deadline.
 //!
+//! [`NodeInterfaceSupervisor`] is the transport-neutral permanent aggregate. It
+//! owns one [`NodeCore`], the authoritative outbound interface router, direct
+//! ticket-aware [`DataRouterCoordinator`] and [`OrdinaryRouterCoordinator`]
+//! paths, one DATA and ordinary permit service per concrete interface actor,
+//! and the shared authorization policy. Its checked constructor consumes the
+//! unsplit interface fabric and paired permit proofs before returning
+//! common-slot actor capabilities.
+//!
+//! [`TxSupervisor`] remains the earlier RF-inert aggregate around the legacy
+//! no-RF dispatcher and DATA handoff machine. It is retained for focused owner
+//! lifecycle validation, but it is not the permanent multi-interface graph.
+//!
 //! This crate deliberately has no firmware, radio, HAL, device-API, flash, or
 //! executor dependency. The aggregate is the intended sole [`NodeCore`] owner;
-//! portable RNS ingress and timer APIs are exposed through it while firmware
-//! remains responsible for RNode reassembly and for draining every returned
-//! protocol action. Durable submission projection and a real radio dispatcher
-//! are still separate boundaries.
+//! portable RNS ingress accepts only registry-validated interface provenance,
+//! while firmware remains responsible for RNode reassembly and for draining
+//! every returned protocol action. Durable submission projection and a real
+//! radio dispatcher are still separate boundaries.
 
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+
+mod data_permit;
+mod data_router;
+mod node_interface;
+mod ordinary_permit;
+mod ordinary_router;
+
+pub use data_permit::{
+    DataPermitServer, DataPermitServerFaultResidueKind, DataPermitServerPhase,
+    DataPermitServerStep, DataPermitServerWait,
+};
+
+pub use data_router::{
+    DataCompletionAcceptError, DataCompletionAcceptFailure, DataPermitAuthorizationError,
+    DataPermitAuthorizationFailure, DataPreparedHop, DataRecoveryAckError, DataRouterBuildError,
+    DataRouterBuildFailure, DataRouterCompletionProgress, DataRouterConfig, DataRouterCoordinator,
+    DataRouterFault, DataRouterFaultResidueKind, DataRouterOwnerMismatch, DataRouterParkedCounts,
+    DataRouterParkedKind, DataRouterPrepareRequest, DataRouterPrepareResult, DataRouterStep,
+};
+
+pub use node_interface::{
+    NodeInterfaceActorPorts, NodeInterfaceAnnounceFlushResult, NodeInterfaceCompletionFamily,
+    NodeInterfaceCompletionOrigin, NodeInterfaceCompletionResidue, NodeInterfaceDataPrepareResult,
+    NodeInterfaceIngressActionFault, NodeInterfaceIngressRecycleFault, NodeInterfaceIngressStep,
+    NodeInterfaceOrdinaryOfferError, NodeInterfaceOrdinaryOfferFailure,
+    NodeInterfaceQueuedIngressProcessed, NodeInterfaceSupervisor,
+    NodeInterfaceSupervisorBuildError, NodeInterfaceSupervisorBuildFailure,
+    NodeInterfaceSupervisorBuildSuccess, NodeInterfaceSupervisorFault, NodeInterfaceSupervisorPass,
+    NodeInterfaceSupervisorTransition, NodeInterfaceTerminalIngressActions,
+    NodeInterfaceTickAccepted, NodeInterfaceTickActionFailure, NodeInterfaceTickResult,
+};
+
+pub use ordinary_permit::{
+    OrdinaryPermitServer, OrdinaryPermitServerFaultResidueKind, OrdinaryPermitServerPhase,
+    OrdinaryPermitServerStep, OrdinaryPermitServerWait,
+};
+
+pub use ordinary_router::{
+    OrdinaryCompletionAcceptError, OrdinaryCompletionAcceptFailure,
+    OrdinaryPermitAuthorizationError, OrdinaryPermitAuthorizationFailure, OrdinaryRouterAdmission,
+    OrdinaryRouterBuildError, OrdinaryRouterBuildFailure, OrdinaryRouterBusyReason,
+    OrdinaryRouterCompletionProgress, OrdinaryRouterConfig, OrdinaryRouterCoordinator,
+    OrdinaryRouterFault, OrdinaryRouterFaultResidueKind, OrdinaryRouterOfferError,
+    OrdinaryRouterOfferFailure, OrdinaryRouterRejectedActions, OrdinaryRouterStep,
+};
 
 use core::future::{Future, pending};
 
@@ -30,10 +87,10 @@ use embassy_time::{Duration, Instant, Timer};
 use rand_core::{CryptoRng, RngCore};
 use reticulum_node_core::{
     AcknowledgeError, AnnounceAdmissionError, AttemptHandle, DestinationHash, InboundProofPolicy,
-    IngressReport, MaintenanceReport, MonotonicMillis, MonotonicSeconds, NodeActions, NodeCore,
-    PacketInterfaceId, PrepareDataRequest, ReceiptCorrelationError, TerminalAttempt,
-    TxAuthorizationCandidate, TxAuthorizationErrorKind, TxAuthorizationPolicy, TxLeaseDeadline,
-    TxMaintenanceReport, TxPolicyDecision, TxPolicyDenial, TxRecoveryObservation, TxRecoveryRecord,
+    MaintenanceReport, MonotonicMillis, MonotonicSeconds, NodeActions, NodeCore,
+    PrepareDataRequest, TerminalAttempt, TxAuthorizationCandidate, TxAuthorizationErrorKind,
+    TxAuthorizationPolicy, TxLeaseDeadline, TxMaintenanceReport, TxPolicyDecision, TxPolicyDenial,
+    TxRecoveryObservation, TxRecoveryRecord,
 };
 use reticulum_tx_dispatch::{
     NoRfTxDispatcher, NoRfTxDispatcherPhase, NoRfTxDispatcherStep, NoRfTxDispatcherWait,
@@ -112,7 +169,7 @@ pub struct RfInertTxPolicy;
 
 impl TxAuthorizationPolicy for RfInertTxPolicy {
     fn authorize(&mut self, _candidate: TxAuthorizationCandidate) -> TxPolicyDecision {
-        TxPolicyDecision::Deny(TxPolicyDenial::RegionalProfileUnavailable)
+        TxPolicyDecision::Deny(TxPolicyDenial::ResourceUnavailable)
     }
 }
 
@@ -255,11 +312,12 @@ impl TxSupervisorUnavailable {
     }
 }
 
-/// Permanent aggregate owning all currently implemented TX state machines.
+/// Legacy RF-inert aggregate for the earlier no-RF DATA ownership machines.
 ///
-/// Store this value in static storage and run one never-cancelled supervisor
-/// task. The short waits created internally are cancellation-safe; dropping or
-/// replacing the aggregate is not a recovery mechanism.
+/// This type remains for focused lifecycle validation. New permanent runtimes
+/// use [`NodeInterfaceSupervisor`], which owns the authoritative router,
+/// ordinary-action path, and per-interface permit services. Dropping either
+/// aggregate is not an ownership recovery mechanism.
 #[must_use = "dropping the supervisor abandons unique node and packet owners"]
 pub struct TxSupervisor<
     M,
@@ -353,10 +411,10 @@ where
     pub fn queue_announce<R: RngCore + CryptoRng>(
         &mut self,
         app_data: Option<&[u8]>,
-        now: MonotonicSeconds,
+        emitted_at: reticulum_node_core::AnnounceEmissionTime,
         rng: &mut R,
     ) -> Result<(), AnnounceAdmissionError> {
-        self.owner.queue_announce(app_data, now, rng)
+        self.owner.queue_announce(app_data, emitted_at, rng)
     }
 
     /// Flush ready local announces into the ordinary protocol-action envelope.
@@ -369,21 +427,6 @@ where
         rng: &mut R,
     ) -> NodeActions {
         self.owner.flush_announces(now, rng)
-    }
-
-    /// Process one complete base-MTU packet through the sole RNS owner.
-    ///
-    /// RNode fragment reassembly and timestamp selection remain platform
-    /// responsibilities. Every event and outbound packet in the returned report
-    /// must be drained before the runtime admits unbounded additional work.
-    pub fn ingest_rns<R: RngCore + CryptoRng>(
-        &mut self,
-        raw: &[u8],
-        now: MonotonicSeconds,
-        interface: PacketInterfaceId,
-        rng: &mut R,
-    ) -> Result<IngressReport, ReceiptCorrelationError> {
-        self.owner.ingest(raw, now, interface, rng)
     }
 
     /// Run RNS timer maintenance through the sole node owner.
@@ -916,7 +959,7 @@ mod tests {
     use reticulum_node_core::{
         AttemptOutcome, AttemptUnsentReason, DestinationHash, InterfaceSet, MonotonicSeconds,
         NodeConfig, NodeIdentity, NodeInstanceId, PacketInterfaceId, TxCompletionCode,
-        TxPacketBuffer,
+        TxPacketBuffer, TxPermitReservation,
     };
     use reticulum_tx_dispatch::{NoRfTxDispatcherConfig, TxDispatcherCompletionCodes};
     use reticulum_tx_handoff::TxHandoff;
@@ -969,12 +1012,14 @@ mod tests {
 
     struct RecordingDeny {
         calls: usize,
+        candidate: Option<TxAuthorizationCandidate>,
     }
 
     impl TxAuthorizationPolicy for RecordingDeny {
-        fn authorize(&mut self, _candidate: TxAuthorizationCandidate) -> TxPolicyDecision {
+        fn authorize(&mut self, candidate: TxAuthorizationCandidate) -> TxPolicyDecision {
             self.calls += 1;
-            TxPolicyDecision::Deny(TxPolicyDenial::RegionalProfileUnavailable)
+            self.candidate = Some(candidate);
+            TxPolicyDecision::Deny(TxPolicyDenial::ResourceUnavailable)
         }
     }
 
@@ -983,9 +1028,15 @@ mod tests {
     }
 
     impl TxAuthorizationPolicy for RecordingAllow {
-        fn authorize(&mut self, _candidate: TxAuthorizationCandidate) -> TxPolicyDecision {
+        fn authorize(&mut self, candidate: TxAuthorizationCandidate) -> TxPolicyDecision {
             self.calls += 1;
-            TxPolicyDecision::Authorize
+            TxPolicyDecision::Authorize(
+                TxPermitReservation::try_new(
+                    candidate.requirements.resource(),
+                    candidate.requirements.required_units(),
+                )
+                .expect("test policy must mirror valid requirements"),
+            )
         }
     }
 
@@ -1121,45 +1172,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn permanent_protocol_surface_keeps_rns_inside_supervisor() {
-        let (mut sender, _) = build_supervisor(RfInertTxPolicy, 70);
-        let (mut receiver, _) = build_supervisor(RfInertTxPolicy, 72);
-        assert_ne!(sender.destination_hash(), receiver.destination_hash());
-
-        let mut rng = CounterRng::default();
-        sender.set_inbound_proof_policy(InboundProofPolicy::Always);
-        sender
-            .queue_announce(
-                Some(b"permanent-owner-surface"),
-                MonotonicSeconds::new(10),
-                &mut rng,
-            )
-            .expect("bounded announce queue must accept one item");
-        let mut actions = sender.flush_announces(MonotonicSeconds::new(10), &mut rng);
-        assert!(actions.events.is_empty());
-        assert_eq!(actions.unroutable_packets, 0);
-        assert_eq!(actions.packets.len(), 1);
-
-        let packet = actions
-            .packets
-            .pop()
-            .expect("one queued announce must produce one packet");
-        let report = receiver
-            .ingest_rns(
-                packet.bytes(),
-                MonotonicSeconds::new(10),
-                PacketInterfaceId::new(7),
-                &mut rng,
-            )
-            .expect("announce ingress must not violate receipt correlation");
-        assert!(report.actions.packets.is_empty());
-
-        let maintenance = receiver.tick_rns(MonotonicSeconds::new(11), &mut rng);
-        assert_eq!(maintenance.timed_out_attempts, 0);
-        assert_eq!(maintenance.correlation_fault, None);
-    }
-
     fn drive_to_quiescence<P>(supervisor: &mut TestSupervisor<P>, clock: &mut ManualClock) -> usize
     where
         P: TxAuthorizationPolicy,
@@ -1202,7 +1214,13 @@ mod tests {
 
     #[test]
     fn rf_inert_policy_completes_owner_lifecycle_without_authorization() {
-        let (mut supervisor, destination) = build_supervisor(RecordingDeny { calls: 0 }, 20);
+        let (mut supervisor, destination) = build_supervisor(
+            RecordingDeny {
+                calls: 0,
+                candidate: None,
+            },
+            20,
+        );
         let mut clock = ManualClock::at(1_000);
         seed(&mut supervisor, &mut clock);
 
@@ -1220,6 +1238,14 @@ mod tests {
         assert!(drive_to_quiescence(&mut supervisor, &mut clock) <= 16);
 
         assert_eq!(supervisor.policy.calls, 1);
+        assert_eq!(
+            supervisor
+                .policy
+                .candidate
+                .expect("called policy must retain its candidate")
+                .now,
+            MonotonicMillis::new(1_000)
+        );
         assert_eq!(supervisor.parked_counts().available(), 1);
         assert_eq!(supervisor.parked_counts().recovered(), 0);
         assert_eq!(supervisor.permit_phase(), TxPermitServerPhase::Idle);
@@ -1235,7 +1261,7 @@ mod tests {
         assert_eq!(
             terminal.outcome(),
             AttemptOutcome::Unsent(AttemptUnsentReason::PolicyDenied(
-                TxPolicyDenial::RegionalProfileUnavailable
+                TxPolicyDenial::ResourceUnavailable
             ))
         );
         assert_eq!(

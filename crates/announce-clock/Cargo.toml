@@ -1,0 +1,15 @@
+[package]
+name = "reticulum-announce-clock"
+description = "Power-loss-safe Reticulum announce-emission boot epoch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+embedded-storage.workspace = true
+sha2.workspace = true
+
+[lib]
+path = "src/lib.rs"

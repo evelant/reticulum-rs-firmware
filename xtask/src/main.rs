@@ -309,7 +309,7 @@ fn graph_policy() -> ExitCode {
             "reticulum-heltec-tracker-v2-tx-hil",
             "--no-default-features",
             "--features",
-            "semantic-announce-hil",
+            "semantic-announce-hil,tracker-radio",
             "--target",
             "all",
             "--format",
@@ -332,7 +332,7 @@ fn graph_policy() -> ExitCode {
             "reticulum-heltec-tracker-v2-tx-hil",
             "--no-default-features",
             "--features",
-            "semantic-roundtrip-hil",
+            "semantic-roundtrip-hil,tracker-radio",
             "--target",
             "all",
             "--format",
@@ -342,6 +342,46 @@ fn graph_policy() -> ExitCode {
         Ok(tree) => tree,
         Err(error) => {
             eprintln!("error: could not inspect semantic round-trip TX HIL graph: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let e290_semantic_hil = match capture(
+        "cargo",
+        [
+            "tree",
+            "--locked",
+            "-p",
+            "reticulum-heltec-vision-master-e290-semantic-hil",
+            "--target",
+            "all",
+            "--format",
+            "{p} features=[{f}]",
+        ],
+    ) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!("error: could not inspect E290 semantic HIL graph: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let e290_node = match capture(
+        "cargo",
+        [
+            "tree",
+            "--locked",
+            "-p",
+            "reticulum-heltec-vision-master-e290-node",
+            "--target",
+            "all",
+            "--format",
+            "{p} features=[{f}]",
+        ],
+    ) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!("error: could not inspect permanent E290 node graph: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -360,6 +400,66 @@ fn graph_policy() -> ExitCode {
         Ok(tree) => tree,
         Err(error) => {
             eprintln!("error: could not inspect comparison graph: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let mut interface_neutral_rns_closures = Vec::new();
+    for (label, package) in [
+        ("Rete integration", "reticulum-rns-rete"),
+        ("node core", "reticulum-node-core"),
+    ] {
+        match capture_stdout_at(
+            "cargo",
+            [
+                "tree",
+                "--locked",
+                "-p",
+                package,
+                "--edges",
+                "normal",
+                "--target",
+                "all",
+                "--prefix",
+                "none",
+                "--no-dedupe",
+                "--format",
+                "{p}",
+            ],
+            &root,
+        ) {
+            Ok(tree) => interface_neutral_rns_closures.push((label, tree)),
+            Err(error) => {
+                eprintln!("error: could not inspect {label} normal closure: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    // Workspace metadata exposes workspace-unified feature sets. This package-selected
+    // tree supplies the dispatcher's own target-all normal closure and feature sets.
+    let radio_tx_dispatch_closure = match capture_stdout_at(
+        "cargo",
+        [
+            "tree",
+            "--locked",
+            "-p",
+            "reticulum-radio-tx-dispatch",
+            "--edges",
+            "normal",
+            "--target",
+            "all",
+            "--prefix",
+            "none",
+            "--no-dedupe",
+            "--format",
+            "{p}\t{f}",
+        ],
+        &root,
+    ) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!("error: could not inspect real radio TX dispatcher closure: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -401,9 +501,23 @@ fn graph_policy() -> ExitCode {
         eprintln!("error: {error}");
         failed = true;
     }
+    if let Err(error) = validate_e290_semantic_hil_graph_boundary(&e290_semantic_hil) {
+        eprintln!("error: {error}");
+        failed = true;
+    }
+    if let Err(error) = validate_e290_node_graph_boundary(&e290_node) {
+        eprintln!("error: {error}");
+        failed = true;
+    }
     for forbidden in ["rete-core", "rete-stack", "rete-transport", "rete-lxmf"] {
         if comparison.contains(forbidden) {
             eprintln!("error: Leviculum comparison graph contains forbidden {forbidden}");
+            failed = true;
+        }
+    }
+    for (label, closure) in &interface_neutral_rns_closures {
+        if let Err(error) = validate_interface_neutral_rns_closure(label, closure) {
+            eprintln!("error: {error}");
             failed = true;
         }
     }
@@ -425,18 +539,40 @@ fn graph_policy() -> ExitCode {
             .map_err(|error| format!("firmware receive-only dependency boundary: {error}"))?;
         validate_portable_layer_dependency_boundary(&json, &root)
             .map_err(|error| format!("portable layer dependency boundary: {error}"))?;
+        validate_device_api_edge_dependency_boundary(&json, &root)
+            .map_err(|error| format!("device API edge dependency boundary: {error}"))?;
+        validate_portable_durability_dependency_boundaries(&json, &root)
+            .map_err(|error| format!("portable durability dependency boundary: {error}"))?;
         validate_tracker_radio_dependency_boundary(&json, &root)
             .map_err(|error| format!("Tracker bidirectional radio dependency boundary: {error}"))?;
         validate_tx_handoff_dependency_boundary(&json, &root)
             .map_err(|error| format!("TX handoff dependency boundary: {error}"))?;
+        validate_interface_router_dependency_boundary(&json, &root)
+            .map_err(|error| format!("interface router dependency boundary: {error}"))?;
         validate_tx_dispatch_dependency_boundary(&json, &root)
             .map_err(|error| format!("TX dispatcher dependency boundary: {error}"))?;
+        validate_radio_interface_dependency_boundary(&json, &root)
+            .map_err(|error| format!("radio interface dependency boundary: {error}"))?;
+        validate_e290_board_facts_dependency_boundary(&json, &root)
+            .map_err(|error| format!("E290 board-facts dependency boundary: {error}"))?;
+        validate_semantic_hil_dependency_boundary(&json, &root)
+            .map_err(|error| format!("semantic HIL fixture dependency boundary: {error}"))?;
+        validate_lora_phy_radio_dependency_boundary(&json, &root)
+            .map_err(|error| format!("shared lora-phy radio dependency boundary: {error}"))?;
+        validate_e290_radio_dependency_boundary(&json, &root)
+            .map_err(|error| format!("E290 radio dependency boundary: {error}"))?;
+        validate_radio_tx_dispatch_dependency_boundary(&json, &root)
+            .map_err(|error| format!("real radio TX dispatcher dependency boundary: {error}"))?;
+        validate_radio_tx_dispatch_resolved_closure(&json, &radio_tx_dispatch_closure, &root)
+            .map_err(|error| format!("real radio TX dispatcher resolved closure: {error}"))?;
         validate_storage_model_dependency_boundary(&json, &root)
             .map_err(|error| format!("durable storage model dependency boundary: {error}"))?;
         validate_storage_journal_dependency_boundary(&json, &root)
             .map_err(|error| format!("physical storage journal dependency boundary: {error}"))?;
         validate_storage_actor_dependency_boundary(&json, &root)
             .map_err(|error| format!("sole storage actor dependency boundary: {error}"))?;
+        validate_submission_runtime_dependency_boundary(&json, &root)
+            .map_err(|error| format!("durable submission runtime dependency boundary: {error}"))?;
         validate_device_api_adapter_dependency_boundary(&json, &root)
             .map_err(|error| format!("device API adapter dependency boundary: {error}"))?;
         validate_storage_hil_dependency_boundary(&json, &root)
@@ -455,36 +591,78 @@ fn graph_policy() -> ExitCode {
         ExitCode::FAILURE
     } else {
         println!(
-            "ok: all safe, RX, HIL and all-features all-target product graphs, the RF-inert physical-storage HIL graph, the separately hazardous default-sentinel, semantic-announce and semantic-round-trip TX HIL graphs and the Leviculum \
+            "ok: all safe, RX, HIL and all-features all-target product graphs, the RF-inert physical-storage HIL graph, the separately hazardous default-sentinel, Tracker semantic-announce/semantic-round-trip and E290 semantic-round-trip TX HIL graphs, the permanent E290 node graph and the Leviculum \
              comparison graph are isolated; the returned-fault hook is feature-exclusive; \
-             firmware direct dependencies use only the RX façade and every-feature resolution \
+             legacy Tracker firmware direct dependencies use only the RX façade and every-feature resolution \
              excludes TX ownership and pre-integration durable crates; resolved Rete packages match reported \
              source/revision; esp-rtos and lora-phy resolve only to their reviewed local patches, \
              and each checked vendor inventory reconstructs the pristine registry source; the device \
-             API and node core remain mutually isolated and free of direct platform dependencies; \
-             the Tracker bidirectional radio has only its reviewed board, framing, HAL, critical-section and patched lora-phy edges while the historical TX-HIL crate is a one-edge compatibility facade; \
-             the TX handoff, dispatcher and supervisor use only their reviewed node-core, \
-             handoff, dispatcher, Embassy Sync/Futures/Time, rand_core and SHA-256 dependency \
-             edges; the durable storage model uses only reviewed minicbor and SHA-256 edges; \
+             API and node core remain mutually isolated and free of direct platform dependencies; the \
+             allocation-free device-API framing crate has no dependency or feature surface, while its \
+             boot-lifetime job handoff reaches only the logical device API and Embassy Sync; \
+             the Rete integration and node-core normal closures contain no RNode, radio-interface, LoRa or board package; \
+             the shared lora-phy owner and E290 radio wrapper have only their exact reviewed HAL, framing, board and test edges; \
+             the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the permanent E290 node reaches the LoRa-first node/router/dispatcher graph, exact portable identity, announce-clock, NOR-region and durable-submission layers, and the target-safe experimental device-API semantic port while excluding deferred API bearers, onboard clients and foreign Tracker/HIL packages; \
+             the interface router has only its reviewed node-core and Embassy Sync normal edges plus test-only rand_core and RNS fixture edges; \
+             the TX handoff, RF-inert dispatcher and supervisor use only their reviewed node-core, \
+             interface-router ingress, handoff, dispatcher, Embassy Sync/Futures/Time, rand_core \
+             and SHA-256 dependency edges; radio-interface has only its exact lora-modulation, RNS-conformance and \
+             test-only Embassy Sync edges; the E290 board-facts crate has only its one \
+             feature-free local radio-interface edge; the staged real-radio dispatcher has only its reviewed \
+             portable interface-router, node-core, handoff, radio-interface, Embassy Sync/Time and rand_core normal \
+             edges plus test-only Embassy Futures and static storage, and its target-all normal \
+             closure exactly matches all 64 reviewed local \
+             path or registry/Git source identities and dispatcher-specific enabled-feature sets; \
+             the portable identity, announce-clock and NOR-region crates use only their exact reviewed embedded-storage, rand_core, SHA-256 and zeroize subsets; the durable \
+             storage model uses only reviewed minicbor and SHA-256 edges; \
              the physical storage journal uses only reviewed embedded-storage, storage-model and SHA-256 edges; \
-             the sole storage actor uses only reviewed embedded-storage, node-core, journal, semantic-model, submission-projector and dispatcher edges plus its reviewed test-only Embassy Sync, rand_core and handoff edges; \
-             the device API adapter uses only reviewed embedded-storage, device-API, storage-actor and semantic-model edges with one exact host-sim feature forward; \
+             the sole storage actor uses only reviewed embedded-storage, node-core, journal, semantic-model and submission-projector edges plus its reviewed test-only rand_core edge; the durable submission runtime uses only reviewed Embassy Sync, embedded-storage, rand_core, node-core, storage-actor, semantic-model, submission-projector and transport-neutral supervisor edges plus its journal-only test fixture; \
+             the device API adapter uses only reviewed device-API and semantic-model normal edges with test-only embedded-storage and storage-actor fixtures plus one exact experimental-rns-data feature forward; \
              the physical-storage HIL has only its reviewed raw-flash, journal, semantic-model, logging and ESP runtime edges and no radio/protocol stack; \
-             the submission projector uses only reviewed node-core, storage-model, dispatcher \
+             the submission projector uses only reviewed node-core and storage-model \
              and test-only rand_core and RNS adapter edges"
         );
         ExitCode::SUCCESS
     }
 }
 
-const PRODUCT_GRAPH_FORBIDDEN: [&str; 14] = [
+const INTERFACE_NEUTRAL_RNS_FORBIDDEN: [&str; 9] = [
+    "lora-modulation",
+    "lora-phy",
+    "reticulum-board-heltec-tracker-v2",
+    "reticulum-board-heltec-vision-master-e290",
+    "reticulum-radio-interface",
+    "reticulum-radio-lora-phy",
+    "reticulum-radio-tx-dispatch",
+    "reticulum-rns-rete-rx",
+    "reticulum-heltec-tracker-v2",
+];
+
+fn validate_interface_neutral_rns_closure(label: &str, tree: &str) -> Result<(), String> {
+    for forbidden in INTERFACE_NEUTRAL_RNS_FORBIDDEN {
+        if tree.lines().any(|line| line.starts_with(forbidden)) {
+            return Err(format!(
+                "{label} normal closure contains interface-specific package {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+const PRODUCT_GRAPH_FORBIDDEN: [&str; 20] = [
     "leviculum-core",
     "rete-lxmf",
     "lxmf-rs",
     "reticulum-board-heltec-tracker-v2-radio",
     "reticulum-board-heltec-tracker-v2-tx-hil",
+    "reticulum-board-heltec-vision-master-e290-radio",
     "reticulum-device-api-adapter",
+    "reticulum-device-api-framing",
+    "reticulum-device-api-handoff",
     "reticulum-node-core",
+    "reticulum-radio-tx-dispatch",
+    "reticulum-radio-lora-phy",
+    "reticulum-semantic-roundtrip-hil",
     "reticulum-storage-actor",
     "reticulum-storage-journal",
     "reticulum-storage-model",
@@ -505,10 +683,11 @@ fn validate_product_graph_boundary(label: &str, tree: &str) -> Result<(), String
     Ok(())
 }
 
-const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 19] = [
+const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 25] = [
     "embassy-executor",
     "esp-radio",
     "lora-modulation",
+    "reticulum-radio-lora-phy",
     "lora-phy",
     "rete-core",
     "rete-stack",
@@ -516,10 +695,15 @@ const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 19] = [
     "reticulum-board-heltec-tracker-v2-radio",
     "reticulum-board-heltec-tracker-v2-tx-hil",
     "reticulum-board-heltec-tracker-v2",
+    "reticulum-board-heltec-vision-master-e290-radio",
     "reticulum-device-api-adapter",
+    "reticulum-device-api-framing",
+    "reticulum-device-api-handoff",
     "reticulum-node-core",
     "reticulum-radio-interface",
+    "reticulum-radio-tx-dispatch",
     "reticulum-rns-rete",
+    "reticulum-semantic-roundtrip-hil",
     "reticulum-storage-actor",
     "reticulum-submission-projector",
     "reticulum-tx-dispatch",
@@ -527,13 +711,15 @@ const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 19] = [
     "reticulum-tx-supervisor",
 ];
 
-const TX_HIL_GRAPH_REQUIRED: [&str; 3] = [
+const TX_HIL_GRAPH_REQUIRED: [&str; 5] = [
     "reticulum-board-heltec-tracker-v2-radio",
     "reticulum-board-heltec-tracker-v2-tx-hil",
     "reticulum-radio-interface",
+    "reticulum-radio-lora-phy",
+    "reticulum-semantic-roundtrip-hil",
 ];
 
-const TX_HIL_GRAPH_FORBIDDEN: [&str; 16] = [
+const TX_HIL_GRAPH_FORBIDDEN: [&str; 20] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-core",
@@ -541,7 +727,11 @@ const TX_HIL_GRAPH_FORBIDDEN: [&str; 16] = [
     "rete-stack",
     "rete-transport",
     "reticulum-device-api-adapter",
+    "reticulum-device-api-framing",
+    "reticulum-device-api-handoff",
+    "reticulum-board-heltec-vision-master-e290-radio",
     "reticulum-node-core",
+    "reticulum-radio-tx-dispatch",
     "reticulum-rns-rete",
     "reticulum-storage-actor",
     "reticulum-storage-journal",
@@ -570,22 +760,28 @@ fn validate_tx_hil_graph_boundary(tree: &str) -> Result<(), String> {
     Ok(())
 }
 
-const SEMANTIC_TX_HIL_GRAPH_REQUIRED: [&str; 7] = [
+const SEMANTIC_TX_HIL_GRAPH_REQUIRED: [&str; 9] = [
     "reticulum-board-heltec-tracker-v2-radio",
     "reticulum-board-heltec-tracker-v2-tx-hil",
     "reticulum-radio-interface",
+    "reticulum-radio-lora-phy",
     "reticulum-rns-rete",
+    "reticulum-semantic-roundtrip-hil",
     "rete-core",
     "rete-stack",
     "rete-transport",
 ];
 
-const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 12] = [
+const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 16] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
     "reticulum-device-api-adapter",
+    "reticulum-device-api-framing",
+    "reticulum-device-api-handoff",
+    "reticulum-board-heltec-vision-master-e290-radio",
     "reticulum-node-core",
+    "reticulum-radio-tx-dispatch",
     "reticulum-storage-actor",
     "reticulum-storage-journal",
     "reticulum-storage-model",
@@ -612,7 +808,7 @@ fn validate_semantic_tx_hil_graph_boundary(tree: &str) -> Result<(), String> {
     }
     if !tree.lines().any(|line| {
         line.contains("reticulum-heltec-tracker-v2-tx-hil")
-            && line.contains("features=[semantic-announce-hil]")
+            && line.contains("features=[semantic-announce-hil,tracker-radio]")
     }) {
         return Err(
             "semantic announce TX HIL graph did not activate only its explicit root feature"
@@ -625,6 +821,15 @@ fn validate_semantic_tx_hil_graph_boundary(tree: &str) -> Result<(), String> {
     {
         return Err(
             "semantic announce TX HIL graph did not activate the Rete adapter conformance surface"
+                .to_owned(),
+        );
+    }
+    if !tree.lines().any(|line| {
+        line.contains("reticulum-semantic-roundtrip-hil")
+            && line.ends_with("features=[semantic-announce-hil]")
+    }) {
+        return Err(
+            "semantic announce TX HIL graph did not select the exact portable fixture feature"
                 .to_owned(),
         );
     }
@@ -648,7 +853,7 @@ fn validate_semantic_roundtrip_tx_hil_graph_boundary(tree: &str) -> Result<(), S
     }
     if !tree.lines().any(|line| {
         line.contains("reticulum-heltec-tracker-v2-tx-hil")
-            && line.contains("features=[semantic-roundtrip-hil]")
+            && line.contains("features=[semantic-roundtrip-hil,tracker-radio]")
     }) {
         return Err(
             "semantic round-trip TX HIL graph did not activate only its explicit root feature"
@@ -675,6 +880,162 @@ fn validate_semantic_roundtrip_tx_hil_graph_boundary(tree: &str) -> Result<(), S
     }
     if !tree.contains("static_cell") {
         return Err("semantic round-trip TX HIL graph is missing static_cell".to_owned());
+    }
+    if !tree.lines().any(|line| {
+        line.contains("reticulum-semantic-roundtrip-hil")
+            && line.ends_with("features=[semantic-roundtrip-hil]")
+    }) {
+        return Err(
+            "semantic round-trip TX HIL graph did not select the exact portable fixture feature"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+const E290_SEMANTIC_HIL_GRAPH_REQUIRED: [&str; 9] = [
+    "reticulum-board-heltec-vision-master-e290",
+    "reticulum-board-heltec-vision-master-e290-radio",
+    "reticulum-semantic-roundtrip-hil",
+    "reticulum-radio-interface",
+    "reticulum-radio-lora-phy",
+    "reticulum-rns-rete",
+    "rete-core",
+    "rete-stack",
+    "rete-transport",
+];
+
+const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 19] = [
+    "leviculum-core",
+    "lxmf-rs",
+    "rete-lxmf",
+    "reticulum-board-heltec-tracker-v2-radio",
+    "reticulum-board-heltec-tracker-v2-tx-hil",
+    "reticulum-board-heltec-tracker-v2 v",
+    "reticulum-heltec-tracker-v2-tx-hil",
+    "reticulum-device-api-adapter",
+    "reticulum-device-api-framing",
+    "reticulum-device-api-handoff",
+    "reticulum-interface-router",
+    "reticulum-node-core",
+    "reticulum-radio-tx-dispatch",
+    "reticulum-storage-actor",
+    "reticulum-storage-journal",
+    "reticulum-submission-projector",
+    "reticulum-tx-dispatch",
+    "reticulum-tx-handoff",
+    "reticulum-tx-supervisor",
+];
+
+fn validate_e290_semantic_hil_graph_boundary(tree: &str) -> Result<(), String> {
+    for required in E290_SEMANTIC_HIL_GRAPH_REQUIRED {
+        if !tree.contains(required) {
+            return Err(format!(
+                "E290 semantic HIL graph is missing required {required}"
+            ));
+        }
+    }
+    for forbidden in E290_SEMANTIC_HIL_GRAPH_FORBIDDEN {
+        if tree.contains(forbidden) {
+            return Err(format!(
+                "E290 semantic HIL graph contains forbidden {forbidden}"
+            ));
+        }
+    }
+
+    let policy_line = tree
+        .lines()
+        .find(|line| line.contains("reticulum-semantic-roundtrip-hil"))
+        .ok_or_else(|| "E290 semantic HIL graph has no shared policy package".to_owned())?;
+    if !policy_line.ends_with("features=[semantic-roundtrip-hil]") {
+        return Err(format!(
+            "E290 semantic HIL must reach only the board-independent semantic round-trip fixture feature, observed {policy_line}"
+        ));
+    }
+    Ok(())
+}
+
+const E290_NODE_GRAPH_REQUIRED: [&str; 27] = [
+    "embedded-storage",
+    "esp-storage",
+    "reticulum-announce-clock",
+    "reticulum-board-heltec-vision-master-e290",
+    "reticulum-board-heltec-vision-master-e290-radio",
+    "reticulum-device-api",
+    "reticulum-device-api-adapter",
+    "reticulum-device-identity-store",
+    "reticulum-interface-router",
+    "reticulum-node-core",
+    "reticulum-nor-flash-region",
+    "reticulum-radio-interface",
+    "reticulum-radio-lora-phy",
+    "reticulum-radio-tx-dispatch",
+    "reticulum-rns-rete",
+    "rete-core",
+    "rete-stack",
+    "rete-transport",
+    "reticulum-storage-actor",
+    "reticulum-storage-journal",
+    "reticulum-storage-model",
+    "reticulum-submission-projector",
+    "reticulum-submission-runtime",
+    "reticulum-tx-dispatch",
+    "reticulum-tx-handoff",
+    "reticulum-tx-supervisor",
+    "static_cell",
+];
+
+const E290_NODE_GRAPH_FORBIDDEN: [&str; 13] = [
+    "leviculum-core",
+    "lxmf-rs",
+    "rete-lxmf",
+    "reticulum-board-heltec-tracker-v2",
+    "reticulum-heltec-tracker-v2",
+    "reticulum-heltec-vision-master-e290-qualification",
+    "reticulum-heltec-vision-master-e290-semantic-hil",
+    "reticulum-lab-rx-returned-fault-hil",
+    "reticulum-device-api-framing",
+    "reticulum-device-api-handoff",
+    "reticulum-rns-leviculum",
+    "reticulum-rns-rete-rx",
+    "reticulum-semantic-roundtrip-hil",
+];
+
+fn validate_e290_node_graph_boundary(tree: &str) -> Result<(), String> {
+    for required in E290_NODE_GRAPH_REQUIRED {
+        if !tree.contains(required) {
+            return Err(format!(
+                "permanent E290 node graph is missing required {required}"
+            ));
+        }
+    }
+    for forbidden in E290_NODE_GRAPH_FORBIDDEN {
+        if tree.contains(forbidden) {
+            return Err(format!(
+                "permanent E290 node graph contains deferred or foreign package {forbidden}"
+            ));
+        }
+    }
+
+    let root_line = tree
+        .lines()
+        .find(|line| line.starts_with("reticulum-heltec-vision-master-e290-node "))
+        .ok_or_else(|| "permanent E290 node graph has no product root".to_owned())?;
+    if !root_line.ends_with("features=[]") {
+        return Err(format!(
+            "permanent E290 node must have no hidden product features, observed {root_line}"
+        ));
+    }
+    for package in ["reticulum-device-api ", "reticulum-device-api-adapter "] {
+        let line = tree
+            .lines()
+            .find(|line| line.contains(package))
+            .ok_or_else(|| format!("permanent E290 node graph has no {package}line"))?;
+        if !line.contains("features=[experimental-rns-data]") {
+            return Err(format!(
+                "permanent E290 node must enable only target-safe experimental RNS DATA on {package}, observed {line}"
+            ));
+        }
     }
     Ok(())
 }
@@ -752,7 +1113,10 @@ fn validate_portable_layer_dependency_boundary(
             if package_name == "reticulum-device-api"
                 && matches!(
                     dependency_name,
-                    "reticulum-tx-handoff" | "reticulum-tx-dispatch" | "reticulum-tx-supervisor"
+                    "reticulum-radio-tx-dispatch"
+                        | "reticulum-tx-handoff"
+                        | "reticulum-tx-dispatch"
+                        | "reticulum-tx-supervisor"
                 )
             {
                 return Err(format!(
@@ -827,6 +1191,158 @@ fn validate_portable_layer_dependency_boundary(
     Ok(())
 }
 
+fn validate_device_api_edge_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+
+    let framing_name = "reticulum-device-api-framing";
+    let framing = exact_local_package(
+        packages,
+        workspace,
+        framing_name,
+        "crates/device-api-framing/Cargo.toml",
+    )?;
+    let framing_features = framing["features"]
+        .as_object()
+        .ok_or_else(|| format!("{framing_name} package has no feature map"))?;
+    let framing_dependencies = framing["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{framing_name} package has no dependency array"))?;
+    if !framing_features.is_empty() || !framing_dependencies.is_empty() {
+        return Err(format!(
+            "{framing_name} must expose no features or dependencies"
+        ));
+    }
+
+    let handoff_name = "reticulum-device-api-handoff";
+    let handoff = exact_local_package(
+        packages,
+        workspace,
+        handoff_name,
+        "crates/device-api-handoff/Cargo.toml",
+    )?;
+    let handoff_features = handoff["features"]
+        .as_object()
+        .ok_or_else(|| format!("{handoff_name} package has no feature map"))?;
+    let handoff_dependencies = handoff["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{handoff_name} package has no dependency array"))?;
+    if !handoff_features.is_empty() || handoff_dependencies.len() != 2 {
+        return Err(format!(
+            "{handoff_name} must expose no features and exactly two reviewed normal dependencies"
+        ));
+    }
+    validate_exact_registry_dependency(
+        handoff_dependencies,
+        handoff_name,
+        "embassy-sync",
+        "=0.8.0",
+        None,
+        false,
+        &[],
+    )?;
+    validate_exact_local_dependency(
+        handoff_dependencies,
+        handoff_name,
+        "reticulum-device-api",
+        &workspace.join("crates/device-api"),
+        false,
+    )?;
+
+    Ok(())
+}
+
+fn validate_portable_durability_dependency_boundaries(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    const IDENTITY_DEPENDENCIES: [(&str, &str); 4] = [
+        ("embedded-storage", "=0.3.1"),
+        ("rand_core", "=0.6.4"),
+        ("sha2", "=0.10.9"),
+        ("zeroize", "=1.9.0"),
+    ];
+    const ANNOUNCE_CLOCK_DEPENDENCIES: [(&str, &str); 2] =
+        [("embedded-storage", "=0.3.1"), ("sha2", "=0.10.9")];
+    const NOR_REGION_DEPENDENCIES: [(&str, &str); 1] = [("embedded-storage", "=0.3.1")];
+
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+
+    for (package_name, manifest, empty_default_feature, expected_dependencies) in [
+        (
+            "reticulum-device-identity-store",
+            "crates/device-identity-store/Cargo.toml",
+            false,
+            &IDENTITY_DEPENDENCIES[..],
+        ),
+        (
+            "reticulum-announce-clock",
+            "crates/announce-clock/Cargo.toml",
+            false,
+            &ANNOUNCE_CLOCK_DEPENDENCIES[..],
+        ),
+        (
+            "reticulum-nor-flash-region",
+            "crates/nor-flash-region/Cargo.toml",
+            true,
+            &NOR_REGION_DEPENDENCIES[..],
+        ),
+    ] {
+        let package = exact_local_package(packages, workspace, package_name, manifest)?;
+        let features = package["features"]
+            .as_object()
+            .ok_or_else(|| format!("{package_name} package has no feature map"))?;
+        let feature_shape_is_exact = if empty_default_feature {
+            features.len() == 1
+                && features
+                    .get("default")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|values| values.is_empty())
+        } else {
+            features.is_empty()
+        };
+        if !feature_shape_is_exact {
+            return Err(format!(
+                "{package_name} exposes an unreviewed feature surface"
+            ));
+        }
+
+        let dependencies = package["dependencies"]
+            .as_array()
+            .ok_or_else(|| format!("{package_name} package has no dependency array"))?;
+        if dependencies.len() != expected_dependencies.len() {
+            return Err(format!(
+                "{package_name} must have exactly {} reviewed normal dependencies, found {}",
+                expected_dependencies.len(),
+                dependencies.len()
+            ));
+        }
+        for (dependency_name, requirement) in expected_dependencies {
+            validate_exact_registry_dependency(
+                dependencies,
+                package_name,
+                dependency_name,
+                requirement,
+                None,
+                false,
+                &[],
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_tracker_radio_dependency_boundary(
     metadata_json: &str,
     workspace: &Path,
@@ -878,9 +1394,9 @@ fn validate_tracker_radio_dependency_boundary(
     let dependencies = radio["dependencies"]
         .as_array()
         .ok_or_else(|| format!("{radio_name} package has no dependency array"))?;
-    if dependencies.len() != 7 {
+    if dependencies.len() != 8 {
         return Err(format!(
-            "{radio_name} must have exactly six reviewed normal dependencies and one test-only critical-section edge, found {}",
+            "{radio_name} must have exactly seven reviewed normal dependencies and one test-only critical-section edge, found {}",
             dependencies.len()
         ));
     }
@@ -919,12 +1435,14 @@ fn validate_tracker_radio_dependency_boundary(
             ));
         }
     }
-    for (name, relative_path) in [
+    for (name, relative_path, uses_default_features) in [
         (
             "reticulum-board-heltec-tracker-v2",
             "crates/board-heltec-tracker-v2",
+            true,
         ),
-        ("reticulum-radio-interface", "crates/radio-interface"),
+        ("reticulum-radio-interface", "crates/radio-interface", true),
+        ("reticulum-radio-lora-phy", "crates/radio-lora-phy", false),
     ] {
         let expected_path = workspace.join(relative_path);
         let matches = dependencies
@@ -944,7 +1462,7 @@ fn validate_tracker_radio_dependency_boundary(
             || dependency["optional"].as_bool() != Some(false)
             || !dependency["rename"].is_null()
             || !dependency["target"].is_null()
-            || dependency["uses_default_features"].as_bool() != Some(true)
+            || dependency["uses_default_features"].as_bool() != Some(uses_default_features)
             || dependency["features"]
                 .as_array()
                 .is_none_or(|values| !values.is_empty())
@@ -1394,6 +1912,1222 @@ fn validate_tx_dispatch_dependency_boundary(
     Ok(())
 }
 
+fn validate_radio_interface_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let expected_manifest = workspace.join("crates/radio-interface/Cargo.toml");
+    let matching = packages
+        .iter()
+        .filter(|package| {
+            package["name"].as_str() == Some("reticulum-radio-interface")
+                && package["source"].is_null()
+                && package["manifest_path"].as_str().map(Path::new)
+                    == Some(expected_manifest.as_path())
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err(format!(
+            "expected exactly one local reticulum-radio-interface package at {}, found {}",
+            expected_manifest.display(),
+            matching.len()
+        ));
+    }
+    let package = matching[0];
+
+    let features = package["features"]
+        .as_object()
+        .ok_or_else(|| "reticulum-radio-interface package has no feature map".to_owned())?;
+    if !features.is_empty() {
+        return Err("reticulum-radio-interface must not expose Cargo features".to_owned());
+    }
+
+    let dependencies = package["dependencies"]
+        .as_array()
+        .ok_or_else(|| "reticulum-radio-interface package has no dependency array".to_owned())?;
+    if dependencies
+        .iter()
+        .any(|dependency| dependency["kind"].as_str() == Some("build"))
+    {
+        return Err("reticulum-radio-interface must not have build dependencies".to_owned());
+    }
+    if dependencies.len() != 3 {
+        return Err(format!(
+            "reticulum-radio-interface must have exactly three reviewed dependencies, found {}",
+            dependencies.len()
+        ));
+    }
+
+    let normal = dependencies
+        .iter()
+        .filter(|dependency| dependency["kind"].is_null())
+        .collect::<Vec<_>>();
+    if normal.len() != 2 {
+        return Err(format!(
+            "reticulum-radio-interface must have exactly two normal dependencies, found {}",
+            normal.len()
+        ));
+    }
+
+    let lora_modulation = normal
+        .iter()
+        .filter(|dependency| dependency["name"].as_str() == Some("lora-modulation"))
+        .collect::<Vec<_>>();
+    if lora_modulation.len() != 1
+        || lora_modulation[0]["req"].as_str() != Some("=0.1.5")
+        || lora_modulation[0]["source"].as_str()
+            != Some("registry+https://github.com/rust-lang/crates.io-index")
+        || !lora_modulation[0]["path"].is_null()
+        || lora_modulation[0]["optional"].as_bool() != Some(false)
+        || !lora_modulation[0]["rename"].is_null()
+        || !lora_modulation[0]["target"].is_null()
+        || lora_modulation[0]["uses_default_features"].as_bool() != Some(false)
+        || lora_modulation[0]["features"]
+            .as_array()
+            .is_none_or(|features| !features.is_empty())
+    {
+        return Err(
+            "lora-modulation must be the unconditional feature-free registry =0.1.5 normal dependency"
+                .to_owned(),
+        );
+    }
+
+    let expected_conformance_path = workspace.join("crates/rns-conformance");
+    let conformance = normal
+        .iter()
+        .filter(|dependency| dependency["name"].as_str() == Some("reticulum-rns-conformance"))
+        .collect::<Vec<_>>();
+    if conformance.len() != 1
+        || conformance[0]["req"].as_str() != Some("*")
+        || conformance[0]["path"].as_str().map(Path::new)
+            != Some(expected_conformance_path.as_path())
+        || !conformance[0]["source"].is_null()
+        || conformance[0]["optional"].as_bool() != Some(false)
+        || !conformance[0]["rename"].is_null()
+        || !conformance[0]["target"].is_null()
+        || conformance[0]["uses_default_features"].as_bool() != Some(true)
+        || conformance[0]["features"]
+            .as_array()
+            .is_none_or(|features| !features.is_empty())
+    {
+        return Err(format!(
+            "reticulum-rns-conformance must be the unconditional default-featured local normal dependency at {}",
+            expected_conformance_path.display()
+        ));
+    }
+
+    let development = dependencies
+        .iter()
+        .filter(|dependency| dependency["kind"].as_str() == Some("dev"))
+        .collect::<Vec<_>>();
+    if development.len() != 1 {
+        return Err(format!(
+            "reticulum-radio-interface must have exactly one reviewed development dependency, found {}",
+            development.len()
+        ));
+    }
+    let embassy_sync = development
+        .iter()
+        .filter(|dependency| dependency["name"].as_str() == Some("embassy-sync"))
+        .collect::<Vec<_>>();
+    if embassy_sync.len() != 1
+        || embassy_sync[0]["req"].as_str() != Some("=0.8.0")
+        || embassy_sync[0]["source"].as_str()
+            != Some("registry+https://github.com/rust-lang/crates.io-index")
+        || !embassy_sync[0]["path"].is_null()
+        || embassy_sync[0]["optional"].as_bool() != Some(false)
+        || !embassy_sync[0]["rename"].is_null()
+        || !embassy_sync[0]["target"].is_null()
+        || embassy_sync[0]["uses_default_features"].as_bool() != Some(false)
+        || embassy_sync[0]["features"]
+            .as_array()
+            .is_none_or(|features| !features.is_empty())
+    {
+        return Err(
+            "embassy-sync must be the unconditional feature-free registry =0.8.0 development dependency"
+                .to_owned(),
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_e290_board_facts_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let package_name = "reticulum-board-heltec-vision-master-e290";
+    let expected_manifest = workspace
+        .join("crates/board-heltec-vision-master-e290")
+        .join("Cargo.toml");
+    let matching = packages
+        .iter()
+        .filter(|package| {
+            package["name"].as_str() == Some(package_name)
+                && package["source"].is_null()
+                && package["manifest_path"].as_str().map(Path::new)
+                    == Some(expected_manifest.as_path())
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err(format!(
+            "expected exactly one local {package_name} package at {}, found {}",
+            expected_manifest.display(),
+            matching.len()
+        ));
+    }
+    let package = matching[0];
+    let features = package["features"]
+        .as_object()
+        .ok_or_else(|| format!("{package_name} package has no feature map"))?;
+    if !features.is_empty() {
+        return Err(format!("{package_name} must not expose Cargo features"));
+    }
+
+    let dependencies = package["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{package_name} package has no dependency array"))?;
+    if dependencies.len() != 1 {
+        return Err(format!(
+            "{package_name} must have exactly one reviewed normal dependency, found {}",
+            dependencies.len()
+        ));
+    }
+    let dependency = &dependencies[0];
+    let expected_path = workspace.join("crates/radio-interface");
+    if dependency["name"].as_str() != Some("reticulum-radio-interface")
+        || dependency["req"].as_str() != Some("*")
+        || !dependency["source"].is_null()
+        || dependency["path"].as_str().map(Path::new) != Some(expected_path.as_path())
+        || !dependency["kind"].is_null()
+        || dependency["optional"].as_bool() != Some(false)
+        || !dependency["rename"].is_null()
+        || !dependency["target"].is_null()
+        || dependency["uses_default_features"].as_bool() != Some(false)
+        || dependency["features"]
+            .as_array()
+            .is_none_or(|features| !features.is_empty())
+    {
+        return Err(format!(
+            "{package_name} must use one unconditional feature-free local reticulum-radio-interface dependency at {}",
+            expected_path.display()
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_semantic_hil_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let package_name = "reticulum-semantic-roundtrip-hil";
+    let package = exact_local_package(
+        packages,
+        workspace,
+        package_name,
+        "crates/semantic-roundtrip-hil/Cargo.toml",
+    )?;
+    let features = package["features"]
+        .as_object()
+        .ok_or_else(|| format!("{package_name} package has no feature map"))?;
+    let expected_features = serde_json::json!({
+        "default": [],
+        "semantic-announce-hil": [
+            "dep:rand_core",
+            "dep:reticulum-rns-rete",
+            "reticulum-rns-rete/conformance"
+        ],
+        "semantic-roundtrip-hil": [
+            "dep:rand_core",
+            "dep:reticulum-rns-rete"
+        ]
+    });
+    if serde_json::Value::Object(features.clone()) != expected_features {
+        return Err(format!(
+            "{package_name} exposes an unreviewed feature surface"
+        ));
+    }
+
+    let dependencies = package["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{package_name} package has no dependency array"))?;
+    if dependencies.len() != 3 {
+        return Err(format!(
+            "{package_name} must have exactly three reviewed dependencies, found {}",
+            dependencies.len()
+        ));
+    }
+    validate_exact_local_dependency(
+        dependencies,
+        package_name,
+        "reticulum-radio-interface",
+        &workspace.join("crates/radio-interface"),
+        false,
+    )?;
+
+    let random = exact_dependency(dependencies, package_name, "rand_core", None)?;
+    if random["req"].as_str() != Some("=0.6.4")
+        || random["source"].as_str()
+            != Some("registry+https://github.com/rust-lang/crates.io-index")
+        || !random["path"].is_null()
+        || random["optional"].as_bool() != Some(true)
+        || !random["rename"].is_null()
+        || !random["target"].is_null()
+        || random["uses_default_features"].as_bool() != Some(false)
+        || random["features"]
+            .as_array()
+            .is_none_or(|features| !features.is_empty())
+    {
+        return Err(format!(
+            "{package_name} must use one optional feature-free rand_core =0.6.4 dependency"
+        ));
+    }
+
+    let rns = exact_dependency(dependencies, package_name, "reticulum-rns-rete", None)?;
+    let expected_rns_path = workspace.join("crates/rns-rete");
+    if rns["req"].as_str() != Some("*")
+        || !rns["source"].is_null()
+        || rns["path"].as_str().map(Path::new) != Some(expected_rns_path.as_path())
+        || rns["optional"].as_bool() != Some(true)
+        || !rns["rename"].is_null()
+        || !rns["target"].is_null()
+        || rns["uses_default_features"].as_bool() != Some(false)
+        || rns["features"]
+            .as_array()
+            .is_none_or(|features| !features.is_empty())
+    {
+        return Err(format!(
+            "{package_name} must use one optional feature-free local reticulum-rns-rete dependency"
+        ));
+    }
+
+    Ok(())
+}
+
+fn exact_dependency<'a>(
+    dependencies: &'a [serde_json::Value],
+    package_name: &str,
+    dependency_name: &str,
+    kind: Option<&str>,
+) -> Result<&'a serde_json::Value, String> {
+    let matching = dependencies
+        .iter()
+        .filter(|dependency| {
+            dependency["name"].as_str() == Some(dependency_name)
+                && match kind {
+                    Some(kind) => dependency["kind"].as_str() == Some(kind),
+                    None => dependency["kind"].is_null(),
+                }
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err(format!(
+            "{package_name} must have exactly one {kind:?} {dependency_name} dependency"
+        ));
+    }
+    Ok(matching[0])
+}
+
+fn validate_exact_registry_dependency(
+    dependencies: &[serde_json::Value],
+    package_name: &str,
+    dependency_name: &str,
+    requirement: &str,
+    kind: Option<&str>,
+    uses_default_features: bool,
+    expected_features: &[&str],
+) -> Result<(), String> {
+    let dependency = exact_dependency(dependencies, package_name, dependency_name, kind)?;
+    let features = dependency["features"].as_array().ok_or_else(|| {
+        format!("{package_name} {dependency_name} dependency has no feature list")
+    })?;
+    let actual_features = features
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
+    if dependency["req"].as_str() != Some(requirement)
+        || dependency["source"].as_str()
+            != Some("registry+https://github.com/rust-lang/crates.io-index")
+        || !dependency["path"].is_null()
+        || dependency["optional"].as_bool() != Some(false)
+        || !dependency["rename"].is_null()
+        || !dependency["target"].is_null()
+        || dependency["uses_default_features"].as_bool() != Some(uses_default_features)
+        || actual_features != expected_features
+    {
+        return Err(format!(
+            "{package_name} has an unreviewed {kind:?} registry {dependency_name} dependency shape"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_exact_local_dependency(
+    dependencies: &[serde_json::Value],
+    package_name: &str,
+    dependency_name: &str,
+    expected_path: &Path,
+    uses_default_features: bool,
+) -> Result<(), String> {
+    let dependency = exact_dependency(dependencies, package_name, dependency_name, None)?;
+    if dependency["req"].as_str() != Some("*")
+        || !dependency["source"].is_null()
+        || dependency["path"].as_str().map(Path::new) != Some(expected_path)
+        || dependency["optional"].as_bool() != Some(false)
+        || !dependency["rename"].is_null()
+        || !dependency["target"].is_null()
+        || dependency["uses_default_features"].as_bool() != Some(uses_default_features)
+        || dependency["features"]
+            .as_array()
+            .is_none_or(|features| !features.is_empty())
+    {
+        return Err(format!(
+            "{package_name} has an unreviewed local {dependency_name} dependency shape"
+        ));
+    }
+    Ok(())
+}
+
+fn exact_local_package<'a>(
+    packages: &'a [serde_json::Value],
+    workspace: &Path,
+    package_name: &str,
+    relative_manifest: &str,
+) -> Result<&'a serde_json::Value, String> {
+    let expected_manifest = workspace.join(relative_manifest);
+    let matching = packages
+        .iter()
+        .filter(|package| {
+            package["name"].as_str() == Some(package_name)
+                && package["source"].is_null()
+                && package["manifest_path"].as_str().map(Path::new)
+                    == Some(expected_manifest.as_path())
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err(format!(
+            "expected exactly one local {package_name} package at {}, found {}",
+            expected_manifest.display(),
+            matching.len()
+        ));
+    }
+    Ok(matching[0])
+}
+
+fn validate_interface_router_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let package_name = "reticulum-interface-router";
+    let package = exact_local_package(
+        packages,
+        workspace,
+        package_name,
+        "crates/interface-router/Cargo.toml",
+    )?;
+    let features = package["features"]
+        .as_object()
+        .ok_or_else(|| format!("{package_name} package has no feature map"))?;
+    if features.len() != 1
+        || features
+            .get("default")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|values| !values.is_empty())
+    {
+        return Err(format!(
+            "{package_name} must expose only one empty default feature"
+        ));
+    }
+
+    let dependencies = package["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{package_name} package has no dependency array"))?;
+    if dependencies.len() != 4 {
+        return Err(format!(
+            "{package_name} must have exactly two reviewed normal and two reviewed test dependencies, found {}",
+            dependencies.len()
+        ));
+    }
+    validate_exact_registry_dependency(
+        dependencies,
+        package_name,
+        "embassy-sync",
+        "=0.8.0",
+        None,
+        false,
+        &[],
+    )?;
+    validate_exact_local_dependency(
+        dependencies,
+        package_name,
+        "reticulum-node-core",
+        &workspace.join("crates/node-core"),
+        false,
+    )?;
+    validate_exact_registry_dependency(
+        dependencies,
+        package_name,
+        "rand_core",
+        "=0.6.4",
+        Some("dev"),
+        false,
+        &[],
+    )?;
+
+    let rns = exact_dependency(
+        dependencies,
+        package_name,
+        "reticulum-rns-rete",
+        Some("dev"),
+    )?;
+    let expected_rns_path = workspace.join("crates/rns-rete");
+    if rns["req"].as_str() != Some("*")
+        || !rns["source"].is_null()
+        || rns["path"].as_str().map(Path::new) != Some(expected_rns_path.as_path())
+        || rns["optional"].as_bool() != Some(false)
+        || !rns["rename"].is_null()
+        || !rns["target"].is_null()
+        || rns["uses_default_features"].as_bool() != Some(false)
+        || rns["features"]
+            .as_array()
+            .is_none_or(|features| !features.is_empty())
+    {
+        return Err(format!(
+            "{package_name} has an unreviewed test-only RNS fixture dependency shape"
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_lora_phy_radio_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let package_name = "reticulum-radio-lora-phy";
+    let package = exact_local_package(
+        packages,
+        workspace,
+        package_name,
+        "crates/radio-lora-phy/Cargo.toml",
+    )?;
+    if package["features"]
+        .as_object()
+        .is_none_or(|features| !features.is_empty())
+    {
+        return Err(format!("{package_name} must not expose Cargo features"));
+    }
+    let dependencies = package["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{package_name} package has no dependency array"))?;
+    if dependencies.len() != 4 {
+        return Err(format!(
+            "{package_name} must have exactly four reviewed normal dependencies, found {}",
+            dependencies.len()
+        ));
+    }
+    validate_exact_registry_dependency(
+        dependencies,
+        package_name,
+        "critical-section",
+        "=1.2.0",
+        None,
+        false,
+        &[],
+    )?;
+    validate_exact_registry_dependency(
+        dependencies,
+        package_name,
+        "embedded-hal-async",
+        "=1.0.0",
+        None,
+        true,
+        &[],
+    )?;
+    validate_exact_registry_dependency(
+        dependencies,
+        package_name,
+        "lora-phy",
+        "=3.0.1",
+        None,
+        false,
+        &[],
+    )?;
+    validate_exact_local_dependency(
+        dependencies,
+        package_name,
+        "reticulum-radio-interface",
+        &workspace.join("crates/radio-interface"),
+        false,
+    )?;
+    Ok(())
+}
+
+fn validate_e290_radio_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let package_name = "reticulum-board-heltec-vision-master-e290-radio";
+    let package = exact_local_package(
+        packages,
+        workspace,
+        package_name,
+        "crates/board-heltec-vision-master-e290-radio/Cargo.toml",
+    )?;
+    if package["features"]
+        .as_object()
+        .is_none_or(|features| !features.is_empty())
+    {
+        return Err(format!("{package_name} must not expose Cargo features"));
+    }
+    let dependencies = package["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{package_name} package has no dependency array"))?;
+    if dependencies.len() != 7 {
+        return Err(format!(
+            "{package_name} must have six reviewed normal dependencies and one test-only critical-section edge, found {}",
+            dependencies.len()
+        ));
+    }
+    for (name, requirement, defaults) in [
+        ("embedded-hal", "=1.0.0", true),
+        ("embedded-hal-async", "=1.0.0", true),
+        ("lora-phy", "=3.0.1", false),
+    ] {
+        validate_exact_registry_dependency(
+            dependencies,
+            package_name,
+            name,
+            requirement,
+            None,
+            defaults,
+            &[],
+        )?;
+    }
+    for (name, relative_path) in [
+        (
+            "reticulum-board-heltec-vision-master-e290",
+            "crates/board-heltec-vision-master-e290",
+        ),
+        ("reticulum-radio-interface", "crates/radio-interface"),
+        ("reticulum-radio-lora-phy", "crates/radio-lora-phy"),
+    ] {
+        validate_exact_local_dependency(
+            dependencies,
+            package_name,
+            name,
+            &workspace.join(relative_path),
+            false,
+        )?;
+    }
+    validate_exact_registry_dependency(
+        dependencies,
+        package_name,
+        "critical-section",
+        "=1.2.0",
+        Some("dev"),
+        false,
+        &["std"],
+    )?;
+    Ok(())
+}
+
+fn validate_radio_tx_dispatch_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let expected_manifest = workspace.join("crates/radio-tx-dispatch/Cargo.toml");
+    let matching = packages
+        .iter()
+        .filter(|package| {
+            package["name"].as_str() == Some("reticulum-radio-tx-dispatch")
+                && package["source"].is_null()
+                && package["manifest_path"].as_str().map(Path::new)
+                    == Some(expected_manifest.as_path())
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err(format!(
+            "expected exactly one local reticulum-radio-tx-dispatch package at {}, found {}",
+            expected_manifest.display(),
+            matching.len()
+        ));
+    }
+    let package = matching[0];
+
+    let features = package["features"]
+        .as_object()
+        .ok_or_else(|| "reticulum-radio-tx-dispatch package has no feature map".to_owned())?;
+    if features.len() != 1
+        || features
+            .get("default")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|default| !default.is_empty())
+    {
+        return Err(
+            "reticulum-radio-tx-dispatch must expose only an empty default feature".to_owned(),
+        );
+    }
+
+    let dependencies = package["dependencies"]
+        .as_array()
+        .ok_or_else(|| "reticulum-radio-tx-dispatch package has no dependency array".to_owned())?;
+    if dependencies
+        .iter()
+        .any(|dependency| dependency["kind"].as_str() == Some("build"))
+    {
+        return Err("reticulum-radio-tx-dispatch must not have build dependencies".to_owned());
+    }
+    if dependencies.len() != 9 {
+        return Err(format!(
+            "reticulum-radio-tx-dispatch must have exactly nine reviewed dependencies, found {}",
+            dependencies.len()
+        ));
+    }
+
+    let normal = dependencies
+        .iter()
+        .filter(|dependency| dependency["kind"].is_null())
+        .collect::<Vec<_>>();
+    if normal.len() != 7 {
+        return Err(format!(
+            "reticulum-radio-tx-dispatch must have exactly seven normal dependencies, found {}",
+            normal.len()
+        ));
+    }
+
+    for (name, relative_path) in [
+        ("reticulum-interface-router", "crates/interface-router"),
+        ("reticulum-node-core", "crates/node-core"),
+        ("reticulum-radio-interface", "crates/radio-interface"),
+        ("reticulum-tx-handoff", "crates/tx-handoff"),
+    ] {
+        let expected_path = workspace.join(relative_path);
+        let dependency = normal
+            .iter()
+            .filter(|dependency| dependency["name"].as_str() == Some(name))
+            .collect::<Vec<_>>();
+        if dependency.len() != 1
+            || dependency[0]["req"].as_str() != Some("*")
+            || dependency[0]["path"].as_str().map(Path::new) != Some(expected_path.as_path())
+            || !dependency[0]["source"].is_null()
+            || dependency[0]["optional"].as_bool() != Some(false)
+            || !dependency[0]["rename"].is_null()
+            || !dependency[0]["target"].is_null()
+            || dependency[0]["uses_default_features"].as_bool() != Some(false)
+            || dependency[0]["features"]
+                .as_array()
+                .is_none_or(|features| !features.is_empty())
+        {
+            return Err(format!(
+                "{name} must be one unconditional feature-free local normal dependency at {}",
+                expected_path.display()
+            ));
+        }
+    }
+
+    for (name, requirement) in [
+        ("embassy-sync", "=0.8.0"),
+        ("embassy-time", "=0.5.0"),
+        ("rand_core", "=0.6.4"),
+    ] {
+        let dependency = normal
+            .iter()
+            .filter(|dependency| dependency["name"].as_str() == Some(name))
+            .collect::<Vec<_>>();
+        if dependency.len() != 1
+            || dependency[0]["req"].as_str() != Some(requirement)
+            || dependency[0]["source"].as_str()
+                != Some("registry+https://github.com/rust-lang/crates.io-index")
+            || !dependency[0]["path"].is_null()
+            || dependency[0]["optional"].as_bool() != Some(false)
+            || !dependency[0]["rename"].is_null()
+            || !dependency[0]["target"].is_null()
+            || dependency[0]["uses_default_features"].as_bool() != Some(false)
+            || dependency[0]["features"]
+                .as_array()
+                .is_none_or(|features| !features.is_empty())
+        {
+            return Err(format!(
+                "{name} must be the unconditional feature-free registry {requirement} normal dependency"
+            ));
+        }
+    }
+
+    let development = dependencies
+        .iter()
+        .filter(|dependency| dependency["kind"].as_str() == Some("dev"))
+        .collect::<Vec<_>>();
+    if development.len() != 2 {
+        return Err(format!(
+            "reticulum-radio-tx-dispatch must have exactly two reviewed development dependencies, found {}",
+            development.len()
+        ));
+    }
+    for (name, requirement, uses_default_features) in [
+        ("embassy-futures", "=0.1.2", false),
+        ("static_cell", "=2.1.1", true),
+    ] {
+        let dependency = development
+            .iter()
+            .filter(|dependency| dependency["name"].as_str() == Some(name))
+            .collect::<Vec<_>>();
+        if dependency.len() != 1
+            || dependency[0]["req"].as_str() != Some(requirement)
+            || dependency[0]["source"].as_str()
+                != Some("registry+https://github.com/rust-lang/crates.io-index")
+            || !dependency[0]["path"].is_null()
+            || dependency[0]["optional"].as_bool() != Some(false)
+            || !dependency[0]["rename"].is_null()
+            || !dependency[0]["target"].is_null()
+            || dependency[0]["uses_default_features"].as_bool() != Some(uses_default_features)
+            || dependency[0]["features"]
+                .as_array()
+                .is_none_or(|features| !features.is_empty())
+        {
+            return Err(format!(
+                "reticulum-radio-tx-dispatch development dependency {name} does not match the reviewed pin"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn forbidden_radio_tx_dispatch_closure_category(
+    package: &serde_json::Value,
+    workspace: &Path,
+) -> Option<&'static str> {
+    let name = package["name"].as_str()?;
+    if name.starts_with("reticulum-board-") {
+        return Some("board");
+    }
+    if name == "lora-phy"
+        || name.starts_with("sx126")
+        || name.starts_with("sx127")
+        || name.starts_with("sx128")
+        || name.starts_with("radio-sx")
+        || (name.starts_with("reticulum-radio-")
+            && name != "reticulum-radio-interface"
+            && name != "reticulum-radio-tx-dispatch")
+    {
+        return Some("concrete radio driver");
+    }
+    if name.starts_with("esp-") || name.starts_with("esp32") {
+        return Some("concrete platform");
+    }
+    if name.starts_with("reticulum-heltec-") {
+        return Some("firmware");
+    }
+    if name.starts_with("reticulum-storage-") {
+        return Some("project storage");
+    }
+    if name == "reticulum-submission-projector" {
+        return Some("projector");
+    }
+    if name.starts_with("reticulum-device-api") {
+        return Some("device API");
+    }
+    if name == "reticulum-tx-dispatch" {
+        return Some("RF-inert dispatcher");
+    }
+    if name == "reticulum-tx-supervisor" {
+        return Some("supervisor");
+    }
+
+    package["manifest_path"]
+        .as_str()
+        .and_then(|path| Path::new(path).strip_prefix(workspace).ok())
+        .and_then(|relative| {
+            let mut components = relative.components();
+            match (components.next(), components.next()) {
+                (Some(Component::Normal(first)), _) if first == OsStr::new("firmware") => {
+                    Some("firmware")
+                }
+                (Some(Component::Normal(first)), Some(Component::Normal(second)))
+                    if first == OsStr::new("crates") =>
+                {
+                    let crate_directory = second.to_str()?;
+                    if crate_directory.starts_with("board-") {
+                        Some("board")
+                    } else if crate_directory.starts_with("storage-") {
+                        Some("project storage")
+                    } else if crate_directory == "submission-projector" {
+                        Some("projector")
+                    } else if crate_directory.starts_with("device-api") {
+                        Some("device API")
+                    } else if crate_directory == "tx-dispatch" {
+                        Some("RF-inert dispatcher")
+                    } else if crate_directory == "tx-supervisor" {
+                        Some("supervisor")
+                    } else if crate_directory.starts_with("radio-")
+                        && crate_directory != "radio-interface"
+                        && crate_directory != "radio-tx-dispatch"
+                    {
+                        Some("concrete radio driver")
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        })
+}
+
+const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
+const RETE_GIT_SOURCE: &str = "git+https://github.com/evelant/rete.git?rev=\
+f6f5fb0637d00691e09fa0105be4df902405fee4#\
+f6f5fb0637d00691e09fa0105be4df902405fee4";
+
+#[derive(Clone, Copy)]
+enum ReviewedClosureSource {
+    Local(&'static str),
+    Registry,
+    Git(&'static str),
+}
+
+#[derive(Clone, Copy)]
+struct ReviewedClosurePackage {
+    name: &'static str,
+    version: &'static str,
+    source: ReviewedClosureSource,
+    features: &'static [&'static str],
+}
+
+const fn closure_registry(
+    name: &'static str,
+    version: &'static str,
+    features: &'static [&'static str],
+) -> ReviewedClosurePackage {
+    ReviewedClosurePackage {
+        name,
+        version,
+        source: ReviewedClosureSource::Registry,
+        features,
+    }
+}
+
+const fn closure_git(
+    name: &'static str,
+    version: &'static str,
+    features: &'static [&'static str],
+) -> ReviewedClosurePackage {
+    ReviewedClosurePackage {
+        name,
+        version,
+        source: ReviewedClosureSource::Git(RETE_GIT_SOURCE),
+        features,
+    }
+}
+
+const fn closure_local(
+    name: &'static str,
+    manifest: &'static str,
+    features: &'static [&'static str],
+) -> ReviewedClosurePackage {
+    ReviewedClosurePackage {
+        name,
+        version: "0.1.0",
+        source: ReviewedClosureSource::Local(manifest),
+        features,
+    }
+}
+
+const RADIO_TX_DISPATCH_REVIEWED_CLOSURE: [ReviewedClosurePackage; 64] = [
+    closure_registry("aes", "0.8.4", &[]),
+    closure_registry("block-buffer", "0.10.4", &[]),
+    closure_registry("byteorder", "1.5.0", &[]),
+    closure_registry("cbc", "0.1.2", &[]),
+    closure_registry("cfg-if", "1.0.4", &[]),
+    closure_registry("cipher", "0.4.4", &[]),
+    closure_registry("cpufeatures", "0.2.17", &[]),
+    closure_registry("critical-section", "1.2.0", &[]),
+    closure_registry("crypto-common", "0.1.7", &[]),
+    closure_registry("curve25519-dalek", "4.1.3", &["digest", "zeroize"]),
+    closure_registry("curve25519-dalek-derive", "0.1.1", &[]),
+    closure_registry(
+        "digest",
+        "0.10.7",
+        &["block-buffer", "core-api", "default", "mac", "subtle"],
+    ),
+    closure_registry("document-features", "0.2.12", &["default"]),
+    closure_registry("ed25519", "2.2.3", &[]),
+    closure_registry("ed25519-dalek", "2.2.0", &["zeroize"]),
+    closure_registry("embassy-sync", "0.8.0", &[]),
+    closure_registry("embassy-time", "0.5.0", &[]),
+    closure_registry("embassy-time-driver", "0.2.2", &[]),
+    closure_registry("embedded-hal", "0.2.7", &[]),
+    closure_registry("embedded-hal", "1.0.0", &[]),
+    closure_registry("embedded-hal-async", "1.0.0", &[]),
+    closure_registry("embedded-io", "0.6.1", &[]),
+    closure_registry("embedded-io", "0.7.1", &[]),
+    closure_registry("embedded-io-async", "0.6.1", &[]),
+    closure_registry("embedded-io-async", "0.7.0", &[]),
+    closure_registry("fiat-crypto", "0.2.9", &[]),
+    closure_registry("futures-core", "0.3.32", &[]),
+    closure_registry("futures-sink", "0.3.32", &[]),
+    closure_registry("generic-array", "0.14.7", &["more_lengths"]),
+    closure_registry("hash32", "0.3.1", &[]),
+    closure_registry("heapless", "0.8.0", &[]),
+    closure_registry("heapless", "0.9.3", &[]),
+    closure_registry("hkdf", "0.12.4", &[]),
+    closure_registry("hmac", "0.12.1", &[]),
+    closure_registry("inout", "0.1.4", &[]),
+    closure_registry("libc", "0.2.186", &[]),
+    closure_registry("litrs", "1.0.0", &[]),
+    closure_registry("lora-modulation", "0.1.5", &[]),
+    closure_registry("nb", "0.1.3", &[]),
+    closure_registry("nb", "1.1.0", &[]),
+    closure_registry("proc-macro2", "1.0.106", &["default", "proc-macro"]),
+    closure_registry("quote", "1.0.46", &["default", "proc-macro"]),
+    closure_registry("rand_core", "0.6.4", &[]),
+    closure_git("rete-core", "0.1.0", &["alloc", "default"]),
+    closure_git("rete-stack", "0.1.0", &["alloc"]),
+    closure_git("rete-transport", "0.1.0", &[]),
+    closure_local(
+        "reticulum-interface-router",
+        "crates/interface-router/Cargo.toml",
+        &[],
+    ),
+    closure_local("reticulum-node-core", "crates/node-core/Cargo.toml", &[]),
+    closure_local(
+        "reticulum-radio-interface",
+        "crates/radio-interface/Cargo.toml",
+        &[],
+    ),
+    closure_local(
+        "reticulum-radio-tx-dispatch",
+        "crates/radio-tx-dispatch/Cargo.toml",
+        &["default"],
+    ),
+    closure_local(
+        "reticulum-rns-conformance",
+        "crates/rns-conformance/Cargo.toml",
+        &[],
+    ),
+    closure_local("reticulum-rns-rete", "crates/rns-rete/Cargo.toml", &[]),
+    closure_local("reticulum-tx-handoff", "crates/tx-handoff/Cargo.toml", &[]),
+    closure_registry("sha2", "0.10.9", &[]),
+    closure_registry("signature", "2.2.0", &[]),
+    closure_registry("stable_deref_trait", "1.2.1", &[]),
+    closure_registry("subtle", "2.6.1", &[]),
+    closure_registry(
+        "syn",
+        "2.0.118",
+        &[
+            "clone-impls",
+            "default",
+            "derive",
+            "extra-traits",
+            "full",
+            "parsing",
+            "printing",
+            "proc-macro",
+            "visit",
+        ],
+    ),
+    closure_registry("typenum", "1.20.1", &[]),
+    closure_registry("unicode-ident", "1.0.24", &[]),
+    closure_registry("void", "1.0.2", &[]),
+    closure_registry("x25519-dalek", "2.0.1", &["static_secrets", "zeroize"]),
+    closure_registry("zeroize", "1.9.0", &["derive", "zeroize_derive"]),
+    closure_registry("zeroize_derive", "1.5.0", &[]),
+];
+
+fn reviewed_closure_display(
+    package: ReviewedClosurePackage,
+    workspace: &Path,
+) -> Result<String, String> {
+    let base = format!("{} v{}", package.name, package.version);
+    match package.source {
+        ReviewedClosureSource::Local(relative_manifest) => {
+            let crate_directory = workspace
+                .join(relative_manifest)
+                .parent()
+                .ok_or_else(|| format!("reviewed manifest {relative_manifest} has no parent"))?
+                .to_owned();
+            Ok(format!("{base} ({})", crate_directory.display()))
+        }
+        ReviewedClosureSource::Registry => Ok(base),
+        ReviewedClosureSource::Git(source) => {
+            let source = source
+                .strip_prefix("git+")
+                .ok_or_else(|| format!("reviewed git source for {} lacks git+", package.name))?;
+            let (url, revision) = source.rsplit_once('#').ok_or_else(|| {
+                format!("reviewed git source for {} lacks a revision", package.name)
+            })?;
+            let short_revision = revision.get(..8).ok_or_else(|| {
+                format!("reviewed git revision for {} is too short", package.name)
+            })?;
+            Ok(format!("{base} ({url}#{short_revision})"))
+        }
+    }
+}
+
+fn metadata_matches_reviewed_closure_package(
+    package: &serde_json::Value,
+    reviewed: ReviewedClosurePackage,
+    workspace: &Path,
+) -> bool {
+    if package["name"].as_str() != Some(reviewed.name)
+        || package["version"].as_str() != Some(reviewed.version)
+    {
+        return false;
+    }
+    match reviewed.source {
+        ReviewedClosureSource::Local(relative_manifest) => {
+            package["source"].is_null()
+                && package["manifest_path"].as_str().map(Path::new)
+                    == Some(workspace.join(relative_manifest).as_path())
+        }
+        ReviewedClosureSource::Registry => package["source"].as_str() == Some(CRATES_IO_SOURCE),
+        ReviewedClosureSource::Git(source) => package["source"].as_str() == Some(source),
+    }
+}
+
+fn validate_radio_tx_dispatch_resolved_closure(
+    metadata_json: &str,
+    cargo_tree: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+
+    let expected_displays = RADIO_TX_DISPATCH_REVIEWED_CLOSURE
+        .iter()
+        .copied()
+        .map(|package| reviewed_closure_display(package, workspace))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut seen = BTreeSet::new();
+    for (line_index, line) in cargo_tree.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let (display, feature_text) = line.split_once('\t').ok_or_else(|| {
+            format!(
+                "resolved closure line {} has no feature separator: {line:?}",
+                line_index + 1
+            )
+        })?;
+        let display = display.strip_suffix(" (proc-macro)").unwrap_or(display);
+        let reviewed_indices = expected_displays
+            .iter()
+            .enumerate()
+            .filter_map(|(index, expected)| (expected == display).then_some(index))
+            .collect::<Vec<_>>();
+        if reviewed_indices.len() != 1 {
+            let mut words = display.split_whitespace();
+            let name = words.next().unwrap_or("<unknown>");
+            let version = words
+                .next()
+                .and_then(|version| version.strip_prefix('v'))
+                .unwrap_or("<unknown>");
+            let category = packages
+                .iter()
+                .filter(|package| {
+                    package["name"].as_str() == Some(name)
+                        && package["version"].as_str() == Some(version)
+                })
+                .find_map(|package| {
+                    forbidden_radio_tx_dispatch_closure_category(package, workspace)
+                });
+            return Err(if let Some(category) = category {
+                format!(
+                    "resolved normal closure contains unreviewed {category} package identity {display}"
+                )
+            } else {
+                format!("resolved normal closure contains unreviewed package identity {display}")
+            });
+        }
+        let reviewed_index = reviewed_indices[0];
+        let reviewed = RADIO_TX_DISPATCH_REVIEWED_CLOSURE[reviewed_index];
+        let matching_metadata = packages
+            .iter()
+            .filter(|package| {
+                metadata_matches_reviewed_closure_package(package, reviewed, workspace)
+            })
+            .count();
+        if matching_metadata != 1 {
+            return Err(format!(
+                "reviewed closure identity {display} must have exactly one matching metadata package, found {matching_metadata}"
+            ));
+        }
+
+        let actual_features = if feature_text.is_empty() {
+            BTreeSet::new()
+        } else {
+            let features = feature_text.split(',').collect::<BTreeSet<_>>();
+            if features.len() != feature_text.split(',').count() {
+                return Err(format!(
+                    "resolved closure identity {display} repeats an enabled feature"
+                ));
+            }
+            features
+        };
+        let expected_features = reviewed.features.iter().copied().collect::<BTreeSet<_>>();
+        if actual_features != expected_features {
+            return Err(format!(
+                "resolved closure identity {display} enables features {actual_features:?}, expected exactly {expected_features:?}"
+            ));
+        }
+        seen.insert(reviewed_index);
+    }
+
+    if seen.len() != RADIO_TX_DISPATCH_REVIEWED_CLOSURE.len() {
+        let missing = RADIO_TX_DISPATCH_REVIEWED_CLOSURE
+            .iter()
+            .enumerate()
+            .filter(|(index, _package)| !seen.contains(index))
+            .map(|(_index, package)| format!("{} v{}", package.name, package.version))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "resolved normal closure is missing reviewed package identities: {missing}"
+        ));
+    }
+
+    Ok(())
+}
+
 fn validate_storage_model_dependency_boundary(
     metadata_json: &str,
     workspace: &Path,
@@ -1638,9 +3372,9 @@ fn validate_storage_actor_dependency_boundary(
     {
         return Err("reticulum-storage-actor must not have build dependencies".to_owned());
     }
-    if dependencies.len() != 9 {
+    if dependencies.len() != 6 {
         return Err(format!(
-            "reticulum-storage-actor must have exactly nine reviewed dependencies, found {}",
+            "reticulum-storage-actor must have exactly six reviewed dependencies, found {}",
             dependencies.len()
         ));
     }
@@ -1649,9 +3383,9 @@ fn validate_storage_actor_dependency_boundary(
         .iter()
         .filter(|dependency| dependency["kind"].is_null())
         .collect::<Vec<_>>();
-    if normal.len() != 6 {
+    if normal.len() != 5 {
         return Err(format!(
-            "reticulum-storage-actor must have exactly six normal dependencies, found {}",
+            "reticulum-storage-actor must have exactly five normal dependencies, found {}",
             normal.len()
         ));
     }
@@ -1687,7 +3421,6 @@ fn validate_storage_actor_dependency_boundary(
             "reticulum-submission-projector",
             "crates/submission-projector",
         ),
-        ("reticulum-tx-dispatch", "crates/tx-dispatch"),
     ] {
         let expected_path = workspace.join(relative_path);
         let dependency = normal
@@ -1717,57 +3450,147 @@ fn validate_storage_actor_dependency_boundary(
         .iter()
         .filter(|dependency| dependency["kind"].as_str() == Some("dev"))
         .collect::<Vec<_>>();
-    if development.len() != 3 {
+    if development.len() != 1 {
         return Err(format!(
-            "reticulum-storage-actor must have exactly three reviewed dev dependencies, found {}",
+            "reticulum-storage-actor must have exactly one reviewed dev dependency, found {}",
             development.len()
         ));
     }
 
-    for (name, requirement) in [("embassy-sync", "=0.8.0"), ("rand_core", "=0.6.4")] {
-        let dependency = development
-            .iter()
-            .filter(|dependency| dependency["name"].as_str() == Some(name))
-            .collect::<Vec<_>>();
-        if dependency.len() != 1
-            || dependency[0]["req"].as_str() != Some(requirement)
-            || dependency[0]["source"].as_str()
-                != Some("registry+https://github.com/rust-lang/crates.io-index")
-            || !dependency[0]["path"].is_null()
-            || dependency[0]["optional"].as_bool() != Some(false)
-            || !dependency[0]["rename"].is_null()
-            || !dependency[0]["target"].is_null()
-            || dependency[0]["uses_default_features"].as_bool() != Some(false)
-            || dependency[0]["features"]
-                .as_array()
-                .is_none_or(|features| !features.is_empty())
-        {
-            return Err(format!(
-                "reticulum-storage-actor dev dependency {name} must be the unconditional feature-free registry {requirement} pin"
-            ));
-        }
-    }
-
-    let handoff_path = workspace.join("crates/tx-handoff");
-    let handoff = development
+    let rand_core = development
         .iter()
-        .filter(|dependency| dependency["name"].as_str() == Some("reticulum-tx-handoff"))
+        .filter(|dependency| dependency["name"].as_str() == Some("rand_core"))
         .collect::<Vec<_>>();
-    if handoff.len() != 1
-        || handoff[0]["req"].as_str() != Some("*")
-        || handoff[0]["path"].as_str().map(Path::new) != Some(handoff_path.as_path())
-        || !handoff[0]["source"].is_null()
-        || handoff[0]["optional"].as_bool() != Some(false)
-        || !handoff[0]["rename"].is_null()
-        || !handoff[0]["target"].is_null()
-        || handoff[0]["uses_default_features"].as_bool() != Some(false)
-        || handoff[0]["features"]
+    if rand_core.len() != 1
+        || rand_core[0]["req"].as_str() != Some("=0.6.4")
+        || rand_core[0]["source"].as_str()
+            != Some("registry+https://github.com/rust-lang/crates.io-index")
+        || !rand_core[0]["path"].is_null()
+        || rand_core[0]["optional"].as_bool() != Some(false)
+        || !rand_core[0]["rename"].is_null()
+        || !rand_core[0]["target"].is_null()
+        || rand_core[0]["uses_default_features"].as_bool() != Some(false)
+        || rand_core[0]["features"]
             .as_array()
             .is_none_or(|features| !features.is_empty())
     {
+        return Err(
+            "reticulum-storage-actor dev dependency rand_core must be the unconditional feature-free registry =0.6.4 pin"
+                .to_owned(),
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_submission_runtime_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let package_name = "reticulum-submission-runtime";
+    let package = exact_local_package(
+        packages,
+        workspace,
+        package_name,
+        "crates/submission-runtime/Cargo.toml",
+    )?;
+    let features = package["features"]
+        .as_object()
+        .ok_or_else(|| format!("{package_name} package has no feature map"))?;
+    if features.len() != 1
+        || features
+            .get("default")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|values| !values.is_empty())
+    {
         return Err(format!(
-            "reticulum-tx-handoff must be one unconditional feature-free local dev dependency at {}",
-            handoff_path.display()
+            "{package_name} must expose only one empty default feature"
+        ));
+    }
+
+    let dependencies = package["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{package_name} package has no dependency array"))?;
+    if dependencies.len() != 9
+        || dependencies
+            .iter()
+            .any(|dependency| dependency["kind"].as_str() == Some("build"))
+    {
+        return Err(format!(
+            "{package_name} must have exactly eight reviewed normal dependencies and one reviewed test dependency"
+        ));
+    }
+    validate_exact_registry_dependency(
+        dependencies,
+        package_name,
+        "embassy-sync",
+        "=0.8.0",
+        None,
+        false,
+        &[],
+    )?;
+    validate_exact_registry_dependency(
+        dependencies,
+        package_name,
+        "embedded-storage",
+        "=0.3.1",
+        None,
+        false,
+        &[],
+    )?;
+    validate_exact_registry_dependency(
+        dependencies,
+        package_name,
+        "rand_core",
+        "=0.6.4",
+        None,
+        false,
+        &[],
+    )?;
+    for (name, relative_path) in [
+        ("reticulum-node-core", "crates/node-core"),
+        ("reticulum-storage-actor", "crates/storage-actor"),
+        ("reticulum-storage-model", "crates/storage-model"),
+        (
+            "reticulum-submission-projector",
+            "crates/submission-projector",
+        ),
+        ("reticulum-tx-supervisor", "crates/tx-supervisor"),
+    ] {
+        validate_exact_local_dependency(
+            dependencies,
+            package_name,
+            name,
+            &workspace.join(relative_path),
+            false,
+        )?;
+    }
+
+    let journal = exact_dependency(
+        dependencies,
+        package_name,
+        "reticulum-storage-journal",
+        Some("dev"),
+    )?;
+    let expected_journal_path = workspace.join("crates/storage-journal");
+    if journal["req"].as_str() != Some("*")
+        || !journal["source"].is_null()
+        || journal["path"].as_str().map(Path::new) != Some(expected_journal_path.as_path())
+        || journal["optional"].as_bool() != Some(false)
+        || !journal["rename"].is_null()
+        || !journal["target"].is_null()
+        || journal["uses_default_features"].as_bool() != Some(false)
+        || journal["features"]
+            .as_array()
+            .is_none_or(|values| !values.is_empty())
+    {
+        return Err(format!(
+            "{package_name} has an unreviewed test-only storage-journal dependency shape"
         ));
     }
 
@@ -1808,17 +3631,19 @@ fn validate_device_api_adapter_dependency_boundary(
     let default = features
         .get("default")
         .and_then(serde_json::Value::as_array);
-    let host_sim = features
-        .get("host-sim")
+    let experimental_rns_data = features
+        .get("experimental-rns-data")
         .and_then(serde_json::Value::as_array);
     if features.len() != 2
         || default.is_none_or(|default| !default.is_empty())
-        || host_sim.is_none_or(|host_sim| {
-            host_sim.len() != 1 || host_sim[0].as_str() != Some("reticulum-device-api/host-sim")
+        || experimental_rns_data.is_none_or(|experimental_rns_data| {
+            experimental_rns_data.len() != 1
+                || experimental_rns_data[0].as_str()
+                    != Some("reticulum-device-api/experimental-rns-data")
         })
     {
         return Err(
-            "reticulum-device-api-adapter must expose only default=[] and host-sim=[reticulum-device-api/host-sim]"
+            "reticulum-device-api-adapter must expose only default=[] and experimental-rns-data=[reticulum-device-api/experimental-rns-data]"
                 .to_owned(),
         );
     }
@@ -1826,19 +3651,29 @@ fn validate_device_api_adapter_dependency_boundary(
     let dependencies = package["dependencies"]
         .as_array()
         .ok_or_else(|| "reticulum-device-api-adapter package has no dependency array".to_owned())?;
-    if dependencies
-        .iter()
-        .any(|dependency| !dependency["kind"].is_null())
-    {
-        return Err(
-            "reticulum-device-api-adapter must not have build or development dependencies"
-                .to_owned(),
-        );
-    }
     if dependencies.len() != 4 {
         return Err(format!(
-            "reticulum-device-api-adapter must have exactly four reviewed normal dependencies, found {}",
+            "reticulum-device-api-adapter must have exactly two reviewed normal and two reviewed test dependencies, found {} total",
             dependencies.len()
+        ));
+    }
+
+    let normal_count = dependencies
+        .iter()
+        .filter(|dependency| dependency["kind"].is_null())
+        .count();
+    let dev_count = dependencies
+        .iter()
+        .filter(|dependency| dependency["kind"].as_str() == Some("dev"))
+        .count();
+    if normal_count != 2
+        || dev_count != 2
+        || dependencies.iter().any(|dependency| {
+            !dependency["kind"].is_null() && dependency["kind"].as_str() != Some("dev")
+        })
+    {
+        return Err(format!(
+            "reticulum-device-api-adapter must have exactly two normal and two dev dependencies, found normal={normal_count} dev={dev_count}"
         ));
     }
 
@@ -1854,21 +3689,26 @@ fn validate_device_api_adapter_dependency_boundary(
         || embedded_storage[0]["optional"].as_bool() != Some(false)
         || !embedded_storage[0]["rename"].is_null()
         || !embedded_storage[0]["target"].is_null()
+        || embedded_storage[0]["kind"].as_str() != Some("dev")
         || embedded_storage[0]["uses_default_features"].as_bool() != Some(false)
         || embedded_storage[0]["features"]
             .as_array()
             .is_none_or(|features| !features.is_empty())
     {
         return Err(
-            "embedded-storage must be the unconditional feature-free registry =0.3.1 normal dependency"
+            "embedded-storage must be the unconditional feature-free registry =0.3.1 dev dependency"
                 .to_owned(),
         );
     }
 
-    for (name, relative_path) in [
-        ("reticulum-device-api", "crates/device-api"),
-        ("reticulum-storage-actor", "crates/storage-actor"),
-        ("reticulum-storage-model", "crates/storage-model"),
+    for (name, relative_path, expected_kind) in [
+        ("reticulum-device-api", "crates/device-api", None),
+        (
+            "reticulum-storage-actor",
+            "crates/storage-actor",
+            Some("dev"),
+        ),
+        ("reticulum-storage-model", "crates/storage-model", None),
     ] {
         let expected_path = workspace.join(relative_path);
         let dependency = dependencies
@@ -1882,13 +3722,18 @@ fn validate_device_api_adapter_dependency_boundary(
             || dependency[0]["optional"].as_bool() != Some(false)
             || !dependency[0]["rename"].is_null()
             || !dependency[0]["target"].is_null()
+            || match expected_kind {
+                Some(kind) => dependency[0]["kind"].as_str() != Some(kind),
+                None => !dependency[0]["kind"].is_null(),
+            }
             || dependency[0]["uses_default_features"].as_bool() != Some(false)
             || dependency[0]["features"]
                 .as_array()
                 .is_none_or(|features| !features.is_empty())
         {
             return Err(format!(
-                "{name} must be one unconditional feature-free local normal dependency at {}",
+                "{name} must be one unconditional feature-free local {} dependency at {}",
+                expected_kind.unwrap_or("normal"),
                 expected_path.display()
             ));
         }
@@ -1942,6 +3787,7 @@ fn validate_storage_hil_dependency_boundary(
         "esp-println",
         "esp-storage",
         "log",
+        "reticulum-nor-flash-region",
         "reticulum-storage-journal",
         "reticulum-storage-model",
     ]);
@@ -1967,6 +3813,7 @@ fn validate_storage_hil_dependency_boundary(
         );
     }
     for (name, relative_path) in [
+        ("reticulum-nor-flash-region", "crates/nor-flash-region"),
         ("reticulum-storage-journal", "crates/storage-journal"),
         ("reticulum-storage-model", "crates/storage-model"),
     ] {
@@ -2094,9 +3941,9 @@ fn validate_submission_projector_dependency_boundary(
     {
         return Err("reticulum-submission-projector must not have build dependencies".to_owned());
     }
-    if dependencies.len() != 5 {
+    if dependencies.len() != 4 {
         return Err(format!(
-            "reticulum-submission-projector must have exactly five reviewed dependencies, found {}",
+            "reticulum-submission-projector must have exactly four reviewed dependencies, found {}",
             dependencies.len()
         ));
     }
@@ -2105,16 +3952,15 @@ fn validate_submission_projector_dependency_boundary(
         .iter()
         .filter(|dependency| dependency["kind"].is_null())
         .collect::<Vec<_>>();
-    if normal.len() != 3 {
+    if normal.len() != 2 {
         return Err(format!(
-            "reticulum-submission-projector must have exactly three normal dependencies, found {}",
+            "reticulum-submission-projector must have exactly two normal dependencies, found {}",
             normal.len()
         ));
     }
     for (name, relative_path) in [
         ("reticulum-node-core", "crates/node-core"),
         ("reticulum-storage-model", "crates/storage-model"),
-        ("reticulum-tx-dispatch", "crates/tx-dispatch"),
     ] {
         let expected_path = workspace.join(relative_path);
         let dependency = normal
@@ -2247,9 +4093,9 @@ fn validate_tx_supervisor_dependency_boundary(
     {
         return Err("reticulum-tx-supervisor must not have build dependencies".to_owned());
     }
-    if dependencies.len() != 8 {
+    if dependencies.len() != 10 {
         return Err(format!(
-            "reticulum-tx-supervisor must have exactly eight reviewed dependencies, found {}",
+            "reticulum-tx-supervisor must have exactly ten reviewed dependencies, found {}",
             dependencies.len()
         ));
     }
@@ -2258,16 +4104,18 @@ fn validate_tx_supervisor_dependency_boundary(
         .iter()
         .filter(|dependency| dependency["kind"].is_null())
         .collect::<Vec<_>>();
-    if normal.len() != 6 {
+    if normal.len() != 8 {
         return Err(format!(
-            "reticulum-tx-supervisor must have exactly six normal dependencies, found {}",
+            "reticulum-tx-supervisor must have exactly eight normal dependencies, found {}",
             normal.len()
         ));
     }
 
     for (name, relative_path) in [
+        ("reticulum-interface-router", "crates/interface-router"),
         ("reticulum-node-core", "crates/node-core"),
         ("reticulum-tx-dispatch", "crates/tx-dispatch"),
+        ("reticulum-tx-handoff", "crates/tx-handoff"),
     ] {
         let expected_path = workspace.join(relative_path);
         let dependency = normal
@@ -2333,26 +4181,26 @@ fn validate_tx_supervisor_dependency_boundary(
         ));
     }
 
-    let handoff_path = workspace.join("crates/tx-handoff");
-    let handoff = development
+    let rns_path = workspace.join("crates/rns-rete");
+    let rns_rete = development
         .iter()
-        .filter(|dependency| dependency["name"].as_str() == Some("reticulum-tx-handoff"))
+        .filter(|dependency| dependency["name"].as_str() == Some("reticulum-rns-rete"))
         .collect::<Vec<_>>();
-    if handoff.len() != 1
-        || handoff[0]["req"].as_str() != Some("*")
-        || handoff[0]["path"].as_str().map(Path::new) != Some(handoff_path.as_path())
-        || !handoff[0]["source"].is_null()
-        || handoff[0]["optional"].as_bool() != Some(false)
-        || !handoff[0]["rename"].is_null()
-        || !handoff[0]["target"].is_null()
-        || handoff[0]["uses_default_features"].as_bool() != Some(false)
-        || handoff[0]["features"]
+    if rns_rete.len() != 1
+        || rns_rete[0]["req"].as_str() != Some("*")
+        || rns_rete[0]["path"].as_str().map(Path::new) != Some(rns_path.as_path())
+        || !rns_rete[0]["source"].is_null()
+        || rns_rete[0]["optional"].as_bool() != Some(false)
+        || !rns_rete[0]["rename"].is_null()
+        || !rns_rete[0]["target"].is_null()
+        || rns_rete[0]["uses_default_features"].as_bool() != Some(false)
+        || rns_rete[0]["features"]
             .as_array()
             .is_none_or(|features| !features.is_empty())
     {
         return Err(format!(
-            "reticulum-tx-handoff must be one feature-free local dev dependency at {}",
-            handoff_path.display()
+            "reticulum-rns-rete must be one feature-free local dev dependency at {}",
+            rns_path.display()
         ));
     }
 
@@ -2574,8 +4422,12 @@ fn validate_firmware_dependency_boundary(
         "reticulum-board-heltec-tracker-v2-radio",
         "reticulum-board-heltec-tracker-v2-tx-hil",
         "reticulum-device-api-adapter",
+        "reticulum-device-api-framing",
+        "reticulum-device-api-handoff",
         "reticulum-node-core",
+        "reticulum-radio-tx-dispatch",
         "reticulum-rns-rete",
+        "reticulum-semantic-roundtrip-hil",
         "reticulum-storage-actor",
         "reticulum-storage-journal",
         "reticulum-storage-model",
@@ -2612,7 +4464,11 @@ fn validate_firmware_dependency_boundary(
                     "reticulum-board-heltec-tracker-v2-radio"
                         | "reticulum-board-heltec-tracker-v2-tx-hil"
                         | "reticulum-device-api-adapter"
+                        | "reticulum-device-api-framing"
+                        | "reticulum-device-api-handoff"
                         | "reticulum-node-core"
+                        | "reticulum-radio-tx-dispatch"
+                        | "reticulum-semantic-roundtrip-hil"
                         | "reticulum-storage-actor"
                         | "reticulum-storage-journal"
                         | "reticulum-storage-model"
@@ -4154,6 +6010,26 @@ mod tests {
     }
 
     #[test]
+    fn interface_neutral_rns_closure_rejects_rnode_and_lora_packages() {
+        validate_interface_neutral_rns_closure(
+            "node core",
+            "reticulum-node-core v0.1.0\nreticulum-rns-rete v0.1.0\nrete-core v0.1.0",
+        )
+        .unwrap();
+
+        for forbidden in INTERFACE_NEUTRAL_RNS_FORBIDDEN {
+            assert!(
+                validate_interface_neutral_rns_closure(
+                    "node core",
+                    &format!("reticulum-node-core v0.1.0\n{forbidden} v0.1.0"),
+                )
+                .is_err(),
+                "accepted forbidden package {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn resolved_rete_pin_is_tied_to_reported_metadata() {
         let source = "https://github.com/example/rete";
         let revision = "0123456789abcdef0123456789abcdef01234567";
@@ -4335,7 +6211,11 @@ mod tests {
             "lora-phy",
             "reticulum-rns-rete",
             "reticulum-device-api-adapter",
+            "reticulum-device-api-framing",
+            "reticulum-device-api-handoff",
             "reticulum-node-core",
+            "reticulum-radio-tx-dispatch",
+            "reticulum-semantic-roundtrip-hil",
             "reticulum-storage-actor",
             "reticulum-storage-journal",
             "reticulum-storage-model",
@@ -4361,7 +6241,27 @@ mod tests {
                 "reticulum-device-api-adapter",
                 "crates/device-api-adapter",
             ),
+            (
+                "device-api-framing-id",
+                "reticulum-device-api-framing",
+                "crates/device-api-framing",
+            ),
+            (
+                "device-api-handoff-id",
+                "reticulum-device-api-handoff",
+                "crates/device-api-handoff",
+            ),
             ("node-core-id", "reticulum-node-core", "crates/node-core"),
+            (
+                "radio-tx-dispatch-id",
+                "reticulum-radio-tx-dispatch",
+                "crates/radio-tx-dispatch",
+            ),
+            (
+                "semantic-roundtrip-hil-id",
+                "reticulum-semantic-roundtrip-hil",
+                "crates/semantic-roundtrip-hil",
+            ),
             (
                 "storage-actor-id",
                 "reticulum-storage-actor",
@@ -4440,8 +6340,14 @@ mod tests {
         for forbidden in [
             "reticulum-board-heltec-tracker-v2-radio",
             "reticulum-board-heltec-tracker-v2-tx-hil",
+            "reticulum-board-heltec-vision-master-e290-radio",
             "reticulum-device-api-adapter",
+            "reticulum-device-api-framing",
+            "reticulum-device-api-handoff",
             "reticulum-node-core",
+            "reticulum-radio-tx-dispatch",
+            "reticulum-radio-lora-phy",
+            "reticulum-semantic-roundtrip-hil",
             "reticulum-storage-actor",
             "reticulum-storage-journal",
             "reticulum-storage-model",
@@ -4481,7 +6387,9 @@ mod tests {
         let valid = "reticulum-heltec-tracker-v2-tx-hil v0.1.0\n\
                      ├── reticulum-board-heltec-tracker-v2-tx-hil v0.1.0\n\
                      │   └── reticulum-board-heltec-tracker-v2-radio v0.1.0\n\
-                     └── reticulum-radio-interface v0.1.0";
+                     ├── reticulum-radio-lora-phy v0.1.0\n\
+                     ├── reticulum-radio-interface v0.1.0\n\
+                     └── reticulum-semantic-roundtrip-hil v0.1.0 features=[]";
         validate_tx_hil_graph_boundary(valid).unwrap();
 
         for missing in TX_HIL_GRAPH_REQUIRED {
@@ -4498,10 +6406,12 @@ mod tests {
 
     #[test]
     fn semantic_tx_hil_graph_requires_exact_rete_surface_and_excludes_product_stack() {
-        let valid = "reticulum-heltec-tracker-v2-tx-hil v0.1.0 features=[semantic-announce-hil]\n\
+        let valid = "reticulum-heltec-tracker-v2-tx-hil v0.1.0 features=[semantic-announce-hil,tracker-radio]\n\
                      ├── reticulum-board-heltec-tracker-v2-tx-hil v0.1.0 features=[]\n\
                      │   └── reticulum-board-heltec-tracker-v2-radio v0.1.0 features=[]\n\
                      ├── reticulum-radio-interface v0.1.0 features=[]\n\
+                     ├── reticulum-radio-lora-phy v0.1.0 features=[]\n\
+                     ├── reticulum-semantic-roundtrip-hil v0.1.0 features=[semantic-announce-hil]\n\
                      └── reticulum-rns-rete v0.1.0 features=[conformance]\n\
                          ├── rete-core v0.1.0 features=[alloc,default]\n\
                          ├── rete-stack v0.1.0 features=[alloc]\n\
@@ -4519,7 +6429,10 @@ mod tests {
             assert!(error.contains(forbidden), "{error}");
         }
 
-        let no_root_feature = valid.replace("features=[semantic-announce-hil]", "features=[]");
+        let no_root_feature = valid.replace(
+            "features=[semantic-announce-hil,tracker-radio]",
+            "features=[]",
+        );
         assert!(validate_semantic_tx_hil_graph_boundary(&no_root_feature).is_err());
 
         let no_conformance = valid.replace(
@@ -4531,10 +6444,12 @@ mod tests {
 
     #[test]
     fn semantic_roundtrip_tx_hil_graph_requires_product_rete_surface_and_static_owner() {
-        let valid = "reticulum-heltec-tracker-v2-tx-hil v0.1.0 features=[semantic-roundtrip-hil]\n\
+        let valid = "reticulum-heltec-tracker-v2-tx-hil v0.1.0 features=[semantic-roundtrip-hil,tracker-radio]\n\
                      ├── reticulum-board-heltec-tracker-v2-tx-hil v0.1.0 features=[]\n\
                      │   └── reticulum-board-heltec-tracker-v2-radio v0.1.0 features=[]\n\
                      ├── reticulum-radio-interface v0.1.0 features=[]\n\
+                     ├── reticulum-radio-lora-phy v0.1.0 features=[]\n\
+                     ├── reticulum-semantic-roundtrip-hil v0.1.0 features=[semantic-roundtrip-hil]\n\
                      ├── reticulum-rns-rete v0.1.0 features=[]\n\
                      │   ├── rete-core v0.1.0 features=[alloc,default]\n\
                      │   ├── rete-stack v0.1.0 features=[alloc]\n\
@@ -4553,7 +6468,10 @@ mod tests {
             assert!(error.contains(forbidden), "{error}");
         }
 
-        let no_root_feature = valid.replace("features=[semantic-roundtrip-hil]", "features=[]");
+        let no_root_feature = valid.replace(
+            "features=[semantic-roundtrip-hil,tracker-radio]",
+            "features=[]",
+        );
         assert!(validate_semantic_roundtrip_tx_hil_graph_boundary(&no_root_feature).is_err());
 
         let conformance = valid.replace(
@@ -4564,6 +6482,99 @@ mod tests {
 
         let no_static = valid.replace("static_cell", "missing-static-owner");
         assert!(validate_semantic_roundtrip_tx_hil_graph_boundary(&no_static).is_err());
+    }
+
+    #[test]
+    fn e290_semantic_hil_reuses_only_board_independent_policy() {
+        let valid = "reticulum-heltec-vision-master-e290-semantic-hil v0.1.0 features=[]\n\
+                     ├── reticulum-board-heltec-vision-master-e290-radio v0.1.0 features=[]\n\
+                     │   ├── reticulum-board-heltec-vision-master-e290 v0.1.0 features=[]\n\
+                     │   └── reticulum-radio-lora-phy v0.1.0 features=[]\n\
+                     ├── reticulum-radio-interface v0.1.0 features=[]\n\
+                     ├── reticulum-semantic-roundtrip-hil v0.1.0 features=[semantic-roundtrip-hil]\n\
+                     └── reticulum-rns-rete v0.1.0 features=[]\n\
+                         ├── rete-core v0.1.0 features=[alloc,default]\n\
+                         ├── rete-stack v0.1.0 features=[alloc]\n\
+                         └── rete-transport v0.1.0 features=[]";
+        validate_e290_semantic_hil_graph_boundary(valid).unwrap();
+
+        for missing in E290_SEMANTIC_HIL_GRAPH_REQUIRED {
+            let tree = valid.replace(missing, "missing-required-package");
+            let error = validate_e290_semantic_hil_graph_boundary(&tree).unwrap_err();
+            assert!(error.contains(missing), "{error}");
+        }
+        for forbidden in E290_SEMANTIC_HIL_GRAPH_FORBIDDEN {
+            let tree = format!("{valid}\n└── {forbidden} v0.1.0 features=[]");
+            let error = validate_e290_semantic_hil_graph_boundary(&tree).unwrap_err();
+            assert!(error.contains(forbidden), "{error}");
+        }
+
+        let wrong_policy_feature = valid.replace(
+            "features=[semantic-roundtrip-hil]",
+            "features=[semantic-announce-hil,semantic-roundtrip-hil]",
+        );
+        assert!(validate_e290_semantic_hil_graph_boundary(&wrong_policy_feature).is_err());
+    }
+
+    #[test]
+    fn permanent_e290_node_graph_is_lora_first_with_transport_neutral_durability() {
+        let valid = "reticulum-heltec-vision-master-e290-node v0.1.0 features=[]\n\
+                     ├── embedded-storage v0.3.1 features=[]\n\
+                     ├── esp-storage v0.9.0 features=[critical-section,esp32s3]\n\
+                     ├── reticulum-announce-clock v0.1.0 features=[]\n\
+                     ├── reticulum-board-heltec-vision-master-e290-radio v0.1.0 features=[]\n\
+                     │   ├── reticulum-board-heltec-vision-master-e290 v0.1.0 features=[]\n\
+                     │   └── reticulum-radio-lora-phy v0.1.0 features=[]\n\
+                     ├── reticulum-device-api v0.1.0 features=[experimental-rns-data]\n\
+                     ├── reticulum-device-api-adapter v0.1.0 features=[experimental-rns-data]\n\
+                     ├── reticulum-device-identity-store v0.1.0 features=[]\n\
+                     ├── reticulum-interface-router v0.1.0 features=[]\n\
+                     ├── reticulum-node-core v0.1.0 features=[]\n\
+                     │   └── reticulum-rns-rete v0.1.0 features=[]\n\
+                     │       ├── rete-core v0.1.0 features=[alloc,default]\n\
+                     │       ├── rete-stack v0.1.0 features=[alloc]\n\
+                     │       └── rete-transport v0.1.0 features=[]\n\
+                     ├── reticulum-nor-flash-region v0.1.0 features=[]\n\
+                     ├── reticulum-radio-interface v0.1.0 features=[]\n\
+                     ├── reticulum-radio-tx-dispatch v0.1.0 features=[]\n\
+                     ├── reticulum-storage-actor v0.1.0 features=[]\n\
+                     ├── reticulum-storage-journal v0.1.0 features=[]\n\
+                     ├── reticulum-storage-model v0.1.0 features=[]\n\
+                     ├── reticulum-submission-projector v0.1.0 features=[]\n\
+                     ├── reticulum-submission-runtime v0.1.0 features=[]\n\
+                     ├── reticulum-tx-dispatch v0.1.0 features=[]\n\
+                     ├── reticulum-tx-handoff v0.1.0 features=[]\n\
+                     ├── reticulum-tx-supervisor v0.1.0 features=[]\n\
+                     └── static_cell v2.1.1 features=[]";
+        validate_e290_node_graph_boundary(valid).unwrap();
+
+        for missing in E290_NODE_GRAPH_REQUIRED {
+            let tree = valid.replace(missing, "missing-required-package");
+            let error = validate_e290_node_graph_boundary(&tree).unwrap_err();
+            assert!(error.contains(missing), "{error}");
+        }
+        for forbidden in E290_NODE_GRAPH_FORBIDDEN {
+            let tree = format!("{valid}\n└── {forbidden} v0.1.0 features=[]");
+            let error = validate_e290_node_graph_boundary(&tree).unwrap_err();
+            assert!(error.contains(forbidden), "{error}");
+        }
+
+        let hidden_feature = valid.replacen(
+            "reticulum-heltec-vision-master-e290-node v0.1.0 features=[]",
+            "reticulum-heltec-vision-master-e290-node v0.1.0 features=[future-transport]",
+            1,
+        );
+        assert!(validate_e290_node_graph_boundary(&hidden_feature).is_err());
+
+        for package in ["reticulum-device-api", "reticulum-device-api-adapter"] {
+            let expected = format!("{package} v0.1.0 features=[experimental-rns-data]");
+            let drifted = format!("{package} v0.1.0 features=[]");
+            let feature_drift = valid.replacen(&expected, &drifted, 1);
+            assert!(
+                validate_e290_node_graph_boundary(&feature_drift).is_err(),
+                "permanent node accepted missing experimental feature on {package}"
+            );
+        }
     }
 
     #[test]
@@ -4597,7 +6608,7 @@ mod tests {
         );
 
         let mut wrong_path = metadata.clone();
-        wrong_path["packages"][0]["dependencies"][8]["path"] =
+        wrong_path["packages"][0]["dependencies"][9]["path"] =
             serde_json::Value::String(root.join("elsewhere").display().to_string());
         assert!(validate_storage_hil_dependency_boundary(&wrong_path.to_string(), &root).is_err());
 
@@ -4666,6 +6677,7 @@ mod tests {
         validate_portable_layer_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_tx_handoff_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_tx_dispatch_dependency_boundary(&metadata.to_string(), &root).unwrap();
+        validate_radio_tx_dispatch_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_storage_model_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_storage_journal_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_storage_actor_dependency_boundary(&metadata.to_string(), &root).unwrap();
@@ -4678,6 +6690,63 @@ mod tests {
             serde_json::Value::String(root.join("elsewhere/Cargo.toml").display().to_string());
         assert!(
             validate_portable_layer_dependency_boundary(&wrong_path.to_string(), &root).is_err()
+        );
+    }
+
+    #[test]
+    fn device_api_edge_boundary_locks_framing_and_handoff_shapes() {
+        let root = workspace_root();
+        let metadata = device_api_edge_metadata_fixture(&root);
+        validate_device_api_edge_dependency_boundary(&metadata.to_string(), &root).unwrap();
+
+        let mut framing_dependency = metadata.clone();
+        fixture_package_mut(
+            &mut framing_dependency,
+            "reticulum-device-api-framing",
+        )["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(handoff_dependency_fixture("cobs", "=0.3.0", None));
+        assert!(
+            validate_device_api_edge_dependency_boundary(&framing_dependency.to_string(), &root,)
+                .is_err()
+        );
+
+        let mut wrong_sync = metadata.clone();
+        fixture_dependency_mut(
+            fixture_package_mut(&mut wrong_sync, "reticulum-device-api-handoff"),
+            "embassy-sync",
+            None,
+        )["req"] = serde_json::Value::String("=0.7.2".to_owned());
+        assert!(
+            validate_device_api_edge_dependency_boundary(&wrong_sync.to_string(), &root).is_err()
+        );
+
+        let mut wrong_api_path = metadata.clone();
+        fixture_dependency_mut(
+            fixture_package_mut(&mut wrong_api_path, "reticulum-device-api-handoff"),
+            "reticulum-device-api",
+            None,
+        )["path"] = serde_json::Value::String(root.join("elsewhere").display().to_string());
+        assert!(
+            validate_device_api_edge_dependency_boundary(&wrong_api_path.to_string(), &root)
+                .is_err()
+        );
+
+        let mut extra_handoff_dependency = metadata;
+        fixture_package_mut(
+            &mut extra_handoff_dependency,
+            "reticulum-device-api-handoff",
+        )["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(handoff_dependency_fixture("esp-hal", "=1.1.1", None));
+        assert!(
+            validate_device_api_edge_dependency_boundary(
+                &extra_handoff_dependency.to_string(),
+                &root,
+            )
+            .is_err()
         );
     }
 
@@ -4863,6 +6932,621 @@ mod tests {
     }
 
     #[test]
+    fn radio_interface_boundary_rejects_dependency_and_feature_drift() {
+        let root = workspace_root();
+        let baseline = portable_layers_metadata_fixture(&root);
+        validate_radio_interface_dependency_boundary(&baseline.to_string(), &root).unwrap();
+
+        let mut wrong_manifest = baseline.clone();
+        fixture_package_mut(&mut wrong_manifest, "reticulum-radio-interface")["manifest_path"] =
+            serde_json::Value::String(root.join("elsewhere/Cargo.toml").display().to_string());
+        assert!(
+            validate_radio_interface_dependency_boundary(&wrong_manifest.to_string(), &root)
+                .is_err()
+        );
+
+        let mut duplicate = baseline.clone();
+        duplicate["packages"]
+            .as_array_mut()
+            .unwrap()
+            .push(radio_interface_package_fixture(&root));
+        assert!(
+            validate_radio_interface_dependency_boundary(&duplicate.to_string(), &root).is_err()
+        );
+
+        let mut extra_feature = baseline.clone();
+        fixture_package_mut(&mut extra_feature, "reticulum-radio-interface")["features"]["default"] =
+            serde_json::json!([]);
+        assert!(
+            validate_radio_interface_dependency_boundary(&extra_feature.to_string(), &root)
+                .is_err()
+        );
+
+        for (name, kind) in [
+            ("lora-modulation", None),
+            ("reticulum-rns-conformance", None),
+            ("embassy-sync", Some("dev")),
+        ] {
+            let mut dependency_feature = baseline.clone();
+            fixture_dependency_mut(
+                fixture_package_mut(&mut dependency_feature, "reticulum-radio-interface"),
+                name,
+                kind,
+            )["features"] = serde_json::json!(["unreviewed"]);
+            assert!(
+                validate_radio_interface_dependency_boundary(
+                    &dependency_feature.to_string(),
+                    &root,
+                )
+                .is_err(),
+                "dependency {name} accepted an unreviewed feature"
+            );
+
+            for (field, value) in [
+                ("optional", serde_json::Value::Bool(true)),
+                (
+                    "rename",
+                    serde_json::Value::String("renamed-dependency".to_owned()),
+                ),
+                (
+                    "target",
+                    serde_json::Value::String("cfg(target_os = \"none\")".to_owned()),
+                ),
+            ] {
+                let mut changed = baseline.clone();
+                fixture_dependency_mut(
+                    fixture_package_mut(&mut changed, "reticulum-radio-interface"),
+                    name,
+                    kind,
+                )[field] = value;
+                assert!(
+                    validate_radio_interface_dependency_boundary(&changed.to_string(), &root)
+                        .is_err(),
+                    "dependency {name} accepted changed {field}"
+                );
+            }
+
+            let mut changed_defaults = baseline.clone();
+            let dependency = fixture_dependency_mut(
+                fixture_package_mut(&mut changed_defaults, "reticulum-radio-interface"),
+                name,
+                kind,
+            );
+            let reviewed_default = name == "reticulum-rns-conformance";
+            dependency["uses_default_features"] = serde_json::Value::Bool(!reviewed_default);
+            assert!(
+                validate_radio_interface_dependency_boundary(&changed_defaults.to_string(), &root,)
+                    .is_err(),
+                "dependency {name} accepted changed default-feature behavior"
+            );
+        }
+
+        for (name, kind, wrong_requirement) in [
+            ("lora-modulation", None, "=0.1.4"),
+            ("reticulum-rns-conformance", None, "=0.1.0"),
+            ("embassy-sync", Some("dev"), "=0.7.2"),
+        ] {
+            let mut wrong_pin = baseline.clone();
+            fixture_dependency_mut(
+                fixture_package_mut(&mut wrong_pin, "reticulum-radio-interface"),
+                name,
+                kind,
+            )["req"] = serde_json::Value::String(wrong_requirement.to_owned());
+            assert!(
+                validate_radio_interface_dependency_boundary(&wrong_pin.to_string(), &root)
+                    .is_err(),
+                "dependency {name} accepted requirement {wrong_requirement}"
+            );
+        }
+
+        for (name, kind) in [("lora-modulation", None), ("embassy-sync", Some("dev"))] {
+            let mut registry_path = baseline.clone();
+            fixture_dependency_mut(
+                fixture_package_mut(&mut registry_path, "reticulum-radio-interface"),
+                name,
+                kind,
+            )["path"] = serde_json::Value::String(root.join("elsewhere").display().to_string());
+            assert!(
+                validate_radio_interface_dependency_boundary(&registry_path.to_string(), &root)
+                    .is_err(),
+                "registry dependency {name} accepted a local path"
+            );
+        }
+
+        let mut wrong_local_path = baseline.clone();
+        fixture_dependency_mut(
+            fixture_package_mut(&mut wrong_local_path, "reticulum-radio-interface"),
+            "reticulum-rns-conformance",
+            None,
+        )["path"] = serde_json::Value::String(root.join("elsewhere").display().to_string());
+        assert!(
+            validate_radio_interface_dependency_boundary(&wrong_local_path.to_string(), &root)
+                .is_err()
+        );
+
+        let mut wrong_local_source = baseline.clone();
+        fixture_dependency_mut(
+            fixture_package_mut(&mut wrong_local_source, "reticulum-radio-interface"),
+            "reticulum-rns-conformance",
+            None,
+        )["source"] = serde_json::Value::String(
+            "registry+https://github.com/rust-lang/crates.io-index".to_owned(),
+        );
+        assert!(
+            validate_radio_interface_dependency_boundary(&wrong_local_source.to_string(), &root)
+                .is_err()
+        );
+
+        let mut wrong_kind = baseline.clone();
+        fixture_dependency_mut(
+            fixture_package_mut(&mut wrong_kind, "reticulum-radio-interface"),
+            "embassy-sync",
+            Some("dev"),
+        )["kind"] = serde_json::Value::Null;
+        assert!(
+            validate_radio_interface_dependency_boundary(&wrong_kind.to_string(), &root).is_err()
+        );
+
+        let mut extra_dependency = baseline.clone();
+        fixture_package_mut(&mut extra_dependency, "reticulum-radio-interface")["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(handoff_dependency_fixture("heapless", "=0.9.1", None));
+        assert!(
+            validate_radio_interface_dependency_boundary(&extra_dependency.to_string(), &root)
+                .is_err()
+        );
+
+        let mut build = baseline;
+        let mut build_dependency = handoff_dependency_fixture("cc", "=1.2.0", Some("dev"));
+        build_dependency["kind"] = serde_json::Value::String("build".to_owned());
+        fixture_package_mut(&mut build, "reticulum-radio-interface")["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(build_dependency);
+        assert!(validate_radio_interface_dependency_boundary(&build.to_string(), &root).is_err());
+    }
+
+    #[test]
+    fn e290_board_facts_boundary_rejects_platform_and_edge_drift() {
+        let root = workspace_root();
+        let baseline = portable_layers_metadata_fixture(&root);
+        validate_e290_board_facts_dependency_boundary(&baseline.to_string(), &root).unwrap();
+
+        let mut wrong_manifest = baseline.clone();
+        fixture_package_mut(
+            &mut wrong_manifest,
+            "reticulum-board-heltec-vision-master-e290",
+        )["manifest_path"] =
+            serde_json::Value::String(root.join("elsewhere/Cargo.toml").display().to_string());
+        assert!(
+            validate_e290_board_facts_dependency_boundary(&wrong_manifest.to_string(), &root)
+                .is_err()
+        );
+
+        let mut duplicate = baseline.clone();
+        duplicate["packages"]
+            .as_array_mut()
+            .unwrap()
+            .push(e290_board_facts_package_fixture(&root));
+        assert!(
+            validate_e290_board_facts_dependency_boundary(&duplicate.to_string(), &root).is_err()
+        );
+
+        let mut extra_feature = baseline.clone();
+        fixture_package_mut(
+            &mut extra_feature,
+            "reticulum-board-heltec-vision-master-e290",
+        )["features"]["default"] = serde_json::json!([]);
+        assert!(
+            validate_e290_board_facts_dependency_boundary(&extra_feature.to_string(), &root)
+                .is_err()
+        );
+
+        for (field, value) in [
+            ("optional", serde_json::Value::Bool(true)),
+            (
+                "rename",
+                serde_json::Value::String("renamed-interface".to_owned()),
+            ),
+            (
+                "target",
+                serde_json::Value::String("cfg(target_os = \"none\")".to_owned()),
+            ),
+            ("uses_default_features", serde_json::Value::Bool(true)),
+            ("features", serde_json::json!(["unreviewed"])),
+            ("req", serde_json::Value::String("=0.1.0".to_owned())),
+            (
+                "path",
+                serde_json::Value::String(root.join("elsewhere").display().to_string()),
+            ),
+            (
+                "source",
+                serde_json::Value::String(CRATES_IO_SOURCE.to_owned()),
+            ),
+            ("kind", serde_json::Value::String("dev".to_owned())),
+        ] {
+            let mut changed = baseline.clone();
+            fixture_dependency_mut(
+                fixture_package_mut(&mut changed, "reticulum-board-heltec-vision-master-e290"),
+                "reticulum-radio-interface",
+                None,
+            )[field] = value;
+            assert!(
+                validate_e290_board_facts_dependency_boundary(&changed.to_string(), &root).is_err(),
+                "E290 board-facts edge accepted changed {field}"
+            );
+        }
+
+        let mut extra_dependency = baseline;
+        fixture_package_mut(
+            &mut extra_dependency,
+            "reticulum-board-heltec-vision-master-e290",
+        )["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(handoff_dependency_fixture("esp-hal", "=1.1.1", None));
+        assert!(
+            validate_e290_board_facts_dependency_boundary(&extra_dependency.to_string(), &root)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn shared_lora_phy_and_e290_radio_boundaries_reject_edge_drift() {
+        let root = workspace_root();
+        let baseline = portable_layers_metadata_fixture(&root);
+        validate_lora_phy_radio_dependency_boundary(&baseline.to_string(), &root).unwrap();
+        validate_e290_radio_dependency_boundary(&baseline.to_string(), &root).unwrap();
+
+        let mut shared_extra = baseline.clone();
+        fixture_package_mut(&mut shared_extra, "reticulum-radio-lora-phy")["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(handoff_dependency_fixture("esp-hal", "=1.1.1", None));
+        assert!(
+            validate_lora_phy_radio_dependency_boundary(&shared_extra.to_string(), &root).is_err()
+        );
+
+        let mut shared_wrong_path = baseline.clone();
+        fixture_dependency_mut(
+            fixture_package_mut(&mut shared_wrong_path, "reticulum-radio-lora-phy"),
+            "reticulum-radio-interface",
+            None,
+        )["path"] = serde_json::Value::String(root.join("elsewhere").display().to_string());
+        assert!(
+            validate_lora_phy_radio_dependency_boundary(&shared_wrong_path.to_string(), &root)
+                .is_err()
+        );
+
+        let mut e290_feature = baseline.clone();
+        fixture_package_mut(
+            &mut e290_feature,
+            "reticulum-board-heltec-vision-master-e290-radio",
+        )["features"]["arbitrary-power"] = serde_json::json!([]);
+        assert!(validate_e290_radio_dependency_boundary(&e290_feature.to_string(), &root).is_err());
+
+        let mut e290_wrong_driver = baseline;
+        fixture_dependency_mut(
+            fixture_package_mut(
+                &mut e290_wrong_driver,
+                "reticulum-board-heltec-vision-master-e290-radio",
+            ),
+            "lora-phy",
+            None,
+        )["uses_default_features"] = serde_json::Value::Bool(true);
+        assert!(
+            validate_e290_radio_dependency_boundary(&e290_wrong_driver.to_string(), &root).is_err()
+        );
+    }
+
+    #[test]
+    fn radio_tx_dispatch_boundary_rejects_platform_storage_and_edge_drift() {
+        let root = workspace_root();
+
+        let mut wrong_manifest = portable_layers_metadata_fixture(&root);
+        fixture_package_mut(&mut wrong_manifest, "reticulum-radio-tx-dispatch")["manifest_path"] =
+            serde_json::Value::String(root.join("elsewhere/Cargo.toml").display().to_string());
+        assert!(
+            validate_radio_tx_dispatch_dependency_boundary(&wrong_manifest.to_string(), &root)
+                .is_err()
+        );
+
+        let mut duplicate = portable_layers_metadata_fixture(&root);
+        duplicate["packages"]
+            .as_array_mut()
+            .unwrap()
+            .push(radio_tx_dispatch_package_fixture(&root));
+        assert!(
+            validate_radio_tx_dispatch_dependency_boundary(&duplicate.to_string(), &root).is_err()
+        );
+
+        for name in [
+            "reticulum-interface-router",
+            "reticulum-node-core",
+            "reticulum-radio-interface",
+            "reticulum-tx-handoff",
+        ] {
+            let mut wrong_path = portable_layers_metadata_fixture(&root);
+            fixture_dependency_mut(
+                fixture_package_mut(&mut wrong_path, "reticulum-radio-tx-dispatch"),
+                name,
+                None,
+            )["path"] = serde_json::Value::String(root.join("elsewhere").display().to_string());
+            assert!(
+                validate_radio_tx_dispatch_dependency_boundary(&wrong_path.to_string(), &root)
+                    .is_err(),
+                "local dependency {name} accepted the wrong path"
+            );
+        }
+
+        for (name, kind) in [
+            ("embassy-futures", Some("dev")),
+            ("embassy-sync", None),
+            ("embassy-time", None),
+            ("rand_core", None),
+            ("reticulum-interface-router", None),
+            ("reticulum-node-core", None),
+            ("reticulum-radio-interface", None),
+            ("reticulum-tx-handoff", None),
+            ("static_cell", Some("dev")),
+        ] {
+            let mut dependency_feature = portable_layers_metadata_fixture(&root);
+            fixture_dependency_mut(
+                fixture_package_mut(&mut dependency_feature, "reticulum-radio-tx-dispatch"),
+                name,
+                kind,
+            )["features"] = serde_json::json!(["unreviewed"]);
+            assert!(
+                validate_radio_tx_dispatch_dependency_boundary(
+                    &dependency_feature.to_string(),
+                    &root,
+                )
+                .is_err(),
+                "dependency {name} accepted an unreviewed feature"
+            );
+
+            for (field, value) in [
+                ("optional", serde_json::Value::Bool(true)),
+                (
+                    "rename",
+                    serde_json::Value::String("renamed-dependency".to_owned()),
+                ),
+                (
+                    "target",
+                    serde_json::Value::String("cfg(target_os = \"none\")".to_owned()),
+                ),
+            ] {
+                let mut changed = portable_layers_metadata_fixture(&root);
+                fixture_dependency_mut(
+                    fixture_package_mut(&mut changed, "reticulum-radio-tx-dispatch"),
+                    name,
+                    kind,
+                )[field] = value;
+                assert!(
+                    validate_radio_tx_dispatch_dependency_boundary(&changed.to_string(), &root)
+                        .is_err(),
+                    "dependency {name} accepted changed {field}"
+                );
+            }
+        }
+
+        let mut futures_promoted_to_normal = portable_layers_metadata_fixture(&root);
+        fixture_dependency_mut(
+            fixture_package_mut(
+                &mut futures_promoted_to_normal,
+                "reticulum-radio-tx-dispatch",
+            ),
+            "embassy-futures",
+            Some("dev"),
+        )["kind"] = serde_json::Value::Null;
+        assert!(
+            validate_radio_tx_dispatch_dependency_boundary(
+                &futures_promoted_to_normal.to_string(),
+                &root,
+            )
+            .is_err()
+        );
+
+        let mut futures_defaults = portable_layers_metadata_fixture(&root);
+        fixture_dependency_mut(
+            fixture_package_mut(&mut futures_defaults, "reticulum-radio-tx-dispatch"),
+            "embassy-futures",
+            Some("dev"),
+        )["uses_default_features"] = serde_json::Value::Bool(true);
+        assert!(
+            validate_radio_tx_dispatch_dependency_boundary(&futures_defaults.to_string(), &root)
+                .is_err()
+        );
+
+        for (name, path) in [
+            (
+                "reticulum-board-heltec-tracker-v2-radio",
+                "crates/board-heltec-tracker-v2-radio",
+            ),
+            ("embedded-hal", "crates/forbidden-embedded-hal"),
+            ("reticulum-storage-model", "crates/storage-model"),
+            (
+                "reticulum-submission-projector",
+                "crates/submission-projector",
+            ),
+            ("reticulum-device-api", "crates/device-api"),
+        ] {
+            let mut extra = portable_layers_metadata_fixture(&root);
+            fixture_package_mut(&mut extra, "reticulum-radio-tx-dispatch")["dependencies"]
+                .as_array_mut()
+                .unwrap()
+                .push(handoff_path_dependency_fixture(
+                    name,
+                    "*",
+                    &root.join(path),
+                    None,
+                ));
+            assert!(
+                validate_radio_tx_dispatch_dependency_boundary(&extra.to_string(), &root).is_err(),
+                "forbidden dependency {name} was accepted"
+            );
+        }
+
+        let mut build = portable_layers_metadata_fixture(&root);
+        let mut build_dependency = handoff_dependency_fixture("cc", "=1.0.0", Some("dev"));
+        build_dependency["kind"] = serde_json::Value::String("build".to_owned());
+        fixture_package_mut(&mut build, "reticulum-radio-tx-dispatch")["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(build_dependency);
+        assert!(validate_radio_tx_dispatch_dependency_boundary(&build.to_string(), &root).is_err());
+
+        let mut extra_feature = portable_layers_metadata_fixture(&root);
+        fixture_package_mut(&mut extra_feature, "reticulum-radio-tx-dispatch")["features"]["board"] =
+            serde_json::json!([]);
+        assert!(
+            validate_radio_tx_dispatch_dependency_boundary(&extra_feature.to_string(), &root)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn radio_tx_dispatch_resolved_closure_is_an_exact_identity_and_feature_set() {
+        let root = workspace_root();
+        let (baseline_metadata, baseline_tree) = radio_tx_dispatch_reviewed_closure_fixture(&root);
+        validate_radio_tx_dispatch_resolved_closure(
+            &baseline_metadata.to_string(),
+            &baseline_tree,
+            &root,
+        )
+        .unwrap();
+
+        for (name, version) in [
+            ("embassy-stm32", "0.4.0"),
+            ("nrf52840-hal", "0.19.0"),
+            ("rp2040-hal", "0.11.0"),
+            ("cc1101", "0.1.0"),
+            ("arbitrary-registry-wrapper", "7.3.1"),
+            ("lora-phy", "3.0.1"),
+            ("esp-hal", "1.0.0"),
+        ] {
+            let mut metadata = baseline_metadata.clone();
+            let mut tree = baseline_tree.clone();
+            add_registry_closure_fixture_package(&mut metadata, &mut tree, &root, name, version);
+            let error =
+                validate_radio_tx_dispatch_resolved_closure(&metadata.to_string(), &tree, &root)
+                    .unwrap_err();
+            assert!(error.contains(name), "registry package {name}: {error}");
+        }
+
+        for (name, relative_manifest) in [
+            (
+                "reticulum-board-heltec-tracker-v2-radio",
+                "crates/board-heltec-tracker-v2-radio/Cargo.toml",
+            ),
+            ("reticulum-storage-actor", "crates/storage-actor/Cargo.toml"),
+            ("reticulum-device-api", "crates/device-api/Cargo.toml"),
+            (
+                "reticulum-submission-projector",
+                "crates/submission-projector/Cargo.toml",
+            ),
+            (
+                "reticulum-heltec-tracker-v2",
+                "firmware/heltec-tracker-v2/Cargo.toml",
+            ),
+            ("reticulum-tx-dispatch", "crates/tx-dispatch/Cargo.toml"),
+            ("reticulum-tx-supervisor", "crates/tx-supervisor/Cargo.toml"),
+            (
+                "innocently-named-local-wrapper",
+                "crates/innocently-named-local-wrapper/Cargo.toml",
+            ),
+            ("renamed-storage-wrapper", "crates/storage-actor/Cargo.toml"),
+        ] {
+            let mut metadata = baseline_metadata.clone();
+            let mut tree = baseline_tree.clone();
+            add_local_closure_fixture_package(
+                &mut metadata,
+                &mut tree,
+                &root,
+                name,
+                "0.1.0",
+                relative_manifest,
+            );
+            let error =
+                validate_radio_tx_dispatch_resolved_closure(&metadata.to_string(), &tree, &root)
+                    .unwrap_err();
+            assert!(error.contains(name), "local package {name}: {error}");
+        }
+
+        let mut wrong_version = baseline_metadata.clone();
+        let embassy_sync = wrong_version["packages"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|package| package["name"].as_str() == Some("embassy-sync"))
+            .unwrap();
+        embassy_sync["version"] = serde_json::Value::String("0.8.1".to_owned());
+        let wrong_version_tree =
+            baseline_tree.replace("embassy-sync v0.8.0\t", "embassy-sync v0.8.1\t");
+        assert!(
+            validate_radio_tx_dispatch_resolved_closure(
+                &wrong_version.to_string(),
+                &wrong_version_tree,
+                &root,
+            )
+            .is_err()
+        );
+
+        let mut wrong_source = baseline_metadata.clone();
+        let embassy_sync = wrong_source["packages"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|package| package["name"].as_str() == Some("embassy-sync"))
+            .unwrap();
+        embassy_sync["source"] =
+            serde_json::Value::String("registry+https://example.invalid/index".to_owned());
+        assert!(
+            validate_radio_tx_dispatch_resolved_closure(
+                &wrong_source.to_string(),
+                &baseline_tree,
+                &root,
+            )
+            .is_err()
+        );
+
+        let mut wrong_path = baseline_metadata.clone();
+        let node_core = wrong_path["packages"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|package| package["name"].as_str() == Some("reticulum-node-core"))
+            .unwrap();
+        node_core["manifest_path"] = serde_json::Value::String(
+            root.join("crates/lookalike-node-core/Cargo.toml")
+                .display()
+                .to_string(),
+        );
+        assert!(
+            validate_radio_tx_dispatch_resolved_closure(
+                &wrong_path.to_string(),
+                &baseline_tree,
+                &root,
+            )
+            .is_err()
+        );
+
+        let feature_drift_tree =
+            baseline_tree.replace("embassy-sync v0.8.0\t\n", "embassy-sync v0.8.0\tstd\n");
+        let feature_error = validate_radio_tx_dispatch_resolved_closure(
+            &baseline_metadata.to_string(),
+            &feature_drift_tree,
+            &root,
+        )
+        .unwrap_err();
+        assert!(
+            feature_error.contains("embassy-sync") && feature_error.contains("features"),
+            "{feature_error}"
+        );
+    }
+
+    #[test]
     fn storage_model_boundary_rejects_unreviewed_dependencies_features_and_edge_shapes() {
         let root = workspace_root();
         const PACKAGE_INDEX: usize = 5;
@@ -5016,10 +7700,7 @@ mod tests {
             ("reticulum-storage-journal", None),
             ("reticulum-storage-model", None),
             ("reticulum-submission-projector", None),
-            ("reticulum-tx-dispatch", None),
-            ("embassy-sync", Some("dev")),
             ("rand_core", Some("dev")),
-            ("reticulum-tx-handoff", Some("dev")),
         ];
         for (name, kind) in dependencies {
             let mut default_features = portable_layers_metadata_fixture(&root);
@@ -5103,8 +7784,6 @@ mod tests {
             ("reticulum-storage-journal", None),
             ("reticulum-storage-model", None),
             ("reticulum-submission-projector", None),
-            ("reticulum-tx-dispatch", None),
-            ("reticulum-tx-handoff", Some("dev")),
         ] {
             let mut wrong_path = portable_layers_metadata_fixture(&root);
             fixture_dependency_mut(
@@ -5118,11 +7797,7 @@ mod tests {
             );
         }
 
-        for (name, kind) in [
-            ("embedded-storage", None),
-            ("embassy-sync", Some("dev")),
-            ("rand_core", Some("dev")),
-        ] {
+        for (name, kind) in [("embedded-storage", None), ("rand_core", Some("dev"))] {
             let mut registry_path = portable_layers_metadata_fixture(&root);
             fixture_dependency_mut(
                 fixture_package_mut(&mut registry_path, "reticulum-storage-actor"),
@@ -5160,6 +7835,62 @@ mod tests {
     }
 
     #[test]
+    fn submission_runtime_boundary_rejects_platform_radio_and_edge_drift() {
+        let root = workspace_root();
+        let baseline = portable_layers_metadata_fixture(&root);
+        validate_submission_runtime_dependency_boundary(&baseline.to_string(), &root).unwrap();
+
+        let mut wrong_manifest = baseline.clone();
+        fixture_package_mut(&mut wrong_manifest, "reticulum-submission-runtime")["manifest_path"] =
+            serde_json::Value::String(
+                root.join("crates/lookalike-runtime/Cargo.toml")
+                    .display()
+                    .to_string(),
+            );
+        assert!(
+            validate_submission_runtime_dependency_boundary(&wrong_manifest.to_string(), &root)
+                .is_err()
+        );
+
+        let mut wrong_node_path = baseline.clone();
+        fixture_dependency_mut(
+            fixture_package_mut(&mut wrong_node_path, "reticulum-submission-runtime"),
+            "reticulum-node-core",
+            None,
+        )["path"] = serde_json::Value::String(
+            root.join("crates/lookalike-node-core")
+                .display()
+                .to_string(),
+        );
+        assert!(
+            validate_submission_runtime_dependency_boundary(&wrong_node_path.to_string(), &root)
+                .is_err()
+        );
+
+        let mut radio_edge = baseline.clone();
+        fixture_package_mut(&mut radio_edge, "reticulum-submission-runtime")["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(handoff_path_dependency_fixture(
+                "reticulum-radio-tx-dispatch",
+                "*",
+                &root.join("crates/radio-tx-dispatch"),
+                None,
+            ));
+        assert!(
+            validate_submission_runtime_dependency_boundary(&radio_edge.to_string(), &root)
+                .is_err()
+        );
+
+        let mut feature = baseline;
+        fixture_package_mut(&mut feature, "reticulum-submission-runtime")["features"]["lora"] =
+            serde_json::json!([]);
+        assert!(
+            validate_submission_runtime_dependency_boundary(&feature.to_string(), &root).is_err()
+        );
+    }
+
+    #[test]
     fn device_api_adapter_boundary_rejects_dependency_feature_and_path_drift() {
         const PACKAGE_INDEX: usize = 9;
         let root = workspace_root();
@@ -5182,10 +7913,10 @@ mod tests {
         );
 
         for (feature, value) in [
-            ("default", serde_json::json!(["host-sim"])),
-            ("host-sim", serde_json::json!([])),
+            ("default", serde_json::json!(["experimental-rns-data"])),
+            ("experimental-rns-data", serde_json::json!([])),
             (
-                "host-sim",
+                "experimental-rns-data",
                 serde_json::json!(["reticulum-device-api/unreviewed"]),
             ),
         ] {
@@ -5308,16 +8039,26 @@ mod tests {
                 .is_err()
         );
 
-        for kind in ["dev", "build"] {
-            let mut non_normal = portable_layers_metadata_fixture(&root);
-            non_normal["packages"][PACKAGE_INDEX]["dependencies"][0]["kind"] =
-                serde_json::Value::String(kind.to_owned());
+        for (dependency_index, kind) in [(0, None), (1, Some("dev")), (2, None), (3, Some("dev"))] {
+            let mut wrong_kind = portable_layers_metadata_fixture(&root);
+            wrong_kind["packages"][PACKAGE_INDEX]["dependencies"][dependency_index]["kind"] = kind
+                .map_or(serde_json::Value::Null, |kind| {
+                    serde_json::Value::String(kind.to_owned())
+                });
             assert!(
-                validate_device_api_adapter_dependency_boundary(&non_normal.to_string(), &root)
+                validate_device_api_adapter_dependency_boundary(&wrong_kind.to_string(), &root)
                     .is_err(),
-                "adapter accepted a {kind} dependency"
+                "adapter accepted the wrong kind for dependency {dependency_index}"
             );
         }
+
+        let mut build_dependency = portable_layers_metadata_fixture(&root);
+        build_dependency["packages"][PACKAGE_INDEX]["dependencies"][1]["kind"] =
+            serde_json::Value::String("build".to_owned());
+        assert!(
+            validate_device_api_adapter_dependency_boundary(&build_dependency.to_string(), &root)
+                .is_err()
+        );
 
         let mut extra = portable_layers_metadata_fixture(&root);
         extra["packages"][PACKAGE_INDEX]["dependencies"]
@@ -5352,7 +8093,7 @@ mod tests {
                 .is_err()
         );
 
-        for dependency_index in 0..=2 {
+        for dependency_index in 0..=1 {
             let mut wrong_path = portable_layers_metadata_fixture(&root);
             wrong_path["packages"][PACKAGE_INDEX]["dependencies"][dependency_index]["path"] =
                 serde_json::Value::String(root.join("elsewhere").display().to_string());
@@ -5420,7 +8161,7 @@ mod tests {
         }
 
         let mut wrong_dev_version = portable_layers_metadata_fixture(&root);
-        wrong_dev_version["packages"][PACKAGE_INDEX]["dependencies"][3]["req"] =
+        wrong_dev_version["packages"][PACKAGE_INDEX]["dependencies"][2]["req"] =
             serde_json::Value::String("=0.6.3".to_owned());
         assert!(
             validate_submission_projector_dependency_boundary(
@@ -5431,7 +8172,7 @@ mod tests {
         );
 
         let mut dev_defaults = portable_layers_metadata_fixture(&root);
-        dev_defaults["packages"][PACKAGE_INDEX]["dependencies"][3]["uses_default_features"] =
+        dev_defaults["packages"][PACKAGE_INDEX]["dependencies"][2]["uses_default_features"] =
             serde_json::Value::Bool(true);
         assert!(
             validate_submission_projector_dependency_boundary(&dev_defaults.to_string(), &root)
@@ -5439,7 +8180,7 @@ mod tests {
         );
 
         let mut dev_feature = portable_layers_metadata_fixture(&root);
-        dev_feature["packages"][PACKAGE_INDEX]["dependencies"][3]["features"] =
+        dev_feature["packages"][PACKAGE_INDEX]["dependencies"][2]["features"] =
             serde_json::json!(["unreviewed"]);
         assert!(
             validate_submission_projector_dependency_boundary(&dev_feature.to_string(), &root)
@@ -5447,7 +8188,7 @@ mod tests {
         );
 
         let mut build = portable_layers_metadata_fixture(&root);
-        build["packages"][PACKAGE_INDEX]["dependencies"][3]["kind"] =
+        build["packages"][PACKAGE_INDEX]["dependencies"][2]["kind"] =
             serde_json::Value::String("build".to_owned());
         assert!(
             validate_submission_projector_dependency_boundary(&build.to_string(), &root).is_err()
@@ -5482,7 +8223,7 @@ mod tests {
             validate_tx_supervisor_dependency_boundary(&wrong_manifest.to_string(), &root).is_err()
         );
 
-        for dependency_index in 0..=1 {
+        for dependency_index in [0, 1, 6, 7] {
             let mut wrong_path = portable_layers_metadata_fixture(&root);
             wrong_path["packages"][PACKAGE_INDEX]["dependencies"][dependency_index]["path"] =
                 serde_json::Value::String(root.join("elsewhere").display().to_string());
@@ -5524,7 +8265,7 @@ mod tests {
         }
 
         let mut wrong_handoff_path = portable_layers_metadata_fixture(&root);
-        wrong_handoff_path["packages"][PACKAGE_INDEX]["dependencies"][6]["path"] =
+        wrong_handoff_path["packages"][PACKAGE_INDEX]["dependencies"][7]["path"] =
             serde_json::Value::String(root.join("elsewhere").display().to_string());
         assert!(
             validate_tx_supervisor_dependency_boundary(&wrong_handoff_path.to_string(), &root)
@@ -5532,7 +8273,7 @@ mod tests {
         );
 
         let mut handoff_defaults = portable_layers_metadata_fixture(&root);
-        handoff_defaults["packages"][PACKAGE_INDEX]["dependencies"][6]["uses_default_features"] =
+        handoff_defaults["packages"][PACKAGE_INDEX]["dependencies"][7]["uses_default_features"] =
             serde_json::Value::Bool(true);
         assert!(
             validate_tx_supervisor_dependency_boundary(&handoff_defaults.to_string(), &root)
@@ -5540,7 +8281,7 @@ mod tests {
         );
 
         let mut static_cell_without_defaults = portable_layers_metadata_fixture(&root);
-        static_cell_without_defaults["packages"][PACKAGE_INDEX]["dependencies"][7]["uses_default_features"] =
+        static_cell_without_defaults["packages"][PACKAGE_INDEX]["dependencies"][9]["uses_default_features"] =
             serde_json::Value::Bool(false);
         assert!(
             validate_tx_supervisor_dependency_boundary(
@@ -5548,6 +8289,20 @@ mod tests {
                 &root
             )
             .is_err()
+        );
+
+        let mut wrong_rns_path = portable_layers_metadata_fixture(&root);
+        wrong_rns_path["packages"][PACKAGE_INDEX]["dependencies"][8]["path"] =
+            serde_json::Value::String(root.join("elsewhere").display().to_string());
+        assert!(
+            validate_tx_supervisor_dependency_boundary(&wrong_rns_path.to_string(), &root).is_err()
+        );
+
+        let mut rns_defaults = portable_layers_metadata_fixture(&root);
+        rns_defaults["packages"][PACKAGE_INDEX]["dependencies"][8]["uses_default_features"] =
+            serde_json::Value::Bool(true);
+        assert!(
+            validate_tx_supervisor_dependency_boundary(&rns_defaults.to_string(), &root).is_err()
         );
 
         let mut extra = portable_layers_metadata_fixture(&root);
@@ -5575,6 +8330,148 @@ mod tests {
         assert!(
             validate_tx_supervisor_dependency_boundary(&extra_feature.to_string(), &root).is_err()
         );
+    }
+
+    #[test]
+    fn portable_durability_boundaries_accept_only_exact_local_packages_and_features() {
+        let root = workspace_root();
+        let baseline = portable_layers_metadata_fixture(&root);
+        validate_portable_durability_dependency_boundaries(&baseline.to_string(), &root).unwrap();
+
+        for package_name in [
+            "reticulum-device-identity-store",
+            "reticulum-announce-clock",
+            "reticulum-nor-flash-region",
+        ] {
+            let mut wrong_manifest = portable_layers_metadata_fixture(&root);
+            fixture_package_mut(&mut wrong_manifest, package_name)["manifest_path"] =
+                serde_json::Value::String(
+                    root.join("crates/lookalike/Cargo.toml")
+                        .display()
+                        .to_string(),
+                );
+            assert!(
+                validate_portable_durability_dependency_boundaries(
+                    &wrong_manifest.to_string(),
+                    &root,
+                )
+                .is_err(),
+                "{package_name} accepted a lookalike manifest path"
+            );
+
+            let mut nonlocal = portable_layers_metadata_fixture(&root);
+            fixture_package_mut(&mut nonlocal, package_name)["source"] =
+                serde_json::Value::String(CRATES_IO_SOURCE.to_owned());
+            assert!(
+                validate_portable_durability_dependency_boundaries(&nonlocal.to_string(), &root,)
+                    .is_err(),
+                "{package_name} accepted a nonlocal package"
+            );
+
+            let mut duplicate = portable_layers_metadata_fixture(&root);
+            let duplicate_package = fixture_package_mut(&mut duplicate, package_name).clone();
+            duplicate["packages"]
+                .as_array_mut()
+                .unwrap()
+                .push(duplicate_package);
+            assert!(
+                validate_portable_durability_dependency_boundaries(&duplicate.to_string(), &root,)
+                    .is_err(),
+                "{package_name} accepted a duplicate package"
+            );
+
+            let mut extra_feature = portable_layers_metadata_fixture(&root);
+            fixture_package_mut(&mut extra_feature, package_name)["features"]["future"] =
+                serde_json::json!([]);
+            assert!(
+                validate_portable_durability_dependency_boundaries(
+                    &extra_feature.to_string(),
+                    &root,
+                )
+                .is_err(),
+                "{package_name} accepted an unreviewed feature"
+            );
+        }
+    }
+
+    #[test]
+    fn portable_durability_boundaries_reject_all_dependency_shape_drift() {
+        let root = workspace_root();
+        for (package_name, dependency_name) in [
+            ("reticulum-device-identity-store", "embedded-storage"),
+            ("reticulum-device-identity-store", "rand_core"),
+            ("reticulum-device-identity-store", "sha2"),
+            ("reticulum-device-identity-store", "zeroize"),
+            ("reticulum-announce-clock", "embedded-storage"),
+            ("reticulum-announce-clock", "sha2"),
+            ("reticulum-nor-flash-region", "embedded-storage"),
+        ] {
+            for (field, value) in [
+                ("name", serde_json::json!("unreviewed-replacement")),
+                ("req", serde_json::json!(">=0.0.0")),
+                (
+                    "source",
+                    serde_json::json!("registry+https://example.invalid/index"),
+                ),
+                ("path", serde_json::json!(root.join("crates/lookalike"))),
+                ("kind", serde_json::json!("dev")),
+                ("optional", serde_json::json!(true)),
+                ("rename", serde_json::json!("renamed-dependency")),
+                ("target", serde_json::json!("cfg(target_os = \"none\")")),
+                ("uses_default_features", serde_json::json!(true)),
+                ("features", serde_json::json!(["unreviewed"])),
+            ] {
+                let mut changed = portable_layers_metadata_fixture(&root);
+                fixture_dependency_mut(
+                    fixture_package_mut(&mut changed, package_name),
+                    dependency_name,
+                    None,
+                )[field] = value;
+                assert!(
+                    validate_portable_durability_dependency_boundaries(
+                        &changed.to_string(),
+                        &root,
+                    )
+                    .is_err(),
+                    "{package_name} {dependency_name} accepted changed {field}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn portable_durability_boundaries_reject_platform_radio_rete_and_async_edges() {
+        let root = workspace_root();
+        for package_name in [
+            "reticulum-device-identity-store",
+            "reticulum-announce-clock",
+            "reticulum-nor-flash-region",
+        ] {
+            for prohibited in [
+                "esp-hal",
+                "esp-storage",
+                "reticulum-radio-interface",
+                "lora-phy",
+                "rete-core",
+                "reticulum-rns-rete",
+                "embassy-sync",
+                "embassy-time",
+            ] {
+                let mut metadata = portable_layers_metadata_fixture(&root);
+                fixture_package_mut(&mut metadata, package_name)["dependencies"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(handoff_dependency_fixture(prohibited, "=0.0.0", None));
+                assert!(
+                    validate_portable_durability_dependency_boundaries(
+                        &metadata.to_string(),
+                        &root,
+                    )
+                    .is_err(),
+                    "{package_name} accepted prohibited dependency {prohibited}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -5667,6 +8564,7 @@ mod tests {
     fn portable_layer_boundary_rejects_tx_ownership_from_device_api() {
         let root = workspace_root();
         for prohibited in [
+            "reticulum-radio-tx-dispatch",
             "reticulum-tx-handoff",
             "reticulum-tx-dispatch",
             "reticulum-tx-supervisor",
@@ -5734,7 +8632,56 @@ mod tests {
                 storage_journal_package_fixture(root),
                 storage_actor_package_fixture(root),
                 device_api_adapter_package_fixture(root),
+                radio_tx_dispatch_package_fixture(root),
+                radio_interface_package_fixture(root),
+                e290_board_facts_package_fixture(root),
+                lora_phy_radio_package_fixture(root),
+                e290_radio_package_fixture(root),
+                device_identity_store_package_fixture(root),
+                announce_clock_package_fixture(root),
+                nor_flash_region_package_fixture(root),
+                submission_runtime_package_fixture(root),
             ]
+        })
+    }
+
+    fn device_identity_store_package_fixture(root: &Path) -> serde_json::Value {
+        serde_json::json!({
+            "name": "reticulum-device-identity-store",
+            "source": null,
+            "manifest_path": root.join("crates/device-identity-store/Cargo.toml"),
+            "features": {},
+            "dependencies": [
+                handoff_dependency_fixture("embedded-storage", "=0.3.1", None),
+                handoff_dependency_fixture("rand_core", "=0.6.4", None),
+                handoff_dependency_fixture("sha2", "=0.10.9", None),
+                handoff_dependency_fixture("zeroize", "=1.9.0", None),
+            ],
+        })
+    }
+
+    fn announce_clock_package_fixture(root: &Path) -> serde_json::Value {
+        serde_json::json!({
+            "name": "reticulum-announce-clock",
+            "source": null,
+            "manifest_path": root.join("crates/announce-clock/Cargo.toml"),
+            "features": {},
+            "dependencies": [
+                handoff_dependency_fixture("embedded-storage", "=0.3.1", None),
+                handoff_dependency_fixture("sha2", "=0.10.9", None),
+            ],
+        })
+    }
+
+    fn nor_flash_region_package_fixture(root: &Path) -> serde_json::Value {
+        serde_json::json!({
+            "name": "reticulum-nor-flash-region",
+            "source": null,
+            "manifest_path": root.join("crates/nor-flash-region/Cargo.toml"),
+            "features": { "default": [] },
+            "dependencies": [
+                handoff_dependency_fixture("embedded-storage", "=0.3.1", None),
+            ],
         })
     }
 
@@ -5766,6 +8713,234 @@ mod tests {
                 static_cell,
             ],
         })
+    }
+
+    fn radio_tx_dispatch_package_fixture(root: &Path) -> serde_json::Value {
+        let mut static_cell = handoff_dependency_fixture("static_cell", "=2.1.1", Some("dev"));
+        static_cell["uses_default_features"] = serde_json::Value::Bool(true);
+        serde_json::json!({
+            "name": "reticulum-radio-tx-dispatch",
+            "source": null,
+            "manifest_path": root.join("crates/radio-tx-dispatch/Cargo.toml"),
+            "features": { "default": [] },
+            "dependencies": [
+                handoff_dependency_fixture("embassy-sync", "=0.8.0", None),
+                handoff_dependency_fixture("embassy-time", "=0.5.0", None),
+                handoff_dependency_fixture("rand_core", "=0.6.4", None),
+                handoff_path_dependency_fixture(
+                    "reticulum-interface-router",
+                    "*",
+                    &root.join("crates/interface-router"),
+                    None,
+                ),
+                handoff_path_dependency_fixture(
+                    "reticulum-node-core",
+                    "*",
+                    &root.join("crates/node-core"),
+                    None,
+                ),
+                handoff_path_dependency_fixture(
+                    "reticulum-radio-interface",
+                    "*",
+                    &root.join("crates/radio-interface"),
+                    None,
+                ),
+                handoff_path_dependency_fixture(
+                    "reticulum-tx-handoff",
+                    "*",
+                    &root.join("crates/tx-handoff"),
+                    None,
+                ),
+                handoff_dependency_fixture("embassy-futures", "=0.1.2", Some("dev")),
+                static_cell,
+            ],
+        })
+    }
+
+    fn radio_interface_package_fixture(root: &Path) -> serde_json::Value {
+        let mut conformance = handoff_path_dependency_fixture(
+            "reticulum-rns-conformance",
+            "*",
+            &root.join("crates/rns-conformance"),
+            None,
+        );
+        conformance["uses_default_features"] = serde_json::Value::Bool(true);
+        serde_json::json!({
+            "name": "reticulum-radio-interface",
+            "source": null,
+            "manifest_path": root.join("crates/radio-interface/Cargo.toml"),
+            "features": {},
+            "dependencies": [
+                handoff_dependency_fixture("lora-modulation", "=0.1.5", None),
+                conformance,
+                handoff_dependency_fixture("embassy-sync", "=0.8.0", Some("dev")),
+            ],
+        })
+    }
+
+    fn e290_board_facts_package_fixture(root: &Path) -> serde_json::Value {
+        serde_json::json!({
+            "name": "reticulum-board-heltec-vision-master-e290",
+            "source": null,
+            "manifest_path": root.join("crates/board-heltec-vision-master-e290/Cargo.toml"),
+            "features": {},
+            "dependencies": [
+                handoff_path_dependency_fixture(
+                    "reticulum-radio-interface",
+                    "*",
+                    &root.join("crates/radio-interface"),
+                    None,
+                ),
+            ],
+        })
+    }
+
+    fn lora_phy_radio_package_fixture(root: &Path) -> serde_json::Value {
+        let mut embedded_hal_async =
+            handoff_dependency_fixture("embedded-hal-async", "=1.0.0", None);
+        embedded_hal_async["uses_default_features"] = serde_json::Value::Bool(true);
+        let radio_interface = handoff_path_dependency_fixture(
+            "reticulum-radio-interface",
+            "*",
+            &root.join("crates/radio-interface"),
+            None,
+        );
+        serde_json::json!({
+            "name": "reticulum-radio-lora-phy",
+            "source": null,
+            "manifest_path": root.join("crates/radio-lora-phy/Cargo.toml"),
+            "features": {},
+            "dependencies": [
+                handoff_dependency_fixture("critical-section", "=1.2.0", None),
+                embedded_hal_async,
+                handoff_dependency_fixture("lora-phy", "=3.0.1", None),
+                radio_interface,
+            ],
+        })
+    }
+
+    fn e290_radio_package_fixture(root: &Path) -> serde_json::Value {
+        let mut embedded_hal = handoff_dependency_fixture("embedded-hal", "=1.0.0", None);
+        embedded_hal["uses_default_features"] = serde_json::Value::Bool(true);
+        let mut embedded_hal_async =
+            handoff_dependency_fixture("embedded-hal-async", "=1.0.0", None);
+        embedded_hal_async["uses_default_features"] = serde_json::Value::Bool(true);
+        let local = |name: &str, path: &str| {
+            handoff_path_dependency_fixture(name, "*", &root.join(path), None)
+        };
+        let mut critical = handoff_dependency_fixture("critical-section", "=1.2.0", Some("dev"));
+        critical["features"] = serde_json::json!(["std"]);
+        serde_json::json!({
+            "name": "reticulum-board-heltec-vision-master-e290-radio",
+            "source": null,
+            "manifest_path": root.join("crates/board-heltec-vision-master-e290-radio/Cargo.toml"),
+            "features": {},
+            "dependencies": [
+                embedded_hal,
+                embedded_hal_async,
+                handoff_dependency_fixture("lora-phy", "=3.0.1", None),
+                local(
+                    "reticulum-board-heltec-vision-master-e290",
+                    "crates/board-heltec-vision-master-e290",
+                ),
+                local("reticulum-radio-interface", "crates/radio-interface"),
+                local("reticulum-radio-lora-phy", "crates/radio-lora-phy"),
+                critical,
+            ],
+        })
+    }
+
+    fn radio_tx_dispatch_reviewed_closure_fixture(root: &Path) -> (serde_json::Value, String) {
+        let packages = RADIO_TX_DISPATCH_REVIEWED_CLOSURE
+            .iter()
+            .copied()
+            .map(|package| {
+                let (source, manifest_path) = match package.source {
+                    ReviewedClosureSource::Local(relative_manifest) => (
+                        serde_json::Value::Null,
+                        root.join(relative_manifest).display().to_string(),
+                    ),
+                    ReviewedClosureSource::Registry => (
+                        serde_json::Value::String(CRATES_IO_SOURCE.to_owned()),
+                        root.join("fixture/registry")
+                            .join(format!("{}-{}", package.name, package.version))
+                            .join("Cargo.toml")
+                            .display()
+                            .to_string(),
+                    ),
+                    ReviewedClosureSource::Git(source) => (
+                        serde_json::Value::String(source.to_owned()),
+                        root.join("fixture/git")
+                            .join(package.name)
+                            .join("Cargo.toml")
+                            .display()
+                            .to_string(),
+                    ),
+                };
+                serde_json::json!({
+                    "name": package.name,
+                    "version": package.version,
+                    "source": source,
+                    "manifest_path": manifest_path,
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut tree = String::new();
+        for package in RADIO_TX_DISPATCH_REVIEWED_CLOSURE {
+            tree.push_str(&reviewed_closure_display(package, root).unwrap());
+            tree.push('\t');
+            tree.push_str(&package.features.join(","));
+            tree.push('\n');
+        }
+        (serde_json::json!({ "packages": packages }), tree)
+    }
+
+    fn add_registry_closure_fixture_package(
+        metadata: &mut serde_json::Value,
+        tree: &mut String,
+        root: &Path,
+        name: &str,
+        version: &str,
+    ) {
+        metadata["packages"]
+            .as_array_mut()
+            .expect("fixture packages")
+            .push(serde_json::json!({
+                "name": name,
+                "version": version,
+                "source": CRATES_IO_SOURCE,
+                "manifest_path": root.join("fixture/registry")
+                    .join(format!("{name}-{version}"))
+                    .join("Cargo.toml"),
+            }));
+        tree.push_str(&format!("{name} v{version}\t\n"));
+    }
+
+    fn add_local_closure_fixture_package(
+        metadata: &mut serde_json::Value,
+        tree: &mut String,
+        root: &Path,
+        name: &str,
+        version: &str,
+        relative_manifest: &str,
+    ) {
+        let manifest = root.join(relative_manifest);
+        metadata["packages"]
+            .as_array_mut()
+            .expect("fixture packages")
+            .push(serde_json::json!({
+                "name": name,
+                "version": version,
+                "source": null,
+                "manifest_path": manifest,
+            }));
+        tree.push_str(&format!(
+            "{name} v{version} ({})\t\n",
+            manifest
+                .parent()
+                .expect("fixture manifest parent")
+                .display()
+        ));
     }
 
     fn storage_model_package_fixture(root: &Path) -> serde_json::Value {
@@ -5832,18 +9007,55 @@ mod tests {
                     &root.join("crates/submission-projector"),
                     None,
                 ),
+                handoff_dependency_fixture("rand_core", "=0.6.4", Some("dev")),
+            ],
+        })
+    }
+
+    fn submission_runtime_package_fixture(root: &Path) -> serde_json::Value {
+        serde_json::json!({
+            "name": "reticulum-submission-runtime",
+            "source": null,
+            "manifest_path": root.join("crates/submission-runtime/Cargo.toml"),
+            "features": { "default": [] },
+            "dependencies": [
+                handoff_dependency_fixture("embassy-sync", "=0.8.0", None),
+                handoff_dependency_fixture("embedded-storage", "=0.3.1", None),
+                handoff_dependency_fixture("rand_core", "=0.6.4", None),
                 handoff_path_dependency_fixture(
-                    "reticulum-tx-dispatch",
+                    "reticulum-node-core",
                     "*",
-                    &root.join("crates/tx-dispatch"),
+                    &root.join("crates/node-core"),
                     None,
                 ),
-                handoff_dependency_fixture("embassy-sync", "=0.8.0", Some("dev")),
-                handoff_dependency_fixture("rand_core", "=0.6.4", Some("dev")),
                 handoff_path_dependency_fixture(
-                    "reticulum-tx-handoff",
+                    "reticulum-storage-actor",
                     "*",
-                    &root.join("crates/tx-handoff"),
+                    &root.join("crates/storage-actor"),
+                    None,
+                ),
+                handoff_path_dependency_fixture(
+                    "reticulum-storage-model",
+                    "*",
+                    &root.join("crates/storage-model"),
+                    None,
+                ),
+                handoff_path_dependency_fixture(
+                    "reticulum-submission-projector",
+                    "*",
+                    &root.join("crates/submission-projector"),
+                    None,
+                ),
+                handoff_path_dependency_fixture(
+                    "reticulum-tx-supervisor",
+                    "*",
+                    &root.join("crates/tx-supervisor"),
+                    None,
+                ),
+                handoff_path_dependency_fixture(
+                    "reticulum-storage-journal",
+                    "*",
+                    &root.join("crates/storage-journal"),
                     Some("dev"),
                 ),
             ],
@@ -5888,10 +9100,10 @@ mod tests {
             "manifest_path": root.join("crates/device-api-adapter/Cargo.toml"),
             "features": {
                 "default": [],
-                "host-sim": ["reticulum-device-api/host-sim"],
+                "experimental-rns-data": ["reticulum-device-api/experimental-rns-data"],
             },
             "dependencies": [
-                handoff_dependency_fixture("embedded-storage", "=0.3.1", None),
+                handoff_dependency_fixture("embedded-storage", "=0.3.1", Some("dev")),
                 handoff_path_dependency_fixture(
                     "reticulum-device-api",
                     "*",
@@ -5902,7 +9114,7 @@ mod tests {
                     "reticulum-storage-actor",
                     "*",
                     &root.join("crates/storage-actor"),
-                    None,
+                    Some("dev"),
                 ),
                 handoff_path_dependency_fixture(
                     "reticulum-storage-model",
@@ -5910,6 +9122,35 @@ mod tests {
                     &root.join("crates/storage-model"),
                     None,
                 ),
+            ],
+        })
+    }
+
+    fn device_api_edge_metadata_fixture(root: &Path) -> serde_json::Value {
+        serde_json::json!({
+            "packages": [
+                {
+                    "name": "reticulum-device-api-framing",
+                    "source": null,
+                    "manifest_path": root.join("crates/device-api-framing/Cargo.toml"),
+                    "features": {},
+                    "dependencies": [],
+                },
+                {
+                    "name": "reticulum-device-api-handoff",
+                    "source": null,
+                    "manifest_path": root.join("crates/device-api-handoff/Cargo.toml"),
+                    "features": {},
+                    "dependencies": [
+                        handoff_dependency_fixture("embassy-sync", "=0.8.0", None),
+                        handoff_path_dependency_fixture(
+                            "reticulum-device-api",
+                            "*",
+                            &root.join("crates/device-api"),
+                            None,
+                        ),
+                    ],
+                },
             ],
         })
     }
@@ -5957,6 +9198,12 @@ mod tests {
                     ),
                     hil_registry_dependency_fixture("log", "=0.4.27", &[]),
                     handoff_path_dependency_fixture(
+                        "reticulum-nor-flash-region",
+                        "*",
+                        &root.join("crates/nor-flash-region"),
+                        None,
+                    ),
+                    handoff_path_dependency_fixture(
                         "reticulum-storage-journal",
                         "*",
                         &root.join("crates/storage-journal"),
@@ -6002,12 +9249,6 @@ mod tests {
                     &root.join("crates/storage-model"),
                     None,
                 ),
-                handoff_path_dependency_fixture(
-                    "reticulum-tx-dispatch",
-                    "*",
-                    &root.join("crates/tx-dispatch"),
-                    None,
-                ),
                 handoff_dependency_fixture("rand_core", "=0.6.4", Some("dev")),
                 handoff_path_dependency_fixture(
                     "reticulum-rns-rete",
@@ -6045,9 +9286,21 @@ mod tests {
                 handoff_dependency_fixture("embassy-time", "=0.5.0", None),
                 handoff_dependency_fixture("rand_core", "=0.6.4", None),
                 handoff_path_dependency_fixture(
+                    "reticulum-interface-router",
+                    "*",
+                    &root.join("crates/interface-router"),
+                    None,
+                ),
+                handoff_path_dependency_fixture(
                     "reticulum-tx-handoff",
                     "*",
                     &root.join("crates/tx-handoff"),
+                    None,
+                ),
+                handoff_path_dependency_fixture(
+                    "reticulum-rns-rete",
+                    "*",
+                    &root.join("crates/rns-rete"),
                     Some("dev"),
                 ),
                 static_cell,
@@ -6077,6 +9330,12 @@ mod tests {
             None,
         );
         framing["uses_default_features"] = serde_json::Value::Bool(true);
+        let shared = handoff_path_dependency_fixture(
+            "reticulum-radio-lora-phy",
+            "*",
+            &root.join("crates/radio-lora-phy"),
+            None,
+        );
         let mut dev_critical =
             handoff_dependency_fixture("critical-section", "=1.2.0", Some("dev"));
         dev_critical["features"] = serde_json::json!(["std"]);
@@ -6105,6 +9364,7 @@ mod tests {
                         lora_phy,
                         board,
                         framing,
+                        shared,
                         dev_critical,
                     ],
                 },

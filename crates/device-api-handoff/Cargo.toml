@@ -1,0 +1,15 @@
+[package]
+name = "reticulum-device-api-handoff"
+description = "Allocation-free owning handoff for authenticated local device-API jobs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+embassy-sync.workspace = true
+reticulum-device-api = { path = "../device-api", default-features = false }
+
+[lib]
+path = "src/lib.rs"

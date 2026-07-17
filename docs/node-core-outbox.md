@@ -1,28 +1,80 @@
-# Bounded node-core external-buffer DATA dispatch
+# Bounded node-core external-buffer packet dispatch
 
-**Status:** portable route/permit/completion/recovery, owning handoff storage,
-and firmware-excluded RF-inert persistent dispatcher, permit server, and node
-DATA-owner machine with synchronous parked-owner preparation implemented;
-firmware-excluded permanent RF-inert supervisor, sole-owner RNS forwarding
-surface, and async TX-machine runner implemented;
-portable durable model/projector and independent physical journal implemented;
-portable sole storage actor implemented and target-checked; no permanent
-storage task; portable authenticated device-API adapter implemented but not
-transport/firmware-linked; no firmware RF TX linkage or radio driver
+**Status:** portable DATA and ordinary route/permit/completion/recovery owners,
+bounded interface fabric, both router coordinators and per-actor permit
+services, ticket-aware real-radio dispatch, and the permanent E290 node/LoRa
+composition are implemented and pass their host, portable-target and ESP32-S3
+build gates. The durable model/projector, physical journal, sole storage actor,
+and authenticated device-API adapter are implemented separately. Durable
+identity, a permanent storage/API task, local DATA/LXMF submission and client
+delivery, and powered E290 qualification of the product image remain open.
 **Rete pin:** `f6f5fb0637d00691e09fa0105be4df902405fee4`
 
 ## Purpose and boundary
 
 `reticulum-node-core` proves the portable state transitions on both sides of an
-owning interface handoff. Firmware will eventually supply a complete 500-byte
-`TxPacketBuffer`; node-core registers it once, prepares encrypted RNS DATA
-directly into it, resolves the route, and returns a unique routed `TxJob`
-without moving or copying the packet array. The same owner then moves through
+owning interface handoff. The permanent E290 composition supplies and
+registers its fixed 500-byte `TxPacketBuffer` pool; node-core can prepare
+encrypted RNS DATA directly into a buffer, resolve the route, and return a
+unique routed `TxJob` without moving or copying the packet array. The same
+owner then moves through
 permit-pending, authorized or unpermitted, completion, and recovery typestates.
 Alongside the concrete RNS owner, node-core stores only fixed scalar dispatch
 metadata for those external buffers and the fixed DATA attempt ledger. Proofs
 and timeouts move the exact attempt into an in-place terminal tombstone before
 Rete removes its receipt.
+
+The independent `OrdinaryActionOwner` registers a second class of caller-owned
+500-byte buffers against the same opaque node/incarnation scope. It can only be
+issued by the one-shot `NodeCore::take_ordinary_action_owner()` claim. Its
+constructor is not public and dropping the issued pool does not release the
+claim. This is an identity invariant, not just a convenience: slot IDs and
+generations are pool-local, so two pools with the same `TxOwnerScope` could
+otherwise both create slot-zero/generation-one jobs and accept each other's
+owners.
+
+Static buffer references live by value in `OrdinaryBufferPool`, indexed by
+their registered stable slots. `register_and_park()` validates the destination
+slot before changing either owner metadata or the supplied buffer;
+`park_return()` retains the complete owning return on any collision or metadata
+error. `admit_from_pool()` borrows the parking table only briefly and moves the
+selected references into jobs with the buffers' original static lifetime. This
+allows a permanent machine to park a terminal return and admit the same exact
+pointer again. The older borrowed-slice `admit()` remains only for bounded
+short-lived stack scopes; a static slice borrowed through that API cannot be a
+reusable parking table.
+
+One admission call preflights every packet length and route, the complete free
+capacity, selected registered owners, the inclusive deadline, and the required
+checked generation range before changing any slot, pointer, or byte. Failure
+returns the exact original `NodeActions` and leaves every parked reference in
+place; success copies each native packet `Vec` once, in order, and retains the
+events and unroutable count explicitly in
+`OrdinaryActionBatch`. Each ordinary job retains its exact native target,
+stable slot/generation, deadline, selected interface, and admission-time
+remaining route. `OrdinaryTxJob` has no public byte accessor, RNode framing
+state, or receipt record. `begin_permit(requirements)` moves it into a
+separate ordinary-specific non-copy request/pending/reply family. The shared
+policy sees the selected interface, packet length, exact opaque resource ID,
+nonzero actor-defined units, deadline and cumulative `may_have_transmitted`
+value. A covering same-resource reservation changes the authoritative phase
+and cumulative history before the grant leaves the owner; mismatched or
+under-sized reservations remain unpermitted. Only
+`OrdinaryAuthorizedTx::frame(now)` exposes bytes, once and strictly before the
+deadline. Ordinary and DATA owning typestates remain separate and share only
+interface-neutral scalar policy vocabulary.
+
+Typed ordinary completion validates its class against the routed or authorized
+phase. Valid completion advances the same packet generation to the next
+interface, returns the external buffer, or stops remaining fan-out through an
+explicitly unpermitted or authorized cancellation. Pre-send cancellation
+requires the caller to retain the exact unsent request; after sending the
+request, pending ownership has no definitely-unsent cancellation shortcut.
+Same-generation metadata/class faults and recovery faults retain the exact
+unique owner in `OrdinaryTxQuarantine`, while foreign or stale completions are
+returned unchanged as validation failures. A definitive final-hop return is
+`RouteComplete` even at or after its deadline; `DeadlineExpired` means the
+deadline actually suppressed at least one remaining fan-out hop.
 
 The crate privately owns `reticulum-rns-rete::EmbeddedNode`, but its public
 surface uses project-owned identities, destination hashes, interface targets,
@@ -32,40 +84,52 @@ adapter's `IngressReport` and `NodeActions` envelopes without exposing mutable
 Rete state. It has no dependency on the device API, Embassy, radio traits, ESP
 crates, a board support package or durable storage.
 The separate `reticulum-tx-handoff` edge crate depends on node-core and Embassy
-Sync while keeping node-core itself synchronous and executor-free.
+Sync while keeping node-core itself synchronous and executor-free. It exposes
+distinct DATA and ordinary-action channel families rather than erasing one
+owner protocol into the other.
 `reticulum-tx-dispatch` depends on both portable crates and owns their packet-
 interface roles in persistent state. It has no direct device-API, executor,
 clock, TX-capable driver/HAL, or firmware dependency; node-core's transitive
-portable RX/framing edge supplies no TX capability. A future local-session
+Rete closure contains no radio, RNode, LoRa or board crate. The separate
+`reticulum-rns-rete-rx` vertical-slice adapter owns physical RNode receive and
+reassembly. A future local-session
 dispatcher is a different boundary: it will depend on both node-core and
 device-api and map their types explicitly.
 
-`reticulum-tx-supervisor` is a separate firmware-excluded edge. It owns one
-exact node-core, the DATA machine, permit server, RF-inert dispatcher,
-authorization policy, and monotonic clock contract in a permanent aggregate.
-It forwards the sole owner's destination hash, explicit inbound-proof policy,
-bounded announce queue/flush, complete-packet RNS ingress, and timer maintenance.
-It also provides complete synchronous TX-machine passes, a public cancellation-
-safe work wait, and a never-returning async run loop, but has no firmware,
-radio/HAL, flash, or device-API dependency.
+`reticulum-tx-supervisor` is a separate portable edge. Its production
+`NodeInterfaceSupervisor` owns one exact node-core, the authoritative interface
+router, both coordinators, every per-actor permit server, the authorization
+policy, and the monotonic-clock contract. It forwards the sole owner's
+destination hash, explicit inbound-proof policy, bounded announce queue/flush,
+registry-validated exact-owner RNS ingress, and timer maintenance. No public
+supervisor method accepts a caller-selected raw interface ID. The older
+RF-inert `TxSupervisor` and its async runner remain only a legacy DATA-machine
+test aggregate; neither aggregate depends on firmware, radio/HAL, flash, or the
+device API.
 
 Inbound proof generation defaults to `Never` and must be explicitly changed to
 `Always`. `queue_announce()` copies optional application data into Rete's
 bounded pending queue and reports oversize or full-queue admission failures;
 `flush_announces()` later returns the ready broadcast actions. Ingress and tick
 likewise return all ordinary application events and outbound packets to the
-caller. These `NodeActions` remain allocation-backed. They are not registered
-external packet owners and are not accepted or retained by the current RF-
-inert dispatcher.
+caller. These native `NodeActions` remain allocation-backed until a caller
+atomically admits the complete envelope into `OrdinaryActionOwner`. That owner
+now connects to the interface router's ticketed per-actor job/completion queue
+and a separate permit-only handoff/server. The implemented
+`reticulum-radio-tx-dispatch` consumes the router's DATA/ordinary actor union
+and retains LoRa-specific framing/access policy locally. The permanent E290
+composition now joins it to `NodeInterfaceSupervisor`, timed RNode RX and the
+sole E290 radio owner. No local DATA submission or client-delivery edge is
+present yet, so that autonomous image does not originate a controlled DATA
+exchange.
 
 `TxJob`, permit requests/replies, completions, buffers, and recovery records do
 not expose packet bytes. Only an exactly matched `AuthorizedTx` can borrow the
 encoded frame, once, through `frame(now)` before its deadline. This API proves
-authorization semantics; it does not perform RF transmission. The bounded
-channel storage and an RF-inert dispatcher now exist, but the dispatcher's only
-frame consumer is a private scalar inspector. It exposes no pluggable byte sink
-and has no interface implementation, radio implementation, or RF-capable
-firmware connection.
+authorization semantics; it does not itself perform RF transmission. The
+legacy RF-inert dispatcher consumes authorized bytes only through a private
+scalar inspector. The separate ticket-aware radio dispatcher is the sole byte
+consumer in the permanent LoRa actor and owns the actual RNode/radio boundary.
 
 `NoRfTxDispatcher` keeps each unique job, permit-pending/authorized owner,
 completion, pressured owner return, and unmatched control value in a compact
@@ -165,7 +229,9 @@ enabled packet interfaces:
    return the same available buffer inside `PrepareFailure`.
 6. On success, commit the full receipt hash to the active attempt and resolve
    Rete's `All`, `Only(interface)`, or `AllExcept(interface)` target against the
-   supplied enabled-interface snapshot.
+   supplied enabled-interface snapshot. Locally originated destination DATA is
+   `Only` the interface on which the current path was learned; a peer registered
+   without an observed interface retains the unknown/direct-path `All` fallback.
 7. Bind the first deterministic hop, dispatch generation, target, and deadline
    into the buffer and return the only `TxJob` that owns its mutable reference.
 
@@ -253,17 +319,31 @@ never fabricates or force-reuses the missing reference.
 
 ## Permit, byte access, and completion
 
-`TxJob::begin_permit()` consumes routed ownership into `PermitPendingTx` and an
-opaque non-`Copy` `TxPermitRequest`. `authorize_tx(request, now, policy)` first
+`TxJob::begin_permit(requirements)` consumes routed ownership into
+`PermitPendingTx` and an opaque non-`Copy` `TxPermitRequest`. Requirements bind
+a `TxPermitResourceId` and nonzero actor-defined resource units; node-core does
+not interpret either as a radio, stream, datagram, or other link mechanism.
+`authorize_tx(request, now, policy)` first
 validates node identity, `NodeInstanceId`, slot, dispatch generation, selected
 interface, and per-hop generation. It denies terminal, expired, or retained-
 recovery work without invoking policy. Only a fully valid candidate reaches
-the synchronous regional/airtime policy.
+the synchronous interface-resource policy. The candidate includes the exact
+requirements, packet length, and selected interface and carries the exact
+`MonotonicMillis` sample supplied as `now`: the same sample used for the
+immediately preceding deadline check, without a resample before policy runs.
+It is an evaluation-time observation and does not imply that policy grants the
+candidate.
 
-A policy grant immediately and irrevocably changes authoritative dispatch
-state to `Authorized` and sets the cumulative `may_have_transmitted` bit before
-the non-`Copy` reply leaves node-core. This is the linearization point. A lost
-or delayed grant can therefore never be reclassified as definitely unsent.
+A policy authorization must carry a `TxPermitReservation` naming the same
+resource whose units cover the request. A resource mismatch or
+under-reservation becomes `CapacityUnavailable` while the dispatch remains
+unpermitted. A covering reservation immediately and irrevocably changes
+authoritative dispatch state to `Authorized` and sets the cumulative
+`may_have_transmitted` bit before the non-`Copy` reply leaves node-core. This is
+the reservation-consumption and transmission-classification linearization
+point; no later fault refunds it. A lost or delayed grant can therefore never
+be reclassified as definitely unsent. The exact reservation is available from
+the grant and resolved `AuthorizedTx` for the selected interface actor.
 `PermitPendingTx::resolve(reply, now)` also checks the exact binding; a mismatch
 retains both the unique pending owner and unchanged reply. A grant resolved at
 or after the exact deadline produces `ExpiredAuthorizedTx`, which has no byte
@@ -305,13 +385,14 @@ same buffer binding becomes reusable. `NodeTxDataMachine` parks the recovered
 buffer with its complete generation-safe observation and does not expose it as
 available until exact acknowledgement. The supervisor exposes both the
 observation and acknowledgement facade. `reticulum-submission-projector`
-withholds that action until the transport audit is known committed, although
-no permanent runtime drives it. `reticulum-storage-journal` now supplies the
+withholds that action until the transport audit is known committed.
+`reticulum-storage-journal` supplies the
 physical append/replay/compaction backend, and `reticulum-storage-actor` now
 owns that journal, the live replay index and the sole projector. It retains one
 bounded exact pending mutation and can autonomously reconcile an ambiguous
-backend result before exposing the acknowledgement. No permanent firmware task
-yet drives that actor and projector from this node/supervisor path.
+backend result before exposing the acknowledgement. The E290 image now mounts
+and recovers that runtime before service, but no resident firmware path yet
+drives live observations or acknowledgements from this node/supervisor path.
 An internally inconsistent same-lease return or an explicit recovery fault
 returns an owning `TxQuarantine` and retains the fail-closed scalar record.
 Before exposing its `TxRecoveryObservation`, quarantine canonicalizes the
@@ -418,7 +499,7 @@ cargo +esp check --locked -p reticulum-tx-supervisor \
   --target xtensa-esp32s3-none-elf
 ```
 
-The 45-test node-core host suite covers bounded announce admission/flush,
+The 69-test node-core host suite covers bounded announce admission/flush,
 explicit inbound-proof policy, stable one-time registration, pointer-stable no-
 copy preparation, deadline-before-mutation rejection, empty and deterministic
 multi-interface routes, per-hop generations, exact queue rollback, cumulative
@@ -428,9 +509,11 @@ fan-out, coherent late recovery, fault and invariant quarantine, cross-
 incarnation/stale returns, completion-metadata tamper quarantine, receipt
 terminal races, tombstone backpressure, and exact acknowledgement reuse. A
 layout guard keeps packet-sized arrays out of
-dispatch slots. Five handoff unit tests cover production-mutex static
+dispatch slots. Eleven handoff unit tests cover production-mutex static
 construction, static-reference identity, FIFO ordering, owner/control pressure,
-exact `ChannelFull<T>` returns and mismatched permit replies. Five host-only
+exact `ChannelFull<T>` returns, mismatched permit replies, ordinary common-
+origin splitting without a seed, ordinary receive cancellation, and crossed
+ordinary permit replies with exact full-channel cancellation. Five host-only
 integration tests manually step the real job/request/reply/return ports through
 authorized no-RF frame inspection, policy denial, exact-deadline grant
 expiry/recovery, serialized two-interface fan-out with the same owner, and
@@ -450,26 +533,40 @@ failure retention, final and recovered parking, generation-scoped recovery
 acknowledgement, quarantine, exact owner binding, completion-failure retention,
 cancelled return waits, `Next` pressure/readiness cancellation, and compact
 production-mutex layout.
-The 13-test supervisor suite covers separate and deadline-crossing fresh clock
-samples, the complete RF-denied lifecycle, exact-deadline recovery retention,
+The 13 legacy `TxSupervisor` tests cover separate and deadline-crossing fresh
+clock samples, the complete RF-denied lifecycle, exact-deadline recovery retention,
 terminal/recovery acknowledgement facades, permit-grace reply priority and
 fault drain, monotonic regression, public combined-wait cancellation, the
 permanent protocol-owner forwarding surface, deadline conversion, common-
-origin/full-seed construction, and static storage. The focused node-core and
-dispatch suites contain 45 and 33 tests respectively. None of these crates is
-linked into firmware, and there is still no driver, radio, or RF path.
+origin/full-seed construction, and static storage. Twenty-one focused ordinary-
+action tests cover atomic full-pool failure with exact envelope return, packet
+order and every target shape, event/unroutable retention, registration and
+foreign/busy/invariant rejection, inclusive deadline return, stale and
+exhausted generations, the one-shot same-scope pool claim, final-hop deadline
+classification, serialized fan-out, exact requirements/reservation matching,
+one-shot authorized bytes, cumulative transmission history, delayed grants,
+typed cancellation, quarantine, the minimum active deadline, oversize
+validation, owning park failures, exact static-pointer recycling, and unchanged
+DATA capacity. The focused node-core and RF-inert dispatch suites contain 70
+and 33 tests respectively. The production aggregate, ticket-aware dispatcher
+and E290 radio owner are now linked in the permanent LoRa-first firmware graph;
+the RF-inert machines remain focused regression fixtures.
 
 ## Next boundary
 
 The portable owning storage layer, RF-inert dispatcher, permit and node DATA-
-owner machines, and permanent RF-inert supervisor aggregate now exist.
+owner machines, and permanent production supervisor aggregate now exist.
 `TxHandoff::split_paired()` consumes one unique static handoff; every registered
 owner must seed that inseparable common-origin role set before
 `NoRfTxMachineSet::try_new()` can bind it into the supervisor. Incomplete
 construction returns the paired roles and queued owners unchanged. Pool-sized
 channels carry jobs and owner returns, depth-one channels isolate permit
 requests/replies, and every send is a non-awaiting `try_send` that returns the
-unchanged value on pressure. The remaining orchestration work is:
+unchanged value on pressure. Separately, `OrdinaryPermitHandoff::split_paired()`
+creates the common-origin node/actor roles for only the depth-one ordinary
+permit request/reply channels. Ticketed ordinary jobs and completions use the
+interface router's per-actor queues; the fixed `OrdinaryBufferPool` remains in
+the coordinator. The remaining product work at this boundary is:
 
 1. Host the implemented portable storage actor in one permanent Embassy task.
    Connect the checked product `esp-storage` partition adapter, gate all service
@@ -477,22 +574,24 @@ unchanged value on pressure. The remaining orchestration work is:
    stores and radio timing. The isolated journal clean-path/software-reset HIL
    has passed; actor-on-target, controlled power-fail, endurance/soak, and
    integrated-runtime coverage remain open.
-2. Host the supervisor's sole-owner RNS surface in a permanent node task with
-   timed RNode reassembly and distinct RNode-fragment, RNS-seconds, and TX-owner
-   clocks. The portable aggregate now forwards ingress, tick, proof policy, and
-   bounded announce operations, but no firmware graph instantiates it.
-3. Connect the implemented authenticated device-API adapter to framing,
+2. Preserve and qualify the implemented mirrored identity and announce-clock
+   boot gate. It preflights identity without mutation, reserves the next logical
+   announce epoch before provisioning/loading, requires redundant key mirrors,
+   and keeps protocol-monotonic deadlines separate from the 40-bit local
+   announce-emission order. Powered reset and power-cut evidence remains open.
+3. Connect the implemented authenticated device-API adapter to USB framing,
    sessions and the permanent actor task; drive the model's conservative boot
    recovery and node observations through the actor's narrow projector methods;
    and add a proved safe retirement condition for bounded volatile projector
    slots without attempting to persist leases or mutable references.
-4. Convert every allocation-backed `NodeActions` packet returned by announce
-   flush, ingress, and tick into caller-reservable ownership with explicit
-   backpressure. The external-buffer DATA path alone does not stage proofs,
-   announces, forwarding, Links, or Resources into the dispatcher.
-5. Join these boundaries to a concrete policy and sole radio owner before
-   claiming a product TX path. The attached antenna-equipped boards are already
-   cleared for NA915 development TX/RX, so integration firmware may exercise
-   that path as soon as it preserves the ownership and policy contracts.
-   Separately named RF HILs and the derived RNode peer remain development
-   artifacts, not product dependencies.
+4. Add bounded local DATA/LXMF submission and durable client delivery without
+   changing the completed router/permit/radio ownership path or adding RNode
+   state to node-core. Native action allocation and pre-mutation backpressure
+   remain separate Rete hardening work.
+5. With both attached modules confirmed `HT-RA62-HF` and the isolated semantic
+   HIL passed, qualify the permanent pair's boot, radio initialization,
+   ordinary ANNOUNCE
+   TX/RX, contention and reset behavior. Use an external injector or the
+   separate semantic-HIL fixture for controlled DATA/proof until the local
+   submission edge exists. Separately named RF HILs and the derived RNode peer
+   remain development artifacts, not product dependencies.

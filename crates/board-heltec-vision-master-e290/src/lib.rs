@@ -1,0 +1,406 @@
+//! Heltec Vision Master E290 board facts.
+//!
+//! This is not a BSP or evidence that a connected board has been qualified. It
+//! centralizes the supplied V0.3.1 schematic's pin ownership, the fitted
+//! HT-RA62-HF matching range, conservative design memory evidence, and inert
+//! boot policy before concrete `esp-hal` peripheral ownership is introduced.
+
+#![no_std]
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
+use reticulum_radio_interface::{
+    LabRxProfile, LabRxProfileConfig, LabRxProfileError, ReceiveFrequencyRange,
+};
+
+/// Product model described by the supplied design documents.
+pub const BOARD_MODEL: &str = "Heltec Vision Master E290";
+
+/// Revision of the supplied schematic, not a claim about a connected PCB.
+pub const DOCUMENTED_SCHEMATIC_REVISION: &str = "V0.3.1";
+
+/// Fitted high-frequency radio-module variant required for NA915 operation.
+pub const FITTED_RADIO_MODULE: &str = "HT-RA62-HF";
+
+/// Conservative PSRAM floor implied by the schematic's ESP32-S3R8 part.
+///
+/// This is design evidence only. Firmware must qualify the mapped capacity on
+/// every physical board before relying on it.
+pub const DESIGN_PSRAM_FLOOR_BYTES: usize = 8 * 1024 * 1024;
+
+/// The board-facts layer never enables transmission by default.
+pub const TX_ENABLED_BY_DEFAULT: bool = false;
+
+/// No legal operating frequency can be inferred from the board alone.
+pub const DEFAULT_FREQUENCY_HZ: Option<u32> = None;
+
+/// No conducted or radiated transmit power is selected by the board alone.
+pub const DEFAULT_TX_POWER_DBM: Option<i8> = None;
+
+/// Lowest frequency supported by the fitted HT-RA62-HF matching network.
+pub const RF_MATCHING_MIN_HZ: u32 = 863_000_000;
+
+/// Highest frequency supported by the fitted HT-RA62-HF matching network.
+pub const RF_MATCHING_MAX_HZ: u32 = 928_000_000;
+
+/// Inclusive receive range for the fitted HT-RA62-HF radio path.
+pub const LAB_RX_FREQUENCY_RANGE: ReceiveFrequencyRange =
+    match ReceiveFrequencyRange::try_new(RF_MATCHING_MIN_HZ, RF_MATCHING_MAX_HZ) {
+        Ok(range) => range,
+        Err(_) => panic!("invalid Vision Master E290 RF range"),
+    };
+
+/// Validate an explicit lab profile against the complete fitted radio path.
+///
+/// Validation requires the entire occupied channel, not only its center
+/// frequency, to remain inside 863--928 MHz. It does not authorize transmit.
+pub const fn validate_lab_rx_profile(
+    config: LabRxProfileConfig,
+) -> Result<LabRxProfile, LabRxProfileError> {
+    LabRxProfile::validate(config, LAB_RX_FREQUENCY_RANGE)
+}
+
+/// Peripheral owner that must hold the corresponding GPIO capability.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GpioOwner {
+    /// The sole E-Ink display actor.
+    Display,
+    /// The battery-monitor owner.
+    BatteryMonitor,
+    /// The sole HT-RA62/SX1262 radio owner.
+    Radio,
+    /// The QuickLink I2C-bus owner.
+    QuickLink,
+    /// The sole native-USB controller owner.
+    Usb,
+    /// The physical user-input owner.
+    UserInput,
+    /// The exposed UART owner.
+    Uart,
+}
+
+/// Every internal signal assigned by the supplied E290 pin map and schematic.
+///
+/// The GPIO number is the discriminant, so duplicate assignments are rejected
+/// by the compiler in addition to the exhaustive collision test.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum BoardSignal {
+    /// E-Ink serial-data input.
+    EinkSdi = 1,
+    /// E-Ink serial clock.
+    EinkClock = 2,
+    /// E-Ink chip select.
+    EinkChipSelect = 3,
+    /// E-Ink data/command selection.
+    EinkDataCommand = 4,
+    /// E-Ink reset.
+    EinkReset = 5,
+    /// E-Ink busy indication.
+    EinkBusy = 6,
+    /// Battery-voltage ADC input.
+    BatteryAdc = 7,
+    /// HT-RA62 SPI chip select.
+    RadioNss = 8,
+    /// HT-RA62 SPI clock.
+    RadioSck = 9,
+    /// HT-RA62 SPI controller-output/peripheral-input signal.
+    RadioMosi = 10,
+    /// HT-RA62 SPI controller-input/peripheral-output signal.
+    RadioMiso = 11,
+    /// HT-RA62 reset.
+    RadioReset = 12,
+    /// HT-RA62 busy indication.
+    RadioBusy = 13,
+    /// HT-RA62 DIO1 interrupt.
+    RadioDio1 = 14,
+    /// Native USB D- routed through the Type-C connector.
+    UsbDataMinus = 19,
+    /// Native USB D+ routed through the Type-C connector.
+    UsbDataPlus = 20,
+    /// Active-low user key with an external pull-up.
+    UserKey = 21,
+    /// QuickLink I2C clock.
+    QuickLinkScl = 38,
+    /// QuickLink I2C data.
+    QuickLinkSda = 39,
+    /// Exposed UART transmit signal.
+    UartTx = 43,
+    /// Exposed UART receive signal.
+    UartRx = 44,
+}
+
+impl BoardSignal {
+    /// ESP32-S3 GPIO number assigned to this signal.
+    pub const fn gpio(self) -> u8 {
+        self as u8
+    }
+
+    /// Sole peripheral owner for this signal.
+    pub const fn owner(self) -> GpioOwner {
+        match self {
+            Self::EinkSdi
+            | Self::EinkClock
+            | Self::EinkChipSelect
+            | Self::EinkDataCommand
+            | Self::EinkReset
+            | Self::EinkBusy => GpioOwner::Display,
+            Self::BatteryAdc => GpioOwner::BatteryMonitor,
+            Self::RadioNss
+            | Self::RadioSck
+            | Self::RadioMosi
+            | Self::RadioMiso
+            | Self::RadioReset
+            | Self::RadioBusy
+            | Self::RadioDio1 => GpioOwner::Radio,
+            Self::UsbDataMinus | Self::UsbDataPlus => GpioOwner::Usb,
+            Self::UserKey => GpioOwner::UserInput,
+            Self::QuickLinkScl | Self::QuickLinkSda => GpioOwner::QuickLink,
+            Self::UartTx | Self::UartRx => GpioOwner::Uart,
+        }
+    }
+}
+
+/// Exhaustive set of internal GPIO assignments described by this crate.
+pub const BOARD_SIGNALS: [BoardSignal; 21] = [
+    BoardSignal::EinkSdi,
+    BoardSignal::EinkClock,
+    BoardSignal::EinkChipSelect,
+    BoardSignal::EinkDataCommand,
+    BoardSignal::EinkReset,
+    BoardSignal::EinkBusy,
+    BoardSignal::BatteryAdc,
+    BoardSignal::RadioNss,
+    BoardSignal::RadioSck,
+    BoardSignal::RadioMosi,
+    BoardSignal::RadioMiso,
+    BoardSignal::RadioReset,
+    BoardSignal::RadioBusy,
+    BoardSignal::RadioDio1,
+    BoardSignal::UsbDataMinus,
+    BoardSignal::UsbDataPlus,
+    BoardSignal::UserKey,
+    BoardSignal::QuickLinkScl,
+    BoardSignal::QuickLinkSda,
+    BoardSignal::UartTx,
+    BoardSignal::UartRx,
+];
+
+/// GPIO assignments as named constants for concrete BSP construction.
+pub mod pins {
+    use super::BoardSignal;
+
+    /// E-Ink serial-data input.
+    pub const EINK_SDI: u8 = BoardSignal::EinkSdi.gpio();
+    /// E-Ink serial clock.
+    pub const EINK_CLOCK: u8 = BoardSignal::EinkClock.gpio();
+    /// E-Ink chip select.
+    pub const EINK_CHIP_SELECT: u8 = BoardSignal::EinkChipSelect.gpio();
+    /// E-Ink data/command selection.
+    pub const EINK_DATA_COMMAND: u8 = BoardSignal::EinkDataCommand.gpio();
+    /// E-Ink reset.
+    pub const EINK_RESET: u8 = BoardSignal::EinkReset.gpio();
+    /// E-Ink busy indication.
+    pub const EINK_BUSY: u8 = BoardSignal::EinkBusy.gpio();
+    /// Battery-voltage ADC input.
+    pub const BATTERY_ADC: u8 = BoardSignal::BatteryAdc.gpio();
+    /// HT-RA62 SPI chip select.
+    pub const RADIO_NSS: u8 = BoardSignal::RadioNss.gpio();
+    /// HT-RA62 SPI clock.
+    pub const RADIO_SCK: u8 = BoardSignal::RadioSck.gpio();
+    /// HT-RA62 SPI controller-output/peripheral-input signal.
+    pub const RADIO_MOSI: u8 = BoardSignal::RadioMosi.gpio();
+    /// HT-RA62 SPI controller-input/peripheral-output signal.
+    pub const RADIO_MISO: u8 = BoardSignal::RadioMiso.gpio();
+    /// HT-RA62 reset.
+    pub const RADIO_RESET: u8 = BoardSignal::RadioReset.gpio();
+    /// HT-RA62 busy indication.
+    pub const RADIO_BUSY: u8 = BoardSignal::RadioBusy.gpio();
+    /// HT-RA62 DIO1 interrupt.
+    pub const RADIO_DIO1: u8 = BoardSignal::RadioDio1.gpio();
+    /// Native USB D-.
+    pub const USB_DATA_MINUS: u8 = BoardSignal::UsbDataMinus.gpio();
+    /// Native USB D+.
+    pub const USB_DATA_PLUS: u8 = BoardSignal::UsbDataPlus.gpio();
+    /// Active-low user key.
+    pub const USER_KEY: u8 = BoardSignal::UserKey.gpio();
+    /// QuickLink I2C clock.
+    pub const QUICKLINK_SCL: u8 = BoardSignal::QuickLinkScl.gpio();
+    /// QuickLink I2C data.
+    pub const QUICKLINK_SDA: u8 = BoardSignal::QuickLinkSda.gpio();
+    /// Exposed UART transmit signal.
+    pub const UART_TX: u8 = BoardSignal::UartTx.gpio();
+    /// Exposed UART receive signal.
+    pub const UART_RX: u8 = BoardSignal::UartRx.gpio();
+}
+
+/// Logic level to apply to a safety-critical output at inert boot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SafeLevel {
+    /// Drive the output low.
+    Low,
+    /// Drive the output high.
+    High,
+}
+
+/// Fail-safe state applied before any radio initialization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RadioSafeState {
+    /// Level applied to the active-low SX1262 reset input.
+    pub sx1262_reset: SafeLevel,
+    /// Level applied to the active-low SPI chip-select input.
+    pub sx1262_nss: SafeLevel,
+}
+
+/// Reset-low and NSS-high contain the HT-RA62 without Tracker FEM controls.
+pub const INERT_RADIO_STATE: RadioSafeState = RadioSafeState {
+    sx1262_reset: SafeLevel::Low,
+    sx1262_nss: SafeLevel::High,
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EXPECTED_GPIOS: [u8; 21] = [
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 19, 20, 21, 38, 39, 43, 44,
+    ];
+
+    fn valid_profile(frequency_hz: u32) -> LabRxProfileConfig {
+        LabRxProfileConfig {
+            frequency_hz: Some(frequency_hz),
+            spreading_factor: 7,
+            bandwidth_hz: 125_000,
+            coding_rate_denominator: 5,
+            preamble_symbols: 18,
+            explicit_header: true,
+            crc: true,
+            iq_inverted: false,
+        }
+    }
+
+    #[test]
+    fn documented_gpio_map_is_exact_and_collision_free() {
+        let actual = BOARD_SIGNALS.map(BoardSignal::gpio);
+        assert_eq!(actual, EXPECTED_GPIOS);
+
+        for (index, gpio) in actual.iter().enumerate() {
+            assert!(!actual[..index].contains(gpio), "duplicate GPIO {gpio}");
+        }
+    }
+
+    #[test]
+    fn gpio_ownership_is_exhaustive_and_exact() {
+        let actual = BOARD_SIGNALS.map(BoardSignal::owner);
+        assert_eq!(actual[..6], [GpioOwner::Display; 6]);
+        assert_eq!(actual[6], GpioOwner::BatteryMonitor);
+        assert_eq!(actual[7..14], [GpioOwner::Radio; 7]);
+        assert_eq!(actual[14..16], [GpioOwner::Usb; 2]);
+        assert_eq!(actual[16], GpioOwner::UserInput);
+        assert_eq!(actual[17..19], [GpioOwner::QuickLink; 2]);
+        assert_eq!(actual[19..], [GpioOwner::Uart; 2]);
+    }
+
+    #[test]
+    fn radio_pins_are_disjoint_from_display_and_battery_pins() {
+        let display_and_battery = &EXPECTED_GPIOS[..7];
+        let radio = &EXPECTED_GPIOS[7..14];
+        assert_eq!(display_and_battery, &[1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(radio, &[8, 9, 10, 11, 12, 13, 14]);
+        assert!(
+            radio
+                .iter()
+                .all(|radio_gpio| !display_and_battery.contains(radio_gpio))
+        );
+    }
+
+    #[test]
+    fn named_pin_constants_match_every_signal() {
+        let named = [
+            pins::EINK_SDI,
+            pins::EINK_CLOCK,
+            pins::EINK_CHIP_SELECT,
+            pins::EINK_DATA_COMMAND,
+            pins::EINK_RESET,
+            pins::EINK_BUSY,
+            pins::BATTERY_ADC,
+            pins::RADIO_NSS,
+            pins::RADIO_SCK,
+            pins::RADIO_MOSI,
+            pins::RADIO_MISO,
+            pins::RADIO_RESET,
+            pins::RADIO_BUSY,
+            pins::RADIO_DIO1,
+            pins::USB_DATA_MINUS,
+            pins::USB_DATA_PLUS,
+            pins::USER_KEY,
+            pins::QUICKLINK_SCL,
+            pins::QUICKLINK_SDA,
+            pins::UART_TX,
+            pins::UART_RX,
+        ];
+        assert_eq!(named, EXPECTED_GPIOS);
+    }
+
+    #[test]
+    fn radio_boot_policy_is_inert_and_has_no_implicit_profile() {
+        assert_eq!(INERT_RADIO_STATE.sx1262_reset, SafeLevel::Low);
+        assert_eq!(INERT_RADIO_STATE.sx1262_nss, SafeLevel::High);
+        assert!(!core::hint::black_box(TX_ENABLED_BY_DEFAULT));
+        assert_eq!(DEFAULT_FREQUENCY_HZ, None);
+        assert_eq!(DEFAULT_TX_POWER_DBM, None);
+    }
+
+    #[test]
+    fn fitted_range_and_design_memory_floor_are_exact() {
+        assert_eq!(FITTED_RADIO_MODULE, "HT-RA62-HF");
+        assert_eq!(LAB_RX_FREQUENCY_RANGE.minimum_hz(), 863_000_000);
+        assert_eq!(LAB_RX_FREQUENCY_RANGE.maximum_hz(), 928_000_000);
+        assert_eq!(DESIGN_PSRAM_FLOOR_BYTES, 8_388_608);
+    }
+
+    #[test]
+    fn profile_validation_requires_the_complete_channel_inside_fitted_range() {
+        let lower_valid_center = RF_MATCHING_MIN_HZ + 62_500;
+        let upper_valid_center = RF_MATCHING_MAX_HZ - 62_500;
+        assert!(validate_lab_rx_profile(valid_profile(lower_valid_center)).is_ok());
+        assert!(validate_lab_rx_profile(valid_profile(915_000_000)).is_ok());
+        assert!(validate_lab_rx_profile(valid_profile(upper_valid_center)).is_ok());
+
+        let below = lower_valid_center - 1;
+        assert_eq!(
+            validate_lab_rx_profile(valid_profile(below)),
+            Err(LabRxProfileError::ChannelOutsideSupportedRange {
+                frequency_hz: below,
+                bandwidth_hz: 125_000,
+                lower_edge_hz: (RF_MATCHING_MIN_HZ - 1) as u64,
+                upper_edge_hz: (RF_MATCHING_MIN_HZ + 124_999) as u64,
+                minimum_hz: RF_MATCHING_MIN_HZ,
+                maximum_hz: RF_MATCHING_MAX_HZ,
+            })
+        );
+
+        let above = upper_valid_center + 1;
+        assert_eq!(
+            validate_lab_rx_profile(valid_profile(above)),
+            Err(LabRxProfileError::ChannelOutsideSupportedRange {
+                frequency_hz: above,
+                bandwidth_hz: 125_000,
+                lower_edge_hz: (RF_MATCHING_MAX_HZ - 124_999) as u64,
+                upper_edge_hz: (RF_MATCHING_MAX_HZ + 1) as u64,
+                minimum_hz: RF_MATCHING_MIN_HZ,
+                maximum_hz: RF_MATCHING_MAX_HZ,
+            })
+        );
+    }
+
+    #[test]
+    fn profile_validation_rejects_missing_frequency() {
+        let mut config = valid_profile(915_000_000);
+        config.frequency_hz = None;
+        assert_eq!(
+            validate_lab_rx_profile(config),
+            Err(LabRxProfileError::MissingFrequency)
+        );
+    }
+}

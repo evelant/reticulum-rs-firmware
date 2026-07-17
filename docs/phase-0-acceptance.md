@@ -36,6 +36,8 @@ cargo run --locked -p reticulum-conformance-rete
 cargo test --locked -p reticulum-rns-leviculum
 cargo check --locked \
   -p reticulum-device-api \
+  -p reticulum-device-api-framing \
+  -p reticulum-device-api-handoff \
   -p reticulum-node-core \
   -p reticulum-storage-model \
   -p reticulum-submission-projector \
@@ -47,11 +49,15 @@ cargo check --locked \
   -p reticulum-rns-rete-rx \
   -p reticulum-rns-leviculum \
   -p reticulum-radio-interface \
+  -p reticulum-board-heltec-vision-master-e290 \
   -p reticulum-board-heltec-tracker-v2 \
   --target riscv32imac-unknown-none-elf
 cargo +esp check --locked \
   -p reticulum-device-api \
+  -p reticulum-device-api-framing \
+  -p reticulum-device-api-handoff \
   -p reticulum-node-core \
+  -p reticulum-board-heltec-vision-master-e290 \
   -p reticulum-storage-model \
   -p reticulum-submission-projector \
   -p reticulum-tx-handoff \
@@ -227,8 +233,10 @@ Together these boundaries currently enforce:
 - deterministic resolution of outbound `All`/`Only`/`AllExcept` against the
   enabled-interface snapshot and serialized, no-copy fan-out through a unique,
   byte-inaccessible routed `TxJob`;
-- opaque non-`Copy` permit requests/replies whose grant linearization
-  irrevocably records possible transmission before leaving node-core;
+- opaque non-`Copy` permit requests/replies binding an exact interface
+  resource ID and nonzero actor-defined units, with unknown,
+  mismatched/under-sized reservations denied and a covering grant irrevocably
+  recording possible transmission before leaving node-core;
 - one-shot packet-byte access only through an exactly matched
   `AuthorizedTx::frame(now)`, with delayed grants becoming byte-inaccessible
   `ExpiredAuthorizedTx`;
@@ -276,10 +284,21 @@ supervisor aggregate owns those machines with node-core and an authorization
 policy, samples the clock freshly before maintenance/DATA/permit/dispatcher,
 waits for the exact next owner deadline or permit grace, and bounds sustained
 progress to 16 passes before yielding. It now exposes the sole node owner's
-proof policy, bounded announce queue/flush, complete-packet ingress, RNS tick,
-and a public cancellation-safe TX-work wait. Its `RfInertTxPolicy` denies RF;
-ordinary returned protocol actions remain allocation-backed and lack fixed
-dispatcher ownership.
+proof policy, bounded announce queue/flush, registry-validated exact-owner RNS
+ingress, RNS tick, and a public cancellation-safe TX-work wait; no public
+supervisor method accepts a caller-selected raw interface ID. Its
+`RfInertTxPolicy` denies RF. A separately constructible ordinary coordinator
+now admits complete returned action envelopes into the registered static pool,
+derives live eligibility from the authoritative interface router, services the
+opaque authorization edge, and retains exact ticketed jobs, completions,
+rejections and post-fault drain state. Its per-actor permit-only server
+authorizes once, retains exact requests/replies across pressure, and continues
+forced denial after coordinator fault. The separate real-radio dispatcher now
+retains the router's DATA/ordinary tickets, but the DATA router/permit service
+and one permanent E290 aggregate remain missing. These pieces and the router's
+cancellation-safe capacity/completion waits pass host and both target checks,
+but none is yet owned by the legacy supervisor aggregate or a permanent
+firmware graph.
 
 The semantic durable model, idempotent projector, physical journal, and portable
 sole storage actor are implemented and target-checked. The actor owns the NOR
@@ -303,7 +322,7 @@ five appends, mutation-free retry/conflict, B2 compaction, and zero-mutation B2
 replay after software reset. That image calls the journal directly and does not
 qualify the actor on hardware. Controlled power cuts, endurance/soak, at-rest
 encryption, the permanent Embassy actor task, product `esp-storage` adapter,
-boot service gating, device-API framing/session/transport linkage, and runtime
+boot service gating, device-API session/credential/bearer composition, and runtime
 flash/watchdog/OTA/radio coordination remain open. Permanent firmware must
 drive boot recovery for every replayed submission before service enablement.
 RNS ingress/tick now reach the sole portable owner, but timed RNode reassembly and

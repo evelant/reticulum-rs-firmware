@@ -1,183 +1,213 @@
-# RF-inert permanent TX supervisor
+# Portable node/interface supervisor
 
-**Status:** permanent portable protocol-owner aggregate and async TX-machine
-run loop implemented, target-checked, and outside every firmware graph; RNS
-ingress, timer maintenance, proof policy, and bounded announce admission are
-exposed through the sole owner, but ordinary protocol actions remain
-allocation-backed and there is no permanent firmware, storage, device-API, or
-radio edge
-**RF status:** both attached boards have antennas and are authorized for NA915
-development TX; this crate remains RF-inert because its concrete driver/radio
-owner and regional/airtime policy adapter are not implemented
+**Status:** `NodeInterfaceSupervisor` is the permanent portable protocol-owner
+aggregate. It owns the sole `NodeCore`, authoritative interface router, DATA
+and ordinary coordinators, one DATA and ordinary permit server per actor, and
+the shared authorization policy. The first concrete consumer is the
+LoRa-only, two-task Heltec Vision Master E290 firmware graph. Its host,
+portable-target, ESP32-S3 build and review gates pass; the image remains
+unflashed and needs its own powered qualification. Both attached modules are
+confirmed `HT-RA62-HF`, and the separate semantic image has passed its
+functional radio/RNode/Rete HIL.
 
-## Boundary
+The older `TxSupervisor` is retained only as a legacy no-RF test aggregate for
+the original DATA-machine ownership path. It is not the production composition
+and does not define how future interfaces are added.
 
-`reticulum-tx-supervisor::TxSupervisor` owns one exact `NodeCore`, its
-`NodeTxDataMachine`, the node-side `TxPermitServer`, the
-`NoRfTxDispatcher`, and one authorization policy. The aggregate is intended to
-live in static storage and be borrowed by one never-cancelled task for the
-remainder of the boot. Dropping and reconstructing it is not an ownership
-recovery mechanism.
+## Permanent ownership boundary
 
-The aggregate is now the portable sole RNS owner surface. It exposes the local
-destination hash, explicit inbound delivery-proof policy, bounded signed-
-announce queueing and flushing, complete-packet RNS ingress, and RNS timer
-maintenance without exposing its mutable `NodeCore`. Automatic proofs default
-to `Never`; opting into `Always` only makes proof packets appear in the returned
-actions. Announce admission reports oversize application data or a full bounded
-queue before the caller flushes ready announcements.
+`reticulum_tx_supervisor::NodeInterfaceSupervisor` consumes and permanently
+owns:
 
-`flush_announces()`, `ingest_rns()`, and `tick_rns()` return their ordinary RNS
-action/report envelopes to the caller. Those envelopes still contain
-allocation-backed packet vectors. The supervisor neither stages those packets
-into the fixed `TxPacketBuffer` pool nor retains them under downstream
-backpressure, so a runtime must not discard them or treat this surface as a
-radio dispatcher.
+- one exact `NodeCore` and its node-instance ownership scope;
+- one `InterfaceFabric`, including the authoritative registry and bounded
+  job, completion, and ingress queues;
+- one `DataRouterCoordinator` with its complete registered DATA buffer pool;
+- one `OrdinaryRouterCoordinator` with its independent ordinary buffer pool;
+- one DATA and one ordinary permit-only handoff for every interface actor slot;
+  and
+- one shared `TxAuthorizationPolicy` implementation.
 
-Construction also preserves channel identity and boot ownership. A
-`PairedTxHandoff` can be created only from one channel store, all registered
-buffer owners must be queued through it, and `NoRfTxMachineSet::try_new()`
-rejects an incomplete seed set while returning the unchanged paired roles and
-already queued owners. The supervisor therefore cannot combine disconnected
-handoff halves or silently consume the last capability needed to finish
-seeding.
+Checked construction rejects zero actor slots, mismatched node ownership, or
+invalid interface/permit composition without silently discarding a non-copy
+owner. On success it returns the aggregate plus one `NodeInterfaceActorPorts`
+capability for each actor slot. Each actor capability can then be split into
+TX and ingress roles without creating a second registry authority.
 
-The crate has no firmware, board, radio, HAL, device-API, flash, or executor
-dependency. Its dispatcher still has only the fixed scalar no-RF inspector and
-no pluggable byte sink. `RfInertTxPolicy` denies every otherwise valid candidate
-with `RegionalProfileUnavailable`, so this aggregate cannot authorize RF.
+The aggregate is intended to remain in static storage and be owned by one
+never-cancelled node task for the boot lifetime. Dropping and reconstructing it
+is not an owner-recovery mechanism.
 
-## Clocked synchronous pass
+## Sealed fixed-pool ingress
 
-`run_one_pass()` drives one bounded pass in this order:
+Ingress is queue-only. An interface actor obtains an
+`AvailableIngressBuffer` from its own fabric queue, writes only the initialized
+native RNS packet prefix, seals it as a `SealedIngressPacket`, and submits that
+exact owner through its queue-bound ingress capability. There is no public
+runtime path that wraps an arbitrary payload with a caller-selected interface
+ID.
 
-1. sample the monotonic clock and call `NodeCore::maintain_tx()`;
-2. sample again and step the node DATA machine;
-3. when no fault has stopped new authorization, sample again and step the
-   permit server and policy; and
-4. sample again and step the RF-inert dispatcher.
+`step_ingress()` performs one bounded transition:
 
-Samples are never shared between lanes. A regressing sample is retained as a
-permanent `TxClockRegression` and stops the remainder of that pass and all later
-clocked transitions. `try_prepare_and_submit_data()` also replaces the
-request's caller-supplied owner time with a fresh checked supervisor sample.
-Every clock instance and owner deadline used with an aggregate must share one
-epoch and millisecond scale.
+1. retry an exact buffer recycle retained behind a full return queue;
+2. expose a non-retryable exact buffer owner until firmware takes it;
+3. expose a retained terminal action owner until firmware takes it;
+4. retry an action envelope retained because the ordinary coordinator was
+   busy;
+5. otherwise receive one sealed actor packet;
+6. validate its queue origin, current interface lease, online state, initialized
+   length, and registered logical MTU;
+7. synchronously pass its bytes and registry-derived interface provenance to
+   `NodeCore`; and
+8. return the exact buffer to the same actor pool, retaining it for retry only
+   if the return queue is full and otherwise exposing it as terminal residue.
 
-`NodeCore::next_tx_deadline()` exposes the earliest live routed or authorized
-owner deadline. `TxSupervisor::next_wake()` combines it with the dispatcher's
-active permit-exchange grace deadline and returns the earlier absolute wake.
-The async runner therefore does not depend on an arbitrary polling interval for
-lease maintenance or permit recovery.
+The RX pool therefore remains stationary: queue depth fixes the number of
+buffers assigned to each actor, and neither protocol processing nor action
+backpressure creates replacement owners.
 
-## Permanent async run
+Actions returned by successful ingress are admitted to the owned ordinary
+coordinator. `OrdinaryRouterOfferError::Busy` is the only retryable action
+failure; the aggregate retains that exact envelope and retries it on a later
+bounded ingress step. Aggregate faults, a disabled coordinator, and an
+envelope larger than the configured ordinary pool are terminal. They retain an
+exact `NodeInterfaceTerminalIngressActions` residue, report its typed
+`NodeInterfaceIngressActionFault`, and require firmware to take the owner for
+quarantine or fail-stop handling. Terminal faults are never mislabeled as
+transient pressure.
 
-`run()` repeatedly executes complete synchronous passes. Sustained progress is
-limited to `MAX_IMMEDIATE_PASSES`, currently 16, before an explicit executor
-yield. The runner also yields after every selected wake, so a conforming clock
-that wakes early cannot create a quiescent busy loop. When a pass is
-quiescent, `wait_for_work()` races only waits compatible with the current
-machine phases:
+Queue-origin rejection, node receipt-correlation rejection, action status, and
+buffer-recycle pressure are all explicit `NodeInterfaceIngressStep` results.
+Firmware must inspect both action and recycle status; processing a packet does
+not imply that every resulting owner has already reached its next pool.
+Only a full actor return queue is retryable. A crossed queue, slot or fabric
+origin instead retains the exact sealed buffer as typed terminal residue for
+firmware to take and quarantine while it drains already-admitted work.
 
-- node DATA return or retained-`Next` capacity progress;
-- a permit request while the permit server is idle;
-- dispatcher job/reply input while that machine can receive it; and
-- the exact absolute maintenance or permit-grace deadline.
+## DATA and ordinary outbound ownership
 
-The public wait lets a future permanent node task race TX-machine work against
-its independently owned RX-frame and RNS-timer waits. The async-clock wait is
-required to be cancellation-safe. Each channel wait is cancellation-safe
-because a ready owner/control value is stored in persistent machine state
-before the short future completes; pending losers remain in their Embassy
-channels. Dispatcher input is polled ahead of the deadline future, preserving
-the rule that an already-observable exact permit reply wins a grace-deadline
-tie. Cancelling `wait_for_work()` is safe; cancelling the aggregate-owning task
-or reconstructing the aggregate remains outside the contract.
+The two packet families remain distinct even though they share the interface
+router and product authorization policy.
 
-## Fault behavior
+`DataRouterCoordinator` owns the registered external DATA buffers used by
+destination sends and receipt tracking. It prepares through the sole
+`NodeCore`, retains each exact attempt owner, routes a ticketed DATA job to the
+selected actor, and reconciles ticket-bound completion back into node-core.
+Recovered owners remain unavailable until their exact durable disposition can
+be acknowledged.
 
-The supervisor retains clock, DATA-machine, permit-service, and dispatcher
-faults as a copy-only snapshot. Once any permanent fault exists:
+`OrdinaryRouterCoordinator` atomically moves complete allocation-backed
+`NodeActions` envelopes into its registered fixed pool. It derives the enabled
+interface set from the same authoritative router at admission time, serializes
+`Only`, `All`, and `AllExcept` fan-out, and returns each exact ordinary owner to
+the pool only after its ticketed completion is reconciled. Events, unroutable
+counts, rejected envelopes, recoveries, and quarantines remain typed output;
+they are not silently dropped.
 
-- fresh DATA preparation is rejected;
-- the permit lane and authorization policy are no longer called; and
-- DATA and dispatcher steps continue where possible so exact owners already in
-  motion can return to the parked table or a retained fail-closed state.
+DATA and ordinary ticketed jobs and completions use the shared interface
+router. Each actor's DATA and ordinary permit exchange instead uses its own
+depth-one permit-only pair. A permit server retains the exact request or reply
+across pressure and calls the shared policy once for that request. Only a
+matching grant permits the actor to expose packet bytes through the family's
+one-shot typestate. A coordinator fault stops fresh authorization but preserves
+the forced-denial path needed to return already-issued actor owners safely.
 
-A clock regression is stricter because no further clocked transition is safe;
-the permanent runner waits forever for supervised reboot/recovery. No fault
-path fabricates or force-reuses a missing packet-buffer owner.
+A stale registry generation does not discard a completion. The router converts
+it into explicit node recovery while retaining the exact DATA or ordinary
+owner, and the supervisor demultiplexes it back to the matching coordinator.
+An unexpected coordinator rejection latches an aggregate fault with a
+copy-only binding for the exact retained completion.
 
-## Correlation and durable projection
+## Fair bounded progression
 
-`NodeTxQueuedHop` now includes the generation-scoped `AttemptHandle` alongside
-slot, complete attempt token, interface, packet length, preparation-time full-
-packet digest, and deadline. The metadata returned for a queued or retained hop
-can therefore be correlated with node-core terminal tombstones without relying
-on a slot alone.
+`step(now)` first performs DATA owner maintenance once, then scans the
+following orchestration lanes with a persistent round-robin cursor:
 
-The supervisor now exposes copy-only iterators for terminal attempts, recovered
-owners, and quarantines, plus exact `acknowledge_terminal()` and
-`acknowledge_recovered()` facades. `reticulum-submission-projector` correlates
-those observations to the project-owned durable lifecycle and unlocks an exact
-acknowledgement only after the corresponding transition or transport audit is
-known committed. Recovered owners remain parked and unavailable until that
-acknowledgement succeeds; terminal acknowledgement can remain retryable while
-the packet owner is still bound.
+- shared interface completion intake;
+- DATA coordinator progression;
+- ordinary coordinator progression;
+- one DATA permit server per actor; and
+- one ordinary permit server per actor.
 
-Ordinary parked recoveries and quarantines are consumed through their distinct
-`recovered_observations()` and `quarantine_observations()` iterator paths. A
-recovery-correlated owner trapped as residue inside a permanently disabled DATA
-machine is not acknowledgeable and is therefore exposed only through
-`data_fault_quarantine_observation()`; the caller must project it as quarantine
-even when `data_fault_residue_kind()` says `RecoveredBuffer`. The residue kind
-and retained supervisor DATA fault preserve the original and secondary
-diagnostics without misclassifying that fail-closed owner as releasable.
+At most one useful ownership transition is selected per pass. Idle, pressured,
+or disabled lanes do not end the scan, and the cursor advances after both
+progress and a completely idle pass. A full LoRa actor queue therefore cannot
+indefinitely hide another ready lane, and a coordinator-local fault does not
+prevent an already-issued permit request from reaching its forced-denial drain
+path.
 
-This is a portable semantic boundary, not powered durability. The projector
-retains an opaque write plan. `reticulum-storage-actor` now owns that projector,
-the live `SubmissionIndex`, and `reticulum-storage-journal`; it can append the
-canonical record, enforce physical lifetime reservation, replay, compact, and
-apply the index only after durability. No permanent firmware task yet drives
-that actor and this supervisor together. See
-[Durable submissions](durable-submissions.md) and
-[Physical submission journal](storage-journal.md).
+The aggregate exposes the earliest DATA, ordinary, or node-owner deadline plus
+copy-only capacity, permit-phase, ingress-residue, and coordinator-fault
+status. The permanent firmware task owns scheduling around this synchronous
+surface, including protocol seconds, ingress polling, actor completion
+capacity, radio microsecond deadlines, and executor yielding. The portable
+aggregate does not own a radio or impose LoRa scheduling on a future non-radio
+actor.
 
-## Work still outside the aggregate
+Local announce flush and protocol ticks also admit every returned packet action
+through the owned ordinary coordinator. Their typed failure results retain the
+complete exact action envelope, so the caller must retry, reject, quarantine,
+or fail-stop explicitly.
 
-The supervisor does not yet:
+## First concrete firmware graph
 
-- retain or convert allocation-backed announce, proof, forwarding, and other
-  `NodeActions` into fixed packet owners accepted by a bounded dispatcher;
-- host timed RNode reassembly, RX and protocol-second scheduling around the
-  exposed sole-owner ingress/tick surface in a permanent firmware task;
-- accept device-API/LXMF intents through a physical persist-before-accept edge;
-- own the flash journal, reservations, replay, compaction, and boot recovery;
-- drive the existing projector observations and acknowledgements from the sole
-  node task;
-- safely retire completed volatile projector correlations after every source
-  has been drained;
-- connect projected dispositions through the implemented device-API adapter in
-  the permanent firmware task; or
-- provide a driver, packet-interface implementation, radio reset contract, RF
-  policy, or firmware dependency edge.
+The Heltec Vision Master E290 node target is the first concrete permanent
+composition. It deliberately contains two long-lived tasks:
 
-The next product boundary is a permanent Embassy runtime around this sole node
-owner and the portable storage actor. It must add product flash adaptation and
-boot gating, race cancellation-safe TX work with timed RX/RNS work, and convert
-every returned ordinary protocol action into bounded owned storage before a
-real policy/radio dispatcher can accept it. No permanent firmware dependency
-edge exists yet.
+- a transport-neutral node task owning `NodeInterfaceSupervisor`, node timers,
+  action drain/retry, and interface online state; and
+- one LoRa actor task owning timed RNode receive/reassembly, the ticket-aware
+  `SoleRadioTxDispatcher`, CAD/backoff, exact airtime permit requirements, and
+  the E290 HT-RA62/SX1262 radio.
+
+The two tasks exchange only the actor capability returned by the shared
+interface fabric, ticketed jobs/completions, sealed ingress buffers, and
+permit-only messages. LoRa is the first and primary complete transport slice.
+The node/router seam is transport-neutral so a later USB, Wi-Fi, BLE, Ethernet,
+or other packet actor can receive its own registry slot and bounded pools, but
+those actors are intentionally deferred. They will implement their native link
+mechanics and will not emulate CAD, airtime reservations, RNode fragmentation,
+or another radio abstraction.
+
+The E290 image is not yet the full appliance. Its mirrored durable identity and
+restart-safe announce epoch are now boot-gated ahead of node/radio service, but
+journal/message storage and device-API integration, local LXMF
+submission/delivery, and the optional clients remain later composition work.
+Powered identity/reset and permanent-graph LoRa qualification remain open even
+though the physical-module gate and isolated semantic HIL are complete.
+
+## Legacy no-RF aggregate
+
+`TxSupervisor` and its async `run()`/`wait_for_work()` surface predate the
+shared interface-router composition. They remain useful for focused tests of
+the original external-buffer DATA machine, permit grace, fresh clock samples,
+deadline recovery, and exact-owner behavior under an always-denying
+`RfInertTxPolicy`.
+
+That type does not own the production `OutboundRouter`, both coordinator
+families, all per-actor permit servers, or a concrete actor. Its no-RF
+dispatcher has no hardware or pluggable byte sink. New firmware must compose
+`NodeInterfaceSupervisor`; documentation and code must not infer permanent
+runtime behavior from the legacy runner.
+
+## Durability and remaining integration
+
+This crate defines volatile protocol ownership, not powered durability.
+`reticulum-submission-projector`, `reticulum-storage-actor`, and the physical
+journal own persist-before-accept and persist-before-ack semantics. The E290
+node task still needs to host and boot-gate that storage path, project terminal,
+recovery, and quarantine observations, and expose the authenticated device API.
+
+Other remaining product work includes powered identity/announce-clock
+qualification, local LXMF intent admission and event delivery,
+Links/Resources hardening, regional
+release policy, memory/stack/soak qualification, and additional transport
+actors after the LoRa vertical slice is stable.
 
 ## Validation
 
-The focused supervisor suite currently contains 13 host tests covering
-separate and deadline-crossing clock samples, a complete RF-denied owner
-lifecycle, exact-deadline recovery retention and acknowledgement, terminal
-acknowledgement before and after owner return, permit-grace reply priority and
-fault draining, monotonic regression, cancellation of the public combined wait,
-the permanent protocol-owner surface, deadline conversion, common-origin/full-
-seed construction, and static storage.
+Use the package's focused host and portable-target gates without relying on a
+fixed test count:
 
 ```sh
 cargo test --locked -p reticulum-tx-supervisor

@@ -5,9 +5,10 @@ use reticulum_radio_interface::{
     FrameSignal, RNODE_LORA_DATA_PER_FRAME, RNODE_LORA_SPLIT_FLAG, RNS_MTU, RawReceivedFrame,
     SX1262_FRAME_MTU, TimedReceiveError,
 };
-use reticulum_rns_rete::{
-    DestType, Identity, IngressDisposition, IngressDropReason, InterfaceId, ReceiveOnlyClockSample,
-    ReceiveOnlyIngress, ReceiveOnlyIngressOutcome, ReceiveOnlyWake,
+use reticulum_rns_rete::{DestType, IngressDisposition, IngressDropReason};
+use reticulum_rns_rete_rx::{
+    ReceiveOnlyClockSample, ReceiveOnlyIngressOutcome, ReceiveOnlyInterfaceId, ReceiveOnlyRete,
+    ReceiveOnlyWake, receive_only_identity_from_private_key,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -394,14 +395,18 @@ fn assert_target_expectations(scenario: &Scenario) {
 
 fn replay_scenario(scenario: &Scenario) {
     assert_target_expectations(scenario);
-    let mut ingress = ReceiveOnlyIngress::<16, 4, 32, 2>::new(
-        Identity::from_seed(format!("rnode-hil-corpus:{}", scenario.name).as_bytes()).unwrap(),
+    let identity_seed = Sha256::digest(format!("rnode-hil-corpus:{}", scenario.name).as_bytes());
+    let mut private_key = [0; 64];
+    private_key[..32].copy_from_slice(&identity_seed);
+    private_key[32..].copy_from_slice(&identity_seed);
+    let mut ingress = ReceiveOnlyRete::<16, 4, 32, 2>::new(
+        receive_only_identity_from_private_key(&private_key).unwrap(),
         "reticulum-rs-firmware",
         &["rnode-hil-corpus"],
         FRAGMENT_TIMEOUT_TICKS,
         0,
         MAINTENANCE_INTERVAL_TICKS,
-        InterfaceId(7),
+        ReceiveOnlyInterfaceId(7),
     )
     .unwrap();
     let mut rng = CounterRng::default();

@@ -123,7 +123,7 @@ Build this mode explicitly with:
 source ~/export-esp.sh
 cargo +esp build --locked --release \
   -p reticulum-heltec-tracker-v2-tx-hil \
-  --no-default-features --features semantic-roundtrip-hil \
+  --no-default-features --features semantic-roundtrip-hil,tracker-radio \
   --target xtensa-esp32s3-none-elf
 ```
 
@@ -232,7 +232,7 @@ Build the historical semantic-announce image explicitly with:
 source ~/export-esp.sh
 cargo +esp build --locked --release \
   -p reticulum-heltec-tracker-v2-tx-hil \
-  --no-default-features --features semantic-announce-hil \
+  --no-default-features --features semantic-announce-hil,tracker-radio \
   --target xtensa-esp32s3-none-elf
 ```
 
@@ -273,30 +273,34 @@ completion flag.
   completions with the radio shut down. Neither board is running the earlier
   RNode peer image.
 
-## Next bounded product slice and remaining gates
+## Historical next slice and current remaining gates
 
-The product radio owner now exists. The immediate next slice is fixed ownership
-for allocation-backed ordinary Rete actions, followed by a real dispatcher
-that performs one CAD contest and atomically sends one or two physical frames.
-That path can then join the permanent node owner, storage actor and authenticated
-device API. Another comparison HIL would add less evidence than moving the same
-announce/DATA/proof lifecycle behind the permanent ownership and persistence
-boundaries. Both attached antenna-equipped boards remain cleared for NA915
-development TX/RX.
+When this exploratory Tracker HIL concluded, its immediate next slice was fixed
+ordinary-action ownership plus a real CAD/RNode dispatcher, followed by
+permanent node composition. That software work is now complete in the E290
+target: `NodeInterfaceSupervisor` owns the router, DATA and ordinary
+coordinators and per-actor permit services, while a separate LoRa task owns the
+ticket-aware dispatcher and E290 radio. The permanent image passes its
+build-only gates but remains deliberately unflashed; both physical E290
+modules are now confirmed `HT-RA62-HF`, and the separate semantic image passed
+its powered functional HIL. Both attached antenna-equipped Tracker boards remain cleared for
+NA915 development TX/RX and remain the regression fixture.
 
-1. Give the permanent node task sole ownership of `EmbeddedNode`, the separate
-   RNode-tick and Rete-seconds clocks, timed RX reassembly, ordinary Rete
-   ingress/tick actions and the radio-owner queues.
-2. Host the storage actor on the product flash partition and connect the API
+1. **Complete in the E290 source graph:** give the permanent node task sole
+   ownership of `EmbeddedNode`, keep RNode microseconds separate from Rete
+   seconds, and connect timed RX plus ordinary ingress/tick actions through the
+   sealed interface fabric.
+2. **Open:** host the storage actor on the product flash partition and connect the API
    adapter so an external send is durable before Rete preparation, while proof
    and timeout outcomes become durable before terminal acknowledgement.
-3. Carry that accepted DATA through the existing registered-buffer,
-   supervisor/permit and regional/airtime boundaries to the sole radio owner,
-   then reproduce this two-board round trip through the permanent graph.
-4. Convert remaining allocation-backed RNS actions into caller-reservable
-   packet ownership before enabling announce/proof/forwarding bursts, then test
-   ordered traffic and queue pressure with raw monitoring as an observation tap.
-5. Complete formal powered receive/electrical/fault/retention/soak
+3. **Composed but not powered:** the registered-buffer, supervisor/permit,
+   regional/airtime, and sole-radio ownership path exists. Add a local durable
+   DATA/LXMF submission surface, then reproduce this exchange through the
+   permanent E290 graph as its own powered qualification.
+4. **Partially complete:** returned ordinary actions now enter a fixed pool and
+   ticketed router path without loss under downstream pressure. Caller-reservable
+   construction before Rete allocates and mutates remains open.
+5. **Open:** complete formal powered receive/electrical/fault/retention/soak
    qualification. This exploratory semantic pass does not substitute for those
    gates or production regional certification.
 

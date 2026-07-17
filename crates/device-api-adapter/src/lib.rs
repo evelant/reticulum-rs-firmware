@@ -1,43 +1,102 @@
-//! Authenticated device-API dispatch over the sole durable storage actor.
+//! Authenticated device-API dispatch over a narrow durable-submission port.
 //!
 //! This adapter performs no framing, session establishment, allocation, radio
-//! work, or direct flash access. It authorizes trusted session context, scopes
-//! status reads by principal, and publishes a mutating acceptance only after
-//! [`reticulum_storage_actor::StorageActor`] reports the exact intent durable.
+//! work, raw flash access, or journal construction. It authorizes trusted
+//! session context, scopes status reads by principal, and passes one complete
+//! owned acceptance candidate through [`SubmissionPort`] only after an
+//! authorized mutation. The port retains all actor, journal, and backend
+//! ownership.
 
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-#[cfg(all(feature = "host-sim", target_os = "none"))]
-compile_error!("the experimental `host-sim` device API adapter is unavailable on target_os=none");
-
-use embedded_storage::nor_flash::MultiwriteNorFlash;
 use reticulum_device_api::{
-    self as api, ApiErrorCode, ApiErrorResponse, ApiVersion, AuthorizationError, DeviceRequest,
-    DeviceResponse, DispatchContext, EncodedPacketSha256, PreparedPacketDetails, RequestEnvelope,
-    ResponseEnvelope, SubmissionFailure, SubmissionState, SubmissionStatus, authorize_request,
+    self as api, ApiErrorCode, ApiErrorResponse, ApiVersion, AuthorizationError,
+    CapabilityAvailability, DeviceRequest, DeviceResponse, DispatchContext, EncodedPacketSha256,
+    PreparedPacketDetails, RequestEnvelope, ResponseEnvelope, SubmissionFailure, SubmissionState,
+    SubmissionStatus, authorize_request,
 };
-use reticulum_storage_actor::StorageActor;
-#[cfg(feature = "host-sim")]
-use reticulum_storage_actor::{AcceptanceProgress, DriveError};
 use reticulum_storage_model as storage;
 
-/// Authorize and dispatch one decoded logical request against the mounted sole
-/// storage actor.
+/// Bounded semantic result of durable submission acceptance.
+///
+/// This vocabulary is owned by the API boundary. Port implementations map
+/// storage-engine-specific progress into these outcomes without exposing an
+/// actor, journal, backend, or storage-actor result type to dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubmissionAcceptance {
+    /// A new submission was durably accepted.
+    Accepted(storage::SubmissionId),
+    /// An identical principal-scoped idempotent submission already exists.
+    Replay(storage::SubmissionId),
+    /// The idempotency key already names different semantic content.
+    IdempotencyConflict,
+    /// No durable capacity is currently available for a new submission.
+    CapacityExhausted,
+    /// The durable submission identifier space is permanently exhausted.
+    IdentifierExhausted,
+}
+
+/// Bounded failure vocabulary exposed by a durable-submission port.
+///
+/// Backend-specific diagnostics remain inside the port implementation. The
+/// logical API deliberately exposes only stable client-actionable categories.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubmissionPortError {
+    /// The product profile or current runtime has disabled submission service.
+    Unavailable,
+    /// Another exact retained durable mutation currently owns the actor.
+    Busy,
+    /// A physical backend operation failed or returned ambiguously.
+    Backend,
+    /// The supplied physical storage binding did not match the mounted owner.
+    Binding,
+    /// The durable owner latched a semantic or physical invariant fault.
+    Faulted,
+}
+
+/// Narrow target-safe semantic port required by device-API dispatch.
+///
+/// Implementations own all storage actors, operation-scoped journal views, and
+/// physical backends. No such capability crosses this boundary. Every status
+/// lookup is already scoped by the authenticated principal supplied by the
+/// adapter.
+pub trait SubmissionPort {
+    /// Current product/runtime availability of durable submission service.
+    fn availability(&mut self) -> CapabilityAvailability;
+
+    /// Read the public state of one principal-owned submission.
+    ///
+    /// Missing and foreign identifiers must both return `Ok(None)`.
+    fn submission_state(
+        &mut self,
+        principal: storage::PrincipalId,
+        id: storage::SubmissionId,
+    ) -> Result<Option<storage::LifecycleState>, SubmissionPortError>;
+
+    /// Durably accept or idempotently replay one complete owned candidate.
+    fn accept(
+        &mut self,
+        candidate: storage::AcceptanceCandidate,
+    ) -> Result<SubmissionAcceptance, SubmissionPortError>;
+}
+
+/// Authorize and dispatch one decoded logical request against a narrow
+/// durable-submission port.
 ///
 /// The response always uses the current device API version and echoes the
 /// caller's request identifier. Authentication facts come only from
 /// `context`; request CBOR cannot supply or replace them. Although the wire
 /// decoder rejects incompatible majors, this boundary repeats that check so a
 /// manually constructed envelope cannot bypass version policy.
-pub fn dispatch<F, const SUBMISSIONS: usize, const PROJECTED: usize>(
-    actor: &mut StorageActor<F, SUBMISSIONS, PROJECTED>,
+pub fn dispatch<P>(
+    port: &mut P,
     context: DispatchContext,
     envelope: RequestEnvelope<'_>,
 ) -> ResponseEnvelope
 where
-    F: MultiwriteNorFlash,
+    P: SubmissionPort,
 {
     let request_id = envelope.request_id;
     let request = envelope.request;
@@ -46,7 +105,7 @@ where
         api_error(ApiErrorCode::UnsupportedVersion, operation)
     } else {
         match authorize_request(context, &request) {
-            Ok(()) => dispatch_authorized(actor, context, request, operation),
+            Ok(()) => dispatch_authorized(port, context, request, operation),
             Err(error) => authorization_error(error, operation),
         }
     };
@@ -57,38 +116,41 @@ where
     }
 }
 
-fn dispatch_authorized<F, const SUBMISSIONS: usize, const PROJECTED: usize>(
-    actor: &mut StorageActor<F, SUBMISSIONS, PROJECTED>,
+fn dispatch_authorized<P>(
+    port: &mut P,
     context: DispatchContext,
     request: DeviceRequest<'_>,
     operation: u16,
 ) -> DeviceResponse
 where
-    F: MultiwriteNorFlash,
+    P: SubmissionPort,
 {
     match request {
-        DeviceRequest::SystemCapabilities => DeviceResponse::SystemCapabilities(
-            api::CapabilitySnapshot::for_dispatch(cfg!(feature = "host-sim")),
-        ),
+        DeviceRequest::SystemCapabilities => {
+            let available = cfg!(feature = "experimental-rns-data")
+                && port.availability() == CapabilityAvailability::Available;
+            DeviceResponse::SystemCapabilities(api::CapabilitySnapshot::for_dispatch(available))
+        }
         DeviceRequest::SubmissionStatus { id } => {
             let Some(principal) = context.principal else {
                 return api_error(ApiErrorCode::AuthenticationRequired, operation);
             };
-            if actor.fault().is_some() || actor.pending_kind().is_some() {
-                return api_error(ApiErrorCode::Internal, operation);
+            if port.availability() != CapabilityAvailability::Available {
+                return api_error(ApiErrorCode::CapabilityUnavailable, operation);
             }
             let principal = storage::PrincipalId::new(principal.0);
             let id = storage::SubmissionId::new(id.0);
-            match actor.index().get_owned_state(principal, id) {
-                Some(state) => DeviceResponse::SubmissionStatus(SubmissionStatus {
+            match port.submission_state(principal, id) {
+                Ok(Some(state)) => DeviceResponse::SubmissionStatus(SubmissionStatus {
                     id: api_submission_id(id),
                     state: api_submission_state(state),
                 }),
-                None => api_error(ApiErrorCode::NotFound, operation),
+                Ok(None) => api_error(ApiErrorCode::NotFound, operation),
+                Err(error) => port_error(error, operation),
             }
         }
-        #[cfg(feature = "host-sim")]
-        DeviceRequest::PrepareRnsData {
+        #[cfg(feature = "experimental-rns-data")]
+        DeviceRequest::SubmitRnsData {
             destination,
             payload,
             idempotency_key,
@@ -96,6 +158,9 @@ where
             let Some(principal) = context.principal else {
                 return api_error(ApiErrorCode::AuthenticationRequired, operation);
             };
+            if port.availability() != CapabilityAvailability::Available {
+                return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+            }
             let intent = match storage::ExperimentalRnsDataIntent::new(
                 storage::DestinationHash::new(destination.0),
                 payload,
@@ -108,7 +173,7 @@ where
                 storage::IdempotencyKey::new(idempotency_key.0),
                 intent,
             );
-            acceptance_response(actor.accept(candidate), operation)
+            acceptance_response(port.accept(candidate), operation)
         }
         _ => api_error(ApiErrorCode::UnsupportedOperation, operation),
     }
@@ -129,28 +194,39 @@ fn api_error(code: ApiErrorCode, operation: u16) -> DeviceResponse {
     })
 }
 
-#[cfg(feature = "host-sim")]
-fn acceptance_response<E>(
-    progress: Result<AcceptanceProgress, DriveError<E>>,
+#[cfg(feature = "experimental-rns-data")]
+fn acceptance_response(
+    progress: Result<SubmissionAcceptance, SubmissionPortError>,
     operation: u16,
 ) -> DeviceResponse {
     match progress {
-        Ok(AcceptanceProgress::Accepted(id) | AcceptanceProgress::Replay(id)) => {
-            DeviceResponse::PrepareRnsDataAccepted(api::SubmissionAccepted {
+        Ok(SubmissionAcceptance::Accepted(id) | SubmissionAcceptance::Replay(id)) => {
+            DeviceResponse::SubmitRnsDataAccepted(api::SubmissionAccepted {
                 id: api_submission_id(id),
             })
         }
-        Ok(AcceptanceProgress::IdempotencyConflict { .. }) => {
+        Ok(SubmissionAcceptance::IdempotencyConflict) => {
             api_error(ApiErrorCode::IdempotencyConflict, operation)
         }
-        Ok(AcceptanceProgress::IndexExhausted | AcceptanceProgress::JournalCapacityExhausted) => {
+        Ok(SubmissionAcceptance::CapacityExhausted) => {
             api_error(ApiErrorCode::CapacityExhausted, operation)
         }
-        Ok(AcceptanceProgress::IdentifierExhausted)
-        | Err(DriveError::Backend(_))
-        | Err(DriveError::Busy { .. })
-        | Err(DriveError::Faulted(_)) => api_error(ApiErrorCode::Internal, operation),
+        Ok(SubmissionAcceptance::IdentifierExhausted) => {
+            api_error(ApiErrorCode::Internal, operation)
+        }
+        Err(error) => port_error(error, operation),
     }
+}
+
+fn port_error(error: SubmissionPortError, operation: u16) -> DeviceResponse {
+    let code = match error {
+        SubmissionPortError::Unavailable => ApiErrorCode::CapabilityUnavailable,
+        SubmissionPortError::Busy
+        | SubmissionPortError::Backend
+        | SubmissionPortError::Binding
+        | SubmissionPortError::Faulted => ApiErrorCode::Internal,
+    };
+    api_error(code, operation)
 }
 
 fn api_submission_id(id: storage::SubmissionId) -> api::SubmissionId {

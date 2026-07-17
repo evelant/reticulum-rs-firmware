@@ -1,19 +1,25 @@
 # Portable sole storage actor
 
-**Status:** portable sole-owner aggregate and narrow node-observation/
-acknowledgement surface implemented and host/ESP32-S3 target-checked; permanent
-Embassy task, product `esp-storage` partition adapter, firmware/device-API
-transport linkage, boot service orchestration, and integrated powered-fault
-qualification remain open
+**Status:** portable backend-independent sole-owner aggregate, exact bound-
+journal access, and narrow node-observation/acknowledgement surface implemented;
+the separate transport-neutral submission runtime supplies portable boot/live
+orchestration with the same operation-scoped access. The E290 now hosts both in
+a resident sole-flash coordinator beside the transport-neutral node supervisor
+and composes the exact authorized-frame request/durable-echo handoff. That
+LoRa-first software composition and ADR 0005's interface-local active-owner
+fail-stop now pass cross-layer host tests. Portable API framing and job handoff
+are qualified; live external admission remains blocked only by session,
+firmware composition, and a bearer; integrated
+powered-fault qualification remains open.
 
 ## Ownership boundary
 
 `reticulum-storage-actor` is the only portable component allowed to combine one
 schema-1 NOR journal with its live semantic state. A
-`StorageActor<F, SUBMISSIONS, PROJECTED>` owns:
+`StorageActor<SUBMISSIONS, PROJECTED>` owns:
 
-- the `MultiwriteNorFlash` backend and last completely established
-  `JournalState`;
+- the exact `JournalBinding` established at mount and the last completely
+  established `JournalState`;
 - the `SubmissionIndex` produced by complete semantic replay;
 - the sole `SubmissionProjector` and its volatile attempt correlation;
 - one optional pending mutation retained across an ambiguous backend result;
@@ -27,10 +33,18 @@ or accept a request from a partial replay. An erased but unformatted partition
 and an unknown nonblank partition both fail closed. Formatting remains an
 explicit provisioning operation outside this actor.
 
-The actor is synchronous and executor-independent. It is the portable ownership
-core for a future permanent task, not that Embassy task itself. Its consuming
-`into_flash` escape is intended for tests or an explicit shutdown/recovery
-boundary; ordinary firmware must keep the mounted actor in one permanent owner.
+The physical backend remains outside the actor. Mount and every physical
+mutation borrow a `BoundJournalAccess` for one synchronous operation. The actor
+rejects a different device, absolute range, capacity, alignment, length, or
+physical-layout version before journal I/O; this integration error does not
+latch a fault in otherwise-valid durable state. A coordinator can therefore
+lend mutually exclusive partition views without a boot-lifetime borrow of the
+whole flash device.
+
+The actor is synchronous and executor-independent. `reticulum-submission-runtime`
+owns and advances it in the portable durability-first loop, but neither crate
+is an Embassy task or product composition. See
+[Transport-neutral durable submission runtime](submission-runtime.md).
 
 ## Persist-before-visible ordering
 
@@ -48,20 +62,27 @@ There are two serialized mutation sources:
    from a different projector cannot replace the owned request.
 
 The public projector accessor is immutable. Mutation is exposed only through
-narrow actor-owned operations. `begin_preparation`,
-`observe_preparation_result`, `observe_frame`, `observe_terminal`,
-`observe_recovered`, and `observe_quarantined` are all busy/fault-gated and
-plan against the actor's live index. Any returned persistence request must flow
-back through `persist_projector`. `pending_acknowledgements` exposes only exact
-copyable actions unlocked by durable records, and `report_acknowledgement`
-updates only the actor-owned correlation after the caller reports the matching
-node/supervisor result. A compile-fail doctest guards against replacing or
-extracting the sole projector through safe code.
+narrow actor-owned operations. `ready_intent` returns an owned durable intent
+only after its preparation barrier is committed and no attempt, fault, or
+mutation is pending, so a caller need not retain an index borrow across a node
+call.
+`begin_preparation`, transport-neutral `observe_preparation`, `observe_frame`,
+`observe_terminal`, `observe_recovered`, and `observe_quarantined` are all
+busy/fault-gated and plan against the actor's live index. Dispatcher queue state
+and interface-specific preparation results remain outside durable storage. Any
+returned persistence request must flow back through `persist_projector`.
+`pending_acknowledgements` exposes only exact copyable actions unlocked by
+durable records, and `report_acknowledgement` updates only the actor-owned
+correlation after the caller reports the matching node/supervisor result. A
+compile-fail doctest guards against replacing or extracting the sole projector
+through safe code.
 
-These methods deliberately accept the existing node-core and TX-dispatch
-observation types instead of inventing a second correlation vocabulary. They
-still do not run the orchestration loop: the permanent task must drain a
-follow-on projector persistence request before admitting unrelated work. A
+The production preparation seam uses
+`SubmissionPreparationObservation`, a transport-neutral projector vocabulary;
+native `AuthorizedFrameObservation`, terminal, recovery, and quarantine types
+retain exact node-core correlation. The actor itself does not choose or order
+these calls. `SubmissionRuntime::drive_step` now supplies that portable loop and
+drains a follow-on projector persistence request before unrelated work. A
 quarantine audit, for example, can stage a second conservative final record and
 has no upstream owner-release acknowledgement.
 
@@ -103,6 +124,8 @@ projector, task-stack, or firmware RAM budget.
 ## Fault behavior
 
 Backend errors are retryable ambiguity and leave the exact mutation pending.
+Binding errors are non-latching coordinator mistakes detected before I/O; a
+correctly bound access can immediately retry the retained work.
 Capacity and idempotency outcomes are definitive typed results. Corrupt
 manifests or records, semantic replay failures, conflicting logical content,
 projector/request mismatches, impossible compaction outcomes, readback mismatch,
@@ -110,14 +133,37 @@ and model-application invariants latch a bounded `StorageFault`. Once faulted,
 all mutation entry points fail closed with that same fault; the actor never
 publishes a partial acceptance or acknowledgement.
 
-The backend's concrete error type is intentionally retained only at this
-portable boundary. `reticulum-device-api-adapter` translates it, actor `Busy`,
-identifier exhaustion, and a latched fault into stable API errors without
-leaking platform error types.
+The backend's concrete error type is intentionally retained at this portable
+boundary. The E290 `ProductStorageCoordinator` maps runtime/backend results into
+the bounded target-safe `SubmissionPortError` vocabulary; only then does
+`reticulum-device-api-adapter` translate availability, busy, capacity and fault
+outcomes into stable API responses. Platform error types and journal
+capabilities do not cross the port.
+
+The E290 product keeps actor faults separate from the node supervisor's mesh-
+routing fault state. An ambiguous backend error retains the exact pending
+mutation for unchanged retry. At boot, an unavailable journal mount, supported-
+history profile, or recovery occurs before any durability-gated DATA owner can
+exist and produces a resident coordinator with no submission runtime; local
+durable service remains closed while route-only LoRa can continue. Flash-map,
+identity, announce-clock, and identity-vacant fresh-provisioning failures remain
+boot-fatal because they precede a valid core node identity and storage contract.
+
+A permanent actor/runtime fault after an authorized DATA observation is active
+does not release that owner merely because the node supervisor itself is not
+draining. The E290 node retains the observation, while the portable dispatcher
+retains the completion and router ticket awaiting an exact durable echo. The
+implemented ADR 0005 product policy enters `ActiveOwnerFailStopped`, marks that
+same LoRa lease offline without changing its generation, and stops fresh LoRa
+ingress, protocol, announce, submission and radio work for the rest of the boot.
+Only bounded fail-closed drainage continues; no timeout or automatic reboot
+fabricates durability. A future independently owned packet actor can remain
+healthy because this state is interface-local.
 
 ## Validation and remaining integration
 
-Focused host tests cover mount-before-service, typed durable boot recovery and
+Focused host tests cover exact mount binding and no-I/O rejection for wrong
+device/range/layout/capacity, mount-before-service, typed durable boot recovery and
 lost-reply reconciliation, acceptance/replay/conflict and
 index capacity, lost acceptance and projector replies followed by autonomous
 reconciliation, sole-projector identity and replacement resistance, the full
@@ -125,33 +171,52 @@ preparation/frame/terminal/retry-and-complete acknowledgement path, recovered
 owner acknowledgement, quarantine audit plus deferred finalization,
 busy/fault-gated observations, pre-fault rejection before flash mutation,
 compaction recovery after an ambiguous target erase, and permanent fault
-latching. The 17-test suite, compile-fail ownership guard, strict host clippy,
+latching. The focused suite, compile-fail ownership guard, strict host clippy,
 and ESP32-S3 Xtensa check/clippy pass. The existing powered storage HIL
 predates this actor and calls the journal directly, so it is not on-target
 actor qualification.
 
-Product integration still requires:
+The E290 product library adds two cross-layer host tests over this real actor/
+runtime boundary. One proves zero-write authorization rejection, one durable
+acceptance and cap, the pre-node preparation barrier, exact LoRa frame
+persistence/echo/completion, timeout, principal isolation, and remount. The
+other injects a wrong bound-journal access after frame exposure and proves
+`ActiveOwnerFailStopped` retains every owner with an ordinary action queued and
+permits no later host-radio operation. Together with 23 focused policy/product
+tests, the 25-test E290 suite closes software composition qualification without
+claiming powered flash or RF behavior.
 
-- one permanent Embassy task that owns the actor for the boot lifetime;
-- a checked product `esp-storage` adapter constrained to the real `retlog`
-  partition, rather than only the dedicated HIL adapter;
-- gating USB/BLE/Wi-Fi device-API and RF/node service until mount, replay, and
-  actor-owned conservative boot recovery are complete for every replayed
-  submission; the portable operation exists, but the permanent task must drive
-  it to a definitive result before opening services;
-- connection of the implemented authenticated device-API adapter to framing,
-  sessions and USB/BLE/Wi-Fi, plus a safe projector-slot retirement handshake;
+Remaining product work includes:
+
+- powered qualification of the resident E290 coordinator, which owns the sole
+  flash backend and lends one short-lived bound journal view to at most one
+  runtime step per outer node loop. Its software composition now passes;
+- preservation of the checked `node_journal` partition boundary and
+  identity-vacant first-provision authority. `provision_first()` now repairs
+  only the canonical empty A1 programming trajectory and never erases; an
+  existing identity uses strict mount only;
+- composition of the authenticated device-API adapter's target-safe
+  `SubmissionPort` with the implemented framing/handoff, sessions and
+  USB/BLE/Wi-Fi serving. `ProductStorageCoordinator` implements the semantic
+  port under a host-qualified one-entry composition cap, but no external lane
+  calls it;
+- an exact node-owner quiescence proof before projector-slot retirement, a
+  quarantine release/suppression design, and an explicit response to the
+  schema-1 journal's permanent retention, 162-submission lifetime limit, and
+  lack of eviction/garbage collection;
 - coordination with flash cache constraints, watchdog feeding, OTA, other
   stores, journal compaction, and radio deadlines;
 - controlled power-cut/brownout tests, endurance and soak measurements, stack
-  and boot-scan measurements, and an at-rest encryption/provisioning decision;
-  and
-- merger with the sole node owner and concrete radio owner for bidirectional
-  Reticulum traffic.
+  and boot-scan measurements, and an at-rest encryption/provisioning decision.
 
-The two antenna-equipped development boards are authorized for NA915 TX/RX.
-Current product-candidate graphs remain TX-free because storage/node/radio
-integration is not implemented, not because development transmission is
-forbidden. A bounded integration image may transmit whenever that accelerates
-the work, provided it retains one explicit regional/airtime policy and one
-radio owner.
+The two development boards are attached with antennas, physically confirmed as
+`HT-RA62-HF`, and authorized for NA915. Their isolated semantic TX/RX HIL
+passed; powered storage/product-graph behavior remains separately unqualified.
+The current E290 product graph has the LoRa node/radio owner plus the resident
+operation-scoped durable runtime driver. Its one-entry qualification cap is not
+product capacity, and the absent external admission lane means accepted local
+durable work cannot yet originate through that path. The same runtime
+preparation contract remains transport-
+neutral: LoRa is the first primary route, while later eligible interfaces can
+join the node fabric without changing actor or journal semantics. No speculative
+second transport is required to complete or qualify the LoRa-first slice.

@@ -3,21 +3,27 @@
 //!
 //! This harness deliberately has no radio, HAL, executor, or firmware
 //! dependency. `NoRfInspector` borrows authorized frames only long enough to
-//! record scalar test evidence; it cannot perform I/O.
+//! record scalar test evidence; it cannot perform I/O. The authorized-frame
+//! request/acknowledgement tests use the same real typestate to produce exact
+//! observations without constructing private node-core scalars.
 
-use core::ptr;
+use core::{
+    ptr,
+    task::{Context, Poll, Waker},
+};
 
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use rand_core::{CryptoRng, RngCore};
 use reticulum_node_core::{
-    AttemptOutcome, AttemptUnsentReason, DestinationHash, InterfaceSet, MonotonicMillis,
-    MonotonicSeconds, NodeConfig, NodeCore, NodeIdentity, NodeInstanceId, PacketInterfaceId,
-    PermitResolution, PrepareDataRequest, RoutedTxJob, TxAuthorizationCandidate,
+    AttemptOutcome, AttemptUnsentReason, AuthorizedFrameObservation, DestinationHash, InterfaceSet,
+    MonotonicMillis, MonotonicSeconds, NodeConfig, NodeCore, NodeIdentity, NodeInstanceId,
+    PacketInterfaceId, PermitResolution, PrepareDataRequest, RoutedTxJob, TxAuthorizationCandidate,
     TxAuthorizationPolicy, TxCompletionCode, TxCompletionDisposition, TxFrame, TxFrameError,
-    TxLeaseDeadline, TxPacketBuffer, TxPermitDenialReason, TxPolicyDecision, TxPolicyDenial,
+    TxLeaseDeadline, TxPacketBuffer, TxPermitDenialReason, TxPermitRequirements,
+    TxPermitReservation, TxPermitResourceId, TxPolicyDecision, TxPolicyDenial,
     TxRecoveryPriorPhase, TxRecoveryReason,
 };
-use reticulum_tx_handoff::{ChannelFull, TxHandoff, TxOwnerReturn};
+use reticulum_tx_handoff::{AuthorizedFrameHandoff, ChannelFull, TxHandoff, TxOwnerReturn};
 use static_cell::ConstStaticCell;
 
 type TestNode<const BUFFERS: usize> = NodeCore<4, 2, 8, 2, BUFFERS>;
@@ -25,6 +31,17 @@ type TestNode<const BUFFERS: usize> = NodeCore<4, 2, 8, 2, BUFFERS>;
 const AUTHORIZED_NO_RF_INSPECTION: TxCompletionCode = TxCompletionCode::new(0x4e52);
 const AUTHORIZED_GRANT_EXPIRED: TxCompletionCode = TxCompletionCode::new(0x4e45);
 const DEFINITELY_UNPERMITTED: TxCompletionCode = TxCompletionCode::new(0x4e55);
+const TEST_PERMIT_RESOURCE: TxPermitResourceId = TxPermitResourceId::new([0x49; 16]);
+
+fn test_permit_requirements() -> TxPermitRequirements {
+    TxPermitRequirements::try_new(TEST_PERMIT_RESOURCE, 1)
+        .expect("test permit units must be nonzero")
+}
+
+fn test_permit_reservation() -> TxPermitReservation {
+    TxPermitReservation::try_new(TEST_PERMIT_RESOURCE, 1)
+        .expect("test permit units must be nonzero")
+}
 
 trait MustFit {
     fn must_fit(self, message: &str);
@@ -77,7 +94,7 @@ struct RecordingPolicy {
 impl RecordingPolicy {
     fn allowing() -> Self {
         Self {
-            decision: TxPolicyDecision::Authorize,
+            decision: TxPolicyDecision::Authorize(test_permit_reservation()),
             candidates: std::vec::Vec::new(),
         }
     }
@@ -187,6 +204,177 @@ fn interfaces(ids: &[u8]) -> InterfaceSet {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn expose_authorized_observation<const BUFFERS: usize>(
+    owner: &mut TestNode<BUFFERS>,
+    buffer: &mut TxPacketBuffer,
+    destination: DestinationHash,
+    plaintext: &[u8],
+    rns_now: u64,
+    owner_now: u64,
+    rng: &mut CounterRng,
+) -> AuthorizedFrameObservation {
+    let job = prepare(
+        owner,
+        buffer,
+        destination,
+        plaintext,
+        rns_now,
+        owner_now,
+        owner_now + 1_000,
+        interfaces(&[1]),
+        rng,
+    );
+    let (pending, request) = job.begin_permit(test_permit_requirements());
+    let mut policy = RecordingPolicy::allowing();
+    let reply = owner
+        .authorize_tx(request, MonotonicMillis::new(owner_now + 1), &mut policy)
+        .unwrap_or_else(|failure| panic!("authorization failed: {:?}", failure.reason()));
+    let mut authorized = match pending.resolve(reply, MonotonicMillis::new(owner_now + 2)) {
+        Ok(PermitResolution::Authorized(authorized)) => authorized,
+        Ok(PermitResolution::Expired(_)) => panic!("fresh grant expired"),
+        Ok(PermitResolution::Unpermitted(_)) => panic!("allowed grant was denied"),
+        Err(_) => panic!("matching reply mismatched"),
+    };
+    let observation = authorized
+        .frame(MonotonicMillis::new(owner_now + 3))
+        .expect("authorized frame must be exposed once")
+        .observation();
+    let returned = match owner
+        .complete_tx(
+            authorized.complete(AUTHORIZED_NO_RF_INSPECTION),
+            MonotonicMillis::new(owner_now + 4),
+        )
+        .unwrap_or_else(|failure| panic!("completion failed: {:?}", failure.reason()))
+    {
+        TxCompletionDisposition::Available(buffer) => buffer,
+        TxCompletionDisposition::Next(_) => panic!("single route fanned out"),
+        TxCompletionDisposition::Recovered { .. } => panic!("fresh return recovered"),
+        TxCompletionDisposition::Quarantined(_) => panic!("valid return quarantined"),
+    };
+    assert_eq!(ptr::from_ref(returned), ptr::from_ref(buffer));
+    observation
+}
+
+static FRAME_OBSERVATION_BUFFER: ConstStaticCell<TxPacketBuffer> =
+    ConstStaticCell::new(TxPacketBuffer::new());
+static FRAME_OBSERVATION_HANDOFF: ConstStaticCell<AuthorizedFrameHandoff<NoopRawMutex>> =
+    ConstStaticCell::new(AuthorizedFrameHandoff::new());
+
+#[test]
+fn frame_observation_pair_retains_full_values_fifo_and_mismatched_acknowledgements() {
+    let mut owner = node::<1>(80, "frame-observation-owner");
+    let receiver = node::<0>(81, "frame-observation-receiver");
+    register_peer(&mut owner, 81, "frame-observation-receiver");
+    let buffer = FRAME_OBSERVATION_BUFFER.take();
+    owner
+        .register_packet_buffer(buffer)
+        .expect("observation buffer must register");
+    let mut rng = CounterRng::default();
+    let first = expose_authorized_observation(
+        &mut owner,
+        buffer,
+        receiver.destination_hash(),
+        b"first retained frame observation",
+        1,
+        1_000,
+        &mut rng,
+    );
+    let second = expose_authorized_observation(
+        &mut owner,
+        buffer,
+        receiver.destination_hash(),
+        b"second retained frame observation",
+        2,
+        2_000,
+        &mut rng,
+    );
+    assert_ne!(first, second);
+
+    let (mut node, mut dispatcher) = FRAME_OBSERVATION_HANDOFF.take().split();
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(matches!(
+        node.requests().poll_receive(&mut context),
+        Poll::Pending
+    ));
+    assert!(matches!(
+        dispatcher.acknowledgements().poll_receive(&mut context),
+        Poll::Pending
+    ));
+    assert!(matches!(
+        dispatcher.requests().poll_ready_to_send(&mut context),
+        Poll::Ready(())
+    ));
+    assert!(matches!(
+        node.acknowledgements().poll_ready_to_send(&mut context),
+        Poll::Ready(())
+    ));
+
+    dispatcher
+        .requests()
+        .try_send(first)
+        .must_fit("first request must fit");
+    assert_eq!(dispatcher.requests().len(), 1);
+    let retained_second = match dispatcher.requests().try_send(second) {
+        Err(full) => full.into_inner(),
+        Ok(()) => panic!("depth-one request channel accepted a second observation"),
+    };
+    assert_eq!(retained_second, second);
+    assert_eq!(
+        node.requests().try_receive(),
+        Some(first),
+        "oldest request must arrive first"
+    );
+    dispatcher
+        .requests()
+        .try_send(retained_second)
+        .must_fit("retained second request must fit after draining first");
+    assert_eq!(
+        node.requests().poll_receive(&mut context),
+        Poll::Ready(second),
+        "second request must follow the first"
+    );
+
+    node.acknowledgements()
+        .try_send(first)
+        .must_fit("first acknowledgement must fit");
+    let retained_second_ack = match node.acknowledgements().try_send(second) {
+        Err(full) => full.into_inner(),
+        Ok(()) => panic!("depth-one acknowledgement channel accepted a second value"),
+    };
+    assert_eq!(retained_second_ack, second);
+    assert_eq!(
+        dispatcher.acknowledgements().try_receive(),
+        Some(first),
+        "oldest acknowledgement must arrive first"
+    );
+    node.acknowledgements()
+        .try_send(retained_second_ack)
+        .must_fit("retained second acknowledgement must fit after draining first");
+    assert_eq!(
+        dispatcher.acknowledgements().try_receive(),
+        Some(second),
+        "second acknowledgement must follow the first"
+    );
+
+    let retained_request = first;
+    node.acknowledgements()
+        .try_send(second)
+        .must_fit("mismatched acknowledgement must remain observable");
+    let mismatched = dispatcher
+        .acknowledgements()
+        .try_receive()
+        .expect("mismatched acknowledgement must not be hidden");
+    assert_eq!(mismatched, second);
+    assert_ne!(mismatched, retained_request);
+    assert_eq!(retained_request, first);
+    dispatcher
+        .requests()
+        .try_send(retained_request)
+        .must_fit("caller must be able to re-offer its retained request");
+    assert_eq!(node.requests().try_receive(), Some(first));
+}
+
 static AUTHORIZED_BUFFER: ConstStaticCell<TxPacketBuffer> =
     ConstStaticCell::new(TxPacketBuffer::new());
 static AUTHORIZED_HANDOFF: ConstStaticCell<TxHandoff<NoopRawMutex, 1>> =
@@ -224,7 +412,7 @@ fn authorized_job_crosses_every_handoff_and_exposes_one_no_rf_frame() {
     let job = dispatcher.jobs.try_receive().expect("job must arrive");
     assert_eq!(job.slot_id(), slot);
     assert_eq!(job.interface(), PacketInterfaceId::new(1));
-    let (pending, request) = job.begin_permit();
+    let (pending, request) = job.begin_permit(test_permit_requirements());
     dispatcher
         .permit_requests
         .try_send(request)
@@ -332,12 +520,12 @@ fn policy_denial_crosses_control_plane_without_exposing_frame_bytes() {
         .try_send(job)
         .must_fit("job handoff must have room");
     let job = dispatcher.jobs.try_receive().expect("job must arrive");
-    let (pending, request) = job.begin_permit();
+    let (pending, request) = job.begin_permit(test_permit_requirements());
     dispatcher
         .permit_requests
         .try_send(request)
         .must_fit("request handoff must have room");
-    let mut policy = RecordingPolicy::denying(TxPolicyDenial::RegionalProfileUnavailable);
+    let mut policy = RecordingPolicy::denying(TxPolicyDenial::ResourceUnavailable);
     let request = node
         .permit_requests
         .try_receive()
@@ -361,7 +549,7 @@ fn policy_denial_crosses_control_plane_without_exposing_frame_bytes() {
     assert_eq!(
         unpermitted.denial(),
         Some(TxPermitDenialReason::Policy(
-            TxPolicyDenial::RegionalProfileUnavailable
+            TxPolicyDenial::ResourceUnavailable
         ))
     );
 
@@ -395,7 +583,7 @@ fn policy_denial_crosses_control_plane_without_exposing_frame_bytes() {
     assert_eq!(
         terminal.outcome(),
         AttemptOutcome::Unsent(AttemptUnsentReason::PolicyDenied(
-            TxPolicyDenial::RegionalProfileUnavailable
+            TxPolicyDenial::ResourceUnavailable
         ))
     );
     assert_eq!(owner.capacities().attempts_used, 0);
@@ -436,7 +624,7 @@ fn grant_resolved_at_exact_deadline_returns_recovery_without_frame_access() {
         .try_send(job)
         .must_fit("job handoff must have room");
     let job = dispatcher.jobs.try_receive().expect("job must arrive");
-    let (pending, request) = job.begin_permit();
+    let (pending, request) = job.begin_permit(test_permit_requirements());
     dispatcher
         .permit_requests
         .try_send(request)
@@ -546,7 +734,7 @@ fn serialized_fanout_requeues_same_owner_and_authorizes_interfaces_in_order() {
         .try_receive()
         .expect("first job must arrive");
     assert_eq!(first.interface(), PacketInterfaceId::new(1));
-    let (pending, request) = first.begin_permit();
+    let (pending, request) = first.begin_permit(test_permit_requirements());
     dispatcher
         .permit_requests
         .try_send(request)
@@ -608,7 +796,7 @@ fn serialized_fanout_requeues_same_owner_and_authorizes_interfaces_in_order() {
         .jobs
         .try_receive()
         .expect("second job must arrive");
-    let (pending, request) = second.begin_permit();
+    let (pending, request) = second.begin_permit(test_permit_requirements());
     dispatcher
         .permit_requests
         .try_send(request)
@@ -720,7 +908,7 @@ fn terminal_attempt_before_authorization_bypasses_policy_and_stops_fanout() {
         .try_send(job)
         .must_fit("job handoff must have room");
     let job = dispatcher.jobs.try_receive().expect("job must arrive");
-    let (pending, request) = job.begin_permit();
+    let (pending, request) = job.begin_permit(test_permit_requirements());
     dispatcher
         .permit_requests
         .try_send(request)

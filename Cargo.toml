@@ -2,20 +2,32 @@
 resolver = "3"
 members = [
     "comparisons/rns-leviculum",
+    "crates/announce-clock",
     "crates/board-heltec-tracker-v2",
     "crates/board-heltec-tracker-v2-radio",
     "crates/board-heltec-tracker-v2-tx-hil",
+    "crates/board-heltec-vision-master-e290",
+    "crates/board-heltec-vision-master-e290-radio",
     "crates/device-api",
     "crates/device-api-adapter",
+    "crates/device-api-framing",
+    "crates/device-api-handoff",
+    "crates/device-identity-store",
+    "crates/interface-router",
     "crates/lab-rx-returned-fault-hil",
     "crates/node-core",
+    "crates/nor-flash-region",
+    "crates/radio-lora-phy",
+    "crates/radio-tx-dispatch",
     "crates/radio-interface",
     "crates/rns-conformance",
     "crates/rns-rete",
     "crates/rns-rete-rx",
+    "crates/semantic-roundtrip-hil",
     "crates/storage-actor",
     "crates/storage-journal",
     "crates/storage-model",
+    "crates/submission-runtime",
     "crates/submission-projector",
     "crates/tx-dispatch",
     "crates/tx-handoff",
@@ -23,6 +35,9 @@ members = [
     "firmware/heltec-tracker-v2",
     "firmware/heltec-tracker-v2-storage-hil",
     "firmware/heltec-tracker-v2-tx-hil",
+    "firmware/heltec-vision-master-e290-qualification",
+    "firmware/heltec-vision-master-e290-node",
+    "firmware/heltec-vision-master-e290-semantic-hil",
     "tools/conformance-rete",
     "tools/phase1-rx-local-data",
     "tools/storage-hil-verify",
@@ -30,20 +45,32 @@ members = [
 ]
 exclude = ["vendor/esp-rtos-0.3.0", "vendor/lora-phy-3.0.1"]
 default-members = [
+    "crates/announce-clock",
     "crates/board-heltec-tracker-v2",
     "crates/board-heltec-tracker-v2-radio",
     "crates/board-heltec-tracker-v2-tx-hil",
+    "crates/board-heltec-vision-master-e290",
+    "crates/board-heltec-vision-master-e290-radio",
     "crates/device-api",
     "crates/device-api-adapter",
+    "crates/device-api-framing",
+    "crates/device-api-handoff",
+    "crates/device-identity-store",
+    "crates/interface-router",
     "crates/lab-rx-returned-fault-hil",
     "crates/node-core",
+    "crates/nor-flash-region",
+    "crates/radio-lora-phy",
+    "crates/radio-tx-dispatch",
     "crates/radio-interface",
     "crates/rns-conformance",
     "crates/rns-rete",
     "crates/rns-rete-rx",
+    "crates/semantic-roundtrip-hil",
     "crates/storage-actor",
     "crates/storage-journal",
     "crates/storage-model",
+    "crates/submission-runtime",
     "crates/submission-projector",
     "crates/tx-dispatch",
     "crates/tx-handoff",
@@ -62,6 +89,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+allocator-api2 = { version = "=0.3.1", default-features = false }
 embassy-executor = { version = "=0.10.0", default-features = false }
 embassy-futures = { version = "=0.1.2", default-features = false }
 embassy-sync = { version = "=0.8.0", default-features = false }

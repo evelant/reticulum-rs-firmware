@@ -10,39 +10,54 @@ build = "build.rs"
 autobins = false
 
 [features]
-default = []
+default = ["tracker-radio"]
+tracker-radio = [
+    "dep:reticulum-board-heltec-tracker-v2-tx-hil",
+    "dep:embassy-executor",
+    "dep:embassy-time",
+    "dep:embedded-hal",
+    "dep:embedded-hal-async",
+    "dep:embedded-hal-bus",
+    "dep:esp-alloc",
+    "esp-alloc/internal-heap-stats",
+    "dep:esp-backtrace",
+    "dep:esp-bootloader-esp-idf",
+    "dep:esp-hal",
+    "dep:esp-println",
+    "dep:esp-rtos",
+    "dep:log",
+    "dep:static_cell",
+]
 near-field-attenuation-hil = [
     "reticulum-board-heltec-tracker-v2-tx-hil/near-field-attenuation-hil",
 ]
 semantic-announce-hil = [
-    "dep:rand_core",
     "dep:reticulum-rns-rete",
+    "reticulum-semantic-roundtrip-hil/semantic-announce-hil",
     "reticulum-rns-rete/conformance",
 ]
 semantic-roundtrip-hil = [
-    "dep:rand_core",
     "dep:reticulum-rns-rete",
-    "dep:static_cell",
-    "esp-alloc/internal-heap-stats",
+    "reticulum-semantic-roundtrip-hil/semantic-roundtrip-hil",
 ]
 
 [dependencies]
-rand_core = { workspace = true, optional = true }
 reticulum-radio-interface = { path = "../../crates/radio-interface" }
 reticulum-rns-rete = { path = "../../crates/rns-rete", default-features = false, optional = true }
+reticulum-semantic-roundtrip-hil = { path = "../../crates/semantic-roundtrip-hil", default-features = false }
 static_cell = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "xtensa")'.dependencies]
-reticulum-board-heltec-tracker-v2-tx-hil = { path = "../../crates/board-heltec-tracker-v2-tx-hil" }
+reticulum-board-heltec-tracker-v2-tx-hil = { path = "../../crates/board-heltec-tracker-v2-tx-hil", optional = true }
 
-embassy-executor = { workspace = true, features = ["log"] }
-embassy-time = { workspace = true, features = ["log"] }
-embedded-hal.workspace = true
-embedded-hal-async.workspace = true
-embedded-hal-bus.workspace = true
-esp-alloc.workspace = true
-esp-backtrace = { workspace = true, features = ["esp32s3", "panic-handler", "println"] }
-esp-bootloader-esp-idf = { workspace = true, features = ["esp32s3", "log-04"] }
+embassy-executor = { workspace = true, features = ["log"], optional = true }
+embassy-time = { workspace = true, features = ["log"], optional = true }
+embedded-hal = { workspace = true, optional = true }
+embedded-hal-async = { workspace = true, optional = true }
+embedded-hal-bus = { workspace = true, optional = true }
+esp-alloc = { workspace = true, optional = true }
+esp-backtrace = { workspace = true, features = ["esp32s3", "panic-handler", "println"], optional = true }
+esp-bootloader-esp-idf = { workspace = true, features = ["esp32s3", "log-04"], optional = true }
 esp-hal = { workspace = true, features = [
     "esp32s3",
     "exception-handler",
@@ -50,15 +65,15 @@ esp-hal = { workspace = true, features = [
     "log-04",
     "rt",
     "unstable",
-] }
-esp-println = { workspace = true, features = ["auto", "esp32s3", "log-04"] }
+], optional = true }
+esp-println = { workspace = true, features = ["auto", "esp32s3", "log-04"], optional = true }
 esp-rtos = { workspace = true, features = [
     "embassy",
     "esp-alloc",
     "esp32s3",
     "log-04",
-] }
-log.workspace = true
+], optional = true }
+log = { workspace = true, optional = true }
 
 [lib]
 path = "src/lib.rs"
@@ -68,3 +83,4 @@ name = "reticulum-heltec-tracker-v2-tx-hil"
 path = "src/main.rs"
 test = false
 bench = false
+required-features = ["tracker-radio"]

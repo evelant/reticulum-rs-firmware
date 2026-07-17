@@ -20,6 +20,7 @@ embedded-hal-async.workspace = true
 lora-phy.workspace = true
 reticulum-board-heltec-tracker-v2 = { path = "../board-heltec-tracker-v2" }
 reticulum-radio-interface = { path = "../radio-interface" }
+reticulum-radio-lora-phy = { path = "../radio-lora-phy", default-features = false }
 
 [dev-dependencies]
 critical-section = { workspace = true, features = ["std"] }

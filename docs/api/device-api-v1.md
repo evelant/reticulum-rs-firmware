@@ -1,11 +1,14 @@
 # Device API v1 logical protocol
 
-Status: logical codec and portable authenticated dispatch implemented over the
-mounted sole storage actor. This document freezes the operation and field
+Status: logical codec and portable authenticated dispatch implemented over a
+narrow durable-submission port. This document freezes the operation and field
 numbers exercised by `reticulum-device-api`; `reticulum-device-api-adapter`
 implements capabilities and principal-scoped status in its default build plus
-durable experimental preparation under host simulation. No framing, session,
-firmware transport, node dispatch or radio transmission is connected here.
+target-safe durable experimental outbound RNS DATA submission behind an explicit
+feature. Separate portable framing and boot-lifetime authenticated-job handoff
+crates now exist, but no session or firmware bearer is implemented here; a
+product port may route an accepted submission through the node after the durable
+barriers.
 
 ## Boundary
 
@@ -16,21 +19,26 @@ codec, and a small common authorization policy. It does not contain:
 - USB, BLE, Wi-Fi, WebSocket, COBS, length framing, reconnect, or chunking;
 - a node-core dispatcher, queue, storage, firmware, ESP, Embassy, or board code;
 - an interface that returns raw Reticulum/RNode packet bytes;
-- radio-TX authorization or any path to a radio driver.
+- raw/direct-radio-TX authorization or access to a radio driver.
 
-Transport framing and authenticated session establishment are later layers.
-Those layers decode a message and supply a trusted `DispatchContext` separately.
+Transport framing, job handoff and authenticated session establishment are
+separate layers. Those layers decode a message and supply a trusted
+`DispatchContext` separately.
 No principal, permission, or session assertion is accepted from CBOR input.
 
 `reticulum-device-api-adapter` is the separate allocation-free `no_std`
-dispatcher over a mounted `StorageActor`. It repeats major-version validation,
+dispatcher over a narrow `SubmissionPort`. The port exposes only runtime
+availability, principal-scoped status, and durable acceptance; its implementation
+retains every storage actor, operation-scoped journal view, and physical backend.
+The adapter repeats major-version validation,
 applies the codec's authorization policy to trusted context, always emits the
 current response version, echoes the request ID, and performs no direct flash,
 framing, session, radio or node work. The default feature set handles public
 capabilities and authenticated, principal-scoped status. Missing and cross-
 principal IDs both return `NotFound`, so the adapter does not disclose another
-principal's durable records. Status fails closed with `Internal` while the
-actor has an ambiguous pending mutation or a latched fault; it never publishes
+principal's durable records. A port reports unavailable service as
+`CapabilityUnavailable`; status fails closed with `Internal` while the durable
+owner has an ambiguous pending mutation or a latched fault and never publishes
 the deliberately lagging live index as if it were current. Public capabilities
 remain available in either condition.
 
@@ -100,17 +108,17 @@ authorization credential.
 | ---: | --- | --- | --- |
 | `0x0001` | `system.capabilities` | v1 | public/read-only |
 | `0x0002` | `submission.status` | v1 | authenticated + `READ_SUBMISSION_STATUS` |
-| `0xf001` | `experimental.prepare_rns_data` | host simulation only | authenticated + `EXPERIMENTAL_PREPARE_RNS_DATA` |
+| `0xf001` | `experimental.submit_rns_data` | feature-gated experimental | authenticated + `EXPERIMENTAL_SUBMIT_RNS_DATA` |
 
 Numbers `0xf000..=0xffff` are experimental and can disappear or change without
-API compatibility. `0xf001` is compiled only with the `host-sim` Cargo feature.
-Enabling `host-sim` on `target_os = "none"` is a compile error. A build without
-that feature returns `UnsupportedOperation(0xf001)`. The adapter mirrors this
+API compatibility. `0xf001` is compiled only with the target-safe
+`experimental-rns-data` Cargo feature. A build without that feature returns
+`UnsupportedOperation(0xf001)`. The adapter mirrors this
 feature boundary. Its capability response restricts the codec snapshot to the
-adapter's own compiled operations, so Cargo feature unification on a separate
-`reticulum-device-api/host-sim` dependency edge cannot make an adapter default
-build advertise the missing host-only dispatch arm. Its target-checked default
-build cannot acquire the operation through a transitive feature.
+adapter's own compiled operation and the port's runtime availability, so Cargo
+feature unification on a separate
+`reticulum-device-api/experimental-rns-data` dependency edge cannot make an
+adapter default build advertise its missing dispatch arm.
 
 ### `system.capabilities` (`0x0001`)
 
@@ -123,16 +131,19 @@ Successful response body:
 | ---: | --- | --- | --- |
 | 0 | map | yes | highest API version, using the common version-map shape |
 | 1 | bool | yes | `packet_output`; always `false` in this slice |
-| 2 | u8 | yes | `radio_tx`: 0 unavailable, 1 disabled, 2 available; always 0 in this slice |
-| 3 | bool | yes | experimental prepare operation compiled in |
+| 2 | u8 | yes | `direct_radio_tx`: raw/direct-radio access; 0 unavailable, 1 disabled, 2 available; always 0 in this slice |
+| 3 | bool | yes | transport-neutral experimental outbound RNS DATA submission advertised by this dispatcher |
 | 4 | u16 | yes | maximum logical message bytes (512) |
 | 5 | u16 | yes | maximum encoded body bytes (448) |
 | 6 | u16 | yes | maximum experimental payload bytes (383) |
 
 `CapabilitySnapshot::current()` is device-owned and cannot advertise packet
-output or radio TX. The host experiment changes only key 3. A higher dispatcher
-uses `CapabilitySnapshot::for_dispatch` to restrict that codec-build snapshot;
-it can disable a capability but cannot enable one omitted from the codec build.
+output or direct-radio TX. Key 2 says nothing about node-owned RNS traffic: an
+accepted request advertised by key 3 may be routed over LoRa or any other
+eligible Reticulum interface without granting a client direct radio control. A
+higher dispatcher uses `CapabilitySnapshot::for_dispatch` to restrict that
+codec-build snapshot; it can disable a capability but cannot enable one omitted
+from the codec build.
 
 ### `submission.status` (`0x0002`)
 
@@ -204,14 +215,17 @@ semantic replay. Product reboot safety still requires the firmware task to
 finish that mount plus conservative boot recovery before enabling any API
 transport or RF/node service.
 
-### `experimental.prepare_rns_data` (`0xf001`)
+### `experimental.submit_rns_data` (`0xf001`)
 
-This host-only operation proves strict decode, authenticated durable acceptance,
-idempotency input, and the API-to-storage boundary. It is deliberately not named
-`rns.send`, is not a stable product operation, and has no firmware integration.
-The future client-facing send operation is `messages.send` through embedded
-LXMF. A separately authorized raw RNS/RNode bridge, if ever implemented, remains
-a distinct capability and mode.
+This target-safe experimental operation proves strict decode, authenticated
+durable acceptance, idempotency input, and the API-to-storage boundary. It is a
+transport-neutral submission: the client neither selects LoRa nor receives a
+radio capability. The resident E290 composition can carry accepted work through
+the node router and the LoRa-first interface after the durable barriers, although
+no firmware bearer exposes this API yet. The future client-facing message
+operation remains `messages.send` through embedded LXMF. A separately authorized
+raw RNS/RNode or direct-radio bridge, if ever implemented, remains a distinct
+capability and mode.
 
 Request body:
 
@@ -236,20 +250,22 @@ storage, and its RNS receipt timeout has already started. Packet bytes remain
 inaccessible until an opaque permit exchange produces `AuthorizedTx`, whose
 `frame(now)` accessor is one-shot and exact-deadline checked. A standalone
 bounded async handoff carries these typestates, and the portable projector
-models their persist-before-ack observations, but no device-API/storage/runtime
-firmware path invokes that node/TX path. There is no radio integration, and the
-host-only operation remains disconnected from it.
+models their persist-before-ack observations. The E290 host composition test
+exercises that API-to-runtime-to-router-to-LoRa software path; portable framing
+and job handoff are implemented separately, while external live admission still
+requires session establishment, firmware composition, and a bearer.
 
-Successful host-simulation response body:
+Successful experimental response body:
 
 | Key | Type | Required | Meaning |
 | ---: | --- | --- | --- |
 | 0 | u64 | yes | device-assigned submission ID |
 
-For any adapter backed by the sole storage actor, acceptance means the exact
+For any adapter port backed by the sole storage actor, acceptance means the exact
 intent is durable and the backend has reserved the physical capacity required
-by its lifecycle contract. The adapter's `host-sim` path enforces that ordering:
-it copies the borrowed payload into the owned intent, invokes `actor.accept`,
+by its lifecycle contract. The adapter's `experimental-rns-data` path enforces
+that ordering: it copies the borrowed payload into the owned intent, invokes the
+port's durable `accept`,
 and publishes `Accepted` or exact `Replay` only after durable success. A lost
 backend reply maps to `Internal` while the actor retains the exact mutation;
 after `drive_pending()` reconciles it, retry returns the same durable ID.
@@ -299,12 +315,12 @@ framing rules.
 
 - `system.capabilities` is available before application authentication;
 - `submission.status` requires an authenticated principal and its read bit;
-- experimental preparation requires an authenticated principal and its
-  experimental permission.
+- experimental outbound RNS DATA submission requires an authenticated principal
+  and `EXPERIMENTAL_SUBMIT_RNS_DATA`.
 
 Authentication, ownership filtering, rate limiting, idempotency scope, physical
 presence, and high-assurance session encryption are not solved by this codec.
-The portable adapter scopes status and host-simulation idempotency by the
+The portable adapter scopes status and experimental-operation idempotency by the
 principal from `DispatchContext`, never by bytes supplied in a request. The
 future session runtime must establish that context, enforce connection-level
 rate limits, and keep its authentication state outside request CBOR.
@@ -317,15 +333,16 @@ The canonical `system.capabilities` request for request ID 42 is:
 a4 00 a2 00 01 01 00 01 18 2a 02 01 03 a0
 ```
 
-The wire tests freeze this request, both default and host-simulation capability
+The wire tests freeze this request, both default and experimental capability
 responses, typed permission/capacity/idempotency error responses, the
-experimental preparation request, and its submission-ID-only accepted response.
+experimental submission request, and its submission-ID-only accepted response.
 They also cover every submission failure, state invariants, closed numeric
 enums, unknown fields, unknown operations, missing and duplicate known fields,
 every truncated golden prefix, trailing bytes,
 message/body/payload/nesting limits, indefinite-value rejection, fixed
 byte-string widths, borrowed payload storage, authorization, and the
-packet-output/radio-TX safety values.
+packet-output/direct-radio-TX safety values and the separate outbound-RNS
+submission advertisement.
 
 ## Validation profiles
 
@@ -335,17 +352,19 @@ Run all three supported profiles explicitly from the workspace root:
 cargo test --locked -p reticulum-device-api
 cargo clippy --locked -p reticulum-device-api --all-targets -- -D warnings
 
-cargo test --locked -p reticulum-device-api --features host-sim
-cargo clippy --locked -p reticulum-device-api --all-targets --features host-sim -- -D warnings
+cargo test --locked -p reticulum-device-api --features experimental-rns-data
+cargo clippy --locked -p reticulum-device-api --all-targets \
+  --features experimental-rns-data -- -D warnings
 
 cargo check --locked -p reticulum-device-api --no-default-features \
   --target riscv32imac-unknown-none-elf
+cargo check --locked -p reticulum-device-api --no-default-features \
+  --features experimental-rns-data --target riscv32imac-unknown-none-elf
 ```
 
 The first pair validates the default host profile, the second pair validates the
-host-only experiment, and the final command proves the default crate remains
-`no_std` on an installed `target_os = "none"` target. `host-sim` is intentionally
-rejected on that target.
+experimental operation, and the final two commands prove both feature profiles
+remain `no_std` on an installed `target_os = "none"` target.
 
 Validate authenticated dispatch independently in both host profiles and the
 default ESP32-S3 graph:
@@ -354,27 +373,47 @@ default ESP32-S3 graph:
 cargo test --locked -p reticulum-device-api-adapter
 cargo clippy --locked -p reticulum-device-api-adapter --all-targets -- -D warnings
 
-cargo test --locked -p reticulum-device-api-adapter --features host-sim
+cargo test --locked -p reticulum-device-api-adapter --features experimental-rns-data
 cargo clippy --locked -p reticulum-device-api-adapter --all-targets \
-  --features host-sim -- -D warnings
+  --features experimental-rns-data -- -D warnings
 
 cargo test --locked -p reticulum-device-api-adapter \
-  --features reticulum-device-api/host-sim
+  --features reticulum-device-api/experimental-rns-data
 cargo clippy --locked -p reticulum-device-api-adapter --all-targets \
-  --features reticulum-device-api/host-sim -- -D warnings
+  --features reticulum-device-api/experimental-rns-data -- -D warnings
 
 cargo +esp check --locked --release -p reticulum-device-api-adapter \
-  --target xtensa-esp32s3-none-elf
+  --features experimental-rns-data --target xtensa-esp32s3-none-elf
 cargo +esp clippy --locked --release -p reticulum-device-api-adapter \
-  --target xtensa-esp32s3-none-elf -- -D warnings
+  --features experimental-rns-data --target xtensa-esp32s3-none-elf -- -D warnings
 ```
 
-These checks pass. The dependency-only host-simulation profile proves feature
+Validate the separately bounded bearer-edge contracts without composing a
+physical transport:
+
+```sh
+cargo test --locked \
+  -p reticulum-device-api-framing \
+  -p reticulum-device-api-handoff
+cargo clippy --locked --all-targets \
+  -p reticulum-device-api-framing \
+  -p reticulum-device-api-handoff -- -D warnings
+cargo check --locked \
+  -p reticulum-device-api-framing \
+  -p reticulum-device-api-handoff \
+  --target riscv32imac-unknown-none-elf
+cargo +esp check --locked \
+  -p reticulum-device-api-framing \
+  -p reticulum-device-api-handoff \
+  --target xtensa-esp32s3-none-elf
+```
+
+These checks pass. The dependency-only experimental profile proves feature
 unification cannot advertise an adapter-local operation that is absent. The
-adapter's focused tests cover exact authorization and zero-mutation rejection,
+adapter's focused tests cover exact authorization and zero-port-call rejection,
 request context, version/capability behavior, principal isolation, every durable
 lifecycle mapping, maximum-size owned-payload acceptance/replay/conflict,
 acceptance across remount, stable capacity and identifier-exhaustion errors,
-faulted and pending status gating, and lost-write reconciliation. The target
-commands use the default feature set because adapter `host-sim` is intentionally
-a compile error on bare metal.
+faulted and pending status gating, wrong-binding rejection without I/O, and
+lost-write reconciliation. Target checks exercise the experimental operation
+directly on a `no_std` bare-metal build.
