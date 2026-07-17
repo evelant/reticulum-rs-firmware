@@ -11,17 +11,20 @@
 #![deny(missing_docs)]
 
 use embedded_storage::nor_flash::MultiwriteNorFlash;
+use reticulum_node_core::{TerminalAttempt, TxRecoveryObservation};
 use reticulum_storage_journal::{
     AppendOutcome, JournalError, JournalState, SlotCorruption, append, compact, mount,
 };
 use reticulum_storage_model::{
-    AcceptOutcome, AcceptanceCandidate, ApplyError, JournalEntry, PlannedMutation, SubmissionId,
-    SubmissionIndex,
+    AcceptOutcome, AcceptanceCandidate, ApplyError, BootRecoveryDecision, JournalEntry,
+    PlanOutcome, PlannedMutation, SubmissionId, SubmissionIndex,
 };
 use reticulum_submission_projector::{
-    PersistHandle, PersistRequest, PersistenceProgress, PersistenceReply, ProjectorError,
-    SubmissionProjector,
+    AcknowledgementAction, AcknowledgementReply, PersistHandle, PersistRequest,
+    PersistenceProgress, PersistenceReply, PreparedFrameObservation, ProjectionProgress,
+    ProjectorError, SubmissionProjector,
 };
+use reticulum_tx_dispatch::NodeTxPrepareResult;
 
 #[cfg(test)]
 mod tests;
@@ -31,6 +34,8 @@ mod tests;
 pub enum PendingKind {
     /// A device-facing acceptance candidate and its exact planned record.
     Acceptance,
+    /// An exact conservative boot-finalization record and its boot identity.
+    BootRecovery,
     /// An exact request retained by the actor-owned submission projector.
     Projector,
 }
@@ -81,7 +86,7 @@ pub enum StorageFault {
     ReadbackMismatch,
     /// Committed acceptances violate the lifetime reservation invariant.
     ReservationInvariant,
-    /// A durably completed actor-owned model plan could not be applied.
+    /// An actor-owned recovery decision or durably completed plan was rejected.
     ModelApplyRejected(ApplyError),
     /// The request supplied to the actor is not exactly retained by its projector.
     ProjectorRequestMismatch,
@@ -148,6 +153,17 @@ pub enum AcceptanceProgress {
     JournalCapacityExhausted,
 }
 
+/// Definitive non-fault result of recovering one replayed submission at boot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BootRecoveryProgress {
+    /// Queued intent remains replay-safe and may be submitted again.
+    ReplayQueued,
+    /// The replayed submission was already durably final.
+    AlreadyFinal,
+    /// Replay-unsafe interrupted work is now durably final.
+    Finalized,
+}
+
 /// Definitive progress from autonomously reconciling the actor's retained mutation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PendingProgress {
@@ -155,19 +171,30 @@ pub enum PendingProgress {
     Idle,
     /// One retained acceptance is durable and applied to the live index.
     AcceptanceCommitted(SubmissionId),
+    /// One retained conservative boot-finalization is durable and applied.
+    BootRecoveryFinalized(SubmissionId),
     /// One retained projector mutation is durable and applied to the live index.
     ProjectorCommitted,
     /// The journal cannot reserve a complete schema lifetime for the acceptance.
     AcceptanceCapacityExhausted,
 }
 
-// The fixed actor cell deliberately owns the complete acceptance plan without
-// allocation; the projector variant remains a compact handle into its sole owner.
+// The fixed actor cell deliberately owns a complete acceptance or boot plan
+// without allocation; the projector variant is a compact handle into its owner.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PendingMutation {
-    Acceptance { planned: PlannedMutation },
-    Projector { handle: PersistHandle },
+    Acceptance {
+        planned: PlannedMutation,
+    },
+    BootRecovery {
+        id: SubmissionId,
+        boot_sequence: u64,
+        planned: PlannedMutation,
+    },
+    Projector {
+        handle: PersistHandle,
+    },
 }
 
 /// Target-layout byte size of the actor's actual optional pending-mutation cell.
@@ -176,14 +203,15 @@ enum PendingMutation {
 /// measurable in host and firmware builds.
 pub const PENDING_MUTATION_BYTES: usize = core::mem::size_of::<Option<PendingMutation>>();
 
-// One actor-owned acceptance plan or one compact projector handle must fit.
-// Projector requests remain solely in the actor-owned projector.
+// One actor-owned acceptance/boot plan or one compact projector handle must
+// fit. Projector requests remain solely in the actor-owned projector.
 const _: () = assert!(PENDING_MUTATION_BYTES <= 512);
 
 impl PendingMutation {
     const fn kind(self) -> PendingKind {
         match self {
             Self::Acceptance { .. } => PendingKind::Acceptance,
+            Self::BootRecovery { .. } => PendingKind::BootRecovery,
             Self::Projector { .. } => PendingKind::Projector,
         }
     }
@@ -268,23 +296,101 @@ where
     pub fn begin_preparation(
         &mut self,
         id: SubmissionId,
-    ) -> Result<reticulum_submission_projector::ProjectionProgress, ProjectorOperationError> {
-        if let Some(fault) = self.fault {
-            return Err(ProjectorOperationError::Faulted(fault));
-        }
-        if let Some(pending) = self.pending {
-            return Err(ProjectorOperationError::Busy {
-                pending: pending.kind(),
-            });
-        }
-        if let Some(projector_fault) = self.projector.fault() {
-            return Err(self.latch_projector_operation(ProjectorError::Faulted(projector_fault)));
-        }
-        match self.projector.begin_preparation(&self.index, id) {
-            Ok(progress) => Ok(progress),
-            Err(error @ ProjectorError::Faulted(_)) => Err(self.latch_projector_operation(error)),
-            Err(error) => Err(ProjectorOperationError::Rejected(error)),
-        }
+    ) -> Result<ProjectionProgress, ProjectorOperationError> {
+        self.ensure_projector_operation()?;
+        let result = self.projector.begin_preparation(&self.index, id);
+        self.map_projector_operation(result)
+    }
+
+    /// Project one synchronous node preparation result against the actor-owned
+    /// live index and volatile correlation state.
+    ///
+    /// Any returned persistence handle still names an exact request retained
+    /// solely by this actor's projector. Physical persistence must flow through
+    /// [`Self::persist_projector`].
+    pub fn observe_preparation_result(
+        &mut self,
+        id: SubmissionId,
+        result: NodeTxPrepareResult,
+    ) -> Result<ProjectionProgress, ProjectorOperationError> {
+        self.ensure_projector_operation()?;
+        let result = self
+            .projector
+            .observe_preparation_result(&self.index, id, result);
+        self.map_projector_operation(result)
+    }
+
+    /// Project scalar metadata for one complete authorized Reticulum frame.
+    ///
+    /// Packet bytes and owners remain outside storage; the projector retains
+    /// only its bounded attempt correlation and any exact journal request.
+    pub fn observe_frame(
+        &mut self,
+        observation: PreparedFrameObservation,
+    ) -> Result<ProjectionProgress, ProjectorOperationError> {
+        self.ensure_projector_operation()?;
+        let result = self.projector.observe_frame(&self.index, observation);
+        self.map_projector_operation(result)
+    }
+
+    /// Project one exact node-core terminal tombstone.
+    ///
+    /// The corresponding upstream acknowledgement remains invisible until the
+    /// final lifecycle record is durably committed through this actor.
+    pub fn observe_terminal(
+        &mut self,
+        terminal: TerminalAttempt,
+    ) -> Result<ProjectionProgress, ProjectorOperationError> {
+        self.ensure_projector_operation()?;
+        let result = self.projector.observe_terminal(&self.index, terminal);
+        self.map_projector_operation(result)
+    }
+
+    /// Project one exact recovered packet-owner observation.
+    ///
+    /// Its release acknowledgement is exposed only after the transport audit
+    /// is durable.
+    pub fn observe_recovered(
+        &mut self,
+        observation: TxRecoveryObservation,
+    ) -> Result<ProjectionProgress, ProjectorOperationError> {
+        self.ensure_projector_operation()?;
+        let result = self.projector.observe_recovered(&self.index, observation);
+        self.map_projector_operation(result)
+    }
+
+    /// Project one exact fail-closed packet-owner quarantine observation.
+    ///
+    /// Quarantine has no release acknowledgement; the projector may stage a
+    /// following conservative final record after its audit becomes durable.
+    pub fn observe_quarantined(
+        &mut self,
+        observation: TxRecoveryObservation,
+    ) -> Result<ProjectionProgress, ProjectorOperationError> {
+        self.ensure_projector_operation()?;
+        let result = self.projector.observe_quarantined(&self.index, observation);
+        self.map_projector_operation(result)
+    }
+
+    /// Iterate exact upstream acknowledgement actions unlocked by durable
+    /// projector records, in stable projector-slot order.
+    pub fn pending_acknowledgements(&self) -> impl Iterator<Item = AcknowledgementAction> + '_ {
+        self.projector.pending_acknowledgements()
+    }
+
+    /// Report the result of one exact retained upstream acknowledgement.
+    ///
+    /// A retryable reply leaves the same action retained. Completion releases
+    /// only the exactly correlated action; mismatch or upstream failure is
+    /// fail-closed by the actor.
+    pub fn report_acknowledgement(
+        &mut self,
+        action: AcknowledgementAction,
+        reply: AcknowledgementReply,
+    ) -> Result<(), ProjectorOperationError> {
+        self.ensure_projector_operation()?;
+        let result = self.projector.report_acknowledgement(action, reply);
+        self.map_projector_operation(result)
     }
 
     /// Current fail-closed actor fault, if any.
@@ -351,7 +457,83 @@ where
             PendingProgress::AcceptanceCapacityExhausted => {
                 Ok(AcceptanceProgress::JournalCapacityExhausted)
             }
-            PendingProgress::Idle | PendingProgress::ProjectorCommitted => {
+            PendingProgress::Idle
+            | PendingProgress::BootRecoveryFinalized(_)
+            | PendingProgress::ProjectorCommitted => Err(self.latch(StorageFault::LogicalConflict)),
+        }
+    }
+
+    /// Resolve one completely replayed submission before services are enabled.
+    ///
+    /// Queued work and already-final work require no physical mutation and
+    /// return immediately. Preparing or awaiting-delivery work is converted to
+    /// the model's conservative interrupted-by-reset final state, then becomes
+    /// visible in the live index only after its exact planned record is
+    /// durably appended or proved already equivalent.
+    ///
+    /// A backend error retains the complete plan together with `id` and
+    /// `boot_sequence`. An exact retry or [`Self::drive_pending`] reconciles
+    /// that same record; any different identifier or boot sequence receives
+    /// [`DriveError::Busy`] until the retained operation is resolved.
+    pub fn finalize_boot_recovery(
+        &mut self,
+        id: SubmissionId,
+        boot_sequence: u64,
+    ) -> Result<BootRecoveryProgress, DriveError<F::Error>> {
+        self.ensure_healthy()?;
+
+        match self.pending {
+            Some(PendingMutation::BootRecovery {
+                id: pending_id,
+                boot_sequence: pending_boot_sequence,
+                ..
+            }) if pending_id == id && pending_boot_sequence == boot_sequence => {}
+            Some(pending) => {
+                return Err(DriveError::Busy {
+                    pending: pending.kind(),
+                });
+            }
+            None => {
+                let decision = self
+                    .index
+                    .boot_recovery(id, boot_sequence)
+                    .map_err(|error| self.latch(StorageFault::ModelApplyRejected(error)))?;
+                let transition = match decision {
+                    BootRecoveryDecision::ReplayQueued => {
+                        return Ok(BootRecoveryProgress::ReplayQueued);
+                    }
+                    BootRecoveryDecision::AlreadyFinal => {
+                        return Ok(BootRecoveryProgress::AlreadyFinal);
+                    }
+                    BootRecoveryDecision::FinalizeInterrupted(transition) => transition,
+                };
+                let planned = match self
+                    .index
+                    .plan_transition(transition)
+                    .map_err(|error| self.latch(StorageFault::ModelApplyRejected(error)))?
+                {
+                    PlanOutcome::Append(planned) => planned,
+                    PlanOutcome::AlreadyEquivalent => {
+                        return Err(self.latch(StorageFault::LogicalConflict));
+                    }
+                };
+                self.pending = Some(PendingMutation::BootRecovery {
+                    id,
+                    boot_sequence,
+                    planned,
+                });
+            }
+        }
+
+        match self.drive_pending()? {
+            PendingProgress::BootRecoveryFinalized(finalized) if finalized == id => {
+                Ok(BootRecoveryProgress::Finalized)
+            }
+            PendingProgress::Idle
+            | PendingProgress::AcceptanceCommitted(_)
+            | PendingProgress::BootRecoveryFinalized(_)
+            | PendingProgress::ProjectorCommitted
+            | PendingProgress::AcceptanceCapacityExhausted => {
                 Err(self.latch(StorageFault::LogicalConflict))
             }
         }
@@ -389,6 +571,7 @@ where
             PendingProgress::ProjectorCommitted => Ok(PersistenceProgress::Committed),
             PendingProgress::Idle
             | PendingProgress::AcceptanceCommitted(_)
+            | PendingProgress::BootRecoveryFinalized(_)
             | PendingProgress::AcceptanceCapacityExhausted => {
                 Err(self.latch(StorageFault::ProjectorRequestMismatch))
             }
@@ -419,6 +602,20 @@ where
                     PhysicalProgress::AcceptanceCapacityExhausted => {
                         self.pending = None;
                         Ok(PendingProgress::AcceptanceCapacityExhausted)
+                    }
+                }
+            }
+            Some(PendingMutation::BootRecovery { id, planned, .. }) => {
+                match self.drive_append(planned.entry())? {
+                    PhysicalProgress::Durable(_) => {
+                        if let Err(error) = self.index.apply_planned(planned) {
+                            return Err(self.latch(StorageFault::ModelApplyRejected(error)));
+                        }
+                        self.pending = None;
+                        Ok(PendingProgress::BootRecoveryFinalized(id))
+                    }
+                    PhysicalProgress::AcceptanceCapacityExhausted => {
+                        Err(self.latch(StorageFault::ReservationInvariant))
                     }
                 }
             }
@@ -525,6 +722,32 @@ where
                 ProjectorError::Faulted(fault),
             ))),
             None => Ok(()),
+        }
+    }
+
+    fn ensure_projector_operation(&mut self) -> Result<(), ProjectorOperationError> {
+        if let Some(fault) = self.fault {
+            return Err(ProjectorOperationError::Faulted(fault));
+        }
+        if let Some(pending) = self.pending {
+            return Err(ProjectorOperationError::Busy {
+                pending: pending.kind(),
+            });
+        }
+        if let Some(projector_fault) = self.projector.fault() {
+            return Err(self.latch_projector_operation(ProjectorError::Faulted(projector_fault)));
+        }
+        Ok(())
+    }
+
+    fn map_projector_operation<T>(
+        &mut self,
+        result: Result<T, ProjectorError>,
+    ) -> Result<T, ProjectorOperationError> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(error @ ProjectorError::Faulted(_)) => Err(self.latch_projector_operation(error)),
+            Err(error) => Err(ProjectorOperationError::Rejected(error)),
         }
     }
 

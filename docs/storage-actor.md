@@ -1,8 +1,9 @@
 # Portable sole storage actor
 
-**Status:** portable sole-owner aggregate implemented and host/ESP32-S3
-target-checked; permanent Embassy task, product `esp-storage` partition adapter,
-firmware/device-API transport linkage, boot service gating, and integrated powered-fault
+**Status:** portable sole-owner aggregate and narrow node-observation/
+acknowledgement surface implemented and host/ESP32-S3 target-checked; permanent
+Embassy task, product `esp-storage` partition adapter, firmware/device-API
+transport linkage, boot service orchestration, and integrated powered-fault
 qualification remain open
 
 ## Ownership boundary
@@ -47,15 +48,31 @@ There are two serialized mutation sources:
    from a different projector cannot replace the owned request.
 
 The public projector accessor is immutable. Mutation is exposed only through
-narrow actor-owned operations: the first implemented operation,
-`begin_preparation`, is busy/fault-gated, plans the queued-to-preparing barrier
-against the actor's live index, and returns bounded progress whose persistence
-request must be routed back through `persist_projector`. A compile-fail doctest
-guards against replacing or extracting the sole projector through safe code.
-Queued-attempt binding, frame and terminal/recovery/quarantine observations,
-and upstream acknowledgement reporting are deliberately not delegated yet;
-their narrow actor-owned surface will be fixed together with the sole node-owner
-runtime instead of exposing the projector's raw mutable API now.
+narrow actor-owned operations. `begin_preparation`,
+`observe_preparation_result`, `observe_frame`, `observe_terminal`,
+`observe_recovered`, and `observe_quarantined` are all busy/fault-gated and
+plan against the actor's live index. Any returned persistence request must flow
+back through `persist_projector`. `pending_acknowledgements` exposes only exact
+copyable actions unlocked by durable records, and `report_acknowledgement`
+updates only the actor-owned correlation after the caller reports the matching
+node/supervisor result. A compile-fail doctest guards against replacing or
+extracting the sole projector through safe code.
+
+These methods deliberately accept the existing node-core and TX-dispatch
+observation types instead of inventing a second correlation vocabulary. They
+still do not run the orchestration loop: the permanent task must drain a
+follow-on projector persistence request before admitting unrelated work. A
+quarantine audit, for example, can stage a second conservative final record and
+has no upstream owner-release acknowledgement.
+
+`finalize_boot_recovery(id, boot_sequence)` is the actor-owned boot mutation
+edge. A fully replayed queued submission returns `ReplayQueued`, a durable final
+submission returns `AlreadyFinal`, and replay-unsafe `Preparing` or
+`AwaitingDelivery` work is changed to `InterruptedByReset` only after the exact
+transition is committed or read back equivalent. Ambiguous writes retain the
+plan, submission ID, and boot sequence in the same serialization cell;
+`drive_pending()` can finish them without caller reconstruction, while a
+mismatched retry receives `Busy`.
 
 Only one mutation can occupy the actor's serialization cell. Unrelated work
 receives `Busy` until the retained mutation reaches a definitive result.
@@ -100,14 +117,18 @@ leaking platform error types.
 
 ## Validation and remaining integration
 
-Focused host tests cover mount-before-service, acceptance/replay/conflict and
+Focused host tests cover mount-before-service, typed durable boot recovery and
+lost-reply reconciliation, acceptance/replay/conflict and
 index capacity, lost acceptance and projector replies followed by autonomous
-reconciliation, sole-projector identity and replacement resistance, busy/fault-
-gated preparation, pre-fault rejection before flash mutation, compaction
-recovery after an ambiguous target erase, and permanent fault latching. The
-suite, compile-fail ownership guard, strict host clippy, and ESP32-S3 Xtensa
-check/clippy pass. The existing powered storage HIL predates this actor and
-calls the journal directly, so it is not on-target actor qualification.
+reconciliation, sole-projector identity and replacement resistance, the full
+preparation/frame/terminal/retry-and-complete acknowledgement path, recovered
+owner acknowledgement, quarantine audit plus deferred finalization,
+busy/fault-gated observations, pre-fault rejection before flash mutation,
+compaction recovery after an ambiguous target erase, and permanent fault
+latching. The 17-test suite, compile-fail ownership guard, strict host clippy,
+and ESP32-S3 Xtensa check/clippy pass. The existing powered storage HIL
+predates this actor and calls the journal directly, so it is not on-target
+actor qualification.
 
 Product integration still requires:
 
@@ -115,7 +136,9 @@ Product integration still requires:
 - a checked product `esp-storage` adapter constrained to the real `retlog`
   partition, rather than only the dedicated HIL adapter;
 - gating USB/BLE/Wi-Fi device-API and RF/node service until mount, replay, and
-  conservative boot recovery are complete;
+  actor-owned conservative boot recovery are complete for every replayed
+  submission; the portable operation exists, but the permanent task must drive
+  it to a definitive result before opening services;
 - connection of the implemented authenticated device-API adapter to framing,
   sessions and USB/BLE/Wi-Fi, plus a safe projector-slot retirement handshake;
 - coordination with flash cache constraints, watchdog feeding, OTA, other

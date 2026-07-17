@@ -9,9 +9,11 @@
 //! cancellation-safe waits against the next absolute deadline.
 //!
 //! This crate deliberately has no firmware, radio, HAL, device-API, flash, or
-//! executor dependency. It does not yet own RNS `tick` actions, RX ingress, a
-//! durable submission-intent journal, or recovery/terminal projection. Those
-//! boundaries must be added before this becomes the full product node owner.
+//! executor dependency. The aggregate is the intended sole [`NodeCore`] owner;
+//! portable RNS ingress and timer APIs are exposed through it while firmware
+//! remains responsible for RNode reassembly and for draining every returned
+//! protocol action. Durable submission projection and a real radio dispatcher
+//! are still separate boundaries.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -27,10 +29,11 @@ use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_time::{Duration, Instant, Timer};
 use rand_core::{CryptoRng, RngCore};
 use reticulum_node_core::{
-    AcknowledgeError, AttemptHandle, MonotonicMillis, NodeCore, PrepareDataRequest,
-    TerminalAttempt, TxAuthorizationCandidate, TxAuthorizationErrorKind, TxAuthorizationPolicy,
-    TxLeaseDeadline, TxMaintenanceReport, TxPolicyDecision, TxPolicyDenial, TxRecoveryObservation,
-    TxRecoveryRecord,
+    AcknowledgeError, AnnounceAdmissionError, AttemptHandle, DestinationHash, InboundProofPolicy,
+    IngressReport, MaintenanceReport, MonotonicMillis, MonotonicSeconds, NodeActions, NodeCore,
+    PacketInterfaceId, PrepareDataRequest, ReceiptCorrelationError, TerminalAttempt,
+    TxAuthorizationCandidate, TxAuthorizationErrorKind, TxAuthorizationPolicy, TxLeaseDeadline,
+    TxMaintenanceReport, TxPolicyDecision, TxPolicyDenial, TxRecoveryObservation, TxRecoveryRecord,
 };
 use reticulum_tx_dispatch::{
     NoRfTxDispatcher, NoRfTxDispatcherPhase, NoRfTxDispatcherStep, NoRfTxDispatcherWait,
@@ -331,6 +334,70 @@ where
         self.dispatcher.phase()
     }
 
+    /// Primary local Reticulum destination owned by this aggregate.
+    pub fn destination_hash(&self) -> DestinationHash {
+        self.owner.destination_hash()
+    }
+
+    /// Configure automatic delivery proofs on the aggregate's sole node owner.
+    ///
+    /// Proof packets returned by later ingress calls remain ordinary protocol
+    /// actions. The permanent runtime must retain and drain them through its
+    /// bounded radio handoff; this method does not bypass authorization or
+    /// transmit directly.
+    pub fn set_inbound_proof_policy(&mut self, policy: InboundProofPolicy) {
+        self.owner.set_inbound_proof_policy(policy);
+    }
+
+    /// Admit one signed local announce into the sole node owner's bounded queue.
+    pub fn queue_announce<R: RngCore + CryptoRng>(
+        &mut self,
+        app_data: Option<&[u8]>,
+        now: MonotonicSeconds,
+        rng: &mut R,
+    ) -> Result<(), AnnounceAdmissionError> {
+        self.owner.queue_announce(app_data, now, rng)
+    }
+
+    /// Flush ready local announces into the ordinary protocol-action envelope.
+    ///
+    /// The caller owns every returned action and must not silently discard one
+    /// because the downstream radio handoff is full.
+    pub fn flush_announces<R: RngCore>(
+        &mut self,
+        now: MonotonicSeconds,
+        rng: &mut R,
+    ) -> NodeActions {
+        self.owner.flush_announces(now, rng)
+    }
+
+    /// Process one complete base-MTU packet through the sole RNS owner.
+    ///
+    /// RNode fragment reassembly and timestamp selection remain platform
+    /// responsibilities. Every event and outbound packet in the returned report
+    /// must be drained before the runtime admits unbounded additional work.
+    pub fn ingest_rns<R: RngCore + CryptoRng>(
+        &mut self,
+        raw: &[u8],
+        now: MonotonicSeconds,
+        interface: PacketInterfaceId,
+        rng: &mut R,
+    ) -> Result<IngressReport, ReceiptCorrelationError> {
+        self.owner.ingest(raw, now, interface, rng)
+    }
+
+    /// Run RNS timer maintenance through the sole node owner.
+    ///
+    /// This uses whole protocol seconds, independent from the millisecond clock
+    /// supplied to TX-owner maintenance and permit deadlines.
+    pub fn tick_rns<R: RngCore + CryptoRng>(
+        &mut self,
+        now: MonotonicSeconds,
+        rng: &mut R,
+    ) -> MaintenanceReport {
+        self.owner.tick(now, rng)
+    }
+
     /// Scalar fixed-owner-table occupancy.
     pub fn parked_counts(&self) -> NodeTxParkedCounts {
         self.data.parked_counts()
@@ -540,13 +607,19 @@ where
         pass
     }
 
-    /// Await one phase-compatible input or the next absolute deadline.
+    /// Await one phase-compatible TX-machine input or the next absolute deadline.
     ///
     /// Call this only after a complete pass reports no progress. Dispatcher
     /// input is polled before the timer, so an already-observable permit reply
     /// wins an exact grace-deadline tie. Losing short waits are safe to cancel;
     /// all unique owners remain in channels or persistent machine state.
-    async fn wait_for_work<C>(&mut self, clock: &mut C)
+    ///
+    /// A permanent node task may race this future against an independently
+    /// owned RX-frame or RNS-timer future. Cancelling this future cannot discard
+    /// an owner: channel receives and the supplied deadline wait are required to
+    /// be cancellation-safe, and state changes occur only after a selected wait
+    /// completes.
+    pub async fn wait_for_work<C>(&mut self, clock: &mut C)
     where
         C: TxAsyncMonotonicClock,
     {
@@ -1046,6 +1119,45 @@ mod tests {
                 .with(PacketInterfaceId::new(1))
                 .expect("test interface must fit"),
         }
+    }
+
+    #[test]
+    fn permanent_protocol_surface_keeps_rns_inside_supervisor() {
+        let (mut sender, _) = build_supervisor(RfInertTxPolicy, 70);
+        let (mut receiver, _) = build_supervisor(RfInertTxPolicy, 72);
+        assert_ne!(sender.destination_hash(), receiver.destination_hash());
+
+        let mut rng = CounterRng::default();
+        sender.set_inbound_proof_policy(InboundProofPolicy::Always);
+        sender
+            .queue_announce(
+                Some(b"permanent-owner-surface"),
+                MonotonicSeconds::new(10),
+                &mut rng,
+            )
+            .expect("bounded announce queue must accept one item");
+        let mut actions = sender.flush_announces(MonotonicSeconds::new(10), &mut rng);
+        assert!(actions.events.is_empty());
+        assert_eq!(actions.unroutable_packets, 0);
+        assert_eq!(actions.packets.len(), 1);
+
+        let packet = actions
+            .packets
+            .pop()
+            .expect("one queued announce must produce one packet");
+        let report = receiver
+            .ingest_rns(
+                packet.bytes(),
+                MonotonicSeconds::new(10),
+                PacketInterfaceId::new(7),
+                &mut rng,
+            )
+            .expect("announce ingress must not violate receipt correlation");
+        assert!(report.actions.packets.is_empty());
+
+        let maintenance = receiver.tick_rns(MonotonicSeconds::new(11), &mut rng);
+        assert_eq!(maintenance.timed_out_attempts, 0);
+        assert_eq!(maintenance.correlation_fault, None);
     }
 
     fn drive_to_quiescence<P>(supervisor: &mut TestSupervisor<P>, clock: &mut ManualClock) -> usize

@@ -1,10 +1,11 @@
 # RF-inert permanent TX supervisor
 
-**Status:** permanent aggregate and async run loop implemented, target-checked,
-and outside every firmware graph; portable durable projection exists beside
-it, and the physical journal plus portable sole storage actor are implemented,
-but there is no permanent storage task, firmware device API, or complete node-
-owner integration
+**Status:** permanent portable protocol-owner aggregate and async TX-machine
+run loop implemented, target-checked, and outside every firmware graph; RNS
+ingress, timer maintenance, proof policy, and bounded announce admission are
+exposed through the sole owner, but ordinary protocol actions remain
+allocation-backed and there is no permanent firmware, storage, device-API, or
+radio edge
 **RF status:** both attached boards have antennas and are authorized for NA915
 development TX; this crate remains RF-inert because its concrete driver/radio
 owner and regional/airtime policy adapter are not implemented
@@ -17,6 +18,21 @@ owner and regional/airtime policy adapter are not implemented
 live in static storage and be borrowed by one never-cancelled task for the
 remainder of the boot. Dropping and reconstructing it is not an ownership
 recovery mechanism.
+
+The aggregate is now the portable sole RNS owner surface. It exposes the local
+destination hash, explicit inbound delivery-proof policy, bounded signed-
+announce queueing and flushing, complete-packet RNS ingress, and RNS timer
+maintenance without exposing its mutable `NodeCore`. Automatic proofs default
+to `Never`; opting into `Always` only makes proof packets appear in the returned
+actions. Announce admission reports oversize application data or a full bounded
+queue before the caller flushes ready announcements.
+
+`flush_announces()`, `ingest_rns()`, and `tick_rns()` return their ordinary RNS
+action/report envelopes to the caller. Those envelopes still contain
+allocation-backed packet vectors. The supervisor neither stages those packets
+into the fixed `TxPacketBuffer` pool nor retains them under downstream
+backpressure, so a runtime must not discard them or treat this surface as a
+radio dispatcher.
 
 Construction also preserves channel identity and boot ownership. A
 `PairedTxHandoff` can be created only from one channel store, all registered
@@ -60,21 +76,23 @@ lease maintenance or permit recovery.
 limited to `MAX_IMMEDIATE_PASSES`, currently 16, before an explicit executor
 yield. The runner also yields after every selected wake, so a conforming clock
 that wakes early cannot create a quiescent busy loop. When a pass is
-quiescent, its internal `wait_for_work()` races only waits compatible with the
-current machine phases:
+quiescent, `wait_for_work()` races only waits compatible with the current
+machine phases:
 
 - node DATA return or retained-`Next` capacity progress;
 - a permit request while the permit server is idle;
 - dispatcher job/reply input while that machine can receive it; and
 - the exact absolute maintenance or permit-grace deadline.
 
-The async-clock wait is required to be cancellation-safe. Each channel wait is
-cancellation-safe because a ready owner/control value is
-stored in persistent machine state before the short future completes; pending
-losers remain in their Embassy channels. Dispatcher input is polled ahead of
-the deadline future, preserving the rule that an already-observable exact
-permit reply wins a grace-deadline tie. This safety applies to the short selected
-waits, not cancellation of the permanent aggregate-owning task.
+The public wait lets a future permanent node task race TX-machine work against
+its independently owned RX-frame and RNS-timer waits. The async-clock wait is
+required to be cancellation-safe. Each channel wait is cancellation-safe
+because a ready owner/control value is stored in persistent machine state
+before the short future completes; pending losers remain in their Embassy
+channels. Dispatcher input is polled ahead of the deadline future, preserving
+the rule that an already-observable exact permit reply wins a grace-deadline
+tie. Cancelling `wait_for_work()` is safe; cancelling the aggregate-owning task
+or reconstructing the aggregate remains outside the contract.
 
 ## Fault behavior
 
@@ -129,8 +147,10 @@ that actor and this supervisor together. See
 
 The supervisor does not yet:
 
-- own ordinary RNS `tick` output or allocation-backed actions;
-- merge receive ingress with all node-core mutation under one sole node task;
+- retain or convert allocation-backed announce, proof, forwarding, and other
+  `NodeActions` into fixed packet owners accepted by a bounded dispatcher;
+- host timed RNode reassembly, RX and protocol-second scheduling around the
+  exposed sole-owner ingress/tick surface in a permanent firmware task;
 - accept device-API/LXMF intents through a physical persist-before-accept edge;
 - own the flash journal, reservations, replay, compaction, and boot recovery;
 - drive the existing projector observations and acknowledgements from the sole
@@ -142,20 +162,22 @@ The supervisor does not yet:
 - provide a driver, packet-interface implementation, radio reset contract, RF
   policy, or firmware dependency edge.
 
-The next product boundary is a permanent Embassy task around the portable
-storage actor, with product flash adaptation, boot gating and device-API
-dispatch, followed by merging RX, RNS tick/actions, submission projection, and
-acknowledgement into the eventual sole node owner. Firmware TX integration
-remains later and separately gated.
+The next product boundary is a permanent Embassy runtime around this sole node
+owner and the portable storage actor. It must add product flash adaptation and
+boot gating, race cancellation-safe TX work with timed RX/RNS work, and convert
+every returned ordinary protocol action into bounded owned storage before a
+real policy/radio dispatcher can accept it. No permanent firmware dependency
+edge exists yet.
 
 ## Validation
 
-The focused supervisor suite currently contains 12 host tests covering
+The focused supervisor suite currently contains 13 host tests covering
 separate and deadline-crossing clock samples, a complete RF-denied owner
 lifecycle, exact-deadline recovery retention and acknowledgement, terminal
 acknowledgement before and after owner return, permit-grace reply priority and
-fault draining, monotonic regression, cancellation of the combined wait,
-deadline conversion, common-origin/full-seed construction, and static storage.
+fault draining, monotonic regression, cancellation of the public combined wait,
+the permanent protocol-owner surface, deadline conversion, common-origin/full-
+seed construction, and static storage.
 
 ```sh
 cargo test --locked -p reticulum-tx-supervisor

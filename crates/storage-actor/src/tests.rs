@@ -1,6 +1,17 @@
 extern crate std;
 
-use std::{vec, vec::Vec};
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use rand_core::{CryptoRng, RngCore};
+use reticulum_node_core::{
+    AttemptOutcome, DestinationHash as NodeDestinationHash, InterfaceSet, MonotonicMillis,
+    MonotonicSeconds, NodeConfig, NodeCore, NodeIdentity, NodeInstanceId, PrepareDataRequest,
+    RoutedTxJob, TxCompletionDisposition, TxLeaseDeadline, TxPacketBuffer,
+};
+use reticulum_tx_dispatch::{
+    NodeTxDataMachine, NodeTxDataStep, NodeTxPrepareResult, NodeTxQueuedHop, TxPermitServer,
+};
+use reticulum_tx_handoff::{TxHandoff, TxOwnerReturn};
+use std::{boxed::Box, vec, vec::Vec};
 
 use embedded_storage::nor_flash::{
     ErrorType, MultiwriteNorFlash, NorFlash, NorFlashError, NorFlashErrorKind, ReadNorFlash,
@@ -10,14 +21,128 @@ use reticulum_storage_journal::{
     BANK_SLOT_COUNT, ERASE_SIZE, MAX_ACCEPTED_SUBMISSIONS, PARTITION_SIZE, SLOT_SIZE, format_erased,
 };
 use reticulum_storage_model::{
-    DestinationHash, ExperimentalRnsDataIntent, IdempotencyKey, LifecycleState, PrincipalId,
-    SubmissionReplay,
+    DestinationHash, ExperimentalRnsDataIntent, FinalDisposition, IdempotencyKey, InternalFailure,
+    InterruptedState, LifecycleState, PrincipalId, SubmissionFailure, SubmissionReplay,
 };
 use reticulum_submission_projector::{
-    PersistenceReply, ProjectionProgress, ProjectorError, ProjectorFault, SubmissionProjector,
+    AcknowledgementKind, AcknowledgementReply, PersistenceReply, PreparedFrameObservation,
+    ProjectionProgress, ProjectorError, ProjectorFault, SubmissionProjector,
 };
 
 use super::*;
+
+type TestNode = NodeCore<4, 2, 8, 2, 1>;
+
+#[derive(Default)]
+struct CounterRng(u8);
+
+impl RngCore for CounterRng {
+    fn next_u32(&mut self) -> u32 {
+        let mut bytes = [0; 4];
+        self.fill_bytes(&mut bytes);
+        u32::from_le_bytes(bytes)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut bytes = [0; 8];
+        self.fill_bytes(&mut bytes);
+        u64::from_le_bytes(bytes)
+    }
+
+    fn fill_bytes(&mut self, destination: &mut [u8]) {
+        for byte in destination {
+            self.0 = self.0.wrapping_add(1);
+            *byte = self.0;
+        }
+    }
+
+    fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(destination);
+        Ok(())
+    }
+}
+
+impl CryptoRng for CounterRng {}
+
+fn identity(tag: u8) -> NodeIdentity {
+    NodeIdentity::from_private_key(&[tag; 64]).unwrap()
+}
+
+fn prepared_job(
+    tag: u8,
+    owner_deadline_ms: u64,
+) -> (TestNode, RoutedTxJob<'static>, NodeTxQueuedHop) {
+    let mut sender = TestNode::new(
+        identity(tag),
+        "reticulum",
+        &["storage-actor-sender"],
+        NodeInstanceId::new([tag.wrapping_add(0x80); 16]),
+        NodeConfig::endpoint(),
+    )
+    .unwrap();
+    let receiver_identity = identity(tag.wrapping_add(1));
+    sender
+        .register_peer(
+            &receiver_identity,
+            "reticulum",
+            &["storage-actor-receiver"],
+            MonotonicSeconds::new(0),
+        )
+        .unwrap();
+    let receiver = TestNode::new(
+        receiver_identity,
+        "reticulum",
+        &["storage-actor-receiver"],
+        NodeInstanceId::new([tag.wrapping_add(0x81); 16]),
+        NodeConfig::endpoint(),
+    )
+    .unwrap();
+    let destination = NodeDestinationHash::new(*receiver.destination_hash().as_bytes());
+
+    let buffer = Box::leak(Box::new(TxPacketBuffer::new()));
+    sender.register_packet_buffer(buffer).unwrap();
+    let handoff = Box::leak(Box::new(TxHandoff::<NoopRawMutex, 1>::new()));
+    let (node_handoff, mut dispatcher_handoff) = handoff.split();
+    dispatcher_handoff
+        .returns
+        .try_send(TxOwnerReturn::Available(buffer))
+        .unwrap_or_else(|_| panic!("seed must fit the empty owner-return channel"));
+    let (data_handoff, _permit) = TxPermitServer::from_node_handoff(node_handoff);
+    let mut data = NodeTxDataMachine::new(data_handoff, &sender);
+    assert_eq!(
+        data.step(&mut sender, MonotonicMillis::new(1)),
+        NodeTxDataStep::Advanced
+    );
+    assert_eq!(
+        data.step(&mut sender, MonotonicMillis::new(2)),
+        NodeTxDataStep::Advanced
+    );
+    assert!(matches!(
+        data.step(&mut sender, MonotonicMillis::new(3)),
+        NodeTxDataStep::SeedParked { remaining: 0, .. }
+    ));
+
+    let result = data.try_prepare_and_submit_data(
+        &mut sender,
+        PrepareDataRequest {
+            destination,
+            plaintext: b"storage actor projector runtime test",
+            rns_now: MonotonicSeconds::new(100),
+            owner_now: MonotonicMillis::new(100_000),
+            deadline: TxLeaseDeadline::new(MonotonicMillis::new(owner_deadline_ms)),
+            enabled_interfaces: InterfaceSet::from_bits(1 << 1),
+        },
+        &mut CounterRng::default(),
+    );
+    let NodeTxPrepareResult::Queued(queued) = result else {
+        panic!("fresh prepared job was not queued: {result:?}")
+    };
+    let job = dispatcher_handoff
+        .jobs
+        .try_receive()
+        .expect("queued job must be available to the dispatcher");
+    (sender, job, queued)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FakeError {
@@ -172,6 +297,40 @@ fn request_for<const S: usize, const P: usize>(
     actor.projector().persistence_request(handle).unwrap()
 }
 
+fn persist_projection<const S: usize, const P: usize>(
+    actor: &mut StorageActor<FakeNor, S, P>,
+    progress: ProjectionProgress,
+) -> PersistRequest {
+    let ProjectionProgress::Persist(handle) = progress else {
+        panic!("projector operation did not produce a persistence request")
+    };
+    let request = actor.projector().persistence_request(handle).unwrap();
+    assert_eq!(
+        actor.persist_projector(request),
+        Ok(PersistenceProgress::Committed)
+    );
+    request
+}
+
+fn actor_with_durable_preparation(
+    first_id: u64,
+    tag: u8,
+) -> (StorageActor<FakeNor, 4, 2>, SubmissionId) {
+    let mut actor =
+        StorageActor::<_, 4, 2>::mount(FakeNor::formatted(), SubmissionId::new(first_id)).unwrap();
+    let id = match actor.accept(candidate(tag, b"projector runtime")) {
+        Ok(AcceptanceProgress::Accepted(id)) => id,
+        other => panic!("acceptance failed: {other:?}"),
+    };
+    let request = request_for(&mut actor, id);
+    assert_eq!(
+        actor.persist_projector(request),
+        Ok(PersistenceProgress::Committed)
+    );
+    assert!(actor.projector().preparation_allowed(actor.index(), id));
+    (actor, id)
+}
+
 #[test]
 fn mount_is_the_only_service_entry_and_completes_replay() {
     let measured_pending_bytes = std::hint::black_box(PENDING_MUTATION_BYTES);
@@ -272,6 +431,142 @@ fn lost_acceptance_reply_reconciles_autonomously_and_blocks_different_work() {
 }
 
 #[test]
+fn boot_recovery_returns_typed_outcomes_and_commits_before_final_visibility() {
+    let mut initial =
+        StorageActor::<_, 2, 1>::mount(FakeNor::formatted(), SubmissionId::new(32)).unwrap();
+    let id = match initial.accept(candidate(14, b"boot recovery outcomes")) {
+        Ok(AcceptanceProgress::Accepted(id)) => id,
+        other => panic!("acceptance failed: {other:?}"),
+    };
+    let state_before = initial.state();
+    let writes_before = initial.flash.writes;
+    assert_eq!(
+        initial.finalize_boot_recovery(id, 70),
+        Ok(BootRecoveryProgress::ReplayQueued)
+    );
+    assert_eq!(initial.state(), state_before);
+    assert_eq!(initial.flash.writes, writes_before);
+
+    let request = request_for(&mut initial, id);
+    assert_eq!(
+        initial.persist_projector(request),
+        Ok(PersistenceProgress::Committed)
+    );
+    assert_eq!(
+        initial.index().get(id).unwrap().state(),
+        LifecycleState::Preparing
+    );
+
+    // A real boot starts with a completely replayed index and an empty
+    // volatile projector before conservative finalization is admitted.
+    let mut recovered =
+        StorageActor::<_, 2, 1>::mount(initial.into_flash(), SubmissionId::new(32)).unwrap();
+    assert_eq!(
+        recovered.finalize_boot_recovery(id, 71),
+        Ok(BootRecoveryProgress::Finalized)
+    );
+    let LifecycleState::Final(FinalDisposition::Failed(SubmissionFailure::Internal(
+        InternalFailure::InterruptedByReset(marker),
+    ))) = recovered.index().get(id).unwrap().state()
+    else {
+        panic!("boot recovery did not make the interrupted state final")
+    };
+    assert_eq!(marker.boot_sequence(), 71);
+    assert_eq!(marker.interrupted_state(), InterruptedState::Preparing);
+
+    let mut replayed =
+        StorageActor::<_, 2, 1>::mount(recovered.into_flash(), SubmissionId::new(32)).unwrap();
+    let writes_before = replayed.flash.writes;
+    assert_eq!(
+        replayed.finalize_boot_recovery(id, 72),
+        Ok(BootRecoveryProgress::AlreadyFinal)
+    );
+    assert_eq!(replayed.flash.writes, writes_before);
+}
+
+#[test]
+fn ambiguous_boot_finalization_retains_exact_plan_and_blocks_mismatched_identity() {
+    let mut initial =
+        StorageActor::<_, 4, 1>::mount(FakeNor::formatted(), SubmissionId::new(34)).unwrap();
+    let interrupted = match initial.accept(candidate(15, b"interrupted")) {
+        Ok(AcceptanceProgress::Accepted(id)) => id,
+        other => panic!("interrupted acceptance failed: {other:?}"),
+    };
+    let request = request_for(&mut initial, interrupted);
+    assert_eq!(
+        initial.persist_projector(request),
+        Ok(PersistenceProgress::Committed)
+    );
+    let queued = match initial.accept(candidate(16, b"still queued")) {
+        Ok(AcceptanceProgress::Accepted(id)) => id,
+        other => panic!("queued acceptance failed: {other:?}"),
+    };
+
+    let mut actor =
+        StorageActor::<_, 4, 1>::mount(initial.into_flash(), SubmissionId::new(34)).unwrap();
+    let state_before = actor.state();
+    actor.flash.lose_write_reply_after(1);
+    assert_eq!(
+        actor.finalize_boot_recovery(interrupted, 90),
+        Err(DriveError::Backend(FakeError::Injected))
+    );
+    assert_eq!(actor.pending_kind(), Some(PendingKind::BootRecovery));
+    assert_eq!(actor.state(), state_before);
+    assert_eq!(
+        actor.index().get(interrupted).unwrap().state(),
+        LifecycleState::Preparing,
+        "an ambiguous physical result must not become live before reconciliation"
+    );
+
+    for (id, boot_sequence) in [(interrupted, 91), (queued, 90)] {
+        assert_eq!(
+            actor.finalize_boot_recovery(id, boot_sequence),
+            Err(DriveError::Busy {
+                pending: PendingKind::BootRecovery
+            })
+        );
+    }
+    assert_eq!(
+        actor.accept(candidate(17, b"blocked while boot finalization is pending")),
+        Err(DriveError::Busy {
+            pending: PendingKind::BootRecovery
+        })
+    );
+    assert_eq!(
+        actor.begin_preparation(queued),
+        Err(ProjectorOperationError::Busy {
+            pending: PendingKind::BootRecovery
+        })
+    );
+
+    assert_eq!(
+        actor.drive_pending(),
+        Ok(PendingProgress::BootRecoveryFinalized(interrupted))
+    );
+    assert_eq!(actor.pending_kind(), None);
+    assert_eq!(
+        actor.state().committed_records(),
+        state_before.committed_records() + 1
+    );
+    let LifecycleState::Final(FinalDisposition::Failed(SubmissionFailure::Internal(
+        InternalFailure::InterruptedByReset(marker),
+    ))) = actor.index().get(interrupted).unwrap().state()
+    else {
+        panic!("reconciled boot recovery did not become final")
+    };
+    assert_eq!(
+        marker.boot_sequence(),
+        90,
+        "mismatched retries must not replace the exact retained plan"
+    );
+    assert_eq!(marker.interrupted_state(), InterruptedState::Preparing);
+    assert_eq!(
+        actor.finalize_boot_recovery(queued, 90),
+        Ok(BootRecoveryProgress::ReplayQueued)
+    );
+}
+
+#[test]
 fn projector_request_commits_through_actor_owned_live_index() {
     let mut actor =
         StorageActor::<_, 4, 2>::mount(FakeNor::formatted(), SubmissionId::new(40)).unwrap();
@@ -291,6 +586,178 @@ fn projector_request_commits_through_actor_owned_live_index() {
         LifecycleState::Preparing
     );
     assert!(actor.projector().preparation_allowed(actor.index(), id));
+}
+
+#[test]
+fn actor_projects_preparation_frame_terminal_and_exact_acknowledgement() {
+    let (mut actor, id) = actor_with_durable_preparation(42, 20);
+    let (mut node, job, queued) = prepared_job(21, 200_000);
+
+    assert_eq!(
+        actor.observe_preparation_result(id, NodeTxPrepareResult::Queued(queued)),
+        Ok(ProjectionProgress::AttemptBound)
+    );
+    let frame = PreparedFrameObservation::new(
+        queued.attempt_handle(),
+        queued.attempt(),
+        usize::from(queued.packet_len()),
+        *queued.encoded_packet_sha256().as_bytes(),
+    );
+    let progress = actor.observe_frame(frame).unwrap();
+    persist_projection(&mut actor, progress);
+    assert!(matches!(
+        actor.index().get(id).unwrap().state(),
+        LifecycleState::AwaitingDelivery(_)
+    ));
+
+    assert_eq!(
+        node.tick(MonotonicSeconds::new(132), &mut CounterRng::default())
+            .timed_out_attempts,
+        1
+    );
+    let terminal = node.terminal_attempts().next().unwrap();
+    assert_eq!(terminal.outcome(), AttemptOutcome::DeliveryTimeout);
+    let progress = actor.observe_terminal(terminal).unwrap();
+    assert_eq!(actor.pending_acknowledgements().count(), 0);
+    persist_projection(&mut actor, progress);
+
+    let action = actor.pending_acknowledgements().next().unwrap();
+    assert_eq!(action.submission(), id);
+    assert_eq!(action.kind(), AcknowledgementKind::Terminal(terminal));
+    assert_eq!(
+        actor.report_acknowledgement(action, AcknowledgementReply::Retryable),
+        Ok(())
+    );
+    assert_eq!(actor.pending_acknowledgements().next(), Some(action));
+
+    assert!(matches!(
+        node.rollback_queued(job, MonotonicMillis::new(100_100))
+            .unwrap_or_else(|failure| panic!(
+                "queued owner did not return: {:?}",
+                failure.reason()
+            )),
+        TxCompletionDisposition::Available(_)
+    ));
+    assert_eq!(node.acknowledge_terminal(terminal.handle()), Ok(terminal));
+    assert_eq!(
+        actor.report_acknowledgement(action, AcknowledgementReply::Completed),
+        Ok(())
+    );
+    assert_eq!(actor.pending_acknowledgements().count(), 0);
+}
+
+#[test]
+fn actor_projects_recovery_and_quarantine_without_exposing_mutable_projector() {
+    let (mut recovered_actor, recovered_id) = actor_with_durable_preparation(44, 22);
+    let (mut recovered_node, recovered_job, recovered_queued) = prepared_job(23, 200_000);
+    assert_eq!(
+        recovered_actor.observe_preparation_result(
+            recovered_id,
+            NodeTxPrepareResult::Queued(recovered_queued),
+        ),
+        Ok(ProjectionProgress::AttemptBound)
+    );
+    assert_eq!(
+        recovered_node
+            .maintain_tx(MonotonicMillis::new(200_000))
+            .newly_recovery_required,
+        1
+    );
+    let recovered = match recovered_node
+        .rollback_queued(recovered_job, MonotonicMillis::new(200_001))
+        .unwrap_or_else(|failure| panic!("recovery rollback failed: {:?}", failure.reason()))
+    {
+        TxCompletionDisposition::Recovered { observation, .. } => observation,
+        TxCompletionDisposition::Available(_) => panic!("expired owner bypassed recovery"),
+        TxCompletionDisposition::Next(_) => panic!("single-interface job unexpectedly fanned out"),
+        TxCompletionDisposition::Quarantined(_) => panic!("ordinary expiry quarantined"),
+    };
+    let progress = recovered_actor.observe_recovered(recovered).unwrap();
+    assert_eq!(recovered_actor.pending_acknowledgements().count(), 0);
+    persist_projection(&mut recovered_actor, progress);
+    let recovery_action = recovered_actor.pending_acknowledgements().next().unwrap();
+    assert_eq!(recovery_action.submission(), recovered_id);
+    assert_eq!(
+        recovery_action.kind(),
+        AcknowledgementKind::Recovered(recovered)
+    );
+    assert_eq!(
+        recovered_actor.report_acknowledgement(recovery_action, AcknowledgementReply::Completed),
+        Ok(())
+    );
+    assert_eq!(recovered_actor.pending_acknowledgements().count(), 0);
+
+    let (mut quarantined_actor, quarantined_id) = actor_with_durable_preparation(46, 24);
+    let (mut quarantined_node, quarantined_job, quarantined_queued) = prepared_job(25, 200_000);
+    assert_eq!(
+        quarantined_actor.observe_preparation_result(
+            quarantined_id,
+            NodeTxPrepareResult::Queued(quarantined_queued),
+        ),
+        Ok(ProjectionProgress::AttemptBound)
+    );
+    assert_eq!(
+        quarantined_node
+            .maintain_tx(MonotonicMillis::new(200_000))
+            .newly_recovery_required,
+        1
+    );
+    let quarantined = match quarantined_node
+        .rollback_queued(quarantined_job, MonotonicMillis::new(200_001))
+        .unwrap_or_else(|failure| panic!("quarantine fixture failed: {:?}", failure.reason()))
+    {
+        TxCompletionDisposition::Recovered { observation, .. } => observation,
+        TxCompletionDisposition::Available(_) => panic!("expired owner bypassed recovery"),
+        TxCompletionDisposition::Next(_) => panic!("single-interface job unexpectedly fanned out"),
+        TxCompletionDisposition::Quarantined(_) => panic!("ordinary expiry quarantined"),
+    };
+    let progress = quarantined_actor.observe_quarantined(quarantined).unwrap();
+    persist_projection(&mut quarantined_actor, progress);
+    let deferred_final = quarantined_actor
+        .projector()
+        .pending_persistence()
+        .next()
+        .expect("durable quarantine audit must stage a conservative final record");
+    assert_eq!(
+        quarantined_actor.persist_projector(deferred_final),
+        Ok(PersistenceProgress::Committed)
+    );
+    assert!(
+        quarantined_actor
+            .index()
+            .get(quarantined_id)
+            .unwrap()
+            .state()
+            .is_final()
+    );
+    assert_eq!(quarantined_actor.pending_acknowledgements().count(), 0);
+}
+
+#[test]
+fn projector_fault_from_runtime_observation_latches_at_actor_boundary() {
+    let (mut actor, id) = actor_with_durable_preparation(48, 26);
+    let (_node, _job, queued) = prepared_job(27, 200_000);
+    assert_eq!(
+        actor.observe_preparation_result(id, NodeTxPrepareResult::Queued(queued)),
+        Ok(ProjectionProgress::AttemptBound)
+    );
+    let mismatched = PreparedFrameObservation::new(
+        queued.attempt_handle(),
+        queued.attempt(),
+        usize::from(queued.packet_len()),
+        [0x55; 32],
+    );
+    let projector_fault = ProjectorFault::PacketDigestMismatch(id);
+    let actor_fault = StorageFault::ProjectorRejected(ProjectorError::Faulted(projector_fault));
+    assert_eq!(
+        actor.observe_frame(mismatched),
+        Err(ProjectorOperationError::Faulted(actor_fault))
+    );
+    assert_eq!(actor.fault(), Some(actor_fault));
+    assert_eq!(
+        actor.observe_preparation_result(id, NodeTxPrepareResult::QueueBackpressured),
+        Err(ProjectorOperationError::Faulted(actor_fault))
+    );
 }
 
 #[test]
@@ -365,6 +832,12 @@ fn projector_backend_retry_reconciles_autonomously_from_owned_request() {
     );
     assert_eq!(
         actor.begin_preparation(second),
+        Err(ProjectorOperationError::Busy {
+            pending: PendingKind::Projector
+        })
+    );
+    assert_eq!(
+        actor.observe_preparation_result(second, NodeTxPrepareResult::QueueBackpressured),
         Err(ProjectorOperationError::Busy {
             pending: PendingKind::Projector
         })

@@ -64,10 +64,19 @@ flowchart LR
 The storage actor is the sole authority allowed to order physical commits and
 mutate the live index. It also owns the one projector that carries bounded
 volatile correlation. Callers receive only immutable projector inspection and
-narrow actor-owned operations such as `begin_preparation`; they cannot obtain,
-replace, or extract the projector. Every durable projector request returns
-through `persist_projector`. The node supervisor remains the sole owner of
-native Rete state, packet buffers, attempts, and TX typestates.
+narrow actor-owned operations for the preparation barrier, node preparation
+result, authorized frame, terminal, recovery, quarantine, and exact upstream
+acknowledgement; they cannot obtain, replace, or extract the projector. Every
+durable projector request returns through `persist_projector`, and every
+mutating observation shares the actor's pending-write/fault gate. The node
+supervisor remains the sole owner of native Rete state, packet buffers,
+attempts, and TX typestates.
+
+After complete mount/replay, `finalize_boot_recovery` also owns the conservative
+boot edge. It returns queued and already-final decisions without writing, or
+retains and durably commits the exact `InterruptedByReset` transition before
+reporting `Finalized`. An ambiguous backend reply preserves the ID, boot
+sequence, and plan for exact autonomous retry.
 
 ## Durable identity and records
 
@@ -378,7 +387,8 @@ LXMF/NomadNet/UI services without redefining the durable protocol.
    a separate evidence set.
 2. Place the portable sole actor in one permanent Embassy task, connect a
    checked product `esp-storage` partition adapter, gate service on complete
-   mount/replay, and serialize it with other flash users.
+   mount/replay and definitive `finalize_boot_recovery` results for every
+   submission, and serialize it with other flash users.
 3. Connect the implemented authenticated device-API adapter to framing,
    sessions and a firmware transport, then merge projection with the sole node
    runtime; do not run the current supervisor's pass-discarding convenience loop

@@ -275,13 +275,21 @@ machine owns the job/return ports plus fixed parked-owner table. The permanent
 supervisor aggregate owns those machines with node-core and an authorization
 policy, samples the clock freshly before maintenance/DATA/permit/dispatcher,
 waits for the exact next owner deadline or permit grace, and bounds sustained
-progress to 16 passes before yielding. Its `RfInertTxPolicy` denies RF.
+progress to 16 passes before yielding. It now exposes the sole node owner's
+proof policy, bounded announce queue/flush, complete-packet ingress, RNS tick,
+and a public cancellation-safe TX-work wait. Its `RfInertTxPolicy` denies RF;
+ordinary returned protocol actions remain allocation-backed and lack fixed
+dispatcher ownership.
 
 The semantic durable model, idempotent projector, physical journal, and portable
 sole storage actor are implemented and target-checked. The actor owns the NOR
 backend, live replay index, sole projector, one optional pending mutation capped
 at 512 bytes, and a fail-closed fault latch; it completes mount/replay before
-service and can autonomously reconcile an ambiguous backend result. The
+service and can autonomously reconcile an ambiguous backend result. Narrow
+actor-owned methods now project preparation, frame, terminal, recovery and
+quarantine observations and exact acknowledgements without exposing mutable
+projector state. Actor-owned boot recovery also commits the exact conservative
+reset transition before reporting interrupted work final. The
 portable authenticated device-API adapter is also implemented: default builds
 serve capabilities and principal-scoped status, while host simulation alone
 enables durable experimental acceptance; the default adapter is target-checked
@@ -296,9 +304,11 @@ replay after software reset. That image calls the journal directly and does not
 qualify the actor on hardware. Controlled power cuts, endurance/soak, at-rest
 encryption, the permanent Embassy actor task, product `esp-storage` adapter,
 boot service gating, device-API framing/session/transport linkage, and runtime
-flash/watchdog/OTA/radio coordination remain open. Ordinary RNS tick/actions
-and RX ingress are also not yet merged under a sole node owner. There is still no product
-firmware storage connection or product driver/radio
+flash/watchdog/OTA/radio coordination remain open. Permanent firmware must
+drive boot recovery for every replayed submission before service enablement.
+RNS ingress/tick now reach the sole portable owner, but timed RNode reassembly and
+action draining are not hosted by permanent firmware. There is still no
+product firmware storage connection or product driver/radio
 integration, so current product-candidate graphs are TX-free. Development TX is
 nevertheless authorized on both attached antenna-equipped boards under NA915;
 the separately named TX HIL and derived RNode peer are development artifacts,

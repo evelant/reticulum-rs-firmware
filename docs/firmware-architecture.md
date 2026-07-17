@@ -102,14 +102,14 @@ Claims in READMEs were not treated as proof of embedded portability.
 | `rete-core`, `rete-transport`, `rete-stack`, and `rete-lxmf-core`, no defaults, `thumbv6m-none-eabi` | Pass | The layers are genuinely bare-metal buildable; compilation does not cure the LXMF correctness gaps documented below |
 | Focused `rete` core/transport/LXMF host suites at the reviewed upstream snapshot | 391 pass | Historical selection evidence for wire, crypto, forwarding, link/resource, and LXMF codec behavior; this is not evidence for the later lifecycle patch or a complete Python/RF conformance claim |
 | Exact `f6f5fb0` receipt/LXMF lifecycle library suites | 502 pass | CI checks the pinned fork directly: 151 transport, 124 stack, 143 LXMF and 84 daemon tests, plus all-target host and `thumbv6m-none-eabi` checks |
-| `reticulum-node-core`, generic bare-metal and ESP32-S3 Xtensa | Pass | External-buffer dispatch metadata, exact attempt ledger, deterministic routing, opaque permit/completion typestates, exact deadlines and retained recovery compile without `std` on both targets; 43 focused host tests have no async or radio linkage and the current receive-only firmware intentionally does not link it |
+| `reticulum-node-core`, generic bare-metal and ESP32-S3 Xtensa | Pass | External-buffer dispatch metadata, exact attempt ledger, deterministic routing, opaque permit/completion typestates, exact deadlines, retained recovery, explicit proof policy and bounded announce operations compile without `std` on both targets; 45 focused host tests have no async or radio linkage and the current receive-only firmware intentionally does not link it |
 | `reticulum-tx-handoff`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | Static one-time channel-role splitting, exact owner returns, depth-one permit control, and cancellation-safe receive behavior compile on both targets; a host-only manually stepped no-RF harness exercises representative routed DATA paths across the real ports; graph policy keeps the crate outside firmware |
 | `reticulum-tx-dispatch`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The firmware-excluded RF-inert dispatcher, permit server, and exact-owner-bound fixed per-slot node DATA machine retain owners/control values across backpressure, synchronously prepare from parked owners, use cancellation-safe short waits, park recovered owners until exact acknowledgement, and fail closed at the permit recovery grace; 33 focused tests exercise these boundaries and graph policy keeps the crate outside firmware |
-| `reticulum-tx-supervisor`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The firmware-excluded permanent aggregate and async runner own node-core plus all TX machines, require common-origin/full-seed construction, sample the clock separately for every lane, wait on exact owner/grace deadlines, yield after at most 16 productive passes and every selected wake, and use phase-gated cancellation-safe selection; 12 tests cover its RF-inert lifecycle, timing, faults, cancellation, and static construction, and graph policy keeps it outside firmware |
+| `reticulum-tx-supervisor`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The firmware-excluded permanent aggregate and async runner own node-core plus all TX machines, expose sole-owner ingress/tick/announce/proof operations, require common-origin/full-seed construction, sample the clock separately for every TX lane, wait on exact owner/grace deadlines, yield after at most 16 productive passes and every selected wake, and use phase-gated cancellation-safe selection; 13 tests cover its protocol surface, RF-inert lifecycle, timing, faults, cancellation, and static construction, and graph policy keeps it outside firmware |
 | `reticulum-storage-model`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The allocation-free semantic journal model enforces canonical bounded records, principal-scoped idempotency, exact preflight/apply plans, monotonic conservative transmission uncertainty, and fail-closed complete replay; 22 integration tests plus one compile-fail doctest cover the boundary, which intentionally makes no physical-durability or flash-capacity claim |
 | `reticulum-submission-projector`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The fixed-capacity projector correlates volatile attempts with semantic records and withholds terminal/recovery acknowledgement behind exact persistence replies; 24 focused tests cover ordering, retries, proof/timeout-before-frame races, faults and conservative reboot behavior, while graph policy keeps it outside firmware |
 | `reticulum-storage-journal`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The allocation-free physical backend fixes the 1 MiB/two-bank schema-1 format, full-bank replay, commit-last exact-readback append, a 162-acceptance lifetime ceiling, and source-preserving handoff compaction; fake-NOR tests cover torn/lost append and compaction, while the separate powered HIL qualifies only the clean raw-flash path and software-reset replay |
-| `reticulum-storage-actor`, host and ESP32-S3 Xtensa | Pass | The portable sole owner mounts and fully replays before service, owns the NOR journal/live index/sole projector, publishes only after durable append or exact equivalence, autonomously reconciles one ambiguous mutation, and latches invariant faults closed; 12 focused host tests cover acceptance, projector identity, lost replies, compaction recovery and fault retention, with strict host and Xtensa clippy/checks passing |
+| `reticulum-storage-actor`, host and ESP32-S3 Xtensa | Pass | The portable sole owner mounts and fully replays before service, owns the NOR journal/live index/sole projector, projects node/TX observations without mutable-projector escape, durably finalizes conservative boot recovery, publishes only after append or exact equivalence, autonomously reconciles one ambiguous mutation, and latches invariant faults closed; 17 focused host tests cover acceptance, boot recovery, observation/acknowledgement ordering, projector identity, lost replies, compaction recovery and fault retention, with strict host and Xtensa clippy/checks passing |
 | `reticulum-device-api-adapter`, default/host-sim/dependency-unified host and default ESP32-S3 Xtensa | Pass | The allocation-free authenticated dispatcher exposes public capabilities and principal-scoped status by default, fails status closed during actor ambiguity/fault, and restricts advertised operations to its local build; its host-only feature copies experimental borrowed payloads into actor-owned durable acceptance and maps replay/conflict/capacity/ambiguity to stable API results. Focused tests and strict clippy pass in all three host profiles; the default target graph passes Xtensa checks and compile-forbids adapter `host-sim` |
 | `reticulum-heltec-tracker-v2-storage-hil`, ESP32-S3 Xtensa | Pass (target and powered clean-path HIL) | On E9:44, source `7b47113` passed strict continuous two-boot serial verification of A1 format, five appends, no-mutation retry/conflict, B2 compaction and `0/0` B2 replay after `CoreSw`; independent raw-dump replay confirmed generation 2, five records/slots, one revision-4 `Delivered` submission, erased A manifest and erased B tail. Controlled power cuts, endurance/soak, encryption and product-runtime integration remain open |
 | `reticulum-heltec-tracker-v2-tx-hil --features semantic-announce-hil`, ESP32-S3 to RNode 1.86 plus pinned Python RNS 1.3.8 | Pass (powered conformance HIL) | E9 emitted one deterministic signed ANNOUNCE and became radio-inert; E0 delivered exactly one 167-byte ordinary RNode packet and Python validated its first-hop signature and destination binding. This does not exercise a product identity, full Reticulum instance, live transport admission, node-core RX/router ownership or LXMF |
@@ -263,14 +263,20 @@ force-reused.
 
 The firmware-excluded `reticulum-tx-supervisor` now owns one exact node-core,
 DATA machine, permit server, RF-inert dispatcher, authorization policy, and
-monotonic clock contract in a permanent aggregate. Its async runner samples
-the clock freshly before maintenance and every machine lane, combines the
-earliest live owner deadline with permit-recovery grace, yields after at most
-16 productive passes and after every selected wake, and selects only phase-
-compatible cancellation-safe waits. `RfInertTxPolicy` rejects every RF
-authorization. Faults stop fresh
-preparation and policy while owner-draining DATA/dispatcher transitions
-continue where possible.
+monotonic clock contract in a permanent aggregate. It now forwards the sole
+owner's destination hash, explicit inbound-proof policy, bounded announce
+queue/flush, complete-packet RNS ingress, and protocol timer maintenance.
+Automatic proofs default to off. Its async runner samples the clock freshly
+before maintenance and every machine lane, combines the earliest live owner
+deadline with permit-recovery grace, yields after at most 16 productive passes
+and after every selected wake, and selects only phase-compatible cancellation-
+safe waits. The same public wait can safely lose a race against a future
+firmware-owned RX or RNS-timer wait. `RfInertTxPolicy` rejects every RF
+authorization. Faults stop fresh preparation and policy while owner-draining
+DATA/dispatcher transitions continue where possible. Returned ordinary
+`NodeActions` are still allocation-backed and are not staged in fixed packet
+owners or accepted by a real radio dispatcher; no permanent firmware edge
+instantiates this aggregate.
 
 The explicit semantic TX lane now has two distinct results. The historical
 conformance fixture at
@@ -636,6 +642,11 @@ recovery records including `NodeInstanceId`. Only a matching, non-`Copy` permit
 reply can produce `AuthorizedTx`, and only its one-shot `frame(now)` accessor
 borrows packet bytes. Node-core remains independent of `device-api`; a later
 dispatcher maps authenticated wire requests into separately bounded intents.
+The same private owner now exposes explicit inbound-proof policy, bounded local
+announce queue/flush, complete-packet ingress, and RNS timer maintenance. These
+operations return all ordinary protocol actions to their caller; their packet
+vectors remain allocation-backed and distinct from the fixed external-buffer
+DATA path.
 
 `reticulum-tx-handoff` now moves these static owning typestates through
 pool-sized Embassy job/return channels and separate depth-one permit channels.
@@ -658,27 +669,37 @@ reply, the dispatcher returns its exact owner as a recovery fault,
 disables/quarantines the path, and never guesses authorization.
 
 `reticulum-tx-supervisor` now provides the permanent aggregate and async run
-loop around those components. Every complete pass takes a distinct checked
-clock sample before `maintain_tx()`, DATA, permit/policy, and dispatcher work.
-The runner waits for the exact earlier node-owner deadline or permit grace,
-uses phase-gated cancellation-safe selection, and yields after at most 16
-immediately productive passes and after every selected wake. Its initial policy
-is explicitly RF-inert, and retained
-faults stop fresh preparation/policy while continuing exact-owner drain where
-possible.
+loop around those components and is the portable sole `NodeCore` owner surface.
+It forwards destination identity, proof policy, bounded announce operations,
+RNS ingress, and RNS tick without exposing mutable protocol state. Every
+complete TX-machine pass takes a distinct checked clock sample before
+`maintain_tx()`, DATA, permit/policy, and dispatcher work. The runner waits for
+the exact earlier node-owner deadline or permit grace, uses phase-gated
+cancellation-safe selection, and yields after at most 16 immediately productive
+passes and after every selected wake. Its public wait can be raced and cancelled
+by the eventual firmware event loop without losing a packet-buffer owner. Its
+initial policy is explicitly RF-inert, and retained faults stop fresh
+preparation/policy while continuing exact-owner drain where possible.
 
 `reticulum-storage-actor` now connects the implemented physical journal, live
 replay index and sole projector. It publishes acceptance and projector progress
 only after commit or exact readback equivalence, retains one bounded ambiguous
 mutation for autonomous retry, and faults closed on invariant contradictions.
+Its narrow actor-owned surface now accepts preparation, frame, terminal,
+recovery and quarantine observations and exposes exact acknowledgements only
+after their records are durable; mutable projector access remains unavailable.
 The next bounded product integration hosts it in a permanent Embassy task,
-connects the product `esp-storage` partition and boot gates, and serves it
-through the implemented authenticated device-API adapter. In the same runtime,
-the proven `EmbeddedNode` owner pattern moves behind the permanent sole node and
-radio owners, with high-resolution RNode reassembly ticks kept distinct from
-Rete protocol seconds. No framing, session or firmware transport currently
-serves through the adapter, and the HIL graph deliberately excludes storage,
-API and node-core.
+drives its implemented durable boot-finalization operation to completion for
+every replayed submission, connects the product `esp-storage` partition and
+boot gates, and serves it through the implemented authenticated device-API
+adapter. In the same runtime,
+the implemented supervisor surface must be instantiated as the permanent sole
+node owner, with high-resolution RNode reassembly ticks kept distinct from Rete
+protocol seconds. Every returned allocation-backed action must first be moved
+into a bounded ownership boundary; the current no-RF dispatcher accepts only
+the external-buffer DATA path. No framing, session, firmware transport, real
+radio dispatcher, or permanent firmware dependency edge exists, and the HIL
+graph deliberately excludes storage, API and node-core.
 
 Firmware integration, safe projector-slot retirement and product-runtime
 powered reboot recovery remain open. The isolated journal clean-path/software-
@@ -736,8 +757,16 @@ Recommended runtime model:
 
 - A single project-owned `reticulum-node-core::NodeCore` owns the adapter's
   private `EmbeddedNode`, which in turn owns Rete's mutable protocol state;
+  `TxSupervisor` is the implemented portable aggregate for that sole owner, and
   firmware has no `inner_mut`, `Deref`, or raw transport escape hatch.
 - A periodic tick plus input events produces outgoing packets, storage changes, timers, and application events.
+- The implemented supervisor forwards proof policy, bounded local announce
+  admission/flush, complete-packet ingress, and RNS tick. Its public TX-work
+  wait is cancellation-safe so the permanent task can race it with RX and
+  protocol timers without losing an external packet owner.
+- Ordinary action packets returned by announce flush, ingress, and tick remain
+  allocation-backed until a fixed-owner staging boundary is implemented; they
+  must not be silently dropped when a downstream queue is full.
 - Ingress resolves Rete's `SourceInterface`/`AllExceptSource` actions into
   concrete interface identifiers before an action can enter an asynchronous
   queue.
@@ -1183,6 +1212,13 @@ an ambiguous backend result, public `drive_pending()` resolves the exact actor-
 owned mutation without requiring the caller to reproduce its candidate,
 request, or projector. The actual optional pending cell is compile-time capped
 at 512 bytes; this does not include the index, projector slots or task stack.
+Busy/fault-gated actor methods now project preparation results, authorized
+frames, terminal tombstones, recovered owners and quarantines, and report exact
+upstream acknowledgements without exposing `&mut SubmissionProjector`.
+`finalize_boot_recovery` also retains and durably commits the model's exact
+conservative reset transition, including exact-plan retry after an ambiguous
+backend reply. Permanent firmware must still invoke it for every replayed
+submission and gate service until all results are definitive.
 
 `reticulum-device-api-adapter` places the current authenticated logical API over
 that owner without direct flash access. Default target builds expose current
@@ -1199,8 +1235,9 @@ HIL supplies a checked partition-relative `esp-storage` adapter and never uses
 the sector-rewriting byte-storage path. That adapter belongs to the dedicated
 HIL and is not yet a product firmware partition service. The missing product
 boundary is one permanent Embassy task around the portable actor that connects
-the checked product adapter, gates service on mount/replay, coordinates OTA,
-watchdogs, other stores and radio timing, and publishes device-API acceptance.
+the checked product adapter, durably finalizes replay-unsafe interrupted work,
+gates service on mount/replay/recovery, coordinates OTA, watchdogs, other stores
+and radio timing, and publishes device-API acceptance.
 `sequential-storage` remains research/
 reference material, not an open contender for this first journal. A separate
 small blob log can be evaluated later. Use littlefs only if later requirements
@@ -1548,9 +1585,11 @@ still does not close production identity/durability, reboot recovery, the combin
 permanent owner graph, forwarding/multi-hop, Links/Resources, LXMF, sustained
 memory, airtime policy, formal electrical/RF or regional gates.
 
-1. Promote `EmbeddedNode` into the permanent sole node task with ordinary Rete
-   ingress/actions, timed RNode reassembly, and separate RNode-tick/Rete-seconds
-   clocks; connect its bounded actions to the sole radio owner.
+1. Instantiate the supervisor's sole `NodeCore` owner surface in the permanent
+   node task with timed RNode reassembly and separate RNode-tick/Rete-seconds
+   clocks. Convert every allocation-backed announce, proof, ingress, tick, and
+   forwarding action into fixed packet ownership before connecting a real sole
+   radio dispatcher; no permanent firmware edge exists yet.
 2. Host the portable storage actor on the product partition and attach the
    authenticated API adapter and initial framed transport. Preserve durable
    acceptance before Rete preparation and durable terminal projection before

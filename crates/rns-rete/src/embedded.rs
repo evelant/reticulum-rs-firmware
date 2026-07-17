@@ -228,6 +228,7 @@ impl TxPacket {
 
 /// Application events and resolved transmission actions from one core call.
 #[derive(Debug, Default)]
+#[must_use = "every protocol event, packet, and unroutable-action count must be drained or retained"]
 pub struct NodeActions {
     /// Native Rete events. These remain provisional because several variants
     /// contain allocation-backed payloads.
@@ -1872,7 +1873,10 @@ mod tests {
         assert_eq!(rejected_metrics.ingress.owned_link_full, 1);
         assert_eq!(rejected_metrics.capacity.links.used, 2);
 
-        responder.close_link(&first_link_id.unwrap(), &mut rng);
+        let close = responder.close_link(&first_link_id.unwrap(), &mut rng);
+        assert_eq!(close.packets.len(), 1);
+        assert_eq!(close.events.len(), 1);
+        assert_eq!(close.unroutable_packets, 0);
         assert_eq!(responder.metrics().capacity.links.used, 1);
 
         let replay = responder.ingest(&overflow_request.bytes, 4, InterfaceId(3), &mut rng);

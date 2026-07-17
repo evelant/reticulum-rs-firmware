@@ -19,13 +19,15 @@
 
 use rand_core::{CryptoRng, RngCore};
 use reticulum_rns_rete::{
-    DestHash as RnsDestinationHash, EmbeddedNode as RnsNode, EmbeddedNodeConfig as RnsNodeConfig,
-    Identity as RnsIdentity, IngressReport, InterfaceId as RnsInterfaceId, NodeActions,
+    AnnounceAdmissionError as RnsAnnounceAdmissionError, DestHash as RnsDestinationHash,
+    EmbeddedNode as RnsNode, EmbeddedNodeConfig as RnsNodeConfig, Identity as RnsIdentity,
+    InboundProofPolicy as RnsInboundProofPolicy, InterfaceId as RnsInterfaceId,
     NodeRole as RnsNodeRole, PrepareDataError as RnsPrepareDataError,
     PreparedData as RnsPreparedData, RNS_MTU, ReceiptCandidate, ReceiptKind,
     ReceiptReservationUnavailable, ReceiptTerminal, ReceiptTerminalReservation,
     ReceiptTerminalSink, TxTarget as RnsTxTarget,
 };
+pub use reticulum_rns_rete::{IngressReport, NodeActions};
 use sha2::{Digest, Sha256};
 
 /// Complete packet storage reserved for one base-MTU Reticulum transmission.
@@ -33,6 +35,9 @@ pub const PACKET_CAPACITY: usize = RNS_MTU;
 
 /// Largest destination-DATA plaintext accepted by the current RNS adapter.
 pub const MAX_DATA_PAYLOAD: usize = reticulum_rns_rete::MAX_DATA_PAYLOAD;
+
+/// Largest application-data payload accepted for one local announce.
+pub const MAX_ANNOUNCE_APP_DATA: usize = reticulum_rns_rete::MAX_ANNOUNCE_APP_DATA;
 
 /// Whether Rete's current heapless backend can instantiate these table
 /// capacities.
@@ -398,6 +403,30 @@ pub enum NodeRole {
     Transport,
 }
 
+/// Automatic delivery-proof behavior for DATA received at the primary local
+/// destination.
+///
+/// The default is fail-quiet: inbound DATA is delivered to the application but
+/// does not cause an automatic transmission. Firmware must opt in explicitly
+/// when delivery proofs are part of its configured Reticulum service policy.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum InboundProofPolicy {
+    /// Never generate delivery proofs automatically.
+    #[default]
+    Never,
+    /// Generate a delivery proof for every successfully decrypted DATA packet.
+    Always,
+}
+
+impl InboundProofPolicy {
+    const fn into_rns(self) -> RnsInboundProofPolicy {
+        match self {
+            Self::Never => RnsInboundProofPolicy::Never,
+            Self::Always => RnsInboundProofPolicy::Always,
+        }
+    }
+}
+
 /// Construction policy for the bounded node owner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NodeConfig {
@@ -443,6 +472,38 @@ pub enum NodeConstructionError {
 pub enum PeerRegistrationError {
     /// RNS rejected the peer name, aspects, or identity.
     InvalidPeer,
+}
+
+/// Failure to admit one local announce into the bounded protocol queue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AnnounceAdmissionError {
+    /// Optional application data cannot fit in a base-MTU announce.
+    AppDataTooLarge {
+        /// Supplied application-data length in bytes.
+        actual: usize,
+        /// Maximum accepted application-data length in bytes.
+        maximum: usize,
+    },
+    /// Every configured pending-announce slot is occupied.
+    QueueFull {
+        /// Configured pending-announce capacity.
+        limit: usize,
+    },
+    /// The native protocol implementation rejected announce construction or
+    /// queueing after product-owned admission checks passed.
+    NativeRejected,
+}
+
+impl From<RnsAnnounceAdmissionError> for AnnounceAdmissionError {
+    fn from(error: RnsAnnounceAdmissionError) -> Self {
+        match error {
+            RnsAnnounceAdmissionError::AppDataTooLarge { actual, maximum } => {
+                Self::AppDataTooLarge { actual, maximum }
+            }
+            RnsAnnounceAdmissionError::QueueFull { limit } => Self::QueueFull { limit },
+            RnsAnnounceAdmissionError::NativeRejected => Self::NativeRejected,
+        }
+    }
 }
 
 /// Full RNS hash used to correlate one prepared DATA packet with its delivery
@@ -1981,6 +2042,50 @@ impl<
             .map_err(|_| PeerRegistrationError::InvalidPeer)
     }
 
+    /// Configure automatic delivery proofs for DATA received at this node's
+    /// primary local destination.
+    ///
+    /// This changes protocol behavior only. Radio transmission remains subject
+    /// to the runtime's action ownership, routing, permit, and regional-policy
+    /// boundaries.
+    pub fn set_inbound_proof_policy(&mut self, policy: InboundProofPolicy) {
+        self.rns.set_inbound_proof_policy(policy.into_rns());
+    }
+
+    /// Admit one signed local announce into the bounded protocol queue.
+    ///
+    /// `app_data` is copied into protocol-owned pending-announce storage. The
+    /// announce remains queued until [`Self::flush_announces`] makes its
+    /// transmission action available to the runtime.
+    pub fn queue_announce<R: RngCore + CryptoRng>(
+        &mut self,
+        app_data: Option<&[u8]>,
+        now: MonotonicSeconds,
+        rng: &mut R,
+    ) -> Result<(), AnnounceAdmissionError> {
+        self.rns
+            .queue_announce(app_data, now.get(), rng)
+            .map_err(AnnounceAdmissionError::from)
+    }
+
+    /// Flush every currently ready local announce into the ordinary runtime
+    /// action envelope.
+    ///
+    /// The returned envelope has no application events and no unroutable
+    /// packets. Each packet retains the broadcast target assigned by RNS. A
+    /// caller must preserve those owned actions until its radio/dispatcher
+    /// boundary accepts or rejects them.
+    pub fn flush_announces<R: RngCore>(
+        &mut self,
+        now: MonotonicSeconds,
+        rng: &mut R,
+    ) -> NodeActions {
+        NodeActions {
+            packets: self.rns.flush_announces(now.get(), rng),
+            ..NodeActions::default()
+        }
+    }
+
     /// Register one externally allocated packet buffer with this owner.
     ///
     /// Registration assigns the next stable slot exactly once. A buffer must
@@ -3417,6 +3522,41 @@ mod tests {
         )
     }
 
+    fn deliver_prepared<const PATHS: usize, const BUFFERS: usize>(
+        sender: &mut TestNode<PATHS, BUFFERS>,
+        receiver: &mut TestNode<PATHS, BUFFERS>,
+        buffer: &mut TxPacketBuffer,
+        plaintext: &[u8],
+        now: u64,
+        interface: PacketInterfaceId,
+        rng: &mut CounterRng,
+    ) -> NodeActions {
+        let job = prepare(
+            sender,
+            buffer,
+            receiver.destination_hash(),
+            plaintext,
+            now,
+            rng,
+        );
+        let packet_len = usize::from(job.packet_len());
+        let packet = job.owner.buffer.bytes[..packet_len].to_vec();
+        let received = receiver.ingest(&packet, time(now), interface, rng).unwrap();
+        let disposition = sender
+            .complete_tx(
+                job.return_unpermitted().complete(TxCompletionCode::new(0)),
+                owner_time(now * 1_000 + 100),
+            )
+            .unwrap_or_else(|failure| {
+                panic!(
+                    "prepared test packet did not return: {:?}",
+                    failure.reason()
+                )
+            });
+        assert!(matches!(disposition, TxCompletionDisposition::Available(_)));
+        received.actions
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn prepare_with_interfaces<'a, const PATHS: usize, const BUFFERS: usize>(
         sender: &mut TestNode<PATHS, BUFFERS>,
@@ -3498,6 +3638,110 @@ mod tests {
             TxTarget::AllExcept(PacketInterfaceId::new(9))
         );
         assert_eq!(deadline(123).instant().get(), 123);
+    }
+
+    #[test]
+    fn announce_wrappers_preserve_bounded_admission_and_action_routing() {
+        let mut owner = node::<2, 0>(80, "announce");
+        let mut rng = CounterRng::default();
+        let oversized = [0u8; MAX_ANNOUNCE_APP_DATA + 1];
+
+        assert_eq!(
+            owner.queue_announce(Some(&oversized), time(1), &mut rng),
+            Err(AnnounceAdmissionError::AppDataTooLarge {
+                actual: MAX_ANNOUNCE_APP_DATA + 1,
+                maximum: MAX_ANNOUNCE_APP_DATA,
+            })
+        );
+        owner.queue_announce(None, time(1), &mut rng).unwrap();
+        owner
+            .queue_announce(Some(b"product announce"), time(1), &mut rng)
+            .unwrap();
+        assert_eq!(
+            owner.queue_announce(None, time(1), &mut rng),
+            Err(AnnounceAdmissionError::QueueFull { limit: 2 })
+        );
+
+        let actions = owner.flush_announces(time(1), &mut rng);
+        assert!(actions.events.is_empty());
+        assert_eq!(actions.unroutable_packets, 0);
+        assert_eq!(actions.packets.len(), 2);
+        assert!(actions.packets.iter().all(|packet| {
+            packet.target() == RnsTxTarget::All
+                && reticulum_rns_rete::parse_packet(packet.bytes()).is_ok_and(|packet| {
+                    packet.packet_type == reticulum_rns_rete::PacketType::Announce
+                })
+        }));
+        assert_eq!(
+            AnnounceAdmissionError::from(RnsAnnounceAdmissionError::NativeRejected),
+            AnnounceAdmissionError::NativeRejected
+        );
+    }
+
+    #[test]
+    fn inbound_proof_policy_is_explicit_and_controls_proof_actions() {
+        let mut sender = node::<4, 1>(81, "sender");
+        let mut receiver = node::<4, 1>(82, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
+        let mut rng = CounterRng::default();
+
+        assert_eq!(InboundProofPolicy::default(), InboundProofPolicy::Never);
+        receiver.queue_announce(None, time(1), &mut rng).unwrap();
+        let announce = receiver.flush_announces(time(1), &mut rng);
+        assert_eq!(announce.packets.len(), 1);
+        sender
+            .ingest(
+                announce.packets[0].bytes(),
+                time(1),
+                PacketInterfaceId::new(4),
+                &mut rng,
+            )
+            .unwrap();
+
+        let default_actions = deliver_prepared(
+            &mut sender,
+            &mut receiver,
+            &mut buffer,
+            b"default proof policy",
+            2,
+            PacketInterfaceId::new(7),
+            &mut rng,
+        );
+        assert!(default_actions.packets.is_empty());
+
+        receiver.set_inbound_proof_policy(InboundProofPolicy::Always);
+        let proof_actions = deliver_prepared(
+            &mut sender,
+            &mut receiver,
+            &mut buffer,
+            b"proof requested",
+            3,
+            PacketInterfaceId::new(7),
+            &mut rng,
+        );
+        assert_eq!(proof_actions.packets.len(), 1);
+        assert_eq!(
+            proof_actions.packets[0].target(),
+            RnsTxTarget::Only(RnsInterfaceId(7))
+        );
+        assert_eq!(
+            reticulum_rns_rete::parse_packet(proof_actions.packets[0].bytes())
+                .unwrap()
+                .packet_type,
+            reticulum_rns_rete::PacketType::Proof
+        );
+
+        receiver.set_inbound_proof_policy(InboundProofPolicy::Never);
+        let disabled_actions = deliver_prepared(
+            &mut sender,
+            &mut receiver,
+            &mut buffer,
+            b"proof disabled",
+            4,
+            PacketInterfaceId::new(7),
+            &mut rng,
+        );
+        assert!(disabled_actions.packets.is_empty());
     }
 
     #[test]

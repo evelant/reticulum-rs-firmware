@@ -1781,10 +1781,15 @@ dependencies = [
 name = "reticulum-storage-actor"
 version = "0.1.0"
 dependencies = [
+ "embassy-sync 0.8.0",
  "embedded-storage",
+ "rand_core 0.6.4",
+ "reticulum-node-core",
  "reticulum-storage-journal",
  "reticulum-storage-model",
  "reticulum-submission-projector",
+ "reticulum-tx-dispatch",
+ "reticulum-tx-handoff",
 ]
 
 [[package]]

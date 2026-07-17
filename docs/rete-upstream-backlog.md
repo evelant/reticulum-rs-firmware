@@ -386,7 +386,9 @@ three TX machines in one permanent aggregate. Its async runner takes a fresh
 checked clock sample before maintenance/DATA/permit/dispatcher, waits for the
 exact earlier live-owner deadline or permit grace, yields after 16 productive
 passes and every selected wake, and selects only phase-compatible cancellation-
-safe waits.
+safe waits. The aggregate now also forwards explicit proof policy, bounded
+announce operations, complete-packet ingress and RNS tick, and exposes its
+short wait publicly for a permanent event loop.
 `RfInertTxPolicy` denies RF, and retained faults stop new preparation and policy
 while owner-draining transitions continue where possible.
 
@@ -397,10 +399,12 @@ lifetime reservation, exact readback, complete integrity-validated replay, and
 retention-only compaction. Its isolated clean-path/software-reset powered HIL
 has passed; controlled power cuts and product-runtime integration remain open.
 The portable sole storage actor now connects that journal to its live index and
-projector with exact autonomous ambiguity recovery. The remaining product
-blockers are a permanent firmware task/product flash adapter and boot gates;
+projector with exact autonomous ambiguity recovery plus narrow node-observation
+and acknowledgement methods. It also owns exact durable conservative boot
+finalization. The remaining product blockers are a permanent firmware task/
+product flash adapter and orchestration of mount/replay/recovery boot gates;
 device-API/runtime linkage; safe projector-slot retirement;
-eventual sole-owner integration of RX plus ordinary RNS tick/actions;
+permanent timed RX/RNode hosting and complete ordinary-action draining;
 firmware/driver integration; product-runtime powered reboot recovery;
 caller-reservable bounded construction for those ordinary outbound actions;
 and higher-level LXMF persistence.

@@ -3,7 +3,8 @@
 **Status:** portable route/permit/completion/recovery, owning handoff storage,
 and firmware-excluded RF-inert persistent dispatcher, permit server, and node
 DATA-owner machine with synchronous parked-owner preparation implemented;
-firmware-excluded permanent RF-inert supervisor and async runner implemented;
+firmware-excluded permanent RF-inert supervisor, sole-owner RNS forwarding
+surface, and async TX-machine runner implemented;
 portable durable model/projector and independent physical journal implemented;
 portable sole storage actor implemented and target-checked; no permanent
 storage task; portable authenticated device-API adapter implemented but not
@@ -26,8 +27,10 @@ Rete removes its receipt.
 The crate privately owns `reticulum-rns-rete::EmbeddedNode`, but its public
 surface uses project-owned identities, destination hashes, interface targets,
 packet-slot IDs, deadlines, attempt tokens and handles, terminal outcomes,
-errors and capacity snapshots. It has no dependency on the device API,
-Embassy, radio traits, ESP crates, a board support package or durable storage.
+errors and capacity snapshots. The protocol-owner surface also forwards the
+adapter's `IngressReport` and `NodeActions` envelopes without exposing mutable
+Rete state. It has no dependency on the device API, Embassy, radio traits, ESP
+crates, a board support package or durable storage.
 The separate `reticulum-tx-handoff` edge crate depends on node-core and Embassy
 Sync while keeping node-core itself synchronous and executor-free.
 `reticulum-tx-dispatch` depends on both portable crates and owns their packet-
@@ -40,8 +43,20 @@ device-api and map their types explicitly.
 `reticulum-tx-supervisor` is a separate firmware-excluded edge. It owns one
 exact node-core, the DATA machine, permit server, RF-inert dispatcher,
 authorization policy, and monotonic clock contract in a permanent aggregate.
-It provides both complete synchronous passes and a never-returning async run
-loop, but has no firmware, radio/HAL, flash, or device-API dependency.
+It forwards the sole owner's destination hash, explicit inbound-proof policy,
+bounded announce queue/flush, complete-packet RNS ingress, and timer maintenance.
+It also provides complete synchronous TX-machine passes, a public cancellation-
+safe work wait, and a never-returning async run loop, but has no firmware,
+radio/HAL, flash, or device-API dependency.
+
+Inbound proof generation defaults to `Never` and must be explicitly changed to
+`Always`. `queue_announce()` copies optional application data into Rete's
+bounded pending queue and reports oversize or full-queue admission failures;
+`flush_announces()` later returns the ready broadcast actions. Ingress and tick
+likewise return all ordinary application events and outbound packets to the
+caller. These `NodeActions` remain allocation-backed. They are not registered
+external packet owners and are not accepted or retained by the current RF-
+inert dispatcher.
 
 `TxJob`, permit requests/replies, completions, buffers, and recovery records do
 not expose packet bytes. Only an exactly matched `AuthorizedTx` can borrow the
@@ -74,9 +89,10 @@ Terminal, expired, recovery-required, or invalid requests bypass policy.
 Cancellation while a short wait remains pending leaves the item in its Embassy
 channel. The DATA machine stores a ready return in persistent state before its
 wait completes and waits for `Next` capacity without putting the job into the
-future. `TxSupervisor::run()` now selects those phase-compatible waits plus the
-next absolute deadline; the permanent top-level task borrowing the aggregate
-must itself never be cancelled.
+future. Public `TxSupervisor::wait_for_work()` selects those phase-compatible
+waits plus the next absolute deadline and may safely lose a race against an
+independently owned RX or RNS-timer future. The permanent top-level task
+borrowing the aggregate must itself never be cancelled.
 
 Each complete supervisor pass takes a fresh checked monotonic sample before
 lease maintenance, DATA processing, permit/policy processing, and dispatcher
@@ -402,8 +418,9 @@ cargo +esp check --locked -p reticulum-tx-supervisor \
   --target xtensa-esp32s3-none-elf
 ```
 
-The 43-test node-core host suite covers stable one-time registration, pointer-stable
-no-copy preparation, deadline-before-mutation rejection, empty and deterministic
+The 45-test node-core host suite covers bounded announce admission/flush,
+explicit inbound-proof policy, stable one-time registration, pointer-stable no-
+copy preparation, deadline-before-mutation rejection, empty and deterministic
 multi-interface routes, per-hop generations, exact queue rollback, cumulative
 prior authorization, opaque permit matching, policy and terminal races, exact-
 deadline authorization/reply/frame/completion/maintenance behavior, serialized
@@ -433,14 +450,14 @@ failure retention, final and recovered parking, generation-scoped recovery
 acknowledgement, quarantine, exact owner binding, completion-failure retention,
 cancelled return waits, `Next` pressure/readiness cancellation, and compact
 production-mutex layout.
-The 12-test supervisor suite covers separate and deadline-crossing fresh clock
+The 13-test supervisor suite covers separate and deadline-crossing fresh clock
 samples, the complete RF-denied lifecycle, exact-deadline recovery retention,
 terminal/recovery acknowledgement facades, permit-grace reply priority and
-fault drain, monotonic regression, combined-wait cancellation, deadline
-conversion, common-origin/full-seed construction, and static storage. The
-focused node-core and dispatch suites contain 43 and 33 tests respectively.
-None of these crates is linked into firmware, and there is still no driver,
-radio, or RF path.
+fault drain, monotonic regression, public combined-wait cancellation, the
+permanent protocol-owner forwarding surface, deadline conversion, common-
+origin/full-seed construction, and static storage. The focused node-core and
+dispatch suites contain 45 and 33 tests respectively. None of these crates is
+linked into firmware, and there is still no driver, radio, or RF path.
 
 ## Next boundary
 
@@ -460,18 +477,19 @@ unchanged value on pressure. The remaining orchestration work is:
    stores and radio timing. The isolated journal clean-path/software-reset HIL
    has passed; actor-on-target, controlled power-fail, endurance/soak, and
    integrated-runtime coverage remain open.
-2. Merge RX ingress, ordinary RNS tick/actions, durable submission projection,
-   and exact acknowledgement into
-   the eventual sole node owner. The current aggregate drives only TX lease
-   maintenance and the three TX machines.
+2. Host the supervisor's sole-owner RNS surface in a permanent node task with
+   timed RNode reassembly and distinct RNode-fragment, RNS-seconds, and TX-owner
+   clocks. The portable aggregate now forwards ingress, tick, proof policy, and
+   bounded announce operations, but no firmware graph instantiates it.
 3. Connect the implemented authenticated device-API adapter to framing,
    sessions and the permanent actor task; drive the model's conservative boot
    recovery and node observations through the actor's narrow projector methods;
    and add a proved safe retirement condition for bounded volatile projector
    slots without attempting to persist leases or mutable references.
-4. Convert allocation-backed ordinary RNS actions into caller-reservable packet
-   ownership; the DATA path alone does not cover proofs, announces, forwarding,
-   Links or Resources.
+4. Convert every allocation-backed `NodeActions` packet returned by announce
+   flush, ingress, and tick into caller-reservable ownership with explicit
+   backpressure. The external-buffer DATA path alone does not stage proofs,
+   announces, forwarding, Links, or Resources into the dispatcher.
 5. Join these boundaries to a concrete policy and sole radio owner before
    claiming a product TX path. The attached antenna-equipped boards are already
    cleared for NA915 development TX/RX, so integration firmware may exercise

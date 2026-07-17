@@ -464,7 +464,7 @@ fn graph_policy() -> ExitCode {
              handoff, dispatcher, Embassy Sync/Futures/Time, rand_core and SHA-256 dependency \
              edges; the durable storage model uses only reviewed minicbor and SHA-256 edges; \
              the physical storage journal uses only reviewed embedded-storage, storage-model and SHA-256 edges; \
-             the sole storage actor uses only reviewed embedded-storage, journal, semantic-model and submission-projector edges; \
+             the sole storage actor uses only reviewed embedded-storage, node-core, journal, semantic-model, submission-projector and dispatcher edges plus its reviewed test-only Embassy Sync, rand_core and handoff edges; \
              the device API adapter uses only reviewed embedded-storage, device-API, storage-actor and semantic-model edges with one exact host-sim feature forward; \
              the physical-storage HIL has only its reviewed raw-flash, journal, semantic-model, logging and ESP runtime edges and no radio/protocol stack; \
              the submission projector uses only reviewed node-core, storage-model, dispatcher \
@@ -1396,20 +1396,29 @@ fn validate_storage_actor_dependency_boundary(
         .ok_or_else(|| "reticulum-storage-actor package has no dependency array".to_owned())?;
     if dependencies
         .iter()
-        .any(|dependency| !dependency["kind"].is_null())
+        .any(|dependency| dependency["kind"].as_str() == Some("build"))
     {
-        return Err(
-            "reticulum-storage-actor must not have build or development dependencies".to_owned(),
-        );
+        return Err("reticulum-storage-actor must not have build dependencies".to_owned());
     }
-    if dependencies.len() != 4 {
+    if dependencies.len() != 9 {
         return Err(format!(
-            "reticulum-storage-actor must have exactly four reviewed normal dependencies, found {}",
+            "reticulum-storage-actor must have exactly nine reviewed dependencies, found {}",
             dependencies.len()
         ));
     }
 
-    let embedded_storage = dependencies
+    let normal = dependencies
+        .iter()
+        .filter(|dependency| dependency["kind"].is_null())
+        .collect::<Vec<_>>();
+    if normal.len() != 6 {
+        return Err(format!(
+            "reticulum-storage-actor must have exactly six normal dependencies, found {}",
+            normal.len()
+        ));
+    }
+
+    let embedded_storage = normal
         .iter()
         .filter(|dependency| dependency["name"].as_str() == Some("embedded-storage"))
         .collect::<Vec<_>>();
@@ -1433,15 +1442,17 @@ fn validate_storage_actor_dependency_boundary(
     }
 
     for (name, relative_path) in [
+        ("reticulum-node-core", "crates/node-core"),
         ("reticulum-storage-journal", "crates/storage-journal"),
         ("reticulum-storage-model", "crates/storage-model"),
         (
             "reticulum-submission-projector",
             "crates/submission-projector",
         ),
+        ("reticulum-tx-dispatch", "crates/tx-dispatch"),
     ] {
         let expected_path = workspace.join(relative_path);
-        let dependency = dependencies
+        let dependency = normal
             .iter()
             .filter(|dependency| dependency["name"].as_str() == Some(name))
             .collect::<Vec<_>>();
@@ -1462,6 +1473,64 @@ fn validate_storage_actor_dependency_boundary(
                 expected_path.display()
             ));
         }
+    }
+
+    let development = dependencies
+        .iter()
+        .filter(|dependency| dependency["kind"].as_str() == Some("dev"))
+        .collect::<Vec<_>>();
+    if development.len() != 3 {
+        return Err(format!(
+            "reticulum-storage-actor must have exactly three reviewed dev dependencies, found {}",
+            development.len()
+        ));
+    }
+
+    for (name, requirement) in [("embassy-sync", "=0.8.0"), ("rand_core", "=0.6.4")] {
+        let dependency = development
+            .iter()
+            .filter(|dependency| dependency["name"].as_str() == Some(name))
+            .collect::<Vec<_>>();
+        if dependency.len() != 1
+            || dependency[0]["req"].as_str() != Some(requirement)
+            || dependency[0]["source"].as_str()
+                != Some("registry+https://github.com/rust-lang/crates.io-index")
+            || !dependency[0]["path"].is_null()
+            || dependency[0]["optional"].as_bool() != Some(false)
+            || !dependency[0]["rename"].is_null()
+            || !dependency[0]["target"].is_null()
+            || dependency[0]["uses_default_features"].as_bool() != Some(false)
+            || dependency[0]["features"]
+                .as_array()
+                .is_none_or(|features| !features.is_empty())
+        {
+            return Err(format!(
+                "reticulum-storage-actor dev dependency {name} must be the unconditional feature-free registry {requirement} pin"
+            ));
+        }
+    }
+
+    let handoff_path = workspace.join("crates/tx-handoff");
+    let handoff = development
+        .iter()
+        .filter(|dependency| dependency["name"].as_str() == Some("reticulum-tx-handoff"))
+        .collect::<Vec<_>>();
+    if handoff.len() != 1
+        || handoff[0]["req"].as_str() != Some("*")
+        || handoff[0]["path"].as_str().map(Path::new) != Some(handoff_path.as_path())
+        || !handoff[0]["source"].is_null()
+        || handoff[0]["optional"].as_bool() != Some(false)
+        || !handoff[0]["rename"].is_null()
+        || !handoff[0]["target"].is_null()
+        || handoff[0]["uses_default_features"].as_bool() != Some(false)
+        || handoff[0]["features"]
+            .as_array()
+            .is_none_or(|features| !features.is_empty())
+    {
+        return Err(format!(
+            "reticulum-tx-handoff must be one unconditional feature-free local dev dependency at {}",
+            handoff_path.display()
+        ));
     }
 
     Ok(())
@@ -4640,11 +4709,10 @@ mod tests {
 
     #[test]
     fn storage_actor_boundary_rejects_dependency_feature_and_path_drift() {
-        const PACKAGE_INDEX: usize = 8;
         let root = workspace_root();
 
         let mut wrong_manifest = portable_layers_metadata_fixture(&root);
-        wrong_manifest["packages"][PACKAGE_INDEX]["manifest_path"] =
+        fixture_package_mut(&mut wrong_manifest, "reticulum-storage-actor")["manifest_path"] =
             serde_json::Value::String(root.join("elsewhere/Cargo.toml").display().to_string());
         assert!(
             validate_storage_actor_dependency_boundary(&wrong_manifest.to_string(), &root).is_err()
@@ -4657,30 +4725,40 @@ mod tests {
             .push(storage_actor_package_fixture(&root));
         assert!(validate_storage_actor_dependency_boundary(&duplicate.to_string(), &root).is_err());
 
-        let mut wrong_version = portable_layers_metadata_fixture(&root);
-        wrong_version["packages"][PACKAGE_INDEX]["dependencies"][0]["req"] =
-            serde_json::Value::String("=0.3.0".to_owned());
-        assert!(
-            validate_storage_actor_dependency_boundary(&wrong_version.to_string(), &root).is_err()
-        );
-
-        for dependency_index in 0..=3 {
+        let dependencies = [
+            ("embedded-storage", None),
+            ("reticulum-node-core", None),
+            ("reticulum-storage-journal", None),
+            ("reticulum-storage-model", None),
+            ("reticulum-submission-projector", None),
+            ("reticulum-tx-dispatch", None),
+            ("embassy-sync", Some("dev")),
+            ("rand_core", Some("dev")),
+            ("reticulum-tx-handoff", Some("dev")),
+        ];
+        for (name, kind) in dependencies {
             let mut default_features = portable_layers_metadata_fixture(&root);
-            default_features["packages"][PACKAGE_INDEX]["dependencies"][dependency_index]["uses_default_features"] =
-                serde_json::Value::Bool(true);
+            fixture_dependency_mut(
+                fixture_package_mut(&mut default_features, "reticulum-storage-actor"),
+                name,
+                kind,
+            )["uses_default_features"] = serde_json::Value::Bool(true);
             assert!(
                 validate_storage_actor_dependency_boundary(&default_features.to_string(), &root)
                     .is_err(),
-                "dependency {dependency_index} accepted default features"
+                "dependency {name} accepted default features"
             );
 
             let mut dependency_feature = portable_layers_metadata_fixture(&root);
-            dependency_feature["packages"][PACKAGE_INDEX]["dependencies"][dependency_index]["features"] =
-                serde_json::json!(["unreviewed"]);
+            fixture_dependency_mut(
+                fixture_package_mut(&mut dependency_feature, "reticulum-storage-actor"),
+                name,
+                kind,
+            )["features"] = serde_json::json!(["unreviewed"]);
             assert!(
                 validate_storage_actor_dependency_boundary(&dependency_feature.to_string(), &root)
                     .is_err(),
-                "dependency {dependency_index} accepted an unreviewed feature"
+                "dependency {name} accepted an unreviewed feature"
             );
 
             for (field, value) in [
@@ -4695,60 +4773,102 @@ mod tests {
                 ),
             ] {
                 let mut changed = portable_layers_metadata_fixture(&root);
-                changed["packages"][PACKAGE_INDEX]["dependencies"][dependency_index][field] = value;
+                fixture_dependency_mut(
+                    fixture_package_mut(&mut changed, "reticulum-storage-actor"),
+                    name,
+                    kind,
+                )[field] = value;
                 assert!(
                     validate_storage_actor_dependency_boundary(&changed.to_string(), &root)
                         .is_err(),
-                    "dependency {dependency_index} accepted changed {field}"
+                    "dependency {name} accepted changed {field}"
                 );
             }
-        }
-
-        for dependency_index in 1..=3 {
-            let mut wrong_path = portable_layers_metadata_fixture(&root);
-            wrong_path["packages"][PACKAGE_INDEX]["dependencies"][dependency_index]["path"] =
-                serde_json::Value::String(root.join("elsewhere").display().to_string());
-            assert!(
-                validate_storage_actor_dependency_boundary(&wrong_path.to_string(), &root).is_err(),
-                "local dependency {dependency_index} accepted the wrong path"
-            );
 
             let mut wrong_requirement = portable_layers_metadata_fixture(&root);
-            wrong_requirement["packages"][PACKAGE_INDEX]["dependencies"][dependency_index]["req"] =
-                serde_json::Value::String("=0.1.0".to_owned());
+            fixture_dependency_mut(
+                fixture_package_mut(&mut wrong_requirement, "reticulum-storage-actor"),
+                name,
+                kind,
+            )["req"] = serde_json::Value::String("=99.0.0".to_owned());
             assert!(
                 validate_storage_actor_dependency_boundary(&wrong_requirement.to_string(), &root)
                     .is_err(),
-                "local dependency {dependency_index} accepted a registry-like requirement"
+                "dependency {name} accepted the wrong requirement"
             );
-        }
 
-        let mut registry_path = portable_layers_metadata_fixture(&root);
-        registry_path["packages"][PACKAGE_INDEX]["dependencies"][0]["path"] =
-            serde_json::Value::String(root.join("elsewhere").display().to_string());
-        assert!(
-            validate_storage_actor_dependency_boundary(&registry_path.to_string(), &root).is_err()
-        );
-
-        for kind in ["dev", "build"] {
-            let mut non_normal = portable_layers_metadata_fixture(&root);
-            non_normal["packages"][PACKAGE_INDEX]["dependencies"][0]["kind"] =
-                serde_json::Value::String(kind.to_owned());
+            let mut wrong_kind = portable_layers_metadata_fixture(&root);
+            fixture_dependency_mut(
+                fixture_package_mut(&mut wrong_kind, "reticulum-storage-actor"),
+                name,
+                kind,
+            )["kind"] = match kind {
+                None => serde_json::Value::String("dev".to_owned()),
+                Some("dev") => serde_json::Value::Null,
+                Some(other) => panic!("unexpected fixture dependency kind {other}"),
+            };
             assert!(
-                validate_storage_actor_dependency_boundary(&non_normal.to_string(), &root).is_err(),
-                "actor accepted a {kind} dependency"
+                validate_storage_actor_dependency_boundary(&wrong_kind.to_string(), &root).is_err(),
+                "dependency {name} accepted the wrong kind"
             );
         }
+
+        for (name, kind) in [
+            ("reticulum-node-core", None),
+            ("reticulum-storage-journal", None),
+            ("reticulum-storage-model", None),
+            ("reticulum-submission-projector", None),
+            ("reticulum-tx-dispatch", None),
+            ("reticulum-tx-handoff", Some("dev")),
+        ] {
+            let mut wrong_path = portable_layers_metadata_fixture(&root);
+            fixture_dependency_mut(
+                fixture_package_mut(&mut wrong_path, "reticulum-storage-actor"),
+                name,
+                kind,
+            )["path"] = serde_json::Value::String(root.join("elsewhere").display().to_string());
+            assert!(
+                validate_storage_actor_dependency_boundary(&wrong_path.to_string(), &root).is_err(),
+                "local dependency {name} accepted the wrong path"
+            );
+        }
+
+        for (name, kind) in [
+            ("embedded-storage", None),
+            ("embassy-sync", Some("dev")),
+            ("rand_core", Some("dev")),
+        ] {
+            let mut registry_path = portable_layers_metadata_fixture(&root);
+            fixture_dependency_mut(
+                fixture_package_mut(&mut registry_path, "reticulum-storage-actor"),
+                name,
+                kind,
+            )["path"] = serde_json::Value::String(root.join("elsewhere").display().to_string());
+            assert!(
+                validate_storage_actor_dependency_boundary(&registry_path.to_string(), &root)
+                    .is_err(),
+                "registry dependency {name} accepted a path"
+            );
+        }
+
+        let mut build = portable_layers_metadata_fixture(&root);
+        fixture_dependency_mut(
+            fixture_package_mut(&mut build, "reticulum-storage-actor"),
+            "embedded-storage",
+            None,
+        )["kind"] = serde_json::Value::String("build".to_owned());
+        assert!(validate_storage_actor_dependency_boundary(&build.to_string(), &root).is_err());
 
         let mut extra = portable_layers_metadata_fixture(&root);
-        extra["packages"][PACKAGE_INDEX]["dependencies"]
+        fixture_package_mut(&mut extra, "reticulum-storage-actor")["dependencies"]
             .as_array_mut()
             .unwrap()
             .push(handoff_dependency_fixture("sha2", "=0.10.9", None));
         assert!(validate_storage_actor_dependency_boundary(&extra.to_string(), &root).is_err());
 
         let mut extra_feature = portable_layers_metadata_fixture(&root);
-        extra_feature["packages"][PACKAGE_INDEX]["features"]["std"] = serde_json::json!([]);
+        fixture_package_mut(&mut extra_feature, "reticulum-storage-actor")["features"]["std"] =
+            serde_json::json!([]);
         assert!(
             validate_storage_actor_dependency_boundary(&extra_feature.to_string(), &root).is_err()
         );
@@ -5404,6 +5524,12 @@ mod tests {
             "dependencies": [
                 handoff_dependency_fixture("embedded-storage", "=0.3.1", None),
                 handoff_path_dependency_fixture(
+                    "reticulum-node-core",
+                    "*",
+                    &root.join("crates/node-core"),
+                    None,
+                ),
+                handoff_path_dependency_fixture(
                     "reticulum-storage-journal",
                     "*",
                     &root.join("crates/storage-journal"),
@@ -5421,8 +5547,53 @@ mod tests {
                     &root.join("crates/submission-projector"),
                     None,
                 ),
+                handoff_path_dependency_fixture(
+                    "reticulum-tx-dispatch",
+                    "*",
+                    &root.join("crates/tx-dispatch"),
+                    None,
+                ),
+                handoff_dependency_fixture("embassy-sync", "=0.8.0", Some("dev")),
+                handoff_dependency_fixture("rand_core", "=0.6.4", Some("dev")),
+                handoff_path_dependency_fixture(
+                    "reticulum-tx-handoff",
+                    "*",
+                    &root.join("crates/tx-handoff"),
+                    Some("dev"),
+                ),
             ],
         })
+    }
+
+    fn fixture_package_mut<'a>(
+        metadata: &'a mut serde_json::Value,
+        name: &str,
+    ) -> &'a mut serde_json::Value {
+        metadata["packages"]
+            .as_array_mut()
+            .expect("fixture packages array")
+            .iter_mut()
+            .find(|package| package["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("fixture package {name}"))
+    }
+
+    fn fixture_dependency_mut<'a>(
+        package: &'a mut serde_json::Value,
+        name: &str,
+        kind: Option<&str>,
+    ) -> &'a mut serde_json::Value {
+        package["dependencies"]
+            .as_array_mut()
+            .expect("fixture dependencies array")
+            .iter_mut()
+            .find(|dependency| {
+                dependency["name"].as_str() == Some(name)
+                    && match kind {
+                        Some(kind) => dependency["kind"].as_str() == Some(kind),
+                        None => dependency["kind"].is_null(),
+                    }
+            })
+            .unwrap_or_else(|| panic!("fixture dependency {name} with kind {kind:?}"))
     }
 
     fn device_api_adapter_package_fixture(root: &Path) -> serde_json::Value {
