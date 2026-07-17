@@ -297,11 +297,14 @@ after the port reports durable acceptance or exact replay. The resident E290
 `ProductStorageCoordinator` implements that port with short-lived bound journal
 views and stable mappings for replay, conflict, capacity, ambiguity and faults.
 The product accepted-history cap is one solely for composition qualification,
-not product capacity. Allocation-free COBS record framing and a depth-one
-boot-lifetime authenticated-job handoff now define the portable edge, including
-partial-TX ownership, reconnect epochs and stale-reply handling, but no session,
-firmware job lane or USB/BLE/Wi-Fi bearer invokes the adapter yet. The proposed
-authentication and USB ownership contract is recorded in
+not product capacity. Allocation-free COBS framing, the bounded
+USB-qualification session server, and a depth-one boot-lifetime authenticated-
+job handoff now define the portable edge, including mutual PSK proofs,
+directional tags, exact sequences, partial-TX ownership, reconnect epochs and
+stale-reply handling. Independent Python vectors freeze the transcript and wire
+records. No credential authority, firmware job lane or USB/BLE/Wi-Fi bearer
+invokes the adapter yet. The accepted authentication and USB ownership contract
+is recorded in
 [ADR 0006](docs/adr/0006-authenticated-local-api-bearer.md). Default and
 experimental host tests/clippy plus the corresponding ESP32-S3 Xtensa checks
 pass.
@@ -338,10 +341,10 @@ DATA durability gate, and ADR 0005 failure isolation are now qualified together
 in the host composition harness, but remain unqualified on powered E290
 hardware. Device-API dispatch is a
 separate portable integration boundary: the target-safe authenticated adapter,
-COBS framing, boot-lifetime job handoff, and E290
-`ProductStorageCoordinator` port implementation are compiled, but no session,
-external firmware lane, or USB/BLE/Wi-Fi bearer serves through them. The
-legacy `TxSupervisor` remains a separate RF-inert test aggregate. The permanent
+COBS framing, qualification-session core, boot-lifetime job handoff, and E290
+`ProductStorageCoordinator` port implementation are compiled, but no credential
+authority, external firmware lane, or USB/BLE/Wi-Fi bearer serves through them.
+The legacy `TxSupervisor` remains a separate RF-inert test aggregate. The permanent
 `NodeInterfaceSupervisor` now owns the router, DATA and ordinary coordinators,
 and both permit-service families; the first permanent E290 image composes it
 with the ticket-aware dispatcher and E290 radio owner. That image is
@@ -394,10 +397,10 @@ The DATA router, both permit-only services and permanent aggregate are now
 connected to the dispatcher, sole-Rete owner, timed RNode RX and one E290 LoRa
 actor in the first permanent build-verified target. Its exact authorized-frame
 durability handoff and ADR 0005 active-owner fail-stop now pass cross-layer host
-composition tests. Live external admission is blocked by the absent
-session/credential implementation, firmware composition, and bearer—not by
-another durability-policy or cap qualification. The next software slice is
-that authenticated USB-to-LoRa edge, followed by durable configuration/message
+composition tests. Live external admission is blocked by the absent credential
+authority, firmware composition, and bearer—not by another session-crypto,
+durability-policy or cap qualification. The next software slice is that
+credential-backed USB-to-LoRa edge, followed by durable configuration/message
 hosting and client delivery.
 The node-side routing
 boundary remains interface-neutral so additional Reticulum links can be added
@@ -454,6 +457,7 @@ cargo test --locked
 cargo test --locked -p reticulum-device-api --features experimental-rns-data
 cargo test --locked -p reticulum-device-api-adapter \
   --features experimental-rns-data
+python3 interop/python/generate_device_api_session_vectors.py --check
 cargo run --locked -p reticulum-conformance-rete
 cargo check --locked \
   -p reticulum-rns-conformance \
@@ -462,6 +466,7 @@ cargo check --locked \
   -p reticulum-device-api \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-handoff \
+  -p reticulum-device-api-session \
   -p reticulum-node-core \
   -p reticulum-radio-lora-phy \
   -p reticulum-radio-tx-dispatch \
@@ -482,6 +487,7 @@ cargo +esp check --locked \
   -p reticulum-device-api \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-handoff \
+  -p reticulum-device-api-session \
   -p reticulum-node-core \
   -p reticulum-board-heltec-vision-master-e290 \
   -p reticulum-board-heltec-vision-master-e290-radio \

@@ -125,9 +125,10 @@ LoRa lease offline, and permits no later host-radio TX or RX.
 
 The E290 library therefore has 25 passing tests: 23 focused policy/product tests
 plus those two cross-layer composition tests. This closes software composition
-qualification for the LoRa-first one-entry profile. Portable API framing and
-job handoff are qualified; live external admission remains blocked on
-session/credential state, firmware composition, and a bearer. Powered E290
+qualification for the LoRa-first one-entry profile. Portable API framing, the
+qualification-session core, and job handoff are qualified; live external
+admission remains blocked on credential authority/state, firmware composition,
+and a bearer. Powered E290
 permanent-graph behavior remains unqualified even though the physical
 HF-module gate and isolated semantic HIL are complete; it requires separate
 hardware evidence.

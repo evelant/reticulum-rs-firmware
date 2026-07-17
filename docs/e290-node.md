@@ -22,9 +22,10 @@ service while the LoRa node still starts in route-only mode. The exact
 authorized-frame request/durable-echo handoff is source-composed and now passes
 cross-layer host qualification. The one-entry accepted-history cap is exercised
 by that harness solely as a composition profile and is not a product-capacity
-commitment. Portable API framing and the boot-lifetime job handoff are
-qualified; live external admission is blocked only by session/credential
-state, firmware composition, and a bearer. ADR 0005's active-owner policy is implemented:
+commitment. Portable API framing, the qualification-session core, and the boot-
+lifetime job handoff are qualified; live external admission is blocked only by
+the absent credential authority, firmware composition, and a bearer. ADR 0005's
+active-owner policy is implemented:
 a permanent fault
 with an unresolved frame enters interface-local `ActiveOwnerFailStopped`, takes
 the same LoRa lease offline without changing its generation, retains the exact
@@ -458,10 +459,11 @@ as the bounded qualification fixture for the deterministic DATA/proof exchange.
 
 ## Product blockers after this slice
 
-- Compose the implemented bounded COBS framing and boot-lifetime job/reply
-  handoff with a reviewed session/credential layer and the first USB bearer.
-  Session and physical-bearer composition are now the missing edges for live
-  external admission; the one-entry composition cap and ADR 0005 host behavior
+- Compose the implemented bounded COBS framing, qualification-session core,
+  and boot-lifetime job/reply handoff with a reviewed credential authority and
+  the first USB bearer. Credential revalidation, firmware composition, and the
+  physical bearer are now the missing edges for live external admission; the
+  one-entry composition cap and ADR 0005 host behavior
   already pass. A later product-capacity policy must not weaken the same
   durability contract, and future interface actors fail-stop only their
   affected actor.

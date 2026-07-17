@@ -105,6 +105,16 @@ jobs:
           -p reticulum-device-api-adapter
           --features experimental-rns-data
 
+      - name: Device API edge rustdoc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: >-
+          cargo doc --locked
+          -p reticulum-device-api-framing
+          -p reticulum-device-api-handoff
+          -p reticulum-device-api-session
+          --no-deps
+
       - name: Released-Python foundation vectors
         env:
           PYTHON: python
@@ -134,6 +144,7 @@ jobs:
           -p reticulum-device-api
           -p reticulum-device-api-framing
           -p reticulum-device-api-handoff
+          -p reticulum-device-api-session
           -p reticulum-device-identity-store
           -p reticulum-announce-clock
           -p reticulum-interface-router
@@ -294,6 +305,7 @@ jobs:
           -p reticulum-device-api
           -p reticulum-device-api-framing
           -p reticulum-device-api-handoff
+          -p reticulum-device-api-session
           -p reticulum-device-identity-store
           -p reticulum-announce-clock
           -p reticulum-node-core

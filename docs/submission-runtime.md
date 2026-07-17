@@ -10,9 +10,9 @@ composes the exact radio authorized-frame request/durable-echo handoff. A
 one-entry accepted-history cap exists only for composition qualification and is
 not a product-capacity commitment. Eight focused runtime tests, two E290
 cross-layer composition tests, strict Clippy, and generic/ESP32-S3 target checks
-pass. Portable API framing and job handoff are qualified; live external
-admission remains blocked only by session/credential state, firmware
-composition, and a bearer.
+pass. Portable API framing, the qualification-session core, and job handoff are
+qualified; live external admission remains blocked only by the absent
+credential authority, firmware composition, and a bearer.
 
 ## Boundary
 
@@ -175,9 +175,10 @@ or RF claim.
   and idempotency history, has a 162-submission lifetime admission limit, and
   has no eviction or garbage collection. A bounded retention/export/migration
   policy is required before this becomes a long-lived message service.
-- **Client edge:** authenticated API dispatch, framing and boot-lifetime job
-  handoff exist, but sessions, authorization provisioning, firmware
-  composition and USB/BLE/Wi-Fi serving are not wired to the runtime.
+- **Client edge:** authenticated API dispatch, framing, the qualification-
+  session core, and boot-lifetime job handoff exist, but credential authority/
+  provisioning, firmware composition, and USB/BLE/Wi-Fi serving are not wired
+  to the runtime.
   `ProductStorageCoordinator`
   implements the target-safe `SubmissionPort` under the one-entry qualification
   cap, but no external caller reaches it.

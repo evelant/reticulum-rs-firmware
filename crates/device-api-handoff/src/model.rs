@@ -138,9 +138,10 @@ impl OwnedMessage {
 
 /// Exact authenticated local API request owner.
 ///
-/// `G` should be a session-layer type with private principal and permission
-/// fields. Enqueuing transfers that trusted snapshot and the encoded bytes to
-/// the node; later connection loss does not revoke the accepted work.
+/// `G` should be a non-cloneable session-layer reference to device-owned
+/// credential state, not a client-supplied principal or permission snapshot.
+/// Enqueuing transfers that exact reference and the encoded bytes to the node;
+/// later connection loss does not revoke the accepted work.
 #[must_use = "a local API request owner must be enqueued, retained, or explicitly rejected"]
 pub struct LocalApiRequest<G> {
     key: RequestKey,
@@ -163,7 +164,7 @@ impl<G> LocalApiRequest<G> {
         self.key
     }
 
-    /// Opaque authenticated grant minted by the session layer.
+    /// Opaque credential reference minted by the authenticated session layer.
     pub const fn grant(&self) -> &G {
         &self.grant
     }

@@ -599,7 +599,8 @@ fn graph_policy() -> ExitCode {
              and each checked vendor inventory reconstructs the pristine registry source; the device \
              API and node core remain mutually isolated and free of direct platform dependencies; the \
              allocation-free device-API framing crate has no dependency or feature surface, while its \
-             boot-lifetime job handoff reaches only the logical device API and Embassy Sync; \
+             boot-lifetime job handoff reaches only the logical device API and Embassy Sync, and the \
+             authenticated session layer has only its exact reviewed cryptographic, device-API, framing, handoff and test-only hex edges; \
              the Rete integration and node-core normal closures contain no RNode, radio-interface, LoRa or board package; \
              the shared lora-phy owner and E290 radio wrapper have only their exact reviewed HAL, framing, board and test edges; \
              the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the permanent E290 node reaches the LoRa-first node/router/dispatcher graph, exact portable identity, announce-clock, NOR-region and durable-submission layers, and the target-safe experimental device-API semantic port while excluding deferred API bearers, onboard clients and foreign Tracker/HIL packages; \
@@ -649,7 +650,7 @@ fn validate_interface_neutral_rns_closure(label: &str, tree: &str) -> Result<(),
     Ok(())
 }
 
-const PRODUCT_GRAPH_FORBIDDEN: [&str; 20] = [
+const PRODUCT_GRAPH_FORBIDDEN: [&str; 21] = [
     "leviculum-core",
     "rete-lxmf",
     "lxmf-rs",
@@ -659,6 +660,7 @@ const PRODUCT_GRAPH_FORBIDDEN: [&str; 20] = [
     "reticulum-device-api-adapter",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
+    "reticulum-device-api-session",
     "reticulum-node-core",
     "reticulum-radio-tx-dispatch",
     "reticulum-radio-lora-phy",
@@ -683,7 +685,7 @@ fn validate_product_graph_boundary(label: &str, tree: &str) -> Result<(), String
     Ok(())
 }
 
-const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 25] = [
+const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 26] = [
     "embassy-executor",
     "esp-radio",
     "lora-modulation",
@@ -699,6 +701,7 @@ const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 25] = [
     "reticulum-device-api-adapter",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
+    "reticulum-device-api-session",
     "reticulum-node-core",
     "reticulum-radio-interface",
     "reticulum-radio-tx-dispatch",
@@ -719,7 +722,7 @@ const TX_HIL_GRAPH_REQUIRED: [&str; 5] = [
     "reticulum-semantic-roundtrip-hil",
 ];
 
-const TX_HIL_GRAPH_FORBIDDEN: [&str; 20] = [
+const TX_HIL_GRAPH_FORBIDDEN: [&str; 21] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-core",
@@ -729,6 +732,7 @@ const TX_HIL_GRAPH_FORBIDDEN: [&str; 20] = [
     "reticulum-device-api-adapter",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
+    "reticulum-device-api-session",
     "reticulum-board-heltec-vision-master-e290-radio",
     "reticulum-node-core",
     "reticulum-radio-tx-dispatch",
@@ -772,13 +776,14 @@ const SEMANTIC_TX_HIL_GRAPH_REQUIRED: [&str; 9] = [
     "rete-transport",
 ];
 
-const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 16] = [
+const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 17] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
     "reticulum-device-api-adapter",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
+    "reticulum-device-api-session",
     "reticulum-board-heltec-vision-master-e290-radio",
     "reticulum-node-core",
     "reticulum-radio-tx-dispatch",
@@ -905,7 +910,7 @@ const E290_SEMANTIC_HIL_GRAPH_REQUIRED: [&str; 9] = [
     "rete-transport",
 ];
 
-const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 19] = [
+const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 20] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -916,6 +921,7 @@ const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 19] = [
     "reticulum-device-api-adapter",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
+    "reticulum-device-api-session",
     "reticulum-interface-router",
     "reticulum-node-core",
     "reticulum-radio-tx-dispatch",
@@ -985,7 +991,7 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 27] = [
     "static_cell",
 ];
 
-const E290_NODE_GRAPH_FORBIDDEN: [&str; 13] = [
+const E290_NODE_GRAPH_FORBIDDEN: [&str; 14] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -996,6 +1002,7 @@ const E290_NODE_GRAPH_FORBIDDEN: [&str; 13] = [
     "reticulum-lab-rx-returned-fault-hil",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
+    "reticulum-device-api-session",
     "reticulum-rns-leviculum",
     "reticulum-rns-rete-rx",
     "reticulum-semantic-roundtrip-hil",
@@ -1253,6 +1260,72 @@ fn validate_device_api_edge_dependency_boundary(
         "reticulum-device-api",
         &workspace.join("crates/device-api"),
         false,
+    )?;
+
+    let session_name = "reticulum-device-api-session";
+    let session = exact_local_package(
+        packages,
+        workspace,
+        session_name,
+        "crates/device-api-session/Cargo.toml",
+    )?;
+    let session_features = session["features"]
+        .as_object()
+        .ok_or_else(|| format!("{session_name} package has no feature map"))?;
+    let session_dependencies = session["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{session_name} package has no dependency array"))?;
+    if !session_features.is_empty() || session_dependencies.len() != 9 {
+        return Err(format!(
+            "{session_name} must expose no features and exactly eight reviewed normal dependencies plus one test-only dependency"
+        ));
+    }
+    for (dependency_name, requirement) in [
+        ("hkdf", "=0.12.4"),
+        ("hmac", "=0.12.1"),
+        ("rand_core", "=0.6.4"),
+        ("sha2", "=0.10.9"),
+        ("zeroize", "=1.9.0"),
+    ] {
+        validate_exact_registry_dependency(
+            session_dependencies,
+            session_name,
+            dependency_name,
+            requirement,
+            None,
+            false,
+            &[],
+        )?;
+    }
+    for (dependency_name, relative_path, uses_default_features) in [
+        ("reticulum-device-api", "crates/device-api", false),
+        (
+            "reticulum-device-api-framing",
+            "crates/device-api-framing",
+            true,
+        ),
+        (
+            "reticulum-device-api-handoff",
+            "crates/device-api-handoff",
+            true,
+        ),
+    ] {
+        validate_exact_local_dependency(
+            session_dependencies,
+            session_name,
+            dependency_name,
+            &workspace.join(relative_path),
+            uses_default_features,
+        )?;
+    }
+    validate_exact_registry_dependency(
+        session_dependencies,
+        session_name,
+        "hex",
+        "=0.4.3",
+        Some("dev"),
+        true,
+        &[],
     )?;
 
     Ok(())
@@ -4424,6 +4497,7 @@ fn validate_firmware_dependency_boundary(
         "reticulum-device-api-adapter",
         "reticulum-device-api-framing",
         "reticulum-device-api-handoff",
+        "reticulum-device-api-session",
         "reticulum-node-core",
         "reticulum-radio-tx-dispatch",
         "reticulum-rns-rete",
@@ -4466,6 +4540,7 @@ fn validate_firmware_dependency_boundary(
                         | "reticulum-device-api-adapter"
                         | "reticulum-device-api-framing"
                         | "reticulum-device-api-handoff"
+                        | "reticulum-device-api-session"
                         | "reticulum-node-core"
                         | "reticulum-radio-tx-dispatch"
                         | "reticulum-semantic-roundtrip-hil"
@@ -6213,6 +6288,7 @@ mod tests {
             "reticulum-device-api-adapter",
             "reticulum-device-api-framing",
             "reticulum-device-api-handoff",
+            "reticulum-device-api-session",
             "reticulum-node-core",
             "reticulum-radio-tx-dispatch",
             "reticulum-semantic-roundtrip-hil",
@@ -6250,6 +6326,11 @@ mod tests {
                 "device-api-handoff-id",
                 "reticulum-device-api-handoff",
                 "crates/device-api-handoff",
+            ),
+            (
+                "device-api-session-id",
+                "reticulum-device-api-session",
+                "crates/device-api-session",
             ),
             ("node-core-id", "reticulum-node-core", "crates/node-core"),
             (
@@ -6344,6 +6425,7 @@ mod tests {
             "reticulum-device-api-adapter",
             "reticulum-device-api-framing",
             "reticulum-device-api-handoff",
+            "reticulum-device-api-session",
             "reticulum-node-core",
             "reticulum-radio-tx-dispatch",
             "reticulum-radio-lora-phy",
@@ -6694,7 +6776,7 @@ mod tests {
     }
 
     #[test]
-    fn device_api_edge_boundary_locks_framing_and_handoff_shapes() {
+    fn device_api_edge_boundary_locks_framing_handoff_and_session_shapes() {
         let root = workspace_root();
         let metadata = device_api_edge_metadata_fixture(&root);
         validate_device_api_edge_dependency_boundary(&metadata.to_string(), &root).unwrap();
@@ -6733,7 +6815,7 @@ mod tests {
                 .is_err()
         );
 
-        let mut extra_handoff_dependency = metadata;
+        let mut extra_handoff_dependency = metadata.clone();
         fixture_package_mut(
             &mut extra_handoff_dependency,
             "reticulum-device-api-handoff",
@@ -6744,6 +6826,112 @@ mod tests {
         assert!(
             validate_device_api_edge_dependency_boundary(
                 &extra_handoff_dependency.to_string(),
+                &root,
+            )
+            .is_err()
+        );
+
+        for (dependency_name, kind) in [
+            ("hkdf", None),
+            ("hmac", None),
+            ("rand_core", None),
+            ("sha2", None),
+            ("zeroize", None),
+            ("hex", Some("dev")),
+        ] {
+            let mut wrong_version = metadata.clone();
+            fixture_dependency_mut(
+                fixture_package_mut(&mut wrong_version, "reticulum-device-api-session"),
+                dependency_name,
+                kind,
+            )["req"] = serde_json::Value::String("=0.0.0".to_owned());
+            assert!(
+                validate_device_api_edge_dependency_boundary(&wrong_version.to_string(), &root)
+                    .is_err(),
+                "session accepted wrong {dependency_name} version"
+            );
+        }
+
+        for dependency_name in [
+            "reticulum-device-api",
+            "reticulum-device-api-framing",
+            "reticulum-device-api-handoff",
+        ] {
+            let mut wrong_session_path = metadata.clone();
+            fixture_dependency_mut(
+                fixture_package_mut(&mut wrong_session_path, "reticulum-device-api-session"),
+                dependency_name,
+                None,
+            )["path"] = serde_json::Value::String(root.join("elsewhere").display().to_string());
+            assert!(
+                validate_device_api_edge_dependency_boundary(
+                    &wrong_session_path.to_string(),
+                    &root,
+                )
+                .is_err(),
+                "session accepted wrong {dependency_name} path"
+            );
+        }
+
+        let mut normal_hex = metadata.clone();
+        fixture_dependency_mut(
+            fixture_package_mut(&mut normal_hex, "reticulum-device-api-session"),
+            "hex",
+            Some("dev"),
+        )["kind"] = serde_json::Value::Null;
+        assert!(
+            validate_device_api_edge_dependency_boundary(&normal_hex.to_string(), &root).is_err(),
+            "session accepted hex as a normal dependency"
+        );
+
+        let mut default_hkdf = metadata.clone();
+        fixture_dependency_mut(
+            fixture_package_mut(&mut default_hkdf, "reticulum-device-api-session"),
+            "hkdf",
+            None,
+        )["uses_default_features"] = serde_json::Value::Bool(true);
+        assert!(
+            validate_device_api_edge_dependency_boundary(&default_hkdf.to_string(), &root).is_err(),
+            "session accepted hkdf default features"
+        );
+
+        let mut disabled_framing_defaults = metadata.clone();
+        fixture_dependency_mut(
+            fixture_package_mut(
+                &mut disabled_framing_defaults,
+                "reticulum-device-api-session",
+            ),
+            "reticulum-device-api-framing",
+            None,
+        )["uses_default_features"] = serde_json::Value::Bool(false);
+        assert!(
+            validate_device_api_edge_dependency_boundary(
+                &disabled_framing_defaults.to_string(),
+                &root,
+            )
+            .is_err(),
+            "session accepted framing dependency-shape drift"
+        );
+
+        let mut session_feature = metadata.clone();
+        fixture_package_mut(&mut session_feature, "reticulum-device-api-session")["features"]["std"] =
+            serde_json::json!([]);
+        assert!(
+            validate_device_api_edge_dependency_boundary(&session_feature.to_string(), &root)
+                .is_err()
+        );
+
+        let mut extra_session_dependency = metadata;
+        fixture_package_mut(
+            &mut extra_session_dependency,
+            "reticulum-device-api-session",
+        )["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(handoff_dependency_fixture("esp-hal", "=1.1.1", None));
+        assert!(
+            validate_device_api_edge_dependency_boundary(
+                &extra_session_dependency.to_string(),
                 &root,
             )
             .is_err()
@@ -9127,6 +9315,23 @@ mod tests {
     }
 
     fn device_api_edge_metadata_fixture(root: &Path) -> serde_json::Value {
+        let mut session_framing = handoff_path_dependency_fixture(
+            "reticulum-device-api-framing",
+            "*",
+            &root.join("crates/device-api-framing"),
+            None,
+        );
+        session_framing["uses_default_features"] = serde_json::Value::Bool(true);
+        let mut session_handoff = handoff_path_dependency_fixture(
+            "reticulum-device-api-handoff",
+            "*",
+            &root.join("crates/device-api-handoff"),
+            None,
+        );
+        session_handoff["uses_default_features"] = serde_json::Value::Bool(true);
+        let mut session_hex = handoff_dependency_fixture("hex", "=0.4.3", Some("dev"));
+        session_hex["uses_default_features"] = serde_json::Value::Bool(true);
+
         serde_json::json!({
             "packages": [
                 {
@@ -9149,6 +9354,28 @@ mod tests {
                             &root.join("crates/device-api"),
                             None,
                         ),
+                    ],
+                },
+                {
+                    "name": "reticulum-device-api-session",
+                    "source": null,
+                    "manifest_path": root.join("crates/device-api-session/Cargo.toml"),
+                    "features": {},
+                    "dependencies": [
+                        handoff_dependency_fixture("hkdf", "=0.12.4", None),
+                        handoff_dependency_fixture("hmac", "=0.12.1", None),
+                        handoff_dependency_fixture("rand_core", "=0.6.4", None),
+                        handoff_path_dependency_fixture(
+                            "reticulum-device-api",
+                            "*",
+                            &root.join("crates/device-api"),
+                            None,
+                        ),
+                        session_framing,
+                        session_handoff,
+                        handoff_dependency_fixture("sha2", "=0.10.9", None),
+                        handoff_dependency_fixture("zeroize", "=1.9.0", None),
+                        session_hex,
                     ],
                 },
             ],

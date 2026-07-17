@@ -45,7 +45,7 @@ impl ApiVersion {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RequestId(pub u64);
 
-/// Authenticated local-client principal supplied by the session layer.
+/// Authenticated local-client principal derived from device-owned authority.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct PrincipalId(pub [u8; 16]);
 
@@ -61,7 +61,7 @@ pub struct DestinationHash(pub [u8; 16]);
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SubmissionId(pub u64);
 
-/// Permissions established by an authenticated session, never by CBOR input.
+/// Permissions derived from device-owned authority, never from CBOR input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Permissions(u32);
 
@@ -96,7 +96,7 @@ impl BitOr for Permissions {
 /// Trusted authentication and authorization facts supplied out of band.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DispatchContext {
-    /// Principal authenticated by the local-session layer, if any.
+    /// Principal derived from device-owned authenticated credential state, if any.
     pub principal: Option<PrincipalId>,
     /// Permissions granted to that authenticated principal.
     pub permissions: Permissions,

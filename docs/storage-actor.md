@@ -7,9 +7,10 @@ orchestration with the same operation-scoped access. The E290 now hosts both in
 a resident sole-flash coordinator beside the transport-neutral node supervisor
 and composes the exact authorized-frame request/durable-echo handoff. That
 LoRa-first software composition and ADR 0005's interface-local active-owner
-fail-stop now pass cross-layer host tests. Portable API framing and job handoff
-are qualified; live external admission remains blocked only by session,
-firmware composition, and a bearer; integrated
+fail-stop now pass cross-layer host tests. Portable API framing, the
+qualification-session core, and job handoff are qualified; live external
+admission remains blocked only by the absent credential authority, firmware
+composition, and a bearer; integrated
 powered-fault qualification remains open.
 
 ## Ownership boundary
@@ -196,10 +197,10 @@ Remaining product work includes:
   only the canonical empty A1 programming trajectory and never erases; an
   existing identity uses strict mount only;
 - composition of the authenticated device-API adapter's target-safe
-  `SubmissionPort` with the implemented framing/handoff, sessions and
-  USB/BLE/Wi-Fi serving. `ProductStorageCoordinator` implements the semantic
-  port under a host-qualified one-entry composition cap, but no external lane
-  calls it;
+  `SubmissionPort` with the implemented framing/session/handoff, a credential
+  authority, and USB/BLE/Wi-Fi serving. `ProductStorageCoordinator` implements
+  the semantic port under a host-qualified one-entry composition cap, but no
+  external lane calls it;
 - an exact node-owner quiescence proof before projector-slot retirement, a
   quarantine release/suppression design, and an explicit response to the
   schema-1 journal's permanent retention, 162-submission lifetime limit, and

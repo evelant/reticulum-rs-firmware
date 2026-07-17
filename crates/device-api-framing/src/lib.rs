@@ -2,7 +2,7 @@
 //!
 //! The wire form is a zero-delimited COBS record. Its decoded body contains a
 //! fixed magic, version, record kind, reserved field, session ID, sequence,
-//! payload length, payload, and a fixed 32-byte authentication-tag slot. This
+//! payload length, payload, and a fixed 16-byte authentication-tag slot. This
 //! crate owns only byte framing. A session layer decides which record kinds are
 //! legal, constructs and verifies tags, enforces sequence policy, and mints an
 //! authenticated application grant.

@@ -1,6 +1,6 @@
 # ADR 0006: Authenticated local device-API bearer
 
-- **Status:** proposed
+- **Status:** accepted for the qualification session core; firmware bearer pending
 - **Date:** 2026-07-17
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0003](0003-lora-first-interface-fabric.md) and
@@ -99,10 +99,20 @@ channel and one depth-one reply channel. A boot-lifetime bearer manager retains
 the sole bearer role across all USB reconnects and authenticated session
 epochs. An ordinary disconnect does not drop this role.
 
+That manager constructs exactly one `SessionEpochAllocator` after boot and
+retains it while any node-side request or reply can exist. Every server
+handshake flight consumes the next epoch, including a flight that never
+authenticates, so reconnecting cannot reuse the `(epoch, correlation)` key of
+delayed work. Correlations restart at zero only under a newly allocated epoch.
+The allocator uses the final `u64` epoch once and then fails terminally; it
+never wraps. Reconstructing it during the same boot is a service-contract
+violation. Reboot clears the volatile handoff before a new allocator starts.
+
 The request owner carries:
 
 - a local session epoch and request correlation used only for reply routing;
-- an opaque authenticated grant minted from device-side credential state; and
+- an opaque authenticated grant containing credential ID/generation and
+  session routing facts, but no principal, permissions or PSK; and
 - the exact bounded logical API message.
 
 The node side receives the unique owner. Cancellation while waiting for
@@ -140,28 +150,91 @@ confirmed display/code/QR ceremony or an equivalent reviewed out-of-band
 binding. The qualification shortcut is not advertised as protection against a
 malicious process already controlling the connected host.
 
-Before session code is composed, v1 freezes deterministic encodings and test
-vectors for this transcript:
+`reticulum-device-api-session` freezes the qualification protocol implemented
+by both the allocation-free Rust server and the independent Python vector
+generator. Record kinds are `0x01` client hello, `0x02` server hello, `0x03`
+server proof, `0x04` client proof, `0x10` request, `0x11` response and `0x12`
+reserved authenticated close. No other kind is accepted.
 
-1. `ClientHello`: protocol/version, suite, credential ID and 32-byte client
-   nonce;
-2. `ServerHello`: selected version/suite, device ID, 32-byte device nonce,
-   credential generation and bounded limits/capabilities;
-3. a hash over both complete length-delimited messages;
-4. HKDF-SHA256 extraction from the per-client PSK with a transcript-bound
-   salt;
-5. distinct labelled expansion for server proof, client proof,
-   client-to-device key, device-to-client key and 128-bit session ID;
-6. server proof first, followed by a client proof bound to the transcript and
-   server proof; and
-7. no logical API admission before the client proof succeeds.
+The 56-byte `ClientHello` payload is:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 2 | protocol major `1`, little-endian |
+| 2 | 2 | protocol minor `0`, little-endian |
+| 4 | 2 | suite `1`, little-endian |
+| 6 | 1 | bearer binding (`1` = USB Serial/JTAG) |
+| 7 | 1 | reserved zero |
+| 8 | 16 | opaque credential ID |
+| 24 | 32 | fresh client nonce |
+
+The 76-byte `ServerHello` payload is:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 2 | selected major `1`, little-endian |
+| 2 | 2 | selected minor `0`, little-endian |
+| 4 | 2 | selected suite `1`, little-endian |
+| 6 | 1 | actual bearer binding |
+| 7 | 1 | reserved zero |
+| 8 | 16 | stable public device-API ID |
+| 24 | 32 | fresh device nonce |
+| 56 | 8 | credential generation, little-endian |
+| 64 | 2 | maximum record payload `512`, little-endian |
+| 66 | 2 | maximum logical message `512`, little-endian |
+| 68 | 1 | maximum in-flight requests `1` |
+| 69 | 3 | reserved zero |
+| 72 | 4 | flags `0x00000007`: qualification-only, integrity-only, device API |
+
+Both hello records use a zero session ID, sequence zero and zero framing tag.
+The transcript hash is SHA-256 over the exact domain
+`reticulum-rs-firmware/device-api/session/transcript/v1\0`, then the client
+record kind, little-endian `u16` payload length and complete client payload,
+then the server record kind, length and complete server payload. This binds
+every negotiable value and the message roles without binding COBS transport
+bytes.
+
+The HKDF extraction salt is SHA-256 of the exact
+`reticulum-rs-firmware/device-api/session/hkdf-salt/v1\0` domain plus the
+transcript hash. HKDF-SHA256 uses the 32-byte client PSK as input key material.
+Five independent expansions use the exact
+`reticulum-rs-firmware/device-api/session/hkdf-expand/v1\0` domain, a one-byte
+purpose (`1` server proof, `2` client proof, `3` client-to-device record, `4`
+device-to-client record, `5` session ID), and the transcript hash. The first
+four outputs are 32 bytes; the session ID is 16 bytes.
+
+The server proof is the full HMAC-SHA256 of the exact
+`reticulum-rs-firmware/device-api/session/server-proof/v1\0` domain plus
+transcript hash. The client proof is the full HMAC-SHA256 of the exact
+`reticulum-rs-firmware/device-api/session/client-proof/v1\0` domain, transcript
+hash and server proof. Proofs occupy their 32-byte record payloads; those
+records carry the derived session ID, sequence zero and a zero framing-tag
+slot. A logical API record is not admitted until the client proof verifies.
+
+Established sequences begin at zero independently in each direction. A record
+tag is the leftmost 16 bytes of HMAC-SHA256 over the exact
+`reticulum-rs-firmware/device-api/session/client-to-device-record/v1\0` or
+`reticulum-rs-firmware/device-api/session/device-to-client-record/v1\0` domain
+plus `Record::write_authenticated_data`, which contains the full canonical
+34-byte header and valid payload. Independent keys and domains prevent
+reflection. The server accepts only the exact next request sequence and permits
+only one in-flight request. Reply typestate retains the session and reserves
+its TX sequence until every framed byte is acknowledged. Dropping a partial
+flight drops the session, so a possibly transmitted sequence is never reused.
+
+The complete non-secret known-answer inputs, intermediate keys, proofs, decoded
+records and COBS wire bytes are committed in
+[`interop/vectors/device-api-session-v1.json`](../../interop/vectors/device-api-session-v1.json)
+and independently regenerated by
+`interop/python/generate_device_api_session_vectors.py`.
 
 Every negotiable value is transcript-bound. Unsupported versions or suites
 fail closed with no unauthenticated fallback. Directional record sequences
 start at zero and accept only the exact next value. Duplicate, gap, overflow,
 reflection, bad tag or wrong session ID terminates the session. Proof and tag
 comparison is constant-time, session key material is zeroized where practical,
-and authentication attempts are rate-limited.
+and the future bearer manager must enforce handshake timeout and attempt-rate
+policy around this core.
 
 The first wired qualification suite may use HKDF-SHA256 plus
 HMAC-SHA256 truncated to the fixed 128-bit record tag. That suite provides
@@ -174,8 +247,13 @@ data and disables any downgrade to the qualification-only suite. The fixed
 
 ### Bind authorization at durable acceptance
 
-Immediately before accepting a state-changing request, the node/storage owner
-revalidates the credential generation and required permission. Durable
+Immediately before dispatching every authenticated request, the node/storage
+owner revalidates the grant's credential ID and generation and derives a fresh
+device-owned `DispatchContext`. Public logical operations such as
+`system.capabilities` require no operation permission, but they still cross an
+authenticated bearer session; “public” does not mean unauthenticated wire
+access. Immediately before accepting a state-changing request, the same
+serialized owner revalidates the required permission. Durable
 acceptance records the principal, authorized operation/policy snapshot and a
 principal-scoped idempotency key. Revocation or disconnect prevents work not
 yet accepted but does not undo an already accepted mutation.
@@ -205,23 +283,33 @@ physical attacker and must not be described as tamper-resistant.
 - The authentication-only lab suite is a deliberate qualification aid, not the
   final confidentiality story for LXMF or administration.
 
-## Required validation before acceptance
+## Validation status and remaining bearer gates
 
-- Deterministic handshake, key-schedule and record-tag interoperability
-  vectors from an independent host implementation.
-- Negative replay, reflection, downgrade, wrong-generation, reset, sequence
-  gap/duplicate/overflow and bad-tag vectors.
+- Complete: deterministic handshake, key-schedule, proof, record-tag and COBS
+  interoperability vectors from an independent Python implementation.
+- Complete in the portable core: reflection, downgrade, wrong-generation,
+  reset-nonce, sequence gap/duplicate/overflow, wrong-session and bad-tag
+  rejection, partial hello/proof/reply acknowledgement typestate, exact
+  correlation matching and old-reply/new-session epoch-alias rejection.
+- Remaining: malformed established-stream policy and logical-CBOR validation in
+  the bearer manager.
 - Pairing timeout, exclusive-window, revoke, rotate and factory-reset tests.
-- Cancellation at every partial RX/TX, request admission and reply boundary.
-- Exact stale-reply draining and idempotent retry after disconnect.
-- RISC-V and ESP32-S3 `no_std` checks, strict Clippy/rustdoc and static memory
-  accounting.
+- Remaining: cancellation at the concrete USB RX/TX, request-admission and
+  reply-channel boundaries.
+- Remaining: concrete stale-reply channel draining and idempotent retry after
+  disconnect.
+- Complete: RISC-V and ESP32-S3 `no_std` checks and strict Clippy/rustdoc.
+- Remaining: static memory accounting in the composed bearer task.
 - Powered USB reconnect tests on macOS, Linux and Windows without corrupting
   LoRa scheduling or durable storage.
 
 ## Deferred decisions
 
 This ADR does not select the production AEAD construction, implement the
-credential journal, define a USB OTG composite descriptor, add WebUSB/NCM, or
-create any non-LoRa Reticulum packet actor. Those decisions do not block the
-first authenticated USB-to-LoRa qualification path.
+credential journal/authority, choose pairing timeouts and attempt-rate limits,
+compose the USB bearer manager, define a USB OTG composite descriptor, add
+WebUSB/NCM, or create any non-LoRa Reticulum packet actor. Credential authority,
+qualification pairing/rate policy and the USB bearer manager are still required
+before the authenticated USB-to-LoRa qualification path can run. Production
+AEAD and the later transport/interface decisions are not prerequisites for that
+explicitly integrity-only wired lab profile.

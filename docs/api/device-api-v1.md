@@ -5,10 +5,12 @@ narrow durable-submission port. This document freezes the operation and field
 numbers exercised by `reticulum-device-api`; `reticulum-device-api-adapter`
 implements capabilities and principal-scoped status in its default build plus
 target-safe durable experimental outbound RNS DATA submission behind an explicit
-feature. Separate portable framing and boot-lifetime authenticated-job handoff
-crates now exist, but no session or firmware bearer is implemented here; a
-product port may route an accepted submission through the node after the durable
-barriers.
+feature. Separate portable framing, USB-qualification session and boot-lifetime
+authenticated-job handoff crates now exist. The session core emits only a
+credential ID/generation grant; a still-unimplemented credential authority must
+revalidate it and derive `DispatchContext`. No firmware bearer is composed yet;
+a product port may route an accepted submission through the node after the
+durable barriers.
 
 ## Boundary
 
@@ -22,8 +24,9 @@ codec, and a small common authorization policy. It does not contain:
 - raw/direct-radio-TX authorization or access to a radio driver.
 
 Transport framing, job handoff and authenticated session establishment are
-separate layers. Those layers decode a message and supply a trusted
-`DispatchContext` separately.
+separate layers. They decode and carry the message plus a session-minted
+credential reference. A device-owned credential authority must revalidate that
+reference and separately derive the trusted `DispatchContext`.
 No principal, permission, or session assertion is accepted from CBOR input.
 
 `reticulum-device-api-adapter` is the separate allocation-free `no_std`
@@ -251,9 +254,10 @@ inaccessible until an opaque permit exchange produces `AuthorizedTx`, whose
 `frame(now)` accessor is one-shot and exact-deadline checked. A standalone
 bounded async handoff carries these typestates, and the portable projector
 models their persist-before-ack observations. The E290 host composition test
-exercises that API-to-runtime-to-router-to-LoRa software path; portable framing
-and job handoff are implemented separately, while external live admission still
-requires session establishment, firmware composition, and a bearer.
+exercises that API-to-runtime-to-router-to-LoRa software path; portable framing,
+qualification-session establishment, and job handoff are implemented
+separately, while external live admission still requires credential
+revalidation, firmware composition, and a bearer.
 
 Successful experimental response body:
 
@@ -322,8 +326,10 @@ Authentication, ownership filtering, rate limiting, idempotency scope, physical
 presence, and high-assurance session encryption are not solved by this codec.
 The portable adapter scopes status and experimental-operation idempotency by the
 principal from `DispatchContext`, never by bytes supplied in a request. The
-future session runtime must establish that context, enforce connection-level
-rate limits, and keep its authentication state outside request CBOR.
+portable session core deliberately emits only a credential ID/generation grant;
+a future credential-backed firmware runtime must revalidate it, establish the
+dispatch context, enforce connection-level rate limits, and keep authentication
+state outside request CBOR.
 
 ## Golden vectors
 
@@ -394,18 +400,25 @@ physical transport:
 ```sh
 cargo test --locked \
   -p reticulum-device-api-framing \
-  -p reticulum-device-api-handoff
+  -p reticulum-device-api-handoff \
+  -p reticulum-device-api-session
 cargo clippy --locked --all-targets \
   -p reticulum-device-api-framing \
-  -p reticulum-device-api-handoff -- -D warnings
+  -p reticulum-device-api-handoff \
+  -p reticulum-device-api-session -- -D warnings
 cargo check --locked \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-handoff \
+  -p reticulum-device-api-session \
   --target riscv32imac-unknown-none-elf
 cargo +esp check --locked \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-handoff \
+  -p reticulum-device-api-session \
   --target xtensa-esp32s3-none-elf
+python3 interop/python/generate_device_api_session_vectors.py --check
+PYTHONPATH=interop/python python3 -m unittest -v \
+  interop/python/test_device_api_session_vectors.py
 ```
 
 These checks pass. The dependency-only experimental profile proves feature
@@ -415,5 +428,8 @@ request context, version/capability behavior, principal isolation, every durable
 lifecycle mapping, maximum-size owned-payload acceptance/replay/conflict,
 acceptance across remount, stable capacity and identifier-exhaustion errors,
 faulted and pending status gating, wrong-binding rejection without I/O, and
-lost-write reconciliation. Target checks exercise the experimental operation
-directly on a `no_std` bare-metal build.
+lost-write reconciliation. The session tests and independent Python vectors
+cover canonical hello/proof derivation, direction-separated record tags,
+downgrade/reflection/replay/generation/reset failures, exact sequence policy and
+partial-write typestate. Target checks exercise the portable layers directly on
+`no_std` bare-metal builds.

@@ -38,6 +38,7 @@ cargo check --locked \
   -p reticulum-device-api \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-handoff \
+  -p reticulum-device-api-session \
   -p reticulum-node-core \
   -p reticulum-storage-model \
   -p reticulum-submission-projector \
@@ -56,6 +57,7 @@ cargo +esp check --locked \
   -p reticulum-device-api \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-handoff \
+  -p reticulum-device-api-session \
   -p reticulum-node-core \
   -p reticulum-board-heltec-vision-master-e290 \
   -p reticulum-storage-model \
@@ -322,7 +324,8 @@ five appends, mutation-free retry/conflict, B2 compaction, and zero-mutation B2
 replay after software reset. That image calls the journal directly and does not
 qualify the actor on hardware. Controlled power cuts, endurance/soak, at-rest
 encryption, the permanent Embassy actor task, product `esp-storage` adapter,
-boot service gating, device-API session/credential/bearer composition, and runtime
+boot service gating, device-API credential authority plus framing/session/
+handoff/bearer composition, and runtime
 flash/watchdog/OTA/radio coordination remain open. Permanent firmware must
 drive boot recovery for every replayed submission before service enablement.
 RNS ingress/tick now reach the sole portable owner, but timed RNode reassembly and

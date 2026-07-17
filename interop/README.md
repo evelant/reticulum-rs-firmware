@@ -31,6 +31,27 @@ uses a fresh ephemeral key and IV, so byte equality would not be reproducible.
 Separate semantic tests will decrypt Python ciphertext and encrypt Rust data
 for Python as the Link/Resource lanes are added.
 
+## Local device-API session lane
+
+`vectors/device-api-session-v1.json` freezes the non-secret inputs, exact hello
+encodings, transcript hash, HKDF outputs, full proofs, direction-separated
+record tags and COBS wire records for the USB Serial/JTAG qualification suite.
+Its generator uses only Python's standard-library SHA-256 and HMAC and imports
+no Rust, Rete or Reticulum implementation. Check both the committed corpus and
+the independent mutation tests with:
+
+```sh
+python3 interop/python/generate_device_api_session_vectors.py --check
+PYTHONPATH=interop/python python3 -m unittest -v \
+  interop/python/test_device_api_session_vectors.py
+cargo test --locked -p reticulum-device-api-session
+```
+
+These are deterministic software vectors. They do not claim that a USB bearer,
+credential authority or permanent E290 firmware composition exists yet. Suite
+1 authenticates and integrity-protects records but deliberately does not hide
+their payloads; it is forbidden on BLE and Wi-Fi.
+
 ## Phase-1 RNode receive lane
 
 `vectors/rnode-hil-v1.json` is the deterministic schema-3 receive corpus for

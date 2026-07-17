@@ -7,9 +7,10 @@ authenticated device-API dispatch implemented; resident E290 operation-scoped
 flash/runtime coordinator implemented; isolated powered journal clean-path/
 software-reset HIL passed on board E9:44; the 25-test E290 host suite qualifies
 the one-entry complete LoRa-first software composition and ADR 0005 active-owner
-fail-stop. Portable API framing and the boot-lifetime job handoff are qualified;
-live external admission remains blocked by the absent session/credential owner,
-firmware composition, and bearer. Controlled power-cut durability, projector
+fail-stop. Portable API framing, the USB-qualification session core, and the
+boot-lifetime job handoff are qualified; live external admission remains
+blocked by the absent credential authority, firmware composition, and bearer.
+Controlled power-cut durability, projector
 retirement, journal retention, endurance/soak, and at-rest encryption remain
 unqualified.
 
@@ -74,9 +75,13 @@ evidence.
 
 ```mermaid
 flowchart LR
-    Client["authenticated local client"] --> Bearer["USB bearer + session (not implemented)"]
-    Bearer --> Edge["portable framing + job handoff (implemented)"]
-    Edge --> API["portable authenticated API adapter (implemented)"]
+    Client["authenticated local client"] --> Bearer["USB bearer (not implemented)"]
+    Bearer --> Framing["portable framing (implemented)"]
+    Framing --> Session["portable qualification session (implemented, not composed)"]
+    Session --> Handoff["portable job handoff (implemented)"]
+    Handoff --> API["portable authenticated API adapter (implemented)"]
+    Authority["credential authority (not implemented)"] --> Session
+    Authority --> API
     API -. "firmware composition absent" .-> Runtime["resident portable submission runtime"]
     Coordinator["E290 sole-flash coordinator (resident)"] <--> Runtime
     Runtime <--> Store["portable sole storage actor (implemented)"]
@@ -116,9 +121,9 @@ timers, and `NodeInterfaceSupervisor`, with at most one runtime drive attempt
 per outer loop. The concrete LoRa dispatcher remains a separate actor.
 
 The current E290 profile permits one accepted-history entry solely for host
-composition qualification; that is not product capacity, and no external API
-job/session/bearer admission edge exists. Journal strict-mount, supported-
-history, or recovery failure during
+composition qualification; that is not product capacity, and no credential-
+backed external API firmware lane or bearer is composed. Journal strict-mount,
+supported-history, or recovery failure during
 boot therefore occurs before a durability-gated DATA owner can exist; it leaves
 the coordinator resident without a submission runtime, keeps local durable
 service closed, and permits route-only LoRa to continue. Flash-map, identity,
@@ -296,8 +301,8 @@ The projector cross-checks the preparation and authorized-byte digests and
 lengths; repeated fan-out observations are idempotent only when all durable
 packet metadata is identical. The E290 composition implements this ownership
 path under a host-qualified one-entry cap. Production remains externally
-unreachable only because no session/credential owner, firmware lane, or bearer
-is composed.
+unreachable only because no credential authority, firmware lane, or bearer is
+composed around the portable session core.
 
 Terminal outcomes map as follows:
 
@@ -485,10 +490,10 @@ LXMF/NomadNet/UI services without redefining the durable protocol.
    the wrong-binding post-frame `ActiveOwnerFailStopped` path with queued
    ordinary work and no later host-radio operation. The one-entry cap is a
    qualified composition profile, not product capacity.
-4. Compose the implemented framing and boot-lifetime job handoff between the
-   authenticated device-API adapter and runtime, then add sessions,
-   authorization provisioning, and a firmware USB bearer. Those are the only
-   missing edges for live external admission.
+4. Compose the implemented framing, qualification-session core, and boot-
+   lifetime job handoff between the authenticated device-API adapter and
+   runtime, then add credential authority/provisioning and a firmware USB
+   bearer. Those are the only missing edges for live external admission.
    Keep the local client API distinct from the node's Reticulum interface
    selection. No second interface is required; later Reticulum transports use
    the same transport-neutral runtime and router contract.

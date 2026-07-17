@@ -8,10 +8,11 @@
 //! about USB, BLE, Wi-Fi, framing, storage, Reticulum, or radios.
 //!
 //! The request's `G` parameter is the session layer's opaque authenticated
-//! grant. A session implementation can therefore keep the grant's principal
-//! and permission fields private and make the grant non-cloneable. This crate
-//! neither constructs nor interprets it; it transfers the exact grant to the
-//! node owner with the encoded request.
+//! grant. A session implementation can therefore make the grant non-cloneable
+//! and carry only a device-minted authorization reference rather than
+//! client-supplied principal or permission data. This crate neither constructs
+//! nor interprets it; it transfers the exact grant to the node owner with the
+//! encoded request.
 //!
 //! Awaiting capacity never moves an owner into a future. The caller retains
 //! the exact request or reply across cancellation, then uses `try_send`

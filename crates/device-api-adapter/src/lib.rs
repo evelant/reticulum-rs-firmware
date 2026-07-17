@@ -1,11 +1,11 @@
 //! Authenticated device-API dispatch over a narrow durable-submission port.
 //!
 //! This adapter performs no framing, session establishment, allocation, radio
-//! work, raw flash access, or journal construction. It authorizes trusted
-//! session context, scopes status reads by principal, and passes one complete
-//! owned acceptance candidate through [`SubmissionPort`] only after an
-//! authorized mutation. The port retains all actor, journal, and backend
-//! ownership.
+//! work, raw flash access, or journal construction. It authorizes a trusted
+//! device-owned dispatch context, scopes status reads by principal, and passes
+//! one complete owned acceptance candidate through [`SubmissionPort`] only
+//! after an authorized mutation. The port retains all actor, journal, and
+//! backend ownership.
 
 #![no_std]
 #![forbid(unsafe_code)]

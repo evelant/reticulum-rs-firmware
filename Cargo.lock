@@ -1688,6 +1688,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "reticulum-device-api-session"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "hkdf",
+ "hmac",
+ "rand_core 0.6.4",
+ "reticulum-device-api",
+ "reticulum-device-api-framing",
+ "reticulum-device-api-handoff",
+ "sha2",
+ "zeroize",
+]
+
+[[package]]
 name = "reticulum-device-identity-store"
 version = "0.1.0"
 dependencies = [

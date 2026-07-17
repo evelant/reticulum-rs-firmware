@@ -92,9 +92,9 @@ interface roles in persistent state. It has no direct device-API, executor,
 clock, TX-capable driver/HAL, or firmware dependency; node-core's transitive
 Rete closure contains no radio, RNode, LoRa or board crate. The separate
 `reticulum-rns-rete-rx` vertical-slice adapter owns physical RNode receive and
-reassembly. A future local-session
-dispatcher is a different boundary: it will depend on both node-core and
-device-api and map their types explicitly.
+reassembly. The implemented portable local-session core remains a different
+boundary; a future credential-backed firmware dispatcher will depend on both
+node-core and device-api and map their types explicitly.
 
 `reticulum-tx-supervisor` is a separate portable edge. Its production
 `NodeInterfaceSupervisor` owns one exact node-core, the authoritative interface
@@ -580,7 +580,8 @@ the coordinator. The remaining product work at this boundary is:
    and keeps protocol-monotonic deadlines separate from the 40-bit local
    announce-emission order. Powered reset and power-cut evidence remains open.
 3. Connect the implemented authenticated device-API adapter to USB framing,
-   sessions and the permanent actor task; drive the model's conservative boot
+   the qualification-session core and the permanent actor task, adding a
+   credential authority; drive the model's conservative boot
    recovery and node observations through the actor's narrow projector methods;
    and add a proved safe retirement condition for bounded volatile projector
    slots without attempting to persist leases or mutable references.
