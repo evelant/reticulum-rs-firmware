@@ -36,9 +36,13 @@ implemented. E290 boot maps only its canonical recoverable trajectory to an
 explicit disabled state. This bootstrap is not an authenticated session and
 does not dispatch the logical API documented here. Its status and physical-
 presence-required path has run on both boards, but a successful button-confirmed
-initialization and post-write readback remain open. Live
-Begin, Proof, Activate, and Abort mutation plus the external authenticated API/
-session firmware lane remain unimplemented. A product port may route an
+initialization and post-write readback remain open. ADR 0010's separate
+allocation-free live-pairing core now freezes Begin, ProofStart, Activate and
+AbortCurrent records, typed continuation/reference binding, HMAC-SHA256 proof
+and activation confirmation, secret-owner zeroization, and independent Python
+vectors. E290 durable lifecycle mutation, entropy, secret-bearing handoff, and
+the external authenticated API/session firmware lane remain unimplemented. A
+product port may route an
 accepted submission through the node after the durable barriers.
 
 ## Boundary
@@ -469,6 +473,7 @@ cargo test --locked \
   -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-pairing-control \
+  -p reticulum-device-api-pairing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session
 cargo clippy --locked --all-targets \
@@ -476,6 +481,7 @@ cargo clippy --locked --all-targets \
   -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-pairing-control \
+  -p reticulum-device-api-pairing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session -- -D warnings
 cargo check --locked \
@@ -483,6 +489,7 @@ cargo check --locked \
   -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-pairing-control \
+  -p reticulum-device-api-pairing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
   --target riscv32imac-unknown-none-elf
@@ -491,12 +498,15 @@ cargo +esp check --locked \
   -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-pairing-control \
+  -p reticulum-device-api-pairing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
   --target xtensa-esp32s3-none-elf
 python3 interop/python/generate_device_api_session_vectors.py --check
 PYTHONPATH=interop/python python3 -m unittest -v \
   interop/python/test_device_api_session_vectors.py
+python3 interop/python/generate_device_api_pairing_vectors.py --check
+python3 interop/python/test_device_api_pairing_vectors.py
 ```
 
 These checks pass. The dependency-only experimental profile proves feature
@@ -506,11 +516,13 @@ request context, version/capability behavior, principal isolation, every durable
 lifecycle mapping, maximum-size owned-payload acceptance/replay/conflict,
 acceptance across remount, stable capacity and identifier-exhaustion errors,
 faulted and pending status gating, wrong-binding rejection without I/O, and
-lost-write reconciliation. The session tests and independent Python vectors
-cover canonical hello/proof derivation, direction-separated record tags,
-downgrade/reflection/replay/generation/reset failures, exact sequence policy and
-partial-write typestate. Target checks exercise the portable layers directly on
-`no_std` bare-metal builds.
+lost-write reconciliation. The session and live-pairing tests plus their
+independent Python vectors cover canonical hello/proof derivation, direction-
+separated record tags, downgrade/reflection/replay/generation/reset failures,
+exact sequence policy, partial-write typestate, every pairing flight and
+transcript byte, substituted continuations, activation confirmation, malformed
+shapes, and secret-owner drop behavior. Target checks exercise the portable
+layers directly on `no_std` bare-metal builds.
 
 The separate permanent-E290 composition gate now passes 83 host-library tests
 plus strict host/target review and release-link checks. It covers the third USB/

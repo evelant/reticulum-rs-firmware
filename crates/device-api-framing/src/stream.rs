@@ -1,5 +1,7 @@
 //! Streaming synchronization, decoded ownership, and partial-TX cursor.
 
+use zeroize::{Zeroize, Zeroizing};
+
 use crate::{
     DECODED_RECORD_CAPACITY, Record, RecordDecodeError,
     cobs::{self, DecodeError as CobsDecodeError},
@@ -85,8 +87,7 @@ impl StreamDecoder {
         }
 
         let encoded_length = self.encoded_length;
-        self.encoded_length = 0;
-        match cobs::decode(&self.encoded[..encoded_length], &mut self.decoded) {
+        let event = match cobs::decode(&self.encoded[..encoded_length], &mut self.decoded) {
             Ok(decoded_length) => match Record::decode(&self.decoded[..decoded_length]) {
                 Ok(record) => DecodeEvent::Record(record),
                 Err(error) => DecodeEvent::MalformedRecord(error),
@@ -96,13 +97,14 @@ impl StreamDecoder {
                 | CobsDecodeError::TruncatedBlock
                 | CobsDecodeError::OutputTooSmall,
             ) => DecodeEvent::MalformedCobs,
-        }
+        };
+        self.reset_record();
+        event
     }
 
     /// Discard a partial record and require a fresh leading delimiter.
     pub fn reset(&mut self) {
-        self.synchronized = false;
-        self.reset_record();
+        self.zeroize();
     }
 
     /// Whether the decoder has observed a leading delimiter.
@@ -113,6 +115,26 @@ impl StreamDecoder {
     fn reset_record(&mut self) {
         self.overflowed = false;
         self.encoded_length = 0;
+        self.encoded.zeroize();
+        self.decoded.zeroize();
+    }
+
+    #[cfg(test)]
+    pub(super) fn scratch_is_zeroed(&self) -> bool {
+        self.encoded.iter().all(|byte| *byte == 0) && self.decoded.iter().all(|byte| *byte == 0)
+    }
+}
+
+impl Zeroize for StreamDecoder {
+    fn zeroize(&mut self) {
+        self.synchronized = false;
+        self.reset_record();
+    }
+}
+
+impl Drop for StreamDecoder {
+    fn drop(&mut self) {
+        self.zeroize();
     }
 }
 
@@ -156,9 +178,9 @@ pub struct FramedRecord {
 impl FramedRecord {
     /// Encode one decoded record into a zero-prefixed and zero-suffixed COBS owner.
     pub fn encode(record: &Record) -> Result<Self, FrameEncodeError> {
-        let mut decoded = [0_u8; DECODED_RECORD_CAPACITY];
+        let mut decoded = Zeroizing::new([0_u8; DECODED_RECORD_CAPACITY]);
         let decoded_length = record.write_decoded(&mut decoded);
-        let mut bytes = [0_u8; WIRE_RECORD_CAPACITY];
+        let mut bytes = Zeroizing::new([0_u8; WIRE_RECORD_CAPACITY]);
         bytes[0] = 0;
         let encoded_length = cobs::encode(
             &decoded[..decoded_length],
@@ -170,7 +192,7 @@ impl FramedRecord {
         Ok(Self {
             length,
             offset: 0,
-            bytes,
+            bytes: *bytes,
         })
     }
 
@@ -216,5 +238,17 @@ impl FramedRecord {
     /// Total encoded wire length.
     pub const fn length(&self) -> usize {
         self.length
+    }
+}
+
+impl Zeroize for FramedRecord {
+    fn zeroize(&mut self) {
+        self.bytes.zeroize();
+    }
+}
+
+impl Drop for FramedRecord {
+    fn drop(&mut self) {
+        self.zeroize();
     }
 }

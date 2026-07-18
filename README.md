@@ -346,6 +346,14 @@ zero-tag status and explicit-initialization records plus their coarse public
 results. It depends only on the COBS framing crate; sequence ordering, replay,
 connection ownership, physical presence, task handoff, and flash mutation stay
 outside the codec.
+ADR 0010 now freezes the separate live Begin/ProofStart/Activate/AbortCurrent
+protocol. Its allocation-free `no_std` core owns the exact fixed record layouts,
+typed credential-reference continuation, HMAC-SHA256 transcript and mutual
+activation confirmation while zeroizing PSKs, challenges, proofs, decoded
+records, framing scratch, and encoded frames. Independent standard-library
+Python vectors fix all eight successful COBS flights and both proof domains.
+The core remains intentionally outside every product graph until the E290 sole
+credential owner composes its durable lifecycle and secret-bearing handoff.
 The feature-free pairing policy is now a permanent E290 dependency only, and a
 resident `CredentialRuntime` inside `ProductStorageCoordinator` privately
 retains that policy, the exact boot binding, any mounted authority, and any
@@ -478,17 +486,19 @@ The DATA router, both permit-only services and permanent aggregate are now
 connected to the dispatcher, sole-Rete owner, timed RNode RX and one E290 LoRa
 actor in the first permanent build-verified target. Its exact authorized-frame
 durability handoff and ADR 0005 active-owner fail-stop now pass cross-layer host
-composition tests. Live external admission is blocked by credential
-initialization invocation and live pairing lifecycle composition, the external
-API/session firmware lane, and a bearer—not by credential-store boot composition
-or another semantic authority, session-crypto, durability-policy, partition, or
-cap decision. The feature-free ADR 0009 admission policy, resident
+composition tests. Live external admission is blocked by successful powered
+credential initialization, live pairing lifecycle composition, and the
+authenticated API/session firmware lane—not by credential-store boot
+composition, the frozen pairing/session cryptography, another semantic
+authority, durability policy, partition, or capacity decision. The feature-free
+ADR 0009 admission policy, resident
 initialization owner, and sole-owner physical drive are compiled only into the
-permanent E290 graph. The next software slice must compose the featureless
-pre-authentication codec with debounced physical presence, the USB byte owner,
-and a bounded command/reply handoff, then compose live Begin, Proof,
-Activate, and Abort ownership before the credential-backed USB-to-LoRa edge,
-durable configuration/message hosting, and client delivery.
+permanent E290 graph. The pre-authentication initialization codec, debounced
+physical presence, USB byte owner, and bounded command/reply handoff are already
+composed. The next software slice must join the frozen live-pairing core to
+typed Add/Activate/Abort store ownership, bounded entropy, cross-store
+exclusion, and a secret-bearing reply handoff before the credential-backed
+USB-to-LoRa edge, durable configuration/message hosting, and client delivery.
 The node-side routing
 boundary remains interface-neutral so additional Reticulum links can be added
 later through adapters without rewriting the LoRa actor or protocol owner; no
@@ -508,6 +518,7 @@ second transport is required to qualify the first LoRa vertical slice.
 - [Device-API credential authority decision](docs/adr/0007-device-api-credential-authority.md)
 - [Durable authorization provenance decision](docs/adr/0008-durable-authorization-provenance.md)
 - [Device-API credential store and pairing decision](docs/adr/0009-device-api-credential-store-and-pairing.md)
+- [Wired developer pairing protocol](docs/adr/0010-device-api-live-pairing-protocol.md)
 - [Transport-neutral interface registry and router](docs/interface-router.md)
 - [Phase-0 validation contract](docs/phase-0-acceptance.md)
 - [Phase-1 receive-only slice](docs/phase-1-rx-slice.md)
@@ -550,6 +561,9 @@ cargo test --locked -p reticulum-device-api --features experimental-rns-data
 cargo test --locked -p reticulum-device-api-adapter \
   --features experimental-rns-data
 python3 interop/python/generate_device_api_session_vectors.py --check
+python3 interop/python/test_device_api_session_vectors.py
+python3 interop/python/generate_device_api_pairing_vectors.py --check
+python3 interop/python/test_device_api_pairing_vectors.py
 cargo run --locked -p reticulum-conformance-rete
 cargo check --locked \
   -p reticulum-rns-conformance \
@@ -561,6 +575,7 @@ cargo check --locked \
   -p reticulum-device-api-pairing-policy \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-pairing-control \
+  -p reticulum-device-api-pairing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
   -p reticulum-node-core \
@@ -586,6 +601,7 @@ cargo +esp check --locked \
   -p reticulum-device-api-pairing-policy \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-pairing-control \
+  -p reticulum-device-api-pairing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
   -p reticulum-node-core \

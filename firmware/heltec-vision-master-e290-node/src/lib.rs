@@ -35,6 +35,17 @@ pub const fn storage_device_id_from_eui48(mac: [u8; 6]) -> StorageDeviceId {
     ])
 }
 
+/// Derive the stable public device-API identifier from the E290 eFuse MAC.
+///
+/// This namespace is intentionally distinct from the physical flash binding.
+/// Pairing and authenticated-session transcripts use these exact 16 bytes.
+pub const fn device_api_id_from_eui48(mac: [u8; 6]) -> [u8; 16] {
+    [
+        b'e', b'2', b'9', b'0', b'-', b'a', b'p', b'i', b'-', b'1', mac[0], mac[1], mac[2], mac[3],
+        mac[4], mac[5],
+    ]
+}
+
 /// Bind the physical journal layout to one coordinator-owned storage device.
 pub const fn node_journal_binding(device: StorageDeviceId) -> JournalBinding {
     JournalBinding::new(
@@ -79,8 +90,8 @@ mod tests {
     extern crate std;
 
     use crate::{
-        api_credentials_binding, config, node_journal_binding, partition_contract,
-        storage_device_id_from_eui48,
+        api_credentials_binding, config, device_api_id_from_eui48, node_journal_binding,
+        partition_contract, storage_device_id_from_eui48,
     };
     use reticulum_node_core::{NodeConfig, NodeCore, NodeIdentity, NodeInstanceId};
 
@@ -126,6 +137,10 @@ mod tests {
         );
         let device = storage_device_id_from_eui48([0xac, 0xa7, 0x04, 0xe1, 0x3e, 0x88]);
         assert_eq!(device.as_bytes(), b"e290-flash\xac\xa7\x04\xe1\x3e\x88");
+        assert_eq!(
+            device_api_id_from_eui48([0xac, 0xa7, 0x04, 0xe1, 0x3e, 0x88]),
+            *b"e290-api-1\xac\xa7\x04\xe1\x3e\x88"
+        );
         let binding = node_journal_binding(device);
         assert_eq!(binding.device(), device);
         assert_eq!(binding.absolute_offset(), 0x0063_0000);

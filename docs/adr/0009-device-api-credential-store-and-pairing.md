@@ -6,8 +6,9 @@
   E290 forward-only initialization runtime/sole-owner port implemented; the
   E290 USB Serial/JTAG pre-authentication initialization bearer, GPIO21
   physical-presence sampler, and depth-one task handoff are host-, target-, and
-  bounded-powered-control verified; live authenticated lifecycle mutation/
-  session service and successful button-confirmed initialization remain pending
+  bounded-powered-control verified; ADR 0010 live-pairing wire/crypto core and
+  independent vectors implemented; E290 authenticated lifecycle mutation,
+  session service, and successful button-confirmed initialization remain pending
 - **Date:** 2026-07-18
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0004](0004-sole-flash-coordinator.md),
@@ -28,7 +29,10 @@ Serial/JTAG task owns byte framing and debounced GPIO21 observations, and a
 depth-one command/reply handoff invokes the sole flash coordinator through the
 node task. This permits only coarse status and explicit empty-store
 initialization; authenticated pairing still needs live lifecycle mutation
-over one device-owned authority that survives power loss. Pairing
+over one device-owned authority that survives power loss. ADR 0010 now freezes
+the separate Begin/ProofStart/Activate/AbortCurrent records, typed continuation,
+HMAC transcript and activation confirmation; this ADR still owns the durable
+policy/store integration. Pairing
 must not publish a secret-bearing authority before its physical commit is
 established, and an empty or erased store must not silently create a trust
 relationship.
@@ -443,9 +447,11 @@ boundary includes:
 - live Begin/Proof/Activate/Abort ownership that retains each typed physical
   successor until definite reconciliation; initialization permit retention and
   forward-only erased/interrupted recovery are already resident;
-- entropy, unique-ID/PSK allocation and collision handling; exact pairing wire
-  records, challenge/HMAC transcript domains, proof verification, response
-  delivery, COBS/log separation, and secret zeroization;
+- bounded entropy, unique-ID/PSK allocation and collision handling; E290 proof
+  operation ownership, response delivery, COBS/log separation, and
+  secret-bearing task handoff. Exact wire records, challenge/HMAC domains,
+  proof verification and project-owned codec/framing zeroization are complete
+  in ADR 0010's portable core;
 - sole-flash lifecycle mutation beyond empty initialization, trusted-fact
   rechecks, ambiguous-result and power-cut reconciliation, and powered hardware
   qualification. USB suspend/resume behavior still requires powered host-matrix
@@ -535,6 +541,14 @@ but cannot claim security from the developer USB trust shortcut.
   session/tag requirements, payload shapes, unknown-code rejection, and framing
   fault ownership. Its featureless graph reaches only framing and is composed
   only into the permanent E290 product, not a legacy product or HIL graph.
+- Complete in the portable live-pairing slice: ADR 0010's 13 unit tests, four
+  compile-fail doctests and five independent Python tests freeze all eight
+  successful flights, fixed payloads and result vocabularies, COBS bytes,
+  transcript/proof/confirmation KATs, every transcript-bound byte and role,
+  substituted-reference rejection, and secret-owner drop behavior. Strict
+  host, generic bare-metal and ESP32-S3 Xtensa gates pass. The core remains
+  forbidden from product/HIL graphs until this ADR's E290 lifecycle ownership
+  is composed.
 - Complete as E290 host/target USB bootstrap composition: the 83-test firmware
   library suite covers the stable-time active-low debouncer, held-low boot,
   clock regression, missed-SOF suspension with bus-reset-delimited epochs,

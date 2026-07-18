@@ -1,8 +1,9 @@
 # ADR 0006: Authenticated local device-API bearer
 
 - **Status:** accepted for the qualification session, portable credential
-  authority/store, durable provenance, ADR 0009 pairing design, and E290
-  credential boot composition; pairing manager and firmware bearer pending
+  authority/store, durable provenance, ADR 0009 policy/store design, ADR 0010
+  live-pairing protocol/core, and E290 credential boot composition; E290 live
+  lifecycle manager and authenticated firmware bearer pending
 - **Date:** 2026-07-17
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0003](0003-lora-first-interface-fabric.md) and

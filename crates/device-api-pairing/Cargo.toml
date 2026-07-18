@@ -1,0 +1,21 @@
+[package]
+name = "reticulum-device-api-pairing"
+description = "Allocation-free live pairing records and possession proofs for the local Reticulum API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+hmac.workspace = true
+reticulum-device-api-credentials = { path = "../device-api-credentials", default-features = false }
+reticulum-device-api-framing = { path = "../device-api-framing", default-features = false }
+sha2.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+
+[lib]
+path = "src/lib.rs"

@@ -47,10 +47,29 @@ PYTHONPATH=interop/python python3 -m unittest -v \
 cargo test --locked -p reticulum-device-api-session
 ```
 
-These are deterministic software vectors. They do not claim that a USB bearer,
-credential authority or permanent E290 firmware composition exists yet. Suite
-1 authenticates and integrity-protects records but deliberately does not hide
-their payloads; it is forbidden on BLE and Wi-Fi.
+These are deterministic software vectors. They do not claim that an
+authenticated USB bearer or permanent E290 session composition exists yet.
+Suite 1 authenticates and integrity-protects records but deliberately does not
+hide their payloads; it is forbidden on BLE and Wi-Fi.
+
+## Wired developer-pairing lane
+
+`vectors/device-api-pairing-v1.json` freezes ADR 0010's public test inputs,
+eight successful pre-authentication records, transcript hash, full client proof,
+activation confirmation and exact COBS wire bytes. The independent generator
+uses only Python's standard-library SHA-256 and HMAC. Check the committed corpus,
+mutation tests and allocation-free Rust core with:
+
+```sh
+python3 interop/python/generate_device_api_pairing_vectors.py --check
+python3 interop/python/test_device_api_pairing_vectors.py
+cargo test --locked -p reticulum-device-api-pairing
+```
+
+This integrity-only developer ceremony assumes the physically connected USB
+host after GPIO21 confirmation. It provides no payload confidentiality and is
+not enabled for BLE or Wi-Fi. Durable credential mutation and powered bearer
+composition remain separate qualification gates.
 
 ## Phase-1 RNode receive lane
 

@@ -40,6 +40,7 @@ cargo check --locked \
   -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-pairing-control \
+  -p reticulum-device-api-pairing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
   -p reticulum-node-core \
@@ -62,6 +63,7 @@ cargo +esp check --locked \
   -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-pairing-control \
+  -p reticulum-device-api-pairing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
   -p reticulum-node-core \

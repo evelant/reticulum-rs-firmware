@@ -1,5 +1,7 @@
 //! Decoded record owner and exact wire-body validation.
 
+use zeroize::{Zeroize, Zeroizing};
+
 /// Maximum opaque session or application payload in one record.
 pub const PAYLOAD_CAPACITY: usize = 512;
 /// 128-bit authentication-tag slot carried by every decoded record.
@@ -211,26 +213,40 @@ impl Record {
             });
         }
 
-        let mut payload = [0_u8; PAYLOAD_CAPACITY];
+        let mut payload = Zeroizing::new([0_u8; PAYLOAD_CAPACITY]);
         let payload_end = HEADER_LENGTH + payload_length.get();
         payload[..payload_length.get()].copy_from_slice(&input[HEADER_LENGTH..payload_end]);
-        let mut authentication_tag = [0_u8; AUTH_TAG_LENGTH];
+        let mut session_id = Zeroizing::new([0_u8; SESSION_ID_LENGTH]);
+        session_id.copy_from_slice(&input[SESSION_ID_RANGE]);
+        let mut authentication_tag = Zeroizing::new([0_u8; AUTH_TAG_LENGTH]);
         authentication_tag.copy_from_slice(&input[payload_end..expected]);
 
         Ok(Self {
             kind: input[KIND_INDEX],
-            session_id: input[SESSION_ID_RANGE]
-                .try_into()
-                .map_err(|_| RecordDecodeError::TooShort)?,
+            session_id: *session_id,
             sequence: u64::from_le_bytes(
                 input[SEQUENCE_RANGE]
                     .try_into()
                     .map_err(|_| RecordDecodeError::TooShort)?,
             ),
             payload_length,
-            payload,
-            authentication_tag,
+            payload: *payload,
+            authentication_tag: *authentication_tag,
         })
+    }
+}
+
+impl Zeroize for Record {
+    fn zeroize(&mut self) {
+        self.session_id.zeroize();
+        self.payload.zeroize();
+        self.authentication_tag.zeroize();
+    }
+}
+
+impl Drop for Record {
+    fn drop(&mut self) {
+        self.zeroize();
     }
 }
 

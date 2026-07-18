@@ -114,6 +114,7 @@ jobs:
           -p reticulum-device-api-pairing-policy
           -p reticulum-device-api-framing
           -p reticulum-device-api-pairing-control
+          -p reticulum-device-api-pairing
           -p reticulum-device-api-handoff
           -p reticulum-device-api-session
           --no-deps
@@ -122,6 +123,13 @@ jobs:
         env:
           PYTHON: python
         run: cargo run --locked -p xtask -- check-rns-vectors
+
+      - name: Independent device API session and pairing vectors
+        run: |
+          python interop/python/generate_device_api_session_vectors.py --check
+          python interop/python/test_device_api_session_vectors.py
+          python interop/python/generate_device_api_pairing_vectors.py --check
+          python interop/python/test_device_api_pairing_vectors.py
 
       - name: RNode HIL corpus and peer tooling
         env:
@@ -149,6 +157,7 @@ jobs:
           -p reticulum-device-api-pairing-policy
           -p reticulum-device-api-framing
           -p reticulum-device-api-pairing-control
+          -p reticulum-device-api-pairing
           -p reticulum-device-api-handoff
           -p reticulum-device-api-session
           -p reticulum-device-identity-store
@@ -313,6 +322,7 @@ jobs:
           -p reticulum-device-api-pairing-policy
           -p reticulum-device-api-framing
           -p reticulum-device-api-pairing-control
+          -p reticulum-device-api-pairing
           -p reticulum-device-api-handoff
           -p reticulum-device-api-session
           -p reticulum-device-identity-store

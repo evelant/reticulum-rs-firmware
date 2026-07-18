@@ -1743,6 +1743,9 @@ dependencies = [
 [[package]]
 name = "reticulum-device-api-framing"
 version = "0.1.0"
+dependencies = [
+ "zeroize",
+]
 
 [[package]]
 name = "reticulum-device-api-handoff"
@@ -1750,6 +1753,18 @@ version = "0.1.0"
 dependencies = [
  "embassy-sync 0.8.0",
  "reticulum-device-api",
+]
+
+[[package]]
+name = "reticulum-device-api-pairing"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "hmac",
+ "reticulum-device-api-credentials",
+ "reticulum-device-api-framing",
+ "sha2",
+ "zeroize",
 ]
 
 [[package]]

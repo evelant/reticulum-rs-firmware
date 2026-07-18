@@ -2,6 +2,8 @@ extern crate std;
 
 use std::vec::Vec;
 
+use zeroize::Zeroize;
+
 use crate::{
     AUTH_TAG_LENGTH, AUTHENTICATED_DATA_CAPACITY, DecodeEvent, FramedRecord, HEADER_LENGTH, MAGIC,
     PAYLOAD_CAPACITY, PROTOCOL_VERSION, PayloadLength, Record, RecordDecodeError, StreamDecoder,
@@ -275,4 +277,91 @@ fn canonical_authenticated_bytes_cover_the_complete_semantic_header_and_payload(
     );
     assert_eq!(&authenticated[32..34], &27_u16.to_le_bytes());
     assert_eq!(&authenticated[HEADER_LENGTH..length], &payload(0xc1)[..27]);
+}
+
+#[test]
+fn decoder_wipes_reusable_scratch_after_every_terminal_frame_event_and_reset() {
+    let valid = FramedRecord::encode(&record(0xd1, 73)).unwrap();
+    let mut decoder = StreamDecoder::new();
+    let mut observed_record = false;
+    for byte in valid.encoded() {
+        let event = decoder.push(*byte);
+        if matches!(event, DecodeEvent::Record(_)) {
+            observed_record = true;
+            assert!(decoder.scratch_is_zeroed());
+        }
+    }
+    assert!(observed_record);
+
+    let mut observed_malformed_cobs = false;
+    for byte in [5, 1, 2, 0] {
+        let event = decoder.push(byte);
+        if matches!(event, DecodeEvent::MalformedCobs) {
+            observed_malformed_cobs = true;
+            assert!(decoder.scratch_is_zeroed());
+        }
+    }
+    assert!(observed_malformed_cobs);
+
+    let mut decoded = [0_u8; crate::DECODED_RECORD_CAPACITY];
+    let decoded_length = cobs::decode(&valid.encoded()[1..valid.length() - 1], &mut decoded)
+        .expect("test frame COBS");
+    decoded[0] ^= 0xff;
+    let mut corrupted = [0_u8; WIRE_RECORD_CAPACITY];
+    corrupted[0] = 0;
+    let encoded_length = cobs::encode(&decoded[..decoded_length], &mut corrupted[1..]).unwrap();
+    corrupted[encoded_length + 1] = 0;
+    let mut observed_malformed_record = false;
+    for byte in &corrupted[..encoded_length + 2] {
+        let event = decoder.push(*byte);
+        if matches!(event, DecodeEvent::MalformedRecord(_)) {
+            observed_malformed_record = true;
+            assert!(decoder.scratch_is_zeroed());
+        }
+    }
+    assert!(observed_malformed_record);
+
+    for _ in 0..WIRE_RECORD_CAPACITY + 1 {
+        let _ = decoder.push(1);
+    }
+    assert!(matches!(decoder.push(0), DecodeEvent::Overflow));
+    assert!(decoder.scratch_is_zeroed());
+
+    for byte in &valid.encoded()[..valid.length() / 2] {
+        let _ = decoder.push(*byte);
+    }
+    assert!(!decoder.scratch_is_zeroed());
+    decoder.reset();
+    assert!(decoder.scratch_is_zeroed());
+    assert!(!decoder.is_synchronized());
+}
+
+#[test]
+fn sensitive_owners_have_drop_glue_and_explicit_zeroization_wipes_buffers() {
+    assert!(core::mem::needs_drop::<Record>());
+    assert!(core::mem::needs_drop::<StreamDecoder>());
+    assert!(core::mem::needs_drop::<FramedRecord>());
+
+    let mut decoded = record(0xe1, PAYLOAD_CAPACITY);
+    decoded.zeroize();
+    assert_eq!(decoded.session_id(), &[0; 16]);
+    assert_eq!(decoded.full_payload(), &[0; PAYLOAD_CAPACITY]);
+    assert_eq!(decoded.authentication_tag(), &[0; AUTH_TAG_LENGTH]);
+
+    let input = record(0xe2, 91);
+    let mut framed = FramedRecord::encode(&input).unwrap();
+    let length = framed.length();
+    assert!(framed.encoded().iter().any(|byte| *byte != 0));
+    framed.zeroize();
+    assert_eq!(framed.length(), length);
+    assert!(framed.encoded().iter().all(|byte| *byte == 0));
+
+    let mut decoder = StreamDecoder::new();
+    for byte in &FramedRecord::encode(&record(0xe3, 117)).unwrap().encoded()[..41] {
+        let _ = decoder.push(*byte);
+    }
+    assert!(!decoder.scratch_is_zeroed());
+    decoder.zeroize();
+    assert!(decoder.scratch_is_zeroed());
+    assert!(!decoder.is_synchronized());
 }

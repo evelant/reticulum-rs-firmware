@@ -41,3 +41,18 @@ the allocation-free Rust server implementation.
 The corpus describes only the USB Serial/JTAG integrity-only qualification
 suite. It is not a production confidentiality profile and is not a powered USB
 or firmware-bearer result.
+
+## Wired developer pairing
+
+`device-api-pairing-v1.json` is the independent known-answer corpus generated
+by `../python/generate_device_api_pairing_vectors.py`. It fixes the complete
+Begin, ProofStart, Activate and AbortCurrent success flights, canonical RDA1 and
+COBS bytes, transcript hash, client possession proof and activation
+confirmation for ADR 0010's USB Serial/JTAG developer profile. The generator
+uses only Python's standard-library SHA-256 and HMAC; its five tests regenerate
+the corpus, mutate every transcript byte and role, and verify COBS and proof-
+domain separation against the Rust core.
+
+These public test secrets are deterministic software evidence only. The corpus
+does not prove physical presence, durable Pending/Active mutation, USB delivery
+or powered firmware composition.
