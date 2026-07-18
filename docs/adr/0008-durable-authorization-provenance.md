@@ -123,8 +123,9 @@ gate without preserving user data.
 - The API payload and physical journal geometry remain stable.
 - Existing schema-1 development journals require an explicit journal-only
   reprovision before local durable admission reopens.
-- Credential persistence, pairing/admin lifecycle, async handoff composition,
-  and a physical bearer remain separate gates.
+- Credential persistence, pairing lifecycle, async handoff composition, and the
+  first physical USB bearer are now composed and pass one bounded powered happy
+  path; broader admin/fault/lifecycle qualification remains a separate gate.
 
 ## Qualification requirements
 

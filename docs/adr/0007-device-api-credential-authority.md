@@ -2,8 +2,8 @@
 
 - **Status:** accepted for the portable authority snapshot, canonical image,
   and lifecycle-specific pairing successors; ADR 0009 typed physical store path
-  and E290 boot mount composition implemented; external authority/session and
-  pairing-manager composition pending
+  and E290 boot mount composition implemented; authority/session, pairing
+  manager, and first powered API/DATA/peer-proof path composed
 - **Date:** 2026-07-17
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0004](0004-sole-flash-coordinator.md) and
@@ -34,9 +34,9 @@ specified well enough to expose on hardware. ADR 0008 has since completed the
 schema-2 provenance contract. ADR 0009 now selects a dedicated E290 credential
 partition, physical store envelope, and bounded initial pairing policy. Their
 portable store implementation and E290 boot/coordinator ownership are now
-complete, while external authority/session composition, pairing, and the
-physical bearer remain incomplete; this ADR's session record vocabulary still
-does not double as an unauthenticated pairing exchange.
+complete. External authority/session composition, pairing, and the physical USB
+bearer now pass one bounded powered happy path; this ADR's session record
+vocabulary still does not double as an unauthenticated pairing exchange.
 
 ## Decision
 
@@ -197,9 +197,9 @@ authenticated request ownership types, exact CBOR decode, grant revalidation,
 synchronous adapter acceptance, logical response encoding and authenticated
 reply framing. It does not traverse the asynchronous handoff channels. A second
 case replaces the authority with a PSK-free revoked tombstone after request
-admission and proves authority revalidation rejects; the future composed owner
-must still prove it neither falls back to unauthenticated dispatch nor invokes
-a port after that error.
+admission and proves authority revalidation rejects. The composed node owner
+also regresses that rejection with neither unauthenticated fallback nor a port
+call; broader powered rejection/fault qualification remains open.
 
 ### Keep persistence implementation behind the selected physical contract
 
@@ -222,11 +222,12 @@ storage. ADR 0009 assigns the distinct plaintext developer/HIL
 `api_credentials` raw-NOR range at `0x614000..0x616000` and selects its
 two-sector commit/retire contract. The target validates that range and exact
 eFuse-derived binding, immediately mounts/recovers it after flash open, and
-retains any mounted owner. Live credential mutation, cross-store reset, and
-powered qualification remain uncomposed.
+retains any mounted owner. Live credential mutation and the bounded powered
+happy path are composed; cross-store reset and broader fault qualification
+remain open.
 
-Pairing likewise remains outside the session core. ADR 0009 requires its later
-bounded manager to own a roughly two-second GPIO21 confirmation, exclusive
+Pairing remains outside the session core. ADR 0009's bounded manager owns a
+roughly two-second GPIO21 confirmation, exclusive
 60-second USB Serial/JTAG window, three-attempt ceiling, one pending enrollment,
 durable-before-offer `Pending`, HMAC possession proof, and durable-before-
 completion `Active` transition. Empty media never pairs or initializes
@@ -260,9 +261,10 @@ never existed.
   snapshot image without inventing physical flash headers, commit mechanics,
   pairing, reset or USB behavior. The exact image owner zeroizes on drop and
   decoding consumes it before revalidating every record through the builder.
-- The minimal USB authority/session owner and physical bearer are now
-  source-composed. Live powered admission remains disabled until explicit
-  initialization/pairing succeeds and the authenticated exchange is qualified.
+- The minimal USB authority/session owner and physical bearer are composed.
+  Explicit initialization/pairing and a bounded authenticated submission/peer-
+  proof/status exchange now pass on powered hardware; broader lifecycle and
+  fault qualification remains open.
 
 ## Validation status
 

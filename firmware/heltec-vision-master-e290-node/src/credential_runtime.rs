@@ -10,6 +10,7 @@
 use core::mem;
 
 use rand_core::{CryptoRng, RngCore};
+use reticulum_device_api::IdentitySummary;
 use reticulum_device_api_adapter::SubmissionPort;
 use reticulum_device_api_credential_store::{
     BoundCredentialStoreAccess, CommitPairingLifecycleSuccessorError, CredentialStoreBinding,
@@ -311,9 +312,10 @@ impl CredentialRuntime {
     /// Revalidate and dispatch one session-authenticated request against the
     /// currently publishable authority without exposing that authority.
     ///
-    /// The caller supplies only the disjoint logical submission port. Missing,
-    /// replaced, revoked, or otherwise unpublished authority state therefore
-    /// takes the helper's zero-port-I/O authentication-failure path.
+    /// The caller supplies a copy-only public identity summary and the disjoint
+    /// logical submission port. Missing, replaced, revoked, or otherwise
+    /// unpublished authority state therefore takes the helper's zero-port-I/O
+    /// authentication-failure path.
     #[allow(
         clippy::result_large_err,
         reason = "terminal failure must retain the exact allocation-free request owner"
@@ -321,6 +323,7 @@ impl CredentialRuntime {
     pub fn dispatch_authenticated_request<P>(
         &self,
         request: LocalApiRequest<AuthenticatedGrant>,
+        identity: IdentitySummary,
         port: &mut P,
     ) -> Result<LocalApiReply, AuthenticatedApiDispatchFailure>
     where
@@ -331,7 +334,7 @@ impl CredentialRuntime {
             .as_ref()
             .and_then(MountedCredentialStore::publishable_authority)
             .filter(|_| self.boot_state.authority_publishable());
-        dispatch_authenticated_request(request, authority, port)
+        dispatch_authenticated_request(request, authority, identity, port)
     }
 
     /// Whether the retained authority is physically and locally eligible for a

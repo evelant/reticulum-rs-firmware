@@ -291,14 +291,17 @@ NA915 development TX/RX and remain the regression fixture.
    ownership of `EmbeddedNode`, keep RNode microseconds separate from Rete
    seconds, and connect timed RX plus ordinary ingress/tick actions through the
    sealed interface fabric.
-2. **Partially complete:** the resident storage actor/runtime now owns the
-   product journal; connect the API adapter's external lane so a send is durable before Rete preparation, while proof
-   and timeout outcomes become durable before terminal acknowledgement.
-3. **Composed with bounded powered smoke:** the registered-buffer,
-   supervisor/permit, regional/airtime, and sole-radio ownership path booted and
-   emitted ordinary frames on both boards. Add a local durable DATA/LXMF
-   submission surface, then reproduce the controlled peer exchange through the
-   permanent E290 graph as its full powered qualification.
+2. **Complete for the bounded one-entry profile:** the resident storage actor/
+   runtime owns the product journal, and the API adapter's external lane makes a
+   send durable before Rete preparation while proof/timeout outcomes become
+   durable before terminal acknowledgement.
+3. **Powered bounded end-to-end PASS:** the registered-buffer,
+   supervisor/permit, regional/airtime, and sole-radio ownership path now accepts
+   one authenticated durable RNS DATA submission, transmits it from the
+   permanent sender, receives/decrypts it on the second permanent E290, returns
+   a valid proof, and preserves `Delivered` across sender USB re-enumeration.
+   LXMF persistence and application-level inbox delivery remain separate next
+   slices.
 4. **Partially complete:** returned ordinary actions now enter a fixed pool and
    ticketed router path without loss under downstream pressure. Caller-reservable
    construction before Rete allocates and mutates remains open.

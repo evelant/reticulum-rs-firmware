@@ -12,11 +12,11 @@ use reticulum_interface_router::{
 };
 use reticulum_node_core::{
     AcknowledgeError, AnnounceAdmissionError, AnnounceEmissionTime, AttemptHandle,
-    CapacitySnapshot, IngressReport, MaintenanceReport, MonotonicMillis, MonotonicSeconds,
-    NodeActions, NodeCore, OrdinaryActionCapacitySnapshot, OrdinaryPreparedPacket,
-    PacketInterfaceId, PreparedPacket, ReceiptCorrelationError, TerminalAttempt, TerminalAttempts,
-    TxAuthorizationPolicy, TxLeaseDeadline, TxMaintenanceReport, TxOwnerScope,
-    TxRecoveryObservation,
+    CapacitySnapshot, DestinationHash, IngressReport, MaintenanceReport, MonotonicMillis,
+    MonotonicSeconds, NodeActions, NodeCore, OrdinaryActionCapacitySnapshot,
+    OrdinaryPreparedPacket, PacketInterfaceId, PreparedPacket, ReceiptCorrelationError,
+    TerminalAttempt, TerminalAttempts, TxAuthorizationPolicy, TxLeaseDeadline, TxMaintenanceReport,
+    TxOwnerScope, TxRecoveryObservation,
 };
 use reticulum_tx_handoff::{
     DataPairedPermitHandoff, DispatcherPermitHandoff, OrdinaryDispatcherPermitHandoff,
@@ -2123,9 +2123,9 @@ impl NodeInterfaceOrdinaryOfferFailure {
 /// outbound coordinator families, per-actor permit services, and product
 /// authorization policy.
 ///
-/// The aggregate exposes narrow submission and status methods only. Concrete
-/// interface actors retain their router and permit capabilities outside this
-/// value and remain free to implement any transport.
+/// The aggregate exposes narrow identity, submission, and status methods only.
+/// Concrete interface actors retain their router and permit capabilities
+/// outside this value and remain free to implement any transport.
 #[must_use = "dropping the permanent aggregate abandons exact outbound owners"]
 pub struct NodeInterfaceSupervisor<
     M,
@@ -2301,6 +2301,11 @@ where
             },
             actors,
         })
+    }
+
+    /// Primary local Reticulum destination owned by this aggregate.
+    pub fn destination_hash(&self) -> DestinationHash {
+        self.node.destination_hash()
     }
 
     /// Register one stable interface identity in a vacant actor slot.

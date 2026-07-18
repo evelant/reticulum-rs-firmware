@@ -172,13 +172,12 @@ mechanics and will not emulate CAD, airtime reservations, RNode fragmentation,
 or another radio abstraction.
 
 The E290 image is not yet the full appliance. Its mirrored durable identity and
-restart-safe announce epoch are now boot-gated ahead of node/radio service, and
-the pre-authentication initialization/live-pairing API edge is composed. Message
-storage, authenticated device-API/session serving, local LXMF submission/
-delivery, and the optional clients remain later composition work. Bounded
-hard-reset reattachment now has powered evidence; broader reset/power-cut and
-permanent-graph LoRa qualification remain open even though the physical-module
-gate and isolated semantic HIL are complete.
+restart-safe announce epoch are boot-gated ahead of node/radio service; the pre-
+authentication initialization/live-pairing edge and authenticated API/session
+serving are composed. One powered permanent-graph submission now reaches LoRa
+peer proof and durable terminal status after USB re-enumeration. Message storage,
+local LXMF submission/delivery, optional clients, broader reset/power-cut, and
+full LoRa qualification remain later work.
 
 ## Legacy no-RF aggregate
 

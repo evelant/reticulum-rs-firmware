@@ -6,11 +6,17 @@ strict review, graph, image-size, and same-image readback gates. Its
 third task now owns a USB Serial/JTAG pre-authentication initialization and live-
 pairing bearer, one shared exact-next sequence space, debounced GPIO21 physical
 presence, an interrupt-linearized reset-epoch guard, and an application-entry
-USB boot quarantine. Powered work has now completed one full happy path on MAC
-`ac:a7:04:e1:3e:88`: exact current-image readback, button-confirmed empty-store
-initialization, pairing through durable Active generation 3, exact Active
-credential-partition readback, hard reset, and an authenticated
-`system.capabilities` request/reply. Earlier controls returned
+USB boot quarantine. Powered work has now completed the full first outbound path
+on the two E290s. MAC `ac:a7:04:e1:3e:88` retained its button-confirmed empty-
+store initialization, durable Active generation 3, and host credential; MAC
+`ac:a7:04:e1:3f:88` owns a separate durable node identity. Both ran the exact
+same current image with matching address-zero readbacks. An authenticated API
+1.1 session read the sender's public primary destination, durably accepted one
+RNS DATA submission, and stayed open while polling status. The peer matched its
+own destination, decrypted the packet, returned a valid Reticulum proof, and
+the sender durably projected `Delivered`. A full sender USB re-enumeration and
+fresh authenticated session returned the same terminal metadata. Earlier
+controls returned
 `initialization-required`, enforced GPIO21 for initialization and live Begin,
 rejected stale sequence zero, and restored a fresh epoch after full host
 re-enumeration. Both preceding boot-quarantined image readbacks matched exactly,
@@ -33,9 +39,12 @@ encryption, rate limiting/attempt policy, repeated handshake attempts, and
 concurrent requests are deferred. Credential selection, admission handoff, and
 node dispatch are bearer-neutral. The current qualification suite is USB
 Serial/JTAG-only; BLE or Wi-Fi can later reuse the ownership boundary after its
-binding/suite is added and qualified. The powered proof qualifies only the
-minimal one-shot handshake and `system.capabilities` exchange; the deferred
-session features and wireless bearer bindings remain unqualified.
+binding/suite is added and qualified. The powered proof now qualifies
+authenticated capabilities and identity reads, sequential request/response
+flights in one session, durable submission, LoRa DATA delivery, peer decrypt/
+proof, terminal projection, and status after USB re-enumeration. It does not
+claim application-level message consumption, session resumption, or either
+deferred wireless bearer binding.
 
 This target is the first executable product composition, not another HIL
 fixture. It starts a transport-mode Rete node, one E290 LoRa actor, receive and
@@ -222,8 +231,8 @@ LoRa lanes continue; with an unresolved active owner, the node enters
 `ActiveOwnerFailStopped`, takes the same LoRa lease offline without changing its
 generation, and retains the observation/completion/ticket while admitting no
 later RF operation. The storage lane is normally idle until an authenticated
-USB client submits work; that source-composed path has not yet run on powered
-hardware. The task performs
+USB client submits work; the current bounded run completed this path through
+peer proof and post-re-enumeration status. The task performs
 at most 16 immediate passes, yields, and currently uses a temporary 1 ms idle
 poll because the aggregate does not yet expose one combined readiness/deadline
 wait.
@@ -264,7 +273,7 @@ The target requires a 16 MiB flash image/header and uses
 | Announce clock | `0x612000` | 8 KiB | Wired, mirrored boot-epoch append logs |
 | API credentials | `0x614000` | 8 KiB | Wired boot mount/recovery; exact eFuse-derived binding; retained plaintext two-sector store; no automatic provisioning |
 | Device config | `0x616000` | 104 KiB | Reserved, not wired |
-| Node journal | `0x630000` | 1 MiB | Resident operation-scoped submission runtime; one-entry qualification cap; minimal USB capabilities powered-qualified, authenticated submission open |
+| Node journal | `0x630000` | 1 MiB | Resident operation-scoped submission runtime; one-entry qualification cap; authenticated submission and post-re-enumeration terminal status powered-qualified |
 | Message store | `0x730000` | 2 MiB | Reserved, not wired |
 | Unallocated | `0x930000` | 6.8125 MiB | OTA/layout decision |
 
@@ -276,7 +285,8 @@ must not be used for this target.
 credential range is checked, boot-mounted/recovered, and retained. Explicit
 initialization and ADR 0010 live pairing are routed through the resident owner;
 minimal single-flight authenticated USB session/API serving is powered-qualified
-for one capabilities exchange, while authenticated submission remains open.
+through identity, durable submission, sequential status, peer proof, and a
+post-re-enumeration terminal status read.
 `device_config`
 retains the standard NVS subtype while it is unwired; the application-owned
 journal and unwired message store retain `data,undefined`. Their labels and
@@ -410,9 +420,9 @@ occurs during boot before a durability-gated DATA owner can exist: the
 coordinator retains the flash backend with no runtime, local durable admission
 remains closed, and the LoRa node/radio tasks still start in route-only mode.
 The accepted-history cap is one for qualification. The minimal authenticated
-USB edge now has one powered initialize/pair/reboot/capabilities happy-path
-qualification; authenticated submission and its durability/LoRa effects remain
-open. The
+USB edge now has powered initialize/pair/reboot/capabilities/identity evidence
+plus one durable submission whose LoRa DATA/proof terminal state survived USB
+re-enumeration. The
 LoRa actor now hands the exact `AuthorizedFrameObservation` to the node/storage
 owner while its dispatcher retains the completion and router ticket. The node
 retains and re-offers that observation until the runtime returns `Durable`,
@@ -550,9 +560,11 @@ adds 15 tests for its CLI contract, exact response-family correlation and
 device-ID validation, pair/resume sequence headroom, owner-only reservation and
 atomic Pending persistence, fixed 96-byte binary layout, and atomic complete
 Pending-to-Active replacement that persists the HMAC-bound durable Active
-generation while retaining owner-only permissions, and secret-free output. The authenticated one-shot client adds
-two tests for argument bounds and coalesced-record preservation. Together these
-29 focused tests are part of the full 176-test xtask gate.
+generation while retaining owner-only permissions, and secret-free output. The
+bounded authenticated client adds 15 tests for operation parsing, public-
+identity formatting, sequential request IDs, version policy, polling terminal
+semantics, coalesced-record preservation, and submission-input non-disclosure.
+Together these 42 focused tests are part of the full 189-test xtask gate.
 
 Once all response bytes enter the endpoint FIFO, firmware requests hardware
 `WR_DONE` and releases the software response owner without waiting for a later
@@ -818,27 +830,57 @@ After `pair` has durably activated the credential and marked the owner-only
 state file Active, force a real USB bus reset/re-enumeration before opening an
 ordinary session. Pairing exclusivity intentionally keeps the old connection
 closed to ordinary sessions, and merely closing or reopening the TTY is not a
-reset boundary. The minimal host client then performs exactly one hello/proof
-handshake, sends one authenticated `system.capabilities` request, authenticates
-the response, and exits:
+reset boundary. The bounded host client performs one hello/proof handshake and
+supports these authenticated logical operations:
+
+- `system-capabilities` (the default command);
+- `identity-summary`;
+- `submission-status` with `--submission-id`;
+- `submit-rns-data` with destination, payload, and idempotency key; and
+- `submit-and-wait`, which submits once and polls every 500 ms over the same
+  authenticated session until `Delivered` or a terminal failure.
+
+Read the public primary destination:
 
 ```sh
 cargo +stable run --locked -p xtask -- e290-authenticated-usb \
   --port /dev/cu.usbmodemXXXX \
-  --state-file /secure/new-e290-pairing.key
+  --state-file /secure/new-e290-pairing.key \
+  identity-summary
+```
+
+Submit DATA and wait up to the default 45-second overall deadline:
+
+```sh
+cargo +stable run --locked -p xtask -- e290-authenticated-usb \
+  --port /dev/cu.usbmodemXXXX \
+  --state-file /secure/new-e290-pairing.key \
+  --destination-hash <32-lowercase-hex> \
+  --payload-hex <0-to-766-hex> \
+  --idempotency-key <32-hex> \
+  submit-and-wait
 ```
 
 The command accepts only the canonical Active state-file format, verifies the
 device ID and credential generation during the handshake, preserves coalesced
-records, uses one absolute deadline, and prints only non-secret scalar results.
-It has no retry, resumption, close, encryption, rate-policy, repeated-attempt,
-or concurrent-request behavior. It deliberately drops its restored client
-session after the one response while firmware remains established, so reset/
-re-enumerate USB before every later invocation, whether the previous invocation
-succeeded or failed. Do not infer whether a credential identifier exists from
-the failure text.
+records, accepts any response minor within API major 1, uses one absolute
+deadline, and prints only non-secret scalar results. `submit-and-wait` uses
+strictly increasing request IDs and treats only status `Internal` as a transient
+poll result; `Failed`, `Cancelled`, any other API error, or deadline expiry is a
+failure. It has no resumption, close, encryption, rate-policy, repeated-
+handshake, or concurrent-request behavior. Each one-shot command drops its
+restored client session after one response while firmware remains established,
+so reset/re-enumerate USB before a later invocation. `submit-and-wait` is the
+exception: it deliberately retains that one session for sequential status
+requests. Do not infer whether a credential identifier exists from failure
+text.
 
-On 2026-07-18, the current 682,480-byte application was packaged as a
+The current one-entry accepted-history cap is a qualification profile, and the
+successful sender now contains its one committed record. A later novel
+submission requires a product-capacity policy change or deliberate journal
+reprovisioning; it is not evidence that the intended product capacity is one.
+
+Earlier on 2026-07-18, the then-current 682,480-byte application was packaged as a
 748,016-byte merged flash image (SHA-256
 `4864180ab1d51081758ec3bec53068d6c75316209a2ccc269a0aad48c210fe2c`) and
 installed on board MAC `ac:a7:04:e1:3e:88`. Exact address-zero readback matched
@@ -857,6 +899,26 @@ disabled, experimental RNS DATA submission enabled, 512-byte messages,
 initialization, pairing, activation, reboot recovery, and the minimal
 authenticated USB request/response path on hardware. It does not qualify
 session resumption, encryption, rate limiting, BLE, or Wi-Fi.
+
+Later on 2026-07-18, API 1.1 added `identity.summary` and the multi-request
+`submit-and-wait` host path. The release application is 686,176 bytes; GNU size
+reports 645,159 bytes text, 3,596 bytes initialized data, 469,232 bytes BSS/
+reservations, and 1,117,987 bytes total. Its 751,712-byte merged image has
+SHA-256
+`4285fcaa9df6a6f0314ed4735377ea986b0efcafafc2710ad7594489a49b4795`.
+The same image was installed on both boards and exact address-zero readbacks
+matched. The sender's primary destination is
+`c99e8ff1ec8629e4e1290e14462ae8af`; the separately provisioned receiver's is
+`83a09ed807a0a7c631386deaa0448fb9`. The sender durably accepted submission 1,
+prepared a 131-byte packet with full encoded-byte SHA-256
+`df937860f5225deb9d2350c6f3a46f33bd659ccbcb6b47267add47c9a287a4fe`,
+and reached `Delivered` in about 2.6 seconds after the receiver decrypted the
+matching DATA and returned a valid Reticulum proof. Full sender USB re-
+enumeration followed by a fresh authenticated `submission-status` request
+returned the identical terminal state, length, and digest. This is end-to-end
+proof through the permanent owner graph and physical LoRa link. `Delivered`
+does not yet prove that an onboard LXMF/NomadNet mailbox or external client
+consumed the plaintext; inbound application events are currently drained.
 
 The first powered end-to-end attempt usefully failed closed during post-reboot
 authentication with an expected generation 2 versus observed generation 3
@@ -1144,9 +1206,9 @@ as the bounded qualification fixture for the deterministic DATA/proof exchange.
   causal node frontier, secret handoff, and boot quarantine. Preserve the
   now-composed feature-free session/handoff dependencies, static depth-one API
   handoff, current-authority node dispatch, disjoint submission-port view, and
-  minimal single-flight USB session bearer. Next, drive authenticated RNS DATA
-  submission through the durable runtime and real LoRa peer, while preserving
-  the already-qualified handshake and capabilities request/reply.
+  minimal single-flight USB session bearer. Preserve the now-qualified API 1.1
+  identity, authenticated RNS DATA, durable runtime, real LoRa peer proof,
+  sequential status, and fresh post-re-enumeration session path.
   Resumption, retries, close records, encryption, rate/attempt policy, repeated
   attempts, and concurrency remain later hardening work; the transport-neutral
   admission boundary must remain reusable by BLE and Wi-Fi, whose session
@@ -1164,8 +1226,8 @@ as the bounded qualification fixture for the deterministic DATA/proof exchange.
 - Deliver non-packet node output to a durable/client owner. This milestone logs
   and drains it so transport progress cannot deadlock.
 - Add LXMF propagation/storage and local LXMF/NomadNet client services.
-- Compose the independently vector-tested ADR 0006 authentication model with
-  ADR 0009 pairing and the first USB bearer. Add Wi-Fi as a Reticulum transport only when that
+- Preserve the composed independently vector-tested ADR 0006 authentication
+  model, ADR 0009 pairing, and first USB bearer. Add Wi-Fi as a Reticulum transport only when that
   separate link behavior is specified; packet transports remain deferred
   behind the primary LoRa slice.
 - Replace the single-LoRa airtime policy with a composite per-resource policy

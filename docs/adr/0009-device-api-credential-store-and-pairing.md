@@ -230,8 +230,10 @@ pre-authentication initialization/pairing records and a deliberately minimal
 authenticated USB session/API bearer. The latter admits one handshake per
 connection and one request at a time and fails terminally until reset; its
 initialize/pair/reboot/authenticated-capabilities happy path is qualified on one
-powered board. Submission, repeated-session, ambiguity, and fault behavior
-remain separate gates.
+powered board. A later image also qualifies one durable submission with
+sequential status, physical LoRa peer proof, and fresh post-re-enumeration
+status. Broader repeated-session, ambiguity, and fault behavior remain separate
+gates.
 Every successfully mounted owner, including a blocked or cleanup-failed owner,
 is retained in `ProductStorageCoordinator`. Erased media is never provisioned
 automatically.
@@ -459,8 +461,8 @@ correlation across durable drive/reconciliation, and returns only the matching
 
 - exact powered Pending and Abort readbacks plus ambiguity/fault/cut
   qualification across every mutation boundary;
-- authenticated submission, no-fallback failure cases, and repeated-session
-  qualification beyond the minimal capabilities happy path;
+- no-fallback failure cases and broader repeated-session/lifecycle
+  qualification beyond the bounded submission/status happy path;
 - USB suspend/resume behavior
   still requires powered host-matrix validation; the present SOF/missed-SOF
   policy is not a final suspend contract.
@@ -574,8 +576,8 @@ but cannot claim security from the developer USB trust shortcut.
   mapping, single USB ownership, GPIO21 pull-up composition, initialization-
   before-journal scheduling, shared control/live decoding, causal ordering,
   durable reply correlation, reset-generation blocking, physical detachment,
-  USB-RAM scrubbing, and earliest-Rust-entry boot quarantine. The 124-test
-  firmware library, 29 focused host-client tests, full 176-test xtask suite,
+  USB-RAM scrubbing, and earliest-Rust-entry boot quarantine. The 125-test
+  firmware library, 42 focused host-client tests, full 189-test xtask suite,
   strict host/target Clippy, rustdoc, release linking, graph policy, and image-
   size ceilings pass. Final measurements are recorded with the qualified image.
 - Complete as historical bounded powered bootstrap control: the 544,371/3,548/469,280/
@@ -606,8 +608,8 @@ but cannot claim security from the developer USB trust shortcut.
   recovered sequence-zero `initialization-required`, and both credential
   partitions remained entirely `0xff`. No authenticated record was admitted by
   that image; this does not qualify the subsequently composed minimal bearer.
-- Complete as a bounded powered happy path on MAC `ac:a7:04:e1:3e:88`: the
-  current 748,016-byte image with SHA-256
+- Complete as the first bounded powered happy path on MAC
+  `ac:a7:04:e1:3e:88`: the 748,016-byte image with SHA-256
   `4864180ab1d51081758ec3bec53068d6c75316209a2ccc269a0aad48c210fe2c`
   matched exact address-zero readback. A physical hold completed initialization,
   pairing committed Active generation 3, the exact post-activation credential
@@ -616,7 +618,16 @@ but cannot claim security from the developer USB trust shortcut.
   and a fresh post-reset USB epoch completed authenticated
   `system.capabilities`. Only the digest of the secret-bearing partition is
   recorded. This does not qualify Pending/Abort images, ambiguity/fault cuts,
-  authenticated submission, or the deferred session features.
+  or the deferred session features.
+- Complete as the next bounded powered path on both E290s: the API 1.1
+  751,712-byte image with SHA-256
+  `4285fcaa9df6a6f0314ed4735377ea986b0efcafafc2710ad7594489a49b4795`
+  matched exact address-zero readbacks. The Active sender completed
+  authenticated identity, durable submission, and sequential status requests;
+  the receiver decrypted matching LoRa DATA and returned a valid proof. Sender
+  `Delivered` status survived full USB re-enumeration and a fresh session. This
+  does not qualify application inbox consumption or the deferred lifecycle and
+  fault cases.
 - The host asserts DTR, clears RTS, and keeps initialize on one open TTY. TTY
   reopen is not an epoch boundary; only USB bus reset is. Status defaults to 15
   seconds and initialize to 120 seconds. A post-send I/O failure or timed-out
@@ -628,8 +639,8 @@ but cannot claim security from the developer USB trust shortcut.
   zeroizes serial/state scratch and validates the returned device identity.
   Secure pair/resume persistence is Unix-only. Pair and resume require three-
   and two-request sequence headroom respectively. An ambiguous Activate remains
-  unreconciled until the authenticated session exists; the client retains the
-  file and must not guess Active or abort.
+  unreconciled by the current host; the client retains the file and must not
+  guess Active or abort.
 - Pairing integration tests must still cover powered GPIO debounce/sampling,
   USB reset/suspend/resume behavior, disconnect at every secret/proof/completion boundary,
   proof replay and wrong transcript binding, unique ID/PSK allocation, E290
@@ -647,7 +658,8 @@ but cannot claim security from the developer USB trust shortcut.
   exact flash readback before this path is enabled outside developer/HIL use.
 
 The software-routed pre-authentication lifecycle and durable credential mutation
-are complete, and one powered initialization/pair/activation/reboot/capabilities
-happy path is qualified. This ADR does not claim powered-cut recovery, exact
-Pending/Abort readbacks, authenticated submission, or a production session/API
-security profile.
+are complete. Powered qualification now covers initialization/pair/activation/
+reboot, capabilities/identity, one durable submission, peer proof, sequential
+status, and a fresh post-re-enumeration status session. This ADR does not claim
+powered-cut recovery, exact Pending/Abort readbacks, application inbox
+consumption, or a production session/API security profile.

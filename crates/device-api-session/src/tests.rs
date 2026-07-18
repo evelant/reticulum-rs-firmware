@@ -3,8 +3,8 @@ extern crate std;
 use rand_core::{CryptoRng, RngCore};
 use reticulum_device_api::{
     ApiVersion, CapabilityAvailability, DestinationHash, DeviceRequest, DeviceResponse,
-    IdempotencyKey, Permissions, PrincipalId, RequestEnvelope, RequestId, decode_request,
-    decode_response, encode_request, encode_response,
+    IdempotencyKey, IdentitySummary, Permissions, PrincipalId, RequestEnvelope, RequestId,
+    decode_request, decode_response, encode_request, encode_response,
 };
 use reticulum_device_api_adapter::{
     SubmissionAcceptance, SubmissionPort, SubmissionPortError, dispatch,
@@ -956,7 +956,14 @@ fn authority_grant_supplies_adapter_context_and_revoked_grant_does_not_revalidat
     });
 
     let mut port = CountingPort::default();
-    let response = lease.with_dispatch_context(|context| dispatch(&mut port, context, decoded));
+    let response = lease.with_dispatch_context(|context| {
+        dispatch(
+            &mut port,
+            IdentitySummary::new(DestinationHash([0x88; 16])),
+            context,
+            decoded,
+        )
+    });
     assert_eq!(port.availability_calls, 1);
     assert_eq!(port.status_calls, 0);
     assert_eq!(port.acceptance_calls, 1);

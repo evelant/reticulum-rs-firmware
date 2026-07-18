@@ -8,6 +8,7 @@ use embassy_time::{Duration, Instant, Timer};
 use esp_hal::rng::Trng;
 use log::{error, info, warn};
 use reticulum_announce_clock::BootEpoch;
+use reticulum_device_api::{DestinationHash as ApiDestinationHash, IdentitySummary};
 use reticulum_device_api_handoff::{LocalApiReply, LocalApiRequest, NodeHandoff};
 use reticulum_device_api_pairing::{
     AbortCurrentResponse, AbortResult, ActivateFailure, ActivateResponse, BeginResponse,
@@ -254,6 +255,9 @@ pub async fn run(
     announce_epoch: BootEpoch,
     mut rng: Trng,
 ) {
+    let identity_summary = IdentitySummary::new(ApiDestinationHash(
+        *supervisor.destination_hash().as_bytes(),
+    ));
     let (
         mut pairing_handoff,
         mut live_pairing_handoff,
@@ -647,6 +651,7 @@ pub async fn run(
                 4 => {
                     progressed |= step_authenticated_api(
                         storage,
+                        identity_summary,
                         &mut authenticated_api,
                         &mut authenticated_api_state,
                     );
@@ -811,6 +816,7 @@ pub async fn run(
 
 fn step_authenticated_api(
     storage: &mut ProductStorageCoordinator,
+    identity: IdentitySummary,
     handoff: &mut NodeHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
     state: &mut AuthenticatedApiNodeState,
 ) -> bool {
@@ -838,7 +844,7 @@ fn step_authenticated_api(
         else {
             unreachable!()
         };
-        match storage.dispatch_authenticated_request(request) {
+        match storage.dispatch_authenticated_request(request, identity) {
             Ok(reply) => *state = AuthenticatedApiNodeState::PendingReply(reply),
             Err(failure) => {
                 let kind = failure.kind();

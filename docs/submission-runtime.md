@@ -14,8 +14,8 @@ pass. Portable API framing, immutable credential authority and store, the
 qualification-session core, and job handoff are qualified. E290 boot now mounts,
 performs bounded deterministic retire-then-cleanup recovery, and retains the
 credential store without provisioning it. The minimal authenticated USB
-session/API lane is source-composed; live powered admission remains blocked by
-successful ADR 0009 initialization/pairing and end-to-end proof.
+session/API lane is composed and passes one bounded powered ADR 0009 credential/
+API/DATA/peer-proof/status path.
 Semantic schema 2 now preserves exact authorization provenance through runtime
 acceptance, remount, and replay.
 
@@ -107,8 +107,10 @@ identity and attempt correlation are stable across an interface choice, while
 the projector still cross-checks the complete length, frame digest, and attempt
 token. The product has a one-entry qualification cap. The minimal authenticated
 USB lane can reach the composed handoff from a fresh local submission in the
-source graph; powered proof remains open, while the host composition harness
-drives the same semantic boundaries directly.
+powered E290 graph. One bounded run passed durable acceptance, LoRa DATA/peer
+proof, terminal projection, and a fresh status session after USB re-
+enumeration; the host composition harness drives the same semantic boundaries
+directly.
 
 ## E290 cross-layer software qualification
 
@@ -185,8 +187,9 @@ or RF claim.
   durable authorization provenance now reaches the journal, and the resident
   coordinator retains the boot-mounted credential store and its admission
   state. Explicit initialization/provisioning/pairing and the minimal
-  single-flight authenticated USB session are wired to the runtime in source.
-  BLE/Wi-Fi serving and powered USB proof remain open.
+  single-flight authenticated USB session are wired to the runtime. Its bounded
+  powered USB-to-LoRa-peer-proof/status path passes; BLE/Wi-Fi serving and
+  application-level message consumption remain open.
   `ProductStorageCoordinator` implements the target-safe `SubmissionPort` under
   the one-entry qualification cap.
 - **Powered qualification:** integrated power-cut/brownout, watchdog, flash

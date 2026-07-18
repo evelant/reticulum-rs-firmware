@@ -135,13 +135,12 @@ invent a cost-based route algorithm that Reticulum has not requested.
 
 - The separate E290 semantic-HIL fixture has now passed its controlled
   two-board ANNOUNCE, DATA, and proof exchange. The autonomous permanent image
-  must separately prove boot, radio initialization,
-  ordinary ANNOUNCE TX/RX, contention and reset behavior; it needs an external
-  injector or the source-composed credential-backed USB API bearer to originate
-  controlled DATA. The portable session core, target-safe submission port,
-  cross-layer host path, and minimal USB bearer now exist; powered
-  authentication and DATA injection remain open. No Wi-Fi or BLE implementation
-  is required first.
+  has separately passed bounded boot/radio/ordinary-TX smoke and one credential-
+  backed USB API submission through controlled LoRa DATA/peer proof and terminal
+  status after re-enumeration. The portable session core, target-safe submission
+  port, cross-layer path, and minimal USB bearer implement that path. Broader
+  contention, reset/fault, and application-message qualification remains open;
+  no Wi-Fi or BLE implementation is required first.
 - Rete, node-core, storage, LXMF, and application services cannot acquire a
   dependency on `lora-phy`, RNode framing, SX126x, or an E290/Tracker BSP.
 - Node-core authorization contains no radio configuration, RNode frame-count,

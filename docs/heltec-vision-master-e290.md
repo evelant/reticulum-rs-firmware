@@ -361,12 +361,13 @@ than continuous redraw.
    transmissions, bounded RX/TX, signed ANNOUNCEs, encrypted DATA, and delivery
    proof provided both the radio smoke evidence and semantic checks. Both
    immediate and post-capture image-range readbacks matched.
-6. **Implemented, build-verified, and powered-smoke-verified:** make E290 the primary permanent-node
-   graph with one transport-neutral node task and one concrete LoRa task while
-   retaining Tracker HIL as a regression target. The permanent image now passes
-   boot, erased-credential, journal/LoRa/interface, and ordinary-TX smoke; it
-   still requires controlled peer RX/DATA, fault, cut, high-water, and full
-   powered product-graph qualification.
+6. **Implemented, build-verified, and bounded end-to-end powered-verified:** make
+   E290 the primary permanent-node graph with one transport-neutral node task
+   and one concrete LoRa task while retaining Tracker HIL as a regression
+   target. The permanent image now passes boot, credential, journal/LoRa/
+   interface, authenticated durable submission, controlled peer RX/DATA/proof,
+   and post-re-enumeration terminal-status checks. Fault, cut, high-water,
+   application-inbox, and full powered product-graph qualification remain.
 7. Integrate the powered storage actor and authenticated USB device API first,
    then add an optional second Reticulum interface (with a distinct USB stream
    actor the leading candidate) to prove heterogeneous routing. Wi-Fi, BLE,

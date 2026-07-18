@@ -3,9 +3,10 @@
 Status: logical codec and portable authenticated dispatch implemented over a
 narrow durable-submission port. This document freezes the operation and field
 numbers exercised by `reticulum-device-api`; `reticulum-device-api-adapter`
-implements capabilities and principal-scoped status in its default build plus
-target-safe durable experimental outbound RNS DATA submission behind an explicit
-feature. Separate portable framing, immutable credential-authority, USB-
+implements capabilities, the public primary-destination summary, and principal-
+scoped status in its default build plus target-safe durable experimental
+outbound RNS DATA submission behind an explicit feature. Separate portable
+framing, immutable credential-authority, USB-
 qualification session and boot-lifetime authenticated-job handoff crates now
 exist. The session core emits only a credential ID/generation grant; the
 portable authority revalidates it and derives `DispatchContext` through a
@@ -35,8 +36,9 @@ selection, and the read-only interrupted-initialization classifier are
 implemented. E290 boot maps only its canonical recoverable trajectory to an
 explicit disabled state. This bootstrap is not an authenticated session and
 does not dispatch the logical API documented here. Its status and physical-
-presence-required path has run on both boards, but a successful button-confirmed
-initialization and post-write readback remain open. ADR 0010's separate
+presence-required path has run on both boards; one sender subsequently completed
+button-confirmed initialization, pairing, and exact post-write readback. ADR
+0010's separate
 allocation-free live-pairing core now freezes Begin, ProofStart, Activate and
 AbortCurrent records, typed continuation/reference binding, HMAC-SHA256 proof
 and activation confirmation, secret-owner zeroization, and independent Python
@@ -57,9 +59,12 @@ retries, close records, encryption, rate limiting/attempt policy, repeated
 handshake attempts, and concurrency. Admission and node dispatch are
 transport-neutral so later BLE and Wi-Fi bearers can reach the same lane after
 their currently disabled session bindings/suites are implemented and qualified.
-This is source/test status;
-no authenticated request has yet run on powered hardware. A product port may route an
-accepted submission through the node after the durable barriers.
+Powered E290 qualification now covers authenticated capabilities and identity
+reads plus one durable experimental submission that crossed LoRa, was decrypted
+by a second permanent node, returned a valid Reticulum proof for the exact
+packet, and remained `Delivered` after sender USB re-enumeration. A product port
+may route an accepted submission through the node only after the durable
+barriers.
 
 ## Boundary
 
@@ -98,8 +103,9 @@ remain available in either condition.
 
 ## Version and evolution rules
 
-The initial version is `1.0`. A decoder accepts major version 1 with any minor
-version, skips unknown numeric map fields, and rejects another major version.
+The initial version was `1.0`; the current version is `1.1`, which adds
+`identity.summary`. A decoder accepts major version 1 with any minor version,
+skips unknown numeric map fields, and rejects another major version.
 Encoding an envelope with another major version fails with the typed
 `EncodeError::UnsupportedVersion` before any message is emitted. All encoder
 output uses definite maps, ascending numeric keys, and CBOR's preferred shortest
@@ -122,7 +128,7 @@ new optional numeric map fields instead of extending these enums. Experimental
 operations remain exempt from stable compatibility as described below.
 
 The decoder consumes exactly one logical CBOR item. Trailing bytes are rejected;
-stream recovery and message boundaries belong to the future framing crate.
+stream recovery and message boundaries belong to the separate framing crate.
 The allocation-free strict skipper bounds container/tag nesting within an
 operation body or one unknown field value to eight levels.
 
@@ -162,6 +168,7 @@ authorization credential.
 | ---: | --- | --- | --- |
 | `0x0001` | `system.capabilities` | v1 | public/read-only |
 | `0x0002` | `submission.status` | v1 | authenticated + `READ_SUBMISSION_STATUS` |
+| `0x0003` | `identity.summary` | v1.1 | public/read-only |
 | `0xf001` | `experimental.submit_rns_data` | feature-gated experimental | authenticated + `EXPERIMENTAL_SUBMIT_RNS_DATA` |
 
 Numbers `0xf000..=0xffff` are experimental and can disappear or change without
@@ -198,6 +205,25 @@ eligible Reticulum interface without granting a client direct radio control. A
 higher dispatcher uses `CapabilitySnapshot::for_dispatch` to restrict that
 codec-build snapshot; it can disable a capability but cannot enable one omitted
 from the codec build.
+
+### `identity.summary` (`0x0003`)
+
+Request body: a map with no recognized fields. Unknown fields are permitted for
+evolution.
+
+Successful response body:
+
+| Key | Type | Required | Meaning |
+| ---: | --- | --- | --- |
+| 0 | bytes(16) | yes | complete destination hash for the node's primary permanent application destination |
+
+The response is intentionally public, copy-only identity metadata; it contains
+no private key, credential, principal, permission, route, or storage handle. It
+requires no logical operation permission. A physical E290 device-API bearer is
+still authenticated before it carries any logical operation, including this
+one. The adapter receives this scalar from the node owner separately from
+`SubmissionPort`, so the read performs no storage or radio I/O and cannot gain a
+mutable device capability.
 
 ### `submission.status` (`0x0002`)
 
@@ -276,8 +302,8 @@ durable acceptance, idempotency input, and the API-to-storage boundary. It is a
 transport-neutral submission: the client neither selects LoRa nor receives a
 radio capability. The resident E290 composition can carry accepted work through
 the node router and the LoRa-first interface after the durable barriers. The
-minimal single-flight USB bearer now exposes this API in source, although it is
-not yet powered-qualified. The future client-facing message
+minimal single-flight USB bearer now exposes this API and has completed one
+bounded powered submission/peer-proof/status path. The future client-facing message
 operation remains `messages.send` through embedded LXMF. A separately authorized
 raw RNS/RNode or direct-radio bridge, if ever implemented, remains a distinct
 capability and mode.
@@ -310,8 +336,10 @@ exercises that API-to-runtime-to-router-to-LoRa software path; portable framing,
 immutable credential authority, qualification-session establishment, and job
 handoff and raw-NOR credential storage are implemented separately, while
 the credential store is now boot-composed. External live admission now has its
-first source-composed USB handshake/session bearer; it still requires powered
-qualification of initialization, pairing, authentication, request, and reply.
+first powered-qualified USB handshake and session bearer. Initialization,
+pairing, authenticated request/reply, durable submission, peer proof, and post-
+re-enumeration status have run on the E290 pair; broader lifecycle, fault, and
+bearer qualification remains open.
 
 Successful experimental response body:
 
@@ -329,10 +357,11 @@ backend reply maps to `Internal` while the actor retains the exact mutation;
 after `drive_pending()` reconciles it, retry returns the same durable ID.
 Idempotency conflict and capacity map to their stable API categories, while
 identifier exhaustion, actor busy, backend ambiguity and a latched fault map to
-`Internal`. The minimal authenticated USB bearer now exposes this operation in
-the source graph once a credential is active. The pre-authentication bootstrap
-cannot create an authenticated owner, and powered end-to-end proof remains
-open. Acceptance
+`Internal`. The minimal authenticated USB bearer now exposes this operation
+when a credential is active. The pre-authentication bootstrap cannot create an
+authenticated owner. A powered E290 submission has completed durable acceptance,
+LoRa delivery, peer decrypt/proof, terminal projection, and post-re-enumeration
+status. Acceptance
 is not a delivery guarantee; a later status can report no
 path, delivery timeout, downstream rejection, or an internal failure. The ID
 can be queried through `submission.status`. The response contains no
@@ -375,6 +404,7 @@ framing rules.
 `authorize_request(context, request)` applies the common baseline:
 
 - `system.capabilities` requires no logical operation permission;
+- `identity.summary` requires no logical operation permission;
 - `submission.status` requires an authenticated principal and its read bit;
 - experimental outbound RNS DATA submission requires an authenticated principal
   and `EXPERIMENTAL_SUBMIT_RNS_DATA`.
@@ -411,10 +441,10 @@ initialization-interrupted, blocked, corrupt, or backend-failed state. The
 resident credential runtime and sole-owner physical drive are invoked by both
 the E290 pre-authentication status/initialize lane and its routed Begin/
 ProofStart/Activate/AbortCurrent lifecycle. The composed node lane consumes only
-session-minted grants and retains malformed logical owners terminally; the
-future USB serving runtime must select active credentials, enforce
-connection-level rate limits, and keep authentication state outside request
-CBOR. The existing bootstrap does not create a session grant or admit a logical
+session-minted grants and retains malformed logical owners terminally. The USB
+serving runtime selects active credentials and keeps authentication state
+outside request CBOR; connection-level rate limits remain deferred. The pre-
+authentication bootstrap does not create a session grant or admit a logical
 request.
 
 Semantic journal schema 2 persists the principal, idempotency key,
@@ -427,15 +457,22 @@ returns the original ID and retains the original evidence. See
 
 ## Golden vectors
 
-The canonical `system.capabilities` request for request ID 42 is:
+The canonical API 1.1 `system.capabilities` request for request ID 42 is:
 
 ```text
-a4 00 a2 00 01 01 00 01 18 2a 02 01 03 a0
+a4 00 a2 00 01 01 01 01 18 2a 02 01 03 a0
 ```
 
-The wire tests freeze this request, both default and experimental capability
-responses, typed permission/capacity/idempotency error responses, the
-experimental submission request, and its submission-ID-only accepted response.
+The canonical API 1.1 `identity.summary` request for request ID 42 is:
+
+```text
+a4 00 a2 00 01 01 01 01 18 2a 02 03 03 a0
+```
+
+The wire tests freeze these requests, the identity response, both default and
+experimental capability responses, typed permission/capacity/idempotency error
+responses, the experimental submission request, and its submission-ID-only
+accepted response.
 They also cover every submission failure, state invariants, closed numeric
 enums, unknown fields, unknown operations, missing and duplicate known fields,
 every truncated golden prefix, trailing bytes,
@@ -613,8 +650,22 @@ the service and restored sequence zero after firmware detachment, USB-RAM scrub,
 and reattachment. A non-seizing in-place `ResetDevice` returned success but left
 the endpoint stale and is not an accepted recovery primitive. The image-readback
 hard-reset reattachment path is bounded powered evidence, while suspend/resume,
-successful powered activation, controlled cuts, and the ROM/bootloader interval
-before the application quarantine remain to be qualified. This is not an
-authenticated session or logical API operation. The subsequently composed
-minimal USB bearer and node lane still have no powered authenticated-API
-evidence.
+controlled cuts, and the ROM/bootloader interval before the application
+quarantine remain to be qualified.
+
+The subsequent API 1.1 image packaged a 686,176-byte application as a
+751,712-byte merged image with SHA-256
+`4285fcaa9df6a6f0314ed4735377ea986b0efcafafc2710ad7594489a49b4795`.
+Exact address-zero readbacks matched on both E290 boards. The authenticated
+sender reported primary destination
+`c99e8ff1ec8629e4e1290e14462ae8af`; the provisioned receiver reported
+`83a09ed807a0a7c631386deaa0448fb9`. Submission 1 prepared a 131-byte packet
+whose full encoded-byte SHA-256 was
+`df937860f5225deb9d2350c6f3a46f33bd659ccbcb6b47267add47c9a287a4fe`.
+The receiver matched its local destination, decrypted the DATA packet, and
+returned a valid Reticulum proof; sender status became `Delivered` in about 2.6
+seconds. A full sender USB re-enumeration followed by a fresh authenticated
+session returned the same terminal state, length, and digest. This qualifies
+the exact USB-to-durable-runtime-to-LoRa-to-peer-proof path, not application-
+level message consumption, multi-hop routing, session resumption, or the
+deferred BLE/Wi-Fi bearers.

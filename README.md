@@ -274,9 +274,9 @@ coordinator retains exclusive flash authority while local durable submission
 stays disabled and route-only LoRa continues. The current product profile allows
 at most one accepted-history entry solely for composition qualification, not as
 a product-capacity commitment. The source-composed minimal authenticated USB
-lane can originate work through this path once a credential exists, although
-that complete path has not yet run on powered hardware; the host composition
-harness exercises the same semantic boundary directly. Node-core emits an
+lane now originates work through this path from an Active credential; the
+bounded powered E290 run completed durable acceptance, physical LoRa DATA/proof,
+terminal projection, and status after USB re-enumeration. Node-core emits an
 `AuthorizedFrameObservation` from the
 exact authorized native DATA bytes before interface framing. The portable radio
 dispatcher now retains every post-byte-exposure DATA completion and router
@@ -408,7 +408,7 @@ store/pairing decision in
 experimental host tests/clippy plus the corresponding ESP32-S3 Xtensa checks
 pass.
 
-The E290 library now has 110 passing host tests, including the resident live-
+The E290 library now has 125 passing host tests, including the resident live-
 pairing lifecycle, its causal control/live frontier, shared USB decoder and
 sequence gate, secret-owning handoff, initialization/product policy, and
 two real cross-layer composition tests. The happy path rejects
@@ -465,20 +465,24 @@ and both recovered sequence-zero service after the readback reset. This proves
 the then-dormant handoff did not regress the existing USB bootstrap in that
 bounded run. It does not exercise an authenticated handshake, request, or
 reply, and it is not evidence for the subsequently composed minimal USB session
-bearer. The currently linked source with that minimal bearer is 640,587 bytes
-text, 3,596 bytes initialized data, 469,232 bytes BSS/reservations, and
-1,113,415 bytes total by GNU size. Its packaged application is 681,648 bytes;
-the 747,184-byte merged image has SHA-256
-`5ccfeb7518ea3bfa856cb439b3e75d118ec3ec78254bc5f0ef9b33851740a8bd`.
-Exact address-zero readbacks matched that digest on both boards, both returned
-sequence-zero `initialization-required`, and both credential partitions retained
-the all-`0xff` digest above. This qualifies the successor's package/readback and
-pre-authentication bootstrap regression, but no powered authenticated handshake,
-request, or reply has run yet.
-This does not qualify controlled peer RX, DATA, successful pairing/
-authentication, powered credential initialization, power-cut recovery,
-suspend/resume, stack high-water, heap pressure, or the full powered owner
-graph. Device-API dispatch is a separate portable integration boundary: the
+bearer. The current API 1.1 source is 645,159 bytes text, 3,596 bytes initialized
+data, 469,232 bytes BSS/reservations, and 1,117,987 bytes total by GNU size. Its
+686,176-byte application is packaged as a 751,712-byte merged image with
+SHA-256
+`4285fcaa9df6a6f0314ed4735377ea986b0efcafafc2710ad7594489a49b4795`.
+Exact address-zero readbacks matched on both E290s. The Active sender exposed
+its public primary destination through `identity.summary`, durably accepted
+submission 1, and kept one authenticated session open for sequential status
+polls. The second permanent node decrypted the matching LoRa DATA and returned
+a valid Reticulum proof; the sender reached `Delivered` in about 2.6 seconds.
+After full sender USB re-enumeration, a fresh authenticated session returned the
+same 131-byte packet length and encoded-byte SHA-256
+`df937860f5225deb9d2350c6f3a46f33bd659ccbcb6b47267add47c9a287a4fe`.
+This qualifies controlled peer RX/DATA/proof, successful pairing/authentication,
+powered credential initialization, and the bounded permanent outbound owner
+graph. It does not qualify application-level inbox consumption, power-cut
+recovery, suspend/resume, stack high-water, heap pressure, or the full product.
+Device-API dispatch is a separate portable integration boundary: the
 target-safe authenticated adapter,
 COBS framing, pre-authentication initialization-control codec, immutable
 credential authority, qualification-session core, boot-lifetime job handoff,
@@ -487,17 +491,18 @@ permanent node now receives exact owners from a static depth-one handoff,
 revalidates each grant against the currently publishable authority, and invokes
 that port synchronously through disjoint borrows; rejection has zero port I/O
 and no unauthenticated fallback. Schema-2 acceptance retains exact
-authorization provenance. The current source graph now serves that boundary
-through its minimal single-flight USB bearer; BLE and Wi-Fi implementations do
-not yet exist, and powered USB authentication/request/reply proof remains open.
+authorization provenance. The current source graph serves that boundary
+through its minimal single-flight USB bearer; capabilities, identity, durable
+submission, sequential status, peer proof, and fresh post-re-enumeration status
+are powered-qualified. BLE and Wi-Fi implementations do not yet exist.
 The
 resident credential runtime now also retains live pairing permits, proofs,
 secrets, typed store candidates, and reconciliation owners through definite
 outcomes. The bearer-neutral secret handoff preserves exact owners under
 pressure and is now split between the USB and node tasks. Mutation-producing
 live requests cross the node's journal-aware causal frontier and do not receive
-success until the exact durable terminal outcome; powered activation remains
-to be completed.
+success until the exact durable terminal outcome; powered activation has now
+completed on the sender.
 The legacy `TxSupervisor` remains a separate RF-inert test aggregate. The permanent
 `NodeInterfaceSupervisor` now owns the router, DATA and ordinary coordinators,
 and both permit-service families; the first permanent E290 image composes it
@@ -545,17 +550,19 @@ ANNOUNCE/DATA/proof fixture; its bounded clear CAD before each transmission
 passed the intended register/CAD/RX/TX smoke evidence without another
 throwaway image. The
 permanent autonomous image has a separate boot/radio/ordinary-ANNOUNCE pair
-test. Its source graph now has a local submission/API edge, but that edge has
-not yet originated controlled DATA in a powered run.
+test. Its local submission/API edge has now originated controlled DATA in a
+powered run and completed exact peer proof plus terminal status after USB re-
+enumeration.
 The DATA router, both permit-only services and permanent aggregate are now
 connected to the dispatcher, sole-Rete owner, timed RNode RX and one E290 LoRa
 actor in the first permanent build-verified target. Its exact authorized-frame
 durability handoff and ADR 0005 active-owner fail-stop now pass cross-layer host
-composition tests. Powered live external admission is blocked on successful
-credential initialization and authenticated USB handshake/request/reply
-proof—not by credential-store boot
-composition, the frozen pairing/session cryptography, another semantic
-authority, durability policy, partition, or capacity decision. The feature-free
+composition tests. Powered live external admission now passes its bounded
+credential initialization, authenticated USB handshake/request/reply, durable
+submission, and physical LoRa peer-proof path. Broader lifecycle/fault work and
+the application message edge remain—not credential-store boot composition, the
+frozen pairing/session cryptography, another semantic authority, durability
+policy, partition, or capacity decision. The feature-free
 ADR 0009 admission policy, resident
 initialization owner, and sole-owner physical drive are compiled only into the
 permanent E290 graph. The pre-authentication initialization and live-pairing

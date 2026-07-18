@@ -8,8 +8,8 @@
 //! radio, raw-flash, or session-key access.
 
 use reticulum_device_api::{
-    ApiErrorCode, ApiErrorResponse, ApiVersion, DeviceResponse, ResponseEnvelope, decode_request,
-    encode_response,
+    ApiErrorCode, ApiErrorResponse, ApiVersion, DeviceResponse, IdentitySummary, ResponseEnvelope,
+    decode_request, encode_response,
 };
 use reticulum_device_api_adapter::{SubmissionPort, dispatch};
 use reticulum_device_api_credentials::CredentialAuthority;
@@ -52,6 +52,8 @@ impl AuthenticatedApiDispatchFailure {
 
 /// Revalidate and synchronously dispatch one authenticated logical API request.
 ///
+/// `identity` is a copy-only public node summary supplied independently of the
+/// submission port; serving it cannot acquire storage or radio capabilities.
 /// Missing, replaced, revoked, or generation-mismatched credential state emits
 /// a generic `AuthenticationRequired` response without invoking `port`. It is
 /// never retried through [`reticulum_device_api::DispatchContext::UNAUTHENTICATED`].
@@ -63,6 +65,7 @@ impl AuthenticatedApiDispatchFailure {
 pub fn dispatch_authenticated_request<const CREDENTIALS: usize, P>(
     request: LocalApiRequest<AuthenticatedGrant>,
     authority: Option<&CredentialAuthority<CREDENTIALS>>,
+    identity: IdentitySummary,
     port: &mut P,
 ) -> Result<LocalApiReply, AuthenticatedApiDispatchFailure>
 where
@@ -80,7 +83,9 @@ where
     let operation = envelope.request.operation();
     let response = match authority.and_then(|authority| request.grant().revalidate(authority).ok())
     {
-        Some(lease) => lease.with_dispatch_context(|context| dispatch(port, context, envelope)),
+        Some(lease) => {
+            lease.with_dispatch_context(|context| dispatch(port, identity, context, envelope))
+        }
         None => ResponseEnvelope {
             version: ApiVersion::CURRENT,
             request_id: envelope.request_id,
@@ -117,8 +122,9 @@ mod tests {
     use rand_core::{CryptoRng, RngCore};
     use reticulum_device_api::{
         ApiErrorCode, ApiErrorResponse, ApiVersion, CapabilityAvailability, CapabilitySnapshot,
-        DeviceRequest, DeviceResponse, OP_SYSTEM_CAPABILITIES, Permissions, PrincipalId,
-        RequestEnvelope, RequestId, ResponseEnvelope, decode_response, encode_request,
+        DestinationHash, DeviceRequest, DeviceResponse, IdentitySummary, OP_SYSTEM_CAPABILITIES,
+        Permissions, PrincipalId, RequestEnvelope, RequestId, ResponseEnvelope, decode_response,
+        encode_request,
     };
     use reticulum_device_api_adapter::{SubmissionAcceptance, SubmissionPort, SubmissionPortError};
     use reticulum_device_api_credentials::{
@@ -157,6 +163,7 @@ mod tests {
     const CLIENT_NONCE: [u8; 32] = [0x64; 32];
     const SERVER_NONCE: [u8; 32] = [0x75; 32];
     const EXPECTED_KEY: RequestKey = RequestKey::new(SessionEpoch::new(1), CorrelationId::new(0));
+    const IDENTITY_SUMMARY: IdentitySummary = IdentitySummary::new(DestinationHash([0x91; 16]));
 
     struct FixedRng {
         bytes: [u8; 32],
@@ -392,6 +399,21 @@ mod tests {
         ))
     }
 
+    fn identity_request(request_id: RequestId) -> LocalApiRequest<AuthenticatedGrant> {
+        let envelope = RequestEnvelope {
+            version: ApiVersion::CURRENT,
+            request_id,
+            request: DeviceRequest::IdentitySummary,
+        };
+        let mut encoded = [0_u8; MESSAGE_CAPACITY];
+        let length = encode_request(&envelope, &mut encoded)
+            .unwrap_or_else(|error| panic!("identity request encoding failed: {error:?}"));
+        authenticated_request(OwnedMessage::new(
+            MessageLength::new(length).expect("canonical request fits the handoff capacity"),
+            encoded,
+        ))
+    }
+
     fn assert_authentication_required(
         reply: reticulum_device_api_handoff::LocalApiReply,
         request_id: RequestId,
@@ -419,8 +441,9 @@ mod tests {
         let authority = active_authority(GENERATION);
         let mut port = CountingPort::default();
 
-        let reply = dispatch_authenticated_request(request, Some(&authority), &mut port)
-            .unwrap_or_else(|fault| panic!("valid dispatch failed: {:?}", fault.kind()));
+        let reply =
+            dispatch_authenticated_request(request, Some(&authority), IDENTITY_SUMMARY, &mut port)
+                .unwrap_or_else(|fault| panic!("valid dispatch failed: {:?}", fault.kind()));
 
         assert_eq!(reply.key(), EXPECTED_KEY);
         assert_eq!(port.availability_calls, 1);
@@ -441,6 +464,31 @@ mod tests {
     }
 
     #[test]
+    fn current_grant_returns_public_identity_without_submission_port_io() {
+        let request_id = RequestId(0x8877_6655_4433_2211);
+        let request = identity_request(request_id);
+        let authority = active_authority(GENERATION);
+        let mut port = CountingPort::default();
+
+        let reply =
+            dispatch_authenticated_request(request, Some(&authority), IDENTITY_SUMMARY, &mut port)
+                .unwrap_or_else(|fault| panic!("valid dispatch failed: {:?}", fault.kind()));
+
+        assert_eq!(reply.key(), EXPECTED_KEY);
+        assert_eq!(port.total_calls(), 0);
+        let response = decode_response(reply.message().encoded())
+            .unwrap_or_else(|error| panic!("identity response was not canonical: {error:?}"));
+        assert_eq!(
+            response,
+            ResponseEnvelope {
+                version: ApiVersion::CURRENT,
+                request_id,
+                response: DeviceResponse::IdentitySummary(IDENTITY_SUMMARY),
+            }
+        );
+    }
+
+    #[test]
     fn absent_revoked_and_generation_mismatched_authorities_fail_without_port_fallback() {
         let mut port = CountingPort::default();
 
@@ -448,6 +496,7 @@ mod tests {
         let absent = dispatch_authenticated_request::<1, _>(
             capabilities_request(absent_id),
             None,
+            IDENTITY_SUMMARY,
             &mut port,
         )
         .unwrap_or_else(|fault| panic!("absent authority response failed: {:?}", fault.kind()));
@@ -458,6 +507,7 @@ mod tests {
         let revoked = dispatch_authenticated_request(
             capabilities_request(revoked_id),
             Some(&revoked_authority),
+            IDENTITY_SUMMARY,
             &mut port,
         )
         .unwrap_or_else(|fault| panic!("revoked authority response failed: {:?}", fault.kind()));
@@ -468,6 +518,7 @@ mod tests {
         let mismatched = dispatch_authenticated_request(
             capabilities_request(mismatched_id),
             Some(&mismatched_authority),
+            IDENTITY_SUMMARY,
             &mut port,
         )
         .unwrap_or_else(|fault| {
@@ -488,7 +539,12 @@ mod tests {
         let authority = active_authority(GENERATION);
         let mut port = CountingPort::default();
 
-        let failure = match dispatch_authenticated_request(request, Some(&authority), &mut port) {
+        let failure = match dispatch_authenticated_request(
+            request,
+            Some(&authority),
+            IDENTITY_SUMMARY,
+            &mut port,
+        ) {
             Ok(_) => panic!("malformed logical request unexpectedly dispatched"),
             Err(failure) => failure,
         };

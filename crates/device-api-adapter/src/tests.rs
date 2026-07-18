@@ -315,6 +315,10 @@ fn mounted<const SUBMISSIONS: usize>() -> TestActor<SUBMISSIONS> {
     TestActor::mount(FakeNor::formatted(), SubmissionId::new(10))
 }
 
+fn identity_summary() -> api::IdentitySummary {
+    api::IdentitySummary::new(api::DestinationHash([0xa5; 16]))
+}
+
 #[derive(Default)]
 struct UnavailablePort {
     availability_calls: usize,
@@ -351,7 +355,7 @@ fn dispatch<const SUBMISSIONS: usize>(
     context: DispatchContext,
     envelope: RequestEnvelope<'_>,
 ) -> ResponseEnvelope {
-    super::dispatch(actor, &context, envelope)
+    super::dispatch(actor, identity_summary(), &context, envelope)
 }
 
 fn envelope<'a>(request_id: u64, request: DeviceRequest<'a>) -> RequestEnvelope<'a> {
@@ -504,10 +508,34 @@ fn capabilities_are_public_current_and_side_effect_free() {
 }
 
 #[test]
+fn identity_summary_is_public_read_only_and_never_calls_submission_port() {
+    let expected = identity_summary();
+    for context in [
+        DispatchContext::UNAUTHENTICATED,
+        authenticated(1, Permissions::NONE),
+    ] {
+        let mut port = UnavailablePort::default();
+        let response = super::dispatch(
+            &mut port,
+            expected,
+            &context,
+            envelope(110, DeviceRequest::IdentitySummary),
+        );
+        assert_eq!(response.version, ApiVersion::CURRENT);
+        assert_eq!(response.request_id, RequestId(110));
+        assert_eq!(response.response, DeviceResponse::IdentitySummary(expected));
+        assert_eq!(port.availability_calls, 0);
+        assert_eq!(port.status_calls, 0);
+        assert_eq!(port.acceptance_calls, 0);
+    }
+}
+
+#[test]
 fn unavailable_service_is_not_advertised_or_called_for_status() {
     let mut port = UnavailablePort::default();
     let capabilities = super::dispatch(
         &mut port,
+        identity_summary(),
         &DispatchContext::UNAUTHENTICATED,
         envelope(111, DeviceRequest::SystemCapabilities),
     );
@@ -518,6 +546,7 @@ fn unavailable_service_is_not_advertised_or_called_for_status() {
 
     let status = super::dispatch(
         &mut port,
+        identity_summary(),
         &authenticated(1, Permissions::READ_SUBMISSION_STATUS),
         envelope(
             112,
@@ -705,6 +734,7 @@ fn unavailable_service_rejects_mutation_before_acceptance() {
     let mut port = UnavailablePort::default();
     let response = super::dispatch(
         &mut port,
+        identity_summary(),
         &submit_context(1),
         envelope(118, submit_request(b"unavailable", 2)),
     );
@@ -1051,6 +1081,7 @@ fn wrong_journal_binding_is_internal_and_touches_no_storage() {
     };
     let response = super::dispatch(
         &mut port,
+        identity_summary(),
         &submit_context(1),
         envelope(60, submit_request(b"wrong-backend", 2)),
     );

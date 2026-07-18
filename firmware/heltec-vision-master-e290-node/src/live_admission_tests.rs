@@ -1,7 +1,7 @@
 use crate::{config, durability_policy::DurabilityServiceState};
 use reticulum_device_api::{
     ApiErrorCode, ApiVersion, DestinationHash as ApiDestinationHash, DeviceRequest, DeviceResponse,
-    DispatchContext, DispatchProvenance, IdempotencyKey, Permissions,
+    DispatchContext, DispatchProvenance, IdempotencyKey, IdentitySummary, Permissions,
     PrincipalId as ApiPrincipalId, RequestEnvelope, RequestId,
     SubmissionFailure as ApiSubmissionFailure, SubmissionId as ApiSubmissionId, SubmissionState,
 };
@@ -19,6 +19,7 @@ use std::vec;
 
 const OWNER: ApiPrincipalId = ApiPrincipalId([0x11; 16]);
 const FOREIGN: ApiPrincipalId = ApiPrincipalId([0x22; 16]);
+const IDENTITY_SUMMARY: IdentitySummary = IdentitySummary::new(ApiDestinationHash([0x33; 16]));
 
 fn submit_request<'a>(
     request_id: u64,
@@ -84,6 +85,7 @@ fn authenticated_submission_crosses_lora_policy_and_scripted_radio_durability() 
 
     let unauthenticated = dispatch(
         &mut service,
+        IDENTITY_SUMMARY,
         &DispatchContext::UNAUTHENTICATED,
         submit_request(1, destination, b"live LoRa submission", 0x31),
     );
@@ -95,6 +97,7 @@ fn authenticated_submission_crosses_lora_policy_and_scripted_radio_durability() 
 
     let denied = dispatch(
         &mut service,
+        IDENTITY_SUMMARY,
         &context(OWNER, Permissions::READ_SUBMISSION_STATUS),
         submit_request(2, destination, b"live LoRa submission", 0x31),
     );
@@ -103,6 +106,7 @@ fn authenticated_submission_crosses_lora_policy_and_scripted_radio_durability() 
 
     let accepted = dispatch(
         &mut service,
+        IDENTITY_SUMMARY,
         &full_context(OWNER),
         submit_request(3, destination, b"live LoRa submission", 0x31),
     );
@@ -115,6 +119,7 @@ fn authenticated_submission_crosses_lora_policy_and_scripted_radio_durability() 
     let after_accept_writes = service.write_attempts();
     let second_novel = dispatch(
         &mut service,
+        IDENTITY_SUMMARY,
         &full_context(OWNER),
         submit_request(4, destination, b"second novel submission", 0x32),
     );
@@ -205,6 +210,7 @@ fn authenticated_submission_crosses_lora_policy_and_scripted_radio_durability() 
 
     let awaiting = dispatch(
         &mut service,
+        IDENTITY_SUMMARY,
         &full_context(OWNER),
         status_request(5, api_id),
     );
@@ -252,6 +258,7 @@ fn authenticated_submission_crosses_lora_policy_and_scripted_radio_durability() 
 
     let final_status = dispatch(
         &mut service,
+        IDENTITY_SUMMARY,
         &full_context(OWNER),
         status_request(6, api_id),
     );
@@ -263,6 +270,7 @@ fn authenticated_submission_crosses_lora_policy_and_scripted_radio_durability() 
     ));
     let foreign_status = dispatch(
         &mut service,
+        IDENTITY_SUMMARY,
         &full_context(FOREIGN),
         status_request(7, api_id),
     );
@@ -278,6 +286,7 @@ fn authenticated_submission_crosses_lora_policy_and_scripted_radio_durability() 
     ));
     let after_remount = dispatch(
         &mut remounted,
+        IDENTITY_SUMMARY,
         &full_context(OWNER),
         status_request(8, api_id),
     );
@@ -296,6 +305,7 @@ fn permanent_post_frame_storage_failure_fail_stops_lora_with_all_owners_retained
     let destination = *system.destination.as_bytes();
     let accepted = dispatch(
         &mut service,
+        IDENTITY_SUMMARY,
         &full_context(OWNER),
         submit_request(20, destination, b"fail-stop frame", 0x51),
     );

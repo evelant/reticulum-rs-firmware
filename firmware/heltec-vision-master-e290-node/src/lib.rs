@@ -442,8 +442,9 @@ mod tests {
 
         let node = include_str!("node_task.rs");
         assert!(node.contains("enum AuthenticatedApiNodeState"));
+        assert!(node.contains("*supervisor.destination_hash().as_bytes()"));
         assert!(node.contains("progressed |= step_authenticated_api("));
-        assert!(node.contains("storage.dispatch_authenticated_request(request)"));
+        assert!(node.contains("storage.dispatch_authenticated_request(request, identity)"));
         assert!(node.contains("AuthenticatedApiNodeState::PendingReply(pressure.into_inner())"));
         assert!(node.contains("AuthenticatedApiNodeState::Quarantined {"));
         assert!(node.contains("request: failure.into_request()"));
@@ -451,10 +452,9 @@ mod tests {
         let storage = include_str!("platform_storage.rs");
         assert!(storage.contains("struct ProductSubmissionPort<'a>"));
         assert!(storage.contains(".select_ordinary_session(at, connection, credential_id)"));
-        assert!(
-            storage
-                .contains("credential_runtime.dispatch_authenticated_request(request, &mut port)")
-        );
+        assert!(storage.contains(
+            "credential_runtime.dispatch_authenticated_request(request, identity, &mut port)"
+        ));
 
         let usb = include_str!("usb_pairing_task.rs");
         assert!(usb.contains(

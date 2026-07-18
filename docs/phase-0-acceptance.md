@@ -375,8 +375,8 @@ their five-second overall deadlines, proving bounded multi-request liveness
 without opening the presence window. Subsequent 8 KiB credential-partition
 readbacks on both boards were entirely `0xff` with SHA-256
 `7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f`,
-confirming zero writes. A successful hold, write, and post-write readback remain
-open.
+confirming zero writes. That historical run did not attempt a successful hold,
+write, or post-write readback.
 The preceding boot-quarantined 701,744-byte image with SHA-256
 `14d9fd6dd482c47baa9afd2fda6a5ba1d69f46785bf23ae29f6b9fe561e4b212`
 then matched exact address-zero readbacks from both boards. Each board
@@ -417,15 +417,26 @@ verification preserved at
 `artifacts/storage-hil/20260716T211318Z-e944-7b47113`. It proves A1 format,
 five appends, mutation-free retry/conflict, B2 compaction, and zero-mutation B2
 replay after software reset. That image calls the journal directly and does not
-qualify the actor on hardware. Controlled power cuts, endurance/soak, at-rest
-encryption, successful powered initialization/pairing/activation, powered
-authenticated USB handshake/session/API qualification, full qualification of the
-current permanent owner graph, and runtime flash/watchdog/OTA/radio coordination
-remain open. The credential smoke does
-not claim initialized-media recovery, interruption/power-cut recovery, a live
-authentication session, controlled peer RX/DATA, or an authenticated external
-bearer. On-
-device stack high-water and scenario heap measurements also remain required.
+qualify the actor on hardware.
+
+The current API 1.1 permanent image has now completed the next bounded product
+slice. Its 751,712-byte merged image (SHA-256
+`4285fcaa9df6a6f0314ed4735377ea986b0efcafafc2710ad7594489a49b4795`)
+matched exact address-zero readbacks on both E290s. The sender retained its
+powered initialization/pairing/Active state, authenticated over USB, exposed
+its public primary destination, and durably accepted one submission. The second
+permanent node decrypted the matching LoRa DATA and returned a valid Reticulum
+proof; the sender durably reached `Delivered`, and a fresh authenticated status
+request after full USB re-enumeration returned the same terminal metadata. This
+qualifies the bounded authenticated external-bearer-to-peer-proof path, not
+application inbox consumption or the full Rete production gates below.
+
+Controlled power cuts, endurance/soak, at-rest encryption, remaining credential
+lifecycle paths, full qualification of the current permanent owner graph, and
+runtime flash/watchdog/OTA/radio coordination remain open. The current evidence
+does not claim initialized-media interruption recovery, application-level
+message consumption, multi-hop routing, or session resumption. On-device stack
+high-water and scenario heap measurements also remain required.
 
 ## Rete production hard gates
 

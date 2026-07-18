@@ -4,8 +4,8 @@ use core::{convert::Infallible, marker::PhantomData, ops::BitOr};
 
 /// Device API v1 major version.
 pub const API_VERSION_MAJOR: u16 = 1;
-/// Initial device API v1 minor version.
-pub const API_VERSION_MINOR: u16 = 0;
+/// Device API v1 revision adding `identity.summary`.
+pub const API_VERSION_MINOR: u16 = 1;
 
 /// Maximum size of one decoded or encoded logical CBOR message.
 pub const MAX_MESSAGE_BYTES: usize = 512;
@@ -18,6 +18,8 @@ pub const MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES: usize = 383;
 pub const OP_SYSTEM_CAPABILITIES: u16 = 0x0001;
 /// `submission.status` operation number.
 pub const OP_SUBMISSION_STATUS: u16 = 0x0002;
+/// `identity.summary` operation number.
+pub const OP_IDENTITY_SUMMARY: u16 = 0x0003;
 /// Error response kind used instead of a successful operation number.
 pub const RESPONSE_ERROR: u16 = 0x0000;
 /// Target-safe outbound RNS DATA submission operation in the experimental range.
@@ -56,6 +58,27 @@ pub struct IdempotencyKey(pub [u8; 16]);
 /// Complete 128-bit Reticulum destination hash.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct DestinationHash(pub [u8; 16]);
+
+/// Public, copy-only summary of the node's primary Reticulum identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IdentitySummary {
+    /// Primary destination served by the node.
+    primary_destination: DestinationHash,
+}
+
+impl IdentitySummary {
+    /// Construct the public summary for a node's primary destination.
+    pub const fn new(primary_destination: DestinationHash) -> Self {
+        Self {
+            primary_destination,
+        }
+    }
+
+    /// Primary destination served by the node.
+    pub const fn primary_destination(self) -> DestinationHash {
+        self.primary_destination
+    }
+}
 
 /// Device-assigned identifier for a submitted operation.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -303,6 +326,8 @@ pub enum AuthorizationError {
 pub enum DeviceRequest<'a> {
     /// Read API version, safety capabilities, and hard codec limits.
     SystemCapabilities,
+    /// Read the node's public primary Reticulum destination.
+    IdentitySummary,
     /// Read status for a previously accepted submission.
     SubmissionStatus {
         /// Device-assigned submission identifier.
@@ -329,6 +354,7 @@ impl DeviceRequest<'_> {
     pub const fn operation(&self) -> u16 {
         match self {
             Self::SystemCapabilities => OP_SYSTEM_CAPABILITIES,
+            Self::IdentitySummary => OP_IDENTITY_SUMMARY,
             Self::SubmissionStatus { .. } => OP_SUBMISSION_STATUS,
             #[cfg(feature = "experimental-rns-data")]
             Self::SubmitRnsData { .. } => OP_EXPERIMENTAL_SUBMIT_RNS_DATA,
@@ -339,7 +365,9 @@ impl DeviceRequest<'_> {
     /// Whether this operation can change node state.
     pub const fn is_mutating(&self) -> bool {
         match self {
-            Self::SystemCapabilities | Self::SubmissionStatus { .. } => false,
+            Self::SystemCapabilities | Self::IdentitySummary | Self::SubmissionStatus { .. } => {
+                false
+            }
             #[cfg(feature = "experimental-rns-data")]
             Self::SubmitRnsData { .. } => true,
             Self::__Borrowed(never, _) => match *never {},
@@ -348,7 +376,7 @@ impl DeviceRequest<'_> {
 
     const fn required_permission(&self) -> Option<RequiredPermission> {
         match self {
-            Self::SystemCapabilities => None,
+            Self::SystemCapabilities | Self::IdentitySummary => None,
             Self::SubmissionStatus { .. } => Some(RequiredPermission::ReadSubmissionStatus),
             #[cfg(feature = "experimental-rns-data")]
             Self::SubmitRnsData { .. } => Some(RequiredPermission::ExperimentalSubmitRnsData),
@@ -673,6 +701,8 @@ pub struct ApiErrorResponse {
 pub enum DeviceResponse {
     /// Result of `system.capabilities`.
     SystemCapabilities(CapabilitySnapshot),
+    /// Result of `identity.summary`.
+    IdentitySummary(IdentitySummary),
     /// Result of `submission.status`.
     SubmissionStatus(SubmissionStatus),
     /// Accepted experimental outbound RNS DATA submission.
@@ -687,6 +717,7 @@ impl DeviceResponse {
     pub const fn kind(&self) -> u16 {
         match self {
             Self::SystemCapabilities(_) => OP_SYSTEM_CAPABILITIES,
+            Self::IdentitySummary(_) => OP_IDENTITY_SUMMARY,
             Self::SubmissionStatus(_) => OP_SUBMISSION_STATUS,
             #[cfg(feature = "experimental-rns-data")]
             Self::SubmitRnsDataAccepted(_) => OP_EXPERIMENTAL_SUBMIT_RNS_DATA,

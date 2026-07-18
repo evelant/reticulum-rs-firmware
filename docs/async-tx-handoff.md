@@ -10,8 +10,8 @@ permit server, and the build-verified E290 target composes that aggregate with
 the ticket-aware dispatcher and board owner in separate node and LoRa tasks.
 **RF status:** the two attached `HT-RA62-HF` boards are antenna-equipped and
 authorized for NA915 development TX. The isolated same-image E290 semantic HIL
-passed; the permanent owner graph now has bounded powered boot/ordinary-TX
-smoke, while controlled peer RX/DATA and full qualification remain open
+passed; the permanent owner graph now has bounded powered boot/ordinary-TX plus
+authenticated durable DATA/peer-proof evidence. Full qualification remains open.
 
 ## Legacy DATA handoff decision
 
@@ -448,9 +448,10 @@ retained, the same LoRa lease goes offline without a generation change, and no
 fresh LoRa work runs for the rest of the boot. Dispatcher coverage proves that
 an acknowledgement-gated DATA owner excludes a queued ordinary job, RX and
 completion, while request pressure, mismatch and cancellation keep exact owners.
-The external authenticated device-API job lane and minimal USB bearer are now
-source-composed into the permanent LoRa image. Powered local submission remains
-open, and client delivery is still unimplemented.
+The external authenticated device-API job lane and minimal USB bearer are
+source-composed into the permanent LoRa image. Powered local submission through
+peer proof and terminal status now passes; application client delivery is still
+unimplemented.
 
 ## Remaining admission and qualification blocker
 
@@ -460,9 +461,10 @@ ordinary boundary still starts after Rete has created an allocation-backed
 `NodeActions` envelope and mutated protocol state. Its fixed owner and bounded
 router therefore provide exact downstream ownership and pressure but do not yet
 provide caller-reservable construction or upstream backpressure before that
-mutation. Product DATA/LXMF intent admission remains a separate product blocker.
-The current source has only the experimental authenticated submission surface,
-and no powered E290 image has qualified it.
+mutation. Product LXMF intent admission remains a separate product blocker. The
+current source has the experimental authenticated raw-RNS submission surface,
+and the powered E290 pair has qualified it through exact peer proof; it is not
+yet the durable LXMF/message API.
 
 The durable profile permits one accepted-history entry solely for composition
 qualification. The minimal authenticated USB lane is its first source-composed

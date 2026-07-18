@@ -143,8 +143,10 @@ simultaneously, the product must also choose either globally unique,
 bearer-qualified connection/session epochs or strictly disjoint per-bearer
 reply channels governed by one global pairing-exclusivity coordinator. A second
 bearer must not reuse an independent epoch allocator against the current shared
-routing namespace. Source and portable tests cover this composition; powered
-authenticated handshake, request, and reply proof remains open.
+routing namespace. Source and portable tests cover this composition; the
+bounded powered USB handshake, sequential request/reply, and fresh post-re-
+enumeration session paths pass. Broader lifecycle, rate, and wireless-bearer
+qualification remains open.
 
 The handoff's 512-byte limit is the authoritative
 `reticulum-device-api::MAX_MESSAGE_BYTES`, not a duplicated constant.
@@ -300,9 +302,9 @@ data and disables any downgrade to the qualification-only suite. The fixed
 Immediately before dispatching every authenticated request, the node/storage
 owner revalidates the grant's credential ID and generation and derives a fresh
 device-owned `DispatchContext`. Public logical operations such as
-`system.capabilities` require no operation permission, but they still cross an
-authenticated bearer session; “public” does not mean unauthenticated wire
-access. Immediately before accepting a state-changing request, the same
+`system.capabilities` and `identity.summary` require no operation permission,
+but they still cross an authenticated bearer session; “public” does not mean
+unauthenticated wire access. Immediately before accepting a state-changing request, the same
 serialized owner revalidates the required permission. The durable acceptance
 contract requires the principal, authorized operation/policy snapshot and a
 principal-scoped idempotency key. Semantic schema 2 persists the principal,
@@ -390,7 +392,9 @@ physical attacker and must not be described as tamper-resistant.
   revalidation, synchronous dispatch through a credential-disjoint submission
   view, retained reply pressure, and generic rejection with no fallback or
   submission-port I/O. The minimal USB bearer admits one handshake per
-  connection and one request at a time, with fault-until-reset behavior.
+  connection and one request in flight, with fault-until-reset behavior. The
+  host may issue sequential requests in that established session; the powered
+  `submit-and-wait` path uses this for status polling.
 - Deliberately deferred from the first bearer profile: resumption, protocol
   retries, close records, encryption, rate limiting/attempt policy, repeated
   handshake attempts, concurrency, and richer established-stream recovery.

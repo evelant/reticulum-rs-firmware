@@ -4,15 +4,15 @@ use minicbor::{Decoder, Encoder, data::Type, encode::write::Cursor};
 
 use crate::model::{
     API_VERSION_MAJOR, ApiErrorCode, ApiErrorResponse, ApiVersion, CapabilityAvailability,
-    CapabilitySnapshot, DeviceRequest, DeviceResponse, MAX_BODY_BYTES, MAX_MESSAGE_BYTES,
-    OP_SUBMISSION_STATUS, OP_SYSTEM_CAPABILITIES, PreparedPacketDetails, RESPONSE_ERROR,
-    RequestEnvelope, RequestId, ResponseEnvelope, SubmissionFailure, SubmissionId, SubmissionState,
-    SubmissionStatus,
+    CapabilitySnapshot, DestinationHash, DeviceRequest, DeviceResponse, IdentitySummary,
+    MAX_BODY_BYTES, MAX_MESSAGE_BYTES, OP_IDENTITY_SUMMARY, OP_SUBMISSION_STATUS,
+    OP_SYSTEM_CAPABILITIES, PreparedPacketDetails, RESPONSE_ERROR, RequestEnvelope, RequestId,
+    ResponseEnvelope, SubmissionFailure, SubmissionId, SubmissionState, SubmissionStatus,
 };
 #[cfg(feature = "experimental-rns-data")]
 use crate::model::{
-    DestinationHash, IdempotencyKey, MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES,
-    OP_EXPERIMENTAL_SUBMIT_RNS_DATA, SubmissionAccepted,
+    IdempotencyKey, MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES, OP_EXPERIMENTAL_SUBMIT_RNS_DATA,
+    SubmissionAccepted,
 };
 
 const MAX_MAP_ENTRIES: u64 = 32;
@@ -57,6 +57,8 @@ pub enum RequiredField {
     CapabilityMaxBodyBytes,
     /// Capability experimental submission payload limit at body key 6.
     CapabilityMaxSubmitPayloadBytes,
+    /// Identity summary primary destination hash at body key 0.
+    IdentityPrimaryDestination,
     /// Submission state at body key 1.
     SubmissionState,
     /// State-specific prepared packet length at body key 2.
@@ -199,6 +201,9 @@ pub fn encode_request(
         DeviceRequest::SystemCapabilities => {
             put!(encoder.map(0));
         }
+        DeviceRequest::IdentitySummary => {
+            put!(encoder.map(0));
+        }
         DeviceRequest::SubmissionStatus { id } => {
             put!(encoder.map(1));
             put!(encoder.u8(0));
@@ -296,6 +301,9 @@ pub fn encode_response(
         DeviceResponse::SystemCapabilities(capabilities) => {
             encode_capabilities(&mut encoder, capabilities)?;
         }
+        DeviceResponse::IdentitySummary(summary) => {
+            encode_identity_summary(&mut encoder, summary)?;
+        }
         DeviceResponse::SubmissionStatus(status) => {
             encode_submission_status(&mut encoder, status)?;
         }
@@ -351,6 +359,7 @@ pub fn decode_response(input: &[u8]) -> Result<ResponseEnvelope, DecodeError> {
     let body = require(body, RequiredField::EnvelopeBody)?;
     let response = match kind {
         OP_SYSTEM_CAPABILITIES => DeviceResponse::SystemCapabilities(decode_capabilities(body)?),
+        OP_IDENTITY_SUMMARY => DeviceResponse::IdentitySummary(decode_identity_summary(body)?),
         OP_SUBMISSION_STATUS => DeviceResponse::SubmissionStatus(decode_submission_status(body)?),
         #[cfg(feature = "experimental-rns-data")]
         OP_EXPERIMENTAL_SUBMIT_RNS_DATA => {
@@ -397,6 +406,16 @@ fn encode_capabilities(
     put!(encoder.u16(capabilities.max_body_bytes));
     put!(encoder.u8(6));
     put!(encoder.u16(capabilities.max_submit_rns_data_payload_bytes));
+    Ok(())
+}
+
+fn encode_identity_summary(
+    encoder: &mut SliceEncoder<'_>,
+    summary: IdentitySummary,
+) -> Result<(), EncodeError> {
+    put!(encoder.map(1));
+    put!(encoder.u8(0));
+    put!(encoder.bytes(&summary.primary_destination().0));
     Ok(())
 }
 
@@ -634,6 +653,7 @@ fn decode_request_body<'a>(
 ) -> Result<DeviceRequest<'a>, DecodeError> {
     match operation {
         OP_SYSTEM_CAPABILITIES => decode_capabilities_request(body),
+        OP_IDENTITY_SUMMARY => decode_identity_summary_request(body),
         OP_SUBMISSION_STATUS => decode_status_request(body),
         #[cfg(feature = "experimental-rns-data")]
         OP_EXPERIMENTAL_SUBMIT_RNS_DATA => decode_submit_request(body),
@@ -650,6 +670,17 @@ fn decode_capabilities_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeE
     }
     finish_body(&decoder, body)?;
     Ok(DeviceRequest::SystemCapabilities)
+}
+
+fn decode_identity_summary_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError> {
+    let mut decoder = Decoder::new(body);
+    let entries = decode_map_len(&mut decoder)?;
+    for _ in 0..entries {
+        decoder.u64().map_err(|_| DecodeError::Malformed)?;
+        skip_strict(&mut decoder, 0)?;
+    }
+    finish_body(&decoder, body)?;
+    Ok(DeviceRequest::IdentitySummary)
 }
 
 fn decode_status_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError> {
@@ -801,6 +832,33 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
             RequiredField::CapabilityMaxSubmitPayloadBytes,
         )?,
     })
+}
+
+fn decode_identity_summary(body: &[u8]) -> Result<IdentitySummary, DecodeError> {
+    let mut decoder = Decoder::new(body);
+    let entries = decode_map_len(&mut decoder)?;
+    let mut primary_destination = None;
+    for _ in 0..entries {
+        let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
+        match key {
+            0 => {
+                reject_duplicate(
+                    primary_destination.is_some(),
+                    RequiredField::IdentityPrimaryDestination,
+                )?;
+                primary_destination = Some(DestinationHash(decode_fixed_bytes::<16>(
+                    &mut decoder,
+                    RequiredField::IdentityPrimaryDestination,
+                )?));
+            }
+            _ => skip_strict(&mut decoder, 0)?,
+        }
+    }
+    finish_body(&decoder, body)?;
+    Ok(IdentitySummary::new(require(
+        primary_destination,
+        RequiredField::IdentityPrimaryDestination,
+    )?))
 }
 
 fn decode_submission_status(body: &[u8]) -> Result<SubmissionStatus, DecodeError> {

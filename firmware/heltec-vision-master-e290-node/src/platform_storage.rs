@@ -12,7 +12,7 @@ use rand_core::{CryptoRng, RngCore};
 use reticulum_announce_clock::{
     BootEpochReservation, FreshClockPolicy, ReserveError, reserve_next_boot_epoch,
 };
-use reticulum_device_api::CapabilityAvailability;
+use reticulum_device_api::{CapabilityAvailability, IdentitySummary};
 use reticulum_device_api_adapter::{SubmissionAcceptance, SubmissionPort, SubmissionPortError};
 use reticulum_device_api_credential_store::{
     BoundCredentialStore, CredentialStoreBinding, CredentialStoreRecovery, MountedCredentialStore,
@@ -706,6 +706,8 @@ impl ProductStorageCoordinator {
 
     /// Dispatch one exact session-authenticated request while credential and
     /// journal fields remain disjointly borrowed by the sole storage owner.
+    /// The public identity summary is copied in from the node owner and is not
+    /// stored in or derived by this flash coordinator.
     #[allow(
         clippy::result_large_err,
         reason = "terminal failure must retain the exact allocation-free request owner"
@@ -713,6 +715,7 @@ impl ProductStorageCoordinator {
     pub(crate) fn dispatch_authenticated_request(
         &mut self,
         request: LocalApiRequest<AuthenticatedGrant>,
+        identity: IdentitySummary,
     ) -> Result<LocalApiReply, AuthenticatedApiDispatchFailure> {
         let credential_physical_mutation_outstanding = self
             .credential_runtime
@@ -731,7 +734,7 @@ impl ProductStorageCoordinator {
             submission_service_enabled: *submission_service_enabled,
             credential_physical_mutation_outstanding,
         };
-        credential_runtime.dispatch_authenticated_request(request, &mut port)
+        credential_runtime.dispatch_authenticated_request(request, identity, &mut port)
     }
 
     /// Admit one ordinary authenticated session and return its exact selected

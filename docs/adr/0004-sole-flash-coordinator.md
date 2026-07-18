@@ -106,9 +106,9 @@ attempt failed.
   boot-mounted/recovered immediately after flash open, and retained in this
   coordinator without automatic provisioning. Explicit initialization and live
   pairing are routed through the pre-authentication USB records. The first
-  authenticated API/session firmware lane is now source-composed as a minimal
-  single-flight USB bearer; powered handshake/request/reply qualification
-  remains open.
+  authenticated API/session firmware lane is composed as a minimal single-
+  flight USB bearer; one bounded powered handshake/identity/submission/peer-
+  proof/status path passes.
 - A journal strict-mount, supported-history, or recovery failure during boot
   occurs before any durability-gated DATA owner can exist and disables only
   local durable submission service. The sole flash owner remains resident and
@@ -145,14 +145,14 @@ attempt failed.
 The backend-independent actor/runtime, resident E290 operation-scoped
 coordinator, exact authorized-frame request/durable-echo handoff, one-entry cap,
 and ADR 0005 fault behavior are implemented and pass cross-layer host
-composition tests. The minimal external USB API edge is now source-composed;
-its powered qualification is the next live-storage proof.
+composition tests. The minimal external USB API edge now passes its first
+bounded powered live-storage proof.
 
 1. Preserve ADR 0009 credential boot ownership, the routed explicit
    initialization/live-pairing lifecycle, and the implemented authority,
    framing, session, handoff, and first authenticated local USB API bearer.
-   Qualify that path on powered hardware while preserving zero-write
-   authorization rejection and durable acceptance before publishing an ID.
+   Preserve its powered happy path while qualifying zero-write authorization
+   rejection and broader failure/lifecycle cases.
 2. With both physical `HT-RA62-HF` markings now confirmed, qualify E290 first provisioning,
    strict mount, boot recovery, resident ownership, authorized-frame handoff,
    ADR 0005 failure isolation, and pre-owner route-only degradation on both

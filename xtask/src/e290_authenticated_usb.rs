@@ -1,4 +1,4 @@
-//! Minimal authenticated USB client for one E290 device-API request.
+//! Bounded authenticated USB client for E290 device-API requests.
 
 use std::{
     fmt::Write as _,
@@ -12,14 +12,15 @@ use std::{
 
 use rand_core::{CryptoRng, RngCore};
 use reticulum_device_api::{
-    ApiVersion, DeviceRequest, DeviceResponse, MAX_MESSAGE_BYTES, RequestEnvelope, RequestId,
-    decode_response, encode_request,
+    ApiVersion, DestinationHash, DeviceRequest, DeviceResponse, IdempotencyKey, MAX_MESSAGE_BYTES,
+    MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES, RequestEnvelope, RequestId, SubmissionFailure, SubmissionId,
+    SubmissionState, decode_response, encode_request,
 };
 use reticulum_device_api_framing::{DecodeEvent, Record, StreamDecoder, TxAdvanceError};
 use reticulum_device_api_handoff::{MessageLength, OwnedMessage};
 use reticulum_device_api_session::{
     BearerBinding, ClientCredential, ClientHelloFlight, ClientParameters, ClientProofFlight,
-    ClientRequestFlight, DeviceId,
+    ClientRequestFlight, ClientSession, DeviceId,
 };
 use serialport::ClearBuffer;
 use zeroize::Zeroizing;
@@ -28,15 +29,70 @@ use crate::e290_pairing_live::load_activated_credential;
 
 const BAUD_RATE: u32 = 115_200;
 const DEFAULT_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_SUBMIT_AND_WAIT_TIMEOUT_MS: u64 = 45_000;
+const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const OPEN_SETTLE_MS: u64 = 250;
 const IO_SLICE_MS: u64 = 100;
 const READ_BUFFER_CAPACITY: usize = 1_024;
-const CAPABILITIES_REQUEST_ID: RequestId = RequestId(1);
+
+#[derive(Debug, Eq, PartialEq)]
+enum Command {
+    SystemCapabilities,
+    IdentitySummary,
+    SubmissionStatus {
+        id: SubmissionId,
+    },
+    SubmitRnsData {
+        destination: DestinationHash,
+        payload: Vec<u8>,
+        idempotency_key: IdempotencyKey,
+    },
+    SubmitAndWait {
+        destination: DestinationHash,
+        payload: Vec<u8>,
+        idempotency_key: IdempotencyKey,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommandKind {
+    SystemCapabilities,
+    IdentitySummary,
+    SubmissionStatus,
+    SubmitRnsData,
+    SubmitAndWait,
+}
+
+struct RequestIds {
+    next: Option<u64>,
+}
+
+impl RequestIds {
+    const fn new() -> Self {
+        Self { next: Some(1) }
+    }
+
+    fn take(&mut self) -> Result<RequestId, String> {
+        let next = self
+            .next
+            .ok_or_else(|| "logical request ID space is exhausted".to_owned())?;
+        self.next = next.checked_add(1);
+        Ok(RequestId(next))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WaitDecision {
+    PollAgain,
+    RetryInternal,
+    Delivered(reticulum_device_api::SubmissionStatus),
+}
 
 struct Options {
     port: String,
     state_file: PathBuf,
     timeout: Duration,
+    command: Command,
 }
 
 struct HostRng;
@@ -176,7 +232,7 @@ pub(crate) fn run(args: Vec<String>) -> ExitCode {
     let options = match parse(&args) {
         Ok(options) => options,
         Err(reason) => {
-            eprintln!("error: {reason}");
+            eprintln!("{}", cli_error_line(&reason));
             usage();
             return ExitCode::from(2);
         }
@@ -188,13 +244,20 @@ pub(crate) fn run(args: Vec<String>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(reason) => {
-            eprintln!("error: {reason}");
+            eprintln!("{}", cli_error_line(&reason));
             ExitCode::FAILURE
         }
     }
 }
 
+fn cli_error_line(reason: &str) -> String {
+    format!("error: {reason}")
+}
+
 fn transact(options: &Options) -> Result<String, String> {
+    let deadline = Instant::now()
+        .checked_add(options.timeout)
+        .ok_or_else(|| "--timeout-ms is too large for the host monotonic clock".to_owned())?;
     let activated = load_activated_credential(&options.state_file)?;
     let (device_id, credential_id, generation, psk) = activated.into_parts();
     let expected_device_id = DeviceId::new(*device_id.as_bytes());
@@ -212,9 +275,6 @@ fn transact(options: &Options) -> Result<String, String> {
     port.clear(ClearBuffer::Input)
         .map_err(|error| format!("could not clear stale input on {}: {error}", options.port))?;
 
-    let deadline = Instant::now()
-        .checked_add(options.timeout)
-        .ok_or_else(|| "--timeout-ms is too large for the host monotonic clock".to_owned())?;
     let mut reader = BufferedRecordReader::new();
     let mut rng = HostRng;
 
@@ -242,18 +302,72 @@ fn transact(options: &Options) -> Result<String, String> {
         .try_finish()
         .map_err(|_| "complete client proof did not advance client typestate".to_owned())?;
     let session_id = *session.session_id().as_bytes();
+    let mut request_ids = RequestIds::new();
+    let request_id = request_ids.take()?;
+    let (session, response) = exchange(
+        &mut *port,
+        &mut reader,
+        session,
+        request_id,
+        command_request(&options.command),
+        command_name(&options.command),
+        deadline,
+    )?;
 
+    if matches!(&options.command, Command::SubmitAndWait { .. }) {
+        let submission_id = match response {
+            DeviceResponse::SubmitRnsDataAccepted(accepted) => accepted.id,
+            DeviceResponse::Error(error) => {
+                return Err(format_api_error(command_name(&options.command), error));
+            }
+            other => {
+                return Err(format!(
+                    "device returned response kind {} instead of {}",
+                    other.kind(),
+                    command_name(&options.command),
+                ));
+            }
+        };
+        return wait_for_delivery(
+            &mut *port,
+            &mut reader,
+            session,
+            &mut request_ids,
+            deadline,
+            device_id.as_bytes(),
+            &session_id,
+            submission_id,
+        );
+    }
+    drop(session);
+    format_one_shot_response(
+        &options.command,
+        device_id.as_bytes(),
+        &session_id,
+        response,
+    )
+}
+
+fn exchange<P: Read + Write + ?Sized>(
+    port: &mut P,
+    reader: &mut BufferedRecordReader,
+    session: ClientSession,
+    request_id: RequestId,
+    request: DeviceRequest<'_>,
+    operation: &str,
+    deadline: Instant,
+) -> Result<(ClientSession, DeviceResponse), String> {
     let request = RequestEnvelope {
         version: ApiVersion::CURRENT,
-        request_id: CAPABILITIES_REQUEST_ID,
-        request: DeviceRequest::SystemCapabilities,
+        request_id,
+        request,
     };
     let mut request_bytes = [0_u8; MAX_MESSAGE_BYTES];
     let request_length = encode_request(&request, &mut request_bytes)
-        .map_err(|error| format!("could not encode system.capabilities request: {error:?}"))?;
+        .map_err(|error| format!("could not encode {operation} request: {error:?}"))?;
     let request_owner = OwnedMessage::new(
         MessageLength::new(request_length)
-            .map_err(|_| "system.capabilities request exceeded the session limit".to_owned())?,
+            .map_err(|_| format!("{operation} request exceeded the session limit"))?,
         request_bytes,
     );
     let request = session
@@ -268,41 +382,214 @@ fn transact(options: &Options) -> Result<String, String> {
     let authenticated = awaiting_response
         .authenticate(response_record)
         .map_err(|error| format!("authenticated response was rejected: {error:?}"))?;
-    let (_, response_message) = authenticated.into_parts();
+    let (session, response_message) = authenticated.into_parts();
     let response = decode_response(response_message.encoded())
         .map_err(|error| format!("could not decode authenticated response: {error:?}"))?;
-    if response.version != ApiVersion::CURRENT {
-        return Err(format!(
-            "device returned API version {}.{}",
-            response.version.major, response.version.minor
-        ));
-    }
-    if response.request_id != CAPABILITIES_REQUEST_ID {
+    validate_response_version(response.version)?;
+    if response.request_id != request_id {
         return Err(format!(
             "device returned request ID {} instead of {}",
-            response.request_id.0, CAPABILITIES_REQUEST_ID.0
+            response.request_id.0, request_id.0
         ));
     }
+    Ok((session, response.response))
+}
 
-    let DeviceResponse::SystemCapabilities(capabilities) = response.response else {
-        return Err(format!(
-            "device returned response kind {} instead of system.capabilities",
-            response.response.kind()
-        ));
-    };
-    Ok(format!(
-        "command=system-capabilities outcome=ok device_id={} session_id={} api={}.{} packet_output={} direct_radio_tx={} experimental_submit_rns_data={} max_message_bytes={} max_body_bytes={} max_submit_rns_data_payload_bytes={}",
-        hex(device_id.as_bytes()),
-        hex(&session_id),
-        capabilities.api_version().major,
-        capabilities.api_version().minor,
-        capabilities.packet_output(),
-        capabilities.direct_radio_tx().wire_code(),
-        capabilities.experimental_submit_rns_data(),
-        capabilities.max_message_bytes(),
-        capabilities.max_body_bytes(),
-        capabilities.max_submit_rns_data_payload_bytes(),
-    ))
+fn validate_response_version(version: ApiVersion) -> Result<(), String> {
+    if version.major == ApiVersion::CURRENT.major {
+        Ok(())
+    } else {
+        Err(format!(
+            "device returned incompatible API version {}.{}; client major is {}",
+            version.major,
+            version.minor,
+            ApiVersion::CURRENT.major
+        ))
+    }
+}
+
+fn format_one_shot_response(
+    command: &Command,
+    device_id: &[u8; 16],
+    session_id: &[u8; 16],
+    response: DeviceResponse,
+) -> Result<String, String> {
+    match (command, response) {
+        (Command::SystemCapabilities, DeviceResponse::SystemCapabilities(capabilities)) => {
+            Ok(format!(
+                "command=system-capabilities outcome=ok device_id={} session_id={} api={}.{} packet_output={} direct_radio_tx={} experimental_submit_rns_data={} max_message_bytes={} max_body_bytes={} max_submit_rns_data_payload_bytes={}",
+                hex(device_id),
+                hex(session_id),
+                capabilities.api_version().major,
+                capabilities.api_version().minor,
+                capabilities.packet_output(),
+                capabilities.direct_radio_tx().wire_code(),
+                capabilities.experimental_submit_rns_data(),
+                capabilities.max_message_bytes(),
+                capabilities.max_body_bytes(),
+                capabilities.max_submit_rns_data_payload_bytes(),
+            ))
+        }
+        (Command::IdentitySummary, DeviceResponse::IdentitySummary(summary)) => Ok(format!(
+            "command=identity-summary outcome=ok device_id={} session_id={} primary_destination={}",
+            hex(device_id),
+            hex(session_id),
+            hex(&summary.primary_destination().0),
+        )),
+        (Command::SubmissionStatus { id }, DeviceResponse::SubmissionStatus(status)) => {
+            if status.id != *id {
+                return Err(format!(
+                    "device returned submission ID {} instead of {}",
+                    status.id.0, id.0
+                ));
+            }
+            Ok(format_submission_status(
+                "submission-status",
+                device_id,
+                session_id,
+                status,
+            ))
+        }
+        (Command::SubmitRnsData { .. }, DeviceResponse::SubmitRnsDataAccepted(accepted)) => {
+            Ok(format!(
+                "command=submit-rns-data outcome=accepted device_id={} session_id={} submission_id={}",
+                hex(device_id),
+                hex(session_id),
+                accepted.id.0,
+            ))
+        }
+        (_, DeviceResponse::Error(error)) => Err(format_api_error(command_name(command), error)),
+        (_, other) => Err(format!(
+            "device returned response kind {} instead of {}",
+            other.kind(),
+            command_name(command),
+        )),
+    }
+}
+
+fn command_request(command: &Command) -> DeviceRequest<'_> {
+    match command {
+        Command::SystemCapabilities => DeviceRequest::SystemCapabilities,
+        Command::IdentitySummary => DeviceRequest::IdentitySummary,
+        Command::SubmissionStatus { id } => DeviceRequest::SubmissionStatus { id: *id },
+        Command::SubmitRnsData {
+            destination,
+            payload,
+            idempotency_key,
+        }
+        | Command::SubmitAndWait {
+            destination,
+            payload,
+            idempotency_key,
+        } => DeviceRequest::SubmitRnsData {
+            destination: *destination,
+            payload,
+            idempotency_key: *idempotency_key,
+        },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn wait_for_delivery<P: Read + Write + ?Sized>(
+    port: &mut P,
+    reader: &mut BufferedRecordReader,
+    mut session: ClientSession,
+    request_ids: &mut RequestIds,
+    deadline: Instant,
+    device_id: &[u8; 16],
+    session_id: &[u8; 16],
+    submission_id: SubmissionId,
+) -> Result<String, String> {
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!(
+                "timed out waiting for submission {} to reach delivered",
+                submission_id.0
+            ));
+        }
+        thread::sleep(POLL_INTERVAL.min(remaining));
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for submission {} to reach delivered",
+                submission_id.0
+            ));
+        }
+
+        let request_id = request_ids.take()?;
+        let (restored, response) = exchange(
+            port,
+            reader,
+            session,
+            request_id,
+            DeviceRequest::SubmissionStatus { id: submission_id },
+            "submission-status",
+            deadline,
+        )?;
+        session = restored;
+        match classify_wait_response(submission_id, response)? {
+            WaitDecision::PollAgain | WaitDecision::RetryInternal => {}
+            WaitDecision::Delivered(status) => {
+                return Ok(format_submission_status(
+                    "submit-and-wait",
+                    device_id,
+                    session_id,
+                    status,
+                ));
+            }
+        }
+    }
+}
+
+fn classify_wait_response(
+    expected_id: SubmissionId,
+    response: DeviceResponse,
+) -> Result<WaitDecision, String> {
+    match response {
+        DeviceResponse::SubmissionStatus(status) => {
+            if status.id != expected_id {
+                return Err(format!(
+                    "device returned submission ID {} instead of {}",
+                    status.id.0, expected_id.0
+                ));
+            }
+            match status.state {
+                SubmissionState::Queued
+                | SubmissionState::Preparing
+                | SubmissionState::AwaitingDelivery(_) => Ok(WaitDecision::PollAgain),
+                SubmissionState::Delivered(_) => Ok(WaitDecision::Delivered(status)),
+                SubmissionState::Failed(failure) => Err(format!(
+                    "submission {} reached state=failed failure={}",
+                    status.id.0,
+                    failure_name(failure)
+                )),
+                SubmissionState::Cancelled => Err(format!(
+                    "submission {} reached state=cancelled",
+                    status.id.0
+                )),
+            }
+        }
+        DeviceResponse::Error(error)
+            if error.code == reticulum_device_api::ApiErrorCode::Internal =>
+        {
+            Ok(WaitDecision::RetryInternal)
+        }
+        DeviceResponse::Error(error) => Err(format_api_error("submission-status", error)),
+        other => Err(format!(
+            "device returned response kind {} instead of submission-status",
+            other.kind()
+        )),
+    }
+}
+
+fn format_api_error(operation: &str, error: reticulum_device_api::ApiErrorResponse) -> String {
+    format!(
+        "device rejected {operation} request: code={} operation={}",
+        error.code.wire_code(),
+        error
+            .operation
+            .map_or_else(|| "none".to_owned(), |operation| operation.to_string()),
+    )
 }
 
 fn write_flight<W: Write + ?Sized, F: OutboundFlight>(
@@ -352,6 +639,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut port = None;
     let mut state_file = None;
     let mut timeout_ms = None;
+    let mut command = None;
+    let mut destination = None;
+    let mut payload = None;
+    let mut idempotency_key = None;
+    let mut submission_id = None;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -376,14 +668,132 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 }
                 timeout_ms = Some(parsed);
             }
-            unknown => return Err(format!("unexpected or duplicate argument {unknown:?}")),
+            "--destination-hash" if destination.is_none() => {
+                index += 1;
+                destination = Some(DestinationHash(parse_fixed_hex(
+                    required_value(args.get(index), "--destination-hash")?,
+                    "--destination-hash",
+                )?));
+            }
+            "--payload-hex" if payload.is_none() => {
+                index += 1;
+                payload = Some(parse_payload_hex(required_value(
+                    args.get(index),
+                    "--payload-hex",
+                )?)?);
+            }
+            "--idempotency-key" if idempotency_key.is_none() => {
+                index += 1;
+                idempotency_key = Some(IdempotencyKey(parse_fixed_hex(
+                    required_value(args.get(index), "--idempotency-key")?,
+                    "--idempotency-key",
+                )?));
+            }
+            "--submission-id" if submission_id.is_none() => {
+                index += 1;
+                submission_id = Some(SubmissionId(parse_u64(args.get(index), "--submission-id")?));
+            }
+            "system-capabilities" if command.is_none() => {
+                command = Some(CommandKind::SystemCapabilities);
+            }
+            "identity-summary" if command.is_none() => {
+                command = Some(CommandKind::IdentitySummary);
+            }
+            "submission-status" if command.is_none() => {
+                command = Some(CommandKind::SubmissionStatus);
+            }
+            "submit-rns-data" if command.is_none() => command = Some(CommandKind::SubmitRnsData),
+            "submit-and-wait" if command.is_none() => command = Some(CommandKind::SubmitAndWait),
+            option @ ("--port" | "--state-file" | "--timeout-ms" | "--destination-hash"
+            | "--payload-hex" | "--idempotency-key" | "--submission-id") => {
+                return Err(format!("duplicate option {option}"));
+            }
+            command_name @ ("system-capabilities"
+            | "identity-summary"
+            | "submission-status"
+            | "submit-rns-data"
+            | "submit-and-wait") => {
+                return Err(format!("unexpected or duplicate command {command_name}"));
+            }
+            unknown if unknown.starts_with('-') => {
+                return Err(format!("unexpected option at argument {}", index + 1));
+            }
+            _ => {
+                return Err(format!(
+                    "unexpected positional argument at argument {}",
+                    index + 1
+                ));
+            }
         }
         index += 1;
     }
+    let command = match command.unwrap_or(CommandKind::SystemCapabilities) {
+        kind @ (CommandKind::SystemCapabilities | CommandKind::IdentitySummary) => {
+            if destination.is_some()
+                || payload.is_some()
+                || idempotency_key.is_some()
+                || submission_id.is_some()
+            {
+                return Err(format!(
+                    "{} does not accept operation-specific arguments",
+                    command_kind_name(kind)
+                ));
+            }
+            match kind {
+                CommandKind::SystemCapabilities => Command::SystemCapabilities,
+                CommandKind::IdentitySummary => Command::IdentitySummary,
+                _ => unreachable!("combined match admits only argument-free commands"),
+            }
+        }
+        CommandKind::SubmissionStatus => {
+            if destination.is_some() || payload.is_some() || idempotency_key.is_some() {
+                return Err(
+                    "submission-status does not accept submit-rns-data arguments".to_owned(),
+                );
+            }
+            Command::SubmissionStatus {
+                id: submission_id
+                    .ok_or_else(|| "submission-status requires --submission-id".to_owned())?,
+            }
+        }
+        kind @ (CommandKind::SubmitRnsData | CommandKind::SubmitAndWait) => {
+            if submission_id.is_some() {
+                return Err(format!(
+                    "{} does not accept --submission-id",
+                    command_kind_name(kind)
+                ));
+            }
+            let operation = command_kind_name(kind);
+            let destination =
+                destination.ok_or_else(|| format!("{operation} requires --destination-hash"))?;
+            let payload = payload.ok_or_else(|| format!("{operation} requires --payload-hex"))?;
+            let idempotency_key =
+                idempotency_key.ok_or_else(|| format!("{operation} requires --idempotency-key"))?;
+            match kind {
+                CommandKind::SubmitRnsData => Command::SubmitRnsData {
+                    destination,
+                    payload,
+                    idempotency_key,
+                },
+                CommandKind::SubmitAndWait => Command::SubmitAndWait {
+                    destination,
+                    payload,
+                    idempotency_key,
+                },
+                _ => unreachable!("combined match admits only submission commands"),
+            }
+        }
+    };
+    let default_timeout_ms = if matches!(&command, Command::SubmitAndWait { .. }) {
+        DEFAULT_SUBMIT_AND_WAIT_TIMEOUT_MS
+    } else {
+        DEFAULT_TIMEOUT_MS
+    };
     Ok(Options {
         port: port.ok_or_else(|| "--port is required".to_owned())?,
         state_file: state_file.ok_or_else(|| "--state-file is required".to_owned())?,
-        timeout: Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS)),
+        timeout: Duration::from_millis(timeout_ms.unwrap_or(default_timeout_ms)),
+        command,
     })
 }
 
@@ -393,9 +803,125 @@ fn required_value<'a>(value: Option<&'a String>, flag: &str) -> Result<&'a str, 
         .ok_or_else(|| format!("{flag} requires a value"))
 }
 
+fn parse_u64(value: Option<&String>, flag: &str) -> Result<u64, String> {
+    required_value(value, flag)?
+        .parse()
+        .map_err(|_| format!("{flag} requires an unsigned 64-bit integer"))
+}
+
+fn parse_fixed_hex<const N: usize>(value: &str, flag: &str) -> Result<[u8; N], String> {
+    if value.len() != N * 2 {
+        return Err(format!(
+            "{flag} requires exactly {} hexadecimal digits",
+            N * 2
+        ));
+    }
+    let mut bytes = [0_u8; N];
+    decode_hex_into(value, &mut bytes, flag)?;
+    Ok(bytes)
+}
+
+fn parse_payload_hex(value: &str) -> Result<Vec<u8>, String> {
+    if !value.len().is_multiple_of(2) {
+        return Err("--payload-hex requires an even number of hexadecimal digits".to_owned());
+    }
+    let length = value.len() / 2;
+    if length > MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES {
+        return Err(format!(
+            "--payload-hex decodes to {length} bytes; maximum is {MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES}"
+        ));
+    }
+    let mut bytes = vec![0_u8; length];
+    decode_hex_into(value, &mut bytes, "--payload-hex")?;
+    Ok(bytes)
+}
+
+fn decode_hex_into(value: &str, output: &mut [u8], flag: &str) -> Result<(), String> {
+    for (index, byte) in output.iter_mut().enumerate() {
+        let offset = index * 2;
+        let high = hex_nibble(value.as_bytes()[offset]);
+        let low = hex_nibble(value.as_bytes()[offset + 1]);
+        let (Some(high), Some(low)) = (high, low) else {
+            return Err(format!("{flag} requires hexadecimal digits"));
+        };
+        *byte = (high << 4) | low;
+    }
+    Ok(())
+}
+
+const fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+const fn command_name(command: &Command) -> &'static str {
+    match command {
+        Command::SystemCapabilities => "system-capabilities",
+        Command::IdentitySummary => "identity-summary",
+        Command::SubmissionStatus { .. } => "submission-status",
+        Command::SubmitRnsData { .. } => "submit-rns-data",
+        Command::SubmitAndWait { .. } => "submit-and-wait",
+    }
+}
+
+const fn command_kind_name(command: CommandKind) -> &'static str {
+    match command {
+        CommandKind::SystemCapabilities => "system-capabilities",
+        CommandKind::IdentitySummary => "identity-summary",
+        CommandKind::SubmissionStatus => "submission-status",
+        CommandKind::SubmitRnsData => "submit-rns-data",
+        CommandKind::SubmitAndWait => "submit-and-wait",
+    }
+}
+
+fn format_submission_status(
+    command: &str,
+    device_id: &[u8; 16],
+    session_id: &[u8; 16],
+    status: reticulum_device_api::SubmissionStatus,
+) -> String {
+    let prefix = format!(
+        "command={command} outcome=ok device_id={} session_id={} submission_id={}",
+        hex(device_id),
+        hex(session_id),
+        status.id.0,
+    );
+    match status.state {
+        SubmissionState::Queued => format!("{prefix} state=queued"),
+        SubmissionState::Preparing => format!("{prefix} state=preparing"),
+        SubmissionState::AwaitingDelivery(details) => format!(
+            "{prefix} state=awaiting-delivery packet_len={} encoded_packet_sha256={}",
+            details.packet_len,
+            hex(details.encoded_packet_sha256.as_bytes()),
+        ),
+        SubmissionState::Delivered(details) => format!(
+            "{prefix} state=delivered packet_len={} encoded_packet_sha256={}",
+            details.packet_len,
+            hex(details.encoded_packet_sha256.as_bytes()),
+        ),
+        SubmissionState::Failed(failure) => {
+            format!("{prefix} state=failed failure={}", failure_name(failure))
+        }
+        SubmissionState::Cancelled => format!("{prefix} state=cancelled"),
+    }
+}
+
+const fn failure_name(failure: SubmissionFailure) -> &'static str {
+    match failure {
+        SubmissionFailure::NoPath => "no-path",
+        SubmissionFailure::DeliveryTimeout => "delivery-timeout",
+        SubmissionFailure::Rejected => "rejected",
+        SubmissionFailure::Internal => "internal",
+    }
+}
+
 fn usage() {
     eprintln!(
-        "usage: cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>]"
+        "usage:\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] [system-capabilities]\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] identity-summary\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] --submission-id <u64> submission-status\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] --destination-hash <32-hex> --payload-hex <0-to-766-hex> --idempotency-key <32-hex> submit-rns-data\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64, default 45000>] --destination-hash <32-hex> --payload-hex <0-to-766-hex> --idempotency-key <32-hex> submit-and-wait"
     );
 }
 
@@ -450,6 +976,7 @@ mod tests {
         assert_eq!(parsed.port, "/dev/test");
         assert_eq!(parsed.state_file, PathBuf::from("/tmp/e290.key"));
         assert_eq!(parsed.timeout, Duration::from_millis(7000));
+        assert_eq!(parsed.command, Command::SystemCapabilities);
 
         assert!(parse(&strings(&["--port", "/dev/test"])).is_err());
         assert!(parse(&strings(&["--state-file", "/tmp/e290.key"])).is_err());
@@ -475,6 +1002,495 @@ mod tests {
             ]))
             .is_err()
         );
+    }
+
+    #[test]
+    fn parser_error_output_redacts_unrecognized_submission_material() {
+        const PAYLOAD: &str = "48656c6c6f2070726976617465206d657373616765";
+        const IDEMPOTENCY_KEY: &str = "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff";
+
+        let payload_option = format!("--payload-hex={PAYLOAD}");
+        let payload_args = vec![
+            "--port".to_owned(),
+            "/dev/test".to_owned(),
+            "--state-file".to_owned(),
+            "/tmp/e290.key".to_owned(),
+            payload_option,
+        ];
+        let payload_reason = parse(&payload_args)
+            .err()
+            .expect("joined payload option must be rejected");
+        let payload_output = cli_error_line(&payload_reason);
+        assert_eq!(payload_output, "error: unexpected option at argument 5");
+        assert!(!payload_output.contains(PAYLOAD));
+
+        let idempotency_args = vec![
+            "--port".to_owned(),
+            "/dev/test".to_owned(),
+            "--state-file".to_owned(),
+            "/tmp/e290.key".to_owned(),
+            "submit-rns-data".to_owned(),
+            IDEMPOTENCY_KEY.to_owned(),
+        ];
+        let idempotency_reason = parse(&idempotency_args)
+            .err()
+            .expect("bare idempotency material must be rejected");
+        let idempotency_output = cli_error_line(&idempotency_reason);
+        assert_eq!(
+            idempotency_output,
+            "error: unexpected positional argument at argument 6"
+        );
+        assert!(!idempotency_output.contains(IDEMPOTENCY_KEY));
+    }
+
+    #[test]
+    fn parser_names_only_whitelisted_duplicate_options_and_commands() {
+        let duplicate_option = parse(&strings(&[
+            "--port",
+            "/dev/one",
+            "--port",
+            "/dev/two",
+            "--state-file",
+            "/tmp/e290.key",
+        ]))
+        .err()
+        .expect("duplicate option must be rejected");
+        assert_eq!(duplicate_option, "duplicate option --port");
+
+        let duplicate_command = parse(&strings(&[
+            "--port",
+            "/dev/test",
+            "--state-file",
+            "/tmp/e290.key",
+            "system-capabilities",
+            "submit-and-wait",
+        ]))
+        .err()
+        .expect("multiple commands must be rejected");
+        assert_eq!(
+            duplicate_command,
+            "unexpected or duplicate command submit-and-wait"
+        );
+    }
+
+    #[test]
+    fn parser_accepts_explicit_capabilities_and_complete_submission() {
+        let capabilities = parse(&strings(&[
+            "--port",
+            "/dev/test",
+            "system-capabilities",
+            "--state-file",
+            "/tmp/e290.key",
+        ]))
+        .unwrap();
+        assert_eq!(capabilities.command, Command::SystemCapabilities);
+
+        let submitted = parse(&strings(&[
+            "--payload-hex",
+            "48656c6c6f",
+            "submit-rns-data",
+            "--idempotency-key",
+            "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+            "--state-file",
+            "/tmp/e290.key",
+            "--destination-hash",
+            "000102030405060708090a0b0c0d0e0f",
+            "--port",
+            "/dev/test",
+        ]))
+        .unwrap();
+        assert_eq!(
+            submitted.command,
+            Command::SubmitRnsData {
+                destination: DestinationHash([
+                    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
+                    0x0d, 0x0e, 0x0f,
+                ]),
+                payload: b"Hello".to_vec(),
+                idempotency_key: IdempotencyKey([
+                    0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc,
+                    0xfd, 0xfe, 0xff,
+                ]),
+            }
+        );
+    }
+
+    #[test]
+    fn identity_summary_is_argument_free_and_outputs_only_public_hashes() {
+        let parsed = parse(&strings(&[
+            "--port",
+            "/dev/test",
+            "identity-summary",
+            "--state-file",
+            "/tmp/e290.key",
+        ]))
+        .unwrap();
+        assert_eq!(parsed.command, Command::IdentitySummary);
+        assert_eq!(parsed.timeout, Duration::from_millis(DEFAULT_TIMEOUT_MS));
+        assert_eq!(
+            command_request(&parsed.command),
+            DeviceRequest::IdentitySummary
+        );
+
+        assert_eq!(
+            parse(&strings(&[
+                "--port",
+                "/dev/test",
+                "identity-summary",
+                "--submission-id",
+                "42",
+                "--state-file",
+                "/tmp/e290.key",
+            ]))
+            .err()
+            .unwrap(),
+            "identity-summary does not accept operation-specific arguments"
+        );
+
+        let output = format_one_shot_response(
+            &Command::IdentitySummary,
+            &[0xab; 16],
+            &[0xcd; 16],
+            DeviceResponse::IdentitySummary(reticulum_device_api::IdentitySummary::new(
+                DestinationHash([
+                    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
+                    0x0d, 0x0e, 0x0f,
+                ]),
+            )),
+        )
+        .unwrap();
+        assert_eq!(
+            output,
+            format!(
+                "command=identity-summary outcome=ok device_id={} session_id={} primary_destination=000102030405060708090a0b0c0d0e0f",
+                "ab".repeat(16),
+                "cd".repeat(16),
+            )
+        );
+    }
+
+    #[test]
+    fn parser_gives_submit_and_wait_a_bounded_default_and_accepts_override() {
+        let common = [
+            "--destination-hash",
+            "000102030405060708090a0b0c0d0e0f",
+            "--payload-hex",
+            "48656c6c6f",
+            "--idempotency-key",
+            "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+            "--state-file",
+            "/tmp/e290.key",
+            "--port",
+            "/dev/test",
+            "submit-and-wait",
+        ];
+        let waiting = parse(&strings(&common)).unwrap();
+        assert_eq!(
+            waiting.timeout,
+            Duration::from_millis(DEFAULT_SUBMIT_AND_WAIT_TIMEOUT_MS)
+        );
+        assert!(matches!(waiting.command, Command::SubmitAndWait { .. }));
+
+        let mut overridden = strings(&common);
+        overridden.insert(0, "12000".to_owned());
+        overridden.insert(0, "--timeout-ms".to_owned());
+        assert_eq!(
+            parse(&overridden).unwrap().timeout,
+            Duration::from_millis(12_000)
+        );
+    }
+
+    #[test]
+    fn parser_accepts_status_and_rejects_missing_or_mixed_status_arguments() {
+        let status = parse(&strings(&[
+            "submission-status",
+            "--state-file",
+            "/tmp/e290.key",
+            "--submission-id",
+            "18446744073709551615",
+            "--port",
+            "/dev/test",
+        ]))
+        .unwrap();
+        assert_eq!(
+            status.command,
+            Command::SubmissionStatus {
+                id: SubmissionId(u64::MAX)
+            }
+        );
+
+        assert_eq!(
+            parse(&strings(&[
+                "submission-status",
+                "--state-file",
+                "/tmp/e290.key",
+                "--port",
+                "/dev/test",
+            ]))
+            .err()
+            .unwrap(),
+            "submission-status requires --submission-id"
+        );
+        assert_eq!(
+            parse(&strings(&[
+                "submission-status",
+                "--state-file",
+                "/tmp/e290.key",
+                "--submission-id",
+                "7",
+                "--payload-hex",
+                "00",
+                "--port",
+                "/dev/test",
+            ]))
+            .err()
+            .unwrap(),
+            "submission-status does not accept submit-rns-data arguments"
+        );
+        assert!(
+            parse(&strings(&[
+                "submission-status",
+                "--state-file",
+                "/tmp/e290.key",
+                "--submission-id",
+                "not-a-number",
+                "--port",
+                "/dev/test",
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parser_rejects_incomplete_or_malformed_submission_material() {
+        let base = [
+            "--port",
+            "/dev/test",
+            "--state-file",
+            "/tmp/e290.key",
+            "submit-rns-data",
+        ];
+        assert_eq!(
+            parse(&strings(&base)).err().unwrap(),
+            "submit-rns-data requires --destination-hash"
+        );
+        assert!(
+            parse(&strings(&[
+                "--port",
+                "/dev/test",
+                "--state-file",
+                "/tmp/e290.key",
+                "--destination-hash",
+                "00",
+                "--payload-hex",
+                "00",
+                "--idempotency-key",
+                "00000000000000000000000000000000",
+                "submit-rns-data",
+            ]))
+            .is_err()
+        );
+        assert!(
+            parse(&strings(&[
+                "--port",
+                "/dev/test",
+                "--state-file",
+                "/tmp/e290.key",
+                "--destination-hash",
+                "0000000000000000000000000000000g",
+                "--payload-hex",
+                "0",
+                "--idempotency-key",
+                "00000000000000000000000000000000",
+                "submit-rns-data",
+            ]))
+            .is_err()
+        );
+        let oversized = "00".repeat(MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES + 1);
+        let args = vec![
+            "--port".to_owned(),
+            "/dev/test".to_owned(),
+            "--state-file".to_owned(),
+            "/tmp/e290.key".to_owned(),
+            "--destination-hash".to_owned(),
+            "00000000000000000000000000000000".to_owned(),
+            "--payload-hex".to_owned(),
+            oversized,
+            "--idempotency-key".to_owned(),
+            "00000000000000000000000000000000".to_owned(),
+            "submit-rns-data".to_owned(),
+        ];
+        assert!(parse(&args).is_err());
+    }
+
+    #[test]
+    fn parser_rejects_submission_arguments_without_submission_command() {
+        assert_eq!(
+            parse(&strings(&[
+                "--port",
+                "/dev/test",
+                "--state-file",
+                "/tmp/e290.key",
+                "--payload-hex",
+                "00",
+            ]))
+            .err()
+            .unwrap(),
+            "system-capabilities does not accept operation-specific arguments"
+        );
+    }
+
+    #[test]
+    fn status_output_exposes_only_scalar_state_and_prepared_packet_diagnostics() {
+        let device_id = [0x11; 16];
+        let session_id = [0x22; 16];
+        let details = reticulum_device_api::PreparedPacketDetails {
+            packet_len: 97,
+            encoded_packet_sha256: reticulum_device_api::EncodedPacketSha256::new([0x33; 32]),
+        };
+        let awaiting = format_submission_status(
+            "submission-status",
+            &device_id,
+            &session_id,
+            reticulum_device_api::SubmissionStatus {
+                id: SubmissionId(42),
+                state: SubmissionState::AwaitingDelivery(details),
+            },
+        );
+        assert_eq!(
+            awaiting,
+            format!(
+                "command=submission-status outcome=ok device_id={} session_id={} submission_id=42 state=awaiting-delivery packet_len=97 encoded_packet_sha256={}",
+                "11".repeat(16),
+                "22".repeat(16),
+                "33".repeat(32),
+            )
+        );
+
+        let failed = format_submission_status(
+            "submission-status",
+            &device_id,
+            &session_id,
+            reticulum_device_api::SubmissionStatus {
+                id: SubmissionId(42),
+                state: SubmissionState::Failed(SubmissionFailure::DeliveryTimeout),
+            },
+        );
+        assert!(failed.ends_with("submission_id=42 state=failed failure=delivery-timeout"));
+        assert!(!failed.contains("packet_len"));
+        assert!(!failed.contains("sha256"));
+    }
+
+    #[test]
+    fn wait_state_machine_retries_only_internal_and_requires_delivered() {
+        let id = SubmissionId(42);
+        let status = |state| {
+            DeviceResponse::SubmissionStatus(reticulum_device_api::SubmissionStatus { id, state })
+        };
+        let details = reticulum_device_api::PreparedPacketDetails {
+            packet_len: 97,
+            encoded_packet_sha256: reticulum_device_api::EncodedPacketSha256::new([0x33; 32]),
+        };
+        assert_eq!(
+            classify_wait_response(id, status(SubmissionState::Queued)).unwrap(),
+            WaitDecision::PollAgain
+        );
+        assert_eq!(
+            classify_wait_response(id, status(SubmissionState::Preparing)).unwrap(),
+            WaitDecision::PollAgain
+        );
+        assert_eq!(
+            classify_wait_response(id, status(SubmissionState::AwaitingDelivery(details))).unwrap(),
+            WaitDecision::PollAgain
+        );
+        assert!(matches!(
+            classify_wait_response(id, status(SubmissionState::Delivered(details))).unwrap(),
+            WaitDecision::Delivered(_)
+        ));
+        assert!(
+            classify_wait_response(
+                id,
+                status(SubmissionState::Failed(SubmissionFailure::NoPath))
+            )
+            .is_err()
+        );
+        assert!(classify_wait_response(id, status(SubmissionState::Cancelled)).is_err());
+
+        let api_error = |code| {
+            DeviceResponse::Error(reticulum_device_api::ApiErrorResponse {
+                code,
+                operation: Some(reticulum_device_api::OP_SUBMISSION_STATUS),
+            })
+        };
+        assert_eq!(
+            classify_wait_response(id, api_error(reticulum_device_api::ApiErrorCode::Internal))
+                .unwrap(),
+            WaitDecision::RetryInternal
+        );
+        assert!(
+            classify_wait_response(id, api_error(reticulum_device_api::ApiErrorCode::NotFound))
+                .is_err()
+        );
+        assert!(
+            classify_wait_response(
+                id,
+                DeviceResponse::SubmissionStatus(reticulum_device_api::SubmissionStatus {
+                    id: SubmissionId(43),
+                    state: SubmissionState::Queued,
+                })
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn repeated_session_request_ids_are_strictly_increasing_and_never_wrap() {
+        let mut ids = RequestIds::new();
+        assert_eq!(ids.take().unwrap(), RequestId(1));
+        assert_eq!(ids.take().unwrap(), RequestId(2));
+        ids.next = Some(u64::MAX);
+        assert_eq!(ids.take().unwrap(), RequestId(u64::MAX));
+        assert!(ids.take().is_err());
+    }
+
+    #[test]
+    fn response_version_accepts_any_current_major_minor_only() {
+        assert!(
+            validate_response_version(ApiVersion {
+                major: ApiVersion::CURRENT.major,
+                minor: u16::MAX,
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_response_version(ApiVersion {
+                major: ApiVersion::CURRENT.major + 1,
+                minor: 0,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn submit_and_wait_output_contains_no_submission_input_material() {
+        let line = format_submission_status(
+            "submit-and-wait",
+            &[0x11; 16],
+            &[0x22; 16],
+            reticulum_device_api::SubmissionStatus {
+                id: SubmissionId(42),
+                state: SubmissionState::Delivered(reticulum_device_api::PreparedPacketDetails {
+                    packet_len: 97,
+                    encoded_packet_sha256: reticulum_device_api::EncodedPacketSha256::new(
+                        [0x33; 32],
+                    ),
+                }),
+            },
+        );
+        assert!(line.contains("command=submit-and-wait outcome=ok"));
+        assert!(line.contains("state=delivered packet_len=97 encoded_packet_sha256="));
+        assert!(!line.contains("48656c6c6f"));
+        assert!(!line.contains("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"));
     }
 
     #[test]

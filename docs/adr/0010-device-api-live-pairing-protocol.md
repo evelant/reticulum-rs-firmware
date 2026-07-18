@@ -4,8 +4,9 @@
   protocol/core, independent vectors, E290 resident durable lifecycle, bounded
   entropy, and bearer-neutral secret handoff implemented and target-verified;
   node/USB scheduling, recoverable pairing utility, and minimal authenticated
-  USB session/API bearer implemented; one powered initialize/pair/reboot/
-  capabilities happy path qualified, with broader lifecycle/fault/submission
+  USB session/API bearer implemented; powered initialize/pair/reboot,
+  capabilities/identity, durable submission, sequential status, peer proof, and
+  post-re-enumeration status paths qualified, with broader lifecycle/fault
   qualification pending
 - **Date:** 2026-07-18
 - **Decision owners:** project maintainers
@@ -21,9 +22,9 @@ deliberately leaves the live pairing records and proof transcript unspecified.
 The authenticated session core needed a frozen way to create and activate at
 least one credential before it could become useful in the permanent E290
 image. That ordering led to the pairing protocol below; the minimal session
-bearer is now source-composed, and one powered activation plus post-reboot
-authenticated capabilities exchange has passed. Pending/Abort readback,
-ambiguity/fault, and authenticated-submission qualification remain open.
+bearer is source-composed, and powered activation plus post-reboot authenticated
+API qualification has passed through one durable LoRa DATA/peer-proof terminal
+path. Pending/Abort readback and ambiguity/fault qualification remain open.
 
 The first profile is a wired developer and hardware-qualification aid. It
 trusts the process controlling the physically connected USB host after the user

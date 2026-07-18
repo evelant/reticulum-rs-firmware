@@ -5,7 +5,7 @@ storage actor, transport-neutral submission runtime, native authorized-frame
 seam, and exact E290 request/durable-echo handoff implemented; portable
 authenticated device-API dispatch implemented; resident E290 operation-scoped
 flash/runtime coordinator implemented; isolated powered journal clean-path/
-software-reset HIL passed on board E9:44; the 106-test E290 host suite qualifies
+software-reset HIL passed on board E9:44; the 125-test E290 host suite qualifies
 the one-entry complete LoRa-first software composition and ADR 0005 active-owner
 fail-stop. Portable API framing, the pre-authentication initialization-control
 codec, immutable credential authority, the USB-
@@ -14,12 +14,13 @@ semantic schema 2 now durably binds exact authorization provenance to every
 acceptance. E290 now validates, boot-mounts, deterministically recovers, and
 retains the credential store without auto-provisioning. Explicit initialization
 and live pairing are routed through the resident owner and pre-authentication
-USB records. The minimal authenticated USB session/API lane is source-composed;
-live powered admission remains blocked by successful credential creation and
-end-to-end handshake/request/reply proof. Source `96e38aa` adds bounded
+USB records. The minimal authenticated USB session/API lane is composed and
+passes one bounded powered credential/API/DATA/peer-proof/status path. Source
+`96e38aa` supplies earlier bounded
 powered evidence for exact image readback, erased credentials with zero
 mutation, strict empty-journal mount, resident service, and ordinary TX on both
-boards; it does not exercise durable DATA or interruption recovery.
+boards; that historical image did not exercise durable DATA or interruption
+recovery. The current API 1.1 image supplies the newer durable DATA proof.
 Controlled power-cut durability, projector
 retirement, journal retention, endurance/soak, and at-rest encryption remain
 unqualified.
@@ -86,7 +87,7 @@ evidence.
 
 ```mermaid
 flowchart LR
-    Client["authenticated local client"] --> Bearer["minimal authenticated USB bearer (source-composed; powered proof open)"]
+    Client["authenticated local client"] --> Bearer["minimal authenticated USB bearer (bounded powered proof passed)"]
     Bearer --> Framing["portable framing (implemented)"]
     Framing --> Session["portable qualification session (composed single-flight)"]
     Session --> Handoff["portable job handoff (implemented)"]

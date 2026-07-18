@@ -12,10 +12,9 @@ credential authority, the qualification-session core, and job handoff are
 qualified; durable authorization provenance is now part of semantic schema 2.
 Resident credential initialization and live-pairing mutation are composed
 through the pre-authentication USB records. The minimal authenticated USB
-session/API lane is source-composed; live powered admission remains blocked by
-successful credential creation and end-to-end handshake/request/reply proof. The permanent
-graph's empty-journal/ordinary-TX powered smoke passes; integrated powered-fault
-qualification remains open.
+session/API lane is composed and passes one bounded powered credential/API/
+DATA/peer-proof/status path. The permanent graph's empty-journal/ordinary-TX
+powered smoke also passes; integrated powered-fault qualification remains open.
 
 ## Ownership boundary
 
@@ -189,7 +188,7 @@ acceptance and cap, the pre-node preparation barrier, exact LoRa frame
 persistence/echo/completion, timeout, principal isolation, and remount. The
 other injects a wrong bound-journal access after frame exposure and proves
 `ActiveOwnerFailStopped` retains every owner with an ordinary action queued and
-permits no later host-radio operation. The 106-test E290 suite now covers those
+permits no later host-radio operation. The 125-test E290 suite now covers those
 two paths plus the policy/product, credential boot/runtime, live-pairing, USB/
 reset, and causal-frontier surfaces. It closes software composition
 qualification without claiming powered flash or RF behavior.
@@ -204,12 +203,11 @@ Remaining product work includes:
   identity-vacant first-provision authority. `provision_first()` now repairs
   only the canonical empty A1 programming trajectory and never erases; an
   existing identity uses strict mount only;
-- powered qualification of the authenticated device-API adapter's target-safe
-  `SubmissionPort` with the source-composed framing/session/handoff, credential
-  authority, and minimal USB bearer, followed later by BLE/Wi-Fi serving.
-  `ProductStorageCoordinator` implements the semantic port under a
-  host-qualified one-entry composition cap, and the USB lane can call it once a
-  credential is active;
+- broader powered fault/cut/soak qualification of the authenticated device-API
+  adapter's target-safe `SubmissionPort` path, followed later by BLE/Wi-Fi
+  serving. `ProductStorageCoordinator` implements the semantic port under a
+  host-qualified one-entry composition cap, and the active-credential USB lane
+  has completed the bounded DATA/peer-proof/status happy path;
 - an exact node-owner quiescence proof before projector-slot retirement, a
   quarantine release/suppression design, and an explicit response to the
   schema-2 journal's permanent retention, 162-submission lifetime limit, and
@@ -223,13 +221,14 @@ The two development boards are attached with antennas, physically confirmed as
 `HT-RA62-HF`, and authorized for NA915. Their isolated semantic TX/RX HIL
 passed; the permanent graph's source-`96e38aa` smoke also passed exact image
 readback, erased credential classification, empty-journal mount, resident
-storage, and ordinary TX. Power cuts, durable DATA, high-water, and full
-storage/product-graph qualification remain open.
+storage, and ordinary TX. The current permanent image additionally passes one
+durable DATA/peer-proof terminal path and post-re-enumeration status read. Power cuts, high-
+water, and full storage/product-graph qualification remain open.
 The current E290 product graph has the LoRa node/radio owner plus the resident
 operation-scoped durable runtime driver. Its one-entry qualification cap is not
-product capacity. The minimal authenticated USB lane can now originate accepted
-local durable work in the source graph, although powered end-to-end proof is
-still open. The same runtime
+product capacity. The minimal authenticated USB lane now originates accepted
+local durable work in the powered E290 graph and has completed the exact end-to-
+end proof path. The same runtime
 preparation contract remains transport-
 neutral: LoRa is the first primary route, while later eligible interfaces can
 join the node fabric without changing actor or journal semantics. No speculative

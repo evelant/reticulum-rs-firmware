@@ -1,4 +1,5 @@
-//! Authenticated device-API dispatch over a narrow durable-submission port.
+//! Device-API dispatch with explicit public identity metadata and a narrow
+//! durable-submission port.
 //!
 //! This adapter performs no framing, session establishment, allocation, radio
 //! work, raw flash access, or journal construction. It authorizes a trusted
@@ -87,11 +88,14 @@ pub trait SubmissionPort {
 ///
 /// The response always uses the current device API version and echoes the
 /// caller's request identifier. Authentication facts come only from
-/// `context`; request CBOR cannot supply or replace them. Although the wire
-/// decoder rejects incompatible majors, this boundary repeats that check so a
-/// manually constructed envelope cannot bypass version policy.
+/// `context`; request CBOR cannot supply or replace them. The public `identity`
+/// summary is supplied independently of the submission port so an identity
+/// read cannot acquire storage capabilities. Although the wire decoder rejects
+/// incompatible majors, this boundary repeats that check so a manually
+/// constructed envelope cannot bypass version policy.
 pub fn dispatch<P>(
     port: &mut P,
+    identity: api::IdentitySummary,
     context: &DispatchContext,
     envelope: RequestEnvelope<'_>,
 ) -> ResponseEnvelope
@@ -105,7 +109,7 @@ where
         api_error(ApiErrorCode::UnsupportedVersion, operation)
     } else {
         match authorize_request(context, &request) {
-            Ok(()) => dispatch_authorized(port, context, request, operation),
+            Ok(()) => dispatch_authorized(port, identity, context, request, operation),
             Err(error) => authorization_error(error, operation),
         }
     };
@@ -118,6 +122,7 @@ where
 
 fn dispatch_authorized<P>(
     port: &mut P,
+    identity: api::IdentitySummary,
     context: &DispatchContext,
     request: DeviceRequest<'_>,
     operation: u16,
@@ -131,6 +136,7 @@ where
                 && port.availability() == CapabilityAvailability::Available;
             DeviceResponse::SystemCapabilities(api::CapabilitySnapshot::for_dispatch(available))
         }
+        DeviceRequest::IdentitySummary => DeviceResponse::IdentitySummary(identity),
         DeviceRequest::SubmissionStatus { id } => {
             let Some(principal) = context.principal() else {
                 return api_error(ApiErrorCode::AuthenticationRequired, operation);
