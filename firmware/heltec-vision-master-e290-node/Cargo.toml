@@ -19,6 +19,8 @@ reticulum-board-heltec-vision-master-e290-radio = { path = "../../crates/board-h
 reticulum-device-api = { path = "../../crates/device-api", default-features = false, features = ["experimental-rns-data"] }
 reticulum-device-api-adapter = { path = "../../crates/device-api-adapter", default-features = false, features = ["experimental-rns-data"] }
 reticulum-device-api-credential-store = { path = "../../crates/device-api-credential-store", default-features = false }
+reticulum-device-api-framing = { path = "../../crates/device-api-framing", default-features = false }
+reticulum-device-api-pairing-control = { path = "../../crates/device-api-pairing-control", default-features = false }
 reticulum-device-api-pairing-policy = { path = "../../crates/device-api-pairing-policy", default-features = false }
 reticulum-device-identity-store = { path = "../../crates/device-identity-store", default-features = false }
 reticulum-interface-router = { path = "../../crates/interface-router", default-features = false }
@@ -31,6 +33,7 @@ reticulum-storage-journal = { path = "../../crates/storage-journal", default-fea
 reticulum-storage-model = { path = "../../crates/storage-model", default-features = false }
 reticulum-submission-runtime = { path = "../../crates/submission-runtime", default-features = false }
 reticulum-tx-supervisor = { path = "../../crates/tx-supervisor", default-features = false }
+embassy-sync.workspace = true
 
 [target.'cfg(target_arch = "xtensa")'.dependencies]
 reticulum-radio-lora-phy = { path = "../../crates/radio-lora-phy" }
@@ -38,7 +41,6 @@ reticulum-tx-handoff = { path = "../../crates/tx-handoff", default-features = fa
 
 embassy-executor = { workspace = true, features = ["log"] }
 embassy-futures.workspace = true
-embassy-sync.workspace = true
 embassy-time = { workspace = true, features = ["log"] }
 embedded-hal.workspace = true
 embedded-hal-async.workspace = true
@@ -58,7 +60,7 @@ esp-hal = { workspace = true, features = [
     "rt",
     "unstable",
 ] }
-esp-println = { workspace = true, features = ["auto", "esp32s3", "log-04"] }
+esp-println = { workspace = true, features = ["esp32s3", "log-04", "no-op"] }
 esp-rtos = { workspace = true, features = [
     "embassy",
     "esp-alloc",

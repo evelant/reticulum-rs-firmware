@@ -565,10 +565,10 @@ jobs:
           # BSS includes the linker-reserved stack and moves inversely with
           # initialized data. The total cap is an aggregate image-growth guard,
           # not a substitute for section-level or runtime DRAM measurements.
-          # The 2026-07-17 durable E290 node baseline is
-          # 629335/11176/461652/1102163. Its caps retain about 14% text, 46%
-          # data, 3% BSS and 7% aggregate headroom while the full appliance is
-          # still expected to grow deliberately under reviewed measurements.
+          # The 2026-07-18 USB pairing-control E290 node baseline is
+          # 544371/3548/469280/1017199. Its unchanged caps retain about 25%
+          # text, 78% data, 1% BSS and 14% aggregate headroom while the full
+          # appliance is still expected to grow under reviewed measurements.
           release=target/xtensa-esp32s3-none-elf/release
           check_size safe-idle "$release/reticulum-heltec-tracker-v2" \
             65536 6144 475136 550000

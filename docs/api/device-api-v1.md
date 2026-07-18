@@ -22,18 +22,24 @@ a resident `CredentialRuntime` privately retains the policy, exact boot binding,
 mounted authority, and admitted initialization permit. The coordinator compiles
 a sole-owner port that freshly reinspects node identity and creates a short-lived
 bound credential view; its runtime accepts only forward erased/interrupted
-trajectories. A separate featureless pre-authentication codec now freezes
-zero-session, zero-tag status and explicit-initialization records while exposing
-only coarse public results; it depends solely on framing and performs no policy,
-ordering, replay, or mutation work. No GPIO debounce, USB byte owner, connection
-epoch, command handoff, or powered initialization invokes that path, and boot
-never initializes automatically. Lifecycle-specific Add/Activate/Abort planners, opaque typed
-store commit/reconcile owners, mounted-store pending selection, and the read-only
-interrupted-initialization classifier are implemented. E290 boot now maps only
-its canonical recoverable trajectory to an explicit disabled state. Live Begin,
-Proof, Activate, and Abort mutation, the external API/session firmware lane, and
-every physical bearer remain unimplemented. A product port may route an accepted
-submission through the node after the durable barriers.
+trajectories. A separate featureless pre-authentication codec freezes zero-
+session, zero-tag status and explicit-initialization records while exposing only
+coarse public results; it depends solely on framing and performs no policy,
+ordering, replay, or mutation work itself. The permanent E290 three-task image
+now composes that codec behind a sole USB Serial/JTAG byte owner, debounced
+active-low GPIO21, boot-lifetime connection epochs, exact-next sequencing, and
+a depth-one scalar command/reply handoff to the node-owned coordinator. Boot
+still never initializes automatically. Lifecycle-specific Add/Activate/Abort
+planners, opaque typed store commit/reconcile owners, mounted-store pending
+selection, and the read-only interrupted-initialization classifier are
+implemented. E290 boot maps only its canonical recoverable trajectory to an
+explicit disabled state. This bootstrap is not an authenticated session and
+does not dispatch the logical API documented here. Its status and physical-
+presence-required path has run on both boards, but a successful button-confirmed
+initialization and post-write readback remain open. Live
+Begin, Proof, Activate, and Abort mutation plus the external authenticated API/
+session firmware lane remain unimplemented. A product port may route an
+accepted submission through the node after the durable barriers.
 
 ## Boundary
 
@@ -283,9 +289,9 @@ exercises that API-to-runtime-to-router-to-LoRa software path; portable framing,
 immutable credential authority, qualification-session establishment, and job
 handoff and raw-NOR credential storage are implemented separately, while
 the credential store is now boot-composed. External live admission still
-requires invoking the resident initialization path when media is empty, live
-credential pairing lifecycle composition, an external API/session firmware
-lane, and a bearer.
+requires powered qualification of the now-composed empty-media initialization
+bootstrap, live credential pairing lifecycle composition, and an authenticated
+external API/session firmware lane and bearer.
 
 Successful experimental response body:
 
@@ -303,7 +309,9 @@ backend reply maps to `Internal` while the actor retains the exact mutation;
 after `drive_pending()` reconciles it, retry returns the same durable ID.
 Idempotency conflict and capacity map to their stable API categories, while
 identifier exhaustion, actor busy, backend ambiguity and a latched fault map to
-`Internal`. No firmware transport currently exposes this operation. Acceptance
+`Internal`. No authenticated firmware transport or logical API bearer currently
+exposes this operation; the E290 pre-authentication USB bootstrap does not
+dispatch it. Acceptance
 is not a delivery guarantee; a later status can report no
 path, delivery timeout, downstream rejection, or an internal failure. The ID
 can be queried through `submission.status`. The response contains no
@@ -374,11 +382,12 @@ authorization cannot reuse a session generation. E290 firmware now mounts and
 recovers the portable store before any other product-store write and retains
 its `Ready`, authentication-only, uninitialized-erased,
 initialization-interrupted, blocked, corrupt, or backend-failed state. The
-resident initialization runtime and sole-owner physical drive are compiled but
-have no bearer/request caller. A future external serving runtime must invoke
-that path explicitly when needed, add live Begin/Proof/Activate/Abort pairing,
+resident initialization runtime and sole-owner physical drive are invoked only
+by the E290's pre-authentication status/initialize lane. A future authenticated
+external serving runtime must add live Begin/Proof/Activate/Abort pairing,
 enforce connection-level rate limits, and keep authentication state outside
-request CBOR.
+request CBOR. The existing bootstrap does not create a session grant or admit a
+logical request.
 
 Semantic journal schema 2 persists the principal, idempotency key,
 operation-specific intent, credential ID/generation, complete authority
@@ -451,8 +460,8 @@ cargo +esp clippy --locked --release -p reticulum-device-api-adapter \
   --features experimental-rns-data --target xtensa-esp32s3-none-elf -- -D warnings
 ```
 
-Validate the separately bounded bearer-edge contracts without composing a
-physical transport:
+Validate the separately bounded portable bearer-edge contracts independently
+of the product-specific physical adapter:
 
 ```sh
 cargo test --locked \
@@ -502,3 +511,41 @@ cover canonical hello/proof derivation, direction-separated record tags,
 downgrade/reflection/replay/generation/reset failures, exact sequence policy and
 partial-write typestate. Target checks exercise the portable layers directly on
 `no_std` bare-metal builds.
+
+The separate permanent-E290 composition gate now passes 83 host-library tests
+plus strict host/target review and release-link checks. It covers the third USB/
+GPIO task, active-low stable-time debounce, an 8 ms missed-SOF suspension that
+retains its epoch and sequence until bus reset, connection-epoch and sequence
+exhaustion, duplicate/gap rejection, depth-one pressure and reply correlation,
+and node-owned status/initialize dispatch. Button/control arbitration is
+bounded. A stable High transition is latched before a later Low; a raw-sample
+gap of at least 20 ms cancels a possible hold and suppresses Low until a fresh
+debounced High. Once every response byte enters the endpoint FIFO, firmware
+requests `WR_DONE` and releases that software owner; a later response remains
+backpressured until FIFO space is available.
+Each fresh connection also resets the publication latch and debouncer to Low,
+so release evidence retained for an older epoch cannot arm the new epoch; the
+replacement epoch must observe a complete fresh High debounce.
+
+The `e290-pairing-control` client has 11 focused tests and keeps one serial port
+open across status, initialization, and polling so its exact-next sequence
+advances within one bus-reset-delimited epoch. It asserts DTR and clears RTS;
+closing/reopening the TTY does not start a new epoch. Status defaults to a
+15-second overall deadline and initialize to 120 seconds. A post-send I/O
+failure or request timeout leaves its last sequence consumed-or-ambiguous and
+requires a confirmed USB bus
+reset before restarting at zero. Firmware refuses `u64::MAX`; the host
+rejects that value and reports no usable successor after `u64::MAX - 1`.
+
+The final explicit-16-MiB image returned `initialization-required` and
+`physical-presence-required` from both boards. Five-second no-button workflows
+on both boards advanced cleanly through sequences 0--47 before their overall
+deadlines. Subsequent 8 KiB credential-partition readbacks on both boards were
+entirely `0xff` with SHA-256
+`7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f`,
+confirming zero writes; successful post-write readback remains open. The
+firmware selects no-op logging, leaving the
+COBS bootstrap as the sole application-owned USB byte stream. Powered reset/
+suspend/resume behavior remains unqualified, and this is not an authenticated
+session or logical API operation. These focused results do not claim a complete
+workspace test rerun.

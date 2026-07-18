@@ -14,11 +14,14 @@ path = "src/main.rs"
 [dependencies]
 md-5 = "=0.10.6"
 quote = "=1.0.46"
+reticulum-device-api-framing = { path = "../crates/device-api-framing", default-features = false }
+reticulum-device-api-pairing-control = { path = "../crates/device-api-pairing-control", default-features = false }
 reticulum-rns-rete = { path = "../crates/rns-rete", default-features = false }
 object = { version = "=0.37.3", default-features = false, features = ["read", "std"] }
 reticulum-phase1-rx-local-data = { path = "../tools/phase1-rx-local-data" }
 serde.workspace = true
 serde_json.workspace = true
+serialport.workspace = true
 sha2.workspace = true
 syn = { version = "=2.0.118", features = ["full", "parsing", "printing"] }
 tar = "=0.4.46"

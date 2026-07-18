@@ -257,10 +257,6 @@ pub(crate) struct ProductStorageCoordinator {
 }
 
 /// Product-level result of admission-time identity preflight and initialization policy.
-#[expect(
-    dead_code,
-    reason = "the compiled product port has no caller until a local pairing bearer lands"
-)]
 pub(crate) enum ProductInitializationRequest {
     /// Identity media could not be inspected, so no policy request ran.
     IdentityUnavailable,
@@ -271,10 +267,6 @@ pub(crate) enum ProductInitializationRequest {
 }
 
 /// Product-level result of one same-boot physical initialization drive.
-#[expect(
-    dead_code,
-    reason = "the compiled product port has no caller until a local pairing bearer lands"
-)]
 pub(crate) enum ProductInitializationDrive {
     /// Identity media could not be inspected, so credential media was untouched.
     IdentityUnavailable,
@@ -292,15 +284,7 @@ pub(crate) enum ProductSubmissionDrive {
     RuntimeUnavailable,
 }
 
-/// Sole-owner surface reserved for the future local pairing bearer.
-///
-/// Main uses the status method for powered composition evidence. The remaining
-/// methods compile the complete product-owned control and physical-I/O path,
-/// but no USB/BLE/Wi-Fi task invokes them until a bearer is added.
-#[expect(
-    dead_code,
-    reason = "status is live now; the remaining operations await the local pairing bearer"
-)]
+/// Sole-owner surface invoked by the node-side local pairing-control lane.
 pub(crate) trait ProductCredentialInitializationPort {
     /// Current non-secret resident initialization ownership.
     fn initialization_status(&self) -> CredentialInitializationStatus;

@@ -12,6 +12,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use syn::{Fields, ImplItem, Item, Type, Visibility};
 
+mod e290_pairing_control;
 mod phase1_closure;
 mod phase1_hil;
 mod phase1_image;
@@ -28,6 +29,7 @@ fn main() -> ExitCode {
     match args.next().as_deref() {
         Some("doctor") if args.next().is_none() => doctor(),
         Some("build-tracker") if args.next().is_none() => build_tracker(),
+        Some("e290-pairing-control") => e290_pairing_control::run(args.collect()),
         Some("check-rns-vectors") if args.next().is_none() => check_rns_vectors(),
         Some("check-rnode-hil-vectors") if args.next().is_none() => check_rnode_hil_vectors(),
         Some("graph-policy") if args.next().is_none() => graph_policy(),
@@ -43,7 +45,7 @@ fn main() -> ExitCode {
         _ => {
             eprintln!(
                 "usage: cargo run -p xtask -- \
-                 <doctor|build-tracker|check-rns-vectors|check-rnode-hil-vectors|graph-policy|rx-api-policy|print-rx-api-surface|phase1-rx-hil-artifacts|phase1-rx-closure-artifacts|phase1-rx-powered-evidence>"
+                 <doctor|build-tracker|e290-pairing-control|check-rns-vectors|check-rnode-hil-vectors|graph-policy|rx-api-policy|print-rx-api-surface|phase1-rx-hil-artifacts|phase1-rx-closure-artifacts|phase1-rx-powered-evidence>"
             );
             ExitCode::from(2)
         }
@@ -606,13 +608,13 @@ fn graph_policy() -> ExitCode {
              source/revision; esp-rtos and lora-phy resolve only to their reviewed local patches, \
              and each checked vendor inventory reconstructs the pristine registry source; the device \
              API and node core remain mutually isolated and free of direct platform dependencies; the \
-             allocation-free device-API framing crate has no dependency or feature surface; the featureless pre-authentication pairing-control codec reaches only framing and remains absent from every product/HIL graph until bearer composition, while the \
+             allocation-free device-API framing crate has no dependency or feature surface; the featureless pre-authentication pairing-control codec reaches only framing, remains absent from every legacy/HIL graph and is composed only into the permanent E290 USB control surface, while the \
              boot-lifetime job handoff reaches only the logical device API and Embassy Sync, and the \
              credential authority has only its exact logical device-API, constant-time comparison and zeroization edges; credential-store integration escape identifiers remain restricted to their exact reviewed definition and call sites in the two trusted owner files, and every workspace member target remains beneath a scanned source root; the physical-presence pairing policy has only its exact feature-disabled credential-authority edge, is composed feature-free only into the permanent E290 node, and remains absent from every legacy product and HIL graph; the \
              authenticated session layer has only its exact reviewed cryptographic, device-API, credentials, framing and handoff normal edges plus its exact test-only hex, semantic-adapter and storage-model fixtures; \
              the Rete integration and node-core normal closures contain no RNode, radio-interface, LoRa or board package; \
              the shared lora-phy owner and E290 radio wrapper have only their exact reviewed HAL, framing, board and test edges; \
-             the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the permanent E290 node reaches the LoRa-first node/router/dispatcher graph, exact portable identity, credential-store authority, announce-clock, NOR-region and durable-submission layers, and the target-safe experimental device-API semantic port while excluding the uncomposed pre-authentication control codec, deferred authenticated API bearers, onboard clients and foreign Tracker/HIL packages; \
+             the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the permanent E290 node reaches the LoRa-first node/router/dispatcher graph, exact portable identity, credential-store authority, announce-clock, NOR-region and durable-submission layers, the target-safe experimental device-API semantic port and the featureless framed USB pre-authentication control codec while excluding authenticated API handoff/session layers, onboard clients and foreign Tracker/HIL packages; \
              the interface router has only its reviewed node-core and Embassy Sync normal edges plus test-only rand_core and RNS fixture edges; \
              the TX handoff, RF-inert dispatcher and supervisor use only their reviewed node-core, \
              interface-router ingress, handoff, dispatcher, Embassy Sync/Futures/Time, rand_core \
@@ -1195,7 +1197,7 @@ fn validate_e290_semantic_hil_graph_boundary(tree: &str) -> Result<(), String> {
     Ok(())
 }
 
-const E290_NODE_GRAPH_REQUIRED: [&str; 30] = [
+const E290_NODE_GRAPH_REQUIRED: [&str; 33] = [
     "embedded-storage",
     "esp-storage",
     "reticulum-announce-clock",
@@ -1205,6 +1207,8 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 30] = [
     "reticulum-device-api-adapter",
     "reticulum-device-api-credential-store",
     "reticulum-device-api-credentials",
+    "reticulum-device-api-framing",
+    "reticulum-device-api-pairing-control",
     "reticulum-device-api-pairing-policy",
     "reticulum-device-identity-store",
     "reticulum-interface-router",
@@ -1225,10 +1229,11 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 30] = [
     "reticulum-tx-dispatch",
     "reticulum-tx-handoff",
     "reticulum-tx-supervisor",
+    "esp-println",
     "static_cell",
 ];
 
-const E290_NODE_GRAPH_FORBIDDEN: [&str; 15] = [
+const E290_NODE_GRAPH_FORBIDDEN: [&str; 13] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -1236,8 +1241,6 @@ const E290_NODE_GRAPH_FORBIDDEN: [&str; 15] = [
     "reticulum-heltec-tracker-v2",
     "reticulum-heltec-vision-master-e290-qualification",
     "reticulum-heltec-vision-master-e290-semantic-hil",
-    "reticulum-device-api-framing",
-    "reticulum-device-api-pairing-control",
     "reticulum-device-api-handoff",
     "reticulum-device-api-session",
     "reticulum-lab-rx-returned-fault-hil",
@@ -1285,6 +1288,8 @@ fn validate_e290_node_graph_boundary(tree: &str) -> Result<(), String> {
     for package in [
         "reticulum-device-api-credential-store ",
         "reticulum-device-api-credentials ",
+        "reticulum-device-api-framing ",
+        "reticulum-device-api-pairing-control ",
         "reticulum-device-api-pairing-policy ",
     ] {
         let line = tree
@@ -1293,9 +1298,18 @@ fn validate_e290_node_graph_boundary(tree: &str) -> Result<(), String> {
             .ok_or_else(|| format!("permanent E290 node graph has no {package}line"))?;
         if !line.ends_with("features=[]") {
             return Err(format!(
-                "permanent E290 node must not enable credential features on {package}, observed {line}"
+                "permanent E290 node must keep credential and pre-authentication control packages feature-free; observed {line}"
             ));
         }
+    }
+    let println_line = tree
+        .lines()
+        .find(|line| line.contains("esp-println "))
+        .ok_or_else(|| "permanent E290 node graph has no esp-println line".to_owned())?;
+    if !println_line.ends_with("features=[esp32s3,log-04,no-op]") {
+        return Err(format!(
+            "permanent E290 node must reserve USB Serial/JTAG by enabling only the no-op esp-println backend, observed {println_line}"
+        ));
     }
     Ok(())
 }
@@ -1344,6 +1358,29 @@ fn validate_e290_node_feature_boundary(
         "reticulum-device-api-pairing-policy",
         &workspace.join("crates/device-api-pairing-policy"),
         false,
+    )?;
+    validate_exact_local_dependency(
+        dependencies,
+        package_name,
+        "reticulum-device-api-framing",
+        &workspace.join("crates/device-api-framing"),
+        false,
+    )?;
+    validate_exact_local_dependency(
+        dependencies,
+        package_name,
+        "reticulum-device-api-pairing-control",
+        &workspace.join("crates/device-api-pairing-control"),
+        false,
+    )?;
+    validate_exact_target_registry_dependency(
+        dependencies,
+        package_name,
+        "esp-println",
+        "=0.17.0",
+        "cfg(target_arch = \"xtensa\")",
+        false,
+        &["esp32s3", "log-04", "no-op"],
     )?;
     Ok(())
 }
@@ -2851,6 +2888,40 @@ fn validate_exact_registry_dependency(
     {
         return Err(format!(
             "{package_name} has an unreviewed {kind:?} registry {dependency_name} dependency shape"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_exact_target_registry_dependency(
+    dependencies: &[serde_json::Value],
+    package_name: &str,
+    dependency_name: &str,
+    requirement: &str,
+    target: &str,
+    uses_default_features: bool,
+    expected_features: &[&str],
+) -> Result<(), String> {
+    let dependency = exact_dependency(dependencies, package_name, dependency_name, None)?;
+    let features = dependency["features"].as_array().ok_or_else(|| {
+        format!("{package_name} {dependency_name} dependency has no feature list")
+    })?;
+    let actual_features = features
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
+    if dependency["req"].as_str() != Some(requirement)
+        || dependency["source"].as_str()
+            != Some("registry+https://github.com/rust-lang/crates.io-index")
+        || !dependency["path"].is_null()
+        || dependency["optional"].as_bool() != Some(false)
+        || !dependency["rename"].is_null()
+        || dependency["target"].as_str() != Some(target)
+        || dependency["uses_default_features"].as_bool() != Some(uses_default_features)
+        || actual_features != expected_features
+    {
+        return Err(format!(
+            "{package_name} has an unreviewed target-specific registry {dependency_name} dependency shape"
         ));
     }
     Ok(())
@@ -7312,6 +7383,9 @@ mod tests {
     }
 
     fn e290_node_metadata_fixture(root: &Path) -> serde_json::Value {
+        let mut esp_println = handoff_dependency_fixture("esp-println", "=0.17.0", None);
+        esp_println["features"] = serde_json::json!(["esp32s3", "log-04", "no-op"]);
+        esp_println["target"] = serde_json::json!("cfg(target_arch = \"xtensa\")");
         serde_json::json!({
             "packages": [{
                 "name": "reticulum-heltec-vision-master-e290-node",
@@ -7333,7 +7407,20 @@ mod tests {
                         "*",
                         &root.join("crates/device-api-pairing-policy"),
                         None,
-                    )
+                    ),
+                    handoff_path_dependency_fixture(
+                        "reticulum-device-api-framing",
+                        "*",
+                        &root.join("crates/device-api-framing"),
+                        None,
+                    ),
+                    handoff_path_dependency_fixture(
+                        "reticulum-device-api-pairing-control",
+                        "*",
+                        &root.join("crates/device-api-pairing-control"),
+                        None,
+                    ),
+                    esp_println,
                 ]
             }]
         })
@@ -7343,6 +7430,7 @@ mod tests {
     fn permanent_e290_node_graph_is_lora_first_with_transport_neutral_durability() {
         let valid = "reticulum-heltec-vision-master-e290-node v0.1.0 features=[default]\n\
                      ├── embedded-storage v0.3.1 features=[]\n\
+                     ├── esp-println v0.17.0 features=[esp32s3,log-04,no-op]\n\
                      ├── esp-storage v0.9.0 features=[critical-section,esp32s3]\n\
                      ├── reticulum-announce-clock v0.1.0 features=[]\n\
                      ├── reticulum-board-heltec-vision-master-e290-radio v0.1.0 features=[]\n\
@@ -7352,6 +7440,8 @@ mod tests {
                      ├── reticulum-device-api-adapter v0.1.0 features=[experimental-rns-data]\n\
                      ├── reticulum-device-api-credential-store v0.1.0 features=[]\n\
                      │   └── reticulum-device-api-credentials v0.1.0 features=[]\n\
+                     ├── reticulum-device-api-framing v0.1.0 features=[]\n\
+                     ├── reticulum-device-api-pairing-control v0.1.0 features=[]\n\
                      ├── reticulum-device-api-pairing-policy v0.1.0 features=[]\n\
                      ├── reticulum-device-identity-store v0.1.0 features=[]\n\
                      ├── reticulum-interface-router v0.1.0 features=[]\n\
@@ -7404,13 +7494,28 @@ mod tests {
         for package in [
             "reticulum-device-api-credential-store",
             "reticulum-device-api-credentials",
+            "reticulum-device-api-framing",
+            "reticulum-device-api-pairing-control",
+            "reticulum-device-api-pairing-policy",
         ] {
             let expected = format!("{package} v0.1.0 features=[]");
             let drifted = format!("{package} v0.1.0 features=[default]");
             let feature_drift = valid.replacen(&expected, &drifted, 1);
             assert!(
                 validate_e290_node_graph_boundary(&feature_drift).is_err(),
-                "permanent node accepted credential feature drift on {package}"
+                "permanent node accepted feature drift on feature-free package {package}"
+            );
+        }
+
+        for forbidden_backend in ["auto", "jtag-serial", "uart"] {
+            let feature_drift = valid.replacen(
+                "esp-println v0.17.0 features=[esp32s3,log-04,no-op]",
+                &format!("esp-println v0.17.0 features=[esp32s3,log-04,{forbidden_backend}]"),
+                1,
+            );
+            assert!(
+                validate_e290_node_graph_boundary(&feature_drift).is_err(),
+                "permanent node accepted the {forbidden_backend} esp-println backend"
             );
         }
     }
@@ -7444,7 +7549,7 @@ mod tests {
     }
 
     #[test]
-    fn permanent_e290_node_requires_exact_direct_credential_dependencies() {
+    fn permanent_e290_node_requires_exact_direct_preauth_and_credential_dependencies() {
         let root = workspace_root();
         let baseline = e290_node_metadata_fixture(&root);
         validate_e290_node_feature_boundary(&baseline.to_string(), &root).unwrap();
@@ -7459,6 +7564,16 @@ mod tests {
                 "reticulum-device-api-pairing-policy",
                 "crates/not-the-pairing-policy",
                 "pairing-policy",
+            ),
+            (
+                "reticulum-device-api-framing",
+                "crates/not-device-api-framing",
+                "device-api-framing",
+            ),
+            (
+                "reticulum-device-api-pairing-control",
+                "crates/not-device-api-pairing-control",
+                "device-api-pairing-control",
             ),
         ] {
             let mut missing = baseline.clone();
@@ -7531,6 +7646,97 @@ mod tests {
             }
         }
 
+        let dependency_name = "esp-println";
+        let mut missing = baseline.clone();
+        fixture_package_mut(&mut missing, "reticulum-heltec-vision-master-e290-node")
+            ["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|dependency| dependency["name"].as_str() != Some(dependency_name));
+        assert!(
+            validate_e290_node_feature_boundary(&missing.to_string(), &root).is_err(),
+            "permanent node accepted missing esp-println"
+        );
+
+        let mut duplicated = baseline.clone();
+        let duplicate = duplicated["packages"][0]["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|dependency| dependency["name"].as_str() == Some(dependency_name))
+            .unwrap()
+            .clone();
+        duplicated["packages"][0]["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate);
+        assert!(
+            validate_e290_node_feature_boundary(&duplicated.to_string(), &root).is_err(),
+            "permanent node accepted duplicate esp-println"
+        );
+
+        for forbidden_backend in ["auto", "jtag-serial", "uart"] {
+            for features in [
+                serde_json::json!(["esp32s3", "log-04", forbidden_backend]),
+                serde_json::json!(["esp32s3", "log-04", "no-op", forbidden_backend]),
+            ] {
+                let mut drifted = baseline.clone();
+                fixture_dependency_mut(
+                    fixture_package_mut(&mut drifted, "reticulum-heltec-vision-master-e290-node"),
+                    dependency_name,
+                    None,
+                )["features"] = features;
+                assert!(
+                    validate_e290_node_feature_boundary(&drifted.to_string(), &root).is_err(),
+                    "permanent node accepted the {forbidden_backend} esp-println backend"
+                );
+            }
+        }
+
+        for (label, field, value) in [
+            ("version requirement", "req", serde_json::json!("^0.17")),
+            (
+                "registry source",
+                "source",
+                serde_json::json!("registry+https://example.invalid/index"),
+            ),
+            (
+                "local path",
+                "path",
+                serde_json::json!(root.join("vendor/lookalike-esp-println")),
+            ),
+            ("dependency kind", "kind", serde_json::json!("dev")),
+            ("optional edge", "optional", serde_json::json!(true)),
+            ("renamed edge", "rename", serde_json::json!("silent-logger")),
+            ("missing target", "target", serde_json::Value::Null),
+            (
+                "wrong target",
+                "target",
+                serde_json::json!("cfg(target_os = \"none\")"),
+            ),
+            (
+                "default features",
+                "uses_default_features",
+                serde_json::json!(true),
+            ),
+            (
+                "feature set",
+                "features",
+                serde_json::json!(["esp32s3", "no-op"]),
+            ),
+        ] {
+            let mut drifted = baseline.clone();
+            fixture_dependency_mut(
+                fixture_package_mut(&mut drifted, "reticulum-heltec-vision-master-e290-node"),
+                dependency_name,
+                None,
+            )[field] = value;
+            assert!(
+                validate_e290_node_feature_boundary(&drifted.to_string(), &root).is_err(),
+                "permanent node accepted esp-println {label} drift"
+            );
+        }
+
         let mut wrong_manifest = baseline.clone();
         fixture_package_mut(
             &mut wrong_manifest,
@@ -7587,7 +7793,7 @@ mod tests {
     }
 
     #[test]
-    fn pairing_control_remains_outside_every_product_graph_until_bearer_composition() {
+    fn pairing_control_is_required_only_by_permanent_e290_usb_composition() {
         for (label, forbidden) in [
             ("Tracker product", &PRODUCT_GRAPH_FORBIDDEN[..]),
             ("storage HIL", &STORAGE_HIL_GRAPH_FORBIDDEN[..]),
@@ -7597,11 +7803,28 @@ mod tests {
                 &SEMANTIC_TX_HIL_GRAPH_FORBIDDEN[..],
             ),
             ("E290 semantic HIL", &E290_SEMANTIC_HIL_GRAPH_FORBIDDEN[..]),
-            ("permanent E290 node", &E290_NODE_GRAPH_FORBIDDEN[..]),
+        ] {
+            for package in [
+                "reticulum-device-api-framing",
+                "reticulum-device-api-pairing-control",
+            ] {
+                assert!(
+                    forbidden.contains(&package),
+                    "{label} no longer forbids the E290 USB pre-authentication package {package}"
+                );
+            }
+        }
+        for package in [
+            "reticulum-device-api-framing",
+            "reticulum-device-api-pairing-control",
         ] {
             assert!(
-                forbidden.contains(&"reticulum-device-api-pairing-control"),
-                "{label} no longer forbids the uncomposed pairing-control codec"
+                E290_NODE_GRAPH_REQUIRED.contains(&package),
+                "permanent E290 node no longer requires {package}"
+            );
+            assert!(
+                !E290_NODE_GRAPH_FORBIDDEN.contains(&package),
+                "permanent E290 node still forbids composed {package}"
             );
         }
     }

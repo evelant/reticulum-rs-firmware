@@ -11,7 +11,10 @@ pub mod credential_runtime;
 pub mod cross_store_gate;
 pub mod durability_boot;
 pub mod durability_policy;
+pub mod pairing_control_handoff;
+pub mod pairing_control_mapping;
 pub mod partition_contract;
+pub mod usb_pairing_policy;
 
 #[cfg(test)]
 extern crate std;
@@ -167,6 +170,55 @@ mod tests {
                 "credential boot must precede {later_operation}"
             );
         }
+    }
+
+    #[test]
+    fn usb_initialization_bearer_is_a_third_non_interface_owner() {
+        let main = include_str!("main.rs");
+        assert!(main.contains("PairingControlHandoff::new()).split()"));
+        assert!(main.contains("peripherals.GPIO21"));
+        assert!(main.contains("InputConfig::default().with_pull(Pull::Up)"));
+        assert!(main.contains("peripherals.USB_DEVICE"));
+        assert!(main.contains("spawner.spawn(usb_pairing_task);"));
+        assert!(main.contains("tasks=3 interfaces=1 primary_transport=lora"));
+        assert!(!main.contains("esp_println::logger::init_logger_from_env"));
+
+        let usb = include_str!("usb_pairing_task.rs");
+        assert!(usb.contains("discard_rx_fifo(&mut rx)"));
+        assert!(usb.contains("rx.drain_rx_fifo(&mut discarded)"));
+        assert!(usb.contains("let _ = tx.flush_tx_nb();"));
+        assert!(!usb.contains("flush_tx_nb().is_ok()"));
+        for forbidden in [
+            "ProductStorageCoordinator",
+            "ProductSupervisor",
+            "InterfaceFabric",
+            "NodeCore",
+            "E290Radio",
+            "FlashStorage",
+        ] {
+            assert!(
+                !usb.contains(forbidden),
+                "USB pairing owner reached forbidden product capability {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn node_owns_pairing_control_before_other_flash_mutation_work() {
+        let source = include_str!("node_task.rs");
+        let pairing = source
+            .find("progressed |= step_pairing_control(")
+            .expect("node loop must step pairing control");
+        let frame = source
+            .find("if let Some(observation) = pending_frame_acknowledgement.take()")
+            .expect("node loop must retain its authorized-frame owner");
+        let journal = source
+            .find("match storage.drive_submission_step(")
+            .expect("node loop must retain its journal drive");
+        assert!(pairing < frame);
+        assert!(pairing < journal);
+        assert!(source.contains("CredentialInitializationStatus::InFlight"));
+        assert!(source.contains("drive_initialization_and_schedule"));
     }
 
     #[test]

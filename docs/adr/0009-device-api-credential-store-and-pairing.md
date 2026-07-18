@@ -3,10 +3,12 @@
 - **Status:** accepted design; portable lifecycle-safe authority/store path,
   interrupted-initialization classifier, E290 boot/coordinator mount integration,
   pairing-admission policy, pre-authentication initialization-control codec, and
-  E290 forward-only initialization runtime/sole-owner port implemented; live
-  lifecycle mutation, firmware bearer/handoff composition, and powered pairing
-  qualification pending
-- **Date:** 2026-07-17
+  E290 forward-only initialization runtime/sole-owner port implemented; the
+  E290 USB Serial/JTAG pre-authentication initialization bearer, GPIO21
+  physical-presence sampler, and depth-one task handoff are host-, target-, and
+  bounded-powered-control verified; live authenticated lifecycle mutation/
+  session service and successful button-confirmed initialization remain pending
+- **Date:** 2026-07-18
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0004](0004-sole-flash-coordinator.md),
   [ADR 0006](0006-authenticated-local-api-bearer.md), and
@@ -19,11 +21,13 @@ now expose lifecycle-specific successor planning, the physical store carries
 those opaque transitions through commit and reconciliation, permanent E290
 firmware mounts/recovers its physical store, and a portable policy owner freezes
 physical-presence window admission. The feature-free policy and resident
-initialization owner are now composed only into the permanent E290 graph, but
-the featureless framing-only initialization-control codec remains portable and
-uncomposed. The firmware still cannot admit an external request until a USB byte
-owner, connection/presence owner, and bounded task handoff invoke the sole flash
-coordinator; authenticated pairing additionally needs live lifecycle mutation
+initialization owner are now composed only into the permanent E290 graph. The
+featureless framing-only initialization-control codec remains portable and is
+now composed only into that graph's narrow USB bootstrap lane. A sole USB
+Serial/JTAG task owns byte framing and debounced GPIO21 observations, and a
+depth-one command/reply handoff invokes the sole flash coordinator through the
+node task. This permits only coarse status and explicit empty-store
+initialization; authenticated pairing still needs live lifecycle mutation
 over one device-owned authority that survives power loss. Pairing
 must not publish a secret-bearing authority before its physical commit is
 established, and an empty or erased store must not silently create a trust
@@ -215,7 +219,8 @@ Boot returns the seven product states `Ready`, `AuthOnly` (the Rust
 `AuthenticationOnly` variant), `Uninitialized` (the `UninitializedErased`
 variant), `InitializationInterrupted`, `Blocked`, `Corrupt`, or `Backend`.
 Only `Ready` permits a future credential mutation; `Ready` and `AuthOnly` may
-retain a publishable authority, but this image has no session or bearer and
+retain a publishable authority. The image now has a pre-authentication
+initialization bearer, but still has no authenticated session/API bearer and
 therefore performs no live authentication.
 Every successfully mounted owner, including a blocked or cleanup-failed owner,
 is retained in `ProductStorageCoordinator`. Erased media is never provisioned
@@ -230,7 +235,11 @@ disabled. The only initial action allowed is an explicit initialization command
 received on the button-confirmed USB connection described below. The resident
 physical runtime reclassifies the media and either establishes or resumes the
 canonical empty revision-1 authority. Programmed noncanonical media is never
-reformatted by this path. No USB connection invokes it yet.
+reformatted by this path. The E290 node task now invokes this path only after
+the USB/GPIO owner has established the exact connection-bound physical-presence
+window. Both powered boards have reached `physical-presence-required`, but no
+qualifying hold, physical credential write, or post-write readback is yet
+qualified.
 
 The portable store also provides the read-only
 `classify_empty_provision_media` four-way classifier for this boundary:
@@ -297,8 +306,8 @@ Requests have an empty payload; responses have exactly one payload byte.
 
 All other kinds, codes, payload shapes, nonzero session IDs, and nonzero tags
 are rejected. The framing sequence is preserved but deliberately uninterpreted:
-the future bearer must enforce boot-lifetime connection epochs, exact-next
-ordering, replay rejection, and request/response correlation. The codec exposes
+the E290 bearer enforces boot-lifetime connection epochs, exact-next ordering,
+replay rejection, and request/response correlation. The codec exposes
 no media classification, backend fault, identity state, policy diagnostic,
 secret, or credential existence detail. It performs no GPIO, timeout, session,
 flash, or task-handoff work, and it cannot dispatch the logical device API.
@@ -309,8 +318,8 @@ flash, or task-handoff work, and it cannot dispatch the logical device API.
 admission owner. It deliberately has no GPIO, USB, flash, entropy, HMAC, wire,
 or executor dependency. Graph policy permits its feature-free edge only in the
 permanent E290 product and continues to exclude it from legacy product/HIL
-graphs. A later E290 bearer adapter must supply debounced active-low GPIO21
-observations and use USB Serial/JTAG as the only bearer for this first
+graphs. The E290 bearer adapter now supplies debounced active-low GPIO21
+observations and uses USB Serial/JTAG as the only bearer for this first
 developer/HIL ceremony.
 
 The exact admission contract is:
@@ -319,6 +328,13 @@ The exact admission contract is:
   low observation can arm it; boot, connection, replacement, closure, and clock
   fault all require another release before rearming, so a button held low cannot
   open or automatically reopen a window;
+- button and unauthenticated control work receive bounded turns. A debounced
+  High transition is latched ahead of a later Low. A raw-sample gap of at least
+  20 ms cancels any possible hold, publishes conservative release evidence, and
+  suppresses Low until a fresh debounced High is observed. Each fresh connection
+  resets both the publication latch and debouncer to Low, so release evidence
+  retained for an older epoch cannot arm the new epoch; the replacement epoch
+  must observe a complete fresh High debounce;
 - one uninterrupted active-low interval reaches its threshold at exactly
   2,000 monotonic milliseconds. At that threshold the policy invalidates prior
   ordinary-session admission and returns a single-use request for the bearer to
@@ -390,11 +406,20 @@ durable, publishable result to the policy closes an otherwise-open window as
 successfully activated. Thus both `Pending` before secret offer and `Active`
 before completion are durable facts.
 
-The current firmware logger shares the USB Serial/JTAG stream. Binary COBS
-pairing/session service must not start while arbitrary text logs can interleave
-with its records. Bearer composition must first move logs to a different sink,
-disable them for that stream, or encapsulate them as an explicitly typed framed
-channel. No raw log byte may appear between binary COBS records.
+The permanent E290 image selects `esp-println`'s `no-op` backend and does not
+initialize its logger, so application, panic, and framework log text cannot
+share the USB Serial/JTAG FIFO. Binary COBS control records are the sole
+firmware-owned bytes on that stream. Boot-ROM output can still precede the
+application; the streaming decoder deliberately ignores bytes until a leading
+zero delimiter. A future authenticated bearer must preserve this ownership or
+move diagnostics to a different sink. No raw log byte may appear between
+binary COBS records.
+
+The USB response owner is released only after every byte enters the endpoint
+FIFO and firmware requests hardware `WR_DONE`. Waiting for a later completion
+observation can deadlock RX after the host already received the response. A
+later response remains losslessly backpressured at the FIFO until capacity is
+available.
 
 A surviving `Pending` record remains the only enrollment in progress. A later
 button-confirmed window may prove it again if the client retained the secret,
@@ -405,21 +430,26 @@ or discards a pending secret-bearing ID.
 The portable policy and resident initialization runtime do not implement or
 imply live pairing. The coordinator has a source-composed, target-checked sole-
 owner port that freshly inspects node identity and constructs the short-lived
-bound credential view, and the portable pre-authentication record codec exists,
-but no USB byte owner, GPIO debounce, connection epoch, command/reply handoff,
-or powered test invokes it. The remaining boundary includes:
+bound credential view. The third E290 task owns USB bytes, active-low GPIO21
+debounce, SOF/bus-reset observations, a missed-SOF suspension threshold that
+retains the current epoch, and bus-reset-delimited connection epochs; depth-one
+command/reply channels keep the
+opaque exclusivity capability with the node/storage owner. This composition is
+host- and target-verified. Both boards have also returned
+`initialization-required` and `physical-presence-required`; this bounded control
+result is not successful powered initialization evidence. The remaining
+boundary includes:
 
 - live Begin/Proof/Activate/Abort ownership that retains each typed physical
   successor until definite reconciliation; initialization permit retention and
   forward-only erased/interrupted recovery are already resident;
-- board debounce/sampling, boot-lifetime USB connection-epoch allocation,
-  exclusive bearer arbitration, and exact disconnect classification;
 - entropy, unique-ID/PSK allocation and collision handling; exact pairing wire
   records, challenge/HMAC transcript domains, proof verification, response
   delivery, COBS/log separation, and secret zeroization;
-- sole-flash lifecycle mutation, trusted-fact rechecks, ambiguous-result and
-  power-cut reconciliation, firmware task invocation, and powered hardware
-  qualification.
+- sole-flash lifecycle mutation beyond empty initialization, trusted-fact
+  rechecks, ambiguous-result and power-cut reconciliation, and powered hardware
+  qualification. USB suspend/resume behavior still requires powered host-matrix
+  validation; the present SOF/missed-SOF policy is not a final suspend contract.
 
 ### Defer the production security profile
 
@@ -477,8 +507,8 @@ but cannot claim security from the developer USB trust shortcut.
   sole-owner fresh-identity/fresh-view initialization port. Cross-store gating
   defers admission behind retained journal work and defers journal mutation or
   acceptance behind in-flight initialization without disabling the service.
-  These checks contribute to the 57-test E290 host suite; they are not powered
-  integration or live-authentication evidence.
+  These checks contribute to the 83-test E290 host-library suite; they are not
+  powered integration or live-authentication evidence.
 - Complete as bounded powered erased-media smoke at source `96e38aa`: both
   boards reported `UninitializedErased` with zero recovery steps/writes/erases,
   API/session/bearer closed, LoRa continuing, and exact post-boot credential
@@ -498,27 +528,59 @@ but cannot claim security from the developer USB trust shortcut.
   exact pending begin/proof/activation/abort transitions, operation ownership
   across disconnect, clock regression, overflow faults, and the 256-byte policy-
   owner RAM ceiling. Its feature-free edge is composed only into permanent E290
-  firmware; no bearer invokes it.
+  firmware; the E290 USB/GPIO bearer invokes its narrow status/initialize path
+  through the node-owned handoff.
 - Complete in the portable initialization-control slice: eight tests freeze all
   four record kinds, every status/result code, exact COBS round trips, zero
   session/tag requirements, payload shapes, unknown-code rejection, and framing
-  fault ownership. Its featureless graph reaches only framing and is not yet
-  composed into any product or HIL graph.
-- Pairing integration tests must still cover real GPIO debounce/sampling,
-  exclusive USB ownership, disconnect at every secret/proof/completion boundary,
+  fault ownership. Its featureless graph reaches only framing and is composed
+  only into the permanent E290 product, not a legacy product or HIL graph.
+- Complete as E290 host/target USB bootstrap composition: the 83-test firmware
+  library suite covers the stable-time active-low debouncer, held-low boot,
+  clock regression, missed-SOF suspension with bus-reset-delimited epochs,
+  sequence exhaustion, duplicate/gap rejection, bounded button/control
+  arbitration, latched High-before-Low publication, raw-sample continuity loss,
+  fresh-connection publication-latch/debouncer reset, endpoint-FIFO response
+  ownership, depth-one pressure, capability-free handoff, coarse public result
+  mapping, single USB ownership, GPIO21 pull-up composition, and initialization-
+  before-journal scheduling. Strict host/target Clippy, rustdoc, release linking,
+  graph policy, and the image-size ceilings pass.
+  Eleven focused `e290-pairing-control` tests cover command defaults, one-port
+  sequence progression, terminal results, ambiguity guidance, and exhaustion;
+  these focused counts do not claim a complete workspace rerun.
+- Complete as bounded powered bootstrap control: the 544,371/3,548/469,280/
+  1,017,199-byte text/data/BSS/total ELF packaged a 587,456-byte application.
+  Its 652,992-byte explicit-16-MiB repository-partition-table image has SHA-256
+  `1727a14b58a076d65ea12feb61b564d5dfc66d6c6f0b9a8ddd39fc773332705c` and was
+  flashed to both boards. Both returned `initialization-required` and
+  `physical-presence-required`. Five-second no-button workflows on both boards
+  advanced through sequences 0--47 before their overall deadlines. Subsequent
+  8 KiB credential-partition readbacks on both boards were entirely `0xff` with
+  SHA-256
+  `7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f`,
+  confirming zero writes. Successful post-write readback remains open.
+- The host asserts DTR, clears RTS, and keeps initialize on one open TTY. TTY
+  reopen is not an epoch boundary; only USB bus reset is. Status defaults to 15
+  seconds and initialize to 120 seconds. A post-send I/O failure or timed-out
+  request leaves its last sequence consumed-or-ambiguous. `u64::MAX` is refused
+  and cannot wrap.
+- Pairing integration tests must still cover powered GPIO debounce/sampling,
+  USB reset/suspend/resume behavior, disconnect at every secret/proof/completion boundary,
   proof replay and wrong transcript binding, unique ID/PSK allocation, E290
   interrupted-initialization powered recovery, retained same-boot ambiguity
   under real faults, and 16-ID exhaustion.
-- Live mutation/bearer composition must keep the ADR 0004 coordinator as the
+- Live authenticated mutation/bearer composition must keep the ADR 0004 coordinator as the
   only flash and mutable-authority owner, zeroize temporary secrets, preserve LoRa
   scheduling under USB pressure, and prove no API/session service starts from
   unformatted, unrecovered, or conflicting media. It must also prove USB
-  disconnect closes pairing and that logging cannot interleave with binary
-  COBS framing.
+  disconnect closes pairing. The current no-op logging selection mechanically
+  excludes application log bytes from the binary COBS stream; powered capture
+  must still verify that ownership.
 - Powered E290 tests must interrupt initial provisioning, pending creation,
   activation, retirement, and cleanup at every reachable boundary and verify
   exact flash readback before this path is enabled outside developer/HIL use.
 
-No live pairing, credential mutation through an external request, bearer
-composition, powered-cut recovery, or live-authentication gate is claimed
-complete by this ADR.
+No live authenticated pairing, lifecycle credential mutation, powered empty-
+store initialization, powered-cut recovery, or live-authentication gate is
+claimed complete by this ADR. Only the pre-authentication status/initialize USB
+composition is claimed in firmware.

@@ -5,34 +5,38 @@ vertical slice and transport-neutral seams reserved for later interfaces;
 Vision Master E290 pair qualified at 16 MiB flash and 8 MiB PSRAM; independent
 E290 HT-RA62 owner, interface fabric, ordinary router/permit service, and
 ticket-aware LoRa dispatcher implemented and target-checked; the DATA router,
-both permit services, and permanent `NodeInterfaceSupervisor` are composed in
-the first E290 LoRa-only two-task firmware graph; identity-authorized first
-journal provisioning plus a resident operation-scoped one-entry qualification
-runtime are also composed; optional journal boot failure before an active DATA owner
-isolates local durable service while route-only LoRa continues; the exact
-authorized-frame request/durable-echo handoff and the interface-local active-
-owner fail-stop now pass cross-layer host composition tests; portable API
-framing, the featureless pre-authentication initialization-control codec,
-immutable credential authority, qualification-session and boot-lifetime job
-handoff are qualified; semantic schema 2 persists exact
-authorization provenance; ADR 0009 selects the dedicated E290 credential
-range and two-sector store, and its bounded developer/HIL pairing-admission
-policy is implemented and feature-free in only the permanent E290 graph; E290
-boot mounts/recovers that store immediately after flash open, and the resident
-`CredentialRuntime` privately retains its exact binding, mounted authority,
-policy, and initialization permit while accepting only forward erased/
-interrupted trajectories; the coordinator's sole-owner initialization port is
-source-composed and target-checked with cross-store mutation exclusion but has
-no live or powered caller; live external admission still awaits GPIO/USB/task-
-handoff composition, live lifecycle
-mutations, an API/session firmware lane, and a bearer; host, portable-target,
-ESP32-S3 build, packaging and review gates pass;
-the isolated
+both permit services, permanent `NodeInterfaceSupervisor`, and narrow
+pre-authentication USB/GPIO owner are composed in the first E290 three-task
+firmware graph; identity-authorized first journal provisioning plus a resident
+operation-scoped one-entry qualification runtime are also composed; optional
+journal boot failure before an active DATA owner isolates local durable service
+while route-only LoRa continues; the exact authorized-frame request/durable-
+echo handoff and interface-local active-owner fail-stop pass cross-layer host
+composition tests; portable API framing, the featureless pre-authentication
+initialization-control codec, immutable credential authority, qualification-
+session core, and boot-lifetime authenticated-job handoff are qualified;
+semantic schema 2 persists exact authorization provenance; ADR 0009 selects the
+dedicated E290 credential range and two-sector store, and its bounded developer/
+HIL pairing-admission policy is feature-free only in the permanent E290 graph;
+E290 boot mounts/recovers that store immediately after flash open, and the
+resident `CredentialRuntime` privately retains its exact binding, mounted
+authority, policy, and initialization permit while accepting only forward
+erased/interrupted trajectories; the third task now composes USB Serial/JTAG,
+debounced GPIO21, boot-lifetime connection epochs, exact-next sequencing, and a
+depth-one command/reply handoff for coarse status and explicit empty-store
+initialization. This slice passes 83 E290 host-library tests, 12 focused host-
+client tests, and target gates. Both powered boards returned
+`initialization-required` and `physical-presence-required`; successful button-
+confirmed initialization and post-write readback remain open. This is not an
+authenticated session or logical API bearer.
+Live external admission still awaits live lifecycle mutations and an
+authenticated API/session firmware lane; host, portable-target, ESP32-S3 build,
+packaging and review gates pass; the isolated
 E290 same-image ANNOUNCE/DATA/proof HIL and its pre/post image readbacks passed,
 and the permanent E290 node passed its first two-board powered boot/credential/
 ordinary-TX smoke with exact image and credential-partition readback; Tracker
 ANNOUNCE/DATA/proof and isolated storage HIL also passed<br>
-**Date:** 2026-07-17<br>
+**Date:** 2026-07-18<br>
 **Primary full-stack target:** Heltec Vision Master E290-HF, ESP32-S3R8 + HT-RA62/SX1262<br>
 **Qualified radio regression target:** Heltec Wireless Tracker V2.3, ESP32-S3FN8 + SX1262 + KCT8103L<br>
 **Product goal:** an always-on, self-contained, heterogeneous-interface Reticulum transport and LXMF store-and-forward node, with optional onboard messaging and NomadNet clients controlled over USB, BLE, or Wi-Fi
@@ -158,7 +162,7 @@ Claims in READMEs were not treated as proof of embedded portability.
 | `reticulum-tx-dispatch`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The RF-inert dispatcher, permit server, and exact-owner-bound fixed per-slot node DATA machine retain owners/control values across backpressure, synchronously prepare from parked owners, use cancellation-safe short waits, park recovered owners until exact acknowledgement, and fail closed at the permit recovery grace. The permanent E290 graph reaches these DATA machines through `NodeInterfaceSupervisor`; their legacy job/return harness remains separate and RF-inert |
 | `reticulum-radio-tx-dispatch`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The firmware-includable persistent serializer consumes the interface router's ticketed DATA/ordinary actor union and retains each ticket while keeping the two typestate families separate over one `SoleRnodeRadio`. It performs randomized initial/retry backoff and CAD, validates the actor-stamped interface configuration, maps the active radio fingerprint and aggregate airtime to node-core's opaque resource-and-units permit, revalidates before permit negotiation and after grant, exposes bytes once, and makes one logical one/two-frame RNode transmit. Every post-byte-exposure DATA completion, including cancellation and fault recovery, is gated with its router ticket and exact authorized-frame observation until an identical durable acknowledgement arrives. Request pressure and cancelled waits retain ownership; unexpected or mismatched acknowledgements fail closed while retaining both observations. `DispatchReport` is copy-only diagnosis, never ownership. RX start remains an explicit idle scheduler choice even when TX is queued, and phase-aware completion-capacity readiness never moves a retained completion. Its watchdog, final-frame metadata and fail-closed recovery retain exact owners/control values across completion pressure, partial or impossible progress, stale/lost replies, configuration drift, invalid RX metadata, radio faults, and dropped CAD/TX/RX futures. Host, strict Clippy, warning-free rustdoc, generic no-std and Xtensa gates pass. Its exact direct-dependency policy keeps Embassy Futures test-only. The first permanent E290 graph instantiates it as the sole LoRa actor dispatcher; its target build/review gates pass and powered qualification of that permanent image remains a separate gate |
 | `reticulum-tx-supervisor`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | `NodeInterfaceSupervisor` is the production portable aggregate: it owns the sole node-core, authoritative interface router, DATA and ordinary coordinators, one permit server per family and actor, and one shared policy. Its sealed fixed-pool ingress validates queue origin, current lease, online state and logical MTU, recycles the exact buffer, retries only a full return queue and `Busy` action pressure, and exposes every other buffer-return or action residue as an exact takeable terminal owner for quarantine. A bounded round-robin pass fairly scans completions, both coordinators and all permit services. The E290 node graph composes this aggregate; the older async `TxSupervisor` remains only a legacy RF-inert DATA-machine test aggregate |
-| `reticulum-heltec-vision-master-e290-node`, host and ESP32-S3 Xtensa | Pass (software composition/build/review/package plus bounded powered smoke) | The first permanent image has one transport-neutral node task and one concrete LoRa task. It composes the fixed interface fabric, both router coordinators and permit services, `ExactLoRaAirtimePolicy`, timed RNode RX, the ticket-aware dispatcher and the E290 radio. Its sole checked flash owner validates the exact credential partition and eFuse-derived binding, then mounts and performs bounded credential retirement/cleanup immediately after open and before any other product-store write. It never auto-provisions credentials. A resident `CredentialRuntime` inside `ProductStorageCoordinator` privately retains the seven-state boot result, exact binding, any mounted authority, feature-free pairing policy, and any admitted initialization permit. Its physical drive reclassifies a fresh bound view and accepts only forward erased/interrupted trajectories; the coordinator's compiled sole-owner port freshly inspects node identity and creates that short-lived view. Cross-store gating defers initialization behind retained journal work and journal mutation/acceptance behind in-flight initialization without disabling other node service. No bearer, GPIO debounce, command handoff, or powered initialization invokes the port, and live Begin/Proof/Activate/Abort mutations remain uncomposed. The same flash owner preflights a durable plaintext identity, normally provisions the journal only while identity remains vacant, reserves a restart-safe logical announce epoch, mirrors the identity, then strictly mounts through an eFuse-MAC-bound operation-scoped view and accepts at most one historical submission solely for composition qualification. A non-default development feature can provision schema 2 for a committed identity only after proving the complete journal was explicitly erased; it never erases. The node task drives one submission-runtime step in its fair schedule and each physical call borrows a fresh matching view. The coordinator implements the target-safe device-API `SubmissionPort`, but no composed session, external firmware lane or bearer invokes it; the one-entry cap is not a product-capacity commitment. Fifty-seven host library tests pass: 55 focused policy/product/credential-boot/credential-runtime/cross-store tests plus a real cross-layer authenticated acceptance/barrier/supervisor/LoRa-policy/dispatcher/durable-echo/timeout/status/remount path and a wrong-binding post-frame `ActiveOwnerFailStopped` path that retains queued ordinary work and permits no later host-radio operation. Optional journal boot mount/recovery failure before a gated owner exists still disables local durable service while route-only LoRa continues. It intentionally has no USB/Wi-Fi/BLE actor or bearer, external API lane, local client surface, message-store service or durable client delivery yet. Source `96e38aa` passed a bounded two-board powered smoke before this initialization-runtime slice: exact 729,504-byte image readback, 8 MiB PSRAM, zero-mutation `UninitializedErased` credentials, journal/LoRa/interface readiness, and two ordinary one-frame TXs per board. Controlled peer RX/DATA, pairing/authentication, powered initialization, power-cut recovery, runtime high-water, and full product-graph qualification remain open |
+| `reticulum-heltec-vision-master-e290-node`, host and ESP32-S3 Xtensa | Pass (software composition/build/review/package plus bounded powered control) | The permanent image has transport-neutral node, concrete LoRa, and pre-authentication USB/GPIO tasks. It composes the fixed interface fabric, router coordinators and permit services, `ExactLoRaAirtimePolicy`, timed RNode RX, ticket-aware dispatcher, and E290 radio. Its sole checked flash owner mounts the eFuse-bound credential store without automatic provisioning and retains the seven-state boot result, authority, feature-free pairing policy, and forward-only erased/interrupted initialization runtime. The third task solely owns USB Serial/JTAG records and debounced active-low GPIO21. An 8 ms missed-SOF interval suspends without changing the epoch or sequence; a later SOF resumes it, and only bus reset delimits connection epochs. Exact-next sequencing and depth-one channels carry coarse status or explicit initialization while the opaque flash capability remains node-owned. Fresh connections reset both the physical-presence publication latch and debouncer to Low, preventing release evidence retained for an older epoch from arming a new one and requiring a complete fresh High debounce. This is not an authenticated session, logical API lane, or Reticulum interface; live Begin/Proof/Activate/Abort remains uncomposed. Both powered boards returned `initialization-required` and `physical-presence-required`; no-button workflows on both advanced through sequences 0--47 before their five-second overall deadlines. Successful button-confirmed initialization, credential readback, and USB reset/suspend/resume qualification remain open. The image selects no-op firmware logging, so native USB logs are not a validation surface. Eighty-three host-library tests, 12 focused host-client tests, strict review, target, package, graph, and image-size gates pass. The final ELF is 544,371 bytes text, 3,548 data, 469,280 BSS/reservations, and 1,017,199 total. Its application is 587,456 of 6,291,456 bytes; the explicit 16 MiB partition-table image is 652,992 bytes with SHA-256 `1727a14b58a076d65ea12feb61b564d5dfc66d6c6f0b9a8ddd39fc773332705c` and was flashed to both boards. Controlled peer RX/DATA, authenticated pairing/API service, successful powered initialization, power-cut recovery, runtime high-water, and full product qualification remain open |
 | `reticulum-storage-model`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The allocation-free semantic journal model enforces canonical schema-2 records, exact authorization snapshots, principal-scoped idempotency across credential rotation, exact preflight/apply plans, monotonic conservative transmission uncertainty, and fail-closed complete replay; 26 integration tests plus one compile-fail doctest cover the boundary, which intentionally makes no physical-durability or flash-capacity claim |
 | `reticulum-submission-projector`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The fixed-capacity projector correlates volatile attempts with semantic records and withholds terminal/recovery acknowledgement behind exact persistence replies; 24 focused tests cover ordering, retries, native authorized-frame conversion, proof/timeout-before-frame races, faults and conservative reboot behavior. Completed slots deliberately do not retire without a future exact node-owner quiescence proof |
 | `reticulum-storage-journal`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The allocation-free backend fixes the 1 MiB/two-bank physical format 1 with semantic schema 2, full-bank replay, commit-last exact-readback append, a 162-acceptance lifetime ceiling, and source-preserving handoff compaction. Valid schema-1 manifests return typed unsupported-version with zero mutation only after the normal two-bank trajectory checks. An independently authorized first-provision API resumes every canonical A1 prefix/commit cut without erasing and rejects nonempty/off-trajectory media; 34 fake-NOR tests cover provisioning, semantic-version rejection, torn/lost append and compaction. The historical powered HIL qualifies only the unchanged physical clean path/software-reset behavior at its schema-1 source; schema-2 HIL remains to rerun |
@@ -166,10 +170,10 @@ Claims in READMEs were not treated as proof of embedded portability.
 | `reticulum-submission-runtime`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The executor- and transport-neutral runtime owns boot recovery and the durability-first live scheduling order over backend-independent `StorageActor` plus `SubmissionNodePort`. Physical calls borrow exact bound access, while frame observations stay backend-free; binding is checked before recovery phase change, node preparation, or acknowledgement. It persists the no-replay preparation barrier before native DATA preparation and withholds terminal/recovery release behind committed records. Eight focused fake-NOR tests cover the full barrier/frame/terminal/ack order, lost-write reconciliation, permanent frame-persistence failure without a false durable result or acknowledgement, pre-frame terminal pressure, recovery-ack pressure, retry classification, reboot recovery, and wrong-binding rejection; strict host/generic/Xtensa gates pass. The E290 image keeps it resident, and the exact frame request/durable-echo path plus its one-entry composition cap now pass real cross-layer host tests; no external admission lane exists |
 | `reticulum-device-api-adapter`, default/`experimental-rns-data`/dependency-unified host and ESP32-S3 Xtensa | Pass | The allocation-free authenticated dispatcher exposes public capabilities and principal-scoped status, fails status closed during port ambiguity/fault, and restricts advertised operations to its local build. The target-safe `experimental-rns-data` path converts one authorized borrowed payload plus validated non-wire dispatch provenance into an owned schema-2 acceptance candidate through the narrow `SubmissionPort`, then maps durable acceptance/replay, conflict, capacity and port faults to stable API results without receiving an actor, journal or flash capability. Focused tests and strict Clippy pass across the relevant host and bare-metal profiles. `ProductStorageCoordinator` implements the port in the E290 graph under a one-entry qualification cap, but no composed session, external firmware lane or bearer calls the dispatcher |
 | `reticulum-device-api-framing`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The dependency-free allocation-free edge owns canonical zero-delimited COBS records with a 128-bit session ID, direction-local sequence, 512-byte opaque payload and 128-bit tag slot. Its streaming decoder ignores pre-delimiter garbage, bounds overflow and resynchronizes only at a zero; established-session policy remains the later session owner's responsibility. Its explicit partial-TX cursor never advances without a backend acknowledgement. Nine tests cover empty/maximum owners, canonical authenticated bytes, dense zero patterns, malformed/overlong recovery, shared delimiters, reset and partial writes. It contains no USB HAL, session, credential, API-dispatch or packet-interface behavior |
-| `reticulum-device-api-pairing-control`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (portable codec; not product-composed) | The featureless allocation-free bootstrap codec depends only on framing and freezes zero-session, zero-tag status/initialize request and response kinds, exact empty/one-byte payload shapes, and coarse public status/result codes. It preserves but does not interpret sequence numbers. Eight tests cover every kind/code, exact COBS round trips, malformed fields and shapes, unknown values, and framing-fault ownership. It contains no USB HAL, GPIO, clock, connection policy, credential authority, flash, task handoff, logical API, session, or radio edge. Graph policy keeps it outside every product and HIL graph until the bearer slice composes it |
+| `reticulum-device-api-pairing-control`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (portable codec; composed only in the permanent E290 bootstrap) | The featureless allocation-free bootstrap codec depends only on framing and freezes zero-session, zero-tag status/initialize request and response kinds, exact empty/one-byte payload shapes, and coarse public status/result codes. It preserves but does not interpret sequence numbers. Eight tests cover every kind/code, exact COBS round trips, malformed fields and shapes, unknown values, and framing-fault ownership. It contains no USB HAL, GPIO, clock, connection policy, credential authority, flash, task handoff, logical API, session, or radio edge. The permanent E290 firmware now composes it behind the separate USB/GPIO owner; graph policy still excludes it from legacy products and HIL images |
 | `reticulum-device-api-credentials`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (portable immutable authority and semantic codec; no physical persistence) | The allocation-free crate owns the shared credential ID/generation types below session and validates one immutable fixed 16-record snapshot before service. Its canonical zeroizing 2,048-byte image encodes 128-byte records in strict credential-ID order, zeros every unused/reserved byte, and is consumed by a decoder that rejects noncanonical wire shapes before rebuilding the authority. Consuming builder inserts prevent a rejected record from exposing a valid prefix; live successor plans require one exact next-revision mutation and reject same-generation authorization changes or silent removal, while lifecycle-specific planners authorize only Add-`Pending`, exact Activate-`Pending`, and exact Abort-`Pending` transitions. Their opaque store candidates retain the transition plus an exact zeroizing source binding across structural and transition-specific preflight. `NewPendingCredential` consumes an existing zeroizing PSK owner; `Pending`/`Active` records zeroize distinct PSKs, while `Revoked` tombstones are PSK-free. Constant-time fixed-table lookup yields only opaque zeroizing active or exact-pending selections; exact grant revalidation supplies a non-copyable device-owned `DispatchContext` through a borrowing synchronous callback. The callback freezes the authority and prevents moving the exact context, but immediate dispatch/no fallback remain trusted sole-owner rules because linked code can reconstruct scalar facts. Twenty-three unit tests, eight public successor regressions and 18 compile-fail doctests cover canonical loading and encoding, successor and lifecycle policy, cross-predecessor rejection, stable vocabularies, image/secret/lease ownership, and the 2,048-byte E290 authority ceiling. It contains no physical raw-NOR format, mutation actor, pairing/rate policy, firmware, bearer, Reticulum identity or radio edge; see ADR 0007 |
 | `reticulum-device-api-credential-store`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (portable physical store; mount/classification boot-composed and initialization recovery source-composed on E290) | The allocation-free crate owns ADR 0009's exact 8 KiB two-sector raw-NOR format over an operation-scoped device/range/layout binding. It consumes the canonical 2,048-byte authority image, commits and re-scans a complete successor before retiring its predecessor, blocks publication while retirement is incomplete, never falls back across a retired or corrupt committed successor, and retains current/candidate owners across ambiguous backend results. Typed pairing commit/reconcile owners preserve Add/Activate/Abort provenance without exposing proof material; semantic preflight rejects both structural and exact-transition mismatches without I/O, while the supported product path selects pending proof material only through a mounted publishable authority. A repository source guard confines its two hidden unchecked integration bridges to the semantic authority and physical store. Explicit empty revision-1 provisioning has a no-erase deterministic recovery path plus a read-only four-way classifier for exactly erased, recoverably interrupted, already committed, and ineligible media; cleanup erases are bounded and exactly read back. Thirty-two fake-NOR tests cover typed lifecycle chains, cross-predecessor rejection and retry, every-byte provision/program/retire/cleanup cuts, lost replies, read faults, wrong bindings, conflicts, revision exhaustion, publication gating, and corrupt-successor non-fallback. Strict host Clippy/rustdoc plus generic and Xtensa checks pass. Its four-dependency graph contains no ESP, async, session, bearer, pairing, Reticulum, or radio edge. The E290 product supplies the exact platform binding, bounded mount recovery, read-only interrupted-initialization classification, and a source-composed forward-only empty-provision recovery drive. Live Add/Activate/Abort lifecycle mutation remains uncomposed. Format 1 stores PSKs in plaintext for developer/HIL use |
-| `reticulum-device-api-pairing-policy`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (portable policy; feature-free only in permanent E290 firmware) | The allocation-free owner freezes exact 2,000 ms release-to-arm physical presence, a 60,000 ms threshold-based exclusive window, strictly increasing boot-lifetime connection epochs, a shared three-Begin/Proof budget, one non-secret pending reference, and exact operation ownership across timeout/disconnect. The third classified request closes new work while an admitted operation drains to a definite result. Trusted initialization facts distinguish `ExactlyErased` from `RecoverableInterrupted`; a single-use permit retains the admitted media trajectory for the sole physical owner to reclassify immediately before I/O. Trusted Begin facts likewise remain assertions to recheck. Twenty unit tests plus four compile-fail doctests cover boundaries, both initialization trajectories, counted refusals, pending transitions, ordinary-session invalidation, faults and a 256-byte RAM ceiling. It has no GPIO, USB, flash, entropy, HMAC, framing, executor, or radio edge. Graph policy requires its feature-free edge only in the permanent E290 product and forbids it from legacy product/HIL graphs. `CredentialRuntime` retains its policy and initialization permits, but no bearer/GPIO/request lane invokes the compiled sole-owner path and live lifecycle mutation is not composed; this is not powered pairing evidence |
+| `reticulum-device-api-pairing-policy`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (portable policy; feature-free only in permanent E290 firmware) | The allocation-free owner freezes exact 2,000 ms release-to-arm physical presence, a 60,000 ms threshold-based exclusive window, strictly increasing boot-lifetime connection epochs, a shared three-Begin/Proof budget, one non-secret pending reference, and exact operation ownership across timeout/disconnect. The third classified request closes new work while an admitted operation drains to a definite result. Trusted initialization facts distinguish `ExactlyErased` from `RecoverableInterrupted`; a single-use permit retains the admitted media trajectory for the sole physical owner to reclassify immediately before I/O. Trusted Begin facts likewise remain assertions to recheck. Twenty unit tests plus four compile-fail doctests cover boundaries, both initialization trajectories, counted refusals, pending transitions, ordinary-session invalidation, faults and a 256-byte RAM ceiling. It has no GPIO, USB, flash, entropy, HMAC, framing, executor, or radio edge. Graph policy requires its feature-free edge only in the permanent E290 product and forbids it from legacy product/HIL graphs. `CredentialRuntime` retains its policy and initialization permits; the E290 USB/GPIO owner invokes its narrow status/initialize path through the node-owned handoff, and both powered boards reached `physical-presence-required`. Live lifecycle mutation and successful button-confirmed initialization remain unqualified, so this is not powered authenticated-pairing evidence |
 | `reticulum-device-api-session`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (portable qualification core; no bearer) | The allocation-free server freezes the USB Serial/JTAG-only HKDF/HMAC qualification transcript, full mutual proofs, direction-separated 128-bit record tags, exact-next sequences and a single-request typestate. Its non-cloneable grant contains credential ID/generation and session routing facts but no PSK, principal or permissions; it revalidates against the portable device-owned authority to obtain a borrowing dispatch lease. Twelve Rust tests plus five independent Python vector/mutation tests cover the known-answer schedule, COBS wire bytes, downgrade, reflection, generation/reset invalidation, boot-lifetime reply epochs, gaps/duplicates/overflow, bad tags, wrong sessions, partial hello/proof/reply acknowledgement, one direct authority-to-adapter request/reply path and revoked-authority revalidation rejection. The asynchronous handoff/no-fallback composition remains unproven. It contains no credential persistence, pairing/rate policy, firmware composition, USB HAL, Rete or radio edge |
 | `reticulum-device-api-handoff`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The boot-lifetime bearer manager and node owner exchange exact authenticated jobs and replies through independent depth-one Embassy channels. An opaque non-cloneable grant crosses with the logical message; the message capacity is the authoritative device-API limit. Capacity/receive waits are cancellation-safe, pressure returns exact owners, disconnect changes only the reply-routing epoch, stale replies are drained, and accepted work remains node-owned. Eight tests cover pressure, cancellation, reconnect, stale/crossed replies, idempotent retry and full buffers. It has no framing, physical bearer, storage, Rete, radio or board dependency |
 | `reticulum-heltec-tracker-v2-storage-hil`, ESP32-S3 Xtensa | Pass (target and powered clean-path HIL) | On E9:44, source `7b47113` passed strict continuous two-boot serial verification of A1 format, five appends, no-mutation retry/conflict, B2 compaction and `0/0` B2 replay after `CoreSw`; independent raw-dump replay confirmed generation 2, five records/slots, one revision-4 `Delivered` submission, erased A manifest and erased B tail. Controlled power cuts, endurance/soak, encryption and powered product-runtime integration remain open |
@@ -370,18 +374,23 @@ auto-provisions credential media. A resident `CredentialRuntime` in the
 coordinator retains the exact boot binding, mounted authority, feature-free
 pairing policy, and initialization permits; it accepts only forward progress
 from the erased/interrupted boot trajectory. The coordinator also compiles the
-sole-owner identity preflight and short-lived bound credential-view drive, but
-no GPIO debounce, USB byte owner, command handoff, or powered test calls it. The
-graph now hosts the exact
+sole-owner identity preflight and short-lived bound credential-view drive. A
+third task now solely owns USB Serial/JTAG bytes and debounced GPIO21, enforces
+connection epochs and exact-next request sequences, and reaches that drive only
+through depth-one scalar command/reply channels. The graph now hosts the exact
 authorized-frame request/durable-echo handoff between its portable dispatcher
 and resident runtime. It also hosts the target-safe adapter/`SubmissionPort`
-semantic seam under a one-entry qualification cap, but no external API job lane
-or bearer calls it. LXMF submission, message storage, local client delivery, and
-product-capacity policy remain open.
+semantic seam under a one-entry qualification cap, but the narrow bootstrap
+does not expose that logical API or create an authenticated session. Both
+powered boards now pass status and `physical-presence-required` control, while
+the hold, credential write/readback, USB reset/suspend/resume, LXMF submission,
+message storage, local client delivery, and product-capacity policy remain open.
+The current 8 ms missed-SOF suspension retains its epoch and sequence until bus
+reset; powered lifecycle qualification is still required.
 
-The E290 library's 57-test host suite now qualifies that LoRa-first software
-composition: 55 focused policy/product/credential-boot/credential-runtime/
-cross-store tests
+The E290 library's 83-test host suite now qualifies that three-task software
+composition: 81 focused policy/product/credential-boot/credential-runtime/
+cross-store/USB-control tests
 plus two cross-layer tests using
 the real authenticated adapter, runtime, `NodeInterfaceSupervisor`, exact E290
 LoRa policy, and dispatcher. The happy path proves zero-write authorization
@@ -389,8 +398,24 @@ rejection, one acceptance/cap, the durable preparation barrier, exact frame
 persistence/echo/completion, timeout/status/principal isolation, and remount.
 The fault path injects a wrong binding after frame exposure with ordinary work
 queued behind it and proves `ActiveOwnerFailStopped` retains all owners with no
-later host-radio TX or RX. Scripted host radio and fake NOR make this software
-evidence, not powered E290 or RF evidence.
+later host-radio TX or RX. The focused additions freeze GPIO debounce,
+SOF-suspension/bus-reset connection tracking, sequence and epoch exhaustion,
+bounded button/control arbitration, latched High-before-Low publication, raw-
+sample continuity loss, fresh-connection publication-latch/debouncer reset,
+response-FIFO ownership, pressure, stale reply, and scheduling boundaries.
+Twelve separate host-client tests cover default deadlines, single-open sequence
+progression, ambiguity and exhaustion. These
+focused results do not claim a full workspace rerun. Scripted host radio, fake
+NOR, and host-side USB state machines remain software evidence; the separate
+powered result is limited to the control behavior stated above.
+
+The USB edge releases a response only after every byte has entered the endpoint
+FIFO and hardware `WR_DONE` has been requested; it does not wait for a later
+completion observation that could deadlock RX after host delivery. A later
+response remains backpressured on FIFO capacity. Button and control work receive
+bounded turns. A stable High transition is latched ahead of a later Low, and any
+raw-sample gap of at least 20 ms cancels a possible hold and suppresses Low until
+a fresh debounced High has been published.
 
 The explicit semantic TX lane now has two distinct results. The historical
 conformance fixture at
@@ -529,10 +554,13 @@ verified erased credential classification with zero credential writes/erases,
 strict journal mount, resident storage, and continuing LoRa/ordinary TX on both
 boards; controlled cuts and broader runtime qualification remain open.
 The credential range and ADR 0009 store are boot-composed, while its
-resident initialization owner and sole-owner physical port are source-composed
-but remain unwired to GPIO, a USB byte owner, or a command handoff. The API still requires
-live lifecycle pairing, firmware composition of the portable
-authority/framing/session/handoff, and an initial bearer. A send
+resident initialization owner and sole-owner physical port are now reached by
+the third task's debounced GPIO21, sole USB byte owner, and depth-one command/
+reply handoff for pre-authentication status/initialize only. Both boards have
+returned `initialization-required` and `physical-presence-required`; the
+button-confirmed write/readback remains pending. The authenticated API
+still requires live lifecycle pairing plus composition of the portable
+authority/session/authenticated-job handoff. A send
 becomes visible only after durable acceptance, and proof/timeout
 acknowledgement waits for durable projection. The antenna-equipped Tracker
 pair remains the qualified NA915 regression fixture; the memory-qualified
@@ -794,7 +822,7 @@ flowchart TB
 ```text
 Cargo.toml                         # workspace only
 firmware/
-  heltec-vision-master-e290-node/ # first permanent LoRa-only E290 composition
+  heltec-vision-master-e290-node/ # permanent LoRa-first E290 composition
   heltec-tracker-v2/              # constrained regression composition
 crates/
   node-core/                      # orchestration, policy, capabilities
@@ -1006,9 +1034,13 @@ resident `CredentialRuntime` privately retains the exact boot binding, mounted
 authority, and admitted initialization permit; it reclassifies a fresh bound
 view and accepts only forward erased/interrupted progress. The coordinator's
 source-composed sole-owner port freshly reinspects identity and creates that
-short-lived view, but no external API lane, session, USB/BLE/Wi-Fi byte owner,
-GPIO debounce, command handoff, or powered test invokes it. Boot never initializes
-automatically, and live Begin/Proof/Activate/Abort mutations remain uncomposed.
+short-lived view. The E290's separate pre-authentication USB/GPIO task invokes
+only status/initialize through a depth-one scalar handoff; no authenticated
+external API lane, session, or USB/BLE/Wi-Fi API bearer invokes the logical
+dispatcher. Powered workflows have invoked initialization far enough to return
+`physical-presence-required` on both boards, but no qualifying hold admitted the
+physical credential drive. Boot never initializes automatically, and live
+Begin/Proof/Activate/Abort mutations remain uncomposed.
 The image still lacks local LXMF intent
 submission, message storage, and client delivery. LoRa
 remains the first and primary complete transport; later packet interfaces enter
@@ -1377,9 +1409,11 @@ pairing contract; the policy crate implements the exact 2,000 ms hold,
 admission state without owning the ceremony's I/O or secrets. Its store is boot-
 mounted/recovered and retained by the E290 coordinator. The feature-free policy
 and forward-only initialization runtime are composed only in that permanent
-graph, including the sole-owner fresh-identity/fresh-view port, but no GPIO/
-USB owner/task-handoff caller, live lifecycle mutation, external API/session job
-lane, or physical bearer exists.
+graph, including the sole-owner fresh-identity/fresh-view port. Its third task
+now composes a narrow pre-authentication USB Serial/JTAG owner, debounced GPIO21,
+connection/sequence policy, and depth-one status/initialize handoff. That is a
+physical bootstrap bearer, not live lifecycle mutation, an authenticated
+session, or the external logical API job lane.
 `DispatchLease` mints validated non-wire provenance, and the adapter
 persists its exact credential/policy/permission snapshot with schema-2
 acceptance.
@@ -1436,10 +1470,14 @@ proof/`Active` ordering. The portable admission policy is implemented, but its
 feature-free firmware edge exists only in the permanent E290 graph. The
 resident runtime and sole-owner port compose exact permit retention, fresh
 identity/media inspection, forward-only empty-store recovery, and cross-store
-mutation exclusion. The featureless initialization-control wire codec is frozen,
-but GPIO/USB ownership, command delivery, live Begin/Proof/Activate/Abort
-credential mutation, proof verification, and powered bearer composition remain
-unimplemented.
+mutation exclusion. The permanent E290's third task now composes the featureless
+initialization-control wire codec, sole USB byte ownership, debounced GPIO21,
+connection epochs, exact-next sequences, and depth-one command delivery. That
+pre-authentication slice now has bounded powered status and
+`physical-presence-required` evidence on both boards; the confirmed hold,
+credential write/readback, and reset/suspend/resume matrix remain open. Live
+Begin/Proof/Activate/Abort credential mutation, proof verification, and an
+authenticated session/API bearer remain unimplemented.
 Private Reticulum keys never leave the device by default. Identity
 export is an explicit, encrypted, physically confirmed flow.
 
@@ -1454,12 +1492,16 @@ If the browser must perform high-assurance operations, the Wi-Fi SPA milestone m
 
 ### USB
 
-Start with the ESP32-S3's hardwired USB Serial/JTAG CDC function carrying the
-framed device API. It is the lowest-risk path for qualification, preserves ROM
-flashing/recovery and gives a deterministic test harness. This backend has no
-separate project-defined CDC interface: move logs to UART0 on GPIO43/44 or a
-disabled/bounded diagnostic sink before the API takes ownership. Raw logs are
-never multiplexed into the API stream.
+Start with the ESP32-S3's hardwired USB Serial/JTAG CDC function. The permanent
+E290 image now uses it for only the framed pre-authentication status/initialize
+bootstrap; the authenticated logical device API remains a later lane. This is
+the lowest-risk first path for qualification, preserves ROM flashing/recovery,
+and gives a deterministic test harness. This backend has no separate project-
+defined CDC interface. The current image selects `esp-println`'s no-op backend
+and does not initialize its logger, so application, framework, and panic log
+text cannot share the FIFO. Future authenticated service must preserve that
+sole-owner rule or move diagnostics to a separately reviewed sink. Raw logs are
+never multiplexed into framed records.
 
 The programmable USB OTG peripheral is the later backend for custom
 descriptors, composite API/diagnostic endpoints, WebUSB or networking. OTG and
@@ -1468,13 +1510,29 @@ exclusive profiles rather than simultaneous owners.
 
 The Tracker and E290 use the ESP32-S3's native USB rather than a separate
 USB/UART bridge. A broken descriptor/USB task can therefore remove the normal
-control path, and host DTR/open behavior can reset or reconnect the board.
-Preserve a documented GPIO0 ROM-download recovery path, test every supported
-host's reconnect behavior, and never tie one-time identity generation to an
-ordinary USB-induced reset. Treat native-USB logs as reset-minimizing post-boot
-diagnostics, not proof of the original power-on sequence. Cold-power
-qualification uses UART0 with USB data disconnected and an RX-only,
-non-back-powering capture on the exposed GPIO43/U0TXD pin.
+control path. The current macOS path accepts writes but does not deliver them to
+the endpoint unless the host asserts DTR; the host tool asserts DTR and clears
+RTS. Opening or closing that TTY does not delimit the firmware sequence epoch,
+and DTR itself is not a connection signal. Only USB bus reset retires an epoch;
+an 8 ms missed-SOF interval merely suspends it, and a later SOF resumes the same
+sequence. Preserve a documented GPIO0 ROM-download recovery path, test every
+supported host's reconnect behavior, and never tie one-time identity generation
+to an ordinary USB-induced reset. Powered reset/suspend/resume qualification is
+still required before this becomes the final lifecycle contract. The no-op-
+logging image has no native USB boot-log evidence surface. Any cold-power
+diagnostic build must use a separately reviewed sink such as UART0 with USB data
+disconnected and an RX-only, non-back-powering capture on the exposed GPIO43/
+U0TXD pin.
+
+The host client defaults standalone status to 15 seconds and the physical-
+presence initialization workflow to 120 seconds. It keeps initialization on one
+open TTY while monotonically advancing the exact-next sequence. A post-send I/O
+failure or request timeout leaves the last sent sequence consumed-or-ambiguous,
+so the client requires a
+confirmed USB bus reset before restarting at zero instead of guessing
+reuse or increment. Firmware refuses `u64::MAX` and exhausts that epoch; the
+client rejects the maximum and reports no usable successor after
+`u64::MAX - 1`.
 
 CDC-NCM USB Ethernet is attractive later: the current esp-hal example serves an HTTP page directly at a fixed address, which could provide the SPA over USB. Host behavior across macOS, Windows, Linux, Android, iOS, and browser captive-network handling needs a dedicated compatibility matrix. Do not make it a phase-1 requirement.
 
@@ -1691,14 +1749,13 @@ runtime and sole flash backend in a permanent `ProductStorageCoordinator`, lends
 checked operation-scoped views, durably finalizes replay-unsafe interrupted
 work, gates service on mount/replay/recovery, and implements `SubmissionPort`.
 The accepted-history cap is one in the passing host composition, not product
-capacity, and the still-missing product edge is a bounded external API job lane
-plus GPIO/USB/task-handoff invocation of ADR 0009's resident pairing and
-initialization owner, live lifecycle credential mutation, and a USB/BLE/Wi-Fi
-bearer. The physical credential store, feature-free pairing policy, and forward-
-only initialization runtime are composed in the permanent E290 graph; the
-portable immutable authority, framing, pre-authentication control codec,
-qualification session, and boot-lifetime handoff are not yet composed into an
-external serving lane. Live typed Begin,
+capacity. ADR 0009's narrow status/initialize path now composes GPIO21, one USB
+Serial/JTAG byte owner, connection/sequence enforcement, and a depth-one
+command/reply handoff into the permanent E290 graph. The still-missing product
+edge is a bounded authenticated external API job lane, live lifecycle credential
+mutation, and a USB/BLE/Wi-Fi API bearer. The portable immutable authority,
+framing, qualification session, and authenticated boot-lifetime handoff remain
+separately qualified rather than externally served. Live typed Begin,
 Proof, Activate, and Abort mutation/reconciliation ownership remains next.
 OTA, watchdog, other-store and radio-timing
 coordination also remain qualification/design work.
@@ -1887,19 +1944,25 @@ identity, forwarding, multi-hop, Resource or routing gates.
 
 ### Phase 2 — always-on RNS transport node
 
-Current progress: the LoRa-only E290 source graph now composes the permanent
+Current progress: the LoRa-first E290 source graph now composes the permanent
 node/router aggregate, concrete radio actor, durable identity/announce clock,
-resident operation-scoped one-entry qualification storage coordinator, and
-exact authorized-frame request/durable-echo ownership gate. It is an integration
+resident operation-scoped one-entry qualification storage coordinator, exact
+authorized-frame request/durable-echo ownership gate, and a third narrow pre-
+authentication USB/GPIO task. It is an integration
 milestone inside this phase, not its exit: ADR 0005's interface-local active-
 owner fail-stop and the complete one-entry LoRa software composition pass host
 qualification. Credential-store boot composition now passes host and target
 build gates and its erased-media path passed the first permanent-image powered
 smoke; the feature-free pairing policy and initialization runtime are now
-source-composed only in the permanent E290 graph, without a live or powered
-caller. The featureless pre-authentication control codec and cross-store
-mutation-exclusion gate are implemented; USB/GPIO/task-handoff composition is
-still absent.
+source-composed only in the permanent E290 graph. The featureless pre-
+authentication control codec, cross-store mutation-exclusion gate, debounced
+GPIO21/USB ownership, connection/sequence policy, and depth-one handoff now
+compose a host- and target-verified status/initialize caller. Powered status and
+`physical-presence-required` now pass on both boards; no-button workflows on
+both advanced cleanly through sequences 0--47 before their five-second deadlines,
+and both post-workflow 8 KiB credential readbacks remained entirely erased.
+Successful button-confirmed initialization,
+raw post-write verification, and reset/suspend/resume behavior remain open.
 The lifecycle-safe credential planners/store bridge and interrupted-
 initialization classifier pass portable gates, and read-only E290 boot mapping
 is composed. The resident owner retains exact initialization ambiguity and
@@ -2063,12 +2126,17 @@ the product. Its host, portable-target, strict ESP32-S3 build, merged-image
 packaging and independent review gates pass. The resulting permanent image is
 now also flashed on both erased boards with exact same-image readback. Its first
 powered smoke established boot, 8 MiB PSRAM, zero-mutation erased credentials,
-journal/LoRa/interface readiness, and autonomous ordinary TX only.
+journal/LoRa/interface readiness, and autonomous ordinary TX. The later final
+USB-control image was packaged with the explicit 16 MiB repository partition
+table and flashed to both boards; it adds bounded status,
+`physical-presence-required`, and multi-request sequence-liveness evidence, not
+a successful credential write.
 
 The Tracker result and the powered E290 semantic HIL close exploratory
 compatibility plus the E290 functional PHY/framing, signed-ANNOUNCE, encrypted
-DATA and delivery-proof boundary. The permanent-image smoke separately closes
-only its basic boot/erased-credential/ordinary-TX boundary. Together they do not
+DATA and delivery-proof boundary. The permanent-image results separately close
+only basic boot/erased-credential/ordinary-TX and bounded pre-authentication
+control. Together they do not
 close controlled permanent-graph peer RX/DATA, interruption recovery,
 heterogeneous forwarding, multi-hop behavior, Links/Resources, LXMF, sustained
 memory, busy-CAD policy, formal electrical/RF, range, or regional release
@@ -2085,7 +2153,8 @@ gates.
    immediate and post-capture readbacks. Do not infer permanent-node, storage,
    API, multi-hop, range, fault or soak behavior from that separate fixture.
    Keep the Tracker pair as the second radio regression fixture.
-3. Preserve the 57-test E290 host composition gate, including credential boot
+3. Preserve the 83-test E290 host-library composition gate and 12 focused host-
+   client tests, including credential boot
    classification/order, the authenticated
    happy path and wrong-binding `ActiveOwnerFailStopped` path. Preserve the now
    implemented immutable credential authority, bounded qualification-session
@@ -2095,19 +2164,23 @@ gates.
    mounted-store pending selection, and interrupted-initialization classifier;
    preserve its explicit read-only E290 boot state, resident exact-bound
    `CredentialRuntime`, forward-only recovery, and sole-owner initialization
-   port plus cross-store mutation exclusion. Preserve the featureless
-   pre-authentication control codec, then connect ADR 0009's exclusive physical-
-   presence policy to debounced GPIO, the USB byte owner, and a bounded
-   command/reply handoff before composing live lifecycle mutation. Preserve
+   port plus cross-store mutation exclusion. Preserve the now-composed
+   featureless pre-authentication control codec, exclusive physical-presence
+   policy, debounced GPIO21, sole USB byte owner, boot-lifetime epochs, exact-
+   next sequencing, and bounded command/reply handoff. Preserve the bounded
+   powered status/physical-presence-required result, then complete the GPIO21
+   hold, credential write/readback, and reset/suspend/resume qualification before
+   composing live lifecycle mutation. Preserve
    the implemented schema-2 credential/generation/authority/policy provenance; then
    compose authority/framing/session/boot-
-   lifetime job handoff as an external API lane and add the first USB local
-   bearer. Select the real capacity policy beyond the qualified one-entry
+   lifetime job handoff as an external API lane and add the first authenticated
+   USB local bearer. Select the real capacity policy beyond the qualified one-entry
    composition profile. Preserve durable acceptance before Rete preparation
    and durable terminal projection before acknowledgement.
-4. Extend the source-`5f3f259` resident-runtime smoke on both E290s with powered
-   explicit initialization, controlled peer RX, and the authenticated local
-   admission edge. Preserve
+4. Extend the final USB-control image's two-board status and
+   `physical-presence-required` evidence with powered button-confirmed
+   initialization, controlled peer RX, and the authenticated local admission
+   edge. Preserve
    boot, radio initialization, exact image/credential readbacks, ordinary
    ANNOUNCE TX/RX, contention, reset behavior, encrypted DATA/proof durability,
    and paired serial evidence. The existing smoke is not that qualification.

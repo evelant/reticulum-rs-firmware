@@ -146,6 +146,12 @@ pub const ORDINARY_OWNER_LEASE_MS: u64 = 30_000;
 pub const SUBMISSION_OWNER_LEASE_MS: u64 = 30_000;
 /// Delay before retrying an ambiguous or temporarily busy journal operation.
 pub const STORAGE_RETRY_BACKOFF_MS: u64 = 1_000;
+/// Bounded cadence for the USB Serial/JTAG owner and raw GPIO sampler.
+pub const USB_PAIRING_POLL_INTERVAL_MS: u64 = 1;
+/// Repeated debounced button-observation cadence supplied to pairing policy.
+pub const PAIRING_BUTTON_OBSERVATION_INTERVAL_MS: u64 = 20;
+/// Maximum RX or TX bytes touched by one USB task poll.
+pub const USB_PAIRING_MAX_BYTES_PER_POLL: usize = 64;
 
 /// Product action for an envelope surfaced by the coordinator's explicit
 /// rejected-actions output.

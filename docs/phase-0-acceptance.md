@@ -307,9 +307,10 @@ authorizes once, retains exact requests/replies across pressure, and continues
 forced denial after coordinator fault. The separate real-radio dispatcher now
 retains the router's DATA/ordinary tickets. The DATA router, both permit
 services, and permanent `NodeInterfaceSupervisor` are composed with it in the
-E290 two-task graph. These pieces and the router's cancellation-safe capacity/
-completion waits pass host and both target checks; full powered qualification
-of the permanent graph remains open.
+E290 three-task graph alongside the narrow pre-authentication USB/GPIO owner.
+These pieces and the router's cancellation-safe capacity/completion waits pass
+host and both target checks; full powered qualification of the current
+permanent graph remains open.
 
 The semantic durable model, idempotent projector, physical journal, and portable
 sole storage actor are implemented and target-checked. The actor owns the live
@@ -325,7 +326,9 @@ portable authenticated device-API adapter is also implemented: default builds
 serve capabilities and principal-scoped status, while the explicit target-safe
 feature enables durable experimental acceptance. Both profiles are target-
 checked. The permanent E290 graph keeps the journal runtime and sole flash in a
-resident coordinator and passes 57 host tests. Immediately after flash open it
+resident coordinator and passes 83 host-library tests plus 12 focused host-
+client tests. These focused counts do not claim a full workspace rerun.
+Immediately after flash open it
 validates the exact `api_credentials` partition/eFuse binding, mounts and
 performs at most one retire then cleanup step, and retains any mounted credential
 store without auto-provisioning. Credential failure closes only credential
@@ -339,10 +342,43 @@ LoRa/interface ready, and two ordinary one-frame TXs per board. Source
 counted reboot smoke with the resident pairing policy present,
 `Eligible { media: ExactlyErased }` initialization status, continuing ordinary
 LoRa TX, and both credential partitions still entirely `0xff`. No request lane
-invoked initialization. A featureless, framing-only pre-authentication codec now
-freezes the status/initialize wire vocabulary, and the resident coordinator now
-excludes overlapping credential/journal mutations, but no USB byte owner, GPIO
-debounce, connection epoch, or command handoff invokes it. A dedicated
+invoked initialization in that historical source. The current image composes
+the featureless status/initialize codec through one USB Serial/JTAG owner,
+stable-time active-low GPIO21 debounce, bus-reset-delimited epochs, exact-next
+sequences, and depth-one scalar command/reply channels to the node-owned
+coordinator. An 8 ms missed-SOF interval suspends without changing the epoch or
+sequence; later SOF resumes it. It still does not expose an authenticated
+session or the logical device API. Button/control arbitration is bounded, stable
+High is latched before later Low, and a raw-sample gap of at least 20 ms cancels
+a possible hold until a fresh debounced High. A response owner is released only
+after all bytes enter the endpoint FIFO and `WR_DONE` is requested; later
+responses backpressure on FIFO capacity.
+Each fresh connection resets the publication latch and debouncer to Low,
+preventing release evidence retained for an older epoch from arming the new
+epoch and requiring a complete fresh High debounce.
+
+Strict host/target, graph, release-link, host-client, and size-cap checks pass.
+The final ELF is 544,371/3,548/469,280/1,017,199 bytes for text/data/BSS/total;
+the application is 587,456 of 6,291,456 bytes. Its explicit 16 MiB repository-
+partition-table merged image is 652,992 bytes with SHA-256
+`1727a14b58a076d65ea12feb61b564d5dfc66d6c6f0b9a8ddd39fc773332705c`, and that
+exact image was flashed to both boards. Both returned
+`initialization-required` and `physical-presence-required`. No-button,
+single-open workflows on both boards advanced through sequences 0--47 before
+their five-second overall deadlines, proving bounded multi-request liveness
+without opening the presence window. Subsequent 8 KiB credential-partition
+readbacks on both boards were entirely `0xff` with SHA-256
+`7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f`,
+confirming zero writes. A successful hold, write, and post-write readback remain
+open.
+The host asserts DTR and clears RTS. TTY reopen does not start a new epoch; only
+USB bus reset does. Status defaults to 15 seconds and initialize to 120 seconds;
+a post-send I/O failure or request timeout leaves the last sequence
+consumed-or-ambiguous, and
+`u64::MAX` is refused rather than wrapped. The current image selects no-op
+firmware logging, so native USB logs are unavailable as boot evidence and cannot
+interleave with the COBS control stream. Powered reset/suspend/resume
+qualification remains open. A dedicated
 RF-inert Tracker storage HIL image is target-
 checked and its isolated clean-path/software-reset powered run passed on board
 E9:44 from source `7b47113`, with strict serial and independent raw-partition
@@ -351,11 +387,12 @@ verification preserved at
 five appends, mutation-free retry/conflict, B2 compaction, and zero-mutation B2
 replay after software reset. That image calls the journal directly and does not
 qualify the actor on hardware. Controlled power cuts, endurance/soak, at-rest
-encryption, full powered qualification of the permanent owner graph, pairing plus
-authority/framing/session/handoff/bearer composition, and runtime
+encryption, full powered qualification of the current permanent owner graph,
+live authenticated pairing plus authority/session/API-bearer composition, and runtime
 flash/watchdog/OTA/radio coordination remain open. The credential smoke does
 not claim initialized-media recovery, interruption/power-cut recovery, a live
-authentication session, controlled peer RX/DATA, or an external bearer. On-
+authentication session, controlled peer RX/DATA, or an authenticated external
+bearer. On-
 device stack high-water and scenario heap measurements also remain required.
 
 ## Rete production hard gates

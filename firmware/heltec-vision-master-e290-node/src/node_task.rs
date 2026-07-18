@@ -6,9 +6,22 @@ use embassy_time::{Duration, Instant, Timer};
 use esp_hal::rng::Trng;
 use log::{error, info, warn};
 use reticulum_announce_clock::BootEpoch;
+use reticulum_device_api_pairing_control::{ControlRequest, ControlResponse, InitializeResult};
+use reticulum_device_api_pairing_policy::{
+    AcquirePairingExclusive, ButtonEffect, ConnectionId, ExclusiveAcquireOutcome,
+    MonotonicMillis as PairingMillis, PolicyEvent,
+};
 use reticulum_heltec_vision_master_e290_node::{
     announce_time::BootAnnounceClock,
+    credential_runtime::CredentialInitializationStatus,
     durability_policy::{AuthorizedFrameDurability, DurabilityServiceState},
+    pairing_control_handoff::{
+        ButtonObservationReply, ExclusiveAcquisitionReply, LifecycleAcknowledgement,
+        NodePairingHandoff, PairingControlCommand, PairingControlReply, PairingControlReplyKind,
+    },
+    pairing_control_mapping::{
+        public_initialization_drive, public_initialization_refusal, public_initialization_status,
+    },
 };
 use reticulum_interface_router::{InterfaceDescriptor, SealedIngressPacket};
 use reticulum_node_core::{
@@ -26,7 +39,10 @@ use reticulum_tx_supervisor::{
 
 use crate::{
     LORA_ONLINE, ProductSupervisor, RADIO_READY, config,
-    platform_storage::{ProductStorageCoordinator, ProductSubmissionDrive},
+    platform_storage::{
+        ProductCredentialInitializationPort, ProductInitializationDrive,
+        ProductInitializationRequest, ProductStorageCoordinator, ProductSubmissionDrive,
+    },
 };
 
 type RetainedActions = (
@@ -60,6 +76,7 @@ struct IngressDrainState<'a> {
 pub async fn run(
     supervisor: &'static mut ProductSupervisor,
     storage: &'static mut ProductStorageCoordinator,
+    mut pairing_handoff: NodePairingHandoff<CriticalSectionRawMutex>,
     mut frame_handoff: AuthorizedFrameNodeHandoff<CriticalSectionRawMutex>,
     offline_descriptor: InterfaceDescriptor,
     announce_epoch: BootEpoch,
@@ -102,9 +119,21 @@ pub async fn run(
         DurabilityServiceState::from_runtime_available(storage.submission_service_available());
     let mut retained_frame: Option<AuthorizedFrameObservation> = None;
     let mut pending_frame_acknowledgement: Option<AuthorizedFrameObservation> = None;
+    let mut pending_pairing_reply: Option<PairingControlReply> = None;
+    let mut pending_pairing_exclusive: Option<(ConnectionId, AcquirePairingExclusive)> = None;
+    let mut initialization_retry_not_before_ms: Option<u64> = None;
 
     loop {
         let mut progressed = false;
+
+        progressed |= step_pairing_control(
+            storage,
+            &mut pairing_handoff,
+            &mut pending_pairing_reply,
+            &mut pending_pairing_exclusive,
+            &mut initialization_retry_not_before_ms,
+            now_millis(),
+        );
 
         // Authorized-frame evidence outranks completion processing. The LoRa
         // actor does not return the owning completion until this task echoes
@@ -592,6 +621,200 @@ pub async fn run(
             Timer::after(Duration::from_millis(config::NODE_POLL_INTERVAL_MS)).await;
         }
     }
+}
+
+fn step_pairing_control(
+    storage: &mut ProductStorageCoordinator,
+    handoff: &mut NodePairingHandoff<CriticalSectionRawMutex>,
+    pending_reply: &mut Option<PairingControlReply>,
+    pending_exclusive: &mut Option<(ConnectionId, AcquirePairingExclusive)>,
+    initialization_retry_not_before_ms: &mut Option<u64>,
+    now_millis: u64,
+) -> bool {
+    let mut progressed = flush_pairing_reply(handoff, pending_reply);
+
+    let initialization_status = storage.initialization_status();
+    if matches!(
+        initialization_status,
+        CredentialInitializationStatus::InFlight { .. }
+    ) && initialization_retry_not_before_ms.is_none_or(|deadline| now_millis >= deadline)
+    {
+        let _ = drive_initialization_and_schedule(
+            storage,
+            initialization_retry_not_before_ms,
+            now_millis,
+        );
+        progressed = true;
+    } else if !matches!(
+        initialization_status,
+        CredentialInitializationStatus::InFlight { .. }
+    ) {
+        *initialization_retry_not_before_ms = None;
+    }
+
+    // One command owns one reply. Do not dequeue another command while a
+    // pressured reply remains local to the node owner.
+    if pending_reply.is_some() {
+        return poll_pairing_timeout(storage, pending_exclusive, now_millis) || progressed;
+    }
+    let Some(command) = handoff.try_receive_command() else {
+        return poll_pairing_timeout(storage, pending_exclusive, now_millis) || progressed;
+    };
+
+    let connection = command.connection();
+    let reply_kind = match command {
+        PairingControlCommand::Connected { at, connection } => {
+            *pending_exclusive = None;
+            let _ = storage.pairing_connected(at, connection);
+            PairingControlReplyKind::Lifecycle(LifecycleAcknowledgement::Connected)
+        }
+        PairingControlCommand::Disconnected { at, connection } => {
+            if pending_exclusive
+                .as_ref()
+                .is_some_and(|(owner, _)| *owner == connection)
+            {
+                *pending_exclusive = None;
+            }
+            let _ = storage.pairing_disconnected(at, connection);
+            PairingControlReplyKind::Lifecycle(LifecycleAcknowledgement::Disconnected)
+        }
+        PairingControlCommand::ObserveButton {
+            at,
+            connection,
+            level,
+        } => {
+            let outcome = match storage.pairing_observe_button(at, level) {
+                Some(ButtonEffect::AcquirePairingExclusive(capability)) => {
+                    *pending_exclusive = Some((connection, capability));
+                    ButtonObservationReply::AcquireExclusive
+                }
+                Some(ButtonEffect::Closed(_) | ButtonEffect::Fault(_)) => {
+                    if pending_exclusive
+                        .as_ref()
+                        .is_some_and(|(owner, _)| *owner == connection)
+                    {
+                        *pending_exclusive = None;
+                    }
+                    ButtonObservationReply::Observed
+                }
+                Some(ButtonEffect::None) | None => ButtonObservationReply::Observed,
+            };
+            PairingControlReplyKind::Button(outcome)
+        }
+        PairingControlCommand::ExclusiveAcquired { at, connection } => {
+            let outcome = if pending_exclusive
+                .as_ref()
+                .is_some_and(|(owner, _)| *owner == connection)
+            {
+                let (_, capability) = pending_exclusive
+                    .take()
+                    .expect("the matching exclusive capability was retained");
+                match storage.pairing_exclusive_acquired(at, capability) {
+                    Some(ExclusiveAcquireOutcome::Opened(_)) => ExclusiveAcquisitionReply::Opened,
+                    Some(ExclusiveAcquireOutcome::Closed(_)) => ExclusiveAcquisitionReply::Closed,
+                    Some(ExclusiveAcquireOutcome::Stale | ExclusiveAcquireOutcome::Fault(_))
+                    | None => ExclusiveAcquisitionReply::Refused,
+                }
+            } else {
+                ExclusiveAcquisitionReply::Refused
+            };
+            PairingControlReplyKind::Exclusive(outcome)
+        }
+        PairingControlCommand::Control {
+            at,
+            connection,
+            request,
+        } => {
+            let response = match request {
+                ControlRequest::Status { sequence } => ControlResponse::status(
+                    sequence,
+                    public_initialization_status(storage.initialization_status()),
+                ),
+                ControlRequest::Initialize { sequence } => {
+                    let result = match storage.request_initialization(at, connection) {
+                        ProductInitializationRequest::IdentityUnavailable
+                        | ProductInitializationRequest::DeferredForJournalMutation => {
+                            InitializeResult::Retrying
+                        }
+                        ProductInitializationRequest::Runtime(Err(refusal)) => {
+                            public_initialization_refusal(refusal)
+                        }
+                        ProductInitializationRequest::Runtime(Ok(_accepted)) => {
+                            drive_initialization_and_schedule(
+                                storage,
+                                initialization_retry_not_before_ms,
+                                now_millis,
+                            )
+                        }
+                    };
+                    ControlResponse::initialize(sequence, result)
+                }
+            };
+            PairingControlReplyKind::Control(response)
+        }
+    };
+    *pending_reply = Some(PairingControlReply::new(connection, reply_kind));
+    let _ = flush_pairing_reply(handoff, pending_reply);
+    let _ = poll_pairing_timeout(storage, pending_exclusive, now_millis);
+    true
+}
+
+fn poll_pairing_timeout(
+    storage: &mut ProductStorageCoordinator,
+    pending_exclusive: &mut Option<(ConnectionId, AcquirePairingExclusive)>,
+    now_millis: u64,
+) -> bool {
+    // Run after any queued command carrying an earlier observation timestamp,
+    // so asynchronous handoff delay cannot manufacture a clock regression.
+    // This node-owned poll still runs every loop even when a host stops reading
+    // and back-pressures the USB TX FIFO indefinitely.
+    if matches!(
+        storage.pairing_poll_timeout(PairingMillis::new(now_millis)),
+        Some(PolicyEvent::Closed(_) | PolicyEvent::Fault(_))
+    ) {
+        *pending_exclusive = None;
+        true
+    } else {
+        false
+    }
+}
+
+fn flush_pairing_reply(
+    handoff: &mut NodePairingHandoff<CriticalSectionRawMutex>,
+    pending_reply: &mut Option<PairingControlReply>,
+) -> bool {
+    let Some(reply) = pending_reply.take() else {
+        return false;
+    };
+    match handoff.try_send_reply(reply) {
+        Ok(()) => true,
+        Err(pressure) => {
+            *pending_reply = Some(pressure.into_inner());
+            false
+        }
+    }
+}
+
+fn drive_initialization_and_schedule(
+    storage: &mut ProductStorageCoordinator,
+    retry_not_before_ms: &mut Option<u64>,
+    now_millis: u64,
+) -> InitializeResult {
+    let result = match storage.drive_initialization() {
+        ProductInitializationDrive::IdentityUnavailable => InitializeResult::Retrying,
+        ProductInitializationDrive::Runtime(outcome) => public_initialization_drive(outcome),
+    };
+    if result == InitializeResult::Retrying
+        && matches!(
+            storage.initialization_status(),
+            CredentialInitializationStatus::InFlight { .. }
+        )
+    {
+        *retry_not_before_ms = Some(now_millis.saturating_add(config::STORAGE_RETRY_BACKOFF_MS));
+    } else {
+        *retry_not_before_ms = None;
+    }
+    result
 }
 
 fn authorized_frame_durability(
