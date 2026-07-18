@@ -37,15 +37,15 @@ class DeviceApiPairingVectorTests(unittest.TestCase):
         generated = vectors.build_vectors()["proof"]
         self.assertEqual(
             generated["transcript_hash_hex"],
-            "bffdaf52b55fe93afc49c893e16d2c82943e042cf0087fb66f6df99e3398cf6a",
+            "ea2e28d9e18696df5b3fb8de3416cc6b2e98ffae1e8fcda8c150990e605351cb",
         )
         self.assertEqual(
             generated["client_proof_hex"],
-            "b8d1cd5617191b45c59c1e8ca75ae9d317e36f94be7740c3fb9da1467cd2abba",
+            "6a3855c27a2d61fcd00e39a85c419fb52a09043d51f3333c7989ec832b51eb5d",
         )
         self.assertEqual(
             generated["activation_confirmation_hex"],
-            "a7d3810f6f0a30b71cb614c164eee53705f0b6d13170c2b419b6f9b1bc456803",
+            "41a2f9c1ba3e8ab6d96d939ec1b6d6cd7f126ad9e9f3be275b3278a6031b8869",
         )
 
     def test_every_proof_payload_byte_and_role_is_transcript_bound(self) -> None:
@@ -122,7 +122,9 @@ class DeviceApiPairingVectorTests(unittest.TestCase):
             vectors.proof_request_payload(), vectors.proof_challenge_payload()
         )
         proof = vectors.client_proof(transcript)
-        confirmation = vectors.activation_confirmation(transcript, proof)
+        confirmation = vectors.activation_confirmation(
+            transcript, proof, vectors.ACTIVATED_CREDENTIAL_GENERATION
+        )
         reflected = hmac.new(
             vectors.PSK,
             vectors.CLIENT_PROOF_DOMAIN + transcript + proof,
@@ -130,6 +132,19 @@ class DeviceApiPairingVectorTests(unittest.TestCase):
         ).digest()
         self.assertNotEqual(proof, confirmation)
         self.assertNotEqual(confirmation, reflected)
+
+    def test_activation_confirmation_binds_the_durable_generation(self) -> None:
+        transcript = vectors.transcript_hash(
+            vectors.proof_request_payload(), vectors.proof_challenge_payload()
+        )
+        proof = vectors.client_proof(transcript)
+        canonical = vectors.activation_confirmation(
+            transcript, proof, vectors.ACTIVATED_CREDENTIAL_GENERATION
+        )
+        substituted = vectors.activation_confirmation(
+            transcript, proof, vectors.ACTIVATED_CREDENTIAL_GENERATION + 1
+        )
+        self.assertNotEqual(canonical, substituted)
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ DEFAULT_OUTPUT = ROOT / "interop" / "vectors" / "device-api-pairing-v1.json"
 
 PAIRING_MAJOR = 1
 PAIRING_MINOR = 0
-PAIRING_SUITE = 1
+PAIRING_SUITE = 2
 BEARER_USB_SERIAL_JTAG = 1
 FRAMING_VERSION = 1
 
@@ -34,14 +34,15 @@ KIND_ABORT_CURRENT_REQUEST = 0x2A
 KIND_ABORT_CURRENT_RESPONSE = 0x2B
 
 TRANSCRIPT_DOMAIN = b"reticulum-rs-firmware/device-api/pairing/transcript/v1\0"
-CLIENT_PROOF_DOMAIN = b"reticulum-rs-firmware/device-api/pairing/client-proof/v1\0"
+CLIENT_PROOF_DOMAIN = b"reticulum-rs-firmware/device-api/pairing/client-proof/v2\0"
 ACTIVATION_PROOF_DOMAIN = (
-    b"reticulum-rs-firmware/device-api/pairing/activation-proof/v1\0"
+    b"reticulum-rs-firmware/device-api/pairing/activation-proof/v2\0"
 )
 
 DEVICE_ID = b"e290-api-1" + bytes.fromhex("aca704e13e88")
 CREDENTIAL_ID = bytes(range(0x10, 0x20))
 CREDENTIAL_GENERATION = 0x0102_0304_0506_0708
+ACTIVATED_CREDENTIAL_GENERATION = CREDENTIAL_GENERATION + 1
 PSK = bytes(range(0x20, 0x40))
 CLIENT_NONCE = bytes(range(0x40, 0x60))
 DEVICE_CHALLENGE = bytes(range(0x60, 0x80))
@@ -140,10 +141,12 @@ def client_proof(transcript: bytes) -> bytes:
     ).digest()
 
 
-def activation_confirmation(transcript: bytes, proof: bytes) -> bytes:
+def activation_confirmation(
+    transcript: bytes, proof: bytes, activated_generation: int
+) -> bytes:
     return hmac.new(
         PSK,
-        ACTIVATION_PROOF_DOMAIN + transcript + proof,
+        ACTIVATION_PROOF_DOMAIN + transcript + proof + u64(activated_generation),
         hashlib.sha256,
     ).digest()
 
@@ -160,7 +163,7 @@ def activate_response_payload(confirmation: bytes) -> bytes:
             bytes((0,)),
             bytes(7),
             CREDENTIAL_ID,
-            u64(CREDENTIAL_GENERATION),
+            u64(ACTIVATED_CREDENTIAL_GENERATION),
             confirmation,
         )
     )
@@ -234,7 +237,9 @@ def build_vectors() -> dict[str, object]:
     challenge = proof_challenge_payload()
     transcript = transcript_hash(proof_request, challenge)
     proof = client_proof(transcript)
-    confirmation = activation_confirmation(transcript, proof)
+    confirmation = activation_confirmation(
+        transcript, proof, ACTIVATED_CREDENTIAL_GENERATION
+    )
 
     return {
         "profile": "reticulum-rs-firmware device API wired pairing v1",
@@ -244,6 +249,7 @@ def build_vectors() -> dict[str, object]:
             "device_id_hex": DEVICE_ID.hex(),
             "credential_id_hex": CREDENTIAL_ID.hex(),
             "credential_generation": CREDENTIAL_GENERATION,
+            "activated_credential_generation": ACTIVATED_CREDENTIAL_GENERATION,
             "psk_hex": PSK.hex(),
             "client_nonce_hex": CLIENT_NONCE.hex(),
             "device_challenge_hex": DEVICE_CHALLENGE.hex(),

@@ -328,7 +328,7 @@ fn complete_pairing(
     decoder: &mut StreamDecoder,
     deadline: Instant,
     port_name: &str,
-    mut state: PendingStateFile,
+    state: PendingStateFile,
     device_id: DeviceId,
     credential_id: CredentialId,
     generation: CredentialGeneration,
@@ -397,7 +397,7 @@ fn complete_pairing(
         PairingResponse::Activate(response) => response,
         _ => unreachable!("exchange enforces the response family"),
     };
-    match &activate {
+    let activated_generation = match &activate {
         ActivateResponse::Activated { .. } => {
             if !activate.verify_confirmation(&psk, &transcript) {
                 return Err(format!(
@@ -406,6 +406,9 @@ fn complete_pairing(
                     next_sequence_guidance(activate_sequence)
                 ));
             }
+            activate
+                .generation()
+                .expect("the Activated response always carries its durable generation")
         }
         ActivateResponse::Failure { failure, .. } => {
             return Err(format!(
@@ -416,9 +419,10 @@ fn complete_pairing(
                 next_sequence_guidance(activate_sequence)
             ));
         }
-    }
+    };
 
-    state.mark_active()?;
+    let state_path = state.path.clone();
+    state.mark_active(device_id, credential_id, activated_generation, &psk)?;
     let next = next_usable_sequence(activate_sequence)
         .map_or_else(|| "exhausted".to_owned(), |value| value.to_string());
     Ok(CommandResult {
@@ -429,8 +433,8 @@ fn complete_pairing(
             if resumed { "resume" } else { "pair" },
             hex(device_id.as_bytes()),
             hex(credential_id.as_bytes()),
-            generation.get(),
-            state.path.display()
+            activated_generation.get(),
+            state_path.display()
         ),
     })
 }
@@ -981,47 +985,118 @@ impl PendingStateFile {
         })
     }
 
-    fn mark_active(&mut self) -> Result<(), String> {
-        ensure_path_matches_file(&self.file, &self.path, "Pending state before Active marking")
-            .map_err(|error| {
+    fn mark_active(
+        self,
+        device_id: DeviceId,
+        credential_id: CredentialId,
+        activated_generation: CredentialGeneration,
+        psk: &PairingPsk,
+    ) -> Result<(), String> {
+        let Self { file, path } = self;
+        ensure_path_matches_file(&file, &path, "Pending state before Active replacement").map_err(
+            |error| {
                 format!(
                     "credential activated and confirmation verified, but {error}; authenticated-session reconciliation is required"
                 )
-            })?;
-        self.file
-            .seek(SeekFrom::Start(STATE_STATUS_OFFSET))
-            .and_then(|_| self.file.write_all(&[STATE_ACTIVE]))
-            .and_then(|()| self.file.sync_all())
-            .map_err(|error| {
-                format!(
-                    "credential activated and confirmation verified, but state file {} could not be marked Active: {error}; authenticated-session reconciliation is deferred, so do not guess or abort",
-                    self.path.display()
-                )
-            })?;
-        let mut observed = [0_u8; 1];
-        self.file
-            .seek(SeekFrom::Start(STATE_STATUS_OFFSET))
-            .and_then(|_| self.file.read_exact(&mut observed))
-            .map_err(|error| {
-                format!(
-                    "credential activated and confirmation verified, but Active status could not be read back from state file {}: {error}; authenticated-session reconciliation is required, so do not guess or abort",
-                    self.path.display()
-                )
-            })?;
-        if observed != [STATE_ACTIVE] {
-            return Err(format!(
-                "credential activated and confirmation verified, but state file {} did not read back as Active; authenticated-session reconciliation is required, so do not guess or abort",
-                self.path.display()
-            ));
-        }
-        ensure_path_matches_file(&self.file, &self.path, "Active state after marking").map_err(
-            |error| {
-                format!(
-                    "credential activated and confirmation verified, but {error}; authenticated-session reconciliation is required, so do not guess or abort"
-                )
             },
         )?;
-        Ok(())
+        let (mut staging_file, staging_path) = create_staging_file(&path).map_err(|error| {
+            format!(
+                "credential activated and confirmation verified, but an owner-only Active staging file could not be created for {}: {error}; authenticated-session reconciliation is required",
+                path.display()
+            )
+        })?;
+        let expected = encode_state(
+            STATE_ACTIVE,
+            Some((device_id, credential_id, activated_generation, psk)),
+        );
+        if let Err(error) = write_sync_and_verify(&mut staging_file, &staging_path, &expected) {
+            drop(staging_file);
+            let cleanup = fs::remove_file(&staging_path)
+                .and_then(|()| sync_parent(&path).map_err(io::Error::other));
+            return Err(format!(
+                "credential activated and confirmation verified, but {error}; Active staging cleanup for {} {} and authenticated-session reconciliation is required",
+                staging_path.display(),
+                if cleanup.is_ok() {
+                    "completed"
+                } else {
+                    "failed"
+                }
+            ));
+        }
+        if let Err(error) =
+            ensure_path_matches_file(&file, &path, "Pending state before Active replacement")
+        {
+            drop(staging_file);
+            let cleanup = fs::remove_file(&staging_path)
+                .and_then(|()| sync_parent(&path).map_err(io::Error::other));
+            return Err(format!(
+                "credential activated and confirmation verified, but {error}; Active staging cleanup for {} {} and authenticated-session reconciliation is required",
+                staging_path.display(),
+                if cleanup.is_ok() {
+                    "completed"
+                } else {
+                    "failed"
+                }
+            ));
+        }
+        drop(staging_file);
+        fs::rename(&staging_path, &path).map_err(|error| {
+            format!(
+                "credential activated and confirmation verified, but complete Active staging file {} could not atomically replace {}: {error}; preserve both files for authenticated-session reconciliation",
+                staging_path.display(),
+                path.display()
+            )
+        })?;
+        drop(file);
+        sync_parent(&path).map_err(|error| {
+            format!(
+                "credential activated and confirmation verified and a complete Active file may be installed at {}, but its directory entry could not be synchronized: {error}; authenticated-session reconciliation is required",
+                path.display()
+            )
+        })?;
+
+        let mut active = open_existing_state(&path).map_err(|error| {
+            format!(
+                "credential activated and confirmation verified, but the replaced Active state could not be reopened: {error}; authenticated-session reconciliation is required"
+            )
+        })?;
+        if active
+            .metadata()
+            .map_err(|error| {
+                format!(
+                    "credential activated and confirmation verified, but Active state {} could not be inspected: {error}; authenticated-session reconciliation is required",
+                    path.display()
+                )
+            })?
+            .len()
+            != STATE_FILE_LENGTH as u64
+        {
+            return Err(format!(
+                "credential activated and confirmation verified, but state file {} is not exactly {STATE_FILE_LENGTH} bytes; authenticated-session reconciliation is required",
+                path.display()
+            ));
+        }
+        let mut observed = Zeroizing::new([0_u8; STATE_FILE_LENGTH]);
+        active.read_exact(&mut observed[..]).map_err(|error| {
+            format!(
+                "credential activated and confirmation verified, but Active state {} could not be read back: {error}; authenticated-session reconciliation is required",
+                path.display()
+            )
+        })?;
+        if observed.as_ref() != expected.as_ref() {
+            return Err(format!(
+                "credential activated and confirmation verified, but state file {} did not read back as the complete expected Active credential; authenticated-session reconciliation is required",
+                path.display()
+            ));
+        }
+        ensure_path_matches_file(&active, &path, "Active state after replacement").map_err(
+            |error| {
+                format!(
+                    "credential activated and confirmation verified, but {error}; authenticated-session reconciliation is required"
+                )
+            },
+        )
     }
 }
 
@@ -1557,7 +1632,7 @@ mod tests {
     };
 
     #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     use super::*;
 
@@ -1744,13 +1819,15 @@ mod tests {
     #[test]
     fn pending_state_round_trips_atomically_and_active_is_not_resumable() {
         let path = temporary_path();
+        let pending_link = path.with_extension("pending-hard-link");
         let device_id = DeviceId::new([0x11; 16]).unwrap();
         let credential_id = CredentialId::new([0x22; 16]);
         let generation = CredentialGeneration::new(7);
+        let activated_generation = CredentialGeneration::new(11);
         let psk = PairingPsk::new([0x33; 32]).unwrap();
         let reservation = ReservedStateFile::reserve(&path).unwrap();
         let staging_path = reservation.staging_path.clone();
-        let mut state = reservation
+        let state = reservation
             .commit_pending(device_id, credential_id, generation, &psk)
             .unwrap();
         assert!(!staging_path.exists());
@@ -1777,22 +1854,36 @@ mod tests {
         assert_eq!(persisted.psk.as_bytes(), psk.as_bytes());
         drop(persisted);
 
-        state.mark_active().unwrap();
+        fs::hard_link(&path, &pending_link).unwrap();
+        let pending_inode = fs::metadata(&pending_link).unwrap().ino();
+        assert_eq!(state.file.metadata().unwrap().ino(), pending_inode);
+        state
+            .mark_active(device_id, credential_id, activated_generation, &psk)
+            .unwrap();
         let active = fs::read(&path).unwrap();
         assert_eq!(active.len(), STATE_FILE_LENGTH);
         assert_eq!(active[10], STATE_ACTIVE);
+        assert_eq!(&active[48..56], &activated_generation.get().to_le_bytes());
         assert_eq!(&active[56..88], psk.as_bytes());
+        assert_ne!(fs::metadata(&path).unwrap().ino(), pending_inode);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let retained_pending = fs::read(&pending_link).unwrap();
+        assert_eq!(retained_pending[10], STATE_PENDING);
+        assert_eq!(&retained_pending[48..56], &generation.get().to_le_bytes());
         let activated = load_activated_credential(&path).unwrap();
         let (loaded_device, loaded_credential, loaded_generation, loaded_psk) =
             activated.into_parts();
         assert_eq!(loaded_device, device_id);
         assert_eq!(loaded_credential, credential_id);
-        assert_eq!(loaded_generation, generation);
+        assert_eq!(loaded_generation, activated_generation);
         assert_eq!(loaded_psk.as_ref(), psk.as_bytes());
         let error = PendingStateFile::open_pending(&path).err().unwrap();
         assert!(error.contains("already Active"));
-        drop(state);
         fs::remove_file(path).unwrap();
+        fs::remove_file(pending_link).unwrap();
     }
 
     #[cfg(unix)]

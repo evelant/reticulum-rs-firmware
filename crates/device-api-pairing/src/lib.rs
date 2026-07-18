@@ -22,8 +22,8 @@ mod crypto;
 mod protocol;
 
 pub use crypto::{
-    ActivationConfirmation, ClientProof, PairingPsk, PairingTranscript, ProofRejected,
-    TranscriptMismatch, VerifiedClientProof,
+    ActivationConfirmation, ActivationGenerationNotAdvanced, ClientProof, PairingPsk,
+    PairingTranscript, ProofRejected, TranscriptMismatch, VerifiedClientProof,
 };
 pub use protocol::{
     ABORT_CURRENT_REQUEST_LENGTH, ABORT_CURRENT_RESPONSE_LENGTH, ACTIVATE_REQUEST_LENGTH,

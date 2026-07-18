@@ -14,9 +14,9 @@ use crate::protocol::{
 type HmacSha256 = Hmac<Sha256>;
 
 const TRANSCRIPT_DOMAIN: &[u8] = b"reticulum-rs-firmware/device-api/pairing/transcript/v1\0";
-const CLIENT_PROOF_DOMAIN: &[u8] = b"reticulum-rs-firmware/device-api/pairing/client-proof/v1\0";
+const CLIENT_PROOF_DOMAIN: &[u8] = b"reticulum-rs-firmware/device-api/pairing/client-proof/v2\0";
 const ACTIVATION_PROOF_DOMAIN: &[u8] =
-    b"reticulum-rs-firmware/device-api/pairing/activation-proof/v1\0";
+    b"reticulum-rs-firmware/device-api/pairing/activation-proof/v2\0";
 
 /// Zeroizing 256-bit pairing pre-shared key.
 ///
@@ -193,18 +193,30 @@ impl VerifiedClientProof {
     /// Consuming the verified owner makes one confirmation the terminal use of
     /// this proof state. The physical-store owner must call this only after the
     /// exact Active successor is durable and publishable.
-    pub fn into_activation_confirmation(self, psk: &PairingPsk) -> ActivationConfirmation {
-        ActivationConfirmation {
+    pub fn into_activation_confirmation(
+        self,
+        activated_generation: CredentialGeneration,
+        psk: &PairingPsk,
+    ) -> Result<ActivationConfirmation, ActivationGenerationNotAdvanced> {
+        if activated_generation.get() <= self.generation.get() {
+            return Err(ActivationGenerationNotAdvanced);
+        }
+        let generation = activated_generation.get().to_le_bytes();
+        Ok(ActivationConfirmation {
             credential_id: self.credential_id,
-            generation: self.generation,
+            generation: activated_generation,
             mac: full_mac(
                 psk.as_bytes(),
                 ACTIVATION_PROOF_DOMAIN,
-                &[&self.transcript_hash, &self.proof[..]],
+                &[&self.transcript_hash, &self.proof[..], &generation],
             ),
-        }
+        })
     }
 }
+
+/// A durable Active credential did not advance beyond its Pending generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ActivationGenerationNotAdvanced;
 
 /// Full zeroizing device activation-confirmation HMAC.
 ///
@@ -227,16 +239,21 @@ impl ActivationConfirmation {
         psk: &PairingPsk,
         transcript: &PairingTranscript,
         client_proof: &ClientProof,
-    ) -> Self {
-        Self {
+        activated_generation: CredentialGeneration,
+    ) -> Result<Self, ActivationGenerationNotAdvanced> {
+        if activated_generation.get() <= transcript.generation.get() {
+            return Err(ActivationGenerationNotAdvanced);
+        }
+        let generation = activated_generation.get().to_le_bytes();
+        Ok(Self {
             credential_id: transcript.credential_id,
-            generation: transcript.generation,
+            generation: activated_generation,
             mac: full_mac(
                 psk.as_bytes(),
                 ACTIVATION_PROOF_DOMAIN,
-                &[transcript.as_bytes(), client_proof.as_bytes()],
+                &[transcript.as_bytes(), client_proof.as_bytes(), &generation],
             ),
-        }
+        })
     }
 
     /// Bind 32 decoded confirmation bytes to their validated credential reference.
@@ -294,12 +311,13 @@ impl ActivationConfirmation {
         transcript: &PairingTranscript,
         client_proof: &ClientProof,
     ) -> bool {
+        let generation = self.generation.get().to_le_bytes();
         self.credential_id == transcript.credential_id
-            && self.generation == transcript.generation
+            && self.generation.get() > transcript.generation.get()
             && verify_full_mac(
                 psk.as_bytes(),
                 ACTIVATION_PROOF_DOMAIN,
-                &[transcript.as_bytes(), client_proof.as_bytes()],
+                &[transcript.as_bytes(), client_proof.as_bytes(), &generation],
                 self.as_bytes(),
             )
     }

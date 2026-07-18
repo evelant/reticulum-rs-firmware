@@ -34,8 +34,8 @@ pub const RECORD_KIND_ABORT_CURRENT_RESPONSE: u8 = 0x2b;
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Pairing protocol minor version.
 pub const PROTOCOL_MINOR: u16 = 0;
-/// HMAC-SHA256 possession-proof suite identifier.
-pub const PROOF_SUITE: u16 = 1;
+/// HMAC-SHA256 possession-proof suite identifier with Active-generation binding.
+pub const PROOF_SUITE: u16 = 2;
 
 /// Exact Begin request payload length.
 pub const BEGIN_REQUEST_LENGTH: usize = 0;

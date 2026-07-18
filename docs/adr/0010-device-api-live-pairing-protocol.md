@@ -4,7 +4,9 @@
   protocol/core, independent vectors, E290 resident durable lifecycle, bounded
   entropy, and bearer-neutral secret handoff implemented and target-verified;
   node/USB scheduling, recoverable pairing utility, and minimal authenticated
-  USB session/API bearer implemented; successful powered qualification pending
+  USB session/API bearer implemented; one powered initialize/pair/reboot/
+  capabilities happy path qualified, with broader lifecycle/fault/submission
+  qualification pending
 - **Date:** 2026-07-18
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0006](0006-authenticated-local-api-bearer.md),
@@ -19,8 +21,9 @@ deliberately leaves the live pairing records and proof transcript unspecified.
 The authenticated session core needed a frozen way to create and activate at
 least one credential before it could become useful in the permanent E290
 image. That ordering led to the pairing protocol below; the minimal session
-bearer is now source-composed, while powered activation and authentication
-remain open.
+bearer is now source-composed, and one powered activation plus post-reboot
+authenticated capabilities exchange has passed. Pending/Abort readback,
+ambiguity/fault, and authenticated-submission qualification remain open.
 
 The first profile is a wired developer and hardware-qualification aid. It
 trusts the process controlling the physically connected USB host after the user
@@ -65,11 +68,11 @@ The fixed record kinds are:
 | AbortCurrent request | `0x2a` | client to device |
 | AbortCurrent response | `0x2b` | device to client |
 
-Pairing protocol major/minor are `1.0`, the proof suite is `1`
-(HMAC-SHA256 with a 256-bit PSK), and bearer binding `1` means ESP32-S3 USB
-Serial/JTAG. Other bearer values remain unavailable in this profile. Pairing
-never accepts a client-supplied principal, permission set, policy version, or
-credential generation.
+Pairing protocol major/minor are `1.0`, the proof suite is `2`
+(HMAC-SHA256 with a 256-bit PSK and durable Active-generation binding), and
+bearer binding `1` means ESP32-S3 USB Serial/JTAG. Other bearer values remain
+unavailable in this profile. Pairing never accepts a client-supplied principal,
+permission set, policy version, or credential generation.
 
 ### Begin only offers a durably recoverable Pending credential
 
@@ -92,7 +95,7 @@ A successful Begin response is exactly 88 bytes:
 | 1 | 7 | reserved, exactly zero |
 | 8 | 2 | pairing major `1`, little-endian |
 | 10 | 2 | pairing minor `0`, little-endian |
-| 12 | 2 | proof suite `1`, little-endian |
+| 12 | 2 | proof suite `2`, little-endian |
 | 14 | 1 | bearer binding `1` |
 | 15 | 1 | reserved, exactly zero |
 | 16 | 16 | stable public device-API ID |
@@ -126,7 +129,7 @@ Its request payload is exactly 64 bytes:
 | ---: | ---: | --- |
 | 0 | 2 | pairing major `1`, little-endian |
 | 2 | 2 | pairing minor `0`, little-endian |
-| 4 | 2 | proof suite `1`, little-endian |
+| 4 | 2 | proof suite `2`, little-endian |
 | 6 | 1 | bearer binding `1` |
 | 7 | 1 | reserved, exactly zero |
 | 8 | 16 | exact pending credential ID |
@@ -147,7 +150,7 @@ A successful challenge response is exactly 104 bytes:
 | 1 | 7 | reserved, exactly zero |
 | 8 | 2 | pairing major `1`, little-endian |
 | 10 | 2 | pairing minor `0`, little-endian |
-| 12 | 2 | proof suite `1`, little-endian |
+| 12 | 2 | proof suite `2`, little-endian |
 | 14 | 1 | bearer binding `1` |
 | 15 | 1 | reserved, exactly zero |
 | 16 | 16 | stable public device-API ID |
@@ -182,7 +185,7 @@ The client proof is the full 32 bytes:
 ```text
 HMAC-SHA256(
   PSK,
-  "reticulum-rs-firmware/device-api/pairing/client-proof/v1\0" ||
+  "reticulum-rs-firmware/device-api/pairing/client-proof/v2\0" ||
   transcript_hash
 )
 ```
@@ -204,17 +207,24 @@ credential mutation.
 For a valid proof, the policy converts the retained proof permit into the exact
 activation capability. The sole store owner commits/reconciles the
 Activate-`Pending` successor and installs its publishable authority before any
-success response or authenticated session admission.
+success response or authenticated session admission. It then selects the exact
+committed Active record from that authority; it neither reuses the Pending
+generation nor assumes that the Active generation is `pending + 1`.
 
 The successful device confirmation is:
 
 ```text
 HMAC-SHA256(
   PSK,
-  "reticulum-rs-firmware/device-api/pairing/activation-proof/v1\0" ||
-  transcript_hash || client_proof
+  "reticulum-rs-firmware/device-api/pairing/activation-proof/v2\0" ||
+  transcript_hash || client_proof || LE64(activated_generation)
 )
 ```
+
+The activated generation must be strictly greater than the Pending transcript
+generation. The transcript already binds the credential ID; the final field
+cryptographically binds the actual store-selected Active generation returned
+to the host.
 
 A successful Activate response is exactly 64 bytes:
 
@@ -343,6 +353,14 @@ atomically renames it over the reservation and synchronizes the parent before
 ProofStart. It never prints the PSK. Secure `pair` and `resume` persistence is
 currently Unix-only; `abort-current` remains available on other hosts.
 
+After a successful confirmation, the client writes and synchronizes a second
+complete owner-only staging file containing Active state and the confirmed
+durable Active generation, atomically renames it over the Pending file,
+synchronizes the parent directory, and read-verifies the complete replacement.
+The final path therefore contains either one complete Pending image or one
+complete Active image across a host interruption; status and generation are
+never updated as separate in-place writes.
+
 `resume` reopens only a canonical Pending file, generates a fresh nonce, and
 validates the exact returned device ID and credential reference before proof.
 Pair requires Begin sequence `<= u64::MAX - 3`; resume requires ProofStart
@@ -356,14 +374,14 @@ reconciliation lane; the current client must not guess or abort.
 
 The portable core and an independent standard-library Python implementation now
 freeze known-answer records, COBS bytes, transcript hash, client proof, and
-activation confirmation. Thirteen Rust unit tests and four ownership
+activation confirmation. Fourteen Rust unit tests and four ownership
 compile-fail doctests cover every successful flight, malformed profiles and
-shapes, coarse results, substituted credential references, secret-owner drop
-glue, and constant-time proof rejection. Five Python tests independently
-regenerate the corpus, mutate every transcript-bound byte and both message
-roles, and verify COBS framing and proof-domain separation. Host, strict
-Clippy/rustdoc, generic `riscv32imac-unknown-none-elf`, and ESP32-S3 Xtensa
-checks pass.
+shapes, coarse results, substituted credential references and final-generation
+binding, secret-owner drop glue, and constant-time proof rejection. Six Python
+tests independently regenerate the corpus, mutate every transcript-bound byte
+and both message roles, and verify COBS framing, proof-domain separation, and
+durable-generation binding. Host, strict Clippy/rustdoc, generic
+`riscv32imac-unknown-none-elf`, and ESP32-S3 Xtensa checks pass.
 
 The permanent E290 graph contains the live-pairing core only through its
 resident credential lifecycle. Its host library suite covers durable
@@ -383,9 +401,10 @@ causal control/live scheduling, bus-reset challenge invalidation, reset-
 generation blocking, physical detachment, and USB-memory scrubbing. The minimal
 authenticated session/API lane and its no-fallback proof are now
 source-composed. Exact final suite totals are recorded with the qualified image.
-Powered qualification next reads the exact
-credential partition after Pending, Active, and Abort and proves that only
-Active authenticates after reboot.
+The first powered happy path now includes exact Active-partition readback and
+successful post-reboot authentication. Further qualification must capture the
+exact Pending and Abort images, prove those states cannot authenticate, and
+exercise ambiguity and power-cut boundaries.
 
 ## Consequences
 
@@ -394,8 +413,9 @@ Active authenticates after reboot.
   firmware exchange.
 - A lost Begin offer has an explicit, physically confirmed recovery path.
 - The qualification protocol remains reusable above another local byte bearer,
-  but suite 1 is permitted only for the trusted wired developer/HIL profile.
+  but suite 2 is permitted only for the trusted wired developer/HIL profile.
 - The protocol adds authentication of possession and activation confirmation,
   not confidentiality or production host identity binding.
-- Authenticated session/API composition, activation-ambiguity reconciliation,
-  and powered lifecycle/fault testing remain separate implementation gates.
+- Authenticated submission, activation-ambiguity reconciliation, and broader
+  powered lifecycle/fault testing remain separate implementation gates beyond
+  the qualified capabilities happy path.

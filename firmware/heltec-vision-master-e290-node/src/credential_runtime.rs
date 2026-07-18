@@ -1058,6 +1058,10 @@ impl CredentialRuntime {
                 verified,
                 psk,
             } => {
+                let pending = permit.pending();
+                let active = store
+                    .publishable_authority()
+                    .and_then(|authority| authority.select_for_handshake(pending.id()).ok());
                 self.mounted = Some(store);
                 let result = self
                     .pairing
@@ -1071,9 +1075,27 @@ impl CredentialRuntime {
                     return CredentialPairingDriveOutcome::Blocked(Some(mutation));
                 }
                 self.live_pairing = LivePairingOwnership::Idle;
-                CredentialPairingDriveOutcome::Activated(
-                    verified.into_activation_confirmation(&psk),
-                )
+                let Some(active) = active else {
+                    self.live_pairing = LivePairingOwnership::Blocked;
+                    return CredentialPairingDriveOutcome::Blocked(Some(mutation));
+                };
+                let (active_id, active_generation, active_psk) = active.into_parts();
+                if active_id != pending.id() {
+                    self.live_pairing = LivePairingOwnership::Blocked;
+                    return CredentialPairingDriveOutcome::Blocked(Some(mutation));
+                }
+                let Ok(active_psk) = PairingPsk::from_zeroizing(active_psk) else {
+                    self.live_pairing = LivePairingOwnership::Blocked;
+                    return CredentialPairingDriveOutcome::Blocked(Some(mutation));
+                };
+                drop(psk);
+                match verified.into_activation_confirmation(active_generation, &active_psk) {
+                    Ok(confirmation) => CredentialPairingDriveOutcome::Activated(confirmation),
+                    Err(_) => {
+                        self.live_pairing = LivePairingOwnership::Blocked;
+                        CredentialPairingDriveOutcome::Blocked(Some(mutation))
+                    }
+                }
             }
             MutationCompletion::Abort { permit } => {
                 self.mounted = Some(store);
@@ -1523,7 +1545,11 @@ mod tests {
     };
     use reticulum_device_api_credential_store::{
         BoundCredentialStore, CredentialStoreDeviceId, PARTITION_SIZE, PHYSICAL_FORMAT_VERSION,
-        mount, recover_empty_provision,
+        commit_successor, mount, recover_empty_provision,
+    };
+    use reticulum_device_api_credentials::{
+        AuthorityRevision, CredentialAudit, CredentialAuthorityBuilder, CredentialGeneration,
+        CredentialRecord, CredentialStatus,
     };
     use reticulum_device_api_pairing::{
         ActivateRequest, BeginOffer, ClientProof, PairingTranscript, ProofStartRequest,
@@ -2353,13 +2379,19 @@ mod tests {
         };
         assert!(confirmation.verify(offer.psk(), &transcript, &verification_proof));
         assert_eq!(confirmation.credential_id(), offer.credential_id());
-        assert_eq!(confirmation.generation(), offer.generation());
 
         let authority = runtime
             .mounted
             .as_ref()
             .and_then(MountedCredentialStore::publishable_authority)
             .expect("activated authority is publishable");
+        let (active_id, active_generation, _active_psk) = authority
+            .select_for_handshake(offer.credential_id())
+            .expect("committed Active credential is selectable")
+            .into_parts();
+        assert_eq!(active_id, offer.credential_id());
+        assert!(active_generation.get() > offer.generation().get());
+        assert_eq!(confirmation.generation(), active_generation);
         assert_eq!(authority.active_count(), 1);
         assert!(
             authority
@@ -2378,6 +2410,112 @@ mod tests {
         ));
         assert_eq!(runtime.live_pairing_status(), CredentialPairingStatus::Idle);
         assert!(!runtime.credential_physical_mutation_outstanding());
+    }
+
+    #[test]
+    fn activation_confirmation_uses_store_generation_when_pending_is_older() {
+        const PENDING_PSK: [u8; 32] = [0x31; 32];
+        const OTHER_PSK: [u8; 32] = [0x72; 32];
+
+        let store_binding = binding(0x5a);
+        let mut access = bound(FakeNor::erased(), store_binding);
+        let mounted = recover_empty_provision(&mut access)
+            .unwrap_or_else(|_| panic!("test revision-1 provisioning failed"));
+        let pending_id = CredentialId::new([0x41; 16]);
+        let pending_record = || {
+            CredentialRecord::with_secret(
+                pending_id,
+                CredentialGeneration::new(2),
+                PrincipalId([0x51; 16]),
+                Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA,
+                CredentialStatus::Pending,
+                CredentialAudit::new(
+                    AuthorityRevision::new(2),
+                    AuthorityRevision::new(2),
+                    PairingOrigin::UsbPhysicalPresence,
+                    AuthorizationPolicyVersion::new(1),
+                ),
+                PENDING_PSK,
+            )
+        };
+        let revision_two = CredentialAuthorityBuilder::new(AuthorityRevision::new(2))
+            .unwrap_or_else(|fault| panic!("revision-2 builder failed: {:?}", fault.kind()))
+            .insert(pending_record())
+            .unwrap_or_else(|fault| panic!("revision-2 pending failed: {:?}", fault.kind()))
+            .finish();
+        let mounted = commit_successor(mounted, &mut access, revision_two)
+            .unwrap_or_else(|_| panic!("revision-2 commit failed"));
+        let mounted = recover_once(mounted, &mut access)
+            .unwrap_or_else(|_| panic!("revision-2 cleanup failed"));
+        assert_eq!(mounted.recovery(), CredentialStoreRecovery::Clean);
+
+        let other = CredentialRecord::with_secret(
+            CredentialId::new([0x42; 16]),
+            CredentialGeneration::new(3),
+            PrincipalId([0x52; 16]),
+            Permissions::READ_SUBMISSION_STATUS,
+            CredentialStatus::Active,
+            CredentialAudit::new(
+                AuthorityRevision::new(3),
+                AuthorityRevision::new(3),
+                PairingOrigin::UsbPhysicalPresence,
+                AuthorizationPolicyVersion::new(1),
+            ),
+            OTHER_PSK,
+        );
+        let revision_three = CredentialAuthorityBuilder::new(AuthorityRevision::new(3))
+            .unwrap_or_else(|fault| panic!("revision-3 builder failed: {:?}", fault.kind()))
+            .insert(pending_record())
+            .unwrap_or_else(|fault| panic!("revision-3 pending failed: {:?}", fault.kind()))
+            .insert(other)
+            .unwrap_or_else(|fault| panic!("revision-3 active failed: {:?}", fault.kind()))
+            .finish();
+        let mounted = commit_successor(mounted, &mut access, revision_three)
+            .unwrap_or_else(|_| panic!("revision-3 commit failed"));
+        let mounted = recover_once(mounted, &mut access)
+            .unwrap_or_else(|_| panic!("revision-3 cleanup failed"));
+        assert_eq!(mounted.recovery(), CredentialStoreRecovery::Clean);
+        drop(mounted);
+
+        access.backend_mut().reset_io();
+        let boot = boot_credentials(&mut access);
+        assert_eq!(boot.state(), CredentialBootState::Ready);
+        access.backend_mut().reset_io();
+        let device_id = device_id(0x5a);
+        let mut runtime = CredentialRuntime::from_boot(boot, store_binding, device_id);
+        open_pairing_window(&mut runtime);
+        let offer = BeginOffer::after_pending_commit(
+            device_id,
+            pending_id,
+            CredentialGeneration::new(2),
+            PairingPsk::new(PENDING_PSK).unwrap(),
+        )
+        .unwrap();
+        let mut rng = TestRng::patterned(0x63);
+        let (transcript, verification_proof) =
+            admit_valid_activation(&mut runtime, &mut rng, &offer);
+        assert!(matches!(
+            runtime.drive_live_pairing(&mut access),
+            CredentialPairingDriveOutcome::MutationPrepared(PairingMutation::ActivatePending)
+        ));
+        let confirmation = match runtime.drive_live_pairing(&mut access) {
+            CredentialPairingDriveOutcome::Activated(confirmation) => confirmation,
+            _ => panic!("non-adjacent activation did not commit"),
+        };
+        let authority = runtime
+            .mounted
+            .as_ref()
+            .and_then(MountedCredentialStore::publishable_authority)
+            .expect("activated authority is publishable");
+        let (_, active_generation, _active_psk) = authority
+            .select_for_handshake(pending_id)
+            .expect("activated credential is selectable")
+            .into_parts();
+        assert_eq!(offer.generation().get(), 2);
+        assert_eq!(active_generation.get(), 4);
+        assert_ne!(active_generation.get(), offer.generation().get() + 1);
+        assert_eq!(confirmation.generation(), active_generation);
+        assert!(confirmation.verify(offer.psk(), &transcript, &verification_proof));
     }
 
     #[test]

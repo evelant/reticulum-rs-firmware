@@ -229,7 +229,9 @@ retain a publishable authority. The image has both the distinct
 pre-authentication initialization/pairing records and a deliberately minimal
 authenticated USB session/API bearer. The latter admits one handshake per
 connection and one request at a time and fails terminally until reset; its
-powered authentication path remains unqualified.
+initialize/pair/reboot/authenticated-capabilities happy path is qualified on one
+powered board. Submission, repeated-session, ambiguity, and fault behavior
+remain separate gates.
 Every successfully mounted owner, including a blocked or cleanup-failed owner,
 is retained in `ProductStorageCoordinator`. Erased media is never provisioned
 automatically.
@@ -245,9 +247,11 @@ physical runtime reclassifies the media and either establishes or resumes the
 canonical empty revision-1 authority. Programmed noncanonical media is never
 reformatted by this path. The E290 node task now invokes this path only after
 the USB/GPIO owner has established the exact connection-bound physical-presence
-window. Both powered boards have reached `physical-presence-required`, but no
-qualifying hold, physical credential write, or post-write readback is yet
-qualified.
+window. Both powered boards have reached `physical-presence-required`; one board
+has additionally completed the qualifying hold, empty revision-1 write,
+Pending-to-Active lifecycle, exact Active partition readback, reboot, and
+authenticated capabilities exchange. Pending/Abort readbacks and fault cuts
+remain unqualified.
 
 The portable store also provides the read-only
 `classify_empty_provision_media` four-way classifier for this boundary:
@@ -447,15 +451,16 @@ command/reply channels keep the
 opaque exclusivity capability with the node/storage owner. The node schedules
 live operations through a causal control/live frontier, retains exact request
 correlation across durable drive/reconciliation, and returns only the matching
-terminal result through the secret-owning handoff. This composition is host-
-and target-verified. Both boards have also returned
-`initialization-required` and `physical-presence-required`; this bounded control
-result is not successful powered initialization evidence. The remaining
-boundary includes:
+  terminal result through the secret-owning handoff. This composition is host-
+  and target-verified. Both boards have also returned
+  `initialization-required` and `physical-presence-required`; one board then
+  completed initialization, pairing, durable activation, reboot, and an
+  authenticated capabilities exchange. The remaining boundary includes:
 
-- successful powered initialization, Begin, proof, durable activation, abort,
-  and fault/cut qualification;
-- powered authenticated session/API and no-fallback qualification;
+- exact powered Pending and Abort readbacks plus ambiguity/fault/cut
+  qualification across every mutation boundary;
+- authenticated submission, no-fallback failure cases, and repeated-session
+  qualification beyond the minimal capabilities happy path;
 - USB suspend/resume behavior
   still requires powered host-matrix validation; the present SOF/missed-SOF
   policy is not a final suspend contract.
@@ -544,11 +549,12 @@ but cannot claim security from the developer USB trust shortcut.
   session/tag requirements, payload shapes, unknown-code rejection, and framing
   fault ownership. Its featureless graph reaches only framing and is composed
   only into the permanent E290 product, not a legacy product or HIL graph.
-- Complete in the portable live-pairing slice: ADR 0010's 13 unit tests, four
-  compile-fail doctests and five independent Python tests freeze all eight
+- Complete in the portable live-pairing slice: ADR 0010's 14 unit tests, four
+  compile-fail doctests and six independent Python tests freeze all eight
   successful flights, fixed payloads and result vocabularies, COBS bytes,
   transcript/proof/confirmation KATs, every transcript-bound byte and role,
-  substituted-reference rejection, and secret-owner drop behavior. Strict
+  the actual advanced Active generation, substituted-reference rejection, and
+  secret-owner drop behavior. Strict
   host, generic bare-metal and ESP32-S3 Xtensa gates pass. The core is required
   only by the permanent E290 graph and remains forbidden from legacy/HIL graphs.
 - Complete in the resident E290 lifecycle and handoff slice: bounded entropy;
@@ -568,7 +574,7 @@ but cannot claim security from the developer USB trust shortcut.
   mapping, single USB ownership, GPIO21 pull-up composition, initialization-
   before-journal scheduling, shared control/live decoding, causal ordering,
   durable reply correlation, reset-generation blocking, physical detachment,
-  USB-RAM scrubbing, and earliest-Rust-entry boot quarantine. The 123-test
+  USB-RAM scrubbing, and earliest-Rust-entry boot quarantine. The 124-test
   firmware library, 29 focused host-client tests, full 176-test xtask suite,
   strict host/target Clippy, rustdoc, release linking, graph policy, and image-
   size ceilings pass. Final measurements are recorded with the qualified image.
@@ -582,7 +588,8 @@ but cannot claim security from the developer USB trust shortcut.
   8 KiB credential-partition readbacks on both boards were entirely `0xff` with
   SHA-256
   `7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f`,
-  confirming zero writes. Successful post-write readback remains open.
+  confirming zero writes. That historical run did not qualify a post-write
+  readback.
 - Complete as preceding-image boot-quarantine and no-mutation control: the
   701,744-byte image with SHA-256
   `14d9fd6dd482c47baa9afd2fda6a5ba1d69f46785bf23ae29f6b9fe561e4b212`
@@ -599,6 +606,17 @@ but cannot claim security from the developer USB trust shortcut.
   recovered sequence-zero `initialization-required`, and both credential
   partitions remained entirely `0xff`. No authenticated record was admitted by
   that image; this does not qualify the subsequently composed minimal bearer.
+- Complete as a bounded powered happy path on MAC `ac:a7:04:e1:3e:88`: the
+  current 748,016-byte image with SHA-256
+  `4864180ab1d51081758ec3bec53068d6c75316209a2ccc269a0aad48c210fe2c`
+  matched exact address-zero readback. A physical hold completed initialization,
+  pairing committed Active generation 3, the exact post-activation credential
+  partition read SHA-256
+  `ce7c4937b0e72c3a8a332a040267b0c408a8946ea75f22041688cd7f5bd99170`,
+  and a fresh post-reset USB epoch completed authenticated
+  `system.capabilities`. Only the digest of the secret-bearing partition is
+  recorded. This does not qualify Pending/Abort images, ambiguity/fault cuts,
+  authenticated submission, or the deferred session features.
 - The host asserts DTR, clears RTS, and keeps initialize on one open TTY. TTY
   reopen is not an epoch boundary; only USB bus reset is. Status defaults to 15
   seconds and initialize to 120 seconds. A post-send I/O failure or timed-out
@@ -629,5 +647,7 @@ but cannot claim security from the developer USB trust shortcut.
   exact flash readback before this path is enabled outside developer/HIL use.
 
 The software-routed pre-authentication lifecycle and durable credential mutation
-are complete. This ADR does not claim successful powered initialization/
-pairing/activation, powered-cut recovery, or an authenticated session/API gate.
+are complete, and one powered initialization/pair/activation/reboot/capabilities
+happy path is qualified. This ADR does not claim powered-cut recovery, exact
+Pending/Abort readbacks, authenticated submission, or a production session/API
+security profile.
