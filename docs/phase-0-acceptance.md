@@ -328,7 +328,7 @@ portable authenticated device-API adapter is also implemented: default builds
 serve capabilities and principal-scoped status, while the explicit target-safe
 feature enables durable experimental acceptance. Both profiles are target-
 checked. The permanent E290 graph keeps the journal runtime and sole flash in a
-resident coordinator and passes 83 host-library tests plus 12 focused host-
+resident coordinator and passes 95 host-library tests plus 12 focused host-
 client tests. These focused counts do not claim a full workspace rerun.
 Immediately after flash open it
 validates the exact `api_credentials` partition/eFuse binding, mounts and
@@ -360,11 +360,14 @@ preventing release evidence retained for an older epoch from arming the new
 epoch and requiring a complete fresh High debounce.
 
 Strict host/target, graph, release-link, host-client, and size-cap checks pass.
-The final ELF is 544,371/3,548/469,280/1,017,199 bytes for text/data/BSS/total;
-the application is 587,456 of 6,291,456 bytes. Its explicit 16 MiB repository-
-partition-table merged image is 652,992 bytes with SHA-256
-`1727a14b58a076d65ea12feb61b564d5dfc66d6c6f0b9a8ddd39fc773332705c`, and that
-exact image was flashed to both boards. Both returned
+The current resident-live-pairing software ELF is
+547,915/3,548/469,280/1,020,743 bytes for text/data/BSS/total; the application is
+590,960 of 6,291,456 bytes. Its 656,496-byte explicit 16 MiB repository-
+partition-table merged image has SHA-256
+`9e788486c0621f0a2c32049b7df6522259b510fd2e080d26b83e5c5228ffc564` but has not
+yet been flashed. The preceding 652,992-byte USB-control image with SHA-256
+`1727a14b58a076d65ea12feb61b564d5dfc66d6c6f0b9a8ddd39fc773332705c` was flashed
+to both boards. Both returned
 `initialization-required` and `physical-presence-required`. No-button,
 single-open workflows on both boards advanced through sequences 0--47 before
 their five-second overall deadlines, proving bounded multi-request liveness

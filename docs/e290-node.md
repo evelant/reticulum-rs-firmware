@@ -1,7 +1,7 @@
 # Permanent Vision Master E290 node image
 
 **Status:** the first permanent, LoRa-first image is implemented and passes its
-83-test host-library composition suite, 12 focused host-client tests,
+95-test host-library composition suite, 12 focused host-client tests,
 portable-target, ESP32-S3 build, strict review, graph, and image-size gates. Its
 third task now owns a narrow USB Serial/JTAG pre-authentication status/initialize
 bearer and debounced GPIO21 physical presence. The final image returned
@@ -42,8 +42,12 @@ pass their portable gates. E290 boot now consumes that classifier read-only and
 maps only its canonical interrupted trajectory to an explicit disabled state;
 it does not recover or initialize media automatically. The feature-free policy
 is now a permanent-E290-only dependency, resident inside the coordinator's
-`CredentialRuntime` with the exact boot binding, any mounted authority, and any
-admitted initialization permit. A sole USB Serial/JTAG/GPIO task now terminates
+`CredentialRuntime` with the exact boot binding, any mounted authority, any
+admitted initialization permit, and every live-pairing proof/store owner. The
+runtime implements bounded entropy, Begin/ProofStart/Activate/AbortCurrent,
+cleanup-before-next-mutation, and ambiguous-result reconciliation. A compiled
+bearer-neutral depth-one handoff preserves exact secret-bearing owners under
+pressure. A sole USB Serial/JTAG/GPIO task now terminates
 the zero-session, zero-tag status/initialize records. The first SOF establishes
 a boot-lifetime connection epoch; an 8 ms missed-SOF interval suspends endpoint
 work without changing that epoch or its exact-next sequence; a later SOF resumes
@@ -53,8 +57,9 @@ replies with the node through depth-one channels. The opaque exclusivity
 capability and the sole flash coordinator remain node-owned. This bootstrap lane
 does not implement an authenticated session, the logical device API, or a
 Reticulum packet interface, and successful physical initialization remains
-unqualified on powered hardware. Live external authenticated admission is still blocked by
-Begin/Proof/Activate/Abort composition and the external API/session lane. ADR
+unqualified on powered hardware. Live external authenticated admission is still
+blocked by node/USB scheduling of the resident lifecycle and the external API/
+session lane. ADR
 0005's active-owner policy is implemented: a
 permanent fault
 with an unresolved frame enters interface-local `ActiveOwnerFailStopped`, takes
@@ -79,9 +84,11 @@ transport-neutral node task
       retained boot binding + optional MountedCredentialStore
       feature-free PairingPolicy + private initialization permit
       forward-only erased/interrupted physical drive
+      resident live-pairing proof + typed mutation/reconciliation owners
     SubmissionRuntime + operation-scoped BoundJournal views
     exact authorized-frame retain/re-offer + durable echo
   depth-one pre-auth command/reply handoff
+  depth-one bearer-neutral live-pairing handoff (compiled, not split yet)
              |
        InterfaceFabric slot 0
        ticketed jobs/completions
@@ -378,8 +385,9 @@ bus-reset-delimited nonzero connection epochs, exact-next request sequences,
 stale-RX discard, and coarse response framing. A missed-SOF suspension retains
 the epoch, sequence gate, and bytes already committed to the endpoint FIFO; it
 does not represent disconnect. Powered reset/suspend/resume semantics are still
-to be qualified. Live Begin, Proof, Activate, and Abort mutations remain
-uncomposed.
+to be qualified. Live Begin, Proof, Activate, and Abort are implemented inside
+the resident credential owner, but this task lane does not route or drive them
+yet.
 
 Both operation-scoped views name the device with the domain-separated 16-byte
 value `"e290-flash" || eFuse base MAC`. The credential view additionally fixes
@@ -492,14 +500,18 @@ SHA-256
 retains explicit growth headroom rather than treating this early image as the
 full appliance ceiling.
 
-The final USB-control slice links at 544,371 bytes text, 3,548 bytes initialized
-data, 469,280 bytes BSS/reservations, and 1,017,199 bytes total by GNU size. Its
-packaged application is 587,456 of 6,291,456 bytes (9.34% of the factory slot).
+The resident live-pairing software slice links at 547,915 bytes text, 3,548
+bytes initialized data, 469,280 bytes BSS/reservations, and 1,020,743 bytes
+total by GNU size. Its packaged application is 590,960 of 6,291,456 bytes
+(9.39% of the factory slot); the unpadded merged image is 656,496 bytes with
+SHA-256
+`9e788486c0621f0a2c32049b7df6522259b510fd2e080d26b83e5c5228ffc564`.
 The depth-one pairing handoff contributes a 144-byte static owner and the USB
 task pool is 2,016 bytes. These values remain below the unchanged CI ceilings of
 720,896/16,384/475,136/1,180,000 bytes, leaving 5,856 bytes under the aggregate
-BSS guard. They are not runtime stack-high-water or powered-memory results; the
-exact merged-image binding used below supplies the package hash.
+BSS guard. They are host/link/package evidence, not runtime stack-high-water,
+powered-memory, or flashed-hardware results. The last image actually flashed to
+both boards remains the earlier USB-control package recorded below.
 
 ## Powered permanent-graph smokes
 
@@ -818,10 +830,11 @@ as the bounded qualification fixture for the deterministic DATA/proof exchange.
   connection epochs, exact-next sequence checks, and depth-one command/reply
   handoff; complete the powered button-confirmed credential write and exact
   post-write readback, then qualify reset/suspend/resume behavior. Then
-  compose live Begin/Proof/Activate/Abort mutation ownership with the immutable
-  authority and bounded COBS framing,
+  connect the resident live Begin/Proof/Activate/Abort mutation owner and
+  bearer-neutral secret handoff to the node task, generalize cross-store
+  exclusion, and multiplex its records through the bounded COBS framing,
   qualification-session core, and boot-lifetime job/reply handoff with the
-  first authenticated USB API bearer. Lifecycle persistence and authenticated
+  first authenticated USB API bearer. Bearer scheduling and authenticated
   session/API composition are the remaining edges for live external admission;
   the narrow pre-authentication bearer, one-entry composition cap, and ADR 0005
   host behavior already pass. A later product-capacity policy must not weaken the same

@@ -40,8 +40,11 @@ initialization and post-write readback remain open. ADR 0010's separate
 allocation-free live-pairing core now freezes Begin, ProofStart, Activate and
 AbortCurrent records, typed continuation/reference binding, HMAC-SHA256 proof
 and activation confirmation, secret-owner zeroization, and independent Python
-vectors. E290 durable lifecycle mutation, entropy, secret-bearing handoff, and
-the external authenticated API/session firmware lane remain unimplemented. A
+vectors. The E290 resident owner now implements bounded entropy, exact proof
+continuation, durable Add/Activate/Abort mutation with reconciliation and
+cleanup ordering, plus a bearer-neutral secret-owning handoff. Node/USB routing
+of that lifecycle and the external authenticated API/session firmware lane
+remain unimplemented. A
 product port may route an
 accepted submission through the node after the durable barriers.
 
@@ -386,12 +389,12 @@ authorization cannot reuse a session generation. E290 firmware now mounts and
 recovers the portable store before any other product-store write and retains
 its `Ready`, authentication-only, uninitialized-erased,
 initialization-interrupted, blocked, corrupt, or backend-failed state. The
-resident initialization runtime and sole-owner physical drive are invoked only
-by the E290's pre-authentication status/initialize lane. A future authenticated
-external serving runtime must add live Begin/Proof/Activate/Abort pairing,
-enforce connection-level rate limits, and keep authentication state outside
-request CBOR. The existing bootstrap does not create a session grant or admit a
-logical request.
+resident credential runtime and sole-owner physical drive are invoked only by
+the E290's pre-authentication status/initialize lane today. A future
+authenticated external serving runtime must route the implemented live Begin/
+Proof/Activate/Abort lifecycle, enforce connection-level rate limits, and keep
+authentication state outside request CBOR. The existing bootstrap does not
+create a session grant or admit a logical request.
 
 Semantic journal schema 2 persists the principal, idempotency key,
 operation-specific intent, credential ID/generation, complete authority
@@ -524,7 +527,7 @@ transcript byte, substituted continuations, activation confirmation, malformed
 shapes, and secret-owner drop behavior. Target checks exercise the portable
 layers directly on `no_std` bare-metal builds.
 
-The separate permanent-E290 composition gate now passes 83 host-library tests
+The separate permanent-E290 composition gate now passes 95 host-library tests
 plus strict host/target review and release-link checks. It covers the third USB/
 GPIO task, active-low stable-time debounce, an 8 ms missed-SOF suspension that
 retains its epoch and sequence until bus reset, connection-epoch and sequence

@@ -352,8 +352,13 @@ typed credential-reference continuation, HMAC-SHA256 transcript and mutual
 activation confirmation while zeroizing PSKs, challenges, proofs, decoded
 records, framing scratch, and encoded frames. Independent standard-library
 Python vectors fix all eight successful COBS flights and both proof domains.
-The core remains intentionally outside every product graph until the E290 sole
-credential owner composes its durable lifecycle and secret-bearing handoff.
+The core is now composed only into the permanent E290 graph. Its resident
+credential owner implements bounded entropy, exact Begin/ProofStart/Activate/
+AbortCurrent policy completion, typed Add/Activate/Abort store mutation,
+ambiguous-result reconciliation, cleanup-before-next-mutation, and exact
+connection/window/deadline challenge binding. A separate bearer-neutral,
+depth-one handoff returns the exact unsent secret-bearing owner under pressure.
+Neither handoff endpoint is instantiated by the node or USB task yet.
 The feature-free pairing policy is now a permanent E290 dependency only, and a
 resident `CredentialRuntime` inside `ProductStorageCoordinator` privately
 retains that policy, the exact boot binding, any mounted authority, and any
@@ -361,15 +366,16 @@ admitted initialization permit. Its physical drive reclassifies a fresh bound
 view and accepts only forward progress along the exact erased or interrupted
 trajectory, retaining ownership across ambiguous results. The coordinator's
 compiled sole-owner initialization port freshly reinspects node identity and
-creates the short-lived bound credential view. No USB byte owner, GPIO debounce,
-connection-epoch source, task handoff, or powered initialization invokes it yet.
+creates the short-lived bound credential view. The node task invokes that port
+through the pre-authentication USB/GPIO command lane; powered testing has
+reached the physical-presence gate but not a successful credential write.
 Its explicit cross-store gate defers initialization while journal mutation is
 retained and defers journal mutation or new submission acceptance while
 initialization is in flight, without disabling projection, status, routing, or
 LoRa service.
-Boot never starts initialization automatically, and live Begin, Proof,
-Activate, and Abort lifecycle mutations remain uncomposed. No firmware API/
-session job lane or bearer invokes the adapter yet. The credential authority
+Boot never starts initialization automatically. Live lifecycle ownership is
+resident and host/target verified, but no node scheduling path, external
+firmware API/session job lane, or bearer invokes it yet. The credential authority
 passes 23 unit tests, eight public
 successor tests, and 18 compile-fail doctests; the
 physical store passes 32 fake-NOR tests. The accepted
@@ -383,9 +389,9 @@ store/pairing decision in
 experimental host tests/clippy plus the corresponding ESP32-S3 Xtensa checks
 pass.
 
-The E290 library now has 57 passing host tests: 55 focused policy/product/
-credential-boot/credential-runtime tests, including a mechanical source-order
-regression, plus two real cross-layer composition tests. The happy path rejects
+The E290 library now has 95 passing host tests, including the resident live-
+pairing lifecycle, secret-owning handoff, initialization/product policy, and
+two real cross-layer composition tests. The happy path rejects
 unauthenticated and unauthorized requests without a NOR write, durably accepts
 exactly one request and rejects a second novel request at the qualification cap,
 commits `Preparing` before touching the real `NodeInterfaceSupervisor`, then
@@ -427,12 +433,11 @@ credential authority, qualification-session core, boot-lifetime job handoff,
 and E290 `ProductStorageCoordinator` port implementation are compiled, and
 schema-2 acceptance retains exact authorization provenance, but no external
 firmware lane or USB/BLE/Wi-Fi bearer serves through them. The
-resident credential runtime and compiled sole-owner initialization port now
-retain an admitted initialization permit, reclassify immediately before
-physical I/O, and preserve exact binding and mounted authority ownership. No
-GPIO debounce, bearer connection epoch source, command handoff, or powered test
-invokes that port yet, and live Begin/Proof/Activate/Abort
-mutations remain uncomposed.
+resident credential runtime now also retains live pairing permits, proofs,
+secrets, typed store candidates, and reconciliation owners through definite
+outcomes. The compiled bearer-neutral secret handoff preserves exact owners
+under pressure. The node/USB tasks do not yet route that handoff or drive the
+live lifecycle, and powered pairing remains unqualified.
 The legacy `TxSupervisor` remains a separate RF-inert test aggregate. The permanent
 `NodeInterfaceSupervisor` now owns the router, DATA and ordinary coordinators,
 and both permit-service families; the first permanent E290 image composes it
@@ -487,18 +492,19 @@ connected to the dispatcher, sole-Rete owner, timed RNode RX and one E290 LoRa
 actor in the first permanent build-verified target. Its exact authorized-frame
 durability handoff and ADR 0005 active-owner fail-stop now pass cross-layer host
 composition tests. Live external admission is blocked by successful powered
-credential initialization, live pairing lifecycle composition, and the
-authenticated API/session firmware lane—not by credential-store boot
+credential initialization, node/bearer scheduling of the resident live pairing
+lifecycle, and the authenticated API/session firmware lane—not by credential-store boot
 composition, the frozen pairing/session cryptography, another semantic
 authority, durability policy, partition, or capacity decision. The feature-free
 ADR 0009 admission policy, resident
 initialization owner, and sole-owner physical drive are compiled only into the
 permanent E290 graph. The pre-authentication initialization codec, debounced
 physical presence, USB byte owner, and bounded command/reply handoff are already
-composed. The next software slice must join the frozen live-pairing core to
-typed Add/Activate/Abort store ownership, bounded entropy, cross-store
-exclusion, and a secret-bearing reply handoff before the credential-backed
-USB-to-LoRa edge, durable configuration/message hosting, and client delivery.
+composed. The next software slice must generalize cross-store exclusion, connect
+the resident lifecycle and bearer-neutral secret handoff to the node owner, and
+multiplex live records into the existing sole USB framing/sequence owner before
+the credential-backed USB-to-LoRa edge, durable configuration/message hosting,
+and client delivery.
 The node-side routing
 boundary remains interface-neutral so additional Reticulum links can be added
 later through adapters without rewriting the LoRa actor or protocol owner; no

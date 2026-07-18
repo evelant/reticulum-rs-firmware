@@ -4,31 +4,53 @@
 //! media. This coordinator consumes that boot result, owns the physical-
 //! presence policy and any admitted initialization capability, and accepts only
 //! forward progress when it later receives a fresh operation-scoped flash view.
-//! It intentionally exposes no Begin, Proof, activation, or abort path yet.
+//! Live pairing retains every semantic, policy, proof, and physical-store owner
+//! until a definite terminal result; bearer framing remains outside this module.
 
 use core::mem;
 
+use rand_core::{CryptoRng, RngCore};
 use reticulum_device_api_credential_store::{
-    BoundCredentialStoreAccess, CredentialStoreBinding, CredentialStoreBindingError,
-    CredentialStoreFault, CredentialStoreMountError, CredentialStoreRecovery,
-    EmptyProvisionMediaClassification, MountedCredentialStore, classify_empty_provision_media,
-    mount, recover_empty_provision,
+    BoundCredentialStoreAccess, CommitPairingLifecycleSuccessorError, CredentialStoreBinding,
+    CredentialStoreBindingError, CredentialStoreFault, CredentialStoreMountError,
+    CredentialStoreRecovery, EmptyProvisionMediaClassification, MountedCredentialStore,
+    PendingPairingLifecycleSuccessor, classify_empty_provision_media,
+    commit_pairing_lifecycle_successor, mount, reconcile_pairing_lifecycle_successor,
+    recover_empty_provision, recover_once,
+};
+use reticulum_device_api_credentials::{
+    AuthorizationPolicyVersion, CredentialAuthority, CredentialId, CredentialLifecycleFaultKind,
+    E290_CREDENTIAL_RECORD_CAPACITY, NewPendingCredential, PairingLifecycleStoreCandidate,
+    PairingOrigin, PendingCredentialRef, Permissions, PrincipalId,
+};
+use reticulum_device_api_pairing::{
+    ActivateFailure, ActivateRequest, DeviceChallenge, DeviceId, PairingFailure, PairingPsk,
+    PairingTranscript, ProofChallenge, ProofStartRequest,
 };
 use reticulum_device_api_pairing_policy::{
-    AcquirePairingExclusive, ActiveLowButton, ButtonEffect, ConnectionId, ConnectionRefusal,
+    AbortOutcome, AcquirePairingExclusive, ActivationOutcome, ActiveLowButton, AttemptDecision,
+    AttemptRefusal, BeginFacts, BeginOutcome, ButtonEffect, ConnectionId, ConnectionRefusal,
     ExclusiveAcquireOutcome, InitializableMedia, InitializationFacts, InitializationPermit,
     MonotonicMillis, PairingPolicy, PendingRef, PendingState, PermitError, PolicyEvent,
-    RequestRefused, WindowClosed,
+    RequestRefusal, RequestRefused, WindowClosed,
 };
+use zeroize::Zeroizing;
 
 use crate::credential_boot::{
     CredentialBootOutcome, CredentialBootState, MAXIMUM_CREDENTIAL_BOOT_OUTCOME_BYTES,
+};
+use crate::credential_pairing::{
+    AbortAdmission, ActivateAdmission, BeginAdmission, CredentialPairingDriveOutcome,
+    CredentialPairingStatus, LivePairingOwnership, MAX_PAIRING_ENTROPY_ATTEMPTS,
+    MAXIMUM_LIVE_PAIRING_OWNERSHIP_BYTES, MutationCompletion, PairingDriveRetry, PairingMutation,
+    ProofOwnership, ProofStartAdmission,
 };
 
 /// Conservative fixed-RAM ceiling for retained credential and pairing state.
 pub const MAXIMUM_CREDENTIAL_RUNTIME_BYTES: usize = MAXIMUM_CREDENTIAL_BOOT_OUTCOME_BYTES
     + reticulum_device_api_pairing_policy::PAIRING_POLICY_RAM_CEILING
-    + 256;
+    + MAXIMUM_LIVE_PAIRING_OWNERSHIP_BYTES
+    + 512;
 
 /// Public snapshot of explicit initialization ownership.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -161,9 +183,11 @@ enum InitializationOwnership {
 #[must_use = "credential and pairing ownership must remain resident"]
 pub struct CredentialRuntime {
     binding: CredentialStoreBinding,
+    device_id: DeviceId,
     boot_state: CredentialBootState,
     mounted: Option<MountedCredentialStore>,
     pairing: Option<PairingPolicy>,
+    live_pairing: LivePairingOwnership,
     initialization: InitializationOwnership,
 }
 
@@ -171,7 +195,11 @@ const _: () = assert!(mem::size_of::<CredentialRuntime>() <= MAXIMUM_CREDENTIAL_
 
 impl CredentialRuntime {
     /// Consume boot ownership into the expected product-flash binding.
-    pub fn from_boot(outcome: CredentialBootOutcome, expected: CredentialStoreBinding) -> Self {
+    pub fn from_boot(
+        outcome: CredentialBootOutcome,
+        expected: CredentialStoreBinding,
+        device_id: DeviceId,
+    ) -> Self {
         let (boot_state, mounted) = outcome.into_parts_for_binding(expected);
         let initialization = match boot_state {
             CredentialBootState::UninitializedErased => {
@@ -185,9 +213,11 @@ impl CredentialRuntime {
         let pairing = pairing_policy_for_boot(boot_state, mounted.as_ref());
         Self {
             binding: expected,
+            device_id,
             boot_state,
             mounted,
             pairing,
+            live_pairing: LivePairingOwnership::Idle,
             initialization,
         }
     }
@@ -200,6 +230,11 @@ impl CredentialRuntime {
     /// Exact physical binding required for every later operation-scoped view.
     pub const fn binding(&self) -> CredentialStoreBinding {
         self.binding
+    }
+
+    /// Stable device-API identifier bound for the complete resident lifetime.
+    pub const fn device_id(&self) -> DeviceId {
+        self.device_id
     }
 
     /// Non-secret mounted authority revision, when one is retained.
@@ -224,6 +259,7 @@ impl CredentialRuntime {
     pub fn mutation_eligible(&self) -> bool {
         self.boot_state.mutation_eligible()
             && self.pairing.is_some()
+            && self.live_pairing.is_idle()
             && self
                 .mounted
                 .as_ref()
@@ -237,6 +273,46 @@ impl CredentialRuntime {
     /// Whether boot supplied enough validated state to own pairing policy.
     pub const fn pairing_policy_available(&self) -> bool {
         self.pairing.is_some()
+    }
+
+    /// Current non-secret live-pairing ownership and cleanup state.
+    pub fn live_pairing_status(&self) -> CredentialPairingStatus {
+        match &self.live_pairing {
+            LivePairingOwnership::Idle => {
+                if self
+                    .mounted
+                    .as_ref()
+                    .is_some_and(|store| store.recovery() != CredentialStoreRecovery::Clean)
+                {
+                    CredentialPairingStatus::CleanupRequired
+                } else {
+                    CredentialPairingStatus::Idle
+                }
+            }
+            LivePairingOwnership::Proof(_) => CredentialPairingStatus::ProofOutstanding,
+            LivePairingOwnership::AwaitingCleanStore(completion) => {
+                CredentialPairingStatus::AwaitingCleanStore(completion.mutation())
+            }
+            LivePairingOwnership::Prepared { completion, .. } => {
+                CredentialPairingStatus::MutationPrepared(completion.mutation())
+            }
+            LivePairingOwnership::Reconciling { completion, .. } => {
+                CredentialPairingStatus::ReconcileRequired(completion.mutation())
+            }
+            LivePairingOwnership::Blocked => CredentialPairingStatus::Blocked,
+        }
+    }
+
+    /// Whether journal physical mutation must remain excluded by credential work.
+    pub fn credential_physical_mutation_outstanding(&self) -> bool {
+        matches!(
+            self.initialization,
+            InitializationOwnership::InFlight { .. }
+        ) || self.live_pairing.mutation().is_some()
+            || self
+                .mounted
+                .as_ref()
+                .is_some_and(|store| store.recovery() != CredentialStoreRecovery::Clean)
     }
 
     /// Current non-secret explicit-initialization state.
@@ -269,7 +345,11 @@ impl CredentialRuntime {
         now: MonotonicMillis,
         connection: ConnectionId,
     ) -> Option<Result<Option<WindowClosed>, ConnectionRefusal>> {
-        Some(self.pairing.as_mut()?.connected(now, connection))
+        let outcome = self.pairing.as_mut()?.connected(now, connection);
+        if outcome.is_ok() || matches!(outcome, Err(ConnectionRefusal::ClockRegression)) {
+            self.cancel_challenge_only();
+        }
+        Some(outcome)
     }
 
     /// Forward a disconnect while retaining any admitted physical operation.
@@ -278,7 +358,13 @@ impl CredentialRuntime {
         now: MonotonicMillis,
         connection: ConnectionId,
     ) -> Option<PolicyEvent> {
-        Some(self.pairing.as_mut()?.disconnected(now, connection))
+        let event = self.pairing.as_mut()?.disconnected(now, connection);
+        if matches!(event, PolicyEvent::Fault(_)) {
+            self.cancel_challenge_only();
+        } else {
+            self.cancel_challenge_for_connection(connection);
+        }
+        Some(event)
     }
 
     /// Forward one already-debounced physical-presence sample.
@@ -287,7 +373,11 @@ impl CredentialRuntime {
         now: MonotonicMillis,
         level: ActiveLowButton,
     ) -> Option<ButtonEffect> {
-        Some(self.pairing.as_mut()?.observe_button(now, level))
+        let effect = self.pairing.as_mut()?.observe_button(now, level);
+        if matches!(effect, ButtonEffect::Closed(_) | ButtonEffect::Fault(_)) {
+            self.cancel_challenge_only();
+        }
+        Some(effect)
     }
 
     /// Confirm that the bearer granted the requested exclusive connection.
@@ -296,12 +386,620 @@ impl CredentialRuntime {
         now: MonotonicMillis,
         effect: AcquirePairingExclusive,
     ) -> Option<ExclusiveAcquireOutcome> {
-        Some(self.pairing.as_mut()?.exclusive_acquired(now, effect))
+        let outcome = self.pairing.as_mut()?.exclusive_acquired(now, effect);
+        if matches!(
+            &outcome,
+            ExclusiveAcquireOutcome::Closed(_) | ExclusiveAcquireOutcome::Fault(_)
+        ) {
+            self.cancel_challenge_only();
+        }
+        Some(outcome)
     }
 
     /// Poll the retained physical-presence window deadline.
     pub fn pairing_poll_timeout(&mut self, now: MonotonicMillis) -> Option<PolicyEvent> {
-        Some(self.pairing.as_mut()?.poll_timeout(now))
+        let challenge_expired = matches!(
+            &self.live_pairing,
+            LivePairingOwnership::Proof(proof) if now >= proof.permit.deadline()
+        );
+        let event = self.pairing.as_mut()?.poll_timeout(now);
+        if challenge_expired || !matches!(event, PolicyEvent::None) {
+            self.cancel_challenge_only();
+        }
+        Some(event)
+    }
+
+    /// Admit one empty Begin request and retain its complete AddPending candidate.
+    ///
+    /// This performs no physical I/O. The caller must exclude journal mutation
+    /// before admission and then drive the accepted owner with
+    /// [`Self::drive_live_pairing`].
+    pub fn request_pairing_begin<R>(
+        &mut self,
+        now: MonotonicMillis,
+        connection: ConnectionId,
+        rng: &mut R,
+    ) -> BeginAdmission
+    where
+        R: RngCore + CryptoRng,
+    {
+        let mutation_ready = self.mutation_eligible();
+        let (retained_capacity_available, next_revision_available) = self
+            .mounted
+            .as_ref()
+            .and_then(MountedCredentialStore::publishable_authority)
+            .map(|authority| {
+                (
+                    authority.record_count() < E290_CREDENTIAL_RECORD_CAPACITY,
+                    authority.revision().next().is_ok(),
+                )
+            })
+            .unwrap_or((false, false));
+        let Some(policy) = self.pairing.as_mut() else {
+            return BeginAdmission::Refused(PairingFailure::Unavailable);
+        };
+        let decision = policy.begin(
+            now,
+            connection,
+            BeginFacts::new(
+                mutation_ready,
+                retained_capacity_available,
+                next_revision_available,
+            ),
+        );
+        let permit = match decision {
+            AttemptDecision::Admitted { permit, .. } => permit,
+            AttemptDecision::Refused { reason, .. } => {
+                return BeginAdmission::Refused(public_attempt_refusal(reason));
+            }
+        };
+        if !self.live_pairing.is_idle() {
+            let result = policy.finish_begin(permit, BeginOutcome::NotCommitted);
+            if result.is_err() {
+                self.live_pairing = LivePairingOwnership::Blocked;
+            }
+            return BeginAdmission::Refused(PairingFailure::Blocked);
+        }
+        let Some(authority) = self
+            .mounted
+            .as_ref()
+            .and_then(MountedCredentialStore::publishable_authority)
+        else {
+            let result = policy.finish_begin(permit, BeginOutcome::NotCommitted);
+            if result.is_err() {
+                self.live_pairing = LivePairingOwnership::Blocked;
+            }
+            return BeginAdmission::Refused(PairingFailure::Blocked);
+        };
+        let Some((candidate, pending)) = prepare_begin_candidate(authority, rng) else {
+            let result = policy.finish_begin(permit, BeginOutcome::NotCommitted);
+            if result.is_err() {
+                self.live_pairing = LivePairingOwnership::Blocked;
+            }
+            return BeginAdmission::Refused(PairingFailure::Blocked);
+        };
+        self.live_pairing = LivePairingOwnership::Prepared {
+            completion: MutationCompletion::Begin {
+                permit,
+                device_id: self.device_id,
+                pending,
+            },
+            candidate,
+        };
+        BeginAdmission::Accepted
+    }
+
+    /// Admit ProofStart, select only the exact publishable Pending secret, and
+    /// retain its permit, secret, and transcript for one Activate continuation.
+    pub fn request_pairing_proof_start<R>(
+        &mut self,
+        now: MonotonicMillis,
+        connection: ConnectionId,
+        request: &ProofStartRequest,
+        rng: &mut R,
+    ) -> ProofStartAdmission
+    where
+        R: RngCore + CryptoRng,
+    {
+        let pending = match PendingRef::new(request.credential_id(), request.generation()) {
+            Ok(pending) => pending,
+            Err(_) => return ProofStartAdmission::Refused(PairingFailure::Refused),
+        };
+        let Some(policy) = self.pairing.as_mut() else {
+            return ProofStartAdmission::Refused(PairingFailure::Unavailable);
+        };
+        let permit = match policy.proof(now, connection, pending) {
+            AttemptDecision::Admitted { permit, .. } => permit,
+            AttemptDecision::Refused { reason, .. } => {
+                return ProofStartAdmission::Refused(public_attempt_refusal(reason));
+            }
+        };
+        if !self.live_pairing.is_idle() {
+            let _ = policy.proof_rejected(permit);
+            return ProofStartAdmission::Refused(PairingFailure::Blocked);
+        }
+        let selected = self.mounted.as_ref().and_then(|store| {
+            store
+                .select_pending_for_proof(PendingCredentialRef::new(
+                    pending.id(),
+                    pending.generation(),
+                ))
+                .ok()
+        });
+        let Some(selected) = selected else {
+            let _ = policy.proof_rejected(permit);
+            return ProofStartAdmission::Refused(PairingFailure::Refused);
+        };
+        let (_, selected_psk) = selected.into_parts();
+        let psk = match PairingPsk::from_zeroizing(selected_psk) {
+            Ok(psk) => psk,
+            Err(_) => {
+                let _ = policy.proof_rejected(permit);
+                return ProofStartAdmission::Refused(PairingFailure::Blocked);
+            }
+        };
+        let Some(challenge) = generate_challenge(rng) else {
+            let _ = policy.proof_rejected(permit);
+            return ProofStartAdmission::Refused(PairingFailure::Blocked);
+        };
+        let Some(protocol_connection) =
+            reticulum_device_api_pairing::ConnectionId::new(permit.connection().get())
+        else {
+            let _ = policy.proof_rejected(permit);
+            return ProofStartAdmission::Refused(PairingFailure::Blocked);
+        };
+        let Some(protocol_window) =
+            reticulum_device_api_pairing::WindowId::new(permit.window().get())
+        else {
+            let _ = policy.proof_rejected(permit);
+            return ProofStartAdmission::Refused(PairingFailure::Blocked);
+        };
+        let challenge = match ProofChallenge::new(
+            self.device_id,
+            protocol_connection,
+            protocol_window,
+            pending.id(),
+            pending.generation(),
+            challenge,
+        ) {
+            Ok(challenge) => challenge,
+            Err(_) => {
+                let _ = policy.proof_rejected(permit);
+                return ProofStartAdmission::Refused(PairingFailure::Blocked);
+            }
+        };
+        let transcript = match PairingTranscript::new(request, &challenge) {
+            Ok(transcript) => transcript,
+            Err(_) => {
+                let _ = policy.proof_rejected(permit);
+                return ProofStartAdmission::Refused(PairingFailure::Blocked);
+            }
+        };
+        self.live_pairing = LivePairingOwnership::Proof(ProofOwnership {
+            permit,
+            psk,
+            transcript,
+        });
+        ProofStartAdmission::Challenge(challenge)
+    }
+
+    /// Consume the only outstanding ProofStart continuation.
+    ///
+    /// A wrong reference or HMAC is terminal for the challenge-only operation:
+    /// policy ownership is released and every retained secret is dropped.
+    pub fn request_pairing_activate(
+        &mut self,
+        now: MonotonicMillis,
+        connection: ConnectionId,
+        request: ActivateRequest,
+    ) -> ActivateAdmission {
+        let ownership = mem::replace(&mut self.live_pairing, LivePairingOwnership::Blocked);
+        let LivePairingOwnership::Proof(proof) = ownership else {
+            self.live_pairing = ownership;
+            drop(request);
+            return ActivateAdmission::Refused(ActivateFailure::ProofRejected);
+        };
+        let continuation_is_current = self.pairing.as_mut().is_some_and(|policy| {
+            policy.proof_continuation_is_current(now, connection, &proof.permit)
+        });
+        if !continuation_is_current {
+            drop(request);
+            self.live_pairing = match self
+                .pairing
+                .as_mut()
+                .and_then(|policy| policy.proof_rejected(proof.permit).ok())
+            {
+                Some(()) => LivePairingOwnership::Idle,
+                None => LivePairingOwnership::Blocked,
+            };
+            return ActivateAdmission::Refused(ActivateFailure::ProofRejected);
+        }
+        let verified = match request.verify_continuation(&proof.psk, &proof.transcript) {
+            Ok(verified) => verified,
+            Err(_) => {
+                self.live_pairing = match self
+                    .pairing
+                    .as_mut()
+                    .and_then(|policy| policy.proof_rejected(proof.permit).ok())
+                {
+                    Some(()) => LivePairingOwnership::Idle,
+                    None => LivePairingOwnership::Blocked,
+                };
+                return ActivateAdmission::Refused(ActivateFailure::ProofRejected);
+            }
+        };
+        let Some(policy) = self.pairing.as_mut() else {
+            self.live_pairing = LivePairingOwnership::Blocked;
+            return ActivateAdmission::Refused(ActivateFailure::Unavailable);
+        };
+        let permit = match policy.proof_verified(proof.permit) {
+            Ok(permit) => permit,
+            Err(_) => {
+                self.live_pairing = LivePairingOwnership::Blocked;
+                return ActivateAdmission::Refused(ActivateFailure::Blocked);
+            }
+        };
+        self.live_pairing =
+            LivePairingOwnership::AwaitingCleanStore(MutationCompletion::Activate {
+                permit,
+                verified,
+                psk: proof.psk,
+            });
+        ActivateAdmission::Accepted
+    }
+
+    /// Admit identifier-free AbortCurrent for the device-selected sole Pending.
+    pub fn request_pairing_abort_current(
+        &mut self,
+        now: MonotonicMillis,
+        connection: ConnectionId,
+    ) -> AbortAdmission {
+        let Some(policy) = self.pairing.as_mut() else {
+            return AbortAdmission::Refused(PairingFailure::Unavailable);
+        };
+        let permit = match policy.abort_current(now, connection) {
+            Ok(permit) => permit,
+            Err(refused) => {
+                return AbortAdmission::Refused(public_request_refusal(refused.reason()));
+            }
+        };
+        if !self.live_pairing.is_idle() {
+            let _ = policy.finish_abort(permit, AbortOutcome::NotCommitted);
+            return AbortAdmission::Refused(PairingFailure::Blocked);
+        }
+        self.live_pairing =
+            LivePairingOwnership::AwaitingCleanStore(MutationCompletion::Abort { permit });
+        AbortAdmission::Accepted
+    }
+
+    /// Advance at most one cleanup, candidate-construction, commit, or
+    /// reconciliation stage through the supplied operation-scoped store view.
+    pub fn drive_live_pairing<A>(&mut self, access: &mut A) -> CredentialPairingDriveOutcome
+    where
+        A: BoundCredentialStoreAccess,
+    {
+        let ownership = mem::replace(&mut self.live_pairing, LivePairingOwnership::Blocked);
+        match ownership {
+            LivePairingOwnership::Idle => {
+                self.live_pairing = LivePairingOwnership::Idle;
+                self.drive_credential_cleanup(access, None)
+            }
+            ownership @ LivePairingOwnership::Proof(_) => {
+                self.live_pairing = ownership;
+                CredentialPairingDriveOutcome::Idle
+            }
+            LivePairingOwnership::AwaitingCleanStore(completion) => {
+                self.drive_awaiting_clean_store(access, completion)
+            }
+            LivePairingOwnership::Prepared {
+                completion,
+                candidate,
+            } => self.drive_prepared_mutation(access, completion, candidate),
+            LivePairingOwnership::Reconciling {
+                completion,
+                pending,
+            } => self.drive_reconciliation(access, completion, pending),
+            LivePairingOwnership::Blocked => {
+                self.live_pairing = LivePairingOwnership::Blocked;
+                CredentialPairingDriveOutcome::Blocked(None)
+            }
+        }
+    }
+
+    fn drive_credential_cleanup<A>(
+        &mut self,
+        access: &mut A,
+        mutation: Option<PairingMutation>,
+    ) -> CredentialPairingDriveOutcome
+    where
+        A: BoundCredentialStoreAccess,
+    {
+        match self.cleanup_once(access) {
+            Ok(true) => CredentialPairingDriveOutcome::CleanupCompleted,
+            Ok(false) => CredentialPairingDriveOutcome::Idle,
+            Err(reason) => CredentialPairingDriveOutcome::Retry { mutation, reason },
+        }
+    }
+
+    fn cleanup_once<A>(&mut self, access: &mut A) -> Result<bool, PairingDriveRetry>
+    where
+        A: BoundCredentialStoreAccess,
+    {
+        let Some(store) = self.mounted.take() else {
+            return Err(PairingDriveRetry::Semantic);
+        };
+        if store.recovery() == CredentialStoreRecovery::Clean {
+            self.mounted = Some(store);
+            return Ok(false);
+        }
+        match recover_once(store, access) {
+            Ok(store) => {
+                self.mounted = Some(store);
+                Ok(true)
+            }
+            Err(error) => {
+                let reason = public_store_retry(error.error());
+                self.mounted = Some(error.into_store());
+                Err(reason)
+            }
+        }
+    }
+
+    fn drive_awaiting_clean_store<A>(
+        &mut self,
+        access: &mut A,
+        completion: MutationCompletion,
+    ) -> CredentialPairingDriveOutcome
+    where
+        A: BoundCredentialStoreAccess,
+    {
+        let mutation = completion.mutation();
+        if self
+            .mounted
+            .as_ref()
+            .is_some_and(|store| store.recovery() != CredentialStoreRecovery::Clean)
+        {
+            let outcome = self.drive_credential_cleanup(access, Some(mutation));
+            self.live_pairing = LivePairingOwnership::AwaitingCleanStore(completion);
+            return outcome;
+        }
+        let candidate = self
+            .mounted
+            .as_ref()
+            .and_then(MountedCredentialStore::publishable_authority)
+            .and_then(|authority| match &completion {
+                MutationCompletion::Activate { .. } => authority
+                    .plan_activate_pending(PendingCredentialRef::new(
+                        completion.pending().id(),
+                        completion.pending().generation(),
+                    ))
+                    .ok(),
+                MutationCompletion::Abort { .. } => authority
+                    .plan_abort_pending(PendingCredentialRef::new(
+                        completion.pending().id(),
+                        completion.pending().generation(),
+                    ))
+                    .ok(),
+                MutationCompletion::Begin { .. } => None,
+            })
+            .map(|plan| plan.into_store_candidate());
+        let Some(candidate) = candidate else {
+            self.finish_uncommitted(completion);
+            self.live_pairing = LivePairingOwnership::Blocked;
+            return CredentialPairingDriveOutcome::Blocked(Some(mutation));
+        };
+        self.live_pairing = LivePairingOwnership::Prepared {
+            completion,
+            candidate,
+        };
+        CredentialPairingDriveOutcome::MutationPrepared(mutation)
+    }
+
+    fn drive_prepared_mutation<A>(
+        &mut self,
+        access: &mut A,
+        completion: MutationCompletion,
+        candidate: PairingLifecycleStoreCandidate<E290_CREDENTIAL_RECORD_CAPACITY>,
+    ) -> CredentialPairingDriveOutcome
+    where
+        A: BoundCredentialStoreAccess,
+    {
+        let mutation = completion.mutation();
+        let Some(current) = self.mounted.take() else {
+            self.live_pairing = LivePairingOwnership::Blocked;
+            return CredentialPairingDriveOutcome::Blocked(Some(mutation));
+        };
+        match commit_pairing_lifecycle_successor(current, access, candidate) {
+            Ok(committed) => self.finish_committed(completion, committed.into_store()),
+            Err(CommitPairingLifecycleSuccessorError::Semantic(error)) => {
+                let (current, candidate) = error.into_parts();
+                self.mounted = Some(current);
+                drop(candidate);
+                self.finish_uncommitted(completion);
+                self.live_pairing = LivePairingOwnership::Blocked;
+                CredentialPairingDriveOutcome::Blocked(Some(mutation))
+            }
+            Err(CommitPairingLifecycleSuccessorError::Physical(error)) => {
+                let pending = error.into_pending();
+                self.live_pairing = LivePairingOwnership::Reconciling {
+                    completion,
+                    pending,
+                };
+                CredentialPairingDriveOutcome::ReconcileRequired(mutation)
+            }
+        }
+    }
+
+    fn drive_reconciliation<A>(
+        &mut self,
+        access: &mut A,
+        completion: MutationCompletion,
+        pending: PendingPairingLifecycleSuccessor,
+    ) -> CredentialPairingDriveOutcome
+    where
+        A: BoundCredentialStoreAccess,
+    {
+        let mutation = completion.mutation();
+        match reconcile_pairing_lifecycle_successor(pending, access) {
+            Ok(committed) => self.finish_committed(completion, committed.into_store()),
+            Err(error) => {
+                let reason = public_store_retry(error.error());
+                let pending = error.into_pending();
+                self.live_pairing = LivePairingOwnership::Reconciling {
+                    completion,
+                    pending,
+                };
+                CredentialPairingDriveOutcome::Retry {
+                    mutation: Some(mutation),
+                    reason,
+                }
+            }
+        }
+    }
+
+    fn finish_committed(
+        &mut self,
+        completion: MutationCompletion,
+        store: MountedCredentialStore,
+    ) -> CredentialPairingDriveOutcome {
+        let mutation = completion.mutation();
+        match completion {
+            MutationCompletion::Begin {
+                permit,
+                device_id,
+                pending,
+            } => {
+                let selected = store.select_pending_for_proof(PendingCredentialRef::new(
+                    pending.id(),
+                    pending.generation(),
+                ));
+                self.mounted = Some(store);
+                let policy_result = self
+                    .pairing
+                    .as_mut()
+                    .map(|policy| {
+                        policy.finish_begin(permit, BeginOutcome::PendingCommitted(pending))
+                    })
+                    .unwrap_or(Err(PermitError::NoOperation));
+                if policy_result.is_err() {
+                    self.live_pairing = LivePairingOwnership::Blocked;
+                    return CredentialPairingDriveOutcome::Blocked(Some(mutation));
+                }
+                self.live_pairing = LivePairingOwnership::Idle;
+                let Ok(selected) = selected else {
+                    self.live_pairing = LivePairingOwnership::Blocked;
+                    return CredentialPairingDriveOutcome::Blocked(Some(mutation));
+                };
+                let (selected_pending, psk) = selected.into_parts();
+                if selected_pending.id() != pending.id()
+                    || selected_pending.generation() != pending.generation()
+                {
+                    self.live_pairing = LivePairingOwnership::Blocked;
+                    return CredentialPairingDriveOutcome::Blocked(Some(mutation));
+                }
+                let Ok(psk) = PairingPsk::from_zeroizing(psk) else {
+                    self.live_pairing = LivePairingOwnership::Blocked;
+                    return CredentialPairingDriveOutcome::Blocked(Some(mutation));
+                };
+                match reticulum_device_api_pairing::BeginOffer::after_pending_commit(
+                    device_id,
+                    pending.id(),
+                    pending.generation(),
+                    psk,
+                ) {
+                    Ok(offer) => CredentialPairingDriveOutcome::BeginOffered(offer),
+                    Err(_) => {
+                        self.live_pairing = LivePairingOwnership::Blocked;
+                        CredentialPairingDriveOutcome::Blocked(Some(mutation))
+                    }
+                }
+            }
+            MutationCompletion::Activate {
+                permit,
+                verified,
+                psk,
+            } => {
+                self.mounted = Some(store);
+                let result = self
+                    .pairing
+                    .as_mut()
+                    .map(|policy| {
+                        policy.finish_activation(permit, ActivationOutcome::ActiveCommitted)
+                    })
+                    .unwrap_or(Err(PermitError::NoOperation));
+                if result.is_err() {
+                    self.live_pairing = LivePairingOwnership::Blocked;
+                    return CredentialPairingDriveOutcome::Blocked(Some(mutation));
+                }
+                self.live_pairing = LivePairingOwnership::Idle;
+                CredentialPairingDriveOutcome::Activated(
+                    verified.into_activation_confirmation(&psk),
+                )
+            }
+            MutationCompletion::Abort { permit } => {
+                self.mounted = Some(store);
+                let result = self
+                    .pairing
+                    .as_mut()
+                    .map(|policy| policy.finish_abort(permit, AbortOutcome::TombstoneCommitted))
+                    .unwrap_or(Err(PermitError::NoOperation));
+                if result.is_err() {
+                    self.live_pairing = LivePairingOwnership::Blocked;
+                    return CredentialPairingDriveOutcome::Blocked(Some(mutation));
+                }
+                self.live_pairing = LivePairingOwnership::Idle;
+                CredentialPairingDriveOutcome::Aborted
+            }
+        }
+    }
+
+    fn finish_uncommitted(&mut self, completion: MutationCompletion) {
+        let result = match completion {
+            MutationCompletion::Begin { permit, .. } => self
+                .pairing
+                .as_mut()
+                .map(|policy| policy.finish_begin(permit, BeginOutcome::NotCommitted)),
+            MutationCompletion::Activate { permit, .. } => self.pairing.as_mut().map(|policy| {
+                policy
+                    .finish_activation(permit, ActivationOutcome::NotCommitted)
+                    .map(|_| ())
+            }),
+            MutationCompletion::Abort { permit } => self
+                .pairing
+                .as_mut()
+                .map(|policy| policy.finish_abort(permit, AbortOutcome::NotCommitted)),
+        };
+        self.live_pairing = if matches!(result, Some(Ok(()))) {
+            LivePairingOwnership::Idle
+        } else {
+            LivePairingOwnership::Blocked
+        };
+    }
+
+    fn cancel_challenge_for_connection(&mut self, connection: ConnectionId) {
+        let should_cancel = matches!(
+            &self.live_pairing,
+            LivePairingOwnership::Proof(proof) if proof.permit.connection() == connection
+        );
+        if should_cancel {
+            self.cancel_challenge_only();
+        }
+    }
+
+    fn cancel_challenge_only(&mut self) {
+        let ownership = mem::replace(&mut self.live_pairing, LivePairingOwnership::Blocked);
+        let LivePairingOwnership::Proof(proof) = ownership else {
+            self.live_pairing = ownership;
+            return;
+        };
+        self.live_pairing = match self
+            .pairing
+            .as_mut()
+            .and_then(|policy| policy.proof_rejected(proof.permit).ok())
+        {
+            Some(()) => LivePairingOwnership::Idle,
+            None => LivePairingOwnership::Blocked,
+        };
     }
 
     /// Admit explicit initialization while retaining the single-use permit.
@@ -486,6 +1184,123 @@ impl CredentialRuntime {
     }
 }
 
+fn prepare_begin_candidate<R>(
+    authority: &CredentialAuthority<E290_CREDENTIAL_RECORD_CAPACITY>,
+    rng: &mut R,
+) -> Option<(
+    PairingLifecycleStoreCandidate<E290_CREDENTIAL_RECORD_CAPACITY>,
+    PendingRef,
+)>
+where
+    R: RngCore + CryptoRng,
+{
+    for _ in 0..MAX_PAIRING_ENTROPY_ATTEMPTS {
+        let mut credential_bytes = [0_u8; 16];
+        let mut principal_bytes = [0_u8; 16];
+        let mut psk = Zeroizing::new([0_u8; 32]);
+        rng.fill_bytes(&mut credential_bytes);
+        rng.fill_bytes(&mut principal_bytes);
+        rng.fill_bytes(&mut *psk);
+        let credential_id = CredentialId::new(credential_bytes);
+        let permissions = Permissions::from_bits(
+            Permissions::READ_SUBMISSION_STATUS.bits()
+                | Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA.bits(),
+        )
+        .expect("the fixed developer policy contains only stable permission bits");
+        let enrollment = NewPendingCredential::new(
+            credential_id,
+            PrincipalId(principal_bytes),
+            permissions,
+            PairingOrigin::UsbPhysicalPresence,
+            AuthorizationPolicyVersion::new(1),
+            psk,
+        );
+        match authority.plan_add_pending(enrollment) {
+            Ok(plan) => {
+                let pending = PendingRef::new(
+                    credential_id,
+                    reticulum_device_api_credentials::CredentialGeneration::new(
+                        plan.candidate_revision().get(),
+                    ),
+                )
+                .ok()?;
+                return Some((plan.into_store_candidate(), pending));
+            }
+            Err(fault) => {
+                let retryable = matches!(
+                    fault.kind(),
+                    CredentialLifecycleFaultKind::ZeroCredentialId
+                        | CredentialLifecycleFaultKind::CredentialIdAlreadyRetained
+                        | CredentialLifecycleFaultKind::ZeroPrincipal
+                        | CredentialLifecycleFaultKind::ZeroPsk
+                        | CredentialLifecycleFaultKind::DuplicatePsk
+                );
+                drop(fault.into_enrollment());
+                if !retryable {
+                    return None;
+                }
+            }
+        }
+    }
+    None
+}
+
+fn generate_challenge<R>(rng: &mut R) -> Option<DeviceChallenge>
+where
+    R: RngCore + CryptoRng,
+{
+    for _ in 0..MAX_PAIRING_ENTROPY_ATTEMPTS {
+        let mut bytes = Zeroizing::new([0_u8; 32]);
+        rng.fill_bytes(&mut *bytes);
+        if let Ok(challenge) = DeviceChallenge::from_zeroizing(bytes) {
+            return Some(challenge);
+        }
+    }
+    None
+}
+
+const fn public_attempt_refusal(refusal: AttemptRefusal) -> PairingFailure {
+    match refusal {
+        AttemptRefusal::NotConnected
+        | AttemptRefusal::WrongConnection
+        | AttemptRefusal::WindowNotOpen
+        | AttemptRefusal::TimedOut => PairingFailure::PhysicalPresenceRequired,
+        AttemptRefusal::PendingExists
+        | AttemptRefusal::PendingMissing
+        | AttemptRefusal::PendingMismatch
+        | AttemptRefusal::CapacityExhausted => PairingFailure::Refused,
+        AttemptRefusal::OperationInFlight
+        | AttemptRefusal::MutationBlocked
+        | AttemptRefusal::RevisionExhausted
+        | AttemptRefusal::ClockRegression
+        | AttemptRefusal::OperationIdExhausted => PairingFailure::Blocked,
+    }
+}
+
+const fn public_request_refusal(refusal: RequestRefusal) -> PairingFailure {
+    match refusal {
+        RequestRefusal::NotConnected
+        | RequestRefusal::WrongConnection
+        | RequestRefusal::WindowNotOpen
+        | RequestRefusal::TimedOut => PairingFailure::PhysicalPresenceRequired,
+        RequestRefusal::PendingExists
+        | RequestRefusal::PendingMissing
+        | RequestRefusal::PendingMismatch
+        | RequestRefusal::InitializationNotEligible => PairingFailure::Refused,
+        RequestRefusal::OperationInFlight
+        | RequestRefusal::ClockRegression
+        | RequestRefusal::OperationIdExhausted => PairingFailure::Blocked,
+    }
+}
+
+fn public_store_retry<E>(error: &CredentialStoreMountError<E>) -> PairingDriveRetry {
+    match error {
+        CredentialStoreMountError::Backend(_) => PairingDriveRetry::Backend,
+        CredentialStoreMountError::Binding(error) => PairingDriveRetry::Binding(*error),
+        CredentialStoreMountError::Fault(fault) => PairingDriveRetry::Media(*fault),
+    }
+}
+
 fn pairing_policy_for_boot(
     state: CredentialBootState,
     mounted: Option<&MountedCredentialStore>,
@@ -565,6 +1380,9 @@ mod tests {
     use reticulum_device_api_credential_store::{
         BoundCredentialStore, CredentialStoreDeviceId, PARTITION_SIZE, PHYSICAL_FORMAT_VERSION,
         mount, recover_empty_provision,
+    };
+    use reticulum_device_api_pairing::{
+        ActivateRequest, BeginOffer, ClientProof, PairingTranscript, ProofStartRequest,
     };
     use reticulum_device_api_pairing_policy::{
         BUTTON_HOLD_MILLIS, CloseReason, PAIRING_WINDOW_MILLIS, RequestRefusal,
@@ -795,7 +1613,10 @@ mod tests {
         let boot = boot_credentials(&mut access);
         assert_eq!(boot.state(), CredentialBootState::UninitializedErased);
         access.backend_mut().reset_io();
-        (CredentialRuntime::from_boot(boot, store_binding), access)
+        (
+            CredentialRuntime::from_boot(boot, store_binding, device_id(0x51)),
+            access,
+        )
     }
 
     fn interrupted_runtime() -> (CredentialRuntime, BoundCredentialStore<FakeNor>) {
@@ -811,7 +1632,10 @@ mod tests {
         let boot = boot_credentials(&mut access);
         assert_eq!(boot.state(), CredentialBootState::InitializationInterrupted);
         access.backend_mut().reset_io();
-        (CredentialRuntime::from_boot(boot, store_binding), access)
+        (
+            CredentialRuntime::from_boot(boot, store_binding, device_id(0x52)),
+            access,
+        )
     }
 
     fn committed_bytes(store_binding: CredentialStoreBinding) -> Vec<u8> {
@@ -820,6 +1644,189 @@ mod tests {
             .unwrap_or_else(|_| panic!("test revision-1 provisioning failed"));
         assert_eq!(mounted.revision().get(), 1);
         access.into_backend().bytes
+    }
+
+    struct TestRng {
+        next: u8,
+        zero: bool,
+        fills: usize,
+    }
+
+    impl TestRng {
+        const fn patterned(seed: u8) -> Self {
+            Self {
+                next: seed,
+                zero: false,
+                fills: 0,
+            }
+        }
+
+        const fn zero() -> Self {
+            Self {
+                next: 0,
+                zero: true,
+                fills: 0,
+            }
+        }
+    }
+
+    impl RngCore for TestRng {
+        fn next_u32(&mut self) -> u32 {
+            let mut bytes = [0_u8; 4];
+            self.fill_bytes(&mut bytes);
+            u32::from_le_bytes(bytes)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut bytes = [0_u8; 8];
+            self.fill_bytes(&mut bytes);
+            u64::from_le_bytes(bytes)
+        }
+
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            self.fills += 1;
+            if self.zero {
+                dest.fill(0);
+                return;
+            }
+            for byte in dest {
+                if self.next == 0 {
+                    self.next = 1;
+                }
+                *byte = self.next;
+                self.next = self.next.wrapping_add(1);
+            }
+        }
+
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+            self.fill_bytes(dest);
+            Ok(())
+        }
+    }
+
+    impl CryptoRng for TestRng {}
+
+    fn device_id(seed: u8) -> DeviceId {
+        DeviceId::new([seed; 16]).expect("test device ID is nonzero")
+    }
+
+    fn ready_pairing_runtime() -> (CredentialRuntime, BoundCredentialStore<FakeNor>) {
+        let (mut runtime, mut access) = erased_runtime();
+        admit_initialization(&mut runtime, InitializableMedia::ExactlyErased);
+        assert!(runtime.credential_physical_mutation_outstanding());
+        assert!(matches!(
+            runtime.drive_initialization(&mut access, true),
+            InitializationDriveOutcome::Completed
+        ));
+        assert!(!runtime.credential_physical_mutation_outstanding());
+        (runtime, access)
+    }
+
+    fn commit_begin(
+        runtime: &mut CredentialRuntime,
+        access: &mut BoundCredentialStore<FakeNor>,
+        rng: &mut TestRng,
+    ) -> BeginOffer {
+        assert_eq!(
+            runtime.request_pairing_begin(time(REQUEST_MILLIS + 1), connection(), rng,),
+            BeginAdmission::Accepted
+        );
+        assert_eq!(
+            runtime.live_pairing_status(),
+            CredentialPairingStatus::MutationPrepared(PairingMutation::AddPending)
+        );
+        match runtime.drive_live_pairing(access) {
+            CredentialPairingDriveOutcome::BeginOffered(offer) => offer,
+            _ => panic!("prepared Begin did not commit"),
+        }
+    }
+
+    fn start_proof(
+        runtime: &mut CredentialRuntime,
+        rng: &mut TestRng,
+        offer: &BeginOffer,
+    ) -> (ProofStartRequest, ProofChallenge) {
+        let request =
+            ProofStartRequest::new(2, offer.credential_id(), offer.generation(), [0x5a; 32])
+                .expect("test ProofStart is valid");
+        let challenge = match runtime.request_pairing_proof_start(
+            time(REQUEST_MILLIS + 2),
+            connection(),
+            &request,
+            rng,
+        ) {
+            ProofStartAdmission::Challenge(challenge) => challenge,
+            ProofStartAdmission::Refused(_) => panic!("proof was refused"),
+        };
+        (request, challenge)
+    }
+
+    fn admit_valid_activation(
+        runtime: &mut CredentialRuntime,
+        rng: &mut TestRng,
+        offer: &BeginOffer,
+    ) -> (PairingTranscript, ClientProof) {
+        let (request, challenge) = start_proof(runtime, rng, offer);
+        assert_eq!(challenge.device_id(), runtime.device_id());
+        assert_eq!(challenge.connection_id().get(), connection().get());
+        let transcript = PairingTranscript::new(&request, &challenge)
+            .unwrap_or_else(|_| panic!("matching test transcript was rejected"));
+        let proof = ClientProof::calculate(offer.psk(), &transcript);
+        let verification_proof = ClientProof::calculate(offer.psk(), &transcript);
+        let activate = ActivateRequest::new(3, offer.credential_id(), offer.generation(), proof)
+            .expect("test Activate is valid");
+        assert_eq!(
+            runtime.request_pairing_activate(time(REQUEST_MILLIS + 3), connection(), activate,),
+            ActivateAdmission::Accepted
+        );
+        (transcript, verification_proof)
+    }
+
+    fn prepare_activation_candidate(
+        runtime: &mut CredentialRuntime,
+        access: &mut BoundCredentialStore<FakeNor>,
+        seed: u8,
+    ) {
+        let mut rng = TestRng::patterned(seed);
+        let offer = commit_begin(runtime, access, &mut rng);
+        let _ = admit_valid_activation(runtime, &mut rng, &offer);
+        assert!(matches!(
+            runtime.drive_live_pairing(access),
+            CredentialPairingDriveOutcome::CleanupCompleted
+        ));
+        assert!(matches!(
+            runtime.drive_live_pairing(access),
+            CredentialPairingDriveOutcome::MutationPrepared(PairingMutation::ActivatePending)
+        ));
+    }
+
+    fn start_third_attempt_proof(
+        runtime: &mut CredentialRuntime,
+        access: &mut BoundCredentialStore<FakeNor>,
+        seed: u8,
+    ) {
+        let mut rng = TestRng::patterned(seed);
+        let offer = commit_begin(runtime, access, &mut rng);
+        assert!(matches!(
+            runtime.drive_live_pairing(access),
+            CredentialPairingDriveOutcome::CleanupCompleted
+        ));
+        assert_eq!(
+            runtime.request_pairing_begin(time(REQUEST_MILLIS + 2), connection(), &mut rng,),
+            BeginAdmission::Refused(PairingFailure::Refused)
+        );
+        let _ = start_proof(runtime, &mut rng, &offer);
+        assert_eq!(
+            runtime.live_pairing_status(),
+            CredentialPairingStatus::ProofOutstanding
+        );
+        assert!(!runtime.credential_physical_mutation_outstanding());
+        assert!(
+            runtime
+                .pairing
+                .as_ref()
+                .is_some_and(PairingPolicy::operation_outstanding)
+        );
     }
 
     #[test]
@@ -1105,7 +2112,436 @@ mod tests {
     }
 
     #[test]
+    fn begin_proof_activate_commits_end_to_end_with_bound_confirmation() {
+        let (mut runtime, mut access) = ready_pairing_runtime();
+        let mut rng = TestRng::patterned(0x11);
+        let offer = commit_begin(&mut runtime, &mut access, &mut rng);
+        assert_eq!(offer.device_id(), runtime.device_id());
+        assert_eq!(
+            runtime.live_pairing_status(),
+            CredentialPairingStatus::CleanupRequired
+        );
+        assert!(runtime.credential_physical_mutation_outstanding());
+
+        let (transcript, verification_proof) =
+            admit_valid_activation(&mut runtime, &mut rng, &offer);
+        assert_eq!(
+            runtime.live_pairing_status(),
+            CredentialPairingStatus::AwaitingCleanStore(PairingMutation::ActivatePending)
+        );
+
+        assert!(matches!(
+            runtime.drive_live_pairing(&mut access),
+            CredentialPairingDriveOutcome::CleanupCompleted
+        ));
+        assert_eq!(
+            runtime.live_pairing_status(),
+            CredentialPairingStatus::AwaitingCleanStore(PairingMutation::ActivatePending)
+        );
+        assert!(matches!(
+            runtime.drive_live_pairing(&mut access),
+            CredentialPairingDriveOutcome::MutationPrepared(PairingMutation::ActivatePending)
+        ));
+        let confirmation = match runtime.drive_live_pairing(&mut access) {
+            CredentialPairingDriveOutcome::Activated(confirmation) => confirmation,
+            _ => panic!("prepared activation did not commit"),
+        };
+        assert!(confirmation.verify(offer.psk(), &transcript, &verification_proof));
+        assert_eq!(confirmation.credential_id(), offer.credential_id());
+        assert_eq!(confirmation.generation(), offer.generation());
+
+        let authority = runtime
+            .mounted
+            .as_ref()
+            .and_then(MountedCredentialStore::publishable_authority)
+            .expect("activated authority is publishable");
+        assert_eq!(authority.active_count(), 1);
+        assert!(
+            authority
+                .pending_credential()
+                .unwrap_or_else(|_| panic!("activated authority has multiple pending records"))
+                .is_none()
+        );
+        assert_eq!(
+            runtime.live_pairing_status(),
+            CredentialPairingStatus::CleanupRequired
+        );
+        assert!(runtime.credential_physical_mutation_outstanding());
+        assert!(matches!(
+            runtime.drive_live_pairing(&mut access),
+            CredentialPairingDriveOutcome::CleanupCompleted
+        ));
+        assert_eq!(runtime.live_pairing_status(), CredentialPairingStatus::Idle);
+        assert!(!runtime.credential_physical_mutation_outstanding());
+    }
+
+    #[test]
+    fn abort_current_commits_only_after_cleanup_and_retains_a_tombstone() {
+        let (mut runtime, mut access) = ready_pairing_runtime();
+        let mut rng = TestRng::patterned(0x31);
+        let offer = commit_begin(&mut runtime, &mut access, &mut rng);
+        assert_eq!(
+            runtime.request_pairing_abort_current(time(REQUEST_MILLIS + 2), connection(),),
+            AbortAdmission::Accepted
+        );
+        assert_eq!(
+            runtime.live_pairing_status(),
+            CredentialPairingStatus::AwaitingCleanStore(PairingMutation::AbortPending)
+        );
+        assert!(matches!(
+            runtime.drive_live_pairing(&mut access),
+            CredentialPairingDriveOutcome::CleanupCompleted
+        ));
+        assert!(matches!(
+            runtime.drive_live_pairing(&mut access),
+            CredentialPairingDriveOutcome::MutationPrepared(PairingMutation::AbortPending)
+        ));
+        assert!(matches!(
+            runtime.drive_live_pairing(&mut access),
+            CredentialPairingDriveOutcome::Aborted
+        ));
+
+        let authority = runtime
+            .mounted
+            .as_ref()
+            .and_then(MountedCredentialStore::publishable_authority)
+            .expect("aborted authority is publishable");
+        assert_eq!(authority.record_count(), 1);
+        assert_eq!(authority.active_count(), 0);
+        assert!(
+            authority
+                .pending_credential()
+                .unwrap_or_else(|_| panic!("aborted authority has multiple pending records"))
+                .is_none()
+        );
+        assert_eq!(
+            runtime.live_pairing_status(),
+            CredentialPairingStatus::CleanupRequired
+        );
+        drop(offer);
+    }
+
+    #[test]
+    fn bad_wrong_connection_and_expired_activate_each_destroy_the_challenge() {
+        enum Fault {
+            BadProof,
+            WrongConnection,
+            Expired,
+        }
+
+        for (seed, fault) in [
+            (0x41, Fault::BadProof),
+            (0x51, Fault::WrongConnection),
+            (0x61, Fault::Expired),
+        ] {
+            let (mut runtime, mut access) = ready_pairing_runtime();
+            let mut rng = TestRng::patterned(seed);
+            let offer = commit_begin(&mut runtime, &mut access, &mut rng);
+            let (request, challenge) = start_proof(&mut runtime, &mut rng, &offer);
+            let transcript = PairingTranscript::new(&request, &challenge)
+                .unwrap_or_else(|_| panic!("matching test transcript was rejected"));
+            let proof = match fault {
+                Fault::BadProof => {
+                    let calculated = ClientProof::calculate(offer.psk(), &transcript);
+                    let mut bytes = *calculated.as_bytes();
+                    bytes[0] ^= 1;
+                    ClientProof::from_bytes(bytes)
+                }
+                Fault::WrongConnection | Fault::Expired => {
+                    ClientProof::calculate(offer.psk(), &transcript)
+                }
+            };
+            let activate =
+                ActivateRequest::new(3, offer.credential_id(), offer.generation(), proof)
+                    .expect("test Activate is valid");
+            let request_connection = match fault {
+                Fault::WrongConnection => ConnectionId::new(2).expect("nonzero connection"),
+                Fault::BadProof | Fault::Expired => connection(),
+            };
+            let now = match fault {
+                Fault::Expired => time(WINDOW_OPEN_MILLIS + PAIRING_WINDOW_MILLIS),
+                Fault::BadProof | Fault::WrongConnection => time(REQUEST_MILLIS + 3),
+            };
+            assert_eq!(
+                runtime.request_pairing_activate(now, request_connection, activate),
+                ActivateAdmission::Refused(ActivateFailure::ProofRejected)
+            );
+            assert_eq!(
+                runtime.live_pairing_status(),
+                CredentialPairingStatus::CleanupRequired
+            );
+            assert!(
+                !runtime
+                    .pairing
+                    .as_ref()
+                    .is_some_and(PairingPolicy::operation_outstanding)
+            );
+        }
+    }
+
+    #[test]
+    fn clock_fault_in_an_intervening_request_invalidates_a_valid_continuation() {
+        let (mut runtime, mut access) = ready_pairing_runtime();
+        let mut rng = TestRng::patterned(0x68);
+        let offer = commit_begin(&mut runtime, &mut access, &mut rng);
+        let (request, challenge) = start_proof(&mut runtime, &mut rng, &offer);
+        let transcript = PairingTranscript::new(&request, &challenge)
+            .unwrap_or_else(|_| panic!("matching test transcript was rejected"));
+        let proof = ClientProof::calculate(offer.psk(), &transcript);
+        let activate = ActivateRequest::new(3, offer.credential_id(), offer.generation(), proof)
+            .expect("test Activate is valid");
+
+        assert_eq!(
+            runtime.request_pairing_begin(time(1), connection(), &mut rng),
+            BeginAdmission::Refused(PairingFailure::Blocked)
+        );
+        assert_eq!(
+            runtime.request_pairing_activate(time(REQUEST_MILLIS + 3), connection(), activate,),
+            ActivateAdmission::Refused(ActivateFailure::ProofRejected)
+        );
+        assert_eq!(
+            runtime.live_pairing_status(),
+            CredentialPairingStatus::CleanupRequired
+        );
+        assert!(
+            !runtime
+                .pairing
+                .as_ref()
+                .is_some_and(PairingPolicy::operation_outstanding)
+        );
+    }
+
+    #[test]
+    fn abort_current_does_not_reveal_pending_state_outside_physical_presence() {
+        let (mut without_pending, _) = ready_pairing_runtime();
+        assert!(matches!(
+            without_pending.pairing_disconnected(time(REQUEST_MILLIS + 1), connection()),
+            Some(PolicyEvent::Closed(_))
+        ));
+        let without =
+            without_pending.request_pairing_abort_current(time(REQUEST_MILLIS + 2), connection());
+
+        let (mut with_pending, mut access) = ready_pairing_runtime();
+        let mut rng = TestRng::patterned(0x69);
+        let _offer = commit_begin(&mut with_pending, &mut access, &mut rng);
+        assert!(matches!(
+            with_pending.pairing_disconnected(time(REQUEST_MILLIS + 2), connection()),
+            Some(PolicyEvent::Closed(_))
+        ));
+        let with =
+            with_pending.request_pairing_abort_current(time(REQUEST_MILLIS + 3), connection());
+
+        assert_eq!(
+            without,
+            AbortAdmission::Refused(PairingFailure::PhysicalPresenceRequired)
+        );
+        assert_eq!(with, without);
+    }
+
+    #[test]
+    fn begin_and_challenge_entropy_exhaustion_is_bounded_and_releases_policy() {
+        let (mut runtime, _) = ready_pairing_runtime();
+        let mut rng = TestRng::zero();
+        assert_eq!(
+            runtime.request_pairing_begin(time(REQUEST_MILLIS + 1), connection(), &mut rng,),
+            BeginAdmission::Refused(PairingFailure::Blocked)
+        );
+        assert_eq!(rng.fills, usize::from(MAX_PAIRING_ENTROPY_ATTEMPTS) * 3);
+        assert_eq!(runtime.live_pairing_status(), CredentialPairingStatus::Idle);
+        assert!(
+            !runtime
+                .pairing
+                .as_ref()
+                .is_some_and(PairingPolicy::operation_outstanding)
+        );
+
+        let (mut runtime, mut access) = ready_pairing_runtime();
+        let mut begin_rng = TestRng::patterned(0x72);
+        let offer = commit_begin(&mut runtime, &mut access, &mut begin_rng);
+        let request =
+            ProofStartRequest::new(2, offer.credential_id(), offer.generation(), [0x5a; 32])
+                .expect("test ProofStart is valid");
+        let mut challenge_rng = TestRng::zero();
+        assert!(matches!(
+            runtime.request_pairing_proof_start(
+                time(REQUEST_MILLIS + 2),
+                connection(),
+                &request,
+                &mut challenge_rng,
+            ),
+            ProofStartAdmission::Refused(PairingFailure::Blocked)
+        ));
+        assert_eq!(
+            challenge_rng.fills,
+            usize::from(MAX_PAIRING_ENTROPY_ATTEMPTS)
+        );
+        assert_eq!(
+            runtime.live_pairing_status(),
+            CredentialPairingStatus::CleanupRequired
+        );
+        assert!(
+            !runtime
+                .pairing
+                .as_ref()
+                .is_some_and(PairingPolicy::operation_outstanding)
+        );
+    }
+
+    #[test]
+    fn partial_write_and_lost_reply_reconcile_begin_without_releasing_ownership() {
+        for (seed, fault) in [
+            (0x81, WriteFault::Partial(37)),
+            (0x91, WriteFault::LostReply),
+        ] {
+            let (mut runtime, mut access) = ready_pairing_runtime();
+            let mut rng = TestRng::patterned(seed);
+            assert_eq!(
+                runtime.request_pairing_begin(time(REQUEST_MILLIS + 1), connection(), &mut rng,),
+                BeginAdmission::Accepted
+            );
+            access.backend_mut().fail_next_write = Some(fault);
+            assert!(matches!(
+                runtime.drive_live_pairing(&mut access),
+                CredentialPairingDriveOutcome::ReconcileRequired(PairingMutation::AddPending)
+            ));
+            assert_eq!(
+                runtime.live_pairing_status(),
+                CredentialPairingStatus::ReconcileRequired(PairingMutation::AddPending)
+            );
+            assert!(runtime.mounted.is_none());
+            assert!(runtime.credential_physical_mutation_outstanding());
+            assert!(matches!(
+                runtime.drive_live_pairing(&mut access),
+                CredentialPairingDriveOutcome::BeginOffered(_)
+            ));
+            assert!(runtime.mounted.is_some());
+            assert_eq!(
+                runtime.live_pairing_status(),
+                CredentialPairingStatus::CleanupRequired
+            );
+        }
+    }
+
+    #[test]
+    fn third_attempt_disconnect_timeout_and_replacement_cancel_only_the_challenge() {
+        for action in 0_u8..3 {
+            let (mut runtime, mut access) = ready_pairing_runtime();
+            start_third_attempt_proof(&mut runtime, &mut access, 0xa1 + action);
+            match action {
+                0 => {
+                    let other = ConnectionId::new(2).expect("nonzero connection");
+                    assert!(matches!(
+                        runtime.pairing_disconnected(time(REQUEST_MILLIS + 3), other),
+                        Some(PolicyEvent::None)
+                    ));
+                    assert_eq!(
+                        runtime.live_pairing_status(),
+                        CredentialPairingStatus::ProofOutstanding
+                    );
+                    assert!(matches!(
+                        runtime.pairing_disconnected(time(REQUEST_MILLIS + 4), connection()),
+                        Some(PolicyEvent::None)
+                    ));
+                }
+                1 => {
+                    assert!(matches!(
+                        runtime.pairing_poll_timeout(time(
+                            WINDOW_OPEN_MILLIS + PAIRING_WINDOW_MILLIS,
+                        )),
+                        Some(PolicyEvent::None)
+                    ));
+                }
+                2 => {
+                    let replacement = ConnectionId::new(2).expect("nonzero connection");
+                    assert!(matches!(
+                        runtime.pairing_connected(time(REQUEST_MILLIS + 3), replacement),
+                        Some(Ok(None))
+                    ));
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(runtime.live_pairing_status(), CredentialPairingStatus::Idle);
+            assert!(!runtime.credential_physical_mutation_outstanding());
+            assert!(
+                !runtime
+                    .pairing
+                    .as_ref()
+                    .is_some_and(PairingPolicy::operation_outstanding)
+            );
+        }
+    }
+
+    #[test]
+    fn mismatched_typed_candidate_blocks_before_store_io_and_does_not_retry() {
+        let (mut runtime_a, mut access_a) = ready_pairing_runtime();
+        let (mut runtime_b, mut access_b) = ready_pairing_runtime();
+        prepare_activation_candidate(&mut runtime_a, &mut access_a, 0xb1);
+        prepare_activation_candidate(&mut runtime_b, &mut access_b, 0xc1);
+
+        let ownership_a =
+            core::mem::replace(&mut runtime_a.live_pairing, LivePairingOwnership::Blocked);
+        let ownership_b =
+            core::mem::replace(&mut runtime_b.live_pairing, LivePairingOwnership::Blocked);
+        let (completion_a, candidate_a) = match ownership_a {
+            LivePairingOwnership::Prepared {
+                completion,
+                candidate,
+            } => (completion, candidate),
+            _ => panic!("runtime A did not retain a prepared activation"),
+        };
+        let (completion_b, candidate_b) = match ownership_b {
+            LivePairingOwnership::Prepared {
+                completion,
+                candidate,
+            } => (completion, candidate),
+            _ => panic!("runtime B did not retain a prepared activation"),
+        };
+        runtime_a.live_pairing = LivePairingOwnership::Prepared {
+            completion: completion_a,
+            candidate: candidate_b,
+        };
+        runtime_b.live_pairing = LivePairingOwnership::Prepared {
+            completion: completion_b,
+            candidate: candidate_a,
+        };
+        access_a.backend_mut().reset_io();
+
+        assert!(matches!(
+            runtime_a.drive_live_pairing(&mut access_a),
+            CredentialPairingDriveOutcome::Blocked(Some(PairingMutation::ActivatePending))
+        ));
+        assert_eq!(access_a.backend().reads, 0);
+        assert_eq!(access_a.backend().writes, 0);
+        assert_eq!(access_a.backend().erases, 0);
+        assert_eq!(
+            runtime_a.live_pairing_status(),
+            CredentialPairingStatus::Blocked
+        );
+        assert!(matches!(
+            runtime_a.drive_live_pairing(&mut access_a),
+            CredentialPairingDriveOutcome::Blocked(None)
+        ));
+        assert_eq!(access_a.backend().reads, 0);
+        assert!(
+            !runtime_a
+                .pairing
+                .as_ref()
+                .is_some_and(PairingPolicy::operation_outstanding)
+        );
+        assert!(
+            runtime_a
+                .mounted
+                .as_ref()
+                .and_then(MountedCredentialStore::publishable_authority)
+                .and_then(|authority| authority.pending_credential().ok())
+                .flatten()
+                .is_some()
+        );
+    }
+
+    #[test]
     fn resident_runtime_stays_within_its_fixed_ram_ceiling() {
+        assert!(size_of::<LivePairingOwnership>() <= MAXIMUM_LIVE_PAIRING_OWNERSHIP_BYTES);
         assert!(size_of::<CredentialRuntime>() <= MAXIMUM_CREDENTIAL_RUNTIME_BYTES);
     }
 }

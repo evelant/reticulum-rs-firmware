@@ -7,10 +7,12 @@
 pub mod announce_time;
 pub mod config;
 pub mod credential_boot;
+pub mod credential_pairing;
 pub mod credential_runtime;
 pub mod cross_store_gate;
 pub mod durability_boot;
 pub mod durability_policy;
+pub mod live_pairing_handoff;
 pub mod pairing_control_handoff;
 pub mod pairing_control_mapping;
 pub mod partition_contract;

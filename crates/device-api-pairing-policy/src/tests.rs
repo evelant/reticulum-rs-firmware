@@ -419,12 +419,19 @@ fn begin_reserves_one_pending_and_exact_proof_activation_clears_it() {
         _ => panic!("wrong pending proof was not counted and rejected"),
     }
     let proof = match policy.proof(time(2_102), connection(1), enrolled) {
-        AttemptDecision::Admitted { permit, .. } => permit,
+        AttemptDecision::Admitted { permit, .. } => {
+            assert_eq!(permit.connection(), connection(1));
+            assert_eq!(permit.window().get(), 1);
+            assert_eq!(permit.deadline(), time(62_010));
+            assert_eq!(permit.pending(), enrolled);
+            permit
+        }
         _ => panic!("exact pending proof rejected"),
     };
     let activation = policy
         .proof_verified(proof)
         .unwrap_or_else(|error| panic!("proof verification rejected: {error:?}"));
+    assert_eq!(activation.pending(), enrolled);
     policy
         .finish_activation(activation, ActivationOutcome::ActiveCommitted)
         .unwrap_or_else(|error| panic!("activation rejected: {error:?}"));
@@ -468,8 +475,9 @@ fn abort_is_exact_durable_and_does_not_spend_attempts() {
         .unwrap_or_else(|| panic!("wrong abort admitted"));
     assert_eq!(wrong.reason(), RequestRefusal::PendingMismatch);
     let abort = policy
-        .abort_pending(time(2_101), connection(1), existing)
+        .abort_current(time(2_101), connection(1))
         .unwrap_or_else(|error| panic!("exact abort rejected: {error:?}"));
+    assert_eq!(abort.pending(), existing);
     policy
         .finish_abort(abort, AbortOutcome::TombstoneCommitted)
         .unwrap_or_else(|error| panic!("abort completion rejected: {error:?}"));
@@ -478,6 +486,60 @@ fn abort_is_exact_durable_and_does_not_spend_attempts() {
         AttemptDecision::Admitted { ordinal: 1, .. } => {}
         _ => panic!("abort spent the Begin/Proof budget"),
     }
+}
+
+#[test]
+fn identifier_free_abort_hides_pending_state_before_physical_admission() {
+    for pending_state in [PendingState::None, PendingState::One(pending(5, 6))] {
+        let mut policy = PairingPolicy::new(pending_state);
+        assert_eq!(
+            policy
+                .abort_current(time(1), connection(1))
+                .err()
+                .map(|refused| refused.reason()),
+            Some(RequestRefusal::NotConnected)
+        );
+        assert_eq!(policy.connected(time(2), connection(1)), Ok(None));
+        assert_eq!(
+            policy
+                .abort_current(time(3), connection(1))
+                .err()
+                .map(|refused| refused.reason()),
+            Some(RequestRefusal::WindowNotOpen)
+        );
+    }
+}
+
+#[test]
+fn proof_continuation_survives_third_attempt_drain_but_not_clock_fault() {
+    let existing = pending(7, 8);
+    let mut policy = PairingPolicy::new(PendingState::One(existing));
+    open(&mut policy, connection(1), 0);
+    for at in [2_100, 2_101] {
+        assert!(matches!(
+            policy.begin(time(at), connection(1), begin_ready()),
+            AttemptDecision::Refused {
+                reason: AttemptRefusal::PendingExists,
+                ..
+            }
+        ));
+    }
+    let proof = match policy.proof(time(2_102), connection(1), existing) {
+        AttemptDecision::Admitted {
+            permit,
+            ordinal: 3,
+            closed_to_new_attempts: Some(closed),
+        } => {
+            assert_eq!(closed.reason(), CloseReason::ThirdAttempt);
+            permit
+        }
+        _ => panic!("third exact proof was not admitted into draining"),
+    };
+    assert!(policy.proof_continuation_is_current(time(2_103), connection(1), &proof));
+    assert!(!policy.proof_continuation_is_current(time(2_000), connection(1), &proof));
+    policy
+        .proof_rejected(proof)
+        .unwrap_or_else(|error| panic!("invalidated proof owner was lost: {error:?}"));
 }
 
 #[test]

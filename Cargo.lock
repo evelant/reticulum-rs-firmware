@@ -1900,7 +1900,9 @@ dependencies = [
  "reticulum-device-api",
  "reticulum-device-api-adapter",
  "reticulum-device-api-credential-store",
+ "reticulum-device-api-credentials",
  "reticulum-device-api-framing",
+ "reticulum-device-api-pairing",
  "reticulum-device-api-pairing-control",
  "reticulum-device-api-pairing-policy",
  "reticulum-device-identity-store",
@@ -1918,6 +1920,7 @@ dependencies = [
  "reticulum-tx-supervisor",
  "sha2",
  "static_cell",
+ "zeroize",
 ]
 
 [[package]]

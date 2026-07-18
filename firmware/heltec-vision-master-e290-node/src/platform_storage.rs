@@ -17,6 +17,7 @@ use reticulum_device_api_adapter::{SubmissionAcceptance, SubmissionPort, Submiss
 use reticulum_device_api_credential_store::{
     BoundCredentialStore, CredentialStoreBinding, CredentialStoreRecovery, MountedCredentialStore,
 };
+use reticulum_device_api_pairing::DeviceId;
 use reticulum_device_api_pairing_policy::{
     AcquirePairingExclusive, ActiveLowButton, ButtonEffect, ConnectionId, ConnectionRefusal,
     ExclusiveAcquireOutcome, MonotonicMillis as PairingMillis, PolicyEvent, WindowClosed,
@@ -33,7 +34,7 @@ use reticulum_heltec_vision_master_e290_node::credential_runtime::{
     InitializationDriveOutcome, InitializationRequestRefusal, MAXIMUM_CREDENTIAL_RUNTIME_BYTES,
 };
 use reticulum_heltec_vision_master_e290_node::cross_store_gate::{
-    CredentialInitializationGate, JournalMutationGate, credential_initialization_gate,
+    CredentialPhysicalMutationGate, JournalMutationGate, credential_physical_mutation_gate,
     journal_mutation_gate as cross_store_journal_mutation_gate,
 };
 use reticulum_heltec_vision_master_e290_node::partition_contract::{
@@ -278,8 +279,8 @@ pub(crate) enum ProductInitializationDrive {
 pub(crate) enum ProductSubmissionDrive {
     /// One mounted runtime step ran and returned its exact result.
     Runtime(Result<RuntimeStep, RuntimeError<ProductRegionError>>),
-    /// Credential initialization temporarily owns physical mutation access.
-    DeferredForCredentialInitialization,
+    /// Credential initialization, live pairing, or recovery owns mutation access.
+    DeferredForCredentialMutation,
     /// Durable submission service has no usable resident runtime.
     RuntimeUnavailable,
 }
@@ -542,9 +543,13 @@ impl ProductFlashOwner {
         self,
         runtime: Option<ProductSubmissionRuntime>,
         credentials: BootCredentialStore,
+        device_api_id: DeviceId,
     ) -> ProductStorageCoordinator {
-        let credential_runtime =
-            CredentialRuntime::from_boot(credentials.outcome, self.credential_binding);
+        let credential_runtime = CredentialRuntime::from_boot(
+            credentials.outcome,
+            self.credential_binding,
+            device_api_id,
+        );
         let submission_service_enabled = runtime.is_some();
         ProductStorageCoordinator {
             flash: self.flash,
@@ -619,7 +624,8 @@ impl ProductStorageCoordinator {
     fn journal_mutation_gate(&self) -> JournalMutationGate {
         cross_store_journal_mutation_gate(
             self.submission_service_available(),
-            self.credential_runtime.initialization_status(),
+            self.credential_runtime
+                .credential_physical_mutation_outstanding(),
         )
     }
 
@@ -641,8 +647,8 @@ impl ProductStorageCoordinator {
     /// Advance at most one durable submission transition through the permanent
     /// transport-neutral node owner.
     ///
-    /// Credential initialization deferral is explicit and never aliases
-    /// runtime absence, so the node retains journal service and retries later.
+    /// Credential mutation deferral is explicit and never aliases runtime
+    /// absence, so the node retains journal service and retries later.
     pub(crate) fn drive_submission_step<N, R>(
         &mut self,
         node: &mut N,
@@ -657,8 +663,8 @@ impl ProductStorageCoordinator {
     {
         match self.journal_mutation_gate() {
             JournalMutationGate::Ready => {}
-            JournalMutationGate::DeferredForCredentialInitialization => {
-                return ProductSubmissionDrive::DeferredForCredentialInitialization;
+            JournalMutationGate::DeferredForCredentialMutation => {
+                return ProductSubmissionDrive::DeferredForCredentialMutation;
             }
             JournalMutationGate::RuntimeUnavailable => {
                 return ProductSubmissionDrive::RuntimeUnavailable;
@@ -745,8 +751,8 @@ impl ProductCredentialInitializationPort for ProductStorageCoordinator {
             })
             .unwrap_or((false, false));
         if matches!(
-            credential_initialization_gate(journal_actor_pending, journal_projector_pending),
-            CredentialInitializationGate::DeferredForJournalMutation
+            credential_physical_mutation_gate(journal_actor_pending, journal_projector_pending),
+            CredentialPhysicalMutationGate::DeferredForJournalMutation
         ) {
             return ProductInitializationRequest::DeferredForJournalMutation;
         }
@@ -834,7 +840,7 @@ impl SubmissionPort for ProductStorageCoordinator {
     ) -> Result<SubmissionAcceptance, SubmissionPortError> {
         match self.journal_mutation_gate() {
             JournalMutationGate::Ready => {}
-            JournalMutationGate::DeferredForCredentialInitialization => {
+            JournalMutationGate::DeferredForCredentialMutation => {
                 return Err(SubmissionPortError::Busy);
             }
             JournalMutationGate::RuntimeUnavailable => {

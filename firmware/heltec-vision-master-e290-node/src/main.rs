@@ -53,10 +53,12 @@ use reticulum_board_heltec_vision_master_e290_radio::{
     E290_NA915_DEV_CONFIGURATION, E290_NA915_DEV_CONFIGURATION_FINGERPRINT, E290_NA915_DEV_PROFILE,
     E290Radio,
 };
+use reticulum_device_api_pairing::DeviceId;
 use reticulum_device_identity_store::IdentityMirrorCoverage;
 use reticulum_heltec_vision_master_e290_node::{
     config,
     credential_boot::CredentialBootState,
+    device_api_id_from_eui48,
     durability_boot::{
         BUILD_JOURNAL_REPROVISION_POLICY, JournalReprovisionPolicy, announce_clock_policy,
         journal_boot_policy,
@@ -226,14 +228,22 @@ async fn main(spawner: Spawner) -> ! {
 
     let base_mac = esp_hal::efuse::base_mac_address();
     let base_mac_bytes = base_mac.as_bytes();
-    let storage_device_id = storage_device_id_from_eui48([
+    let base_mac_eui48 = [
         base_mac_bytes[0],
         base_mac_bytes[1],
         base_mac_bytes[2],
         base_mac_bytes[3],
         base_mac_bytes[4],
         base_mac_bytes[5],
-    ]);
+    ];
+    let storage_device_id = storage_device_id_from_eui48(base_mac_eui48);
+    let device_api_id = match DeviceId::new(device_api_id_from_eui48(base_mac_eui48)) {
+        Ok(device_api_id) => device_api_id,
+        Err(reason) => {
+            error!("e290-node stage=device-api-id status=FAIL reason={reason:?}");
+            inert_forever().await
+        }
+    };
     info!(
         "e290-node stage=boot base_mac={} identity=pending-durable radio_constructed=false rf_state=reset_low_nss_high",
         base_mac
@@ -416,7 +426,7 @@ async fn main(spawner: Spawner) -> ! {
         }
     };
     let storage_coordinator =
-        flash_owner.into_storage_coordinator(submission_runtime, credential_boot);
+        flash_owner.into_storage_coordinator(submission_runtime, credential_boot, device_api_id);
     let storage_service_available = storage_coordinator.submission_service_available();
     let credential_boot_state = storage_coordinator.credential_boot_state();
     let credential_binding = storage_coordinator.credential_binding();

@@ -19,7 +19,9 @@ reticulum-board-heltec-vision-master-e290-radio = { path = "../../crates/board-h
 reticulum-device-api = { path = "../../crates/device-api", default-features = false, features = ["experimental-rns-data"] }
 reticulum-device-api-adapter = { path = "../../crates/device-api-adapter", default-features = false, features = ["experimental-rns-data"] }
 reticulum-device-api-credential-store = { path = "../../crates/device-api-credential-store", default-features = false }
+reticulum-device-api-credentials = { path = "../../crates/device-api-credentials", default-features = false }
 reticulum-device-api-framing = { path = "../../crates/device-api-framing", default-features = false }
+reticulum-device-api-pairing = { path = "../../crates/device-api-pairing", default-features = false }
 reticulum-device-api-pairing-control = { path = "../../crates/device-api-pairing-control", default-features = false }
 reticulum-device-api-pairing-policy = { path = "../../crates/device-api-pairing-policy", default-features = false }
 reticulum-device-identity-store = { path = "../../crates/device-identity-store", default-features = false }
@@ -34,6 +36,8 @@ reticulum-storage-model = { path = "../../crates/storage-model", default-feature
 reticulum-submission-runtime = { path = "../../crates/submission-runtime", default-features = false }
 reticulum-tx-supervisor = { path = "../../crates/tx-supervisor", default-features = false }
 embassy-sync.workspace = true
+rand_core.workspace = true
+zeroize.workspace = true
 
 [target.'cfg(target_arch = "xtensa")'.dependencies]
 reticulum-radio-lora-phy = { path = "../../crates/radio-lora-phy" }
@@ -70,14 +74,12 @@ esp-rtos = { workspace = true, features = [
 embedded-storage.workspace = true
 esp-storage = { workspace = true, features = ["esp32s3", "critical-section"] }
 log.workspace = true
-rand_core.workspace = true
 static_cell.workspace = true
 
 [dev-dependencies]
 embassy-futures.workspace = true
 embassy-sync.workspace = true
 embedded-storage.workspace = true
-rand_core.workspace = true
 reticulum-tx-handoff = { path = "../../crates/tx-handoff", default-features = false }
 sha2.workspace = true
 

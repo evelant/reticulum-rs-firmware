@@ -1,8 +1,10 @@
 # ADR 0010: Wired developer pairing protocol
 
 - **Status:** accepted for the USB Serial/JTAG developer/HIL profile; portable
-  protocol/core and independent vectors implemented and target-verified; E290
-  durable lifecycle/bearer composition pending
+  protocol/core, independent vectors, E290 resident durable lifecycle, bounded
+  entropy, and bearer-neutral secret handoff implemented and target-verified;
+  node/USB scheduling, host utility, authenticated session/API, and powered
+  qualification pending
 - **Date:** 2026-07-18
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0006](0006-authenticated-local-api-bearer.md),
@@ -307,7 +309,13 @@ zeroized on every terminal/drop path. Secret-bearing types implement neither
 PSK, proof, challenge, or raw pairing record. The selected RustCrypto
 `Sha256`/`Hmac<Sha256>` contexts do not implement `Zeroize`; their internal
 context memory is an explicit cryptographic-backend residual even though every
-project-owned input, output and scratch owner wipes.
+project-owned input, output and scratch owner wipes. Rust moves may also leave
+compiler-created copies of a value's former representation; `zeroize` cannot
+guarantee those copies are erased. The resident lifecycle therefore guarantees
+wipe-on-drop for the current project-owned secret owner, but does not claim that
+typestate/enum moves leave no transient stack copy. Avoiding that residual would
+require a separately reviewed pinned/in-place secret-state design and compiler
+assumptions stronger than this developer profile currently makes.
 
 ## Host persistence contract
 
@@ -332,11 +340,22 @@ roles, and verify COBS framing and proof-domain separation. Host, strict
 Clippy/rustdoc, generic `riscv32imac-unknown-none-elf`, and ESP32-S3 Xtensa
 checks pass.
 
-Firmware composition tests must cover Add -> Proof -> Activate, Add ->
-AbortCurrent, resumed Pending under a fresh connection/window, response loss,
-disconnect at every boundary, bounded entropy collision retries, cross-store
-exclusion, secret-bearing depth-one pressure, bus-reset challenge invalidation,
-and no unauthenticated fallback. Powered qualification then reads the exact
+The permanent E290 graph now contains the live-pairing core only through its
+resident credential lifecycle. Its 95-test host library suite covers durable
+Add -> Proof -> Activate, Add -> AbortCurrent, cleanup before subsequent
+mutation, resumed Pending under a fresh connection/window, partial writes and
+lost replies, disconnect/timeout/replacement challenge cancellation, exact
+connection/window/deadline binding, eight-attempt entropy exhaustion, semantic
+no-I/O failure, RAM ceilings, and exact secret-bearing depth-one pressure. The
+stable E290 device ID is captured once by the resident runtime and cannot vary
+between Begin and ProofStart. The same package passes strict Clippy/rustdoc plus
+generic bare-metal and ESP32-S3
+Xtensa checks.
+
+Remaining firmware composition tests must cover generalized cross-store
+exclusion, node/bearer reply retention through partial USB TX, bus-reset
+challenge invalidation across the routed handoff, and no unauthenticated
+fallback. Powered qualification then reads the exact
 credential partition after Pending, Active, and Abort and proves that only
 Active authenticates after reboot.
 
@@ -350,5 +369,6 @@ Active authenticates after reboot.
   but suite 1 is permitted only for the trusted wired developer/HIL profile.
 - The protocol adds authentication of possession and activation confirmation,
   not confidentiality or production host identity binding.
-- Live E290 lifecycle mutation, the host client, authenticated session/API
-  composition, and powered fault testing remain separate implementation gates.
+- Node/USB routing of the resident E290 lifecycle, the host client,
+  authenticated session/API composition, and powered fault testing remain
+  separate implementation gates.

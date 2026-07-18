@@ -514,13 +514,13 @@ pub async fn run(
                                     "e290-node stage=durable-submission status=RETRY reason=busy:{pending:?} retry_not_before_ms={retry_not_before_ms}"
                                 );
                             }
-                            ProductSubmissionDrive::DeferredForCredentialInitialization => {
+                            ProductSubmissionDrive::DeferredForCredentialMutation => {
                                 let retry_not_before_ms =
                                     owner_now.saturating_add(config::STORAGE_RETRY_BACKOFF_MS);
                                 durability_service =
                                     durability_service.retry_at(retry_not_before_ms);
                                 info!(
-                                    "e290-node stage=durable-submission status=DEFERRED reason=credential-initialization-in-flight retry_not_before_ms={retry_not_before_ms}"
+                                    "e290-node stage=durable-submission status=DEFERRED reason=credential-mutation-in-flight retry_not_before_ms={retry_not_before_ms}"
                                 );
                             }
                             ProductSubmissionDrive::Runtime(Err(reason)) => {

@@ -498,6 +498,31 @@ pub struct BeginAttemptPermit {
 pub struct ProofAttemptPermit {
     operation: OperationKey,
     pending: PendingRef,
+    deadline: MonotonicMillis,
+    continuation_generation: u64,
+}
+
+impl ProofAttemptPermit {
+    /// Accepted connection to which this exact proof operation is bound.
+    pub const fn connection(&self) -> ConnectionId {
+        self.operation.window.connection
+    }
+
+    /// Physical-presence window to which this proof operation is bound.
+    pub const fn window(&self) -> WindowId {
+        self.operation.window.window
+    }
+
+    /// Original exclusive-window deadline for bounding the continuation even
+    /// when this attempt itself closed new admission.
+    pub const fn deadline(&self) -> MonotonicMillis {
+        self.deadline
+    }
+
+    /// Exact durable Pending credential admitted for proof.
+    pub const fn pending(&self) -> PendingRef {
+        self.pending
+    }
 }
 
 /// Exact-pending abort capability.
@@ -507,11 +532,25 @@ pub struct AbortPendingPermit {
     pending: PendingRef,
 }
 
+impl AbortPendingPermit {
+    /// Exact durable Pending credential admitted for abort.
+    pub const fn pending(&self) -> PendingRef {
+        self.pending
+    }
+}
+
 /// Capability to report the durable result after a verified proof.
 #[must_use = "dropped activation ownership leaves pairing fail closed"]
 pub struct ActivationPermit {
     operation: OperationKey,
     pending: PendingRef,
+}
+
+impl ActivationPermit {
+    /// Exact durable Pending credential whose verified proof authorized activation.
+    pub const fn pending(&self) -> PendingRef {
+        self.pending
+    }
 }
 
 /// Definite outcome of a Begin mutation.
@@ -608,6 +647,7 @@ pub struct PairingPolicy {
     next_window: u64,
     next_operation: u64,
     admission_generation: u64,
+    proof_continuation_generation: u64,
     window: WindowState,
     in_flight: Option<InFlight>,
     pending: Option<PendingRef>,
@@ -627,6 +667,7 @@ impl PairingPolicy {
             next_window: 0,
             next_operation: 0,
             admission_generation: 0,
+            proof_continuation_generation: 0,
             window: WindowState::Idle,
             in_flight: None,
             pending: match pending {
@@ -657,6 +698,7 @@ impl PairingPolicy {
         self.last_connection = connection.get();
         self.reset_hold();
         self.bump_admission_generation();
+        self.invalidate_proof_continuations();
         Ok(closed)
     }
 
@@ -672,6 +714,7 @@ impl PairingPolicy {
         self.active_connection = None;
         self.reset_hold();
         self.bump_admission_generation();
+        self.invalidate_proof_continuations();
         closed.map_or(PolicyEvent::None, PolicyEvent::Closed)
     }
 
@@ -971,7 +1014,12 @@ impl PairingPolicy {
         };
         let closed = self.close_on_third(ordinal);
         AttemptDecision::Admitted {
-            permit: ProofAttemptPermit { operation, pending },
+            permit: ProofAttemptPermit {
+                operation,
+                pending,
+                deadline: MonotonicMillis::new(window.deadline),
+                continuation_generation: self.proof_continuation_generation,
+            },
             ordinal,
             closed_to_new_attempts: closed,
         }
@@ -982,6 +1030,34 @@ impl PairingPolicy {
         self.finish_exact(permit.operation, OperationKind::Proof(permit.pending))?;
         self.finish_draining();
         Ok(())
+    }
+
+    /// Revalidate one admitted proof immediately before cryptographic
+    /// continuation verification.
+    ///
+    /// An admitted third attempt remains valid while the policy drains, but a
+    /// timeout, disconnect, replacement connection, or clock regression
+    /// invalidates the continuation. The exact operation remains owned so the
+    /// caller can release it with [`Self::proof_rejected`].
+    pub fn proof_continuation_is_current(
+        &mut self,
+        now: MonotonicMillis,
+        connection: ConnectionId,
+        permit: &ProofAttemptPermit,
+    ) -> bool {
+        if self.observe_time(now).is_err() {
+            return false;
+        }
+        if now >= permit.deadline {
+            self.expire_window(now.get());
+            return false;
+        }
+        self.active_connection == Some(connection)
+            && permit.connection() == connection
+            && self.proof_continuation_generation == permit.continuation_generation
+            && self
+                .require_exact(permit.operation, OperationKind::Proof(permit.pending))
+                .is_ok()
     }
 
     /// Convert an admitted, cryptographically verified proof into exact
@@ -1050,6 +1126,29 @@ impl PairingPolicy {
         Ok(AbortPendingPermit { operation, pending })
     }
 
+    /// Admit identifier-free abort for the device-selected durable Pending.
+    ///
+    /// Connection and physical-window checks run before inspecting pending
+    /// state, so an unbound caller cannot distinguish missing from present
+    /// enrollment state.
+    pub fn abort_current(
+        &mut self,
+        now: MonotonicMillis,
+        connection: ConnectionId,
+    ) -> Result<AbortPendingPermit, RequestRefused> {
+        let window = self.request_window(now, connection)?;
+        if self.in_flight.is_some() {
+            return Err(Self::request_refused(RequestRefusal::OperationInFlight));
+        }
+        let pending = self
+            .pending
+            .ok_or_else(|| Self::request_refused(RequestRefusal::PendingMissing))?;
+        let operation = self
+            .start_operation(window.key, OperationKind::Abort(pending))
+            .map_err(Self::request_refused)?;
+        Ok(AbortPendingPermit { operation, pending })
+    }
+
     /// Reconcile one exact pending-abort mutation.
     pub fn finish_abort(
         &mut self,
@@ -1089,6 +1188,7 @@ impl PairingPolicy {
             self.close_window(CloseReason::ClockFault);
             self.reset_hold();
             self.bump_admission_generation();
+            self.invalidate_proof_continuations();
             return Err(());
         }
         self.last_now = Some(now.get());
@@ -1102,6 +1202,10 @@ impl PairingPolicy {
 
     fn bump_admission_generation(&mut self) {
         self.admission_generation = self.admission_generation.saturating_add(1);
+    }
+
+    fn invalidate_proof_continuations(&mut self) {
+        self.proof_continuation_generation = self.proof_continuation_generation.saturating_add(1);
     }
 
     fn allocate_window_id(&mut self) -> Option<WindowId> {
@@ -1123,9 +1227,14 @@ impl PairingPolicy {
             WindowState::Acquiring(window) | WindowState::Open(window) => window.deadline,
             WindowState::Idle | WindowState::Draining => return None,
         };
-        (now >= deadline)
-            .then(|| self.close_window(CloseReason::Timeout))
-            .flatten()
+        if now < deadline {
+            return None;
+        }
+        let closed = self.close_window(CloseReason::Timeout);
+        if closed.is_some() {
+            self.invalidate_proof_continuations();
+        }
+        closed
     }
 
     fn close_window(&mut self, reason: CloseReason) -> Option<WindowClosed> {
