@@ -10,6 +10,7 @@
 use core::mem;
 
 use rand_core::{CryptoRng, RngCore};
+use reticulum_device_api_adapter::SubmissionPort;
 use reticulum_device_api_credential_store::{
     BoundCredentialStoreAccess, CommitPairingLifecycleSuccessorError, CredentialStoreBinding,
     CredentialStoreBindingError, CredentialStoreFault, CredentialStoreMountError,
@@ -23,6 +24,7 @@ use reticulum_device_api_credentials::{
     E290_CREDENTIAL_RECORD_CAPACITY, NewPendingCredential, PairingLifecycleStoreCandidate,
     PairingOrigin, PendingCredentialRef, Permissions, PrincipalId,
 };
+use reticulum_device_api_handoff::{LocalApiReply, LocalApiRequest};
 use reticulum_device_api_pairing::{
     ActivateFailure, ActivateRequest, DeviceChallenge, DeviceId, PairingFailure, PairingPsk,
     PairingTranscript, ProofChallenge, ProofStartRequest,
@@ -34,8 +36,12 @@ use reticulum_device_api_pairing_policy::{
     MonotonicMillis, PairingPolicy, PendingRef, PendingState, PermitError, PolicyEvent,
     RequestRefusal, RequestRefused, WindowClosed,
 };
+use reticulum_device_api_session::AuthenticatedGrant;
 use zeroize::Zeroizing;
 
+use crate::authenticated_api_node::{
+    AuthenticatedApiDispatchFailure, dispatch_authenticated_request,
+};
 use crate::credential_boot::{
     CredentialBootOutcome, CredentialBootState, MAXIMUM_CREDENTIAL_BOOT_OUTCOME_BYTES,
 };
@@ -252,6 +258,32 @@ impl CredentialRuntime {
                 .as_ref()
                 .and_then(MountedCredentialStore::publishable_authority)
                 .is_some()
+    }
+
+    /// Revalidate and dispatch one session-authenticated request against the
+    /// currently publishable authority without exposing that authority.
+    ///
+    /// The caller supplies only the disjoint logical submission port. Missing,
+    /// replaced, revoked, or otherwise unpublished authority state therefore
+    /// takes the helper's zero-port-I/O authentication-failure path.
+    #[allow(
+        clippy::result_large_err,
+        reason = "terminal failure must retain the exact allocation-free request owner"
+    )]
+    pub fn dispatch_authenticated_request<P>(
+        &self,
+        request: LocalApiRequest<AuthenticatedGrant>,
+        port: &mut P,
+    ) -> Result<LocalApiReply, AuthenticatedApiDispatchFailure>
+    where
+        P: SubmissionPort,
+    {
+        let authority = self
+            .mounted
+            .as_ref()
+            .and_then(MountedCredentialStore::publishable_authority)
+            .filter(|_| self.boot_state.authority_publishable());
+        dispatch_authenticated_request(request, authority, port)
     }
 
     /// Whether the retained authority is physically and locally eligible for a

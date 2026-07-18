@@ -2,8 +2,10 @@
 //!
 //! This task terminates the unauthenticated credential-initialization and live-
 //! pairing records on one shared framed stream and exact-next sequence space.
-//! It is not a Reticulum packet interface and has no access to node routing,
-//! radio, credential, journal, or raw flash owners.
+//! It also retains the boot-lifetime authenticated API bearer endpoint, but
+//! does not yet admit session records. It is not a Reticulum packet interface
+//! and has no access to node routing, radio, credential, journal, or raw flash
+//! owners.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -17,10 +19,12 @@ use esp_hal::{
     usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagTx},
 };
 use reticulum_device_api_framing::{DecodeEvent, FramedRecord, Record, StreamDecoder};
+use reticulum_device_api_handoff::BearerHandoff;
 use reticulum_device_api_pairing_control::ControlResponse;
 use reticulum_device_api_pairing_policy::{
     ActiveLowButton, ConnectionId, MonotonicMillis as PairingMillis,
 };
+use reticulum_device_api_session::AuthenticatedGrant;
 use reticulum_heltec_vision_master_e290_node::{
     config,
     live_pairing_handoff::{BearerLivePairingHandoff, LivePairingCommand, LivePairingReply},
@@ -260,6 +264,7 @@ pub async fn run(
     button: Input<'static>,
     mut handoff: UsbPairingHandoff<CriticalSectionRawMutex>,
     mut live_handoff: BearerLivePairingHandoff<CriticalSectionRawMutex>,
+    _authenticated_api: BearerHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
 ) {
     let mut usb_serial = UsbSerialJtag::<Blocking>::new(usb_device);
     let registers = USB_DEVICE::regs();

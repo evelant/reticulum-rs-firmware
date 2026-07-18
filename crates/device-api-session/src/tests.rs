@@ -25,13 +25,16 @@ use reticulum_storage_model::{
     AcceptanceCandidate, LifecycleState, PrincipalId as StoragePrincipalId,
     SubmissionId as StorageSubmissionId,
 };
+use zeroize::Zeroizing;
 
 use crate::{
-    ActiveCredential, BearerBinding, ClientHello, CredentialGeneration, CredentialId, DeviceId,
-    HandshakeError, PendingClientProof, ReplyRouteFaultKind, ServerHello, ServerHelloFlight,
-    ServerParameters, ServerSession, SessionEpochAllocator, SessionFault,
+    ActiveCredential, AwaitingReply, AwaitingResponse, AwaitingServerHello, BearerBinding,
+    ClientCredential, ClientHandshakeError, ClientHello, ClientHelloFlight, ClientParameters,
+    ClientRequestFaultKind, ClientSession, ClientSessionFault, CredentialGeneration, CredentialId,
+    DeviceId, HandshakeError, PendingClientProof, ReplyFlight, ReplyRouteFaultKind, ServerHello,
+    ServerHelloFlight, ServerParameters, ServerSession, SessionEpochAllocator, SessionFault,
     crypto::{
-        KeySchedule, client_proof, derive, server_proof, server_record_tag,
+        KeySchedule, client_proof, client_record_tag, derive, server_proof, server_record_tag,
         verify_server_record_tag,
     },
     protocol::{
@@ -334,6 +337,157 @@ fn tagged_request(schedule: &KeySchedule, sequence: u64, payload: &[u8]) -> Reco
     let tag = client_tag_for_test(&schedule.client_record_key, &untagged);
     let (kind, session_id, sequence, length, payload, _) = untagged.into_parts();
     Record::new(kind, session_id, sequence, length, payload, tag)
+}
+
+fn client_parameters() -> ClientParameters {
+    ClientParameters::new(DEVICE_ID, BearerBinding::UsbSerialJtag)
+}
+
+fn client_credential() -> ClientCredential {
+    ClientCredential::from_zeroizing(CREDENTIAL_ID, GENERATION, Zeroizing::new(PSK))
+}
+
+fn owned_message(payload: &[u8]) -> OwnedMessage {
+    let mut owner = [0_u8; PAYLOAD_CAPACITY];
+    owner[..payload.len()].copy_from_slice(payload);
+    OwnedMessage::new(MessageLength::new(payload.len()).unwrap(), owner)
+}
+
+fn expect_error<T, E>(result: Result<T, E>, success_message: &str) -> E {
+    match result {
+        Ok(_) => panic!("{success_message}"),
+        Err(error) => error,
+    }
+}
+
+fn start_client_handshake() -> (AwaitingServerHello, ClientHello) {
+    let mut rng = FixedRng::new(CLIENT_NONCE);
+    let mut flight = ClientHelloFlight::begin(client_parameters(), client_credential(), &mut rng)
+        .unwrap_or_else(|error| panic!("client handshake begin failed: {error:?}"));
+    let hello = ClientHello::from_record(decode_one(flight.remaining()))
+        .unwrap_or_else(|error| panic!("client emitted invalid hello: {error:?}"));
+    let length = flight.remaining().len();
+    flight.advance(length).unwrap();
+    let awaiting = flight
+        .try_finish()
+        .unwrap_or_else(|_| panic!("complete client hello did not advance typestate"));
+    (awaiting, hello)
+}
+
+fn server_hello_record_for(
+    client_hello: ClientHello,
+    device_id: DeviceId,
+    generation: CredentialGeneration,
+) -> Record {
+    let mut epochs = SessionEpochAllocator::new();
+    let mut rng = FixedRng::new(SERVER_NONCE);
+    let flight = ServerHelloFlight::begin(
+        client_hello,
+        ActiveCredential::new(CREDENTIAL_ID, generation, PSK),
+        ServerParameters::new(device_id, BearerBinding::UsbSerialJtag),
+        &mut epochs,
+        &mut rng,
+    )
+    .unwrap_or_else(|error| panic!("server handshake begin failed: {error:?}"));
+    decode_one(flight.remaining())
+}
+
+fn establish_client_server() -> (ClientSession, ServerSession, KeySchedule) {
+    let mut client_rng = FixedRng::new(CLIENT_NONCE);
+    let mut client_hello_flight =
+        ClientHelloFlight::begin(client_parameters(), client_credential(), &mut client_rng)
+            .unwrap_or_else(|error| panic!("client handshake begin failed: {error:?}"));
+    let parsed_client_hello = ClientHello::from_record(decode_one(client_hello_flight.remaining()))
+        .unwrap_or_else(|error| panic!("client emitted invalid hello: {error:?}"));
+    let client_hello_length = client_hello_flight.remaining().len();
+    client_hello_flight.advance(client_hello_length).unwrap();
+    let awaiting_server_hello = client_hello_flight
+        .try_finish()
+        .unwrap_or_else(|_| panic!("complete client hello did not advance typestate"));
+
+    let mut epochs = SessionEpochAllocator::new();
+    let mut server_rng = FixedRng::new(SERVER_NONCE);
+    let mut server_hello_flight = ServerHelloFlight::begin(
+        parsed_client_hello,
+        ActiveCredential::new(CREDENTIAL_ID, GENERATION, PSK),
+        ServerParameters::new(DEVICE_ID, BearerBinding::UsbSerialJtag),
+        &mut epochs,
+        &mut server_rng,
+    )
+    .unwrap_or_else(|error| panic!("server handshake begin failed: {error:?}"));
+    let server_hello = ServerHello::from_record(decode_one(server_hello_flight.remaining()))
+        .unwrap_or_else(|error| panic!("server emitted invalid hello: {error:?}"));
+    let awaiting_server_proof = awaiting_server_hello
+        .accept(decode_one(server_hello_flight.remaining()))
+        .unwrap_or_else(|error| panic!("client rejected valid server hello: {error:?}"));
+    let schedule = derive(&PSK, &parsed_client_hello, &server_hello);
+
+    let server_hello_length = server_hello_flight.remaining().len();
+    server_hello_flight.advance(server_hello_length).unwrap();
+    let mut server_proof_flight = server_hello_flight
+        .try_finish()
+        .unwrap_or_else(|_| panic!("complete server hello did not advance typestate"));
+    let mut client_proof_flight = awaiting_server_proof
+        .verify(decode_one(server_proof_flight.remaining()))
+        .unwrap_or_else(|error| panic!("client rejected valid server proof: {error:?}"));
+
+    let server_proof_length = server_proof_flight.remaining().len();
+    server_proof_flight.advance(server_proof_length).unwrap();
+    let pending_client_proof = server_proof_flight
+        .try_finish()
+        .unwrap_or_else(|_| panic!("complete server proof did not advance typestate"));
+    let client_proof_record = decode_one(client_proof_flight.remaining());
+    let client_proof_length = client_proof_flight.remaining().len();
+    client_proof_flight.advance(client_proof_length).unwrap();
+    let client_session = client_proof_flight
+        .try_finish()
+        .unwrap_or_else(|_| panic!("complete client proof did not establish session"));
+    let server_session = pending_client_proof
+        .authenticate(client_proof_record)
+        .unwrap_or_else(|error| panic!("server rejected valid client proof: {error:?}"));
+
+    (client_session, server_session, schedule)
+}
+
+fn send_client_request(
+    client: ClientSession,
+    server: ServerSession,
+    payload: &[u8],
+) -> (AwaitingResponse, AwaitingReply) {
+    let mut flight = match client.frame_request(owned_message(payload)) {
+        Ok(flight) => flight,
+        Err(fault) => panic!("client request framing failed: {:?}", fault.kind()),
+    };
+    let request_record = decode_one(flight.remaining());
+    let request_length = flight.remaining().len();
+    flight.advance(request_length).unwrap();
+    let awaiting_response = flight
+        .try_finish()
+        .unwrap_or_else(|_| panic!("complete request did not advance typestate"));
+    let authenticated = server
+        .authenticate_request(request_record)
+        .unwrap_or_else(|error| panic!("server rejected valid client request: {error:?}"));
+    let (request, awaiting_reply) = authenticated.into_parts();
+    assert_eq!(request.message().encoded(), payload);
+    (awaiting_response, awaiting_reply)
+}
+
+fn frame_server_response(waiting: AwaitingReply, payload: &[u8]) -> ReplyFlight {
+    let key = waiting.request_key();
+    match waiting.frame_reply(LocalApiReply::new(key, owned_message(payload))) {
+        Ok(flight) => flight,
+        Err(fault) => panic!("server response framing failed: {:?}", fault.kind()),
+    }
+}
+
+fn pending_server_response(
+    request: &[u8],
+    response: &[u8],
+) -> (AwaitingResponse, ReplyFlight, KeySchedule) {
+    let (client, server, schedule) = establish_client_server();
+    let (awaiting, waiting) = send_client_request(client, server, request);
+    let flight = frame_server_response(waiting, response);
+    (awaiting, flight, schedule)
 }
 
 #[test]
@@ -987,4 +1141,393 @@ fn deterministic_material_matches_independent_python_vector() {
         hex::encode(flight.remaining()),
         "0007524441310111011143500f898ee83026808be25bf16c114401010101010101020f20766563746f722d726573706f6e7365b04abfae374dcb7592292ba4c22729bf00"
     );
+}
+
+#[test]
+fn public_client_typestate_matches_vectors_and_server_end_to_end() {
+    let parameters = client_parameters();
+    assert_eq!(parameters.expected_device_id(), DEVICE_ID);
+    assert_eq!(parameters.bearer(), BearerBinding::UsbSerialJtag);
+    let credential = client_credential();
+    assert_eq!(credential.id(), CREDENTIAL_ID);
+    assert_eq!(credential.generation(), GENERATION);
+
+    let mut client_rng = FixedRng::new(CLIENT_NONCE);
+    let client_hello_flight = ClientHelloFlight::begin(parameters, credential, &mut client_rng)
+        .unwrap_or_else(|error| panic!("client handshake begin failed: {error:?}"));
+    let client_hello_wire = "0007524441310101010101010101010101010101010101010101010101010101010238020101010201020131101112131415161718191a1b1c1d1e1f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f0101010101010101010101010101010100";
+    assert_eq!(
+        hex::encode(client_hello_flight.remaining()),
+        client_hello_wire
+    );
+    let parsed_client_hello = ClientHello::from_record(decode_one(client_hello_flight.remaining()))
+        .unwrap_or_else(|error| panic!("client emitted invalid hello: {error:?}"));
+    assert_eq!(parsed_client_hello, client_hello());
+    assert_eq!(
+        client_hello_flight.next_chunk(7),
+        &client_hello_flight.remaining()[..7]
+    );
+    let mut client_hello_flight = match client_hello_flight.try_finish() {
+        Ok(_) => panic!("unacknowledged client hello advanced typestate"),
+        Err(flight) => flight,
+    };
+    client_hello_flight.advance(7).unwrap();
+    let mut client_hello_flight = match client_hello_flight.try_finish() {
+        Ok(_) => panic!("partially acknowledged client hello advanced typestate"),
+        Err(flight) => flight,
+    };
+    let remaining = client_hello_flight.remaining().len();
+    client_hello_flight.advance(remaining).unwrap();
+    let awaiting_server_hello = client_hello_flight
+        .try_finish()
+        .unwrap_or_else(|_| panic!("complete client hello did not advance typestate"));
+
+    let mut epochs = SessionEpochAllocator::new();
+    let mut server_rng = FixedRng::new(SERVER_NONCE);
+    let mut server_hello_flight = ServerHelloFlight::begin(
+        parsed_client_hello,
+        ActiveCredential::new(CREDENTIAL_ID, GENERATION, PSK),
+        ServerParameters::new(DEVICE_ID, BearerBinding::UsbSerialJtag),
+        &mut epochs,
+        &mut server_rng,
+    )
+    .unwrap_or_else(|error| panic!("server handshake begin failed: {error:?}"));
+    let server_hello_wire = "000752444131010201010101010101010101010101010101010101010101010101024c020101010201020139202122232425262728292a2b2c2d2e2f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f08070605040302010202030201010102070101010101010101010101010101010101010100";
+    assert_eq!(
+        hex::encode(server_hello_flight.remaining()),
+        server_hello_wire
+    );
+    let server_hello = ServerHello::from_record(decode_one(server_hello_flight.remaining()))
+        .unwrap_or_else(|error| panic!("server emitted invalid hello: {error:?}"));
+    let awaiting_server_proof = awaiting_server_hello
+        .accept(decode_one(server_hello_flight.remaining()))
+        .unwrap_or_else(|error| panic!("client rejected valid server hello: {error:?}"));
+    let schedule = derive(&PSK, &parsed_client_hello, &server_hello);
+    let server_hello_length = server_hello_flight.remaining().len();
+    server_hello_flight.advance(server_hello_length).unwrap();
+    let mut server_proof_flight = server_hello_flight
+        .try_finish()
+        .unwrap_or_else(|_| panic!("complete server hello did not advance typestate"));
+
+    let server_proof_wire = "0007524441310103011143500f898ee83026808be25bf16c114401010101010101022021f8dadb11a16a3ff23cb346843583ad980b5a4b22cc75c5a058b403089a8401e50101010101010101010101010101010100";
+    assert_eq!(
+        hex::encode(server_proof_flight.remaining()),
+        server_proof_wire
+    );
+    let client_proof_flight = awaiting_server_proof
+        .verify(decode_one(server_proof_flight.remaining()))
+        .unwrap_or_else(|error| panic!("client rejected valid server proof: {error:?}"));
+    let server_proof_length = server_proof_flight.remaining().len();
+    server_proof_flight.advance(server_proof_length).unwrap();
+    let pending_client_proof = server_proof_flight
+        .try_finish()
+        .unwrap_or_else(|_| panic!("complete server proof did not advance typestate"));
+
+    let client_proof_wire = "0007524441310104011143500f898ee83026808be25bf16c114401010101010101022021419b56f8245fb32647258ed4102531c606543b32cd125af94b5fff96fa21496d0101010101010101010101010101010100";
+    assert_eq!(
+        hex::encode(client_proof_flight.remaining()),
+        client_proof_wire
+    );
+    let client_proof_record = decode_one(client_proof_flight.remaining());
+    let mut client_proof_flight = match client_proof_flight.try_finish() {
+        Ok(_) => panic!("unacknowledged client proof established a session"),
+        Err(flight) => flight,
+    };
+    let client_proof_length = client_proof_flight.remaining().len();
+    client_proof_flight.advance(client_proof_length).unwrap();
+    let client_session = client_proof_flight
+        .try_finish()
+        .unwrap_or_else(|_| panic!("complete client proof did not establish a session"));
+    let server_session = pending_client_proof
+        .authenticate(client_proof_record)
+        .unwrap_or_else(|error| panic!("server rejected valid client proof: {error:?}"));
+    assert_eq!(client_session.session_id(), server_session.session_id());
+    assert_eq!(client_session.session_id(), schedule.session_id);
+
+    let request_flight = match client_session.frame_request(owned_message(b"vector-request")) {
+        Ok(flight) => flight,
+        Err(fault) => panic!("client request framing failed: {:?}", fault.kind()),
+    };
+    let request_wire = "0007524441310110011143500f898ee83026808be25bf16c114401010101010101020e1f766563746f722d72657175657374fba3e2eedff43b16b35829413cee6bc200";
+    assert_eq!(hex::encode(request_flight.remaining()), request_wire);
+    let request_record = decode_one(request_flight.remaining());
+    let mut request_flight = match request_flight.try_finish() {
+        Ok(_) => panic!("unacknowledged request entered the response state"),
+        Err(flight) => flight,
+    };
+    request_flight.advance(5).unwrap();
+    let mut request_flight = match request_flight.try_finish() {
+        Ok(_) => panic!("partially acknowledged request entered the response state"),
+        Err(flight) => flight,
+    };
+    let request_remaining = request_flight.remaining().len();
+    request_flight.advance(request_remaining).unwrap();
+    let awaiting_response = request_flight
+        .try_finish()
+        .unwrap_or_else(|_| panic!("complete request did not enter the response state"));
+    let authenticated = server_session
+        .authenticate_request(request_record)
+        .unwrap_or_else(|error| panic!("server rejected public-client request: {error:?}"));
+    let (request, waiting) = authenticated.into_parts();
+    assert_eq!(request.message().encoded(), b"vector-request");
+
+    let mut response_flight = frame_server_response(waiting, b"vector-response");
+    let response_wire = "0007524441310111011143500f898ee83026808be25bf16c114401010101010101020f20766563746f722d726573706f6e7365b04abfae374dcb7592292ba4c22729bf00";
+    assert_eq!(hex::encode(response_flight.remaining()), response_wire);
+    let response = awaiting_response
+        .authenticate(decode_one(response_flight.remaining()))
+        .unwrap_or_else(|error| panic!("client rejected valid response: {error:?}"));
+    assert_eq!(response.message().encoded(), b"vector-response");
+    let (client_session, response_message) = response.into_parts();
+    assert_eq!(response_message.encoded(), b"vector-response");
+    let response_length = response_flight.remaining().len();
+    response_flight.advance(response_length).unwrap();
+    let server_session = response_flight
+        .try_finish()
+        .unwrap_or_else(|_| panic!("complete response did not restore server session"));
+    assert_eq!(client_session.next_client_sequence(), 1);
+    assert_eq!(client_session.next_server_sequence(), 1);
+    assert_eq!(server_session.next_client_sequence(), 1);
+    assert_eq!(server_session.next_server_sequence(), 1);
+
+    let (awaiting_response, waiting) =
+        send_client_request(client_session, server_session, b"second-request");
+    let response_flight = frame_server_response(waiting, b"second-response");
+    let valid = decode_one(response_flight.remaining());
+    let (kind, session_id, _, length, payload, tag) = valid.into_parts();
+    let duplicate = Record::new(kind, session_id, 0, length, payload, tag);
+    let error = expect_error(
+        awaiting_response.authenticate(duplicate),
+        "duplicate response sequence was accepted",
+    );
+    assert_eq!(
+        error,
+        ClientSessionFault::UnexpectedSequence {
+            expected: 1,
+            observed: 0,
+        }
+    );
+}
+
+#[test]
+fn client_handshake_rejects_unqualified_or_unauthenticated_servers() {
+    let mut rng = FixedRng::new(CLIENT_NONCE);
+    let forbidden = match ClientHelloFlight::begin(
+        ClientParameters::new(DEVICE_ID, BearerBinding::BleGatt),
+        client_credential(),
+        &mut rng,
+    ) {
+        Ok(_) => panic!("qualification suite started on BLE"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        forbidden,
+        ClientHandshakeError::QualificationSuiteForbidden {
+            bearer: BearerBinding::BleGatt
+        }
+    ));
+
+    let (awaiting, hello) = start_client_handshake();
+    let record = server_hello_record_for(hello, DEVICE_ID, GENERATION);
+    let (kind, session_id, sequence, length, mut payload, tag) = record.into_parts();
+    payload[6] = BearerBinding::BleGatt as u8;
+    let error = expect_error(
+        awaiting.accept(Record::new(
+            kind, session_id, sequence, length, payload, tag,
+        )),
+        "server hello on the wrong bearer was accepted",
+    );
+    assert!(matches!(
+        error,
+        ClientHandshakeError::BearerMismatch {
+            expected: BearerBinding::UsbSerialJtag,
+            observed: BearerBinding::BleGatt,
+        }
+    ));
+
+    let other_device = DeviceId::new([0x99; 16]);
+    let (awaiting, hello) = start_client_handshake();
+    let error = expect_error(
+        awaiting.accept(server_hello_record_for(hello, other_device, GENERATION)),
+        "server hello for the wrong device was accepted",
+    );
+    match error {
+        ClientHandshakeError::DeviceMismatch { expected, observed } => {
+            assert_eq!(expected, DEVICE_ID);
+            assert_eq!(observed, other_device);
+        }
+        other => panic!("wrong device produced unexpected error: {other:?}"),
+    }
+
+    let next_generation = CredentialGeneration::new(GENERATION.get() + 1);
+    let (awaiting, hello) = start_client_handshake();
+    let error = expect_error(
+        awaiting.accept(server_hello_record_for(hello, DEVICE_ID, next_generation)),
+        "server hello for the wrong credential generation was accepted",
+    );
+    match error {
+        ClientHandshakeError::CredentialGenerationMismatch { expected, observed } => {
+            assert_eq!(expected, GENERATION);
+            assert_eq!(observed, next_generation);
+        }
+        other => panic!("wrong generation produced unexpected error: {other:?}"),
+    }
+
+    let (awaiting, hello) = start_client_handshake();
+    let mut epochs = SessionEpochAllocator::new();
+    let mut server_rng = FixedRng::new(SERVER_NONCE);
+    let mut server_hello_flight = ServerHelloFlight::begin(
+        hello,
+        ActiveCredential::new(CREDENTIAL_ID, GENERATION, PSK),
+        ServerParameters::new(DEVICE_ID, BearerBinding::UsbSerialJtag),
+        &mut epochs,
+        &mut server_rng,
+    )
+    .unwrap();
+    let awaiting_proof = awaiting
+        .accept(decode_one(server_hello_flight.remaining()))
+        .unwrap();
+    let length = server_hello_flight.remaining().len();
+    server_hello_flight.advance(length).unwrap();
+    let server_proof_flight = server_hello_flight
+        .try_finish()
+        .unwrap_or_else(|_| panic!("complete server hello did not expose proof"));
+    let proof = decode_one(server_proof_flight.remaining());
+    let (kind, session_id, sequence, length, mut payload, tag) = proof.into_parts();
+    payload[0] ^= 0x80;
+    let error = expect_error(
+        awaiting_proof.verify(Record::new(
+            kind, session_id, sequence, length, payload, tag,
+        )),
+        "invalid server proof was accepted",
+    );
+    assert!(matches!(error, ClientHandshakeError::AuthenticationFailed));
+}
+
+#[test]
+fn client_request_exhaustion_returns_the_exact_unsent_owner() {
+    let (mut client, server, _) = establish_client_server();
+    client.set_sequences_for_test(u64::MAX, 0);
+    let mut buffer = [0xa5_u8; PAYLOAD_CAPACITY];
+    buffer[..4].copy_from_slice(b"last");
+    let expected = buffer;
+    let message = OwnedMessage::new(MessageLength::new(4).unwrap(), buffer);
+    let fault = match client.frame_request(message) {
+        Ok(_) => panic!("exhausted client sequence framed a request"),
+        Err(fault) => fault,
+    };
+    assert_eq!(fault.kind(), ClientRequestFaultKind::SequenceExhausted);
+    let returned = fault.into_message();
+    assert_eq!(returned.encoded(), b"last");
+    assert_eq!(returned.full_buffer(), &expected);
+    drop(server);
+}
+
+#[test]
+fn client_response_authentication_fails_closed_for_every_session_boundary() {
+    let (awaiting, flight, _) = pending_server_response(b"kind", b"response");
+    let record = decode_one(flight.remaining());
+    let (_, session_id, sequence, length, payload, tag) = record.into_parts();
+    let error = expect_error(
+        awaiting.authenticate(Record::new(
+            RECORD_KIND_REQUEST,
+            session_id,
+            sequence,
+            length,
+            payload,
+            tag,
+        )),
+        "response state accepted a request record",
+    );
+    assert_eq!(
+        error,
+        ClientSessionFault::UnexpectedKind {
+            observed: RECORD_KIND_REQUEST
+        }
+    );
+
+    let (awaiting, flight, _) = pending_server_response(b"session", b"response");
+    let record = decode_one(flight.remaining());
+    let (kind, mut session_id, sequence, length, payload, tag) = record.into_parts();
+    session_id[0] ^= 0x80;
+    let error = expect_error(
+        awaiting.authenticate(Record::new(
+            kind, session_id, sequence, length, payload, tag,
+        )),
+        "response from the wrong session was accepted",
+    );
+    assert_eq!(error, ClientSessionFault::WrongSession);
+
+    let (awaiting, flight, _) = pending_server_response(b"gap", b"response");
+    let record = decode_one(flight.remaining());
+    let (kind, session_id, sequence, length, payload, tag) = record.into_parts();
+    let error = expect_error(
+        awaiting.authenticate(Record::new(
+            kind,
+            session_id,
+            sequence + 1,
+            length,
+            payload,
+            tag,
+        )),
+        "response sequence gap was accepted",
+    );
+    assert_eq!(
+        error,
+        ClientSessionFault::UnexpectedSequence {
+            expected: 0,
+            observed: 1,
+        }
+    );
+
+    let (awaiting, flight, _) = pending_server_response(b"tag", b"response");
+    let record = decode_one(flight.remaining());
+    let (kind, session_id, sequence, length, payload, mut tag) = record.into_parts();
+    tag[0] ^= 0x80;
+    let error = expect_error(
+        awaiting.authenticate(Record::new(
+            kind, session_id, sequence, length, payload, tag,
+        )),
+        "response with a bad tag was accepted",
+    );
+    assert_eq!(error, ClientSessionFault::BadTag);
+
+    let (awaiting, flight, schedule) = pending_server_response(b"reflection", b"response");
+    let record = decode_one(flight.remaining());
+    let (kind, session_id, sequence, length, payload, _) = record.into_parts();
+    let untagged = Record::new(
+        kind,
+        session_id,
+        sequence,
+        length,
+        payload,
+        [0; AUTH_TAG_LENGTH],
+    );
+    let reflected = client_record_tag(&schedule.client_record_key, &untagged);
+    let (kind, session_id, sequence, length, payload, _) = untagged.into_parts();
+    let error = expect_error(
+        awaiting.authenticate(Record::new(
+            kind, session_id, sequence, length, payload, reflected,
+        )),
+        "client-direction tag was accepted on a response",
+    );
+    assert_eq!(error, ClientSessionFault::BadTag);
+
+    let (mut client, server, schedule) = establish_client_server();
+    client.set_sequences_for_test(0, u64::MAX);
+    let (awaiting, waiting) = send_client_request(client, server, b"exhaustion");
+    drop(waiting);
+    let exhausted = Record::new(
+        RECORD_KIND_RESPONSE,
+        schedule.session_id.0,
+        u64::MAX,
+        PayloadLength::new(0).unwrap(),
+        [0; PAYLOAD_CAPACITY],
+        [0; AUTH_TAG_LENGTH],
+    );
+    let error = expect_error(
+        awaiting.authenticate(exhausted),
+        "exhausted response sequence was accepted",
+    );
+    assert_eq!(error, ClientSessionFault::SequenceExhausted);
 }

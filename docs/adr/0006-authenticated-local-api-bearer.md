@@ -3,8 +3,8 @@
 - **Status:** accepted for the qualification session, portable credential
   authority/store, durable provenance, ADR 0009 policy/store design, ADR 0010
   live-pairing protocol/core, E290 credential boot composition, and routed
-  pre-authentication live lifecycle; authenticated session/logical-API bearer
-  pending
+  pre-authentication live lifecycle; authenticated node-side handoff and
+  logical dispatch composed; USB session/bearer pending
 - **Date:** 2026-07-17
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0003](0003-lora-first-interface-fabric.md) and
@@ -126,6 +126,12 @@ the node operation. The persistent bearer manager drains replies, discards a
 reply from a stale epoch and allows an idempotent retry to become a new request
 owner. Dropping either boot-lifetime endpoint is a fatal service teardown.
 
+The permanent E290 graph now instantiates that depth-one handoff statically.
+The node endpoint is scheduled as its own fair lane; the USB task retains the
+bearer endpoint across reconnects but does not yet feed it. No authenticated
+hello, proof, request, response, or close record is admitted by the USB owner in
+this slice, so this source composition does not constitute a live bearer.
+
 The handoff's 512-byte limit is the authoritative
 `reticulum-device-api::MAX_MESSAGE_BYTES`, not a duplicated constant.
 
@@ -177,8 +183,12 @@ shortcut is not advertised as protection against a malicious process already
 controlling the connected host.
 
 `reticulum-device-api-session` freezes the qualification protocol implemented
-by both the allocation-free Rust server and the independent Python vector
-generator. Record kinds are `0x01` client hello, `0x02` server hello, `0x03`
+by the allocation-free Rust server, its public allocation-free `no_std` client
+typestates, and the independent Python vector generator. The client owns exact
+partial-TX hello, proof, and request flights, authenticates the next response,
+and restores its idle session only after successful verification; no E290 host
+utility or USB task drives those typestates yet. Record kinds are `0x01` client
+hello, `0x02` server hello, `0x03`
 server proof, `0x04` client proof, `0x10` request, `0x11` response and `0x12`
 reserved authenticated close. No other kind is accepted.
 
@@ -302,12 +312,19 @@ copyable, so the exact value cannot be moved out of that callback. Its scalar
 facts remain reconstructible by trusted linked Rust code; immediate use and no
 fallback are sole-owner integration/review obligations, not an unforgeable
 capability boundary. Revalidation failure must never be downgraded to an
-unauthenticated context or invoke an adapter/storage port. The portable host
-test proves the direct authority-to-reply path and authority rejection after
-request admission; the composed firmware no-fallback/zero-port-I/O path remains
-to be proven. Cross-snapshot successor regressions separately reject
-same-generation authorization changes and silent credential removal. No
-composed firmware task yet exercises this path.
+unauthenticated context or invoke an adapter/storage port. The permanent E290
+node now implements that composition: it decodes the bounded logical request,
+asks the resident credential runtime to revalidate against the currently
+publishable authority, and invokes the adapter synchronously through a
+short-lived submission-port view borrowing only coordinator fields disjoint
+from credential authority. Missing, replaced, revoked, or generation-mismatched
+state returns the generic authentication-required response with zero
+submission-port I/O and no unauthenticated fallback. A malformed logical
+request is retained as a terminal quarantine owner because it has no
+trustworthy logical request ID; an unexpected post-dispatch encoding failure
+is likewise never redispatched. Cross-snapshot successor regressions separately reject
+same-generation authorization changes and silent credential removal. The USB
+bearer endpoint is dormant, so powered hardware has not exercised this path.
 
 A reply is delivered only to its accepting live session or retrieved later by
 the same authorized principal. Session epochs route replies; they are not
@@ -352,8 +369,11 @@ physical attacker and must not be described as tamper-resistant.
 - Complete in semantic schema 2: exact authorization provenance is validated,
   durably encoded, retained across replay/remount, and mapped only after logical
   authorization succeeds.
-- Remaining: composed handoff proof that rejection never falls back or invokes
-  adapter/storage port I/O.
+- Complete in the permanent E290 source graph: static depth-one authenticated
+  request/reply handoff, a fair node dispatch lane, current-authority
+  revalidation, synchronous dispatch through a credential-disjoint submission
+  view, retained reply pressure, and generic rejection with no fallback or
+  submission-port I/O. The USB bearer endpoint is retained dormant.
 - Remaining: malformed established-stream policy and logical-CBOR validation in
   the bearer manager.
 - Complete in the portable store: the dedicated two-sector format,
@@ -370,8 +390,9 @@ physical attacker and must not be described as tamper-resistant.
   shared USB control/live decoding and exact-next sequencing, reset-generation
   gating, secret-owning handoff, node causal scheduling, and correlated durable
   Begin/Activate/Abort replies.
-- Remaining: durable revoke/rotate/reset transactions, authenticated session
-  dispatch, and powered successful lifecycle/cut/window/rate tests.
+- Remaining: durable revoke/rotate/reset transactions, USB authenticated
+  handshake/session record admission, and powered successful
+  lifecycle/cut/window/rate/API tests.
 - Remaining: cancellation at the concrete USB RX/TX, request-admission and
   reply-channel boundaries.
 - Remaining: concrete stale-reply channel draining and idempotent retry after
@@ -385,10 +406,11 @@ physical attacker and must not be described as tamper-resistant.
 ## Deferred decisions
 
 This ADR does not select the production AEAD construction, compose the
-authenticated USB bearer/session manager, define
+authenticated USB bearer/session manager beyond retaining its dormant handoff
+endpoint, define
 a USB OTG composite descriptor, add WebUSB/NCM, or create any non-LoRa
 Reticulum packet actor. The qualification pairing/rate policy is selected, but
-its powered successful mutation path and external API/session composition are
+its powered successful mutation path and USB handshake/session composition are
 still required before the authenticated USB-to-LoRa qualification path can run.
 Production AEAD and the later transport/interface decisions are not
 prerequisites for that explicitly integrity-only wired lab profile.

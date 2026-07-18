@@ -1,11 +1,14 @@
 //! Permanent transport-neutral node owner task.
 
+use core::mem;
+
 use embassy_futures::yield_now;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Instant, Timer};
 use esp_hal::rng::Trng;
 use log::{error, info, warn};
 use reticulum_announce_clock::BootEpoch;
+use reticulum_device_api_handoff::{LocalApiReply, LocalApiRequest, NodeHandoff};
 use reticulum_device_api_pairing::{
     AbortCurrentResponse, AbortResult, ActivateFailure, ActivateResponse, BeginResponse,
     PairingFailure, PairingRequest, PairingResponse, ProofStartResponse,
@@ -15,8 +18,10 @@ use reticulum_device_api_pairing_policy::{
     AcquirePairingExclusive, ButtonEffect, ConnectionId, ExclusiveAcquireOutcome,
     MonotonicMillis as PairingMillis, PolicyEvent,
 };
+use reticulum_device_api_session::AuthenticatedGrant;
 use reticulum_heltec_vision_master_e290_node::{
     announce_time::BootAnnounceClock,
+    authenticated_api_node::AuthenticatedApiDispatchFailureKind,
     causal_pairing_frontier::{PairingCommandLane, select_pairing_command_lane},
     credential_pairing::{CredentialPairingStatus, PairingMutation},
     credential_runtime::CredentialInitializationStatus,
@@ -151,17 +156,47 @@ struct PairingNodeState {
     live_lane_faulted: bool,
 }
 
-pub(crate) struct NodePairingHandoffs {
-    control: NodePairingHandoff<CriticalSectionRawMutex>,
-    live: NodeLivePairingHandoff<CriticalSectionRawMutex>,
+enum AuthenticatedApiNodeState {
+    Ready,
+    PendingRequest(LocalApiRequest<AuthenticatedGrant>),
+    PendingReply(LocalApiReply),
+    Quarantined {
+        request: LocalApiRequest<AuthenticatedGrant>,
+        fault: AuthenticatedApiDispatchFailureKind,
+    },
 }
 
-impl NodePairingHandoffs {
+const _: () = assert!(
+    mem::size_of::<AuthenticatedApiNodeState>()
+        <= config::MAXIMUM_AUTHENTICATED_API_NODE_STATE_BYTES
+);
+
+impl AuthenticatedApiNodeState {
+    const fn new() -> Self {
+        Self::Ready
+    }
+}
+
+pub(crate) struct NodeHandoffs {
+    control: NodePairingHandoff<CriticalSectionRawMutex>,
+    live: NodeLivePairingHandoff<CriticalSectionRawMutex>,
+    authenticated_api: NodeHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
+    frame: AuthorizedFrameNodeHandoff<CriticalSectionRawMutex>,
+}
+
+impl NodeHandoffs {
     pub(crate) const fn new(
         control: NodePairingHandoff<CriticalSectionRawMutex>,
         live: NodeLivePairingHandoff<CriticalSectionRawMutex>,
+        authenticated_api: NodeHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
+        frame: AuthorizedFrameNodeHandoff<CriticalSectionRawMutex>,
     ) -> Self {
-        Self { control, live }
+        Self {
+            control,
+            live,
+            authenticated_api,
+            frame,
+        }
     }
 
     fn into_parts(
@@ -169,8 +204,10 @@ impl NodePairingHandoffs {
     ) -> (
         NodePairingHandoff<CriticalSectionRawMutex>,
         NodeLivePairingHandoff<CriticalSectionRawMutex>,
+        NodeHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
+        AuthorizedFrameNodeHandoff<CriticalSectionRawMutex>,
     ) {
-        (self.control, self.live)
+        (self.control, self.live, self.authenticated_api, self.frame)
     }
 }
 
@@ -194,13 +231,13 @@ impl PairingNodeState {
 pub async fn run(
     supervisor: &'static mut ProductSupervisor,
     storage: &'static mut ProductStorageCoordinator,
-    pairing_handoffs: NodePairingHandoffs,
-    mut frame_handoff: AuthorizedFrameNodeHandoff<CriticalSectionRawMutex>,
+    handoffs: NodeHandoffs,
     offline_descriptor: InterfaceDescriptor,
     announce_epoch: BootEpoch,
     mut rng: Trng,
 ) {
-    let (mut pairing_handoff, mut live_pairing_handoff) = pairing_handoffs.into_parts();
+    let (mut pairing_handoff, mut live_pairing_handoff, mut authenticated_api, mut frame_handoff) =
+        handoffs.into_parts();
     RADIO_READY.wait().await;
     let online = match supervisor.set_interface_online(offline_descriptor.lease(), true) {
         Ok(descriptor) => descriptor,
@@ -239,6 +276,7 @@ pub async fn run(
     let mut retained_frame: Option<AuthorizedFrameObservation> = None;
     let mut pending_frame_acknowledgement: Option<AuthorizedFrameObservation> = None;
     let mut pairing = PairingNodeState::new();
+    let mut authenticated_api_state = AuthenticatedApiNodeState::new();
 
     loop {
         let mut progressed = false;
@@ -582,6 +620,13 @@ pub async fn run(
                         }
                     }
                 }
+                4 => {
+                    progressed |= step_authenticated_api(
+                        storage,
+                        &mut authenticated_api,
+                        &mut authenticated_api_state,
+                    );
+                }
                 _ => {
                     let owner_now = now_millis();
                     if !storage_step_attempted && durability_service.storage_step_due(owner_now) {
@@ -738,6 +783,62 @@ pub async fn run(
             Timer::after(Duration::from_millis(config::NODE_POLL_INTERVAL_MS)).await;
         }
     }
+}
+
+fn step_authenticated_api(
+    storage: &mut ProductStorageCoordinator,
+    handoff: &mut NodeHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
+    state: &mut AuthenticatedApiNodeState,
+) -> bool {
+    // Each invocation performs at most one ownership transition. This keeps a
+    // pressured reply or terminal request resident without letting local API
+    // traffic consume the node task's other fair lanes.
+    if matches!(state, AuthenticatedApiNodeState::PendingReply(_)) {
+        let AuthenticatedApiNodeState::PendingReply(reply) =
+            mem::replace(state, AuthenticatedApiNodeState::Ready)
+        else {
+            unreachable!()
+        };
+        return match handoff.replies().try_send(reply) {
+            Ok(()) => true,
+            Err(pressure) => {
+                *state = AuthenticatedApiNodeState::PendingReply(pressure.into_inner());
+                false
+            }
+        };
+    }
+
+    if matches!(state, AuthenticatedApiNodeState::PendingRequest(_)) {
+        let AuthenticatedApiNodeState::PendingRequest(request) =
+            mem::replace(state, AuthenticatedApiNodeState::Ready)
+        else {
+            unreachable!()
+        };
+        match storage.dispatch_authenticated_request(request) {
+            Ok(reply) => *state = AuthenticatedApiNodeState::PendingReply(reply),
+            Err(failure) => {
+                let kind = failure.kind();
+                *state = AuthenticatedApiNodeState::Quarantined {
+                    request: failure.into_request(),
+                    fault: kind,
+                };
+                error!(
+                    "e290-node stage=authenticated-api status=FAIL-STOP reason={kind:?} action=retain-request-and-close-api-lane"
+                );
+            }
+        }
+        return true;
+    }
+
+    if let AuthenticatedApiNodeState::Quarantined { request, fault } = state {
+        let _ = (request, fault);
+        return false;
+    }
+    if let Some(request) = handoff.requests().try_receive() {
+        *state = AuthenticatedApiNodeState::PendingRequest(request);
+        return true;
+    }
+    false
 }
 
 fn step_pairing_frontier(

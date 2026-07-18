@@ -5,6 +5,7 @@
 #![deny(missing_docs)]
 
 pub mod announce_time;
+pub mod authenticated_api_node;
 pub mod causal_pairing_frontier;
 pub mod config;
 pub mod credential_boot;
@@ -414,6 +415,42 @@ mod tests {
                 "USB pairing owner reached forbidden product capability {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn authenticated_api_handoff_is_node_owned_while_usb_session_is_dormant() {
+        let main = include_str!("main.rs");
+        assert!(main.contains("DeviceApiHandoff<CriticalSectionRawMutex, AuthenticatedGrant>"));
+        assert!(main.contains("AUTHENTICATED_API.init(DeviceApiHandoff::new()).split()"));
+        assert!(main.contains("node_authenticated_api,"));
+        assert!(main.contains("usb_authenticated_api,"));
+        assert!(
+            main.contains("authenticated_local_api=node-handoff-dormant bearer_session=absent")
+        );
+
+        let node = include_str!("node_task.rs");
+        assert!(node.contains("enum AuthenticatedApiNodeState"));
+        assert!(node.contains("progressed |= step_authenticated_api("));
+        assert!(node.contains("storage.dispatch_authenticated_request(request)"));
+        assert!(node.contains("AuthenticatedApiNodeState::PendingReply(pressure.into_inner())"));
+        assert!(node.contains("AuthenticatedApiNodeState::Quarantined {"));
+        assert!(node.contains("request: failure.into_request()"));
+
+        let storage = include_str!("platform_storage.rs");
+        assert!(storage.contains("struct ProductSubmissionPort<'a>"));
+        assert!(
+            storage
+                .contains("credential_runtime.dispatch_authenticated_request(request, &mut port)")
+        );
+
+        let usb = include_str!("usb_pairing_task.rs");
+        assert!(usb.contains(
+            "_authenticated_api: BearerHandoff<CriticalSectionRawMutex, AuthenticatedGrant>"
+        ));
+        assert!(!usb.contains("ServerSession"));
+        assert!(!usb.contains("ServerHelloFlight"));
+        assert!(!usb.contains("SessionEpochAllocator"));
+        assert_eq!(config::NODE_FAIR_LANES, 6);
     }
 
     #[test]

@@ -310,9 +310,10 @@ after the port reports durable acceptance or exact replay. The resident E290
 `ProductStorageCoordinator` implements that port with short-lived bound journal
 views and stable mappings for replay, conflict, capacity, ambiguity and faults.
 The product accepted-history cap is one solely for composition qualification,
-not product capacity. Allocation-free COBS framing, the bounded
-USB-qualification session server, and a depth-one boot-lifetime authenticated-
-job handoff now define the portable edge, including mutual PSK proofs,
+not product capacity. Allocation-free COBS framing, bounded public `no_std`
+USB-qualification server/client session typestates, and a depth-one
+boot-lifetime authenticated-job handoff now define the portable edge, including
+mutual PSK proofs,
 directional tags, exact sequences, partial-TX ownership, reconnect epochs and
 stale-reply handling. Independent Python vectors freeze the transcript and wire
 records. A separate allocation-free immutable credential authority now owns the
@@ -379,7 +380,11 @@ Boot never starts initialization automatically. Live lifecycle ownership is
 resident and host/target verified; the node now schedules it through the
 bearer-neutral owning handoff, and the sole USB owner multiplexes all four live
 pairing records with initialization control in one exact sequence space. The
-authenticated firmware API/session job lane is still absent. The credential authority
+permanent graph now additionally composes the feature-free session/handoff
+crates and a static depth-one authenticated API channel. Its node endpoint
+revalidates current authority and dispatches synchronously through a
+credential-disjoint submission-port view; its USB endpoint remains dormant and
+admits no authenticated session records. The credential authority
 passes 23 unit tests, eight public
 successor tests, and 18 compile-fail doctests; the
 physical store passes 32 fake-NOR tests. The accepted
@@ -393,7 +398,7 @@ store/pairing decision in
 experimental host tests/clippy plus the corresponding ESP32-S3 Xtensa checks
 pass.
 
-The E290 library now has 106 passing host tests, including the resident live-
+The E290 library now has 110 passing host tests, including the resident live-
 pairing lifecycle, its causal control/live frontier, shared USB decoder and
 sequence gate, secret-owning handoff, initialization/product policy, and
 two real cross-layer composition tests. The happy path rejects
@@ -429,7 +434,7 @@ upgrade/readback (SHA-256
 bearer remained closed, both LoRa actors continued ordinary TX, and both post-
 boot credential partitions retained the all-`0xff` SHA-256
 `7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f`.
-The current boot-quarantined routed live-pairing image is 701,744 bytes with
+The preceding boot-quarantined routed live-pairing image is 701,744 bytes with
 SHA-256
 `14d9fd6dd482c47baa9afd2fda6a5ba1d69f46785bf23ae29f6b9fe561e4b212`;
 exact address-zero readbacks from both boards matched. Each board reattached
@@ -440,16 +445,29 @@ credential partitions remained entirely erased. The application detaches and
 scrubs USB at its earliest Rust entry before product initialization, then
 canonically reattaches and waits for a clean enumeration reset. The preceding
 ROM/bootloader interval is not covered by that quarantine.
+The current authenticated-node-foundation build is 718,688 bytes with SHA-256
+`e20f6191cb2bfa78fbd7f3d588eb418913da3f1f89e3b80a4db0a28abaf414ea`.
+Exact address-zero readbacks matched on both boards. Both returned sequence-zero
+`initialization-required`; both 8 KiB credential partitions remained the exact
+all-`0xff` SHA-256
+`7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f`;
+and both recovered sequence-zero service after the readback reset. This proves
+the dormant handoff did not regress the existing USB bootstrap in that bounded
+run. It does not exercise an authenticated handshake, request, or reply.
 This does not qualify controlled peer RX, DATA, successful pairing/
 authentication, powered credential initialization, power-cut recovery,
 suspend/resume, stack high-water, heap pressure, or the full powered owner
-graph. Device-API dispatch is a
-separate portable integration boundary: the target-safe authenticated adapter,
+graph. Device-API dispatch is a separate portable integration boundary: the
+target-safe authenticated adapter,
 COBS framing, pre-authentication initialization-control codec, immutable
 credential authority, qualification-session core, boot-lifetime job handoff,
-and E290 `ProductStorageCoordinator` port implementation are compiled, and
-schema-2 acceptance retains exact authorization provenance, but no external
-firmware lane or USB/BLE/Wi-Fi bearer serves through them. The
+and E290 `ProductStorageCoordinator` port implementation are compiled. The
+permanent node now receives exact owners from a static depth-one handoff,
+revalidates each grant against the currently publishable authority, and invokes
+that port synchronously through disjoint borrows; rejection has zero port I/O
+and no unauthenticated fallback. Schema-2 acceptance retains exact
+authorization provenance, but the USB endpoint is dormant and no USB/BLE/Wi-Fi
+bearer serves through it. The
 resident credential runtime now also retains live pairing permits, proofs,
 secrets, typed store candidates, and reconciliation owners through definite
 outcomes. The bearer-neutral secret handoff preserves exact owners under
@@ -511,15 +529,17 @@ connected to the dispatcher, sole-Rete owner, timed RNode RX and one E290 LoRa
 actor in the first permanent build-verified target. Its exact authorized-frame
 durability handoff and ADR 0005 active-owner fail-stop now pass cross-layer host
 composition tests. Live external admission is blocked by successful powered
-credential initialization and the authenticated API/session firmware lane—not by credential-store boot
+credential initialization and the authenticated USB handshake/session
+bearer—not by credential-store boot
 composition, the frozen pairing/session cryptography, another semantic
 authority, durability policy, partition, or capacity decision. The feature-free
 ADR 0009 admission policy, resident
 initialization owner, and sole-owner physical drive are compiled only into the
 permanent E290 graph. The pre-authentication initialization and live-pairing
-codecs, debounced physical presence, sole USB byte owner, reset-epoch guard, and
-bounded command/reply handoffs are composed. The next software slice can
-therefore start at the authenticated credential-backed USB session edge,
+codecs, debounced physical presence, sole USB byte owner, reset-epoch guard,
+bounded command/reply handoffs, static authenticated handoff, and node-side
+current-authority dispatch are composed. The next software slice can therefore
+start at the authenticated credential-backed USB session state machine,
 followed by USB-to-LoRa submission, durable configuration/message hosting, and
 client delivery.
 The node-side routing

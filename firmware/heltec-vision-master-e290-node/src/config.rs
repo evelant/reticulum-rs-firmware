@@ -134,8 +134,13 @@ const _: () = assert!(TX_OPERATION_WATCHDOG_US >= MAXIMUM_TX_OPERATION_REQUIRED_
 pub const NODE_POLL_INTERVAL_MS: u64 = 1;
 /// Fair synchronous lane passes before the node task yields.
 pub const NODE_MAX_IMMEDIATE_PASSES: usize = 16;
-/// Fair node-task lanes: ingress, supervisor, maintenance, announce, storage.
-pub const NODE_FAIR_LANES: u8 = 5;
+/// Fair node-task lanes: ingress, supervisor, maintenance, announce,
+/// authenticated local API, and storage.
+pub const NODE_FAIR_LANES: u8 = 6;
+/// Fixed-RAM ceiling for the static authenticated request/reply channels.
+pub const MAXIMUM_AUTHENTICATED_API_HANDOFF_BYTES: usize = 2_048;
+/// Fixed-RAM ceiling for node-retained authenticated request/reply/quarantine state.
+pub const MAXIMUM_AUTHENTICATED_API_NODE_STATE_BYTES: usize = 1_024;
 /// Native RNS maintenance cadence.
 pub const PROTOCOL_TICK_INTERVAL_SECONDS: u64 = 1;
 /// Periodic local transport announce cadence for the first milestone.

@@ -328,7 +328,7 @@ portable authenticated device-API adapter is also implemented: default builds
 serve capabilities and principal-scoped status, while the explicit target-safe
 feature enables durable experimental acceptance. Both profiles are target-
 checked. The permanent E290 graph keeps the journal runtime and sole flash in a
-resident coordinator. Current suite totals and final-image measurements are
+resident coordinator. Current suite totals and current-image measurements are
 recorded only after the release, target, and powered readback gates below.
 Immediately after flash open it
 validates the exact `api_credentials` partition/eFuse binding, mounts and
@@ -376,7 +376,7 @@ readbacks on both boards were entirely `0xff` with SHA-256
 `7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f`,
 confirming zero writes. A successful hold, write, and post-write readback remain
 open.
-The final boot-quarantined 701,744-byte image with SHA-256
+The preceding boot-quarantined 701,744-byte image with SHA-256
 `14d9fd6dd482c47baa9afd2fda6a5ba1d69f46785bf23ae29f6b9fe561e4b212`
 then matched exact address-zero readbacks from both boards. Each board
 reattached and served sequence-zero `initialization-required` after the hard
@@ -388,6 +388,12 @@ liveness, and zero-mutation evidence. With no secret response in flight it does
 not independently prove USB FIFO/RAM secret erasure or non-replay, successful
 credential initialization, or anything about the preceding ROM/bootloader
 interval.
+The current 718,688-byte authenticated-node-foundation image with SHA-256
+`e20f6191cb2bfa78fbd7f3d588eb418913da3f1f89e3b80a4db0a28abaf414ea`
+also matched exact address-zero readbacks from both boards. Both returned and
+then recovered sequence-zero `initialization-required`; both credential
+partitions remained entirely `0xff`. The authenticated bearer endpoint stayed
+dormant, so this is only a regression of the existing bootstrap/reset path.
 The host asserts DTR and clears RTS. TTY reopen does not start a new epoch; only
 USB bus reset does. A powered macOS `USBDeviceReEnumerate` replaced the service
 and restored sequence zero after firmware detachment/scrub/reattachment. A non-
@@ -410,7 +416,7 @@ five appends, mutation-free retry/conflict, B2 compaction, and zero-mutation B2
 replay after software reset. That image calls the journal directly and does not
 qualify the actor on hardware. Controlled power cuts, endurance/soak, at-rest
 encryption, successful powered initialization/pairing/activation, authenticated
-authority/session/API-bearer composition, full powered qualification of the
+USB handshake/session/API-bearer composition, full powered qualification of the
 current permanent owner graph, and runtime flash/watchdog/OTA/radio coordination
 remain open. The credential smoke does
 not claim initialized-media recovery, interruption/power-cut recovery, a live

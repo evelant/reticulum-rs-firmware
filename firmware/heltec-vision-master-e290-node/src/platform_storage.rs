@@ -17,6 +17,7 @@ use reticulum_device_api_adapter::{SubmissionAcceptance, SubmissionPort, Submiss
 use reticulum_device_api_credential_store::{
     BoundCredentialStore, CredentialStoreBinding, CredentialStoreRecovery, MountedCredentialStore,
 };
+use reticulum_device_api_handoff::{LocalApiReply, LocalApiRequest};
 use reticulum_device_api_pairing::{
     AbortCurrentResponse, AbortResult, ActivateResponse, BeginResponse, DeviceId, PairingRequest,
     PairingResponse, ProofStartResponse,
@@ -25,10 +26,12 @@ use reticulum_device_api_pairing_policy::{
     AcquirePairingExclusive, ActiveLowButton, ButtonEffect, ConnectionId, ConnectionRefusal,
     ExclusiveAcquireOutcome, MonotonicMillis as PairingMillis, PolicyEvent, WindowClosed,
 };
+use reticulum_device_api_session::AuthenticatedGrant;
 use reticulum_device_identity_store::{
     DurableIdentityMaterial, IdentityBootReport, IdentityPreflight, IdentityStoreError,
     boot_load_or_provision, inspect_identity,
 };
+use reticulum_heltec_vision_master_e290_node::authenticated_api_node::AuthenticatedApiDispatchFailure;
 use reticulum_heltec_vision_master_e290_node::credential_boot::{
     CredentialBootOutcome, CredentialBootState, boot_credentials,
 };
@@ -262,6 +265,19 @@ pub(crate) struct ProductStorageCoordinator {
     credential_runtime: CredentialRuntime,
     runtime: Option<ProductSubmissionRuntime>,
     submission_service_enabled: bool,
+}
+
+/// Short-lived logical API view over fields disjoint from credential authority.
+///
+/// Constructing this view freezes the credential-mutation fact used by one
+/// synchronous adapter dispatch. It never gains access to credential records,
+/// pairing policy, or the raw credential partition.
+struct ProductSubmissionPort<'a> {
+    flash: &'a mut FlashStorage<'static>,
+    journal_binding: JournalBinding,
+    runtime: &'a mut Option<ProductSubmissionRuntime>,
+    submission_service_enabled: bool,
+    credential_physical_mutation_outstanding: bool,
 }
 
 /// Product-level result of admission-time identity preflight and initialization policy.
@@ -673,6 +689,49 @@ impl ProductStorageCoordinator {
         )
     }
 
+    fn submission_port(&mut self) -> ProductSubmissionPort<'_> {
+        let credential_physical_mutation_outstanding = self
+            .credential_runtime
+            .credential_physical_mutation_outstanding();
+        ProductSubmissionPort {
+            flash: &mut *self.flash,
+            journal_binding: self.journal_binding,
+            runtime: &mut self.runtime,
+            submission_service_enabled: self.submission_service_enabled,
+            credential_physical_mutation_outstanding,
+        }
+    }
+
+    /// Dispatch one exact session-authenticated request while credential and
+    /// journal fields remain disjointly borrowed by the sole storage owner.
+    #[allow(
+        clippy::result_large_err,
+        reason = "terminal failure must retain the exact allocation-free request owner"
+    )]
+    pub(crate) fn dispatch_authenticated_request(
+        &mut self,
+        request: LocalApiRequest<AuthenticatedGrant>,
+    ) -> Result<LocalApiReply, AuthenticatedApiDispatchFailure> {
+        let credential_physical_mutation_outstanding = self
+            .credential_runtime
+            .credential_physical_mutation_outstanding();
+        let Self {
+            flash,
+            journal_binding,
+            credential_runtime,
+            runtime,
+            submission_service_enabled,
+        } = self;
+        let mut port = ProductSubmissionPort {
+            flash,
+            journal_binding: *journal_binding,
+            runtime,
+            submission_service_enabled: *submission_service_enabled,
+            credential_physical_mutation_outstanding,
+        };
+        credential_runtime.dispatch_authenticated_request(request, &mut port)
+    }
+
     /// Admit one transport-neutral live-pairing request without exposing flash.
     ///
     /// Mutation-producing requests retain their complete owner while journal
@@ -929,9 +988,9 @@ impl ProductCredentialInitializationPort for ProductStorageCoordinator {
     }
 }
 
-impl SubmissionPort for ProductStorageCoordinator {
+impl SubmissionPort for ProductSubmissionPort<'_> {
     fn availability(&mut self) -> CapabilityAvailability {
-        if !self.submission_service_available() {
+        if !self.submission_service_enabled {
             return CapabilityAvailability::Unavailable;
         }
         let Some(runtime) = self.runtime.as_ref() else {
@@ -969,7 +1028,10 @@ impl SubmissionPort for ProductStorageCoordinator {
         &mut self,
         candidate: AcceptanceCandidate,
     ) -> Result<SubmissionAcceptance, SubmissionPortError> {
-        match self.journal_mutation_gate() {
+        match cross_store_journal_mutation_gate(
+            self.submission_service_enabled && self.runtime.is_some(),
+            self.credential_physical_mutation_outstanding,
+        ) {
             JournalMutationGate::Ready => {}
             JournalMutationGate::DeferredForCredentialMutation => {
                 return Err(SubmissionPortError::Busy);
@@ -1002,6 +1064,27 @@ impl SubmissionPort for ProductStorageCoordinator {
             .accept(&mut journal, candidate)
             .map(map_submission_acceptance)
             .map_err(map_submission_port_runtime_error)
+    }
+}
+
+impl SubmissionPort for ProductStorageCoordinator {
+    fn availability(&mut self) -> CapabilityAvailability {
+        self.submission_port().availability()
+    }
+
+    fn submission_state(
+        &mut self,
+        principal: PrincipalId,
+        id: SubmissionId,
+    ) -> Result<Option<LifecycleState>, SubmissionPortError> {
+        self.submission_port().submission_state(principal, id)
+    }
+
+    fn accept(
+        &mut self,
+        candidate: AcceptanceCandidate,
+    ) -> Result<SubmissionAcceptance, SubmissionPortError> {
+        self.submission_port().accept(candidate)
     }
 }
 

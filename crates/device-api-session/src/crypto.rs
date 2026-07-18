@@ -94,7 +94,15 @@ pub(crate) fn server_proof(schedule: &KeySchedule) -> [u8; 32] {
     )
 }
 
-#[cfg(test)]
+pub(crate) fn verify_server_proof(schedule: &KeySchedule, observed: &[u8; 32]) -> bool {
+    verify_full_mac(
+        &schedule.server_proof_key,
+        SERVER_PROOF_DOMAIN,
+        &[&schedule.transcript_hash],
+        observed,
+    )
+}
+
 pub(crate) fn client_proof(schedule: &KeySchedule, server_proof: &[u8; 32]) -> [u8; 32] {
     full_mac(
         &schedule.client_proof_key,
@@ -116,7 +124,6 @@ pub(crate) fn verify_client_proof(
     )
 }
 
-#[cfg(test)]
 pub(crate) fn client_record_tag(key: &[u8; 32], record: &Record) -> [u8; AUTH_TAG_LENGTH] {
     record_tag(key, CLIENT_RECORD_DOMAIN, record)
 }
@@ -129,7 +136,6 @@ pub(crate) fn server_record_tag(key: &[u8; 32], record: &Record) -> [u8; AUTH_TA
     record_tag(key, SERVER_RECORD_DOMAIN, record)
 }
 
-#[cfg(test)]
 pub(crate) fn verify_server_record_tag(key: &[u8; 32], record: &Record) -> bool {
     verify_record_tag(key, SERVER_RECORD_DOMAIN, record)
 }

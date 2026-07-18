@@ -21,9 +21,11 @@ reticulum-device-api-adapter = { path = "../../crates/device-api-adapter", defau
 reticulum-device-api-credential-store = { path = "../../crates/device-api-credential-store", default-features = false }
 reticulum-device-api-credentials = { path = "../../crates/device-api-credentials", default-features = false }
 reticulum-device-api-framing = { path = "../../crates/device-api-framing", default-features = false }
+reticulum-device-api-handoff = { path = "../../crates/device-api-handoff", default-features = false }
 reticulum-device-api-pairing = { path = "../../crates/device-api-pairing", default-features = false }
 reticulum-device-api-pairing-control = { path = "../../crates/device-api-pairing-control", default-features = false }
 reticulum-device-api-pairing-policy = { path = "../../crates/device-api-pairing-policy", default-features = false }
+reticulum-device-api-session = { path = "../../crates/device-api-session", default-features = false }
 reticulum-device-identity-store = { path = "../../crates/device-identity-store", default-features = false }
 reticulum-interface-router = { path = "../../crates/interface-router", default-features = false }
 reticulum-node-core = { path = "../../crates/node-core", default-features = false }

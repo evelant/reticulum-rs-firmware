@@ -45,7 +45,13 @@ continuation, durable Add/Activate/Abort mutation with reconciliation and
 cleanup ordering, plus a bearer-neutral secret-owning handoff. The node schedules
 that lifecycle through its journal-aware causal frontier, and the sole USB owner
 routes all four records through the shared decoder and sequence gate. The
-external authenticated API/session firmware lane remains unimplemented. A
+permanent graph now also instantiates the feature-free session and handoff
+crates, a static depth-one authenticated request/reply handoff, and a separate
+node-side dispatch lane. That lane revalidates every opaque grant against the
+currently publishable authority and synchronously invokes the logical adapter
+through a submission-port view disjoint from credential ownership. Its USB
+bearer endpoint is retained dormant: the USB task still admits no authenticated
+handshake/session records, so no external client can reach this lane. A
 product port may route an
 accepted submission through the node after the durable barriers.
 
@@ -298,8 +304,8 @@ immutable credential authority, qualification-session establishment, and job
 handoff and raw-NOR credential storage are implemented separately, while
 the credential store is now boot-composed. External live admission still
 requires powered qualification of the now-composed empty-media initialization
-bootstrap and pairing lifecycle, followed by composition of an authenticated
-external API/session firmware lane and bearer.
+bootstrap and pairing lifecycle, followed by composition of the authenticated
+USB handshake/session bearer.
 
 Successful experimental response body:
 
@@ -317,9 +323,10 @@ backend reply maps to `Internal` while the actor retains the exact mutation;
 after `drive_pending()` reconciles it, retry returns the same durable ID.
 Idempotency conflict and capacity map to their stable API categories, while
 identifier exhaustion, actor busy, backend ambiguity and a latched fault map to
-`Internal`. No authenticated firmware transport or logical API bearer currently
-exposes this operation; the E290 pre-authentication USB bootstrap does not
-dispatch it. Acceptance
+`Internal`. No authenticated firmware bearer currently exposes this operation.
+The E290 node can dispatch an authenticated handoff owner, but its USB handoff
+endpoint is dormant and the pre-authentication bootstrap cannot create such an
+owner. Acceptance
 is not a delivery guarantee; a later status can report no
 path, delivery timeout, downstream rejection, or an internal failure. The ID
 can be queried through `submission.status`. The response contains no
@@ -384,7 +391,12 @@ borrow of the non-copyable `DispatchContext`; the exact context value cannot be
 moved out, but trusted linked code can reconstruct equivalent scalar facts with
 the public constructor. Immediate dispatch, no unauthenticated fallback and no
 port call after rejection remain composition rules, not an unforgeable Rust
-capability. Principal and permissions come from the exact active record. Live authority
+capability. The permanent E290 node now follows them: the resident credential
+runtime revalidates current authority, then a credential-disjoint
+submission-port view is borrowed only for synchronous adapter dispatch.
+Revalidation failure returns the generic authentication-required response with
+zero port I/O; it never constructs an unauthenticated context. Principal and
+permissions come from the exact active record. Live authority
 replacement must also pass exact-next-revision successor validation so changed
 authorization cannot reuse a session generation. E290 firmware now mounts and
 recovers the portable store before any other product-store write and retains
@@ -392,10 +404,12 @@ its `Ready`, authentication-only, uninitialized-erased,
 initialization-interrupted, blocked, corrupt, or backend-failed state. The
 resident credential runtime and sole-owner physical drive are invoked by both
 the E290 pre-authentication status/initialize lane and its routed Begin/
-ProofStart/Activate/AbortCurrent lifecycle. A future authenticated external
-serving runtime must consume active credentials, enforce connection-level rate
-limits, and keep authentication state outside request CBOR. The existing
-bootstrap does not create a session grant or admit a logical request.
+ProofStart/Activate/AbortCurrent lifecycle. The composed node lane consumes only
+session-minted grants and retains malformed logical owners terminally; the
+future USB serving runtime must select active credentials, enforce
+connection-level rate limits, and keep authentication state outside request
+CBOR. The existing bootstrap does not create a session grant or admit a logical
+request.
 
 Semantic journal schema 2 persists the principal, idempotency key,
 operation-specific intent, credential ID/generation, complete authority
@@ -520,20 +534,25 @@ request context, version/capability behavior, principal isolation, every durable
 lifecycle mapping, maximum-size owned-payload acceptance/replay/conflict,
 acceptance across remount, stable capacity and identifier-exhaustion errors,
 faulted and pending status gating, wrong-binding rejection without I/O, and
-lost-write reconciliation. The session and live-pairing tests plus their
-independent Python vectors cover canonical hello/proof derivation, direction-
-separated record tags, downgrade/reflection/replay/generation/reset failures,
-exact sequence policy, partial-write typestate, every pairing flight and
+lost-write reconciliation. The session crate now exposes both server and public
+allocation-free `no_std` client typestates. Its tests and the live-pairing tests
+plus their independent Python vectors cover canonical hello/proof derivation,
+direction-separated record tags, downgrade/reflection/replay/generation/reset
+failures, exact sequence policy, partial-write typestate, every pairing flight and
 transcript byte, substituted continuations, activation confirmation, malformed
 shapes, and secret-owner drop behavior. Target checks exercise the portable
 layers directly on `no_std` bare-metal builds.
 
-The separate permanent-E290 composition gate covers the third USB/GPIO task,
+The separate permanent-E290 composition gate covers the static depth-one
+authenticated handoff, current-authority node dispatch through the disjoint
+submission-port view, retained reply pressure, and terminal malformed-owner
+quarantine in addition to the third USB/GPIO task,
 active-low stable-time debounce, an 8 ms missed-SOF suspension that retains its
 epoch and sequence until bus reset, connection-epoch and sequence exhaustion,
 duplicate/gap rejection, depth-one pressure, exact durable reply correlation,
 causal control/live ordering, and node-owned status/initialize plus live-
-pairing dispatch. Current exact suite totals are recorded with the final image.
+pairing dispatch. Current exact suite totals are recorded with the
+authenticated-node-foundation release image.
 Button/control arbitration is bounded. A stable High transition is latched
 before a later Low; a raw-sample gap of at least 20 ms cancels a possible hold
 and suppresses Low until a fresh debounced High. Once every response byte enters
@@ -564,7 +583,7 @@ AbortCurrent. `resume` is a proof retry, not activation reconciliation.
 
 An earlier explicit-16-MiB image returned `initialization-required` and
 `physical-presence-required` from both boards without writing credentials. The
-final boot-quarantined 701,744-byte image with SHA-256
+preceding boot-quarantined 701,744-byte image with SHA-256
 `14d9fd6dd482c47baa9afd2fda6a5ba1d69f46785bf23ae29f6b9fe561e4b212`
 then matched exact address-zero reads from both boards. Each board reattached
 and served sequence-zero `initialization-required` after the induced hard
@@ -572,13 +591,21 @@ reset. Simultaneous 120-second no-button workflows remained responsive through
 sequences 1102 and 1100, respectively. Subsequent exact 8 KiB credential-
 partition reads on both boards were entirely `0xff` with SHA-256
 `7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f`,
-confirming zero writes; successful post-write readback remains open. The
+confirming zero writes. The current 718,688-byte authenticated-node-foundation
+image with SHA-256
+`e20f6191cb2bfa78fbd7f3d588eb418913da3f1f89e3b80a4db0a28abaf414ea`
+also matched exact address-zero reads from both boards. Both returned and then
+recovered sequence-zero `initialization-required`, and both credential
+partitions retained the same all-`0xff` digest. Its authenticated endpoint was
+dormant, so successful post-write readback and powered authentication remain
+open. The
 firmware selects no-op logging, leaving the COBS bootstrap as the sole
 application-owned USB byte stream. Powered macOS full re-enumeration replaced
 the service and restored sequence zero after firmware detachment, USB-RAM scrub,
 and reattachment. A non-seizing in-place `ResetDevice` returned success but left
-the endpoint stale and is not an accepted recovery primitive. The final-image
+the endpoint stale and is not an accepted recovery primitive. The image-readback
 hard-reset reattachment path is bounded powered evidence, while suspend/resume,
 successful powered activation, controlled cuts, and the ROM/bootloader interval
 before the application quarantine remain to be qualified. This is not an
-authenticated session or logical API operation.
+authenticated session or logical API operation. The newly composed node half
+has no powered authenticated-API evidence.

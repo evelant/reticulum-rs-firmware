@@ -566,8 +566,8 @@ but cannot claim security from the developer USB trust shortcut.
   mapping, single USB ownership, GPIO21 pull-up composition, initialization-
   before-journal scheduling, shared control/live decoding, causal ordering,
   durable reply correlation, reset-generation blocking, physical detachment,
-  USB-RAM scrubbing, and earliest-Rust-entry boot quarantine. The 106-test
-  firmware library, 27 focused host-client tests, full 173-test xtask suite,
+  USB-RAM scrubbing, and earliest-Rust-entry boot quarantine. The 110-test
+  firmware library, 27 focused host-client tests, full 174-test xtask suite,
   strict host/target Clippy, rustdoc, release linking, graph policy, and image-
   size ceilings pass. Final measurements are recorded with the qualified image.
 - Complete as historical bounded powered bootstrap control: the 544,371/3,548/469,280/
@@ -581,7 +581,7 @@ but cannot claim security from the developer USB trust shortcut.
   SHA-256
   `7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f`,
   confirming zero writes. Successful post-write readback remains open.
-- Complete as final-image boot-quarantine and no-mutation control: the
+- Complete as preceding-image boot-quarantine and no-mutation control: the
   701,744-byte image with SHA-256
   `14d9fd6dd482c47baa9afd2fda6a5ba1d69f46785bf23ae29f6b9fe561e4b212`
   matched exact address-zero reads from both boards. Both boards reattached and
@@ -590,6 +590,12 @@ but cannot claim security from the developer USB trust shortcut.
   sequences 1102 and 1100, and both exact credential-partition reads remained
   entirely `0xff`. This does not qualify a successful hold/write, controlled
   power cuts, or the ROM/bootloader interval before the earliest Rust entry.
+- Complete as a current dormant-handoff regression: the 718,688-byte
+  authenticated-node-foundation image with SHA-256
+  `e20f6191cb2bfa78fbd7f3d588eb418913da3f1f89e3b80a4db0a28abaf414ea`
+  matched exact address-zero reads from both boards. Both returned and then
+  recovered sequence-zero `initialization-required`, and both credential
+  partitions remained entirely `0xff`. No authenticated record was admitted.
 - The host asserts DTR, clears RTS, and keeps initialize on one open TTY. TTY
   reopen is not an epoch boundary; only USB bus reset is. Status defaults to 15
   seconds and initialize to 120 seconds. A post-send I/O failure or timed-out

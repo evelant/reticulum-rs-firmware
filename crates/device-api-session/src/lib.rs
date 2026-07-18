@@ -13,6 +13,14 @@
 //! before deriving a logical API dispatch context. Client-supplied principal or
 //! permission data is never part of this protocol.
 //!
+//! A portable client mirror owns its credential and derived keys through
+//! [`ClientHelloFlight`], [`AwaitingServerHello`], [`AwaitingServerProof`], and
+//! [`ClientProofFlight`]. Once established, [`ClientSession`] permits exactly
+//! one [`ClientRequestFlight`] and [`AwaitingResponse`] at a time. This makes
+//! partial writes, cancellation, authentication faults, and sequence reuse
+//! explicit without coupling the client to USB, BLE, Wi-Fi, an allocator, or
+//! an async runtime.
+//!
 //! Established request/reply flow uses typestate. Accepting one authenticated
 //! request consumes the idle session and returns [`AwaitingReply`]; no second
 //! request can be admitted until the matching reply is completely acknowledged
@@ -26,10 +34,17 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod client;
 mod crypto;
 mod protocol;
 mod server;
 
+pub use client::{
+    AuthenticatedResponse, AwaitingResponse, AwaitingServerHello, AwaitingServerProof,
+    ClientCredential, ClientHandshakeError, ClientHelloFlight, ClientParameters, ClientProofFlight,
+    ClientRequestFault, ClientRequestFaultKind, ClientRequestFlight, ClientSession,
+    ClientSessionFault,
+};
 pub use protocol::{
     BearerBinding, ClientHello, DeviceId, HandshakeRecordError, PROTOCOL_MAJOR, PROTOCOL_MINOR,
     QUALIFICATION_SUITE, RECORD_KIND_CLIENT_HELLO, RECORD_KIND_CLIENT_PROOF, RECORD_KIND_CLOSE,

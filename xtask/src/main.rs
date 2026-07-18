@@ -616,7 +616,7 @@ fn graph_policy() -> ExitCode {
              authenticated session layer has only its exact reviewed cryptographic, device-API, credentials, framing and handoff normal edges plus its exact test-only hex, semantic-adapter and storage-model fixtures; \
              the Rete integration and node-core normal closures contain no RNode, radio-interface, LoRa or board package; \
              the shared lora-phy owner and E290 radio wrapper have only their exact reviewed HAL, framing, board and test edges; \
-             the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the permanent E290 node reaches the LoRa-first node/router/dispatcher graph, exact portable identity, credential-store authority, announce-clock, NOR-region and durable-submission layers, the target-safe experimental device-API semantic port, the featureless framed USB pre-authentication control codec and the resident live-pairing lifecycle while excluding authenticated API handoff/session layers, onboard clients and foreign Tracker/HIL packages; \
+             the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the permanent E290 node reaches the LoRa-first node/router/dispatcher graph, exact portable identity, credential-store authority, announce-clock, NOR-region and durable-submission layers, the target-safe experimental device-API semantic port, the featureless framed USB pre-authentication control codec, the resident live-pairing lifecycle and the featureless authenticated API handoff/session building blocks for node-side dispatch while excluding onboard clients and foreign Tracker/HIL packages; \
              the interface router has only its reviewed node-core and Embassy Sync normal edges plus test-only rand_core and RNS fixture edges; \
              the TX handoff, RF-inert dispatcher and supervisor use only their reviewed node-core, \
              interface-router ingress, handoff, dispatcher, Embassy Sync/Futures/Time, rand_core \
@@ -1209,7 +1209,7 @@ fn validate_e290_semantic_hil_graph_boundary(tree: &str) -> Result<(), String> {
     Ok(())
 }
 
-const E290_NODE_GRAPH_REQUIRED: [&str; 34] = [
+const E290_NODE_GRAPH_REQUIRED: [&str; 36] = [
     "embedded-storage",
     "esp-storage",
     "reticulum-announce-clock",
@@ -1220,9 +1220,11 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 34] = [
     "reticulum-device-api-credential-store",
     "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
+    "reticulum-device-api-handoff",
     "reticulum-device-api-pairing",
     "reticulum-device-api-pairing-control",
     "reticulum-device-api-pairing-policy",
+    "reticulum-device-api-session",
     "reticulum-device-identity-store",
     "reticulum-interface-router",
     "reticulum-node-core",
@@ -1246,7 +1248,7 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 34] = [
     "static_cell",
 ];
 
-const E290_NODE_GRAPH_FORBIDDEN: [&str; 13] = [
+const E290_NODE_GRAPH_FORBIDDEN: [&str; 11] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -1254,8 +1256,6 @@ const E290_NODE_GRAPH_FORBIDDEN: [&str; 13] = [
     "reticulum-heltec-tracker-v2",
     "reticulum-heltec-vision-master-e290-qualification",
     "reticulum-heltec-vision-master-e290-semantic-hil",
-    "reticulum-device-api-handoff",
-    "reticulum-device-api-session",
     "reticulum-lab-rx-returned-fault-hil",
     "reticulum-rns-leviculum",
     "reticulum-rns-rete-rx",
@@ -1302,9 +1302,11 @@ fn validate_e290_node_graph_boundary(tree: &str) -> Result<(), String> {
         "reticulum-device-api-credential-store ",
         "reticulum-device-api-credentials ",
         "reticulum-device-api-framing ",
+        "reticulum-device-api-handoff ",
         "reticulum-device-api-pairing ",
         "reticulum-device-api-pairing-control ",
         "reticulum-device-api-pairing-policy ",
+        "reticulum-device-api-session ",
     ] {
         let line = tree
             .lines()
@@ -1312,7 +1314,7 @@ fn validate_e290_node_graph_boundary(tree: &str) -> Result<(), String> {
             .ok_or_else(|| format!("permanent E290 node graph has no {package}line"))?;
         if !line.ends_with("features=[]") {
             return Err(format!(
-                "permanent E290 node must keep credential and pre-authentication control packages feature-free; observed {line}"
+                "permanent E290 node must keep credential, authentication, and pre-authentication control packages feature-free; observed {line}"
             ));
         }
     }
@@ -1390,6 +1392,13 @@ fn validate_e290_node_feature_boundary(
     validate_exact_local_dependency(
         dependencies,
         package_name,
+        "reticulum-device-api-handoff",
+        &workspace.join("crates/device-api-handoff"),
+        false,
+    )?;
+    validate_exact_local_dependency(
+        dependencies,
+        package_name,
         "reticulum-device-api-pairing",
         &workspace.join("crates/device-api-pairing"),
         false,
@@ -1399,6 +1408,13 @@ fn validate_e290_node_feature_boundary(
         package_name,
         "reticulum-device-api-pairing-control",
         &workspace.join("crates/device-api-pairing-control"),
+        false,
+    )?;
+    validate_exact_local_dependency(
+        dependencies,
+        package_name,
+        "reticulum-device-api-session",
+        &workspace.join("crates/device-api-session"),
         false,
     )?;
     validate_exact_registry_dependency(
@@ -7560,6 +7576,12 @@ mod tests {
                         None,
                     ),
                     handoff_path_dependency_fixture(
+                        "reticulum-device-api-handoff",
+                        "*",
+                        &root.join("crates/device-api-handoff"),
+                        None,
+                    ),
+                    handoff_path_dependency_fixture(
                         "reticulum-device-api-pairing",
                         "*",
                         &root.join("crates/device-api-pairing"),
@@ -7569,6 +7591,12 @@ mod tests {
                         "reticulum-device-api-pairing-control",
                         "*",
                         &root.join("crates/device-api-pairing-control"),
+                        None,
+                    ),
+                    handoff_path_dependency_fixture(
+                        "reticulum-device-api-session",
+                        "*",
+                        &root.join("crates/device-api-session"),
                         None,
                     ),
                     handoff_dependency_fixture("rand_core", "=0.6.4", None),
@@ -7594,9 +7622,11 @@ mod tests {
                      ├── reticulum-device-api-credential-store v0.1.0 features=[]\n\
                      │   └── reticulum-device-api-credentials v0.1.0 features=[]\n\
                      ├── reticulum-device-api-framing v0.1.0 features=[]\n\
+                     ├── reticulum-device-api-handoff v0.1.0 features=[]\n\
                      ├── reticulum-device-api-pairing v0.1.0 features=[]\n\
                      ├── reticulum-device-api-pairing-control v0.1.0 features=[]\n\
                      ├── reticulum-device-api-pairing-policy v0.1.0 features=[]\n\
+                     ├── reticulum-device-api-session v0.1.0 features=[]\n\
                      ├── reticulum-device-identity-store v0.1.0 features=[]\n\
                      ├── reticulum-interface-router v0.1.0 features=[]\n\
                      ├── reticulum-node-core v0.1.0 features=[]\n\
@@ -7649,8 +7679,11 @@ mod tests {
             "reticulum-device-api-credential-store",
             "reticulum-device-api-credentials",
             "reticulum-device-api-framing",
+            "reticulum-device-api-handoff",
+            "reticulum-device-api-pairing",
             "reticulum-device-api-pairing-control",
             "reticulum-device-api-pairing-policy",
+            "reticulum-device-api-session",
         ] {
             let expected = format!("{package} v0.1.0 features=[]");
             let drifted = format!("{package} v0.1.0 features=[default]");
@@ -7703,7 +7736,7 @@ mod tests {
     }
 
     #[test]
-    fn permanent_e290_node_requires_exact_direct_preauth_and_credential_dependencies() {
+    fn permanent_e290_node_requires_exact_direct_authentication_dependencies() {
         let root = workspace_root();
         let baseline = e290_node_metadata_fixture(&root);
         validate_e290_node_feature_boundary(&baseline.to_string(), &root).unwrap();
@@ -7730,6 +7763,11 @@ mod tests {
                 "device-api-framing",
             ),
             (
+                "reticulum-device-api-handoff",
+                "crates/not-device-api-handoff",
+                "device-api-handoff",
+            ),
+            (
                 "reticulum-device-api-pairing",
                 "crates/not-device-api-pairing",
                 "device-api-pairing",
@@ -7738,6 +7776,11 @@ mod tests {
                 "reticulum-device-api-pairing-control",
                 "crates/not-device-api-pairing-control",
                 "device-api-pairing-control",
+            ),
+            (
+                "reticulum-device-api-session",
+                "crates/not-device-api-session",
+                "device-api-session",
             ),
         ] {
             let mut missing = baseline.clone();
@@ -8047,6 +8090,43 @@ mod tests {
         }
         assert!(E290_NODE_GRAPH_REQUIRED.contains(&"reticulum-device-api-pairing"));
         assert!(!E290_NODE_GRAPH_FORBIDDEN.contains(&"reticulum-device-api-pairing"));
+    }
+
+    #[test]
+    fn authenticated_api_node_dependencies_are_composed_only_by_the_permanent_e290_node() {
+        for (label, forbidden) in [
+            ("Tracker product", &PRODUCT_GRAPH_FORBIDDEN[..]),
+            ("storage HIL", &STORAGE_HIL_GRAPH_FORBIDDEN[..]),
+            ("Tracker TX HIL", &TX_HIL_GRAPH_FORBIDDEN[..]),
+            (
+                "Tracker semantic TX HIL",
+                &SEMANTIC_TX_HIL_GRAPH_FORBIDDEN[..],
+            ),
+            ("E290 semantic HIL", &E290_SEMANTIC_HIL_GRAPH_FORBIDDEN[..]),
+        ] {
+            for package in [
+                "reticulum-device-api-handoff",
+                "reticulum-device-api-session",
+            ] {
+                assert!(
+                    forbidden.contains(&package),
+                    "{label} no longer forbids the authenticated API node package {package}"
+                );
+            }
+        }
+        for package in [
+            "reticulum-device-api-handoff",
+            "reticulum-device-api-session",
+        ] {
+            assert!(
+                E290_NODE_GRAPH_REQUIRED.contains(&package),
+                "permanent E290 node no longer requires {package}"
+            );
+            assert!(
+                !E290_NODE_GRAPH_FORBIDDEN.contains(&package),
+                "permanent E290 node still forbids composed {package}"
+            );
+        }
     }
 
     #[test]
