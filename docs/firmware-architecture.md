@@ -15,10 +15,12 @@ owner fail-stop now pass cross-layer host composition tests; portable API
 framing, immutable credential authority, qualification-session and boot-
 lifetime job handoff are qualified; semantic schema 2 persists exact
 authorization provenance; ADR 0009 selects the dedicated E290 credential
-range, two-sector store, and bounded developer/HIL pairing policy; E290 boot now
-mounts/recovers that store immediately after flash open and retains it in the
-coordinator, while live external admission still awaits explicit provisioning,
-pairing, an API/session firmware lane, and a bearer; host,
+range and two-sector store, and its bounded developer/HIL pairing-admission
+policy is implemented as a portable but uncomposed owner; E290 boot now mounts/
+recovers that store immediately after flash open and retains it in the
+coordinator, while live external admission still awaits flash-backed
+initialization/pairing composition, an API/session firmware lane, and a bearer;
+host,
 portable-target, ESP32-S3 build, packaging and review gates pass; the isolated
 E290 same-image ANNOUNCE/DATA/proof HIL and its pre/post image readbacks passed,
 and the permanent E290 node passed its first two-board powered boot/credential/
@@ -160,6 +162,7 @@ Claims in READMEs were not treated as proof of embedded portability.
 | `reticulum-device-api-framing`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The dependency-free allocation-free edge owns canonical zero-delimited COBS records with a 128-bit session ID, direction-local sequence, 512-byte opaque payload and 128-bit tag slot. Its streaming decoder ignores pre-delimiter garbage, bounds overflow and resynchronizes only at a zero; established-session policy remains the later session owner's responsibility. Its explicit partial-TX cursor never advances without a backend acknowledgement. Nine tests cover empty/maximum owners, canonical authenticated bytes, dense zero patterns, malformed/overlong recovery, shared delimiters, reset and partial writes. It contains no USB HAL, session, credential, API-dispatch or packet-interface behavior |
 | `reticulum-device-api-credentials`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (portable immutable authority and semantic codec; no physical persistence) | The allocation-free crate owns the shared credential ID/generation types below session and validates one immutable fixed 16-record snapshot before service. Its canonical zeroizing 2,048-byte image encodes 128-byte records in strict credential-ID order, zeros every unused/reserved byte, and is consumed by a decoder that rejects noncanonical wire shapes before rebuilding the authority. Consuming builder inserts prevent a rejected record from exposing a valid prefix; live successor plans require one exact next-revision mutation and reject same-generation authorization changes or silent removal, while canceled or ambiguous storage attempts can recover the explicitly unpublished candidate. `Pending`/`Active` records zeroize distinct PSKs, while `Revoked` tombstones are PSK-free. Constant-time fixed-table lookup yields only an opaque zeroizing `SelectedCredential`; exact grant revalidation supplies a non-copyable device-owned `DispatchContext` through a borrowing synchronous callback. The callback freezes the authority and prevents moving the exact context, but immediate dispatch/no fallback remain trusted sole-owner rules because linked code can reconstruct scalar facts. Twelve unit tests, eight public successor regressions and twelve compile-fail doctests cover canonical loading and encoding, successor/replacement/revocation policy, stable vocabularies, image/secret/lease ownership, and the 2,048-byte E290 authority ceiling. It contains no physical raw-NOR format, mutation actor, pairing/rate policy, firmware, bearer, Reticulum identity or radio edge; see ADR 0007 |
 | `reticulum-device-api-credential-store`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (portable physical store; E290 boot-composed) | The allocation-free crate owns ADR 0009's exact 8 KiB two-sector raw-NOR format over an operation-scoped device/range/layout binding. It consumes the canonical 2,048-byte authority image, commits and re-scans a complete successor before retiring its predecessor, blocks publication while retirement is incomplete, never falls back across a retired or corrupt committed successor, and retains current/candidate owners across ambiguous backend results. Explicit erased-only revision-1 provisioning has a no-erase deterministic recovery path; cleanup erases are bounded and exactly read back. Twenty-two fake-NOR tests cover every-byte provision/program/retire/cleanup cuts, lost replies, read faults, wrong bindings, conflicts, revision exhaustion, publication gating, and corrupt-successor non-fallback. Strict host Clippy/rustdoc plus generic and Xtensa checks pass. Its four-dependency graph contains no ESP, async, session, bearer, pairing, Reticulum, or radio edge. The E290 product supplies the exact platform binding and bounded boot recovery, retains the mounted owner, and deliberately supplies no automatic provisioning or pairing. Format 1 stores PSKs in plaintext for developer/HIL use |
+| `reticulum-device-api-pairing-policy`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (portable policy; not firmware-composed) | The allocation-free owner freezes exact 2,000 ms release-to-arm physical presence, a 60,000 ms threshold-based exclusive window, strictly increasing boot-lifetime connection epochs, a shared three-Begin/Proof budget, one non-secret pending reference, and exact operation ownership across timeout/disconnect. The third classified request closes new work while an admitted operation drains to a definite result; trusted initialization and Begin facts remain assertions for the sole physical owner to recheck. Focused tests cover boundaries, counted refusals, pending transitions, ordinary-session invalidation, faults and a 256-byte RAM ceiling. It has no GPIO, USB, flash, entropy, HMAC, framing, executor, firmware, or radio edge. Live integration still needs lifecycle-safe credential successor/pending selection and a recoverable interrupted-initialization class; it is not powered pairing evidence |
 | `reticulum-device-api-session`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (portable qualification core; no bearer) | The allocation-free server freezes the USB Serial/JTAG-only HKDF/HMAC qualification transcript, full mutual proofs, direction-separated 128-bit record tags, exact-next sequences and a single-request typestate. Its non-cloneable grant contains credential ID/generation and session routing facts but no PSK, principal or permissions; it revalidates against the portable device-owned authority to obtain a borrowing dispatch lease. Twelve Rust tests plus five independent Python vector/mutation tests cover the known-answer schedule, COBS wire bytes, downgrade, reflection, generation/reset invalidation, boot-lifetime reply epochs, gaps/duplicates/overflow, bad tags, wrong sessions, partial hello/proof/reply acknowledgement, one direct authority-to-adapter request/reply path and revoked-authority revalidation rejection. The asynchronous handoff/no-fallback composition remains unproven. It contains no credential persistence, pairing/rate policy, firmware composition, USB HAL, Rete or radio edge |
 | `reticulum-device-api-handoff`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The boot-lifetime bearer manager and node owner exchange exact authenticated jobs and replies through independent depth-one Embassy channels. An opaque non-cloneable grant crosses with the logical message; the message capacity is the authoritative device-API limit. Capacity/receive waits are cancellation-safe, pressure returns exact owners, disconnect changes only the reply-routing epoch, stale replies are drained, and accepted work remains node-owned. Eight tests cover pressure, cancellation, reconnect, stale/crossed replies, idempotent retry and full buffers. It has no framing, physical bearer, storage, Rete, radio or board dependency |
 | `reticulum-heltec-tracker-v2-storage-hil`, ESP32-S3 Xtensa | Pass (target and powered clean-path HIL) | On E9:44, source `7b47113` passed strict continuous two-boot serial verification of A1 format, five appends, no-mutation retry/conflict, B2 compaction and `0/0` B2 replay after `CoreSw`; independent raw-dump replay confirmed generation 2, five records/slots, one revision-4 `Delivered` submission, erased A manifest and erased B tail. Controlled power cuts, endurance/soak, encryption and powered product-runtime integration remain open |
@@ -793,6 +796,7 @@ crates/
   device-api-framing/             # COBS/length framing and chunk transfer
   device-api-credentials/         # immutable credential snapshot and dispatch lease
   device-api-credential-store/    # bound two-sector raw-NOR credential snapshots
+  device-api-pairing-policy/      # physical-presence window and operation admission
   device-api-session/             # bounded PSK handshake, grants and record typestate
   device-api-handoff/             # boot-lifetime authenticated job/reply owner edge
   storage-model/                  # semantic records, index and complete replay
@@ -836,7 +840,8 @@ docs/
 `node-core`, `interface-router`, `tx-handoff`, `tx-dispatch`, `tx-supervisor`, `lxmf-wire`,
 `lxmf-router`, `lxmf-propagation`, `nomad-protocol`, `micron-parser`,
 `device-api`, `device-api-adapter`, `device-api-framing`,
-`device-api-credentials`, `device-api-credential-store`, `device-api-session`, `device-api-handoff`,
+`device-api-credentials`, `device-api-credential-store`,
+`device-api-pairing-policy`, `device-api-session`, `device-api-handoff`,
 `storage-model`, `submission-projector`, `storage-journal`,
 `storage-actor`, `submission-runtime`, and `radio-interface`
 should compile on at least one `*-unknown-none-*` target in CI whenever their
@@ -974,8 +979,10 @@ it is not the product-capacity policy. The resident `ProductStorageCoordinator`
 now
 implements the target-safe device-API `SubmissionPort`. Portable framing,
 immutable credential authority, qualification-session and job handoff cores
-exist, and schema-2 acceptance persists exact authorization provenance. The
-physical credential range and portable store exist, but there is no composed
+exist, the portable pairing-admission policy owns its exact window/connection/
+attempt/operation state, and schema-2 acceptance persists exact authorization
+provenance. The physical credential range and portable store exist, but the
+pairing policy is not composed and there is no flash-backed initialization/
 pairing manager, external API lane, session, or USB/BLE/Wi-Fi bearer. The
 credential store itself is mounted/recovered and retained by the coordinator.
 The image still lacks local LXMF intent
@@ -1335,12 +1342,15 @@ principal-scoped idempotency conflict are distinct from an accepted
 submission's later delivery timeout, and the awaiting-delivery state does not
 imply that an external packet buffer remains bound. The product cap is one only
 for the passing composition profile, not product capacity. Portable framing,
-the immutable credential authority, raw-NOR credential store,
-qualification-session server and authenticated-job handoff now exist as
-separately qualified crates. ADR 0009 selects the developer/HIL pairing
-contract. Its store is boot-mounted/recovered and retained by the E290
-coordinator, but no initialization/pairing manager, external API/session job
-lane, or physical bearer is composed.
+the immutable credential authority, raw-NOR credential store, qualification-
+session server, authenticated-job handoff, and physical-presence pairing policy
+now exist as separately qualified crates. ADR 0009 freezes the developer/HIL
+pairing contract; the policy crate implements the exact 2,000 ms hold,
+60,000 ms window, connection epoch, shared-attempt, and owned-operation
+admission state without owning the ceremony's I/O or secrets. Its store is boot-
+mounted/recovered and retained by the E290 coordinator, but the policy is not
+composed and no flash-backed initialization/pairing manager, external API/
+session job lane, or physical bearer exists.
 `DispatchLease` mints validated non-wire provenance, and the adapter
 persists its exact credential/policy/permission snapshot with schema-2
 acceptance.
@@ -1390,10 +1400,14 @@ or device button confirmation, producing a revocable per-client credential.
 [ADR 0006](adr/0006-authenticated-local-api-bearer.md) accepts and freezes the
 first bounded framing, handoff, PSK transcript and qualification-only integrity
 profile. [ADR 0009](adr/0009-device-api-credential-store-and-pairing.md)
-fixes the first developer/HIL ceremony as a roughly two-second GPIO21 hold,
-exclusive 60-second USB Serial/JTAG window, combined three-attempt ceiling,
-and durable `Pending`/HMAC-proof/`Active` ordering. The physical store exists;
-the pairing manager and firmware composition remain unimplemented.
+fixes the first developer/HIL ceremony as an exact 2,000 ms release-to-arm
+GPIO21 hold, exclusive 60,000 ms USB Serial/JTAG window, strictly increasing
+connection epochs, combined three-attempt ceiling, and durable `Pending`/HMAC-
+proof/`Active` ordering. The portable admission policy is implemented, but its
+GPIO/USB, credential mutation, proof, firmware, and bearer composition remain
+unimplemented. In particular, integration still requires a lifecycle-safe
+credential successor/pending-selection API and a recoverable class for
+interrupted empty-store initialization.
 Private Reticulum keys never leave the device by default. Identity
 export is an explicit, encrypted, physically confirmed flow.
 
@@ -1646,10 +1660,12 @@ checked operation-scoped views, durably finalizes replay-unsafe interrupted
 work, gates service on mount/replay/recovery, and implements `SubmissionPort`.
 The accepted-history cap is one in the passing host composition, not product
 capacity, and the still-missing product edge is a bounded external API job lane
-plus ADR 0009 initialization/pairing implementation and a USB/BLE/Wi-Fi bearer.
-The physical credential store is boot-composed; the portable immutable
-authority, framing, qualification session and boot-lifetime handoff are not yet
-composed into an external serving lane.
+plus composition of ADR 0009's implemented portable pairing policy with
+credential mutation and a USB/BLE/Wi-Fi bearer. The physical credential store
+is boot-composed; the portable immutable authority, pairing policy, framing,
+qualification session and boot-lifetime handoff are not yet composed into an
+external serving lane. Credential integration first needs lifecycle-safe
+successor/pending selection and a recoverable interrupted-initialization class.
 OTA, watchdog, other-store and radio-timing
 coordination also remain qualification/design work.
 `sequential-storage` remains research/
@@ -1845,9 +1861,11 @@ milestone inside this phase, not its exit: ADR 0005's interface-local active-
 owner fail-stop and the complete one-entry LoRa software composition pass host
 qualification. Credential-store boot composition now passes host and target
 build gates and its erased-media path passed the first permanent-image powered
-smoke; pairing implementation, external API firmware/bearer composition,
-controlled peer RX/DATA, power-cut/high-water testing, multi-hop/Resource
-coverage and sustained qualification remain open.
+smoke; the portable pairing policy passes its own gates but remains uncomposed.
+Lifecycle-safe credential successor/pending selection, recoverable interrupted
+initialization, external API firmware/bearer composition, controlled peer RX/
+DATA, power-cut/high-water testing, multi-hop/Resource coverage and sustained
+qualification remain open.
 
 Deliverables:
 
@@ -2030,9 +2048,11 @@ gates.
    classification/order, the authenticated
    happy path and wrong-binding `ActiveOwnerFailStopped` path. Preserve the now
    implemented immutable credential authority, bounded qualification-session
-   core, recoverable operation-scoped credential store, and independent vectors.
-   Preserve the store's immediate post-open boot composition and implement ADR
-   0009's exclusive physical-presence initialization/pairing/rate policy; preserve the
+   core, recoverable operation-scoped credential store, portable pairing policy,
+   and independent vectors. Preserve the store's immediate post-open boot
+   composition; add lifecycle-safe credential successor/pending selection and a
+   recoverable interrupted-initialization class; then compose ADR 0009's
+   exclusive physical-presence initialization/pairing policy. Preserve the
    implemented schema-2 credential/generation/authority/policy provenance; then
    compose authority/framing/session/boot-
    lifetime job handoff as an external API lane and add the first USB local

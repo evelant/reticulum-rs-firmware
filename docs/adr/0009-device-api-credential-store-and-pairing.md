@@ -1,8 +1,8 @@
 # ADR 0009: Device-API credential store and initial pairing policy
 
-- **Status:** accepted design; portable store and E290 boot/coordinator
-  integration implemented; pairing, live mutation, and powered qualification
-  pending
+- **Status:** accepted design; portable store, E290 boot/coordinator integration,
+  and portable pairing-admission policy implemented; live credential mutation,
+  firmware/bearer composition, and powered pairing qualification pending
 - **Date:** 2026-07-17
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0004](0004-sole-flash-coordinator.md),
@@ -12,11 +12,13 @@
 ## Context
 
 The portable credential authority and its canonical 2,048-byte semantic image
-exist, and permanent E290 firmware now mounts/recovers its physical store,
-but it cannot admit an authenticated external
-request until one device-owned authority survives power loss. Pairing must not
-publish a secret-bearing authority before its physical commit is established,
-and an empty or erased store must not silently create a trust relationship.
+exist, permanent E290 firmware now mounts/recovers its physical store, and a
+portable policy owner now freezes physical-presence window admission. The
+firmware still cannot admit an authenticated external request until one
+device-owned authority survives power loss and the policy is composed with the
+sole flash owner and a bearer. Pairing must not publish a secret-bearing
+authority before its physical commit is established, and an empty or erased
+store must not silently create a trust relationship.
 
 This first policy is deliberately a developer/HIL contract. The E290 image
 currently rejects flash encryption, and USB Serial/JTAG provides neither peer
@@ -206,25 +208,70 @@ credential media.
 
 ### Fix the first developer/HIL pairing window
 
-The initial pairing manager, when implemented, uses GPIO21 as the E290 user
-button and USB Serial/JTAG as its only bearer:
+`reticulum-device-api-pairing-policy` implements the allocation-free portable
+admission owner. It deliberately has no GPIO, USB, flash, entropy, HMAC, wire,
+or executor dependency. A later E290 adapter must supply debounced active-low
+GPIO21 observations and use USB Serial/JTAG as the only bearer for this first
+developer/HIL ceremony.
 
-- a continuous roughly two-second button hold opens one exclusive 60-second
-  monotonic window bound to the currently accepted USB connection;
-- while open, ordinary device-API session establishment and all unrelated
-  credential/admin mutation are refused;
-- the window permits at most three total begin/proof attempts, closes on the
-  third attempt, timeout, USB disconnect, or successful activation, and holds
-  at most one `Pending` enrollment;
-- no boot, cable connection, empty store, or elapsed timeout opens another
-  window automatically.
+The exact admission contract is:
 
-Each accepted begin allocates a never-before-used random nonzero 128-bit
-credential ID and random 256-bit PSK, plus the next authority revision. The
-sole owner commits and exactly reads back that `Pending` successor before it
-offers the ID and PSK to the same bound USB connection. A disconnect or failed
-write never converts `Pending` to `Active` and never permits a new pending ID
-to bypass it.
+- the current accepted connection must observe the button released before a
+  low observation can arm it; boot, connection, replacement, closure, and clock
+  fault all require another release before rearming, so a button held low cannot
+  open or automatically reopen a window;
+- one uninterrupted active-low interval reaches its threshold at exactly
+  2,000 monotonic milliseconds. At that threshold the policy invalidates prior
+  ordinary-session admission and returns a single-use request for the bearer to
+  acquire exclusive ownership. The window opens only after the bearer
+  acknowledges that ownership;
+- the deadline is exactly 60,000 monotonic milliseconds after the hold
+  threshold, not after the later exclusivity acknowledgement. A request at
+  `now >= deadline` loses to timeout, including a late acknowledgement;
+- accepted connection epochs are nonzero and strictly increasing for the whole
+  boot. A newer epoch replaces the current connection, closes its acquiring or
+  open window as a disconnect, and resets the hold cycle. An older or reused
+  epoch is refused;
+- acquiring exclusivity, an open window, and any accepted operation exclude
+  ordinary device-API session establishment and unrelated credential/admin
+  mutation. An open window is bound to its exact window and connection epochs;
+- no boot, cable connection, empty store, timeout, disconnect, or completed
+  operation opens another window automatically.
+
+The shared attempt budget is exactly three classified `Begin`/`Proof`
+requests. A request from the bound connection while its window is open and not
+timed out spends the next ordinal before checking operation, pending-record, or
+store eligibility. Thus wrong pending ID/generation, missing/existing pending,
+operation-in-flight, mutation-blocked, retained-capacity-exhausted, and next-
+revision-exhausted refusals all spend budget. A request with no connection, the
+wrong connection, no open window, or an expired window does not. Explicit
+erased initialization and pending abort do not spend this budget.
+
+The third classified request is still evaluated: it may be refused or may
+return an admitted operation permit, but it immediately closes the window to
+new work. If admitted, the owner enters a draining state and retains that exact
+operation until its definite result is reconciled. Timeout, disconnect, or
+connection replacement likewise closes window admission without discarding an
+already accepted operation. A dropped or ambiguous operation permit therefore
+leaves the policy fail closed; it must be retained across the asynchronous
+physical operation and completed only with a definite result.
+
+Initialization admission consumes trusted `identity_ready` and
+`exactly_erased` facts from the sole identity/flash owner and additionally
+requires no durable pending enrollment. Begin admission consumes trusted
+`mutation_ready`, retained-capacity-available, and next-revision-available facts
+and requires the pending slot to be empty. These values are policy preconditions,
+not evidence that media is erased, writable, or unchanged: the sole physical
+owner must revalidate them immediately before mutation. The policy starts from
+either no pending record or one already validated durable pending reference and
+tracks only its non-secret credential ID and generation.
+
+The future mutation coordinator, not the portable policy, allocates for each
+accepted begin a never-before-used random nonzero 128-bit credential ID and
+random 256-bit PSK, plus the next authority revision. The sole owner commits
+and exactly reads back that `Pending` successor before it offers the ID and PSK
+to the same bound USB connection. A disconnect or failed write never converts
+`Pending` to `Active` and never permits a new pending ID to bypass it.
 
 The client proves PSK possession with a domain-separated HMAC-SHA256 over a
 fresh single-use device challenge and the pairing transcript, including the
@@ -234,12 +281,13 @@ record encoding and domain bytes before implementation; it may not weaken
 these bindings or accept a client-supplied principal/permission assertion.
 Failure responses do not reveal whether any unrelated credential exists.
 
-After valid proof, the manager constructs the exact next successor changing
-that record from `Pending` to `Active`. It commits, reads back, retires the old
-snapshot, and publishes the new authority before sending pairing completion or
-allowing session authentication. Successful activation then closes the pairing
-window. Thus both `Pending` before secret offer and `Active` before completion
-are durable facts.
+After valid proof, the future mutation coordinator constructs the exact next
+successor changing that record from `Pending` to `Active`. It commits, reads
+back, retires the old snapshot, and publishes the new authority before sending
+pairing completion or allowing session authentication. Reporting that exact
+durable, publishable result to the policy closes an otherwise-open window as
+successfully activated. Thus both `Pending` before secret offer and `Active`
+before completion are durable facts.
 
 The current firmware logger shares the USB Serial/JTAG stream. Binary COBS
 pairing/session service must not start while arbitrary text logs can interleave
@@ -252,6 +300,23 @@ button-confirmed window may prove it again if the client retained the secret,
 or explicitly abort it by committing a PSK-free revoked/aborted tombstone
 before allocating another ID. The firmware never silently restores, reuses,
 or discards a pending secret-bearing ID.
+
+The portable policy does not implement or imply live pairing. The remaining
+boundary includes:
+
+- a lifecycle-safe credential-authority API that can select the exact durable
+  pending record and construct `Pending`, `Active`, and aborted successors while
+  retaining every secret-bearing owner required for failure reconciliation;
+- a product boot/recovery class for interrupted empty revision-1 initialization,
+  so a reset can resume only the exact canonical trajectory without treating
+  arbitrary programmed media as authorized initialization;
+- board debounce/sampling, boot-lifetime USB connection-epoch allocation,
+  exclusive bearer arbitration, and exact disconnect classification;
+- entropy, unique-ID/PSK allocation and collision handling; exact pairing wire
+  records, challenge/HMAC transcript domains, proof verification, response
+  delivery, COBS/log separation, and secret zeroization;
+- sole-flash mutation, trusted-fact rechecks, ambiguous-result and power-cut
+  reconciliation, firmware task composition, and powered hardware qualification.
 
 ### Defer the production security profile
 
@@ -303,11 +368,18 @@ but cannot claim security from the developer USB trust shortcut.
   API/session/bearer closed, LoRa continuing, and exact post-boot credential
   partitions still entirely `0xff`. No credential was initialized or
   authenticated.
-- Pairing tests must cover hold debounce/duration, exclusive window ownership,
-  monotonic timeout, the combined three-attempt ceiling, disconnect at every
-  secret/proof/completion boundary, one-pending enforcement, proof replay and
-  wrong binding, explicit abort, erased-only initialization, and 16-ID
-  exhaustion.
+- Complete in the portable pairing-policy slice: focused host tests freeze the
+  exact 2,000/60,000 ms boundaries, release-to-rearm behavior, strictly
+  increasing connection epochs, ordinary-session invalidation, trusted
+  initialization facts, counted refused attempts, third-operation draining,
+  exact pending begin/proof/activation/abort transitions, operation ownership
+  across disconnect, clock regression, overflow faults, and the 256-byte policy-
+  owner RAM ceiling. This crate is not composed into firmware or a bearer.
+- Pairing integration tests must still cover real GPIO debounce/sampling,
+  exclusive USB ownership, disconnect at every secret/proof/completion boundary,
+  proof replay and wrong transcript binding, unique ID/PSK allocation, the
+  lifecycle-safe authority successor/pending-selection API, the recoverable
+  interrupted-initialization class, and 16-ID exhaustion.
 - Live mutation/bearer composition must keep the ADR 0004 coordinator as the
   only flash and mutable-authority owner, zeroize temporary secrets, preserve LoRa
   scheduling under USB pressure, and prove no API/session service starts from
@@ -318,5 +390,6 @@ but cannot claim security from the developer USB trust shortcut.
   activation, retirement, and cleanup at every reachable boundary and verify
   exact flash readback before this path is enabled outside developer/HIL use.
 
-None of the pairing, live-mutation/bearer, powered-cut, or live-authentication
-gates is claimed complete by this ADR.
+No live pairing, credential mutation through this policy, bearer composition,
+powered-cut recovery, or live-authentication gate is claimed complete by this
+ADR.

@@ -1707,6 +1707,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "reticulum-device-api-pairing-policy"
+version = "0.1.0"
+dependencies = [
+ "reticulum-device-api-credentials",
+]
+
+[[package]]
 name = "reticulum-device-api-session"
 version = "0.1.0"
 dependencies = [

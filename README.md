@@ -321,11 +321,15 @@ exact credential ID/generation, authority revision, policy version, and granted
 permission mask with every accepted submission; the redundant serialized and
 in-RAM content digest is derived from the immutable intent, so the unchanged
 383-byte request still fits the 512-byte journal body. The canonical authority
-image, dedicated credential-partition contract, two-sector commit/retire
-format, and initial bounded developer/HIL pairing policy are now selected. The
-portable store is boot-mounted/recovered and retained by the firmware
-coordinator, but no provisioning/pairing manager, firmware API/session job lane,
-or USB/BLE/Wi-Fi bearer invokes the adapter yet. The accepted
+image, dedicated credential-partition contract, and two-sector commit/retire
+format are implemented. The initial bounded developer/HIL pairing policy is
+also implemented as a portable, allocation-free admission owner: it freezes the
+exact physical-presence hold/window, connection epoch, shared attempt budget,
+one-pending, and asynchronous operation-ownership rules without owning GPIO,
+USB, flash, secrets, or proof verification. The portable store is boot-mounted/
+recovered and retained by the firmware coordinator, but the policy is not
+composed and no provisioning/pairing manager, firmware API/session job lane, or
+USB/BLE/Wi-Fi bearer invokes the adapter yet. The accepted
 authentication, authority, provenance, and USB ownership contracts are
 recorded in [ADR 0006](docs/adr/0006-authenticated-local-api-bearer.md) and
 [ADR 0007](docs/adr/0007-device-api-credential-authority.md), with the durable
@@ -376,7 +380,10 @@ COBS framing, immutable credential authority, qualification-session core, boot-
 lifetime job handoff, and E290 `ProductStorageCoordinator` port implementation
 are compiled, and schema-2 acceptance retains exact authorization provenance,
 but no persistent credential provisioning/pairing, external
-firmware lane, or USB/BLE/Wi-Fi bearer serves through them.
+firmware lane, or USB/BLE/Wi-Fi bearer serves through them. The next
+integration boundary still needs a lifecycle-safe credential successor/pending-
+selection API and a recoverable interrupted-initialization class before that
+portable policy can own live flash-backed operations.
 The legacy `TxSupervisor` remains a separate RF-inert test aggregate. The permanent
 `NodeInterfaceSupervisor` now owns the router, DATA and ordinary coordinators,
 and both permit-service families; the first permanent E290 image composes it
@@ -430,13 +437,15 @@ The DATA router, both permit-only services and permanent aggregate are now
 connected to the dispatcher, sole-Rete owner, timed RNode RX and one E290 LoRa
 actor in the first permanent build-verified target. Its exact authorized-frame
 durability handoff and ADR 0005 active-owner fail-stop now pass cross-layer host
-composition tests. Live external admission is blocked by explicit credential
-initialization/provisioning, pairing implementation, the external API/session
-firmware lane, and a bearer—not by credential-store boot composition or another
-semantic authority, session-crypto, durability-policy, partition, or cap
-decision. The next software slice implements ADR 0009's bounded
-physical-presence initialization/pairing manager, followed by that credential-backed USB-to-LoRa edge
-and durable configuration/message hosting and client delivery.
+composition tests. Live external admission is blocked by flash-backed
+credential initialization/provisioning and pairing composition, the external
+API/session firmware lane, and a bearer—not by credential-store boot composition
+or another semantic authority, session-crypto, durability-policy, partition, or
+cap decision. The portable ADR 0009 admission policy is implemented but
+uncomposed. The next software slice supplies its lifecycle-safe credential
+successor/pending-selection API and recoverable interrupted-initialization class,
+then composes the bounded manager and credential-backed USB-to-LoRa edge before
+durable configuration/message hosting and client delivery.
 The node-side routing
 boundary remains interface-neutral so additional Reticulum links can be added
 later through adapters without rewriting the LoRa actor or protocol owner; no
@@ -506,6 +515,7 @@ cargo check --locked \
   -p reticulum-device-api \
   -p reticulum-device-api-credential-store \
   -p reticulum-device-api-credentials \
+  -p reticulum-device-api-pairing-policy \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
@@ -529,6 +539,7 @@ cargo +esp check --locked \
   -p reticulum-device-api \
   -p reticulum-device-api-credential-store \
   -p reticulum-device-api-credentials \
+  -p reticulum-device-api-pairing-policy \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \

@@ -602,7 +602,7 @@ fn graph_policy() -> ExitCode {
              API and node core remain mutually isolated and free of direct platform dependencies; the \
              allocation-free device-API framing crate has no dependency or feature surface, while its \
              boot-lifetime job handoff reaches only the logical device API and Embassy Sync, and the \
-             credential authority has only its exact logical device-API, constant-time comparison and zeroization edges; the \
+             credential authority has only its exact logical device-API, constant-time comparison and zeroization edges; the physical-presence pairing policy has only its exact feature-disabled credential-authority edge and remains absent from every product and HIL graph; the \
              authenticated session layer has only its exact reviewed cryptographic, device-API, credentials, framing and handoff normal edges plus its exact test-only hex, semantic-adapter and storage-model fixtures; \
              the Rete integration and node-core normal closures contain no RNode, radio-interface, LoRa or board package; \
              the shared lora-phy owner and E290 radio wrapper have only their exact reviewed HAL, framing, board and test edges; \
@@ -653,7 +653,7 @@ fn validate_interface_neutral_rns_closure(label: &str, tree: &str) -> Result<(),
     Ok(())
 }
 
-const PRODUCT_GRAPH_FORBIDDEN: [&str; 23] = [
+const PRODUCT_GRAPH_FORBIDDEN: [&str; 24] = [
     "leviculum-core",
     "rete-lxmf",
     "lxmf-rs",
@@ -665,6 +665,7 @@ const PRODUCT_GRAPH_FORBIDDEN: [&str; 23] = [
     "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
+    "reticulum-device-api-pairing-policy",
     "reticulum-device-api-session",
     "reticulum-node-core",
     "reticulum-radio-tx-dispatch",
@@ -690,7 +691,7 @@ fn validate_product_graph_boundary(label: &str, tree: &str) -> Result<(), String
     Ok(())
 }
 
-const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 28] = [
+const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 29] = [
     "embassy-executor",
     "esp-radio",
     "lora-modulation",
@@ -708,6 +709,7 @@ const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 28] = [
     "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
+    "reticulum-device-api-pairing-policy",
     "reticulum-device-api-session",
     "reticulum-node-core",
     "reticulum-radio-interface",
@@ -729,7 +731,7 @@ const TX_HIL_GRAPH_REQUIRED: [&str; 5] = [
     "reticulum-semantic-roundtrip-hil",
 ];
 
-const TX_HIL_GRAPH_FORBIDDEN: [&str; 23] = [
+const TX_HIL_GRAPH_FORBIDDEN: [&str; 24] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-core",
@@ -741,6 +743,7 @@ const TX_HIL_GRAPH_FORBIDDEN: [&str; 23] = [
     "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
+    "reticulum-device-api-pairing-policy",
     "reticulum-device-api-session",
     "reticulum-board-heltec-vision-master-e290-radio",
     "reticulum-node-core",
@@ -785,7 +788,7 @@ const SEMANTIC_TX_HIL_GRAPH_REQUIRED: [&str; 9] = [
     "rete-transport",
 ];
 
-const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 19] = [
+const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 20] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -794,6 +797,7 @@ const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 19] = [
     "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
+    "reticulum-device-api-pairing-policy",
     "reticulum-device-api-session",
     "reticulum-board-heltec-vision-master-e290-radio",
     "reticulum-node-core",
@@ -921,7 +925,7 @@ const E290_SEMANTIC_HIL_GRAPH_REQUIRED: [&str; 9] = [
     "rete-transport",
 ];
 
-const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 22] = [
+const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 23] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -934,6 +938,7 @@ const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 22] = [
     "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
+    "reticulum-device-api-pairing-policy",
     "reticulum-device-api-session",
     "reticulum-interface-router",
     "reticulum-node-core",
@@ -1006,7 +1011,7 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 29] = [
     "static_cell",
 ];
 
-const E290_NODE_GRAPH_FORBIDDEN: [&str; 14] = [
+const E290_NODE_GRAPH_FORBIDDEN: [&str; 15] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -1016,6 +1021,7 @@ const E290_NODE_GRAPH_FORBIDDEN: [&str; 14] = [
     "reticulum-heltec-vision-master-e290-semantic-hil",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
+    "reticulum-device-api-pairing-policy",
     "reticulum-device-api-session",
     "reticulum-lab-rx-returned-fault-hil",
     "reticulum-rns-leviculum",
@@ -1373,6 +1379,46 @@ fn validate_device_api_edge_dependency_boundary(
             &[],
         )?;
     }
+
+    let pairing_name = "reticulum-device-api-pairing-policy";
+    let pairing = exact_local_package(
+        packages,
+        workspace,
+        pairing_name,
+        "crates/device-api-pairing-policy/Cargo.toml",
+    )?;
+    let pairing_features = pairing["features"]
+        .as_object()
+        .ok_or_else(|| format!("{pairing_name} package has no feature map"))?;
+    if pairing_features.len() != 1
+        || pairing_features
+            .get("default")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|values| !values.is_empty())
+    {
+        return Err(format!(
+            "{pairing_name} must expose only one empty default feature"
+        ));
+    }
+    let pairing_dependencies = pairing["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{pairing_name} package has no dependency array"))?;
+    if pairing_dependencies.len() != 1
+        || pairing_dependencies
+            .iter()
+            .any(|dependency| !dependency["kind"].is_null())
+    {
+        return Err(format!(
+            "{pairing_name} must have exactly one reviewed normal dependency"
+        ));
+    }
+    validate_exact_local_dependency(
+        pairing_dependencies,
+        pairing_name,
+        "reticulum-device-api-credentials",
+        &workspace.join("crates/device-api-credentials"),
+        false,
+    )?;
 
     let session_name = "reticulum-device-api-session";
     let session = exact_local_package(
@@ -4727,6 +4773,7 @@ fn validate_firmware_dependency_boundary(
         "reticulum-device-api-credentials",
         "reticulum-device-api-framing",
         "reticulum-device-api-handoff",
+        "reticulum-device-api-pairing-policy",
         "reticulum-device-api-session",
         "reticulum-node-core",
         "reticulum-radio-tx-dispatch",
@@ -4772,6 +4819,7 @@ fn validate_firmware_dependency_boundary(
                         | "reticulum-device-api-credentials"
                         | "reticulum-device-api-framing"
                         | "reticulum-device-api-handoff"
+                        | "reticulum-device-api-pairing-policy"
                         | "reticulum-device-api-session"
                         | "reticulum-node-core"
                         | "reticulum-radio-tx-dispatch"
@@ -6522,6 +6570,7 @@ mod tests {
             "reticulum-device-api-credentials",
             "reticulum-device-api-framing",
             "reticulum-device-api-handoff",
+            "reticulum-device-api-pairing-policy",
             "reticulum-device-api-session",
             "reticulum-node-core",
             "reticulum-radio-tx-dispatch",
@@ -6570,6 +6619,11 @@ mod tests {
                 "device-api-handoff-id",
                 "reticulum-device-api-handoff",
                 "crates/device-api-handoff",
+            ),
+            (
+                "device-api-pairing-policy-id",
+                "reticulum-device-api-pairing-policy",
+                "crates/device-api-pairing-policy",
             ),
             (
                 "device-api-session-id",
@@ -6671,6 +6725,7 @@ mod tests {
             "reticulum-device-api-credentials",
             "reticulum-device-api-framing",
             "reticulum-device-api-handoff",
+            "reticulum-device-api-pairing-policy",
             "reticulum-device-api-session",
             "reticulum-node-core",
             "reticulum-radio-tx-dispatch",
@@ -7069,6 +7124,26 @@ mod tests {
     }
 
     #[test]
+    fn pairing_policy_remains_forbidden_from_every_product_and_hil_graph() {
+        for (label, forbidden) in [
+            ("Tracker product", &PRODUCT_GRAPH_FORBIDDEN[..]),
+            ("storage HIL", &STORAGE_HIL_GRAPH_FORBIDDEN[..]),
+            ("Tracker TX HIL", &TX_HIL_GRAPH_FORBIDDEN[..]),
+            (
+                "Tracker semantic TX HIL",
+                &SEMANTIC_TX_HIL_GRAPH_FORBIDDEN[..],
+            ),
+            ("E290 semantic HIL", &E290_SEMANTIC_HIL_GRAPH_FORBIDDEN[..]),
+            ("permanent E290 node", &E290_NODE_GRAPH_FORBIDDEN[..]),
+        ] {
+            assert!(
+                forbidden.contains(&"reticulum-device-api-pairing-policy"),
+                "{label} no longer forbids the uncomposed pairing policy"
+            );
+        }
+    }
+
+    #[test]
     fn storage_hil_boundary_rejects_dependency_feature_and_edge_drift() {
         let root = workspace_root();
         let metadata = storage_hil_metadata_fixture(&root);
@@ -7185,7 +7260,7 @@ mod tests {
     }
 
     #[test]
-    fn device_api_edge_boundary_locks_framing_handoff_credentials_and_session_shapes() {
+    fn device_api_edge_boundary_locks_framing_handoff_credentials_pairing_and_session_shapes() {
         let root = workspace_root();
         let metadata = device_api_edge_metadata_fixture(&root);
         validate_device_api_edge_dependency_boundary(&metadata.to_string(), &root).unwrap();
@@ -7323,6 +7398,90 @@ mod tests {
             validate_device_api_edge_dependency_boundary(&credentials_feature.to_string(), &root)
                 .is_err(),
             "credentials accepted a crate feature"
+        );
+
+        for drifted_features in [
+            serde_json::json!({}),
+            serde_json::json!({ "default": ["unreviewed"] }),
+            serde_json::json!({ "default": [], "std": [] }),
+        ] {
+            let mut pairing_feature = metadata.clone();
+            fixture_package_mut(&mut pairing_feature, "reticulum-device-api-pairing-policy")["features"] =
+                drifted_features;
+            assert!(
+                validate_device_api_edge_dependency_boundary(&pairing_feature.to_string(), &root,)
+                    .is_err(),
+                "pairing policy accepted feature drift"
+            );
+        }
+
+        for (field, value) in [
+            ("req", serde_json::json!("^0.1")),
+            (
+                "source",
+                serde_json::json!("registry+https://github.com/rust-lang/crates.io-index"),
+            ),
+            ("path", serde_json::json!(root.join("elsewhere"))),
+            ("kind", serde_json::json!("dev")),
+            ("optional", serde_json::json!(true)),
+            ("rename", serde_json::json!("credentials")),
+            ("target", serde_json::json!("cfg(target_os = \"none\")")),
+            ("uses_default_features", serde_json::json!(true)),
+            ("features", serde_json::json!(["unreviewed"])),
+        ] {
+            let mut pairing_dependency = metadata.clone();
+            fixture_dependency_mut(
+                fixture_package_mut(
+                    &mut pairing_dependency,
+                    "reticulum-device-api-pairing-policy",
+                ),
+                "reticulum-device-api-credentials",
+                None,
+            )[field] = value;
+            assert!(
+                validate_device_api_edge_dependency_boundary(
+                    &pairing_dependency.to_string(),
+                    &root,
+                )
+                .is_err(),
+                "pairing policy accepted credential dependency drift in {field}"
+            );
+        }
+
+        let mut extra_pairing_dependency = metadata.clone();
+        fixture_package_mut(
+            &mut extra_pairing_dependency,
+            "reticulum-device-api-pairing-policy",
+        )["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(handoff_dependency_fixture("esp-hal", "=1.1.1", None));
+        assert!(
+            validate_device_api_edge_dependency_boundary(
+                &extra_pairing_dependency.to_string(),
+                &root,
+            )
+            .is_err(),
+            "pairing policy accepted an extra dependency"
+        );
+
+        let mut duplicate_pairing_package = metadata.clone();
+        let duplicate = fixture_package_mut(
+            &mut duplicate_pairing_package,
+            "reticulum-device-api-pairing-policy",
+        )
+        .clone();
+        duplicate_pairing_package["packages"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate);
+        assert!(
+            validate_device_api_edge_dependency_boundary(
+                &duplicate_pairing_package.to_string(),
+                &root,
+            )
+            .is_err(),
+            "pairing policy accepted a duplicate local package"
         );
 
         for (dependency_name, kind) in [
@@ -9960,6 +10119,20 @@ mod tests {
                         ),
                         handoff_dependency_fixture("subtle", "=2.6.1", None),
                         handoff_dependency_fixture("zeroize", "=1.9.0", None),
+                    ],
+                },
+                {
+                    "name": "reticulum-device-api-pairing-policy",
+                    "source": null,
+                    "manifest_path": root.join("crates/device-api-pairing-policy/Cargo.toml"),
+                    "features": { "default": [] },
+                    "dependencies": [
+                        handoff_path_dependency_fixture(
+                            "reticulum-device-api-credentials",
+                            "*",
+                            &root.join("crates/device-api-credentials"),
+                            None,
+                        ),
                     ],
                 },
                 {

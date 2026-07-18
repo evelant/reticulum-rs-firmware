@@ -26,12 +26,13 @@ by that harness solely as a composition profile and is not a product-capacity
 commitment. Portable API framing, immutable credential authority, the
 qualification-session core, and the boot-lifetime job handoff are qualified;
 semantic schema 2 persists exact authorization provenance. The dedicated
-credential-partition contract, portable store, and initial developer/HIL
-pairing policy are selected in ADR 0009. The store is now boot-mounted,
-deterministically recovered, and retained by the resident coordinator; the
-pairing manager is not implemented. Live external admission is blocked by
-explicit initialization/provisioning, pairing, the external API/session lane,
-and a bearer. ADR 0005's
+credential-partition contract and portable store are selected in ADR 0009; its
+initial developer/HIL pairing-admission policy is now implemented as a separate
+portable crate. The store is boot-mounted, deterministically recovered, and
+retained by the resident coordinator, but the policy is not composed into a
+flash-backed pairing manager. Live external admission is blocked by credential
+initialization/provisioning and pairing composition, the external API/session
+lane, and a bearer. ADR 0005's
 active-owner policy is implemented:
 a permanent fault
 with an unresolved frame enters interface-local `ActiveOwnerFailStopped`, takes
@@ -589,8 +590,10 @@ as the bounded qualification fixture for the deterministic DATA/proof exchange.
 
 ## Product blockers after this slice
 
-- Preserve ADR 0009's boot-mounted credential store and implement the bounded
-  physical-presence initialization/pairing manager, then compose the immutable authority, bounded
+- Preserve ADR 0009's boot-mounted credential store and portable pairing policy.
+  Add lifecycle-safe credential successor/pending selection and a recoverable
+  interrupted-initialization class, then compose the bounded physical-presence
+  initialization/pairing manager with the immutable authority and bounded
   COBS framing,
   qualification-session core, and boot-lifetime job/reply handoff with the
   first USB bearer. Persistent-state composition, firmware composition, and the physical

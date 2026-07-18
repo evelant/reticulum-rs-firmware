@@ -15,8 +15,12 @@ acceptance. The portable two-sector raw-NOR credential store is implemented,
 and E290 boot now validates its exact eFuse-derived binding, mounts it
 immediately after flash open, performs bounded deterministic recovery, and
 retains any mounted owner in the sole coordinator. It does not auto-provision
-erased media. Provisioning/pairing, the external API/session firmware lane, and
-every physical bearer remain unimplemented. A
+erased media. A separate portable pairing-policy crate implements the exact
+physical-presence window, connection epoch, shared attempt, and operation-
+ownership state, but it is not composed. Flash-backed initialization/pairing,
+the external API/session firmware lane, and every physical bearer remain
+unimplemented. Credential integration also needs lifecycle-safe successor/
+pending selection and a recoverable interrupted-initialization class. A
 product port may route an accepted submission through the node after the
 durable barriers.
 
@@ -31,9 +35,9 @@ codec, and a small common authorization policy. It does not contain:
 - an interface that returns raw Reticulum/RNode packet bytes;
 - raw/direct-radio-TX authorization or access to a radio driver.
 
-Transport framing, job handoff and authenticated session establishment are
-separate layers. They decode and carry the message plus a session-minted
-credential reference. `reticulum-device-api-credentials` implements the fixed-
+Transport framing, pairing admission, job handoff and authenticated session
+establishment are separate layers. They decode and carry the message plus a
+session-minted credential reference. `reticulum-device-api-credentials` implements the fixed-
 capacity device-owned semantic authority: it must revalidate that reference and
 separately derive the trusted `DispatchContext` and validated
 `DispatchProvenance` immediately before dispatch. No principal, permission,
