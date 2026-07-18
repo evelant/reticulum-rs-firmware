@@ -10,8 +10,9 @@ LoRa-first software composition and ADR 0005's interface-local active-owner
 fail-stop now pass cross-layer host tests. Portable API framing, immutable
 credential authority, the qualification-session core, and job handoff are
 qualified; durable authorization provenance is now part of semantic schema 2.
-Live external admission remains blocked by explicit credential initialization/
-pairing, external API/session firmware composition, and a bearer. The permanent
+Live external admission remains blocked by invoking resident credential
+initialization, composing live pairing lifecycle mutation, external API/session
+firmware composition, and a bearer. The permanent
 graph's empty-journal/ordinary-TX powered smoke passes; integrated powered-fault
 qualification remains open.
 
@@ -187,9 +188,9 @@ acceptance and cap, the pre-node preparation barrier, exact LoRa frame
 persistence/echo/completion, timeout, principal isolation, and remount. The
 other injects a wrong bound-journal access after frame exposure and proves
 `ActiveOwnerFailStopped` retains every owner with an ordinary action queued and
-permits no later host-radio operation. Together with 40 focused policy/product/
-credential-boot tests, the 42-test E290 suite closes software composition qualification without
-claiming powered flash or RF behavior.
+permits no later host-radio operation. Together with 51 focused policy/product/
+credential-boot/credential-runtime tests, the 53-test E290 suite closes software
+composition qualification without claiming powered flash or RF behavior.
 
 Remaining product work includes:
 

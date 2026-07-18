@@ -17,13 +17,20 @@ use reticulum_device_api_adapter::{SubmissionAcceptance, SubmissionPort, Submiss
 use reticulum_device_api_credential_store::{
     BoundCredentialStore, CredentialStoreBinding, CredentialStoreRecovery, MountedCredentialStore,
 };
+use reticulum_device_api_pairing_policy::{
+    AcquirePairingExclusive, ActiveLowButton, ButtonEffect, ConnectionId, ConnectionRefusal,
+    ExclusiveAcquireOutcome, MonotonicMillis as PairingMillis, PolicyEvent, WindowClosed,
+};
 use reticulum_device_identity_store::{
     DurableIdentityMaterial, IdentityBootReport, IdentityPreflight, IdentityStoreError,
     boot_load_or_provision, inspect_identity,
 };
 use reticulum_heltec_vision_master_e290_node::credential_boot::{
-    CredentialBootOutcome, CredentialBootState, MAXIMUM_CREDENTIAL_BOOT_OUTCOME_BYTES,
-    boot_credentials,
+    CredentialBootOutcome, CredentialBootState, boot_credentials,
+};
+use reticulum_heltec_vision_master_e290_node::credential_runtime::{
+    CredentialInitializationStatus, CredentialRuntime, InitializationAccepted,
+    InitializationDriveOutcome, InitializationRequestRefusal, MAXIMUM_CREDENTIAL_RUNTIME_BYTES,
 };
 use reticulum_heltec_vision_master_e290_node::partition_contract::{
     ANNOUNCE_CLOCK_LABEL_BYTES, ANNOUNCE_CLOCK_LEN, ANNOUNCE_CLOCK_OFFSET,
@@ -240,15 +247,93 @@ pub(crate) struct ProductFlashOwner {
 pub(crate) struct ProductStorageCoordinator {
     flash: &'static mut FlashStorage<'static>,
     journal_binding: JournalBinding,
-    credential_binding: CredentialStoreBinding,
-    credential_store: Option<MountedCredentialStore>,
-    credential_boot_state: CredentialBootState,
+    credential_runtime: CredentialRuntime,
     runtime: Option<ProductSubmissionRuntime>,
     submission_service_enabled: bool,
 }
 
+/// Product-level result of admission-time identity preflight and initialization policy.
+#[expect(
+    dead_code,
+    reason = "the compiled product port has no caller until a local pairing bearer lands"
+)]
+pub(crate) enum ProductInitializationRequest {
+    /// Identity media could not be inspected, so no policy request ran.
+    IdentityUnavailable,
+    /// Fresh identity preflight completed and the resident runtime decided.
+    Runtime(Result<InitializationAccepted, InitializationRequestRefusal>),
+}
+
+/// Product-level result of one same-boot physical initialization drive.
+#[expect(
+    dead_code,
+    reason = "the compiled product port has no caller until a local pairing bearer lands"
+)]
+pub(crate) enum ProductInitializationDrive {
+    /// Identity media could not be inspected, so credential media was untouched.
+    IdentityUnavailable,
+    /// Fresh identity preflight completed and the resident runtime decided.
+    Runtime(InitializationDriveOutcome<ProductRegionError>),
+}
+
+/// Sole-owner surface reserved for the future local pairing bearer.
+///
+/// Main uses the status method for powered composition evidence. The remaining
+/// methods compile the complete product-owned control and physical-I/O path,
+/// but no USB/BLE/Wi-Fi task invokes them until a bearer is added.
+#[expect(
+    dead_code,
+    reason = "status is live now; the remaining operations await the local pairing bearer"
+)]
+pub(crate) trait ProductCredentialInitializationPort {
+    /// Current non-secret resident initialization ownership.
+    fn initialization_status(&self) -> CredentialInitializationStatus;
+
+    /// Accept one strictly increasing local connection epoch.
+    fn pairing_connected(
+        &mut self,
+        now: PairingMillis,
+        connection: ConnectionId,
+    ) -> Option<Result<Option<WindowClosed>, ConnectionRefusal>>;
+
+    /// Close one matching local connection without discarding physical ownership.
+    fn pairing_disconnected(
+        &mut self,
+        now: PairingMillis,
+        connection: ConnectionId,
+    ) -> Option<PolicyEvent>;
+
+    /// Forward one debounced physical-presence sample.
+    fn pairing_observe_button(
+        &mut self,
+        now: PairingMillis,
+        level: ActiveLowButton,
+    ) -> Option<ButtonEffect>;
+
+    /// Confirm that the local bearer granted exclusive pairing ownership.
+    fn pairing_exclusive_acquired(
+        &mut self,
+        now: PairingMillis,
+        effect: AcquirePairingExclusive,
+    ) -> Option<ExclusiveAcquireOutcome>;
+
+    /// Poll one physical-presence window deadline.
+    fn pairing_poll_timeout(&mut self, now: PairingMillis) -> Option<PolicyEvent>;
+
+    /// Reinspect identity media and request explicit initialization.
+    fn request_initialization(
+        &mut self,
+        now: PairingMillis,
+        connection: ConnectionId,
+    ) -> ProductInitializationRequest;
+
+    /// Reinspect identity media, construct the exact short-lived credential
+    /// view, and advance an already admitted initialization.
+    fn drive_initialization(&mut self) -> ProductInitializationDrive;
+}
+
 const MAXIMUM_PRODUCT_STORAGE_COORDINATOR_CREDENTIAL_OVERHEAD_BYTES: usize =
-    MAXIMUM_CREDENTIAL_BOOT_OUTCOME_BYTES + 512;
+    MAXIMUM_CREDENTIAL_RUNTIME_BYTES + 256;
 const MAXIMUM_PRODUCT_STORAGE_COORDINATOR_BYTES: usize = config::MAXIMUM_DURABLE_RUNTIME_BYTES
     + MAXIMUM_PRODUCT_STORAGE_COORDINATOR_CREDENTIAL_OVERHEAD_BYTES;
 const _: () = assert!(
@@ -458,16 +543,13 @@ impl ProductFlashOwner {
         runtime: Option<ProductSubmissionRuntime>,
         credentials: BootCredentialStore,
     ) -> ProductStorageCoordinator {
-        let (credential_boot_state, credential_store) = credentials
-            .outcome
-            .into_parts_for_binding(self.credential_binding);
+        let credential_runtime =
+            CredentialRuntime::from_boot(credentials.outcome, self.credential_binding);
         let submission_service_enabled = runtime.is_some();
         ProductStorageCoordinator {
             flash: self.flash,
             journal_binding: self.journal_binding,
-            credential_binding: self.credential_binding,
-            credential_store,
-            credential_boot_state,
+            credential_runtime,
             runtime,
             submission_service_enabled,
         }
@@ -495,38 +577,32 @@ fn node_journal_is_erased(
 impl ProductStorageCoordinator {
     /// Credential boot admission retained by the sole flash coordinator.
     pub(crate) const fn credential_boot_state(&self) -> CredentialBootState {
-        self.credential_boot_state
+        self.credential_runtime.credential_boot_state()
     }
 
     /// Exact credential partition binding retained for later API operations.
     pub(crate) const fn credential_binding(&self) -> CredentialStoreBinding {
-        self.credential_binding
+        self.credential_runtime.binding()
     }
 
     /// Non-secret mounted authority revision, when media mounted successfully.
     pub(crate) fn credential_revision(&self) -> Option<u64> {
-        self.credential_store
-            .as_ref()
-            .map(|mounted| mounted.revision().get())
+        self.credential_runtime.revision()
     }
 
     /// Whether the retained authority may authenticate existing credentials.
     pub(crate) fn credential_authority_publishable(&self) -> bool {
-        self.credential_boot_state.authority_publishable()
-            && self
-                .credential_store
-                .as_ref()
-                .and_then(MountedCredentialStore::publishable_authority)
-                .is_some()
+        self.credential_runtime.authority_publishable()
     }
 
     /// Whether the retained authority is clean enough for a future mutation.
     pub(crate) fn credential_mutation_eligible(&self) -> bool {
-        self.credential_boot_state.mutation_eligible()
-            && self
-                .credential_store
-                .as_ref()
-                .is_some_and(|mounted| mounted.recovery() == CredentialStoreRecovery::Clean)
+        self.credential_runtime.mutation_eligible()
+    }
+
+    /// Whether the resident credential state constructed a pairing policy.
+    pub(crate) const fn credential_pairing_policy_available(&self) -> bool {
+        self.credential_runtime.pairing_policy_available()
     }
 
     /// Whether the durable local submission runtime mounted successfully.
@@ -577,6 +653,95 @@ impl ProductStorageCoordinator {
             PartitionNorFlash::new(&mut *self.flash, NODE_JOURNAL_OFFSET, NODE_JOURNAL_LEN);
         let mut journal = BoundJournal::new(region, self.journal_binding);
         Some(runtime.drive_step(&mut journal, node, rns_now, owner_now, deadline, rng))
+    }
+}
+
+impl ProductCredentialInitializationPort for ProductStorageCoordinator {
+    fn initialization_status(&self) -> CredentialInitializationStatus {
+        self.credential_runtime.initialization_status()
+    }
+
+    fn pairing_connected(
+        &mut self,
+        now: PairingMillis,
+        connection: ConnectionId,
+    ) -> Option<Result<Option<WindowClosed>, ConnectionRefusal>> {
+        self.credential_runtime.pairing_connected(now, connection)
+    }
+
+    fn pairing_disconnected(
+        &mut self,
+        now: PairingMillis,
+        connection: ConnectionId,
+    ) -> Option<PolicyEvent> {
+        self.credential_runtime
+            .pairing_disconnected(now, connection)
+    }
+
+    fn pairing_observe_button(
+        &mut self,
+        now: PairingMillis,
+        level: ActiveLowButton,
+    ) -> Option<ButtonEffect> {
+        self.credential_runtime.pairing_observe_button(now, level)
+    }
+
+    fn pairing_exclusive_acquired(
+        &mut self,
+        now: PairingMillis,
+        effect: AcquirePairingExclusive,
+    ) -> Option<ExclusiveAcquireOutcome> {
+        self.credential_runtime
+            .pairing_exclusive_acquired(now, effect)
+    }
+
+    fn pairing_poll_timeout(&mut self, now: PairingMillis) -> Option<PolicyEvent> {
+        self.credential_runtime.pairing_poll_timeout(now)
+    }
+
+    fn request_initialization(
+        &mut self,
+        now: PairingMillis,
+        connection: ConnectionId,
+    ) -> ProductInitializationRequest {
+        let identity_preflight = {
+            let mut region =
+                PartitionNorFlash::new(&mut *self.flash, NODE_IDENTITY_OFFSET, NODE_IDENTITY_LEN);
+            inspect_identity(&mut region)
+        };
+        let identity_ready = match identity_preflight {
+            Ok(IdentityPreflight::Committed { .. }) => true,
+            Ok(IdentityPreflight::Vacant) => false,
+            Err(_) => return ProductInitializationRequest::IdentityUnavailable,
+        };
+        ProductInitializationRequest::Runtime(self.credential_runtime.request_initialization(
+            now,
+            connection,
+            identity_ready,
+        ))
+    }
+
+    fn drive_initialization(&mut self) -> ProductInitializationDrive {
+        let identity_preflight = {
+            let mut region =
+                PartitionNorFlash::new(&mut *self.flash, NODE_IDENTITY_OFFSET, NODE_IDENTITY_LEN);
+            inspect_identity(&mut region)
+        };
+        let identity_ready = match identity_preflight {
+            Ok(IdentityPreflight::Committed { .. }) => true,
+            Ok(IdentityPreflight::Vacant) => false,
+            Err(_) => return ProductInitializationDrive::IdentityUnavailable,
+        };
+        let region = PartitionNorFlash::new(
+            &mut *self.flash,
+            API_CREDENTIALS_OFFSET,
+            API_CREDENTIALS_LEN,
+        );
+        let mut access = BoundCredentialStore::new(region, self.credential_runtime.binding());
+        ProductInitializationDrive::Runtime(
+            self.credential_runtime
+                .drive_initialization(&mut access, identity_ready),
+        )
     }
 }
 

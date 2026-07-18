@@ -17,15 +17,20 @@ immediately after flash open, performs bounded deterministic recovery, and
 retains any mounted owner in the sole coordinator. It does not auto-provision
 erased media. A separate portable pairing-policy crate implements the exact
 physical-presence window, connection epoch, shared attempt, and operation-
-ownership state, but it is not composed. Flash-backed initialization/pairing,
-the external API/session firmware lane, and every physical bearer remain
-unimplemented. Lifecycle-specific Add/Activate/Abort planners, opaque typed
+ownership state. It is now feature-free only in the permanent E290 graph, where
+a resident `CredentialRuntime` privately retains the policy, exact boot binding,
+mounted authority, and admitted initialization permit. The coordinator compiles
+a sole-owner port that freshly reinspects node identity and creates a short-lived
+bound credential view; its runtime accepts only forward erased/interrupted
+trajectories. No GPIO debounce, external request lane, physical bearer, or
+powered initialization invokes that path, and boot never initializes
+automatically. Lifecycle-specific Add/Activate/Abort planners, opaque typed
 store commit/reconcile owners, mounted-store pending selection, and the read-only
 interrupted-initialization classifier are implemented. E290 boot now maps only
-its canonical recoverable trajectory to an explicit disabled state; same-boot
-physical recovery/runtime ownership and physical-presence composition remain
-next. A product port may route an accepted submission through the node after
-the durable barriers.
+its canonical recoverable trajectory to an explicit disabled state. Live Begin,
+Proof, Activate, and Abort mutation, the external API/session firmware lane, and
+every physical bearer remain unimplemented. A product port may route an accepted
+submission through the node after the durable barriers.
 
 ## Boundary
 
@@ -275,8 +280,9 @@ exercises that API-to-runtime-to-router-to-LoRa software path; portable framing,
 immutable credential authority, qualification-session establishment, and job
 handoff and raw-NOR credential storage are implemented separately, while
 the credential store is now boot-composed. External live admission still
-requires explicit credential initialization/provisioning/pairing, an external
-API/session firmware lane, and a bearer.
+requires invoking the resident initialization path when media is empty, live
+credential pairing lifecycle composition, an external API/session firmware
+lane, and a bearer.
 
 Successful experimental response body:
 
@@ -364,10 +370,12 @@ replacement must also pass exact-next-revision successor validation so changed
 authorization cannot reuse a session generation. E290 firmware now mounts and
 recovers the portable store before any other product-store write and retains
 its `Ready`, authentication-only, uninitialized-erased,
-initialization-interrupted, blocked, corrupt, or backend-failed state. A future
-external serving runtime must add explicit
-provisioning/pairing, enforce connection-level rate limits, and keep
-authentication state outside request CBOR.
+initialization-interrupted, blocked, corrupt, or backend-failed state. The
+resident initialization runtime and sole-owner physical drive are compiled but
+have no bearer/request caller. A future external serving runtime must invoke
+that path explicitly when needed, add live Begin/Proof/Activate/Abort pairing,
+enforce connection-level rate limits, and keep authentication state outside
+request CBOR.
 
 Semantic journal schema 2 persists the principal, idempotency key,
 operation-specific intent, credential ID/generation, complete authority

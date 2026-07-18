@@ -2,8 +2,9 @@
 
 - **Status:** accepted design; portable lifecycle-safe authority/store path,
   interrupted-initialization classifier, E290 boot/coordinator mount integration,
-  and pairing-admission policy implemented; E290 initialization/mutation runtime,
-  firmware/bearer composition, and powered pairing qualification pending
+  pairing-admission policy, and E290 forward-only initialization runtime/sole-
+  owner port implemented; live lifecycle mutation, firmware bearer/request
+  composition, and powered pairing qualification pending
 - **Date:** 2026-07-17
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0004](0004-sole-flash-coordinator.md),
@@ -16,9 +17,11 @@ The portable credential authority and its canonical 2,048-byte semantic image
 now expose lifecycle-specific successor planning, the physical store carries
 those opaque transitions through commit and reconciliation, permanent E290
 firmware mounts/recovers its physical store, and a portable policy owner freezes
-physical-presence window admission. The firmware still cannot admit an
-authenticated external request until one device-owned authority survives power
-loss and the policy is composed with the sole flash owner and a bearer. Pairing
+physical-presence window admission. The feature-free policy and resident
+initialization owner are now composed only into the permanent E290 graph, but
+the firmware still cannot admit an authenticated external request until a
+bearer/request lane invokes physical presence and live lifecycle mutation over
+one device-owned authority that survives power loss. Pairing
 must not publish a secret-bearing authority before its physical commit is
 established, and an empty or erased store must not silently create a trust
 relationship.
@@ -221,10 +224,10 @@ No boot path automatically formats or pairs an empty store. With an existing
 Reticulum identity and credential media either exactly erased or on the one
 canonical interrupted empty-provision trajectory, local API admission remains
 disabled. The only initial action allowed is an explicit initialization command
-received on the button-confirmed USB connection described below. Its future
-physical runtime must reclassify the media and either establish or resume the
+received on the button-confirmed USB connection described below. The resident
+physical runtime reclassifies the media and either establishes or resumes the
 canonical empty revision-1 authority. Programmed noncanonical media is never
-reformatted by this path.
+reformatted by this path. No USB connection invokes it yet.
 
 The portable store also provides the read-only
 `classify_empty_provision_media` four-way classifier for this boundary:
@@ -235,9 +238,13 @@ program/digest/commit trajectory with the other sector and all forbidden bytes
 erased. Classification never writes or erases. E290 boot now invokes it only
 after normal mount reports programmed unformatted media and maps only
 `RecoverableInterrupted` to `InitializationInterrupted`; contradictions and
-ineligible media remain corrupt. The resident coordinator does not yet retain
-a same-boot ambiguous initialization permit or perform recovery; that is the
-next composition slice, not automatic boot recovery.
+ineligible media remain corrupt. The resident coordinator now consumes this
+boot result into `CredentialRuntime`, which privately retains the exact binding,
+any mounted authority, the feature-free pairing policy, and any admitted
+initialization permit. It freshly reclassifies a short-lived bound view and
+accepts only forward erased/interrupted trajectories, retaining the permit
+across ambiguous backend or readback results. This is explicit request-time
+recovery, never automatic boot recovery.
 
 Initialization creates no credential, offers no secret, and does not
 implicitly start pairing. A client must issue a separate pairing begin while a
@@ -249,8 +256,10 @@ credential media.
 
 `reticulum-device-api-pairing-policy` implements the allocation-free portable
 admission owner. It deliberately has no GPIO, USB, flash, entropy, HMAC, wire,
-or executor dependency. A later E290 adapter must supply debounced active-low
-GPIO21 observations and use USB Serial/JTAG as the only bearer for this first
+or executor dependency. Graph policy permits its feature-free edge only in the
+permanent E290 product and continues to exclude it from legacy product/HIL
+graphs. A later E290 bearer adapter must supply debounced active-low GPIO21
+observations and use USB Serial/JTAG as the only bearer for this first
 developer/HIL ceremony.
 
 The exact admission contract is:
@@ -342,20 +351,23 @@ or explicitly abort it by committing a PSK-free revoked/aborted tombstone
 before allocating another ID. The firmware never silently restores, reuses,
 or discards a pending secret-bearing ID.
 
-The portable policy does not implement or imply live pairing. The remaining
-boundary includes:
+The portable policy and resident initialization runtime do not implement or
+imply live pairing. The coordinator has a source-composed, target-checked sole-
+owner port that freshly inspects node identity and constructs the short-lived
+bound credential view, but no bearer/request lane, GPIO debounce, or powered
+test invokes it. The remaining boundary includes:
 
-- a resident same-boot mutation owner that retains the exact initialization
-  permit and typed physical successor until definite reconciliation, while
-  accepting only forward progress along the already composed read-only E290
-  boot classification;
+- live Begin/Proof/Activate/Abort ownership that retains each typed physical
+  successor until definite reconciliation; initialization permit retention and
+  forward-only erased/interrupted recovery are already resident;
 - board debounce/sampling, boot-lifetime USB connection-epoch allocation,
   exclusive bearer arbitration, and exact disconnect classification;
 - entropy, unique-ID/PSK allocation and collision handling; exact pairing wire
   records, challenge/HMAC transcript domains, proof verification, response
   delivery, COBS/log separation, and secret zeroization;
-- sole-flash mutation, trusted-fact rechecks, ambiguous-result and power-cut
-  reconciliation, firmware task composition, and powered hardware qualification.
+- sole-flash lifecycle mutation, trusted-fact rechecks, ambiguous-result and
+  power-cut reconciliation, firmware task invocation, and powered hardware
+  qualification.
 
 ### Defer the production security profile
 
@@ -407,9 +419,12 @@ but cannot claim security from the developer USB trust shortcut.
 - Complete in E290 host/target composition: exact partition and eFuse-derived
   binding, immediate post-open mount/recovery ordering, bounded retire then
   cleanup, retained `MountedCredentialStore`, no auto-provisioning, and the
-  seven boot admission classes including read-only interrupted initialization.
-  These checks contribute to the 42-test E290 host
-  suite; they are not powered integration or live-authentication evidence.
+  seven boot admission classes including read-only interrupted initialization;
+  resident `CredentialRuntime` retention of the exact binding, mounted authority,
+  pairing policy, and permit; forward-only erased/interrupted recovery; and the
+  sole-owner fresh-identity/fresh-view initialization port. These checks
+  contribute to the 53-test E290 host suite; they are not powered integration
+  or live-authentication evidence.
 - Complete as bounded powered erased-media smoke at source `96e38aa`: both
   boards reported `UninitializedErased` with zero recovery steps/writes/erases,
   API/session/bearer closed, LoRa continuing, and exact post-boot credential
@@ -423,12 +438,13 @@ but cannot claim security from the developer USB trust shortcut.
   refused attempts, third-operation draining,
   exact pending begin/proof/activation/abort transitions, operation ownership
   across disconnect, clock regression, overflow faults, and the 256-byte policy-
-  owner RAM ceiling. This crate is not composed into firmware or a bearer.
+  owner RAM ceiling. Its feature-free edge is composed only into permanent E290
+  firmware; no bearer invokes it.
 - Pairing integration tests must still cover real GPIO debounce/sampling,
   exclusive USB ownership, disconnect at every secret/proof/completion boundary,
   proof replay and wrong transcript binding, unique ID/PSK allocation, E290
-  interrupted-initialization runtime recovery, retained same-boot ambiguity,
-  and 16-ID exhaustion.
+  interrupted-initialization powered recovery, retained same-boot ambiguity
+  under real faults, and 16-ID exhaustion.
 - Live mutation/bearer composition must keep the ADR 0004 coordinator as the
   only flash and mutable-authority owner, zeroize temporary secrets, preserve LoRa
   scheduling under USB pressure, and prove no API/session service starts from

@@ -230,9 +230,11 @@ provisioning, announce-clock reservation, identity load/provision, or journal
 mount. Boot never provisions erased credential media: it performs at most one
 reported predecessor retirement followed by at most one inactive-sector
 cleanup, classifies the result as `Ready`, authentication-only,
-uninitialized-erased, blocked, corrupt, or backend-failed, and transfers any
-mounted owner into `ProductStorageCoordinator`. These developer partitions are
-deliberately plaintext, so a provisioned full flash dump is secret material.
+uninitialized-erased, initialization-interrupted, blocked, corrupt, or backend-
+failed, and transfers the exact boot binding and any mounted owner into the
+resident `CredentialRuntime` inside `ProductStorageCoordinator`. These developer
+partitions are deliberately plaintext, so a provisioned full flash dump is
+secret material.
 
 This first permanent composition is not yet the full product node. The portable
 `reticulum-storage-model` defines strict canonical submission records,
@@ -339,10 +341,19 @@ operation-ownership rules without owning GPIO, USB, flash, secrets, or proof
 verification. The portable store is boot-mounted/recovered and retained by the
 firmware coordinator, and E290 boot now maps only the exact canonical
 interrupted-initialization trajectory into a distinct read-only disabled state.
-Same-boot initialization recovery and live lifecycle mutations are not yet
-composed there. The policy remains uncomposed, and no provisioning/pairing
-manager, firmware API/session job lane, or USB/BLE/Wi-Fi bearer invokes the
-adapter yet. The credential authority passes 23 unit tests, eight public
+The feature-free pairing policy is now a permanent E290 dependency only, and a
+resident `CredentialRuntime` inside `ProductStorageCoordinator` privately
+retains that policy, the exact boot binding, any mounted authority, and any
+admitted initialization permit. Its physical drive reclassifies a fresh bound
+view and accepts only forward progress along the exact erased or interrupted
+trajectory, retaining ownership across ambiguous results. The coordinator's
+compiled sole-owner initialization port freshly reinspects node identity and
+creates the short-lived bound credential view, but no USB/BLE/Wi-Fi bearer,
+GPIO debounce, external request lane, or powered initialization invokes it yet.
+Boot never starts initialization automatically, and live Begin, Proof,
+Activate, and Abort lifecycle mutations remain uncomposed. No firmware API/
+session job lane or bearer invokes the adapter yet. The credential authority
+passes 23 unit tests, eight public
 successor tests, and 18 compile-fail doctests; the
 physical store passes 32 fake-NOR tests. The accepted
 authentication, authority, provenance, and USB ownership contracts are
@@ -355,8 +366,8 @@ store/pairing decision in
 experimental host tests/clippy plus the corresponding ESP32-S3 Xtensa checks
 pass.
 
-The E290 library now has 42 passing host tests: 40 focused
-policy/product/credential-boot tests, including a mechanical source-order
+The E290 library now has 53 passing host tests: 51 focused policy/product/
+credential-boot/credential-runtime tests, including a mechanical source-order
 regression, plus two real cross-layer composition tests. The happy path rejects
 unauthenticated and unauthorized requests without a NOR write, durably accepts
 exactly one request and rejects a second novel request at the qualification cap,
@@ -394,12 +405,13 @@ separate portable integration boundary: the target-safe authenticated adapter,
 COBS framing, immutable credential authority, qualification-session core, boot-
 lifetime job handoff, and E290 `ProductStorageCoordinator` port implementation
 are compiled, and schema-2 acceptance retains exact authorization provenance,
-but no persistent credential provisioning/pairing, external
-firmware lane, or USB/BLE/Wi-Fi bearer serves through them. The next
-integration boundary must retain same-boot ambiguous initialization/mutation
-owners in the sole coordinator, reclassify media immediately before physical
-I/O, and compose physical-presence policy before that portable policy can own
-live flash-backed operations.
+but no external firmware lane or USB/BLE/Wi-Fi bearer serves through them. The
+resident credential runtime and compiled sole-owner initialization port now
+retain an admitted initialization permit, reclassify immediately before
+physical I/O, and preserve exact binding and mounted authority ownership. No
+GPIO debounce, bearer connection epoch source, external request lane, or
+powered test invokes that port yet, and live Begin/Proof/Activate/Abort
+mutations remain uncomposed.
 The legacy `TxSupervisor` remains a separate RF-inert test aggregate. The permanent
 `NodeInterfaceSupervisor` now owns the router, DATA and ordinary coordinators,
 and both permit-service families; the first permanent E290 image composes it
@@ -453,17 +465,16 @@ The DATA router, both permit-only services and permanent aggregate are now
 connected to the dispatcher, sole-Rete owner, timed RNode RX and one E290 LoRa
 actor in the first permanent build-verified target. Its exact authorized-frame
 durability handoff and ADR 0005 active-owner fail-stop now pass cross-layer host
-composition tests. Live external admission is blocked by flash-backed
-credential initialization/provisioning and pairing composition, the external
+composition tests. Live external admission is blocked by credential
+initialization invocation and live pairing lifecycle composition, the external
 API/session firmware lane, and a bearer—not by credential-store boot composition
 or another semantic authority, session-crypto, durability-policy, partition, or
-cap decision. The portable ADR 0009 admission policy is implemented but
-uncomposed. The lifecycle-safe credential planners, typed store mutation path,
-mounted-store pending selection, interrupted-initialization classifier, and
-explicit read-only E290 boot state now exist; the next software slice composes
-the same-boot recovery/mutation owner and bounded physical-presence manager,
-then the credential-backed USB-to-LoRa edge, before durable configuration/
-message hosting and client delivery.
+cap decision. The feature-free ADR 0009 admission policy, resident
+initialization owner, and sole-owner physical drive are compiled only into the
+permanent E290 graph. The next software slice must connect debounced physical
+presence and a real bearer/request lane, then compose live Begin, Proof,
+Activate, and Abort ownership before the credential-backed USB-to-LoRa edge,
+durable configuration/message hosting, and client delivery.
 The node-side routing
 boundary remains interface-neutral so additional Reticulum links can be added
 later through adapters without rewriting the LoRa actor or protocol owner; no

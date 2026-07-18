@@ -306,8 +306,8 @@ forced denial after coordinator fault. The separate real-radio dispatcher now
 retains the router's DATA/ordinary tickets. The DATA router, both permit
 services, and permanent `NodeInterfaceSupervisor` are composed with it in the
 E290 two-task graph. These pieces and the router's cancellation-safe capacity/
-completion waits pass host and both target checks; the permanent graph remains
-unqualified on powered hardware.
+completion waits pass host and both target checks; full powered qualification
+of the permanent graph remains open.
 
 The semantic durable model, idempotent projector, physical journal, and portable
 sole storage actor are implemented and target-checked. The actor owns the live
@@ -323,7 +323,7 @@ portable authenticated device-API adapter is also implemented: default builds
 serve capabilities and principal-scoped status, while the explicit target-safe
 feature enables durable experimental acceptance. Both profiles are target-
 checked. The permanent E290 graph keeps the journal runtime and sole flash in a
-resident coordinator and passes 42 host tests. Immediately after flash open it
+resident coordinator and passes 53 host tests. Immediately after flash open it
 validates the exact `api_credentials` partition/eFuse binding, mounts and
 performs at most one retire then cleanup step, and retains any mounted credential
 store without auto-provisioning. Credential failure closes only credential

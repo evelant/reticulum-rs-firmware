@@ -74,7 +74,10 @@ use reticulum_tx_supervisor::{
 };
 use static_cell::StaticCell;
 
-use crate::platform_storage::{BootCredentialStore, ProductFlashOwner, ProductStorageCoordinator};
+use crate::platform_storage::{
+    BootCredentialStore, ProductCredentialInitializationPort, ProductFlashOwner,
+    ProductStorageCoordinator,
+};
 
 #[cfg(debug_assertions)]
 compile_error!("the permanent E290 node must be built with --release");
@@ -416,6 +419,9 @@ async fn main(spawner: Spawner) -> ! {
     let credential_revision = storage_coordinator.credential_revision();
     let credential_authority_publishable = storage_coordinator.credential_authority_publishable();
     let credential_mutation_eligible = storage_coordinator.credential_mutation_eligible();
+    let credential_pairing_policy_available =
+        storage_coordinator.credential_pairing_policy_available();
+    let credential_initialization_status = storage_coordinator.initialization_status();
     let storage_coordinator = STORAGE_COORDINATOR.init(storage_coordinator);
 
     let node_rng = bootstrap_rng.clone();
@@ -637,7 +643,7 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(radio_task);
     spawner.spawn(node_task);
     info!(
-        "e290-node stage=composition status=PASS tasks=2 interfaces=1 primary_transport=lora future_transport_actors=deferred node_journal=mounted resident_storage_available={storage_service_available} credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} external_local_api=closed local_api_bearer=absent local_api_session=absent credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} admission=deferred runtime_patch={} flash_assumption_bytes=16777216",
+        "e290-node stage=composition status=PASS tasks=2 interfaces=1 primary_transport=lora future_transport_actors=deferred node_journal=mounted resident_storage_available={storage_service_available} credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} external_local_api=closed local_api_bearer=absent local_api_session=absent credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} admission=deferred runtime_patch={} flash_assumption_bytes=16777216",
         credential_binding.absolute_offset(),
         credential_binding.length(),
         config::DURABLE_RUNTIME_BYTES,

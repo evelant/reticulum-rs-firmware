@@ -5,15 +5,16 @@ storage actor, transport-neutral submission runtime, native authorized-frame
 seam, and exact E290 request/durable-echo handoff implemented; portable
 authenticated device-API dispatch implemented; resident E290 operation-scoped
 flash/runtime coordinator implemented; isolated powered journal clean-path/
-software-reset HIL passed on board E9:44; the 42-test E290 host suite qualifies
+software-reset HIL passed on board E9:44; the 53-test E290 host suite qualifies
 the one-entry complete LoRa-first software composition and ADR 0005 active-owner
 fail-stop. Portable API framing, immutable credential authority, the USB-
 qualification session core, and the boot-lifetime job handoff are qualified;
 semantic schema 2 now durably binds exact authorization provenance to every
 acceptance. E290 now validates, boot-mounts, deterministically recovers, and
 retains the credential store without auto-provisioning. Live external admission
-remains blocked by explicit credential initialization/pairing, external API/
-session firmware composition, and a bearer. Source `96e38aa` adds bounded
+remains blocked by invoking the resident initialization path, composing live
+pairing lifecycle mutation, external API/session firmware composition, and a
+bearer. Source `96e38aa` adds bounded
 powered evidence for exact image readback, erased credentials with zero
 mutation, strict empty-journal mount, resident service, and ordinary TX on both
 boards; it does not exercise durable DATA or interruption recovery.
@@ -512,8 +513,9 @@ LXMF/NomadNet/UI services without redefining the durable protocol.
    the wrong-binding post-frame `ActiveOwnerFailStopped` path with queued
    ordinary work and no later host-radio operation. The one-entry cap is a
    qualified composition profile, not product capacity.
-4. Add explicit credential initialization/provisioning/pairing, then compose the implemented
-   authority, framing, qualification-
+4. Connect explicit requests and physical presence to the resident credential
+   initialization path, add live Begin/Proof/Activate/Abort ownership, then
+   compose the implemented authority, framing, qualification-
    session core, and boot-lifetime job handoff between the authenticated device-
    API adapter and runtime with a firmware USB bearer. Those are the missing
    edges for live external admission.

@@ -608,7 +608,7 @@ fn graph_policy() -> ExitCode {
              API and node core remain mutually isolated and free of direct platform dependencies; the \
              allocation-free device-API framing crate has no dependency or feature surface, while its \
              boot-lifetime job handoff reaches only the logical device API and Embassy Sync, and the \
-             credential authority has only its exact logical device-API, constant-time comparison and zeroization edges; credential-store integration escape identifiers remain restricted to their exact reviewed definition and call sites in the two trusted owner files, and every workspace member target remains beneath a scanned source root; the physical-presence pairing policy has only its exact feature-disabled credential-authority edge and remains absent from every product and HIL graph; the \
+             credential authority has only its exact logical device-API, constant-time comparison and zeroization edges; credential-store integration escape identifiers remain restricted to their exact reviewed definition and call sites in the two trusted owner files, and every workspace member target remains beneath a scanned source root; the physical-presence pairing policy has only its exact feature-disabled credential-authority edge, is composed feature-free only into the permanent E290 node, and remains absent from every legacy product and HIL graph; the \
              authenticated session layer has only its exact reviewed cryptographic, device-API, credentials, framing and handoff normal edges plus its exact test-only hex, semantic-adapter and storage-model fixtures; \
              the Rete integration and node-core normal closures contain no RNode, radio-interface, LoRa or board package; \
              the shared lora-phy owner and E290 radio wrapper have only their exact reviewed HAL, framing, board and test edges; \
@@ -1190,7 +1190,7 @@ fn validate_e290_semantic_hil_graph_boundary(tree: &str) -> Result<(), String> {
     Ok(())
 }
 
-const E290_NODE_GRAPH_REQUIRED: [&str; 29] = [
+const E290_NODE_GRAPH_REQUIRED: [&str; 30] = [
     "embedded-storage",
     "esp-storage",
     "reticulum-announce-clock",
@@ -1200,6 +1200,7 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 29] = [
     "reticulum-device-api-adapter",
     "reticulum-device-api-credential-store",
     "reticulum-device-api-credentials",
+    "reticulum-device-api-pairing-policy",
     "reticulum-device-identity-store",
     "reticulum-interface-router",
     "reticulum-node-core",
@@ -1222,7 +1223,7 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 29] = [
     "static_cell",
 ];
 
-const E290_NODE_GRAPH_FORBIDDEN: [&str; 15] = [
+const E290_NODE_GRAPH_FORBIDDEN: [&str; 14] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -1232,7 +1233,6 @@ const E290_NODE_GRAPH_FORBIDDEN: [&str; 15] = [
     "reticulum-heltec-vision-master-e290-semantic-hil",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
-    "reticulum-device-api-pairing-policy",
     "reticulum-device-api-session",
     "reticulum-lab-rx-returned-fault-hil",
     "reticulum-rns-leviculum",
@@ -1279,6 +1279,7 @@ fn validate_e290_node_graph_boundary(tree: &str) -> Result<(), String> {
     for package in [
         "reticulum-device-api-credential-store ",
         "reticulum-device-api-credentials ",
+        "reticulum-device-api-pairing-policy ",
     ] {
         let line = tree
             .lines()
@@ -1329,6 +1330,13 @@ fn validate_e290_node_feature_boundary(
         package_name,
         "reticulum-device-api-credential-store",
         &workspace.join("crates/device-api-credential-store"),
+        false,
+    )?;
+    validate_exact_local_dependency(
+        dependencies,
+        package_name,
+        "reticulum-device-api-pairing-policy",
+        &workspace.join("crates/device-api-pairing-policy"),
         false,
     )?;
     Ok(())
@@ -7273,6 +7281,12 @@ mod tests {
                         "*",
                         &root.join("crates/device-api-credential-store"),
                         None,
+                    ),
+                    handoff_path_dependency_fixture(
+                        "reticulum-device-api-pairing-policy",
+                        "*",
+                        &root.join("crates/device-api-pairing-policy"),
+                        None,
                     )
                 ]
             }]
@@ -7292,6 +7306,7 @@ mod tests {
                      ├── reticulum-device-api-adapter v0.1.0 features=[experimental-rns-data]\n\
                      ├── reticulum-device-api-credential-store v0.1.0 features=[]\n\
                      │   └── reticulum-device-api-credentials v0.1.0 features=[]\n\
+                     ├── reticulum-device-api-pairing-policy v0.1.0 features=[]\n\
                      ├── reticulum-device-identity-store v0.1.0 features=[]\n\
                      ├── reticulum-interface-router v0.1.0 features=[]\n\
                      ├── reticulum-node-core v0.1.0 features=[]\n\
@@ -7383,68 +7398,91 @@ mod tests {
     }
 
     #[test]
-    fn permanent_e290_node_requires_exact_direct_credential_store_dependency() {
+    fn permanent_e290_node_requires_exact_direct_credential_dependencies() {
         let root = workspace_root();
         let baseline = e290_node_metadata_fixture(&root);
         validate_e290_node_feature_boundary(&baseline.to_string(), &root).unwrap();
 
-        let mut missing = baseline.clone();
-        fixture_package_mut(&mut missing, "reticulum-heltec-vision-master-e290-node")["dependencies"] =
-            serde_json::json!([]);
-        assert!(validate_e290_node_feature_boundary(&missing.to_string(), &root).is_err());
-
-        let mut duplicated = baseline.clone();
-        let duplicate = duplicated["packages"][0]["dependencies"][0].clone();
-        duplicated["packages"][0]["dependencies"]
-            .as_array_mut()
-            .unwrap()
-            .push(duplicate);
-        assert!(validate_e290_node_feature_boundary(&duplicated.to_string(), &root).is_err());
-
-        for (label, field, value) in [
-            ("version requirement", "req", serde_json::json!("^0.1")),
+        for (dependency_name, wrong_path, rename) in [
             (
-                "registry source",
-                "source",
-                serde_json::json!("registry+https://github.com/rust-lang/crates.io-index"),
+                "reticulum-device-api-credential-store",
+                "crates/not-the-credential-store",
+                "credential-store",
             ),
             (
-                "local path",
-                "path",
-                serde_json::json!(root.join("crates/not-the-credential-store")),
-            ),
-            ("dependency kind", "kind", serde_json::json!("dev")),
-            ("optional edge", "optional", serde_json::json!(true)),
-            (
-                "renamed edge",
-                "rename",
-                serde_json::json!("credential-store"),
-            ),
-            (
-                "target-specific edge",
-                "target",
-                serde_json::json!("cfg(target_os = \"none\")"),
-            ),
-            (
-                "default features",
-                "uses_default_features",
-                serde_json::json!(true),
-            ),
-            (
-                "explicit feature",
-                "features",
-                serde_json::json!(["default"]),
+                "reticulum-device-api-pairing-policy",
+                "crates/not-the-pairing-policy",
+                "pairing-policy",
             ),
         ] {
-            let mut drifted = baseline.clone();
-            let package =
-                fixture_package_mut(&mut drifted, "reticulum-heltec-vision-master-e290-node");
-            fixture_dependency_mut(package, "reticulum-device-api-credential-store", None)[field] =
-                value;
+            let mut missing = baseline.clone();
+            fixture_package_mut(&mut missing, "reticulum-heltec-vision-master-e290-node")
+                ["dependencies"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|dependency| dependency["name"].as_str() != Some(dependency_name));
             assert!(
-                validate_e290_node_feature_boundary(&drifted.to_string(), &root).is_err(),
-                "permanent node accepted credential-store {label} drift"
+                validate_e290_node_feature_boundary(&missing.to_string(), &root).is_err(),
+                "permanent node accepted missing {dependency_name}"
             );
+
+            let mut duplicated = baseline.clone();
+            let duplicate = duplicated["packages"][0]["dependencies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|dependency| dependency["name"].as_str() == Some(dependency_name))
+                .unwrap()
+                .clone();
+            duplicated["packages"][0]["dependencies"]
+                .as_array_mut()
+                .unwrap()
+                .push(duplicate);
+            assert!(
+                validate_e290_node_feature_boundary(&duplicated.to_string(), &root).is_err(),
+                "permanent node accepted duplicate {dependency_name}"
+            );
+
+            for (label, field, value) in [
+                ("version requirement", "req", serde_json::json!("^0.1")),
+                (
+                    "registry source",
+                    "source",
+                    serde_json::json!("registry+https://github.com/rust-lang/crates.io-index"),
+                ),
+                (
+                    "local path",
+                    "path",
+                    serde_json::json!(root.join(wrong_path)),
+                ),
+                ("dependency kind", "kind", serde_json::json!("dev")),
+                ("optional edge", "optional", serde_json::json!(true)),
+                ("renamed edge", "rename", serde_json::json!(rename)),
+                (
+                    "target-specific edge",
+                    "target",
+                    serde_json::json!("cfg(target_os = \"none\")"),
+                ),
+                (
+                    "default features",
+                    "uses_default_features",
+                    serde_json::json!(true),
+                ),
+                (
+                    "explicit feature",
+                    "features",
+                    serde_json::json!(["default"]),
+                ),
+            ] {
+                let mut drifted = baseline.clone();
+                let package =
+                    fixture_package_mut(&mut drifted, "reticulum-heltec-vision-master-e290-node");
+                fixture_dependency_mut(package, dependency_name, None)[field] = value;
+                assert!(
+                    validate_e290_node_feature_boundary(&drifted.to_string(), &root).is_err(),
+                    "permanent node accepted {dependency_name} {label} drift"
+                );
+            }
         }
 
         let mut wrong_manifest = baseline.clone();
@@ -7482,7 +7520,7 @@ mod tests {
     }
 
     #[test]
-    fn pairing_policy_remains_forbidden_from_every_product_and_hil_graph() {
+    fn pairing_policy_is_required_only_by_permanent_e290_node() {
         for (label, forbidden) in [
             ("Tracker product", &PRODUCT_GRAPH_FORBIDDEN[..]),
             ("storage HIL", &STORAGE_HIL_GRAPH_FORBIDDEN[..]),
@@ -7492,13 +7530,14 @@ mod tests {
                 &SEMANTIC_TX_HIL_GRAPH_FORBIDDEN[..],
             ),
             ("E290 semantic HIL", &E290_SEMANTIC_HIL_GRAPH_FORBIDDEN[..]),
-            ("permanent E290 node", &E290_NODE_GRAPH_FORBIDDEN[..]),
         ] {
             assert!(
                 forbidden.contains(&"reticulum-device-api-pairing-policy"),
-                "{label} no longer forbids the uncomposed pairing policy"
+                "{label} no longer forbids the pairing policy"
             );
         }
+        assert!(E290_NODE_GRAPH_REQUIRED.contains(&"reticulum-device-api-pairing-policy"));
+        assert!(!E290_NODE_GRAPH_FORBIDDEN.contains(&"reticulum-device-api-pairing-policy"));
     }
 
     #[test]

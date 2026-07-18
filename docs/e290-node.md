@@ -1,7 +1,7 @@
 # Permanent Vision Master E290 node image
 
 **Status:** the first permanent, LoRa-first image is implemented and passes its
-42-test cross-layer host composition suite, portable-target, ESP32-S3 build,
+53-test host composition suite, portable-target, ESP32-S3 build,
 review, and merged-image packaging gates. Source `96e38aa` also passed the first
 bounded powered smoke on both `HT-RA62-HF` boards: exact same-image readback,
 erased credential classification with zero credential mutation, resident
@@ -34,12 +34,15 @@ planners, opaque typed store commit/reconcile owners, mounted-store pending
 selection, and a read-only four-way interrupted-initialization classifier now
 pass their portable gates. E290 boot now consumes that classifier read-only and
 maps only its canonical interrupted trajectory to an explicit disabled state;
-it does not recover or initialize media, and the policy is not a flash-backed
-pairing manager. Live external
-admission is blocked by credential initialization/provisioning and pairing
-composition, the external API/session lane, and a bearer. ADR 0005's
-active-owner policy is implemented:
-a permanent fault
+it does not recover or initialize media automatically. The feature-free policy
+is now a permanent-E290-only dependency, resident inside the coordinator's
+`CredentialRuntime` with the exact boot binding, any mounted authority, and any
+admitted initialization permit. The coordinator also compiles the sole-owner
+physical initialization port, but no bearer, GPIO debounce, external request
+lane, or powered run invokes it. Live external admission is blocked by that
+invocation path, live Begin/Proof/Activate/Abort composition, the external API/
+session lane, and a bearer. ADR 0005's active-owner policy is implemented: a
+permanent fault
 with an unresolved frame enters interface-local `ActiveOwnerFailStopped`, takes
 the same LoRa lease offline without changing its generation, retains the exact
 frame/completion/ticket, and permits no fresh LoRa work for the rest of the boot.
@@ -57,7 +60,10 @@ transport-neutral node task
     bounded ingress, completion, tick and announce lanes
   ProductStorageCoordinator
     resident sole flash backend
-    retained MountedCredentialStore + boot admission state
+    CredentialRuntime
+      retained boot binding + optional MountedCredentialStore
+      feature-free PairingPolicy + private initialization permit
+      forward-only erased/interrupted physical drive
     SubmissionRuntime + operation-scoped BoundJournal views
     exact authorized-frame retain/re-offer + durable echo
              |
@@ -185,7 +191,7 @@ must not be used for this target.
 `node_identity`, `announce_clock`, and `api_credentials` use ESP-IDF's standard
 `data,undefined` subtype. All three have application-owned formats; the
 credential range is checked, boot-mounted/recovered, and retained while ADR
-0009 provisioning/pairing remains absent. `device_config`
+0009 live provisioning/pairing serving remains absent. `device_config`
 retains the standard NVS subtype while it is unwired; the application-owned
 journal and unwired message store retain `data,undefined`. Their labels and
 ranges remain distinct. Numeric custom subtypes are only valid with custom
@@ -213,7 +219,16 @@ unformatted media. Only `RecoverableInterrupted` becomes
 remain corrupt, while classifier binding and backend failures retain their
 distinct fail-closed phases. Classification never writes or erases, mounts no
 authority, and confers no mutation eligibility. There is still no resident
-same-boot ambiguous initialization owner or automatic recovery path.
+automatic boot recovery; initialization remains an explicit request-time path.
+
+The boot outcome is consumed into a resident `CredentialRuntime` inside
+`ProductStorageCoordinator`. That runtime privately retains the exact credential
+binding, any mounted authority, the feature-free pairing policy, and any
+admitted initialization permit. Its physical drive freshly reclassifies media
+and accepts only forward progress along the exact erased or recoverably
+interrupted trajectory; binding mismatch, backward movement, noncanonical
+completion, or stable media faults block further initialization for that boot,
+while backend/readback ambiguity retains the permit for a same-boot retry.
 
 The seven product admission classes are `Ready`; `AuthOnly` (the Rust
 `AuthenticationOnly` variant, logged as `AUTHENTICATION-ONLY`, with existing
@@ -321,11 +336,21 @@ semantic seam: the one-entry cap is not product capacity. Portable framing and
 job handoff exist, but the image has no composed session, external API lane, or
 USB/BLE/Wi-Fi bearer.
 
-The bound view names the device with the domain-separated 16-byte value
-`"e290-flash" || eFuse base MAC`, plus absolute offset `0x630000`, length
-`0x100000`, and physical layout version 1. Mount validates those values and the
-view's capacity/alignment before I/O; every later borrowed operation must match
-the same binding exactly.
+It also implements a compiled sole-owner credential-initialization port. Each
+request and drive freshly inspects `node_identity`; a physical drive then lends
+one short-lived credential-partition view bound to the exact boot device/range/
+layout before calling the resident runtime. No firmware task, USB/BLE/Wi-Fi
+bearer, connection-epoch source, or debounced GPIO21 sampler invokes these
+methods yet, so this is software composition rather than powered initialization
+evidence. Live Begin, Proof, Activate, and Abort mutations remain uncomposed.
+
+Both operation-scoped views name the device with the domain-separated 16-byte
+value `"e290-flash" || eFuse base MAC`. The credential view additionally fixes
+absolute offset `0x614000`, length `0x2000`, and credential physical layout
+version 1. The journal view fixes offset `0x630000`, length `0x100000`, and
+journal physical layout version 1. Each store validates its exact values and
+view capacity/alignment before I/O; every later borrowed operation must match
+its retained binding exactly.
 
 ## Software composition and build gates
 
@@ -352,8 +377,8 @@ cargo +esp clippy --locked --release \
 
 The build script rejects an unreviewed `esp-rtos` main-stack implementation and
 links `linkall.x`. Debug Xtensa builds are compile-time rejected.
-The host library suite has 42 passing tests: 40 focused
-policy/product/credential-boot tests, including the source-order regression,
+The host library suite has 53 passing tests: 51 focused policy/product/
+credential-boot/credential-runtime tests, including the source-order regression,
 every canonical empty-initialization byte cut, adversarial media changes between
 mount and classification, off-trajectory media, and classifier failure phases,
 plus two real cross-layer composition tests. The happy path proves unauthenticated
@@ -367,10 +392,13 @@ foreign-principal `NotFound`, and remount of the durable final state complete th
 path. The fault test injects a permanent wrong-binding error after frame
 exposure with an ordinary announce queued behind it; the result is
 `ActiveOwnerFailStopped`, no acknowledgement or completion, every owner retained,
-and no later host-radio TX or RX. The 40 focused tests include the exact
+and no later host-radio TX or RX. The 51 focused tests include the exact
 one-submission profile assertion and five focused durability-policy tests for
 retry, route-only degradation, pending durable acknowledgement, sticky fail-stop,
-and the request-after-disable race.
+and the request-after-disable race. Eleven credential-runtime tests additionally
+cover both initialization trajectories, fresh binding and identity checks,
+forward-only media movement, ambiguous backend/readback retention, disconnect
+ownership, policy completion, and fail-closed noncanonical states.
 
 Separate ESP release builds with `-Z emit-stack-sizes` produced 1,025 fully
 symbolized records and identical complete frame-size multisets for the default
@@ -609,17 +637,19 @@ as the bounded qualification fixture for the deterministic DATA/proof exchange.
 
 ## Product blockers after this slice
 
-- Preserve ADR 0009's boot-mounted credential store and portable pairing policy.
+- Preserve ADR 0009's boot-mounted credential store, permanent-E290-only
+  feature-free pairing-policy edge, and resident `CredentialRuntime`.
   Preserve the implemented lifecycle-specific credential planners, opaque
   typed store commit/reconcile path, mounted-store pending selection, and
   interrupted-initialization classifier and explicit read-only E290 boot
-  state. Retain same-boot ambiguous initialization/mutation ownership in the
-  sole coordinator, then compose the bounded physical-presence
-  initialization/pairing manager with the immutable authority and bounded COBS
-  framing,
+  state. Preserve the private exact permit/binding/mounted-authority ownership,
+  forward-only initialization drive, and compiled sole-owner port. Connect that
+  port to debounced physical presence and a real request/bearer lane, then
+  compose live Begin/Proof/Activate/Abort mutation ownership with the immutable
+  authority and bounded COBS framing,
   qualification-session core, and boot-lifetime job/reply handoff with the
-  first USB bearer. Persistent-state composition, firmware composition, and the physical
-  bearer are the remaining edges for live external admission; the
+  first USB bearer. Persistent-state composition, firmware composition, and the
+  physical bearer are the remaining edges for live external admission; the
   one-entry composition cap and ADR 0005 host behavior
   already pass. A later product-capacity policy must not weaken the same
   durability contract, and future interface actors fail-stop only their

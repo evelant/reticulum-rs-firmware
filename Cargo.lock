@@ -1832,6 +1832,7 @@ dependencies = [
  "reticulum-device-api",
  "reticulum-device-api-adapter",
  "reticulum-device-api-credential-store",
+ "reticulum-device-api-pairing-policy",
  "reticulum-device-identity-store",
  "reticulum-interface-router",
  "reticulum-node-core",
