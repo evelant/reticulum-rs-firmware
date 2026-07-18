@@ -11,8 +11,9 @@ exist. The session core emits only a credential ID/generation grant; the
 portable authority revalidates it and derives `DispatchContext` through a
 borrowing `DispatchLease`. The context carries validated non-wire provenance,
 and semantic journal schema 2 persists its exact credential/policy snapshot on
-acceptance. Credential persistence/pairing and firmware
-composition remain unimplemented, and no physical bearer is composed yet. A
+acceptance. The portable two-sector raw-NOR credential store is implemented,
+but E290 flash-owner integration, provisioning/pairing, and firmware
+composition remain unimplemented; no physical bearer is composed yet. A
 product port may route an accepted submission through the node after the
 durable barriers.
 
@@ -262,9 +263,9 @@ bounded async handoff carries these typestates, and the portable projector
 models their persist-before-ack observations. The E290 host composition test
 exercises that API-to-runtime-to-router-to-LoRa software path; portable framing,
 immutable credential authority, qualification-session establishment, and job
-handoff are implemented separately, while external live admission still
-requires persistent credential provisioning/pairing, firmware composition, and
-a bearer.
+handoff and raw-NOR credential storage are implemented separately, while
+external live admission still requires firmware store composition, persistent
+credential provisioning/pairing, and a bearer.
 
 Successful experimental response body:
 
@@ -350,8 +351,9 @@ port call after rejection remain composition rules, not an unforgeable Rust
 capability. Principal and permissions come from the exact active record. Live authority
 replacement must also pass exact-next-revision successor validation so changed
 authorization cannot reuse a session generation. A future credential-backed
-firmware runtime must add persistent provisioning/pairing, enforce connection-
-level rate limits, and keep authentication state outside request CBOR.
+firmware runtime must mount and recover the portable store, add persistent
+provisioning/pairing, enforce connection-level rate limits, and keep
+authentication state outside request CBOR.
 
 Semantic journal schema 2 persists the principal, idempotency key,
 operation-specific intent, credential ID/generation, complete authority
@@ -429,22 +431,26 @@ physical transport:
 
 ```sh
 cargo test --locked \
+  -p reticulum-device-api-credential-store \
   -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session
 cargo clippy --locked --all-targets \
+  -p reticulum-device-api-credential-store \
   -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session -- -D warnings
 cargo check --locked \
+  -p reticulum-device-api-credential-store \
   -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
   --target riscv32imac-unknown-none-elf
 cargo +esp check --locked \
+  -p reticulum-device-api-credential-store \
   -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-handoff \

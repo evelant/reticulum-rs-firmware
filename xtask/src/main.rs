@@ -653,7 +653,7 @@ fn validate_interface_neutral_rns_closure(label: &str, tree: &str) -> Result<(),
     Ok(())
 }
 
-const PRODUCT_GRAPH_FORBIDDEN: [&str; 22] = [
+const PRODUCT_GRAPH_FORBIDDEN: [&str; 23] = [
     "leviculum-core",
     "rete-lxmf",
     "lxmf-rs",
@@ -661,6 +661,7 @@ const PRODUCT_GRAPH_FORBIDDEN: [&str; 22] = [
     "reticulum-board-heltec-tracker-v2-tx-hil",
     "reticulum-board-heltec-vision-master-e290-radio",
     "reticulum-device-api-adapter",
+    "reticulum-device-api-credential-store",
     "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
@@ -689,7 +690,7 @@ fn validate_product_graph_boundary(label: &str, tree: &str) -> Result<(), String
     Ok(())
 }
 
-const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 27] = [
+const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 28] = [
     "embassy-executor",
     "esp-radio",
     "lora-modulation",
@@ -703,6 +704,7 @@ const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 27] = [
     "reticulum-board-heltec-tracker-v2",
     "reticulum-board-heltec-vision-master-e290-radio",
     "reticulum-device-api-adapter",
+    "reticulum-device-api-credential-store",
     "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
@@ -727,7 +729,7 @@ const TX_HIL_GRAPH_REQUIRED: [&str; 5] = [
     "reticulum-semantic-roundtrip-hil",
 ];
 
-const TX_HIL_GRAPH_FORBIDDEN: [&str; 22] = [
+const TX_HIL_GRAPH_FORBIDDEN: [&str; 23] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-core",
@@ -735,6 +737,7 @@ const TX_HIL_GRAPH_FORBIDDEN: [&str; 22] = [
     "rete-stack",
     "rete-transport",
     "reticulum-device-api-adapter",
+    "reticulum-device-api-credential-store",
     "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
@@ -782,11 +785,12 @@ const SEMANTIC_TX_HIL_GRAPH_REQUIRED: [&str; 9] = [
     "rete-transport",
 ];
 
-const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 18] = [
+const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 19] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
     "reticulum-device-api-adapter",
+    "reticulum-device-api-credential-store",
     "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
@@ -917,7 +921,7 @@ const E290_SEMANTIC_HIL_GRAPH_REQUIRED: [&str; 9] = [
     "rete-transport",
 ];
 
-const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 21] = [
+const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 22] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -926,6 +930,7 @@ const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 21] = [
     "reticulum-board-heltec-tracker-v2 v",
     "reticulum-heltec-tracker-v2-tx-hil",
     "reticulum-device-api-adapter",
+    "reticulum-device-api-credential-store",
     "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
@@ -999,7 +1004,7 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 27] = [
     "static_cell",
 ];
 
-const E290_NODE_GRAPH_FORBIDDEN: [&str; 15] = [
+const E290_NODE_GRAPH_FORBIDDEN: [&str; 16] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -1007,6 +1012,7 @@ const E290_NODE_GRAPH_FORBIDDEN: [&str; 15] = [
     "reticulum-heltec-tracker-v2",
     "reticulum-heltec-vision-master-e290-qualification",
     "reticulum-heltec-vision-master-e290-semantic-hil",
+    "reticulum-device-api-credential-store",
     "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
@@ -1461,6 +1467,11 @@ fn validate_portable_durability_dependency_boundaries(
     const ANNOUNCE_CLOCK_DEPENDENCIES: [(&str, &str); 2] =
         [("embedded-storage", "=0.3.1"), ("sha2", "=0.10.9")];
     const NOR_REGION_DEPENDENCIES: [(&str, &str); 1] = [("embedded-storage", "=0.3.1")];
+    const CREDENTIAL_STORE_REGISTRY_DEPENDENCIES: [(&str, &str); 3] = [
+        ("embedded-storage", "=0.3.1"),
+        ("sha2", "=0.10.9"),
+        ("zeroize", "=1.9.0"),
+    ];
 
     let metadata: serde_json::Value = serde_json::from_str(metadata_json)
         .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
@@ -1528,6 +1539,57 @@ fn validate_portable_durability_dependency_boundaries(
                 &[],
             )?;
         }
+    }
+
+    let store_name = "reticulum-device-api-credential-store";
+    let store = exact_local_package(
+        packages,
+        workspace,
+        store_name,
+        "crates/device-api-credential-store/Cargo.toml",
+    )?;
+    let store_features = store["features"]
+        .as_object()
+        .ok_or_else(|| format!("{store_name} package has no feature map"))?;
+    if store_features.len() != 1
+        || store_features
+            .get("default")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|values| !values.is_empty())
+    {
+        return Err(format!(
+            "{store_name} exposes an unreviewed feature surface"
+        ));
+    }
+    let store_dependencies = store["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{store_name} package has no dependency array"))?;
+    if store_dependencies.len() != 4
+        || store_dependencies
+            .iter()
+            .any(|dependency| !dependency["kind"].is_null())
+    {
+        return Err(format!(
+            "{store_name} must have exactly four reviewed normal dependencies"
+        ));
+    }
+    validate_exact_local_dependency(
+        store_dependencies,
+        store_name,
+        "reticulum-device-api-credentials",
+        &workspace.join("crates/device-api-credentials"),
+        false,
+    )?;
+    for (dependency_name, requirement) in CREDENTIAL_STORE_REGISTRY_DEPENDENCIES {
+        validate_exact_registry_dependency(
+            store_dependencies,
+            store_name,
+            dependency_name,
+            requirement,
+            None,
+            false,
+            &[],
+        )?;
     }
 
     Ok(())
@@ -4637,6 +4699,7 @@ fn validate_firmware_dependency_boundary(
         "reticulum-board-heltec-tracker-v2-radio",
         "reticulum-board-heltec-tracker-v2-tx-hil",
         "reticulum-device-api-adapter",
+        "reticulum-device-api-credential-store",
         "reticulum-device-api-credentials",
         "reticulum-device-api-framing",
         "reticulum-device-api-handoff",
@@ -4681,6 +4744,7 @@ fn validate_firmware_dependency_boundary(
                     "reticulum-board-heltec-tracker-v2-radio"
                         | "reticulum-board-heltec-tracker-v2-tx-hil"
                         | "reticulum-device-api-adapter"
+                        | "reticulum-device-api-credential-store"
                         | "reticulum-device-api-credentials"
                         | "reticulum-device-api-framing"
                         | "reticulum-device-api-handoff"
@@ -6430,6 +6494,7 @@ mod tests {
             "lora-phy",
             "reticulum-rns-rete",
             "reticulum-device-api-adapter",
+            "reticulum-device-api-credential-store",
             "reticulum-device-api-credentials",
             "reticulum-device-api-framing",
             "reticulum-device-api-handoff",
@@ -6461,6 +6526,11 @@ mod tests {
                 "device-api-adapter-id",
                 "reticulum-device-api-adapter",
                 "crates/device-api-adapter",
+            ),
+            (
+                "device-api-credential-store-id",
+                "reticulum-device-api-credential-store",
+                "crates/device-api-credential-store",
             ),
             (
                 "device-api-credentials-id",
@@ -6573,6 +6643,7 @@ mod tests {
             "reticulum-board-heltec-tracker-v2-tx-hil",
             "reticulum-board-heltec-vision-master-e290-radio",
             "reticulum-device-api-adapter",
+            "reticulum-device-api-credential-store",
             "reticulum-device-api-credentials",
             "reticulum-device-api-framing",
             "reticulum-device-api-handoff",
@@ -8826,6 +8897,7 @@ mod tests {
 
         for package_name in [
             "reticulum-device-identity-store",
+            "reticulum-device-api-credential-store",
             "reticulum-announce-clock",
             "reticulum-nor-flash-region",
         ] {
@@ -8888,6 +8960,9 @@ mod tests {
             ("reticulum-device-identity-store", "rand_core"),
             ("reticulum-device-identity-store", "sha2"),
             ("reticulum-device-identity-store", "zeroize"),
+            ("reticulum-device-api-credential-store", "embedded-storage"),
+            ("reticulum-device-api-credential-store", "sha2"),
+            ("reticulum-device-api-credential-store", "zeroize"),
             ("reticulum-announce-clock", "embedded-storage"),
             ("reticulum-announce-clock", "sha2"),
             ("reticulum-nor-flash-region", "embedded-storage"),
@@ -8923,6 +8998,31 @@ mod tests {
                 );
             }
         }
+
+        for (field, value) in [
+            ("name", serde_json::json!("unreviewed-replacement")),
+            ("req", serde_json::json!(">=0.0.0")),
+            ("source", serde_json::json!(CRATES_IO_SOURCE)),
+            ("path", serde_json::json!(root.join("crates/lookalike"))),
+            ("kind", serde_json::json!("dev")),
+            ("optional", serde_json::json!(true)),
+            ("rename", serde_json::json!("renamed-dependency")),
+            ("target", serde_json::json!("cfg(target_os = \"none\")")),
+            ("uses_default_features", serde_json::json!(true)),
+            ("features", serde_json::json!(["unreviewed"])),
+        ] {
+            let mut changed = portable_layers_metadata_fixture(&root);
+            fixture_dependency_mut(
+                fixture_package_mut(&mut changed, "reticulum-device-api-credential-store"),
+                "reticulum-device-api-credentials",
+                None,
+            )[field] = value;
+            assert!(
+                validate_portable_durability_dependency_boundaries(&changed.to_string(), &root,)
+                    .is_err(),
+                "credential store accepted changed local dependency {field}"
+            );
+        }
     }
 
     #[test]
@@ -8930,6 +9030,7 @@ mod tests {
         let root = workspace_root();
         for package_name in [
             "reticulum-device-identity-store",
+            "reticulum-device-api-credential-store",
             "reticulum-announce-clock",
             "reticulum-nor-flash-region",
         ] {
@@ -9124,6 +9225,7 @@ mod tests {
                 lora_phy_radio_package_fixture(root),
                 e290_radio_package_fixture(root),
                 device_identity_store_package_fixture(root),
+                device_api_credential_store_package_fixture(root),
                 announce_clock_package_fixture(root),
                 nor_flash_region_package_fixture(root),
                 submission_runtime_package_fixture(root),
@@ -9140,6 +9242,26 @@ mod tests {
             "dependencies": [
                 handoff_dependency_fixture("embedded-storage", "=0.3.1", None),
                 handoff_dependency_fixture("rand_core", "=0.6.4", None),
+                handoff_dependency_fixture("sha2", "=0.10.9", None),
+                handoff_dependency_fixture("zeroize", "=1.9.0", None),
+            ],
+        })
+    }
+
+    fn device_api_credential_store_package_fixture(root: &Path) -> serde_json::Value {
+        serde_json::json!({
+            "name": "reticulum-device-api-credential-store",
+            "source": null,
+            "manifest_path": root.join("crates/device-api-credential-store/Cargo.toml"),
+            "features": { "default": [] },
+            "dependencies": [
+                handoff_dependency_fixture("embedded-storage", "=0.3.1", None),
+                handoff_path_dependency_fixture(
+                    "reticulum-device-api-credentials",
+                    "*",
+                    &root.join("crates/device-api-credentials"),
+                    None,
+                ),
                 handoff_dependency_fixture("sha2", "=0.10.9", None),
                 handoff_dependency_fixture("zeroize", "=1.9.0", None),
             ],

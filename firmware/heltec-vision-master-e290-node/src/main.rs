@@ -276,6 +276,9 @@ async fn main(spawner: Spawner) -> ! {
             inert_forever().await
         }
     };
+    info!(
+        "e290-node stage=flash-owner status=PASS partition_contract=validated api_credentials=0x614000..0x616000 credential_store=unwired credential_media=plaintext"
+    );
     let identity_preflight = match flash_owner.inspect_identity() {
         Ok(preflight) => preflight,
         Err(reason) => {

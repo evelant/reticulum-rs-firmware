@@ -16,9 +16,10 @@ fn main() {
 
 fn require_partition_contract() {
     use partition_contract::{
-        ANNOUNCE_CLOCK_LABEL, ANNOUNCE_CLOCK_LEN, ANNOUNCE_CLOCK_OFFSET, DEVICE_CONFIG_LABEL,
-        DEVICE_CONFIG_LEN, DEVICE_CONFIG_OFFSET, NODE_IDENTITY_LABEL, NODE_IDENTITY_LEN,
-        NODE_IDENTITY_OFFSET, NODE_JOURNAL_LABEL, NODE_JOURNAL_LEN, NODE_JOURNAL_OFFSET,
+        ANNOUNCE_CLOCK_LABEL, ANNOUNCE_CLOCK_LEN, ANNOUNCE_CLOCK_OFFSET, API_CREDENTIALS_LABEL,
+        API_CREDENTIALS_LEN, API_CREDENTIALS_OFFSET, DEVICE_CONFIG_LABEL, DEVICE_CONFIG_LEN,
+        DEVICE_CONFIG_OFFSET, NODE_IDENTITY_LABEL, NODE_IDENTITY_LEN, NODE_IDENTITY_OFFSET,
+        NODE_JOURNAL_LABEL, NODE_JOURNAL_LEN, NODE_JOURNAL_OFFSET,
     };
 
     let path = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap())
@@ -33,7 +34,7 @@ fn require_partition_contract() {
         .map(|line| line.split(',').map(str::trim).collect::<Vec<_>>())
         .collect::<Vec<_>>();
 
-    for (label, subtype, offset, len) in [
+    let required = [
         (
             NODE_IDENTITY_LABEL,
             "undefined",
@@ -47,6 +48,12 @@ fn require_partition_contract() {
             ANNOUNCE_CLOCK_LEN,
         ),
         (
+            API_CREDENTIALS_LABEL,
+            "undefined",
+            API_CREDENTIALS_OFFSET,
+            API_CREDENTIALS_LEN,
+        ),
+        (
             DEVICE_CONFIG_LABEL,
             "nvs",
             DEVICE_CONFIG_OFFSET,
@@ -58,7 +65,9 @@ fn require_partition_contract() {
             NODE_JOURNAL_OFFSET,
             NODE_JOURNAL_LEN,
         ),
-    ] {
+    ];
+
+    for &(label, subtype, offset, len) in &required {
         let matches = rows
             .iter()
             .filter(|row| row.first().copied() == Some(label))
@@ -78,6 +87,25 @@ fn require_partition_contract() {
             row.get(5).is_none_or(|flags| flags.is_empty()),
             "{label} must be writable and unencrypted"
         );
+    }
+
+    for row in &rows {
+        assert!(row.len() >= 5, "E290 partition row is incomplete: {row:?}");
+        let label = row[0];
+        let offset = parse_hex(row[3]);
+        let len = parse_hex(row[4]);
+        let end = offset
+            .checked_add(len)
+            .unwrap_or_else(|| panic!("E290 partition range overflows: {label}"));
+        for &(required_label, _, required_offset, required_len) in &required {
+            let required_end = required_offset
+                .checked_add(required_len)
+                .expect("fixed E290 product partition range must not overflow");
+            assert!(
+                label == required_label || offset >= required_end || required_offset >= end,
+                "E290 partition {label} overlaps protected range {required_label}"
+            );
+        }
     }
 }
 

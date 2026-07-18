@@ -10,9 +10,10 @@ composes the exact radio authorized-frame request/durable-echo handoff. A
 one-entry accepted-history cap exists only for composition qualification and is
 not a product-capacity commitment. Eight focused runtime tests, two E290
 cross-layer composition tests, strict Clippy, and generic/ESP32-S3 target checks
-pass. Portable API framing, immutable credential authority, the qualification-
-session core, and job handoff are qualified; live external admission remains
-blocked by credential persistence/pairing, firmware composition, and a bearer.
+pass. Portable API framing, immutable credential authority and store, the
+qualification-session core, and job handoff are qualified; live external
+admission remains blocked by ADR 0009 credential-store composition, pairing
+implementation, a firmware lane, and a bearer.
 Semantic schema 2 now preserves exact authorization provenance through runtime
 acceptance, remount, and replay.
 

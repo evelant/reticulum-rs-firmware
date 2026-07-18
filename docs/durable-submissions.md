@@ -85,7 +85,7 @@ flowchart LR
     Handoff --> API["portable authenticated API adapter (implemented)"]
     Authority["immutable credential authority (implemented)"] --> Session
     Authority --> API
-    CredentialStore["credential persistence/pairing (not implemented)"] --> Authority
+    CredentialStore["credential store/pairing contract selected in ADR 0009; not composed"] --> Authority
     API -. "firmware composition absent" .-> Runtime["resident portable submission runtime"]
     Coordinator["E290 sole-flash coordinator (resident)"] <--> Runtime
     Runtime <--> Store["portable sole storage actor (implemented)"]
@@ -308,8 +308,9 @@ The projector cross-checks the preparation and authorized-byte digests and
 lengths; repeated fan-out observations are idempotent only when all durable
 packet metadata is identical. The E290 composition implements this ownership
 path under a host-qualified one-entry cap. Production remains externally
-unreachable because credential persistence/pairing, a firmware lane, and a
-bearer are not composed around the portable authority/session core.
+unreachable because ADR 0009 credential-store composition, pairing
+implementation, a firmware lane, and a bearer do not yet surround the portable
+authority/session core.
 
 Terminal outcomes map as follows:
 

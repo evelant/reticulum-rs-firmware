@@ -57,7 +57,11 @@ mod tests {
     use reticulum_node_core::{NodeConfig, NodeCore, NodeIdentity, NodeInstanceId};
 
     #[test]
-    fn journal_partition_contract_matches_physical_format() {
+    fn permanent_partition_contract_preserves_exact_store_boundaries() {
+        assert_eq!(partition_contract::API_CREDENTIALS_OFFSET, 0x0061_4000);
+        assert_eq!(partition_contract::API_CREDENTIALS_LEN, 0x0000_2000);
+        assert_eq!(partition_contract::DEVICE_CONFIG_OFFSET, 0x0061_6000);
+        assert_eq!(partition_contract::DEVICE_CONFIG_LEN, 0x0001_a000);
         assert_eq!(partition_contract::NODE_JOURNAL_OFFSET, 0x0063_0000);
         assert_eq!(partition_contract::NODE_JOURNAL_LEN, 0x0010_0000);
         assert_eq!(
@@ -65,12 +69,28 @@ mod tests {
             reticulum_storage_journal::PARTITION_SIZE
         );
         assert_eq!(
+            partition_contract::ANNOUNCE_CLOCK_OFFSET + partition_contract::ANNOUNCE_CLOCK_LEN,
+            partition_contract::API_CREDENTIALS_OFFSET
+        );
+        assert_eq!(
+            partition_contract::API_CREDENTIALS_OFFSET + partition_contract::API_CREDENTIALS_LEN,
+            partition_contract::DEVICE_CONFIG_OFFSET
+        );
+        assert_eq!(
             partition_contract::DEVICE_CONFIG_OFFSET + partition_contract::DEVICE_CONFIG_LEN,
-            partition_contract::NODE_JOURNAL_OFFSET
+            0x0063_0000
         );
         assert_eq!(
             partition_contract::NODE_JOURNAL_OFFSET + partition_contract::NODE_JOURNAL_LEN,
             0x0073_0000
+        );
+        assert_eq!(
+            partition_contract::API_CREDENTIALS_LABEL_BYTES,
+            *b"api_credentials\0"
+        );
+        assert_eq!(
+            partition_contract::DEVICE_CONFIG_LABEL_BYTES,
+            *b"device_config\0\0\0"
         );
         assert_eq!(
             partition_contract::NODE_JOURNAL_LABEL_BYTES,

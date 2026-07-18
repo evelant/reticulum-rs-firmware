@@ -89,7 +89,8 @@ and erase commands are not part of the task protocol.
   software ownership path now passes cross-layer host tests. Portable API
   framing, immutable credential authority, the qualification-session core, and
   job handoff are qualified, and schema 2 persists exact authorization
-  provenance; credential persistence/pairing, an external firmware lane, and a
+  provenance. ADR 0009 selects the credential partition, store, and pairing
+  policy; their coordinator integration, an external firmware lane, and a
   bearer remain absent.
 - A journal strict-mount, supported-history, or recovery failure during boot
   occurs before any durability-gated DATA owner can exist and disables only
@@ -130,7 +131,7 @@ and ADR 0005 fault behavior are implemented and pass cross-layer host
 composition tests. The next live-storage slice is an external API edge plus
 separate powered qualification.
 
-1. Add persistent credential pairing and compose the implemented
+1. Implement ADR 0009 credential persistence/pairing and compose the implemented
    authority/framing/session/handoff with the first
    local USB bearer. Preserve zero-write authorization rejection and durable
    acceptance before publishing an ID.

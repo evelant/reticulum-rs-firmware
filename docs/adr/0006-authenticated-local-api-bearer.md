@@ -1,7 +1,8 @@
 # ADR 0006: Authenticated local device-API bearer
 
 - **Status:** accepted for the qualification session, portable credential
-  authority, and durable provenance; persistence and firmware bearer pending
+  authority/store, durable provenance, and ADR 0009 pairing design;
+  store composition, pairing manager, and firmware bearer pending
 - **Date:** 2026-07-17
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0003](0003-lora-first-interface-fabric.md) and
@@ -152,19 +153,22 @@ validation precedes service. The fixed table uses constant-time ID comparison;
 only an active exact ID yields a zeroizing `SelectedCredential` consumed by the
 session handshake. Missing, pending and revoked IDs share one outward failure.
 
-This is semantic authority, not persistence. There is no credential flash
-format, product partition, mutation actor, provisioning or pairing protocol in
-the implemented slice. Replacing the immutable authority remains a future sole
-storage-owner operation performed only after a complete durable snapshot is
-committed and validated.
+This semantic authority is not itself persistence. The separate portable
+credential store now implements ADR 0009's physical commit/retire contract and
+power-loss recovery, but no firmware mutation owner, provisioning manager, or
+pairing protocol composes it yet. Replacing the immutable authority remains a
+future sole-firmware-owner operation performed only after the store has
+committed and validated a complete durable snapshot.
 
 Physical presence authorizes pairing but does not prove which local host
-process received a secret. The first lab profile explicitly trusts the
-currently connected USB host during a short, exclusive, button-confirmed
-pairing window. Before shipping a turnkey client, pairing adds an independently
-confirmed display/code/QR ceremony or an equivalent reviewed out-of-band
-binding. The qualification shortcut is not advertised as protection against a
-malicious process already controlling the connected host.
+process received a secret. ADR 0009 fixes the first lab profile: a continuous
+roughly two-second GPIO21 hold opens one exclusive 60-second USB Serial/JTAG
+window with at most three begin/proof attempts and one pending enrollment.
+That profile explicitly trusts the connected USB host. Before shipping a
+turnkey client, pairing adds an independently confirmed display/code/QR
+ceremony or an equivalent reviewed out-of-band binding. The qualification
+shortcut is not advertised as protection against a malicious process already
+controlling the connected host.
 
 `reticulum-device-api-session` freezes the qualification protocol implemented
 by both the allocation-free Rust server and the independent Python vector
@@ -338,8 +342,11 @@ physical attacker and must not be described as tamper-resistant.
   adapter/storage port I/O.
 - Remaining: malformed established-stream policy and logical-CBOR validation in
   the bearer manager.
-- Remaining: durable revoke/rotate/factory-reset transactions plus pairing
-  timeout, exclusive-window and failure-rate tests.
+- Complete in the portable store: the dedicated two-sector format,
+  operation-scoped binding, erased-only initialization/recovery,
+  commit/retire/publication ordering, and 22-test power-cut/error matrix.
+- Remaining: E290 store composition, pairing-manager implementation, durable
+  revoke/rotate/reset transactions, and powered cut/window/rate tests.
 - Remaining: cancellation at the concrete USB RX/TX, request-admission and
   reply-channel boundaries.
 - Remaining: concrete stale-reply channel draining and idempotent retry after
@@ -351,12 +358,11 @@ physical attacker and must not be described as tamper-resistant.
 
 ## Deferred decisions
 
-This ADR does not select the production AEAD construction, implement the
-credential journal/persistent actor, choose pairing timeouts and attempt-rate
-limits, compose the USB bearer
-manager, define a USB OTG composite descriptor, add WebUSB/NCM, or create any
-non-LoRa Reticulum packet actor. Credential persistence, qualification
-pairing/rate policy, firmware composition and the USB bearer manager are still
+This ADR does not select the production AEAD construction, compose ADR 0009's
+credential store, implement its pairing manager, compose the USB bearer manager, define
+a USB OTG composite descriptor, add WebUSB/NCM, or create any non-LoRa
+Reticulum packet actor. The qualification pairing/rate policy is selected, but
+its persistence, firmware composition, and USB-bearer implementation are still
 required before the authenticated USB-to-LoRa qualification path can run.
 Production AEAD and the later transport/interface decisions are not
 prerequisites for that explicitly integrity-only wired lab profile.

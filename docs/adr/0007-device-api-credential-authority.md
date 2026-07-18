@@ -1,6 +1,7 @@
-# ADR 0007: Immutable device-API credential authority and deferred persistence
+# ADR 0007: Immutable device-API credential authority
 
-- **Status:** accepted for the portable authority snapshot; persistence and pairing pending
+- **Status:** accepted for the portable authority snapshot and canonical image;
+  ADR 0009 portable physical store implemented; firmware composition and pairing pending
 - **Date:** 2026-07-17
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0004](0004-sole-flash-coordinator.md) and
@@ -18,19 +19,21 @@ permission is public.
 That boundary needs to serve three different consumers without creating a
 cycle or a second authority:
 
-- a future credential store must validate durable records without depending on
+- a credential store must validate durable records without depending on
   session crypto, COBS, a bearer or firmware;
 - the session must obtain one bounded zeroizing PSK owner for a handshake; and
 - the serialized node/storage owner must revalidate a session-minted reference
   immediately before its synchronous logical dispatch and any resulting
   durable acceptance.
 
-Credential persistence, pairing and bearer composition are not yet specified
-well enough to expose on hardware. In particular, the qualification session's
-record-kind vocabulary has no unauthenticated pairing exchange, the current
-E290 partition map has no dedicated credential-store contract, and the durable
-submission schema records the principal and operation intent but no explicit
-credential-generation or authorization-policy provenance.
+At the time this authority boundary was selected, credential persistence,
+pairing, durable authorization provenance, and bearer composition were not
+specified well enough to expose on hardware. ADR 0008 has since completed the
+schema-2 provenance contract. ADR 0009 now selects a dedicated E290 credential
+partition, physical store envelope, and bounded initial pairing policy. Their
+portable store implementation is now complete, while firmware composition,
+pairing, and the physical bearer remain incomplete; this ADR's session record
+vocabulary still does not double as an unauthenticated pairing exchange.
 
 ## Decision
 
@@ -46,10 +49,11 @@ physical bearer into the sole flash owner.
 
 The first product profile fixes the retained-record table at 16 entries. The
 capacity includes pending and revoked records as well as active credentials;
-it is a semantic/RAM ceiling, not a frozen physical format or a promise that
-every client profile may enroll 16 active clients. The current host size gate
-keeps the complete authority at or below 2,048 bytes and one selected
-credential at or below 64 bytes.
+the canonical semantic image is exactly 16 fixed 128-byte slots (2,048 bytes),
+not a promise that every client profile may enroll 16 active clients. ADR 0009
+adopts that as a lifetime ID/tombstone ceiling inside a separately versioned
+physical sector envelope. One selected credential remains at or below 64
+bytes.
 
 ### Validate the complete immutable snapshot before service
 
@@ -181,7 +185,7 @@ admission and proves authority revalidation rejects; the future composed owner
 must still prove it neither falls back to unauthenticated dispatch nor invokes
 a port after that error.
 
-### Keep persistence and pairing behind explicit later contracts
+### Keep persistence implementation behind the selected physical contract
 
 This slice does not make the immutable snapshot durable. A later credential
 store remains owned by the ADR 0004 product storage coordinator and must:
@@ -196,19 +200,21 @@ store remains owned by the ADR 0004 product storage coordinator and must:
 - treat hashes as corruption detection only until secure boot and flash
   encryption provide a reviewed physical-attacker story.
 
-The current `device_config` partition remains reserved and is not silently
-treated as credential storage. Partition selection, physical format, power-cut
-recovery and a cross-store factory-reset transaction require a separate
-decision and powered qualification.
+`device_config` remains reserved and is not silently treated as credential
+storage. ADR 0009 assigns the distinct plaintext developer/HIL
+`api_credentials` raw-NOR range at `0x614000..0x616000` and selects its
+two-sector commit/retire contract. The target validates that range, but the
+store, power-cut recovery, and cross-store reset transaction remain uncomposed
+and require powered qualification.
 
-Pairing likewise remains outside the session core. A later bounded manager must
-own the exclusive physical-presence window, monotonic timeout, attempt budget,
-connection binding, secret delivery and proof-of-possession transition from
-`Pending` to `Active`. The first lab policy may trust the connected USB host
-only during the explicitly button-confirmed window accepted by ADR 0006.
-Production pairing adds an independently confirmed display/code/QR or
-equivalent out-of-band ceremony. Neither policy reuses Reticulum identity
-private material.
+Pairing likewise remains outside the session core. ADR 0009 requires its later
+bounded manager to own a roughly two-second GPIO21 confirmation, exclusive
+60-second USB Serial/JTAG window, three-attempt ceiling, one pending enrollment,
+durable-before-offer `Pending`, HMAC possession proof, and durable-before-
+completion `Active` transition. Empty media never pairs or initializes
+automatically. Production pairing adds an independently confirmed
+display/code/QR or equivalent out-of-band ceremony. Neither policy reuses
+Reticulum identity private material.
 
 ### Close durable authorization provenance in semantic schema 2
 
@@ -232,26 +238,31 @@ never existed.
 - Pending credentials cannot authenticate; revoked credentials retain a
   PSK-free non-reuse tombstone; no revalidation failure becomes an
   unauthenticated request.
-- The first slice is host- and target-checkable without inventing flash,
-  pairing, reset or USB behavior.
-- Live external admission remains disabled until persistence, pairing/rate
-  policy, firmware ownership, and a physical bearer are complete.
+- The portable crate now fixes a canonical 2,048-byte, 16-slot semantic
+  snapshot image without inventing physical flash headers, commit mechanics,
+  pairing, reset or USB behavior. The exact image owner zeroizes on drop and
+  decoding consumes it before revalidating every record through the builder.
+- Live external admission remains disabled until store composition,
+  pairing/rate policy, firmware ownership, and a physical bearer are complete.
 
 ## Validation status
 
-- Complete: six focused unit tests, seven public successor regressions and seven
-  compile-fail doctests cover selection, lease derivation, fail-closed builder
-  ownership, safe live successors, same-generation escalation rejection,
-  revoked tombstones, canonical snapshot rejection, generation/revision and
-  permission vocabularies, non-escaping dispatch context, secret shape and
-  bounded E290 RAM.
+- Complete: twelve focused unit tests, eight public successor regressions and
+  twelve compile-fail doctests cover selection, lease derivation, fail-closed
+  builder ownership, safe live successors and unpublished-candidate recovery,
+  same-generation escalation rejection, revoked tombstones, the golden
+  canonical snapshot layout and round trip, noncanonical image rejection,
+  generation/revision and permission vocabularies, image/secret/lease
+  ownership, non-escaping dispatch context, and bounded E290 RAM.
 - Complete: the session suite contains twelve tests, including one direct
   authority-to-adapter request/reply path with exact durable provenance and one revoke-after-admission
   authority-revalidation rejection. Composed handoff/no-fallback proof remains.
-- Remaining: persistent physical format, operation-scoped binding, ambiguous
-  mutation reconciliation and exhaustive power-cut tests.
-- Remaining: pairing protocol, physical-presence UI, timeouts, rate limits,
-  rotation, reset and firmware task composition.
+- Complete in ADR 0009's portable store: two-sector commit/retire envelope,
+  operation-scoped binding, ambiguous mutation reconciliation, explicit
+  erased-only provisioning recovery, and exhaustive fake-NOR cut/error tests.
+- Remaining outside this semantic crate: E290 store integration,
+  pairing-manager implementation, rotation/reset composition, and powered
+  cut/pairing tests.
 - Complete: semantic schema 2 persists and replays exact authorization-policy
   provenance while preserving the 383-byte payload and 512-byte actor pending
   owner ceiling; see ADR 0008.

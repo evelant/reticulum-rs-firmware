@@ -144,6 +144,23 @@ fn one_new_record_is_a_valid_exact_next_successor() {
 }
 
 #[test]
+fn canceled_commit_recovers_the_complete_unpublished_candidate() {
+    let current = authority::<4>(1, [active_a()]);
+    let candidate = authority::<4>(2, [active_a(), pending_b()]);
+    let plan = current
+        .plan_successor(candidate)
+        .unwrap_or_else(|fault| panic!("valid successor rejected: {:?}", fault.kind()));
+
+    let recovered = plan.into_unpublished_candidate();
+
+    assert_eq!(current.revision(), AuthorityRevision::new(1));
+    assert_eq!(recovered.revision(), AuthorityRevision::new(2));
+    assert_eq!(recovered.record_count(), 2);
+    assert!(recovered.select_for_handshake(id(1)).is_ok());
+    assert!(recovered.select_for_handshake(id(2)).is_err());
+}
+
+#[test]
 fn one_revocation_is_a_valid_exact_next_successor() {
     let current = authority::<4>(2, [active_a(), pending_b()]);
     let candidate = authority::<4>(

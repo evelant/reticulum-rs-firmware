@@ -128,8 +128,8 @@ plus those two cross-layer composition tests. This closes software composition
 qualification for the LoRa-first one-entry profile. Portable API framing,
 immutable credential authority, the qualification-session core, and job handoff
 are qualified, and semantic schema 2 persists exact authorization provenance;
-live external admission remains blocked on credential persistence/pairing,
-firmware composition, and a bearer. Powered E290
+ADR 0009 selects the credential store/pairing contract, while live external
+admission remains blocked on its implementation, firmware composition, and a bearer. Powered E290
 permanent-graph behavior remains unqualified even though the physical
 HF-module gate and isolated semantic HIL are complete; it requires separate
 hardware evidence.

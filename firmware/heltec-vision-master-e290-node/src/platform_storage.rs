@@ -20,10 +20,11 @@ use reticulum_device_identity_store::{
 };
 use reticulum_heltec_vision_master_e290_node::node_journal_binding;
 use reticulum_heltec_vision_master_e290_node::partition_contract::{
-    ANNOUNCE_CLOCK_LABEL_BYTES, ANNOUNCE_CLOCK_LEN, ANNOUNCE_CLOCK_OFFSET, DATA_PARTITION_TYPE,
-    DEVICE_CONFIG_LEN, DEVICE_CONFIG_OFFSET, NODE_IDENTITY_LABEL_BYTES, NODE_IDENTITY_LEN,
-    NODE_IDENTITY_OFFSET, NODE_JOURNAL_LABEL_BYTES, NODE_JOURNAL_LEN, NODE_JOURNAL_OFFSET,
-    REQUIRED_FLASH_BYTES, UNDEFINED_DATA_SUBTYPE,
+    ANNOUNCE_CLOCK_LABEL_BYTES, ANNOUNCE_CLOCK_LEN, ANNOUNCE_CLOCK_OFFSET,
+    API_CREDENTIALS_LABEL_BYTES, API_CREDENTIALS_LEN, API_CREDENTIALS_OFFSET, DATA_PARTITION_TYPE,
+    DEVICE_CONFIG_LABEL_BYTES, DEVICE_CONFIG_LEN, DEVICE_CONFIG_OFFSET, NODE_IDENTITY_LABEL_BYTES,
+    NODE_IDENTITY_LEN, NODE_IDENTITY_OFFSET, NODE_JOURNAL_LABEL_BYTES, NODE_JOURNAL_LEN,
+    NODE_JOURNAL_OFFSET, NVS_DATA_SUBTYPE, REQUIRED_FLASH_BYTES, UNDEFINED_DATA_SUBTYPE,
 };
 use reticulum_node_core::{
     AuthorizedFrameObservation, MonotonicMillis, MonotonicSeconds, TxLeaseDeadline,
@@ -47,11 +48,6 @@ use reticulum_submission_runtime::{
 use crate::config;
 use reticulum_heltec_vision_master_e290_node::durability_boot::JournalBootPolicy;
 
-const NVS_DATA_SUBTYPE: u8 = 0x02;
-const DEVICE_CONFIG_LABEL_BYTES: [u8; 16] = [
-    b'd', b'e', b'v', b'i', b'c', b'e', b'_', b'c', b'o', b'n', b'f', b'i', b'g', 0, 0, 0,
-];
-
 type ProductRegionError = RegionError<FlashStorageError>;
 pub(crate) type ProductSubmissionRuntime =
     SubmissionRuntime<{ config::DURABLE_SUBMISSIONS }, { config::DURABLE_PROJECTED_SUBMISSIONS }>;
@@ -69,6 +65,7 @@ pub(crate) enum ProductFlashOpenError {
     PartitionCardinality {
         identity: u8,
         announce_clock: u8,
+        api_credentials: u8,
         device_config: u8,
         node_journal: u8,
     },
@@ -92,11 +89,12 @@ impl Display for ProductFlashOpenError {
             Self::PartitionCardinality {
                 identity,
                 announce_clock,
+                api_credentials,
                 device_config,
                 node_journal,
             } => write!(
                 formatter,
-                "partition-cardinality identity={identity} announce_clock={announce_clock} device_config={device_config} node_journal={node_journal}"
+                "partition-cardinality identity={identity} announce_clock={announce_clock} api_credentials={api_credentials} device_config={device_config} node_journal={node_journal}"
             ),
             Self::PartitionShape(name) => write!(formatter, "partition-shape name={name}"),
             Self::PartitionOverlap(name) => write!(formatter, "partition-overlap name={name}"),
@@ -563,10 +561,12 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
 
     let mut identity_count = 0_u8;
     let mut clock_count = 0_u8;
+    let mut credentials_count = 0_u8;
     let mut config_count = 0_u8;
     let mut journal_count = 0_u8;
     let mut identity_valid = false;
     let mut clock_valid = false;
+    let mut credentials_valid = false;
     let mut config_valid = false;
     let mut journal_valid = false;
 
@@ -574,6 +574,7 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
         let label = entry.label();
         let named_identity = label == NODE_IDENTITY_LABEL_BYTES;
         let named_clock = label == ANNOUNCE_CLOCK_LABEL_BYTES;
+        let named_credentials = label == API_CREDENTIALS_LABEL_BYTES;
         let named_config = label == DEVICE_CONFIG_LABEL_BYTES;
         let named_journal = label == NODE_JOURNAL_LABEL_BYTES;
         if named_identity {
@@ -581,6 +582,9 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
         }
         if named_clock {
             clock_count = clock_count.saturating_add(1);
+        }
+        if named_credentials {
+            credentials_count = credentials_count.saturating_add(1);
         }
         if named_config {
             config_count = config_count.saturating_add(1);
@@ -605,6 +609,12 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
                 ANNOUNCE_CLOCK_OFFSET,
                 ANNOUNCE_CLOCK_LEN,
                 named_clock,
+            ),
+            (
+                "api_credentials",
+                API_CREDENTIALS_OFFSET,
+                API_CREDENTIALS_LEN,
+                named_credentials,
             ),
             (
                 "device_config",
@@ -640,6 +650,13 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
                 && entry.len() == ANNOUNCE_CLOCK_LEN
                 && plain_writable;
         }
+        if named_credentials {
+            credentials_valid = entry.raw_type() == DATA_PARTITION_TYPE
+                && entry.raw_subtype() == UNDEFINED_DATA_SUBTYPE
+                && entry.offset() == API_CREDENTIALS_OFFSET
+                && entry.len() == API_CREDENTIALS_LEN
+                && plain_writable;
+        }
         if named_config {
             config_valid = entry.raw_type() == DATA_PARTITION_TYPE
                 && entry.raw_subtype() == NVS_DATA_SUBTYPE
@@ -656,10 +673,16 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
         }
     }
 
-    if identity_count != 1 || clock_count != 1 || config_count != 1 || journal_count != 1 {
+    if identity_count != 1
+        || clock_count != 1
+        || credentials_count != 1
+        || config_count != 1
+        || journal_count != 1
+    {
         return Err(ProductFlashOpenError::PartitionCardinality {
             identity: identity_count,
             announce_clock: clock_count,
+            api_credentials: credentials_count,
             device_config: config_count,
             node_journal: journal_count,
         });
@@ -667,6 +690,7 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
     for (valid, name) in [
         (identity_valid, "node_identity"),
         (clock_valid, "announce_clock"),
+        (credentials_valid, "api_credentials"),
         (config_valid, "device_config"),
         (journal_valid, "node_journal"),
     ] {

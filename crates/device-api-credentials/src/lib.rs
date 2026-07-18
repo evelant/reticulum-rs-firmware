@@ -3,15 +3,17 @@
 //! This crate owns the persistent semantic vocabulary and one validated,
 //! immutable boot snapshot. It is deliberately below session framing: a future
 //! raw-NOR credential store can depend on this crate without pulling in
-//! handshake crypto, COBS, a bearer, or firmware. The session layer consumes a
-//! zeroizing [`SelectedCredential`] and later asks this authority to revalidate
-//! the authenticated credential ID and generation.
+//! handshake crypto, COBS, a bearer, or firmware. The canonical E290 semantic
+//! snapshot codec is likewise independent of physical flash headers and commit
+//! mechanics. The session layer consumes a zeroizing [`SelectedCredential`]
+//! and later asks this authority to revalidate the authenticated credential ID
+//! and generation.
 //!
 //! No principal or permission comes from client bytes. A future sole
 //! credential-store owner must durably commit and validate a replacement
-//! snapshot before swapping authorities between requests. This first slice has
-//! no in-place mutation API, flash format, pairing UI, physical-presence policy,
-//! USB/BLE/Wi-Fi code, Reticulum identity, or radio capability.
+//! snapshot before swapping authorities between requests. This slice has no
+//! in-place mutation API, physical flash format, pairing UI, physical-presence
+//! policy, USB/BLE/Wi-Fi code, Reticulum identity, or radio capability.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -22,6 +24,14 @@ use core::marker::PhantomData;
 use reticulum_device_api::{DispatchContext, DispatchProvenance, Permissions, PrincipalId};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 use zeroize::Zeroizing;
+
+mod snapshot;
+
+pub use snapshot::{
+    CREDENTIAL_SNAPSHOT_IMAGE_SIZE, CREDENTIAL_SNAPSHOT_SLOT_SIZE,
+    CredentialSnapshotDecodeFaultKind, CredentialSnapshotImage, decode_e290_credential_snapshot,
+    encode_e290_credential_snapshot,
+};
 
 /// Exact PSK size required by qualification-suite credentials.
 pub const CREDENTIAL_PSK_LENGTH: usize = 32;
@@ -709,6 +719,16 @@ impl<const CAPACITY: usize> PlannedCredentialSuccessor<'_, CAPACITY> {
     /// Borrow the complete candidate for a future canonical durable encoder.
     pub const fn candidate(&self) -> &CredentialAuthority<CAPACITY> {
         &self.candidate
+    }
+
+    /// Cancel publication and recover the still-unpublished candidate owner.
+    ///
+    /// A sole storage owner uses this path after a canceled, failed, or
+    /// ambiguous physical commit. Unlike [`Self::publish_after_commit`], this
+    /// method makes no durability assertion and must not make the recovered
+    /// authority live.
+    pub fn into_unpublished_candidate(self) -> CredentialAuthority<CAPACITY> {
+        self.candidate
     }
 
     /// Publish the candidate only after its durable commit and readback.

@@ -24,9 +24,11 @@ cross-layer host qualification. The one-entry accepted-history cap is exercised
 by that harness solely as a composition profile and is not a product-capacity
 commitment. Portable API framing, immutable credential authority, the
 qualification-session core, and the boot-lifetime job handoff are qualified;
-semantic schema 2 persists exact authorization provenance. Live external
-admission is blocked by credential persistence/pairing, firmware composition,
-and a bearer. ADR 0005's
+semantic schema 2 persists exact authorization provenance. The dedicated
+credential-partition contract, portable store, and initial developer/HIL
+pairing policy are selected in ADR 0009. The store is not wired and the pairing
+manager is not implemented. Live external admission is blocked by that
+integration, firmware composition, and a bearer. ADR 0005's
 active-owner policy is implemented:
 a permanent fault
 with an unresolved frame enters interface-local `ActiveOwnerFailStopped`, takes
@@ -161,7 +163,8 @@ The target requires a 16 MiB flash image/header and uses
 | Factory app | `0x010000` | 6 MiB | Permanent node ELF |
 | Node identity | `0x610000` | 8 KiB | Wired, mirrored plaintext private identity |
 | Announce clock | `0x612000` | 8 KiB | Wired, mirrored boot-epoch append logs |
-| Device config | `0x614000` | 112 KiB | Reserved, not wired |
+| API credentials | `0x614000` | 8 KiB | Checked dedicated range; selected plaintext two-sector store is not wired |
+| Device config | `0x616000` | 104 KiB | Reserved, not wired |
 | Node journal | `0x630000` | 1 MiB | Resident operation-scoped submission runtime; one-entry qualification cap, no external admission lane |
 | Message store | `0x730000` | 2 MiB | Reserved, not wired |
 | Unallocated | `0x930000` | 6.8125 MiB | OTA/layout decision |
@@ -169,10 +172,12 @@ The target requires a 16 MiB flash image/header and uses
 The workspace runner in `.cargo/config.toml` hardcodes an 8 MiB flash size and
 must not be used for this target.
 
-`node_identity` and `announce_clock` use ESP-IDF's standard
-`data,undefined` subtype but have exact application-owned formats.
-`device_config` retains the standard NVS subtype while it is unwired; the
-application-owned journal and unwired message store retain `data,undefined`. Their labels and
+`node_identity`, `announce_clock`, and `api_credentials` use ESP-IDF's standard
+`data,undefined` subtype. The first two have implemented application-owned
+formats; the credential range is checked but remains unwired while ADR 0009's
+two-sector plaintext developer/HIL store is implemented. `device_config`
+retains the standard NVS subtype while it is unwired; the application-owned
+journal and unwired message store retain `data,undefined`. Their labels and
 ranges remain distinct. Numeric custom subtypes are only valid with custom
 partition types in the image tooling and are not used here.
 
@@ -389,8 +394,9 @@ future write:
    durability range. The unpadded merged image contains the bootloader,
    partition table and application; it does not initialize
    `0x610000..0x730000`. Flashing it over arbitrary old bytes therefore does
-   not create blank identity, clock, configuration, or journal media, and the
-   firmware will correctly fail closed. Choose one destructive preparation:
+   not create blank identity, clock, credential, configuration, or journal
+   media, and the firmware will correctly fail closed. Choose one destructive
+   preparation:
 
    - erase the entire chip:
 
@@ -440,8 +446,9 @@ future write:
    ```
 
 7. On every **subsequent upgrade**, preserve a new secret full-flash backup but
-   do not erase `node_identity`, `announce_clock`, `node_journal`, or any newer
-   product store. The unpadded merged-image write must stop at or below
+   do not erase `node_identity`, `announce_clock`, `api_credentials`,
+   `node_journal`, or any newer product store. The unpadded merged-image write
+   must stop at or below
    `0x610000`. For an upgrade-layout check, read the complete application-data
    region `0x610000..0x930000` before the write, leave the board in the loader,
    read it again immediately afterward and require exact equality before the
@@ -456,7 +463,8 @@ truthfully upgraded. An ordinary schema-2 image therefore reports
 `UnsupportedSemanticVersion(1)`, performs no journal mutation, closes local
 submission service, and continues route-only LoRa. Development boards may use
 this explicit journal-only procedure; it preserves `node_identity`,
-`announce_clock`, `device_config`, and every unrelated flash range.
+`announce_clock`, `api_credentials`, `device_config`, and every unrelated flash
+range.
 
 1. Take and protect the full-flash backup described above, then leave the board
    in the serial loader.
@@ -516,10 +524,11 @@ as the bounded qualification fixture for the deterministic DATA/proof exchange.
 
 ## Product blockers after this slice
 
-- Add persistent credential pairing, then compose the implemented immutable
-  authority, bounded COBS framing,
+- Compose ADR 0009's implemented credential store and implement the bounded
+  physical-presence pairing manager, then compose the immutable authority, bounded
+  COBS framing,
   qualification-session core, and boot-lifetime job/reply handoff with the
-  first USB bearer. Persistent state, firmware composition, and the physical
+  first USB bearer. Persistent-state composition, firmware composition, and the physical
   bearer are the remaining edges for live external admission; the
   one-entry composition cap and ADR 0005 host behavior
   already pass. A later product-capacity policy must not weaken the same
@@ -534,8 +543,8 @@ as the bounded qualification fixture for the deterministic DATA/proof exchange.
 - Deliver non-packet node output to a durable/client owner. This milestone logs
   and drains it so transport progress cannot deadlock.
 - Add LXMF propagation/storage and local LXMF/NomadNet client services.
-- Implement and independently vector-test ADR 0006's proposed local
-  authentication model. Add Wi-Fi as a Reticulum transport only when that
+- Compose the independently vector-tested ADR 0006 authentication model with
+  ADR 0009 pairing and the first USB bearer. Add Wi-Fi as a Reticulum transport only when that
   separate link behavior is specified; packet transports remain deferred
   behind the primary LoRa slice.
 - Replace the single-LoRa airtime policy with a composite per-resource policy

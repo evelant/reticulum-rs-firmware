@@ -220,8 +220,11 @@ or incomplete required redundancy fails closed before node or radio service.
 While that independent identity preflight remains vacant, the product can also
 resume only the canonical empty first `node_journal` format without erasing;
 committed identities skip provisioning and use strict journal mount only.
-These developer partitions are deliberately plaintext, so a full flash dump is
-private-key material.
+The same boot guard now requires the exact plaintext `api_credentials`
+partition at `0x614000..0x616000`. The portable credential store is
+implemented, but the product flash owner does not mount it yet. These developer
+partitions are deliberately plaintext, so a provisioned
+full flash dump is secret material.
 
 This first permanent composition is not yet the full product node. The portable
 `reticulum-storage-model` defines strict canonical submission records,
@@ -309,14 +312,18 @@ through a borrowing dispatch lease. Semantic journal schema 2 now persists the
 exact credential ID/generation, authority revision, policy version, and granted
 permission mask with every accepted submission; the redundant serialized and
 in-RAM content digest is derived from the immutable intent, so the unchanged
-383-byte request still fits the 512-byte journal body. It has no persistent
-credential store or pairing manager, and no firmware job lane or USB/BLE/Wi-Fi
-bearer invokes the adapter yet. The accepted authentication, authority,
-provenance, and USB ownership contracts are
+383-byte request still fits the 512-byte journal body. The canonical authority
+image, dedicated credential-partition contract, two-sector commit/retire
+format, and initial bounded developer/HIL pairing policy are now selected, but
+the portable store and pairing manager are not composed in firmware. No firmware job
+lane or USB/BLE/Wi-Fi bearer invokes the adapter yet. The accepted
+authentication, authority, provenance, and USB ownership contracts are
 recorded in [ADR 0006](docs/adr/0006-authenticated-local-api-bearer.md) and
 [ADR 0007](docs/adr/0007-device-api-credential-authority.md), with the durable
 schema transition in
-[ADR 0008](docs/adr/0008-durable-authorization-provenance.md). Default and
+[ADR 0008](docs/adr/0008-durable-authorization-provenance.md) and the physical
+store/pairing decision in
+[ADR 0009](docs/adr/0009-device-api-credential-store-and-pairing.md). Default and
 experimental host tests/clippy plus the corresponding ESP32-S3 Xtensa checks
 pass.
 
@@ -410,11 +417,11 @@ The DATA router, both permit-only services and permanent aggregate are now
 connected to the dispatcher, sole-Rete owner, timed RNode RX and one E290 LoRa
 actor in the first permanent build-verified target. Its exact authorized-frame
 durability handoff and ADR 0005 active-owner fail-stop now pass cross-layer host
-composition tests. Live external admission is blocked by credential
-persistence/pairing, firmware composition, and bearer—not by another semantic
-authority, session-crypto, durability-policy or cap qualification. The next
-software slice adds a recoverable credential store and bounded physical-
-presence pairing policy, followed by that credential-backed USB-to-LoRa edge
+composition tests. Live external admission is blocked by credential-store
+integration, pairing implementation, firmware composition, and bearer—not by another
+semantic authority, session-crypto, durability-policy, partition, or cap
+decision. The next software slice composes ADR 0009's recoverable credential
+store and implements the bounded physical-presence pairing manager, followed by that credential-backed USB-to-LoRa edge
 and durable configuration/message hosting and client delivery.
 The node-side routing
 boundary remains interface-neutral so additional Reticulum links can be added
@@ -434,6 +441,7 @@ second transport is required to qualify the first LoRa vertical slice.
 - [Authenticated local device-API bearer decision](docs/adr/0006-authenticated-local-api-bearer.md)
 - [Device-API credential authority decision](docs/adr/0007-device-api-credential-authority.md)
 - [Durable authorization provenance decision](docs/adr/0008-durable-authorization-provenance.md)
+- [Device-API credential store and pairing decision](docs/adr/0009-device-api-credential-store-and-pairing.md)
 - [Transport-neutral interface registry and router](docs/interface-router.md)
 - [Phase-0 validation contract](docs/phase-0-acceptance.md)
 - [Phase-1 receive-only slice](docs/phase-1-rx-slice.md)
@@ -482,6 +490,7 @@ cargo check --locked \
   -p reticulum-rns-rete \
   -p reticulum-rns-rete-rx \
   -p reticulum-device-api \
+  -p reticulum-device-api-credential-store \
   -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-handoff \
@@ -504,6 +513,7 @@ cargo check --locked \
   --target riscv32imac-unknown-none-elf
 cargo +esp check --locked \
   -p reticulum-device-api \
+  -p reticulum-device-api-credential-store \
   -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-handoff \

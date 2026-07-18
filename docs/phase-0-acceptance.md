@@ -36,6 +36,7 @@ cargo run --locked -p reticulum-conformance-rete
 cargo test --locked -p reticulum-rns-leviculum
 cargo check --locked \
   -p reticulum-device-api \
+  -p reticulum-device-api-credential-store \
   -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-handoff \
@@ -56,6 +57,7 @@ cargo check --locked \
   --target riscv32imac-unknown-none-elf
 cargo +esp check --locked \
   -p reticulum-device-api \
+  -p reticulum-device-api-credential-store \
   -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
   -p reticulum-device-api-handoff \

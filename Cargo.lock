@@ -1676,6 +1676,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "reticulum-device-api-credential-store"
+version = "0.1.0"
+dependencies = [
+ "embedded-storage",
+ "reticulum-device-api-credentials",
+ "sha2",
+ "zeroize",
+]
+
+[[package]]
 name = "reticulum-device-api-credentials"
 version = "0.1.0"
 dependencies = [

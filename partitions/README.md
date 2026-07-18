@@ -9,17 +9,21 @@
 | `factory` | `0x010000..0x610000` | 6 MiB | Permanent node image |
 | `node_identity` | `0x610000..0x612000` | 8 KiB | Wired immutable identity mirrors |
 | `announce_clock` | `0x612000..0x614000` | 8 KiB | Wired boot-epoch mirrors |
-| `device_config` | `0x614000..0x630000` | 112 KiB | Reserved, not wired |
-| `node_journal` | `0x630000..0x730000` | 1 MiB | Checked boot provision/mount/recovery probe; live owner deferred |
+| `api_credentials` | `0x614000..0x616000` | 8 KiB | Checked dedicated range; plaintext store not wired |
+| `device_config` | `0x616000..0x630000` | 104 KiB | Reserved, not wired |
+| `node_journal` | `0x630000..0x730000` | 1 MiB | Resident operation-scoped submission runtime |
 | `message_store` | `0x730000..0x930000` | 2 MiB | Reserved, not wired |
 | unpartitioned | `0x930000..0x1000000` | 6.8125 MiB | OTA/layout decision |
 
-The journal and message-store offsets are unchanged. `device_config` is now
-the 112 KiB standard-NVS range after the two new durability partitions. The
-journal and message store use ESP-IDF's standard `data,undefined` subtype until
-their formats are integrated. `node_identity` and `announce_clock` also use
-that standard subtype, but their exact application-owned formats are now
-implemented; no unsupported numeric subtype is used to imply ownership.
+The journal and message-store offsets are unchanged. The previously unwired
+`device_config` reservation is split into a dedicated 8 KiB
+`api_credentials` raw-NOR range and a 104 KiB standard-NVS configuration
+range. The credential range is validated at boot but remains unwired; ADR 0009
+selects its two-sector plaintext developer/HIL format and initial pairing
+policy without claiming their implementation. The journal, message store,
+identity, announce clock, and credential range use ESP-IDF's standard
+`data,undefined` subtype. No unsupported numeric subtype is used to imply
+application ownership.
 
 `node_identity` contains the same plaintext 64-byte Reticulum private material
 in two commit-last, SHA-256-protected 4 KiB mirrors. Its complete preflight is
@@ -44,8 +48,8 @@ While identity remains vacant, the product can establish or resume only the
 canonical empty A1 journal trajectory before committing identity. Provisioning
 never erases; after identity is committed, only strict mount is allowed. Boot
 drives the submission runtime through complete conservative recovery and then
-returns the temporary journal borrow before protocol construction. Resident
-journal mutation, device configuration, and message storage remain deferred.
+retains it behind the resident operation-scoped flash coordinator. Credential
+store mutation, device configuration, and message storage remain deferred.
 The product does not start protocol service unless clock reservation, journal
 mount/recovery, and redundant identity coverage all succeed. LoRa is the
 primary first transport slice;
