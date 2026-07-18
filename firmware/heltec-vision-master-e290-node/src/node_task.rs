@@ -26,7 +26,7 @@ use reticulum_tx_supervisor::{
 
 use crate::{
     LORA_ONLINE, ProductSupervisor, RADIO_READY, config,
-    platform_storage::ProductStorageCoordinator,
+    platform_storage::{ProductStorageCoordinator, ProductSubmissionDrive},
 };
 
 type RetainedActions = (
@@ -450,17 +450,19 @@ pub async fn run(
                             deadline,
                             &mut rng,
                         ) {
-                            Some(Ok(RuntimeStep::Idle)) => {
+                            ProductSubmissionDrive::Runtime(Ok(RuntimeStep::Idle)) => {
                                 durability_service = durability_service.runtime_progress();
                             }
-                            Some(Ok(step)) => {
+                            ProductSubmissionDrive::Runtime(Ok(step)) => {
                                 durability_service = durability_service.runtime_progress();
                                 info!(
                                     "e290-node stage=durable-submission status=PROGRESS step={step:?}"
                                 );
                                 progressed = true;
                             }
-                            Some(Err(RuntimeError::Storage(DriveError::Backend(reason)))) => {
+                            ProductSubmissionDrive::Runtime(Err(RuntimeError::Storage(
+                                DriveError::Backend(reason),
+                            ))) => {
                                 let retry_not_before_ms =
                                     owner_now.saturating_add(config::STORAGE_RETRY_BACKOFF_MS);
                                 durability_service =
@@ -469,8 +471,10 @@ pub async fn run(
                                     "e290-node stage=durable-submission status=RETRY reason=backend:{reason:?} retry_not_before_ms={retry_not_before_ms}"
                                 );
                             }
-                            Some(Err(RuntimeError::Storage(DriveError::Busy { pending })))
-                            | Some(Err(RuntimeError::Projection(
+                            ProductSubmissionDrive::Runtime(Err(RuntimeError::Storage(
+                                DriveError::Busy { pending },
+                            )))
+                            | ProductSubmissionDrive::Runtime(Err(RuntimeError::Projection(
                                 ProjectorOperationError::Busy { pending },
                             ))) => {
                                 let retry_not_before_ms =
@@ -481,7 +485,16 @@ pub async fn run(
                                     "e290-node stage=durable-submission status=RETRY reason=busy:{pending:?} retry_not_before_ms={retry_not_before_ms}"
                                 );
                             }
-                            Some(Err(reason)) => {
+                            ProductSubmissionDrive::DeferredForCredentialInitialization => {
+                                let retry_not_before_ms =
+                                    owner_now.saturating_add(config::STORAGE_RETRY_BACKOFF_MS);
+                                durability_service =
+                                    durability_service.retry_at(retry_not_before_ms);
+                                info!(
+                                    "e290-node stage=durable-submission status=DEFERRED reason=credential-initialization-in-flight retry_not_before_ms={retry_not_before_ms}"
+                                );
+                            }
+                            ProductSubmissionDrive::Runtime(Err(reason)) => {
                                 storage.disable_submission_service();
                                 let previous = durability_service;
                                 durability_service = durability_service.permanent_failure(
@@ -509,7 +522,7 @@ pub async fn run(
                                 }
                                 progressed = true;
                             }
-                            None => {
+                            ProductSubmissionDrive::RuntimeUnavailable => {
                                 storage.disable_submission_service();
                                 let previous = durability_service;
                                 durability_service = durability_service.permanent_failure(

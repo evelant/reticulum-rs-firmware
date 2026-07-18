@@ -1,7 +1,7 @@
 # Permanent Vision Master E290 node image
 
 **Status:** the first permanent, LoRa-first image is implemented and passes its
-53-test host composition suite, portable-target, ESP32-S3 build,
+57-test host composition suite, portable-target, ESP32-S3 build,
 review, and merged-image packaging gates. Source `5f3f259` passed a bounded
 powered upgrade smoke on both `HT-RA62-HF` boards: exact same-image readback,
 resident pairing-policy and erased-initialization eligibility, zero credential
@@ -23,7 +23,8 @@ service while the LoRa node still starts in route-only mode. The exact
 authorized-frame request/durable-echo handoff is source-composed and now passes
 cross-layer host qualification. The one-entry accepted-history cap is exercised
 by that harness solely as a composition profile and is not a product-capacity
-commitment. Portable API framing, immutable credential authority, the
+commitment. Portable API framing, a featureless pre-authentication
+initialization-control codec, immutable credential authority, the
 qualification-session core, and the boot-lifetime job handoff are qualified;
 semantic schema 2 persists exact authorization provenance. The dedicated
 credential-partition contract and portable store are selected in ADR 0009; its
@@ -39,9 +40,10 @@ is now a permanent-E290-only dependency, resident inside the coordinator's
 `CredentialRuntime` with the exact boot binding, any mounted authority, and any
 admitted initialization permit. The coordinator also compiles the sole-owner
 physical initialization port, but no bearer, GPIO debounce, external request
-lane, or powered run invokes it. Live external admission is blocked by that
-invocation path, live Begin/Proof/Activate/Abort composition, the external API/
-session lane, and a bearer. ADR 0005's active-owner policy is implemented: a
+lane, or powered run invokes it. The codec is not yet a firmware lane. Live
+external admission is blocked by that invocation path, live
+Begin/Proof/Activate/Abort composition, the external API/session lane, and a
+bearer. ADR 0005's active-owner policy is implemented: a
 permanent fault
 with an unresolved frame enters interface-local `ActiveOwnerFailStopped`, takes
 the same LoRa lease offline without changing its generation, retains the exact
@@ -229,6 +231,11 @@ and accepts only forward progress along the exact erased or recoverably
 interrupted trajectory; binding mismatch, backward movement, noncanonical
 completion, or stable media faults block further initialization for that boot,
 while backend/readback ambiguity retains the permit for a same-boot retry.
+The sole coordinator's cross-store gate defers initialization admission behind
+retained journal actor/projector work, and defers journal physical drive or new
+submission acceptance while credential initialization is in flight. The latter
+is an explicit retry state, not runtime failure; projection, status, routing,
+and LoRa remain available.
 
 The seven product admission classes are `Ready`; `AuthOnly` (the Rust
 `AuthenticationOnly` variant, logged as `AUTHENTICATION-ONLY`, with existing
@@ -377,7 +384,7 @@ cargo +esp clippy --locked --release \
 
 The build script rejects an unreviewed `esp-rtos` main-stack implementation and
 links `linkall.x`. Debug Xtensa builds are compile-time rejected.
-The host library suite has 53 passing tests: 51 focused policy/product/
+The host library suite has 57 passing tests: 55 focused policy/product/
 credential-boot/credential-runtime tests, including the source-order regression,
 every canonical empty-initialization byte cut, adversarial media changes between
 mount and classification, off-trajectory media, and classifier failure phases,
@@ -392,13 +399,16 @@ foreign-principal `NotFound`, and remount of the durable final state complete th
 path. The fault test injects a permanent wrong-binding error after frame
 exposure with an ordinary announce queued behind it; the result is
 `ActiveOwnerFailStopped`, no acknowledgement or completion, every owner retained,
-and no later host-radio TX or RX. The 51 focused tests include the exact
+and no later host-radio TX or RX. The 55 focused tests include the exact
 one-submission profile assertion and five focused durability-policy tests for
 retry, route-only degradation, pending durable acknowledgement, sticky fail-stop,
 and the request-after-disable race. Eleven credential-runtime tests additionally
 cover both initialization trajectories, fresh binding and identity checks,
 forward-only media movement, ambiguous backend/readback retention, disconnect
-ownership, policy completion, and fail-closed noncanonical states.
+ownership, policy completion, and fail-closed noncanonical states. Four
+cross-store tests cover both retained journal owners, initialization before and
+after physical I/O, stable credential states, and the distinct deferred versus
+unavailable result.
 
 Separate ESP release builds with `-Z emit-stack-sizes` produced 1,025 fully
 symbolized records and identical complete frame-size multisets for the default
@@ -657,9 +667,11 @@ as the bounded qualification fixture for the deterministic DATA/proof exchange.
   typed store commit/reconcile path, mounted-store pending selection, and
   interrupted-initialization classifier and explicit read-only E290 boot
   state. Preserve the private exact permit/binding/mounted-authority ownership,
-  forward-only initialization drive, and compiled sole-owner port. Connect that
-  port to debounced physical presence and a real request/bearer lane, then
-  compose live Begin/Proof/Activate/Abort mutation ownership with the immutable
+  forward-only initialization drive, cross-store mutation gate, and compiled
+  sole-owner port. Preserve the featureless framing-only pre-authentication
+  codec, then connect it to debounced physical presence, the USB byte owner, and
+  a bounded command/reply handoff. After explicit initialization works, compose
+  live Begin/Proof/Activate/Abort mutation ownership with the immutable
   authority and bounded COBS framing,
   qualification-session core, and boot-lifetime job/reply handoff with the
   first USB bearer. Persistent-state composition, firmware composition, and the

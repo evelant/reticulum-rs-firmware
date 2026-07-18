@@ -39,6 +39,7 @@ cargo check --locked \
   -p reticulum-device-api-credential-store \
   -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
+  -p reticulum-device-api-pairing-control \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
   -p reticulum-node-core \
@@ -60,6 +61,7 @@ cargo +esp check --locked \
   -p reticulum-device-api-credential-store \
   -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
+  -p reticulum-device-api-pairing-control \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
   -p reticulum-node-core \
@@ -323,7 +325,7 @@ portable authenticated device-API adapter is also implemented: default builds
 serve capabilities and principal-scoped status, while the explicit target-safe
 feature enables durable experimental acceptance. Both profiles are target-
 checked. The permanent E290 graph keeps the journal runtime and sole flash in a
-resident coordinator and passes 53 host tests. Immediately after flash open it
+resident coordinator and passes 57 host tests. Immediately after flash open it
 validates the exact `api_credentials` partition/eFuse binding, mounts and
 performs at most one retire then cleanup step, and retains any mounted credential
 store without auto-provisioning. Credential failure closes only credential
@@ -337,7 +339,10 @@ LoRa/interface ready, and two ordinary one-frame TXs per board. Source
 counted reboot smoke with the resident pairing policy present,
 `Eligible { media: ExactlyErased }` initialization status, continuing ordinary
 LoRa TX, and both credential partitions still entirely `0xff`. No request lane
-invoked initialization. A dedicated
+invoked initialization. A featureless, framing-only pre-authentication codec now
+freezes the status/initialize wire vocabulary, and the resident coordinator now
+excludes overlapping credential/journal mutations, but no USB byte owner, GPIO
+debounce, connection epoch, or command handoff invokes it. A dedicated
 RF-inert Tracker storage HIL image is target-
 checked and its isolated clean-path/software-reset powered run passed on board
 E9:44 from source `7b47113`, with strict serial and independent raw-partition

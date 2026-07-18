@@ -22,9 +22,12 @@ a resident `CredentialRuntime` privately retains the policy, exact boot binding,
 mounted authority, and admitted initialization permit. The coordinator compiles
 a sole-owner port that freshly reinspects node identity and creates a short-lived
 bound credential view; its runtime accepts only forward erased/interrupted
-trajectories. No GPIO debounce, external request lane, physical bearer, or
-powered initialization invokes that path, and boot never initializes
-automatically. Lifecycle-specific Add/Activate/Abort planners, opaque typed
+trajectories. A separate featureless pre-authentication codec now freezes
+zero-session, zero-tag status and explicit-initialization records while exposing
+only coarse public results; it depends solely on framing and performs no policy,
+ordering, replay, or mutation work. No GPIO debounce, USB byte owner, connection
+epoch, command handoff, or powered initialization invokes that path, and boot
+never initializes automatically. Lifecycle-specific Add/Activate/Abort planners, opaque typed
 store commit/reconcile owners, mounted-store pending selection, and the read-only
 interrupted-initialization classifier are implemented. E290 boot now maps only
 its canonical recoverable trajectory to an explicit disabled state. Live Begin,
@@ -456,18 +459,21 @@ cargo test --locked \
   -p reticulum-device-api-credential-store \
   -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
+  -p reticulum-device-api-pairing-control \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session
 cargo clippy --locked --all-targets \
   -p reticulum-device-api-credential-store \
   -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
+  -p reticulum-device-api-pairing-control \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session -- -D warnings
 cargo check --locked \
   -p reticulum-device-api-credential-store \
   -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
+  -p reticulum-device-api-pairing-control \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
   --target riscv32imac-unknown-none-elf
@@ -475,6 +481,7 @@ cargo +esp check --locked \
   -p reticulum-device-api-credential-store \
   -p reticulum-device-api-credentials \
   -p reticulum-device-api-framing \
+  -p reticulum-device-api-pairing-control \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
   --target xtensa-esp32s3-none-elf

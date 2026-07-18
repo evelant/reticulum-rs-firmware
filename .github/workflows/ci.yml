@@ -113,6 +113,7 @@ jobs:
           -p reticulum-device-api-credentials
           -p reticulum-device-api-pairing-policy
           -p reticulum-device-api-framing
+          -p reticulum-device-api-pairing-control
           -p reticulum-device-api-handoff
           -p reticulum-device-api-session
           --no-deps
@@ -147,6 +148,7 @@ jobs:
           -p reticulum-device-api-credentials
           -p reticulum-device-api-pairing-policy
           -p reticulum-device-api-framing
+          -p reticulum-device-api-pairing-control
           -p reticulum-device-api-handoff
           -p reticulum-device-api-session
           -p reticulum-device-identity-store
@@ -310,6 +312,7 @@ jobs:
           -p reticulum-device-api-credentials
           -p reticulum-device-api-pairing-policy
           -p reticulum-device-api-framing
+          -p reticulum-device-api-pairing-control
           -p reticulum-device-api-handoff
           -p reticulum-device-api-session
           -p reticulum-device-identity-store

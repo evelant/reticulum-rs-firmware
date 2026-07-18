@@ -32,6 +32,10 @@ use reticulum_heltec_vision_master_e290_node::credential_runtime::{
     CredentialInitializationStatus, CredentialRuntime, InitializationAccepted,
     InitializationDriveOutcome, InitializationRequestRefusal, MAXIMUM_CREDENTIAL_RUNTIME_BYTES,
 };
+use reticulum_heltec_vision_master_e290_node::cross_store_gate::{
+    CredentialInitializationGate, JournalMutationGate, credential_initialization_gate,
+    journal_mutation_gate as cross_store_journal_mutation_gate,
+};
 use reticulum_heltec_vision_master_e290_node::partition_contract::{
     ANNOUNCE_CLOCK_LABEL_BYTES, ANNOUNCE_CLOCK_LEN, ANNOUNCE_CLOCK_OFFSET,
     API_CREDENTIALS_LABEL_BYTES, API_CREDENTIALS_LEN, API_CREDENTIALS_OFFSET, DATA_PARTITION_TYPE,
@@ -260,6 +264,8 @@ pub(crate) struct ProductStorageCoordinator {
 pub(crate) enum ProductInitializationRequest {
     /// Identity media could not be inspected, so no policy request ran.
     IdentityUnavailable,
+    /// Retained journal mutation work must settle before policy admission.
+    DeferredForJournalMutation,
     /// Fresh identity preflight completed and the resident runtime decided.
     Runtime(Result<InitializationAccepted, InitializationRequestRefusal>),
 }
@@ -274,6 +280,16 @@ pub(crate) enum ProductInitializationDrive {
     IdentityUnavailable,
     /// Fresh identity preflight completed and the resident runtime decided.
     Runtime(InitializationDriveOutcome<ProductRegionError>),
+}
+
+/// Product result of attempting one durable-submission runtime step.
+pub(crate) enum ProductSubmissionDrive {
+    /// One mounted runtime step ran and returned its exact result.
+    Runtime(Result<RuntimeStep, RuntimeError<ProductRegionError>>),
+    /// Credential initialization temporarily owns physical mutation access.
+    DeferredForCredentialInitialization,
+    /// Durable submission service has no usable resident runtime.
+    RuntimeUnavailable,
 }
 
 /// Sole-owner surface reserved for the future local pairing bearer.
@@ -616,6 +632,13 @@ impl ProductStorageCoordinator {
         self.submission_service_enabled = false;
     }
 
+    fn journal_mutation_gate(&self) -> JournalMutationGate {
+        cross_store_journal_mutation_gate(
+            self.submission_service_available(),
+            self.credential_runtime.initialization_status(),
+        )
+    }
+
     /// Offer one exact interface-agnostic authorized-frame observation.
     ///
     /// The interface actor must retain and re-offer the observation until the
@@ -633,6 +656,9 @@ impl ProductStorageCoordinator {
 
     /// Advance at most one durable submission transition through the permanent
     /// transport-neutral node owner.
+    ///
+    /// Credential initialization deferral is explicit and never aliases
+    /// runtime absence, so the node retains journal service and retries later.
     pub(crate) fn drive_submission_step<N, R>(
         &mut self,
         node: &mut N,
@@ -640,19 +666,34 @@ impl ProductStorageCoordinator {
         owner_now: MonotonicMillis,
         deadline: TxLeaseDeadline,
         rng: &mut R,
-    ) -> Option<Result<RuntimeStep, RuntimeError<ProductRegionError>>>
+    ) -> ProductSubmissionDrive
     where
         N: SubmissionNodePort,
         R: RngCore + CryptoRng,
     {
-        if !self.submission_service_enabled {
-            return None;
+        match self.journal_mutation_gate() {
+            JournalMutationGate::Ready => {}
+            JournalMutationGate::DeferredForCredentialInitialization => {
+                return ProductSubmissionDrive::DeferredForCredentialInitialization;
+            }
+            JournalMutationGate::RuntimeUnavailable => {
+                return ProductSubmissionDrive::RuntimeUnavailable;
+            }
         }
-        let runtime = self.runtime.as_mut()?;
+        let Some(runtime) = self.runtime.as_mut() else {
+            return ProductSubmissionDrive::RuntimeUnavailable;
+        };
         let region =
             PartitionNorFlash::new(&mut *self.flash, NODE_JOURNAL_OFFSET, NODE_JOURNAL_LEN);
         let mut journal = BoundJournal::new(region, self.journal_binding);
-        Some(runtime.drive_step(&mut journal, node, rns_now, owner_now, deadline, rng))
+        ProductSubmissionDrive::Runtime(runtime.drive_step(
+            &mut journal,
+            node,
+            rns_now,
+            owner_now,
+            deadline,
+            rng,
+        ))
     }
 }
 
@@ -704,6 +745,28 @@ impl ProductCredentialInitializationPort for ProductStorageCoordinator {
         now: PairingMillis,
         connection: ConnectionId,
     ) -> ProductInitializationRequest {
+        let (journal_actor_pending, journal_projector_pending) = self
+            .runtime
+            .as_ref()
+            .map(|runtime| {
+                (
+                    runtime.storage().pending_kind().is_some(),
+                    runtime
+                        .storage()
+                        .projector()
+                        .pending_persistence()
+                        .next()
+                        .is_some(),
+                )
+            })
+            .unwrap_or((false, false));
+        if matches!(
+            credential_initialization_gate(journal_actor_pending, journal_projector_pending),
+            CredentialInitializationGate::DeferredForJournalMutation
+        ) {
+            return ProductInitializationRequest::DeferredForJournalMutation;
+        }
+
         let identity_preflight = {
             let mut region =
                 PartitionNorFlash::new(&mut *self.flash, NODE_IDENTITY_OFFSET, NODE_IDENTITY_LEN);
@@ -785,8 +848,14 @@ impl SubmissionPort for ProductStorageCoordinator {
         &mut self,
         candidate: AcceptanceCandidate,
     ) -> Result<SubmissionAcceptance, SubmissionPortError> {
-        if !self.submission_service_enabled {
-            return Err(SubmissionPortError::Unavailable);
+        match self.journal_mutation_gate() {
+            JournalMutationGate::Ready => {}
+            JournalMutationGate::DeferredForCredentialInitialization => {
+                return Err(SubmissionPortError::Busy);
+            }
+            JournalMutationGate::RuntimeUnavailable => {
+                return Err(SubmissionPortError::Unavailable);
+            }
         }
         let runtime = self
             .runtime

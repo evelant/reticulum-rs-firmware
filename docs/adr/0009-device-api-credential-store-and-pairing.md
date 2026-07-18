@@ -2,9 +2,10 @@
 
 - **Status:** accepted design; portable lifecycle-safe authority/store path,
   interrupted-initialization classifier, E290 boot/coordinator mount integration,
-  pairing-admission policy, and E290 forward-only initialization runtime/sole-
-  owner port implemented; live lifecycle mutation, firmware bearer/request
-  composition, and powered pairing qualification pending
+  pairing-admission policy, pre-authentication initialization-control codec, and
+  E290 forward-only initialization runtime/sole-owner port implemented; live
+  lifecycle mutation, firmware bearer/handoff composition, and powered pairing
+  qualification pending
 - **Date:** 2026-07-17
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0004](0004-sole-flash-coordinator.md),
@@ -19,9 +20,11 @@ those opaque transitions through commit and reconciliation, permanent E290
 firmware mounts/recovers its physical store, and a portable policy owner freezes
 physical-presence window admission. The feature-free policy and resident
 initialization owner are now composed only into the permanent E290 graph, but
-the firmware still cannot admit an authenticated external request until a
-bearer/request lane invokes physical presence and live lifecycle mutation over
-one device-owned authority that survives power loss. Pairing
+the featureless framing-only initialization-control codec remains portable and
+uncomposed. The firmware still cannot admit an external request until a USB byte
+owner, connection/presence owner, and bounded task handoff invoke the sole flash
+coordinator; authenticated pairing additionally needs live lifecycle mutation
+over one device-owned authority that survives power loss. Pairing
 must not publish a secret-bearing authority before its physical commit is
 established, and an empty or erased store must not silently create a trust
 relationship.
@@ -252,6 +255,54 @@ valid physical-presence window is open. Factory reset and cross-store identity
 reset ordering remain a separate design and may not be inferred from erased
 credential media.
 
+The sole flash coordinator also serializes mutations across the credential and
+journal stores. A retained journal actor operation or pending projector
+persistence defers initialization before policy admission. Once initialization
+is admitted and in flight, journal physical drive and new durable-submission
+acceptance are deferred until initialization reaches a stable result. This
+deferral is distinct from runtime absence and must not disable projection,
+status, Reticulum routing, or LoRa service.
+
+### Freeze the pre-authentication initialization-control records
+
+`reticulum-device-api-pairing-control` is a featureless, allocation-free codec
+whose only dependency is `reticulum-device-api-framing`. It defines a narrow
+bootstrap lane, not an unauthenticated device-API session. Every record in this
+lane has the framing session ID and 16-byte authentication tag entirely zero.
+Requests have an empty payload; responses have exactly one payload byte.
+
+| Record kind | Value | Payload |
+| --- | ---: | --- |
+| status request | `0x20` | empty |
+| status response | `0x21` | one `InitializationStatus` byte |
+| initialize request | `0x22` | empty |
+| initialize response | `0x23` | one `InitializeResult` byte |
+
+| `InitializationStatus` | Value |
+| --- | ---: |
+| `Unavailable` | 0 |
+| `InitializationRequired` | 1 |
+| `InFlight` | 2 |
+| `Completed` | 3 |
+| `Blocked` | 4 |
+
+| `InitializeResult` | Value |
+| --- | ---: |
+| `Completed` | 0 |
+| `Retrying` | 1 |
+| `PhysicalPresenceRequired` | 2 |
+| `Refused` | 3 |
+| `Blocked` | 4 |
+| `Unavailable` | 5 |
+
+All other kinds, codes, payload shapes, nonzero session IDs, and nonzero tags
+are rejected. The framing sequence is preserved but deliberately uninterpreted:
+the future bearer must enforce boot-lifetime connection epochs, exact-next
+ordering, replay rejection, and request/response correlation. The codec exposes
+no media classification, backend fault, identity state, policy diagnostic,
+secret, or credential existence detail. It performs no GPIO, timeout, session,
+flash, or task-handoff work, and it cannot dispatch the logical device API.
+
 ### Fix the first developer/HIL pairing window
 
 `reticulum-device-api-pairing-policy` implements the allocation-free portable
@@ -354,8 +405,9 @@ or discards a pending secret-bearing ID.
 The portable policy and resident initialization runtime do not implement or
 imply live pairing. The coordinator has a source-composed, target-checked sole-
 owner port that freshly inspects node identity and constructs the short-lived
-bound credential view, but no bearer/request lane, GPIO debounce, or powered
-test invokes it. The remaining boundary includes:
+bound credential view, and the portable pre-authentication record codec exists,
+but no USB byte owner, GPIO debounce, connection epoch, command/reply handoff,
+or powered test invokes it. The remaining boundary includes:
 
 - live Begin/Proof/Activate/Abort ownership that retains each typed physical
   successor until definite reconciliation; initialization permit retention and
@@ -422,9 +474,11 @@ but cannot claim security from the developer USB trust shortcut.
   seven boot admission classes including read-only interrupted initialization;
   resident `CredentialRuntime` retention of the exact binding, mounted authority,
   pairing policy, and permit; forward-only erased/interrupted recovery; and the
-  sole-owner fresh-identity/fresh-view initialization port. These checks
-  contribute to the 53-test E290 host suite; they are not powered integration
-  or live-authentication evidence.
+  sole-owner fresh-identity/fresh-view initialization port. Cross-store gating
+  defers admission behind retained journal work and defers journal mutation or
+  acceptance behind in-flight initialization without disabling the service.
+  These checks contribute to the 57-test E290 host suite; they are not powered
+  integration or live-authentication evidence.
 - Complete as bounded powered erased-media smoke at source `96e38aa`: both
   boards reported `UninitializedErased` with zero recovery steps/writes/erases,
   API/session/bearer closed, LoRa continuing, and exact post-boot credential
@@ -445,6 +499,11 @@ but cannot claim security from the developer USB trust shortcut.
   across disconnect, clock regression, overflow faults, and the 256-byte policy-
   owner RAM ceiling. Its feature-free edge is composed only into permanent E290
   firmware; no bearer invokes it.
+- Complete in the portable initialization-control slice: eight tests freeze all
+  four record kinds, every status/result code, exact COBS round trips, zero
+  session/tag requirements, payload shapes, unknown-code rejection, and framing
+  fault ownership. Its featureless graph reaches only framing and is not yet
+  composed into any product or HIL graph.
 - Pairing integration tests must still cover real GPIO debounce/sampling,
   exclusive USB ownership, disconnect at every secret/proof/completion boundary,
   proof replay and wrong transcript binding, unique ID/PSK allocation, E290
@@ -460,6 +519,6 @@ but cannot claim security from the developer USB trust shortcut.
   activation, retirement, and cleanup at every reachable boundary and verify
   exact flash readback before this path is enabled outside developer/HIL use.
 
-No live pairing, credential mutation through this policy, bearer composition,
-powered-cut recovery, or live-authentication gate is claimed complete by this
-ADR.
+No live pairing, credential mutation through an external request, bearer
+composition, powered-cut recovery, or live-authentication gate is claimed
+complete by this ADR.

@@ -283,6 +283,12 @@ and exact granted permission mask. A rotated retry preserves the original
 acceptance evidence. Revocation or disconnect prevents work not yet accepted
 but does not undo an already accepted mutation. See ADR 0008.
 
+ADR 0009's separate zero-session, zero-tag initialization-control records are
+not logical device-API operations and cannot invoke this adapter or a session
+fallback. They expose only coarse initialization status and a physically gated
+explicit initialization request needed before any credential exists. Every
+logical operation, including public capabilities, remains session-authenticated.
+
 The implemented `AuthenticatedGrant::revalidate` returns a non-cloneable
 `DispatchLease` that immutably borrows the current authority. It derives the
 principal and permissions from the exact active record, exposes them only
@@ -347,12 +353,15 @@ physical attacker and must not be described as tamper-resistant.
   the bearer manager.
 - Complete in the portable store: the dedicated two-sector format,
   operation-scoped binding, erased-only initialization/recovery,
-  commit/retire/publication ordering, and 22-test power-cut/error matrix.
+  commit/retire/publication ordering, and 32-test power-cut/error matrix.
+- Complete in the portable bootstrap codec: the four ADR 0009
+  status/initialize record kinds, zero session/tag and exact payload shapes,
+  with no logical API dispatch or bearer behavior.
 - Complete in E290 boot composition: exact partition/eFuse binding, immediate
   post-open mount, bounded retire then cleanup, retained mounted ownership, no
   auto-provisioning, and credential-domain failure isolation while LoRa
   continues. This is host/target-build evidence, not powered authentication.
-- Remaining: pairing-manager implementation, durable
+- Remaining: live GPIO/USB/task-handoff pairing-manager composition, durable
   revoke/rotate/reset transactions, and powered cut/window/rate tests.
 - Remaining: cancellation at the concrete USB RX/TX, request-admission and
   reply-channel boundaries.
