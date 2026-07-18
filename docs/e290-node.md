@@ -2,10 +2,11 @@
 
 **Status:** the first permanent, LoRa-first image is implemented and passes its
 37-test cross-layer host composition suite, portable-target, ESP32-S3 build,
-review, and merged-image packaging gates. It has not been flashed; the physical
-modules on both connected boards are now confirmed `HT-RA62-HF`, and a
-separate semantic image passed its powered functional HIL. This permanent image
-still requires its own powered product-graph qualification.
+review, and merged-image packaging gates. Source `96e38aa` also passed the first
+bounded powered smoke on both `HT-RA62-HF` boards: exact same-image readback,
+erased credential classification with zero credential mutation, resident
+journal/LoRa/interface startup, and ordinary one-frame TX. Full powered product-
+graph qualification remains open.
 
 This target is the first executable product composition, not another HIL
 fixture. It starts a transport-mode Rete node, one E290 LoRa actor, receive and
@@ -373,6 +374,29 @@ slot). The unpadded merged image is 729,504 bytes with SHA-256
 retains explicit growth headroom rather than treating this early image as the
 full appliance ceiling.
 
+## First powered permanent-graph smoke
+
+The smoke was captured from source `96e38aa`. Both fully erased boards received
+the same explicit 16 MiB merged image above, and post-boot reads of its complete
+729,504-byte range matched exactly on both boards.
+
+Both monitored reboots reported 8,388,608 bytes of initialized PSRAM,
+`UninitializedErased` credentials with `recovery_steps=0`, `writes=0`, and
+`erases=0`, explicit initialization required, automatic provisioning disabled,
+and API/session/bearer closed. Redundant identity, strict empty-journal mount,
+resident storage, LoRa readiness, and interface 1/MTU 500 were present. Each
+board completed two ordinary-family one-frame LoRa transmissions. Exact
+post-boot reads of both 8 KiB credential partitions were entirely `0xff` and
+shared SHA-256
+`7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f`.
+
+This is boot and ordinary-TX smoke evidence, not controlled peer reception or
+DATA delivery. It does not qualify credential initialization, pairing,
+authentication, a local API bearer, interruption/power-cut recovery, runtime
+stack high-water, heap pressure, soak behavior, or production security. The
+separate semantic HIL remains the controlled cross-board ANNOUNCE/DATA/proof
+result.
+
 ## Connected-board identity and future flash procedure
 
 The read-only 2026-07-17 discovery snapshot was:
@@ -552,10 +576,11 @@ range.
 No firmware path erases the journal automatically, and the feature never
 authorizes writes outside `node_journal`.
 
-No permanent-image write or product-graph RF test has occurred. The physical
-module gate is satisfied and the separate semantic HIL passed; a same-image
-permanent pair must still verify boot, radio initialization, ordinary announce
-TX/RX, contention and reset behavior. Autonomous images with
+The first permanent-image write and powered smoke above verified boot, radio/
+interface readiness, and autonomous ordinary TX on both boards. It did not
+control or verify peer RX, DATA, contention, reset recovery, or interoperability;
+the separate semantic HIL supplies the bounded controlled DATA/proof result.
+Autonomous images with
 `app_data=None` do not originate a controlled fragmented or transit packet.
 Fragment reassembly, forwarding, DATA and proof testing therefore need an
 external Reticulum peer/test injector, the semantic-HIL fixture, or the next
@@ -598,8 +623,9 @@ as the bounded qualification fixture for the deterministic DATA/proof exchange.
   image fails inert at `EpochExhausted`; production may instead require an
   explicit identity rotation/reprovisioning workflow, but must never wrap.
 - Replace the 1 ms node poll with a combined readiness/deadline wait.
-- Run two-board interoperability through the permanent image. Its current
-  success is build evidence; the passed separate semantic HIL establishes only
-  the E290 radio/RNode/Rete functional baseline.
+- Run controlled two-board interoperability through the permanent image. Its
+  current powered success establishes boot and ordinary-TX smoke only; the
+  passed separate semantic HIL establishes the controlled E290
+  radio/RNode/Rete functional baseline.
 - Keep display and GNSS/location integration stubbed until the network,
   persistence and client ownership paths are stable.

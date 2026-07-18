@@ -153,8 +153,9 @@ separate powered qualification.
 2. With both physical `HT-RA62-HF` markings now confirmed, qualify E290 first provisioning,
    strict mount, boot recovery, resident ownership, authorized-frame handoff,
    ADR 0005 failure isolation, and pre-owner route-only degradation on both
-   boards, including controlled powered cuts. Host evidence is not hardware
-   evidence.
+   boards, including controlled powered cuts. The source-`96e38aa` erased-media
+   smoke now supplies hardware evidence only for boot, zero-mutation credential
+   classification, empty-journal mount, LoRa readiness, and ordinary TX.
 3. Select a product-capacity policy beyond the host-qualified one-entry
    composition cap without weakening durability or principal isolation.
 4. Add checked `message_store` partition validation, then typed configuration

@@ -281,22 +281,24 @@ permanent node composition. That software work is now complete in the E290
 target: `NodeInterfaceSupervisor` owns the router, DATA and ordinary
 coordinators and per-actor permit services, while a separate LoRa task owns the
 ticket-aware dispatcher and E290 radio. The permanent image passes its
-build-only gates but remains deliberately unflashed; both physical E290
-modules are now confirmed `HT-RA62-HF`, and the separate semantic image passed
-its powered functional HIL. Both attached antenna-equipped Tracker boards remain cleared for
+software gates and now has a bounded two-board powered smoke for exact image
+readback, boot, erased credentials, journal/LoRa/interface readiness, and
+ordinary one-frame TX. Both physical E290 modules are confirmed `HT-RA62-HF`,
+and the separate semantic image passed its powered functional HIL. Both attached antenna-equipped Tracker boards remain cleared for
 NA915 development TX/RX and remain the regression fixture.
 
 1. **Complete in the E290 source graph:** give the permanent node task sole
    ownership of `EmbeddedNode`, keep RNode microseconds separate from Rete
    seconds, and connect timed RX plus ordinary ingress/tick actions through the
    sealed interface fabric.
-2. **Open:** host the storage actor on the product flash partition and connect the API
-   adapter so an external send is durable before Rete preparation, while proof
+2. **Partially complete:** the resident storage actor/runtime now owns the
+   product journal; connect the API adapter's external lane so a send is durable before Rete preparation, while proof
    and timeout outcomes become durable before terminal acknowledgement.
-3. **Composed but not powered:** the registered-buffer, supervisor/permit,
-   regional/airtime, and sole-radio ownership path exists. Add a local durable
-   DATA/LXMF submission surface, then reproduce this exchange through the
-   permanent E290 graph as its own powered qualification.
+3. **Composed with bounded powered smoke:** the registered-buffer,
+   supervisor/permit, regional/airtime, and sole-radio ownership path booted and
+   emitted ordinary frames on both boards. Add a local durable DATA/LXMF
+   submission surface, then reproduce the controlled peer exchange through the
+   permanent E290 graph as its full powered qualification.
 4. **Partially complete:** returned ordinary actions now enter a fixed pool and
    ticketed router path without loss under downstream pressure. Caller-reservable
    construction before Rete allocates and mutates remains open.

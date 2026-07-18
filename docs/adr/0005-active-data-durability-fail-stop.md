@@ -131,7 +131,8 @@ immutable credential authority, the qualification-session core, and job handoff
 are qualified, and semantic schema 2 persists exact authorization provenance;
 ADR 0009's credential store is now boot-composed, while live external admission
 remains blocked on physical-presence initialization/pairing, a firmware
-API/session lane, and a bearer. Powered E290
-permanent-graph behavior remains unqualified even though the physical
-HF-module gate and isolated semantic HIL are complete; it requires separate
-hardware evidence.
+API/session lane, and a bearer. Source `96e38aa` now supplies bounded powered
+permanent-graph evidence for exact image readback, erased credential/journal
+boot, LoRa/interface readiness, and ordinary TX on both boards. It does not
+exercise the active-DATA durability owner or this ADR's fail-stop path; those
+still require separate hardware evidence.

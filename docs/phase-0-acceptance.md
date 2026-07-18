@@ -327,8 +327,13 @@ resident coordinator and passes 37 host tests. Immediately after flash open it
 validates the exact `api_credentials` partition/eFuse binding, mounts and
 performs at most one retire then cleanup step, and retains any mounted credential
 store without auto-provisioning. Credential failure closes only credential
-admission/mutation; LoRa and the independent journal policy continue. A dedicated RF-inert
-Tracker storage HIL image is target-
+admission/mutation; LoRa and the independent journal policy continue. Source
+`96e38aa` then passed the first permanent-image powered smoke on both erased
+E290s: exact 729,504-byte same-image readback, 8 MiB PSRAM,
+`UninitializedErased` with zero recovery steps/writes/erases, all-`0xff`
+credential partitions after boot, API/session/bearer closed, journal and
+LoRa/interface ready, and two ordinary one-frame TXs per board. A dedicated
+RF-inert Tracker storage HIL image is target-
 checked and its isolated clean-path/software-reset powered run passed on board
 E9:44 from source `7b47113`, with strict serial and independent raw-partition
 verification preserved at
@@ -336,12 +341,12 @@ verification preserved at
 five appends, mutation-free retry/conflict, B2 compaction, and zero-mutation B2
 replay after software reset. That image calls the journal directly and does not
 qualify the actor on hardware. Controlled power cuts, endurance/soak, at-rest
-encryption, powered operation of the permanent owner graph, pairing plus
+encryption, full powered qualification of the permanent owner graph, pairing plus
 authority/framing/session/handoff/bearer composition, and runtime
-flash/watchdog/OTA/radio coordination remain open. The credential boot path has
-host/target-build evidence only; it does not claim powered integration, a live
-authentication session, or an external bearer. On-device stack high-water and
-scenario heap measurements also remain required.
+flash/watchdog/OTA/radio coordination remain open. The credential smoke does
+not claim initialized-media recovery, interruption/power-cut recovery, a live
+authentication session, controlled peer RX/DATA, or an external bearer. On-
+device stack high-water and scenario heap measurements also remain required.
 
 ## Rete production hard gates
 

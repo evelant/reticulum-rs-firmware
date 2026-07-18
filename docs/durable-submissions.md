@@ -13,7 +13,10 @@ semantic schema 2 now durably binds exact authorization provenance to every
 acceptance. E290 now validates, boot-mounts, deterministically recovers, and
 retains the credential store without auto-provisioning. Live external admission
 remains blocked by explicit credential initialization/pairing, external API/
-session firmware composition, and a bearer.
+session firmware composition, and a bearer. Source `96e38aa` adds bounded
+powered evidence for exact image readback, erased credentials with zero
+mutation, strict empty-journal mount, resident service, and ordinary TX on both
+boards; it does not exercise durable DATA or interruption recovery.
 Controlled power-cut durability, projector
 retirement, journal retention, endurance/soak, and at-rest encryption remain
 unqualified.

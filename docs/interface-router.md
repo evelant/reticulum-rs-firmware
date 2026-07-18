@@ -7,8 +7,10 @@ coordinators, and per-actor permit servers. The ticket-aware radio dispatcher
 owns only the TX half of one actor capability; the concrete LoRa task retains
 the independent RX half. The first permanent E290 firmware graph now composes
 those halves in separate node and LoRa tasks. Its build-only gates pass; powered
-permanent-graph qualification remains unflashed. The separate same-image E290
-semantic HIL has passed the functional radio/RNode/Rete path.
+permanent-graph smoke now verifies boot, interface-online state, and ordinary
+one-frame TX on both boards. Controlled RX/DATA, fairness/faults, and full
+qualification remain open. The separate same-image E290 semantic HIL has passed
+the functional radio/RNode/Rete path.
 
 `reticulum-interface-router` is the smallest common boundary needed before a
 second Reticulum interface is added. LoRa is the first and primary complete
@@ -183,8 +185,9 @@ implemented and owned by `NodeInterfaceSupervisor`. There is no second
 ordinary job FIFO beside this router. The E290 target now places that sole
 node-owner aggregate and the E290 LoRa actor in two permanent tasks. Remaining
 work is powered qualification of their RX/TX fairness, watchdogs, and
-interoperability; the physical modules are confirmed, but the permanent image
-has not been flashed.
+interoperability. The physical modules are confirmed and the permanent image's
+bounded two-board boot/ordinary-TX smoke passed, but it did not control peer RX
+or DATA.
 
 LoRa is the first complete transport target and the current implementation
 priority. USB, BLE, and Wi-Fi remain future actors; there is no implementation

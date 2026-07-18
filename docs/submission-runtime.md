@@ -191,7 +191,9 @@ or RF claim.
   cap, but no external caller reaches it.
 - **Powered qualification:** integrated power-cut/brownout, watchdog, flash
   contention, compaction, endurance, stack/static-layout, and radio-deadline
-  tests remain product gates.
+  tests remain product gates. The source-`96e38aa` two-board smoke established
+  strict empty-journal mount, resident storage availability, and continuing
+  ordinary TX only; no external submission or durability-gated DATA ran.
 
 ## Focused validation
 

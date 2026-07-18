@@ -2,8 +2,9 @@
 
 **Status:** **powered PASS** for the isolated same-image E290 semantic LoRa
 vertical slice. Both connected boards were physically confirmed with
-`HT-RA62-HF` modules and attached 915 MHz antennas. The permanent node image
-remains separately unflashed and unqualified.
+`HT-RA62-HF` modules and attached 915 MHz antennas. The permanent node image now
+has a separate bounded boot/erased-credential/ordinary-TX smoke; it remains
+unqualified for this controlled peer ANNOUNCE/DATA/proof exchange.
 
 This is a hazardous, one-shot development image, not product firmware. The
 same ELF is installed on both qualified E290 boards. Exact eFuse base MACs

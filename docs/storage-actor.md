@@ -10,9 +10,10 @@ LoRa-first software composition and ADR 0005's interface-local active-owner
 fail-stop now pass cross-layer host tests. Portable API framing, immutable
 credential authority, the qualification-session core, and job handoff are
 qualified; durable authorization provenance is now part of semantic schema 2.
-Live external admission remains blocked by credential
-persistence/pairing, firmware composition, and a bearer; integrated
-powered-fault qualification remains open.
+Live external admission remains blocked by explicit credential initialization/
+pairing, external API/session firmware composition, and a bearer. The permanent
+graph's empty-journal/ordinary-TX powered smoke passes; integrated powered-fault
+qualification remains open.
 
 ## Ownership boundary
 
@@ -192,9 +193,10 @@ claiming powered flash or RF behavior.
 
 Remaining product work includes:
 
-- powered qualification of the resident E290 coordinator, which owns the sole
+- full powered qualification of the resident E290 coordinator, which owns the sole
   flash backend and lends one short-lived bound journal view to at most one
-  runtime step per outer node loop. Its software composition now passes;
+  runtime step per outer node loop. Its software composition and bounded
+  empty-journal/ordinary-TX powered smoke now pass;
 - preservation of the checked `node_journal` partition boundary and
   identity-vacant first-provision authority. `provision_first()` now repairs
   only the canonical empty A1 programming trajectory and never erases; an
@@ -215,7 +217,10 @@ Remaining product work includes:
 
 The two development boards are attached with antennas, physically confirmed as
 `HT-RA62-HF`, and authorized for NA915. Their isolated semantic TX/RX HIL
-passed; powered storage/product-graph behavior remains separately unqualified.
+passed; the permanent graph's source-`96e38aa` smoke also passed exact image
+readback, erased credential classification, empty-journal mount, resident
+storage, and ordinary TX. Power cuts, durable DATA, high-water, and full
+storage/product-graph qualification remain open.
 The current E290 product graph has the LoRa node/radio owner plus the resident
 operation-scoped durable runtime driver. Its one-entry qualification cap is not
 product capacity, and the absent external admission lane means accepted local

@@ -10,7 +10,8 @@ permit server, and the build-verified E290 target composes that aggregate with
 the ticket-aware dispatcher and board owner in separate node and LoRa tasks.
 **RF status:** the two attached `HT-RA62-HF` boards are antenna-equipped and
 authorized for NA915 development TX. The isolated same-image E290 semantic HIL
-passed; the permanent owner graph remains unflashed and unqualified
+passed; the permanent owner graph now has bounded powered boot/ordinary-TX
+smoke, while controlled peer RX/DATA and full qualification remain open
 
 ## Legacy DATA handoff decision
 
@@ -429,7 +430,8 @@ graph checks.
 
 The attached E290 boards have antennas, confirmed `HT-RA62-HF` modules, and
 explicit NA915 development authorization. The isolated semantic image passed
-its functional two-board HIL, but the permanent image remains unflashed.
+its functional two-board HIL. Source `96e38aa` also passed the permanent image's
+first two-board boot/erased-credential/ordinary-TX smoke with exact readback.
 Permanent-graph interoperability, electrical/RF behavior, fairness, watchdog,
 and soak evidence therefore remain open. Durable identity plus a resident operation-scoped
 storage coordinator are now composed. The coordinator owns the sole flash

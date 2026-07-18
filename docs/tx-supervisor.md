@@ -5,10 +5,12 @@ aggregate. It owns the sole `NodeCore`, authoritative interface router, DATA
 and ordinary coordinators, one DATA and ordinary permit server per actor, and
 the shared authorization policy. The first concrete consumer is the
 LoRa-only, two-task Heltec Vision Master E290 firmware graph. Its host,
-portable-target, ESP32-S3 build and review gates pass; the image remains
-unflashed and needs its own powered qualification. Both attached modules are
-confirmed `HT-RA62-HF`, and the separate semantic image has passed its
-functional radio/RNode/Rete HIL.
+portable-target, ESP32-S3 build and review gates pass. Source `96e38aa` passed a
+bounded powered smoke on both `HT-RA62-HF` boards: exact image readback,
+erased-credential/journal/LoRa startup, and two ordinary one-frame TXs each.
+Controlled peer RX/DATA, fairness/faults, high-water, and full powered
+qualification remain open; the separate semantic image supplies the controlled
+radio/RNode/Rete HIL.
 
 The older `TxSupervisor` is retained only as a legacy no-RF test aggregate for
 the original DATA-machine ownership path. It is not the production composition

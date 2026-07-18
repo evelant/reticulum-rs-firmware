@@ -298,6 +298,11 @@ but cannot claim security from the developer USB trust shortcut.
   cleanup, retained `MountedCredentialStore`, no auto-provisioning, and the six
   boot admission classes. These checks contribute to the 37-test E290 host
   suite; they are not powered integration or live-authentication evidence.
+- Complete as bounded powered erased-media smoke at source `96e38aa`: both
+  boards reported `UninitializedErased` with zero recovery steps/writes/erases,
+  API/session/bearer closed, LoRa continuing, and exact post-boot credential
+  partitions still entirely `0xff`. No credential was initialized or
+  authenticated.
 - Pairing tests must cover hold debounce/duration, exclusive window ownership,
   monotonic timeout, the combined three-attempt ceiling, disconnect at every
   secret/proof/completion boundary, one-pending enforcement, proof replay and

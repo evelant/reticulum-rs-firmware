@@ -60,7 +60,8 @@ fairly, preserves exact fan-out/completion ownership, and distinguishes
 retryable pressure from terminal quarantine and fail-closed drain. The first
 permanent E290 target composes that portable aggregate with one ticket-aware
 LoRa dispatcher and the E290 radio owner; it is software-composition-qualified,
-build-verified, and unflashed.
+build-verified, and now powered-smoke-qualified on both development boards for
+boot, erased credential handling, and ordinary one-frame TX.
 Bitrate and cost are recorded but do not replace Reticulum routing. Until Rete
 paths carry an interface generation, an ID/configuration stays immutable for
 one node-owner lifetime or its learned paths must be purged before reuse.
@@ -126,9 +127,10 @@ back the same 425,744-byte merged image from both boards, SHA-256
 The mode uses the product `reticulum-rns-rete` surface, ADC-backed TRNG and a
 64 KiB heap, but fixed public HIL identities. Its short-run heap peaks of 548
 bytes on E9 and 764 bytes on E0 are not stack, soak or full-product memory
-qualification. It also establishes neither durable production identity/state,
-powered operation of the permanent node-core/radio/storage/API ownership graph, forwarding,
-multi-hop, LXMF nor production TX policy.
+qualification. That earlier run alone establishes neither durable production
+identity/state nor powered operation of the permanent node-core/radio/storage/
+API ownership graph; it also does not establish forwarding, multi-hop, LXMF,
+or production TX policy.
 
 The earlier deterministic one-way ANNOUNCE-to-RNode/Python result remains
 preserved separately at
@@ -358,14 +360,17 @@ check confirms generation 2, all five committed records, the revision-4
 `artifacts/storage-hil/20260716T211318Z-e944-7b47113`.
 
 That powered run qualifies only the journal's isolated clean path and software-
-reset replay; it did not exercise the E290 product composition. The resident
-operation-scoped coordinator is now source-composed and target-checked, while
-its powered behavior, flash/watchdog/OTA/radio coordination, controlled power
-cuts, endurance/soak, and at-rest encryption remain open. Identity, announce
-clock, resident journal recovery, durable submission ordering, the exact LoRa
-DATA durability gate, and ADR 0005 failure isolation are now qualified together
-in the host composition harness, but remain unqualified on powered E290
-hardware. Device-API dispatch is a
+reset replay. The permanent E290 graph now has separate first powered-smoke
+evidence from source `96e38aa`: both erased boards received and exactly read
+back the same 729,504-byte image (SHA-256
+`3b6c07d6c23265b5655901d0b9c62ce1dfafe92251372ef9f51aa11132371e5d`), reported
+8 MiB PSRAM, classified credentials as `UninitializedErased` with zero recovery
+steps/writes/erases, kept the API/session/bearer closed, mounted the journal,
+brought LoRa/interface service ready, and completed two ordinary one-frame TXs
+each. Both post-boot credential partitions remained entirely `0xff`.
+This does not qualify controlled peer RX, DATA, pairing/authentication,
+power-cut recovery, stack high-water, heap pressure, or the full powered owner
+graph. Device-API dispatch is a
 separate portable integration boundary: the target-safe authenticated adapter,
 COBS framing, immutable credential authority, qualification-session core, boot-
 lifetime job handoff, and E290 `ProductStorageCoordinator` port implementation
@@ -375,9 +380,9 @@ firmware lane, or USB/BLE/Wi-Fi bearer serves through them.
 The legacy `TxSupervisor` remains a separate RF-inert test aggregate. The permanent
 `NodeInterfaceSupervisor` now owns the router, DATA and ordinary coordinators,
 and both permit-service families; the first permanent E290 image composes it
-with the ticket-aware dispatcher and E290 radio owner. That image is
-build-verified but remains deliberately unflashed and separately unqualified;
-the physical HF-module gate itself is now satisfied. The older
+with the ticket-aware dispatcher and E290 radio owner. That image now has the
+bounded powered smoke above; broader product-graph qualification remains open.
+The physical HF-module gate itself is satisfied. The older
 Tracker product graphs remain TX-free, while both attached Tracker boards are
 still cleared for NA915 development transmission and currently contain the
 same completed final explicit-configuration semantic-roundtrip image. The
@@ -572,9 +577,10 @@ schema.
 The [permanent E290 node runbook](docs/e290-node.md) describes the first
 LoRa-first two-task product composition, its fixed capacities, 16 MiB partition
 layout, durable identity/announce ordering, build gates and remaining
-storage/client blockers. It is also build-verified but remains unflashed and
-has no powered product-graph
-claim; the isolated semantic HIL does not substitute for that qualification.
+storage/client blockers. Its permanent image now has the bounded two-board
+powered smoke above; neither that smoke nor the isolated semantic HIL
+substitutes for controlled peer-RX/DATA, fault, power-cut, high-water, or full
+product-graph qualification.
 
 The receive-only lab binary has no frequency or modulation defaults. A known
 host/RNode-compatible build example is:

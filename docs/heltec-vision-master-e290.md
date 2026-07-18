@@ -6,8 +6,9 @@ The independent E290 HT-RA62 radio owner now passes host command-log tests and
 generic bare-metal plus ESP32-S3 target checks. Its MAC-gated same-image
 semantic HIL has now passed on both physically confirmed `HT-RA62-HF` boards;
 see [`e290-semantic-hil.md`](e290-semantic-hil.md). The first permanent
-LoRa-only E290 node graph is also composed and build-verified but unflashed
-and separately unqualified; see [`e290-node.md`](e290-node.md). The Tracker V2
+LoRa-only E290 node graph is composed/build-verified and now has bounded powered
+boot/erased-credential/ordinary-TX smoke on both boards; full qualification
+remains open. See [`e290-node.md`](e290-node.md). The Tracker V2
 pair remains the second known-good Reticulum/RNode radio regression fixture.
 
 ## Cutover decision
@@ -360,10 +361,12 @@ than continuous redraw.
    transmissions, bounded RX/TX, signed ANNOUNCEs, encrypted DATA, and delivery
    proof provided both the radio smoke evidence and semantic checks. Both
    immediate and post-capture image-range readbacks matched.
-6. **Implemented and build-verified:** make E290 the primary permanent-node
+6. **Implemented, build-verified, and powered-smoke-verified:** make E290 the primary permanent-node
    graph with one transport-neutral node task and one concrete LoRa task while
-   retaining Tracker HIL as a regression target. This different image remains
-   unflashed and requires its own powered product-graph qualification.
+   retaining Tracker HIL as a regression target. The permanent image now passes
+   boot, erased-credential, journal/LoRa/interface, and ordinary-TX smoke; it
+   still requires controlled peer RX/DATA, fault, cut, high-water, and full
+   powered product-graph qualification.
 7. Integrate the powered storage actor and authenticated USB device API first,
    then add an optional second Reticulum interface (with a distinct USB stream
    actor the leading candidate) to prove heterogeneous routing. Wi-Fi, BLE,

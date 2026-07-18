@@ -286,11 +286,12 @@ messages, propagation payloads, identities, configuration, attachments, OTA,
 and telemetry need separately bounded stores and quotas. Before product use,
 the project still needs:
 
-- powered qualification of the implemented resident E290 product coordinator
+- full powered qualification of the implemented resident E290 product coordinator
   around the operation-scoped portable actor/runtime. Its one-entry cap, live
   driver, exact authorized-frame handoff, and ADR 0005 fault behavior now pass
-  software composition tests; the cap is not product capacity;
-- persistent credential state/pairing plus firmware composition of the
+  software composition tests, while source `96e38aa` adds empty-journal mount
+  and ordinary-TX powered smoke only; the cap is not product capacity;
+- explicit credential initialization/pairing plus firmware composition of the
   implemented authority/framing/session/handoff and
   first USB bearer for the authenticated device-API persist-before-accept/status
   adapter,

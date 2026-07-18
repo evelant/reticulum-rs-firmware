@@ -5,9 +5,11 @@ bounded interface fabric, both router coordinators and per-actor permit
 services, ticket-aware real-radio dispatch, and the permanent E290 node/LoRa
 composition are implemented and pass their host, portable-target and ESP32-S3
 build gates. The durable model/projector, physical journal, sole storage actor,
-and authenticated device-API adapter are implemented separately. Durable
-identity, a permanent storage/API task, local DATA/LXMF submission and client
-delivery, and powered E290 qualification of the product image remain open.
+and authenticated device-API adapter are implemented separately. Local
+DATA/LXMF submission, client delivery, and full powered E290 qualification of
+the product image remain open.
+The permanent image's bounded source-`96e38aa` boot/interface/ordinary-TX smoke
+has passed, without controlled peer RX or DATA.
 **Rete pin:** `f6f5fb0637d00691e09fa0105be4df902405fee4`
 
 ## Purpose and boundary
