@@ -11,9 +11,11 @@ one-entry accepted-history cap exists only for composition qualification and is
 not a product-capacity commitment. Eight focused runtime tests, two E290
 cross-layer composition tests, strict Clippy, and generic/ESP32-S3 target checks
 pass. Portable API framing, immutable credential authority and store, the
-qualification-session core, and job handoff are qualified; live external
-admission remains blocked by ADR 0009 credential-store composition, pairing
-implementation, a firmware lane, and a bearer.
+qualification-session core, and job handoff are qualified. E290 boot now mounts,
+performs bounded deterministic retire-then-cleanup recovery, and retains the
+credential store without provisioning it; live external admission remains
+blocked by ADR 0009 initialization/pairing, an external API/session firmware
+lane, and a bearer.
 Semantic schema 2 now preserves exact authorization provenance through runtime
 acceptance, remount, and replay.
 
@@ -180,9 +182,10 @@ or RF claim.
   policy is required before this becomes a long-lived message service.
 - **Client edge:** authenticated API dispatch, immutable credential authority,
   framing, the qualification-session core, and boot-lifetime job handoff exist,
-  and durable authorization provenance now reaches the journal. Persistent
-  provisioning/pairing, firmware composition, and USB/BLE/Wi-Fi serving are not
-  wired to the runtime.
+  durable authorization provenance now reaches the journal, and the resident
+  coordinator retains the boot-mounted credential store and its admission
+  state. Explicit initialization/provisioning/pairing, external API/session
+  composition, and USB/BLE/Wi-Fi serving are not wired to the runtime.
   `ProductStorageCoordinator`
   implements the target-safe `SubmissionPort` under the one-entry qualification
   cap, but no external caller reaches it.

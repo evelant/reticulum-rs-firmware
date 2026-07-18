@@ -12,8 +12,11 @@ portable authority revalidates it and derives `DispatchContext` through a
 borrowing `DispatchLease`. The context carries validated non-wire provenance,
 and semantic journal schema 2 persists its exact credential/policy snapshot on
 acceptance. The portable two-sector raw-NOR credential store is implemented,
-but E290 flash-owner integration, provisioning/pairing, and firmware
-composition remain unimplemented; no physical bearer is composed yet. A
+and E290 boot now validates its exact eFuse-derived binding, mounts it
+immediately after flash open, performs bounded deterministic recovery, and
+retains any mounted owner in the sole coordinator. It does not auto-provision
+erased media. Provisioning/pairing, the external API/session firmware lane, and
+every physical bearer remain unimplemented. A
 product port may route an accepted submission through the node after the
 durable barriers.
 
@@ -264,8 +267,9 @@ models their persist-before-ack observations. The E290 host composition test
 exercises that API-to-runtime-to-router-to-LoRa software path; portable framing,
 immutable credential authority, qualification-session establishment, and job
 handoff and raw-NOR credential storage are implemented separately, while
-external live admission still requires firmware store composition, persistent
-credential provisioning/pairing, and a bearer.
+the credential store is now boot-composed. External live admission still
+requires explicit credential initialization/provisioning/pairing, an external
+API/session firmware lane, and a bearer.
 
 Successful experimental response body:
 
@@ -350,8 +354,10 @@ the public constructor. Immediate dispatch, no unauthenticated fallback and no
 port call after rejection remain composition rules, not an unforgeable Rust
 capability. Principal and permissions come from the exact active record. Live authority
 replacement must also pass exact-next-revision successor validation so changed
-authorization cannot reuse a session generation. A future credential-backed
-firmware runtime must mount and recover the portable store, add persistent
+authorization cannot reuse a session generation. E290 firmware now mounts and
+recovers the portable store before any other product-store write and retains
+its `Ready`, authentication-only, uninitialized-erased, blocked, corrupt, or
+backend-failed state. A future external serving runtime must add explicit
 provisioning/pairing, enforce connection-level rate limits, and keep
 authentication state outside request CBOR.
 

@@ -6,6 +6,7 @@
 
 pub mod announce_time;
 pub mod config;
+pub mod credential_boot;
 pub mod durability_boot;
 pub mod durability_policy;
 pub mod partition_contract;
@@ -18,6 +19,7 @@ mod live_admission_test_support;
 #[cfg(test)]
 mod live_admission_tests;
 
+use reticulum_device_api_credential_store::{CredentialStoreBinding, CredentialStoreDeviceId};
 use reticulum_storage_actor::{JournalBinding, StorageDeviceId};
 
 /// Derive the coordinator's physical-flash identifier from the E290 eFuse MAC.
@@ -38,6 +40,20 @@ pub const fn node_journal_binding(device: StorageDeviceId) -> JournalBinding {
     )
 }
 
+/// Bind the device-API credential store to the same physical E290 flash ID.
+pub const fn api_credentials_binding(device: StorageDeviceId) -> CredentialStoreBinding {
+    let bytes = device.as_bytes();
+    CredentialStoreBinding::new(
+        CredentialStoreDeviceId::new([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+        ]),
+        partition_contract::API_CREDENTIALS_OFFSET as usize,
+        partition_contract::API_CREDENTIALS_LEN as usize,
+        reticulum_device_api_credential_store::PHYSICAL_FORMAT_VERSION,
+    )
+}
+
 const _: () = assert!(
     partition_contract::NODE_IDENTITY_LEN as usize
         == reticulum_device_identity_store::PARTITION_SIZE
@@ -48,12 +64,19 @@ const _: () = assert!(
 const _: () = assert!(
     partition_contract::NODE_JOURNAL_LEN as usize == reticulum_storage_journal::PARTITION_SIZE
 );
+const _: () = assert!(
+    partition_contract::API_CREDENTIALS_LEN as usize
+        == reticulum_device_api_credential_store::PARTITION_SIZE
+);
 
 #[cfg(test)]
 mod tests {
     extern crate std;
 
-    use crate::{config, node_journal_binding, partition_contract, storage_device_id_from_eui48};
+    use crate::{
+        api_credentials_binding, config, node_journal_binding, partition_contract,
+        storage_device_id_from_eui48,
+    };
     use reticulum_node_core::{NodeConfig, NodeCore, NodeIdentity, NodeInstanceId};
 
     #[test]
@@ -106,6 +129,42 @@ mod tests {
             binding.layout_version(),
             reticulum_storage_journal::PHYSICAL_FORMAT_VERSION
         );
+        let credential_binding = api_credentials_binding(device);
+        assert_eq!(credential_binding.device().as_bytes(), device.as_bytes());
+        assert_eq!(credential_binding.absolute_offset(), 0x0061_4000);
+        assert_eq!(credential_binding.length(), 0x0000_2000);
+        assert_eq!(
+            credential_binding.layout_version(),
+            reticulum_device_api_credential_store::PHYSICAL_FORMAT_VERSION
+        );
+    }
+
+    #[test]
+    fn credential_recovery_precedes_every_other_boot_flash_mutation() {
+        let source = include_str!("main.rs");
+        let flash_open = source
+            .find("ProductFlashOwner::open(flash, storage_device_id)")
+            .expect("main must construct the checked sole flash owner");
+        let credential_boot = source
+            .find("let credential_boot = flash_owner.boot_credentials();")
+            .expect("main must mount and recover credentials");
+        assert!(flash_open < credential_boot);
+
+        for later_operation in [
+            "flash_owner.inspect_identity()",
+            "flash_owner.provision_node_journal(journal_policy)",
+            "flash_owner.reserve_announce_epoch(fresh_clock_policy)",
+            "flash_owner.boot_identity(&mut bootstrap_rng)",
+            "flash_owner.mount_node_runtime(u64::from(announce_epoch.get()))",
+        ] {
+            let later = source
+                .find(later_operation)
+                .unwrap_or_else(|| panic!("main is missing {later_operation}"));
+            assert!(
+                credential_boot < later,
+                "credential boot must precede {later_operation}"
+            );
+        }
     }
 
     #[test]

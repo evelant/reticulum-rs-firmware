@@ -1,7 +1,8 @@
 # ADR 0007: Immutable device-API credential authority
 
 - **Status:** accepted for the portable authority snapshot and canonical image;
-  ADR 0009 portable physical store implemented; firmware composition and pairing pending
+  ADR 0009 physical store and E290 boot composition implemented; external
+  authority/session composition and pairing pending
 - **Date:** 2026-07-17
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0004](0004-sole-flash-coordinator.md) and
@@ -31,9 +32,10 @@ pairing, durable authorization provenance, and bearer composition were not
 specified well enough to expose on hardware. ADR 0008 has since completed the
 schema-2 provenance contract. ADR 0009 now selects a dedicated E290 credential
 partition, physical store envelope, and bounded initial pairing policy. Their
-portable store implementation is now complete, while firmware composition,
-pairing, and the physical bearer remain incomplete; this ADR's session record
-vocabulary still does not double as an unauthenticated pairing exchange.
+portable store implementation and E290 boot/coordinator ownership are now
+complete, while external authority/session composition, pairing, and the
+physical bearer remain incomplete; this ADR's session record vocabulary still
+does not double as an unauthenticated pairing exchange.
 
 ## Decision
 
@@ -187,8 +189,9 @@ a port after that error.
 
 ### Keep persistence implementation behind the selected physical contract
 
-This slice does not make the immutable snapshot durable. A later credential
-store remains owned by the ADR 0004 product storage coordinator and must:
+This semantic slice does not itself make the immutable snapshot durable. The
+ADR 0009 credential store, now boot-composed under the ADR 0004 product storage
+coordinator, supplies the following physical rules:
 
 - use a dedicated checked raw-NOR range and explicit physical binding;
 - commit and read back a complete replacement snapshot before publishing it;
@@ -203,9 +206,10 @@ store remains owned by the ADR 0004 product storage coordinator and must:
 `device_config` remains reserved and is not silently treated as credential
 storage. ADR 0009 assigns the distinct plaintext developer/HIL
 `api_credentials` raw-NOR range at `0x614000..0x616000` and selects its
-two-sector commit/retire contract. The target validates that range, but the
-store, power-cut recovery, and cross-store reset transaction remain uncomposed
-and require powered qualification.
+two-sector commit/retire contract. The target validates that range and exact
+eFuse-derived binding, immediately mounts/recovers it after flash open, and
+retains any mounted owner. Live credential mutation, cross-store reset, and
+powered qualification remain uncomposed.
 
 Pairing likewise remains outside the session core. ADR 0009 requires its later
 bounded manager to own a roughly two-second GPIO21 confirmation, exclusive
@@ -242,8 +246,9 @@ never existed.
   snapshot image without inventing physical flash headers, commit mechanics,
   pairing, reset or USB behavior. The exact image owner zeroizes on drop and
   decoding consumes it before revalidating every record through the builder.
-- Live external admission remains disabled until store composition,
-  pairing/rate policy, firmware ownership, and a physical bearer are complete.
+- Live external admission remains disabled until explicit initialization and
+  pairing/rate policy, external authority/session firmware ownership, and a
+  physical bearer are complete.
 
 ## Validation status
 
@@ -260,8 +265,11 @@ never existed.
 - Complete in ADR 0009's portable store: two-sector commit/retire envelope,
   operation-scoped binding, ambiguous mutation reconciliation, explicit
   erased-only provisioning recovery, and exhaustive fake-NOR cut/error tests.
-- Remaining outside this semantic crate: E290 store integration,
-  pairing-manager implementation, rotation/reset composition, and powered
+- Complete outside this semantic crate: E290 exact-binding boot mount/recovery,
+  retained coordinator ownership, no auto-provisioning, and credential-domain
+  failure isolation pass host and target build checks.
+- Remaining outside this semantic crate: pairing-manager implementation,
+  rotation/reset composition, and powered
   cut/pairing tests.
 - Complete: semantic schema 2 persists and replays exact authorization-policy
   provenance while preserving the 383-byte payload and 512-byte actor pending

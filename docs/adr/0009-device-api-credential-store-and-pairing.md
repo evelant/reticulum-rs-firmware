@@ -1,7 +1,8 @@
 # ADR 0009: Device-API credential store and initial pairing policy
 
-- **Status:** accepted design; firmware integration, pairing implementation,
-  and powered qualification pending
+- **Status:** accepted design; portable store and E290 boot/coordinator
+  integration implemented; pairing, live mutation, and powered qualification
+  pending
 - **Date:** 2026-07-17
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0004](0004-sole-flash-coordinator.md),
@@ -11,7 +12,8 @@
 ## Context
 
 The portable credential authority and its canonical 2,048-byte semantic image
-exist, but the permanent E290 firmware cannot admit an authenticated external
+exist, and permanent E290 firmware now mounts/recovers its physical store,
+but it cannot admit an authenticated external
 request until one device-owned authority survives power loss. Pairing must not
 publish a secret-bearing authority before its physical commit is established,
 and an empty or erased store must not silently create a trust relationship.
@@ -157,6 +159,35 @@ the same scan and recovery rules. This commit/retire order permits a power cut
 to leave two linked committed snapshots, but never authorizes the firmware to
 publish an uncommitted candidate or erase the only committed authority.
 
+This global exclusion applies to a same-boot `PendingCredentialSuccessor`
+created by a live mutation with an uncertain result, and to any cross-store
+intent: either blocks unrelated durable mutation until reconciled. A
+deterministic `RetirePredecessor` or `CleanupInactive` owner discovered by
+read-only boot mount is not such a new ambiguous mutation. E290 boot makes one
+bounded retirement attempt followed by one bounded cleanup attempt, retains the
+mounted owner and resulting admission state, and quarantines only credential
+admission/mutation if either step cannot finish; unrelated journal policy and
+LoRa startup continue.
+
+### Compose bounded recovery immediately after flash open
+
+The E290 `ProductFlashOwner` validates the exact partition shape and derives the
+credential binding from the same eFuse-based physical-device ID used by the
+journal. It invokes credential mount/recovery immediately after open, before
+identity preflight, journal provisioning, announce-clock reservation, identity
+load/provision, or journal mount. A mechanical host regression freezes that
+source order.
+
+Boot returns the six product states `Ready`, `AuthOnly` (the Rust
+`AuthenticationOnly` variant), `Uninitialized` (the `UninitializedErased`
+variant), `Blocked`, `Corrupt`, or `Backend`. Only `Ready` permits a future
+credential mutation; `Ready` and `AuthOnly` may retain a publishable authority,
+but this image has no session or bearer and therefore performs no live
+authentication.
+Every successfully mounted owner, including a blocked or cleanup-failed owner,
+is retained in `ProductStorageCoordinator`. Erased media is never provisioned
+automatically.
+
 ### Make empty-store initialization explicit and non-pairing
 
 No boot path automatically formats or pairs an empty store. With an existing
@@ -245,6 +276,8 @@ but cannot claim security from the developer USB trust shortcut.
   tombstone retention, RAM, scan time, and recovery behavior bounded.
 - Empty or damaged media fails local admission closed and requires deliberate
   physical recovery rather than manufacturing a new trust root at boot.
+- Deterministic boot recovery failure is credential-domain quarantine, not a
+  reason to suppress unrelated LoRa routing or journal policy.
 - The lab profile is easy to qualify over the E290's built-in button and USB,
   but it does not protect against a malicious process on the connected host or
   physical flash extraction.
@@ -260,13 +293,18 @@ but cannot claim security from the developer USB trust shortcut.
   trajectories at the program, readback, retirement, and erase boundaries.
 - Complete: strict host Clippy and warning-free rustdoc plus generic bare-metal
   and ESP32-S3 Xtensa checks.
+- Complete in E290 host/target composition: exact partition and eFuse-derived
+  binding, immediate post-open mount/recovery ordering, bounded retire then
+  cleanup, retained `MountedCredentialStore`, no auto-provisioning, and the six
+  boot admission classes. These checks contribute to the 37-test E290 host
+  suite; they are not powered integration or live-authentication evidence.
 - Pairing tests must cover hold debounce/duration, exclusive window ownership,
   monotonic timeout, the combined three-attempt ceiling, disconnect at every
   secret/proof/completion boundary, one-pending enforcement, proof replay and
   wrong binding, explicit abort, erased-only initialization, and 16-ID
   exhaustion.
-- Target composition must give the ADR 0004 coordinator the only flash and
-  mutable-authority ownership, zeroize temporary secrets, preserve LoRa
+- Live mutation/bearer composition must keep the ADR 0004 coordinator as the
+  only flash and mutable-authority owner, zeroize temporary secrets, preserve LoRa
   scheduling under USB pressure, and prove no API/session service starts from
   unformatted, unrecovered, or conflicting media. It must also prove USB
   disconnect closes pairing and that logging cannot interleave with binary
@@ -275,5 +313,5 @@ but cannot claim security from the developer USB trust shortcut.
   activation, retirement, and cleanup at every reachable boundary and verify
   exact flash readback before this path is enabled outside developer/HIL use.
 
-None of those firmware, pairing, or powered gates is claimed complete by this
-ADR.
+None of the pairing, live-mutation/bearer, powered-cut, or live-authentication
+gates is claimed complete by this ADR.

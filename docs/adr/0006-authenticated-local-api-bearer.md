@@ -1,8 +1,8 @@
 # ADR 0006: Authenticated local device-API bearer
 
 - **Status:** accepted for the qualification session, portable credential
-  authority/store, durable provenance, and ADR 0009 pairing design;
-  store composition, pairing manager, and firmware bearer pending
+  authority/store, durable provenance, ADR 0009 pairing design, and E290
+  credential boot composition; pairing manager and firmware bearer pending
 - **Date:** 2026-07-17
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0003](0003-lora-first-interface-fabric.md) and
@@ -155,8 +155,10 @@ session handshake. Missing, pending and revoked IDs share one outward failure.
 
 This semantic authority is not itself persistence. The separate portable
 credential store now implements ADR 0009's physical commit/retire contract and
-power-loss recovery, but no firmware mutation owner, provisioning manager, or
-pairing protocol composes it yet. Replacing the immutable authority remains a
+power-loss recovery. E290 firmware now mounts and performs bounded boot recovery
+immediately after flash open, then retains any `MountedCredentialStore` in the
+sole coordinator. It has no live mutation owner, provisioning manager, or
+pairing protocol yet. Replacing the immutable authority remains a
 future sole-firmware-owner operation performed only after the store has
 committed and validated a complete durable snapshot.
 
@@ -303,9 +305,10 @@ principal identity. A stale reply is drained and discarded rather than allowed
 to enter a new session's response stream.
 
 The portable authority defines non-wrapping global revisions and the required
-rotation order: enroll a replacement before revoking the old record. Atomic,
-recoverable persistence, factory reset, pairing timeouts/exclusivity and
-failure-rate limits remain future work and require explicit tests. Until secure
+rotation order: enroll a replacement before revoking the old record. Boot
+persistence/recovery is now composed; live successor mutation, factory reset,
+pairing timeouts/exclusivity and failure-rate limits remain future work and
+require explicit tests. Until secure
 boot and flash encryption are enabled, a device PSK is extractable by a
 physical attacker and must not be described as tamper-resistant.
 
@@ -345,7 +348,11 @@ physical attacker and must not be described as tamper-resistant.
 - Complete in the portable store: the dedicated two-sector format,
   operation-scoped binding, erased-only initialization/recovery,
   commit/retire/publication ordering, and 22-test power-cut/error matrix.
-- Remaining: E290 store composition, pairing-manager implementation, durable
+- Complete in E290 boot composition: exact partition/eFuse binding, immediate
+  post-open mount, bounded retire then cleanup, retained mounted ownership, no
+  auto-provisioning, and credential-domain failure isolation while LoRa
+  continues. This is host/target-build evidence, not powered authentication.
+- Remaining: pairing-manager implementation, durable
   revoke/rotate/reset transactions, and powered cut/window/rate tests.
 - Remaining: cancellation at the concrete USB RX/TX, request-admission and
   reply-channel boundaries.
@@ -358,11 +365,12 @@ physical attacker and must not be described as tamper-resistant.
 
 ## Deferred decisions
 
-This ADR does not select the production AEAD construction, compose ADR 0009's
-credential store, implement its pairing manager, compose the USB bearer manager, define
+This ADR does not select the production AEAD construction, implement ADR 0009's
+pairing manager, compose the USB bearer manager, define
 a USB OTG composite descriptor, add WebUSB/NCM, or create any non-LoRa
 Reticulum packet actor. The qualification pairing/rate policy is selected, but
-its persistence, firmware composition, and USB-bearer implementation are still
-required before the authenticated USB-to-LoRa qualification path can run.
+its live mutation path, external API/session composition, and USB-bearer
+implementation are still required before the authenticated USB-to-LoRa
+qualification path can run.
 Production AEAD and the later transport/interface decisions are not
 prerequisites for that explicitly integrity-only wired lab profile.

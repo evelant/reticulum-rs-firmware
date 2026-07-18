@@ -5,13 +5,15 @@ storage actor, transport-neutral submission runtime, native authorized-frame
 seam, and exact E290 request/durable-echo handoff implemented; portable
 authenticated device-API dispatch implemented; resident E290 operation-scoped
 flash/runtime coordinator implemented; isolated powered journal clean-path/
-software-reset HIL passed on board E9:44; the 27-test E290 host suite qualifies
+software-reset HIL passed on board E9:44; the 37-test E290 host suite qualifies
 the one-entry complete LoRa-first software composition and ADR 0005 active-owner
 fail-stop. Portable API framing, immutable credential authority, the USB-
 qualification session core, and the boot-lifetime job handoff are qualified;
 semantic schema 2 now durably binds exact authorization provenance to every
-acceptance. Live external admission remains blocked by credential persistence/
-pairing, firmware composition, and a bearer.
+acceptance. E290 now validates, boot-mounts, deterministically recovers, and
+retains the credential store without auto-provisioning. Live external admission
+remains blocked by explicit credential initialization/pairing, external API/
+session firmware composition, and a bearer.
 Controlled power-cut durability, projector
 retirement, journal retention, endurance/soak, and at-rest encryption remain
 unqualified.
@@ -85,8 +87,8 @@ flowchart LR
     Handoff --> API["portable authenticated API adapter (implemented)"]
     Authority["immutable credential authority (implemented)"] --> Session
     Authority --> API
-    CredentialStore["credential store/pairing contract selected in ADR 0009; not composed"] --> Authority
-    API -. "firmware composition absent" .-> Runtime["resident portable submission runtime"]
+    CredentialStore["credential store boot-mounted/recovered and retained; no provisioning/pairing"] --> Authority
+    API -. "external API/session firmware lane absent" .-> Runtime["resident portable submission runtime"]
     Coordinator["E290 sole-flash coordinator (resident)"] <--> Runtime
     Runtime <--> Store["portable sole storage actor (implemented)"]
     Coordinator --> Journal["operation-scoped schema-2 bound journal"]
@@ -126,7 +128,8 @@ per outer loop. The concrete LoRa dispatcher remains a separate actor.
 
 The current E290 profile permits one accepted-history entry solely for host
 composition qualification; that is not product capacity, and no credential-
-backed external API firmware lane or bearer is composed. Journal strict-mount,
+backed external API/session firmware lane or bearer is composed. Credential
+boot is an earlier, independent coordinator step. Journal strict-mount,
 supported-history, or recovery failure during
 boot therefore occurs before a durability-gated DATA owner can exist; it leaves
 the coordinator resident without a submission runtime, keeps local durable
@@ -308,8 +311,8 @@ The projector cross-checks the preparation and authorized-byte digests and
 lengths; repeated fan-out observations are idempotent only when all durable
 packet metadata is identical. The E290 composition implements this ownership
 path under a host-qualified one-entry cap. Production remains externally
-unreachable because ADR 0009 credential-store composition, pairing
-implementation, a firmware lane, and a bearer do not yet surround the portable
+unreachable because ADR 0009 initialization/pairing implementation, an external
+API/session firmware lane, and a bearer do not yet surround the portable
 authority/session core.
 
 Terminal outcomes map as follows:
@@ -506,7 +509,7 @@ LXMF/NomadNet/UI services without redefining the durable protocol.
    the wrong-binding post-frame `ActiveOwnerFailStopped` path with queued
    ordinary work and no later host-radio operation. The one-entry cap is a
    qualified composition profile, not product capacity.
-4. Add persistent credential provisioning/pairing, then compose the implemented
+4. Add explicit credential initialization/provisioning/pairing, then compose the implemented
    authority, framing, qualification-
    session core, and boot-lifetime job handoff between the authenticated device-
    API adapter and runtime with a firmware USB bearer. Those are the missing

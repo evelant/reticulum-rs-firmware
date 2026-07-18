@@ -45,7 +45,7 @@ use esp_hal::{
     timer::timg::TimerGroup,
 };
 use esp_storage::FlashStorage;
-use log::{error, info};
+use log::{error, info, warn};
 use rand_core::RngCore;
 use reticulum_board_heltec_vision_master_e290_radio::{
     E290_NA915_DEV_CONFIGURATION, E290_NA915_DEV_CONFIGURATION_FINGERPRINT, E290_NA915_DEV_PROFILE,
@@ -54,6 +54,7 @@ use reticulum_board_heltec_vision_master_e290_radio::{
 use reticulum_device_identity_store::IdentityMirrorCoverage;
 use reticulum_heltec_vision_master_e290_node::{
     config,
+    credential_boot::CredentialBootState,
     durability_boot::{
         BUILD_JOURNAL_REPROVISION_POLICY, JournalReprovisionPolicy, announce_clock_policy,
         journal_boot_policy,
@@ -73,7 +74,7 @@ use reticulum_tx_supervisor::{
 };
 use static_cell::StaticCell;
 
-use crate::platform_storage::{ProductFlashOwner, ProductStorageCoordinator};
+use crate::platform_storage::{BootCredentialStore, ProductFlashOwner, ProductStorageCoordinator};
 
 #[cfg(debug_assertions)]
 compile_error!("the permanent E290 node must be built with --release");
@@ -277,8 +278,10 @@ async fn main(spawner: Spawner) -> ! {
         }
     };
     info!(
-        "e290-node stage=flash-owner status=PASS partition_contract=validated api_credentials=0x614000..0x616000 credential_store=unwired credential_media=plaintext"
+        "e290-node stage=flash-owner status=PASS partition_contract=validated api_credentials=0x614000..0x616000 credential_store=bound credential_media=plaintext"
     );
+    let credential_boot = flash_owner.boot_credentials();
+    log_credential_boot(&credential_boot);
     let identity_preflight = match flash_owner.inspect_identity() {
         Ok(preflight) => preflight,
         Err(reason) => {
@@ -405,8 +408,14 @@ async fn main(spawner: Spawner) -> ! {
             None
         }
     };
-    let storage_coordinator = flash_owner.into_storage_coordinator(submission_runtime);
+    let storage_coordinator =
+        flash_owner.into_storage_coordinator(submission_runtime, credential_boot);
     let storage_service_available = storage_coordinator.submission_service_available();
+    let credential_boot_state = storage_coordinator.credential_boot_state();
+    let credential_binding = storage_coordinator.credential_binding();
+    let credential_revision = storage_coordinator.credential_revision();
+    let credential_authority_publishable = storage_coordinator.credential_authority_publishable();
+    let credential_mutation_eligible = storage_coordinator.credential_mutation_eligible();
     let storage_coordinator = STORAGE_COORDINATOR.init(storage_coordinator);
 
     let node_rng = bootstrap_rng.clone();
@@ -628,12 +637,48 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(radio_task);
     spawner.spawn(node_task);
     info!(
-        "e290-node stage=composition status=PASS tasks=2 interfaces=1 primary_transport=lora future_transport_actors=deferred node_journal=mounted resident_storage_available={storage_service_available} durable_runtime_bytes={} admission=deferred runtime_patch={} flash_assumption_bytes=16777216",
+        "e290-node stage=composition status=PASS tasks=2 interfaces=1 primary_transport=lora future_transport_actors=deferred node_journal=mounted resident_storage_available={storage_service_available} credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} external_local_api=closed local_api_bearer=absent local_api_session=absent credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} admission=deferred runtime_patch={} flash_assumption_bytes=16777216",
+        credential_binding.absolute_offset(),
+        credential_binding.length(),
         config::DURABLE_RUNTIME_BYTES,
         env!("RETICULUM_ESP_RTOS_MAIN_STACK_PATCH"),
     );
 
     pending().await
+}
+
+fn log_credential_boot(report: &BootCredentialStore) {
+    let state = report.state();
+    let binding = report.binding();
+    let revision = report.revision();
+    let recovery = report.recovery();
+    let steps = report.completed_recovery_steps();
+    let writes = report.raw_write_calls();
+    let erases = report.raw_erase_calls();
+    match state {
+        CredentialBootState::Ready => info!(
+            "e290-node stage=credential-store status=READY state={state:?} revision={revision:?} recovery={recovery:?} recovery_steps={steps} writes={writes} erases={erases} binding_offset=0x{:x} binding_len=0x{:x} authority_publishable=true credential_mutation_eligible=true external_local_api=closed local_api_bearer=absent local_api_session=absent lora_routing=continue submission_policy=unchanged",
+            binding.absolute_offset(),
+            binding.length(),
+        ),
+        CredentialBootState::AuthenticationOnly { .. } => warn!(
+            "e290-node stage=credential-store status=AUTHENTICATION-ONLY state={state:?} revision={revision:?} recovery={recovery:?} recovery_steps={steps} writes={writes} erases={erases} binding_offset=0x{:x} binding_len=0x{:x} authority_publishable=true credential_mutation_eligible=false external_local_api=closed local_api_bearer=absent local_api_session=absent lora_routing=continue submission_policy=unchanged",
+            binding.absolute_offset(),
+            binding.length(),
+        ),
+        CredentialBootState::UninitializedErased => info!(
+            "e290-node stage=credential-store status=UNINITIALIZED-ERASED state={state:?} revision=none recovery=none recovery_steps={steps} writes={writes} erases={erases} binding_offset=0x{:x} binding_len=0x{:x} authority_publishable=false credential_mutation_eligible=false external_local_api=closed explicit_initialization_required=true automatic_provision=false lora_routing=continue submission_policy=unchanged",
+            binding.absolute_offset(),
+            binding.length(),
+        ),
+        CredentialBootState::Blocked { .. }
+        | CredentialBootState::Corrupt { .. }
+        | CredentialBootState::Backend { .. } => error!(
+            "e290-node stage=credential-store status=DISABLED state={state:?} revision={revision:?} recovery={recovery:?} recovery_steps={steps} writes={writes} erases={erases} binding_offset=0x{:x} binding_len=0x{:x} authority_publishable=false credential_mutation_eligible=false external_local_api=closed lora_routing=continue submission_policy=unchanged",
+            binding.absolute_offset(),
+            binding.length(),
+        ),
+    }
 }
 
 fn monotonic_us() -> u64 {

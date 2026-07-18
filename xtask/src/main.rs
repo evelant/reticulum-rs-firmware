@@ -562,7 +562,7 @@ fn graph_policy() -> ExitCode {
         validate_e290_radio_dependency_boundary(&json, &root)
             .map_err(|error| format!("E290 radio dependency boundary: {error}"))?;
         validate_e290_node_feature_boundary(&json, &root)
-            .map_err(|error| format!("permanent E290 node feature boundary: {error}"))?;
+            .map_err(|error| format!("permanent E290 node composition boundary: {error}"))?;
         validate_radio_tx_dispatch_dependency_boundary(&json, &root)
             .map_err(|error| format!("real radio TX dispatcher dependency boundary: {error}"))?;
         validate_radio_tx_dispatch_resolved_closure(&json, &radio_tx_dispatch_closure, &root)
@@ -606,7 +606,7 @@ fn graph_policy() -> ExitCode {
              authenticated session layer has only its exact reviewed cryptographic, device-API, credentials, framing and handoff normal edges plus its exact test-only hex, semantic-adapter and storage-model fixtures; \
              the Rete integration and node-core normal closures contain no RNode, radio-interface, LoRa or board package; \
              the shared lora-phy owner and E290 radio wrapper have only their exact reviewed HAL, framing, board and test edges; \
-             the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the permanent E290 node reaches the LoRa-first node/router/dispatcher graph, exact portable identity, announce-clock, NOR-region and durable-submission layers, and the target-safe experimental device-API semantic port while excluding deferred API bearers, onboard clients and foreign Tracker/HIL packages; \
+             the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the permanent E290 node reaches the LoRa-first node/router/dispatcher graph, exact portable identity, credential-store authority, announce-clock, NOR-region and durable-submission layers, and the target-safe experimental device-API semantic port while excluding deferred API bearers, onboard clients and foreign Tracker/HIL packages; \
              the interface router has only its reviewed node-core and Embassy Sync normal edges plus test-only rand_core and RNS fixture edges; \
              the TX handoff, RF-inert dispatcher and supervisor use only their reviewed node-core, \
              interface-router ingress, handoff, dispatcher, Embassy Sync/Futures/Time, rand_core \
@@ -974,7 +974,7 @@ fn validate_e290_semantic_hil_graph_boundary(tree: &str) -> Result<(), String> {
     Ok(())
 }
 
-const E290_NODE_GRAPH_REQUIRED: [&str; 27] = [
+const E290_NODE_GRAPH_REQUIRED: [&str; 29] = [
     "embedded-storage",
     "esp-storage",
     "reticulum-announce-clock",
@@ -982,6 +982,8 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 27] = [
     "reticulum-board-heltec-vision-master-e290-radio",
     "reticulum-device-api",
     "reticulum-device-api-adapter",
+    "reticulum-device-api-credential-store",
+    "reticulum-device-api-credentials",
     "reticulum-device-identity-store",
     "reticulum-interface-router",
     "reticulum-node-core",
@@ -1004,7 +1006,7 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 27] = [
     "static_cell",
 ];
 
-const E290_NODE_GRAPH_FORBIDDEN: [&str; 16] = [
+const E290_NODE_GRAPH_FORBIDDEN: [&str; 14] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -1012,8 +1014,6 @@ const E290_NODE_GRAPH_FORBIDDEN: [&str; 16] = [
     "reticulum-heltec-tracker-v2",
     "reticulum-heltec-vision-master-e290-qualification",
     "reticulum-heltec-vision-master-e290-semantic-hil",
-    "reticulum-device-api-credential-store",
-    "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
     "reticulum-device-api-handoff",
     "reticulum-device-api-session",
@@ -1059,6 +1059,20 @@ fn validate_e290_node_graph_boundary(tree: &str) -> Result<(), String> {
             ));
         }
     }
+    for package in [
+        "reticulum-device-api-credential-store ",
+        "reticulum-device-api-credentials ",
+    ] {
+        let line = tree
+            .lines()
+            .find(|line| line.contains(package))
+            .ok_or_else(|| format!("permanent E290 node graph has no {package}line"))?;
+        if !line.ends_with("features=[]") {
+            return Err(format!(
+                "permanent E290 node must not enable credential features on {package}, observed {line}"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1090,6 +1104,16 @@ fn validate_e290_node_feature_boundary(
             "{package_name} must expose only an empty default and an empty opt-in journal-schema2-dev-reprovision feature"
         ));
     }
+    let dependencies = package["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{package_name} package has no dependency array"))?;
+    validate_exact_local_dependency(
+        dependencies,
+        package_name,
+        "reticulum-device-api-credential-store",
+        &workspace.join("crates/device-api-credential-store"),
+        false,
+    )?;
     Ok(())
 }
 
@@ -6820,6 +6844,28 @@ mod tests {
         assert!(validate_e290_semantic_hil_graph_boundary(&wrong_policy_feature).is_err());
     }
 
+    fn e290_node_metadata_fixture(root: &Path) -> serde_json::Value {
+        serde_json::json!({
+            "packages": [{
+                "name": "reticulum-heltec-vision-master-e290-node",
+                "source": null,
+                "manifest_path": root.join("firmware/heltec-vision-master-e290-node/Cargo.toml"),
+                "features": {
+                    "default": [],
+                    "journal-schema2-dev-reprovision": []
+                },
+                "dependencies": [
+                    handoff_path_dependency_fixture(
+                        "reticulum-device-api-credential-store",
+                        "*",
+                        &root.join("crates/device-api-credential-store"),
+                        None,
+                    )
+                ]
+            }]
+        })
+    }
+
     #[test]
     fn permanent_e290_node_graph_is_lora_first_with_transport_neutral_durability() {
         let valid = "reticulum-heltec-vision-master-e290-node v0.1.0 features=[default]\n\
@@ -6831,6 +6877,8 @@ mod tests {
                      │   └── reticulum-radio-lora-phy v0.1.0 features=[]\n\
                      ├── reticulum-device-api v0.1.0 features=[experimental-rns-data]\n\
                      ├── reticulum-device-api-adapter v0.1.0 features=[experimental-rns-data]\n\
+                     ├── reticulum-device-api-credential-store v0.1.0 features=[]\n\
+                     │   └── reticulum-device-api-credentials v0.1.0 features=[]\n\
                      ├── reticulum-device-identity-store v0.1.0 features=[]\n\
                      ├── reticulum-interface-router v0.1.0 features=[]\n\
                      ├── reticulum-node-core v0.1.0 features=[]\n\
@@ -6879,23 +6927,24 @@ mod tests {
                 "permanent node accepted missing experimental feature on {package}"
             );
         }
+        for package in [
+            "reticulum-device-api-credential-store",
+            "reticulum-device-api-credentials",
+        ] {
+            let expected = format!("{package} v0.1.0 features=[]");
+            let drifted = format!("{package} v0.1.0 features=[default]");
+            let feature_drift = valid.replacen(&expected, &drifted, 1);
+            assert!(
+                validate_e290_node_graph_boundary(&feature_drift).is_err(),
+                "permanent node accepted credential feature drift on {package}"
+            );
+        }
     }
 
     #[test]
     fn permanent_e290_node_migration_feature_remains_empty_and_opt_in() {
         let root = workspace_root();
-        let manifest = root.join("firmware/heltec-vision-master-e290-node/Cargo.toml");
-        let baseline = serde_json::json!({
-            "packages": [{
-                "name": "reticulum-heltec-vision-master-e290-node",
-                "source": null,
-                "manifest_path": manifest,
-                "features": {
-                    "default": [],
-                    "journal-schema2-dev-reprovision": []
-                }
-            }]
-        });
+        let baseline = e290_node_metadata_fixture(&root);
         validate_e290_node_feature_boundary(&baseline.to_string(), &root).unwrap();
 
         for drifted_features in [
@@ -6917,6 +6966,105 @@ mod tests {
             let mut drifted = baseline.clone();
             drifted["packages"][0]["features"] = drifted_features;
             assert!(validate_e290_node_feature_boundary(&drifted.to_string(), &root).is_err());
+        }
+    }
+
+    #[test]
+    fn permanent_e290_node_requires_exact_direct_credential_store_dependency() {
+        let root = workspace_root();
+        let baseline = e290_node_metadata_fixture(&root);
+        validate_e290_node_feature_boundary(&baseline.to_string(), &root).unwrap();
+
+        let mut missing = baseline.clone();
+        fixture_package_mut(&mut missing, "reticulum-heltec-vision-master-e290-node")["dependencies"] =
+            serde_json::json!([]);
+        assert!(validate_e290_node_feature_boundary(&missing.to_string(), &root).is_err());
+
+        let mut duplicated = baseline.clone();
+        let duplicate = duplicated["packages"][0]["dependencies"][0].clone();
+        duplicated["packages"][0]["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate);
+        assert!(validate_e290_node_feature_boundary(&duplicated.to_string(), &root).is_err());
+
+        for (label, field, value) in [
+            ("version requirement", "req", serde_json::json!("^0.1")),
+            (
+                "registry source",
+                "source",
+                serde_json::json!("registry+https://github.com/rust-lang/crates.io-index"),
+            ),
+            (
+                "local path",
+                "path",
+                serde_json::json!(root.join("crates/not-the-credential-store")),
+            ),
+            ("dependency kind", "kind", serde_json::json!("dev")),
+            ("optional edge", "optional", serde_json::json!(true)),
+            (
+                "renamed edge",
+                "rename",
+                serde_json::json!("credential-store"),
+            ),
+            (
+                "target-specific edge",
+                "target",
+                serde_json::json!("cfg(target_os = \"none\")"),
+            ),
+            (
+                "default features",
+                "uses_default_features",
+                serde_json::json!(true),
+            ),
+            (
+                "explicit feature",
+                "features",
+                serde_json::json!(["default"]),
+            ),
+        ] {
+            let mut drifted = baseline.clone();
+            let package =
+                fixture_package_mut(&mut drifted, "reticulum-heltec-vision-master-e290-node");
+            fixture_dependency_mut(package, "reticulum-device-api-credential-store", None)[field] =
+                value;
+            assert!(
+                validate_e290_node_feature_boundary(&drifted.to_string(), &root).is_err(),
+                "permanent node accepted credential-store {label} drift"
+            );
+        }
+
+        let mut wrong_manifest = baseline.clone();
+        fixture_package_mut(
+            &mut wrong_manifest,
+            "reticulum-heltec-vision-master-e290-node",
+        )["manifest_path"] = serde_json::json!(
+            root.join("firmware/not-the-heltec-vision-master-e290-node/Cargo.toml")
+        );
+        assert!(validate_e290_node_feature_boundary(&wrong_manifest.to_string(), &root).is_err());
+    }
+
+    #[test]
+    fn credential_store_remains_forbidden_from_legacy_product_and_hil_graphs() {
+        for (label, forbidden) in [
+            ("Tracker product", &PRODUCT_GRAPH_FORBIDDEN[..]),
+            ("storage HIL", &STORAGE_HIL_GRAPH_FORBIDDEN[..]),
+            ("Tracker TX HIL", &TX_HIL_GRAPH_FORBIDDEN[..]),
+            (
+                "Tracker semantic TX HIL",
+                &SEMANTIC_TX_HIL_GRAPH_FORBIDDEN[..],
+            ),
+            ("E290 semantic HIL", &E290_SEMANTIC_HIL_GRAPH_FORBIDDEN[..]),
+        ] {
+            for package in [
+                "reticulum-device-api-credential-store",
+                "reticulum-device-api-credentials",
+            ] {
+                assert!(
+                    forbidden.contains(&package),
+                    "{label} no longer forbids {package}"
+                );
+            }
         }
     }
 

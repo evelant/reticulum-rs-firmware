@@ -14,11 +14,17 @@ use reticulum_announce_clock::{
 };
 use reticulum_device_api::CapabilityAvailability;
 use reticulum_device_api_adapter::{SubmissionAcceptance, SubmissionPort, SubmissionPortError};
+use reticulum_device_api_credential_store::{
+    BoundCredentialStore, CredentialStoreBinding, CredentialStoreRecovery, MountedCredentialStore,
+};
 use reticulum_device_identity_store::{
     DurableIdentityMaterial, IdentityBootReport, IdentityPreflight, IdentityStoreError,
     boot_load_or_provision, inspect_identity,
 };
-use reticulum_heltec_vision_master_e290_node::node_journal_binding;
+use reticulum_heltec_vision_master_e290_node::credential_boot::{
+    CredentialBootOutcome, CredentialBootState, MAXIMUM_CREDENTIAL_BOOT_OUTCOME_BYTES,
+    boot_credentials,
+};
 use reticulum_heltec_vision_master_e290_node::partition_contract::{
     ANNOUNCE_CLOCK_LABEL_BYTES, ANNOUNCE_CLOCK_LEN, ANNOUNCE_CLOCK_OFFSET,
     API_CREDENTIALS_LABEL_BYTES, API_CREDENTIALS_LEN, API_CREDENTIALS_OFFSET, DATA_PARTITION_TYPE,
@@ -26,6 +32,7 @@ use reticulum_heltec_vision_master_e290_node::partition_contract::{
     NODE_IDENTITY_LEN, NODE_IDENTITY_OFFSET, NODE_JOURNAL_LABEL_BYTES, NODE_JOURNAL_LEN,
     NODE_JOURNAL_OFFSET, NVS_DATA_SUBTYPE, REQUIRED_FLASH_BYTES, UNDEFINED_DATA_SUBTYPE,
 };
+use reticulum_heltec_vision_master_e290_node::{api_credentials_binding, node_journal_binding};
 use reticulum_node_core::{
     AuthorizedFrameObservation, MonotonicMillis, MonotonicSeconds, TxLeaseDeadline,
 };
@@ -177,10 +184,50 @@ pub(crate) struct BootJournalMountReport {
     pub(crate) raw_erase_calls: u32,
 }
 
+/// Credential admission result plus non-secret physical mutation evidence.
+pub(crate) struct BootCredentialStore {
+    outcome: CredentialBootOutcome,
+    raw_write_calls: u32,
+    raw_erase_calls: u32,
+}
+
+impl BootCredentialStore {
+    pub(crate) const fn state(&self) -> CredentialBootState {
+        self.outcome.state()
+    }
+
+    pub(crate) const fn binding(&self) -> CredentialStoreBinding {
+        self.outcome.binding()
+    }
+
+    pub(crate) fn revision(&self) -> Option<u64> {
+        self.outcome
+            .mounted()
+            .map(|mounted| mounted.revision().get())
+    }
+
+    pub(crate) fn recovery(&self) -> Option<CredentialStoreRecovery> {
+        self.outcome.mounted().map(MountedCredentialStore::recovery)
+    }
+
+    pub(crate) const fn completed_recovery_steps(&self) -> u8 {
+        self.outcome.completed_recovery_steps()
+    }
+
+    pub(crate) const fn raw_write_calls(&self) -> u32 {
+        self.raw_write_calls
+    }
+
+    pub(crate) const fn raw_erase_calls(&self) -> u32 {
+        self.raw_erase_calls
+    }
+}
+
 /// Unique owner of the one `esp-storage` instance in the permanent image.
 pub(crate) struct ProductFlashOwner {
     flash: &'static mut FlashStorage<'static>,
     journal_binding: JournalBinding,
+    credential_binding: CredentialStoreBinding,
 }
 
 /// Resident sole owner of physical flash and durable submission scheduling.
@@ -193,9 +240,20 @@ pub(crate) struct ProductFlashOwner {
 pub(crate) struct ProductStorageCoordinator {
     flash: &'static mut FlashStorage<'static>,
     journal_binding: JournalBinding,
+    credential_binding: CredentialStoreBinding,
+    credential_store: Option<MountedCredentialStore>,
+    credential_boot_state: CredentialBootState,
     runtime: Option<ProductSubmissionRuntime>,
     submission_service_enabled: bool,
 }
+
+const MAXIMUM_PRODUCT_STORAGE_COORDINATOR_CREDENTIAL_OVERHEAD_BYTES: usize =
+    MAXIMUM_CREDENTIAL_BOOT_OUTCOME_BYTES + 512;
+const MAXIMUM_PRODUCT_STORAGE_COORDINATOR_BYTES: usize = config::MAXIMUM_DURABLE_RUNTIME_BYTES
+    + MAXIMUM_PRODUCT_STORAGE_COORDINATOR_CREDENTIAL_OVERHEAD_BYTES;
+const _: () = assert!(
+    mem::size_of::<ProductStorageCoordinator>() <= MAXIMUM_PRODUCT_STORAGE_COORDINATOR_BYTES
+);
 
 impl ProductFlashOwner {
     /// Validate physical capacity, security state, and every directly adjacent
@@ -218,7 +276,30 @@ impl ProductFlashOwner {
         Ok(Self {
             flash,
             journal_binding: node_journal_binding(storage_device_id),
+            credential_binding: api_credentials_binding(storage_device_id),
         })
+    }
+
+    /// Mount and perform only explicitly reported credential recovery steps.
+    ///
+    /// This operation never initializes erased media and always returns a
+    /// local-API admission classification so unrelated stores and LoRa startup
+    /// can continue after credential-media failure.
+    #[inline(never)]
+    pub(crate) fn boot_credentials(&mut self) -> BootCredentialStore {
+        let region = PartitionNorFlash::new(
+            &mut *self.flash,
+            API_CREDENTIALS_OFFSET,
+            API_CREDENTIALS_LEN,
+        );
+        let mut access = BoundCredentialStore::new(region, self.credential_binding);
+        let outcome = boot_credentials(&mut access);
+        let region = access.into_backend();
+        BootCredentialStore {
+            outcome,
+            raw_write_calls: region.write_calls(),
+            raw_erase_calls: region.erase_calls(),
+        }
     }
 
     /// Classify identity media without mutation so the clock can be reserved
@@ -375,11 +456,18 @@ impl ProductFlashOwner {
     pub(crate) fn into_storage_coordinator(
         self,
         runtime: Option<ProductSubmissionRuntime>,
+        credentials: BootCredentialStore,
     ) -> ProductStorageCoordinator {
+        let (credential_boot_state, credential_store) = credentials
+            .outcome
+            .into_parts_for_binding(self.credential_binding);
         let submission_service_enabled = runtime.is_some();
         ProductStorageCoordinator {
             flash: self.flash,
             journal_binding: self.journal_binding,
+            credential_binding: self.credential_binding,
+            credential_store,
+            credential_boot_state,
             runtime,
             submission_service_enabled,
         }
@@ -405,6 +493,42 @@ fn node_journal_is_erased(
 }
 
 impl ProductStorageCoordinator {
+    /// Credential boot admission retained by the sole flash coordinator.
+    pub(crate) const fn credential_boot_state(&self) -> CredentialBootState {
+        self.credential_boot_state
+    }
+
+    /// Exact credential partition binding retained for later API operations.
+    pub(crate) const fn credential_binding(&self) -> CredentialStoreBinding {
+        self.credential_binding
+    }
+
+    /// Non-secret mounted authority revision, when media mounted successfully.
+    pub(crate) fn credential_revision(&self) -> Option<u64> {
+        self.credential_store
+            .as_ref()
+            .map(|mounted| mounted.revision().get())
+    }
+
+    /// Whether the retained authority may authenticate existing credentials.
+    pub(crate) fn credential_authority_publishable(&self) -> bool {
+        self.credential_boot_state.authority_publishable()
+            && self
+                .credential_store
+                .as_ref()
+                .and_then(MountedCredentialStore::publishable_authority)
+                .is_some()
+    }
+
+    /// Whether the retained authority is clean enough for a future mutation.
+    pub(crate) fn credential_mutation_eligible(&self) -> bool {
+        self.credential_boot_state.mutation_eligible()
+            && self
+                .credential_store
+                .as_ref()
+                .is_some_and(|mounted| mounted.recovery() == CredentialStoreRecovery::Clean)
+    }
+
     /// Whether the durable local submission runtime mounted successfully.
     pub(crate) const fn submission_service_available(&self) -> bool {
         self.submission_service_enabled && self.runtime.is_some()

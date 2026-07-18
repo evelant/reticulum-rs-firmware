@@ -18,6 +18,7 @@ reticulum-announce-clock = { path = "../../crates/announce-clock", default-featu
 reticulum-board-heltec-vision-master-e290-radio = { path = "../../crates/board-heltec-vision-master-e290-radio" }
 reticulum-device-api = { path = "../../crates/device-api", default-features = false, features = ["experimental-rns-data"] }
 reticulum-device-api-adapter = { path = "../../crates/device-api-adapter", default-features = false, features = ["experimental-rns-data"] }
+reticulum-device-api-credential-store = { path = "../../crates/device-api-credential-store", default-features = false }
 reticulum-device-identity-store = { path = "../../crates/device-identity-store", default-features = false }
 reticulum-interface-router = { path = "../../crates/interface-router", default-features = false }
 reticulum-node-core = { path = "../../crates/node-core", default-features = false }
@@ -75,6 +76,7 @@ embassy-sync.workspace = true
 embedded-storage.workspace = true
 rand_core.workspace = true
 reticulum-tx-handoff = { path = "../../crates/tx-handoff", default-features = false }
+sha2.workspace = true
 
 [lib]
 path = "src/lib.rs"

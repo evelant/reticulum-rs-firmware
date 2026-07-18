@@ -1824,6 +1824,7 @@ dependencies = [
  "reticulum-board-heltec-vision-master-e290-radio",
  "reticulum-device-api",
  "reticulum-device-api-adapter",
+ "reticulum-device-api-credential-store",
  "reticulum-device-identity-store",
  "reticulum-interface-router",
  "reticulum-node-core",
@@ -1837,6 +1838,7 @@ dependencies = [
  "reticulum-submission-runtime",
  "reticulum-tx-handoff",
  "reticulum-tx-supervisor",
+ "sha2",
  "static_cell",
 ]
 

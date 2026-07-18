@@ -221,10 +221,16 @@ While that independent identity preflight remains vacant, the product can also
 resume only the canonical empty first `node_journal` format without erasing;
 committed identities skip provisioning and use strict journal mount only.
 The same boot guard now requires the exact plaintext `api_credentials`
-partition at `0x614000..0x616000`. The portable credential store is
-implemented, but the product flash owner does not mount it yet. These developer
-partitions are deliberately plaintext, so a provisioned
-full flash dump is secret material.
+partition at `0x614000..0x616000`. Immediately after the sole flash owner opens,
+the product mounts that portable credential store through an exact binding
+derived from the same eFuse-MAC device ID, before identity preflight, journal
+provisioning, announce-clock reservation, identity load/provision, or journal
+mount. Boot never provisions erased credential media: it performs at most one
+reported predecessor retirement followed by at most one inactive-sector
+cleanup, classifies the result as `Ready`, authentication-only,
+uninitialized-erased, blocked, corrupt, or backend-failed, and transfers any
+mounted owner into `ProductStorageCoordinator`. These developer partitions are
+deliberately plaintext, so a provisioned full flash dump is secret material.
 
 This first permanent composition is not yet the full product node. The portable
 `reticulum-storage-model` defines strict canonical submission records,
@@ -314,9 +320,10 @@ permission mask with every accepted submission; the redundant serialized and
 in-RAM content digest is derived from the immutable intent, so the unchanged
 383-byte request still fits the 512-byte journal body. The canonical authority
 image, dedicated credential-partition contract, two-sector commit/retire
-format, and initial bounded developer/HIL pairing policy are now selected, but
-the portable store and pairing manager are not composed in firmware. No firmware job
-lane or USB/BLE/Wi-Fi bearer invokes the adapter yet. The accepted
+format, and initial bounded developer/HIL pairing policy are now selected. The
+portable store is boot-mounted/recovered and retained by the firmware
+coordinator, but no provisioning/pairing manager, firmware API/session job lane,
+or USB/BLE/Wi-Fi bearer invokes the adapter yet. The accepted
 authentication, authority, provenance, and USB ownership contracts are
 recorded in [ADR 0006](docs/adr/0006-authenticated-local-api-bearer.md) and
 [ADR 0007](docs/adr/0007-device-api-credential-authority.md), with the durable
@@ -327,8 +334,9 @@ store/pairing decision in
 experimental host tests/clippy plus the corresponding ESP32-S3 Xtensa checks
 pass.
 
-The E290 library now has 27 passing host tests: 25 focused policy/product tests
-plus two real cross-layer composition tests. The happy path rejects
+The E290 library now has 37 passing host tests: 35 focused
+policy/product/credential-boot tests, including a mechanical source-order
+regression, plus two real cross-layer composition tests. The happy path rejects
 unauthenticated and unauthorized requests without a NOR write, durably accepts
 exactly one request and rejects a second novel request at the qualification cap,
 commits `Preparing` before touching the real `NodeInterfaceSupervisor`, then
@@ -417,11 +425,12 @@ The DATA router, both permit-only services and permanent aggregate are now
 connected to the dispatcher, sole-Rete owner, timed RNode RX and one E290 LoRa
 actor in the first permanent build-verified target. Its exact authorized-frame
 durability handoff and ADR 0005 active-owner fail-stop now pass cross-layer host
-composition tests. Live external admission is blocked by credential-store
-integration, pairing implementation, firmware composition, and bearer—not by another
+composition tests. Live external admission is blocked by explicit credential
+initialization/provisioning, pairing implementation, the external API/session
+firmware lane, and a bearer—not by credential-store boot composition or another
 semantic authority, session-crypto, durability-policy, partition, or cap
-decision. The next software slice composes ADR 0009's recoverable credential
-store and implements the bounded physical-presence pairing manager, followed by that credential-backed USB-to-LoRa edge
+decision. The next software slice implements ADR 0009's bounded
+physical-presence initialization/pairing manager, followed by that credential-backed USB-to-LoRa edge
 and durable configuration/message hosting and client delivery.
 The node-side routing
 boundary remains interface-neutral so additional Reticulum links can be added

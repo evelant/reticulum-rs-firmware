@@ -1,7 +1,7 @@
 # Permanent Vision Master E290 node image
 
 **Status:** the first permanent, LoRa-first image is implemented and passes its
-27-test cross-layer host composition suite, portable-target, ESP32-S3 build,
+37-test cross-layer host composition suite, portable-target, ESP32-S3 build,
 review, and merged-image packaging gates. It has not been flashed; the physical
 modules on both connected boards are now confirmed `HT-RA62-HF`, and a
 separate semantic image passed its powered functional HIL. This permanent image
@@ -26,9 +26,11 @@ commitment. Portable API framing, immutable credential authority, the
 qualification-session core, and the boot-lifetime job handoff are qualified;
 semantic schema 2 persists exact authorization provenance. The dedicated
 credential-partition contract, portable store, and initial developer/HIL
-pairing policy are selected in ADR 0009. The store is not wired and the pairing
-manager is not implemented. Live external admission is blocked by that
-integration, firmware composition, and a bearer. ADR 0005's
+pairing policy are selected in ADR 0009. The store is now boot-mounted,
+deterministically recovered, and retained by the resident coordinator; the
+pairing manager is not implemented. Live external admission is blocked by
+explicit initialization/provisioning, pairing, the external API/session lane,
+and a bearer. ADR 0005's
 active-owner policy is implemented:
 a permanent fault
 with an unresolved frame enters interface-local `ActiveOwnerFailStopped`, takes
@@ -48,6 +50,7 @@ transport-neutral node task
     bounded ingress, completion, tick and announce lanes
   ProductStorageCoordinator
     resident sole flash backend
+    retained MountedCredentialStore + boot admission state
     SubmissionRuntime + operation-scoped BoundJournal views
     exact authorized-frame retain/re-offer + durable echo
              |
@@ -163,7 +166,7 @@ The target requires a 16 MiB flash image/header and uses
 | Factory app | `0x010000` | 6 MiB | Permanent node ELF |
 | Node identity | `0x610000` | 8 KiB | Wired, mirrored plaintext private identity |
 | Announce clock | `0x612000` | 8 KiB | Wired, mirrored boot-epoch append logs |
-| API credentials | `0x614000` | 8 KiB | Checked dedicated range; selected plaintext two-sector store is not wired |
+| API credentials | `0x614000` | 8 KiB | Wired boot mount/recovery; exact eFuse-derived binding; retained plaintext two-sector store; no automatic provisioning |
 | Device config | `0x616000` | 104 KiB | Reserved, not wired |
 | Node journal | `0x630000` | 1 MiB | Resident operation-scoped submission runtime; one-entry qualification cap, no external admission lane |
 | Message store | `0x730000` | 2 MiB | Reserved, not wired |
@@ -173,15 +176,36 @@ The workspace runner in `.cargo/config.toml` hardcodes an 8 MiB flash size and
 must not be used for this target.
 
 `node_identity`, `announce_clock`, and `api_credentials` use ESP-IDF's standard
-`data,undefined` subtype. The first two have implemented application-owned
-formats; the credential range is checked but remains unwired while ADR 0009's
-two-sector plaintext developer/HIL store is implemented. `device_config`
+`data,undefined` subtype. All three have application-owned formats; the
+credential range is checked, boot-mounted/recovered, and retained while ADR
+0009 provisioning/pairing remains absent. `device_config`
 retains the standard NVS subtype while it is unwired; the application-owned
 journal and unwired message store retain `data,undefined`. Their labels and
 ranges remain distinct. Numeric custom subtypes are only valid with custom
 partition types in the image tooling and are not used here.
 
 ### Durable identity, journal and announce ordering
+
+After partition validation, `ProductFlashOwner` derives the credential binding
+from the exact same eFuse-based physical-device ID used for the journal and
+mounts/recovers `api_credentials` immediately after flash open. A mechanical
+host regression requires that call to precede identity preflight, journal
+provisioning, announce-clock reservation, identity load/provision, and journal
+mount, so credential recovery is complete before any other product-store write.
+Mount is read-only and never auto-provisions erased media. Boot attempts at most
+one reported `RetirePredecessor` operation and then at most one
+`CleanupInactive` operation, retaining any mounted owner in
+`ProductStorageCoordinator`.
+
+The six product admission classes are `Ready`; `AuthOnly` (the Rust
+`AuthenticationOnly` variant, logged as `AUTHENTICATION-ONLY`, with existing
+authority publishable but mutation disabled); `Uninitialized` (the
+`UninitializedErased` variant); `Blocked`; `Corrupt`; and `Backend`.
+Deterministic boot
+retirement/cleanup failure quarantines only credential admission or mutation:
+the owner and failure state remain resident, while journal policy and route-only
+LoRa startup continue unchanged. No state starts a session, bearer, external
+API, pairing flow, or live authentication in this image.
 
 `node_identity` is exactly two 4 KiB erase sectors. Each sector contains one
 256-byte record with a fixed claim, versioned header, the exact 64-byte
@@ -309,8 +333,9 @@ cargo +esp clippy --locked --release \
 
 The build script rejects an unreviewed `esp-rtos` main-stack implementation and
 links `linkall.x`. Debug Xtensa builds are compile-time rejected.
-The host library suite has 27 passing tests: 25 focused policy/product tests and
-two real cross-layer composition tests. The happy path proves unauthenticated
+The host library suite has 37 passing tests: 35 focused
+policy/product/credential-boot tests, including the source-order regression,
+and two real cross-layer composition tests. The happy path proves unauthenticated
 and permission-denied requests cause zero NOR writes, exactly one authenticated
 acceptance succeeds, and a second novel request reaches capacity without a
 write. It then proves the durable `Preparing` barrier precedes node ownership,
@@ -321,15 +346,30 @@ foreign-principal `NotFound`, and remount of the durable final state complete th
 path. The fault test injects a permanent wrong-binding error after frame
 exposure with an ordinary announce queued behind it; the result is
 `ActiveOwnerFailStopped`, no acknowledgement or completion, every owner retained,
-and no later host-radio TX or RX. The remaining 23 tests include the exact
+and no later host-radio TX or RX. The 35 focused tests include the exact
 one-submission profile assertion and five focused durability-policy tests for
 retry, route-only degradation, pending durable acknowledgement, sticky fail-stop,
 and the request-after-disable race.
-The current durable-node release baseline is 629,335 bytes text, 11,176 bytes
-initialized data, and 461,652 bytes BSS/reservations by GNU size; the packaged
-application is 640,624 of 6,291,456 bytes (10.18% of the factory slot). The
-unpadded merged image is 706,160 bytes with SHA-256
-`f63a31b22098e41a7653040a85049c8ae9c5539a350addd36a6fe4c8a1a806c9`. CI
+
+Separate ESP release builds with `-Z emit-stack-sizes` produced 1,025 fully
+symbolized records and identical complete frame-size multisets for the default
+and journal-migration-permitted variants. The largest frames are
+`NodeCore::new` at 52,752 bytes, the Embassy main poll closure at 42,960 bytes,
+`ProductFlashOwner::boot_credentials` at 27,488 bytes, and
+`NodeInterfaceSupervisor::try_new` at 21,440 bytes. Disassembly establishes a
+direct main-frame call to `NodeCore::new`, so that path has a 95,712-byte static
+lower bound before deeper callees and interrupt context. The linked CPU0 stack
+reservation is 176,268 bytes in the default image and 176,276 bytes in the
+migration-permitted image. These compiler records are not runtime high-water
+evidence, and the 52,752-byte maximum exceeds the Tracker-only 48 KiB frame
+ceiling; an E290-specific static gate plus powered stack instrumentation remain
+required.
+
+The current credential-store-composed release baseline is 652,499 bytes text,
+11,360 bytes initialized data, and 461,468 bytes BSS/reservations by GNU size;
+the packaged application is 663,968 of 6,291,456 bytes (10.55% of the factory
+slot). The unpadded merged image is 729,504 bytes with SHA-256
+`3b6c07d6c23265b5655901d0b9c62ce1dfafe92251372ef9f51aa11132371e5d`. CI
 retains explicit growth headroom rather than treating this early image as the
 full appliance ceiling.
 
@@ -524,8 +564,8 @@ as the bounded qualification fixture for the deterministic DATA/proof exchange.
 
 ## Product blockers after this slice
 
-- Compose ADR 0009's implemented credential store and implement the bounded
-  physical-presence pairing manager, then compose the immutable authority, bounded
+- Preserve ADR 0009's boot-mounted credential store and implement the bounded
+  physical-presence initialization/pairing manager, then compose the immutable authority, bounded
   COBS framing,
   qualification-session core, and boot-lifetime job/reply handoff with the
   first USB bearer. Persistent-state composition, firmware composition, and the physical

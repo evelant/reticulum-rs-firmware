@@ -33,8 +33,10 @@ and cross-store ordering easier to express incorrectly.
 
 Permanent E290 composition has one resident storage coordinator containing the
 only `FlashStorage`, the validated partition map, and the optional successfully
-mounted durable submission runtime. It is the ownership point for future
-enabled stores as well. No node, radio, USB, BLE, Wi-Fi, UI, or client task
+mounted durable submission runtime. It also retains the exact credential-store
+binding, credential boot classification, and any successfully mounted
+`MountedCredentialStore`. It is the ownership point for future enabled stores
+as well. No node, radio, USB, BLE, Wi-Fi, UI, or client task
 receives a raw flash owner or a generic read/write/erase capability.
 
 The node supervisor and storage coordinator currently remain in one Embassy
@@ -81,6 +83,17 @@ The coordinator applies these global rules:
 Public coordinator commands are typed product operations. Raw read, program,
 and erase commands are not part of the task protocol.
 
+“Ambiguous” here has a narrow ownership meaning. A same-boot
+`PendingCredentialSuccessor` retained after an uncertain mutation result, or an
+unresolved cross-store intent, blocks every unrelated durable mutation until
+that exact owner is reconciled. A deterministic `RetirePredecessor` or
+`CleanupInactive` state discovered by read-only boot mount is different: boot
+attempts each reported step at most once, retains the mounted owner and failure
+classification, and quarantines later credential admission/mutation for that
+boot if recovery cannot finish. It does not globally block identity, announce-
+clock, journal, or LoRa startup merely because the credential-domain recovery
+attempt failed.
+
 ## Consequences
 
 - The resident coordinator and exact authorized-frame request/durable-echo
@@ -89,9 +102,10 @@ and erase commands are not part of the task protocol.
   software ownership path now passes cross-layer host tests. Portable API
   framing, immutable credential authority, the qualification-session core, and
   job handoff are qualified, and schema 2 persists exact authorization
-  provenance. ADR 0009 selects the credential partition, store, and pairing
-  policy; their coordinator integration, an external firmware lane, and a
-  bearer remain absent.
+  provenance. ADR 0009's credential partition and store are now validated,
+  boot-mounted/recovered immediately after flash open, and retained in this
+  coordinator without automatic provisioning. Pairing, an external API/session
+  firmware lane, and a bearer remain absent.
 - A journal strict-mount, supported-history, or recovery failure during boot
   occurs before any durability-gated DATA owner can exist and disables only
   local durable submission service. The sole flash owner remains resident and
@@ -105,8 +119,8 @@ and erase commands are not part of the task protocol.
   lease offline, and permits no later radio operation in that boot. The E290
   host composition fault test proves this with a wrong binding after frame
   exposure and an ordinary announce queued behind the owner.
-- Live external LoRa DATA now waits for persistent credential state/pairing,
-  firmware composition of the portable
+- Live external LoRa DATA now waits for explicit credential initialization/
+  pairing, firmware composition of the portable
   authority/session edge, and a bearer, not another
   storage ownership, durability-policy, cap, or frame-
   handoff qualification. This is the complete primary LoRa software slice; a
@@ -131,8 +145,9 @@ and ADR 0005 fault behavior are implemented and pass cross-layer host
 composition tests. The next live-storage slice is an external API edge plus
 separate powered qualification.
 
-1. Implement ADR 0009 credential persistence/pairing and compose the implemented
-   authority/framing/session/handoff with the first
+1. Preserve ADR 0009 credential boot ownership, implement explicit
+   initialization/pairing, and compose the implemented authority/framing/
+   session/handoff with the first
    local USB bearer. Preserve zero-write authorization rejection and durable
    acceptance before publishing an ID.
 2. With both physical `HT-RA62-HF` markings now confirmed, qualify E290 first provisioning,
