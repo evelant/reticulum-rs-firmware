@@ -449,7 +449,7 @@ prior hold is cancelled and Low is suppressed until a fresh debounced High.
 Each fresh connection resets both that publication latch and the debouncer to
 Low, so release evidence retained for an older connection epoch cannot arm the
 new epoch; the replacement epoch must observe a complete fresh High debounce.
-The separate host client has 11 focused tests for parsing, default deadlines,
+The separate host client has 12 focused tests for parsing, default deadlines,
 single-open sequence progression, terminal result/exit behavior, ambiguity
 guidance, and sequence exhaustion. These focused counts do not claim that the
 entire workspace suite was rerun.

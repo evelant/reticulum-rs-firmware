@@ -527,7 +527,7 @@ Each fresh connection also resets the publication latch and debouncer to Low,
 so release evidence retained for an older epoch cannot arm the new epoch; the
 replacement epoch must observe a complete fresh High debounce.
 
-The `e290-pairing-control` client has 11 focused tests and keeps one serial port
+The `e290-pairing-control` client has 12 focused tests and keeps one serial port
 open across status, initialization, and polling so its exact-next sequence
 advances within one bus-reset-delimited epoch. It asserts DTR and clears RTS;
 closing/reopening the TTY does not start a new epoch. Status defaults to a
