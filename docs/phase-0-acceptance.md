@@ -332,7 +332,12 @@ admission/mutation; LoRa and the independent journal policy continue. Source
 E290s: exact 729,504-byte same-image readback, 8 MiB PSRAM,
 `UninitializedErased` with zero recovery steps/writes/erases, all-`0xff`
 credential partitions after boot, API/session/bearer closed, journal and
-LoRa/interface ready, and two ordinary one-frame TXs per board. A dedicated
+LoRa/interface ready, and two ordinary one-frame TXs per board. Source
+`5f3f259` then passed an exact 736,144-byte two-board upgrade/readback and
+counted reboot smoke with the resident pairing policy present,
+`Eligible { media: ExactlyErased }` initialization status, continuing ordinary
+LoRa TX, and both credential partitions still entirely `0xff`. No request lane
+invoked initialization. A dedicated
 RF-inert Tracker storage HIL image is target-
 checked and its isolated clean-path/software-reset powered run passed on board
 E9:44 from source `7b47113`, with strict serial and independent raw-partition

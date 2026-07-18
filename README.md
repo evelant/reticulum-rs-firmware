@@ -390,17 +390,20 @@ check confirms generation 2, all five committed records, the revision-4
 `artifacts/storage-hil/20260716T211318Z-e944-7b47113`.
 
 That powered run qualifies only the journal's isolated clean path and software-
-reset replay. The permanent E290 graph now has separate first powered-smoke
-evidence from source `96e38aa`: both erased boards received and exactly read
-back the same 729,504-byte image (SHA-256
-`3b6c07d6c23265b5655901d0b9c62ce1dfafe92251372ef9f51aa11132371e5d`), reported
-8 MiB PSRAM, classified credentials as `UninitializedErased` with zero recovery
-steps/writes/erases, kept the API/session/bearer closed, mounted the journal,
-brought LoRa/interface service ready, and completed two ordinary one-frame TXs
-each. Both post-boot credential partitions remained entirely `0xff`.
-This does not qualify controlled peer RX, DATA, pairing/authentication,
-power-cut recovery, stack high-water, heap pressure, or the full powered owner
-graph. Device-API dispatch is a
+reset replay. The permanent E290 graph has separate powered-smoke evidence.
+Source `96e38aa` first established zero-mutation erased credential boot and
+ordinary LoRa TX. Source `5f3f259` then passed an exact two-board 736,144-byte
+upgrade/readback (SHA-256
+`f422a8003762f9579ee0f4faf8c85cf78961327f7bb2c6db8c8878bc071d389b`), reported
+8 MiB PSRAM, retained the clean identity/journal, and exposed
+`credential_pairing_policy_resident=true` with
+`credential_initialization=Eligible { media: ExactlyErased }`. The API/session/
+bearer remained closed, both LoRa actors continued ordinary TX, and both post-
+boot credential partitions retained the all-`0xff` SHA-256
+`7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f`.
+This does not qualify controlled peer RX, DATA, pairing/authentication, powered
+initialization, power-cut recovery, stack high-water, heap pressure, or the full
+powered owner graph. Device-API dispatch is a
 separate portable integration boundary: the target-safe authenticated adapter,
 COBS framing, immutable credential authority, qualification-session core, boot-
 lifetime job handoff, and E290 `ProductStorageCoordinator` port implementation

@@ -1024,11 +1024,13 @@ request-after-disable race; the two cross-layer E290 tests prove the complete
 happy and permanent-fault compositions described above. The isolated journal
 clean-path/software-reset replay and same-image Rete HIL remain separate powered
 evidence; none of the host results closes the permanent product hardware
-boundary. Source `96e38aa` now adds first powered evidence for the integrated
-image: exact two-board flash/readback, 8 MiB PSRAM, zero-mutation
-`UninitializedErased` credentials, journal/LoRa/interface readiness, and two
-ordinary one-frame TXs per board. It is not controlled peer RX, DATA, pairing,
-power-cut, high-water, or full product-hardware qualification.
+boundary. Source `96e38aa` first added powered evidence for exact two-board
+flash/readback, 8 MiB PSRAM, zero-mutation `UninitializedErased` credentials,
+journal/LoRa/interface readiness, and ordinary TX. Source `5f3f259` extended
+that smoke with exact 736,144-byte upgrade/readback, resident pairing-policy and
+erased-initialization eligibility, continuing LoRa TX, and unchanged all-`0xff`
+credential partitions. It is not powered initialization, controlled peer RX,
+DATA, pairing, power-cut, high-water, or full product-hardware qualification.
 
 ## Core traits and event model
 
@@ -2087,8 +2089,9 @@ gates.
    bearer. Select the real capacity policy beyond the qualified one-entry
    composition profile. Preserve durable acceptance before Rete preparation
    and durable terminal projection before acknowledgement.
-4. Extend the archived source-`96e38aa` permanent-image smoke on both E290s with
-   controlled peer RX and the authenticated local admission edge. Preserve
+4. Extend the source-`5f3f259` resident-runtime smoke on both E290s with powered
+   explicit initialization, controlled peer RX, and the authenticated local
+   admission edge. Preserve
    boot, radio initialization, exact image/credential readbacks, ordinary
    ANNOUNCE TX/RX, contention, reset behavior, encrypted DATA/proof durability,
    and paired serial evidence. The existing smoke is not that qualification.

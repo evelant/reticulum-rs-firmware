@@ -2,11 +2,11 @@
 
 **Status:** the first permanent, LoRa-first image is implemented and passes its
 53-test host composition suite, portable-target, ESP32-S3 build,
-review, and merged-image packaging gates. Source `96e38aa` also passed the first
-bounded powered smoke on both `HT-RA62-HF` boards: exact same-image readback,
-erased credential classification with zero credential mutation, resident
-journal/LoRa/interface startup, and ordinary one-frame TX. Full powered product-
-graph qualification remains open.
+review, and merged-image packaging gates. Source `5f3f259` passed a bounded
+powered upgrade smoke on both `HT-RA62-HF` boards: exact same-image readback,
+resident pairing-policy and erased-initialization eligibility, zero credential
+mutation, journal/LoRa/interface startup, and ordinary one-frame TX. Full
+powered product-graph and initialization qualification remain open.
 
 This target is the first executable product composition, not another HIL
 fixture. It starts a transport-mode Rete node, one E290 LoRa actor, receive and
@@ -414,19 +414,21 @@ evidence, and the 52,752-byte maximum exceeds the Tracker-only 48 KiB frame
 ceiling; an E290-specific static gate plus powered stack instrumentation remain
 required.
 
-The current credential-store-composed release baseline is 652,499 bytes text,
-11,360 bytes initialized data, and 461,468 bytes BSS/reservations by GNU size;
-the packaged application is 663,968 of 6,291,456 bytes (10.55% of the factory
-slot). The unpadded merged image is 729,504 bytes with SHA-256
-`3b6c07d6c23265b5655901d0b9c62ce1dfafe92251372ef9f51aa11132371e5d`. CI
+The current credential-runtime-composed release baseline at source `5f3f259` is
+659,035 bytes text, 11,464 bytes initialized data, and 461,364 bytes BSS/
+reservations by GNU size; the packaged application is 670,608 of 6,291,456 bytes
+(10.66% of the factory slot). The unpadded merged image is 736,144 bytes with
+SHA-256
+`f422a8003762f9579ee0f4faf8c85cf78961327f7bb2c6db8c8878bc071d389b`. CI
 retains explicit growth headroom rather than treating this early image as the
 full appliance ceiling.
 
-## First powered permanent-graph smoke
+## Powered permanent-graph smokes
 
-The smoke was captured from source `96e38aa`. Both fully erased boards received
-the same explicit 16 MiB merged image above, and post-boot reads of its complete
-729,504-byte range matched exactly on both boards.
+The first smoke was captured from source `96e38aa`. Both fully erased boards
+received the same 729,504-byte merged image with SHA-256
+`3b6c07d6c23265b5655901d0b9c62ce1dfafe92251372ef9f51aa11132371e5d`, and
+post-boot reads of that complete range matched exactly on both boards.
 
 Both monitored reboots reported 8,388,608 bytes of initialized PSRAM,
 `UninitializedErased` credentials with `recovery_steps=0`, `writes=0`, and
@@ -437,6 +439,18 @@ board completed two ordinary-family one-frame LoRa transmissions. Exact
 post-boot reads of both 8 KiB credential partitions were entirely `0xff` and
 shared SHA-256
 `7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f`.
+
+Source `5f3f259` then passed a bounded upgrade smoke on 2026-07-18. Both known
+eFuse MACs again reported ESP32-S3 revision 0.2, 16 MiB flash, and disabled
+secure boot/flash encryption immediately before the write. Both exact
+736,144-byte readbacks matched the merged-image SHA-256
+`f422a8003762f9579ee0f4faf8c85cf78961327f7bb2c6db8c8878bc071d389b`. Counted
+monitored reboots retained redundant identity and the clean journal, reported
+8 MiB PSRAM, `credential_pairing_policy_resident=true`, and
+`credential_initialization=Eligible { media: ExactlyErased }` while the local
+API, session, and bearer remained closed. Both LoRa actors reached `READY` and
+transmitted ordinary one-frame work. Post-boot reads of both complete 8 KiB
+credential partitions retained the all-`0xff` SHA-256 above.
 
 This is boot and ordinary-TX smoke evidence, not controlled peer reception or
 DATA delivery. It does not qualify credential initialization, pairing,

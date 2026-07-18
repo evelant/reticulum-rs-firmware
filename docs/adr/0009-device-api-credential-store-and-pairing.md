@@ -430,6 +430,11 @@ but cannot claim security from the developer USB trust shortcut.
   API/session/bearer closed, LoRa continuing, and exact post-boot credential
   partitions still entirely `0xff`. No credential was initialized or
   authenticated.
+- Complete as bounded powered resident-runtime smoke at source `5f3f259`: exact
+  two-board image readback, resident pairing policy, erased-media initialization
+  eligibility, continuing LoRa, and unchanged all-`0xff` credential partitions.
+  No request source invoked initialization, so this is not powered recovery,
+  pairing, or authentication evidence.
 - Complete in the portable pairing-policy slice: 20 unit tests and four
   compile-fail doctests freeze the exact 2,000/60,000 ms boundaries,
   release-to-rearm behavior, strictly
