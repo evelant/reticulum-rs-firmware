@@ -205,12 +205,12 @@ identity preflight, journal provisioning, announce-clock reservation, identity
 load/provision, or journal mount. A mechanical host regression freezes that
 source order.
 
-Boot returns the six product states `Ready`, `AuthOnly` (the Rust
+Boot returns the seven product states `Ready`, `AuthOnly` (the Rust
 `AuthenticationOnly` variant), `Uninitialized` (the `UninitializedErased`
-variant), `Blocked`, `Corrupt`, or `Backend`. Only `Ready` permits a future
-credential mutation; `Ready` and `AuthOnly` may retain a publishable authority,
-but this image has no session or bearer and therefore performs no live
-authentication.
+variant), `InitializationInterrupted`, `Blocked`, `Corrupt`, or `Backend`.
+Only `Ready` permits a future credential mutation; `Ready` and `AuthOnly` may
+retain a publishable authority, but this image has no session or bearer and
+therefore performs no live authentication.
 Every successfully mounted owner, including a blocked or cleanup-failed owner,
 is retained in `ProductStorageCoordinator`. Erased media is never provisioned
 automatically.
@@ -218,12 +218,13 @@ automatically.
 ### Make empty-store initialization explicit and non-pairing
 
 No boot path automatically formats or pairs an empty store. With an existing
-Reticulum identity and both credential sectors exactly erased, local API
-admission remains disabled. The only initial action allowed is an explicit
-erased-only initialization command received on the button-confirmed USB
-connection described below. It rechecks that both sectors are fully erased and
-commits the canonical empty revision-1 authority. Programmed noncanonical
-media is never reformatted by this path.
+Reticulum identity and credential media either exactly erased or on the one
+canonical interrupted empty-provision trajectory, local API admission remains
+disabled. The only initial action allowed is an explicit initialization command
+received on the button-confirmed USB connection described below. Its future
+physical runtime must reclassify the media and either establish or resume the
+canonical empty revision-1 authority. Programmed noncanonical media is never
+reformatted by this path.
 
 The portable store also provides the read-only
 `classify_empty_provision_media` four-way classifier for this boundary:
@@ -231,10 +232,12 @@ The portable store also provides the read-only
 `CommittedEmptyRevision1`, or `NotRecoverable`. The recoverable case is limited
 to an ordered monotonic prefix of the canonical device-bound empty revision-1
 program/digest/commit trajectory with the other sector and all forbidden bytes
-erased. Classification never writes or erases. E290 boot does not yet map this
-result to an explicit interrupted-initialization state, and its resident
-coordinator does not yet retain a same-boot ambiguous initialization permit;
-those are the next composition slice, not automatic boot recovery.
+erased. Classification never writes or erases. E290 boot now invokes it only
+after normal mount reports programmed unformatted media and maps only
+`RecoverableInterrupted` to `InitializationInterrupted`; contradictions and
+ineligible media remain corrupt. The resident coordinator does not yet retain
+a same-boot ambiguous initialization permit or perform recovery; that is the
+next composition slice, not automatic boot recovery.
 
 Initialization creates no credential, offers no secret, and does not
 implicitly start pairing. A client must issue a separate pairing begin while a
@@ -281,7 +284,7 @@ store eligibility. Thus wrong pending ID/generation, missing/existing pending,
 operation-in-flight, mutation-blocked, retained-capacity-exhausted, and next-
 revision-exhausted refusals all spend budget. A request with no connection, the
 wrong connection, no open window, or an expired window does not. Explicit
-erased initialization and pending abort do not spend this budget.
+initialization and pending abort do not spend this budget.
 
 The third classified request is still evaluated: it may be refused or may
 return an admitted operation permit, but it immediately closes the window to
@@ -292,9 +295,11 @@ already accepted operation. A dropped or ambiguous operation permit therefore
 leaves the policy fail closed; it must be retained across the asynchronous
 physical operation and completed only with a definite result.
 
-Initialization admission consumes trusted `identity_ready` and
-`exactly_erased` facts from the sole identity/flash owner and additionally
-requires no durable pending enrollment. Begin admission consumes trusted
+Initialization admission consumes trusted `identity_ready` plus an optional
+`InitializableMedia::{ExactlyErased, RecoverableInterrupted}` classification
+from the sole identity/flash owner and additionally requires no durable pending
+enrollment. Its single-use permit retains the exact admitted classification.
+Begin admission consumes trusted
 `mutation_ready`, retained-capacity-available, and next-revision-available facts
 and requires the pending slot to be empty. These values are policy preconditions,
 not evidence that media is erased, writable, or unchanged: the sole physical
@@ -340,10 +345,10 @@ or discards a pending secret-bearing ID.
 The portable policy does not implement or imply live pairing. The remaining
 boundary includes:
 
-- an E290 boot class that maps only `RecoverableInterrupted` to explicit
-  interrupted initialization, plus a resident same-boot mutation owner that
-  retains the exact policy permit and typed physical successor until definite
-  reconciliation;
+- a resident same-boot mutation owner that retains the exact initialization
+  permit and typed physical successor until definite reconciliation, while
+  accepting only forward progress along the already composed read-only E290
+  boot classification;
 - board debounce/sampling, boot-lifetime USB connection-epoch allocation,
   exclusive bearer arbitration, and exact disconnect classification;
 - entropy, unique-ID/PSK allocation and collision handling; exact pairing wire
@@ -401,26 +406,29 @@ but cannot claim security from the developer USB trust shortcut.
   and ESP32-S3 Xtensa checks.
 - Complete in E290 host/target composition: exact partition and eFuse-derived
   binding, immediate post-open mount/recovery ordering, bounded retire then
-  cleanup, retained `MountedCredentialStore`, no auto-provisioning, and the six
-  boot admission classes. These checks contribute to the 37-test E290 host
+  cleanup, retained `MountedCredentialStore`, no auto-provisioning, and the
+  seven boot admission classes including read-only interrupted initialization.
+  These checks contribute to the 42-test E290 host
   suite; they are not powered integration or live-authentication evidence.
 - Complete as bounded powered erased-media smoke at source `96e38aa`: both
   boards reported `UninitializedErased` with zero recovery steps/writes/erases,
   API/session/bearer closed, LoRa continuing, and exact post-boot credential
   partitions still entirely `0xff`. No credential was initialized or
   authenticated.
-- Complete in the portable pairing-policy slice: focused host tests freeze the
-  exact 2,000/60,000 ms boundaries, release-to-rearm behavior, strictly
+- Complete in the portable pairing-policy slice: 20 unit tests and four
+  compile-fail doctests freeze the exact 2,000/60,000 ms boundaries,
+  release-to-rearm behavior, strictly
   increasing connection epochs, ordinary-session invalidation, trusted
-  initialization facts, counted refused attempts, third-operation draining,
+  exact erased/interrupted initialization facts and permit ownership, counted
+  refused attempts, third-operation draining,
   exact pending begin/proof/activation/abort transitions, operation ownership
   across disconnect, clock regression, overflow faults, and the 256-byte policy-
   owner RAM ceiling. This crate is not composed into firmware or a bearer.
 - Pairing integration tests must still cover real GPIO debounce/sampling,
   exclusive USB ownership, disconnect at every secret/proof/completion boundary,
   proof replay and wrong transcript binding, unique ID/PSK allocation, E290
-  interrupted-initialization boot/runtime composition, retained same-boot
-  ambiguity, and 16-ID exhaustion.
+  interrupted-initialization runtime recovery, retained same-boot ambiguity,
+  and 16-ID exhaustion.
 - Live mutation/bearer composition must keep the ADR 0004 coordinator as the
   only flash and mutable-authority owner, zeroize temporary secrets, preserve LoRa
   scheduling under USB pressure, and prove no API/session service starts from

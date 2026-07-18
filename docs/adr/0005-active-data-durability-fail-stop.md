@@ -123,7 +123,7 @@ ordinary announce behind it, injects a wrong journal binding, and proves
 `ActiveOwnerFailStopped` emits no acknowledgement, retains all owners, takes the
 LoRa lease offline, and permits no later host-radio TX or RX.
 
-The E290 library therefore has 37 passing tests: 35 focused policy/product/
+The E290 library therefore has 42 passing tests: 40 focused policy/product/
 credential-boot tests
 plus those two cross-layer composition tests. This closes software composition
 qualification for the LoRa-first one-entry profile. Portable API framing,

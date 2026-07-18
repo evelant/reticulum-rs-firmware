@@ -671,6 +671,11 @@ fn log_credential_boot(report: &BootCredentialStore) {
             binding.absolute_offset(),
             binding.length(),
         ),
+        CredentialBootState::InitializationInterrupted => warn!(
+            "e290-node stage=credential-store status=INITIALIZATION-INTERRUPTED state={state:?} revision=none recovery=none recovery_steps={steps} writes={writes} erases={erases} binding_offset=0x{:x} binding_len=0x{:x} authority_publishable=false credential_mutation_eligible=false external_local_api=closed explicit_recovery_required=true automatic_recovery=false lora_routing=continue submission_policy=unchanged",
+            binding.absolute_offset(),
+            binding.length(),
+        ),
         CredentialBootState::Blocked { .. }
         | CredentialBootState::Corrupt { .. }
         | CredentialBootState::Backend { .. } => error!(

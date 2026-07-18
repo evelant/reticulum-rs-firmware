@@ -8,8 +8,8 @@
 
 use reticulum_device_api_credential_store::{
     BoundCredentialStoreAccess, CredentialStoreBindingError, CredentialStoreFault,
-    CredentialStoreMountError, CredentialStoreRecovery, MountedCredentialStore, mount,
-    recover_once,
+    CredentialStoreMountError, CredentialStoreRecovery, EmptyProvisionMediaClassification,
+    MountedCredentialStore, classify_empty_provision_media, mount, recover_once,
 };
 
 /// Maximum internal RAM admitted for one boot outcome and retained authority.
@@ -20,6 +20,8 @@ pub const MAXIMUM_CREDENTIAL_BOOT_OUTCOME_BYTES: usize = 2_560;
 pub enum CredentialBootPhase {
     /// Read-only mount and media selection.
     Mount,
+    /// Read-only classification after mount found programmed unformatted media.
+    ClassifyInitialization,
     /// Monotonic predecessor retirement required before publication.
     RetirePredecessor,
     /// Erase-only cleanup of a non-authoritative inactive sector.
@@ -51,6 +53,9 @@ pub enum CredentialBootState {
     /// Both sectors are erased; explicit physical-presence initialization is
     /// required and boot performed no mutation.
     UninitializedErased,
+    /// Media is on the one canonical interrupted empty-initialization
+    /// trajectory. No authority is mounted and boot performed no mutation.
+    InitializationInterrupted,
     /// A mounted authority cannot be published because required retirement
     /// or another ownership-preserving recovery condition remains unresolved.
     Blocked {
@@ -65,8 +70,9 @@ pub enum CredentialBootState {
         /// Stable fail-closed media classification.
         fault: CredentialStoreFault,
     },
-    /// Initial mount could not inspect the backend, so no authority exists in
-    /// RAM and local API admission remains disabled.
+    /// A read-only mount or initialization-classification phase could not
+    /// inspect the backend, so no authority exists in RAM and local API
+    /// admission remains disabled.
     Backend {
         /// Operation that encountered the backend error.
         phase: CredentialBootPhase,
@@ -141,10 +147,12 @@ impl CredentialBootOutcome {
 
 /// Mount credentials and perform only the bounded recovery explicitly named by media.
 ///
-/// Fully erased media is returned as [`CredentialBootState::UninitializedErased`]
-/// without writes or erases. This function intentionally has no provisioning
-/// path. Retirement is attempted before cleanup, and each step is attempted at
-/// most once per call.
+/// Fully erased media is returned as [`CredentialBootState::UninitializedErased`].
+/// Only a canonical interrupted empty-provision trajectory is returned as
+/// [`CredentialBootState::InitializationInterrupted`]. Both paths are
+/// read-only. This function intentionally has no provisioning path. Retirement
+/// is attempted before cleanup, and each step is attempted at most once per
+/// call.
 pub fn boot_credentials<A>(access: &mut A) -> CredentialBootOutcome
 where
     A: BoundCredentialStoreAccess,
@@ -154,6 +162,9 @@ where
         Ok(mounted) => mounted,
         Err(CredentialStoreMountError::Fault(CredentialStoreFault::UnformattedErased)) => {
             return outcome(binding, CredentialBootState::UninitializedErased, None, 0);
+        }
+        Err(CredentialStoreMountError::Fault(CredentialStoreFault::UnformattedNonErased)) => {
+            return classify_unformatted_initialization(binding, access);
         }
         Err(CredentialStoreMountError::Fault(fault)) => {
             return outcome(binding, CredentialBootState::Corrupt { fault }, None, 0);
@@ -205,6 +216,36 @@ where
             }
         },
     }
+}
+
+fn classify_unformatted_initialization<A>(
+    binding: reticulum_device_api_credential_store::CredentialStoreBinding,
+    access: &mut A,
+) -> CredentialBootOutcome
+where
+    A: BoundCredentialStoreAccess,
+{
+    let state = match classify_empty_provision_media(access) {
+        Ok(EmptyProvisionMediaClassification::RecoverableInterrupted) => {
+            CredentialBootState::InitializationInterrupted
+        }
+        Ok(
+            EmptyProvisionMediaClassification::ExactlyErased
+            | EmptyProvisionMediaClassification::CommittedEmptyRevision1
+            | EmptyProvisionMediaClassification::NotRecoverable,
+        ) => CredentialBootState::Corrupt {
+            fault: CredentialStoreFault::UnformattedNonErased,
+        },
+        Err(CredentialStoreMountError::Backend(_)) => CredentialBootState::Backend {
+            phase: CredentialBootPhase::ClassifyInitialization,
+        },
+        Err(CredentialStoreMountError::Binding(error)) => CredentialBootState::Blocked {
+            phase: CredentialBootPhase::ClassifyInitialization,
+            failure: CredentialBootFailure::Binding(error),
+        },
+        Err(CredentialStoreMountError::Fault(fault)) => CredentialBootState::Corrupt { fault },
+    };
+    outcome(binding, state, None, 0)
 }
 
 fn finish_cleanup<A>(
@@ -328,8 +369,8 @@ mod tests {
     use reticulum_device_api_credential_store::{
         BoundCredentialStore, COMMIT_DIGEST_OFFSET, COMMIT_MARKER_OFFSET, CredentialStoreBinding,
         CredentialStoreBindingError, CredentialStoreDeviceId, CredentialStoreFault,
-        CredentialStoreRecovery, PHYSICAL_FORMAT_VERSION, RETIREMENT_MARKER_OFFSET,
-        SNAPSHOT_DIGEST_OFFSET, SNAPSHOT_IMAGE_OFFSET,
+        CredentialStoreMountError, CredentialStoreRecovery, PHYSICAL_FORMAT_VERSION,
+        RETIREMENT_MARKER_OFFSET, SNAPSHOT_DIGEST_OFFSET, SNAPSHOT_IMAGE_OFFSET, mount,
     };
     use sha2::{Digest, Sha256};
     use std::vec;
@@ -372,6 +413,8 @@ mod tests {
         writes: usize,
         erases: usize,
         fail_read: bool,
+        fail_read_at: Option<usize>,
+        replace_bytes_at_read: Option<(usize, Vec<u8>)>,
         fail_write: bool,
         fail_erase: bool,
     }
@@ -384,6 +427,8 @@ mod tests {
                 writes: 0,
                 erases: 0,
                 fail_read: false,
+                fail_read_at: None,
+                replace_bytes_at_read: None,
                 fail_write: false,
                 fail_erase: false,
             }
@@ -398,8 +443,20 @@ mod tests {
         const READ_SIZE: usize = 1;
 
         fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
+            let read_index = self.reads;
             self.reads += 1;
-            if self.fail_read {
+            if self
+                .replace_bytes_at_read
+                .as_ref()
+                .is_some_and(|(at, _)| *at == read_index)
+            {
+                let (_, replacement) = self
+                    .replace_bytes_at_read
+                    .take()
+                    .expect("matching scripted replacement exists");
+                self.bytes = replacement;
+            }
+            if self.fail_read || self.fail_read_at == Some(read_index) {
                 return Err(FakeError::Backend);
             }
             let start = offset as usize;
@@ -470,6 +527,28 @@ mod tests {
         predecessor_digest: [u8; 32],
     ) -> [u8; 32] {
         let base = sector * SECTOR_SIZE;
+        let (prefix, digest) = snapshot_bytes(
+            binding,
+            sector,
+            revision,
+            predecessor_revision,
+            predecessor_digest,
+        );
+        flash.bytes[base..base + SNAPSHOT_DIGEST_OFFSET].copy_from_slice(&prefix);
+        flash.bytes[base + COMMIT_DIGEST_OFFSET..base + COMMIT_MARKER_OFFSET]
+            .copy_from_slice(&digest);
+        flash.bytes[base + COMMIT_MARKER_OFFSET..base + RETIREMENT_MARKER_OFFSET]
+            .copy_from_slice(&COMMIT_MARKER);
+        digest
+    }
+
+    fn snapshot_bytes(
+        binding: CredentialStoreBinding,
+        sector: usize,
+        revision: u64,
+        predecessor_revision: u64,
+        predecessor_digest: [u8; 32],
+    ) -> ([u8; SNAPSHOT_DIGEST_OFFSET], [u8; 32]) {
         let mut prefix = [0_u8; SNAPSHOT_DIGEST_OFFSET];
         prefix[..8].copy_from_slice(b"RDAUTH01");
         prefix[8..10].copy_from_slice(&PHYSICAL_FORMAT_VERSION.to_le_bytes());
@@ -493,12 +572,43 @@ mod tests {
         hasher.update(prefix);
         hasher.update(DIGEST_FLUSH_TRAILER);
         let digest: [u8; 32] = hasher.finalize().into();
-        flash.bytes[base..base + SNAPSHOT_DIGEST_OFFSET].copy_from_slice(&prefix);
-        flash.bytes[base + COMMIT_DIGEST_OFFSET..base + COMMIT_MARKER_OFFSET]
-            .copy_from_slice(&digest);
-        flash.bytes[base + COMMIT_MARKER_OFFSET..base + RETIREMENT_MARKER_OFFSET]
-            .copy_from_slice(&COMMIT_MARKER);
-        digest
+        (prefix, digest)
+    }
+
+    #[derive(Clone, Copy)]
+    enum EmptyProvisionStage {
+        Prefix,
+        Digest,
+        Commit,
+    }
+
+    fn empty_provision_cut(
+        binding: CredentialStoreBinding,
+        stage: EmptyProvisionStage,
+        cut: usize,
+    ) -> FakeNor {
+        let (prefix, digest) = snapshot_bytes(binding, 0, 1, 0, [0; 32]);
+        let mut flash = FakeNor::erased();
+        match stage {
+            EmptyProvisionStage::Prefix => {
+                assert!(cut <= prefix.len());
+                flash.bytes[..cut].copy_from_slice(&prefix[..cut]);
+            }
+            EmptyProvisionStage::Digest => {
+                assert!(cut <= digest.len());
+                flash.bytes[..prefix.len()].copy_from_slice(&prefix);
+                flash.bytes[COMMIT_DIGEST_OFFSET..COMMIT_DIGEST_OFFSET + cut]
+                    .copy_from_slice(&digest[..cut]);
+            }
+            EmptyProvisionStage::Commit => {
+                assert!(cut <= COMMIT_MARKER.len());
+                flash.bytes[..prefix.len()].copy_from_slice(&prefix);
+                flash.bytes[COMMIT_DIGEST_OFFSET..COMMIT_MARKER_OFFSET].copy_from_slice(&digest);
+                flash.bytes[COMMIT_MARKER_OFFSET..COMMIT_MARKER_OFFSET + cut]
+                    .copy_from_slice(&COMMIT_MARKER[..cut]);
+            }
+        }
+        flash
     }
 
     fn clean_revision_one() -> (CredentialStoreBinding, FakeNor) {
@@ -526,6 +636,158 @@ mod tests {
         assert!(outcome.mounted().is_none());
         assert_eq!(outcome.completed_recovery_steps(), 0);
         assert!(access.backend().reads > 0);
+        assert_eq!(access.backend().writes, 0);
+        assert_eq!(access.backend().erases, 0);
+    }
+
+    #[test]
+    fn every_canonical_empty_initialization_cut_is_classified_without_mutation() {
+        let binding = binding([1, 2, 3, 4, 5, 6]);
+        for (stage, length) in [
+            (EmptyProvisionStage::Prefix, SNAPSHOT_DIGEST_OFFSET),
+            (
+                EmptyProvisionStage::Digest,
+                COMMIT_MARKER_OFFSET - COMMIT_DIGEST_OFFSET,
+            ),
+            (EmptyProvisionStage::Commit, COMMIT_MARKER.len()),
+        ] {
+            for cut in 0..=length {
+                let mut access = bound(empty_provision_cut(binding, stage, cut), binding);
+                let outcome = boot_credentials(&mut access);
+                let expected = match (stage, cut) {
+                    (EmptyProvisionStage::Prefix, 0) => CredentialBootState::UninitializedErased,
+                    (EmptyProvisionStage::Commit, cut) if cut == COMMIT_MARKER.len() => {
+                        CredentialBootState::Ready
+                    }
+                    _ => CredentialBootState::InitializationInterrupted,
+                };
+                assert_eq!(outcome.state(), expected, "stage/cut classification failed");
+                assert_eq!(outcome.completed_recovery_steps(), 0);
+                assert_eq!(
+                    outcome.mounted().is_some(),
+                    expected == CredentialBootState::Ready
+                );
+                assert!(access.backend().reads > 0);
+                assert_eq!(access.backend().writes, 0);
+                assert_eq!(access.backend().erases, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn off_trajectory_unformatted_media_stays_corrupt_without_mutation() {
+        let binding = binding([1, 2, 3, 4, 5, 6]);
+        for offset in [SECTOR_SIZE, RETIREMENT_MARKER_OFFSET, COMMIT_DIGEST_OFFSET] {
+            let mut flash = FakeNor::erased();
+            flash.bytes[offset] = 0xfe;
+            let mut access = bound(flash, binding);
+            let outcome = boot_credentials(&mut access);
+            assert_eq!(
+                outcome.state(),
+                CredentialBootState::Corrupt {
+                    fault: CredentialStoreFault::UnformattedNonErased,
+                },
+                "off-trajectory byte at {offset} was not rejected"
+            );
+            assert!(outcome.mounted().is_none());
+            assert_eq!(outcome.completed_recovery_steps(), 0);
+            assert!(access.backend().reads > 0);
+            assert_eq!(access.backend().writes, 0);
+            assert_eq!(access.backend().erases, 0);
+        }
+    }
+
+    #[test]
+    fn changing_media_cannot_promote_an_unformatted_mount_fault() {
+        let binding = binding([1, 2, 3, 4, 5, 6]);
+        let interrupted = || empty_provision_cut(binding, EmptyProvisionStage::Prefix, 1);
+        let mut probe = bound(interrupted(), binding);
+        assert!(matches!(
+            mount(&mut probe),
+            Err(CredentialStoreMountError::Fault(
+                CredentialStoreFault::UnformattedNonErased
+            ))
+        ));
+        let mount_reads = probe.backend().reads;
+        let committed = clean_revision_one().1;
+
+        for (name, replacement) in [("erased", FakeNor::erased()), ("committed", committed)] {
+            let mut flash = interrupted();
+            flash.replace_bytes_at_read = Some((mount_reads, replacement.bytes));
+            let mut access = bound(flash, binding);
+            let outcome = boot_credentials(&mut access);
+            assert_eq!(
+                outcome.state(),
+                CredentialBootState::Corrupt {
+                    fault: CredentialStoreFault::UnformattedNonErased,
+                },
+                "contradictory {name} classification was promoted"
+            );
+            assert!(outcome.mounted().is_none());
+            assert_eq!(outcome.completed_recovery_steps(), 0);
+            assert!(access.backend().replace_bytes_at_read.is_none());
+            assert_eq!(access.backend().writes, 0);
+            assert_eq!(access.backend().erases, 0);
+        }
+    }
+
+    #[test]
+    fn non_unformatted_mount_fault_never_enters_initialization_classification() {
+        let (binding, mut probe_flash) = clean_revision_one();
+        probe_flash.bytes[SNAPSHOT_IMAGE_OFFSET] ^= 1;
+        let mut probe = bound(probe_flash, binding);
+        assert!(matches!(
+            mount(&mut probe),
+            Err(CredentialStoreMountError::Fault(
+                CredentialStoreFault::CommittedSnapshotCorrupt { .. }
+            ))
+        ));
+        let mount_reads = probe.backend().reads;
+
+        let (_, mut flash) = clean_revision_one();
+        flash.bytes[SNAPSHOT_IMAGE_OFFSET] ^= 1;
+        flash.fail_read_at = Some(mount_reads);
+        let mut access = bound(flash, binding);
+        let outcome = boot_credentials(&mut access);
+        assert!(matches!(
+            outcome.state(),
+            CredentialBootState::Corrupt {
+                fault: CredentialStoreFault::CommittedSnapshotCorrupt { .. }
+            }
+        ));
+        assert_eq!(access.backend().reads, mount_reads);
+        assert_eq!(access.backend().writes, 0);
+        assert_eq!(access.backend().erases, 0);
+    }
+
+    #[test]
+    fn classifier_read_failure_is_distinct_from_mount_failure() {
+        let binding = binding([1, 2, 3, 4, 5, 6]);
+        let mut probe = bound(
+            empty_provision_cut(binding, EmptyProvisionStage::Prefix, 1),
+            binding,
+        );
+        assert!(matches!(
+            mount(&mut probe),
+            Err(CredentialStoreMountError::Fault(
+                CredentialStoreFault::UnformattedNonErased
+            ))
+        ));
+        let mount_reads = probe.backend().reads;
+
+        let mut flash = empty_provision_cut(binding, EmptyProvisionStage::Prefix, 1);
+        flash.fail_read_at = Some(mount_reads);
+        let mut access = bound(flash, binding);
+        let outcome = boot_credentials(&mut access);
+        assert_eq!(
+            outcome.state(),
+            CredentialBootState::Backend {
+                phase: CredentialBootPhase::ClassifyInitialization,
+            }
+        );
+        assert!(outcome.mounted().is_none());
+        assert_eq!(outcome.completed_recovery_steps(), 0);
+        assert_eq!(access.backend().reads, mount_reads + 1);
         assert_eq!(access.backend().writes, 0);
         assert_eq!(access.backend().erases, 0);
     }

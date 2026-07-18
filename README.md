@@ -337,11 +337,13 @@ allocation-free admission owner: it freezes the exact physical-presence hold/
 window, connection epoch, shared attempt budget, one-pending, and asynchronous
 operation-ownership rules without owning GPIO, USB, flash, secrets, or proof
 verification. The portable store is boot-mounted/recovered and retained by the
-firmware coordinator, but the new interrupted-initialization classification and
-live lifecycle mutations are not yet composed there. The policy remains
-uncomposed, and no provisioning/pairing manager, firmware API/session job lane,
-or USB/BLE/Wi-Fi bearer invokes the adapter yet. The credential authority passes
-23 unit tests, eight public successor tests, and 18 compile-fail doctests; the
+firmware coordinator, and E290 boot now maps only the exact canonical
+interrupted-initialization trajectory into a distinct read-only disabled state.
+Same-boot initialization recovery and live lifecycle mutations are not yet
+composed there. The policy remains uncomposed, and no provisioning/pairing
+manager, firmware API/session job lane, or USB/BLE/Wi-Fi bearer invokes the
+adapter yet. The credential authority passes 23 unit tests, eight public
+successor tests, and 18 compile-fail doctests; the
 physical store passes 32 fake-NOR tests. The accepted
 authentication, authority, provenance, and USB ownership contracts are
 recorded in [ADR 0006](docs/adr/0006-authenticated-local-api-bearer.md) and
@@ -353,7 +355,7 @@ store/pairing decision in
 experimental host tests/clippy plus the corresponding ESP32-S3 Xtensa checks
 pass.
 
-The E290 library now has 37 passing host tests: 35 focused
+The E290 library now has 42 passing host tests: 40 focused
 policy/product/credential-boot tests, including a mechanical source-order
 regression, plus two real cross-layer composition tests. The happy path rejects
 unauthenticated and unauthorized requests without a NOR write, durably accepts
@@ -394,11 +396,10 @@ lifetime job handoff, and E290 `ProductStorageCoordinator` port implementation
 are compiled, and schema-2 acceptance retains exact authorization provenance,
 but no persistent credential provisioning/pairing, external
 firmware lane, or USB/BLE/Wi-Fi bearer serves through them. The next
-integration boundary must map the implemented interrupted-initialization
-classifier into an explicit E290 boot state, retain same-boot ambiguous
-initialization/mutation owners in the sole coordinator, and compose physical-
-presence policy before that portable policy can own live flash-backed
-operations.
+integration boundary must retain same-boot ambiguous initialization/mutation
+owners in the sole coordinator, reclassify media immediately before physical
+I/O, and compose physical-presence policy before that portable policy can own
+live flash-backed operations.
 The legacy `TxSupervisor` remains a separate RF-inert test aggregate. The permanent
 `NodeInterfaceSupervisor` now owns the router, DATA and ordinary coordinators,
 and both permit-service families; the first permanent E290 image composes it
@@ -458,10 +459,11 @@ API/session firmware lane, and a bearer—not by credential-store boot compositi
 or another semantic authority, session-crypto, durability-policy, partition, or
 cap decision. The portable ADR 0009 admission policy is implemented but
 uncomposed. The lifecycle-safe credential planners, typed store mutation path,
-mounted-store pending selection, and interrupted-initialization classifier now
-exist; the next software slice composes their explicit boot/runtime states and
-bounded physical-presence manager, then the credential-backed USB-to-LoRa edge,
-before durable configuration/message hosting and client delivery.
+mounted-store pending selection, interrupted-initialization classifier, and
+explicit read-only E290 boot state now exist; the next software slice composes
+the same-boot recovery/mutation owner and bounded physical-presence manager,
+then the credential-backed USB-to-LoRa edge, before durable configuration/
+message hosting and client delivery.
 The node-side routing
 boundary remains interface-neutral so additional Reticulum links can be added
 later through adapters without rewriting the LoRa actor or protocol owner; no

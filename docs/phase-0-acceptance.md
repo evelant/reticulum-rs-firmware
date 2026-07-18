@@ -323,7 +323,7 @@ portable authenticated device-API adapter is also implemented: default builds
 serve capabilities and principal-scoped status, while the explicit target-safe
 feature enables durable experimental acceptance. Both profiles are target-
 checked. The permanent E290 graph keeps the journal runtime and sole flash in a
-resident coordinator and passes 37 host tests. Immediately after flash open it
+resident coordinator and passes 42 host tests. Immediately after flash open it
 validates the exact `api_credentials` partition/eFuse binding, mounts and
 performs at most one retire then cleanup step, and retains any mounted credential
 store without auto-provisioning. Credential failure closes only credential

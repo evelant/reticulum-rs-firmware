@@ -7,7 +7,7 @@ use reticulum_device_api_credentials::{CredentialGeneration, CredentialId};
 use crate::{
     AbortOutcome, ActivationOutcome, ActiveLowButton, AttemptDecision, AttemptRefusal,
     BUTTON_HOLD_MILLIS, BeginFacts, BeginOutcome, ButtonEffect, CloseReason, ConnectionId,
-    ConnectionRefusal, ErasedInitializationFacts, ExclusiveAcquireOutcome,
+    ConnectionRefusal, ExclusiveAcquireOutcome, InitializableMedia, InitializationFacts,
     MAX_BEGIN_PROOF_ATTEMPTS, MonotonicMillis, OrdinarySessionRefusal, PAIRING_POLICY_RAM_CEILING,
     PAIRING_WINDOW_MILLIS, PairingPolicy, PendingRef, PendingState, PolicyEvent, PolicyFault,
     RequestRefusal,
@@ -183,34 +183,132 @@ fn ordinary_permit_is_invalidated_at_exclusive_threshold() {
 }
 
 #[test]
-fn initialization_requires_both_trusted_facts_and_spends_no_attempt() {
+fn initialization_facts_are_exhaustive_and_initialization_spends_no_attempt() {
+    for identity_ready in [false, true] {
+        for media in [
+            None,
+            Some(InitializableMedia::ExactlyErased),
+            Some(InitializableMedia::RecoverableInterrupted),
+        ] {
+            let mut policy = PairingPolicy::new(PendingState::None);
+            open(&mut policy, connection(1), 0);
+            let result = policy.initialize(
+                time(2_100),
+                connection(1),
+                InitializationFacts::new(identity_ready, media),
+            );
+            if let (true, Some(expected_media)) = (identity_ready, media) {
+                let permit = result
+                    .unwrap_or_else(|error| panic!("eligible initialization rejected: {error:?}"));
+                assert_eq!(permit.media(), expected_media);
+                policy
+                    .finish_initialization(permit)
+                    .unwrap_or_else(|error| panic!("initialization finish rejected: {error:?}"));
+                match policy.begin(time(2_101), connection(1), begin_ready()) {
+                    AttemptDecision::Admitted { ordinal: 1, .. } => {}
+                    _ => panic!("initialization consumed Begin/Proof attempt budget"),
+                }
+            } else {
+                let refused = result
+                    .err()
+                    .unwrap_or_else(|| panic!("ineligible initialization admitted"));
+                assert_eq!(refused.reason(), RequestRefusal::InitializationNotEligible);
+                match policy.begin(time(2_101), connection(1), begin_ready()) {
+                    AttemptDecision::Admitted { ordinal: 1, .. } => {}
+                    _ => panic!("refused initialization consumed Begin/Proof attempt budget"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn both_initializable_media_require_bound_window_no_pending_and_no_in_flight() {
+    for media in [
+        InitializableMedia::ExactlyErased,
+        InitializableMedia::RecoverableInterrupted,
+    ] {
+        let eligible = InitializationFacts::new(true, Some(media));
+
+        let mut no_window_policy = PairingPolicy::new(PendingState::None);
+        let refused = no_window_policy
+            .initialize(time(0), connection(1), eligible)
+            .err()
+            .unwrap_or_else(|| panic!("unconnected initialization admitted for {media:?}"));
+        assert_eq!(refused.reason(), RequestRefusal::NotConnected);
+        assert_eq!(no_window_policy.connected(time(1), connection(1)), Ok(None));
+        let refused = no_window_policy
+            .initialize(time(2), connection(1), eligible)
+            .err()
+            .unwrap_or_else(|| panic!("windowless initialization admitted for {media:?}"));
+        assert_eq!(refused.reason(), RequestRefusal::WindowNotOpen);
+
+        let mut wrong_connection_policy = PairingPolicy::new(PendingState::None);
+        open(&mut wrong_connection_policy, connection(1), 0);
+        let refused = wrong_connection_policy
+            .initialize(time(2_100), connection(2), eligible)
+            .err()
+            .unwrap_or_else(|| panic!("wrong-connection initialization admitted for {media:?}"));
+        assert_eq!(refused.reason(), RequestRefusal::WrongConnection);
+
+        let existing = pending(5, 9);
+        let mut pending_policy = PairingPolicy::new(PendingState::One(existing));
+        open(&mut pending_policy, connection(1), 0);
+        let refused = pending_policy
+            .initialize(time(2_100), connection(1), eligible)
+            .err()
+            .unwrap_or_else(|| panic!("pending initialization admitted for {media:?}"));
+        assert_eq!(refused.reason(), RequestRefusal::PendingExists);
+
+        let mut in_flight_policy = PairingPolicy::new(PendingState::None);
+        open(&mut in_flight_policy, connection(1), 0);
+        let begin = match in_flight_policy.begin(time(2_100), connection(1), begin_ready()) {
+            AttemptDecision::Admitted { permit, .. } => permit,
+            _ => panic!("eligible Begin rejected"),
+        };
+        let refused = in_flight_policy
+            .initialize(time(2_101), connection(1), eligible)
+            .err()
+            .unwrap_or_else(|| panic!("initialization replaced in-flight ownership for {media:?}"));
+        assert_eq!(refused.reason(), RequestRefusal::OperationInFlight);
+        in_flight_policy
+            .finish_begin(begin, BeginOutcome::NotCommitted)
+            .unwrap_or_else(|error| panic!("Begin finish rejected: {error:?}"));
+    }
+}
+
+#[test]
+fn initialization_permit_retains_ownership_across_disconnect_until_finish() {
     let mut policy = PairingPolicy::new(PendingState::None);
     open(&mut policy, connection(1), 0);
-    for facts in [
-        ErasedInitializationFacts::new(false, false),
-        ErasedInitializationFacts::new(true, false),
-        ErasedInitializationFacts::new(false, true),
-    ] {
-        let refused = policy
-            .initialize_erased(time(2_100), connection(1), facts)
-            .err()
-            .unwrap_or_else(|| panic!("ineligible initialization admitted"));
-        assert_eq!(refused.reason(), RequestRefusal::InitializationNotEligible);
-    }
     let permit = policy
-        .initialize_erased(
+        .initialize(
             time(2_100),
             connection(1),
-            ErasedInitializationFacts::new(true, true),
+            InitializationFacts::new(true, Some(InitializableMedia::RecoverableInterrupted)),
         )
         .unwrap_or_else(|error| panic!("eligible initialization rejected: {error:?}"));
+    assert_eq!(permit.media(), InitializableMedia::RecoverableInterrupted);
+    assert!(policy.operation_outstanding());
+    assert!(matches!(
+        policy.disconnected(time(2_101), connection(1)),
+        PolicyEvent::Closed(closed) if closed.reason() == CloseReason::Disconnect
+    ));
+    assert!(policy.operation_outstanding());
+    assert!(matches!(
+        policy.ordinary_session(time(2_102), connection(1)),
+        Err(OrdinarySessionRefusal::NotConnected)
+    ));
+    assert_eq!(policy.connected(time(2_103), connection(2)), Ok(None));
+    assert!(matches!(
+        policy.ordinary_session(time(2_104), connection(2)),
+        Err(OrdinarySessionRefusal::PairingExclusive)
+    ));
     policy
         .finish_initialization(permit)
-        .unwrap_or_else(|error| panic!("initialization finish rejected: {error:?}"));
-    match policy.begin(time(2_101), connection(1), begin_ready()) {
-        AttemptDecision::Admitted { ordinal, .. } => assert_eq!(ordinal, 1),
-        _ => panic!("initialization consumed Begin/Proof attempt budget"),
-    }
+        .unwrap_or_else(|error| panic!("retained initialization finish rejected: {error:?}"));
+    assert!(!policy.operation_outstanding());
+    assert!(policy.ordinary_session(time(2_105), connection(2)).is_ok());
 }
 
 #[test]

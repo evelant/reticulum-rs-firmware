@@ -5,7 +5,10 @@
 //! caller remains responsible for GPIO sampling, USB connection epochs,
 //! credential-store facts, entropy, secret ownership, proof verification,
 //! durable mutation, and response delivery. In particular, a permit reports
-//! policy admission; it is not proof that flash is erased or writable.
+//! policy admission; it is not proof of the asserted physical media state or
+//! that flash is writable. Initialization facts are trusted assertions from
+//! the physical store owner. That owner must reclassify and recheck the media
+//! immediately before executing an admitted initialization.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -125,27 +128,43 @@ pub enum ActiveLowButton {
     Low,
 }
 
-/// Trusted facts required before explicit empty-store initialization.
-///
-/// These booleans are assertions from the sole identity/flash owner, not facts
-/// proved by this policy crate. The physical operation must recheck them.
+/// Exact physical-media trajectory eligible for explicit initialization.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ErasedInitializationFacts {
-    identity_ready: bool,
-    exactly_erased: bool,
+pub enum InitializableMedia {
+    /// The complete credential-store provision region is exactly erased.
+    ExactlyErased,
+    /// The provision region matches the exact recoverable interrupted-write
+    /// trajectory accepted by the physical store owner.
+    RecoverableInterrupted,
 }
 
-impl ErasedInitializationFacts {
+/// Trusted facts required before explicit credential-store initialization.
+///
+/// These values are assertions from the sole identity/flash owner, not facts
+/// proved by this policy crate. `None` means the latest classified media state
+/// is not eligible. The physical operation must reclassify the media and
+/// recheck identity readiness immediately before writing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InitializationFacts {
+    identity_ready: bool,
+    media: Option<InitializableMedia>,
+}
+
+impl InitializationFacts {
     /// Construct the latest trusted initialization facts.
-    pub const fn new(identity_ready: bool, exactly_erased: bool) -> Self {
+    pub const fn new(identity_ready: bool, media: Option<InitializableMedia>) -> Self {
         Self {
             identity_ready,
-            exactly_erased,
+            media,
         }
     }
 
-    const fn eligible(self) -> bool {
-        self.identity_ready && self.exactly_erased
+    const fn eligible_media(self) -> Option<InitializableMedia> {
+        if self.identity_ready {
+            self.media
+        } else {
+            None
+        }
     }
 }
 
@@ -339,7 +358,8 @@ pub enum RequestRefusal {
     TimedOut,
     /// Another accepted operation still owns completion.
     OperationInFlight,
-    /// Initialization facts do not prove identity-ready exactly-erased media.
+    /// Initialization facts do not assert identity readiness and one exact
+    /// eligible physical-media trajectory.
     InitializationNotEligible,
     /// Initialization is incompatible with a durable pending enrollment.
     PendingExists,
@@ -425,10 +445,34 @@ pub enum AttemptDecision<P> {
     },
 }
 
-/// Explicit erased-store initialization capability.
+/// Explicit credential-store initialization capability.
+///
+/// This capability retains the exact trusted media trajectory admitted by the
+/// policy. It is deliberately neither `Clone` nor `Copy`, and its media value
+/// is not a substitute for the physical runtime's immediate reclassification.
+///
+/// ```compile_fail
+/// use reticulum_device_api_pairing_policy::InitializationPermit;
+/// fn require_clone<T: Clone>() {}
+/// require_clone::<InitializationPermit>();
+/// ```
+///
+/// ```compile_fail
+/// use reticulum_device_api_pairing_policy::InitializationPermit;
+/// fn require_copy<T: Copy>() {}
+/// require_copy::<InitializationPermit>();
+/// ```
 #[must_use = "dropped initialization ownership leaves pairing fail closed"]
-pub struct ErasedInitializationPermit {
+pub struct InitializationPermit {
     operation: OperationKey,
+    media: InitializableMedia,
+}
+
+impl InitializationPermit {
+    /// Return the admitted media trajectory for physical reclassification.
+    pub const fn media(&self) -> InitializableMedia {
+        self.media
+    }
 }
 
 /// New-pending admission capability.
@@ -536,7 +580,7 @@ enum WindowState {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum OperationKind {
-    Initialize,
+    Initialize(InitializableMedia),
     Begin,
     Proof(PendingRef),
     Abort(PendingRef),
@@ -769,14 +813,18 @@ impl PairingPolicy {
             && matches!(self.window, WindowState::Idle)
     }
 
-    /// Admit explicit initialization only under an open bound window and exact
-    /// trusted identity/erased-media facts.
-    pub fn initialize_erased(
+    /// Admit explicit initialization only under an open bound window and
+    /// trusted identity/media facts.
+    ///
+    /// Admission does not spend the shared Begin/Proof attempt budget. The
+    /// physical runtime must reclassify and recheck the asserted trajectory
+    /// immediately before writing.
+    pub fn initialize(
         &mut self,
         now: MonotonicMillis,
         connection: ConnectionId,
-        facts: ErasedInitializationFacts,
-    ) -> Result<ErasedInitializationPermit, RequestRefused> {
+        facts: InitializationFacts,
+    ) -> Result<InitializationPermit, RequestRefused> {
         let window = self.request_window(now, connection)?;
         if self.in_flight.is_some() {
             return Err(Self::request_refused(RequestRefusal::OperationInFlight));
@@ -784,26 +832,27 @@ impl PairingPolicy {
         if self.pending.is_some() {
             return Err(Self::request_refused(RequestRefusal::PendingExists));
         }
-        if !facts.eligible() {
+        let Some(media) = facts.eligible_media() else {
             return Err(Self::request_refused(
                 RequestRefusal::InitializationNotEligible,
             ));
-        }
+        };
         let operation = self
-            .start_operation(window.key, OperationKind::Initialize)
+            .start_operation(window.key, OperationKind::Initialize(media))
             .map_err(Self::request_refused)?;
-        Ok(ErasedInitializationPermit { operation })
+        Ok(InitializationPermit { operation, media })
     }
 
     /// Release initialization ownership after a definite physical outcome.
     ///
-    /// Ambiguous storage outcomes must retain the permit and reconcile rather
-    /// than call this method.
+    /// Ambiguous storage outcomes must retain this exact permit while the
+    /// physical runtime reclassifies and reconciles; they must not call this
+    /// method or obtain replacement ownership.
     pub fn finish_initialization(
         &mut self,
-        permit: ErasedInitializationPermit,
+        permit: InitializationPermit,
     ) -> Result<(), PermitError> {
-        self.finish_exact(permit.operation, OperationKind::Initialize)?;
+        self.finish_exact(permit.operation, OperationKind::Initialize(permit.media))?;
         self.finish_draining();
         Ok(())
     }

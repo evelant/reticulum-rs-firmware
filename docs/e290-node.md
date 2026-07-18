@@ -1,7 +1,7 @@
 # Permanent Vision Master E290 node image
 
 **Status:** the first permanent, LoRa-first image is implemented and passes its
-37-test cross-layer host composition suite, portable-target, ESP32-S3 build,
+42-test cross-layer host composition suite, portable-target, ESP32-S3 build,
 review, and merged-image packaging gates. Source `96e38aa` also passed the first
 bounded powered smoke on both `HT-RA62-HF` boards: exact same-image readback,
 erased credential classification with zero credential mutation, resident
@@ -32,8 +32,10 @@ portable crate. The store is boot-mounted, deterministically recovered, and
 retained by the resident coordinator. Lifecycle-specific Add/Activate/Abort
 planners, opaque typed store commit/reconcile owners, mounted-store pending
 selection, and a read-only four-way interrupted-initialization classifier now
-pass their portable gates, but the E290 boot/runtime does not compose those new
-paths and the policy is not a flash-backed pairing manager. Live external
+pass their portable gates. E290 boot now consumes that classifier read-only and
+maps only its canonical interrupted trajectory to an explicit disabled state;
+it does not recover or initialize media, and the policy is not a flash-backed
+pairing manager. Live external
 admission is blocked by credential initialization/provisioning and pairing
 composition, the external API/session lane, and a bearer. ADR 0005's
 active-owner policy is implemented:
@@ -205,16 +207,19 @@ one reported `RetirePredecessor` operation and then at most one
 The portable store can now distinguish exactly erased media, the one canonical
 recoverably interrupted empty revision-1 trajectory, an already committed
 empty revision 1, and ineligible media without mutation. This firmware boot
-path does not yet consume that classifier: programmed unformatted media still
-uses the existing fail-closed admission path, and there is no resident same-
-boot ambiguous initialization owner. Adding the explicit interrupted state and
-coordinator latch is the next E290 composition step, not a claim of automatic
-recovery in the current image.
+path invokes that classifier only after normal mount reports programmed
+unformatted media. Only `RecoverableInterrupted` becomes
+`InitializationInterrupted`; ineligible or logically contradictory results
+remain corrupt, while classifier binding and backend failures retain their
+distinct fail-closed phases. Classification never writes or erases, mounts no
+authority, and confers no mutation eligibility. There is still no resident
+same-boot ambiguous initialization owner or automatic recovery path.
 
-The six product admission classes are `Ready`; `AuthOnly` (the Rust
+The seven product admission classes are `Ready`; `AuthOnly` (the Rust
 `AuthenticationOnly` variant, logged as `AUTHENTICATION-ONLY`, with existing
 authority publishable but mutation disabled); `Uninitialized` (the
-`UninitializedErased` variant); `Blocked`; `Corrupt`; and `Backend`.
+`UninitializedErased` variant); `InitializationInterrupted`; `Blocked`;
+`Corrupt`; and `Backend`.
 Deterministic boot
 retirement/cleanup failure quarantines only credential admission or mutation:
 the owner and failure state remain resident, while journal policy and route-only
@@ -347,9 +352,11 @@ cargo +esp clippy --locked --release \
 
 The build script rejects an unreviewed `esp-rtos` main-stack implementation and
 links `linkall.x`. Debug Xtensa builds are compile-time rejected.
-The host library suite has 37 passing tests: 35 focused
+The host library suite has 42 passing tests: 40 focused
 policy/product/credential-boot tests, including the source-order regression,
-and two real cross-layer composition tests. The happy path proves unauthenticated
+every canonical empty-initialization byte cut, adversarial media changes between
+mount and classification, off-trajectory media, and classifier failure phases,
+plus two real cross-layer composition tests. The happy path proves unauthenticated
 and permission-denied requests cause zero NOR writes, exactly one authenticated
 acceptance succeeds, and a second novel request reaches capacity without a
 write. It then proves the durable `Preparing` barrier precedes node ownership,
@@ -360,7 +367,7 @@ foreign-principal `NotFound`, and remount of the durable final state complete th
 path. The fault test injects a permanent wrong-binding error after frame
 exposure with an ordinary announce queued behind it; the result is
 `ActiveOwnerFailStopped`, no acknowledgement or completion, every owner retained,
-and no later host-radio TX or RX. The 35 focused tests include the exact
+and no later host-radio TX or RX. The 40 focused tests include the exact
 one-submission profile assertion and five focused durability-policy tests for
 retry, route-only degradation, pending durable acknowledgement, sticky fail-stop,
 and the request-after-disable race.
@@ -605,9 +612,9 @@ as the bounded qualification fixture for the deterministic DATA/proof exchange.
 - Preserve ADR 0009's boot-mounted credential store and portable pairing policy.
   Preserve the implemented lifecycle-specific credential planners, opaque
   typed store commit/reconcile path, mounted-store pending selection, and
-  interrupted-initialization classifier. Map that classifier into an explicit
-  E290 boot state, retain same-boot ambiguous initialization/mutation ownership
-  in the sole coordinator, then compose the bounded physical-presence
+  interrupted-initialization classifier and explicit read-only E290 boot
+  state. Retain same-boot ambiguous initialization/mutation ownership in the
+  sole coordinator, then compose the bounded physical-presence
   initialization/pairing manager with the immutable authority and bounded COBS
   framing,
   qualification-session core, and boot-lifetime job/reply handoff with the

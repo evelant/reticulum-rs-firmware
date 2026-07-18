@@ -21,9 +21,11 @@ ownership state, but it is not composed. Flash-backed initialization/pairing,
 the external API/session firmware lane, and every physical bearer remain
 unimplemented. Lifecycle-specific Add/Activate/Abort planners, opaque typed
 store commit/reconcile owners, mounted-store pending selection, and the read-only
-interrupted-initialization classifier are implemented; E290 boot/runtime and
-physical-presence composition remain next. A product port may route an accepted
-submission through the node after the durable barriers.
+interrupted-initialization classifier are implemented. E290 boot now maps only
+its canonical recoverable trajectory to an explicit disabled state; same-boot
+physical recovery/runtime ownership and physical-presence composition remain
+next. A product port may route an accepted submission through the node after
+the durable barriers.
 
 ## Boundary
 
@@ -361,8 +363,9 @@ capability. Principal and permissions come from the exact active record. Live au
 replacement must also pass exact-next-revision successor validation so changed
 authorization cannot reuse a session generation. E290 firmware now mounts and
 recovers the portable store before any other product-store write and retains
-its `Ready`, authentication-only, uninitialized-erased, blocked, corrupt, or
-backend-failed state. A future external serving runtime must add explicit
+its `Ready`, authentication-only, uninitialized-erased,
+initialization-interrupted, blocked, corrupt, or backend-failed state. A future
+external serving runtime must add explicit
 provisioning/pairing, enforce connection-level rate limits, and keep
 authentication state outside request CBOR.
 
