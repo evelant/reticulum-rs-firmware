@@ -5,17 +5,18 @@ storage actor, transport-neutral submission runtime, native authorized-frame
 seam, and exact E290 request/durable-echo handoff implemented; portable
 authenticated device-API dispatch implemented; resident E290 operation-scoped
 flash/runtime coordinator implemented; isolated powered journal clean-path/
-software-reset HIL passed on board E9:44; the 57-test E290 host suite qualifies
+software-reset HIL passed on board E9:44; the 106-test E290 host suite qualifies
 the one-entry complete LoRa-first software composition and ADR 0005 active-owner
 fail-stop. Portable API framing, the pre-authentication initialization-control
 codec, immutable credential authority, the USB-
 qualification session core, and the boot-lifetime job handoff are qualified;
 semantic schema 2 now durably binds exact authorization provenance to every
 acceptance. E290 now validates, boot-mounts, deterministically recovers, and
-retains the credential store without auto-provisioning. Live external admission
-remains blocked by invoking the resident initialization path, composing live
-pairing lifecycle mutation, external API/session firmware composition, and a
-bearer. Source `96e38aa` adds bounded
+retains the credential store without auto-provisioning. Explicit initialization
+and live pairing are routed through the resident owner and pre-authentication
+USB bearer. Live authenticated admission remains blocked by successful powered
+credential creation plus external API/session firmware composition and an
+authenticated bearer. Source `96e38aa` adds bounded
 powered evidence for exact image readback, erased credentials with zero
 mutation, strict empty-journal mount, resident service, and ordinary TX on both
 boards; it does not exercise durable DATA or interruption recovery.
@@ -85,14 +86,14 @@ evidence.
 
 ```mermaid
 flowchart LR
-    Client["authenticated local client"] --> Bearer["USB bearer (not implemented)"]
+    Client["authenticated local client"] --> Bearer["authenticated USB API bearer (not implemented)"]
     Bearer --> Framing["portable framing (implemented)"]
     Framing --> Session["portable qualification session (implemented, not composed)"]
     Session --> Handoff["portable job handoff (implemented)"]
     Handoff --> API["portable authenticated API adapter (implemented)"]
     Authority["immutable credential authority (implemented)"] --> Session
     Authority --> API
-    CredentialStore["credential store boot-mounted/recovered and retained; no provisioning/pairing"] --> Authority
+    CredentialStore["credential store boot-mounted/recovered; explicit initialization and pairing routed"] --> Authority
     API -. "external API/session firmware lane absent" .-> Runtime["resident portable submission runtime"]
     Coordinator["E290 sole-flash coordinator (resident)"] <--> Runtime
     Runtime <--> Store["portable sole storage actor (implemented)"]
@@ -316,9 +317,9 @@ The projector cross-checks the preparation and authorized-byte digests and
 lengths; repeated fan-out observations are idempotent only when all durable
 packet metadata is identical. The E290 composition implements this ownership
 path under a host-qualified one-entry cap. Production remains externally
-unreachable because ADR 0009 initialization/pairing implementation, an external
-API/session firmware lane, and a bearer do not yet surround the portable
-authority/session core.
+unreachable because the authenticated API/session firmware lane and bearer do
+not yet surround the portable authority/session core; powered successful
+credential creation also remains open.
 
 Terminal outcomes map as follows:
 
@@ -514,12 +515,12 @@ LXMF/NomadNet/UI services without redefining the durable protocol.
    the wrong-binding post-frame `ActiveOwnerFailStopped` path with queued
    ordinary work and no later host-radio operation. The one-entry cap is a
    qualified composition profile, not product capacity.
-4. Connect explicit requests and physical presence to the resident credential
-   initialization path, add live Begin/Proof/Activate/Abort ownership, then
-   compose the implemented authority, framing, qualification-
-   session core, and boot-lifetime job handoff between the authenticated device-
-   API adapter and runtime with a firmware USB bearer. Those are the missing
-   edges for live external admission.
+4. Preserve the connected explicit initialization and live Begin/Proof/
+   Activate/Abort ownership, then compose the implemented authority, framing,
+   qualification-session core, and boot-lifetime job handoff between the
+   authenticated device-API adapter and runtime with an authenticated firmware
+   USB API bearer. Complete the powered credential lifecycle. Those are the
+   missing edges for live authenticated admission.
    Keep the local client API distinct from the node's Reticulum interface
    selection. No second interface is required; later Reticulum transports use
    the same transport-neutral runtime and router contract.

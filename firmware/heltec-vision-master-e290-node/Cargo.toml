@@ -43,6 +43,7 @@ zeroize.workspace = true
 reticulum-radio-lora-phy = { path = "../../crates/radio-lora-phy" }
 reticulum-tx-handoff = { path = "../../crates/tx-handoff", default-features = false }
 
+critical-section.workspace = true
 embassy-executor = { workspace = true, features = ["log"] }
 embassy-futures.workspace = true
 embassy-time = { workspace = true, features = ["log"] }

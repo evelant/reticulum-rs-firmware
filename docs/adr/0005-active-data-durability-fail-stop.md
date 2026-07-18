@@ -123,15 +123,16 @@ ordinary announce behind it, injects a wrong journal binding, and proves
 `ActiveOwnerFailStopped` emits no acknowledgement, retains all owners, takes the
 LoRa lease offline, and permits no later host-radio TX or RX.
 
-The E290 library therefore has 57 passing tests: 55 focused policy/product/
-credential-boot/credential-runtime/cross-store tests
-plus those two cross-layer composition tests. This closes software composition
+The E290 library now has 106 passing tests, including the policy/product,
+credential boot/runtime, live-pairing, USB/reset, causal-frontier, and two
+cross-layer composition paths. This closes software composition
 qualification for the LoRa-first one-entry profile. Portable API framing,
 immutable credential authority, the qualification-session core, and job handoff
 are qualified, and semantic schema 2 persists exact authorization provenance;
-ADR 0009's credential store is now boot-composed, while live external admission
-remains blocked on physical-presence initialization/pairing, a firmware
-API/session lane, and a bearer. Source `96e38aa` now supplies bounded powered
+ADR 0009's credential store is now boot-composed and explicit initialization/
+pairing is routed, while live authenticated admission remains blocked on a
+successful powered credential lifecycle plus the firmware API/session lane and
+authenticated bearer. Source `96e38aa` now supplies bounded powered
 permanent-graph evidence for exact image readback, erased credential/journal
 boot, LoRa/interface readiness, and ordinary TX on both boards. It does not
 exercise the active-DATA durability owner or this ADR's fail-stop path; those

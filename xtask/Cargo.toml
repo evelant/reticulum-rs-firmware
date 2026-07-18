@@ -12,9 +12,11 @@ name = "xtask"
 path = "src/main.rs"
 
 [dependencies]
+getrandom = "=0.3.4"
 md-5 = "=0.10.6"
 quote = "=1.0.46"
 reticulum-device-api-framing = { path = "../crates/device-api-framing", default-features = false }
+reticulum-device-api-pairing = { path = "../crates/device-api-pairing", default-features = false }
 reticulum-device-api-pairing-control = { path = "../crates/device-api-pairing-control", default-features = false }
 reticulum-rns-rete = { path = "../crates/rns-rete", default-features = false }
 object = { version = "=0.37.3", default-features = false, features = ["read", "std"] }
@@ -25,3 +27,4 @@ serialport.workspace = true
 sha2.workspace = true
 syn = { version = "=2.0.118", features = ["full", "parsing", "printing"] }
 tar = "=0.4.46"
+zeroize.workspace = true

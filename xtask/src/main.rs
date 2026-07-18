@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use syn::{Fields, ImplItem, Item, Type, Visibility};
 
 mod e290_pairing_control;
+mod e290_pairing_live;
 mod phase1_closure;
 mod phase1_hil;
 mod phase1_image;
@@ -30,6 +31,7 @@ fn main() -> ExitCode {
         Some("doctor") if args.next().is_none() => doctor(),
         Some("build-tracker") if args.next().is_none() => build_tracker(),
         Some("e290-pairing-control") => e290_pairing_control::run(args.collect()),
+        Some("e290-pairing-live") => e290_pairing_live::run(args.collect()),
         Some("check-rns-vectors") if args.next().is_none() => check_rns_vectors(),
         Some("check-rnode-hil-vectors") if args.next().is_none() => check_rnode_hil_vectors(),
         Some("graph-policy") if args.next().is_none() => graph_policy(),
@@ -45,7 +47,7 @@ fn main() -> ExitCode {
         _ => {
             eprintln!(
                 "usage: cargo run -p xtask -- \
-                 <doctor|build-tracker|e290-pairing-control|check-rns-vectors|check-rnode-hil-vectors|graph-policy|rx-api-policy|print-rx-api-surface|phase1-rx-hil-artifacts|phase1-rx-closure-artifacts|phase1-rx-powered-evidence>"
+                 <doctor|build-tracker|e290-pairing-control|e290-pairing-live|check-rns-vectors|check-rnode-hil-vectors|graph-policy|rx-api-policy|print-rx-api-surface|phase1-rx-hil-artifacts|phase1-rx-closure-artifacts|phase1-rx-powered-evidence>"
             );
             ExitCode::from(2)
         }

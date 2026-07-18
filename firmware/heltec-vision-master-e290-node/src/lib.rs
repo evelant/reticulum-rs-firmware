@@ -5,6 +5,7 @@
 #![deny(missing_docs)]
 
 pub mod announce_time;
+pub mod causal_pairing_frontier;
 pub mod config;
 pub mod credential_boot;
 pub mod credential_pairing;
@@ -13,10 +14,12 @@ pub mod cross_store_gate;
 pub mod durability_boot;
 pub mod durability_policy;
 pub mod live_pairing_handoff;
+pub mod live_pairing_node;
 pub mod pairing_control_handoff;
 pub mod pairing_control_mapping;
 pub mod partition_contract;
 pub mod usb_pairing_policy;
+pub mod usb_pairing_records;
 
 #[cfg(test)]
 extern crate std;
@@ -190,9 +193,90 @@ mod tests {
     }
 
     #[test]
-    fn usb_initialization_bearer_is_a_third_non_interface_owner() {
+    fn usb_boot_quarantine_precedes_hal_and_requires_clean_reenumeration() {
+        let main = include_str!("main.rs");
+        assert!(!main.contains("#[esp_rtos::main]"));
+        let synchronous_entry = main
+            .split("#[esp_hal::main]")
+            .nth(1)
+            .and_then(|tail| tail.split("#[embassy_executor::task]").next())
+            .expect("the product must expose one synchronous earliest entrypoint");
+        let quarantine = synchronous_entry
+            .find("usb_pairing_task::quarantine_usb_at_boot()")
+            .expect("the earliest entrypoint must quarantine USB");
+        let executor = synchronous_entry
+            .find("esp_rtos::embassy::Executor::new()")
+            .expect("the earliest entrypoint must construct the product executor");
+        assert!(quarantine < executor);
+
+        let product = main
+            .split("async fn product_main(")
+            .nth(1)
+            .expect("the product composition must remain one explicit async task");
+        assert!(product.contains("usb_boot_quarantine: usb_pairing_task::BootUsbQuarantine"));
+        assert!(product.contains("let peripherals = esp_hal::init(hal);"));
+        assert!(product.contains("usb_pairing_task::run(\n        usb_boot_quarantine,"));
+
+        let usb = include_str!("usb_pairing_task.rs");
+        let boot = usb
+            .split("pub(crate) fn quarantine_usb_at_boot()")
+            .nth(1)
+            .and_then(|tail| tail.split("#[esp_hal::handler]").next())
+            .expect("the USB owner must expose one bounded boot quarantine");
+        let pad_off = boot
+            .find(".usb_pad_enable()\n            .clear_bit()")
+            .expect("boot quarantine must detach the USB pad");
+        let memory_down = boot
+            .find("write.usb_mem_pd().set_bit()")
+            .expect("boot quarantine must power down endpoint RAM");
+        let memory_up = boot
+            .find("write.usb_mem_pd().clear_bit()")
+            .expect("boot quarantine must restore scrubbed endpoint RAM");
+        let token = boot
+            .find("BootUsbQuarantine { _private: () }")
+            .expect("boot quarantine must return its sole proof token");
+        assert!(pad_off < memory_down);
+        assert!(memory_down < memory_up);
+        assert!(memory_up < token);
+        assert!(boot.contains("USB_EPOCH_BLOCKED.store(true, Ordering::Release)"));
+
+        let run = usb
+            .split("pub async fn run(")
+            .nth(1)
+            .expect("the USB bearer task must exist");
+        let driver = run
+            .find("UsbSerialJtag::<Blocking>::new(usb_device)")
+            .expect("the detached task must claim the HAL owner");
+        let handler = run
+            .find("usb_serial.set_interrupt_handler(usb_bus_reset_interrupt)")
+            .expect("the detached task must install its reset ISR");
+        let dwell = run
+            .find("Timer::after(Duration::from_millis(USB_REATTACH_DWELL_MILLIS)).await")
+            .expect("the detached task must provide a host-visible dwell");
+        let arm = run
+            .find("USB_REATTACH_EXPECTED.store(true, Ordering::Release)")
+            .expect("the detached task must arm one clean enumeration reset");
+        assert!(driver < handler);
+        assert!(handler < dwell);
+        assert!(dwell < arm);
+        assert!(run.contains("USB_CANONICAL_ATTACHED_PAD_CONFIGURATION"));
+        assert!(run.contains("esp_hal::efuse::USB_EXCHG_PINS"));
+        assert!(run.contains("consumed_bus_reset || boot_reattach_pending"));
+
+        let clean_reset = run
+            .find("USB_CLEAN_RESET_GENERATION.load(Ordering::Acquire) == reset_generation")
+            .expect("the task must recognize its exact clean reset generation");
+        let unblock = run
+            .find("USB_EPOCH_BLOCKED.store(false, Ordering::Release)")
+            .expect("the task must explicitly unblock the clean epoch");
+        assert!(clean_reset < unblock);
+    }
+
+    #[test]
+    fn usb_preauthentication_bearer_is_a_third_non_interface_owner() {
         let main = include_str!("main.rs");
         assert!(main.contains("PairingControlHandoff::new()).split()"));
+        assert!(main.contains("LivePairingHandoff::new()).split()"));
         assert!(main.contains("peripherals.GPIO21"));
         assert!(main.contains("InputConfig::default().with_pull(Pull::Up)"));
         assert!(main.contains("peripherals.USB_DEVICE"));
@@ -201,6 +285,118 @@ mod tests {
         assert!(!main.contains("esp_println::logger::init_logger_from_env"));
 
         let usb = include_str!("usb_pairing_task.rs");
+        assert_eq!(
+            usb.matches("let mut decoder = StreamDecoder::new();")
+                .count(),
+            1
+        );
+        assert_eq!(
+            usb.matches("let mut sequence_gate: Option<ExactNextSequenceGate>")
+                .count(),
+            1
+        );
+        assert!(usb.contains("decode_usb_pre_authentication_request"));
+        assert!(usb.contains("awaiting_live_reply"));
+        assert!(usb.contains("handle_live_reply"));
+        assert!(usb.contains("fn usb_bus_reset_interrupt()"));
+        assert!(usb.contains("#[ram]\nfn usb_bus_reset_interrupt()"));
+        assert!(usb.contains("usb_serial.set_interrupt_handler(usb_bus_reset_interrupt)"));
+        assert!(usb.contains("reset_generation: u32"));
+        assert!(usb.contains("TX_EPOCH_ARMED.store(true, Ordering::Release)"));
+        assert!(usb.contains("USB_PAD_FORCED_OFF.store(true, Ordering::Release)"));
+        assert!(usb.contains("USB_EPOCH_BLOCKED.store(true, Ordering::Release)"));
+        assert!(usb.contains("USB_EPOCH_BLOCKED.store(false, Ordering::Release)"));
+        assert!(usb.contains("USB_REATTACH_EXPECTED.store(true, Ordering::Release)"));
+        assert!(usb.contains("USB_CLEAN_RESET_GENERATION"));
+        assert!(usb.contains("previous_generation.wrapping_add(1)"));
+        assert!(usb.contains("let raced_clean_reset ="));
+        assert!(usb.contains("USB_REATTACH_DWELL_MILLIS"));
+        assert!(usb.contains("USB_ATTACHED_PAD_CONFIGURATION.store("));
+        assert!(usb.contains(".pad_pull_override()"));
+        assert!(usb.contains(".dp_pullup()"));
+        assert!(usb.contains(".dm_pullup()"));
+        assert!(usb.contains(
+            "let eligible_sof = saw_sof && disconnect_pending.is_none() && !epoch_blocked;"
+        ));
+        assert!(usb.contains("fn try_send_in_epoch<T, E>("));
+        assert!(usb.contains("critical_section::with(|_|"));
+        assert!(usb.contains(".usb_bus_reset()\n                .bit_is_set()"));
+        let reattach = usb
+            .split("if pad_reenable_pending")
+            .nth(1)
+            .and_then(|tail| tail.split("if consumed_bus_reset").next())
+            .expect("USB task must expose one guarded reattach attempt");
+        let enable_pad = reattach
+            .find(".usb_pad_enable()\n                        .bit(attached & USB_PAD_ENABLE_BIT != 0)")
+            .expect("reattach must restore the canonical scrubbed pad configuration");
+        let reattach_guard = reattach
+            .find("let reattached = critical_section::with(|_| {")
+            .expect("reattach must linearize its marker and pad enable against the ISR");
+        let arm_clean_reset = reattach
+            .find("USB_REATTACH_EXPECTED.store(true, Ordering::Release)")
+            .expect("reattach must arm exactly one expected clean reset");
+        assert!(reattach_guard < arm_clean_reset);
+        assert!(arm_clean_reset < enable_pad);
+        let send_epoch = usb
+            .split("fn try_send_in_epoch<T, E>(")
+            .nth(1)
+            .and_then(|tail| tail.split("fn retire_transmission(").next())
+            .expect("USB task must expose one reset-linearized handoff helper");
+        let send_epoch_check = send_epoch
+            .find("usb_epoch_current(reset_generation)")
+            .expect("handoff must check its admitted epoch");
+        let pending_reset_check = send_epoch
+            .find(".usb_bus_reset()")
+            .expect("handoff must reject a pending reset interrupt");
+        let enqueue = send_epoch
+            .find("Some(send(")
+            .expect("handoff must enqueue inside the guarded section");
+        assert!(send_epoch_check < pending_reset_check);
+        assert!(pending_reset_check < enqueue);
+        assert!(usb.contains("write.usb_mem_pd().set_bit()"));
+        assert!(usb.contains("write.usb_mem_pd().clear_bit()"));
+        assert!(usb.contains("fn tx_epoch_current(reset_generation: u32)"));
+        assert!(usb.contains("&& !USB_EPOCH_BLOCKED.load(Ordering::Acquire)"));
+        let receive = usb
+            .split("fn receive_pre_authentication_request(")
+            .nth(1)
+            .and_then(|tail| tail.split("fn handle_reply(").next())
+            .expect("USB task must expose one bounded pre-authentication receive step");
+        let first_rx_epoch_check = receive
+            .find("usb_epoch_current(context.reset_generation)")
+            .expect("RX must check its reset generation before touching the FIFO");
+        let read = receive
+            .find("rx.read_byte()")
+            .expect("RX must use one bounded FIFO read");
+        let accept = receive
+            .find(".accept(context.connection, sequence)")
+            .expect("RX must retain exact-next sequence admission");
+        let last_rx_epoch_check = receive
+            .rfind("usb_epoch_current(context.reset_generation)")
+            .expect("RX must recheck its reset generation after sequence admission");
+        assert!(first_rx_epoch_check < read);
+        assert!(read < accept);
+        assert!(accept < last_rx_epoch_check);
+        let transmission = usb
+            .split("fn step_transmission(")
+            .nth(1)
+            .and_then(|tail| tail.split("fn discard_rx_fifo(").next())
+            .expect("USB task must expose one bounded transmission step");
+        let first_epoch_check = transmission
+            .find("tx_epoch_current(pending.reset_generation)")
+            .expect("TX must check its reset generation before touching the FIFO");
+        let write = transmission
+            .find("tx.write_byte_nb(*byte)")
+            .expect("TX must use one nonblocking FIFO write");
+        let flush = transmission
+            .find("tx.flush_tx_nb()")
+            .expect("TX must explicitly transfer hardware ownership");
+        let last_epoch_check = transmission
+            .rfind("tx_epoch_current(pending.reset_generation)")
+            .expect("TX must recheck reset generation after WR_DONE");
+        assert!(first_epoch_check < write);
+        assert!(write < flush);
+        assert!(flush < last_epoch_check);
         assert!(usb.contains("discard_rx_fifo(&mut rx)"));
         assert!(usb.contains("rx.drain_rx_fifo(&mut discarded)"));
         assert!(usb.contains("let _ = tx.flush_tx_nb();"));
@@ -221,11 +417,11 @@ mod tests {
     }
 
     #[test]
-    fn node_owns_pairing_control_before_other_flash_mutation_work() {
+    fn node_owns_causal_pairing_frontier_before_other_flash_mutation_work() {
         let source = include_str!("node_task.rs");
         let pairing = source
-            .find("progressed |= step_pairing_control(")
-            .expect("node loop must step pairing control");
+            .find("progressed |= step_pairing_frontier(")
+            .expect("node loop must step the causal pairing frontier");
         let frame = source
             .find("if let Some(observation) = pending_frame_acknowledgement.take()")
             .expect("node loop must retain its authorized-frame owner");
@@ -236,6 +432,20 @@ mod tests {
         assert!(pairing < journal);
         assert!(source.contains("CredentialInitializationStatus::InFlight"));
         assert!(source.contains("drive_initialization_and_schedule"));
+        assert!(source.contains("select_pairing_command_lane"));
+        assert!(source.contains("admit_live_pairing_command"));
+        assert!(source.contains("drive_live_pairing_and_schedule"));
+        let live_admission = source
+            .find("progressed |= admit_live_pairing_command")
+            .expect("live request admission must be explicit");
+        let later_control = source
+            .find("handle_pairing_control_command(storage, state, command, now_millis)")
+            .expect("scalar control handling must be explicit");
+        let timeout = source
+            .find("progressed |= poll_pairing_timeout")
+            .expect("one timeout poll must follow both command lanes");
+        assert!(live_admission < later_control);
+        assert!(later_control < timeout);
     }
 
     #[test]

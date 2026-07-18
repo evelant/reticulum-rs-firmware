@@ -2,8 +2,9 @@
 
 - **Status:** accepted for the qualification session, portable credential
   authority/store, durable provenance, ADR 0009 policy/store design, ADR 0010
-  live-pairing protocol/core, and E290 credential boot composition; E290 live
-  lifecycle manager and authenticated firmware bearer pending
+  live-pairing protocol/core, E290 credential boot composition, and routed
+  pre-authentication live lifecycle; authenticated session/logical-API bearer
+  pending
 - **Date:** 2026-07-17
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0003](0003-lora-first-interface-fabric.md) and
@@ -158,8 +159,10 @@ This semantic authority is not itself persistence. The separate portable
 credential store now implements ADR 0009's physical commit/retire contract and
 power-loss recovery. E290 firmware now mounts and performs bounded boot recovery
 immediately after flash open, then retains any `MountedCredentialStore` in the
-sole coordinator. It has no live mutation owner, provisioning manager, or
-pairing protocol yet. Replacing the immutable authority remains a
+sole coordinator. That coordinator now owns explicit empty-media
+initialization and the ADR 0010 Begin/ProofStart/Activate/AbortCurrent lifecycle,
+including correlated durable Add/Activate/Abort mutation and reconciliation.
+Replacing the immutable authority outside that bounded lifecycle remains a
 future sole-firmware-owner operation performed only after the store has
 committed and validated a complete durable snapshot.
 
@@ -313,9 +316,10 @@ to enter a new session's response stream.
 
 The portable authority defines non-wrapping global revisions and the required
 rotation order: enroll a replacement before revoking the old record. Boot
-persistence/recovery is now composed; live successor mutation, factory reset,
-pairing timeouts/exclusivity and failure-rate limits remain future work and
-require explicit tests. Until secure
+persistence/recovery, live pairing successor mutation, and pairing timeout/
+exclusivity policy are now composed. General rotation, revocation, factory
+reset, and production failure-rate policy remain future work and require
+explicit tests. Until secure
 boot and flash encryption are enabled, a device PSK is extractable by a
 physical attacker and must not be described as tamper-resistant.
 
@@ -362,25 +366,29 @@ physical attacker and must not be described as tamper-resistant.
   post-open mount, bounded retire then cleanup, retained mounted ownership, no
   auto-provisioning, and credential-domain failure isolation while LoRa
   continues. This is host/target-build evidence, not powered authentication.
-- Remaining: live GPIO/USB/task-handoff pairing-manager composition, durable
-  revoke/rotate/reset transactions, and powered cut/window/rate tests.
+- Complete in the pre-authentication E290 path: debounced GPIO21 presence,
+  shared USB control/live decoding and exact-next sequencing, reset-generation
+  gating, secret-owning handoff, node causal scheduling, and correlated durable
+  Begin/Activate/Abort replies.
+- Remaining: durable revoke/rotate/reset transactions, authenticated session
+  dispatch, and powered successful lifecycle/cut/window/rate tests.
 - Remaining: cancellation at the concrete USB RX/TX, request-admission and
   reply-channel boundaries.
 - Remaining: concrete stale-reply channel draining and idempotent retry after
   disconnect.
 - Complete: RISC-V and ESP32-S3 `no_std` checks and strict Clippy/rustdoc.
 - Remaining: static memory accounting in the composed bearer task.
-- Powered USB reconnect tests on macOS, Linux and Windows without corrupting
-  LoRa scheduling or durable storage.
+- Complete on macOS for full USB re-enumeration restoring sequence zero without
+  credential mutation; Linux/Windows reconnect and macOS suspend/resume remain
+  powered matrix work without corrupting LoRa scheduling or durable storage.
 
 ## Deferred decisions
 
-This ADR does not select the production AEAD construction, implement ADR 0009's
-pairing manager, compose the USB bearer manager, define
+This ADR does not select the production AEAD construction, compose the
+authenticated USB bearer/session manager, define
 a USB OTG composite descriptor, add WebUSB/NCM, or create any non-LoRa
 Reticulum packet actor. The qualification pairing/rate policy is selected, but
-its live mutation path, external API/session composition, and USB-bearer
-implementation are still required before the authenticated USB-to-LoRa
-qualification path can run.
+its powered successful mutation path and external API/session composition are
+still required before the authenticated USB-to-LoRa qualification path can run.
 Production AEAD and the later transport/interface decisions are not
 prerequisites for that explicitly integrity-only wired lab profile.

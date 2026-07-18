@@ -1,17 +1,23 @@
 # Permanent Vision Master E290 node image
 
-**Status:** the first permanent, LoRa-first image is implemented and passes its
-95-test host-library composition suite, 12 focused host-client tests,
-portable-target, ESP32-S3 build, strict review, graph, and image-size gates. Its
-third task now owns a narrow USB Serial/JTAG pre-authentication status/initialize
-bearer and debounced GPIO21 physical presence. The final image returned
-`initialization-required` and `physical-presence-required` from both powered
-boards, but the button-confirmed hold, credential write, and exact post-write
-readback remain pending. Source `5f3f259` passed the earlier bounded
+**Status:** the first permanent, LoRa-first image is implemented. Its release
+record below captures the host-library, host-client, portable-target, ESP32-S3,
+strict review, graph, image-size, and same-image readback gates. Its
+third task now owns a USB Serial/JTAG pre-authentication initialization and live-
+pairing bearer, one shared exact-next sequence space, debounced GPIO21 physical
+presence, an interrupt-linearized reset-epoch guard, and an application-entry
+USB boot quarantine. Powered work has
+returned `initialization-required`, enforced GPIO21 for initialization and live
+Begin, rejected stale sequence zero, and restored a fresh epoch after full host
+re-enumeration. Both final-image readbacks matched exactly, both boards served
+sequence zero again after the induced hard reset, and 120-second no-button
+workflows left both credential partitions erased. The button-confirmed hold,
+credential write, and exact post-write readback remain pending. Source `5f3f259` passed the earlier bounded
 powered upgrade smoke on both `HT-RA62-HF` boards: exact same-image readback,
 resident pairing-policy and erased-initialization eligibility, zero credential
 mutation, journal/LoRa/interface startup, and ordinary one-frame TX. Full
-powered product-graph and USB reset/suspend/resume qualification remain open.
+powered product-graph, USB suspend/resume, power-cut behavior, and the ROM/
+bootloader interval before the earliest Rust entrypoint remain open.
 
 This target is the first executable product composition, not another HIL
 fixture. It starts a transport-mode Rete node, one E290 LoRa actor, receive and
@@ -47,19 +53,25 @@ admitted initialization permit, and every live-pairing proof/store owner. The
 runtime implements bounded entropy, Begin/ProofStart/Activate/AbortCurrent,
 cleanup-before-next-mutation, and ambiguous-result reconciliation. A compiled
 bearer-neutral depth-one handoff preserves exact secret-bearing owners under
-pressure. A sole USB Serial/JTAG/GPIO task now terminates
-the zero-session, zero-tag status/initialize records. The first SOF establishes
+pressure and is split between the USB and node tasks. The node schedules live
+requests against control events and journal mutation by their captured causal
+frontier, retains exact request correlation through durable drive/retry, and
+returns success only after the matching commit. A sole USB Serial/JTAG/GPIO task
+terminates the six zero-session, zero-tag initialization/live-pairing request
+kinds through one decoder and one sequence gate. The first SOF establishes
 a boot-lifetime connection epoch; an 8 ms missed-SOF interval suspends endpoint
 work without changing that epoch or its exact-next sequence; a later SOF resumes
 it; and only a USB bus reset retires it so a subsequent SOF can allocate the next
 epoch. The task also debounces active-low GPIO21 and exchanges scalar commands/
-replies with the node through depth-one channels. The opaque exclusivity
+replies with the node through depth-one channels. An unexpected bus reset
+increments an ISR-owned generation, blocks RX and TX, forces the USB pad off,
+retires old response ownership, scrubs USB RAM, and only admits a replacement
+epoch after an interrupt-linearized scrubbed reattach and clean reset. The opaque exclusivity
 capability and the sole flash coordinator remain node-owned. This bootstrap lane
 does not implement an authenticated session, the logical device API, or a
 Reticulum packet interface, and successful physical initialization remains
-unqualified on powered hardware. Live external authenticated admission is still
-blocked by node/USB scheduling of the resident lifecycle and the external API/
-session lane. ADR
+unqualified on powered hardware. External authenticated admission is now
+blocked by the API/session lane rather than live-pairing scheduling. ADR
 0005's active-owner policy is implemented: a
 permanent fault
 with an unresolved frame enters interface-local `ActiveOwnerFailStopped`, takes
@@ -87,8 +99,9 @@ transport-neutral node task
       resident live-pairing proof + typed mutation/reconciliation owners
     SubmissionRuntime + operation-scoped BoundJournal views
     exact authorized-frame retain/re-offer + durable echo
-  depth-one pre-auth command/reply handoff
-  depth-one bearer-neutral live-pairing handoff (compiled, not split yet)
+  depth-one pre-auth control command/reply handoff
+  depth-one bearer-neutral live-pairing command/reply handoff
+  captured-time causal frontier before shared flash mutation
              |
        InterfaceFabric slot 0
        ticketed jobs/completions
@@ -103,8 +116,10 @@ permanent LoRa actor task
 
 pre-authentication USB/GPIO task
   sole USB Serial/JTAG RX/TX owner
-  COBS status/initialize records only
+  one COBS decoder and sequence gate for status/initialize plus
+    Begin/ProofStart/Activate/AbortCurrent
   boot-lifetime connection epoch + exact-next sequence
+  reset ISR generation + pad-off/RAM-scrub/clean-reattach guard
   active-low GPIO21 stable-time debounce
   no Reticulum interface capability
 ```
@@ -220,8 +235,9 @@ must not be used for this target.
 
 `node_identity`, `announce_clock`, and `api_credentials` use ESP-IDF's standard
 `data,undefined` subtype. All three have application-owned formats; the
-credential range is checked, boot-mounted/recovered, and retained while ADR
-0009 live provisioning/pairing serving remains absent. `device_config`
+credential range is checked, boot-mounted/recovered, and retained. Explicit
+initialization and ADR 0010 live pairing are routed through the resident owner;
+authenticated session/API serving remains absent. `device_config`
 retains the standard NVS subtype while it is unwired; the application-owned
 journal and unwired message store retain `data,undefined`. Their labels and
 ranges remain distinct. Numeric custom subtypes are only valid with custom
@@ -371,9 +387,9 @@ device-API `SubmissionPort` for capability, principal-scoped status, and
 `experimental-rns-data` acceptance semantics. That is only the product-side
 semantic seam: the one-entry cap is not product capacity. Portable framing and
 job handoff exist, but the image has no composed authenticated session,
-external logical API lane, or USB/BLE/Wi-Fi API bearer. The separate USB
-bootstrap owner below is intentionally pre-authentication and
-initialization-only.
+external logical API lane, or authenticated USB/BLE/Wi-Fi API bearer. The
+separate USB bootstrap owner below is intentionally pre-authentication and
+serves only initialization and credential pairing.
 
 It also implements the sole-owner credential-initialization port. Each
 request and drive freshly inspects `node_identity`; a physical drive then lends
@@ -384,10 +400,15 @@ task owns fixed COBS buffers, a stable-time active-low GPIO21 debouncer,
 bus-reset-delimited nonzero connection epochs, exact-next request sequences,
 stale-RX discard, and coarse response framing. A missed-SOF suspension retains
 the epoch, sequence gate, and bytes already committed to the endpoint FIFO; it
-does not represent disconnect. Powered reset/suspend/resume semantics are still
-to be qualified. Live Begin, Proof, Activate, and Abort are implemented inside
-the resident credential owner, but this task lane does not route or drive them
-yet.
+does not represent disconnect. A powered macOS `USBDeviceReEnumerate` replaced
+the service and restored sequence zero after firmware pull-off, USB-RAM scrub,
+and reattachment. A non-seizing in-place `ResetDevice` returned success but
+left the same BSD service silent; it is not an accepted recovery primitive.
+The final image reattached and served sequence zero on both boards after the
+hard reset induced by exact flash readback. Suspend/resume and the ROM/
+bootloader interval before the application boot quarantine remain open. Live
+Begin, ProofStart, Activate, and AbortCurrent are routed through this task and
+durably driven by the resident credential owner.
 
 Both operation-scoped views name the device with the domain-separated 16-byte
 value `"e290-flash" || eFuse base MAC`. The credential view additionally fixes
@@ -422,9 +443,9 @@ cargo +esp clippy --locked --release \
 
 The build script rejects an unreviewed `esp-rtos` main-stack implementation and
 links `linkall.x`. Debug Xtensa builds are compile-time rejected.
-The host library suite has 83 passing tests: 81 focused policy/product/
-credential-boot/credential-runtime/USB-control tests, including the source-order regression,
-every canonical empty-initialization byte cut, adversarial media changes between
+The host library suite has 106 passing policy/product/credential-boot/
+credential-runtime/USB-control/live-routing tests, including the source-order
+regressions, every canonical empty-initialization byte cut, adversarial media changes between
 mount and classification, off-trajectory media, and classifier failure phases,
 plus two real cross-layer composition tests. The happy path proves unauthenticated
 and permission-denied requests cause zero NOR writes, exactly one authenticated
@@ -457,10 +478,14 @@ prior hold is cancelled and Low is suppressed until a fresh debounced High.
 Each fresh connection resets both that publication latch and the debouncer to
 Low, so release evidence retained for an older connection epoch cannot arm the
 new epoch; the replacement epoch must observe a complete fresh High debounce.
-The separate host client has 12 focused tests for parsing, default deadlines,
-single-open sequence progression, terminal result/exit behavior, ambiguity
-guidance, and sequence exhaustion. These focused counts do not claim that the
-entire workspace suite was rerun.
+The initialization-control host client has 12 focused tests for parsing,
+default deadlines, single-open sequence progression, terminal result/exit
+behavior, ambiguity guidance, and sequence exhaustion. The live-pairing client
+adds 15 tests for its CLI contract, exact response-family correlation and
+device-ID validation, pair/resume sequence headroom, owner-only reservation and
+atomic Pending persistence, fixed 96-byte binary layout, Pending-to-Active
+marking/readback, and secret-free output. Together these 27 focused tests are
+part of the full 173-test xtask gate.
 
 Once all response bytes enter the endpoint FIFO, firmware requests hardware
 `WR_DONE` and releases the software response owner without waiting for a later
@@ -468,6 +493,15 @@ completion observation. The hardware then owns that response; any later response
 remains losslessly backpressured at the FIFO until space is available. This avoids
 deadlocking RX after the host has already received a frame without weakening
 software ownership of a response that has not yet entered the FIFO.
+
+Because USB Serial/JTAG hardware can retain those hardware-owned bytes across a
+CPU/core reset, the image quarantines USB at the earliest application entry. It
+forces the native pad off, power-cycles USB memory, keeps the pad detached
+through product initialization, and installs the reset ISR before restoring the
+canonical attached configuration. No traffic is admitted until the expected
+enumeration reset names a clean epoch. Runtime bus reset applies the same
+block/detach/scrub/reattach gate. The ROM and bootloader interval before the
+earliest Rust entry remains a boot-chain residual, not a claimed erasure point.
 
 The permanent image selects only `esp-println` features
 `esp32s3,log-04,no-op` and does not initialize the logger. Application,
@@ -500,7 +534,7 @@ SHA-256
 retains explicit growth headroom rather than treating this early image as the
 full appliance ceiling.
 
-The resident live-pairing software slice links at 547,915 bytes text, 3,548
+The historical resident-live-pairing-before-USB-integration slice linked at 547,915 bytes text, 3,548
 bytes initialized data, 469,280 bytes BSS/reservations, and 1,020,743 bytes
 total by GNU size. Its packaged application is 590,960 of 6,291,456 bytes
 (9.39% of the factory slot); the unpadded merged image is 656,496 bytes with
@@ -510,8 +544,17 @@ The depth-one pairing handoff contributes a 144-byte static owner and the USB
 task pool is 2,016 bytes. These values remain below the unchanged CI ceilings of
 720,896/16,384/475,136/1,180,000 bytes, leaving 5,856 bytes under the aggregate
 BSS guard. They are host/link/package evidence, not runtime stack-high-water,
-powered-memory, or flashed-hardware results. The last image actually flashed to
-both boards remains the earlier USB-control package recorded below.
+powered-memory, or flashed-hardware results.
+
+The current boot-quarantined routed live-pairing release links at 594,219 bytes
+text, 3,572 bytes initialized data, 469,256 bytes BSS/reservations, and
+1,067,047 bytes total by GNU size. Its packaged application is 636,208 of
+6,291,456 bytes (10.11%); the unpadded merged image is 701,744 bytes with
+SHA-256
+`14d9fd6dd482c47baa9afd2fda6a5ba1d69f46785bf23ae29f6b9fe561e4b212`.
+Exact reads of that complete range matched on both powered boards. The values
+remain under the unchanged CI caps; runtime stack high-water and heap pressure
+are still not measured.
 
 ## Powered permanent-graph smokes
 
@@ -599,7 +642,67 @@ nor blind increment is safe. Confirm a USB bus reset before restarting
 at zero. The firmware refuses `u64::MAX` and exhausts that epoch; the host rejects
 an explicit maximum and reports no usable successor after `u64::MAX - 1`.
 
-On 2026-07-18, the final 652,992-byte merged image (SHA-256
+## Live-pairing USB client
+
+The companion client keeps that same port and exact sequence space open across
+Begin, ProofStart, and Activate. A `physical-presence-required` Begin is the
+only result it retries: it advances the sequence, prints the GPIO21 instruction,
+and waits within the overall deadline. Every other coarse Begin failure is
+terminal. Before Begin, the client creates without overwrite, synchronizes, and
+read-verifies an owner-only 96-byte Reserved marker. After a durable offer it
+writes and verifies a complete Pending record in an owner-only same-directory
+staging file, atomically renames that file over the reservation, synchronizes
+the parent, and only then sends ProofStart and Activate. It validates the exact
+device/credential continuation and full activation-confirmation MAC before
+changing the state byte to Active. Serial and state scratch are zeroized;
+device and credential IDs may be printed, but the PSK and proofs never are.
+Secure `pair` and `resume` persistence is currently Unix-only.
+
+```sh
+cargo +stable run --locked -p xtask -- e290-pairing-live \
+  --port /dev/cu.usbmodemXXXX \
+  --state-file /secure/new-e290-pairing.key \
+  pair
+```
+
+A Reserved state file is secret-free and contains only the canonical marker. A
+Pending or Active file additionally contains device ID, credential ID,
+generation, and the 32-byte PSK. It is plaintext developer/HIL key material and
+must be protected like a password. Pair requires a starting sequence no greater
+than `u64::MAX - 3`; resume requires no greater than `u64::MAX - 2`.
+
+A known Pending file before Activate can retry ProofStart with a fresh nonce in
+a newly confirmed physical-presence window:
+
+```sh
+cargo +stable run --locked -p xtask -- e290-pairing-live \
+  --port /dev/cu.usbmodemXXXX \
+  --state-file /secure/new-e290-pairing.key \
+  resume
+```
+
+A lost Begin offer leaves only a Reserved marker while the device may own an
+unrecoverable Pending PSK. Assess that state, then use the physically confirmed
+identifier-free recovery command:
+
+```sh
+cargo +stable run --locked -p xtask -- e290-pairing-live \
+  --port /dev/cu.usbmodemXXXX \
+  abort-current
+```
+
+`abort-current` also retries only physical-presence-required and reports the
+exact next sequence. It never reads or deletes a host state file. A successful
+abort is a durable tombstone; removing any corresponding Pending host file is a
+separate operator action.
+
+After an ambiguous Activate, retain the complete file. The current utility
+cannot distinguish Pending from Active because authenticated-session
+reconciliation is not yet composed. Do not guess Active, blindly resume, or
+invoke `abort-current`; `resume` is a proof retry, not an activation-state
+oracle.
+
+On 2026-07-18, the historical control-only 652,992-byte merged image (SHA-256
 `1727a14b58a076d65ea12feb61b564d5dfc66d6c6f0b9a8ddd39fc773332705c`) was
 flashed with the explicit 16 MiB E290 partition table to both boards. Both MAC
 `ac:a7:04:e1:3e:88` and `ac:a7:04:e1:3f:88` returned sequence-zero
@@ -618,10 +721,46 @@ An initial flash using espflash's default partition table correctly failed
 closed before provisioning; all subsequent powered claims use the repository's
 explicit `partitions/heltec-vision-master-e290-node.csv` image.
 
+An intermediate routed live-pairing/reset-guard image was then installed from
+fully erased media on both boards. Both boards returned
+`initialization-required` at sequence zero, returned physical-presence-required
+through sequence 24 during a 2.5-second no-button initialization workflow,
+dropped a deliberately stale sequence-zero request, and returned to a fresh
+sequence-zero epoch after a full macOS USB re-enumeration. Live Begin shares that
+same gate and sequence space: before initialization, both no-button clients
+received only physical-presence-required through sequence 24 and created no
+host PSK file. This intentionally does not reveal deeper credential state before
+physical presence.
+
+The final boot-quarantined image was then installed on both boards. Its exact
+701,744-byte address-zero readback from each board matched SHA-256
+`14d9fd6dd482c47baa9afd2fda6a5ba1d69f46785bf23ae29f6b9fe561e4b212`.
+After the hard reset induced by each readback, both boards reappeared and again
+served sequence-zero `initialization-required`. Simultaneous 120-second
+no-button initialization workflows remained responsive through sequence 1102
+on MAC `ac:a7:04:e1:3e:88` and sequence 1100 on MAC
+`ac:a7:04:e1:3f:88`; neither observed physical presence. Exact post-workflow
+reads of both 8 KiB credential partitions were entirely `0xff` and shared
+SHA-256
+`7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f`.
+This demonstrates hard-reset service recovery through the application-entry
+detach/scrub/reattach path, long no-button request liveness, and zero credential
+mutation. Because no secret response was in flight, it does not independently
+prove USB FIFO/RAM secret erasure or non-replay. A
+successful GPIO21 hold, initialization, pairing, activation, and exact
+post-write readback remain open. ROM and bootloader execution before the
+earliest Rust entrypoint also remains outside the application boot-quarantine
+claim.
+
 The current USB policy treats an 8 ms missed-SOF interval as suspension while
 retaining the epoch and exact-next sequence, then resumes that same epoch on a
-later SOF. Only bus reset disconnects. Powered reset/suspend/resume qualification
-is still required before treating this as the final host-lifecycle contract.
+later SOF. Only bus reset disconnects. Full `USBDeviceReEnumerate` passes and
+replaces the macOS service/session. Non-seizing in-place `ResetDevice` returns
+success but leaves the same endpoint stale and is not a recovery mechanism.
+The final image now has bounded whole-chip hard-reset recovery evidence after
+flash readback, while suspend/resume remains a separate powered qualification
+case. A hard reset does not by itself qualify the ROM/bootloader interval before
+the earliest Rust entrypoint.
 
 ## Connected-board identity and future flash procedure
 
@@ -829,13 +968,15 @@ as the bounded qualification fixture for the deterministic DATA/proof exchange.
   debounced GPIO21 physical presence, single USB byte owner, boot-lifetime
   connection epochs, exact-next sequence checks, and depth-one command/reply
   handoff; complete the powered button-confirmed credential write and exact
-  post-write readback, then qualify reset/suspend/resume behavior. Then
-  connect the resident live Begin/Proof/Activate/Abort mutation owner and
-  bearer-neutral secret handoff to the node task, generalize cross-store
-  exclusion, and multiplex its records through the bounded COBS framing,
-  qualification-session core, and boot-lifetime job/reply handoff with the
-  first authenticated USB API bearer. Bearer scheduling and authenticated
-  session/API composition are the remaining edges for live external admission;
+  post-write readback, then qualify suspend/resume, controlled power cuts, and
+  the pre-application boot-chain residual. Preserve the bounded final-image
+  hard-reset reattachment evidence already captured on both boards.
+  Preserve the now-connected resident Begin/Proof/Activate/Abort owner,
+  generalized cross-store exclusion, shared USB decoder/sequence owner,
+  causal node frontier, secret handoff, and boot quarantine. Next, compose the
+  qualification-session core and boot-lifetime job/reply handoff with the first
+  authenticated USB API bearer. Authenticated session/API composition is the
+  remaining software edge for live external admission;
   the narrow pre-authentication bearer, one-entry composition cap, and ADR 0005
   host behavior already pass. A later product-capacity policy must not weaken the same
   durability contract, and future interface actors fail-stop only their

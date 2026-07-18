@@ -4,7 +4,7 @@
 aggregate. It owns the sole `NodeCore`, authoritative interface router, DATA
 and ordinary coordinators, one DATA and ordinary permit server per actor, and
 the shared authorization policy. The first concrete consumer is the
-LoRa-only, two-task Heltec Vision Master E290 firmware graph. Its host,
+LoRa-first, three-task node/LoRa/USB Heltec Vision Master E290 firmware graph. Its host,
 portable-target, ESP32-S3 build and review gates pass. Source `96e38aa` passed a
 bounded powered smoke on both `HT-RA62-HF` boards: exact image readback,
 erased-credential/journal/LoRa startup, and two ordinary one-frame TXs each.
@@ -172,11 +172,13 @@ mechanics and will not emulate CAD, airtime reservations, RNode fragmentation,
 or another radio abstraction.
 
 The E290 image is not yet the full appliance. Its mirrored durable identity and
-restart-safe announce epoch are now boot-gated ahead of node/radio service, but
-journal/message storage and device-API integration, local LXMF
-submission/delivery, and the optional clients remain later composition work.
-Powered identity/reset and permanent-graph LoRa qualification remain open even
-though the physical-module gate and isolated semantic HIL are complete.
+restart-safe announce epoch are now boot-gated ahead of node/radio service, and
+the pre-authentication initialization/live-pairing API edge is composed. Message
+storage, authenticated device-API/session serving, local LXMF submission/
+delivery, and the optional clients remain later composition work. Bounded
+hard-reset reattachment now has powered evidence; broader reset/power-cut and
+permanent-graph LoRa qualification remain open even though the physical-module
+gate and isolated semantic HIL are complete.
 
 ## Legacy no-RF aggregate
 

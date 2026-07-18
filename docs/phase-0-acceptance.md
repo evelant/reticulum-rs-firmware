@@ -328,8 +328,8 @@ portable authenticated device-API adapter is also implemented: default builds
 serve capabilities and principal-scoped status, while the explicit target-safe
 feature enables durable experimental acceptance. Both profiles are target-
 checked. The permanent E290 graph keeps the journal runtime and sole flash in a
-resident coordinator and passes 95 host-library tests plus 12 focused host-
-client tests. These focused counts do not claim a full workspace rerun.
+resident coordinator. Current suite totals and final-image measurements are
+recorded only after the release, target, and powered readback gates below.
 Immediately after flash open it
 validates the exact `api_credentials` partition/eFuse binding, mounts and
 performs at most one retire then cleanup step, and retains any mounted credential
@@ -345,27 +345,27 @@ counted reboot smoke with the resident pairing policy present,
 `Eligible { media: ExactlyErased }` initialization status, continuing ordinary
 LoRa TX, and both credential partitions still entirely `0xff`. No request lane
 invoked initialization in that historical source. The current image composes
-the featureless status/initialize codec through one USB Serial/JTAG owner,
-stable-time active-low GPIO21 debounce, bus-reset-delimited epochs, exact-next
-sequences, and depth-one scalar command/reply channels to the node-owned
-coordinator. An 8 ms missed-SOF interval suspends without changing the epoch or
-sequence; later SOF resumes it. It still does not expose an authenticated
-session or the logical device API. Button/control arbitration is bounded, stable
-High is latched before later Low, and a raw-sample gap of at least 20 ms cancels
-a possible hold until a fresh debounced High. A response owner is released only
-after all bytes enter the endpoint FIFO and `WR_DONE` is requested; later
-responses backpressure on FIFO capacity.
+status/initialize and Begin/ProofStart/Activate/AbortCurrent through one USB
+Serial/JTAG byte owner, one shared decoder and exact-next sequence gate, and
+separate depth-one owning handoffs. The node-owned causal frontier orders scalar
+policy observations with secret-bearing live requests and withholds mutation
+success until the correlated durable terminal result. Stable-time active-low
+GPIO21 debounce supplies physical presence. An 8 ms missed-SOF interval
+suspends without changing the epoch or sequence; later SOF resumes it. It still
+does not expose an authenticated session or the logical device API.
+Button/control arbitration is bounded, stable High is latched before later Low,
+and a raw-sample gap of at least 20 ms cancels a possible hold until a fresh
+debounced High. A response owner is released only after all bytes enter the
+endpoint FIFO and `WR_DONE` is requested; later responses backpressure on FIFO
+capacity. Runtime bus reset blocks the epoch, removes the pull-up, scrubs USB
+RAM, and permits service only after a detectable reattachment and clean reset.
 Each fresh connection resets the publication latch and debouncer to Low,
 preventing release evidence retained for an older epoch from arming the new
 epoch and requiring a complete fresh High debounce.
 
-Strict host/target, graph, release-link, host-client, and size-cap checks pass.
-The current resident-live-pairing software ELF is
-547,915/3,548/469,280/1,020,743 bytes for text/data/BSS/total; the application is
-590,960 of 6,291,456 bytes. Its 656,496-byte explicit 16 MiB repository-
-partition-table merged image has SHA-256
-`9e788486c0621f0a2c32049b7df6522259b510fd2e080d26b83e5c5228ffc564` but has not
-yet been flashed. The preceding 652,992-byte USB-control image with SHA-256
+Strict host/target, graph, release-link, host-client, size-cap, and final
+same-image readback results are recorded in the E290 runbook. For historical
+context, the preceding 652,992-byte USB-control image with SHA-256
 `1727a14b58a076d65ea12feb61b564d5dfc66d6c6f0b9a8ddd39fc773332705c` was flashed
 to both boards. Both returned
 `initialization-required` and `physical-presence-required`. No-button,
@@ -376,14 +376,31 @@ readbacks on both boards were entirely `0xff` with SHA-256
 `7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f`,
 confirming zero writes. A successful hold, write, and post-write readback remain
 open.
+The final boot-quarantined 701,744-byte image with SHA-256
+`14d9fd6dd482c47baa9afd2fda6a5ba1d69f46785bf23ae29f6b9fe561e4b212`
+then matched exact address-zero readbacks from both boards. Each board
+reattached and served sequence-zero `initialization-required` after the hard
+reset induced by its readback. Simultaneous 120-second no-button initialization
+workflows remained responsive through sequences 1102 and 1100, respectively,
+and both exact credential-partition reads remained entirely `0xff`. This is
+hard-reset service-recovery through the application boot-quarantine path,
+liveness, and zero-mutation evidence. With no secret response in flight it does
+not independently prove USB FIFO/RAM secret erasure or non-replay, successful
+credential initialization, or anything about the preceding ROM/bootloader
+interval.
 The host asserts DTR and clears RTS. TTY reopen does not start a new epoch; only
-USB bus reset does. Status defaults to 15 seconds and initialize to 120 seconds;
+USB bus reset does. A powered macOS `USBDeviceReEnumerate` replaced the service
+and restored sequence zero after firmware detachment/scrub/reattachment. A non-
+seizing `ResetDevice` returned success but left the same endpoint stale and is
+not an accepted recovery primitive. Status defaults to 15 seconds and the
+physical-presence workflows to 120 seconds;
 a post-send I/O failure or request timeout leaves the last sequence
 consumed-or-ambiguous, and
 `u64::MAX` is refused rather than wrapped. The current image selects no-op
 firmware logging, so native USB logs are unavailable as boot evidence and cannot
-interleave with the COBS control stream. Powered reset/suspend/resume
-qualification remains open. A dedicated
+interleave with the COBS control stream. USB suspend/resume, controlled power
+cuts, and the ROM/bootloader interval before the earliest Rust entrypoint remain
+open. A dedicated
 RF-inert Tracker storage HIL image is target-
 checked and its isolated clean-path/software-reset powered run passed on board
 E9:44 from source `7b47113`, with strict serial and independent raw-partition
@@ -392,9 +409,10 @@ verification preserved at
 five appends, mutation-free retry/conflict, B2 compaction, and zero-mutation B2
 replay after software reset. That image calls the journal directly and does not
 qualify the actor on hardware. Controlled power cuts, endurance/soak, at-rest
-encryption, full powered qualification of the current permanent owner graph,
-live authenticated pairing plus authority/session/API-bearer composition, and runtime
-flash/watchdog/OTA/radio coordination remain open. The credential smoke does
+encryption, successful powered initialization/pairing/activation, authenticated
+authority/session/API-bearer composition, full powered qualification of the
+current permanent owner graph, and runtime flash/watchdog/OTA/radio coordination
+remain open. The credential smoke does
 not claim initialized-media recovery, interruption/power-cut recovery, a live
 authentication session, controlled peer RX/DATA, or an authenticated external
 bearer. On-

@@ -8,8 +8,9 @@
   physical-presence sampler, and depth-one task handoff are host-, target-, and
   bounded-powered-control verified; ADR 0010 live-pairing wire/crypto core,
   independent vectors, resident E290 durable lifecycle, bounded entropy, and
-  bearer-neutral secret handoff implemented; node/USB routing, session service,
-  and successful button-confirmed initialization remain pending
+  bearer-neutral secret handoff implemented and routed through the node/USB
+  owners; authenticated session service and successful button-confirmed
+  initialization/pairing remain pending
 - **Date:** 2026-07-18
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0004](0004-sole-flash-coordinator.md),
@@ -28,9 +29,9 @@ featureless framing-only initialization-control codec remains portable and is
 now composed only into that graph's narrow USB bootstrap lane. A sole USB
 Serial/JTAG task owns byte framing and debounced GPIO21 observations, and a
 depth-one command/reply handoff invokes the sole flash coordinator through the
-node task. This permits only coarse status and explicit empty-store
-initialization; authenticated pairing still needs live lifecycle mutation
-over one device-owned authority that survives power loss. ADR 0010 now freezes
+node task. The same byte owner and causal frontier now route coarse status,
+explicit empty-store initialization, and the four live pairing operations over
+one device-owned authority that survives power loss. ADR 0010 freezes
 the separate Begin/ProofStart/Activate/AbortCurrent records, typed continuation,
 HMAC transcript and activation confirmation; this ADR still owns the durable
 policy/store integration. Pairing
@@ -388,7 +389,7 @@ owner must revalidate them immediately before mutation. The policy starts from
 either no pending record or one already validated durable pending reference and
 tracks only its non-secret credential ID and generation.
 
-The future mutation coordinator, not the portable policy, allocates for each
+The resident mutation coordinator, not the portable policy, allocates for each
 accepted begin a never-before-used random nonzero 128-bit credential ID and
 random 256-bit PSK, plus the next authority revision. The sole owner commits
 and exactly reads back that `Pending` successor before it offers the ID and PSK
@@ -398,12 +399,12 @@ to the same bound USB connection. A disconnect or failed write never converts
 The client proves PSK possession with a domain-separated HMAC-SHA256 over a
 fresh single-use device challenge and the pairing transcript, including the
 credential ID and generation, stable public device-API ID, and current
-connection/window binding. The later wire specification must freeze the exact
-record encoding and domain bytes before implementation; it may not weaken
+connection/window binding. ADR 0010 freezes the exact record encoding and
+domain bytes; the implementation may not weaken
 these bindings or accept a client-supplied principal/permission assertion.
 Failure responses do not reveal whether any unrelated credential exists.
 
-After valid proof, the future mutation coordinator constructs the exact next
+After valid proof, the resident mutation coordinator constructs the exact next
 successor changing that record from `Pending` to `Active`. It commits, reads
 back, retires the old snapshot, and publishes the new authority before sending
 pairing completion or allowing session authentication. Reporting that exact
@@ -441,18 +442,19 @@ the short-lived bound credential view. The third E290 task owns USB bytes, activ
 debounce, SOF/bus-reset observations, a missed-SOF suspension threshold that
 retains the current epoch, and bus-reset-delimited connection epochs; depth-one
 command/reply channels keep the
-opaque exclusivity capability with the node/storage owner. This composition is
-host- and target-verified. Both boards have also returned
+opaque exclusivity capability with the node/storage owner. The node schedules
+live operations through a causal control/live frontier, retains exact request
+correlation across durable drive/reconciliation, and returns only the matching
+terminal result through the secret-owning handoff. This composition is host-
+and target-verified. Both boards have also returned
 `initialization-required` and `physical-presence-required`; this bounded control
 result is not successful powered initialization evidence. The remaining
 boundary includes:
 
-- node scheduling of the resident live lifecycle, generalized cross-store
-  exclusion, and connection-routed response delivery through the compiled
-  bearer-neutral secret handoff and sole USB COBS/sequence owner;
-- partial-TX/reset ownership, host persistence, authenticated session/API
-  composition, and no-fallback qualification;
-- powered lifecycle and power-cut qualification. USB suspend/resume behavior
+- successful powered initialization, Begin, proof, durable activation, abort,
+  and fault/cut qualification;
+- authenticated session/API composition and no-fallback qualification;
+- USB suspend/resume behavior
   still requires powered host-matrix validation; the present SOF/missed-SOF
   policy is not a final suspend contract.
 
@@ -512,8 +514,8 @@ but cannot claim security from the developer USB trust shortcut.
   sole-owner fresh-identity/fresh-view initialization port. Cross-store gating
   defers admission behind retained journal work and defers journal mutation or
   acceptance behind in-flight initialization without disabling the service.
-  These checks contribute to the 95-test E290 host-library suite; they are not
-  powered integration or live-authentication evidence.
+  These checks contribute to the E290 host-library gate; they are not powered
+  integration or live-authentication evidence.
 - Complete as bounded powered erased-media smoke at source `96e38aa`: both
   boards reported `UninitializedErased` with zero recovery steps/writes/erases,
   API/session/bearer closed, LoRa continuing, and exact post-boot credential
@@ -533,8 +535,8 @@ but cannot claim security from the developer USB trust shortcut.
   exact pending begin/proof/activation/abort transitions, operation ownership
   across disconnect, clock regression, overflow faults, and the 256-byte policy-
   owner RAM ceiling. Its feature-free edge is composed only into permanent E290
-  firmware; the E290 USB/GPIO bearer invokes its narrow status/initialize path
-  through the node-owned handoff.
+  firmware; the E290 USB/GPIO bearer invokes status/initialize and routed live
+  Begin/ProofStart/Activate/AbortCurrent through node-owned handoffs.
 - Complete in the portable initialization-control slice: eight tests freeze all
   four record kinds, every status/result code, exact COBS round trips, zero
   session/tag requirements, payload shapes, unknown-code rejection, and framing
@@ -552,22 +554,23 @@ but cannot claim security from the developer USB trust shortcut.
   cleanup ordering; ambiguous commit reconciliation; disconnect, timeout and
   replacement cancellation; fail-closed semantic preflight; exact unsent-owner
   pressure; and compile-time RAM ceilings all pass host and target gates. The
-  lifecycle and handoff are compiled but are not yet scheduled by the node or
-  connected to the USB byte owner.
-- Complete as E290 host/target USB bootstrap composition: the 95-test firmware
+  lifecycle and handoff are scheduled by the node and connected to the shared
+  USB control/live byte owner.
+- Complete as E290 host/target USB bootstrap composition: the current firmware
   library suite covers the stable-time active-low debouncer, held-low boot,
   clock regression, missed-SOF suspension with bus-reset-delimited epochs,
   sequence exhaustion, duplicate/gap rejection, bounded button/control
   arbitration, latched High-before-Low publication, raw-sample continuity loss,
   fresh-connection publication-latch/debouncer reset, endpoint-FIFO response
   ownership, depth-one pressure, capability-free handoff, coarse public result
-  mapping, single USB ownership, GPIO21 pull-up composition, and initialization-
-  before-journal scheduling. Strict host/target Clippy, rustdoc, release linking,
-  graph policy, and the image-size ceilings pass.
-  Twelve focused `e290-pairing-control` tests cover command defaults, one-port
-  sequence progression, terminal results, ambiguity guidance, and exhaustion;
-  these focused counts do not claim a complete workspace rerun.
-- Complete as bounded powered bootstrap control: the 544,371/3,548/469,280/
+  mapping, single USB ownership, GPIO21 pull-up composition, initialization-
+  before-journal scheduling, shared control/live decoding, causal ordering,
+  durable reply correlation, reset-generation blocking, physical detachment,
+  USB-RAM scrubbing, and earliest-Rust-entry boot quarantine. The 106-test
+  firmware library, 27 focused host-client tests, full 173-test xtask suite,
+  strict host/target Clippy, rustdoc, release linking, graph policy, and image-
+  size ceilings pass. Final measurements are recorded with the qualified image.
+- Complete as historical bounded powered bootstrap control: the 544,371/3,548/469,280/
   1,017,199-byte text/data/BSS/total ELF packaged a 587,456-byte application.
   Its 652,992-byte explicit-16-MiB repository-partition-table image has SHA-256
   `1727a14b58a076d65ea12feb61b564d5dfc66d6c6f0b9a8ddd39fc773332705c` and was
@@ -578,17 +581,34 @@ but cannot claim security from the developer USB trust shortcut.
   SHA-256
   `7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f`,
   confirming zero writes. Successful post-write readback remains open.
+- Complete as final-image boot-quarantine and no-mutation control: the
+  701,744-byte image with SHA-256
+  `14d9fd6dd482c47baa9afd2fda6a5ba1d69f46785bf23ae29f6b9fe561e4b212`
+  matched exact address-zero reads from both boards. Both boards reattached and
+  served sequence-zero `initialization-required` after the induced hard reset.
+  Simultaneous 120-second no-button workflows stayed responsive through
+  sequences 1102 and 1100, and both exact credential-partition reads remained
+  entirely `0xff`. This does not qualify a successful hold/write, controlled
+  power cuts, or the ROM/bootloader interval before the earliest Rust entry.
 - The host asserts DTR, clears RTS, and keeps initialize on one open TTY. TTY
   reopen is not an epoch boundary; only USB bus reset is. Status defaults to 15
   seconds and initialize to 120 seconds. A post-send I/O failure or timed-out
   request leaves its last sequence consumed-or-ambiguous. `u64::MAX` is refused
   and cannot wrap.
+- The live host client reserves and verifies an owner-only state path before
+  Begin, atomically installs a complete Pending credential before ProofStart,
+  and can `resume` a known Pending file in a fresh confirmed window. It
+  zeroizes serial/state scratch and validates the returned device identity.
+  Secure pair/resume persistence is Unix-only. Pair and resume require three-
+  and two-request sequence headroom respectively. An ambiguous Activate remains
+  unreconciled until the authenticated session exists; the client retains the
+  file and must not guess Active or abort.
 - Pairing integration tests must still cover powered GPIO debounce/sampling,
   USB reset/suspend/resume behavior, disconnect at every secret/proof/completion boundary,
   proof replay and wrong transcript binding, unique ID/PSK allocation, E290
   interrupted-initialization powered recovery, retained same-boot ambiguity
   under real faults, and 16-ID exhaustion.
-- Live authenticated mutation/bearer composition must keep the ADR 0004 coordinator as the
+- Authenticated session/bearer composition must keep the ADR 0004 coordinator as the
   only flash and mutable-authority owner, zeroize temporary secrets, preserve LoRa
   scheduling under USB pressure, and prove no API/session service starts from
   unformatted, unrecovered, or conflicting media. It must also prove USB
@@ -599,7 +619,6 @@ but cannot claim security from the developer USB trust shortcut.
   activation, retirement, and cleanup at every reachable boundary and verify
   exact flash readback before this path is enabled outside developer/HIL use.
 
-No live authenticated pairing, lifecycle credential mutation, powered empty-
-store initialization, powered-cut recovery, or live-authentication gate is
-claimed complete by this ADR. Only the pre-authentication status/initialize USB
-composition is claimed in firmware.
+The software-routed pre-authentication lifecycle and durable credential mutation
+are complete. This ADR does not claim successful powered initialization/
+pairing/activation, powered-cut recovery, or an authenticated session/API gate.

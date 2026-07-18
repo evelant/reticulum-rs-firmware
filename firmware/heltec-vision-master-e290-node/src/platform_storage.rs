@@ -17,7 +17,10 @@ use reticulum_device_api_adapter::{SubmissionAcceptance, SubmissionPort, Submiss
 use reticulum_device_api_credential_store::{
     BoundCredentialStore, CredentialStoreBinding, CredentialStoreRecovery, MountedCredentialStore,
 };
-use reticulum_device_api_pairing::DeviceId;
+use reticulum_device_api_pairing::{
+    AbortCurrentResponse, AbortResult, ActivateResponse, BeginResponse, DeviceId, PairingRequest,
+    PairingResponse, ProofStartResponse,
+};
 use reticulum_device_api_pairing_policy::{
     AcquirePairingExclusive, ActiveLowButton, ButtonEffect, ConnectionId, ConnectionRefusal,
     ExclusiveAcquireOutcome, MonotonicMillis as PairingMillis, PolicyEvent, WindowClosed,
@@ -28,6 +31,10 @@ use reticulum_device_identity_store::{
 };
 use reticulum_heltec_vision_master_e290_node::credential_boot::{
     CredentialBootOutcome, CredentialBootState, boot_credentials,
+};
+use reticulum_heltec_vision_master_e290_node::credential_pairing::{
+    AbortAdmission, ActivateAdmission, BeginAdmission, CredentialPairingDriveOutcome,
+    CredentialPairingStatus, PairingMutation, ProofStartAdmission,
 };
 use reticulum_heltec_vision_master_e290_node::credential_runtime::{
     CredentialInitializationStatus, CredentialRuntime, InitializationAccepted,
@@ -273,6 +280,16 @@ pub(crate) enum ProductInitializationDrive {
     IdentityUnavailable,
     /// Fresh identity preflight completed and the resident runtime decided.
     Runtime(InitializationDriveOutcome<ProductRegionError>),
+}
+
+/// Product-level admission result for one owning live-pairing request.
+pub(crate) enum ProductLivePairingAdmission {
+    /// Journal mutation is still retained; the exact request owner must retry.
+    DeferredForJournalMutation(PairingRequest),
+    /// A challenge or coarse refusal is immediately ready for the bearer.
+    Immediate(PairingResponse),
+    /// One durable mutation was admitted and must be driven before replying.
+    MutationAccepted(PairingMutation),
 }
 
 /// Product result of attempting one durable-submission runtime step.
@@ -615,10 +632,37 @@ impl ProductStorageCoordinator {
         self.submission_service_enabled && self.runtime.is_some()
     }
 
+    /// Current non-secret resident live-pairing ownership.
+    pub(crate) fn live_pairing_status(&self) -> CredentialPairingStatus {
+        self.credential_runtime.live_pairing_status()
+    }
+
     /// Permanently close local submission admission and runtime driving for
     /// this boot without dropping backend-independent durable state.
     pub(crate) fn disable_submission_service(&mut self) {
         self.submission_service_enabled = false;
+    }
+
+    fn journal_mutation_pending(&self) -> (bool, bool) {
+        self.runtime
+            .as_ref()
+            .map(|runtime| {
+                (
+                    runtime.storage().pending_kind().is_some(),
+                    runtime
+                        .storage()
+                        .projector()
+                        .pending_persistence()
+                        .next()
+                        .is_some(),
+                )
+            })
+            .unwrap_or((false, false))
+    }
+
+    fn credential_physical_mutation_gate(&self) -> CredentialPhysicalMutationGate {
+        let (journal_actor_pending, journal_projector_pending) = self.journal_mutation_pending();
+        credential_physical_mutation_gate(journal_actor_pending, journal_projector_pending)
     }
 
     fn journal_mutation_gate(&self) -> JournalMutationGate {
@@ -627,6 +671,108 @@ impl ProductStorageCoordinator {
             self.credential_runtime
                 .credential_physical_mutation_outstanding(),
         )
+    }
+
+    /// Admit one transport-neutral live-pairing request without exposing flash.
+    ///
+    /// Mutation-producing requests retain their complete owner while journal
+    /// work is pending. ProofStart remains challenge-only and bypasses the
+    /// physical-mutation gate. Accepted mutations return no response until the
+    /// caller drives their durable terminal outcome.
+    pub(crate) fn request_live_pairing<R>(
+        &mut self,
+        at: PairingMillis,
+        connection: ConnectionId,
+        request: PairingRequest,
+        rng: &mut R,
+    ) -> ProductLivePairingAdmission
+    where
+        R: RngCore + CryptoRng,
+    {
+        let mutation_request = !matches!(&request, PairingRequest::ProofStart(_));
+        if mutation_request
+            && self.credential_physical_mutation_gate()
+                == CredentialPhysicalMutationGate::DeferredForJournalMutation
+        {
+            return ProductLivePairingAdmission::DeferredForJournalMutation(request);
+        }
+
+        match request {
+            PairingRequest::Begin(request) => {
+                let sequence = request.sequence();
+                match self
+                    .credential_runtime
+                    .request_pairing_begin(at, connection, rng)
+                {
+                    BeginAdmission::Accepted => {
+                        ProductLivePairingAdmission::MutationAccepted(PairingMutation::AddPending)
+                    }
+                    BeginAdmission::Refused(failure) => ProductLivePairingAdmission::Immediate(
+                        PairingResponse::Begin(BeginResponse::failure(sequence, failure)),
+                    ),
+                }
+            }
+            PairingRequest::ProofStart(request) => {
+                let sequence = request.sequence();
+                match self
+                    .credential_runtime
+                    .request_pairing_proof_start(at, connection, &request, rng)
+                {
+                    ProofStartAdmission::Challenge(challenge) => {
+                        ProductLivePairingAdmission::Immediate(PairingResponse::ProofStart(
+                            ProofStartResponse::challenge(sequence, challenge),
+                        ))
+                    }
+                    ProofStartAdmission::Refused(failure) => {
+                        ProductLivePairingAdmission::Immediate(PairingResponse::ProofStart(
+                            ProofStartResponse::failure(sequence, failure),
+                        ))
+                    }
+                }
+            }
+            PairingRequest::Activate(request) => {
+                let sequence = request.sequence();
+                match self
+                    .credential_runtime
+                    .request_pairing_activate(at, connection, request)
+                {
+                    ActivateAdmission::Accepted => ProductLivePairingAdmission::MutationAccepted(
+                        PairingMutation::ActivatePending,
+                    ),
+                    ActivateAdmission::Refused(failure) => ProductLivePairingAdmission::Immediate(
+                        PairingResponse::Activate(ActivateResponse::failure(sequence, failure)),
+                    ),
+                }
+            }
+            PairingRequest::AbortCurrent(request) => {
+                let sequence = request.sequence();
+                match self
+                    .credential_runtime
+                    .request_pairing_abort_current(at, connection)
+                {
+                    AbortAdmission::Accepted => {
+                        ProductLivePairingAdmission::MutationAccepted(PairingMutation::AbortPending)
+                    }
+                    AbortAdmission::Refused(failure) => {
+                        ProductLivePairingAdmission::Immediate(PairingResponse::AbortCurrent(
+                            AbortCurrentResponse::new(sequence, abort_result(failure)),
+                        ))
+                    }
+                }
+            }
+        }
+    }
+
+    /// Advance one cleanup, commit, or reconciliation step through a fresh
+    /// operation-scoped credential-store view.
+    pub(crate) fn drive_live_pairing(&mut self) -> CredentialPairingDriveOutcome {
+        let region = PartitionNorFlash::new(
+            &mut *self.flash,
+            API_CREDENTIALS_OFFSET,
+            API_CREDENTIALS_LEN,
+        );
+        let mut access = BoundCredentialStore::new(region, self.credential_runtime.binding());
+        self.credential_runtime.drive_live_pairing(&mut access)
     }
 
     /// Offer one exact interface-agnostic authorized-frame observation.
@@ -735,23 +881,8 @@ impl ProductCredentialInitializationPort for ProductStorageCoordinator {
         now: PairingMillis,
         connection: ConnectionId,
     ) -> ProductInitializationRequest {
-        let (journal_actor_pending, journal_projector_pending) = self
-            .runtime
-            .as_ref()
-            .map(|runtime| {
-                (
-                    runtime.storage().pending_kind().is_some(),
-                    runtime
-                        .storage()
-                        .projector()
-                        .pending_persistence()
-                        .next()
-                        .is_some(),
-                )
-            })
-            .unwrap_or((false, false));
         if matches!(
-            credential_physical_mutation_gate(journal_actor_pending, journal_projector_pending),
+            self.credential_physical_mutation_gate(),
             CredentialPhysicalMutationGate::DeferredForJournalMutation
         ) {
             return ProductInitializationRequest::DeferredForJournalMutation;
@@ -883,6 +1014,17 @@ fn map_submission_acceptance(progress: AcceptanceProgress) -> SubmissionAcceptan
             SubmissionAcceptance::CapacityExhausted
         }
         AcceptanceProgress::IdentifierExhausted => SubmissionAcceptance::IdentifierExhausted,
+    }
+}
+
+const fn abort_result(failure: reticulum_device_api_pairing::PairingFailure) -> AbortResult {
+    match failure {
+        reticulum_device_api_pairing::PairingFailure::PhysicalPresenceRequired => {
+            AbortResult::PhysicalPresenceRequired
+        }
+        reticulum_device_api_pairing::PairingFailure::Refused => AbortResult::Refused,
+        reticulum_device_api_pairing::PairingFailure::Blocked => AbortResult::Blocked,
+        reticulum_device_api_pairing::PairingFailure::Unavailable => AbortResult::Unavailable,
     }
 }
 

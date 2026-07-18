@@ -3,8 +3,8 @@
 - **Status:** accepted for the USB Serial/JTAG developer/HIL profile; portable
   protocol/core, independent vectors, E290 resident durable lifecycle, bounded
   entropy, and bearer-neutral secret handoff implemented and target-verified;
-  node/USB scheduling, host utility, authenticated session/API, and powered
-  qualification pending
+  node/USB scheduling and the recoverable host utility implemented;
+  authenticated session/API and successful powered qualification pending
 - **Date:** 2026-07-18
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0006](0006-authenticated-local-api-bearer.md),
@@ -236,7 +236,10 @@ Every non-success response has exactly one byte:
 
 An ambiguous or lost success response does not roll back Active. The client
 keeps its credential file and resolves the outcome by attempting a fresh
-authenticated session after a confirmed USB reset.
+authenticated session after a confirmed USB reset. That authenticated
+reconciliation lane is not yet composed in the current host utility: after an
+ambiguous Activate it must retain the file and must not guess Active, invoke
+AbortCurrent, or treat `resume` as an activation-state oracle.
 
 ### AbortCurrent recovers an orphaned pending enrollment
 
@@ -303,8 +306,8 @@ new credential or reusing a challenge.
   excludes new ordinary-session admission.
 
 Decoded records, streaming decoder scratch, encoded frames, pending PSKs,
-challenges, proof owners, task handoff owners, and host credential buffers are
-zeroized on every terminal/drop path. Secret-bearing types implement neither
+challenges, proof owners, task handoff owners, host serial scratch, and host
+credential buffers are zeroized on every terminal/drop path. Secret-bearing types implement neither
 `Copy` nor `Clone` nor secret-revealing `Debug`. Firmware logs never contain a
 PSK, proof, challenge, or raw pairing record. The selected RustCrypto
 `Sha256`/`Hmac<Sha256>` contexts do not implement `Zeroize`; their internal
@@ -317,15 +320,35 @@ typestate/enum moves leave no transient stack copy. Avoiding that residual would
 require a separately reviewed pinned/in-place secret-state design and compiler
 assumptions stronger than this developer profile currently makes.
 
+`WR_DONE` transfers the completed response to USB hardware; software no longer
+owns those FIFO bytes. The firmware therefore detaches the native USB pad and
+power-cycles USB memory at the earliest application entry on every boot, keeps
+the pad detached through initialization, installs the reset ISR, and opens no
+new epoch until a detectable reattachment produces the expected clean reset.
+Runtime bus reset applies the same block/detach/scrub/reattach sequence. The ROM
+and bootloader interval before the earliest Rust entry remains a hardware/
+boot-chain residual and must not be described as a proven secret-erasure point.
+
 ## Host persistence contract
 
-The first host utility writes a fixed binary credential file with a magic,
-format version, state, device ID, credential ID, generation, and 32-byte PSK.
-It creates without overwrite, uses mode `0600` where supported, synchronizes
-the file before sending Activate, retains it after any ambiguous activation,
-and never prints the PSK. If persistence fails after an offer, the client does
-not send Activate and directs the user through AbortCurrent while the physical
-window remains open or in a later confirmed window.
+Before Begin, `pair` creates without overwrite, synchronizes, and read-verifies
+an owner-only 96-byte Reserved marker. That marker is secret-free. A definite
+no-offer removes it; an ambiguous Begin retains it because the device may have
+committed an unrecoverable Pending PSK. After receiving an offer, the client
+writes and verifies a complete owner-only staging file containing magic,
+format, Pending state, device ID, credential ID, generation, and PSK, then
+atomically renames it over the reservation and synchronizes the parent before
+ProofStart. It never prints the PSK. Secure `pair` and `resume` persistence is
+currently Unix-only; `abort-current` remains available on other hosts.
+
+`resume` reopens only a canonical Pending file, generates a fresh nonce, and
+validates the exact returned device ID and credential reference before proof.
+Pair requires Begin sequence `<= u64::MAX - 3`; resume requires ProofStart
+sequence `<= u64::MAX - 2`. Lost ProofStart can retry through `resume` in a
+fresh physically confirmed window. A lost Begin offer leaves only the Reserved
+marker and requires assessment plus physically confirmed AbortCurrent. An
+ambiguous Activate retains the complete file for the future authenticated
+reconciliation lane; the current client must not guess or abort.
 
 ## Validation
 
@@ -340,8 +363,8 @@ roles, and verify COBS framing and proof-domain separation. Host, strict
 Clippy/rustdoc, generic `riscv32imac-unknown-none-elf`, and ESP32-S3 Xtensa
 checks pass.
 
-The permanent E290 graph now contains the live-pairing core only through its
-resident credential lifecycle. Its 95-test host library suite covers durable
+The permanent E290 graph contains the live-pairing core only through its
+resident credential lifecycle. Its host library suite covers durable
 Add -> Proof -> Activate, Add -> AbortCurrent, cleanup before subsequent
 mutation, resumed Pending under a fresh connection/window, partial writes and
 lost replies, disconnect/timeout/replacement challenge cancellation, exact
@@ -352,10 +375,13 @@ between Begin and ProofStart. The same package passes strict Clippy/rustdoc plus
 generic bare-metal and ESP32-S3
 Xtensa checks.
 
-Remaining firmware composition tests must cover generalized cross-store
-exclusion, node/bearer reply retention through partial USB TX, bus-reset
-challenge invalidation across the routed handoff, and no unauthenticated
-fallback. Powered qualification then reads the exact
+The routed composition additionally covers generalized cross-store exclusion,
+node/bearer reply retention through partial USB TX, shared sequence admission,
+causal control/live scheduling, bus-reset challenge invalidation, reset-
+generation blocking, physical detachment, and USB-memory scrubbing. Exact final
+suite totals are recorded with the qualified image. Remaining composition work
+is the authenticated session/API lane and its no-fallback proof. Powered
+qualification then reads the exact
 credential partition after Pending, Active, and Abort and proves that only
 Active authenticates after reboot.
 
@@ -369,6 +395,5 @@ Active authenticates after reboot.
   but suite 1 is permitted only for the trusted wired developer/HIL profile.
 - The protocol adds authentication of possession and activation confirmation,
   not confidentiality or production host identity binding.
-- Node/USB routing of the resident E290 lifecycle, the host client,
-  authenticated session/API composition, and powered fault testing remain
-  separate implementation gates.
+- Authenticated session/API composition, activation-ambiguity reconciliation,
+  and powered lifecycle/fault testing remain separate implementation gates.

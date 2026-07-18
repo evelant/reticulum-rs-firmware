@@ -6,6 +6,10 @@ use embassy_time::{Duration, Instant, Timer};
 use esp_hal::rng::Trng;
 use log::{error, info, warn};
 use reticulum_announce_clock::BootEpoch;
+use reticulum_device_api_pairing::{
+    AbortCurrentResponse, AbortResult, ActivateFailure, ActivateResponse, BeginResponse,
+    PairingFailure, PairingRequest, PairingResponse, ProofStartResponse,
+};
 use reticulum_device_api_pairing_control::{ControlRequest, ControlResponse, InitializeResult};
 use reticulum_device_api_pairing_policy::{
     AcquirePairingExclusive, ButtonEffect, ConnectionId, ExclusiveAcquireOutcome,
@@ -13,8 +17,12 @@ use reticulum_device_api_pairing_policy::{
 };
 use reticulum_heltec_vision_master_e290_node::{
     announce_time::BootAnnounceClock,
+    causal_pairing_frontier::{PairingCommandLane, select_pairing_command_lane},
+    credential_pairing::{CredentialPairingStatus, PairingMutation},
     credential_runtime::CredentialInitializationStatus,
     durability_policy::{AuthorizedFrameDurability, DurabilityServiceState},
+    live_pairing_handoff::{LivePairingCommand, LivePairingReply, NodeLivePairingHandoff},
+    live_pairing_node::{LivePairingOperation, LivePairingOperationStep},
     pairing_control_handoff::{
         ButtonObservationReply, ExclusiveAcquisitionReply, LifecycleAcknowledgement,
         NodePairingHandoff, PairingControlCommand, PairingControlReply, PairingControlReplyKind,
@@ -41,7 +49,8 @@ use crate::{
     LORA_ONLINE, ProductSupervisor, RADIO_READY, config,
     platform_storage::{
         ProductCredentialInitializationPort, ProductInitializationDrive,
-        ProductInitializationRequest, ProductStorageCoordinator, ProductSubmissionDrive,
+        ProductInitializationRequest, ProductLivePairingAdmission, ProductStorageCoordinator,
+        ProductSubmissionDrive,
     },
 };
 
@@ -72,16 +81,126 @@ struct IngressDrainState<'a> {
     local_quarantine_available: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LiveRequestKind {
+    Begin,
+    ProofStart,
+    Activate,
+    AbortCurrent,
+}
+
+impl LiveRequestKind {
+    const fn from_request(request: &PairingRequest) -> Self {
+        match request {
+            PairingRequest::Begin(_) => Self::Begin,
+            PairingRequest::ProofStart(_) => Self::ProofStart,
+            PairingRequest::Activate(_) => Self::Activate,
+            PairingRequest::AbortCurrent(_) => Self::AbortCurrent,
+        }
+    }
+
+    const fn expected_mutation(self) -> Option<PairingMutation> {
+        match self {
+            Self::Begin => Some(PairingMutation::AddPending),
+            Self::ProofStart => None,
+            Self::Activate => Some(PairingMutation::ActivatePending),
+            Self::AbortCurrent => Some(PairingMutation::AbortPending),
+        }
+    }
+
+    fn blocked_response(self, sequence: u64) -> PairingResponse {
+        match self {
+            Self::Begin => {
+                PairingResponse::Begin(BeginResponse::failure(sequence, PairingFailure::Blocked))
+            }
+            Self::ProofStart => PairingResponse::ProofStart(ProofStartResponse::failure(
+                sequence,
+                PairingFailure::Blocked,
+            )),
+            Self::Activate => PairingResponse::Activate(ActivateResponse::failure(
+                sequence,
+                ActivateFailure::Blocked,
+            )),
+            Self::AbortCurrent => PairingResponse::AbortCurrent(AbortCurrentResponse::new(
+                sequence,
+                AbortResult::Blocked,
+            )),
+        }
+    }
+
+    const fn matches_response(self, response: &PairingResponse) -> bool {
+        matches!(
+            (self, response),
+            (Self::Begin, PairingResponse::Begin(_))
+                | (Self::ProofStart, PairingResponse::ProofStart(_))
+                | (Self::Activate, PairingResponse::Activate(_))
+                | (Self::AbortCurrent, PairingResponse::AbortCurrent(_))
+        )
+    }
+}
+
+struct PairingNodeState {
+    pending_control_command: Option<PairingControlCommand>,
+    pending_control_reply: Option<PairingControlReply>,
+    pending_exclusive: Option<(ConnectionId, AcquirePairingExclusive)>,
+    initialization_retry_not_before_ms: Option<u64>,
+    pending_live_command: Option<LivePairingCommand>,
+    pending_live_operation: Option<LivePairingOperation>,
+    pending_live_reply: Option<LivePairingReply>,
+    live_retry_not_before_ms: Option<u64>,
+    live_lane_faulted: bool,
+}
+
+pub(crate) struct NodePairingHandoffs {
+    control: NodePairingHandoff<CriticalSectionRawMutex>,
+    live: NodeLivePairingHandoff<CriticalSectionRawMutex>,
+}
+
+impl NodePairingHandoffs {
+    pub(crate) const fn new(
+        control: NodePairingHandoff<CriticalSectionRawMutex>,
+        live: NodeLivePairingHandoff<CriticalSectionRawMutex>,
+    ) -> Self {
+        Self { control, live }
+    }
+
+    fn into_parts(
+        self,
+    ) -> (
+        NodePairingHandoff<CriticalSectionRawMutex>,
+        NodeLivePairingHandoff<CriticalSectionRawMutex>,
+    ) {
+        (self.control, self.live)
+    }
+}
+
+impl PairingNodeState {
+    const fn new() -> Self {
+        Self {
+            pending_control_command: None,
+            pending_control_reply: None,
+            pending_exclusive: None,
+            initialization_retry_not_before_ms: None,
+            pending_live_command: None,
+            pending_live_operation: None,
+            pending_live_reply: None,
+            live_retry_not_before_ms: None,
+            live_lane_faulted: false,
+        }
+    }
+}
+
 #[embassy_executor::task]
 pub async fn run(
     supervisor: &'static mut ProductSupervisor,
     storage: &'static mut ProductStorageCoordinator,
-    mut pairing_handoff: NodePairingHandoff<CriticalSectionRawMutex>,
+    pairing_handoffs: NodePairingHandoffs,
     mut frame_handoff: AuthorizedFrameNodeHandoff<CriticalSectionRawMutex>,
     offline_descriptor: InterfaceDescriptor,
     announce_epoch: BootEpoch,
     mut rng: Trng,
 ) {
+    let (mut pairing_handoff, mut live_pairing_handoff) = pairing_handoffs.into_parts();
     RADIO_READY.wait().await;
     let online = match supervisor.set_interface_online(offline_descriptor.lease(), true) {
         Ok(descriptor) => descriptor,
@@ -119,19 +238,17 @@ pub async fn run(
         DurabilityServiceState::from_runtime_available(storage.submission_service_available());
     let mut retained_frame: Option<AuthorizedFrameObservation> = None;
     let mut pending_frame_acknowledgement: Option<AuthorizedFrameObservation> = None;
-    let mut pending_pairing_reply: Option<PairingControlReply> = None;
-    let mut pending_pairing_exclusive: Option<(ConnectionId, AcquirePairingExclusive)> = None;
-    let mut initialization_retry_not_before_ms: Option<u64> = None;
+    let mut pairing = PairingNodeState::new();
 
     loop {
         let mut progressed = false;
 
-        progressed |= step_pairing_control(
+        progressed |= step_pairing_frontier(
             storage,
             &mut pairing_handoff,
-            &mut pending_pairing_reply,
-            &mut pending_pairing_exclusive,
-            &mut initialization_retry_not_before_ms,
+            &mut live_pairing_handoff,
+            &mut pairing,
+            &mut rng,
             now_millis(),
         );
 
@@ -623,25 +740,28 @@ pub async fn run(
     }
 }
 
-fn step_pairing_control(
+fn step_pairing_frontier(
     storage: &mut ProductStorageCoordinator,
-    handoff: &mut NodePairingHandoff<CriticalSectionRawMutex>,
-    pending_reply: &mut Option<PairingControlReply>,
-    pending_exclusive: &mut Option<(ConnectionId, AcquirePairingExclusive)>,
-    initialization_retry_not_before_ms: &mut Option<u64>,
+    control_handoff: &mut NodePairingHandoff<CriticalSectionRawMutex>,
+    live_handoff: &mut NodeLivePairingHandoff<CriticalSectionRawMutex>,
+    state: &mut PairingNodeState,
+    rng: &mut Trng,
     now_millis: u64,
 ) -> bool {
-    let mut progressed = flush_pairing_reply(handoff, pending_reply);
+    let mut progressed = flush_pairing_reply(control_handoff, &mut state.pending_control_reply);
+    progressed |= flush_live_pairing_reply(live_handoff, &mut state.pending_live_reply);
 
     let initialization_status = storage.initialization_status();
     if matches!(
         initialization_status,
         CredentialInitializationStatus::InFlight { .. }
-    ) && initialization_retry_not_before_ms.is_none_or(|deadline| now_millis >= deadline)
+    ) && state
+        .initialization_retry_not_before_ms
+        .is_none_or(|deadline| now_millis >= deadline)
     {
         let _ = drive_initialization_and_schedule(
             storage,
-            initialization_retry_not_before_ms,
+            &mut state.initialization_retry_not_before_ms,
             now_millis,
         );
         progressed = true;
@@ -649,31 +769,85 @@ fn step_pairing_control(
         initialization_status,
         CredentialInitializationStatus::InFlight { .. }
     ) {
-        *initialization_retry_not_before_ms = None;
+        state.initialization_retry_not_before_ms = None;
     }
 
-    // One command owns one reply. Do not dequeue another command while a
-    // pressured reply remains local to the node owner.
-    if pending_reply.is_some() {
-        return poll_pairing_timeout(storage, pending_exclusive, now_millis) || progressed;
+    if state.pending_control_command.is_none() && state.pending_control_reply.is_none() {
+        state.pending_control_command = control_handoff.try_receive_command();
     }
-    let Some(command) = handoff.try_receive_command() else {
-        return poll_pairing_timeout(storage, pending_exclusive, now_millis) || progressed;
-    };
+    if state.pending_live_command.is_none()
+        && state.pending_live_operation.is_none()
+        && state.pending_live_reply.is_none()
+    {
+        state.pending_live_command = live_handoff.try_receive_command();
+    }
 
+    // Both command channels have the same sole USB producer. Compare captured
+    // event time anyway so a queued earlier scalar event cannot be overtaken.
+    // Equal timestamps choose live work: the USB owner only enqueues a scalar
+    // command concurrently after transferring that live request, most notably
+    // a bus-reset disconnect observed in the same millisecond.
+    for _ in 0..2 {
+        let next_lane = select_pairing_command_lane(
+            state
+                .pending_live_command
+                .as_ref()
+                .map(|live| live.at().get()),
+            state
+                .pending_control_command
+                .as_ref()
+                .map(|control| control.at().get()),
+        );
+        if next_lane == Some(PairingCommandLane::Live) {
+            progressed |= admit_live_pairing_command(storage, state, rng);
+            if state.pending_live_command.is_some() {
+                // Journal-owned mutation is causally after this request. Keep
+                // later policy events and timeout polls behind the retained
+                // command until journal ownership settles.
+                break;
+            }
+        } else if next_lane == Some(PairingCommandLane::Control) {
+            let command = state
+                .pending_control_command
+                .take()
+                .expect("the selected control command is retained");
+            handle_pairing_control_command(storage, state, command, now_millis);
+            progressed = true;
+        } else {
+            break;
+        }
+    }
+
+    progressed |= drive_live_pairing_and_schedule(storage, state, now_millis);
+    progressed |= flush_pairing_reply(control_handoff, &mut state.pending_control_reply);
+    progressed |= flush_live_pairing_reply(live_handoff, &mut state.pending_live_reply);
+
+    if state.pending_live_command.is_none() && state.pending_control_command.is_none() {
+        progressed |= poll_pairing_timeout(storage, &mut state.pending_exclusive, now_millis);
+    }
+    progressed
+}
+
+fn handle_pairing_control_command(
+    storage: &mut ProductStorageCoordinator,
+    state: &mut PairingNodeState,
+    command: PairingControlCommand,
+    now_millis: u64,
+) {
     let connection = command.connection();
     let reply_kind = match command {
         PairingControlCommand::Connected { at, connection } => {
-            *pending_exclusive = None;
+            state.pending_exclusive = None;
             let _ = storage.pairing_connected(at, connection);
             PairingControlReplyKind::Lifecycle(LifecycleAcknowledgement::Connected)
         }
         PairingControlCommand::Disconnected { at, connection } => {
-            if pending_exclusive
+            if state
+                .pending_exclusive
                 .as_ref()
                 .is_some_and(|(owner, _)| *owner == connection)
             {
-                *pending_exclusive = None;
+                state.pending_exclusive = None;
             }
             let _ = storage.pairing_disconnected(at, connection);
             PairingControlReplyKind::Lifecycle(LifecycleAcknowledgement::Disconnected)
@@ -685,15 +859,16 @@ fn step_pairing_control(
         } => {
             let outcome = match storage.pairing_observe_button(at, level) {
                 Some(ButtonEffect::AcquirePairingExclusive(capability)) => {
-                    *pending_exclusive = Some((connection, capability));
+                    state.pending_exclusive = Some((connection, capability));
                     ButtonObservationReply::AcquireExclusive
                 }
                 Some(ButtonEffect::Closed(_) | ButtonEffect::Fault(_)) => {
-                    if pending_exclusive
+                    if state
+                        .pending_exclusive
                         .as_ref()
                         .is_some_and(|(owner, _)| *owner == connection)
                     {
-                        *pending_exclusive = None;
+                        state.pending_exclusive = None;
                     }
                     ButtonObservationReply::Observed
                 }
@@ -702,11 +877,13 @@ fn step_pairing_control(
             PairingControlReplyKind::Button(outcome)
         }
         PairingControlCommand::ExclusiveAcquired { at, connection } => {
-            let outcome = if pending_exclusive
+            let outcome = if state
+                .pending_exclusive
                 .as_ref()
                 .is_some_and(|(owner, _)| *owner == connection)
             {
-                let (_, capability) = pending_exclusive
+                let (_, capability) = state
+                    .pending_exclusive
                     .take()
                     .expect("the matching exclusive capability was retained");
                 match storage.pairing_exclusive_acquired(at, capability) {
@@ -742,7 +919,7 @@ fn step_pairing_control(
                         ProductInitializationRequest::Runtime(Ok(_accepted)) => {
                             drive_initialization_and_schedule(
                                 storage,
-                                initialization_retry_not_before_ms,
+                                &mut state.initialization_retry_not_before_ms,
                                 now_millis,
                             )
                         }
@@ -753,9 +930,147 @@ fn step_pairing_control(
             PairingControlReplyKind::Control(response)
         }
     };
-    *pending_reply = Some(PairingControlReply::new(connection, reply_kind));
-    let _ = flush_pairing_reply(handoff, pending_reply);
-    let _ = poll_pairing_timeout(storage, pending_exclusive, now_millis);
+    debug_assert!(state.pending_control_reply.is_none());
+    state.pending_control_reply = Some(PairingControlReply::new(connection, reply_kind));
+}
+
+fn admit_live_pairing_command(
+    storage: &mut ProductStorageCoordinator,
+    state: &mut PairingNodeState,
+    rng: &mut Trng,
+) -> bool {
+    let command = state
+        .pending_live_command
+        .take()
+        .expect("live admission requires one retained command");
+    let at = command.at();
+    let connection = command.connection();
+    let request = command.into_request();
+    let sequence = request.sequence();
+    let kind = LiveRequestKind::from_request(&request);
+
+    if state.live_lane_faulted {
+        state.pending_live_reply = Some(LivePairingReply::new(
+            connection,
+            kind.blocked_response(sequence),
+        ));
+        return true;
+    }
+
+    match storage.request_live_pairing(at, connection, request, rng) {
+        ProductLivePairingAdmission::DeferredForJournalMutation(request) => {
+            state.pending_live_command = Some(LivePairingCommand::new(at, connection, request));
+        }
+        ProductLivePairingAdmission::Immediate(response) => {
+            if response.sequence() == sequence && kind.matches_response(&response) {
+                state.pending_live_reply = Some(LivePairingReply::new(connection, response));
+            } else {
+                drop(response);
+                state.live_lane_faulted = true;
+                state.pending_live_reply = Some(LivePairingReply::new(
+                    connection,
+                    kind.blocked_response(sequence),
+                ));
+            }
+        }
+        ProductLivePairingAdmission::MutationAccepted(mutation) => {
+            if kind.expected_mutation() == Some(mutation) {
+                state.pending_live_operation =
+                    Some(LivePairingOperation::new(connection, sequence, mutation));
+                state.live_retry_not_before_ms = None;
+            } else {
+                state.live_lane_faulted = true;
+                state.pending_live_reply = Some(LivePairingReply::new(
+                    connection,
+                    kind.blocked_response(sequence),
+                ));
+            }
+        }
+    }
+    true
+}
+
+fn drive_live_pairing_and_schedule(
+    storage: &mut ProductStorageCoordinator,
+    state: &mut PairingNodeState,
+    now_millis: u64,
+) -> bool {
+    if state.pending_live_reply.is_some()
+        || state
+            .live_retry_not_before_ms
+            .is_some_and(|deadline| now_millis < deadline)
+    {
+        return false;
+    }
+    let status = storage.live_pairing_status();
+    let drive_required = state.pending_live_operation.is_some()
+        || matches!(
+            status,
+            CredentialPairingStatus::AwaitingCleanStore(_)
+                | CredentialPairingStatus::MutationPrepared(_)
+                | CredentialPairingStatus::ReconcileRequired(_)
+                | CredentialPairingStatus::CleanupRequired
+        );
+    if !drive_required {
+        if status == CredentialPairingStatus::Blocked {
+            state.live_lane_faulted = true;
+        }
+        state.live_retry_not_before_ms = None;
+        return false;
+    }
+
+    let outcome = storage.drive_live_pairing();
+    let Some(operation) = state.pending_live_operation.take() else {
+        // Cleanup without a request is expected. Any mutation-bearing state
+        // without correlation is an internal fault, but must keep driving to a
+        // terminal durable state so secret/store ownership is not abandoned.
+        match outcome {
+            reticulum_heltec_vision_master_e290_node::credential_pairing::CredentialPairingDriveOutcome::CleanupCompleted => {
+                state.live_retry_not_before_ms = None;
+            }
+            reticulum_heltec_vision_master_e290_node::credential_pairing::CredentialPairingDriveOutcome::Retry {
+                mutation,
+                ..
+            } => {
+                if mutation.is_some() {
+                    state.live_lane_faulted = true;
+                }
+                state.live_retry_not_before_ms =
+                    Some(now_millis.saturating_add(config::STORAGE_RETRY_BACKOFF_MS));
+            }
+            other => {
+                drop(other);
+                state.live_lane_faulted = true;
+                state.live_retry_not_before_ms = None;
+            }
+        }
+        return true;
+    };
+
+    match operation.apply(outcome) {
+        LivePairingOperationStep::Progress(operation) => {
+            state.pending_live_operation = Some(operation);
+            state.live_retry_not_before_ms = None;
+        }
+        LivePairingOperationStep::Retry { operation, reason } => {
+            state.pending_live_operation = Some(operation);
+            state.live_retry_not_before_ms =
+                Some(now_millis.saturating_add(config::STORAGE_RETRY_BACKOFF_MS));
+            warn!("e290-node stage=live-pairing status=RETRY reason={reason:?}");
+        }
+        LivePairingOperationStep::Reply(reply) => {
+            state.pending_live_reply = Some(reply);
+            state.live_retry_not_before_ms = None;
+        }
+        LivePairingOperationStep::Fault(reply) => {
+            state.live_lane_faulted = true;
+            state.pending_live_reply = Some(reply);
+            state.live_retry_not_before_ms = None;
+            error!(
+                "e290-node stage=live-pairing status=FAIL-CLOSED reason=drive-correlation-mismatch"
+            );
+        }
+    }
     true
 }
 
@@ -782,6 +1097,22 @@ fn poll_pairing_timeout(
 fn flush_pairing_reply(
     handoff: &mut NodePairingHandoff<CriticalSectionRawMutex>,
     pending_reply: &mut Option<PairingControlReply>,
+) -> bool {
+    let Some(reply) = pending_reply.take() else {
+        return false;
+    };
+    match handoff.try_send_reply(reply) {
+        Ok(()) => true,
+        Err(pressure) => {
+            *pending_reply = Some(pressure.into_inner());
+            false
+        }
+    }
+}
+
+fn flush_live_pairing_reply(
+    handoff: &mut NodeLivePairingHandoff<CriticalSectionRawMutex>,
+    pending_reply: &mut Option<LivePairingReply>,
 ) -> bool {
     let Some(reply) = pending_reply.take() else {
         return false;

@@ -6,9 +6,9 @@
 //! bounded-history recovery gate to completion. The backend-independent durable
 //! runtime then remains resident with the sole operation-scoped flash
 //! coordinator. A third task owns the USB Serial/JTAG pre-authentication
-//! initialization bearer and GPIO21 physical-presence input without becoming a
-//! Reticulum packet interface. Authenticated USB, BLE, Wi-Fi, LXMF, NomadNet,
-//! and UI actors remain independent later capabilities.
+//! initialization/live-pairing bearer and GPIO21 physical-presence input
+//! without becoming a Reticulum packet interface. Authenticated USB, BLE,
+//! Wi-Fi, LXMF, NomadNet, and UI actors remain independent later capabilities.
 
 #![no_std]
 #![no_main]
@@ -63,6 +63,7 @@ use reticulum_heltec_vision_master_e290_node::{
         BUILD_JOURNAL_REPROVISION_POLICY, JournalReprovisionPolicy, announce_clock_policy,
         journal_boot_policy,
     },
+    live_pairing_handoff::LivePairingHandoff,
     pairing_control_handoff::PairingControlHandoff,
     storage_device_id_from_eui48,
 };
@@ -135,6 +136,8 @@ static FLASH_STORAGE: StaticCell<FlashStorage<'static>> = StaticCell::new();
 static STORAGE_COORDINATOR: StaticCell<ProductStorageCoordinator> = StaticCell::new();
 static PAIRING_CONTROL: StaticCell<PairingControlHandoff<CriticalSectionRawMutex>> =
     StaticCell::new();
+static LIVE_PAIRING: StaticCell<LivePairingHandoff<CriticalSectionRawMutex>> = StaticCell::new();
+static EXECUTOR: StaticCell<esp_rtos::embassy::Executor> = StaticCell::new();
 
 pub(crate) static RADIO_READY: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 pub(crate) static LORA_ONLINE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
@@ -212,17 +215,32 @@ where
     }
 }
 
+#[esp_hal::main]
+fn main() -> ! {
+    let usb_boot_quarantine = usb_pairing_task::quarantine_usb_at_boot();
+    let executor = EXECUTOR.init(esp_rtos::embassy::Executor::new());
+    executor.run(|spawner| {
+        spawner.spawn(
+            product_main(spawner, usb_boot_quarantine)
+                .expect("the sole product composition task pool must be available"),
+        );
+    })
+}
+
 #[allow(
     clippy::large_stack_frames,
     reason = "one-shot composition moves every fixed owner into static task storage"
 )]
-#[esp_rtos::main]
-async fn main(spawner: Spawner) -> ! {
+#[embassy_executor::task]
+async fn product_main(
+    spawner: Spawner,
+    usb_boot_quarantine: usb_pairing_task::BootUsbQuarantine,
+) -> ! {
     let hal = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(hal);
 
-    // Establish the complete E290 RF interlock before logging, entropy,
-    // executor startup, allocation or radio construction.
+    // Establish the complete E290 RF interlock at the composition task's first
+    // poll, before logging, entropy, PSRAM initialization or radio construction.
     let radio_reset = Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default());
     let radio_nss = Output::new(peripherals.GPIO8, Level::High, OutputConfig::default());
 
@@ -632,6 +650,8 @@ async fn main(spawner: Spawner) -> ! {
     let supervisor = SUPERVISOR.init(supervisor);
     let (usb_pairing_handoff, node_pairing_handoff) =
         PAIRING_CONTROL.init(PairingControlHandoff::new()).split();
+    let (usb_live_pairing_handoff, node_live_pairing_handoff) =
+        LIVE_PAIRING.init(LivePairingHandoff::new()).split();
     let pairing_button = Input::new(
         peripherals.GPIO21,
         InputConfig::default().with_pull(Pull::Up),
@@ -647,7 +667,7 @@ async fn main(spawner: Spawner) -> ! {
     let node_task = match node_task::run(
         supervisor,
         storage_coordinator,
-        node_pairing_handoff,
+        node_task::NodePairingHandoffs::new(node_pairing_handoff, node_live_pairing_handoff),
         frame_node,
         offline_descriptor,
         announce_epoch,
@@ -659,21 +679,26 @@ async fn main(spawner: Spawner) -> ! {
             inert_forever().await
         }
     };
-    let usb_pairing_task =
-        match usb_pairing_task::run(peripherals.USB_DEVICE, pairing_button, usb_pairing_handoff) {
-            Ok(task) => task,
-            Err(_) => {
-                error!("e290-node stage=spawn status=FAIL task=usb-pairing");
-                inert_forever().await
-            }
-        };
+    let usb_pairing_task = match usb_pairing_task::run(
+        usb_boot_quarantine,
+        peripherals.USB_DEVICE,
+        pairing_button,
+        usb_pairing_handoff,
+        usb_live_pairing_handoff,
+    ) {
+        Ok(task) => task,
+        Err(_) => {
+            error!("e290-node stage=spawn status=FAIL task=usb-pairing");
+            inert_forever().await
+        }
+    };
     // This Embassy version reports pool exhaustion while constructing each
     // SpawnToken above; `Spawner::spawn` is infallible and returns unit.
     spawner.spawn(radio_task);
     spawner.spawn(node_task);
     spawner.spawn(usb_pairing_task);
     info!(
-        "e290-node stage=composition status=PASS tasks=3 interfaces=1 primary_transport=lora future_transport_actors=deferred node_journal=mounted resident_storage_available={storage_service_available} credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} preauth_initialization_bearer=usb-serial-jtag pairing_button_gpio=21 authenticated_local_api=closed local_api_session=absent credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} admission=deferred runtime_patch={} flash_assumption_bytes=16777216",
+        "e290-node stage=composition status=PASS tasks=3 interfaces=1 primary_transport=lora future_transport_actors=deferred node_journal=mounted resident_storage_available={storage_service_available} credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} preauth_initialization_bearer=usb-serial-jtag preauth_live_pairing_bearer=usb-serial-jtag pairing_button_gpio=21 authenticated_local_api=closed local_api_session=absent credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} admission=deferred runtime_patch={} flash_assumption_bytes=16777216",
         credential_binding.absolute_offset(),
         credential_binding.length(),
         config::DURABLE_RUNTIME_BYTES,
