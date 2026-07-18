@@ -3,8 +3,8 @@
 - **Status:** accepted for the USB Serial/JTAG developer/HIL profile; portable
   protocol/core, independent vectors, E290 resident durable lifecycle, bounded
   entropy, and bearer-neutral secret handoff implemented and target-verified;
-  node/USB scheduling and the recoverable host utility implemented;
-  authenticated session/API and successful powered qualification pending
+  node/USB scheduling, recoverable pairing utility, and minimal authenticated
+  USB session/API bearer implemented; successful powered qualification pending
 - **Date:** 2026-07-18
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0006](0006-authenticated-local-api-bearer.md),
@@ -16,9 +16,11 @@
 ADR 0009 fixes the physical-presence window, attempt budget, durable
 `Pending`/`Active`/aborted lifecycle, and typed storage ownership, but
 deliberately leaves the live pairing records and proof transcript unspecified.
-The authenticated session core cannot be composed into the permanent E290
-image until at least one credential can be created and activated through a
-frozen protocol.
+The authenticated session core needed a frozen way to create and activate at
+least one credential before it could become useful in the permanent E290
+image. That ordering led to the pairing protocol below; the minimal session
+bearer is now source-composed, while powered activation and authentication
+remain open.
 
 The first profile is a wired developer and hardware-qualification aid. It
 trusts the process controlling the physically connected USB host after the user
@@ -378,10 +380,10 @@ Xtensa checks.
 The routed composition additionally covers generalized cross-store exclusion,
 node/bearer reply retention through partial USB TX, shared sequence admission,
 causal control/live scheduling, bus-reset challenge invalidation, reset-
-generation blocking, physical detachment, and USB-memory scrubbing. Exact final
-suite totals are recorded with the qualified image. Remaining composition work
-is the authenticated session/API lane and its no-fallback proof. Powered
-qualification then reads the exact
+generation blocking, physical detachment, and USB-memory scrubbing. The minimal
+authenticated session/API lane and its no-fallback proof are now
+source-composed. Exact final suite totals are recorded with the qualified image.
+Powered qualification next reads the exact
 credential partition after Pending, Active, and Abort and proves that only
 Active authenticates after reboot.
 

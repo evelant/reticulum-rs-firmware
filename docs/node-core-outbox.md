@@ -581,10 +581,10 @@ the coordinator. The remaining product work at this boundary is:
    announce epoch before provisioning/loading, requires redundant key mirrors,
    and keeps protocol-monotonic deadlines separate from the 40-bit local
    announce-emission order. Powered reset and power-cut evidence remains open.
-3. Implement ADR 0009 credential persistence/pairing, then connect the implemented immutable
-   authority, authenticated device-API
-   adapter, USB framing, qualification-session core and permanent actor task;
-   drive the model's conservative boot
+3. Preserve the implemented ADR 0009 credential persistence/pairing and the
+   connected immutable authority, authenticated device-API adapter, USB
+   framing, minimal qualification-session bearer, and permanent actor task;
+   qualify the powered credential and authenticated request path; drive the model's conservative boot
    recovery and node observations through the actor's narrow projector methods;
    and add a proved safe retirement condition for bounded volatile projector
    slots without attempting to persist leases or mutable references.

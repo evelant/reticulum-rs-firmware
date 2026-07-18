@@ -22,7 +22,7 @@ use reticulum_device_api_credential_store::{
 use reticulum_device_api_credentials::{
     AuthorizationPolicyVersion, CredentialAuthority, CredentialId, CredentialLifecycleFaultKind,
     E290_CREDENTIAL_RECORD_CAPACITY, NewPendingCredential, PairingLifecycleStoreCandidate,
-    PairingOrigin, PendingCredentialRef, Permissions, PrincipalId,
+    PairingOrigin, PendingCredentialRef, Permissions, PrincipalId, SelectedCredential,
 };
 use reticulum_device_api_handoff::{LocalApiReply, LocalApiRequest};
 use reticulum_device_api_pairing::{
@@ -166,6 +166,20 @@ pub enum InitializationDriveOutcome<E> {
     NotInFlight(CredentialInitializationStatus),
 }
 
+/// Uniform refusal for ordinary authenticated-session credential selection.
+///
+/// Connection, pairing-exclusion, authority-publication, and credential
+/// lookup failures deliberately collapse to this opaque result so callers
+/// cannot use the selection edge as a credential-existence oracle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OrdinarySessionSelectionRefusal {
+    _private: (),
+}
+
+impl OrdinarySessionSelectionRefusal {
+    const REFUSED: Self = Self { _private: () };
+}
+
 enum InitializationOwnership {
     Unavailable,
     Eligible(InitializableMedia),
@@ -260,6 +274,40 @@ impl CredentialRuntime {
                 .is_some()
     }
 
+    /// Admit one ordinary session attempt and select its zeroizing credential.
+    ///
+    /// The pairing arbiter is checked before authority lookup and revalidated
+    /// after selection. Every refusal is intentionally indistinguishable at
+    /// this boundary, including a missing, pending, or revoked credential.
+    pub fn select_ordinary_session(
+        &mut self,
+        at: MonotonicMillis,
+        connection: ConnectionId,
+        credential_id: CredentialId,
+    ) -> Result<SelectedCredential, OrdinarySessionSelectionRefusal> {
+        let permit = self
+            .pairing
+            .as_mut()
+            .ok_or(OrdinarySessionSelectionRefusal::REFUSED)?
+            .ordinary_session(at, connection)
+            .map_err(|_| OrdinarySessionSelectionRefusal::REFUSED)?;
+        let selected = self
+            .mounted
+            .as_ref()
+            .and_then(MountedCredentialStore::publishable_authority)
+            .filter(|_| self.boot_state.authority_publishable())
+            .and_then(|authority| authority.select_for_handshake(credential_id).ok())
+            .ok_or(OrdinarySessionSelectionRefusal::REFUSED)?;
+        if !self
+            .pairing
+            .as_ref()
+            .is_some_and(|policy| policy.ordinary_session_is_current(&permit))
+        {
+            return Err(OrdinarySessionSelectionRefusal::REFUSED);
+        }
+        Ok(selected)
+    }
+
     /// Revalidate and dispatch one session-authenticated request against the
     /// currently publishable authority without exposing that authority.
     ///
@@ -311,7 +359,10 @@ impl CredentialRuntime {
     pub fn live_pairing_status(&self) -> CredentialPairingStatus {
         match &self.live_pairing {
             LivePairingOwnership::Idle => {
-                if self
+                if !matches!(
+                    self.boot_state,
+                    CredentialBootState::AuthenticationOnly { .. }
+                ) && self
                     .mounted
                     .as_ref()
                     .is_some_and(|store| store.recovery() != CredentialStoreRecovery::Clean)
@@ -341,10 +392,13 @@ impl CredentialRuntime {
             self.initialization,
             InitializationOwnership::InFlight { .. }
         ) || self.live_pairing.mutation().is_some()
-            || self
+            || (!matches!(
+                self.boot_state,
+                CredentialBootState::AuthenticationOnly { .. }
+            ) && self
                 .mounted
                 .as_ref()
-                .is_some_and(|store| store.recovery() != CredentialStoreRecovery::Clean)
+                .is_some_and(|store| store.recovery() != CredentialStoreRecovery::Clean))
     }
 
     /// Current non-secret explicit-initialization state.
@@ -405,6 +459,17 @@ impl CredentialRuntime {
         now: MonotonicMillis,
         level: ActiveLowButton,
     ) -> Option<ButtonEffect> {
+        if matches!(
+            self.boot_state,
+            CredentialBootState::AuthenticationOnly { .. }
+        ) {
+            let event = self.pairing.as_mut()?.poll_timeout(now);
+            return Some(match event {
+                PolicyEvent::None => ButtonEffect::None,
+                PolicyEvent::Closed(closed) => ButtonEffect::Closed(closed),
+                PolicyEvent::Fault(fault) => ButtonEffect::Fault(fault),
+            });
+        }
         let effect = self.pairing.as_mut()?.observe_button(now, level);
         if matches!(effect, ButtonEffect::Closed(_) | ButtonEffect::Fault(_)) {
             self.cancel_challenge_only();
@@ -418,6 +483,17 @@ impl CredentialRuntime {
         now: MonotonicMillis,
         effect: AcquirePairingExclusive,
     ) -> Option<ExclusiveAcquireOutcome> {
+        if matches!(
+            self.boot_state,
+            CredentialBootState::AuthenticationOnly { .. }
+        ) {
+            let event = self.pairing.as_mut()?.poll_timeout(now);
+            return Some(match event {
+                PolicyEvent::None => ExclusiveAcquireOutcome::Stale,
+                PolicyEvent::Closed(closed) => ExclusiveAcquireOutcome::Closed(closed),
+                PolicyEvent::Fault(fault) => ExclusiveAcquireOutcome::Fault(fault),
+            });
+        }
         let outcome = self.pairing.as_mut()?.exclusive_acquired(now, effect);
         if matches!(
             &outcome,
@@ -455,6 +531,12 @@ impl CredentialRuntime {
     where
         R: RngCore + CryptoRng,
     {
+        if matches!(
+            self.boot_state,
+            CredentialBootState::AuthenticationOnly { .. }
+        ) {
+            return BeginAdmission::Refused(PairingFailure::Unavailable);
+        }
         let mutation_ready = self.mutation_eligible();
         let (retained_capacity_available, next_revision_available) = self
             .mounted
@@ -533,6 +615,12 @@ impl CredentialRuntime {
     where
         R: RngCore + CryptoRng,
     {
+        if matches!(
+            self.boot_state,
+            CredentialBootState::AuthenticationOnly { .. }
+        ) {
+            return ProofStartAdmission::Refused(PairingFailure::Unavailable);
+        }
         let pending = match PendingRef::new(request.credential_id(), request.generation()) {
             Ok(pending) => pending,
             Err(_) => return ProofStartAdmission::Refused(PairingFailure::Refused),
@@ -625,6 +713,13 @@ impl CredentialRuntime {
         connection: ConnectionId,
         request: ActivateRequest,
     ) -> ActivateAdmission {
+        if matches!(
+            self.boot_state,
+            CredentialBootState::AuthenticationOnly { .. }
+        ) {
+            drop(request);
+            return ActivateAdmission::Refused(ActivateFailure::Unavailable);
+        }
         let ownership = mem::replace(&mut self.live_pairing, LivePairingOwnership::Blocked);
         let LivePairingOwnership::Proof(proof) = ownership else {
             self.live_pairing = ownership;
@@ -686,6 +781,12 @@ impl CredentialRuntime {
         now: MonotonicMillis,
         connection: ConnectionId,
     ) -> AbortAdmission {
+        if matches!(
+            self.boot_state,
+            CredentialBootState::AuthenticationOnly { .. }
+        ) {
+            return AbortAdmission::Refused(PairingFailure::Unavailable);
+        }
         let Some(policy) = self.pairing.as_mut() else {
             return AbortAdmission::Refused(PairingFailure::Unavailable);
         };
@@ -710,6 +811,12 @@ impl CredentialRuntime {
     where
         A: BoundCredentialStoreAccess,
     {
+        if matches!(
+            self.boot_state,
+            CredentialBootState::AuthenticationOnly { .. }
+        ) {
+            return CredentialPairingDriveOutcome::Blocked(self.live_pairing.mutation());
+        }
         let ownership = mem::replace(&mut self.live_pairing, LivePairingOwnership::Blocked);
         match ownership {
             LivePairingOwnership::Idle => {
@@ -1044,6 +1151,12 @@ impl CredentialRuntime {
         connection: ConnectionId,
         identity_ready: bool,
     ) -> Result<InitializationAccepted, InitializationRequestRefusal> {
+        if matches!(
+            self.boot_state,
+            CredentialBootState::AuthenticationOnly { .. }
+        ) {
+            return Err(InitializationRequestRefusal::PairingUnavailable);
+        }
         let media = match &self.initialization {
             InitializationOwnership::Eligible(media) => Some(*media),
             _ => None,
@@ -1340,7 +1453,7 @@ fn pairing_policy_for_boot(
     let pending = match state {
         CredentialBootState::UninitializedErased
         | CredentialBootState::InitializationInterrupted => PendingState::None,
-        CredentialBootState::Ready => {
+        CredentialBootState::Ready | CredentialBootState::AuthenticationOnly { .. } => {
             let authority = mounted?.publishable_authority()?;
             match authority.pending_credential().ok()? {
                 None => PendingState::None,
@@ -1349,8 +1462,7 @@ fn pairing_policy_for_boot(
                 }
             }
         }
-        CredentialBootState::AuthenticationOnly { .. }
-        | CredentialBootState::Blocked { .. }
+        CredentialBootState::Blocked { .. }
         | CredentialBootState::Corrupt { .. }
         | CredentialBootState::Backend { .. } => return None,
     };
@@ -1463,6 +1575,7 @@ mod tests {
         erases: usize,
         fail_next_read: bool,
         fail_next_write: Option<WriteFault>,
+        fail_next_erase: bool,
     }
 
     impl FakeNor {
@@ -1474,6 +1587,7 @@ mod tests {
                 erases: 0,
                 fail_next_read: false,
                 fail_next_write: None,
+                fail_next_erase: false,
             }
         }
 
@@ -1483,6 +1597,7 @@ mod tests {
             self.erases = 0;
             self.fail_next_read = false;
             self.fail_next_write = None;
+            self.fail_next_erase = false;
         }
 
         fn range(&self, offset: u32, len: usize) -> Result<core::ops::Range<usize>, FakeError> {
@@ -1560,6 +1675,9 @@ mod tests {
             let len = usize::try_from(to - from).map_err(|_| FakeError::Bounds)?;
             let range = self.range(from, len)?;
             self.erases += 1;
+            if core::mem::take(&mut self.fail_next_erase) {
+                return Err(FakeError::Injected);
+            }
             self.bytes[range].fill(0xff);
             Ok(())
         }
@@ -1752,6 +1870,61 @@ mod tests {
         ));
         assert!(!runtime.credential_physical_mutation_outstanding());
         (runtime, access)
+    }
+
+    fn authentication_only_runtime() -> (
+        CredentialRuntime,
+        BoundCredentialStore<FakeNor>,
+        CredentialId,
+        reticulum_device_api_credentials::CredentialGeneration,
+        Zeroizing<[u8; 32]>,
+    ) {
+        let (mut runtime, mut access) = ready_pairing_runtime();
+        let mut rng = TestRng::patterned(0x17);
+        let offer = commit_begin(&mut runtime, &mut access, &mut rng);
+        let credential_id = offer.credential_id();
+        let _ = admit_valid_activation(&mut runtime, &mut rng, &offer);
+        assert!(matches!(
+            runtime.drive_live_pairing(&mut access),
+            CredentialPairingDriveOutcome::CleanupCompleted
+        ));
+        assert!(matches!(
+            runtime.drive_live_pairing(&mut access),
+            CredentialPairingDriveOutcome::MutationPrepared(PairingMutation::ActivatePending)
+        ));
+        assert!(matches!(
+            runtime.drive_live_pairing(&mut access),
+            CredentialPairingDriveOutcome::Activated(_)
+        ));
+        let active = runtime
+            .mounted
+            .as_ref()
+            .and_then(MountedCredentialStore::publishable_authority)
+            .and_then(|authority| authority.select_for_handshake(credential_id).ok())
+            .expect("activated test credential is publishable");
+        let (selected_id, generation, expected_psk) = active.into_parts();
+        assert_eq!(selected_id, credential_id);
+
+        let store_binding = runtime.binding();
+        let device_id = runtime.device_id();
+        let mut flash = access.into_backend();
+        flash.fail_next_erase = true;
+        let mut access = bound(flash, store_binding);
+        let boot = boot_credentials(&mut access);
+        assert_eq!(
+            boot.state(),
+            CredentialBootState::AuthenticationOnly {
+                cleanup_failure: crate::credential_boot::CredentialBootFailure::Backend,
+            }
+        );
+        access.backend_mut().reset_io();
+        (
+            CredentialRuntime::from_boot(boot, store_binding, device_id),
+            access,
+            credential_id,
+            generation,
+            expected_psk,
+        )
     }
 
     fn commit_begin(
@@ -2205,6 +2378,114 @@ mod tests {
         ));
         assert_eq!(runtime.live_pairing_status(), CredentialPairingStatus::Idle);
         assert!(!runtime.credential_physical_mutation_outstanding());
+    }
+
+    #[test]
+    fn authentication_only_retains_ordinary_session_selection() {
+        let (mut runtime, _access, credential_id, generation, expected_psk) =
+            authentication_only_runtime();
+        assert!(runtime.authority_publishable());
+        assert!(!runtime.mutation_eligible());
+        assert!(runtime.pairing_policy_available());
+        assert_eq!(
+            runtime.pairing_connected(time(0), connection()),
+            Some(Ok(None))
+        );
+
+        let selected = runtime
+            .select_ordinary_session(time(1), connection(), credential_id)
+            .unwrap_or_else(|_| panic!("active credential was unavailable in AuthenticationOnly"));
+        let (selected_id, selected_generation, selected_psk) = selected.into_parts();
+        assert_eq!(selected_id, credential_id);
+        assert_eq!(selected_generation, generation);
+        assert_eq!(&*selected_psk, &*expected_psk);
+
+        let unknown = CredentialId::new([0x99; 16]);
+        assert!(matches!(
+            runtime.select_ordinary_session(time(2), connection(), unknown),
+            Err(error) if error == OrdinarySessionSelectionRefusal::REFUSED
+        ));
+        assert!(matches!(
+            runtime.select_ordinary_session(
+                time(3),
+                ConnectionId::new(2).expect("test connection is nonzero"),
+                credential_id,
+            ),
+            Err(error) if error == OrdinarySessionSelectionRefusal::REFUSED
+        ));
+    }
+
+    #[test]
+    fn authentication_only_refuses_every_credential_mutation_path_without_io() {
+        let (mut runtime, mut access, credential_id, generation, _psk) =
+            authentication_only_runtime();
+        assert_eq!(runtime.live_pairing_status(), CredentialPairingStatus::Idle);
+        assert!(!runtime.credential_physical_mutation_outstanding());
+        assert!(matches!(
+            runtime.pairing_observe_button(time(1), ActiveLowButton::High),
+            Some(ButtonEffect::None)
+        ));
+        assert!(matches!(
+            runtime.pairing_observe_button(time(BUTTON_PRESS_MILLIS), ActiveLowButton::Low),
+            Some(ButtonEffect::None)
+        ));
+        assert!(matches!(
+            runtime.pairing_observe_button(time(WINDOW_OPEN_MILLIS), ActiveLowButton::Low),
+            Some(ButtonEffect::None)
+        ));
+
+        let mut rng = TestRng::patterned(0x27);
+        assert_eq!(
+            runtime.request_pairing_begin(time(REQUEST_MILLIS + 1), connection(), &mut rng),
+            BeginAdmission::Refused(PairingFailure::Unavailable)
+        );
+        assert_eq!(rng.fills, 0);
+
+        let proof_start = ProofStartRequest::new(2, credential_id, generation, [0x5a; 32])
+            .expect("test ProofStart is valid");
+        assert!(matches!(
+            runtime.request_pairing_proof_start(
+                time(REQUEST_MILLIS + 2),
+                connection(),
+                &proof_start,
+                &mut rng,
+            ),
+            ProofStartAdmission::Refused(PairingFailure::Unavailable)
+        ));
+        assert_eq!(rng.fills, 0);
+
+        let activate = ActivateRequest::new(
+            3,
+            credential_id,
+            generation,
+            ClientProof::from_bytes([0x6b; 32]),
+        )
+        .expect("test Activate is valid");
+        assert_eq!(
+            runtime.request_pairing_activate(time(REQUEST_MILLIS + 3), connection(), activate,),
+            ActivateAdmission::Refused(ActivateFailure::Unavailable)
+        );
+        assert_eq!(
+            runtime.request_pairing_abort_current(time(REQUEST_MILLIS + 4), connection()),
+            AbortAdmission::Refused(PairingFailure::Unavailable)
+        );
+        assert!(matches!(
+            runtime.request_initialization(time(REQUEST_MILLIS + 5), connection(), true),
+            Err(InitializationRequestRefusal::PairingUnavailable)
+        ));
+        assert!(matches!(
+            runtime.drive_initialization(&mut access, true),
+            InitializationDriveOutcome::NotInFlight(CredentialInitializationStatus::Unavailable)
+        ));
+        assert!(matches!(
+            runtime.drive_live_pairing(&mut access),
+            CredentialPairingDriveOutcome::Blocked(None)
+        ));
+        assert_eq!(runtime.live_pairing_status(), CredentialPairingStatus::Idle);
+        assert!(!runtime.credential_physical_mutation_outstanding());
+        assert_eq!(access.backend().reads, 0);
+        assert_eq!(access.backend().writes, 0);
+        assert_eq!(access.backend().erases, 0);
     }
 
     #[test]

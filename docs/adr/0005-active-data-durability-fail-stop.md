@@ -130,9 +130,9 @@ qualification for the LoRa-first one-entry profile. Portable API framing,
 immutable credential authority, the qualification-session core, and job handoff
 are qualified, and semantic schema 2 persists exact authorization provenance;
 ADR 0009's credential store is now boot-composed and explicit initialization/
-pairing is routed, while live authenticated admission remains blocked on a
-successful powered credential lifecycle plus the firmware API/session lane and
-authenticated bearer. Source `96e38aa` now supplies bounded powered
+pairing is routed. The firmware API/session lane and minimal authenticated USB
+bearer are source-composed; live powered admission remains blocked on a
+successful credential lifecycle and authenticated request/reply. Source `96e38aa` now supplies bounded powered
 permanent-graph evidence for exact image readback, erased credential/journal
 boot, LoRa/interface readiness, and ordinary TX on both boards. It does not
 exercise the active-DATA durability owner or this ADR's fail-stop path; those

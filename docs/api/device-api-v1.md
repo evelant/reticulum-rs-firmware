@@ -49,10 +49,16 @@ permanent graph now also instantiates the feature-free session and handoff
 crates, a static depth-one authenticated request/reply handoff, and a separate
 node-side dispatch lane. That lane revalidates every opaque grant against the
 currently publishable authority and synchronously invokes the logical adapter
-through a submission-port view disjoint from credential ownership. Its USB
-bearer endpoint is retained dormant: the USB task still admits no authenticated
-handshake/session records, so no external client can reach this lane. A
-product port may route an
+through a submission-port view disjoint from credential ownership. The USB
+task now composes the deliberately minimal first bearer: one authenticated
+handshake per connection, one request in flight, and terminal fault handling
+until USB reset or re-enumeration. It intentionally defers resumption, protocol
+retries, close records, encryption, rate limiting/attempt policy, repeated
+handshake attempts, and concurrency. Admission and node dispatch are
+transport-neutral so later BLE and Wi-Fi bearers can reach the same lane after
+their currently disabled session bindings/suites are implemented and qualified.
+This is source/test status;
+no authenticated request has yet run on powered hardware. A product port may route an
 accepted submission through the node after the durable barriers.
 
 ## Boundary
@@ -269,8 +275,9 @@ This target-safe experimental operation proves strict decode, authenticated
 durable acceptance, idempotency input, and the API-to-storage boundary. It is a
 transport-neutral submission: the client neither selects LoRa nor receives a
 radio capability. The resident E290 composition can carry accepted work through
-the node router and the LoRa-first interface after the durable barriers, although
-no firmware bearer exposes this API yet. The future client-facing message
+the node router and the LoRa-first interface after the durable barriers. The
+minimal single-flight USB bearer now exposes this API in source, although it is
+not yet powered-qualified. The future client-facing message
 operation remains `messages.send` through embedded LXMF. A separately authorized
 raw RNS/RNode or direct-radio bridge, if ever implemented, remains a distinct
 capability and mode.
@@ -302,10 +309,9 @@ models their persist-before-ack observations. The E290 host composition test
 exercises that API-to-runtime-to-router-to-LoRa software path; portable framing,
 immutable credential authority, qualification-session establishment, and job
 handoff and raw-NOR credential storage are implemented separately, while
-the credential store is now boot-composed. External live admission still
-requires powered qualification of the now-composed empty-media initialization
-bootstrap and pairing lifecycle, followed by composition of the authenticated
-USB handshake/session bearer.
+the credential store is now boot-composed. External live admission now has its
+first source-composed USB handshake/session bearer; it still requires powered
+qualification of initialization, pairing, authentication, request, and reply.
 
 Successful experimental response body:
 
@@ -323,10 +329,10 @@ backend reply maps to `Internal` while the actor retains the exact mutation;
 after `drive_pending()` reconciles it, retry returns the same durable ID.
 Idempotency conflict and capacity map to their stable API categories, while
 identifier exhaustion, actor busy, backend ambiguity and a latched fault map to
-`Internal`. No authenticated firmware bearer currently exposes this operation.
-The E290 node can dispatch an authenticated handoff owner, but its USB handoff
-endpoint is dormant and the pre-authentication bootstrap cannot create such an
-owner. Acceptance
+`Internal`. The minimal authenticated USB bearer now exposes this operation in
+the source graph once a credential is active. The pre-authentication bootstrap
+cannot create an authenticated owner, and powered end-to-end proof remains
+open. Acceptance
 is not a delivery guarantee; a later status can report no
 path, delivery timeout, downstream rejection, or an internal failure. The ID
 can be queried through `submission.status`. The response contains no
@@ -551,8 +557,9 @@ active-low stable-time debounce, an 8 ms missed-SOF suspension that retains its
 epoch and sequence until bus reset, connection-epoch and sequence exhaustion,
 duplicate/gap rejection, depth-one pressure, exact durable reply correlation,
 causal control/live ordering, and node-owned status/initialize plus live-
-pairing dispatch. Current exact suite totals are recorded with the
-authenticated-node-foundation release image.
+pairing dispatch. Current exact suite totals are recorded in the E290 runbook;
+the earlier authenticated-node-foundation release image predates the minimal
+bearer.
 Button/control arbitration is bounded. A stable High transition is latched
 before a later Low; a raw-sample gap of at least 20 ms cancels a possible hold
 and suppresses Low until a fresh debounced High. Once every response byte enters
@@ -591,14 +598,15 @@ reset. Simultaneous 120-second no-button workflows remained responsive through
 sequences 1102 and 1100, respectively. Subsequent exact 8 KiB credential-
 partition reads on both boards were entirely `0xff` with SHA-256
 `7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f`,
-confirming zero writes. The current 718,688-byte authenticated-node-foundation
+confirming zero writes. The last powered 718,688-byte authenticated-node-foundation
 image with SHA-256
 `e20f6191cb2bfa78fbd7f3d588eb418913da3f1f89e3b80a4db0a28abaf414ea`
 also matched exact address-zero reads from both boards. Both returned and then
 recovered sequence-zero `initialization-required`, and both credential
 partitions retained the same all-`0xff` digest. Its authenticated endpoint was
-dormant, so successful post-write readback and powered authentication remain
-open. The
+dormant in that exact image, so successful post-write readback and powered
+authentication remain open; this is not evidence for the subsequently composed
+minimal bearer. The
 firmware selects no-op logging, leaving the COBS bootstrap as the sole
 application-owned USB byte stream. Powered macOS full re-enumeration replaced
 the service and restored sequence zero after firmware detachment, USB-RAM scrub,
@@ -607,5 +615,6 @@ the endpoint stale and is not an accepted recovery primitive. The image-readback
 hard-reset reattachment path is bounded powered evidence, while suspend/resume,
 successful powered activation, controlled cuts, and the ROM/bootloader interval
 before the application quarantine remain to be qualified. This is not an
-authenticated session or logical API operation. The newly composed node half
-has no powered authenticated-API evidence.
+authenticated session or logical API operation. The subsequently composed
+minimal USB bearer and node lane still have no powered authenticated-API
+evidence.

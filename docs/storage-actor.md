@@ -11,9 +11,9 @@ fail-stop now pass cross-layer host tests. Portable API framing, immutable
 credential authority, the qualification-session core, and job handoff are
 qualified; durable authorization provenance is now part of semantic schema 2.
 Resident credential initialization and live-pairing mutation are composed
-through the pre-authentication USB bearer. Live authenticated admission remains
-blocked by successful powered credential creation, external API/session
-firmware composition, and an authenticated bearer. The permanent
+through the pre-authentication USB records. The minimal authenticated USB
+session/API lane is source-composed; live powered admission remains blocked by
+successful credential creation and end-to-end handshake/request/reply proof. The permanent
 graph's empty-journal/ordinary-TX powered smoke passes; integrated powered-fault
 qualification remains open.
 
@@ -204,11 +204,12 @@ Remaining product work includes:
   identity-vacant first-provision authority. `provision_first()` now repairs
   only the canonical empty A1 programming trajectory and never erases; an
   existing identity uses strict mount only;
-- composition of the authenticated device-API adapter's target-safe
-  `SubmissionPort` with the implemented framing/session/handoff, a credential
-  authority, and USB/BLE/Wi-Fi serving. `ProductStorageCoordinator` implements
-  the semantic port under a host-qualified one-entry composition cap, but no
-  external lane calls it;
+- powered qualification of the authenticated device-API adapter's target-safe
+  `SubmissionPort` with the source-composed framing/session/handoff, credential
+  authority, and minimal USB bearer, followed later by BLE/Wi-Fi serving.
+  `ProductStorageCoordinator` implements the semantic port under a
+  host-qualified one-entry composition cap, and the USB lane can call it once a
+  credential is active;
 - an exact node-owner quiescence proof before projector-slot retirement, a
   quarantine release/suppression design, and an explicit response to the
   schema-2 journal's permanent retention, 162-submission lifetime limit, and
@@ -226,8 +227,9 @@ storage, and ordinary TX. Power cuts, durable DATA, high-water, and full
 storage/product-graph qualification remain open.
 The current E290 product graph has the LoRa node/radio owner plus the resident
 operation-scoped durable runtime driver. Its one-entry qualification cap is not
-product capacity, and the absent external admission lane means accepted local
-durable work cannot yet originate through that path. The same runtime
+product capacity. The minimal authenticated USB lane can now originate accepted
+local durable work in the source graph, although powered end-to-end proof is
+still open. The same runtime
 preparation contract remains transport-
 neutral: LoRa is the first primary route, while later eligible interfaces can
 join the node fabric without changing actor or journal semantics. No speculative

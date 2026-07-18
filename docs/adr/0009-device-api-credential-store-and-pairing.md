@@ -225,9 +225,11 @@ Boot returns the seven product states `Ready`, `AuthOnly` (the Rust
 `AuthenticationOnly` variant), `Uninitialized` (the `UninitializedErased`
 variant), `InitializationInterrupted`, `Blocked`, `Corrupt`, or `Backend`.
 Only `Ready` permits a future credential mutation; `Ready` and `AuthOnly` may
-retain a publishable authority. The image now has a pre-authentication
-initialization bearer, but still has no authenticated session/API bearer and
-therefore performs no live authentication.
+retain a publishable authority. The image has both the distinct
+pre-authentication initialization/pairing records and a deliberately minimal
+authenticated USB session/API bearer. The latter admits one handshake per
+connection and one request at a time and fails terminally until reset; its
+powered authentication path remains unqualified.
 Every successfully mounted owner, including a blocked or cleanup-failed owner,
 is retained in `ProductStorageCoordinator`. Erased media is never provisioned
 automatically.
@@ -417,8 +419,8 @@ initialize its logger, so application, panic, and framework log text cannot
 share the USB Serial/JTAG FIFO. Binary COBS control records are the sole
 firmware-owned bytes on that stream. Boot-ROM output can still precede the
 application; the streaming decoder deliberately ignores bytes until a leading
-zero delimiter. A future authenticated bearer must preserve this ownership or
-move diagnostics to a different sink. No raw log byte may appear between
+zero delimiter. The minimal authenticated bearer preserves this ownership, and
+any later bearer must do likewise or move diagnostics to a different sink. No raw log byte may appear between
 binary COBS records.
 
 The USB response owner is released only after every byte enters the endpoint
@@ -453,7 +455,7 @@ boundary includes:
 
 - successful powered initialization, Begin, proof, durable activation, abort,
   and fault/cut qualification;
-- authenticated session/API composition and no-fallback qualification;
+- powered authenticated session/API and no-fallback qualification;
 - USB suspend/resume behavior
   still requires powered host-matrix validation; the present SOF/missed-SOF
   policy is not a final suspend contract.
@@ -566,8 +568,8 @@ but cannot claim security from the developer USB trust shortcut.
   mapping, single USB ownership, GPIO21 pull-up composition, initialization-
   before-journal scheduling, shared control/live decoding, causal ordering,
   durable reply correlation, reset-generation blocking, physical detachment,
-  USB-RAM scrubbing, and earliest-Rust-entry boot quarantine. The 110-test
-  firmware library, 27 focused host-client tests, full 174-test xtask suite,
+  USB-RAM scrubbing, and earliest-Rust-entry boot quarantine. The 123-test
+  firmware library, 29 focused host-client tests, full 176-test xtask suite,
   strict host/target Clippy, rustdoc, release linking, graph policy, and image-
   size ceilings pass. Final measurements are recorded with the qualified image.
 - Complete as historical bounded powered bootstrap control: the 544,371/3,548/469,280/
@@ -590,12 +592,13 @@ but cannot claim security from the developer USB trust shortcut.
   sequences 1102 and 1100, and both exact credential-partition reads remained
   entirely `0xff`. This does not qualify a successful hold/write, controlled
   power cuts, or the ROM/bootloader interval before the earliest Rust entry.
-- Complete as a current dormant-handoff regression: the 718,688-byte
+- Complete as a historical dormant-handoff regression: the 718,688-byte
   authenticated-node-foundation image with SHA-256
   `e20f6191cb2bfa78fbd7f3d588eb418913da3f1f89e3b80a4db0a28abaf414ea`
   matched exact address-zero reads from both boards. Both returned and then
   recovered sequence-zero `initialization-required`, and both credential
-  partitions remained entirely `0xff`. No authenticated record was admitted.
+  partitions remained entirely `0xff`. No authenticated record was admitted by
+  that image; this does not qualify the subsequently composed minimal bearer.
 - The host asserts DTR, clears RTS, and keeps initialize on one open TTY. TTY
   reopen is not an epoch boundary; only USB bus reset is. Status defaults to 15
   seconds and initialize to 120 seconds. A post-send I/O failure or timed-out

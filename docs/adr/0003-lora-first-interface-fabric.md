@@ -137,11 +137,11 @@ invent a cost-based route algorithm that Reticulum has not requested.
   two-board ANNOUNCE, DATA, and proof exchange. The autonomous permanent image
   must separately prove boot, radio initialization,
   ordinary ANNOUNCE TX/RX, contention and reset behavior; it needs an external
-  injector or the still-deferred credential-backed API firmware/bearer edge to
-  originate controlled DATA. The portable session core, target-safe submission
-  port, and cross-layer host path
-  already exist, but no external bearer invokes them. No Wi-Fi or BLE
-  implementation is required first.
+  injector or the source-composed credential-backed USB API bearer to originate
+  controlled DATA. The portable session core, target-safe submission port,
+  cross-layer host path, and minimal USB bearer now exist; powered
+  authentication and DATA injection remain open. No Wi-Fi or BLE implementation
+  is required first.
 - Rete, node-core, storage, LXMF, and application services cannot acquire a
   dependency on `lora-phy`, RNode framing, SX126x, or an E290/Tracker BSP.
 - Node-core authorization contains no radio configuration, RNode frame-count,

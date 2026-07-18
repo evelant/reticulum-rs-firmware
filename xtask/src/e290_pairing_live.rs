@@ -90,6 +90,31 @@ struct PersistedPendingState {
     psk: PairingPsk,
 }
 
+pub(crate) struct ActivatedCredential {
+    device_id: DeviceId,
+    credential_id: CredentialId,
+    generation: CredentialGeneration,
+    psk: Zeroizing<[u8; 32]>,
+}
+
+impl ActivatedCredential {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        DeviceId,
+        CredentialId,
+        CredentialGeneration,
+        Zeroizing<[u8; 32]>,
+    ) {
+        (
+            self.device_id,
+            self.credential_id,
+            self.generation,
+            self.psk,
+        )
+    }
+}
+
 struct BeginWorkflowError {
     message: String,
     pending_may_exist: bool,
@@ -1000,6 +1025,81 @@ impl PendingStateFile {
     }
 }
 
+pub(crate) fn load_activated_credential(path: &Path) -> Result<ActivatedCredential, String> {
+    let mut file = open_existing_state(path)?;
+    let mut bytes = Zeroizing::new([0_u8; STATE_FILE_LENGTH]);
+    file.read_exact(&mut bytes[..])
+        .map_err(|error| format!("could not read state file {}: {error}", path.display()))?;
+    if file
+        .metadata()
+        .map_err(|error| format!("could not inspect state file {}: {error}", path.display()))?
+        .len()
+        != STATE_FILE_LENGTH as u64
+    {
+        return Err(format!(
+            "state file {} is not exactly {STATE_FILE_LENGTH} bytes",
+            path.display()
+        ));
+    }
+    ensure_path_matches_file(&file, path, "Active state")?;
+    if bytes[..8] != STATE_MAGIC
+        || bytes[8..10] != STATE_FORMAT_VERSION.to_le_bytes()
+        || bytes[11..16].iter().any(|byte| *byte != 0)
+        || bytes[88..].iter().any(|byte| *byte != 0)
+    {
+        return Err(format!(
+            "state file {} is not canonical version {STATE_FORMAT_VERSION}",
+            path.display()
+        ));
+    }
+    if bytes[STATE_STATUS_OFFSET as usize] != STATE_ACTIVE {
+        return Err(format!(
+            "state file {} is not Active and cannot authenticate a session",
+            path.display()
+        ));
+    }
+
+    let device_id = DeviceId::new(
+        bytes[16..32]
+            .try_into()
+            .expect("fixed state field has exact length"),
+    )
+    .map_err(|_| format!("state file {} has an invalid device ID", path.display()))?;
+    let credential_id = CredentialId::new(
+        bytes[32..48]
+            .try_into()
+            .expect("fixed state field has exact length"),
+    );
+    if credential_id.as_bytes().iter().all(|byte| *byte == 0) {
+        return Err(format!(
+            "state file {} has a zero credential ID",
+            path.display()
+        ));
+    }
+    let generation = CredentialGeneration::new(u64::from_le_bytes(
+        bytes[48..56]
+            .try_into()
+            .expect("fixed state field has exact length"),
+    ));
+    if generation.get() == 0 {
+        return Err(format!(
+            "state file {} has a zero credential generation",
+            path.display()
+        ));
+    }
+    let mut psk = Zeroizing::new([0_u8; 32]);
+    psk.copy_from_slice(&bytes[56..88]);
+    if psk.iter().all(|byte| *byte == 0) {
+        return Err(format!("state file {} has a zero PSK", path.display()));
+    }
+    Ok(ActivatedCredential {
+        device_id,
+        credential_id,
+        generation,
+        psk,
+    })
+}
+
 fn encode_state(
     state: u8,
     pending: Option<(DeviceId, CredentialId, CredentialGeneration, &PairingPsk)>,
@@ -1667,6 +1767,8 @@ mod tests {
             state.file.metadata().unwrap().permissions().mode() & 0o777,
             0o600
         );
+        let error = load_activated_credential(&path).err().unwrap();
+        assert!(error.contains("is not Active"));
 
         let persisted = PendingStateFile::open_pending(&path).unwrap();
         assert_eq!(persisted.device_id, device_id);
@@ -1680,6 +1782,13 @@ mod tests {
         assert_eq!(active.len(), STATE_FILE_LENGTH);
         assert_eq!(active[10], STATE_ACTIVE);
         assert_eq!(&active[56..88], psk.as_bytes());
+        let activated = load_activated_credential(&path).unwrap();
+        let (loaded_device, loaded_credential, loaded_generation, loaded_psk) =
+            activated.into_parts();
+        assert_eq!(loaded_device, device_id);
+        assert_eq!(loaded_credential, credential_id);
+        assert_eq!(loaded_generation, generation);
+        assert_eq!(loaded_psk.as_ref(), psk.as_bytes());
         let error = PendingStateFile::open_pending(&path).err().unwrap();
         assert!(error.contains("already Active"));
         drop(state);

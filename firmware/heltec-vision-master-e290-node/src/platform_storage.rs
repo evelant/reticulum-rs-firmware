@@ -17,6 +17,7 @@ use reticulum_device_api_adapter::{SubmissionAcceptance, SubmissionPort, Submiss
 use reticulum_device_api_credential_store::{
     BoundCredentialStore, CredentialStoreBinding, CredentialStoreRecovery, MountedCredentialStore,
 };
+use reticulum_device_api_credentials::{CredentialId, SelectedCredential};
 use reticulum_device_api_handoff::{LocalApiReply, LocalApiRequest};
 use reticulum_device_api_pairing::{
     AbortCurrentResponse, AbortResult, ActivateResponse, BeginResponse, DeviceId, PairingRequest,
@@ -42,6 +43,7 @@ use reticulum_heltec_vision_master_e290_node::credential_pairing::{
 use reticulum_heltec_vision_master_e290_node::credential_runtime::{
     CredentialInitializationStatus, CredentialRuntime, InitializationAccepted,
     InitializationDriveOutcome, InitializationRequestRefusal, MAXIMUM_CREDENTIAL_RUNTIME_BYTES,
+    OrdinarySessionSelectionRefusal,
 };
 use reticulum_heltec_vision_master_e290_node::cross_store_gate::{
     CredentialPhysicalMutationGate, JournalMutationGate, credential_physical_mutation_gate,
@@ -730,6 +732,18 @@ impl ProductStorageCoordinator {
             credential_physical_mutation_outstanding,
         };
         credential_runtime.dispatch_authenticated_request(request, &mut port)
+    }
+
+    /// Admit one ordinary authenticated session and return its exact selected
+    /// zeroizing credential owner without exposing the resident authority.
+    pub(crate) fn select_ordinary_session(
+        &mut self,
+        at: PairingMillis,
+        connection: ConnectionId,
+        credential_id: CredentialId,
+    ) -> Result<SelectedCredential, OrdinarySessionSelectionRefusal> {
+        self.credential_runtime
+            .select_ordinary_session(at, connection, credential_id)
     }
 
     /// Admit one transport-neutral live-pairing request without exposing flash.

@@ -1,11 +1,11 @@
 //! Sole USB Serial/JTAG and physical-presence GPIO owner.
 //!
-//! This task terminates the unauthenticated credential-initialization and live-
-//! pairing records on one shared framed stream and exact-next sequence space.
-//! It also retains the boot-lifetime authenticated API bearer endpoint, but
-//! does not yet admit session records. It is not a Reticulum packet interface
-//! and has no access to node routing, radio, credential, journal, or raw flash
-//! owners.
+//! This task terminates unauthenticated credential-initialization, live-pairing,
+//! and one authenticated local-API session on a shared framed stream. Pairing
+//! keeps its independent exact-next sequence space; session handshakes and
+//! requests use their own authenticated counters. It is not a Reticulum packet
+//! interface and has no access to node routing, radio, credential, journal, or
+//! raw flash owners.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -16,6 +16,7 @@ use esp_hal::{
     gpio::Input,
     peripherals::USB_DEVICE,
     ram,
+    rng::Trng,
     usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagTx},
 };
 use reticulum_device_api_framing::{DecodeEvent, FramedRecord, Record, StreamDecoder};
@@ -24,13 +25,20 @@ use reticulum_device_api_pairing_control::ControlResponse;
 use reticulum_device_api_pairing_policy::{
     ActiveLowButton, ConnectionId, MonotonicMillis as PairingMillis,
 };
-use reticulum_device_api_session::AuthenticatedGrant;
+use reticulum_device_api_session::{
+    AuthenticatedGrant, RECORD_KIND_CLIENT_HELLO, ServerParameters,
+};
 use reticulum_heltec_vision_master_e290_node::{
     config,
     live_pairing_handoff::{BearerLivePairingHandoff, LivePairingCommand, LivePairingReply},
     pairing_control_handoff::{
         ButtonObservationReply, ExclusiveAcquisitionReply, LifecycleAcknowledgement,
         PairingControlCommand, PairingControlReply, PairingControlReplyKind, UsbPairingHandoff,
+    },
+    session_admission_handoff::BearerSessionAdmissionHandoff,
+    usb_authenticated_session::{
+        PairingExclusiveCloseDisposition, UsbAuthenticatedSession, UsbAuthenticatedSessionPhase,
+        UsbSessionRxDisposition, UsbSessionTxAdvance,
     },
     usb_pairing_policy::{
         ActiveLowButtonDebouncer, ExactNextSequenceGate, PhysicalPresencePublicationGuard,
@@ -95,6 +103,8 @@ struct PendingTransmission {
 struct ControlReplyContext<'a> {
     pending_command: &'a mut Option<PendingCommand>,
     transmission: &'a mut Option<PendingTransmission>,
+    authenticated_session: &'a mut UsbAuthenticatedSession,
+    pending_pairing_exclusive: &'a mut Option<(ConnectionId, u32)>,
     announced_connection: &'a mut Option<ConnectionId>,
     disconnect_pending: &'a mut Option<ConnectionId>,
     reset_generation: u32,
@@ -108,6 +118,29 @@ struct PreAuthenticationRxContext<'a> {
     connection: ConnectionId,
     now_millis: u64,
     reset_generation: u32,
+}
+
+pub(crate) struct UsbHandoffs {
+    pairing: UsbPairingHandoff<CriticalSectionRawMutex>,
+    live: BearerLivePairingHandoff<CriticalSectionRawMutex>,
+    admission: BearerSessionAdmissionHandoff<CriticalSectionRawMutex>,
+    authenticated_api: BearerHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
+}
+
+impl UsbHandoffs {
+    pub(crate) const fn new(
+        pairing: UsbPairingHandoff<CriticalSectionRawMutex>,
+        live: BearerLivePairingHandoff<CriticalSectionRawMutex>,
+        admission: BearerSessionAdmissionHandoff<CriticalSectionRawMutex>,
+        authenticated_api: BearerHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
+    ) -> Self {
+        Self {
+            pairing,
+            live,
+            admission,
+            authenticated_api,
+        }
+    }
 }
 
 // A bus reset is a security-principal boundary for pre-authentication work.
@@ -256,16 +289,22 @@ fn usb_bus_reset_interrupt() {
         .write(|write| write.usb_bus_reset().clear_bit_by_one());
 }
 
-/// Run the sole pre-authentication USB/GPIO bearer.
+/// Run the sole USB/GPIO bearer and boot-lifetime authenticated-session owner.
 #[embassy_executor::task]
 pub async fn run(
     _boot_quarantine: BootUsbQuarantine,
     usb_device: USB_DEVICE<'static>,
     button: Input<'static>,
-    mut handoff: UsbPairingHandoff<CriticalSectionRawMutex>,
-    mut live_handoff: BearerLivePairingHandoff<CriticalSectionRawMutex>,
-    _authenticated_api: BearerHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
+    handoffs: UsbHandoffs,
+    session_parameters: ServerParameters,
+    mut session_rng: Trng,
 ) {
+    let UsbHandoffs {
+        pairing: mut handoff,
+        live: mut live_handoff,
+        admission: mut session_admission,
+        mut authenticated_api,
+    } = handoffs;
     let mut usb_serial = UsbSerialJtag::<Blocking>::new(usb_device);
     let registers = USB_DEVICE::regs();
     let pin_swap = esp_hal::efuse::read_bit(esp_hal::efuse::USB_EXCHG_PINS);
@@ -310,6 +349,8 @@ pub async fn run(
     let mut pending_live_command: Option<PendingLiveCommand> = None;
     let mut awaiting_live_reply: Option<LivePurpose> = None;
     let mut transmission: Option<PendingTransmission> = None;
+    let mut authenticated_session = UsbAuthenticatedSession::new(session_parameters);
+    let mut pending_pairing_exclusive: Option<(ConnectionId, u32)> = None;
     let mut announced_connection: Option<ConnectionId> = None;
     let mut disconnect_pending: Option<ConnectionId> = None;
     let mut tracker_failed = false;
@@ -355,6 +396,16 @@ pub async fn run(
                     discard_rx_fifo(&mut rx);
                     decoder.reset();
                     sequence_gate = Some(ExactNextSequenceGate::new(connection));
+                    debug_assert_eq!(
+                        authenticated_session.phase(),
+                        UsbAuthenticatedSessionPhase::Disconnected
+                    );
+                    if !authenticated_session.begin_connection(connection) {
+                        tracker_failed = true;
+                        authenticated_session.reset();
+                        discard_rx_fifo(&mut rx);
+                        continue;
+                    }
                     if !button_failed
                         && debouncer
                             .reset_for_connection(now_millis, active_low_level(button.is_low()))
@@ -386,6 +437,8 @@ pub async fn run(
                         &mut pending_command,
                         &mut pending_live_command,
                         &mut transmission,
+                        &mut authenticated_session,
+                        &mut pending_pairing_exclusive,
                         announced_connection,
                         &mut disconnect_pending,
                     );
@@ -407,6 +460,8 @@ pub async fn run(
                             &mut pending_command,
                             &mut pending_live_command,
                             &mut transmission,
+                            &mut authenticated_session,
+                            &mut pending_pairing_exclusive,
                             announced_connection,
                             &mut disconnect_pending,
                         );
@@ -421,6 +476,9 @@ pub async fn run(
 
         if USB_PAD_FORCED_OFF.swap(false, Ordering::AcqRel) {
             retire_transmission(&mut transmission);
+            authenticated_session.reset();
+            pending_pairing_exclusive = None;
+            synchronize_tx_epoch(&transmission, &authenticated_session);
             // The pad is already disabled by the reset ISR. Power-cycle the
             // USB memory long enough to discard any byte written after the
             // hardware reset, then expose a clean endpoint only if generation
@@ -547,7 +605,14 @@ pub async fn run(
             });
         }
 
-        if connection_tracker.connection().is_none() || disconnect_pending.is_some() {
+        if connection_tracker.connection().is_none()
+            || disconnect_pending.is_some()
+            || matches!(
+                authenticated_session.phase(),
+                UsbAuthenticatedSessionPhase::Disconnected
+                    | UsbAuthenticatedSessionPhase::TerminatedUntilReset
+            )
+        {
             discard_rx_fifo(&mut rx);
         }
 
@@ -565,6 +630,8 @@ pub async fn run(
                     ControlReplyContext {
                         pending_command: &mut pending_command,
                         transmission: &mut transmission,
+                        authenticated_session: &mut authenticated_session,
+                        pending_pairing_exclusive: &mut pending_pairing_exclusive,
                         announced_connection: &mut announced_connection,
                         disconnect_pending: &mut disconnect_pending,
                         reset_generation,
@@ -599,12 +666,84 @@ pub async fn run(
             }
         }
 
-        if let Some(active_connection) = connection_tracker.active()
-            && let Some(pending_tx) = transmission.as_mut()
-            && (pending_tx.connection != active_connection
-                || step_transmission(&mut tx, pending_tx))
-        {
+        while let Some(reply) = session_admission.try_receive_reply() {
+            critical_section::with(|_| {
+                let _ = authenticated_session.accept_admission_reply(reply, &mut session_rng);
+                synchronize_tx_epoch(&transmission, &authenticated_session);
+            });
+        }
+        while let Some(reply) = authenticated_api.replies().try_receive() {
+            critical_section::with(|_| {
+                if let Err(fault) = authenticated_session.accept_node_reply(reply) {
+                    drop(fault.into_reply());
+                }
+                synchronize_tx_epoch(&transmission, &authenticated_session);
+            });
+        }
+
+        if transmission.is_some() && authenticated_session.tx_kind().is_some() {
+            if let Some(connection) = connection_tracker.connection() {
+                disconnect_pending = Some(connection);
+            }
             retire_transmission(&mut transmission);
+            authenticated_session.reset();
+            pending_pairing_exclusive = None;
+        }
+        synchronize_tx_epoch(&transmission, &authenticated_session);
+
+        if let Some(active_connection) = connection_tracker.active() {
+            if let Some(pending_tx) = transmission.as_mut() {
+                if pending_tx.connection != active_connection
+                    || step_transmission(&mut tx, pending_tx)
+                {
+                    retire_transmission(&mut transmission);
+                }
+            } else if authenticated_session.tx_kind().is_some()
+                && (authenticated_session.connection() != Some(active_connection)
+                    || step_authenticated_transmission(
+                        &mut tx,
+                        &mut authenticated_session,
+                        reset_generation,
+                    ))
+            {
+                disconnect_pending = Some(active_connection);
+                authenticated_session.reset();
+            }
+            synchronize_tx_epoch(&transmission, &authenticated_session);
+        }
+
+        if let Some((connection, exclusive_generation)) = pending_pairing_exclusive {
+            if connection_tracker.connection() != Some(connection)
+                || exclusive_generation != reset_generation
+                || !usb_epoch_current(reset_generation)
+            {
+                pending_pairing_exclusive = None;
+                if authenticated_session.connection() == Some(connection) {
+                    authenticated_session.reset();
+                }
+                synchronize_tx_epoch(&transmission, &authenticated_session);
+            } else {
+                match authenticated_session.close_for_pairing_exclusivity(connection) {
+                    PairingExclusiveCloseDisposition::Closed
+                    | PairingExclusiveCloseDisposition::AlreadyExclusive => {
+                        pending_pairing_exclusive = None;
+                        synchronize_tx_epoch(&transmission, &authenticated_session);
+                        queue_exclusive_acquired(
+                            &mut pending_command,
+                            now_millis,
+                            connection,
+                            reset_generation,
+                        );
+                    }
+                    PairingExclusiveCloseDisposition::DrainBeforeClose { .. } => {}
+                    PairingExclusiveCloseDisposition::StaleConnection => {
+                        pending_pairing_exclusive = None;
+                        disconnect_pending = Some(connection);
+                        authenticated_session.reset();
+                        synchronize_tx_epoch(&transmission, &authenticated_session);
+                    }
+                }
+            }
         }
 
         if awaiting_reply.is_none() && pending_command.is_none() && pending_live_command.is_none() {
@@ -627,8 +766,9 @@ pub async fn run(
             {
                 let periodic_button_due = now_millis.saturating_sub(last_button_observation_ms)
                     >= config::PAIRING_BUTTON_OBSERVATION_INTERVAL_MS;
-                let button_due =
-                    !button_failed && button_publication.publication_due(periodic_button_due);
+                let button_due = pending_pairing_exclusive.is_none()
+                    && !button_failed
+                    && button_publication.publication_due(periodic_button_due);
                 // Both request families share one wire flight. Scalar button
                 // and lifecycle events remain independent so a disconnect can
                 // cross the control handoff while the node still owns a live
@@ -636,6 +776,9 @@ pub async fn run(
                 let control_ready = connection_tracker.active() == Some(connection)
                     && awaiting_live_reply.is_none()
                     && transmission.is_none()
+                    && pending_pairing_exclusive.is_none()
+                    && authenticated_session.tx_kind().is_none()
+                    && authenticated_rx_enabled(authenticated_session.phase())
                     && usb_epoch_current(reset_generation);
                 match select_usb_pairing_work(button_due, control_ready, control_turn_after_button)
                 {
@@ -655,7 +798,7 @@ pub async fn run(
                         observe_button_if_empty,
                     } => {
                         control_turn_after_button = false;
-                        let accepted = receive_pre_authentication_request(
+                        let accepted = receive_usb_request(
                             &mut rx,
                             PreAuthenticationRxContext {
                                 decoder: &mut decoder,
@@ -666,6 +809,7 @@ pub async fn run(
                                 now_millis,
                                 reset_generation,
                             },
+                            &mut authenticated_session,
                         );
                         if observe_button_if_empty && !accepted {
                             queue_button_observation(
@@ -735,84 +879,154 @@ pub async fn run(
             }
         }
 
+        if pending_pairing_exclusive.is_none()
+            && disconnect_pending.is_none()
+            && let Some(connection) = announced_connection
+            && connection_tracker.connection() == Some(connection)
+        {
+            let epoch_current = try_in_epoch(reset_generation, || {
+                authenticated_session.try_send_admission_command(&mut session_admission)
+            })
+            .is_some()
+                && try_in_epoch(reset_generation, || {
+                    authenticated_session.try_send_request(authenticated_api.requests())
+                })
+                .is_some();
+            if !epoch_current {
+                authenticated_session.reset();
+                synchronize_tx_epoch(&transmission, &authenticated_session);
+            }
+        }
+
         Timer::after_millis(config::USB_PAIRING_POLL_INTERVAL_MS).await;
     }
 }
 
-fn receive_pre_authentication_request(
+fn receive_usb_request(
     rx: &mut esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, Blocking>,
-    context: PreAuthenticationRxContext<'_>,
+    mut context: PreAuthenticationRxContext<'_>,
+    authenticated_session: &mut UsbAuthenticatedSession,
 ) -> bool {
-    let Some(sequence_gate) = context.sequence_gate else {
+    let Some(event) = receive_decode_event(rx, context.decoder, context.reset_generation) else {
         return false;
     };
+
+    match authenticated_session.phase() {
+        UsbAuthenticatedSessionPhase::AwaitingClientHello => match event {
+            DecodeEvent::Record(record) if record.kind() == RECORD_KIND_CLIENT_HELLO => {
+                let _ =
+                    authenticated_session.accept_record(record, pairing_time(context.now_millis));
+                true
+            }
+            DecodeEvent::Record(record) => handle_pre_authentication_record(record, &mut context),
+            DecodeEvent::Pending
+            | DecodeEvent::MalformedCobs
+            | DecodeEvent::MalformedRecord(_)
+            | DecodeEvent::Overflow => false,
+        },
+        UsbAuthenticatedSessionPhase::PairingExclusive => match event {
+            DecodeEvent::Record(record) => handle_pre_authentication_record(record, &mut context),
+            DecodeEvent::Pending
+            | DecodeEvent::MalformedCobs
+            | DecodeEvent::MalformedRecord(_)
+            | DecodeEvent::Overflow => false,
+        },
+        UsbAuthenticatedSessionPhase::PendingClientProof
+        | UsbAuthenticatedSessionPhase::Established => {
+            let result =
+                authenticated_session.accept_decode_event(event, pairing_time(context.now_millis));
+            !matches!(result, Ok(UsbSessionRxDisposition::Pending))
+        }
+        UsbAuthenticatedSessionPhase::Disconnected
+        | UsbAuthenticatedSessionPhase::AdmissionCommandPending
+        | UsbAuthenticatedSessionPhase::AwaitingAdmissionReply
+        | UsbAuthenticatedSessionPhase::ServerHelloFlight
+        | UsbAuthenticatedSessionPhase::ServerProofFlight
+        | UsbAuthenticatedSessionPhase::RequestHandoffPending
+        | UsbAuthenticatedSessionPhase::AwaitingReply
+        | UsbAuthenticatedSessionPhase::ReplyFlight
+        | UsbAuthenticatedSessionPhase::TerminatedUntilReset => false,
+    }
+}
+
+fn receive_decode_event(
+    rx: &mut esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, Blocking>,
+    decoder: &mut StreamDecoder,
+    reset_generation: u32,
+) -> Option<DecodeEvent> {
     for _ in 0..config::USB_PAIRING_MAX_BYTES_PER_POLL {
-        if !usb_epoch_current(context.reset_generation) {
-            context.decoder.reset();
-            return false;
+        if !usb_epoch_current(reset_generation) {
+            decoder.reset();
+            return None;
         }
         let Ok(byte) = rx.read_byte() else {
             break;
         };
-        if !usb_epoch_current(context.reset_generation) {
-            context.decoder.reset();
-            return false;
+        if !usb_epoch_current(reset_generation) {
+            decoder.reset();
+            return None;
         }
-        let DecodeEvent::Record(record) = context.decoder.push(byte) else {
-            continue;
-        };
-        let Ok(request) = decode_usb_pre_authentication_request(record) else {
-            continue;
-        };
-        let sequence = request.sequence();
-        let kind = request.kind();
-        if !usb_epoch_current(context.reset_generation) {
-            context.decoder.reset();
-            return false;
+        let event = decoder.push(byte);
+        if !matches!(event, DecodeEvent::Pending) {
+            return Some(event);
         }
-        if sequence_gate.accept(context.connection, sequence).is_err() {
-            continue;
-        }
-        if !usb_epoch_current(context.reset_generation) {
-            context.decoder.reset();
-            return false;
-        }
-        match request {
-            UsbPreAuthenticationRequest::Control(request) => queue_command(
-                context.pending_command,
-                PairingControlCommand::Control {
-                    at: pairing_time(context.now_millis),
-                    connection: context.connection,
-                    request,
-                },
-                PendingPurpose::Control {
-                    connection: context.connection,
-                    sequence,
-                    kind,
-                },
-                context.reset_generation,
-            ),
-            UsbPreAuthenticationRequest::Live(request) => {
-                debug_assert!(context.pending_live_command.is_none());
-                let purpose = LivePurpose {
-                    connection: context.connection,
-                    sequence,
-                    kind,
-                };
-                *context.pending_live_command = Some(PendingLiveCommand {
-                    command: LivePairingCommand::new(
-                        pairing_time(context.now_millis),
-                        context.connection,
-                        request,
-                    ),
-                    purpose,
-                    reset_generation: context.reset_generation,
-                });
-            }
-        }
-        return true;
     }
-    false
+    None
+}
+
+fn handle_pre_authentication_record(
+    record: Record,
+    context: &mut PreAuthenticationRxContext<'_>,
+) -> bool {
+    let Some(sequence_gate) = context.sequence_gate.as_deref_mut() else {
+        return false;
+    };
+    let Ok(request) = decode_usb_pre_authentication_request(record) else {
+        return false;
+    };
+    let sequence = request.sequence();
+    let kind = request.kind();
+    if !usb_epoch_current(context.reset_generation)
+        || sequence_gate.accept(context.connection, sequence).is_err()
+        || !usb_epoch_current(context.reset_generation)
+    {
+        context.decoder.reset();
+        return false;
+    }
+    match request {
+        UsbPreAuthenticationRequest::Control(request) => queue_command(
+            context.pending_command,
+            PairingControlCommand::Control {
+                at: pairing_time(context.now_millis),
+                connection: context.connection,
+                request,
+            },
+            PendingPurpose::Control {
+                connection: context.connection,
+                sequence,
+                kind,
+            },
+            context.reset_generation,
+        ),
+        UsbPreAuthenticationRequest::Live(request) => {
+            debug_assert!(context.pending_live_command.is_none());
+            let purpose = LivePurpose {
+                connection: context.connection,
+                sequence,
+                kind,
+            };
+            *context.pending_live_command = Some(PendingLiveCommand {
+                command: LivePairingCommand::new(
+                    pairing_time(context.now_millis),
+                    context.connection,
+                    request,
+                ),
+                purpose,
+                reset_generation: context.reset_generation,
+            });
+        }
+    }
+    true
 }
 
 fn handle_reply(
@@ -842,15 +1056,32 @@ fn handle_reply(
             PendingPurpose::Button(expected),
             PairingControlReplyKind::Button(ButtonObservationReply::AcquireExclusive),
         ) if expected == connection && context.disconnect_pending.is_none() => {
-            queue_command(
-                context.pending_command,
-                PairingControlCommand::ExclusiveAcquired {
-                    at: pairing_time(now_millis),
-                    connection,
-                },
-                PendingPurpose::Exclusive(connection),
-                context.reset_generation,
-            );
+            match context
+                .authenticated_session
+                .close_for_pairing_exclusivity(connection)
+            {
+                PairingExclusiveCloseDisposition::Closed
+                | PairingExclusiveCloseDisposition::AlreadyExclusive => {
+                    synchronize_tx_epoch(context.transmission, context.authenticated_session);
+                    queue_exclusive_acquired(
+                        context.pending_command,
+                        now_millis,
+                        connection,
+                        context.reset_generation,
+                    );
+                }
+                PairingExclusiveCloseDisposition::DrainBeforeClose { .. } => {
+                    debug_assert!(context.pending_pairing_exclusive.is_none());
+                    *context.pending_pairing_exclusive =
+                        Some((connection, context.reset_generation));
+                }
+                PairingExclusiveCloseDisposition::StaleConnection => {
+                    *context.disconnect_pending = Some(connection);
+                    retire_transmission(context.transmission);
+                    *context.pending_pairing_exclusive = None;
+                    synchronize_tx_epoch(context.transmission, context.authenticated_session);
+                }
+            }
         }
         (
             PendingPurpose::Button(expected),
@@ -1022,6 +1253,67 @@ fn step_transmission(
     true
 }
 
+fn step_authenticated_transmission(
+    tx: &mut UsbSerialJtagTx<'static, Blocking>,
+    session: &mut UsbAuthenticatedSession,
+    reset_generation: u32,
+) -> bool {
+    if !tx_epoch_current(reset_generation) {
+        return false;
+    }
+    let Some(chunk) = session.next_tx_chunk(config::USB_PAIRING_MAX_BYTES_PER_POLL) else {
+        return true;
+    };
+    let mut acknowledged = 0_usize;
+    for byte in chunk {
+        if !tx_epoch_current(reset_generation) {
+            return false;
+        }
+        if tx.write_byte_nb(*byte).is_err() {
+            break;
+        }
+        acknowledged += 1;
+        if !tx_epoch_current(reset_generation) {
+            return false;
+        }
+    }
+    let advance = match session.advance_tx(acknowledged) {
+        Ok(advance) => advance,
+        Err(_) => return true,
+    };
+    if matches!(advance, UsbSessionTxAdvance::RecordComplete { .. }) {
+        if !tx_epoch_current(reset_generation) {
+            return false;
+        }
+        let _ = tx.flush_tx_nb();
+        if !tx_epoch_current(reset_generation) {
+            return false;
+        }
+    }
+    false
+}
+
+fn synchronize_tx_epoch(
+    transmission: &Option<PendingTransmission>,
+    session: &UsbAuthenticatedSession,
+) {
+    debug_assert!(!(transmission.is_some() && session.tx_kind().is_some()));
+    TX_EPOCH_ARMED.store(
+        transmission.is_some() || session.tx_kind().is_some(),
+        Ordering::Release,
+    );
+}
+
+const fn authenticated_rx_enabled(phase: UsbAuthenticatedSessionPhase) -> bool {
+    matches!(
+        phase,
+        UsbAuthenticatedSessionPhase::AwaitingClientHello
+            | UsbAuthenticatedSessionPhase::PendingClientProof
+            | UsbAuthenticatedSessionPhase::Established
+            | UsbAuthenticatedSessionPhase::PairingExclusive
+    )
+}
+
 fn tx_epoch_current(reset_generation: u32) -> bool {
     usb_epoch_current(reset_generation)
 }
@@ -1030,6 +1322,21 @@ fn usb_epoch_current(reset_generation: u32) -> bool {
     !USB_RESET_EXHAUSTED.load(Ordering::Acquire)
         && !USB_EPOCH_BLOCKED.load(Ordering::Acquire)
         && USB_RESET_GENERATION.load(Ordering::Acquire) == reset_generation
+}
+
+fn try_in_epoch<R>(reset_generation: u32, action: impl FnOnce() -> R) -> Option<R> {
+    critical_section::with(|_| {
+        if !usb_epoch_current(reset_generation)
+            || USB_DEVICE::regs()
+                .int_raw()
+                .read()
+                .usb_bus_reset()
+                .bit_is_set()
+        {
+            return None;
+        }
+        Some(action())
+    })
 }
 
 fn try_send_in_epoch<T, E>(
@@ -1080,6 +1387,8 @@ fn invalidate_connection(
     pending_command: &mut Option<PendingCommand>,
     pending_live_command: &mut Option<PendingLiveCommand>,
     transmission: &mut Option<PendingTransmission>,
+    authenticated_session: &mut UsbAuthenticatedSession,
+    pending_pairing_exclusive: &mut Option<(ConnectionId, u32)>,
     announced_connection: Option<ConnectionId>,
     disconnect_pending: &mut Option<ConnectionId>,
 ) {
@@ -1090,6 +1399,9 @@ fn invalidate_connection(
     decoder.reset();
     *sequence_gate = None;
     retire_transmission(transmission);
+    authenticated_session.reset();
+    *pending_pairing_exclusive = None;
+    synchronize_tx_epoch(transmission, authenticated_session);
     if pending_command
         .as_ref()
         .is_some_and(|pending| pending.purpose.connection() == connection)
@@ -1119,6 +1431,23 @@ fn queue_command(
         purpose,
         reset_generation,
     });
+}
+
+fn queue_exclusive_acquired(
+    pending: &mut Option<PendingCommand>,
+    now_millis: u64,
+    connection: ConnectionId,
+    reset_generation: u32,
+) {
+    queue_command(
+        pending,
+        PairingControlCommand::ExclusiveAcquired {
+            at: pairing_time(now_millis),
+            connection,
+        },
+        PendingPurpose::Exclusive(connection),
+        reset_generation,
+    );
 }
 
 fn queue_button_observation(

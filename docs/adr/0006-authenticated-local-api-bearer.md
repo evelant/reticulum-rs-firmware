@@ -3,8 +3,9 @@
 - **Status:** accepted for the qualification session, portable credential
   authority/store, durable provenance, ADR 0009 policy/store design, ADR 0010
   live-pairing protocol/core, E290 credential boot composition, and routed
-  pre-authentication live lifecycle; authenticated node-side handoff and
-  logical dispatch composed; USB session/bearer pending
+  pre-authentication live lifecycle; authenticated node-side handoff, logical
+  dispatch, and minimal single-flight USB session/bearer composed; powered
+  authentication pending
 - **Date:** 2026-07-17
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0003](0003-lora-first-interface-fabric.md) and
@@ -127,10 +128,23 @@ reply from a stale epoch and allows an idempotent retry to become a new request
 owner. Dropping either boot-lifetime endpoint is a fatal service teardown.
 
 The permanent E290 graph now instantiates that depth-one handoff statically.
-The node endpoint is scheduled as its own fair lane; the USB task retains the
-bearer endpoint across reconnects but does not yet feed it. No authenticated
-hello, proof, request, response, or close record is admitted by the USB owner in
-this slice, so this source composition does not constitute a live bearer.
+The node endpoint is scheduled as its own fair lane, and the USB task owns the
+first deliberately minimal bearer manager across reconnects. The manager admits
+one hello/proof handshake per connection and one authenticated request at a
+time. Any session fault is terminal until USB reset or re-enumeration. This
+initial source profile intentionally omits resumption, protocol retries, close
+records, encryption, rate limiting/attempt policy, repeated handshake attempts,
+and concurrent requests. Its admission/handoff and node-dispatch boundary is
+bearer-neutral. The present integrity-only qualification suite is explicitly
+USB Serial/JTAG-only; later BLE and Wi-Fi adapters can reuse the ownership
+boundary after adding and qualifying their binding/suite and supplying their
+own connection and transmission mechanics. Before two bearers run
+simultaneously, the product must also choose either globally unique,
+bearer-qualified connection/session epochs or strictly disjoint per-bearer
+reply channels governed by one global pairing-exclusivity coordinator. A second
+bearer must not reuse an independent epoch allocator against the current shared
+routing namespace. Source and portable tests cover this composition; powered
+authenticated handshake, request, and reply proof remains open.
 
 The handoff's 512-byte limit is the authoritative
 `reticulum-device-api::MAX_MESSAGE_BYTES`, not a duplicated constant.
@@ -324,7 +338,8 @@ request is retained as a terminal quarantine owner because it has no
 trustworthy logical request ID; an unexpected post-dispatch encoding failure
 is likewise never redispatched. Cross-snapshot successor regressions separately reject
 same-generation authorization changes and silent credential removal. The USB
-bearer endpoint is dormant, so powered hardware has not exercised this path.
+bearer now reaches this path in source, but powered hardware has not exercised
+it.
 
 A reply is delivered only to its accepting live session or retrieved later by
 the same authorized principal. Session epochs route replies; they are not
@@ -344,8 +359,9 @@ physical attacker and must not be described as tamper-resistant.
 
 - USB provides the missing local admission edge for the complete LoRa-first
   E290 path without becoming a second Reticulum interface.
-- Framing, session, authenticated grant and node acceptance remain reusable by
-  later BLE or Wi-Fi local-API bearers.
+- Framing, authenticated grant, admission, and node acceptance remain reusable
+  by later BLE or Wi-Fi local-API bearers. The current session suite must be
+  extended and separately qualified for each non-USB binding.
 - A future USB/Wi-Fi/BLE Reticulum packet actor still uses the separate
   interface registry and native-packet ownership contract from ADR 0003.
 - Framing and handoff are allocation-free and fixed-capacity; session and
@@ -373,9 +389,11 @@ physical attacker and must not be described as tamper-resistant.
   request/reply handoff, a fair node dispatch lane, current-authority
   revalidation, synchronous dispatch through a credential-disjoint submission
   view, retained reply pressure, and generic rejection with no fallback or
-  submission-port I/O. The USB bearer endpoint is retained dormant.
-- Remaining: malformed established-stream policy and logical-CBOR validation in
-  the bearer manager.
+  submission-port I/O. The minimal USB bearer admits one handshake per
+  connection and one request at a time, with fault-until-reset behavior.
+- Deliberately deferred from the first bearer profile: resumption, protocol
+  retries, close records, encryption, rate limiting/attempt policy, repeated
+  handshake attempts, concurrency, and richer established-stream recovery.
 - Complete in the portable store: the dedicated two-sector format,
   operation-scoped binding, erased-only initialization/recovery,
   commit/retire/publication ordering, and 32-test power-cut/error matrix.
@@ -390,9 +408,8 @@ physical attacker and must not be described as tamper-resistant.
   shared USB control/live decoding and exact-next sequencing, reset-generation
   gating, secret-owning handoff, node causal scheduling, and correlated durable
   Begin/Activate/Abort replies.
-- Remaining: durable revoke/rotate/reset transactions, USB authenticated
-  handshake/session record admission, and powered successful
-  lifecycle/cut/window/rate/API tests.
+- Remaining: durable revoke/rotate/reset transactions and powered successful
+  USB handshake/request/reply plus lifecycle/cut/window/rate/API tests.
 - Remaining: cancellation at the concrete USB RX/TX, request-admission and
   reply-channel boundaries.
 - Remaining: concrete stale-reply channel draining and idempotent retry after
@@ -405,12 +422,11 @@ physical attacker and must not be described as tamper-resistant.
 
 ## Deferred decisions
 
-This ADR does not select the production AEAD construction, compose the
-authenticated USB bearer/session manager beyond retaining its dormant handoff
-endpoint, define
+This ADR does not select the production AEAD construction, extend the minimal
+authenticated USB bearer beyond its single-handshake/single-request profile, define
 a USB OTG composite descriptor, add WebUSB/NCM, or create any non-LoRa
 Reticulum packet actor. The qualification pairing/rate policy is selected, but
-its powered successful mutation path and USB handshake/session composition are
+its powered successful mutation path and powered USB handshake/request/reply are
 still required before the authenticated USB-to-LoRa qualification path can run.
 Production AEAD and the later transport/interface decisions are not
 prerequisites for that explicitly integrity-only wired lab profile.

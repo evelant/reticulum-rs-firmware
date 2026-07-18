@@ -5,10 +5,11 @@ adapter complete; host fault injection implemented; isolated RF-inert ESP32-S3
 clean-path/software-reset HIL passed on board E9:44; resident E290 operation-
 scoped coordinator and exact authorized-frame request/durable-echo handoff
 integrated with a one-entry accepted-history cap used only for composition
-qualification and no external admission lane; ADR 0005's interface-local
+qualification; a minimal authenticated USB admission lane is source-composed
+but not powered-qualified; ADR 0005's interface-local
 active-owner fail-stop and the complete LoRa-first software composition pass
 cross-layer host tests; semantic schema 2 authorization provenance passes host
-and target checks; live external admission, product-capacity policy,
+and target checks; powered live external admission, product-capacity policy,
 powered fault qualification, controlled power cuts, endurance/soak, and at-rest
 encryption remain open
 
@@ -34,10 +35,10 @@ the logical device API. Schema-2 acceptance persists the revalidated credential
 ID/generation, authority revision, policy version, and exact granted permission
 mask. Its content digest is derived from the complete persisted intent instead
 of occupying a second encoded or in-RAM field; the maximum record is 508 bytes.
-Portable immutable credential authority, framing, the
-qualification-session core, and job handoff exist, but durable credential
-state/pairing, an external firmware lane, and a bearer do not compose them with
-this port. The dedicated Heltec HIL calls the journal
+Portable immutable credential authority, framing, the qualification-session
+core, durable credential state/pairing, job handoff, and the minimal USB bearer
+now compose this port into the permanent source graph. Their powered
+authentication path remains unqualified. The dedicated Heltec HIL calls the journal
 directly and is a storage qualification image, not actor/adapter qualification
 or product firmware. See
 [Portable sole storage actor](storage-actor.md).
@@ -291,10 +292,9 @@ the project still needs:
   driver, exact authorized-frame handoff, and ADR 0005 fault behavior now pass
   software composition tests, while source `96e38aa` adds empty-journal mount
   and ordinary-TX powered smoke only; the cap is not product capacity;
-- explicit credential initialization/pairing plus firmware composition of the
-  implemented authority/framing/session/handoff and
-  first USB bearer for the authenticated device-API persist-before-accept/status
-  adapter,
+- powered credential initialization/pairing plus qualification of the
+  source-composed authority/framing/session/handoff and first USB bearer for the
+  authenticated device-API persist-before-accept/status adapter,
   plus an exact node-owner quiescence proof and quarantine policy before
   projector-slot retirement;
 - coordination with watchdogs, OTA, other flash users, and radio timing;

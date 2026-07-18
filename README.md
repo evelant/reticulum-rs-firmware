@@ -273,9 +273,10 @@ mount or recover at boot, before a durability-gated DATA owner can exist, the
 coordinator retains exclusive flash authority while local durable submission
 stays disabled and route-only LoRa continues. The current product profile allows
 at most one accepted-history entry solely for composition qualification, not as
-a product-capacity commitment. No external admission lane exists, so production
-cannot originate work through this path even though the host composition
-harness now exercises it directly. Node-core emits an
+a product-capacity commitment. The source-composed minimal authenticated USB
+lane can originate work through this path once a credential exists, although
+that complete path has not yet run on powered hardware; the host composition
+harness exercises the same semantic boundary directly. Node-core emits an
 `AuthorizedFrameObservation` from the
 exact authorized native DATA bytes before interface framing. The portable radio
 dispatcher now retains every post-byte-exposure DATA completion and router
@@ -381,10 +382,19 @@ resident and host/target verified; the node now schedules it through the
 bearer-neutral owning handoff, and the sole USB owner multiplexes all four live
 pairing records with initialization control in one exact sequence space. The
 permanent graph now additionally composes the feature-free session/handoff
-crates and a static depth-one authenticated API channel. Its node endpoint
-revalidates current authority and dispatches synchronously through a
-credential-disjoint submission-port view; its USB endpoint remains dormant and
-admits no authenticated session records. The credential authority
+crates, a static depth-one authenticated API channel, and the first deliberately
+minimal USB session bearer. Its node endpoint revalidates current authority and
+dispatches synchronously through a credential-disjoint submission-port view.
+The USB endpoint admits one authenticated handshake per connection and one
+request at a time; any session fault is terminal until USB reset or
+re-enumeration. This first profile deliberately omits resumption, protocol
+retries, close records, encryption, rate limiting/attempt policy, repeated
+handshake attempts, and concurrent requests. Credential selection, admission
+handoff, and node dispatch remain transport-neutral. The current qualification
+crypto suite is deliberately enabled only for USB Serial/JTAG; later BLE and
+Wi-Fi bearers can reuse the ownership boundary after adding and qualifying their
+own binding/suite, without redesigning node dispatch. The
+credential authority
 passes 23 unit tests, eight public
 successor tests, and 18 compile-fail doctests; the
 physical store passes 32 fake-NOR tests. The accepted
@@ -445,15 +455,26 @@ credential partitions remained entirely erased. The application detaches and
 scrubs USB at its earliest Rust entry before product initialization, then
 canonically reattaches and waits for a clean enumeration reset. The preceding
 ROM/bootloader interval is not covered by that quarantine.
-The current authenticated-node-foundation build is 718,688 bytes with SHA-256
+The last powered authenticated-node-foundation build is 718,688 bytes with SHA-256
 `e20f6191cb2bfa78fbd7f3d588eb418913da3f1f89e3b80a4db0a28abaf414ea`.
 Exact address-zero readbacks matched on both boards. Both returned sequence-zero
 `initialization-required`; both 8 KiB credential partitions remained the exact
 all-`0xff` SHA-256
 `7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f`;
 and both recovered sequence-zero service after the readback reset. This proves
-the dormant handoff did not regress the existing USB bootstrap in that bounded
-run. It does not exercise an authenticated handshake, request, or reply.
+the then-dormant handoff did not regress the existing USB bootstrap in that
+bounded run. It does not exercise an authenticated handshake, request, or
+reply, and it is not evidence for the subsequently composed minimal USB session
+bearer. The currently linked source with that minimal bearer is 640,587 bytes
+text, 3,596 bytes initialized data, 469,232 bytes BSS/reservations, and
+1,113,415 bytes total by GNU size. Its packaged application is 681,648 bytes;
+the 747,184-byte merged image has SHA-256
+`5ccfeb7518ea3bfa856cb439b3e75d118ec3ec78254bc5f0ef9b33851740a8bd`.
+Exact address-zero readbacks matched that digest on both boards, both returned
+sequence-zero `initialization-required`, and both credential partitions retained
+the all-`0xff` digest above. This qualifies the successor's package/readback and
+pre-authentication bootstrap regression, but no powered authenticated handshake,
+request, or reply has run yet.
 This does not qualify controlled peer RX, DATA, successful pairing/
 authentication, powered credential initialization, power-cut recovery,
 suspend/resume, stack high-water, heap pressure, or the full powered owner
@@ -466,8 +487,10 @@ permanent node now receives exact owners from a static depth-one handoff,
 revalidates each grant against the currently publishable authority, and invokes
 that port synchronously through disjoint borrows; rejection has zero port I/O
 and no unauthenticated fallback. Schema-2 acceptance retains exact
-authorization provenance, but the USB endpoint is dormant and no USB/BLE/Wi-Fi
-bearer serves through it. The
+authorization provenance. The current source graph now serves that boundary
+through its minimal single-flight USB bearer; BLE and Wi-Fi implementations do
+not yet exist, and powered USB authentication/request/reply proof remains open.
+The
 resident credential runtime now also retains live pairing permits, proofs,
 secrets, typed store candidates, and reconciliation owners through definite
 outcomes. The bearer-neutral secret handoff preserves exact owners under
@@ -522,26 +545,26 @@ ANNOUNCE/DATA/proof fixture; its bounded clear CAD before each transmission
 passed the intended register/CAD/RX/TX smoke evidence without another
 throwaway image. The
 permanent autonomous image has a separate boot/radio/ordinary-ANNOUNCE pair
-test and cannot originate controlled DATA until an injector or local
-submission/API edge exists.
+test. Its source graph now has a local submission/API edge, but that edge has
+not yet originated controlled DATA in a powered run.
 The DATA router, both permit-only services and permanent aggregate are now
 connected to the dispatcher, sole-Rete owner, timed RNode RX and one E290 LoRa
 actor in the first permanent build-verified target. Its exact authorized-frame
 durability handoff and ADR 0005 active-owner fail-stop now pass cross-layer host
-composition tests. Live external admission is blocked by successful powered
-credential initialization and the authenticated USB handshake/session
-bearer—not by credential-store boot
+composition tests. Powered live external admission is blocked on successful
+credential initialization and authenticated USB handshake/request/reply
+proof—not by credential-store boot
 composition, the frozen pairing/session cryptography, another semantic
 authority, durability policy, partition, or capacity decision. The feature-free
 ADR 0009 admission policy, resident
 initialization owner, and sole-owner physical drive are compiled only into the
 permanent E290 graph. The pre-authentication initialization and live-pairing
 codecs, debounced physical presence, sole USB byte owner, reset-epoch guard,
-bounded command/reply handoffs, static authenticated handoff, and node-side
-current-authority dispatch are composed. The next software slice can therefore
-start at the authenticated credential-backed USB session state machine,
-followed by USB-to-LoRa submission, durable configuration/message hosting, and
-client delivery.
+bounded command/reply handoffs, static authenticated handoff, node-side
+current-authority dispatch, and the minimal credential-backed USB session state
+machine are composed. The next proof is powered credential initialization plus
+one authenticated capabilities request/reply, followed by USB-to-LoRa
+submission, durable configuration/message hosting, and client delivery.
 The node-side routing
 boundary remains interface-neutral so additional Reticulum links can be added
 later through adapters without rewriting the LoRa actor or protocol owner; no

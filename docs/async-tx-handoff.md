@@ -448,8 +448,9 @@ retained, the same LoRa lease goes offline without a generation change, and no
 fresh LoRa work runs for the rest of the boot. Dispatcher coverage proves that
 an acknowledgement-gated DATA owner excludes a queued ordinary job, RX and
 completion, while request pressure, mismatch and cancellation keep exact owners.
-Local submission, client delivery, and an external authenticated device-API job
-lane/bearer are not yet composed into this first LoRa image.
+The external authenticated device-API job lane and minimal USB bearer are now
+source-composed into the permanent LoRa image. Powered local submission remains
+open, and client delivery is still unimplemented.
 
 ## Remaining admission and qualification blocker
 
@@ -459,12 +460,14 @@ ordinary boundary still starts after Rete has created an allocation-backed
 `NodeActions` envelope and mutated protocol state. Its fixed owner and bounded
 router therefore provide exact downstream ownership and pressure but do not yet
 provide caller-reservable construction or upstream backpressure before that
-mutation. Local DATA/LXMF intent admission remains a separate product blocker;
-the first E290 image has no local DATA submission surface.
+mutation. Product DATA/LXMF intent admission remains a separate product blocker.
+The current source has only the experimental authenticated submission surface,
+and no powered E290 image has qualified it.
 
 The durable profile permits one accepted-history entry solely for composition
-qualification while exposing no external admission lane; that cap is not a
-product-capacity commitment. At the terminal radio-operation boundary, the LoRa
+qualification. The minimal authenticated USB lane is its first source-composed
+external admission edge; that cap is not a product-capacity commitment. At the
+terminal radio-operation boundary, the LoRa
 actor retains the exact
 `AuthorizedFrameObservation`, completion and router ticket. The bounded,
 transport-neutral request/reply handoff moves a copy to the resident submission

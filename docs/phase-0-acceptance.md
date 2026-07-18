@@ -351,8 +351,9 @@ separate depth-one owning handoffs. The node-owned causal frontier orders scalar
 policy observations with secret-bearing live requests and withholds mutation
 success until the correlated durable terminal result. Stable-time active-low
 GPIO21 debounce supplies physical presence. An 8 ms missed-SOF interval
-suspends without changing the epoch or sequence; later SOF resumes it. It still
-does not expose an authenticated session or the logical device API.
+suspends without changing the epoch or sequence; later SOF resumes it. Those
+pre-authentication records do not expose the logical API; the current source
+serves that separately through the minimal authenticated session bearer.
 Button/control arbitration is bounded, stable High is latched before later Low,
 and a raw-sample gap of at least 20 ms cancels a possible hold until a fresh
 debounced High. A response owner is released only after all bytes enter the
@@ -388,12 +389,14 @@ liveness, and zero-mutation evidence. With no secret response in flight it does
 not independently prove USB FIFO/RAM secret erasure or non-replay, successful
 credential initialization, or anything about the preceding ROM/bootloader
 interval.
-The current 718,688-byte authenticated-node-foundation image with SHA-256
+The last powered 718,688-byte authenticated-node-foundation image with SHA-256
 `e20f6191cb2bfa78fbd7f3d588eb418913da3f1f89e3b80a4db0a28abaf414ea`
 also matched exact address-zero readbacks from both boards. Both returned and
 then recovered sequence-zero `initialization-required`; both credential
 partitions remained entirely `0xff`. The authenticated bearer endpoint stayed
-dormant, so this is only a regression of the existing bootstrap/reset path.
+dormant in that exact image, so this is only a regression of the existing
+bootstrap/reset path and does not qualify the subsequently composed minimal
+bearer.
 The host asserts DTR and clears RTS. TTY reopen does not start a new epoch; only
 USB bus reset does. A powered macOS `USBDeviceReEnumerate` replaced the service
 and restored sequence zero after firmware detachment/scrub/reattachment. A non-
@@ -415,8 +418,8 @@ verification preserved at
 five appends, mutation-free retry/conflict, B2 compaction, and zero-mutation B2
 replay after software reset. That image calls the journal directly and does not
 qualify the actor on hardware. Controlled power cuts, endurance/soak, at-rest
-encryption, successful powered initialization/pairing/activation, authenticated
-USB handshake/session/API-bearer composition, full powered qualification of the
+encryption, successful powered initialization/pairing/activation, powered
+authenticated USB handshake/session/API qualification, full qualification of the
 current permanent owner graph, and runtime flash/watchdog/OTA/radio coordination
 remain open. The credential smoke does
 not claim initialized-media recovery, interruption/power-cut recovery, a live

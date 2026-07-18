@@ -16,8 +16,8 @@ authorization-policy version, the principal, and the exact granted permission
 mask. The schema-1 durable acceptance record preserves only the principal,
 idempotency key, semantic intent, and a redundant content digest.
 
-That gap is acceptable while no external mutating bearer exists, but not once a
-USB, BLE, or Wi-Fi client can create durable work. A later credential rotation
+That gap was acceptable only while no external mutating bearer existed, but not
+once a USB, BLE, or Wi-Fi client could create durable work. A later credential rotation
 or policy update would otherwise make it impossible to determine which exact
 device-owned authorization facts admitted an existing submission. Reconstructing
 those facts from current authority state would be historically false, and

@@ -35,6 +35,10 @@ use reticulum_heltec_vision_master_e290_node::{
     pairing_control_mapping::{
         public_initialization_drive, public_initialization_refusal, public_initialization_status,
     },
+    session_admission_handoff::{
+        NodeSessionAdmissionHandoff, SessionAdmissionCommand, SessionAdmissionOutcome,
+        SessionAdmissionReply,
+    },
 };
 use reticulum_interface_router::{InterfaceDescriptor, SealedIngressPacket};
 use reticulum_node_core::{
@@ -147,6 +151,8 @@ impl LiveRequestKind {
 struct PairingNodeState {
     pending_control_command: Option<PairingControlCommand>,
     pending_control_reply: Option<PairingControlReply>,
+    pending_session_admission_command: Option<SessionAdmissionCommand>,
+    pending_session_admission_reply: Option<SessionAdmissionReply>,
     pending_exclusive: Option<(ConnectionId, AcquirePairingExclusive)>,
     initialization_retry_not_before_ms: Option<u64>,
     pending_live_command: Option<LivePairingCommand>,
@@ -180,34 +186,44 @@ impl AuthenticatedApiNodeState {
 pub(crate) struct NodeHandoffs {
     control: NodePairingHandoff<CriticalSectionRawMutex>,
     live: NodeLivePairingHandoff<CriticalSectionRawMutex>,
+    session_admission: NodeSessionAdmissionHandoff<CriticalSectionRawMutex>,
     authenticated_api: NodeHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
     frame: AuthorizedFrameNodeHandoff<CriticalSectionRawMutex>,
 }
+
+type NodeHandoffParts = (
+    NodePairingHandoff<CriticalSectionRawMutex>,
+    NodeLivePairingHandoff<CriticalSectionRawMutex>,
+    NodeSessionAdmissionHandoff<CriticalSectionRawMutex>,
+    NodeHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
+    AuthorizedFrameNodeHandoff<CriticalSectionRawMutex>,
+);
 
 impl NodeHandoffs {
     pub(crate) const fn new(
         control: NodePairingHandoff<CriticalSectionRawMutex>,
         live: NodeLivePairingHandoff<CriticalSectionRawMutex>,
+        session_admission: NodeSessionAdmissionHandoff<CriticalSectionRawMutex>,
         authenticated_api: NodeHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
         frame: AuthorizedFrameNodeHandoff<CriticalSectionRawMutex>,
     ) -> Self {
         Self {
             control,
             live,
+            session_admission,
             authenticated_api,
             frame,
         }
     }
 
-    fn into_parts(
-        self,
-    ) -> (
-        NodePairingHandoff<CriticalSectionRawMutex>,
-        NodeLivePairingHandoff<CriticalSectionRawMutex>,
-        NodeHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
-        AuthorizedFrameNodeHandoff<CriticalSectionRawMutex>,
-    ) {
-        (self.control, self.live, self.authenticated_api, self.frame)
+    fn into_parts(self) -> NodeHandoffParts {
+        (
+            self.control,
+            self.live,
+            self.session_admission,
+            self.authenticated_api,
+            self.frame,
+        )
     }
 }
 
@@ -216,6 +232,8 @@ impl PairingNodeState {
         Self {
             pending_control_command: None,
             pending_control_reply: None,
+            pending_session_admission_command: None,
+            pending_session_admission_reply: None,
             pending_exclusive: None,
             initialization_retry_not_before_ms: None,
             pending_live_command: None,
@@ -236,8 +254,13 @@ pub async fn run(
     announce_epoch: BootEpoch,
     mut rng: Trng,
 ) {
-    let (mut pairing_handoff, mut live_pairing_handoff, mut authenticated_api, mut frame_handoff) =
-        handoffs.into_parts();
+    let (
+        mut pairing_handoff,
+        mut live_pairing_handoff,
+        mut session_admission_handoff,
+        mut authenticated_api,
+        mut frame_handoff,
+    ) = handoffs.into_parts();
     RADIO_READY.wait().await;
     let online = match supervisor.set_interface_online(offline_descriptor.lease(), true) {
         Ok(descriptor) => descriptor,
@@ -285,6 +308,7 @@ pub async fn run(
             storage,
             &mut pairing_handoff,
             &mut live_pairing_handoff,
+            &mut session_admission_handoff,
             &mut pairing,
             &mut rng,
             now_millis(),
@@ -845,12 +869,17 @@ fn step_pairing_frontier(
     storage: &mut ProductStorageCoordinator,
     control_handoff: &mut NodePairingHandoff<CriticalSectionRawMutex>,
     live_handoff: &mut NodeLivePairingHandoff<CriticalSectionRawMutex>,
+    session_admission_handoff: &mut NodeSessionAdmissionHandoff<CriticalSectionRawMutex>,
     state: &mut PairingNodeState,
     rng: &mut Trng,
     now_millis: u64,
 ) -> bool {
     let mut progressed = flush_pairing_reply(control_handoff, &mut state.pending_control_reply);
     progressed |= flush_live_pairing_reply(live_handoff, &mut state.pending_live_reply);
+    progressed |= flush_session_admission_reply(
+        session_admission_handoff,
+        &mut state.pending_session_admission_reply,
+    );
 
     let initialization_status = storage.initialization_status();
     if matches!(
@@ -882,14 +911,22 @@ fn step_pairing_frontier(
     {
         state.pending_live_command = live_handoff.try_receive_command();
     }
+    if state.pending_session_admission_command.is_none()
+        && state.pending_session_admission_reply.is_none()
+    {
+        state.pending_session_admission_command = session_admission_handoff.try_receive_command();
+    }
 
-    // Both command channels have the same sole USB producer. Compare captured
-    // event time anyway so a queued earlier scalar event cannot be overtaken.
-    // Equal timestamps choose live work: the USB owner only enqueues a scalar
-    // command concurrently after transferring that live request, most notably
-    // a bus-reset disconnect observed in the same millisecond.
-    for _ in 0..2 {
+    // All command channels have the same sole USB producer. Compare captured
+    // event time anyway so a queued earlier wire request or scalar event cannot
+    // be overtaken. Equal timestamps choose wire work, most notably before a
+    // bus-reset disconnect observed in the same millisecond.
+    for _ in 0..3 {
         let next_lane = select_pairing_command_lane(
+            state
+                .pending_session_admission_command
+                .as_ref()
+                .map(|admission| admission.at().get()),
             state
                 .pending_live_command
                 .as_ref()
@@ -899,7 +936,24 @@ fn step_pairing_frontier(
                 .as_ref()
                 .map(|control| control.at().get()),
         );
-        if next_lane == Some(PairingCommandLane::Live) {
+        if next_lane == Some(PairingCommandLane::SessionAdmission) {
+            let command = state
+                .pending_session_admission_command
+                .take()
+                .expect("the selected session-admission command is retained");
+            let connection = command.connection();
+            let outcome = match storage.select_ordinary_session(
+                command.at(),
+                connection,
+                command.credential_id(),
+            ) {
+                Ok(selected) => SessionAdmissionOutcome::Selected(selected),
+                Err(_) => SessionAdmissionOutcome::Refused,
+            };
+            state.pending_session_admission_reply =
+                Some(SessionAdmissionReply::new(connection, outcome));
+            progressed = true;
+        } else if next_lane == Some(PairingCommandLane::Live) {
             progressed |= admit_live_pairing_command(storage, state, rng);
             if state.pending_live_command.is_some() {
                 // Journal-owned mutation is causally after this request. Keep
@@ -922,8 +976,15 @@ fn step_pairing_frontier(
     progressed |= drive_live_pairing_and_schedule(storage, state, now_millis);
     progressed |= flush_pairing_reply(control_handoff, &mut state.pending_control_reply);
     progressed |= flush_live_pairing_reply(live_handoff, &mut state.pending_live_reply);
+    progressed |= flush_session_admission_reply(
+        session_admission_handoff,
+        &mut state.pending_session_admission_reply,
+    );
 
-    if state.pending_live_command.is_none() && state.pending_control_command.is_none() {
+    if state.pending_live_command.is_none()
+        && state.pending_control_command.is_none()
+        && state.pending_session_admission_command.is_none()
+    {
         progressed |= poll_pairing_timeout(storage, &mut state.pending_exclusive, now_millis);
     }
     progressed
@@ -1214,6 +1275,22 @@ fn flush_pairing_reply(
 fn flush_live_pairing_reply(
     handoff: &mut NodeLivePairingHandoff<CriticalSectionRawMutex>,
     pending_reply: &mut Option<LivePairingReply>,
+) -> bool {
+    let Some(reply) = pending_reply.take() else {
+        return false;
+    };
+    match handoff.try_send_reply(reply) {
+        Ok(()) => true,
+        Err(pressure) => {
+            *pending_reply = Some(pressure.into_inner());
+            false
+        }
+    }
+}
+
+fn flush_session_admission_reply(
+    handoff: &mut NodeSessionAdmissionHandoff<CriticalSectionRawMutex>,
+    pending_reply: &mut Option<SessionAdmissionReply>,
 ) -> bool {
     let Some(reply) = pending_reply.take() else {
         return false;

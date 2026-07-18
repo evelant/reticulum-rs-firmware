@@ -5,12 +5,12 @@
 //! provisions or strictly mounts the submission journal and drives an explicit
 //! bounded-history recovery gate to completion. The backend-independent durable
 //! runtime then remains resident with the sole operation-scoped flash
-//! coordinator. A third task owns the USB Serial/JTAG pre-authentication
-//! initialization/live-pairing bearer and GPIO21 physical-presence input
-//! without becoming a Reticulum packet interface. The node owns a dormant,
-//! transport-neutral authenticated API handoff/dispatch lane; USB session
-//! establishment, BLE, Wi-Fi, LXMF, NomadNet, and UI actors remain independent
-//! later capabilities.
+//! coordinator. A third task owns the USB Serial/JTAG initialization,
+//! live-pairing, and single-flight authenticated local-API bearer plus GPIO21
+//! physical-presence input without becoming a Reticulum packet interface. The
+//! node retains transport-neutral admission and authenticated dispatch lanes;
+//! BLE, Wi-Fi, LXMF, NomadNet, and UI actors remain independent later
+//! capabilities.
 
 #![no_std]
 #![no_main]
@@ -60,7 +60,10 @@ use reticulum_board_heltec_vision_master_e290_radio::{
 };
 use reticulum_device_api_handoff::DeviceApiHandoff;
 use reticulum_device_api_pairing::DeviceId;
-use reticulum_device_api_session::AuthenticatedGrant;
+use reticulum_device_api_session::{
+    AuthenticatedGrant, BearerBinding as SessionBearerBinding, DeviceId as SessionDeviceId,
+    ServerParameters,
+};
 use reticulum_device_identity_store::IdentityMirrorCoverage;
 use reticulum_heltec_vision_master_e290_node::{
     config,
@@ -72,6 +75,7 @@ use reticulum_heltec_vision_master_e290_node::{
     },
     live_pairing_handoff::LivePairingHandoff,
     pairing_control_handoff::PairingControlHandoff,
+    session_admission_handoff::SessionAdmissionHandoff,
     storage_device_id_from_eui48,
 };
 use reticulum_interface_router::InterfaceFabric;
@@ -144,6 +148,8 @@ static STORAGE_COORDINATOR: StaticCell<ProductStorageCoordinator> = StaticCell::
 static PAIRING_CONTROL: StaticCell<PairingControlHandoff<CriticalSectionRawMutex>> =
     StaticCell::new();
 static LIVE_PAIRING: StaticCell<LivePairingHandoff<CriticalSectionRawMutex>> = StaticCell::new();
+static SESSION_ADMISSION: StaticCell<SessionAdmissionHandoff<CriticalSectionRawMutex>> =
+    StaticCell::new();
 static AUTHENTICATED_API: StaticCell<
     DeviceApiHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
 > = StaticCell::new();
@@ -276,6 +282,10 @@ async fn product_main(
             inert_forever().await
         }
     };
+    let usb_session_parameters = ServerParameters::new(
+        SessionDeviceId::new(device_api_id_from_eui48(base_mac_eui48)),
+        SessionBearerBinding::UsbSerialJtag,
+    );
     info!(
         "e290-node stage=boot base_mac={} identity=pending-durable radio_constructed=false rf_state=reset_low_nss_high",
         base_mac
@@ -472,6 +482,7 @@ async fn product_main(
 
     let node_rng = bootstrap_rng.clone();
     let radio_rng = bootstrap_rng.clone();
+    let usb_session_rng = bootstrap_rng.clone();
     let mut instance_bytes = [0_u8; 16];
     bootstrap_rng.fill_bytes(&mut instance_bytes);
     let instance = NodeInstanceId::new(instance_bytes);
@@ -666,6 +677,9 @@ async fn product_main(
         PAIRING_CONTROL.init(PairingControlHandoff::new()).split();
     let (usb_live_pairing_handoff, node_live_pairing_handoff) =
         LIVE_PAIRING.init(LivePairingHandoff::new()).split();
+    let (usb_session_admission, node_session_admission) = SESSION_ADMISSION
+        .init(SessionAdmissionHandoff::new())
+        .split();
     let (usb_authenticated_api, node_authenticated_api) =
         AUTHENTICATED_API.init(DeviceApiHandoff::new()).split();
     let pairing_button = Input::new(
@@ -686,6 +700,7 @@ async fn product_main(
         node_task::NodeHandoffs::new(
             node_pairing_handoff,
             node_live_pairing_handoff,
+            node_session_admission,
             node_authenticated_api,
             frame_node,
         ),
@@ -703,9 +718,14 @@ async fn product_main(
         usb_boot_quarantine,
         peripherals.USB_DEVICE,
         pairing_button,
-        usb_pairing_handoff,
-        usb_live_pairing_handoff,
-        usb_authenticated_api,
+        usb_pairing_task::UsbHandoffs::new(
+            usb_pairing_handoff,
+            usb_live_pairing_handoff,
+            usb_session_admission,
+            usb_authenticated_api,
+        ),
+        usb_session_parameters,
+        usb_session_rng,
     ) {
         Ok(task) => task,
         Err(_) => {
@@ -719,7 +739,7 @@ async fn product_main(
     spawner.spawn(node_task);
     spawner.spawn(usb_pairing_task);
     info!(
-        "e290-node stage=composition status=PASS tasks=3 interfaces=1 primary_transport=lora future_transport_actors=deferred node_journal=mounted resident_storage_available={storage_service_available} credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} preauth_initialization_bearer=usb-serial-jtag preauth_live_pairing_bearer=usb-serial-jtag pairing_button_gpio=21 authenticated_local_api=node-handoff-dormant bearer_session=absent credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} admission=deferred runtime_patch={} flash_assumption_bytes=16777216",
+        "e290-node stage=composition status=PASS tasks=3 interfaces=1 primary_transport=lora future_transport_actors=deferred node_journal=mounted resident_storage_available={storage_service_available} credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} preauth_initialization_bearer=usb-serial-jtag preauth_live_pairing_bearer=usb-serial-jtag pairing_button_gpio=21 authenticated_local_api=node-dispatch bearer_session=usb-authenticated-single-flight credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} admission=session-selected runtime_patch={} flash_assumption_bytes=16777216",
         credential_binding.absolute_offset(),
         credential_binding.length(),
         config::DURABLE_RUNTIME_BYTES,

@@ -19,6 +19,8 @@ pub mod live_pairing_node;
 pub mod pairing_control_handoff;
 pub mod pairing_control_mapping;
 pub mod partition_contract;
+pub mod session_admission_handoff;
+pub mod usb_authenticated_session;
 pub mod usb_pairing_policy;
 pub mod usb_pairing_records;
 
@@ -359,25 +361,33 @@ mod tests {
         assert!(usb.contains("fn tx_epoch_current(reset_generation: u32)"));
         assert!(usb.contains("&& !USB_EPOCH_BLOCKED.load(Ordering::Acquire)"));
         let receive = usb
-            .split("fn receive_pre_authentication_request(")
+            .split("fn receive_decode_event(")
             .nth(1)
-            .and_then(|tail| tail.split("fn handle_reply(").next())
-            .expect("USB task must expose one bounded pre-authentication receive step");
+            .and_then(|tail| tail.split("fn handle_pre_authentication_record(").next())
+            .expect("USB task must expose one bounded shared-stream receive step");
         let first_rx_epoch_check = receive
-            .find("usb_epoch_current(context.reset_generation)")
+            .find("usb_epoch_current(reset_generation)")
             .expect("RX must check its reset generation before touching the FIFO");
         let read = receive
             .find("rx.read_byte()")
             .expect("RX must use one bounded FIFO read");
-        let accept = receive
+        let last_rx_epoch_check = receive
+            .rfind("usb_epoch_current(reset_generation)")
+            .expect("RX must recheck its reset generation after touching the FIFO");
+        assert!(first_rx_epoch_check < read);
+        assert!(read < last_rx_epoch_check);
+        let pre_authentication = usb
+            .split("fn handle_pre_authentication_record(")
+            .nth(1)
+            .and_then(|tail| tail.split("fn handle_reply(").next())
+            .expect("USB task must retain independent pre-authentication admission");
+        let accept = pre_authentication
             .find(".accept(context.connection, sequence)")
             .expect("RX must retain exact-next sequence admission");
-        let last_rx_epoch_check = receive
+        let last_pre_authentication_epoch_check = pre_authentication
             .rfind("usb_epoch_current(context.reset_generation)")
             .expect("RX must recheck its reset generation after sequence admission");
-        assert!(first_rx_epoch_check < read);
-        assert!(read < accept);
-        assert!(accept < last_rx_epoch_check);
+        assert!(accept < last_pre_authentication_epoch_check);
         let transmission = usb
             .split("fn step_transmission(")
             .nth(1)
@@ -418,15 +428,17 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_api_handoff_is_node_owned_while_usb_session_is_dormant() {
+    fn minimal_usb_session_uses_node_owned_admission_and_authenticated_dispatch() {
         let main = include_str!("main.rs");
         assert!(main.contains("DeviceApiHandoff<CriticalSectionRawMutex, AuthenticatedGrant>"));
         assert!(main.contains("AUTHENTICATED_API.init(DeviceApiHandoff::new()).split()"));
+        assert!(main.contains("SESSION_ADMISSION"));
+        assert!(main.contains("SessionAdmissionHandoff::new()"));
         assert!(main.contains("node_authenticated_api,"));
         assert!(main.contains("usb_authenticated_api,"));
-        assert!(
-            main.contains("authenticated_local_api=node-handoff-dormant bearer_session=absent")
-        );
+        assert!(main.contains(
+            "authenticated_local_api=node-dispatch bearer_session=usb-authenticated-single-flight"
+        ));
 
         let node = include_str!("node_task.rs");
         assert!(node.contains("enum AuthenticatedApiNodeState"));
@@ -438,6 +450,7 @@ mod tests {
 
         let storage = include_str!("platform_storage.rs");
         assert!(storage.contains("struct ProductSubmissionPort<'a>"));
+        assert!(storage.contains(".select_ordinary_session(at, connection, credential_id)"));
         assert!(
             storage
                 .contains("credential_runtime.dispatch_authenticated_request(request, &mut port)")
@@ -445,11 +458,57 @@ mod tests {
 
         let usb = include_str!("usb_pairing_task.rs");
         assert!(usb.contains(
-            "_authenticated_api: BearerHandoff<CriticalSectionRawMutex, AuthenticatedGrant>"
+            "authenticated_api: BearerHandoff<CriticalSectionRawMutex, AuthenticatedGrant>"
         ));
+        assert!(usb.contains("UsbAuthenticatedSession::new(session_parameters)"));
+        assert!(usb.contains("authenticated_session.try_send_admission_command("));
+        assert!(usb.contains("authenticated_session.try_send_request("));
+        assert!(usb.contains("authenticated_session.accept_node_reply(reply)"));
+        assert!(usb.contains("fn try_in_epoch<R>("));
+        let admission_reply = usb
+            .split("while let Some(reply) = session_admission.try_receive_reply()")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("while let Some(reply) = authenticated_api.replies().try_receive()")
+                    .next()
+            })
+            .expect("admission replies must have one reset-linearized acceptance step");
+        let admission_guard = admission_reply
+            .find("critical_section::with(|_| {")
+            .expect("admission acceptance must exclude the reset ISR");
+        let admission_accept = admission_reply
+            .find("authenticated_session.accept_admission_reply(")
+            .expect("admission acceptance must retain its exact reply");
+        let admission_arm = admission_reply
+            .find("synchronize_tx_epoch(&transmission, &authenticated_session)")
+            .expect("admission acceptance must publish its TX owner before the ISR resumes");
+        assert!(admission_guard < admission_accept);
+        assert!(admission_accept < admission_arm);
+        let api_reply = usb
+            .split("while let Some(reply) = authenticated_api.replies().try_receive()")
+            .nth(1)
+            .and_then(|tail| tail.split("if transmission.is_some()").next())
+            .expect("API replies must have one reset-linearized acceptance step");
+        let api_guard = api_reply
+            .find("critical_section::with(|_| {")
+            .expect("API reply acceptance must exclude the reset ISR");
+        let api_accept = api_reply
+            .find("authenticated_session.accept_node_reply(reply)")
+            .expect("API reply acceptance must retain its exact reply");
+        let api_arm = api_reply
+            .find("synchronize_tx_epoch(&transmission, &authenticated_session)")
+            .expect("API reply acceptance must publish its TX owner before the ISR resumes");
+        assert!(api_guard < api_accept);
+        assert!(api_accept < api_arm);
         assert!(!usb.contains("ServerSession"));
-        assert!(!usb.contains("ServerHelloFlight"));
+        assert!(!usb.contains("ServerHelloFlight::begin"));
         assert!(!usb.contains("SessionEpochAllocator"));
+        let session = include_str!("usb_authenticated_session.rs");
+        assert!(session.contains("ServerSession"));
+        assert!(session.contains("ServerHelloFlight"));
+        assert!(session.contains("SessionEpochAllocator"));
+        assert!(session.contains("one handshake attempt per accepted connection"));
+        assert!(session.contains("one authenticated request"));
         assert_eq!(config::NODE_FAIR_LANES, 6);
     }
 

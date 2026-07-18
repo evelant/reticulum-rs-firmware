@@ -13,9 +13,9 @@ cross-layer composition tests, strict Clippy, and generic/ESP32-S3 target checks
 pass. Portable API framing, immutable credential authority and store, the
 qualification-session core, and job handoff are qualified. E290 boot now mounts,
 performs bounded deterministic retire-then-cleanup recovery, and retains the
-credential store without provisioning it; live external admission remains
-blocked by ADR 0009 initialization/pairing, an external API/session firmware
-lane, and a bearer.
+credential store without provisioning it. The minimal authenticated USB
+session/API lane is source-composed; live powered admission remains blocked by
+successful ADR 0009 initialization/pairing and end-to-end proof.
 Semantic schema 2 now preserves exact authorization provenance through runtime
 acceptance, remount, and replay.
 
@@ -105,10 +105,10 @@ invalid lifecycle state, and latched storage/projector faults remain errors.
 Durable state intentionally drops only the selected-interface scalar: packet
 identity and attempt correlation are stable across an interface choice, while
 the projector still cross-checks the complete length, frame digest, and attempt
-token. The product has a one-entry qualification cap but no external admission
-lane, so production cannot yet reach the composed handoff from a fresh local
-submission; the host composition harness drives the same semantic boundaries
-directly.
+token. The product has a one-entry qualification cap. The minimal authenticated
+USB lane can reach the composed handoff from a fresh local submission in the
+source graph; powered proof remains open, while the host composition harness
+drives the same semantic boundaries directly.
 
 ## E290 cross-layer software qualification
 
@@ -184,11 +184,11 @@ or RF claim.
   framing, the qualification-session core, and boot-lifetime job handoff exist,
   durable authorization provenance now reaches the journal, and the resident
   coordinator retains the boot-mounted credential store and its admission
-  state. Explicit initialization/provisioning/pairing, external API/session
-  composition, and USB/BLE/Wi-Fi serving are not wired to the runtime.
-  `ProductStorageCoordinator`
-  implements the target-safe `SubmissionPort` under the one-entry qualification
-  cap, but no external caller reaches it.
+  state. Explicit initialization/provisioning/pairing and the minimal
+  single-flight authenticated USB session are wired to the runtime in source.
+  BLE/Wi-Fi serving and powered USB proof remain open.
+  `ProductStorageCoordinator` implements the target-safe `SubmissionPort` under
+  the one-entry qualification cap.
 - **Powered qualification:** integrated power-cut/brownout, watchdog, flash
   contention, compaction, endurance, stack/static-layout, and radio-deadline
   tests remain product gates. The source-`96e38aa` two-board smoke established

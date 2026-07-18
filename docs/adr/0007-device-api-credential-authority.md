@@ -260,9 +260,9 @@ never existed.
   snapshot image without inventing physical flash headers, commit mechanics,
   pairing, reset or USB behavior. The exact image owner zeroizes on drop and
   decoding consumes it before revalidating every record through the builder.
-- Live external admission remains disabled until explicit initialization and
-  pairing/rate policy, external authority/session firmware ownership, and a
-  physical bearer are complete.
+- The minimal USB authority/session owner and physical bearer are now
+  source-composed. Live powered admission remains disabled until explicit
+  initialization/pairing succeeds and the authenticated exchange is qualified.
 
 ## Validation status
 
