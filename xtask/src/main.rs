@@ -533,6 +533,8 @@ fn graph_policy() -> ExitCode {
         &root,
     )
     .and_then(|json| {
+        validate_pairing_publication_workspace_member_coverage(&json, &root)
+            .map_err(|error| format!("credential-store integration scan coverage: {error}"))?;
         validate_resolved_rete_pin(&json, candidate.source, candidate.revision)
             .map_err(|error| format!("Rete pin/report mismatch: {error}"))?;
         validate_resolved_esp_rtos_patch(&json, &root)
@@ -606,7 +608,7 @@ fn graph_policy() -> ExitCode {
              API and node core remain mutually isolated and free of direct platform dependencies; the \
              allocation-free device-API framing crate has no dependency or feature surface, while its \
              boot-lifetime job handoff reaches only the logical device API and Embassy Sync, and the \
-             credential authority has only its exact logical device-API, constant-time comparison and zeroization edges; credential-store integration escape identifiers remain restricted to the two trusted owner files; the physical-presence pairing policy has only its exact feature-disabled credential-authority edge and remains absent from every product and HIL graph; the \
+             credential authority has only its exact logical device-API, constant-time comparison and zeroization edges; credential-store integration escape identifiers remain restricted to their exact reviewed definition and call sites in the two trusted owner files, and every workspace member target remains beneath a scanned source root; the physical-presence pairing policy has only its exact feature-disabled credential-authority edge and remains absent from every product and HIL graph; the \
              authenticated session layer has only its exact reviewed cryptographic, device-API, credentials, framing and handoff normal edges plus its exact test-only hex, semantic-adapter and storage-model fixtures; \
              the Rete integration and node-core normal closures contain no RNode, radio-interface, LoRa or board package; \
              the shared lora-phy owner and E290 radio wrapper have only their exact reviewed HAL, framing, board and test edges; \
@@ -634,10 +636,27 @@ fn graph_policy() -> ExitCode {
     }
 }
 
-const CREDENTIAL_STORE_INTEGRATION_ESCAPE_IDENTIFIERS: [&str; 3] = [
-    concat!("credential_store_", "integration"),
-    concat!("into_unpublished_authority_", "for_store_unchecked"),
-    concat!("select_pending_for_proof_", "for_store_unchecked"),
+const PAIRING_PUBLICATION_SCAN_ROOTS: [&str; 5] =
+    ["comparisons", "crates", "firmware", "tools", "xtask"];
+
+struct TrustedIdentifierExpectation {
+    identifier: &'static str,
+    expected_occurrences_by_source: [usize; CREDENTIAL_STORE_INTEGRATION_ALLOWED_SOURCES.len()],
+}
+
+const CREDENTIAL_STORE_INTEGRATION_ESCAPE_EXPECTATIONS: [TrustedIdentifierExpectation; 3] = [
+    TrustedIdentifierExpectation {
+        identifier: concat!("credential_store_", "integration"),
+        expected_occurrences_by_source: [1, 1],
+    },
+    TrustedIdentifierExpectation {
+        identifier: concat!("into_unpublished_authority_", "for_store_unchecked"),
+        expected_occurrences_by_source: [2, 1],
+    },
+    TrustedIdentifierExpectation {
+        identifier: concat!("select_pending_for_proof_", "for_store_unchecked"),
+        expected_occurrences_by_source: [2, 1],
+    },
 ];
 
 const CREDENTIAL_STORE_INTEGRATION_ALLOWED_SOURCES: [&str; 2] = [
@@ -647,7 +666,7 @@ const CREDENTIAL_STORE_INTEGRATION_ALLOWED_SOURCES: [&str; 2] = [
 
 fn validate_pairing_publication_workspace(root: &Path) -> Result<(), String> {
     let mut sources = Vec::new();
-    for relative in ["comparisons", "crates", "firmware", "tools", "xtask"] {
+    for relative in PAIRING_PUBLICATION_SCAN_ROOTS {
         let directory = root.join(relative);
         if directory.is_dir() {
             collect_workspace_rust_sources(root, &directory, &mut sources)?;
@@ -700,33 +719,124 @@ fn collect_workspace_rust_sources(
 }
 
 fn validate_pairing_publication_sources(sources: &[(String, String)]) -> Result<(), String> {
-    let mut allowed_identifiers_found =
-        [false; CREDENTIAL_STORE_INTEGRATION_ESCAPE_IDENTIFIERS.len()];
     for (path, source) in sources {
         if CREDENTIAL_STORE_INTEGRATION_ALLOWED_SOURCES.contains(&path.as_str()) {
-            for (index, identifier) in CREDENTIAL_STORE_INTEGRATION_ESCAPE_IDENTIFIERS
-                .iter()
-                .enumerate()
-            {
-                allowed_identifiers_found[index] |= source.contains(identifier);
-            }
             continue;
         }
-        for identifier in CREDENTIAL_STORE_INTEGRATION_ESCAPE_IDENTIFIERS {
-            if source.contains(identifier) {
+        for expectation in &CREDENTIAL_STORE_INTEGRATION_ESCAPE_EXPECTATIONS {
+            if source.contains(expectation.identifier) {
                 return Err(format!(
-                    "trusted identifier {identifier:?} appears outside the two credential-store owner files in {path}"
+                    "trusted identifier {:?} appears outside the two credential-store owner files in {path}",
+                    expectation.identifier
                 ));
             }
         }
     }
-    for (index, found) in allowed_identifiers_found.into_iter().enumerate() {
-        if !found {
+
+    for expectation in &CREDENTIAL_STORE_INTEGRATION_ESCAPE_EXPECTATIONS {
+        for (source_index, path) in CREDENTIAL_STORE_INTEGRATION_ALLOWED_SOURCES
+            .iter()
+            .enumerate()
+        {
+            let mut matching_sources = sources.iter().filter(|(candidate, _)| candidate == path);
+            let (_, source) = matching_sources.next().ok_or_else(|| {
+                format!("required credential-store integration owner source {path} was not scanned")
+            })?;
+            if matching_sources.next().is_some() {
+                return Err(format!(
+                    "credential-store integration owner source {path} was scanned more than once"
+                ));
+            }
+
+            let actual = source.matches(expectation.identifier).count();
+            let expected = expectation.expected_occurrences_by_source[source_index];
+            if actual != expected {
+                return Err(format!(
+                    "trusted identifier {:?} has {actual} occurrences in {path}; expected exactly {expected} reviewed definition/use occurrences",
+                    expectation.identifier
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_pairing_publication_workspace_member_coverage(
+    metadata_json: &str,
+    root: &Path,
+) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let workspace_members = metadata["workspace_members"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no workspace_members array".to_owned())?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+
+    for member in workspace_members {
+        let member_id = member
+            .as_str()
+            .ok_or_else(|| "cargo metadata contains a non-string workspace member ID".to_owned())?;
+        let package = packages
+            .iter()
+            .find(|package| package["id"].as_str() == Some(member_id))
+            .ok_or_else(|| format!("workspace member {member_id:?} has no package metadata"))?;
+        let package_name = package["name"].as_str().unwrap_or(member_id);
+        let manifest = package["manifest_path"]
+            .as_str()
+            .ok_or_else(|| format!("workspace member {package_name:?} has no manifest_path"))?;
+        validate_pairing_publication_scanned_path(root, Path::new(manifest), package_name)?;
+
+        let targets = package["targets"]
+            .as_array()
+            .ok_or_else(|| format!("workspace member {package_name:?} has no targets array"))?;
+        if targets.is_empty() {
             return Err(format!(
-                "trusted credential-store integration identifier {:?} is absent from both owner files",
-                CREDENTIAL_STORE_INTEGRATION_ESCAPE_IDENTIFIERS[index]
+                "workspace member {package_name:?} has no source targets to verify"
             ));
         }
+        for target in targets {
+            let source = target["src_path"].as_str().ok_or_else(|| {
+                format!("workspace member {package_name:?} has a target without src_path")
+            })?;
+            validate_pairing_publication_scanned_path(root, Path::new(source), package_name)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_pairing_publication_scanned_path(
+    root: &Path,
+    path: &Path,
+    package_name: &str,
+) -> Result<(), String> {
+    let relative = path.strip_prefix(root).map_err(|_| {
+        format!(
+            "workspace member {package_name:?} source path {} is outside the workspace scan boundary {}",
+            path.display(),
+            root.display()
+        )
+    })?;
+    let scan_root = match relative.components().next() {
+        Some(Component::Normal(component)) => component,
+        _ => {
+            return Err(format!(
+                "workspace member {package_name:?} source path {} has no scannable workspace root",
+                path.display()
+            ));
+        }
+    };
+    if !PAIRING_PUBLICATION_SCAN_ROOTS
+        .iter()
+        .any(|allowed| scan_root == OsStr::new(allowed))
+    {
+        return Err(format!(
+            "workspace member {package_name:?} source path {} is under unscanned root {:?}; allowed source roots are {:?}",
+            path.display(),
+            scan_root,
+            PAIRING_PUBLICATION_SCAN_ROOTS
+        ));
     }
     Ok(())
 }
@@ -6465,37 +6575,146 @@ mod tests {
         assert!(workspace_root().join("Cargo.toml").is_file());
     }
 
+    fn expected_pairing_publication_owner_sources() -> Vec<(String, String)> {
+        CREDENTIAL_STORE_INTEGRATION_ALLOWED_SOURCES
+            .iter()
+            .enumerate()
+            .map(|(source_index, path)| {
+                let mut source = String::new();
+                for expectation in &CREDENTIAL_STORE_INTEGRATION_ESCAPE_EXPECTATIONS {
+                    for occurrence in 0..expectation.expected_occurrences_by_source[source_index] {
+                        source.push_str(&format!(
+                            "fn {}_{occurrence}() {{}}\n",
+                            expectation.identifier
+                        ));
+                    }
+                }
+                ((*path).to_owned(), source)
+            })
+            .collect()
+    }
+
     #[test]
     fn pairing_publication_escape_identifiers_are_owner_file_only() {
-        let owner_source = CREDENTIAL_STORE_INTEGRATION_ESCAPE_IDENTIFIERS
-            .iter()
-            .map(|identifier| format!("fn {identifier}() {{}}\n"))
-            .collect::<String>();
-        let allowed = CREDENTIAL_STORE_INTEGRATION_ALLOWED_SOURCES
-            .iter()
-            .map(|path| ((*path).to_owned(), owner_source.clone()))
-            .collect::<Vec<_>>();
+        let allowed = expected_pairing_publication_owner_sources();
         validate_pairing_publication_sources(&allowed).unwrap();
 
-        let vacuous = CREDENTIAL_STORE_INTEGRATION_ALLOWED_SOURCES
-            .iter()
-            .map(|path| ((*path).to_owned(), "// no integration bridge\n".to_owned()))
-            .collect::<Vec<_>>();
-        let error = validate_pairing_publication_sources(&vacuous)
-            .expect_err("a vacuous integration guard was accepted");
-        assert!(error.contains(CREDENTIAL_STORE_INTEGRATION_ESCAPE_IDENTIFIERS[0]));
-
-        for identifier in CREDENTIAL_STORE_INTEGRATION_ESCAPE_IDENTIFIERS {
+        for expectation in &CREDENTIAL_STORE_INTEGRATION_ESCAPE_EXPECTATIONS {
             let escaped_path = "crates/untrusted-pairing-composition/src/lib.rs";
-            let escaped = vec![(
+            let mut escaped = allowed.clone();
+            escaped.push((
                 escaped_path.to_owned(),
-                format!("fn bypass() {{ {identifier}(); }}\n"),
-            )];
+                format!("fn bypass() {{ {}(); }}\n", expectation.identifier),
+            ));
             let error = validate_pairing_publication_sources(&escaped)
                 .expect_err("untrusted integration identifier was accepted");
-            assert!(error.contains(identifier), "{error}");
+            assert!(error.contains(expectation.identifier), "{error}");
             assert!(error.contains(escaped_path), "{error}");
         }
+    }
+
+    #[test]
+    fn pairing_publication_escape_identifiers_require_exact_owner_sites() {
+        let allowed = expected_pairing_publication_owner_sources();
+
+        for expectation in &CREDENTIAL_STORE_INTEGRATION_ESCAPE_EXPECTATIONS {
+            for path in CREDENTIAL_STORE_INTEGRATION_ALLOWED_SOURCES {
+                let mut missing = allowed.clone();
+                let source = &mut missing
+                    .iter_mut()
+                    .find(|(candidate, _)| candidate == path)
+                    .unwrap()
+                    .1;
+                *source = source.replacen(expectation.identifier, "renamed_escape", 1);
+                let error = validate_pairing_publication_sources(&missing)
+                    .expect_err("a missing required owner occurrence was accepted");
+                assert!(error.contains(expectation.identifier), "{error}");
+                assert!(error.contains(path), "{error}");
+
+                let mut extra = allowed.clone();
+                extra
+                    .iter_mut()
+                    .find(|(candidate, _)| candidate == path)
+                    .unwrap()
+                    .1
+                    .push_str(expectation.identifier);
+                let error = validate_pairing_publication_sources(&extra)
+                    .expect_err("an extra owner occurrence was accepted");
+                assert!(error.contains(expectation.identifier), "{error}");
+                assert!(error.contains(path), "{error}");
+            }
+        }
+
+        let mut missing_owner = allowed;
+        missing_owner.retain(|(path, _)| path != CREDENTIAL_STORE_INTEGRATION_ALLOWED_SOURCES[0]);
+        let error = validate_pairing_publication_sources(&missing_owner)
+            .expect_err("a missing owner source was accepted");
+        assert!(
+            error.contains(CREDENTIAL_STORE_INTEGRATION_ALLOWED_SOURCES[0]),
+            "{error}"
+        );
+    }
+
+    fn pairing_publication_coverage_metadata(
+        root: &Path,
+        package_roots: &[&str],
+    ) -> serde_json::Value {
+        let packages = package_roots
+            .iter()
+            .enumerate()
+            .map(|(index, package_root)| {
+                serde_json::json!({
+                    "id": format!("fixture-{index}"),
+                    "name": format!("fixture-{index}"),
+                    "manifest_path": root.join(package_root).join("Cargo.toml"),
+                    "targets": [{
+                        "src_path": root.join(package_root).join("src/lib.rs")
+                    }]
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "workspace_members": packages
+                .iter()
+                .map(|package| package["id"].clone())
+                .collect::<Vec<_>>(),
+            "packages": packages
+        })
+    }
+
+    #[test]
+    fn pairing_publication_scan_covers_every_workspace_member_source_root() {
+        let root = Path::new("/workspace");
+        let expected_roots = ["comparisons", "crates", "firmware", "tools", "xtask"];
+        assert_eq!(PAIRING_PUBLICATION_SCAN_ROOTS, expected_roots);
+        let metadata = pairing_publication_coverage_metadata(
+            root,
+            &[
+                "comparisons/reference",
+                "crates/library",
+                "firmware/device",
+                "tools/helper",
+                "xtask",
+            ],
+        );
+        validate_pairing_publication_workspace_member_coverage(&metadata.to_string(), root)
+            .unwrap();
+
+        let unscanned = pairing_publication_coverage_metadata(root, &["experiments/new-member"]);
+        let error =
+            validate_pairing_publication_workspace_member_coverage(&unscanned.to_string(), root)
+                .expect_err("an unscanned workspace member root was accepted");
+        assert!(error.contains("experiments"), "{error}");
+
+        let mut outside_target = pairing_publication_coverage_metadata(root, &["crates/library"]);
+        outside_target["packages"][0]["targets"][0]["src_path"] =
+            serde_json::json!(root.join("generated/library.rs"));
+        let error = validate_pairing_publication_workspace_member_coverage(
+            &outside_target.to_string(),
+            root,
+        )
+        .expect_err("an unscanned workspace member target was accepted");
+        assert!(error.contains("generated"), "{error}");
     }
 
     #[test]
