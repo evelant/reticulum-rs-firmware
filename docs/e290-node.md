@@ -29,10 +29,13 @@ semantic schema 2 persists exact authorization provenance. The dedicated
 credential-partition contract and portable store are selected in ADR 0009; its
 initial developer/HIL pairing-admission policy is now implemented as a separate
 portable crate. The store is boot-mounted, deterministically recovered, and
-retained by the resident coordinator, but the policy is not composed into a
-flash-backed pairing manager. Live external admission is blocked by credential
-initialization/provisioning and pairing composition, the external API/session
-lane, and a bearer. ADR 0005's
+retained by the resident coordinator. Lifecycle-specific Add/Activate/Abort
+planners, opaque typed store commit/reconcile owners, mounted-store pending
+selection, and a read-only four-way interrupted-initialization classifier now
+pass their portable gates, but the E290 boot/runtime does not compose those new
+paths and the policy is not a flash-backed pairing manager. Live external
+admission is blocked by credential initialization/provisioning and pairing
+composition, the external API/session lane, and a bearer. ADR 0005's
 active-owner policy is implemented:
 a permanent fault
 with an unresolved frame enters interface-local `ActiveOwnerFailStopped`, takes
@@ -198,6 +201,15 @@ Mount is read-only and never auto-provisions erased media. Boot attempts at most
 one reported `RetirePredecessor` operation and then at most one
 `CleanupInactive` operation, retaining any mounted owner in
 `ProductStorageCoordinator`.
+
+The portable store can now distinguish exactly erased media, the one canonical
+recoverably interrupted empty revision-1 trajectory, an already committed
+empty revision 1, and ineligible media without mutation. This firmware boot
+path does not yet consume that classifier: programmed unformatted media still
+uses the existing fail-closed admission path, and there is no resident same-
+boot ambiguous initialization owner. Adding the explicit interrupted state and
+coordinator latch is the next E290 composition step, not a claim of automatic
+recovery in the current image.
 
 The six product admission classes are `Ready`; `AuthOnly` (the Rust
 `AuthenticationOnly` variant, logged as `AUTHENTICATION-ONLY`, with existing
@@ -591,10 +603,13 @@ as the bounded qualification fixture for the deterministic DATA/proof exchange.
 ## Product blockers after this slice
 
 - Preserve ADR 0009's boot-mounted credential store and portable pairing policy.
-  Add lifecycle-safe credential successor/pending selection and a recoverable
-  interrupted-initialization class, then compose the bounded physical-presence
-  initialization/pairing manager with the immutable authority and bounded
-  COBS framing,
+  Preserve the implemented lifecycle-specific credential planners, opaque
+  typed store commit/reconcile path, mounted-store pending selection, and
+  interrupted-initialization classifier. Map that classifier into an explicit
+  E290 boot state, retain same-boot ambiguous initialization/mutation ownership
+  in the sole coordinator, then compose the bounded physical-presence
+  initialization/pairing manager with the immutable authority and bounded COBS
+  framing,
   qualification-session core, and boot-lifetime job/reply handoff with the
   first USB bearer. Persistent-state composition, firmware composition, and the physical
   bearer are the remaining edges for live external admission; the

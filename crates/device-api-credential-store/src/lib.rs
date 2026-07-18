@@ -16,10 +16,15 @@
 )]
 
 use embedded_storage::nor_flash::{ErrorType, MultiwriteNorFlash, NorFlash, ReadNorFlash};
+use reticulum_device_api_credentials::credential_store_integration::{
+    CredentialAuthorityStoreIntegration as _, PairingLifecycleStoreCandidateIntegration as _,
+};
 use reticulum_device_api_credentials::{
     AuthorityRevision, CREDENTIAL_SNAPSHOT_IMAGE_SIZE, CREDENTIAL_SNAPSHOT_SLOT_SIZE,
     CredentialAuthority, CredentialAuthorityBuilder, CredentialSnapshotImage,
-    CredentialSuccessorFaultKind, E290_CREDENTIAL_RECORD_CAPACITY, PlannedCredentialSuccessor,
+    CredentialSuccessorFaultKind, E290_CREDENTIAL_RECORD_CAPACITY, PairingLifecycleStoreCandidate,
+    PairingLifecycleStoreCandidateFaultKind, PairingLifecycleTransition, PendingCredentialRef,
+    PendingCredentialUnavailable, PlannedCredentialSuccessor, SelectedPendingCredential,
     decode_e290_credential_snapshot, encode_e290_credential_snapshot,
 };
 use sha2::{Digest, Sha256};
@@ -202,6 +207,15 @@ pub enum CredentialStoreBindingError {
         /// Backend capacity.
         actual: usize,
     },
+    /// The range or fixed inspection reads violate backend granularity.
+    ReadAlignmentMismatch {
+        /// Absolute range start.
+        absolute_offset: usize,
+        /// Supplied range length.
+        length: usize,
+        /// Backend read granularity.
+        read_size: usize,
+    },
     /// The range or fixed operations violate backend granularity.
     AlignmentMismatch {
         /// Absolute range start.
@@ -281,17 +295,24 @@ impl<F: NorFlash> NorFlash for BoundCredentialStore<F> {
 
 impl<F: MultiwriteNorFlash> MultiwriteNorFlash for BoundCredentialStore<F> {}
 
-/// NOR access that proves the exact credential-store device and range.
-pub trait BoundCredentialStoreAccess: MultiwriteNorFlash {
+/// Read-only NOR access that proves the exact credential-store device and
+/// range.
+pub trait BoundCredentialStoreReadAccess: ReadNorFlash {
     /// Binding represented by this operation-scoped view.
     fn credential_store_binding(&self) -> CredentialStoreBinding;
 }
 
-impl<F: MultiwriteNorFlash> BoundCredentialStoreAccess for BoundCredentialStore<F> {
+impl<F: ReadNorFlash> BoundCredentialStoreReadAccess for BoundCredentialStore<F> {
     fn credential_store_binding(&self) -> CredentialStoreBinding {
         self.binding
     }
 }
+
+/// Writable NOR access that proves the exact credential-store device and
+/// range.
+pub trait BoundCredentialStoreAccess: BoundCredentialStoreReadAccess + MultiwriteNorFlash {}
+
+impl<F: MultiwriteNorFlash> BoundCredentialStoreAccess for BoundCredentialStore<F> {}
 
 /// One of the two alternating full-snapshot sectors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -381,6 +402,34 @@ pub enum CredentialStoreFault {
     },
 }
 
+/// Read-only eligibility classification for explicit empty revision-1
+/// provisioning.
+///
+/// Product boot should first use [`mount`] to recognize an already committed
+/// authority. This classifier then separates fully erased media from the one
+/// canonical interrupted initialization trajectory that
+/// [`recover_empty_provision`] can resume. It never programs or erases.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EmptyProvisionMediaClassification {
+    /// Every byte in both sectors is erased.
+    ExactlyErased,
+    /// Programmed bytes are an ordered monotonic subset of the canonical,
+    /// device-bound empty revision-1 snapshot, but its commit is incomplete.
+    RecoverableInterrupted,
+    /// The exact canonical device-bound empty revision-1 snapshot is already
+    /// committed with sector B erased.
+    ///
+    /// This state is not interrupted and must be recognized through normal
+    /// [`mount`] rather than recovered or reprovisioned.
+    CommittedEmptyRevision1,
+    /// Media is neither fully erased nor an incomplete recoverable trajectory.
+    ///
+    /// This includes arbitrary/off-trajectory programmed media and every other
+    /// formatted state. Callers must not initialize or recover it based on this
+    /// classification; normal mount owns committed-state interpretation.
+    NotRecoverable,
+}
+
 /// Mount failure, separated into pre-I/O binding, backend, and media faults.
 pub enum CredentialStoreMountError<E> {
     /// Binding rejected before I/O.
@@ -432,6 +481,21 @@ impl MountedCredentialStore {
                 Some(&self.authority)
             }
         }
+    }
+
+    /// Select the exact pending proof secret only from a publishable authority.
+    ///
+    /// Missing, mismatched, ambiguous, and predecessor-retirement-blocked
+    /// states share the credential crate's non-oracular unavailable result.
+    /// The returned PSK is a separate zeroizing owner; this store defines no
+    /// proof transcript, connection binding, or attempt policy.
+    pub fn select_pending_for_proof(
+        &self,
+        pending: PendingCredentialRef,
+    ) -> Result<SelectedPendingCredential, PendingCredentialUnavailable> {
+        self.publishable_authority()
+            .ok_or(PendingCredentialUnavailable)?
+            .select_pending_for_proof_for_store_unchecked(pending)
     }
 
     /// Required physical recovery, if any.
@@ -502,9 +566,9 @@ pub fn mount<A>(
     access: &mut A,
 ) -> Result<MountedCredentialStore, CredentialStoreMountError<A::Error>>
 where
-    A: BoundCredentialStoreAccess,
+    A: BoundCredentialStoreReadAccess,
 {
-    validate_binding(access).map_err(CredentialStoreMountError::Binding)?;
+    validate_read_binding(access).map_err(CredentialStoreMountError::Binding)?;
     let binding = access.credential_store_binding();
     let a = scan_sector(access, binding, CredentialStoreSector::A)
         .map_err(CredentialStoreMountError::Backend)?;
@@ -849,7 +913,7 @@ fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
     bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
 
-fn validate_binding<A: BoundCredentialStoreAccess>(
+fn validate_read_binding<A: BoundCredentialStoreReadAccess>(
     access: &A,
 ) -> Result<(), CredentialStoreBindingError> {
     let binding = access.credential_store_binding();
@@ -876,8 +940,6 @@ fn validate_binding<A: BoundCredentialStoreAccess>(
         });
     }
     let read_size = <A as ReadNorFlash>::READ_SIZE;
-    let write_size = <A as NorFlash>::WRITE_SIZE;
-    let erase_size = <A as NorFlash>::ERASE_SIZE;
     let aligned =
         |value: usize, alignment: usize| alignment != 0 && value.is_multiple_of(alignment);
     let read_values = [
@@ -890,6 +952,35 @@ fn validate_binding<A: BoundCredentialStoreAccess>(
         RETIREMENT_MARKER_OFFSET,
         MARKER_SIZE,
     ];
+    if read_values
+        .into_iter()
+        .any(|value| !aligned(value, read_size))
+    {
+        return Err(CredentialStoreBindingError::ReadAlignmentMismatch {
+            absolute_offset: binding.absolute_offset,
+            length: binding.length,
+            read_size,
+        });
+    }
+    if access.capacity() != binding.length {
+        return Err(CredentialStoreBindingError::CapacityMismatch {
+            expected: binding.length,
+            actual: access.capacity(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_binding<A: BoundCredentialStoreAccess>(
+    access: &A,
+) -> Result<(), CredentialStoreBindingError> {
+    validate_read_binding(access)?;
+    let binding = access.credential_store_binding();
+    let read_size = <A as ReadNorFlash>::READ_SIZE;
+    let write_size = <A as NorFlash>::WRITE_SIZE;
+    let erase_size = <A as NorFlash>::ERASE_SIZE;
+    let aligned =
+        |value: usize, alignment: usize| alignment != 0 && value.is_multiple_of(alignment);
     let write_values = [
         binding.absolute_offset,
         SNAPSHOT_PREFIX_SIZE,
@@ -899,12 +990,9 @@ fn validate_binding<A: BoundCredentialStoreAccess>(
         DIGEST_SIZE,
         MARKER_SIZE,
     ];
-    if read_values
+    if write_values
         .into_iter()
-        .any(|value| !aligned(value, read_size))
-        || write_values
-            .into_iter()
-            .any(|value| !aligned(value, write_size))
+        .any(|value| !aligned(value, write_size))
         || !aligned(binding.absolute_offset, erase_size)
         || !aligned(binding.length, erase_size)
         || !aligned(SECTOR_SIZE, erase_size)
@@ -915,12 +1003,6 @@ fn validate_binding<A: BoundCredentialStoreAccess>(
             read_size,
             write_size,
             erase_size,
-        });
-    }
-    if access.capacity() != binding.length {
-        return Err(CredentialStoreBindingError::CapacityMismatch {
-            expected: binding.length,
-            actual: access.capacity(),
         });
     }
     Ok(())
@@ -1063,6 +1145,96 @@ fn inspect_program_stage<A: ReadNorFlash>(
     Ok((exact, compatible, started))
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum EmptyProvisionTrajectory {
+    Erased,
+    Interrupted,
+    Complete,
+    Ineligible,
+}
+
+fn inspect_empty_provision_trajectory<A: ReadNorFlash>(
+    access: &mut A,
+    prefix: &[u8; SNAPSHOT_PREFIX_SIZE],
+    digest: &[u8; DIGEST_SIZE],
+) -> Result<EmptyProvisionTrajectory, A::Error> {
+    let b_erased = region_is_erased(access, CredentialStoreSector::B.offset(), SECTOR_SIZE)?;
+    let (prefix_exact, prefix_compatible, prefix_started) =
+        inspect_program_stage(access, CredentialStoreSector::A.offset(), prefix)?;
+    let (digest_exact, digest_compatible, digest_started) =
+        inspect_program_stage(access, COMMIT_DIGEST_OFFSET, digest)?;
+    let (commit_exact, commit_compatible, commit_started) =
+        inspect_program_stage(access, COMMIT_MARKER_OFFSET, &COMMIT_MARKER)?;
+    let retirement_and_tail_erased = region_is_erased(
+        access,
+        RETIREMENT_MARKER_OFFSET,
+        SECTOR_SIZE - RETIREMENT_MARKER_OFFSET,
+    )?;
+
+    if !b_erased
+        || !prefix_compatible
+        || !digest_compatible
+        || !commit_compatible
+        || !retirement_and_tail_erased
+        || (digest_started && !prefix_exact)
+        || (commit_started && (!prefix_exact || !digest_exact))
+    {
+        return Ok(EmptyProvisionTrajectory::Ineligible);
+    }
+    if commit_exact {
+        return Ok(EmptyProvisionTrajectory::Complete);
+    }
+    if !prefix_started && !digest_started && !commit_started {
+        return Ok(EmptyProvisionTrajectory::Erased);
+    }
+    Ok(EmptyProvisionTrajectory::Interrupted)
+}
+
+/// Classify media for explicit empty revision-1 provisioning without mutation.
+///
+/// Binding validation and backend read failures remain distinct from media
+/// classification. An already committed canonical empty snapshot has its own
+/// result and must be recognized through [`mount`] instead of being treated as
+/// interrupted initialization.
+pub fn classify_empty_provision_media<A>(
+    access: &mut A,
+) -> Result<EmptyProvisionMediaClassification, CredentialStoreMountError<A::Error>>
+where
+    A: BoundCredentialStoreReadAccess,
+{
+    validate_read_binding(access).map_err(CredentialStoreMountError::Binding)?;
+    let binding = access.credential_store_binding();
+    let authority = CredentialAuthorityBuilder::<E290_CREDENTIAL_RECORD_CAPACITY>::new(
+        AuthorityRevision::new(1),
+    )
+    .map_err(|_| {
+        CredentialStoreMountError::Fault(CredentialStoreFault::CommittedSnapshotCorrupt {
+            sector: CredentialStoreSector::A,
+        })
+    })?
+    .finish();
+    let prefix = encode_snapshot_prefix(
+        &authority,
+        binding,
+        CredentialStoreSector::A,
+        0,
+        ZERO_DIGEST,
+    );
+    let digest = snapshot_digest(&prefix);
+    let trajectory = inspect_empty_provision_trajectory(access, &prefix, &digest)
+        .map_err(CredentialStoreMountError::Backend)?;
+    Ok(match trajectory {
+        EmptyProvisionTrajectory::Erased => EmptyProvisionMediaClassification::ExactlyErased,
+        EmptyProvisionTrajectory::Interrupted => {
+            EmptyProvisionMediaClassification::RecoverableInterrupted
+        }
+        EmptyProvisionTrajectory::Complete => {
+            EmptyProvisionMediaClassification::CommittedEmptyRevision1
+        }
+        EmptyProvisionTrajectory::Ineligible => EmptyProvisionMediaClassification::NotRecoverable,
+    })
+}
+
 enum PhysicalError<E> {
     Backend(E),
     Readback,
@@ -1181,34 +1353,19 @@ where
         ZERO_DIGEST,
     );
     let digest = snapshot_digest(&prefix);
-    let b_erased = region_is_erased(access, CredentialStoreSector::B.offset(), SECTOR_SIZE)
-        .map_err(CredentialStoreMountError::Backend)?;
-    let (prefix_exact, prefix_compatible, _) =
-        inspect_program_stage(access, CredentialStoreSector::A.offset(), &prefix[..])
-            .map_err(CredentialStoreMountError::Backend)?;
-    let (digest_exact, digest_compatible, digest_started) =
-        inspect_program_stage(access, COMMIT_DIGEST_OFFSET, &digest)
-            .map_err(CredentialStoreMountError::Backend)?;
-    let (_, commit_compatible, commit_started) =
-        inspect_program_stage(access, COMMIT_MARKER_OFFSET, &COMMIT_MARKER)
-            .map_err(CredentialStoreMountError::Backend)?;
-    let retirement_and_tail_erased = region_is_erased(
-        access,
-        RETIREMENT_MARKER_OFFSET,
-        SECTOR_SIZE - RETIREMENT_MARKER_OFFSET,
-    )
-    .map_err(CredentialStoreMountError::Backend)?;
-    if !b_erased
-        || !prefix_compatible
-        || !digest_compatible
-        || !commit_compatible
-        || !retirement_and_tail_erased
-        || (digest_started && !prefix_exact)
-        || (commit_started && (!prefix_exact || !digest_exact))
+    match inspect_empty_provision_trajectory(access, &prefix, &digest)
+        .map_err(CredentialStoreMountError::Backend)?
     {
-        return Err(CredentialStoreMountError::Fault(
-            CredentialStoreFault::UnformattedNonErased,
-        ));
+        EmptyProvisionTrajectory::Erased | EmptyProvisionTrajectory::Interrupted => {}
+        EmptyProvisionTrajectory::Complete => {
+            drop(authority);
+            return mount(access);
+        }
+        EmptyProvisionTrajectory::Ineligible => {
+            return Err(CredentialStoreMountError::Fault(
+                CredentialStoreFault::UnformattedNonErased,
+            ));
+        }
     }
 
     for (offset, bytes) in [
@@ -1411,6 +1568,233 @@ impl CredentialSuccessorSemanticError {
     }
 }
 
+/// Successfully committed pairing-lifecycle successor with its exact operation.
+///
+/// The mounted authority has passed target commit/readback and predecessor
+/// retirement. It may still report erase-only inactive cleanup.
+#[must_use = "a committed pairing lifecycle owner must be retained or consumed"]
+pub struct CommittedPairingLifecycleSuccessor {
+    transition: PairingLifecycleTransition,
+    store: MountedCredentialStore,
+}
+
+impl CommittedPairingLifecycleSuccessor {
+    /// Lifecycle operation established durably by this commit.
+    pub const fn transition(&self) -> PairingLifecycleTransition {
+        self.transition
+    }
+
+    /// Borrow the newly mounted, publishable store.
+    pub const fn store(&self) -> &MountedCredentialStore {
+        &self.store
+    }
+
+    /// Consume the result into the newly mounted store.
+    pub fn into_store(self) -> MountedCredentialStore {
+        self.store
+    }
+}
+
+/// Exact pairing-lifecycle successor retained across a physical ambiguity.
+///
+/// This owner deliberately exposes no bare candidate authority. Once physical
+/// mutation may have started it must be passed to
+/// [`reconcile_pairing_lifecycle_successor`].
+#[must_use = "pending pairing lifecycle mutation must be reconciled or safely canceled"]
+pub struct PendingPairingLifecycleSuccessor {
+    transition: PairingLifecycleTransition,
+    pending: PendingCredentialSuccessor,
+}
+
+impl PendingPairingLifecycleSuccessor {
+    /// Lifecycle operation retained with this physical owner.
+    pub const fn transition(&self) -> PairingLifecycleTransition {
+        self.transition
+    }
+
+    /// Current committed authority revision at mutation start.
+    pub const fn current_revision(&self) -> AuthorityRevision {
+        self.pending.current_revision()
+    }
+
+    /// Exact unpublished successor revision.
+    pub const fn candidate_revision(&self) -> AuthorityRevision {
+        self.pending.candidate_revision()
+    }
+
+    /// Exact physical binding required for reconciliation.
+    pub const fn binding(&self) -> CredentialStoreBinding {
+        self.pending.binding()
+    }
+
+    /// Whether a physical mutation may already have reached media.
+    pub const fn media_ambiguous(&self) -> bool {
+        self.pending.media_ambiguous()
+    }
+
+    /// Cancel only an I/O-free attempt, dropping the unpublished candidate and
+    /// recovering the unchanged mounted authority.
+    ///
+    /// Once media is ambiguous, the complete typed owner is returned and must
+    /// be reconciled. Dropping the candidate before I/O zeroizes its secrets;
+    /// a later pairing attempt must construct a fresh lifecycle plan.
+    pub fn cancel_before_io(self) -> Result<MountedCredentialStore, Self> {
+        let transition = self.transition;
+        match self.pending.into_parts() {
+            Ok((current, candidate)) => {
+                drop(candidate);
+                Ok(current)
+            }
+            Err(pending) => Err(Self {
+                transition,
+                pending,
+            }),
+        }
+    }
+}
+
+/// Physical pairing-lifecycle failure retaining exact typed mutation ownership.
+#[must_use = "pairing lifecycle failure retains an owner requiring reconciliation"]
+pub struct PairingLifecycleSuccessorStoreError<E> {
+    error: CredentialStoreMountError<E>,
+    pending: PendingPairingLifecycleSuccessor,
+}
+
+impl<E> PairingLifecycleSuccessorStoreError<E> {
+    /// Borrow the non-secret physical error.
+    pub const fn error(&self) -> &CredentialStoreMountError<E> {
+        &self.error
+    }
+
+    /// Recover the exact typed pending mutation for reconciliation.
+    pub fn into_pending(self) -> PendingPairingLifecycleSuccessor {
+        self.pending
+    }
+}
+
+/// Pairing-lifecycle semantic rejection before any store I/O.
+///
+/// The rejected candidate remains an opaque lifecycle-authorized owner. It can
+/// be retried against the correct mounted predecessor without exposing a bare
+/// credential authority or losing the transition discriminator.
+#[must_use = "semantic rejection retains the mounted and lifecycle-candidate owners"]
+pub struct PairingLifecycleSuccessorSemanticError {
+    kind: PairingLifecycleStoreCandidateFaultKind,
+    current: MountedCredentialStore,
+    candidate: PairingLifecycleStoreCandidate<E290_CREDENTIAL_RECORD_CAPACITY>,
+}
+
+impl PairingLifecycleSuccessorSemanticError {
+    /// Lifecycle operation carried by the rejected candidate.
+    pub const fn transition(&self) -> PairingLifecycleTransition {
+        self.candidate.transition()
+    }
+
+    /// Non-secret structural or transition-specific rejection category.
+    pub const fn kind(&self) -> PairingLifecycleStoreCandidateFaultKind {
+        self.kind
+    }
+
+    /// Revision of the unchanged mounted authority.
+    pub const fn current_revision(&self) -> AuthorityRevision {
+        self.current.revision()
+    }
+
+    /// Revision of the rejected unpublished candidate.
+    pub const fn candidate_revision(&self) -> AuthorityRevision {
+        self.candidate.revision()
+    }
+
+    /// Recover the unchanged store and exact opaque candidate for typed retry.
+    pub fn into_parts(
+        self,
+    ) -> (
+        MountedCredentialStore,
+        PairingLifecycleStoreCandidate<E290_CREDENTIAL_RECORD_CAPACITY>,
+    ) {
+        (self.current, self.candidate)
+    }
+}
+
+/// Either pre-I/O semantic rejection or retained physical lifecycle ambiguity.
+pub enum CommitPairingLifecycleSuccessorError<E> {
+    /// Candidate is not the declared exact lifecycle successor of the supplied
+    /// mounted store.
+    Semantic(PairingLifecycleSuccessorSemanticError),
+    /// Physical operation failed and retains exact typed ownership.
+    Physical(PairingLifecycleSuccessorStoreError<E>),
+}
+
+/// Commit one lifecycle-authorized pairing successor through the sole store.
+///
+/// The exact lifecycle transition remains attached to every success, semantic
+/// rejection, and physical ambiguity. Structural and transition-specific
+/// preflight happens before any store I/O and retains the opaque typed
+/// candidate on rejection.
+pub fn commit_pairing_lifecycle_successor<A>(
+    current: MountedCredentialStore,
+    access: &mut A,
+    candidate: PairingLifecycleStoreCandidate<E290_CREDENTIAL_RECORD_CAPACITY>,
+) -> Result<CommittedPairingLifecycleSuccessor, CommitPairingLifecycleSuccessorError<A::Error>>
+where
+    A: BoundCredentialStoreAccess,
+{
+    let candidate = match candidate.validate_against(&current.authority) {
+        Ok(candidate) => candidate,
+        Err(fault) => {
+            let kind = fault.kind();
+            return Err(CommitPairingLifecycleSuccessorError::Semantic(
+                PairingLifecycleSuccessorSemanticError {
+                    kind,
+                    current,
+                    candidate: fault.into_candidate(),
+                },
+            ));
+        }
+    };
+    let transition = candidate.transition();
+    let candidate = candidate.into_unpublished_authority_for_store_unchecked();
+    commit_validated_successor(current, access, candidate)
+        .map(|store| CommittedPairingLifecycleSuccessor { transition, store })
+        .map_err(|error| {
+            CommitPairingLifecycleSuccessorError::Physical(wrap_pairing_lifecycle_error(
+                transition, error,
+            ))
+        })
+}
+
+/// Reconcile one exact pairing-lifecycle successor after physical ambiguity.
+pub fn reconcile_pairing_lifecycle_successor<A>(
+    pending: PendingPairingLifecycleSuccessor,
+    access: &mut A,
+) -> Result<CommittedPairingLifecycleSuccessor, PairingLifecycleSuccessorStoreError<A::Error>>
+where
+    A: BoundCredentialStoreAccess,
+{
+    let PendingPairingLifecycleSuccessor {
+        transition,
+        pending,
+    } = pending;
+    match reconcile_successor(pending, access) {
+        Ok(store) => Ok(CommittedPairingLifecycleSuccessor { transition, store }),
+        Err(error) => Err(wrap_pairing_lifecycle_error(transition, error)),
+    }
+}
+
+fn wrap_pairing_lifecycle_error<E>(
+    transition: PairingLifecycleTransition,
+    error: CredentialSuccessorStoreError<E>,
+) -> PairingLifecycleSuccessorStoreError<E> {
+    let CredentialSuccessorStoreError { error, pending } = error;
+    PairingLifecycleSuccessorStoreError {
+        error,
+        pending: PendingPairingLifecycleSuccessor {
+            transition,
+            pending,
+        },
+    }
+}
+
 /// Start and drive one exact successor through target commit and source retirement.
 ///
 /// The candidate is not published until both target commit and predecessor
@@ -1437,20 +1821,29 @@ where
             ));
         }
     };
+    commit_validated_successor(current, access, candidate).map_err(CommitSuccessorError::Physical)
+}
+
+fn commit_validated_successor<A>(
+    current: MountedCredentialStore,
+    access: &mut A,
+    candidate: CredentialAuthority<E290_CREDENTIAL_RECORD_CAPACITY>,
+) -> Result<MountedCredentialStore, CredentialSuccessorStoreError<A::Error>>
+where
+    A: BoundCredentialStoreAccess,
+{
     let pending = PendingCredentialSuccessor {
         current,
         candidate,
         media_ambiguous: false,
     };
     if pending.current.recovery != CredentialStoreRecovery::Clean {
-        return Err(CommitSuccessorError::Physical(
-            CredentialSuccessorStoreError {
-                error: CredentialStoreMountError::Fault(CredentialStoreFault::RecoveryRequired),
-                pending,
-            },
-        ));
+        return Err(CredentialSuccessorStoreError {
+            error: CredentialStoreMountError::Fault(CredentialStoreFault::RecoveryRequired),
+            pending,
+        });
     }
-    drive_pending_successor(pending, access).map_err(CommitSuccessorError::Physical)
+    drive_pending_successor(pending, access)
 }
 
 /// Either semantic preflight rejection or a retained ambiguous physical mutation.

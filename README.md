@@ -322,14 +322,27 @@ permission mask with every accepted submission; the redundant serialized and
 in-RAM content digest is derived from the immutable intent, so the unchanged
 383-byte request still fits the 512-byte journal body. The canonical authority
 image, dedicated credential-partition contract, and two-sector commit/retire
-format are implemented. The initial bounded developer/HIL pairing policy is
-also implemented as a portable, allocation-free admission owner: it freezes the
-exact physical-presence hold/window, connection epoch, shared attempt budget,
-one-pending, and asynchronous operation-ownership rules without owning GPIO,
-USB, flash, secrets, or proof verification. The portable store is boot-mounted/
-recovered and retained by the firmware coordinator, but the policy is not
-composed and no provisioning/pairing manager, firmware API/session job lane, or
-USB/BLE/Wi-Fi bearer invokes the adapter yet. The accepted
+format are implemented. Lifecycle-specific authority planners construct only
+checked Add-`Pending`, Activate-`Pending`, and Abort-`Pending` successors; their
+opaque candidates pass through typed store commit/reconcile owners that retain
+the exact transition across semantic rejection and ambiguous physical results.
+The supported typed product path exposes pending proof material through a
+mounted publishable authority; the repository source guard confines the two
+unchecked integration bridges to the semantic authority and physical store.
+A separate read-only classifier distinguishes exactly erased, recoverably
+interrupted canonical empty revision-1 provisioning, already committed empty
+revision 1, and ineligible media without mutating either sector. The initial
+bounded developer/HIL pairing policy is also implemented as a portable,
+allocation-free admission owner: it freezes the exact physical-presence hold/
+window, connection epoch, shared attempt budget, one-pending, and asynchronous
+operation-ownership rules without owning GPIO, USB, flash, secrets, or proof
+verification. The portable store is boot-mounted/recovered and retained by the
+firmware coordinator, but the new interrupted-initialization classification and
+live lifecycle mutations are not yet composed there. The policy remains
+uncomposed, and no provisioning/pairing manager, firmware API/session job lane,
+or USB/BLE/Wi-Fi bearer invokes the adapter yet. The credential authority passes
+23 unit tests, eight public successor tests, and 18 compile-fail doctests; the
+physical store passes 32 fake-NOR tests. The accepted
 authentication, authority, provenance, and USB ownership contracts are
 recorded in [ADR 0006](docs/adr/0006-authenticated-local-api-bearer.md) and
 [ADR 0007](docs/adr/0007-device-api-credential-authority.md), with the durable
@@ -381,9 +394,11 @@ lifetime job handoff, and E290 `ProductStorageCoordinator` port implementation
 are compiled, and schema-2 acceptance retains exact authorization provenance,
 but no persistent credential provisioning/pairing, external
 firmware lane, or USB/BLE/Wi-Fi bearer serves through them. The next
-integration boundary still needs a lifecycle-safe credential successor/pending-
-selection API and a recoverable interrupted-initialization class before that
-portable policy can own live flash-backed operations.
+integration boundary must map the implemented interrupted-initialization
+classifier into an explicit E290 boot state, retain same-boot ambiguous
+initialization/mutation owners in the sole coordinator, and compose physical-
+presence policy before that portable policy can own live flash-backed
+operations.
 The legacy `TxSupervisor` remains a separate RF-inert test aggregate. The permanent
 `NodeInterfaceSupervisor` now owns the router, DATA and ordinary coordinators,
 and both permit-service families; the first permanent E290 image composes it
@@ -442,10 +457,11 @@ credential initialization/provisioning and pairing composition, the external
 API/session firmware lane, and a bearer—not by credential-store boot composition
 or another semantic authority, session-crypto, durability-policy, partition, or
 cap decision. The portable ADR 0009 admission policy is implemented but
-uncomposed. The next software slice supplies its lifecycle-safe credential
-successor/pending-selection API and recoverable interrupted-initialization class,
-then composes the bounded manager and credential-backed USB-to-LoRa edge before
-durable configuration/message hosting and client delivery.
+uncomposed. The lifecycle-safe credential planners, typed store mutation path,
+mounted-store pending selection, and interrupted-initialization classifier now
+exist; the next software slice composes their explicit boot/runtime states and
+bounded physical-presence manager, then the credential-backed USB-to-LoRa edge,
+before durable configuration/message hosting and client delivery.
 The node-side routing
 boundary remains interface-neutral so additional Reticulum links can be added
 later through adapters without rewriting the LoRa actor or protocol owner; no

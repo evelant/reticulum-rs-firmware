@@ -1,7 +1,8 @@
 # ADR 0009: Device-API credential store and initial pairing policy
 
-- **Status:** accepted design; portable store, E290 boot/coordinator integration,
-  and portable pairing-admission policy implemented; live credential mutation,
+- **Status:** accepted design; portable lifecycle-safe authority/store path,
+  interrupted-initialization classifier, E290 boot/coordinator mount integration,
+  and pairing-admission policy implemented; E290 initialization/mutation runtime,
   firmware/bearer composition, and powered pairing qualification pending
 - **Date:** 2026-07-17
 - **Decision owners:** project maintainers
@@ -12,13 +13,15 @@
 ## Context
 
 The portable credential authority and its canonical 2,048-byte semantic image
-exist, permanent E290 firmware now mounts/recovers its physical store, and a
-portable policy owner now freezes physical-presence window admission. The
-firmware still cannot admit an authenticated external request until one
-device-owned authority survives power loss and the policy is composed with the
-sole flash owner and a bearer. Pairing must not publish a secret-bearing
-authority before its physical commit is established, and an empty or erased
-store must not silently create a trust relationship.
+now expose lifecycle-specific successor planning, the physical store carries
+those opaque transitions through commit and reconciliation, permanent E290
+firmware mounts/recovers its physical store, and a portable policy owner freezes
+physical-presence window admission. The firmware still cannot admit an
+authenticated external request until one device-owned authority survives power
+loss and the policy is composed with the sole flash owner and a bearer. Pairing
+must not publish a secret-bearing authority before its physical commit is
+established, and an empty or erased store must not silently create a trust
+relationship.
 
 This first policy is deliberately a developer/HIL contract. The E290 image
 currently rejects flash encryption, and USB Serial/JTAG provides neither peer
@@ -171,6 +174,28 @@ mounted owner and resulting admission state, and quarantines only credential
 admission/mutation if either step cannot finish; unrelated journal policy and
 LoRa startup continue.
 
+The semantic authority provides `plan_add_pending`, `plan_activate_pending`,
+and `plan_abort_pending` for adding the sole `Pending` record, activating that
+exact pending record, and replacing it with a PSK-free aborted tombstone. Each
+result becomes an opaque `PairingLifecycleStoreCandidate`;
+`commit_pairing_lifecycle_successor` and
+`reconcile_pairing_lifecycle_successor` retain its Add/Activate/Abort
+discriminator through semantic rejection, physical ambiguity, and durable
+success. Commit preflight first checks generic structural succession and then
+revalidates the declared transition against the exact source pending reference,
+PSK, principal, permissions, and immutable audit facts retained privately by
+the opaque candidate. `Structural` and `TransitionMismatch` errors preserve the
+unchanged mounted authority and candidate without store I/O. The supported
+product path uses
+`MountedCredentialStore::select_pending_for_proof` only after commit/readback
+and predecessor retirement. This is a repository-enforced trusted linked-code
+boundary, not an unforgeable Rust capability: the one-way credential-store-to-
+authority dependency requires narrow public integration methods because Rust
+has no friend-crate visibility. The graph-policy source guard permits those
+integration identifiers only in the credential authority and physical-store
+owner files and rejects workspace composition that bypasses the mounted path.
+Erase-only inactive cleanup may remain.
+
 ### Compose bounded recovery immediately after flash open
 
 The E290 `ProductFlashOwner` validates the exact partition shape and derives the
@@ -199,6 +224,17 @@ erased-only initialization command received on the button-confirmed USB
 connection described below. It rechecks that both sectors are fully erased and
 commits the canonical empty revision-1 authority. Programmed noncanonical
 media is never reformatted by this path.
+
+The portable store also provides the read-only
+`classify_empty_provision_media` four-way classifier for this boundary:
+`ExactlyErased`, `RecoverableInterrupted`,
+`CommittedEmptyRevision1`, or `NotRecoverable`. The recoverable case is limited
+to an ordered monotonic prefix of the canonical device-bound empty revision-1
+program/digest/commit trajectory with the other sector and all forbidden bytes
+erased. Classification never writes or erases. E290 boot does not yet map this
+result to an explicit interrupted-initialization state, and its resident
+coordinator does not yet retain a same-boot ambiguous initialization permit;
+those are the next composition slice, not automatic boot recovery.
 
 Initialization creates no credential, offers no secret, and does not
 implicitly start pairing. A client must issue a separate pairing begin while a
@@ -304,12 +340,10 @@ or discards a pending secret-bearing ID.
 The portable policy does not implement or imply live pairing. The remaining
 boundary includes:
 
-- a lifecycle-safe credential-authority API that can select the exact durable
-  pending record and construct `Pending`, `Active`, and aborted successors while
-  retaining every secret-bearing owner required for failure reconciliation;
-- a product boot/recovery class for interrupted empty revision-1 initialization,
-  so a reset can resume only the exact canonical trajectory without treating
-  arbitrary programmed media as authorized initialization;
+- an E290 boot class that maps only `RecoverableInterrupted` to explicit
+  interrupted initialization, plus a resident same-boot mutation owner that
+  retains the exact policy permit and typed physical successor until definite
+  reconciliation;
 - board debounce/sampling, boot-lifetime USB connection-epoch allocation,
   exclusive bearer arbitration, and exact disconnect classification;
 - entropy, unique-ID/PSK allocation and collision handling; exact pairing wire
@@ -349,13 +383,20 @@ but cannot claim security from the developer USB trust shortcut.
 
 ## Validation status and remaining composition gates
 
-- Complete: 22 portable fake-NOR tests cover exact header/layout bytes, the
-  independently generated digest golden vector, canonical empty provisioning
-  and deterministic no-erase recovery, both
-  sector roles, successor commit/readback/retirement, publication gating,
-  cleanup, wrong binding, conflict, unknown media, revision exhaustion,
-  corrupt-successor non-fallback, and every-byte/lost-reply/read-error
-  trajectories at the program, readback, retirement, and erase boundaries.
+- Complete in the portable authority: 23 unit tests, eight public successor
+  tests, and 18 compile-fail doctests cover canonical snapshots and ownership,
+  lifecycle-specific Add/Activate/Abort planning, exact pending selection,
+  structural and exact-transition preflight retention, lifecycle conflicts,
+  cross-predecessor rejection, and secret-bearing type boundaries.
+- Complete: 32 portable fake-NOR tests cover exact header/layout bytes, the
+  independently generated digest golden vector, the read-only four-way empty-
+  provision classifier, canonical empty provisioning and deterministic no-
+  erase recovery, both sector roles, generic and typed lifecycle successor
+  commit/readback/retirement/reconciliation, mounted-store pending selection,
+  publication gating, cleanup, wrong binding, conflict, unknown media, revision
+  exhaustion, corrupt-successor non-fallback, and every-byte/lost-reply/read-
+  error trajectories at the program, readback, retirement, and erase
+  boundaries.
 - Complete: strict host Clippy and warning-free rustdoc plus generic bare-metal
   and ESP32-S3 Xtensa checks.
 - Complete in E290 host/target composition: exact partition and eFuse-derived
@@ -377,9 +418,9 @@ but cannot claim security from the developer USB trust shortcut.
   owner RAM ceiling. This crate is not composed into firmware or a bearer.
 - Pairing integration tests must still cover real GPIO debounce/sampling,
   exclusive USB ownership, disconnect at every secret/proof/completion boundary,
-  proof replay and wrong transcript binding, unique ID/PSK allocation, the
-  lifecycle-safe authority successor/pending-selection API, the recoverable
-  interrupted-initialization class, and 16-ID exhaustion.
+  proof replay and wrong transcript binding, unique ID/PSK allocation, E290
+  interrupted-initialization boot/runtime composition, retained same-boot
+  ambiguity, and 16-ID exhaustion.
 - Live mutation/bearer composition must keep the ADR 0004 coordinator as the
   only flash and mutable-authority owner, zeroize temporary secrets, preserve LoRa
   scheduling under USB pressure, and prove no API/session service starts from

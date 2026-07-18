@@ -19,10 +19,11 @@ erased media. A separate portable pairing-policy crate implements the exact
 physical-presence window, connection epoch, shared attempt, and operation-
 ownership state, but it is not composed. Flash-backed initialization/pairing,
 the external API/session firmware lane, and every physical bearer remain
-unimplemented. Credential integration also needs lifecycle-safe successor/
-pending selection and a recoverable interrupted-initialization class. A
-product port may route an accepted submission through the node after the
-durable barriers.
+unimplemented. Lifecycle-specific Add/Activate/Abort planners, opaque typed
+store commit/reconcile owners, mounted-store pending selection, and the read-only
+interrupted-initialization classifier are implemented; E290 boot/runtime and
+physical-presence composition remain next. A product port may route an accepted
+submission through the node after the durable barriers.
 
 ## Boundary
 

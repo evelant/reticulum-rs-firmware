@@ -214,6 +214,10 @@ fn build_tracker() -> ExitCode {
 
 fn graph_policy() -> ExitCode {
     let root = workspace_root();
+    if let Err(error) = validate_pairing_publication_workspace(&root) {
+        eprintln!("error: credential-store integration source boundary: {error}");
+        return ExitCode::FAILURE;
+    }
     let mut product_graphs = Vec::new();
     for feature in [
         "safe-idle",
@@ -602,7 +606,7 @@ fn graph_policy() -> ExitCode {
              API and node core remain mutually isolated and free of direct platform dependencies; the \
              allocation-free device-API framing crate has no dependency or feature surface, while its \
              boot-lifetime job handoff reaches only the logical device API and Embassy Sync, and the \
-             credential authority has only its exact logical device-API, constant-time comparison and zeroization edges; the physical-presence pairing policy has only its exact feature-disabled credential-authority edge and remains absent from every product and HIL graph; the \
+             credential authority has only its exact logical device-API, constant-time comparison and zeroization edges; credential-store integration escape identifiers remain restricted to the two trusted owner files; the physical-presence pairing policy has only its exact feature-disabled credential-authority edge and remains absent from every product and HIL graph; the \
              authenticated session layer has only its exact reviewed cryptographic, device-API, credentials, framing and handoff normal edges plus its exact test-only hex, semantic-adapter and storage-model fixtures; \
              the Rete integration and node-core normal closures contain no RNode, radio-interface, LoRa or board package; \
              the shared lora-phy owner and E290 radio wrapper have only their exact reviewed HAL, framing, board and test edges; \
@@ -628,6 +632,103 @@ fn graph_policy() -> ExitCode {
         );
         ExitCode::SUCCESS
     }
+}
+
+const CREDENTIAL_STORE_INTEGRATION_ESCAPE_IDENTIFIERS: [&str; 3] = [
+    concat!("credential_store_", "integration"),
+    concat!("into_unpublished_authority_", "for_store_unchecked"),
+    concat!("select_pending_for_proof_", "for_store_unchecked"),
+];
+
+const CREDENTIAL_STORE_INTEGRATION_ALLOWED_SOURCES: [&str; 2] = [
+    "crates/device-api-credentials/src/lib.rs",
+    "crates/device-api-credential-store/src/lib.rs",
+];
+
+fn validate_pairing_publication_workspace(root: &Path) -> Result<(), String> {
+    let mut sources = Vec::new();
+    for relative in ["comparisons", "crates", "firmware", "tools", "xtask"] {
+        let directory = root.join(relative);
+        if directory.is_dir() {
+            collect_workspace_rust_sources(root, &directory, &mut sources)?;
+        }
+    }
+    validate_pairing_publication_sources(&sources)
+}
+
+fn collect_workspace_rust_sources(
+    root: &Path,
+    directory: &Path,
+    sources: &mut Vec<(String, String)>,
+) -> Result<(), String> {
+    let mut entries = fs::read_dir(directory)
+        .map_err(|error| format!("could not read {}: {error}", directory.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("could not enumerate {}: {error}", directory.display()))?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+
+    for entry in entries {
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("could not inspect {}: {error}", path.display()))?;
+        if file_type.is_symlink() {
+            return Err(format!(
+                "workspace Rust source tree contains unsupported symlink {}",
+                path.display()
+            ));
+        }
+        if file_type.is_dir() {
+            collect_workspace_rust_sources(root, &path, sources)?;
+            continue;
+        }
+        if !file_type.is_file() || path.extension() != Some(OsStr::new("rs")) {
+            continue;
+        }
+
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|error| format!("could not relativize {}: {error}", path.display()))?
+            .to_str()
+            .ok_or_else(|| format!("workspace source path {} is not UTF-8", path.display()))?
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        let source = fs::read_to_string(&path)
+            .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+        sources.push((relative, source));
+    }
+    Ok(())
+}
+
+fn validate_pairing_publication_sources(sources: &[(String, String)]) -> Result<(), String> {
+    let mut allowed_identifiers_found =
+        [false; CREDENTIAL_STORE_INTEGRATION_ESCAPE_IDENTIFIERS.len()];
+    for (path, source) in sources {
+        if CREDENTIAL_STORE_INTEGRATION_ALLOWED_SOURCES.contains(&path.as_str()) {
+            for (index, identifier) in CREDENTIAL_STORE_INTEGRATION_ESCAPE_IDENTIFIERS
+                .iter()
+                .enumerate()
+            {
+                allowed_identifiers_found[index] |= source.contains(identifier);
+            }
+            continue;
+        }
+        for identifier in CREDENTIAL_STORE_INTEGRATION_ESCAPE_IDENTIFIERS {
+            if source.contains(identifier) {
+                return Err(format!(
+                    "trusted identifier {identifier:?} appears outside the two credential-store owner files in {path}"
+                ));
+            }
+        }
+    }
+    for (index, found) in allowed_identifiers_found.into_iter().enumerate() {
+        if !found {
+            return Err(format!(
+                "trusted credential-store integration identifier {:?} is absent from both owner files",
+                CREDENTIAL_STORE_INTEGRATION_ESCAPE_IDENTIFIERS[index]
+            ));
+        }
+    }
+    Ok(())
 }
 
 const INTERFACE_NEUTRAL_RNS_FORBIDDEN: [&str; 9] = [
@@ -6362,6 +6463,44 @@ mod tests {
     #[test]
     fn workspace_root_contains_the_workspace_manifest() {
         assert!(workspace_root().join("Cargo.toml").is_file());
+    }
+
+    #[test]
+    fn pairing_publication_escape_identifiers_are_owner_file_only() {
+        let owner_source = CREDENTIAL_STORE_INTEGRATION_ESCAPE_IDENTIFIERS
+            .iter()
+            .map(|identifier| format!("fn {identifier}() {{}}\n"))
+            .collect::<String>();
+        let allowed = CREDENTIAL_STORE_INTEGRATION_ALLOWED_SOURCES
+            .iter()
+            .map(|path| ((*path).to_owned(), owner_source.clone()))
+            .collect::<Vec<_>>();
+        validate_pairing_publication_sources(&allowed).unwrap();
+
+        let vacuous = CREDENTIAL_STORE_INTEGRATION_ALLOWED_SOURCES
+            .iter()
+            .map(|path| ((*path).to_owned(), "// no integration bridge\n".to_owned()))
+            .collect::<Vec<_>>();
+        let error = validate_pairing_publication_sources(&vacuous)
+            .expect_err("a vacuous integration guard was accepted");
+        assert!(error.contains(CREDENTIAL_STORE_INTEGRATION_ESCAPE_IDENTIFIERS[0]));
+
+        for identifier in CREDENTIAL_STORE_INTEGRATION_ESCAPE_IDENTIFIERS {
+            let escaped_path = "crates/untrusted-pairing-composition/src/lib.rs";
+            let escaped = vec![(
+                escaped_path.to_owned(),
+                format!("fn bypass() {{ {identifier}(); }}\n"),
+            )];
+            let error = validate_pairing_publication_sources(&escaped)
+                .expect_err("untrusted integration identifier was accepted");
+            assert!(error.contains(identifier), "{error}");
+            assert!(error.contains(escaped_path), "{error}");
+        }
+    }
+
+    #[test]
+    fn current_workspace_respects_pairing_publication_source_boundary() {
+        validate_pairing_publication_workspace(&workspace_root()).unwrap();
     }
 
     #[test]

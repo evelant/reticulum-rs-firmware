@@ -310,14 +310,14 @@ fn decode_record(slot: &[u8]) -> Result<CredentialRecord, CredentialSnapshotDeco
                 return Err(CredentialSnapshotDecodeFaultKind::InvalidStatusShape);
             }
             let psk = Zeroizing::new(copy_array(&slot[PSK_RANGE]));
-            Ok(CredentialRecord::with_secret(
+            Ok(CredentialRecord::with_zeroizing_secret(
                 id,
                 generation,
                 principal,
                 permissions,
                 status,
                 audit,
-                *psk,
+                psk,
             ))
         }
         CredentialStatus::Revoked => {

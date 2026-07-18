@@ -1,16 +1,16 @@
 //! Fixed-capacity device-owned authority for local API credentials.
 //!
 //! This crate owns the persistent semantic vocabulary and one validated,
-//! immutable boot snapshot. It is deliberately below session framing: a future
-//! raw-NOR credential store can depend on this crate without pulling in
+//! immutable boot snapshot. It is deliberately below session framing so the
+//! raw-NOR credential store can depend on it without pulling in
 //! handshake crypto, COBS, a bearer, or firmware. The canonical E290 semantic
 //! snapshot codec is likewise independent of physical flash headers and commit
 //! mechanics. The session layer consumes a zeroizing [`SelectedCredential`]
 //! and later asks this authority to revalidate the authenticated credential ID
 //! and generation.
 //!
-//! No principal or permission comes from client bytes. A future sole
-//! credential-store owner must durably commit and validate a replacement
+//! No principal or permission comes from client bytes. The sole credential
+//! store owner must durably commit and validate a replacement
 //! snapshot before swapping authorities between requests. This slice has no
 //! in-place mutation API, physical flash format, pairing UI, physical-presence
 //! policy, USB/BLE/Wi-Fi code, Reticulum identity, or radio capability.
@@ -21,9 +21,11 @@
 
 use core::marker::PhantomData;
 
-use reticulum_device_api::{DispatchContext, DispatchProvenance, Permissions, PrincipalId};
+use reticulum_device_api::{DispatchContext, DispatchProvenance};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 use zeroize::Zeroizing;
+
+pub use reticulum_device_api::{Permissions, PrincipalId};
 
 mod snapshot;
 
@@ -200,6 +202,14 @@ enum CredentialSecret {
     Absent,
 }
 
+fn copy_zeroizing_psk(
+    source: &[u8; CREDENTIAL_PSK_LENGTH],
+) -> Zeroizing<[u8; CREDENTIAL_PSK_LENGTH]> {
+    let mut copy = Zeroizing::new([0; CREDENTIAL_PSK_LENGTH]);
+    copy.copy_from_slice(source);
+    copy
+}
+
 /// One current or retired record loaded from device-owned durable state.
 ///
 /// This owner deliberately implements neither `Clone`, `Copy`, nor `Debug`.
@@ -249,6 +259,26 @@ impl CredentialRecord {
         audit: CredentialAudit,
         psk: [u8; CREDENTIAL_PSK_LENGTH],
     ) -> Self {
+        Self::with_zeroizing_secret(
+            id,
+            generation,
+            principal,
+            permissions,
+            status,
+            audit,
+            Zeroizing::new(psk),
+        )
+    }
+
+    fn with_zeroizing_secret(
+        id: CredentialId,
+        generation: CredentialGeneration,
+        principal: PrincipalId,
+        permissions: Permissions,
+        status: CredentialStatus,
+        audit: CredentialAudit,
+        psk: Zeroizing<[u8; CREDENTIAL_PSK_LENGTH]>,
+    ) -> Self {
         Self {
             id,
             generation,
@@ -257,7 +287,7 @@ impl CredentialRecord {
             status,
             audit,
             revocation_reason: None,
-            secret: CredentialSecret::Present(Zeroizing::new(psk)),
+            secret: CredentialSecret::Present(psk),
         }
     }
 
@@ -338,6 +368,22 @@ impl CredentialRecord {
             && self.revocation_reason == other.revocation_reason
             && secret_matches
     }
+
+    fn duplicate_for_candidate(&self) -> Self {
+        Self {
+            id: self.id,
+            generation: self.generation,
+            principal: self.principal,
+            permissions: self.permissions,
+            status: self.status,
+            audit: self.audit,
+            revocation_reason: self.revocation_reason,
+            secret: match self.psk() {
+                Some(psk) => CredentialSecret::Present(copy_zeroizing_psk(psk)),
+                None => CredentialSecret::Absent,
+            },
+        }
+    }
 }
 
 /// Zeroizing credential material selected for one handshake attempt.
@@ -371,6 +417,224 @@ impl SelectedCredential {
         Zeroizing<[u8; CREDENTIAL_PSK_LENGTH]>,
     ) {
         (self.id, self.generation, self.psk)
+    }
+}
+
+/// Exact identity and generation of the sole pending enrollment.
+///
+/// This is a checked reference, not an authorization capability. Every proof,
+/// activation, or abort operation revalidates it against the current immutable
+/// authority before using it.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct PendingCredentialRef {
+    id: CredentialId,
+    generation: CredentialGeneration,
+}
+
+impl PendingCredentialRef {
+    /// Construct an untrusted candidate reference for exact authority lookup.
+    pub const fn new(id: CredentialId, generation: CredentialGeneration) -> Self {
+        Self { id, generation }
+    }
+
+    /// Opaque pending credential identifier.
+    pub const fn id(self) -> CredentialId {
+        self.id
+    }
+
+    /// Exact pending generation that a proof must bind.
+    pub const fn generation(self) -> CredentialGeneration {
+        self.generation
+    }
+}
+
+/// Device-selected facts and secret for one new pending enrollment.
+///
+/// The pairing manager supplies already-decided device policy facts and fresh
+/// entropy. This owner deliberately implements neither `Clone`, `Copy`, nor
+/// `Debug`; rejection returns the exact owner so the caller may retry or drop
+/// it for zeroization.
+///
+/// ```compile_fail
+/// use reticulum_device_api_credentials::NewPendingCredential;
+/// fn require_clone<T: Clone>() {}
+/// require_clone::<NewPendingCredential>();
+/// ```
+///
+/// ```compile_fail
+/// use reticulum_device_api_credentials::NewPendingCredential;
+/// fn require_debug<T: core::fmt::Debug>() {}
+/// require_debug::<NewPendingCredential>();
+/// ```
+pub struct NewPendingCredential {
+    id: CredentialId,
+    principal: PrincipalId,
+    permissions: Permissions,
+    pairing_origin: PairingOrigin,
+    policy_version: AuthorizationPolicyVersion,
+    psk: Zeroizing<[u8; CREDENTIAL_PSK_LENGTH]>,
+}
+
+impl NewPendingCredential {
+    /// Own one caller-generated enrollment proposal.
+    ///
+    /// Canonical values, uniqueness, capacity, and the one-pending rule are
+    /// checked by [`CredentialAuthority::plan_add_pending`]. Generation and
+    /// audit revisions are never caller supplied; the authority allocates the
+    /// exact next revision itself. The PSK is accepted only as an existing
+    /// zeroizing owner so caller-side early returns cannot leave an unprotected
+    /// secret copy behind.
+    pub fn new(
+        id: CredentialId,
+        principal: PrincipalId,
+        permissions: Permissions,
+        pairing_origin: PairingOrigin,
+        policy_version: AuthorizationPolicyVersion,
+        psk: Zeroizing<[u8; CREDENTIAL_PSK_LENGTH]>,
+    ) -> Self {
+        Self {
+            id,
+            principal,
+            permissions,
+            pairing_origin,
+            policy_version,
+            psk,
+        }
+    }
+
+    /// Proposed never-before-retained credential identifier.
+    pub const fn id(&self) -> CredentialId {
+        self.id
+    }
+
+    /// Recover every proposal field, including the zeroizing PSK owner.
+    pub fn into_parts(
+        self,
+    ) -> (
+        CredentialId,
+        PrincipalId,
+        Permissions,
+        PairingOrigin,
+        AuthorizationPolicyVersion,
+        Zeroizing<[u8; CREDENTIAL_PSK_LENGTH]>,
+    ) {
+        (
+            self.id,
+            self.principal,
+            self.permissions,
+            self.pairing_origin,
+            self.policy_version,
+            self.psk,
+        )
+    }
+}
+
+/// Zeroizing PSK selected from the exact sole pending enrollment.
+///
+/// This owner deliberately implements neither `Clone`, `Copy`, nor `Debug`.
+/// It decides no proof transcript or HMAC construction.
+///
+/// ```compile_fail
+/// use reticulum_device_api_credentials::SelectedPendingCredential;
+/// fn require_clone<T: Clone>() {}
+/// require_clone::<SelectedPendingCredential>();
+/// ```
+///
+/// ```compile_fail
+/// use reticulum_device_api_credentials::SelectedPendingCredential;
+/// fn require_debug<T: core::fmt::Debug>() {}
+/// require_debug::<SelectedPendingCredential>();
+/// ```
+pub struct SelectedPendingCredential {
+    pending: PendingCredentialRef,
+    psk: Zeroizing<[u8; CREDENTIAL_PSK_LENGTH]>,
+}
+
+impl SelectedPendingCredential {
+    /// Exact pending record selected for an external proof implementation.
+    pub const fn pending(&self) -> PendingCredentialRef {
+        self.pending
+    }
+
+    /// Consume the selection into its checked reference and zeroizing PSK.
+    pub fn into_parts(self) -> (PendingCredentialRef, Zeroizing<[u8; CREDENTIAL_PSK_LENGTH]>) {
+        (self.pending, self.psk)
+    }
+}
+
+/// The authority contains more than one pending enrollment and is ineligible
+/// for pairing lifecycle work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MultiplePendingCredentials;
+
+/// Exact pending proof material is unavailable.
+///
+/// Missing, non-pending, wrong-generation, and multiple-pending states share
+/// one result so this selection cannot become a credential-enumeration oracle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PendingCredentialUnavailable;
+
+/// Why a checked pairing lifecycle candidate could not be constructed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CredentialLifecycleFaultKind {
+    /// The global authority revision cannot advance without wrapping.
+    AuthorityRevisionExhausted,
+    /// No record slot remains for another lifetime credential ID.
+    CapacityExhausted,
+    /// The proposed all-zero credential ID is reserved.
+    ZeroCredentialId,
+    /// A retained record already owns the proposed credential ID.
+    CredentialIdAlreadyRetained,
+    /// The proposed all-zero principal is reserved.
+    ZeroPrincipal,
+    /// Authorization policy version zero is reserved.
+    ZeroPolicyVersion,
+    /// The proposed all-zero PSK is forbidden.
+    ZeroPsk,
+    /// A retained secret-bearing record already owns the proposed PSK.
+    DuplicatePsk,
+    /// One pending enrollment already occupies the lifecycle slot.
+    PendingAlreadyExists,
+    /// The authority contains multiple pending records and fails closed.
+    MultiplePendingCredentials,
+    /// The requested exact pending ID and generation are not current.
+    PendingCredentialUnavailable,
+    /// The internally built candidate failed the structural successor defense.
+    StructuralSuccessorRejected,
+}
+
+/// Rejected new-pending plan retaining the exact secret-bearing proposal.
+///
+/// This value deliberately implements no `Debug`; diagnostics use
+/// [`Self::kind`] without formatting or copying retained enrollment material.
+#[must_use = "a rejected pending enrollment must be recovered or explicitly dropped"]
+pub struct NewPendingCredentialFault {
+    kind: CredentialLifecycleFaultKind,
+    enrollment: NewPendingCredential,
+}
+
+impl NewPendingCredentialFault {
+    /// Non-secret rejection category.
+    pub const fn kind(&self) -> CredentialLifecycleFaultKind {
+        self.kind
+    }
+
+    /// Recover the exact rejected enrollment owner.
+    pub fn into_enrollment(self) -> NewPendingCredential {
+        self.enrollment
+    }
+}
+
+/// Rejected activation or abort lifecycle transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PendingCredentialTransitionFault {
+    kind: CredentialLifecycleFaultKind,
+}
+
+impl PendingCredentialTransitionFault {
+    /// Non-secret rejection category.
+    pub const fn kind(self) -> CredentialLifecycleFaultKind {
+        self.kind
     }
 }
 
@@ -706,9 +970,10 @@ impl<const CAPACITY: usize> CredentialSuccessorFault<CAPACITY> {
 /// One live-authority successor structurally validated as one global mutation.
 ///
 /// The plan borrows the current authority so it cannot be replaced while a
-/// future sole storage owner durably commits `candidate`. Calling
-/// [`Self::publish_after_commit`] is a storage-owner assertion that this
-/// durable commit and readback have completed successfully.
+/// sole storage owner durably commits `candidate`. Calling
+/// [`Self::publish_after_commit`] is a public caller assertion that this durable
+/// commit and readback have completed successfully; the type system cannot
+/// verify that physical fact or restrict the method to one downstream crate.
 #[must_use = "a validated credential successor must be durably committed or dropped"]
 pub struct PlannedCredentialSuccessor<'current, const CAPACITY: usize> {
     candidate: CredentialAuthority<CAPACITY>,
@@ -716,7 +981,7 @@ pub struct PlannedCredentialSuccessor<'current, const CAPACITY: usize> {
 }
 
 impl<const CAPACITY: usize> PlannedCredentialSuccessor<'_, CAPACITY> {
-    /// Borrow the complete candidate for a future canonical durable encoder.
+    /// Borrow the complete candidate for the canonical durable encoder.
     pub const fn candidate(&self) -> &CredentialAuthority<CAPACITY> {
         &self.candidate
     }
@@ -734,9 +999,420 @@ impl<const CAPACITY: usize> PlannedCredentialSuccessor<'_, CAPACITY> {
     /// Publish the candidate only after its durable commit and readback.
     ///
     /// The portable semantic crate cannot itself prove a physical flash commit;
-    /// only the future sole credential-store owner may call this transition.
+    /// this public method trusts its caller. Restricting that assertion to the
+    /// sole credential-store owner is a composition and review obligation, not
+    /// an unforgeable Rust capability.
     pub fn publish_after_commit(self) -> CredentialAuthority<CAPACITY> {
         self.candidate
+    }
+}
+
+/// Lifecycle operation authorized by a checked pairing candidate plan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PairingLifecycleTransition {
+    /// A fresh, never-retained ID becomes the sole `Pending` enrollment.
+    AddPending,
+    /// The exact sole `Pending` enrollment becomes `Active`.
+    ActivatePending,
+    /// The exact sole `Pending` enrollment becomes a PSK-free aborted tombstone.
+    AbortPending,
+}
+
+/// Opaque pairing-lifecycle successor authorized above the structural plan.
+///
+/// This distinct owner lets the sole credential-store integration accept only
+/// a lifecycle-authorized candidate. The typed composition path intentionally
+/// does not expose the candidate by shared reference; the supported product
+/// path selects pending proof material from the newly mounted, publishable
+/// authority after physical commit, readback, and predecessor retirement, and
+/// the repository source guard confines the unchecked bridges to the semantic
+/// authority and sole physical store. Erase-only inactive cleanup may remain.
+#[must_use = "a pairing lifecycle successor must be durably committed or dropped"]
+pub struct PlannedPairingLifecycleSuccessor<'current, const CAPACITY: usize> {
+    transition: PairingLifecycleTransition,
+    expected_pending: Option<ExpectedPendingCredential>,
+    plan: PlannedCredentialSuccessor<'current, CAPACITY>,
+}
+
+impl<const CAPACITY: usize> PlannedPairingLifecycleSuccessor<'_, CAPACITY> {
+    /// Authorized lifecycle operation represented by this candidate.
+    pub const fn transition(&self) -> PairingLifecycleTransition {
+        self.transition
+    }
+
+    /// Exact next revision of the unpublished candidate.
+    pub const fn candidate_revision(&self) -> AuthorityRevision {
+        self.plan.candidate.revision
+    }
+
+    /// Consume the authorization into the exact candidate for the sole store.
+    ///
+    /// The returned authority remains unpublished. Product composition must
+    /// give it directly to the sole durable store owner and must not select or
+    /// offer a pending PSK from it.
+    pub fn into_store_candidate(self) -> PairingLifecycleStoreCandidate<CAPACITY> {
+        PairingLifecycleStoreCandidate {
+            transition: self.transition,
+            expected_pending: self.expected_pending,
+            candidate: self.plan.into_unpublished_candidate(),
+        }
+    }
+}
+
+/// Opaque owned pairing candidate awaiting the sole durable store transition.
+///
+/// Keeping the lifecycle discriminator attached lets store composition expose
+/// a typed commit path instead of accepting an indistinguishable bare semantic
+/// authority. This owner intentionally provides no shared authority borrow and
+/// neither `Clone` nor `Debug`.
+///
+/// ```compile_fail
+/// use reticulum_device_api_credentials::PairingLifecycleStoreCandidate;
+/// fn require_clone<T: Clone>() {}
+/// require_clone::<PairingLifecycleStoreCandidate<16>>();
+/// ```
+///
+/// ```compile_fail
+/// use reticulum_device_api_credentials::PairingLifecycleStoreCandidate;
+/// fn require_debug<T: core::fmt::Debug>() {}
+/// require_debug::<PairingLifecycleStoreCandidate<16>>();
+/// ```
+#[must_use = "a pairing store candidate must be committed, reconciled, or dropped"]
+pub struct PairingLifecycleStoreCandidate<const CAPACITY: usize> {
+    transition: PairingLifecycleTransition,
+    expected_pending: Option<ExpectedPendingCredential>,
+    candidate: CredentialAuthority<CAPACITY>,
+}
+
+struct ExpectedPendingCredential {
+    pending: PendingCredentialRef,
+    record: CredentialRecord,
+}
+
+impl ExpectedPendingCredential {
+    fn from_record(record: &CredentialRecord) -> Self {
+        Self {
+            pending: PendingCredentialRef::new(record.id, record.generation),
+            record: record.duplicate_for_candidate(),
+        }
+    }
+
+    fn exactly_matches(&self, record: &CredentialRecord) -> bool {
+        self.pending == PendingCredentialRef::new(record.id, record.generation)
+            && self.record.exactly_matches(record)
+    }
+}
+
+/// Lifecycle-candidate preflight rejection category.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PairingLifecycleStoreCandidateFaultKind {
+    /// The candidate is not one exact structural successor.
+    Structural(CredentialSuccessorFaultKind),
+    /// The structural successor does not implement its declared pairing
+    /// lifecycle transition against this predecessor.
+    TransitionMismatch,
+}
+
+/// Preflight rejection retaining the opaque lifecycle candidate.
+///
+/// This value deliberately implements no `Debug`; diagnostics use
+/// [`Self::kind`] without formatting credential state. Recovering the rejected
+/// owner yields another [`PairingLifecycleStoreCandidate`], never a bare
+/// authority, so callers cannot accidentally discard its lifecycle
+/// authorization while handling a pre-I/O semantic failure.
+#[must_use = "a rejected pairing store candidate must be recovered or explicitly dropped"]
+pub struct PairingLifecycleStoreCandidateFault<const CAPACITY: usize> {
+    kind: PairingLifecycleStoreCandidateFaultKind,
+    candidate: PairingLifecycleStoreCandidate<CAPACITY>,
+}
+
+impl<const CAPACITY: usize> PairingLifecycleStoreCandidateFault<CAPACITY> {
+    /// Non-secret lifecycle-candidate rejection category.
+    pub const fn kind(&self) -> PairingLifecycleStoreCandidateFaultKind {
+        self.kind
+    }
+
+    /// Recover the exact opaque lifecycle candidate for retry or disposal.
+    pub fn into_candidate(self) -> PairingLifecycleStoreCandidate<CAPACITY> {
+        self.candidate
+    }
+}
+
+impl<const CAPACITY: usize> PairingLifecycleStoreCandidate<CAPACITY> {
+    /// Authorized lifecycle operation retained with this candidate.
+    pub const fn transition(&self) -> PairingLifecycleTransition {
+        self.transition
+    }
+
+    /// Exact unpublished revision awaiting durable store commit.
+    pub const fn revision(&self) -> AuthorityRevision {
+        self.candidate.revision
+    }
+
+    /// Preflight this lifecycle candidate against a live authority.
+    ///
+    /// Generic successor validation runs first. A structurally valid candidate
+    /// must then implement the exact Add, Activate, or Abort delta named by its
+    /// lifecycle discriminator. Both failure paths retain the discriminator and
+    /// complete secret owner without reconstructing a bare candidate.
+    #[allow(
+        clippy::result_large_err,
+        reason = "allocation-free rejection must retain the opaque candidate and its exact zeroizing source binding"
+    )]
+    pub fn validate_against(
+        self,
+        current: &CredentialAuthority<CAPACITY>,
+    ) -> Result<Self, PairingLifecycleStoreCandidateFault<CAPACITY>> {
+        let Self {
+            transition,
+            expected_pending,
+            candidate,
+        } = self;
+        match current.plan_successor(candidate) {
+            Ok(plan)
+                if pairing_transition_matches(
+                    transition,
+                    expected_pending.as_ref(),
+                    current,
+                    plan.candidate(),
+                ) =>
+            {
+                Ok(Self {
+                    transition,
+                    expected_pending,
+                    candidate: plan.into_unpublished_candidate(),
+                })
+            }
+            Ok(plan) => Err(PairingLifecycleStoreCandidateFault {
+                kind: PairingLifecycleStoreCandidateFaultKind::TransitionMismatch,
+                candidate: Self {
+                    transition,
+                    expected_pending,
+                    candidate: plan.into_unpublished_candidate(),
+                },
+            }),
+            Err(fault) => {
+                let kind = PairingLifecycleStoreCandidateFaultKind::Structural(fault.kind());
+                Err(PairingLifecycleStoreCandidateFault {
+                    kind,
+                    candidate: Self {
+                        transition,
+                        expected_pending,
+                        candidate: fault.into_candidate(),
+                    },
+                })
+            }
+        }
+    }
+
+    fn into_unpublished_authority_internal(self) -> CredentialAuthority<CAPACITY> {
+        self.candidate
+    }
+}
+
+/// Narrow integration bridges reserved for the sole credential-store crate.
+///
+/// These extension traits are public only because Rust crates are separate
+/// compilation units. They are hidden from generated documentation, sealed
+/// against external implementations, and deliberately use conspicuous
+/// `for_store_unchecked` names. Product composition must not import them.
+#[doc(hidden)]
+pub mod credential_store_integration {
+    use super::{
+        CredentialAuthority, PairingLifecycleStoreCandidate, PendingCredentialRef,
+        PendingCredentialUnavailable, SelectedPendingCredential,
+    };
+
+    mod sealed {
+        pub trait Sealed {}
+
+        impl<const CAPACITY: usize> Sealed for super::CredentialAuthority<CAPACITY> {}
+        impl<const CAPACITY: usize> Sealed for super::PairingLifecycleStoreCandidate<CAPACITY> {}
+    }
+
+    /// Store-only extraction of a preflighted unpublished lifecycle authority.
+    pub trait PairingLifecycleStoreCandidateIntegration<const CAPACITY: usize>:
+        sealed::Sealed
+    {
+        /// Consume the opaque owner after store preflight.
+        fn into_unpublished_authority_for_store_unchecked(self) -> CredentialAuthority<CAPACITY>;
+    }
+
+    impl<const CAPACITY: usize> PairingLifecycleStoreCandidateIntegration<CAPACITY>
+        for PairingLifecycleStoreCandidate<CAPACITY>
+    {
+        fn into_unpublished_authority_for_store_unchecked(self) -> CredentialAuthority<CAPACITY> {
+            self.into_unpublished_authority_internal()
+        }
+    }
+
+    /// Store-only pending-secret selection after publication eligibility.
+    pub trait CredentialAuthorityStoreIntegration<const CAPACITY: usize>: sealed::Sealed {
+        /// Select proof material only after the store has established that this
+        /// bare authority is the publishable mounted successor.
+        fn select_pending_for_proof_for_store_unchecked(
+            &self,
+            pending: PendingCredentialRef,
+        ) -> Result<SelectedPendingCredential, PendingCredentialUnavailable>;
+    }
+
+    impl<const CAPACITY: usize> CredentialAuthorityStoreIntegration<CAPACITY>
+        for CredentialAuthority<CAPACITY>
+    {
+        fn select_pending_for_proof_for_store_unchecked(
+            &self,
+            pending: PendingCredentialRef,
+        ) -> Result<SelectedPendingCredential, PendingCredentialUnavailable> {
+            self.select_pending_for_proof_internal(pending)
+        }
+    }
+}
+
+fn pairing_transition_matches<const CAPACITY: usize>(
+    transition: PairingLifecycleTransition,
+    expected_pending: Option<&ExpectedPendingCredential>,
+    current: &CredentialAuthority<CAPACITY>,
+    candidate: &CredentialAuthority<CAPACITY>,
+) -> bool {
+    match transition {
+        PairingLifecycleTransition::AddPending => {
+            expected_pending.is_none() && add_pending_delta_matches(current, candidate)
+        }
+        PairingLifecycleTransition::ActivatePending => {
+            activate_pending_delta_matches(expected_pending, current, candidate)
+        }
+        PairingLifecycleTransition::AbortPending => {
+            abort_pending_delta_matches(expected_pending, current, candidate)
+        }
+    }
+}
+
+fn add_pending_delta_matches<const CAPACITY: usize>(
+    current: &CredentialAuthority<CAPACITY>,
+    candidate: &CredentialAuthority<CAPACITY>,
+) -> bool {
+    if !matches!(current.sole_pending_record(), Ok(None))
+        || current.count.checked_add(1) != Some(candidate.count)
+    {
+        return false;
+    }
+    let pending = match candidate.sole_pending_record() {
+        Ok(Some(pending)) => pending,
+        Ok(None) | Err(_) => return false,
+    };
+    if current.retains_id(pending.id) {
+        return false;
+    }
+    current.records.iter().flatten().all(|record| {
+        candidate
+            .find_by_id(record.id)
+            .is_some_and(|next| record.exactly_matches(next))
+    })
+}
+
+fn activate_pending_delta_matches<const CAPACITY: usize>(
+    expected_pending: Option<&ExpectedPendingCredential>,
+    current: &CredentialAuthority<CAPACITY>,
+    candidate: &CredentialAuthority<CAPACITY>,
+) -> bool {
+    let pending = match current.sole_pending_record() {
+        Ok(Some(pending)) => pending,
+        Ok(None) | Err(_) => return false,
+    };
+    if !expected_pending.is_some_and(|expected| expected.exactly_matches(pending))
+        || !matches!(candidate.sole_pending_record(), Ok(None))
+        || candidate.count != current.count
+    {
+        return false;
+    }
+    let Some(activated) = candidate.find_by_id(pending.id) else {
+        return false;
+    };
+    active_transition_record_matches(pending, activated)
+        && all_other_records_match(current, candidate, pending.id)
+}
+
+fn abort_pending_delta_matches<const CAPACITY: usize>(
+    expected_pending: Option<&ExpectedPendingCredential>,
+    current: &CredentialAuthority<CAPACITY>,
+    candidate: &CredentialAuthority<CAPACITY>,
+) -> bool {
+    let pending = match current.sole_pending_record() {
+        Ok(Some(pending)) => pending,
+        Ok(None) | Err(_) => return false,
+    };
+    if !expected_pending.is_some_and(|expected| expected.exactly_matches(pending))
+        || !matches!(candidate.sole_pending_record(), Ok(None))
+        || candidate.count != current.count
+    {
+        return false;
+    }
+    let Some(aborted) = candidate.find_by_id(pending.id) else {
+        return false;
+    };
+    aborted_transition_record_matches(pending, aborted)
+        && all_other_records_match(current, candidate, pending.id)
+}
+
+fn active_transition_record_matches(pending: &CredentialRecord, active: &CredentialRecord) -> bool {
+    pending.id == active.id
+        && pending.status == CredentialStatus::Pending
+        && active.status == CredentialStatus::Active
+        && active.generation.get() > pending.generation.get()
+        && pending.principal == active.principal
+        && pending.permissions == active.permissions
+        && audit_immutable_facts_match(pending.audit, active.audit)
+        && active.audit.modified_revision.get() > pending.audit.modified_revision.get()
+        && pending.revocation_reason.is_none()
+        && active.revocation_reason.is_none()
+        && secret_matches(pending, active)
+}
+
+fn aborted_transition_record_matches(
+    pending: &CredentialRecord,
+    aborted: &CredentialRecord,
+) -> bool {
+    pending.id == aborted.id
+        && pending.status == CredentialStatus::Pending
+        && aborted.status == CredentialStatus::Revoked
+        && aborted.generation.get() > pending.generation.get()
+        && pending.principal == aborted.principal
+        && aborted.permissions == Permissions::NONE
+        && audit_immutable_facts_match(pending.audit, aborted.audit)
+        && aborted.audit.modified_revision.get() > pending.audit.modified_revision.get()
+        && pending.revocation_reason.is_none()
+        && aborted.revocation_reason == Some(RevocationReason::PairingAborted)
+        && aborted.psk().is_none()
+}
+
+fn audit_immutable_facts_match(current: CredentialAudit, candidate: CredentialAudit) -> bool {
+    current.created_revision == candidate.created_revision
+        && current.pairing_origin == candidate.pairing_origin
+        && current.policy_version == candidate.policy_version
+}
+
+fn all_other_records_match<const CAPACITY: usize>(
+    current: &CredentialAuthority<CAPACITY>,
+    candidate: &CredentialAuthority<CAPACITY>,
+    target: CredentialId,
+) -> bool {
+    current
+        .records
+        .iter()
+        .flatten()
+        .filter(|record| record.id != target)
+        .all(|record| {
+            candidate
+                .find_by_id(record.id)
+                .is_some_and(|next| record.exactly_matches(next))
+        })
+}
+
+fn secret_matches(left: &CredentialRecord, right: &CredentialRecord) -> bool {
+    match (left.psk(), right.psk()) {
+        (Some(left), Some(right)) => bool::from(left.ct_eq(right)),
+        (None, None) => true,
+        _ => false,
     }
 }
 
@@ -768,6 +1444,213 @@ impl<const CAPACITY: usize> CredentialAuthority<CAPACITY> {
             .count()
     }
 
+    /// Test whether any current or tombstoned record retains this ID.
+    ///
+    /// Every fixed table slot is inspected with a constant-time ID comparison.
+    /// This is intended for fresh-ID collision rejection; a revoked ID remains
+    /// retained and can never be reused.
+    pub fn retains_id(&self, id: CredentialId) -> bool {
+        let mut retained = Choice::from(0);
+        for record in self.records.iter().flatten() {
+            retained |= record.id.as_bytes().ct_eq(id.as_bytes());
+        }
+        bool::from(retained)
+    }
+
+    /// Return the exact sole pending enrollment, if one exists.
+    ///
+    /// More than one pending record is a fail-closed authority state rather
+    /// than an arbitrary selection.
+    pub fn pending_credential(
+        &self,
+    ) -> Result<Option<PendingCredentialRef>, MultiplePendingCredentials> {
+        self.sole_pending_record().map(|record| {
+            record.map(|record| PendingCredentialRef {
+                id: record.id,
+                generation: record.generation,
+            })
+        })
+    }
+
+    fn select_pending_for_proof_internal(
+        &self,
+        pending: PendingCredentialRef,
+    ) -> Result<SelectedPendingCredential, PendingCredentialUnavailable> {
+        let mut selected = 0_u64;
+        let mut found = Choice::from(0);
+        let mut pending_count = 0_usize;
+        for (index, slot) in self.records.iter().enumerate() {
+            let Some(record) = slot else {
+                continue;
+            };
+            let is_pending = Choice::from(u8::from(record.status == CredentialStatus::Pending));
+            pending_count += usize::from(bool::from(is_pending));
+            let id_matches = record.id.as_bytes().ct_eq(pending.id.as_bytes());
+            let generation_matches = record.generation.get().ct_eq(&pending.generation.get());
+            let choose = is_pending & id_matches & generation_matches & !found;
+            let index =
+                u64::try_from(index).expect("a fixed credential table index always fits in u64");
+            selected = u64::conditional_select(&selected, &index, choose);
+            found |= is_pending & id_matches & generation_matches;
+        }
+        if pending_count != 1 || !bool::from(found) {
+            return Err(PendingCredentialUnavailable);
+        }
+        let selected =
+            usize::try_from(selected).expect("selected pending index originated as usize");
+        let record = self.records[selected]
+            .as_ref()
+            .ok_or(PendingCredentialUnavailable)?;
+        let psk = record.psk().ok_or(PendingCredentialUnavailable)?;
+        Ok(SelectedPendingCredential {
+            pending,
+            psk: copy_zeroizing_psk(psk),
+        })
+    }
+
+    /// Construct the exact next complete authority with one new `Pending`.
+    ///
+    /// Existing records, including every private PSK, are duplicated only
+    /// inside this crate into the unpublished complete candidate. The caller
+    /// supplies trusted device policy facts and fresh entropy; this method
+    /// allocates the generation and both audit revisions from the exact next
+    /// authority revision, enforces the lifetime-ID and one-pending rules, and
+    /// finally routes the candidate through [`Self::plan_successor`].
+    pub fn plan_add_pending(
+        &self,
+        enrollment: NewPendingCredential,
+    ) -> Result<PlannedPairingLifecycleSuccessor<'_, CAPACITY>, NewPendingCredentialFault> {
+        match self.sole_pending_record() {
+            Ok(Some(_)) => {
+                return Err(new_pending_fault(
+                    CredentialLifecycleFaultKind::PendingAlreadyExists,
+                    enrollment,
+                ));
+            }
+            Err(_) => {
+                return Err(new_pending_fault(
+                    CredentialLifecycleFaultKind::MultiplePendingCredentials,
+                    enrollment,
+                ));
+            }
+            Ok(None) => {}
+        }
+        let next_revision = match self.revision.next() {
+            Ok(revision) => revision,
+            Err(_) => {
+                return Err(new_pending_fault(
+                    CredentialLifecycleFaultKind::AuthorityRevisionExhausted,
+                    enrollment,
+                ));
+            }
+        };
+        if self.count == CAPACITY {
+            return Err(new_pending_fault(
+                CredentialLifecycleFaultKind::CapacityExhausted,
+                enrollment,
+            ));
+        }
+        if enrollment.id.as_bytes().iter().all(|byte| *byte == 0) {
+            return Err(new_pending_fault(
+                CredentialLifecycleFaultKind::ZeroCredentialId,
+                enrollment,
+            ));
+        }
+        if self.retains_id(enrollment.id) {
+            return Err(new_pending_fault(
+                CredentialLifecycleFaultKind::CredentialIdAlreadyRetained,
+                enrollment,
+            ));
+        }
+        if enrollment.principal.0.iter().all(|byte| *byte == 0) {
+            return Err(new_pending_fault(
+                CredentialLifecycleFaultKind::ZeroPrincipal,
+                enrollment,
+            ));
+        }
+        if enrollment.policy_version.get() == 0 {
+            return Err(new_pending_fault(
+                CredentialLifecycleFaultKind::ZeroPolicyVersion,
+                enrollment,
+            ));
+        }
+        if enrollment.psk.iter().all(|byte| *byte == 0) {
+            return Err(new_pending_fault(
+                CredentialLifecycleFaultKind::ZeroPsk,
+                enrollment,
+            ));
+        }
+        let mut duplicate_psk = Choice::from(0);
+        for record in self.records.iter().flatten() {
+            if let Some(psk) = record.psk() {
+                duplicate_psk |= psk.ct_eq(&*enrollment.psk);
+            }
+        }
+        if bool::from(duplicate_psk) {
+            return Err(new_pending_fault(
+                CredentialLifecycleFaultKind::DuplicatePsk,
+                enrollment,
+            ));
+        }
+
+        let mut candidate = self.duplicate_with_revision(next_revision);
+        let target = candidate
+            .records
+            .iter_mut()
+            .find(|record| record.is_none())
+            .expect("capacity preflight proved one candidate slot is empty");
+        *target = Some(CredentialRecord::with_zeroizing_secret(
+            enrollment.id,
+            CredentialGeneration::new(next_revision.get()),
+            enrollment.principal,
+            enrollment.permissions,
+            CredentialStatus::Pending,
+            CredentialAudit::new(
+                next_revision,
+                next_revision,
+                enrollment.pairing_origin,
+                enrollment.policy_version,
+            ),
+            copy_zeroizing_psk(&enrollment.psk),
+        ));
+        candidate.count += 1;
+
+        match self.plan_successor(candidate) {
+            Ok(plan) => Ok(PlannedPairingLifecycleSuccessor {
+                transition: PairingLifecycleTransition::AddPending,
+                expected_pending: None,
+                plan,
+            }),
+            Err(fault) => {
+                drop(fault);
+                Err(new_pending_fault(
+                    CredentialLifecycleFaultKind::StructuralSuccessorRejected,
+                    enrollment,
+                ))
+            }
+        }
+    }
+
+    /// Construct the exact next complete authority changing one `Pending` to
+    /// `Active` while preserving its PSK and all device-owned policy facts.
+    pub fn plan_activate_pending(
+        &self,
+        pending: PendingCredentialRef,
+    ) -> Result<PlannedPairingLifecycleSuccessor<'_, CAPACITY>, PendingCredentialTransitionFault>
+    {
+        self.plan_pending_transition(pending, PendingTransition::Activate)
+    }
+
+    /// Construct the exact next complete authority changing one `Pending` to
+    /// a PSK-free `PairingAborted` tombstone.
+    pub fn plan_abort_pending(
+        &self,
+        pending: PendingCredentialRef,
+    ) -> Result<PlannedPairingLifecycleSuccessor<'_, CAPACITY>, PendingCredentialTransitionFault>
+    {
+        self.plan_pending_transition(pending, PendingTransition::Abort)
+    }
+
     /// Validate one boot-built candidate as the sole next structural mutation.
     ///
     /// Boot replay may construct an authority directly with
@@ -775,8 +1658,9 @@ impl<const CAPACITY: usize> CredentialAuthority<CAPACITY> {
     /// this cross-snapshot check: the authority revision advances exactly once,
     /// exactly one record changes, every change receives that fresh revision as
     /// its generation, and no retained ID silently disappears. This does not
-    /// authorize lifecycle or policy changes; the future pairing/admin owner
-    /// must separately approve transitions before constructing the candidate.
+    /// authorize lifecycle or policy changes. Pairing code must use the checked
+    /// lifecycle planners in this crate; future unrelated administration needs
+    /// its own policy owner before constructing a generic candidate.
     /// The returned plan borrows this authority until the candidate is either
     /// durably committed and published or dropped.
     pub fn plan_successor(
@@ -898,7 +1782,7 @@ impl<const CAPACITY: usize> CredentialAuthority<CAPACITY> {
         Ok(SelectedCredential {
             id: record.id,
             generation: record.generation,
-            psk: Zeroizing::new(*psk),
+            psk: copy_zeroizing_psk(psk),
         })
     }
 
@@ -961,6 +1845,133 @@ impl<const CAPACITY: usize> CredentialAuthority<CAPACITY> {
     fn find_by_id(&self, id: CredentialId) -> Option<&CredentialRecord> {
         self.records.iter().flatten().find(|record| record.id == id)
     }
+
+    fn sole_pending_record(&self) -> Result<Option<&CredentialRecord>, MultiplePendingCredentials> {
+        let mut pending = None;
+        for record in self.records.iter().flatten() {
+            if record.status != CredentialStatus::Pending {
+                continue;
+            }
+            if pending.is_some() {
+                return Err(MultiplePendingCredentials);
+            }
+            pending = Some(record);
+        }
+        Ok(pending)
+    }
+
+    fn duplicate_with_revision(&self, revision: AuthorityRevision) -> Self {
+        Self {
+            revision,
+            records: core::array::from_fn(|index| {
+                self.records[index]
+                    .as_ref()
+                    .map(CredentialRecord::duplicate_for_candidate)
+            }),
+            count: self.count,
+        }
+    }
+
+    fn plan_pending_transition(
+        &self,
+        pending: PendingCredentialRef,
+        transition: PendingTransition,
+    ) -> Result<PlannedPairingLifecycleSuccessor<'_, CAPACITY>, PendingCredentialTransitionFault>
+    {
+        let current = match self.sole_pending_record() {
+            Ok(Some(record))
+                if record.id == pending.id && record.generation == pending.generation =>
+            {
+                record
+            }
+            Ok(_) => {
+                return Err(pending_transition_fault(
+                    CredentialLifecycleFaultKind::PendingCredentialUnavailable,
+                ));
+            }
+            Err(_) => {
+                return Err(pending_transition_fault(
+                    CredentialLifecycleFaultKind::MultiplePendingCredentials,
+                ));
+            }
+        };
+        let next_revision = self.revision.next().map_err(|_| {
+            pending_transition_fault(CredentialLifecycleFaultKind::AuthorityRevisionExhausted)
+        })?;
+        let replacement = match transition {
+            PendingTransition::Activate => CredentialRecord::with_zeroizing_secret(
+                current.id,
+                CredentialGeneration::new(next_revision.get()),
+                current.principal,
+                current.permissions,
+                CredentialStatus::Active,
+                CredentialAudit::new(
+                    current.audit.created_revision,
+                    next_revision,
+                    current.audit.pairing_origin,
+                    current.audit.policy_version,
+                ),
+                copy_zeroizing_psk(
+                    current
+                        .psk()
+                        .expect("a validated pending credential always owns one PSK"),
+                ),
+            ),
+            PendingTransition::Abort => CredentialRecord::revoked(
+                current.id,
+                CredentialGeneration::new(next_revision.get()),
+                current.principal,
+                CredentialAudit::new(
+                    current.audit.created_revision,
+                    next_revision,
+                    current.audit.pairing_origin,
+                    current.audit.policy_version,
+                ),
+                RevocationReason::PairingAborted,
+            ),
+        };
+
+        let mut candidate = self.duplicate_with_revision(next_revision);
+        let target = candidate
+            .records
+            .iter_mut()
+            .flatten()
+            .find(|record| record.id == pending.id)
+            .expect("the exact pending record originated in this authority");
+        *target = replacement;
+        self.plan_successor(candidate)
+            .map(|plan| PlannedPairingLifecycleSuccessor {
+                transition: match transition {
+                    PendingTransition::Activate => PairingLifecycleTransition::ActivatePending,
+                    PendingTransition::Abort => PairingLifecycleTransition::AbortPending,
+                },
+                expected_pending: Some(ExpectedPendingCredential::from_record(current)),
+                plan,
+            })
+            .map_err(|fault| {
+                drop(fault);
+                pending_transition_fault(CredentialLifecycleFaultKind::StructuralSuccessorRejected)
+            })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PendingTransition {
+    Activate,
+    Abort,
+}
+
+fn new_pending_fault(
+    kind: CredentialLifecycleFaultKind,
+    enrollment: NewPendingCredential,
+) -> NewPendingCredentialFault {
+    NewPendingCredentialFault { kind, enrollment }
+}
+
+const fn pending_transition_fault(
+    kind: CredentialLifecycleFaultKind,
+) -> PendingCredentialTransitionFault {
+    PendingCredentialTransitionFault { kind }
 }
 
 #[cfg(test)]

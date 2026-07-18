@@ -5,8 +5,9 @@ use embedded_storage::nor_flash::{
     check_erase, check_read, check_write,
 };
 use reticulum_device_api_credentials::{
-    AuthorityRevision, CredentialAuthority, CredentialSnapshotImage,
-    decode_e290_credential_snapshot,
+    AuthorityRevision, AuthorizationPolicyVersion, CredentialAuthority, CredentialGeneration,
+    CredentialId, CredentialSnapshotImage, NewPendingCredential, PairingLifecycleTransition,
+    PairingOrigin, PendingCredentialRef, Permissions, PrincipalId, decode_e290_credential_snapshot,
 };
 use std::vec;
 use std::vec::Vec;
@@ -223,20 +224,95 @@ fn bound(flash: FakeNor) -> BoundCredentialStore<FakeNor> {
     BoundCredentialStore::new(flash, binding())
 }
 
+struct ReadOnlyBound<'flash> {
+    backend: &'flash mut FakeNor,
+    binding: CredentialStoreBinding,
+}
+
+impl ErrorType for ReadOnlyBound<'_> {
+    type Error = FakeError;
+}
+
+impl ReadNorFlash for ReadOnlyBound<'_> {
+    const READ_SIZE: usize = FakeNor::READ_SIZE;
+
+    fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
+        self.backend.read(offset, bytes)
+    }
+
+    fn capacity(&self) -> usize {
+        self.backend.capacity()
+    }
+}
+
+impl BoundCredentialStoreReadAccess for ReadOnlyBound<'_> {
+    fn credential_store_binding(&self) -> CredentialStoreBinding {
+        self.binding
+    }
+}
+
+fn classify_read_only(
+    access: &mut BoundCredentialStore<FakeNor>,
+) -> Result<EmptyProvisionMediaClassification, CredentialStoreMountError<FakeError>> {
+    let binding = access.binding();
+    let mut read_only = ReadOnlyBound {
+        backend: access.backend_mut(),
+        binding,
+    };
+    classify_empty_provision_media(&mut read_only)
+}
+
 fn authority(revision: u64, created_revision: u64) -> CredentialAuthority<16> {
+    authority_with_status(revision, created_revision, 2)
+}
+
+fn pending_authority(revision: u64, created_revision: u64) -> CredentialAuthority<16> {
+    authority_with_status(revision, created_revision, 1)
+}
+
+fn new_pending(id_byte: u8, psk: [u8; 32]) -> NewPendingCredential {
+    NewPendingCredential::new(
+        CredentialId::new([id_byte; 16]),
+        PrincipalId([0x61; 16]),
+        Permissions::READ_SUBMISSION_STATUS,
+        PairingOrigin::UsbPhysicalPresence,
+        AuthorizationPolicyVersion::new(1),
+        Zeroizing::new(psk),
+    )
+}
+
+fn authority_with_status(
+    revision: u64,
+    created_revision: u64,
+    status: u8,
+) -> CredentialAuthority<16> {
+    authority_with_status_and_psk(
+        revision,
+        created_revision,
+        status,
+        0x40_u8.wrapping_add(revision as u8),
+    )
+}
+
+fn authority_with_status_and_psk(
+    revision: u64,
+    created_revision: u64,
+    status: u8,
+    psk_byte: u8,
+) -> CredentialAuthority<16> {
     let mut image = CredentialSnapshotImage::zeroed();
     let slot = &mut image.as_mut_bytes()[..CREDENTIAL_SNAPSHOT_SLOT_SIZE];
     slot[..16].fill(0x21);
     slot[16..24].copy_from_slice(&revision.to_le_bytes());
     slot[24..40].fill(0x31);
     slot[40..44].copy_from_slice(&0_u32.to_le_bytes());
-    slot[44] = 2;
+    slot[44] = status;
     slot[45] = 1;
     slot[47] = 1;
     slot[48..56].copy_from_slice(&created_revision.to_le_bytes());
     slot[56..64].copy_from_slice(&revision.to_le_bytes());
     slot[64..68].copy_from_slice(&1_u32.to_le_bytes());
-    slot[72..104].fill(0x40_u8.wrapping_add(revision as u8));
+    slot[72..104].fill(psk_byte);
     decode_e290_credential_snapshot(AuthorityRevision::new(revision), image)
         .unwrap_or_else(|fault| panic!("test authority was invalid: {fault:?}"))
 }
@@ -252,6 +328,23 @@ fn commit_revision_two() -> (MountedCredentialStore, BoundCredentialStore<FakeNo
     let mounted = commit_successor(mounted, &mut access, authority(2, 2))
         .unwrap_or_else(|_| panic!("successor failed"));
     (mounted, access)
+}
+
+fn commit_pending_revision_two() -> (
+    MountedCredentialStore,
+    BoundCredentialStore<FakeNor>,
+    PendingCredentialRef,
+) {
+    let (mounted, mut access) = provisioned();
+    let mounted = commit_successor(mounted, &mut access, pending_authority(2, 2))
+        .unwrap_or_else(|_| panic!("pending successor failed"));
+    let mounted = recover_once(mounted, &mut access)
+        .unwrap_or_else(|_| panic!("pending predecessor cleanup failed"));
+    (
+        mounted,
+        access,
+        PendingCredentialRef::new(CredentialId::new([0x21; 16]), CredentialGeneration::new(2)),
+    )
 }
 
 fn install_snapshot(
@@ -342,6 +435,70 @@ fn digest_formula_flushes_secret_buffer_and_matches_external_golden_vector() {
 }
 
 #[test]
+fn empty_provision_media_classification_is_read_only_and_separates_committed_state() {
+    let mut access = bound(FakeNor::erased());
+    let before = access.backend().bytes.clone();
+    assert_eq!(
+        classify_read_only(&mut access).unwrap_or_else(|_| panic!("erased classification failed")),
+        EmptyProvisionMediaClassification::ExactlyErased
+    );
+    assert_eq!(access.backend().bytes, before);
+    assert_eq!(access.backend().writes, 0);
+    assert_eq!(access.backend().erases, 0);
+
+    let _mounted =
+        provision_empty(&mut access).unwrap_or_else(|_| panic!("canonical empty provision failed"));
+    access.backend_mut().reset_counts();
+    let before = access.backend().bytes.clone();
+    assert_eq!(
+        classify_read_only(&mut access)
+            .unwrap_or_else(|_| panic!("committed classification failed")),
+        EmptyProvisionMediaClassification::CommittedEmptyRevision1
+    );
+    assert_eq!(access.backend().bytes, before);
+    assert_eq!(access.backend().writes, 0);
+    assert_eq!(access.backend().erases, 0);
+    let binding = access.binding();
+    let mounted = {
+        let mut read_only = ReadOnlyBound {
+            backend: access.backend_mut(),
+            binding,
+        };
+        mount(&mut read_only).unwrap_or_else(|_| panic!("read-only mount failed"))
+    };
+    assert_eq!(mounted.revision(), AuthorityRevision::new(1));
+    assert_eq!(access.backend().writes, 0);
+    assert_eq!(access.backend().erases, 0);
+
+    let mut access = bound(FakeNor::erased());
+    access.backend_mut().fail_read_after(0);
+    assert!(matches!(
+        classify_read_only(&mut access),
+        Err(CredentialStoreMountError::Backend(FakeError::Injected))
+    ));
+    assert_eq!(access.backend().writes, 0);
+    assert_eq!(access.backend().erases, 0);
+
+    let mut backend = FakeNor::erased();
+    let mut read_only = ReadOnlyBound {
+        backend: &mut backend,
+        binding: CredentialStoreBinding::new(
+            DEVICE,
+            ABSOLUTE_OFFSET + 1,
+            PARTITION_SIZE,
+            PHYSICAL_FORMAT_VERSION,
+        ),
+    };
+    assert!(matches!(
+        classify_empty_provision_media(&mut read_only),
+        Err(CredentialStoreMountError::Binding(
+            CredentialStoreBindingError::ReadAlignmentMismatch { .. }
+        ))
+    ));
+    assert_eq!((backend.reads, backend.writes, backend.erases), (0, 0, 0));
+}
+
+#[test]
 fn first_provision_requires_every_byte_erased_and_never_erases() {
     for offset in [
         0,
@@ -376,6 +533,25 @@ fn every_first_provision_byte_cut_and_lost_reply_resumes_without_erase() {
                 .backend_mut()
                 .fail_write_after(write_call, FaultKind::Partial(cut));
             assert!(provision_empty(&mut access).is_err());
+            access.backend_mut().reset_counts();
+            let before = access.backend().bytes.clone();
+            let expected = if write_call == 0 && cut == 0 {
+                EmptyProvisionMediaClassification::ExactlyErased
+            } else if write_call == 2 && cut == MARKER_SIZE {
+                EmptyProvisionMediaClassification::CommittedEmptyRevision1
+            } else {
+                EmptyProvisionMediaClassification::RecoverableInterrupted
+            };
+            assert_eq!(
+                classify_read_only(&mut access).unwrap_or_else(|_| {
+                    panic!("first provision write {write_call} cut {cut} did not classify")
+                }),
+                expected,
+                "first provision write {write_call} cut {cut} misclassified"
+            );
+            assert_eq!(access.backend().bytes, before);
+            assert_eq!(access.backend().writes, 0);
+            assert_eq!(access.backend().erases, 0);
             let mounted = recover_empty_provision(&mut access).unwrap_or_else(|_| {
                 panic!("first provision write {write_call} cut {cut} did not resume")
             });
@@ -389,6 +565,22 @@ fn every_first_provision_byte_cut_and_lost_reply_resumes_without_erase() {
             .backend_mut()
             .fail_write_after(write_call, FaultKind::LostReply);
         assert!(provision_empty(&mut access).is_err());
+        access.backend_mut().reset_counts();
+        let before = access.backend().bytes.clone();
+        let expected = if write_call == 2 {
+            EmptyProvisionMediaClassification::CommittedEmptyRevision1
+        } else {
+            EmptyProvisionMediaClassification::RecoverableInterrupted
+        };
+        assert_eq!(
+            classify_read_only(&mut access).unwrap_or_else(|_| {
+                panic!("first provision write {write_call} lost reply did not classify")
+            }),
+            expected
+        );
+        assert_eq!(access.backend().bytes, before);
+        assert_eq!(access.backend().writes, 0);
+        assert_eq!(access.backend().erases, 0);
         let mounted = recover_empty_provision(&mut access)
             .unwrap_or_else(|_| panic!("first provision write {write_call} lost reply failed"));
         assert_eq!(mounted.revision(), AuthorityRevision::new(1));
@@ -397,22 +589,86 @@ fn every_first_provision_byte_cut_and_lost_reply_resumes_without_erase() {
 }
 
 #[test]
+fn lost_final_empty_commit_reply_is_mounted_without_reprogramming() {
+    let mut access = bound(FakeNor::erased());
+    access
+        .backend_mut()
+        .fail_write_after(2, FaultKind::LostReply);
+    assert!(provision_empty(&mut access).is_err());
+
+    access.backend_mut().reset_counts();
+    assert_eq!(
+        classify_read_only(&mut access)
+            .unwrap_or_else(|_| panic!("complete empty snapshot did not classify")),
+        EmptyProvisionMediaClassification::CommittedEmptyRevision1
+    );
+    assert_eq!(access.backend().writes, 0);
+    assert_eq!(access.backend().erases, 0);
+
+    let mounted = recover_empty_provision(&mut access)
+        .unwrap_or_else(|_| panic!("complete empty snapshot did not mount"));
+    assert_eq!(mounted.revision(), AuthorityRevision::new(1));
+    assert_eq!(mounted.recovery(), CredentialStoreRecovery::Clean);
+    assert_eq!(access.backend().writes, 0);
+    assert_eq!(access.backend().erases, 0);
+}
+
+#[test]
 fn first_provision_recovery_rejects_off_trajectory_media_without_mutation() {
     for offset in [
         0,
         COMMIT_DIGEST_OFFSET,
+        COMMIT_MARKER_OFFSET,
         RETIREMENT_MARKER_OFFSET,
+        ERASED_TAIL_OFFSET,
         CredentialStoreSector::B.offset(),
+        PARTITION_SIZE - 1,
     ] {
         let mut flash = FakeNor::erased();
         flash.bytes[offset] = 0;
         let mut access = bound(flash);
+        let before = access.backend().bytes.clone();
+        assert_eq!(
+            classify_read_only(&mut access)
+                .unwrap_or_else(|_| panic!("off-trajectory classification failed")),
+            EmptyProvisionMediaClassification::NotRecoverable
+        );
+        assert_eq!(access.backend().bytes, before);
+        assert_eq!(access.backend().writes, 0);
+        assert_eq!(access.backend().erases, 0);
         assert!(matches!(
             recover_empty_provision(&mut access),
             Err(CredentialStoreMountError::Fault(
                 CredentialStoreFault::UnformattedNonErased
             ))
         ));
+        assert_eq!(access.backend().writes, 0);
+        assert_eq!(access.backend().erases, 0);
+    }
+}
+
+#[test]
+fn empty_provision_classifier_rejects_out_of_order_canonical_stages() {
+    let (_mounted, canonical_access) = provisioned();
+    let canonical = canonical_access.into_backend().bytes;
+
+    let mut digest_before_prefix = FakeNor::erased();
+    digest_before_prefix.bytes[COMMIT_DIGEST_OFFSET] = canonical[COMMIT_DIGEST_OFFSET];
+
+    let mut commit_before_digest = FakeNor::erased();
+    commit_before_digest.bytes[..SNAPSHOT_PREFIX_SIZE]
+        .copy_from_slice(&canonical[..SNAPSHOT_PREFIX_SIZE]);
+    commit_before_digest.bytes[COMMIT_MARKER_OFFSET] = canonical[COMMIT_MARKER_OFFSET];
+
+    for flash in [digest_before_prefix, commit_before_digest] {
+        let mut access = bound(flash);
+        let before = access.backend().bytes.clone();
+        assert_eq!(
+            classify_read_only(&mut access)
+                .unwrap_or_else(|_| panic!("out-of-order classification failed")),
+            EmptyProvisionMediaClassification::NotRecoverable
+        );
+        assert_eq!(access.backend().bytes, before);
         assert_eq!(access.backend().writes, 0);
         assert_eq!(access.backend().erases, 0);
     }
@@ -757,6 +1013,355 @@ fn publication_is_gated_until_mount_retirement_recovery_completes() {
         recover_once(mounted, &mut access).unwrap_or_else(|_| panic!("retirement recovery failed"));
     assert!(mounted.publishable_authority().is_some());
     assert!(mounted.into_authority().is_ok());
+}
+
+#[test]
+fn mounted_pending_secret_selection_requires_publishable_authority() {
+    let (_mounted, access) = provisioned();
+    let mut two_active = access.backend().clone();
+    let mut predecessor_digest = [0_u8; DIGEST_SIZE];
+    predecessor_digest
+        .copy_from_slice(&two_active.bytes[COMMIT_DIGEST_OFFSET..COMMIT_MARKER_OFFSET]);
+    install_snapshot(
+        &mut two_active,
+        CredentialStoreSector::B,
+        &pending_authority(2, 2),
+        1,
+        predecessor_digest,
+    );
+    let pending =
+        PendingCredentialRef::new(CredentialId::new([0x21; 16]), CredentialGeneration::new(2));
+    let mut access = bound(two_active);
+    let mounted = mount(&mut access).unwrap_or_else(|_| panic!("two active did not mount"));
+    assert!(mounted.publishable_authority().is_none());
+    assert!(mounted.select_pending_for_proof(pending).is_err());
+
+    let mounted = recover_once(mounted, &mut access)
+        .unwrap_or_else(|_| panic!("predecessor retirement failed"));
+    assert!(mounted.publishable_authority().is_some());
+    let selected = mounted
+        .select_pending_for_proof(pending)
+        .unwrap_or_else(|_| panic!("publishable pending secret unavailable"));
+    let (selected_pending, psk) = selected.into_parts();
+    assert_eq!(selected_pending, pending);
+    assert_eq!(*psk, [0x42; 32]);
+}
+
+#[test]
+fn pairing_add_mounted_proof_activate_chain_is_durable_and_typed() {
+    let pending =
+        PendingCredentialRef::new(CredentialId::new([0x51; 16]), CredentialGeneration::new(2));
+    let pending_psk = [0x91; 32];
+    let (mounted, mut access) = provisioned();
+    let candidate = mounted
+        .publishable_authority()
+        .unwrap_or_else(|| panic!("freshly provisioned authority was not publishable"))
+        .plan_add_pending(new_pending(0x51, pending_psk))
+        .unwrap_or_else(|fault| panic!("valid pending enrollment rejected: {:?}", fault.kind()))
+        .into_store_candidate();
+    let committed = commit_pairing_lifecycle_successor(mounted, &mut access, candidate)
+        .unwrap_or_else(|_| panic!("pending enrollment did not commit"));
+    assert_eq!(
+        committed.transition(),
+        PairingLifecycleTransition::AddPending
+    );
+    assert_eq!(committed.store().revision(), AuthorityRevision::new(2));
+
+    let selected = committed
+        .store()
+        .select_pending_for_proof(pending)
+        .unwrap_or_else(|_| panic!("durably mounted pending proof secret was unavailable"));
+    let (selected_pending, selected_psk) = selected.into_parts();
+    assert_eq!(selected_pending, pending);
+    assert_eq!(*selected_psk, pending_psk);
+
+    let mounted = recover_once(committed.into_store(), &mut access)
+        .unwrap_or_else(|_| panic!("post-enrollment cleanup failed"));
+    let candidate = mounted
+        .publishable_authority()
+        .unwrap_or_else(|| panic!("clean pending authority was not publishable"))
+        .plan_activate_pending(pending)
+        .unwrap_or_else(|fault| panic!("proved pending activation rejected: {:?}", fault.kind()))
+        .into_store_candidate();
+    let committed = commit_pairing_lifecycle_successor(mounted, &mut access, candidate)
+        .unwrap_or_else(|_| panic!("pending activation did not commit"));
+    assert_eq!(
+        committed.transition(),
+        PairingLifecycleTransition::ActivatePending
+    );
+    assert_eq!(committed.store().revision(), AuthorityRevision::new(3));
+    let authority = committed
+        .store()
+        .publishable_authority()
+        .unwrap_or_else(|| panic!("activated authority was not publishable"));
+    assert_eq!(authority.active_count(), 1);
+    assert_eq!(authority.pending_credential(), Ok(None));
+    assert!(committed.store().select_pending_for_proof(pending).is_err());
+}
+
+#[test]
+fn pairing_add_abort_chain_removes_pending_proof_material() {
+    let pending =
+        PendingCredentialRef::new(CredentialId::new([0x52; 16]), CredentialGeneration::new(2));
+    let (mounted, mut access) = provisioned();
+    let candidate = mounted
+        .publishable_authority()
+        .unwrap_or_else(|| panic!("freshly provisioned authority was not publishable"))
+        .plan_add_pending(new_pending(0x52, [0x92; 32]))
+        .unwrap_or_else(|fault| panic!("valid pending enrollment rejected: {:?}", fault.kind()))
+        .into_store_candidate();
+    let committed = commit_pairing_lifecycle_successor(mounted, &mut access, candidate)
+        .unwrap_or_else(|_| panic!("pending enrollment did not commit"));
+    assert_eq!(
+        committed.transition(),
+        PairingLifecycleTransition::AddPending
+    );
+    assert!(committed.store().select_pending_for_proof(pending).is_ok());
+
+    let mounted = recover_once(committed.into_store(), &mut access)
+        .unwrap_or_else(|_| panic!("post-enrollment cleanup failed"));
+    let candidate = mounted
+        .publishable_authority()
+        .unwrap_or_else(|| panic!("clean pending authority was not publishable"))
+        .plan_abort_pending(pending)
+        .unwrap_or_else(|fault| panic!("pending abort rejected: {:?}", fault.kind()))
+        .into_store_candidate();
+    let committed = commit_pairing_lifecycle_successor(mounted, &mut access, candidate)
+        .unwrap_or_else(|_| panic!("pending abort did not commit"));
+    assert_eq!(
+        committed.transition(),
+        PairingLifecycleTransition::AbortPending
+    );
+    assert_eq!(committed.store().revision(), AuthorityRevision::new(3));
+    let authority = committed
+        .store()
+        .publishable_authority()
+        .unwrap_or_else(|| panic!("aborted authority was not publishable"));
+    assert_eq!(authority.record_count(), 1);
+    assert_eq!(authority.active_count(), 0);
+    assert_eq!(authority.pending_credential(), Ok(None));
+    assert!(committed.store().select_pending_for_proof(pending).is_err());
+}
+
+#[test]
+fn pairing_semantic_rejection_retains_opaque_candidate_for_typed_retry() {
+    let pending =
+        PendingCredentialRef::new(CredentialId::new([0x53; 16]), CredentialGeneration::new(2));
+    let retained_psk = [0x93; 32];
+    let (correct, mut correct_access) = provisioned();
+    let candidate = correct
+        .publishable_authority()
+        .unwrap_or_else(|| panic!("correct predecessor was not publishable"))
+        .plan_add_pending(new_pending(0x53, retained_psk))
+        .unwrap_or_else(|fault| panic!("valid pending enrollment rejected: {:?}", fault.kind()))
+        .into_store_candidate();
+
+    let (wrong, mut wrong_access) = commit_revision_two();
+    let wrong = recover_once(wrong, &mut wrong_access)
+        .unwrap_or_else(|_| panic!("wrong predecessor cleanup failed"));
+    wrong_access.backend_mut().reset_counts();
+    let error = match commit_pairing_lifecycle_successor(wrong, &mut wrong_access, candidate) {
+        Err(CommitPairingLifecycleSuccessorError::Semantic(error)) => error,
+        _ => panic!("wrong predecessor did not reject the typed candidate semantically"),
+    };
+    assert_eq!(error.transition(), PairingLifecycleTransition::AddPending);
+    assert_eq!(
+        error.kind(),
+        PairingLifecycleStoreCandidateFaultKind::Structural(
+            CredentialSuccessorFaultKind::AuthorityRevisionNotNext
+        )
+    );
+    assert_eq!(error.current_revision(), AuthorityRevision::new(2));
+    assert_eq!(error.candidate_revision(), AuthorityRevision::new(2));
+    assert_eq!(
+        (
+            wrong_access.backend().reads,
+            wrong_access.backend().writes,
+            wrong_access.backend().erases
+        ),
+        (0, 0, 0)
+    );
+    let (_wrong, candidate) = error.into_parts();
+
+    let committed = commit_pairing_lifecycle_successor(correct, &mut correct_access, candidate)
+        .unwrap_or_else(|_| panic!("opaque candidate retry against its predecessor failed"));
+    assert_eq!(
+        committed.transition(),
+        PairingLifecycleTransition::AddPending
+    );
+    let selected = committed
+        .store()
+        .select_pending_for_proof(pending)
+        .unwrap_or_else(|_| panic!("retry lost the retained pending secret owner"));
+    assert_eq!(*selected.into_parts().1, retained_psk);
+}
+
+#[test]
+fn pairing_transition_mismatch_is_io_free_and_retries_with_source_secret_intact() {
+    let source_psk = [0x42; 32];
+    let (correct, mut correct_access, pending) = commit_pending_revision_two();
+    let candidate = correct
+        .publishable_authority()
+        .unwrap_or_else(|| panic!("correct pending predecessor was not publishable"))
+        .plan_activate_pending(pending)
+        .unwrap_or_else(|fault| panic!("valid activation plan rejected: {:?}", fault.kind()))
+        .into_store_candidate();
+
+    let (wrong, mut wrong_access) = provisioned();
+    let wrong = commit_successor(
+        wrong,
+        &mut wrong_access,
+        authority_with_status_and_psk(2, 2, 1, 0x99),
+    )
+    .unwrap_or_else(|_| panic!("wrong pending predecessor did not commit"));
+    let wrong = recover_once(wrong, &mut wrong_access)
+        .unwrap_or_else(|_| panic!("wrong pending predecessor cleanup failed"));
+    wrong_access.backend_mut().reset_counts();
+
+    let error = match commit_pairing_lifecycle_successor(wrong, &mut wrong_access, candidate) {
+        Err(CommitPairingLifecycleSuccessorError::Semantic(error)) => error,
+        _ => panic!("cross-predecessor activation was not rejected semantically"),
+    };
+    assert_eq!(
+        error.kind(),
+        PairingLifecycleStoreCandidateFaultKind::TransitionMismatch
+    );
+    assert_eq!(
+        error.transition(),
+        PairingLifecycleTransition::ActivatePending
+    );
+    assert_eq!(error.current_revision(), AuthorityRevision::new(2));
+    assert_eq!(error.candidate_revision(), AuthorityRevision::new(3));
+    assert_eq!(
+        (
+            wrong_access.backend().reads,
+            wrong_access.backend().writes,
+            wrong_access.backend().erases
+        ),
+        (0, 0, 0)
+    );
+
+    let (wrong, candidate) = error.into_parts();
+    let wrong_selected = wrong
+        .select_pending_for_proof(pending)
+        .unwrap_or_else(|_| panic!("semantic rejection lost the unchanged mounted current"));
+    assert_eq!(*wrong_selected.into_parts().1, [0x99; 32]);
+
+    let committed = commit_pairing_lifecycle_successor(correct, &mut correct_access, candidate)
+        .unwrap_or_else(|_| panic!("candidate retry against original predecessor failed"));
+    let selected = committed
+        .store()
+        .publishable_authority()
+        .unwrap_or_else(|| panic!("retried activation was not publishable"))
+        .select_for_handshake(pending.id())
+        .unwrap_or_else(|_| panic!("retried activation lost its source secret"));
+    let (selected_id, selected_generation, selected_psk) = selected.into_parts();
+    assert_eq!(selected_id, pending.id());
+    assert_eq!(selected_generation, CredentialGeneration::new(3));
+    assert_eq!(*selected_psk, source_psk);
+}
+
+#[test]
+fn pairing_physical_reconcile_preserves_transition_provenance() {
+    let (mounted, mut access, pending_ref) = commit_pending_revision_two();
+    let candidate = mounted
+        .publishable_authority()
+        .unwrap_or_else(|| panic!("pending predecessor was not publishable"))
+        .plan_activate_pending(pending_ref)
+        .unwrap_or_else(|fault| panic!("pending activation rejected: {:?}", fault.kind()))
+        .into_store_candidate();
+    access.backend_mut().reset_counts();
+    access
+        .backend_mut()
+        .fail_write_after(0, FaultKind::LostReply);
+    let pending = match commit_pairing_lifecycle_successor(mounted, &mut access, candidate) {
+        Err(CommitPairingLifecycleSuccessorError::Physical(error)) => error.into_pending(),
+        _ => panic!("ambiguous write did not retain typed physical ownership"),
+    };
+    assert_eq!(
+        pending.transition(),
+        PairingLifecycleTransition::ActivatePending
+    );
+    assert!(pending.media_ambiguous());
+    let pending = match pending.cancel_before_io() {
+        Ok(_) => panic!("media-ambiguous lifecycle mutation was cancelable"),
+        Err(pending) => pending,
+    };
+
+    let committed = reconcile_pairing_lifecycle_successor(pending, &mut access)
+        .unwrap_or_else(|_| panic!("typed lifecycle reconciliation failed"));
+    assert_eq!(
+        committed.transition(),
+        PairingLifecycleTransition::ActivatePending
+    );
+    assert_eq!(committed.store().revision(), AuthorityRevision::new(3));
+    assert_eq!(
+        committed
+            .store()
+            .publishable_authority()
+            .unwrap_or_else(|| panic!("reconciled authority was not publishable"))
+            .pending_credential(),
+        Ok(None)
+    );
+}
+
+#[test]
+fn pairing_io_free_recovery_requirement_can_return_unchanged_mounted_owner() {
+    let pending_ref =
+        PendingCredentialRef::new(CredentialId::new([0x54; 16]), CredentialGeneration::new(2));
+    let (mounted, mut access) = provisioned();
+    let candidate = mounted
+        .publishable_authority()
+        .unwrap_or_else(|| panic!("freshly provisioned authority was not publishable"))
+        .plan_add_pending(new_pending(0x54, [0x94; 32]))
+        .unwrap_or_else(|fault| panic!("valid pending enrollment rejected: {:?}", fault.kind()))
+        .into_store_candidate();
+    let mounted = commit_pairing_lifecycle_successor(mounted, &mut access, candidate)
+        .unwrap_or_else(|_| panic!("pending enrollment did not commit"))
+        .into_store();
+    assert!(matches!(
+        mounted.recovery(),
+        CredentialStoreRecovery::CleanupInactive { .. }
+    ));
+    let candidate = mounted
+        .publishable_authority()
+        .unwrap_or_else(|| panic!("cleanup-only authority was not publishable"))
+        .plan_activate_pending(pending_ref)
+        .unwrap_or_else(|fault| panic!("pending activation rejected: {:?}", fault.kind()))
+        .into_store_candidate();
+
+    access.backend_mut().reset_counts();
+    let pending = match commit_pairing_lifecycle_successor(mounted, &mut access, candidate) {
+        Err(CommitPairingLifecycleSuccessorError::Physical(error)) => {
+            assert!(matches!(
+                error.error(),
+                CredentialStoreMountError::Fault(CredentialStoreFault::RecoveryRequired)
+            ));
+            error.into_pending()
+        }
+        _ => panic!("cleanup-required store admitted a lifecycle mutation"),
+    };
+    assert_eq!(
+        pending.transition(),
+        PairingLifecycleTransition::ActivatePending
+    );
+    assert!(!pending.media_ambiguous());
+    assert_eq!(
+        (
+            access.backend().reads,
+            access.backend().writes,
+            access.backend().erases
+        ),
+        (0, 0, 0)
+    );
+    let mounted = pending
+        .cancel_before_io()
+        .unwrap_or_else(|_| panic!("I/O-free lifecycle attempt was not cancelable"));
+    assert_eq!(mounted.revision(), AuthorityRevision::new(2));
+    assert!(matches!(
+        mounted.recovery(),
+        CredentialStoreRecovery::CleanupInactive { .. }
+    ));
 }
 
 #[test]

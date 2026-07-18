@@ -1,8 +1,9 @@
 # ADR 0007: Immutable device-API credential authority
 
-- **Status:** accepted for the portable authority snapshot and canonical image;
-  ADR 0009 physical store and E290 boot composition implemented; external
-  authority/session composition and pairing pending
+- **Status:** accepted for the portable authority snapshot, canonical image,
+  and lifecycle-specific pairing successors; ADR 0009 typed physical store path
+  and E290 boot mount composition implemented; external authority/session and
+  pairing-manager composition pending
 - **Date:** 2026-07-17
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0004](0004-sole-flash-coordinator.md) and
@@ -93,7 +94,7 @@ feature-disabled build to reinterpret persisted authority.
 
 ### Use one global, non-repeating revision space
 
-Every future credential mutation allocates the next nonzero global authority
+Every credential mutation allocates the next nonzero global authority
 revision without wrapping. A record's current generation is the revision at
 which its current status, secret or authorization policy became durable.
 Changing an existing record's permissions or PSK, activating it, or revoking it
@@ -109,18 +110,31 @@ once, exactly one record to change, every authorization-relevant change to use
 that fresh revision as its generation, and every retained ID to remain present
 or become a PSK-free tombstone. Immutable enrollment audit facts and revoked
 tombstones cannot change. The resulting opaque plan borrows the old authority
-and owns the candidate until a future sole store either drops it or asserts
+and owns the candidate until the sole store either drops it or asserts
 durable commit/readback with `publish_after_commit`. Rejected plans retain the
 complete candidate owner without debug-formatting its secrets.
+`publish_after_commit` is necessarily a public caller assertion because this
+portable crate cannot observe raw NOR or grant friend-crate visibility. The
+type system does not prove the physical commit or prevent other linked Rust
+code from calling it; sole-store use is a composition and review obligation.
 
-This is structural monotonicity, not lifecycle authorization. The planner does
-not by itself prove physical presence, possession of a staged PSK, administrator
-intent or an allowed status transition. Before persistence lands, the sole
-pairing/admin mutation owner must define and test whether a new record may begin
-`Active`, exactly what `Pending -> Active` may change, whether an active record
-may return to `Pending`, and whether principal or permission reassignment is
-allowed. It authorizes those semantics before constructing a candidate; the
-successor planner then enforces revision/generation integrity.
+This is structural monotonicity, not lifecycle authorization. The generic
+planner does not by itself prove physical presence, possession of a staged PSK,
+administrator intent or an allowed status transition. The implemented pairing
+planners authorize only adding the sole `Pending` record, activating that exact
+pending record, or replacing it with a PSK-free aborted tombstone before the
+generic successor defense runs. Unrelated administration still needs its own
+policy owner and lifecycle-specific planner rather than constructing an
+arbitrary candidate in product composition.
+
+`NewPendingCredential::new` consumes an existing `Zeroizing<[u8; 32]>` owner;
+the API never accepts a plain PSK array that could remain in caller storage on
+an early return. A lifecycle plan also carries a private zeroizing binding to
+the exact source pending reference and record facts. Physical-store preflight
+first proves generic structural succession and then proves the exact declared
+Add/Activate/Abort delta against its supplied mounted predecessor. Typed
+`Structural` and `TransitionMismatch` failures retain the complete opaque
+candidate for disposal or retry without exposing a bare authority.
 
 Safe rotation enrolls and proves a replacement credential under a new ID and
 generation before a later durable transaction revokes the old record. The two
@@ -252,19 +266,21 @@ never existed.
 
 ## Validation status
 
-- Complete: twelve focused unit tests, eight public successor regressions and
-  twelve compile-fail doctests cover selection, lease derivation, fail-closed
-  builder ownership, safe live successors and unpublished-candidate recovery,
-  same-generation escalation rejection, revoked tombstones, the golden
-  canonical snapshot layout and round trip, noncanonical image rejection,
-  generation/revision and permission vocabularies, image/secret/lease
-  ownership, non-escaping dispatch context, and bounded E290 RAM.
+- Complete: 23 unit tests, eight public successor regressions and 18 compile-
+  fail doctests cover active and exact-pending selection, lease derivation,
+  fail-closed builder ownership, safe live and lifecycle-specific successors,
+  opaque store-candidate preflight, unpublished-candidate recovery, lifecycle
+  conflicts, same-generation escalation rejection, revoked tombstones, the
+  golden canonical snapshot layout and round trip, noncanonical image
+  rejection, generation/revision and permission vocabularies, image/secret/
+  lease ownership, non-escaping dispatch context, and bounded E290 RAM.
 - Complete: the session suite contains twelve tests, including one direct
   authority-to-adapter request/reply path with exact durable provenance and one revoke-after-admission
   authority-revalidation rejection. Composed handoff/no-fallback proof remains.
 - Complete in ADR 0009's portable store: two-sector commit/retire envelope,
-  operation-scoped binding, ambiguous mutation reconciliation, explicit
-  erased-only provisioning recovery, and exhaustive fake-NOR cut/error tests.
+  operation-scoped binding, typed lifecycle commit/reconciliation, mounted-
+  store pending selection, four-way interrupted-initialization classification,
+  explicit no-erase provisioning recovery, and 32 fake-NOR cut/error tests.
 - Complete outside this semantic crate: E290 exact-binding boot mount/recovery,
   retained coordinator ownership, no auto-provisioning, and credential-domain
   failure isolation pass host and target build checks.
