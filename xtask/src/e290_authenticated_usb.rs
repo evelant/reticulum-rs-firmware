@@ -2,9 +2,10 @@
 
 use std::{
     fmt::Write as _,
+    fs::OpenOptions,
     io::{self, Read, Write},
     num::NonZeroU32,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::ExitCode,
     thread,
     time::{Duration, Instant},
@@ -23,6 +24,7 @@ use reticulum_device_api_session::{
     ClientRequestFlight, ClientSession, DeviceId,
 };
 use serialport::ClearBuffer;
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::e290_pairing_live::load_activated_credential;
@@ -39,6 +41,10 @@ const READ_BUFFER_CAPACITY: usize = 1_024;
 enum Command {
     SystemCapabilities,
     IdentitySummary,
+    RnsInboxStatus,
+    RnsInboxPeek {
+        output: PathBuf,
+    },
     SubmissionStatus {
         id: SubmissionId,
     },
@@ -58,6 +64,8 @@ enum Command {
 enum CommandKind {
     SystemCapabilities,
     IdentitySummary,
+    RnsInboxStatus,
+    RnsInboxPeek,
     SubmissionStatus,
     SubmitRnsData,
     SubmitAndWait,
@@ -417,7 +425,7 @@ fn format_one_shot_response(
     match (command, response) {
         (Command::SystemCapabilities, DeviceResponse::SystemCapabilities(capabilities)) => {
             Ok(format!(
-                "command=system-capabilities outcome=ok device_id={} session_id={} api={}.{} packet_output={} direct_radio_tx={} experimental_submit_rns_data={} max_message_bytes={} max_body_bytes={} max_submit_rns_data_payload_bytes={}",
+                "command=system-capabilities outcome=ok device_id={} session_id={} api={}.{} packet_output={} direct_radio_tx={} experimental_submit_rns_data={} experimental_rns_inbox={} max_message_bytes={} max_body_bytes={} max_submit_rns_data_payload_bytes={} max_rns_inbox_payload_bytes={}",
                 hex(device_id),
                 hex(session_id),
                 capabilities.api_version().major,
@@ -425,9 +433,11 @@ fn format_one_shot_response(
                 capabilities.packet_output(),
                 capabilities.direct_radio_tx().wire_code(),
                 capabilities.experimental_submit_rns_data(),
+                capabilities.experimental_rns_inbox().wire_code(),
                 capabilities.max_message_bytes(),
                 capabilities.max_body_bytes(),
                 capabilities.max_submit_rns_data_payload_bytes(),
+                capabilities.max_rns_inbox_payload_bytes(),
             ))
         }
         (Command::IdentitySummary, DeviceResponse::IdentitySummary(summary)) => Ok(format!(
@@ -436,6 +446,34 @@ fn format_one_shot_response(
             hex(session_id),
             hex(&summary.primary_destination().0),
         )),
+        (Command::RnsInboxStatus, DeviceResponse::RnsInboxStatus(status)) => Ok(format!(
+            "command=rns-inbox-status outcome=ok device_id={} session_id={} depth={} capacity={} dropped={} max={} durable={}",
+            hex(device_id),
+            hex(session_id),
+            status.depth,
+            status.capacity,
+            status.dropped_since_boot,
+            status.max_payload_bytes,
+            status.durable,
+        )),
+        (Command::RnsInboxPeek { output }, DeviceResponse::RnsInboxPeek(item)) => {
+            let payload_sha256 = write_rns_inbox_payload(output, item.payload())?;
+            Ok(format!(
+                "command=rns-inbox-peek outcome=ok device_id={} session_id={} item_id={} destination={} length={} sha256={} output={}",
+                hex(device_id),
+                hex(session_id),
+                item.id(),
+                hex(&item.destination().0),
+                item.payload_len(),
+                hex(&payload_sha256),
+                output.display(),
+            ))
+        }
+        (Command::RnsInboxPeek { .. }, DeviceResponse::Error(error))
+            if error.code == reticulum_device_api::ApiErrorCode::NotFound =>
+        {
+            Err("RNS inbox is empty (NotFound); no output file was created".to_owned())
+        }
         (Command::SubmissionStatus { id }, DeviceResponse::SubmissionStatus(status)) => {
             if status.id != *id {
                 return Err(format!(
@@ -471,6 +509,8 @@ fn command_request(command: &Command) -> DeviceRequest<'_> {
     match command {
         Command::SystemCapabilities => DeviceRequest::SystemCapabilities,
         Command::IdentitySummary => DeviceRequest::IdentitySummary,
+        Command::RnsInboxStatus => DeviceRequest::RnsInboxStatus,
+        Command::RnsInboxPeek { .. } => DeviceRequest::RnsInboxPeek,
         Command::SubmissionStatus { id } => DeviceRequest::SubmissionStatus { id: *id },
         Command::SubmitRnsData {
             destination,
@@ -487,6 +527,35 @@ fn command_request(command: &Command) -> DeviceRequest<'_> {
             idempotency_key: *idempotency_key,
         },
     }
+}
+
+fn write_rns_inbox_payload(path: &Path, payload: &[u8]) -> Result<[u8; 32], String> {
+    #[cfg(unix)]
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path).map_err(|error| {
+        format!(
+            "could not create inbox output {} without overwriting: {error}",
+            path.display()
+        )
+    })?;
+    #[cfg(unix)]
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| {
+            format!(
+                "could not restrict inbox output {} to owner-only permissions: {error}",
+                path.display()
+            )
+        })?;
+    file.write_all(payload)
+        .map_err(|error| format!("could not write inbox output {}: {error}", path.display()))?;
+    file.sync_all()
+        .map_err(|error| format!("could not sync inbox output {}: {error}", path.display()))?;
+    Ok(Sha256::digest(payload).into())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -644,6 +713,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut payload = None;
     let mut idempotency_key = None;
     let mut submission_id = None;
+    let mut output = None;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -693,11 +763,21 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 index += 1;
                 submission_id = Some(SubmissionId(parse_u64(args.get(index), "--submission-id")?));
             }
+            "--output" if output.is_none() => {
+                index += 1;
+                output = Some(PathBuf::from(required_value(args.get(index), "--output")?));
+            }
             "system-capabilities" if command.is_none() => {
                 command = Some(CommandKind::SystemCapabilities);
             }
             "identity-summary" if command.is_none() => {
                 command = Some(CommandKind::IdentitySummary);
+            }
+            "rns-inbox-status" if command.is_none() => {
+                command = Some(CommandKind::RnsInboxStatus);
+            }
+            "rns-inbox-peek" if command.is_none() => {
+                command = Some(CommandKind::RnsInboxPeek);
             }
             "submission-status" if command.is_none() => {
                 command = Some(CommandKind::SubmissionStatus);
@@ -705,11 +785,13 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "submit-rns-data" if command.is_none() => command = Some(CommandKind::SubmitRnsData),
             "submit-and-wait" if command.is_none() => command = Some(CommandKind::SubmitAndWait),
             option @ ("--port" | "--state-file" | "--timeout-ms" | "--destination-hash"
-            | "--payload-hex" | "--idempotency-key" | "--submission-id") => {
+            | "--payload-hex" | "--idempotency-key" | "--submission-id" | "--output") => {
                 return Err(format!("duplicate option {option}"));
             }
             command_name @ ("system-capabilities"
             | "identity-summary"
+            | "rns-inbox-status"
+            | "rns-inbox-peek"
             | "submission-status"
             | "submit-rns-data"
             | "submit-and-wait") => {
@@ -728,11 +810,14 @@ fn parse(args: &[String]) -> Result<Options, String> {
         index += 1;
     }
     let command = match command.unwrap_or(CommandKind::SystemCapabilities) {
-        kind @ (CommandKind::SystemCapabilities | CommandKind::IdentitySummary) => {
+        kind @ (CommandKind::SystemCapabilities
+        | CommandKind::IdentitySummary
+        | CommandKind::RnsInboxStatus) => {
             if destination.is_some()
                 || payload.is_some()
                 || idempotency_key.is_some()
                 || submission_id.is_some()
+                || output.is_some()
             {
                 return Err(format!(
                     "{} does not accept operation-specific arguments",
@@ -742,7 +827,23 @@ fn parse(args: &[String]) -> Result<Options, String> {
             match kind {
                 CommandKind::SystemCapabilities => Command::SystemCapabilities,
                 CommandKind::IdentitySummary => Command::IdentitySummary,
+                CommandKind::RnsInboxStatus => Command::RnsInboxStatus,
                 _ => unreachable!("combined match admits only argument-free commands"),
+            }
+        }
+        CommandKind::RnsInboxPeek => {
+            if destination.is_some()
+                || payload.is_some()
+                || idempotency_key.is_some()
+                || submission_id.is_some()
+            {
+                return Err(
+                    "rns-inbox-peek accepts only the operation-specific --output argument"
+                        .to_owned(),
+                );
+            }
+            Command::RnsInboxPeek {
+                output: output.ok_or_else(|| "rns-inbox-peek requires --output".to_owned())?,
             }
         }
         CommandKind::SubmissionStatus => {
@@ -750,6 +851,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 return Err(
                     "submission-status does not accept submit-rns-data arguments".to_owned(),
                 );
+            }
+            if output.is_some() {
+                return Err("submission-status does not accept --output".to_owned());
             }
             Command::SubmissionStatus {
                 id: submission_id
@@ -760,6 +864,12 @@ fn parse(args: &[String]) -> Result<Options, String> {
             if submission_id.is_some() {
                 return Err(format!(
                     "{} does not accept --submission-id",
+                    command_kind_name(kind)
+                ));
+            }
+            if output.is_some() {
+                return Err(format!(
+                    "{} does not accept --output",
                     command_kind_name(kind)
                 ));
             }
@@ -862,6 +972,8 @@ const fn command_name(command: &Command) -> &'static str {
     match command {
         Command::SystemCapabilities => "system-capabilities",
         Command::IdentitySummary => "identity-summary",
+        Command::RnsInboxStatus => "rns-inbox-status",
+        Command::RnsInboxPeek { .. } => "rns-inbox-peek",
         Command::SubmissionStatus { .. } => "submission-status",
         Command::SubmitRnsData { .. } => "submit-rns-data",
         Command::SubmitAndWait { .. } => "submit-and-wait",
@@ -872,6 +984,8 @@ const fn command_kind_name(command: CommandKind) -> &'static str {
     match command {
         CommandKind::SystemCapabilities => "system-capabilities",
         CommandKind::IdentitySummary => "identity-summary",
+        CommandKind::RnsInboxStatus => "rns-inbox-status",
+        CommandKind::RnsInboxPeek => "rns-inbox-peek",
         CommandKind::SubmissionStatus => "submission-status",
         CommandKind::SubmitRnsData => "submit-rns-data",
         CommandKind::SubmitAndWait => "submit-and-wait",
@@ -921,7 +1035,7 @@ const fn failure_name(failure: SubmissionFailure) -> &'static str {
 
 fn usage() {
     eprintln!(
-        "usage:\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] [system-capabilities]\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] identity-summary\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] --submission-id <u64> submission-status\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] --destination-hash <32-hex> --payload-hex <0-to-766-hex> --idempotency-key <32-hex> submit-rns-data\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64, default 45000>] --destination-hash <32-hex> --payload-hex <0-to-766-hex> --idempotency-key <32-hex> submit-and-wait"
+        "usage:\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] [system-capabilities]\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] identity-summary\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] rns-inbox-status\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] rns-inbox-peek --output <path>\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] --submission-id <u64> submission-status\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] --destination-hash <32-hex> --payload-hex <0-to-766-hex> --idempotency-key <32-hex> submit-rns-data\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64, default 45000>] --destination-hash <32-hex> --payload-hex <0-to-766-hex> --idempotency-key <32-hex> submit-and-wait"
     );
 }
 
@@ -935,13 +1049,46 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::{
+        fs,
+        io::Cursor,
+        sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use reticulum_device_api_framing::{
         AUTH_TAG_LENGTH, FramedRecord, PAYLOAD_CAPACITY, PayloadLength,
     };
 
     use super::*;
+
+    static NEXT_TEMP_OUTPUT: AtomicU64 = AtomicU64::new(0);
+
+    struct TempOutput {
+        path: PathBuf,
+    }
+
+    impl TempOutput {
+        fn new(label: &str) -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("host clock must be after the Unix epoch")
+                .as_nanos();
+            let sequence = NEXT_TEMP_OUTPUT.fetch_add(1, Ordering::Relaxed);
+            Self {
+                path: std::env::temp_dir().join(format!(
+                    "reticulum-e290-authenticated-usb-{label}-{}-{nonce}-{sequence}",
+                    std::process::id(),
+                )),
+            }
+        }
+    }
+
+    impl Drop for TempOutput {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
@@ -1071,6 +1218,117 @@ mod tests {
             duplicate_command,
             "unexpected or duplicate command submit-and-wait"
         );
+
+        let duplicate_output = parse(&strings(&[
+            "--port",
+            "/dev/test",
+            "--state-file",
+            "/tmp/e290.key",
+            "rns-inbox-peek",
+            "--output",
+            "/tmp/one",
+            "--output",
+            "/tmp/two",
+        ]))
+        .err()
+        .expect("duplicate output option must be rejected");
+        assert_eq!(duplicate_output, "duplicate option --output");
+    }
+
+    #[test]
+    fn parser_accepts_only_the_inbox_command_arguments() {
+        let status = parse(&strings(&[
+            "--port",
+            "/dev/test",
+            "rns-inbox-status",
+            "--state-file",
+            "/tmp/e290.key",
+        ]))
+        .unwrap();
+        assert_eq!(status.command, Command::RnsInboxStatus);
+        assert_eq!(
+            command_request(&status.command),
+            DeviceRequest::RnsInboxStatus
+        );
+
+        let peek = parse(&strings(&[
+            "--output",
+            "/tmp/inbox.bin",
+            "--state-file",
+            "/tmp/e290.key",
+            "rns-inbox-peek",
+            "--port",
+            "/dev/test",
+        ]))
+        .unwrap();
+        assert_eq!(
+            peek.command,
+            Command::RnsInboxPeek {
+                output: PathBuf::from("/tmp/inbox.bin"),
+            }
+        );
+        assert_eq!(command_request(&peek.command), DeviceRequest::RnsInboxPeek);
+
+        assert_eq!(
+            parse(&strings(&[
+                "--port",
+                "/dev/test",
+                "--state-file",
+                "/tmp/e290.key",
+                "rns-inbox-peek",
+            ]))
+            .err()
+            .unwrap(),
+            "rns-inbox-peek requires --output"
+        );
+        assert_eq!(
+            parse(&strings(&[
+                "--port",
+                "/dev/test",
+                "--state-file",
+                "/tmp/e290.key",
+                "rns-inbox-status",
+                "--output",
+                "/tmp/inbox.bin",
+            ]))
+            .err()
+            .unwrap(),
+            "rns-inbox-status does not accept operation-specific arguments"
+        );
+        assert_eq!(
+            parse(&strings(&[
+                "--port",
+                "/dev/test",
+                "--state-file",
+                "/tmp/e290.key",
+                "rns-inbox-peek",
+                "--output",
+                "/tmp/inbox.bin",
+                "--submission-id",
+                "7",
+            ]))
+            .err()
+            .unwrap(),
+            "rns-inbox-peek accepts only the operation-specific --output argument"
+        );
+    }
+
+    #[test]
+    fn parser_redacts_an_unrecognized_joined_output_path() {
+        const PRIVATE_PATH: &str = "/tmp/private-inbox-location";
+        let reason = parse(&[
+            "--port".to_owned(),
+            "/dev/test".to_owned(),
+            "--state-file".to_owned(),
+            "/tmp/e290.key".to_owned(),
+            format!("--output={PRIVATE_PATH}"),
+            "rns-inbox-peek".to_owned(),
+        ])
+        .err()
+        .expect("joined output option must be rejected");
+        let output = cli_error_line(&reason);
+        assert_eq!(output, "error: unexpected option at argument 5");
+        assert!(!output.contains(PRIVATE_PATH));
     }
 
     #[test]
@@ -1338,6 +1596,148 @@ mod tests {
             .unwrap(),
             "system-capabilities does not accept operation-specific arguments"
         );
+    }
+
+    #[test]
+    fn capabilities_output_includes_inbox_availability_and_limit() {
+        let output = format_one_shot_response(
+            &Command::SystemCapabilities,
+            &[0x11; 16],
+            &[0x22; 16],
+            DeviceResponse::SystemCapabilities(reticulum_device_api::CapabilitySnapshot::current()),
+        )
+        .unwrap();
+        assert!(output.contains("api=1.2"));
+        assert!(output.contains("experimental_rns_inbox=2"));
+        assert!(output.contains("max_rns_inbox_payload_bytes=383"));
+    }
+
+    #[test]
+    fn inbox_status_output_has_authenticated_context_and_only_five_state_scalars() {
+        let output = format_one_shot_response(
+            &Command::RnsInboxStatus,
+            &[0x11; 16],
+            &[0x22; 16],
+            DeviceResponse::RnsInboxStatus(reticulum_device_api::RnsInboxStatus {
+                depth: 1,
+                capacity: 1,
+                dropped_since_boot: 42,
+                max_payload_bytes: 383,
+                durable: true,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            output,
+            format!(
+                "command=rns-inbox-status outcome=ok device_id={} session_id={} depth=1 capacity=1 dropped=42 max=383 durable=true",
+                "11".repeat(16),
+                "22".repeat(16),
+            )
+        );
+        assert_eq!(output.split_whitespace().count(), 9);
+    }
+
+    #[test]
+    fn inbox_peek_creates_private_exact_synced_output_and_reports_only_metadata() {
+        const PAYLOAD: &[u8] = b"private inbox payload";
+        let output_file = TempOutput::new("peek");
+        let command = Command::RnsInboxPeek {
+            output: output_file.path.clone(),
+        };
+        let item = reticulum_device_api::RnsInboxItem::new(
+            core::num::NonZeroU64::new(7).unwrap(),
+            DestinationHash([
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+                0x0e, 0x0f,
+            ]),
+            PAYLOAD,
+        )
+        .unwrap();
+        let output = format_one_shot_response(
+            &command,
+            &[0x11; 16],
+            &[0x22; 16],
+            DeviceResponse::RnsInboxPeek(item),
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&output_file.path).unwrap(), PAYLOAD);
+        let expected_sha256: [u8; 32] = Sha256::digest(PAYLOAD).into();
+        assert_eq!(
+            output,
+            format!(
+                "command=rns-inbox-peek outcome=ok device_id={} session_id={} item_id=7 destination=000102030405060708090a0b0c0d0e0f length={} sha256={} output={}",
+                "11".repeat(16),
+                "22".repeat(16),
+                PAYLOAD.len(),
+                hex(&expected_sha256),
+                output_file.path.display(),
+            )
+        );
+        assert_eq!(output.split_whitespace().count(), 9);
+        assert!(!output.contains("private inbox payload"));
+        assert!(!output.contains(&hex(PAYLOAD)));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(&output_file.path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn inbox_peek_never_overwrites_an_existing_output() {
+        let output_file = TempOutput::new("existing");
+        fs::write(&output_file.path, b"keep this").unwrap();
+        let command = Command::RnsInboxPeek {
+            output: output_file.path.clone(),
+        };
+        let item = reticulum_device_api::RnsInboxItem::new(
+            core::num::NonZeroU64::MIN,
+            DestinationHash([0x44; 16]),
+            b"replacement",
+        )
+        .unwrap();
+        let error = format_one_shot_response(
+            &command,
+            &[0x11; 16],
+            &[0x22; 16],
+            DeviceResponse::RnsInboxPeek(item),
+        )
+        .expect_err("create-new output must reject an existing path");
+        assert!(error.contains("without overwriting"));
+        assert_eq!(fs::read(&output_file.path).unwrap(), b"keep this");
+    }
+
+    #[test]
+    fn empty_inbox_is_clear_and_does_not_create_an_output() {
+        let output_file = TempOutput::new("empty");
+        let command = Command::RnsInboxPeek {
+            output: output_file.path.clone(),
+        };
+        let error = format_one_shot_response(
+            &command,
+            &[0x11; 16],
+            &[0x22; 16],
+            DeviceResponse::Error(reticulum_device_api::ApiErrorResponse {
+                code: reticulum_device_api::ApiErrorCode::NotFound,
+                operation: Some(reticulum_device_api::OP_EXPERIMENTAL_RNS_INBOX_PEEK),
+            }),
+        )
+        .expect_err("an empty inbox must be an explicit error");
+        assert_eq!(
+            error,
+            "RNS inbox is empty (NotFound); no output file was created"
+        );
+        assert!(!output_file.path.exists());
     }
 
     #[test]

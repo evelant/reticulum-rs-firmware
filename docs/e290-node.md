@@ -2,21 +2,26 @@
 
 **Status:** the first permanent, LoRa-first image is implemented. Its release
 record below captures the host-library, host-client, portable-target, ESP32-S3,
-strict review, graph, image-size, and same-image readback gates. Its
-third task now owns a USB Serial/JTAG pre-authentication initialization and live-
-pairing bearer, one shared exact-next sequence space, debounced GPIO21 physical
-presence, an interrupt-linearized reset-epoch guard, and an application-entry
-USB boot quarantine. Powered work has now completed the full first outbound path
-on the two E290s. MAC `ac:a7:04:e1:3e:88` retained its button-confirmed empty-
-store initialization, durable Active generation 3, and host credential; MAC
-`ac:a7:04:e1:3f:88` owns a separate durable node identity. Both ran the exact
-same current image with matching address-zero readbacks. An authenticated API
-1.1 session read the sender's public primary destination, durably accepted one
-RNS DATA submission, and stayed open while polling status. The peer matched its
-own destination, decrypted the packet, returned a valid Reticulum proof, and
-the sender durably projected `Delivered`. A full sender USB re-enumeration and
-fresh authenticated session returned the same terminal metadata. Earlier
-controls returned
+strict review, graph, image-size, and same-image readback gates. Its third task
+owns a USB Serial/JTAG pre-authentication initialization and live-pairing bearer,
+one shared exact-next sequence space, debounced GPIO21 physical presence, an
+interrupt-linearized reset-epoch guard, and an application-entry USB boot
+quarantine. Powered work has completed both the first outbound API 1.1 path and
+the bounded API 1.2 raw-RNS inbox qualification path on the two E290s. In the
+historical API 1.1 image, MAC `ac:a7:04:e1:3e:88` retained its button-confirmed
+empty-store initialization, durable Active generation 3, and host credential;
+MAC `ac:a7:04:e1:3f:88` owned a separate durable node identity. Matching exact
+address-zero readbacks preceded authenticated identity, durable submission,
+physical LoRa DATA/proof, terminal `Delivered`, and a fresh post-re-enumeration
+status read. The later API 1.2 image retained paired generation 5 on `3e:88` and
+generation 3 on `3f:88`. A maximum 383-byte DATA item sent from `3f:88` reached
+`Delivered`, committed to `3e:88`'s exact one-entry `message_store`, survived a
+hard reboot, and remained observable through authenticated status and peek. A
+second valid DATA item reached `Delivered` but left item 1 unchanged and raised
+the boot-local drop counter from zero to one. This closes the bounded commit,
+exact readback, hard-reset survival, and drop-newest proof. It does not qualify
+controlled power cuts, fault isolation, target timing/high-water behavior,
+LXMF, or a full mailbox. Earlier controls returned
 `initialization-required`, enforced GPIO21 for initialization and live Begin,
 rejected stale sequence zero, and restored a fresh epoch after full host
 re-enumeration. Both preceding boot-quarantined image readbacks matched exactly,
@@ -24,11 +29,11 @@ both boards served sequence zero again after the induced hard reset, and
 120-second no-button workflows left both credential partitions erased. Exact
 Pending and Abort readbacks, mutation ambiguity/fault cuts, and broader powered
 lifecycle qualification remain open. Source `5f3f259` passed the earlier
-bounded powered upgrade smoke on both `HT-RA62-HF` boards: exact same-image readback,
-resident pairing-policy and erased-initialization eligibility, zero credential
-mutation, journal/LoRa/interface startup, and ordinary one-frame TX. Full
-powered product-graph, USB suspend/resume, power-cut behavior, and the ROM/
-bootloader interval before the earliest Rust entrypoint remain open.
+bounded powered upgrade smoke on both `HT-RA62-HF` boards: exact same-image
+readback, resident pairing-policy and erased-initialization eligibility, zero
+credential mutation, journal/LoRa/interface startup, and ordinary one-frame TX.
+USB suspend/resume, controlled power cuts, the ROM/bootloader interval before
+the earliest Rust entrypoint, and full product qualification remain open.
 The permanent source graph now additionally composes the feature-free
 authenticated session and handoff crates, a static depth-one request/reply
 handoff, node-side current-authority dispatch, and the first deliberately
@@ -39,12 +44,13 @@ encryption, rate limiting/attempt policy, repeated handshake attempts, and
 concurrent requests are deferred. Credential selection, admission handoff, and
 node dispatch are bearer-neutral. The current qualification suite is USB
 Serial/JTAG-only; BLE or Wi-Fi can later reuse the ownership boundary after its
-binding/suite is added and qualified. The powered proof now qualifies
+binding/suite is added and qualified. Powered evidence now qualifies
 authenticated capabilities and identity reads, sequential request/response
 flights in one session, durable submission, LoRa DATA delivery, peer decrypt/
-proof, terminal projection, and status after USB re-enumeration. It does not
-claim application-level message consumption, session resumption, or either
-deferred wireless bearer binding.
+proof, terminal projection, API 1.2 durable raw-RNS status/peek before and after
+a hard reset, and one drop-newest observation. It does not claim LXMF or general
+application-level message consumption, session resumption, or either deferred
+wireless bearer binding.
 
 This target is the first executable product composition, not another HIL
 fixture. It starts a transport-mode Rete node, one E290 LoRa actor, receive and
@@ -55,9 +61,15 @@ first-provisions the exact node-journal partition, and strictly completes a
 submission-runtime recovery gate before constructing node or radio service. It
 then transfers the sole flash backend and mounted runtime into a resident
 operation-scoped storage coordinator that the node task schedules throughout
-the firmware lifetime. An optional journal mount/recovery failure occurs before
-any durability-gated DATA owner can exist; it disables local durable submission
-service while the LoRa node still starts in route-only mode. The exact
+the firmware lifetime. Current source also read-only mounts ADR 0011's exact
+2 MiB `message_store`, projects transport-neutral decrypted DATA into its
+one-entry commit-last raw-RNS store, retains one candidate across cross-store
+deferral, and exposes authenticated API 1.2 status/peek through a separate
+read-only port. A mount or admission fault disables only that inbox service;
+ordinary Reticulum traffic continues. An optional journal mount/recovery failure
+occurs before any durability-gated DATA owner can exist; it disables local
+durable submission service while the LoRa node still starts in route-only mode.
+The exact
 authorized-frame request/durable-echo handoff is source-composed and now passes
 cross-layer host qualification. The one-entry accepted-history cap is exercised
 by that harness solely as a composition profile and is not a product-capacity
@@ -101,8 +113,9 @@ authenticated capabilities exchange are now qualified on one powered board.
 Separately, the USB task now drives the minimal authenticated
 session described below, and the node receives exact authenticated request owners,
 revalidates each grant against the currently publishable authority, and invokes
-logical dispatch synchronously through a short-lived submission-port view that
-cannot borrow credential records. Revoked or missing credentials return only
+logical dispatch synchronously through disjoint short-lived submission and
+inbox-port views that cannot borrow credential records. Revoked or missing
+credentials return only
 the generic authentication-required response with zero port I/O and no
 unauthenticated fallback. Source-level external admission now reaches that lane
 through the single-flight USB bearer, and the powered happy path above exercises
@@ -113,9 +126,10 @@ permanent fault
 with an unresolved frame enters interface-local `ActiveOwnerFailStopped`, takes
 the same LoRa lease offline without changing its generation, retains the exact
 frame/completion/ticket, and permits no fresh LoRa work for the rest of the boot.
-Device configuration, message storage, client delivery, LXMF/NomadNet, and
-production-ready host-facing USB/BLE/Wi-Fi services remain visible product
-blockers.
+Device configuration, final LXMF/message storage and client delivery,
+LXMF/NomadNet, and production-ready host-facing USB/BLE/Wi-Fi services remain
+visible product blockers. The one-entry raw-RNS qualification record is not
+that final storage or client surface.
 
 ## Composition boundary
 
@@ -135,11 +149,13 @@ transport-neutral node task
       resident live-pairing proof + typed mutation/reconciliation owners
     SubmissionRuntime + operation-scoped BoundJournal views
     exact authorized-frame retain/re-offer + durable echo
+    MountedInboxStore + operation-scoped BoundInboxStore views
+    one deferred fixed candidate + drop-newest admission
   depth-one pre-auth control command/reply handoff
   depth-one bearer-neutral live-pairing command/reply handoff
   authenticated API node lane
     current-authority revalidation + synchronous logical dispatch
-    disjoint short-lived SubmissionPort view
+    disjoint short-lived SubmissionPort + InboundMailboxPort views
     retained reply pressure + terminal malformed-owner quarantine
   depth-one authenticated request/reply handoff
   captured-time causal frontier before shared flash mutation
@@ -274,7 +290,7 @@ The target requires a 16 MiB flash image/header and uses
 | API credentials | `0x614000` | 8 KiB | Wired boot mount/recovery; exact eFuse-derived binding; retained plaintext two-sector store; no automatic provisioning |
 | Device config | `0x616000` | 104 KiB | Reserved, not wired |
 | Node journal | `0x630000` | 1 MiB | Resident operation-scoped submission runtime; one-entry qualification cap; authenticated submission and post-re-enumeration terminal status powered-qualified |
-| Message store | `0x730000` | 2 MiB | Reserved, not wired |
+| Message store | `0x730000` | 2 MiB | Wired ADR 0011 format-1 raw-RNS inbox; one 576-byte commit-last item; 383-byte maximum; not LXMF |
 | Unallocated | `0x930000` | 6.8125 MiB | OTA/layout decision |
 
 The workspace runner in `.cargo/config.toml` hardcodes an 8 MiB flash size and
@@ -287,11 +303,12 @@ initialization and ADR 0010 live pairing are routed through the resident owner;
 minimal single-flight authenticated USB session/API serving is powered-qualified
 through identity, durable submission, sequential status, peer proof, and a
 post-re-enumeration terminal status read.
-`device_config`
-retains the standard NVS subtype while it is unwired; the application-owned
-journal and unwired message store retain `data,undefined`. Their labels and
-ranges remain distinct. Numeric custom subtypes are only valid with custom
-partition types in the image tooling and are not used here.
+`device_config` retains the standard NVS subtype while it is unwired; the
+application-owned journal and wired raw-RNS inbox retain `data,undefined`.
+Their labels and ranges remain distinct. The complete `message_store` range is
+bound to the physical device ID, absolute offset, length, and inbox physical
+format version 1. Numeric custom subtypes are only valid with custom partition
+types in the image tooling and are not used here.
 
 ### Durable identity, journal and announce ordering
 
@@ -412,8 +429,19 @@ then moves into `ProductStorageCoordinator` with the sole physical flash owner.
 The node task drives that resident runtime in its fifth fair lane; each physical
 operation creates a short-lived `BoundJournal` over the exact partition and
 releases the borrow afterward. This preserves one flash authority without
-locking future configuration, message-store, and OTA work into a permanent
+locking future configuration, final message-store, and OTA work into a permanent
 journal-only borrow.
+
+The same coordinator read-only mounts the complete 2 MiB `message_store` before
+node service. ADR 0011 format 1 permits either an entirely erased range or one
+canonical 576-byte committed item at relative offset zero with every later byte
+still erased. It stores the exact 16-byte local destination and at most 383
+decrypted payload bytes in plaintext. The node moves transport-neutral Rete
+`DataReceived` output into a fixed candidate, retains one candidate while a
+credential or journal mutation owns flash, and otherwise commits or drops newest
+without erase, overwrite, acknowledgement, deletion, or reclamation. Mount or
+admission failure disables only inbox capability for that boot and leaves
+ordinary Reticulum routing/proof work available.
 
 Journal mount, unsupported history, or recovery failure is isolated because it
 occurs during boot before a durability-gated DATA owner can exist: the
@@ -422,7 +450,9 @@ remains closed, and the LoRa node/radio tasks still start in route-only mode.
 The accepted-history cap is one for qualification. The minimal authenticated
 USB edge now has powered initialize/pair/reboot/capabilities/identity evidence
 plus one durable submission whose LoRa DATA/proof terminal state survived USB
-re-enumeration. The
+re-enumeration. The API 1.2 image separately has powered exact inbox commit,
+full-range readback, authenticated status/peek, hard-reset survival, and
+drop-newest evidence under the deliberately one-entry qualification format. The
 LoRa actor now hands the exact `AuthorizedFrameObservation` to the node/storage
 owner while its dispatcher retains the completion and router ticket. The node
 retains and re-offers that observation until the runtime returns `Durable`,
@@ -437,13 +467,15 @@ durability and failure behavior.
 
 The resident `ProductStorageCoordinator` also implements the target-safe
 device-API `SubmissionPort` for capability, principal-scoped status, and
-`experimental-rns-data` acceptance semantics. That is only the product-side
-semantic seam: the one-entry cap is not product capacity. Portable framing and
-job handoff now enter the permanent graph through a static depth-one
+`experimental-rns-data` acceptance plus a separate read-only
+`InboundMailboxPort` for authenticated API 1.2 status/peek. Those are only the
+product-side semantic seams: neither one-entry qualification cap is product
+capacity. Portable framing and job handoff enter the permanent graph through a
+static depth-one
 authenticated request/reply channel. The node endpoint decodes the logical
 request, revalidates its opaque grant against the resident current authority,
-and calls the adapter synchronously through a credential-disjoint submission-
-port view. Missing, revoked, replaced, or generation-mismatched credentials
+and calls the adapter synchronously through credential-disjoint submission and
+inbox-port views. Missing, revoked, replaced, or generation-mismatched credentials
 produce a generic authentication-required response without port I/O or fallback.
 Reply pressure retains the exact owner, while malformed logical CBOR is a
 terminal retained fault rather than a redispatch candidate. The USB endpoint
@@ -485,13 +517,14 @@ bootloader interval before the application boot quarantine remain open. Live
 Begin, ProofStart, Activate, and AbortCurrent are routed through this task and
 durably driven by the resident credential owner.
 
-Both operation-scoped views name the device with the domain-separated 16-byte
-value `"e290-flash" || eFuse base MAC`. The credential view additionally fixes
+All three physical-store bindings name the device with the domain-separated
+16-byte value `"e290-flash" || eFuse base MAC`. The credential view additionally fixes
 absolute offset `0x614000`, length `0x2000`, and credential physical layout
 version 1. The journal view fixes offset `0x630000`, length `0x100000`, and
-journal physical layout version 1. Each store validates its exact values and
-view capacity/alignment before I/O; every later borrowed operation must match
-its retained binding exactly.
+journal physical layout version 1. The inbox view fixes offset `0x730000`, length
+`0x200000`, and inbox physical format version 1. Each store validates its exact
+values and view capacity/alignment before I/O; every later borrowed operation
+must match its retained binding exactly.
 
 ## Software composition and build gates
 
@@ -518,11 +551,12 @@ cargo +esp clippy --locked --release \
 
 The build script rejects an unreviewed `esp-rtos` main-stack implementation and
 links `linkall.x`. Debug Xtensa builds are compile-time rejected.
-The host library suite has passing policy/product/credential-boot/
+The 129-test host library suite has passing policy/product/credential-boot/
 credential-runtime/USB-control/live-routing tests, including the source-order
 regressions, every canonical empty-initialization byte cut, adversarial media changes between
 mount and classification, off-trajectory media, and classifier failure phases,
-plus two real cross-layer composition tests. The happy path proves unauthenticated
+two authenticated inbox-port isolation tests, and two real cross-layer
+composition tests. The happy path proves unauthenticated
 and permission-denied requests cause zero NOR writes, exactly one authenticated
 acceptance succeeds, and a second novel request reaches capacity without a
 write. It then proves the durable `Preparing` barrier precedes node ownership,
@@ -539,10 +573,10 @@ retry, route-only degradation, pending durable acknowledgement, sticky fail-stop
 and the request-after-disable race. Credential-runtime tests additionally
 cover both initialization trajectories, fresh binding and identity checks,
 forward-only media movement, ambiguous backend/readback retention, disconnect
-ownership, policy completion, and fail-closed noncanonical states. Four
+ownership, policy completion, and fail-closed noncanonical states. Six
 cross-store tests cover both retained journal owners, initialization before and
-after physical I/O, stable credential states, and the distinct deferred versus
-unavailable result. The USB-control additions cover stable-time active-low
+after physical I/O, stable credential states, inbox exclusion, and the distinct
+deferred versus unavailable result. The USB-control additions cover stable-time active-low
 debounce and held-low boot, SOF suspension and bus-reset-delimited epochs,
 strict epoch and sequence exhaustion, duplicates and gaps, depth-one
 command/reply pressure, capability-free handoff, coarse result mapping, and
@@ -561,10 +595,13 @@ device-ID validation, pair/resume sequence headroom, owner-only reservation and
 atomic Pending persistence, fixed 96-byte binary layout, and atomic complete
 Pending-to-Active replacement that persists the HMAC-bound durable Active
 generation while retaining owner-only permissions, and secret-free output. The
-bounded authenticated client adds 15 tests for operation parsing, public-
-identity formatting, sequential request IDs, version policy, polling terminal
-semantics, coalesced-record preservation, and submission-input non-disclosure.
-Together these 42 focused tests are part of the full 189-test xtask gate.
+bounded authenticated client adds 22 tests for operation parsing, public-
+identity formatting, inbox status/peek, owner-only non-overwriting payload
+output, sequential request IDs, version policy, polling terminal semantics,
+coalesced-record preservation, and submission-input non-disclosure. Together
+these 49 focused tests are part of the full 197-test xtask gate. The portable
+Rete integration and inbox-store suites independently pass 41 and 17 tests,
+respectively.
 
 Once all response bytes enter the endpoint FIFO, firmware requests hardware
 `WR_DONE` and releases the software response owner without waiting for a later
@@ -585,7 +622,8 @@ earliest Rust entry remains a boot-chain residual, not a claimed erasure point.
 The permanent image selects only `esp-println` features
 `esp32s3,log-04,no-op` and does not initialize the logger. Application,
 framework, and panic log text therefore cannot write the USB Serial/JTAG FIFO;
-the pre-authentication COBS records have the sole application-owned byte stream.
+the shared framed initialization, live-pairing, and authenticated-session records
+have the sole application-owned byte stream.
 This deliberately removes the earlier native-USB boot log as a validation
 surface. Powered work must use the typed control responses, RF evidence, and
 exact flash readback, or a separately designed diagnostic sink.
@@ -636,7 +674,7 @@ Exact reads of that complete range matched on both powered boards. The values
 remain under the unchanged CI caps; runtime stack high-water and heap pressure
 are still not measured.
 
-The last powered authenticated-node-foundation release links at 611,479 bytes text,
+The historical powered authenticated-node-foundation release links at 611,479 bytes text,
 3,580 bytes initialized data, 469,248 bytes BSS/reservations, and 1,084,307
 bytes total by GNU size. Its packaged application is 653,152 of 6,291,456 bytes
 (10.38% of the factory slot); the unpadded merged image is 718,688 bytes with
@@ -672,7 +710,7 @@ entirely `0xff` with SHA-256
 That run is package/readback and pre-authentication bootstrap evidence, not a
 powered authenticated handshake, request, or reply.
 
-The current Active-generation-binding source links at 641,419 bytes text, 3,596
+The historical Active-generation-binding source linked at 641,419 bytes text, 3,596
 bytes initialized data, 469,232 bytes BSS/reservations, and 1,114,247 bytes total
 by GNU size. Its packaged application is 682,480 of 6,291,456 bytes (10.85% of
 the factory slot). The 748,016-byte merged image and its powered qualification
@@ -835,6 +873,9 @@ supports these authenticated logical operations:
 
 - `system-capabilities` (the default command);
 - `identity-summary`;
+- `rns-inbox-status` for the five bounded qualification-state scalars;
+- `rns-inbox-peek --output <path>` for an owner-only, non-overwriting copy of
+  the exact retained destination and payload;
 - `submission-status` with `--submission-id`;
 - `submit-rns-data` with destination, payload, and idempotency key; and
 - `submit-and-wait`, which submits once and polls every 500 ms over the same
@@ -861,6 +902,25 @@ cargo +stable run --locked -p xtask -- e290-authenticated-usb \
   submit-and-wait
 ```
 
+Observe the raw-RNS qualification inbox without consuming it:
+
+```sh
+cargo +stable run --locked -p xtask -- e290-authenticated-usb \
+  --port /dev/cu.usbmodemXXXX \
+  --state-file /secure/new-e290-pairing.key \
+  rns-inbox-status
+
+cargo +stable run --locked -p xtask -- e290-authenticated-usb \
+  --port /dev/cu.usbmodemXXXX \
+  --state-file /secure/new-e290-pairing.key \
+  rns-inbox-peek --output /secure/inbox-item.bin
+```
+
+Peek refuses to replace an existing output file, creates a private file, syncs
+it, and prints only item metadata. The file contains plaintext destination and
+payload material and must be handled accordingly. Empty inbox returns a clear
+not-found result without creating output.
+
 The command accepts only the canonical Active state-file format, verifies the
 device ID and credential generation during the handshake, preserves coalesced
 records, accepts any response minor within API major 1, uses one absolute
@@ -875,10 +935,10 @@ exception: it deliberately retains that one session for sequential status
 requests. Do not infer whether a credential identifier exists from failure
 text.
 
-The current one-entry accepted-history cap is a qualification profile, and the
-successful sender now contains its one committed record. A later novel
-submission requires a product-capacity policy change or deliberate journal
-reprovisioning; it is not evidence that the intended product capacity is one.
+The one-entry accepted-history cap is a qualification profile. Each additional
+powered submission below used the documented journal-only erased schema-2
+reprovision workflow; that operator action is neither a product retry mechanism
+nor evidence that the intended product capacity is one.
 
 Earlier on 2026-07-18, the then-current 682,480-byte application was packaged as a
 748,016-byte merged flash image (SHA-256
@@ -918,7 +978,9 @@ enumeration followed by a fresh authenticated `submission-status` request
 returned the identical terminal state, length, and digest. This is end-to-end
 proof through the permanent owner graph and physical LoRa link. `Delivered`
 does not yet prove that an onboard LXMF/NomadNet mailbox or external client
-consumed the plaintext; inbound application events are currently drained.
+consumed the plaintext. Current API 1.2 source now projects inbound DATA into
+the separate raw-RNS qualification store described below; that later result
+must not be retroactively inferred from this API 1.1 proof.
 
 The first powered end-to-end attempt usefully failed closed during post-reboot
 authentication with an expected generation 2 versus observed generation 3
@@ -929,6 +991,70 @@ the actual committed Active generation in the activation confirmation and
 atomically persisting that exact generation on the host. The successful
 rebooted proof above exercises that fix; it does not assume that Active is
 Pending plus one.
+
+### Powered API 1.2 durable raw-RNS inbox qualification
+
+On 2026-07-18, the final post-audit API 1.2 release reported 655,511 bytes text,
+3,676 bytes initialized data, 469,152 bytes BSS/reservations, and 1,128,339 bytes
+total by GNU size. Its 696,416-byte application occupied 696,416 of 6,291,456
+factory bytes and was packaged as a 761,952-byte merged image with SHA-256
+`ba10b04408368c3f5cbcc91f5d514f454595a7812986764c1e95ef528cc71f03`.
+Both boards received that exact image and both address-zero readbacks matched.
+For this clean qualification only, the operator deliberately erased the sender's
+complete `message_store` once; the post-audit image then mounted it with depth 0
+and `durable=true` before traffic. This is setup evidence, not a firmware erase
+or product-reset behavior.
+
+The paired sender `ac:a7:04:e1:3e:88` held Active generation 5; receiver
+`ac:a7:04:e1:3f:88` held Active generation 3.
+
+The receiver's qualification-cap journal was explicitly reprovisioned through
+the documented journal-only erased schema-2 image, after which the ordinary
+post-audit image was restored and read back. Four path-acquisition attempts
+failed `no-path` before any sender inbox write. Those attempts exposed a tooling
+detail: macOS USB-only re-enumeration replaces the USB session but neither
+reboots the firmware nor reschedules its one-shot boot ANNOUNCE. One subsequent
+reverse-direction delivery attempt timed out and produced no inbox commit. An
+explicit `espflash` DTR hard-reset cycle restarted boot ANNOUNCE scheduling, and
+the following attempt succeeded. The receiver journal-only reprovision was
+repeated as required by its one-submission qualification cap. Before the later
+overflow packet, only that receiver journal reprovision/ordinary-image restore
+was repeated. The sender's `message_store` remained untouched from the maximum
+commit through hard reset, overflow, final status/peek, and final raw dump. This
+is controlled qualification workflow evidence, not product capacity, an
+automatic retry claim, or evidence that USB re-enumeration restarts the node.
+
+The receiver then submitted the maximum 383-byte payload to the sender. It
+reached `Delivered` as a 483-byte RNS packet with encoded-byte SHA-256
+`695a2e78ed379378ea9481f1fa37e7e20596237cc1f545470c4d251613b9586a`.
+Authenticated sender status reported depth 1, capacity 1,
+`dropped_since_boot=0`, maximum payload 383, and `durable=true`. Peek returned
+destination `c99e8ff1ec8629e4e1290e14462ae8af` and the exact payload whose SHA-256
+was `38796658031a3eb2fbec2185daa31f8e3d2cc6a998278ee1fc1cc39b28541a4c`.
+The exact 576-byte record had SHA-256
+`58ce28dd27476360dd297fbf3e250d43c72935c90be6d88e32495b6130988d58`;
+independent domain-separated digest recomputation matched the stored
+`9f2910bdd42de13c5fc45e1e6f6574ea6aa143d9054c774c7f5c62d3b68ecdec`.
+The flash read induced a hard reset; a fresh authenticated session afterward
+returned the identical item through peek.
+
+Finally, a second valid 33-byte DATA payload reached `Delivered` as a 147-byte
+packet with encoded-byte SHA-256
+`1bf74485c87a38791d40366095085908c1df189e97814b6d68be9357f2707079`.
+Sender status remained depth 1 and reported `dropped_since_boot=1`; peek still
+returned item 1 with the same destination and maximum-payload digest. The final
+exact 2,097,152-byte `message_store` dump had SHA-256
+`f50dab680d46ef20cd875eff778296a3b92f9d7eef34684f29eedc10b468d724`.
+Its first 576 bytes exactly matched the record above, and bytes 576 through the
+end contained zero non-`0xff` bytes. This closes the bounded commit/readback,
+hard-reset survival, and drop-newest proof. A final raw-read-induced hard reset
+remounted the occupied record at depth 1 with `dropped_since_boot=0`, confirming
+that the drop counter is boot-local while the item is durable.
+
+It does not qualify a controlled power cut at claim/body/commit boundaries,
+corrupt-media or admission-fault isolation on hardware, mount/commit timing,
+internal-RAM or PSRAM high-water, watchdog/radio-deadline effects, LXMF, or a
+full mailbox.
 
 On 2026-07-18, the historical control-only 652,992-byte merged image (SHA-256
 `1727a14b58a076d65ea12feb61b564d5dfc66d6c6f0b9a8ddd39fc773332705c`) was
@@ -976,8 +1102,8 @@ detach/scrub/reattach path, long no-button request liveness, and zero credential
 mutation. Because no secret response was in flight, it does not independently
 prove USB FIFO/RAM secret erasure or non-replay. That preceding image did not
 qualify a successful GPIO21 hold, initialization, pairing, activation, or exact
-post-write readback; the later current-image proof above closes only that happy
-path. ROM and bootloader execution before the earliest Rust entrypoint also
+post-write readback; the later credential-bearing API 1.1 lineage above closes
+only that happy path. ROM and bootloader execution before the earliest Rust entrypoint also
 remains outside the application boot-quarantine claim.
 
 The current USB policy treats an 8 ms missed-SOF interval as suspension while
@@ -1050,9 +1176,9 @@ future write:
 5. Before the **first product provisioning boot**, after the backup, erase the
    durability range. The unpadded merged image contains the bootloader,
    partition table and application; it does not initialize
-   `0x610000..0x730000`. Flashing it over arbitrary old bytes therefore does
-   not create blank identity, clock, credential, configuration, or journal
-   media, and the firmware will correctly fail closed. Choose one destructive
+   `0x610000..0x930000`. Flashing it over arbitrary old bytes therefore does
+   not create blank identity, clock, credential, configuration, journal, or
+   inbox media, and the firmware will correctly fail closed. Choose one destructive
    preparation:
 
    - erase the entire chip:
@@ -1070,7 +1196,7 @@ future write:
      espflash erase-region --skip-update-check \
        --port "$PORT" --chip esp32s3 \
        --before default-reset --after no-reset --non-interactive \
-       0x610000 0x120000
+       0x610000 0x320000
      ```
 
    In either case, verify the entire exclusive range before writing the image:
@@ -1079,8 +1205,8 @@ future write:
    espflash read-flash --skip-update-check \
      --port "$PORT" --chip esp32s3 \
      --before default-reset --after no-reset --non-interactive \
-     0x610000 0x120000 "$BACKUP_DIR/durability-erased.bin"
-   test "$(wc -c < "$BACKUP_DIR/durability-erased.bin" | tr -d ' ')" = 1179648
+     0x610000 0x320000 "$BACKUP_DIR/durability-erased.bin"
+   test "$(wc -c < "$BACKUP_DIR/durability-erased.bin" | tr -d ' ')" = 3276800
    test "$(LC_ALL=C tr -d '\377' < "$BACKUP_DIR/durability-erased.bin" \
      | wc -c | tr -d ' ')" = 0
    ```
@@ -1178,10 +1304,12 @@ control or verify peer RX, DATA, contention, reset recovery, or interoperability
 the separate semantic HIL supplies the bounded controlled DATA/proof result.
 Autonomous images with
 `app_data=None` do not originate a controlled fragmented or transit packet.
-Fragment reassembly, forwarding, DATA and proof testing therefore need an
-external Reticulum peer/test injector, the semantic-HIL fixture, or the next
-local submission/device-API slice. The separate semantic-HIL image has passed
-as the bounded qualification fixture for the deterministic DATA/proof exchange.
+The later API 1.1 permanent-image run supplied controlled peer DATA/proof and
+terminal status, and the API 1.2 run separately supplied receiver-side durable
+raw-RNS commit/peek/reset/drop-newest evidence. Fragment reassembly,
+forwarding, multi-hop, and broader protocol behavior still require dedicated
+fixtures; neither later run changes the deliberately narrow claim of this first
+smoke.
 
 ## Product blockers after this slice
 
@@ -1205,10 +1333,12 @@ as the bounded qualification fixture for the deterministic DATA/proof exchange.
   generalized cross-store exclusion, shared USB decoder/sequence owner,
   causal node frontier, secret handoff, and boot quarantine. Preserve the
   now-composed feature-free session/handoff dependencies, static depth-one API
-  handoff, current-authority node dispatch, disjoint submission-port view, and
-  minimal single-flight USB session bearer. Preserve the now-qualified API 1.1
+  handoff, current-authority node dispatch, disjoint submission and inbox-port
+  views, and minimal single-flight USB session bearer. Preserve the now-qualified API 1.1
   identity, authenticated RNS DATA, durable runtime, real LoRa peer proof,
-  sequential status, and fresh post-re-enumeration session path.
+  sequential status, and fresh post-re-enumeration session path. Also preserve
+  API 1.2's exact one-entry inbox binding/format, authenticated status/peek, and
+  powered commit/readback/hard-reset/drop-newest evidence.
   Resumption, retries, close records, encryption, rate/attempt policy, repeated
   attempts, and concurrency remain later hardening work; the transport-neutral
   admission boundary must remain reusable by BLE and Wi-Fi, whose session
@@ -1217,14 +1347,17 @@ as the bounded qualification fixture for the deterministic DATA/proof exchange.
   behavior already pass. A later product-capacity policy must not weaken the same
   durability contract, and future interface actors fail-stop only their
   affected actor.
-- Extend the resident sole-flash coordinator to host device configuration and
-  message storage with explicit power-loss, wear, migration, and cross-store
-  ordering behavior.
+- Qualify ADR 0011's existing raw-RNS inbox across controlled power cuts,
+  corrupt/mismatched mounts, admission-fault isolation, mount/commit timing,
+  watchdog/radio deadlines, and internal-RAM/PSRAM high-water. Then design final
+  LXMF/message storage and device configuration with explicit wear, migration,
+  reclamation, authorization, and cross-store ordering behavior.
 - Define and qualify the production key backup/recovery and at-rest protection
   policy. The current developer image deliberately requires flash encryption
   disabled and stores its mirrored private identity in plaintext.
-- Deliver non-packet node output to a durable/client owner. This milestone logs
-  and drains it so transport progress cannot deadlock.
+- Deliver non-DATA node events to a durable/client owner. Inbound DATA now enters
+  the raw-RNS qualification store; other events remain drained so transport
+  progress cannot deadlock.
 - Add LXMF propagation/storage and local LXMF/NomadNet client services.
 - Preserve the composed independently vector-tested ADR 0006 authentication
   model, ADR 0009 pairing, and first USB bearer. Add Wi-Fi as a Reticulum transport only when that
@@ -1241,10 +1374,8 @@ as the bounded qualification fixture for the deterministic DATA/proof exchange.
   image fails inert at `EpochExhausted`; production may instead require an
   explicit identity rotation/reprovisioning workflow, but must never wrap.
 - Replace the 1 ms node poll with a combined readiness/deadline wait.
-- Run controlled two-board interoperability through the permanent image. Its
-  current powered evidence establishes boot, ordinary-TX smoke, and bounded
-  USB initialization-required/physical-presence-required behavior only; the
-  passed separate semantic HIL establishes the controlled E290
-  radio/RNode/Rete functional baseline.
+- Extend the completed controlled two-board API 1.1 DATA/proof and API 1.2
+  inbox runs with powered fault isolation, power cuts, sustained traffic,
+  multi-hop/Resource coverage, and full product memory/timing qualification.
 - Keep display and GNSS/location integration stubbed until the network,
   persistence and client ownership paths are stable.

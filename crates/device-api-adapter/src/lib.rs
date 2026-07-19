@@ -20,6 +20,11 @@ use reticulum_device_api::{
 };
 use reticulum_storage_model as storage;
 
+#[cfg(feature = "experimental-rns-inbox")]
+use core::num::NonZeroU64;
+#[cfg(feature = "experimental-rns-inbox")]
+use reticulum_device_api::MAX_RNS_INBOX_PAYLOAD_BYTES;
+
 /// Bounded semantic result of durable submission acceptance.
 ///
 /// This vocabulary is owned by the API boundary. Port implementations map
@@ -83,6 +88,114 @@ pub trait SubmissionPort {
     ) -> Result<SubmissionAcceptance, SubmissionPortError>;
 }
 
+/// One complete semantic item returned by an inbound RNS DATA mailbox.
+#[cfg(feature = "experimental-rns-inbox")]
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct InboundMailboxItem {
+    id: NonZeroU64,
+    destination: api::DestinationHash,
+    payload_len: u16,
+    payload: [u8; MAX_RNS_INBOX_PAYLOAD_BYTES],
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+impl InboundMailboxItem {
+    /// Copy one bounded mailbox payload into an owned semantic item.
+    pub fn new(
+        id: NonZeroU64,
+        destination: api::DestinationHash,
+        payload: &[u8],
+    ) -> Result<Self, InboundMailboxItemTooLarge> {
+        if payload.len() > MAX_RNS_INBOX_PAYLOAD_BYTES {
+            return Err(InboundMailboxItemTooLarge {
+                actual: payload.len(),
+            });
+        }
+        let mut owned = [0_u8; MAX_RNS_INBOX_PAYLOAD_BYTES];
+        owned[..payload.len()].copy_from_slice(payload);
+        Ok(Self {
+            id,
+            destination,
+            payload_len: payload.len() as u16,
+            payload: owned,
+        })
+    }
+
+    /// Device-assigned mailbox item identifier.
+    pub const fn id(&self) -> u64 {
+        self.id.get()
+    }
+
+    /// Local Reticulum destination that received the item.
+    pub const fn destination(&self) -> api::DestinationHash {
+        self.destination
+    }
+
+    /// Exact semantic payload bytes.
+    pub fn payload(&self) -> &[u8] {
+        &self.payload[..self.payload_len as usize]
+    }
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+impl core::fmt::Debug for InboundMailboxItem {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("InboundMailboxItem")
+            .field("id", &self.id)
+            .field("destination", &self.destination)
+            .field("payload_len", &self.payload_len)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A semantic inbound mailbox item exceeded the logical API payload limit.
+#[cfg(feature = "experimental-rns-inbox")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InboundMailboxItemTooLarge {
+    actual: usize,
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+impl InboundMailboxItemTooLarge {
+    /// Rejected payload length.
+    pub const fn actual(self) -> usize {
+        self.actual
+    }
+
+    /// Maximum accepted payload length.
+    pub const fn maximum(self) -> usize {
+        MAX_RNS_INBOX_PAYLOAD_BYTES
+    }
+}
+
+/// Bounded failure vocabulary exposed by an inbound RNS DATA mailbox port.
+#[cfg(feature = "experimental-rns-inbox")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InboundMailboxPortError {
+    /// The build or product profile does not provide mailbox service.
+    Unavailable,
+    /// The sole mailbox owner is temporarily occupied.
+    Busy,
+    /// Mailbox state could not be read reliably.
+    Backend,
+    /// The mailbox owner latched an invariant fault.
+    Faulted,
+}
+
+/// Narrow transport-neutral semantic port for the inbound RNS DATA mailbox.
+#[cfg(feature = "experimental-rns-inbox")]
+pub trait InboundMailboxPort {
+    /// Current product/runtime availability of inbox service.
+    fn availability(&mut self) -> CapabilityAvailability;
+
+    /// Read bounded mailbox runtime state without exposing an item payload.
+    fn status(&mut self) -> Result<api::RnsInboxStatus, InboundMailboxPortError>;
+
+    /// Read the oldest item without consuming it.
+    fn peek(&mut self) -> Result<Option<InboundMailboxItem>, InboundMailboxPortError>;
+}
+
 /// Authorize and dispatch one decoded logical request against a narrow
 /// durable-submission port.
 ///
@@ -110,6 +223,48 @@ where
     } else {
         match authorize_request(context, &request) {
             Ok(()) => dispatch_authorized(port, identity, context, request, operation),
+            Err(error) => authorization_error(error, operation),
+        }
+    };
+    ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id,
+        response,
+    }
+}
+
+/// Authorize and dispatch one request against independent submission and inbox ports.
+///
+/// Identity reads invoke neither port. Submission operations invoke only
+/// `submission_port`, while experimental inbox operations invoke only
+/// `inbox_port`.
+#[cfg(feature = "experimental-rns-inbox")]
+pub fn dispatch_with_inbox<P, M>(
+    submission_port: &mut P,
+    inbox_port: &mut M,
+    identity: api::IdentitySummary,
+    context: &DispatchContext,
+    envelope: RequestEnvelope<'_>,
+) -> ResponseEnvelope
+where
+    P: SubmissionPort,
+    M: InboundMailboxPort,
+{
+    let request_id = envelope.request_id;
+    let request = envelope.request;
+    let operation = request.operation();
+    let response = if envelope.version.major != ApiVersion::CURRENT.major {
+        api_error(ApiErrorCode::UnsupportedVersion, operation)
+    } else {
+        match authorize_request(context, &request) {
+            Ok(()) => dispatch_authorized_with_inbox(
+                submission_port,
+                inbox_port,
+                identity,
+                context,
+                request,
+                operation,
+            ),
             Err(error) => authorization_error(error, operation),
         }
     };
@@ -199,6 +354,58 @@ where
     }
 }
 
+#[cfg(feature = "experimental-rns-inbox")]
+fn dispatch_authorized_with_inbox<P, M>(
+    submission_port: &mut P,
+    inbox_port: &mut M,
+    identity: api::IdentitySummary,
+    context: &DispatchContext,
+    request: DeviceRequest<'_>,
+    operation: u16,
+) -> DeviceResponse
+where
+    P: SubmissionPort,
+    M: InboundMailboxPort,
+{
+    match request {
+        DeviceRequest::SystemCapabilities => {
+            let submit_available = cfg!(feature = "experimental-rns-data")
+                && submission_port.availability() == CapabilityAvailability::Available;
+            let inbox_availability = inbox_port.availability();
+            DeviceResponse::SystemCapabilities(api::CapabilitySnapshot::for_dispatch_with_inbox(
+                submit_available,
+                inbox_availability,
+            ))
+        }
+        DeviceRequest::IdentitySummary => DeviceResponse::IdentitySummary(identity),
+        DeviceRequest::RnsInboxStatus => {
+            if inbox_port.availability() != CapabilityAvailability::Available {
+                return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+            }
+            match inbox_port.status() {
+                Ok(status) => DeviceResponse::RnsInboxStatus(status),
+                Err(error) => inbox_port_error(error, operation),
+            }
+        }
+        DeviceRequest::RnsInboxPeek => {
+            if inbox_port.availability() != CapabilityAvailability::Available {
+                return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+            }
+            match inbox_port.peek() {
+                Ok(Some(item)) => {
+                    match api::RnsInboxItem::new(item.id, item.destination(), item.payload()) {
+                        Ok(item) => DeviceResponse::RnsInboxPeek(item),
+                        Err(_) => api_error(ApiErrorCode::Internal, operation),
+                    }
+                }
+                Ok(None) => api_error(ApiErrorCode::NotFound, operation),
+                Err(error) => inbox_port_error(error, operation),
+            }
+        }
+        other => dispatch_authorized(submission_port, identity, context, other, operation),
+    }
+}
+
 fn authorization_error(error: AuthorizationError, operation: u16) -> DeviceResponse {
     let code = match error {
         AuthorizationError::AuthenticationRequired => ApiErrorCode::AuthenticationRequired,
@@ -245,6 +452,17 @@ fn port_error(error: SubmissionPortError, operation: u16) -> DeviceResponse {
         | SubmissionPortError::Backend
         | SubmissionPortError::Binding
         | SubmissionPortError::Faulted => ApiErrorCode::Internal,
+    };
+    api_error(code, operation)
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+fn inbox_port_error(error: InboundMailboxPortError, operation: u16) -> DeviceResponse {
+    let code = match error {
+        InboundMailboxPortError::Unavailable => ApiErrorCode::CapabilityUnavailable,
+        InboundMailboxPortError::Busy
+        | InboundMailboxPortError::Backend
+        | InboundMailboxPortError::Faulted => ApiErrorCode::Internal,
     };
     api_error(code, operation)
 }

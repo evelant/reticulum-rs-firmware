@@ -9,21 +9,44 @@
 | `factory` | `0x010000..0x610000` | 6 MiB | Permanent node image |
 | `node_identity` | `0x610000..0x612000` | 8 KiB | Wired immutable identity mirrors |
 | `announce_clock` | `0x612000..0x614000` | 8 KiB | Wired boot-epoch mirrors |
-| `api_credentials` | `0x614000..0x616000` | 8 KiB | Checked dedicated range; plaintext store not wired |
+| `api_credentials` | `0x614000..0x616000` | 8 KiB | Wired boot-mounted plaintext two-sector credential store |
 | `device_config` | `0x616000..0x630000` | 104 KiB | Reserved, not wired |
 | `node_journal` | `0x630000..0x730000` | 1 MiB | Resident operation-scoped submission runtime |
-| `message_store` | `0x730000..0x930000` | 2 MiB | Reserved, not wired |
+| `message_store` | `0x730000..0x930000` | 2 MiB | Wired raw-RNS inbox qualification slot; not an LXMF store |
 | unpartitioned | `0x930000..0x1000000` | 6.8125 MiB | OTA/layout decision |
 
 The journal and message-store offsets are unchanged. The previously unwired
 `device_config` reservation is split into a dedicated 8 KiB
 `api_credentials` raw-NOR range and a 104 KiB standard-NVS configuration
-range. The credential range is validated at boot but remains unwired; ADR 0009
-selects its two-sector plaintext developer/HIL format and initial pairing
-policy without claiming their implementation. The journal, message store,
+range. The credential range is validated and boot-mounted; ADR 0009
+defines its implemented two-sector plaintext developer/HIL format and pairing
+policy. Boot mounts/reconciles it immediately after flash open and never
+auto-provisions erased media. The journal, message store,
 identity, announce clock, and credential range use ESP-IDF's standard
 `data,undefined` subtype. No unsupported numeric subtype is used to imply
 application ownership.
+
+The complete `message_store` range is now bound to the deliberately temporary
+[ADR 0011](../docs/adr/0011-durable-rns-inbox-qualification.md) format-1
+qualification store. It may retain one decrypted RNS DATA item of at most 383
+bytes in one 576-byte commit-last record at relative offset zero; every later
+byte in the exact 2 MiB range must remain erased. Mount is read-only and any
+torn, corrupt, unknown, wrongly bound, or noncanonical media disables inbox
+service without repair. The format stores destination and payload in plaintext
+and provides no acknowledgement, deletion, erase, reclamation, or garbage
+collection. It is not the final message queue, an LXMF store, or evidence that
+the eventual product format fits this encoding.
+
+The final post-audit API 1.2 merged image, SHA-256
+`ba10b04408368c3f5cbcc91f5d514f454595a7812986764c1e95ef528cc71f03`,
+matched exact address-zero readbacks on both E290s. Its bounded powered inbox
+run committed one maximum-size item, returned it through authenticated peek
+before and after hard reset, and preserved it while dropping a newer valid
+packet. The final exact 2,097,152-byte `message_store` readback had SHA-256
+`f50dab680d46ef20cd875eff778296a3b92f9d7eef34684f29eedc10b468d724`;
+the first 576 bytes were the canonical record and every remaining byte was
+`0xff`. This is qualification evidence for the temporary one-entry format, not
+authorization to treat the range as a general or LXMF message store.
 
 `node_identity` contains the same plaintext 64-byte Reticulum private material
 in two commit-last, SHA-256-protected 4 KiB mirrors. Its complete preflight is
@@ -48,25 +71,29 @@ While identity remains vacant, the product can establish or resume only the
 canonical empty A1 journal trajectory before committing identity. Provisioning
 never erases; after identity is committed, only strict mount is allowed. Boot
 drives the submission runtime through complete conservative recovery and then
-retains it behind the resident operation-scoped flash coordinator. Credential
-store mutation, device configuration, and message storage remain deferred.
+retains it behind the resident operation-scoped flash coordinator. Device
+configuration and final LXMF/message storage remain deferred. The wired inbox
+is only the one-entry raw-RNS qualification format above.
 The product does not start protocol service unless clock reservation, journal
 mount/recovery, and redundant identity coverage all succeed. LoRa is the
-primary first transport slice;
-USB/BLE/Wi-Fi client service and additional Reticulum transports remain
+primary first transport slice.
+The bounded authenticated USB client API is wired; BLE/Wi-Fi client service,
+production-ready USB behavior, and additional Reticulum transports remain
 deferred.
 
 Raw full-flash dumps now contain a private key after provisioning. Set
 `umask 077` before creating them and retain them only with restricted
 permissions on encrypted storage. After the required backup and before the
 first product boot, perform either a full-chip erase or an exact, readback-
-verified erase of `0x610000..0x730000`. The unpadded merged image does not
+verified erase of `0x610000..0x930000`, including the complete `message_store`.
+The unpadded merged image does not
 initialize those data partitions. Subsequent upgrades must preserve every
 product store; do not repeat the provisioning erase. The exact guarded sequence is in
 [`docs/e290-node.md`](../docs/e290-node.md). This table must not be used through
 the workspace's 8 MiB runner. Both connected modules are confirmed
-`HT-RA62-HF`; neither this permanent-node layout nor its host/build checks
-qualifies the unflashed permanent image on powered hardware.
+`HT-RA62-HF`. The layout and host/build checks alone do not establish powered
+behavior; the separately recorded permanent-image API 1.1 and bounded API 1.2
+runs provide the current two-board evidence under the limits in that runbook.
 
 `heltec-vision-master-e290-semantic-hil.csv` is the explicit hazardous RF HIL
 layout for the qualified 16 MiB E290 pair. It reserves NVS and PHY-init ranges

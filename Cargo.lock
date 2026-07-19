@@ -1933,6 +1933,7 @@ dependencies = [
  "reticulum-radio-interface",
  "reticulum-radio-lora-phy",
  "reticulum-radio-tx-dispatch",
+ "reticulum-rns-inbox-store",
  "reticulum-storage-actor",
  "reticulum-storage-journal",
  "reticulum-storage-model",
@@ -2066,6 +2067,14 @@ dependencies = [
 [[package]]
 name = "reticulum-rns-conformance"
 version = "0.1.0"
+
+[[package]]
+name = "reticulum-rns-inbox-store"
+version = "0.1.0"
+dependencies = [
+ "embedded-storage",
+ "sha2",
+]
 
 [[package]]
 name = "reticulum-rns-leviculum"

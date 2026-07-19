@@ -11,7 +11,9 @@ use reticulum_device_api::{
     ApiErrorCode, ApiErrorResponse, ApiVersion, DeviceResponse, IdentitySummary, ResponseEnvelope,
     decode_request, encode_response,
 };
-use reticulum_device_api_adapter::{SubmissionPort, dispatch};
+use reticulum_device_api_adapter::{
+    InboundMailboxPort, SubmissionPort, dispatch, dispatch_with_inbox,
+};
 use reticulum_device_api_credentials::CredentialAuthority;
 use reticulum_device_api_handoff::{
     LocalApiReply, LocalApiRequest, MESSAGE_CAPACITY, MessageLength, OwnedMessage,
@@ -117,16 +119,87 @@ where
     ))
 }
 
+/// Revalidate and dispatch one authenticated request with an independent inbox port.
+///
+/// This is the permanent node's API 1.2 path. Credential revalidation and
+/// response ownership are identical to [`dispatch_authenticated_request`], but
+/// inbox operations receive only their narrow semantic port. Public identity
+/// reads still invoke neither storage port.
+#[allow(
+    clippy::result_large_err,
+    reason = "terminal failure must retain the exact allocation-free request owner"
+)]
+pub fn dispatch_authenticated_request_with_inbox<const CREDENTIALS: usize, P, M>(
+    request: LocalApiRequest<AuthenticatedGrant>,
+    authority: Option<&CredentialAuthority<CREDENTIALS>>,
+    identity: IdentitySummary,
+    submission_port: &mut P,
+    inbox_port: &mut M,
+) -> Result<LocalApiReply, AuthenticatedApiDispatchFailure>
+where
+    P: SubmissionPort,
+    M: InboundMailboxPort,
+{
+    let envelope = match decode_request(request.message().encoded()) {
+        Ok(envelope) => envelope,
+        Err(_) => {
+            return Err(AuthenticatedApiDispatchFailure {
+                kind: AuthenticatedApiDispatchFailureKind::MalformedRequest,
+                request,
+            });
+        }
+    };
+    let operation = envelope.request.operation();
+    let response = match authority.and_then(|authority| request.grant().revalidate(authority).ok())
+    {
+        Some(lease) => lease.with_dispatch_context(|context| {
+            dispatch_with_inbox(submission_port, inbox_port, identity, context, envelope)
+        }),
+        None => ResponseEnvelope {
+            version: ApiVersion::CURRENT,
+            request_id: envelope.request_id,
+            response: DeviceResponse::Error(ApiErrorResponse {
+                code: ApiErrorCode::AuthenticationRequired,
+                operation: Some(operation),
+            }),
+        },
+    };
+
+    let mut encoded = [0_u8; MESSAGE_CAPACITY];
+    let length = match encode_response(&response, &mut encoded) {
+        Ok(length) => length,
+        Err(_) => {
+            return Err(AuthenticatedApiDispatchFailure {
+                kind: AuthenticatedApiDispatchFailureKind::ResponseEncoding,
+                request,
+            });
+        }
+    };
+    let key = request.key();
+    drop(request);
+    Ok(LocalApiReply::new(
+        key,
+        OwnedMessage::new(
+            MessageLength::new(length).expect("device API and handoff share one capacity"),
+            encoded,
+        ),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use rand_core::{CryptoRng, RngCore};
     use reticulum_device_api::{
         ApiErrorCode, ApiErrorResponse, ApiVersion, CapabilityAvailability, CapabilitySnapshot,
-        DestinationHash, DeviceRequest, DeviceResponse, IdentitySummary, OP_SYSTEM_CAPABILITIES,
-        Permissions, PrincipalId, RequestEnvelope, RequestId, ResponseEnvelope, decode_response,
+        DestinationHash, DeviceRequest, DeviceResponse, IdentitySummary,
+        OP_EXPERIMENTAL_RNS_INBOX_STATUS, OP_SYSTEM_CAPABILITIES, Permissions, PrincipalId,
+        RequestEnvelope, RequestId, ResponseEnvelope, RnsInboxStatus, decode_response,
         encode_request,
     };
-    use reticulum_device_api_adapter::{SubmissionAcceptance, SubmissionPort, SubmissionPortError};
+    use reticulum_device_api_adapter::{
+        InboundMailboxItem, InboundMailboxPort, InboundMailboxPortError, SubmissionAcceptance,
+        SubmissionPort, SubmissionPortError,
+    };
     use reticulum_device_api_credentials::{
         AuthorityRevision, AuthorizationPolicyVersion, CredentialAudit, CredentialAuthority,
         CredentialAuthorityBuilder, CredentialGeneration, CredentialId, CredentialRecord,
@@ -147,7 +220,10 @@ mod tests {
         SubmissionId as StorageSubmissionId,
     };
 
-    use super::{AuthenticatedApiDispatchFailureKind, dispatch_authenticated_request};
+    use super::{
+        AuthenticatedApiDispatchFailureKind, dispatch_authenticated_request,
+        dispatch_authenticated_request_with_inbox,
+    };
 
     const CREDENTIAL_ID: CredentialId = CredentialId::new([
         0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
@@ -164,6 +240,13 @@ mod tests {
     const SERVER_NONCE: [u8; 32] = [0x75; 32];
     const EXPECTED_KEY: RequestKey = RequestKey::new(SessionEpoch::new(1), CorrelationId::new(0));
     const IDENTITY_SUMMARY: IdentitySummary = IdentitySummary::new(DestinationHash([0x91; 16]));
+    const INBOX_STATUS: RnsInboxStatus = RnsInboxStatus {
+        depth: 1,
+        capacity: 1,
+        dropped_since_boot: 9,
+        max_payload_bytes: 383,
+        durable: true,
+    };
 
     struct FixedRng {
         bytes: [u8; 32],
@@ -238,6 +321,36 @@ mod tests {
         ) -> Result<SubmissionAcceptance, SubmissionPortError> {
             self.acceptance_calls += 1;
             Ok(SubmissionAcceptance::CapacityExhausted)
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingInboxPort {
+        availability_calls: usize,
+        status_calls: usize,
+        peek_calls: usize,
+    }
+
+    impl CountingInboxPort {
+        const fn total_calls(&self) -> usize {
+            self.availability_calls + self.status_calls + self.peek_calls
+        }
+    }
+
+    impl InboundMailboxPort for CountingInboxPort {
+        fn availability(&mut self) -> CapabilityAvailability {
+            self.availability_calls += 1;
+            CapabilityAvailability::Available
+        }
+
+        fn status(&mut self) -> Result<RnsInboxStatus, InboundMailboxPortError> {
+            self.status_calls += 1;
+            Ok(INBOX_STATUS)
+        }
+
+        fn peek(&mut self) -> Result<Option<InboundMailboxItem>, InboundMailboxPortError> {
+            self.peek_calls += 1;
+            Ok(None)
         }
     }
 
@@ -414,9 +527,25 @@ mod tests {
         ))
     }
 
+    fn inbox_status_request(request_id: RequestId) -> LocalApiRequest<AuthenticatedGrant> {
+        let envelope = RequestEnvelope {
+            version: ApiVersion::CURRENT,
+            request_id,
+            request: DeviceRequest::RnsInboxStatus,
+        };
+        let mut encoded = [0_u8; MESSAGE_CAPACITY];
+        let length = encode_request(&envelope, &mut encoded)
+            .unwrap_or_else(|error| panic!("inbox status request encoding failed: {error:?}"));
+        authenticated_request(OwnedMessage::new(
+            MessageLength::new(length).expect("canonical request fits the handoff capacity"),
+            encoded,
+        ))
+    }
+
     fn assert_authentication_required(
         reply: reticulum_device_api_handoff::LocalApiReply,
         request_id: RequestId,
+        operation: u16,
     ) {
         assert_eq!(reply.key(), EXPECTED_KEY);
         let response = decode_response(reply.message().encoded())
@@ -428,7 +557,7 @@ mod tests {
                 request_id,
                 response: DeviceResponse::Error(ApiErrorResponse {
                     code: ApiErrorCode::AuthenticationRequired,
-                    operation: Some(OP_SYSTEM_CAPABILITIES),
+                    operation: Some(operation),
                 }),
             }
         );
@@ -459,6 +588,40 @@ mod tests {
                 response: DeviceResponse::SystemCapabilities(CapabilitySnapshot::for_dispatch(
                     true
                 )),
+            }
+        );
+    }
+
+    #[test]
+    fn current_grant_dispatches_inbox_status_only_through_the_inbox_port() {
+        let request_id = RequestId(0xaabb_ccdd_eeff_0011);
+        let request = inbox_status_request(request_id);
+        let authority = active_authority(GENERATION);
+        let mut submission_port = CountingPort::default();
+        let mut inbox_port = CountingInboxPort::default();
+
+        let reply = dispatch_authenticated_request_with_inbox(
+            request,
+            Some(&authority),
+            IDENTITY_SUMMARY,
+            &mut submission_port,
+            &mut inbox_port,
+        )
+        .unwrap_or_else(|fault| panic!("valid inbox dispatch failed: {:?}", fault.kind()));
+
+        assert_eq!(reply.key(), EXPECTED_KEY);
+        assert_eq!(submission_port.total_calls(), 0);
+        assert_eq!(inbox_port.availability_calls, 1);
+        assert_eq!(inbox_port.status_calls, 1);
+        assert_eq!(inbox_port.peek_calls, 0);
+        let response = decode_response(reply.message().encoded())
+            .unwrap_or_else(|error| panic!("inbox response was not canonical: {error:?}"));
+        assert_eq!(
+            response,
+            ResponseEnvelope {
+                version: ApiVersion::CURRENT,
+                request_id,
+                response: DeviceResponse::RnsInboxStatus(INBOX_STATUS),
             }
         );
     }
@@ -500,7 +663,7 @@ mod tests {
             &mut port,
         )
         .unwrap_or_else(|fault| panic!("absent authority response failed: {:?}", fault.kind()));
-        assert_authentication_required(absent, absent_id);
+        assert_authentication_required(absent, absent_id, OP_SYSTEM_CAPABILITIES);
 
         let revoked_id = RequestId(22);
         let revoked_authority = revoked_authority();
@@ -511,7 +674,7 @@ mod tests {
             &mut port,
         )
         .unwrap_or_else(|fault| panic!("revoked authority response failed: {:?}", fault.kind()));
-        assert_authentication_required(revoked, revoked_id);
+        assert_authentication_required(revoked, revoked_id, OP_SYSTEM_CAPABILITIES);
 
         let mismatched_id = RequestId(23);
         let mismatched_authority = active_authority(CredentialGeneration::new(8));
@@ -527,9 +690,58 @@ mod tests {
                 fault.kind()
             )
         });
-        assert_authentication_required(mismatched, mismatched_id);
+        assert_authentication_required(mismatched, mismatched_id, OP_SYSTEM_CAPABILITIES);
 
         assert_eq!(port.total_calls(), 0);
+    }
+
+    #[test]
+    fn stale_or_absent_authority_rejects_inbox_status_before_either_port() {
+        let mut submission_port = CountingPort::default();
+        let mut inbox_port = CountingInboxPort::default();
+
+        let absent_id = RequestId(31);
+        let absent = dispatch_authenticated_request_with_inbox::<1, _, _>(
+            inbox_status_request(absent_id),
+            None,
+            IDENTITY_SUMMARY,
+            &mut submission_port,
+            &mut inbox_port,
+        )
+        .unwrap_or_else(|fault| panic!("absent authority response failed: {:?}", fault.kind()));
+        assert_authentication_required(absent, absent_id, OP_EXPERIMENTAL_RNS_INBOX_STATUS);
+
+        let revoked_id = RequestId(32);
+        let revoked_authority = revoked_authority();
+        let revoked = dispatch_authenticated_request_with_inbox(
+            inbox_status_request(revoked_id),
+            Some(&revoked_authority),
+            IDENTITY_SUMMARY,
+            &mut submission_port,
+            &mut inbox_port,
+        )
+        .unwrap_or_else(|fault| panic!("revoked authority response failed: {:?}", fault.kind()));
+        assert_authentication_required(revoked, revoked_id, OP_EXPERIMENTAL_RNS_INBOX_STATUS);
+
+        let mismatched_id = RequestId(33);
+        let mismatched_authority = active_authority(CredentialGeneration::new(8));
+        let mismatched = dispatch_authenticated_request_with_inbox(
+            inbox_status_request(mismatched_id),
+            Some(&mismatched_authority),
+            IDENTITY_SUMMARY,
+            &mut submission_port,
+            &mut inbox_port,
+        )
+        .unwrap_or_else(|fault| {
+            panic!(
+                "generation-mismatched authority response failed: {:?}",
+                fault.kind()
+            )
+        });
+        assert_authentication_required(mismatched, mismatched_id, OP_EXPERIMENTAL_RNS_INBOX_STATUS);
+
+        assert_eq!(submission_port.total_calls(), 0);
+        assert_eq!(inbox_port.total_calls(), 0);
     }
 
     #[test]

@@ -16,7 +16,7 @@ getrandom = "=0.3.4"
 md-5 = "=0.10.6"
 quote = "=1.0.46"
 rand_core.workspace = true
-reticulum-device-api = { path = "../crates/device-api", default-features = false, features = ["experimental-rns-data"] }
+reticulum-device-api = { path = "../crates/device-api", default-features = false, features = ["experimental-rns-data", "experimental-rns-inbox"] }
 reticulum-device-api-framing = { path = "../crates/device-api-framing", default-features = false }
 reticulum-device-api-handoff = { path = "../crates/device-api-handoff", default-features = false }
 reticulum-device-api-pairing = { path = "../crates/device-api-pairing", default-features = false }

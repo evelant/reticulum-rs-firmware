@@ -31,7 +31,9 @@ use reticulum_rns_rete::{
     ReceiptReservationUnavailable, ReceiptTerminal, ReceiptTerminalReservation,
     ReceiptTerminalSink, TxTarget as RnsTxTarget,
 };
-pub use reticulum_rns_rete::{IngressReport, NodeActions};
+pub use reticulum_rns_rete::{
+    InboundData, InboundDataProjection, IngressReport, NodeActions, project_inbound_data,
+};
 use sha2::{Digest, Sha256};
 
 mod ordinary_actions;

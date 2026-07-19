@@ -1,7 +1,8 @@
 //! Pure cross-store physical-mutation exclusion for the permanent E290 flash owner.
 //!
-//! The credential store and durable submission journal share one physical flash
-//! backend. The product coordinator serializes every physical operation, while
+//! The credential store, durable submission journal, and bounded inbound
+//! mailbox share one physical flash backend. The product coordinator serializes
+//! every physical operation, while
 //! these decisions make the stronger semantic rule explicit: retained journal
 //! actor or projector work blocks admission of a credential physical mutation,
 //! and any outstanding credential physical mutation blocks journal mutation
@@ -66,11 +67,48 @@ pub const fn journal_mutation_gate(
     }
 }
 
+/// Product decision before the bounded inbound mailbox can mutate flash.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InboundMailboxMutationGate {
+    /// The mailbox is mounted and neither other durable owner retains mutation work.
+    Ready,
+    /// Credential-owned physical progress must settle before mailbox admission.
+    DeferredForCredentialMutation,
+    /// Submission-journal physical progress must settle before mailbox admission.
+    DeferredForJournalMutation,
+    /// The inbound mailbox has no usable resident runtime.
+    RuntimeUnavailable,
+}
+
+/// Decide whether one inbound-mailbox commit may run synchronously.
+///
+/// The first qualification mailbox retains no ambiguous physical retry owner:
+/// any non-reconciled backend failure disables that service for the boot. A
+/// candidate deferred before I/O therefore owns plaintext but no flash
+/// mutation. Credential and journal mutations still outrank it because their
+/// retained operations must keep exclusive access to the shared backend.
+pub const fn inbound_mailbox_mutation_gate(
+    runtime_available: bool,
+    credential_physical_mutation_outstanding: bool,
+    journal_actor_pending: bool,
+    journal_projector_pending: bool,
+) -> InboundMailboxMutationGate {
+    if credential_physical_mutation_outstanding {
+        InboundMailboxMutationGate::DeferredForCredentialMutation
+    } else if journal_actor_pending || journal_projector_pending {
+        InboundMailboxMutationGate::DeferredForJournalMutation
+    } else if !runtime_available {
+        InboundMailboxMutationGate::RuntimeUnavailable
+    } else {
+        InboundMailboxMutationGate::Ready
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CredentialPhysicalMutationGate, JournalMutationGate, credential_physical_mutation_gate,
-        journal_mutation_gate,
+        CredentialPhysicalMutationGate, InboundMailboxMutationGate, JournalMutationGate,
+        credential_physical_mutation_gate, inbound_mailbox_mutation_gate, journal_mutation_gate,
     };
 
     #[test]
@@ -132,5 +170,35 @@ mod tests {
 
         assert_eq!(deferred, JournalMutationGate::DeferredForCredentialMutation);
         assert_ne!(deferred, JournalMutationGate::RuntimeUnavailable);
+    }
+
+    #[test]
+    fn inbox_commit_waits_for_every_retained_mutation_owner() {
+        assert_eq!(
+            inbound_mailbox_mutation_gate(true, false, false, false),
+            InboundMailboxMutationGate::Ready
+        );
+        assert_eq!(
+            inbound_mailbox_mutation_gate(true, true, false, false),
+            InboundMailboxMutationGate::DeferredForCredentialMutation
+        );
+        for (actor, projector) in [(true, false), (false, true), (true, true)] {
+            assert_eq!(
+                inbound_mailbox_mutation_gate(true, false, actor, projector),
+                InboundMailboxMutationGate::DeferredForJournalMutation
+            );
+        }
+        assert_eq!(
+            inbound_mailbox_mutation_gate(false, false, false, false),
+            InboundMailboxMutationGate::RuntimeUnavailable
+        );
+    }
+
+    #[test]
+    fn credential_ownership_outranks_other_inbox_unavailability() {
+        assert_eq!(
+            inbound_mailbox_mutation_gate(false, true, true, true),
+            InboundMailboxMutationGate::DeferredForCredentialMutation
+        );
     }
 }

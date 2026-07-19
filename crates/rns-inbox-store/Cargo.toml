@@ -1,6 +1,6 @@
 [package]
-name = "reticulum-device-api"
-description = "Portable logical protocol for the local Reticulum device API"
+name = "reticulum-rns-inbox-store"
+description = "Power-loss-safe one-entry raw-NOR RNS inbox qualification store"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,11 +9,10 @@ publish.workspace = true
 
 [features]
 default = []
-experimental-rns-data = []
-experimental-rns-inbox = []
 
 [dependencies]
-minicbor.workspace = true
+embedded-storage.workspace = true
+sha2.workspace = true
 
 [lib]
 path = "src/lib.rs"

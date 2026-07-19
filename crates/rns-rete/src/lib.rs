@@ -23,12 +23,12 @@ pub mod embedded;
 
 pub use embedded::{
     AdmissionCounters, AnnounceAdmissionError, DestinationRegistrationError, EmbeddedNode,
-    EmbeddedNodeConfig, EmbeddedNodeMetrics, EmbeddedSendError, InboundProofPolicy,
-    IngressCounters, IngressDisposition, IngressDropReason, IngressReport, InterfaceId,
-    MAX_CHANNEL_PAYLOAD, MAX_DATA_PAYLOAD, NodeActions, NodeRole, PrepareDataError, PreparedData,
-    RNS_MTU, ReceiptCandidate, ReceiptId, ReceiptKind, ReceiptReservationUnavailable,
+    EmbeddedNodeConfig, EmbeddedNodeMetrics, EmbeddedSendError, InboundData, InboundDataProjection,
+    InboundProofPolicy, IngressCounters, IngressDisposition, IngressDropReason, IngressReport,
+    InterfaceId, MAX_CHANNEL_PAYLOAD, MAX_DATA_PAYLOAD, NodeActions, NodeRole, PrepareDataError,
+    PreparedData, RNS_MTU, ReceiptCandidate, ReceiptId, ReceiptKind, ReceiptReservationUnavailable,
     ReceiptTerminal, ReceiptTerminalCounters, ReceiptTerminalReservation, ReceiptTerminalSink,
-    ReceiptTickReport, RouteSnapshot, TransportCounters, TxPacket, TxTarget,
+    ReceiptTickReport, RouteSnapshot, TransportCounters, TxPacket, TxTarget, project_inbound_data,
 };
 pub use rete_core::{DestHash, DestType, Identity, IdentityHash, LinkId, Packet, PacketType};
 pub use rete_stack::{DestinationType, Direction, NodeEvent};

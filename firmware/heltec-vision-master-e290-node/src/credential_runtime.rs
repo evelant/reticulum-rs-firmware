@@ -11,7 +11,7 @@ use core::mem;
 
 use rand_core::{CryptoRng, RngCore};
 use reticulum_device_api::IdentitySummary;
-use reticulum_device_api_adapter::SubmissionPort;
+use reticulum_device_api_adapter::{InboundMailboxPort, SubmissionPort};
 use reticulum_device_api_credential_store::{
     BoundCredentialStoreAccess, CommitPairingLifecycleSuccessorError, CredentialStoreBinding,
     CredentialStoreBindingError, CredentialStoreFault, CredentialStoreMountError,
@@ -41,7 +41,7 @@ use reticulum_device_api_session::AuthenticatedGrant;
 use zeroize::Zeroizing;
 
 use crate::authenticated_api_node::{
-    AuthenticatedApiDispatchFailure, dispatch_authenticated_request,
+    AuthenticatedApiDispatchFailure, dispatch_authenticated_request_with_inbox,
 };
 use crate::credential_boot::{
     CredentialBootOutcome, CredentialBootState, MAXIMUM_CREDENTIAL_BOOT_OUTCOME_BYTES,
@@ -320,21 +320,29 @@ impl CredentialRuntime {
         clippy::result_large_err,
         reason = "terminal failure must retain the exact allocation-free request owner"
     )]
-    pub fn dispatch_authenticated_request<P>(
+    pub fn dispatch_authenticated_request<P, M>(
         &self,
         request: LocalApiRequest<AuthenticatedGrant>,
         identity: IdentitySummary,
-        port: &mut P,
+        submission_port: &mut P,
+        inbox_port: &mut M,
     ) -> Result<LocalApiReply, AuthenticatedApiDispatchFailure>
     where
         P: SubmissionPort,
+        M: InboundMailboxPort,
     {
         let authority = self
             .mounted
             .as_ref()
             .and_then(MountedCredentialStore::publishable_authority)
             .filter(|_| self.boot_state.authority_publishable());
-        dispatch_authenticated_request(request, authority, identity, port)
+        dispatch_authenticated_request_with_inbox(
+            request,
+            authority,
+            identity,
+            submission_port,
+            inbox_port,
+        )
     }
 
     /// Whether the retained authority is physically and locally eligible for a

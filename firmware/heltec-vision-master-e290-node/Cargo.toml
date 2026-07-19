@@ -16,8 +16,8 @@ journal-schema2-dev-reprovision = []
 [dependencies]
 reticulum-announce-clock = { path = "../../crates/announce-clock", default-features = false }
 reticulum-board-heltec-vision-master-e290-radio = { path = "../../crates/board-heltec-vision-master-e290-radio" }
-reticulum-device-api = { path = "../../crates/device-api", default-features = false, features = ["experimental-rns-data"] }
-reticulum-device-api-adapter = { path = "../../crates/device-api-adapter", default-features = false, features = ["experimental-rns-data"] }
+reticulum-device-api = { path = "../../crates/device-api", default-features = false, features = ["experimental-rns-data", "experimental-rns-inbox"] }
+reticulum-device-api-adapter = { path = "../../crates/device-api-adapter", default-features = false, features = ["experimental-rns-data", "experimental-rns-inbox"] }
 reticulum-device-api-credential-store = { path = "../../crates/device-api-credential-store", default-features = false }
 reticulum-device-api-credentials = { path = "../../crates/device-api-credentials", default-features = false }
 reticulum-device-api-framing = { path = "../../crates/device-api-framing", default-features = false }
@@ -32,6 +32,7 @@ reticulum-node-core = { path = "../../crates/node-core", default-features = fals
 reticulum-nor-flash-region = { path = "../../crates/nor-flash-region", default-features = false }
 reticulum-radio-interface = { path = "../../crates/radio-interface", default-features = false }
 reticulum-radio-tx-dispatch = { path = "../../crates/radio-tx-dispatch", default-features = false }
+reticulum-rns-inbox-store = { path = "../../crates/rns-inbox-store", default-features = false }
 reticulum-storage-actor = { path = "../../crates/storage-actor", default-features = false }
 reticulum-storage-journal = { path = "../../crates/storage-journal", default-features = false }
 reticulum-storage-model = { path = "../../crates/storage-model", default-features = false }

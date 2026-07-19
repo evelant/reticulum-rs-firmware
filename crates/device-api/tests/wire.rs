@@ -11,23 +11,51 @@ use reticulum_device_api::{
 };
 #[cfg(feature = "experimental-rns-data")]
 use reticulum_device_api::{IdempotencyKey, OP_EXPERIMENTAL_SUBMIT_RNS_DATA, SubmissionAccepted};
+#[cfg(feature = "experimental-rns-inbox")]
+use reticulum_device_api::{
+    MAX_RNS_INBOX_PAYLOAD_BYTES, OP_EXPERIMENTAL_RNS_INBOX_PEEK, OP_EXPERIMENTAL_RNS_INBOX_STATUS,
+    RnsInboxItem, RnsInboxStatus,
+};
 
 const GOLDEN_CAPABILITIES_REQUEST: &[u8] = &[
-    0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa0,
+    0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa0,
 ];
 
-#[cfg(not(feature = "experimental-rns-data"))]
+#[cfg(all(
+    not(feature = "experimental-rns-data"),
+    not(feature = "experimental-rns-inbox")
+))]
 const GOLDEN_CAPABILITIES_RESPONSE: &[u8] = &[
-    0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa7, 0x00, 0xa2,
-    0x00, 0x01, 0x01, 0x01, 0x01, 0xf4, 0x02, 0x00, 0x03, 0xf4, 0x04, 0x19, 0x02, 0x00, 0x05, 0x19,
-    0x01, 0xc0, 0x06, 0x19, 0x01, 0x7f,
+    0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa9, 0x00, 0xa2,
+    0x00, 0x01, 0x01, 0x02, 0x01, 0xf4, 0x02, 0x00, 0x03, 0xf4, 0x04, 0x19, 0x02, 0x00, 0x05, 0x19,
+    0x01, 0xc0, 0x06, 0x19, 0x01, 0x7f, 0x07, 0x00, 0x08, 0x00,
 ];
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(all(
+    feature = "experimental-rns-data",
+    not(feature = "experimental-rns-inbox")
+))]
 const GOLDEN_CAPABILITIES_RESPONSE: &[u8] = &[
-    0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa7, 0x00, 0xa2,
-    0x00, 0x01, 0x01, 0x01, 0x01, 0xf4, 0x02, 0x00, 0x03, 0xf5, 0x04, 0x19, 0x02, 0x00, 0x05, 0x19,
-    0x01, 0xc0, 0x06, 0x19, 0x01, 0x7f,
+    0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa9, 0x00, 0xa2,
+    0x00, 0x01, 0x01, 0x02, 0x01, 0xf4, 0x02, 0x00, 0x03, 0xf5, 0x04, 0x19, 0x02, 0x00, 0x05, 0x19,
+    0x01, 0xc0, 0x06, 0x19, 0x01, 0x7f, 0x07, 0x00, 0x08, 0x00,
+];
+
+#[cfg(all(
+    not(feature = "experimental-rns-data"),
+    feature = "experimental-rns-inbox"
+))]
+const GOLDEN_CAPABILITIES_RESPONSE: &[u8] = &[
+    0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa9, 0x00, 0xa2,
+    0x00, 0x01, 0x01, 0x02, 0x01, 0xf4, 0x02, 0x00, 0x03, 0xf4, 0x04, 0x19, 0x02, 0x00, 0x05, 0x19,
+    0x01, 0xc0, 0x06, 0x19, 0x01, 0x7f, 0x07, 0x02, 0x08, 0x19, 0x01, 0x7f,
+];
+
+#[cfg(all(feature = "experimental-rns-data", feature = "experimental-rns-inbox"))]
+const GOLDEN_CAPABILITIES_RESPONSE: &[u8] = &[
+    0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa9, 0x00, 0xa2,
+    0x00, 0x01, 0x01, 0x02, 0x01, 0xf4, 0x02, 0x00, 0x03, 0xf5, 0x04, 0x19, 0x02, 0x00, 0x05, 0x19,
+    0x01, 0xc0, 0x06, 0x19, 0x01, 0x7f, 0x07, 0x02, 0x08, 0x19, 0x01, 0x7f,
 ];
 
 fn capabilities_request() -> RequestEnvelope<'static> {
@@ -83,12 +111,63 @@ fn exact_capabilities_response_golden_round_trip() {
 }
 
 #[test]
+fn api_v1_0_and_v1_1_capabilities_default_absent_inbox_fields() {
+    const LEGACY: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa7, 0x00,
+        0xa2, 0x00, 0x01, 0x01, 0x00, 0x01, 0xf4, 0x02, 0x00, 0x03, 0xf4, 0x04, 0x19, 0x02, 0x00,
+        0x05, 0x19, 0x01, 0xc0, 0x06, 0x19, 0x01, 0x7f,
+    ];
+
+    for minor in [0_u8, 1] {
+        let mut encoded = LEGACY.to_vec();
+        encoded[6] = minor;
+        encoded[19] = minor;
+        let decoded = decode_response(&encoded).unwrap();
+        assert_eq!(decoded.version.minor, u16::from(minor));
+        let DeviceResponse::SystemCapabilities(capabilities) = decoded.response else {
+            panic!("expected capabilities response")
+        };
+        assert_eq!(capabilities.api_version().minor, u16::from(minor));
+        assert_eq!(
+            capabilities.experimental_rns_inbox(),
+            CapabilityAvailability::Unavailable
+        );
+        assert_eq!(capabilities.max_rns_inbox_payload_bytes(), 0);
+    }
+}
+
+#[test]
+fn inbox_capability_availability_is_a_closed_wire_vocabulary() {
+    let mut encoded = GOLDEN_CAPABILITIES_RESPONSE.to_vec();
+    let key = encoded
+        .windows(2)
+        .rposition(|window| {
+            window
+                == [
+                    0x07,
+                    CapabilitySnapshot::current()
+                        .experimental_rns_inbox()
+                        .wire_code(),
+                ]
+        })
+        .expect("capability key 7");
+    encoded.splice(key + 1..=key + 1, [0x18, 99]);
+    assert_eq!(
+        decode_response(&encoded),
+        Err(DecodeError::InvalidValue {
+            field: RequiredField::CapabilityExperimentalRnsInbox,
+            value: 99,
+        })
+    );
+}
+
+#[test]
 fn exact_identity_summary_goldens_round_trip() {
     const REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa0,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa0,
     ];
     const RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa1, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa1, 0x00,
         0x50, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
         0x1e, 0x1f,
     ];
@@ -110,7 +189,7 @@ fn exact_identity_summary_goldens_round_trip() {
 fn identity_summary_is_copy_only_public_and_read_only() {
     fn assert_copy<T: Copy>() {}
     assert_copy::<IdentitySummary>();
-    assert_eq!(API_VERSION_MINOR, 1);
+    assert_eq!(API_VERSION_MINOR, 2);
     assert_eq!(OP_IDENTITY_SUMMARY, 0x0003);
 
     let summary = IdentitySummary::new(PRIMARY_DESTINATION);
@@ -140,11 +219,11 @@ fn identity_summary_is_copy_only_public_and_read_only() {
 #[test]
 fn identity_summary_unknown_fields_are_skipped_but_required_field_is_strict() {
     const UNKNOWN_REQUEST_FIELD: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa1, 0x18,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa1, 0x18,
         0x63, 0x82, 0x01, 0x02,
     ];
     const UNKNOWN_RESPONSE_FIELD: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa2, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa2, 0x00,
         0x50, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
         0x1e, 0x1f, 0x18, 0x63, 0x82, 0x01, 0x02,
     ];
@@ -195,10 +274,222 @@ fn identity_summary_unknown_fields_are_skipped_but_required_field_is_strict() {
     );
 }
 
+#[cfg(feature = "experimental-rns-inbox")]
+#[test]
+fn exact_experimental_inbox_status_goldens_round_trip() {
+    const REQUEST: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x02, 0x03,
+        0xa0,
+    ];
+    const RESPONSE: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x02, 0x03,
+        0xa5, 0x00, 0x03, 0x01, 0x18, 0x20, 0x02, 0x1b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x03, 0x19, 0x01, 0x7f, 0x04, 0xf5,
+    ];
+    let request = RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        request: DeviceRequest::RnsInboxStatus,
+    };
+    let status = RnsInboxStatus {
+        depth: 3,
+        capacity: 32,
+        dropped_since_boot: 0x0102_0304_0506_0708,
+        max_payload_bytes: MAX_RNS_INBOX_PAYLOAD_BYTES as u16,
+        durable: true,
+    };
+    let response = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        response: DeviceResponse::RnsInboxStatus(status),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let request_len = encode_request(&request, &mut output).unwrap();
+    assert_eq!(&output[..request_len], REQUEST);
+    assert_eq!(decode_request(REQUEST).unwrap(), request);
+    let response_len = encode_response(&response, &mut output).unwrap();
+    assert_eq!(&output[..response_len], RESPONSE);
+    assert_eq!(decode_response(RESPONSE).unwrap(), response);
+    assert_eq!(response.response.kind(), OP_EXPERIMENTAL_RNS_INBOX_STATUS);
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+#[test]
+fn exact_experimental_inbox_peek_goldens_round_trip() {
+    const REQUEST: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x03, 0x03,
+        0xa0,
+    ];
+    const RESPONSE: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x03, 0x03,
+        0xa3, 0x00, 0x1b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01, 0x50, 0x10, 0x11,
+        0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x02,
+        0x43, 0x61, 0x62, 0x63,
+    ];
+    let request = RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        request: DeviceRequest::RnsInboxPeek,
+    };
+    let item = RnsInboxItem::new(
+        core::num::NonZeroU64::new(0x0102_0304_0506_0708).unwrap(),
+        PRIMARY_DESTINATION,
+        b"abc",
+    )
+    .unwrap();
+    let response = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        response: DeviceResponse::RnsInboxPeek(item),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let request_len = encode_request(&request, &mut output).unwrap();
+    assert_eq!(&output[..request_len], REQUEST);
+    assert_eq!(decode_request(REQUEST).unwrap(), request);
+    let response_len = encode_response(&response, &mut output).unwrap();
+    assert_eq!(&output[..response_len], RESPONSE);
+    assert_eq!(decode_response(RESPONSE).unwrap(), response);
+    assert_eq!(response.response.kind(), OP_EXPERIMENTAL_RNS_INBOX_PEEK);
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+#[test]
+fn inbox_item_is_owned_bounded_and_redacts_payload_from_debug() {
+    let mut source = [0x5a_u8; MAX_RNS_INBOX_PAYLOAD_BYTES];
+    let item = RnsInboxItem::new(
+        core::num::NonZeroU64::new(7).unwrap(),
+        PRIMARY_DESTINATION,
+        &source,
+    )
+    .unwrap();
+    source.fill(0);
+    assert_eq!(item.id(), 7);
+    assert_eq!(item.destination(), PRIMARY_DESTINATION);
+    assert_eq!(item.payload_len() as usize, MAX_RNS_INBOX_PAYLOAD_BYTES);
+    assert_eq!(item.payload(), &[0x5a; MAX_RNS_INBOX_PAYLOAD_BYTES]);
+    let debug = std::format!("{item:?}");
+    assert!(debug.contains("payload_len: 383"));
+    assert!(!debug.contains("90, 90"));
+
+    let oversized = [0_u8; MAX_RNS_INBOX_PAYLOAD_BYTES + 1];
+    let error = RnsInboxItem::new(
+        core::num::NonZeroU64::new(8).unwrap(),
+        PRIMARY_DESTINATION,
+        &oversized,
+    )
+    .unwrap_err();
+    assert_eq!(error.actual(), MAX_RNS_INBOX_PAYLOAD_BYTES + 1);
+    assert_eq!(error.maximum(), MAX_RNS_INBOX_PAYLOAD_BYTES);
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+#[test]
+fn maximum_inbox_payload_fits_the_frozen_message_and_body_limits() {
+    let payload = [0x6b_u8; MAX_RNS_INBOX_PAYLOAD_BYTES];
+    let envelope = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(u64::MAX),
+        response: DeviceResponse::RnsInboxPeek(
+            RnsInboxItem::new(
+                core::num::NonZeroU64::new(u64::MAX).unwrap(),
+                DestinationHash([0xff; 16]),
+                &payload,
+            )
+            .unwrap(),
+        ),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_response(&envelope, &mut output).unwrap();
+    assert!(written <= MAX_MESSAGE_BYTES);
+    assert_eq!(decode_response(&output[..written]).unwrap(), envelope);
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+#[test]
+fn inbox_wire_fields_are_required_unique_and_bounded() {
+    let missing_status_depth = [
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x02, 0x03, 0xa4,
+        0x01, 0x01, 0x02, 0x00, 0x03, 0x19, 0x01, 0x7f, 0x04, 0xf4,
+    ];
+    assert_eq!(
+        decode_response(&missing_status_depth),
+        Err(DecodeError::MissingField(RequiredField::RnsInboxDepth))
+    );
+
+    let duplicate_item_id = [
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x03, 0x03, 0xa4,
+        0x00, 0x01, 0x00, 0x02, 0x01, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02,
+        0x40,
+    ];
+    assert_eq!(
+        decode_response(&duplicate_item_id),
+        Err(DecodeError::DuplicateField(RequiredField::RnsInboxItemId))
+    );
+
+    let wrong_destination_width = [
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x03, 0x03, 0xa3,
+        0x00, 0x01, 0x01, 0x4f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x40,
+    ];
+    assert_eq!(
+        decode_response(&wrong_destination_width),
+        Err(DecodeError::InvalidByteStringLength {
+            field: RequiredField::RnsInboxDestination,
+            expected: 16,
+            actual: 15,
+        })
+    );
+
+    let zero_item_id = [
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x03, 0x03, 0xa3,
+        0x00, 0x00, 0x01, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x40,
+    ];
+    assert_eq!(
+        decode_response(&zero_item_id),
+        Err(DecodeError::InvalidValue {
+            field: RequiredField::RnsInboxItemId,
+            value: 0,
+        })
+    );
+
+    let oversized = [0x5a_u8; MAX_RNS_INBOX_PAYLOAD_BYTES + 1];
+    let mut encoded = vec![
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x03, 0x03, 0xa3,
+        0x00, 0x01, 0x01, 0x50,
+    ];
+    encoded.extend_from_slice(&[0; 16]);
+    encoded.extend([0x02, 0x59, 0x01, 0x80]);
+    encoded.extend_from_slice(&oversized);
+    assert_eq!(
+        decode_response(&encoded),
+        Err(DecodeError::InboxPayloadTooLarge {
+            actual: MAX_RNS_INBOX_PAYLOAD_BYTES + 1,
+            max: MAX_RNS_INBOX_PAYLOAD_BYTES,
+        })
+    );
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+#[test]
+fn inbox_reads_require_authentication_but_no_persisted_permission_bit() {
+    let authenticated = DispatchContext::authenticated(
+        PrincipalId([0x72; 16]),
+        Permissions::NONE,
+        dispatch_provenance(),
+    );
+    for request in [DeviceRequest::RnsInboxStatus, DeviceRequest::RnsInboxPeek] {
+        assert!(!request.is_mutating());
+        assert_eq!(
+            authorize_request(&DispatchContext::UNAUTHENTICATED, &request),
+            Err(AuthorizationError::AuthenticationRequired)
+        );
+        assert_eq!(authorize_request(&authenticated, &request), Ok(()));
+    }
+}
+
 #[test]
 fn exact_typed_error_response_golden_round_trip() {
     const GOLDEN: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
         0x04, 0x01, 0x02,
     ];
     let envelope = ResponseEnvelope {
@@ -219,11 +510,11 @@ fn exact_typed_error_response_golden_round_trip() {
 fn immediate_submission_rejections_have_distinct_error_goldens() {
     const MUTATING_OPERATION: u16 = 0xf001;
     const CAPACITY_GOLDEN: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
         0x09, 0x01, 0x19, 0xf0, 0x01,
     ];
     const IDEMPOTENCY_GOLDEN: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
         0x0a, 0x01, 0x19, 0xf0, 0x01,
     ];
     for (code, golden) in [
@@ -335,7 +626,7 @@ fn contradictory_submission_status_wire_shapes_are_rejected() {
 fn unknown_envelope_version_and_body_fields_are_skipped() {
     // Envelope key 99, version key 7, and empty-body key 55 are all unknown.
     let bytes = [
-        0xa5, 0x00, 0xa3, 0x00, 0x01, 0x01, 0x01, 0x07, 0x82, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02,
+        0xa5, 0x00, 0xa3, 0x00, 0x01, 0x01, 0x02, 0x07, 0x82, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02,
         0x01, 0x03, 0xa1, 0x18, 0x37, 0xa1, 0x00, 0xf5, 0x18, 0x63, 0x82, 0x01, 0x02,
     ];
     assert_eq!(decode_request(&bytes).unwrap(), capabilities_request());
@@ -819,8 +1110,53 @@ fn capability_snapshot_separates_direct_radio_from_outbound_rns_submission() {
         capabilities.experimental_submit_rns_data(),
         cfg!(feature = "experimental-rns-data")
     );
+    assert_eq!(
+        capabilities.experimental_rns_inbox(),
+        if cfg!(feature = "experimental-rns-inbox") {
+            CapabilityAvailability::Available
+        } else {
+            CapabilityAvailability::Unavailable
+        }
+    );
+    assert_eq!(
+        capabilities.max_rns_inbox_payload_bytes(),
+        if cfg!(feature = "experimental-rns-inbox") {
+            383
+        } else {
+            0
+        }
+    );
+
+    let legacy_dispatch = CapabilitySnapshot::for_dispatch(true);
+    assert_eq!(
+        legacy_dispatch.experimental_submit_rns_data(),
+        cfg!(feature = "experimental-rns-data")
+    );
+    assert_eq!(
+        legacy_dispatch.experimental_rns_inbox(),
+        CapabilityAvailability::Unavailable
+    );
+    assert_eq!(legacy_dispatch.max_rns_inbox_payload_bytes(), 0);
     assert!(!CapabilitySnapshot::for_dispatch(false).experimental_submit_rns_data());
-    assert_eq!(CapabilitySnapshot::for_dispatch(true), capabilities);
+
+    let inbox_dispatch =
+        CapabilitySnapshot::for_dispatch_with_inbox(true, CapabilityAvailability::Disabled);
+    assert_eq!(
+        inbox_dispatch.experimental_rns_inbox(),
+        if cfg!(feature = "experimental-rns-inbox") {
+            CapabilityAvailability::Disabled
+        } else {
+            CapabilityAvailability::Unavailable
+        }
+    );
+    assert_eq!(
+        inbox_dispatch.max_rns_inbox_payload_bytes(),
+        if cfg!(feature = "experimental-rns-inbox") {
+            383
+        } else {
+            0
+        }
+    );
 }
 
 #[cfg(feature = "experimental-rns-data")]
@@ -846,7 +1182,7 @@ fn submit_request(payload: &'static [u8]) -> RequestEnvelope<'static> {
 #[test]
 fn exact_experimental_submit_golden_and_borrowed_payload() {
     const GOLDEN: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa3,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa3,
         0x00, 0x50, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
         0x0d, 0x0e, 0x0f, 0x01, 0x43, 0x61, 0x62, 0x63, 0x02, 0x50, 0xf0, 0xf1, 0xf2, 0xf3, 0xf4,
         0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff,
@@ -872,7 +1208,7 @@ fn exact_experimental_submit_golden_and_borrowed_payload() {
 #[test]
 fn exact_experimental_submit_accepted_response_has_only_submission_id() {
     const GOLDEN: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa1,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa1,
         0x00, 0x1b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
     ];
     let envelope = ResponseEnvelope {
@@ -1005,6 +1341,36 @@ fn experimental_operation_is_unavailable_without_feature() {
         assert_eq!(
             decode_response(&response),
             Err(DecodeError::UnsupportedResponseKind(0xf001))
+        );
+    }
+
+    #[cfg(not(feature = "experimental-rns-inbox"))]
+    for operation in [0xf002_u16, 0xf003] {
+        let encoded_operation = operation.to_be_bytes();
+        let request = [
+            0xa4,
+            0x00,
+            0xa2,
+            0x00,
+            0x01,
+            0x01,
+            0x02,
+            0x01,
+            0x09,
+            0x02,
+            0x19,
+            encoded_operation[0],
+            encoded_operation[1],
+            0x03,
+            0xa0,
+        ];
+        assert_eq!(
+            decode_request(&request),
+            Err(DecodeError::UnsupportedOperation(operation))
+        );
+        assert_eq!(
+            decode_response(&request),
+            Err(DecodeError::UnsupportedResponseKind(operation))
         );
     }
 

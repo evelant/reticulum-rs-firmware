@@ -555,6 +555,8 @@ fn graph_policy() -> ExitCode {
             .map_err(|error| format!("device API edge dependency boundary: {error}"))?;
         validate_portable_durability_dependency_boundaries(&json, &root)
             .map_err(|error| format!("portable durability dependency boundary: {error}"))?;
+        validate_rns_inbox_store_dependency_boundary(&json, &root)
+            .map_err(|error| format!("durable RNS inbox store dependency boundary: {error}"))?;
         validate_tracker_radio_dependency_boundary(&json, &root)
             .map_err(|error| format!("Tracker bidirectional radio dependency boundary: {error}"))?;
         validate_tx_handoff_dependency_boundary(&json, &root)
@@ -618,7 +620,7 @@ fn graph_policy() -> ExitCode {
              authenticated session layer has only its exact reviewed cryptographic, device-API, credentials, framing and handoff normal edges plus its exact test-only hex, semantic-adapter and storage-model fixtures; \
              the Rete integration and node-core normal closures contain no RNode, radio-interface, LoRa or board package; \
              the shared lora-phy owner and E290 radio wrapper have only their exact reviewed HAL, framing, board and test edges; \
-             the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the permanent E290 node reaches the LoRa-first node/router/dispatcher graph, exact portable identity, credential-store authority, announce-clock, NOR-region and durable-submission layers, the target-safe experimental device-API semantic port, the featureless framed USB pre-authentication control codec, the resident live-pairing lifecycle and a minimal boot-lifetime USB authenticated-session bearer with transport-neutral admission and node-side dispatch while excluding onboard clients and foreign Tracker/HIL packages; \
+             the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the permanent E290 node reaches the LoRa-first node/router/dispatcher graph, exact portable identity, credential-store authority, announce-clock, NOR-region, durable-submission and durable inbound-RNS-inbox layers, both target-safe experimental device-API semantic ports, the featureless framed USB pre-authentication control codec, the resident live-pairing lifecycle and a minimal boot-lifetime USB authenticated-session bearer with transport-neutral admission and node-side dispatch while excluding onboard clients and foreign Tracker/HIL packages; \
              the interface router has only its reviewed node-core and Embassy Sync normal edges plus test-only rand_core and RNS fixture edges; \
              the TX handoff, RF-inert dispatcher and supervisor use only their reviewed node-core, \
              interface-router ingress, handoff, dispatcher, Embassy Sync/Futures/Time, rand_core \
@@ -629,11 +631,11 @@ fn graph_policy() -> ExitCode {
              edges plus test-only Embassy Futures and static storage, and its target-all normal \
              closure exactly matches all 64 reviewed local \
              path or registry/Git source identities and dispatcher-specific enabled-feature sets; \
-             the portable identity, announce-clock and NOR-region crates use only their exact reviewed embedded-storage, rand_core, SHA-256 and zeroize subsets; the durable \
+             the portable identity, announce-clock and NOR-region crates use only their exact reviewed embedded-storage, rand_core, SHA-256 and zeroize subsets; the durable inbound RNS inbox store uses only exact feature-free embedded-storage and SHA-256 pins; the durable \
              storage model uses only reviewed minicbor and SHA-256 edges; \
              the physical storage journal uses only reviewed embedded-storage, storage-model and SHA-256 edges; \
              the sole storage actor uses only reviewed embedded-storage, node-core, journal, semantic-model and submission-projector edges plus its reviewed test-only rand_core edge; the durable submission runtime uses only reviewed Embassy Sync, embedded-storage, rand_core, node-core, storage-actor, semantic-model, submission-projector and transport-neutral supervisor edges plus its journal-only test fixture; \
-             the device API adapter uses only reviewed device-API and semantic-model normal edges with test-only embedded-storage and storage-actor fixtures plus one exact experimental-rns-data feature forward; \
+             the device API adapter uses only reviewed device-API and semantic-model normal edges with test-only embedded-storage and storage-actor fixtures plus exact experimental-rns-data and experimental-rns-inbox feature forwards; \
              the physical-storage HIL has only its reviewed raw-flash, journal, semantic-model, logging and ESP runtime edges and no radio/protocol stack; \
              the submission projector uses only reviewed node-core and storage-model \
              and test-only rand_core and RNS adapter edges"
@@ -875,7 +877,7 @@ fn cargo_tree_contains_package(tree: &str, package: &str) -> bool {
         .any(|line| line.split_whitespace().any(|field| field == package))
 }
 
-const PRODUCT_GRAPH_FORBIDDEN: [&str; 26] = [
+const PRODUCT_GRAPH_FORBIDDEN: [&str; 27] = [
     "leviculum-core",
     "rete-lxmf",
     "lxmf-rs",
@@ -894,6 +896,7 @@ const PRODUCT_GRAPH_FORBIDDEN: [&str; 26] = [
     "reticulum-node-core",
     "reticulum-radio-tx-dispatch",
     "reticulum-radio-lora-phy",
+    "reticulum-rns-inbox-store",
     "reticulum-semantic-roundtrip-hil",
     "reticulum-storage-actor",
     "reticulum-storage-journal",
@@ -915,7 +918,7 @@ fn validate_product_graph_boundary(label: &str, tree: &str) -> Result<(), String
     Ok(())
 }
 
-const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 31] = [
+const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 32] = [
     "embassy-executor",
     "esp-radio",
     "lora-modulation",
@@ -940,6 +943,7 @@ const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 31] = [
     "reticulum-node-core",
     "reticulum-radio-interface",
     "reticulum-radio-tx-dispatch",
+    "reticulum-rns-inbox-store",
     "reticulum-rns-rete",
     "reticulum-semantic-roundtrip-hil",
     "reticulum-storage-actor",
@@ -957,7 +961,7 @@ const TX_HIL_GRAPH_REQUIRED: [&str; 5] = [
     "reticulum-semantic-roundtrip-hil",
 ];
 
-const TX_HIL_GRAPH_FORBIDDEN: [&str; 26] = [
+const TX_HIL_GRAPH_FORBIDDEN: [&str; 27] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-core",
@@ -976,6 +980,7 @@ const TX_HIL_GRAPH_FORBIDDEN: [&str; 26] = [
     "reticulum-board-heltec-vision-master-e290-radio",
     "reticulum-node-core",
     "reticulum-radio-tx-dispatch",
+    "reticulum-rns-inbox-store",
     "reticulum-rns-rete",
     "reticulum-storage-actor",
     "reticulum-storage-journal",
@@ -1016,7 +1021,7 @@ const SEMANTIC_TX_HIL_GRAPH_REQUIRED: [&str; 9] = [
     "rete-transport",
 ];
 
-const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 22] = [
+const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 23] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -1032,6 +1037,7 @@ const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 22] = [
     "reticulum-board-heltec-vision-master-e290-radio",
     "reticulum-node-core",
     "reticulum-radio-tx-dispatch",
+    "reticulum-rns-inbox-store",
     "reticulum-storage-actor",
     "reticulum-storage-journal",
     "reticulum-storage-model",
@@ -1155,7 +1161,7 @@ const E290_SEMANTIC_HIL_GRAPH_REQUIRED: [&str; 9] = [
     "rete-transport",
 ];
 
-const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 25] = [
+const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 26] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -1175,6 +1181,7 @@ const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 25] = [
     "reticulum-interface-router",
     "reticulum-node-core",
     "reticulum-radio-tx-dispatch",
+    "reticulum-rns-inbox-store",
     "reticulum-storage-actor",
     "reticulum-storage-journal",
     "reticulum-submission-projector",
@@ -1211,7 +1218,7 @@ fn validate_e290_semantic_hil_graph_boundary(tree: &str) -> Result<(), String> {
     Ok(())
 }
 
-const E290_NODE_GRAPH_REQUIRED: [&str; 36] = [
+const E290_NODE_GRAPH_REQUIRED: [&str; 37] = [
     "embedded-storage",
     "esp-storage",
     "reticulum-announce-clock",
@@ -1234,6 +1241,7 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 36] = [
     "reticulum-radio-interface",
     "reticulum-radio-lora-phy",
     "reticulum-radio-tx-dispatch",
+    "reticulum-rns-inbox-store",
     "reticulum-rns-rete",
     "rete-core",
     "rete-stack",
@@ -1294,13 +1302,14 @@ fn validate_e290_node_graph_boundary(tree: &str) -> Result<(), String> {
             .lines()
             .find(|line| line.contains(package))
             .ok_or_else(|| format!("permanent E290 node graph has no {package}line"))?;
-        if !line.contains("features=[experimental-rns-data]") {
+        if !line.ends_with("features=[experimental-rns-data,experimental-rns-inbox]") {
             return Err(format!(
-                "permanent E290 node must enable only target-safe experimental RNS DATA on {package}, observed {line}"
+                "permanent E290 node must enable only target-safe experimental RNS DATA and durable inbox operations on {package}, observed {line}"
             ));
         }
     }
     for package in [
+        "reticulum-rns-inbox-store ",
         "reticulum-device-api-credential-store ",
         "reticulum-device-api-credentials ",
         "reticulum-device-api-framing ",
@@ -1316,7 +1325,7 @@ fn validate_e290_node_graph_boundary(tree: &str) -> Result<(), String> {
             .ok_or_else(|| format!("permanent E290 node graph has no {package}line"))?;
         if !line.ends_with("features=[]") {
             return Err(format!(
-                "permanent E290 node must keep credential, authentication, and pre-authentication control packages feature-free; observed {line}"
+                "permanent E290 node must keep the durable inbox, credential, authentication, and pre-authentication control packages feature-free; observed {line}"
             ));
         }
     }
@@ -1363,6 +1372,13 @@ fn validate_e290_node_feature_boundary(
     let dependencies = package["dependencies"]
         .as_array()
         .ok_or_else(|| format!("{package_name} package has no dependency array"))?;
+    validate_exact_local_dependency(
+        dependencies,
+        package_name,
+        "reticulum-rns-inbox-store",
+        &workspace.join("crates/rns-inbox-store"),
+        false,
+    )?;
     validate_exact_local_dependency(
         dependencies,
         package_name,
@@ -2103,6 +2119,62 @@ fn validate_portable_durability_dependency_boundaries(
         )?;
     }
 
+    Ok(())
+}
+
+fn validate_rns_inbox_store_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let package_name = "reticulum-rns-inbox-store";
+    let package = exact_local_package(
+        packages,
+        workspace,
+        package_name,
+        "crates/rns-inbox-store/Cargo.toml",
+    )?;
+    let features = package["features"]
+        .as_object()
+        .ok_or_else(|| format!("{package_name} package has no feature map"))?;
+    if features.len() != 1
+        || features
+            .get("default")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|values| !values.is_empty())
+    {
+        return Err(format!(
+            "{package_name} must expose only one empty default feature"
+        ));
+    }
+
+    let dependencies = package["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{package_name} package has no dependency array"))?;
+    if dependencies.len() != 2
+        || dependencies
+            .iter()
+            .any(|dependency| !dependency["kind"].is_null())
+    {
+        return Err(format!(
+            "{package_name} must have exactly two reviewed normal dependencies and no build or test dependencies"
+        ));
+    }
+    for (dependency_name, requirement) in [("embedded-storage", "=0.3.1"), ("sha2", "=0.10.9")] {
+        validate_exact_registry_dependency(
+            dependencies,
+            package_name,
+            dependency_name,
+            requirement,
+            None,
+            false,
+            &[],
+        )?;
+    }
     Ok(())
 }
 
@@ -4456,16 +4528,24 @@ fn validate_device_api_adapter_dependency_boundary(
     let experimental_rns_data = features
         .get("experimental-rns-data")
         .and_then(serde_json::Value::as_array);
-    if features.len() != 2
+    let experimental_rns_inbox = features
+        .get("experimental-rns-inbox")
+        .and_then(serde_json::Value::as_array);
+    if features.len() != 3
         || default.is_none_or(|default| !default.is_empty())
         || experimental_rns_data.is_none_or(|experimental_rns_data| {
             experimental_rns_data.len() != 1
                 || experimental_rns_data[0].as_str()
                     != Some("reticulum-device-api/experimental-rns-data")
         })
+        || experimental_rns_inbox.is_none_or(|experimental_rns_inbox| {
+            experimental_rns_inbox.len() != 1
+                || experimental_rns_inbox[0].as_str()
+                    != Some("reticulum-device-api/experimental-rns-inbox")
+        })
     {
         return Err(
-            "reticulum-device-api-adapter must expose only default=[] and experimental-rns-data=[reticulum-device-api/experimental-rns-data]"
+            "reticulum-device-api-adapter must expose only default=[] plus exact experimental-rns-data and experimental-rns-inbox forwards"
                 .to_owned(),
         );
     }
@@ -7554,6 +7634,12 @@ mod tests {
                 },
                 "dependencies": [
                     handoff_path_dependency_fixture(
+                        "reticulum-rns-inbox-store",
+                        "*",
+                        &root.join("crates/rns-inbox-store"),
+                        None,
+                    ),
+                    handoff_path_dependency_fixture(
                         "reticulum-device-api-credential-store",
                         "*",
                         &root.join("crates/device-api-credential-store"),
@@ -7619,8 +7705,8 @@ mod tests {
                      ├── reticulum-board-heltec-vision-master-e290-radio v0.1.0 features=[]\n\
                      │   ├── reticulum-board-heltec-vision-master-e290 v0.1.0 features=[]\n\
                      │   └── reticulum-radio-lora-phy v0.1.0 features=[]\n\
-                     ├── reticulum-device-api v0.1.0 features=[experimental-rns-data]\n\
-                     ├── reticulum-device-api-adapter v0.1.0 features=[experimental-rns-data]\n\
+                     ├── reticulum-device-api v0.1.0 features=[experimental-rns-data,experimental-rns-inbox]\n\
+                     ├── reticulum-device-api-adapter v0.1.0 features=[experimental-rns-data,experimental-rns-inbox]\n\
                      ├── reticulum-device-api-credential-store v0.1.0 features=[]\n\
                      │   └── reticulum-device-api-credentials v0.1.0 features=[]\n\
                      ├── reticulum-device-api-framing v0.1.0 features=[]\n\
@@ -7639,6 +7725,7 @@ mod tests {
                      ├── reticulum-nor-flash-region v0.1.0 features=[]\n\
                      ├── reticulum-radio-interface v0.1.0 features=[]\n\
                      ├── reticulum-radio-tx-dispatch v0.1.0 features=[]\n\
+                     ├── reticulum-rns-inbox-store v0.1.0 features=[]\n\
                      ├── reticulum-storage-actor v0.1.0 features=[]\n\
                      ├── reticulum-storage-journal v0.1.0 features=[]\n\
                      ├── reticulum-storage-model v0.1.0 features=[]\n\
@@ -7669,7 +7756,8 @@ mod tests {
         assert!(validate_e290_node_graph_boundary(&hidden_feature).is_err());
 
         for package in ["reticulum-device-api", "reticulum-device-api-adapter"] {
-            let expected = format!("{package} v0.1.0 features=[experimental-rns-data]");
+            let expected =
+                format!("{package} v0.1.0 features=[experimental-rns-data,experimental-rns-inbox]");
             let drifted = format!("{package} v0.1.0 features=[]");
             let feature_drift = valid.replacen(&expected, &drifted, 1);
             assert!(
@@ -7678,6 +7766,7 @@ mod tests {
             );
         }
         for package in [
+            "reticulum-rns-inbox-store",
             "reticulum-device-api-credential-store",
             "reticulum-device-api-credentials",
             "reticulum-device-api-framing",
@@ -7744,6 +7833,11 @@ mod tests {
         validate_e290_node_feature_boundary(&baseline.to_string(), &root).unwrap();
 
         for (dependency_name, wrong_path, rename) in [
+            (
+                "reticulum-rns-inbox-store",
+                "crates/not-the-rns-inbox-store",
+                "rns-inbox-store",
+            ),
             (
                 "reticulum-device-api-credential-store",
                 "crates/not-the-credential-store",
@@ -7992,7 +8086,7 @@ mod tests {
     }
 
     #[test]
-    fn credential_store_remains_forbidden_from_legacy_product_and_hil_graphs() {
+    fn credential_and_inbox_stores_remain_forbidden_from_legacy_product_and_hil_graphs() {
         for (label, forbidden) in [
             ("Tracker product", &PRODUCT_GRAPH_FORBIDDEN[..]),
             ("storage HIL", &STORAGE_HIL_GRAPH_FORBIDDEN[..]),
@@ -8006,6 +8100,7 @@ mod tests {
             for package in [
                 "reticulum-device-api-credential-store",
                 "reticulum-device-api-credentials",
+                "reticulum-rns-inbox-store",
             ] {
                 assert!(
                     forbidden.contains(&package),
@@ -8013,6 +8108,8 @@ mod tests {
                 );
             }
         }
+        assert!(E290_NODE_GRAPH_REQUIRED.contains(&"reticulum-rns-inbox-store"));
+        assert!(!E290_NODE_GRAPH_FORBIDDEN.contains(&"reticulum-rns-inbox-store"));
     }
 
     #[test]
@@ -9591,6 +9688,94 @@ mod tests {
     }
 
     #[test]
+    fn rns_inbox_store_boundary_allows_only_two_exact_registry_edges() {
+        let root = workspace_root();
+        let baseline = portable_layers_metadata_fixture(&root);
+        validate_rns_inbox_store_dependency_boundary(&baseline.to_string(), &root).unwrap();
+
+        let mut wrong_manifest = baseline.clone();
+        fixture_package_mut(&mut wrong_manifest, "reticulum-rns-inbox-store")["manifest_path"] =
+            serde_json::json!(root.join("crates/lookalike-inbox-store/Cargo.toml"));
+        assert!(
+            validate_rns_inbox_store_dependency_boundary(&wrong_manifest.to_string(), &root)
+                .is_err()
+        );
+
+        let mut nonlocal = baseline.clone();
+        fixture_package_mut(&mut nonlocal, "reticulum-rns-inbox-store")["source"] =
+            serde_json::json!(CRATES_IO_SOURCE);
+        assert!(
+            validate_rns_inbox_store_dependency_boundary(&nonlocal.to_string(), &root).is_err()
+        );
+
+        let mut duplicate = baseline.clone();
+        duplicate["packages"]
+            .as_array_mut()
+            .unwrap()
+            .push(rns_inbox_store_package_fixture(&root));
+        assert!(
+            validate_rns_inbox_store_dependency_boundary(&duplicate.to_string(), &root).is_err()
+        );
+
+        for features in [
+            serde_json::json!({}),
+            serde_json::json!({"default": ["unreviewed"]}),
+            serde_json::json!({"default": [], "future": []}),
+        ] {
+            let mut changed = baseline.clone();
+            fixture_package_mut(&mut changed, "reticulum-rns-inbox-store")["features"] = features;
+            assert!(
+                validate_rns_inbox_store_dependency_boundary(&changed.to_string(), &root).is_err()
+            );
+        }
+
+        for dependency_name in ["embedded-storage", "sha2"] {
+            for (field, value) in [
+                ("name", serde_json::json!("unreviewed-replacement")),
+                ("req", serde_json::json!(">=0.0.0")),
+                (
+                    "source",
+                    serde_json::json!("registry+https://example.invalid/index"),
+                ),
+                ("path", serde_json::json!(root.join("crates/lookalike"))),
+                ("kind", serde_json::json!("dev")),
+                ("optional", serde_json::json!(true)),
+                ("rename", serde_json::json!("renamed-dependency")),
+                ("target", serde_json::json!("cfg(target_os = \"none\")")),
+                ("uses_default_features", serde_json::json!(true)),
+                ("features", serde_json::json!(["unreviewed"])),
+            ] {
+                let mut changed = baseline.clone();
+                fixture_dependency_mut(
+                    fixture_package_mut(&mut changed, "reticulum-rns-inbox-store"),
+                    dependency_name,
+                    None,
+                )[field] = value;
+                assert!(
+                    validate_rns_inbox_store_dependency_boundary(&changed.to_string(), &root)
+                        .is_err(),
+                    "{dependency_name} accepted changed {field}"
+                );
+            }
+        }
+
+        let mut build = baseline.clone();
+        fixture_dependency_mut(
+            fixture_package_mut(&mut build, "reticulum-rns-inbox-store"),
+            "sha2",
+            None,
+        )["kind"] = serde_json::json!("build");
+        assert!(validate_rns_inbox_store_dependency_boundary(&build.to_string(), &root).is_err());
+
+        let mut extra = baseline;
+        fixture_package_mut(&mut extra, "reticulum-rns-inbox-store")["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(handoff_dependency_fixture("heapless", "=0.9.1", None));
+        assert!(validate_rns_inbox_store_dependency_boundary(&extra.to_string(), &root).is_err());
+    }
+
+    #[test]
     fn storage_model_boundary_rejects_unreviewed_dependencies_features_and_edge_shapes() {
         let root = workspace_root();
         const PACKAGE_INDEX: usize = 5;
@@ -9961,6 +10146,11 @@ mod tests {
             ("experimental-rns-data", serde_json::json!([])),
             (
                 "experimental-rns-data",
+                serde_json::json!(["reticulum-device-api/unreviewed"]),
+            ),
+            ("experimental-rns-inbox", serde_json::json!([])),
+            (
+                "experimental-rns-inbox",
                 serde_json::json!(["reticulum-device-api/unreviewed"]),
             ),
         ] {
@@ -10716,6 +10906,7 @@ mod tests {
                 announce_clock_package_fixture(root),
                 nor_flash_region_package_fixture(root),
                 submission_runtime_package_fixture(root),
+                rns_inbox_store_package_fixture(root),
             ]
         })
     }
@@ -10776,6 +10967,19 @@ mod tests {
             "features": { "default": [] },
             "dependencies": [
                 handoff_dependency_fixture("embedded-storage", "=0.3.1", None),
+            ],
+        })
+    }
+
+    fn rns_inbox_store_package_fixture(root: &Path) -> serde_json::Value {
+        serde_json::json!({
+            "name": "reticulum-rns-inbox-store",
+            "source": null,
+            "manifest_path": root.join("crates/rns-inbox-store/Cargo.toml"),
+            "features": { "default": [] },
+            "dependencies": [
+                handoff_dependency_fixture("embedded-storage", "=0.3.1", None),
+                handoff_dependency_fixture("sha2", "=0.10.9", None),
             ],
         })
     }
@@ -11196,6 +11400,7 @@ mod tests {
             "features": {
                 "default": [],
                 "experimental-rns-data": ["reticulum-device-api/experimental-rns-data"],
+                "experimental-rns-inbox": ["reticulum-device-api/experimental-rns-inbox"],
             },
             "dependencies": [
                 handoff_dependency_fixture("embedded-storage", "=0.3.1", Some("dev")),

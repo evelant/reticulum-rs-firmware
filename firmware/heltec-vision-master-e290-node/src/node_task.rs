@@ -43,9 +43,10 @@ use reticulum_heltec_vision_master_e290_node::{
 };
 use reticulum_interface_router::{InterfaceDescriptor, SealedIngressPacket};
 use reticulum_node_core::{
-    AuthorizedFrameObservation, MonotonicMillis, MonotonicSeconds, NodeActions,
-    ReceiptCorrelationError, TxLeaseDeadline,
+    AuthorizedFrameObservation, InboundDataProjection, MonotonicMillis, MonotonicSeconds,
+    NodeActions, ReceiptCorrelationError, TxLeaseDeadline, project_inbound_data,
 };
+use reticulum_rns_inbox_store::{InboxCandidate, InboxDestination};
 use reticulum_storage_actor::{DriveError, ProjectorOperationError};
 use reticulum_submission_runtime::{FrameOfferProgress, RuntimeError, RuntimeStep};
 use reticulum_tx_handoff::AuthorizedFrameNodeHandoff;
@@ -58,7 +59,7 @@ use reticulum_tx_supervisor::{
 use crate::{
     LORA_ONLINE, ProductSupervisor, RADIO_READY, config,
     platform_storage::{
-        ProductCredentialInitializationPort, ProductInitializationDrive,
+        ProductCredentialInitializationPort, ProductInboundAdmission, ProductInitializationDrive,
         ProductInitializationRequest, ProductLivePairingAdmission, ProductStorageCoordinator,
         ProductSubmissionDrive,
     },
@@ -304,6 +305,7 @@ pub async fn run(
     let mut pending_frame_acknowledgement: Option<AuthorizedFrameObservation> = None;
     let mut pairing = PairingNodeState::new();
     let mut authenticated_api_state = AuthenticatedApiNodeState::new();
+    let mut pending_inbound: Option<InboxCandidate> = None;
 
     loop {
         let mut progressed = false;
@@ -317,6 +319,10 @@ pub async fn run(
             &mut rng,
             now_millis(),
         );
+
+        if let Some(candidate) = pending_inbound.take() {
+            progressed |= drive_inbound_candidate(storage, &mut pending_inbound, candidate);
+        }
 
         // Authorized-frame evidence outranks completion processing. The LoRa
         // actor does not return the owning completion until this task echoes
@@ -780,14 +786,46 @@ pub async fn run(
                 lane + 1
             };
 
-            // Client delivery is intentionally not part of this first LoRa
-            // vertical slice. Drain scalar/event output so transport progress
-            // cannot deadlock; the runbook records durable client delivery as
-            // a product blocker rather than silently treating this as final.
             if let Some(output) = supervisor.take_non_packet_actions() {
+                let event_count = output.events.len();
+                let mut inbound_data = 0_usize;
+                let mut other_events = 0_usize;
+                for event in output.events {
+                    match project_inbound_data(event) {
+                        InboundDataProjection::Data(data) => {
+                            inbound_data = inbound_data.saturating_add(1);
+                            let (destination, payload) = data.into_parts();
+                            match InboxCandidate::new(InboxDestination::new(destination), &payload)
+                            {
+                                Ok(candidate) if pending_inbound.is_none() => {
+                                    let _ = drive_inbound_candidate(
+                                        storage,
+                                        &mut pending_inbound,
+                                        candidate,
+                                    );
+                                }
+                                Ok(_candidate) => {
+                                    storage.record_inbound_drop();
+                                    warn!(
+                                        "e290-node stage=rns-inbox-admission status=DROPPED reason=pending-candidate-capacity overflow_policy=drop-newest payload_len={} proof_semantics=decrypt-only",
+                                        payload.len(),
+                                    );
+                                }
+                                Err(reason) => {
+                                    storage.record_inbound_drop();
+                                    warn!(
+                                        "e290-node stage=rns-inbox-admission status=DROPPED reason={reason:?} overflow_policy=drop-newest proof_semantics=decrypt-only"
+                                    );
+                                }
+                            }
+                        }
+                        InboundDataProjection::Other(_event) => {
+                            other_events = other_events.saturating_add(1);
+                        }
+                    }
+                }
                 info!(
-                    "e290-node stage=local-output status=DRAINED events={} unroutable={} client_delivery=not-yet-wired",
-                    output.events.len(),
+                    "e290-node stage=local-output status=HANDLED events={event_count} inbound_data={inbound_data} other_events={other_events} unroutable={} inbound_client_delivery=durable-rns-inbox other_event_delivery=not-yet-wired",
                     output.unroutable_packets,
                 );
                 progressed = true;
@@ -810,6 +848,45 @@ pub async fn run(
             // Temporary bounded polling until the aggregate exposes one
             // combined ingress/completion/deadline wait surface.
             Timer::after(Duration::from_millis(config::NODE_POLL_INTERVAL_MS)).await;
+        }
+    }
+}
+
+fn drive_inbound_candidate(
+    storage: &mut ProductStorageCoordinator,
+    pending: &mut Option<InboxCandidate>,
+    candidate: InboxCandidate,
+) -> bool {
+    let payload_len = candidate.payload().len();
+    match storage.offer_inbound(candidate) {
+        ProductInboundAdmission::Committed(id) => {
+            info!(
+                "e290-node stage=rns-inbox-admission status=COMMITTED item_id={} payload_len={payload_len} durability=commit-readback plaintext_at_rest=true proof_semantics=decrypt-only",
+                id.get(),
+            );
+            true
+        }
+        ProductInboundAdmission::Deferred(candidate) => {
+            *pending = Some(candidate);
+            false
+        }
+        ProductInboundAdmission::DroppedFull => {
+            warn!(
+                "e290-node stage=rns-inbox-admission status=DROPPED reason=mailbox-full overflow_policy=drop-newest payload_len={payload_len} proof_semantics=decrypt-only"
+            );
+            true
+        }
+        ProductInboundAdmission::DroppedUnavailable => {
+            warn!(
+                "e290-node stage=rns-inbox-admission status=DROPPED reason=mailbox-unavailable overflow_policy=drop-newest payload_len={payload_len} proof_semantics=decrypt-only"
+            );
+            true
+        }
+        ProductInboundAdmission::DroppedFaulted(reason) => {
+            error!(
+                "e290-node stage=rns-inbox-admission status=DROPPED reason=store-fault fault={reason:?} overflow_policy=drop-newest payload_len={payload_len} inbox_service=disabled radio_actor=continue-route-only proof_semantics=decrypt-only"
+            );
+            true
         }
     }
 }

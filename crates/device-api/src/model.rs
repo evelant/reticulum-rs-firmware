@@ -1,11 +1,11 @@
 //! Rete-independent logical API model and authorization vocabulary.
 
-use core::{convert::Infallible, marker::PhantomData, ops::BitOr};
+use core::{convert::Infallible, marker::PhantomData, num::NonZeroU64, ops::BitOr};
 
 /// Device API v1 major version.
 pub const API_VERSION_MAJOR: u16 = 1;
-/// Device API v1 revision adding `identity.summary`.
-pub const API_VERSION_MINOR: u16 = 1;
+/// Device API v1 revision adding the optional experimental RNS inbox capability.
+pub const API_VERSION_MINOR: u16 = 2;
 
 /// Maximum size of one decoded or encoded logical CBOR message.
 pub const MAX_MESSAGE_BYTES: usize = 512;
@@ -13,6 +13,9 @@ pub const MAX_MESSAGE_BYTES: usize = 512;
 pub const MAX_BODY_BYTES: usize = 448;
 /// Maximum payload accepted by the experimental RNS DATA submission request.
 pub const MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES: usize = 383;
+/// Maximum payload returned by the experimental inbound RNS DATA mailbox.
+#[cfg(feature = "experimental-rns-inbox")]
+pub const MAX_RNS_INBOX_PAYLOAD_BYTES: usize = 383;
 
 /// `system.capabilities` operation number.
 pub const OP_SYSTEM_CAPABILITIES: u16 = 0x0001;
@@ -25,6 +28,12 @@ pub const RESPONSE_ERROR: u16 = 0x0000;
 /// Target-safe outbound RNS DATA submission operation in the experimental range.
 #[cfg(feature = "experimental-rns-data")]
 pub const OP_EXPERIMENTAL_SUBMIT_RNS_DATA: u16 = 0xf001;
+/// Read bounded runtime state for the experimental inbound RNS DATA mailbox.
+#[cfg(feature = "experimental-rns-inbox")]
+pub const OP_EXPERIMENTAL_RNS_INBOX_STATUS: u16 = 0xf002;
+/// Read the oldest item in the experimental inbound RNS DATA mailbox.
+#[cfg(feature = "experimental-rns-inbox")]
+pub const OP_EXPERIMENTAL_RNS_INBOX_PEEK: u16 = 0xf003;
 
 /// Major/minor logical protocol version.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -301,6 +310,14 @@ pub enum RequiredPermission {
     ExperimentalSubmitRnsData,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AuthorizationRequirement {
+    Public,
+    #[cfg(feature = "experimental-rns-inbox")]
+    Authenticated,
+    Permission(RequiredPermission),
+}
+
 impl RequiredPermission {
     const fn bits(self) -> Permissions {
         match self {
@@ -333,6 +350,12 @@ pub enum DeviceRequest<'a> {
         /// Device-assigned submission identifier.
         id: SubmissionId,
     },
+    /// Read bounded runtime state for the inbound RNS DATA mailbox.
+    #[cfg(feature = "experimental-rns-inbox")]
+    RnsInboxStatus,
+    /// Read the oldest inbound RNS DATA item without consuming it.
+    #[cfg(feature = "experimental-rns-inbox")]
+    RnsInboxPeek,
     /// Durably submit outbound RNS DATA without selecting a physical transport.
     #[cfg(feature = "experimental-rns-data")]
     SubmitRnsData {
@@ -356,6 +379,10 @@ impl DeviceRequest<'_> {
             Self::SystemCapabilities => OP_SYSTEM_CAPABILITIES,
             Self::IdentitySummary => OP_IDENTITY_SUMMARY,
             Self::SubmissionStatus { .. } => OP_SUBMISSION_STATUS,
+            #[cfg(feature = "experimental-rns-inbox")]
+            Self::RnsInboxStatus => OP_EXPERIMENTAL_RNS_INBOX_STATUS,
+            #[cfg(feature = "experimental-rns-inbox")]
+            Self::RnsInboxPeek => OP_EXPERIMENTAL_RNS_INBOX_PEEK,
             #[cfg(feature = "experimental-rns-data")]
             Self::SubmitRnsData { .. } => OP_EXPERIMENTAL_SUBMIT_RNS_DATA,
             Self::__Borrowed(never, _) => match *never {},
@@ -368,18 +395,26 @@ impl DeviceRequest<'_> {
             Self::SystemCapabilities | Self::IdentitySummary | Self::SubmissionStatus { .. } => {
                 false
             }
+            #[cfg(feature = "experimental-rns-inbox")]
+            Self::RnsInboxStatus | Self::RnsInboxPeek => false,
             #[cfg(feature = "experimental-rns-data")]
             Self::SubmitRnsData { .. } => true,
             Self::__Borrowed(never, _) => match *never {},
         }
     }
 
-    const fn required_permission(&self) -> Option<RequiredPermission> {
+    const fn authorization_requirement(&self) -> AuthorizationRequirement {
         match self {
-            Self::SystemCapabilities | Self::IdentitySummary => None,
-            Self::SubmissionStatus { .. } => Some(RequiredPermission::ReadSubmissionStatus),
+            Self::SystemCapabilities | Self::IdentitySummary => AuthorizationRequirement::Public,
+            Self::SubmissionStatus { .. } => {
+                AuthorizationRequirement::Permission(RequiredPermission::ReadSubmissionStatus)
+            }
+            #[cfg(feature = "experimental-rns-inbox")]
+            Self::RnsInboxStatus | Self::RnsInboxPeek => AuthorizationRequirement::Authenticated,
             #[cfg(feature = "experimental-rns-data")]
-            Self::SubmitRnsData { .. } => Some(RequiredPermission::ExperimentalSubmitRnsData),
+            Self::SubmitRnsData { .. } => {
+                AuthorizationRequirement::Permission(RequiredPermission::ExperimentalSubmitRnsData)
+            }
             Self::__Borrowed(never, _) => match *never {},
         }
     }
@@ -404,16 +439,26 @@ pub const fn authorize_request(
     context: &DispatchContext,
     request: &DeviceRequest<'_>,
 ) -> Result<(), AuthorizationError> {
-    let Some(required) = request.required_permission() else {
-        return Ok(());
-    };
-    if context.principal.is_none() {
-        return Err(AuthorizationError::AuthenticationRequired);
+    match request.authorization_requirement() {
+        AuthorizationRequirement::Public => Ok(()),
+        #[cfg(feature = "experimental-rns-inbox")]
+        AuthorizationRequirement::Authenticated => {
+            if context.principal.is_some() {
+                Ok(())
+            } else {
+                Err(AuthorizationError::AuthenticationRequired)
+            }
+        }
+        AuthorizationRequirement::Permission(required) => {
+            if context.principal.is_none() {
+                return Err(AuthorizationError::AuthenticationRequired);
+            }
+            if !context.permissions.contains(required.bits()) {
+                return Err(AuthorizationError::PermissionDenied(required));
+            }
+            Ok(())
+        }
     }
-    if !context.permissions.contains(required.bits()) {
-        return Err(AuthorizationError::PermissionDenied(required));
-    }
-    Ok(())
 }
 
 /// Runtime availability of a logical capability.
@@ -455,6 +500,10 @@ pub struct CapabilitySnapshot {
     pub(crate) max_body_bytes: u16,
     /// Maximum experimental submission payload.
     pub(crate) max_submit_rns_data_payload_bytes: u16,
+    /// Runtime availability of the experimental inbound RNS DATA mailbox.
+    pub(crate) experimental_rns_inbox: CapabilityAvailability,
+    /// Maximum payload returned by one experimental inbox item.
+    pub(crate) max_rns_inbox_payload_bytes: u16,
 }
 
 impl CapabilitySnapshot {
@@ -472,6 +521,16 @@ impl CapabilitySnapshot {
             max_message_bytes: MAX_MESSAGE_BYTES as u16,
             max_body_bytes: MAX_BODY_BYTES as u16,
             max_submit_rns_data_payload_bytes: MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES as u16,
+            experimental_rns_inbox: if cfg!(feature = "experimental-rns-inbox") {
+                CapabilityAvailability::Available
+            } else {
+                CapabilityAvailability::Unavailable
+            },
+            max_rns_inbox_payload_bytes: if cfg!(feature = "experimental-rns-inbox") {
+                383
+            } else {
+                0
+            },
         }
     }
 
@@ -484,6 +543,30 @@ impl CapabilitySnapshot {
     pub const fn for_dispatch(experimental_submit_rns_data: bool) -> Self {
         let mut snapshot = Self::current();
         snapshot.experimental_submit_rns_data &= experimental_submit_rns_data;
+        snapshot.experimental_rns_inbox = CapabilityAvailability::Unavailable;
+        snapshot.max_rns_inbox_payload_bytes = 0;
+        snapshot
+    }
+
+    /// Snapshot restricted to submission and inbox operations implemented by a dispatcher.
+    pub const fn for_dispatch_with_inbox(
+        experimental_submit_rns_data: bool,
+        experimental_rns_inbox: CapabilityAvailability,
+    ) -> Self {
+        let mut snapshot = Self::current();
+        snapshot.experimental_submit_rns_data &= experimental_submit_rns_data;
+        if cfg!(feature = "experimental-rns-inbox") {
+            snapshot.experimental_rns_inbox = experimental_rns_inbox;
+            snapshot.max_rns_inbox_payload_bytes =
+                if matches!(experimental_rns_inbox, CapabilityAvailability::Unavailable) {
+                    0
+                } else {
+                    383
+                };
+        } else {
+            snapshot.experimental_rns_inbox = CapabilityAvailability::Unavailable;
+            snapshot.max_rns_inbox_payload_bytes = 0;
+        }
         snapshot
     }
 
@@ -523,6 +606,118 @@ impl CapabilitySnapshot {
     /// Maximum experimental submission payload.
     pub const fn max_submit_rns_data_payload_bytes(self) -> u16 {
         self.max_submit_rns_data_payload_bytes
+    }
+
+    /// Runtime availability of the experimental inbound RNS DATA mailbox.
+    pub const fn experimental_rns_inbox(self) -> CapabilityAvailability {
+        self.experimental_rns_inbox
+    }
+
+    /// Maximum payload returned by one experimental inbox item.
+    pub const fn max_rns_inbox_payload_bytes(self) -> u16 {
+        self.max_rns_inbox_payload_bytes
+    }
+}
+
+/// Bounded runtime state of the experimental inbound RNS DATA mailbox.
+#[cfg(feature = "experimental-rns-inbox")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RnsInboxStatus {
+    /// Number of items currently retained.
+    pub depth: u16,
+    /// Maximum retained item count.
+    pub capacity: u16,
+    /// Number of inbound items dropped since this boot.
+    pub dropped_since_boot: u64,
+    /// Maximum payload length accepted by this mailbox instance.
+    pub max_payload_bytes: u16,
+    /// Whether retained items survive reboot.
+    pub durable: bool,
+}
+
+/// An inbound RNS DATA payload exceeded the fixed logical API limit.
+#[cfg(feature = "experimental-rns-inbox")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RnsInboxPayloadTooLarge {
+    actual: usize,
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+impl RnsInboxPayloadTooLarge {
+    /// Rejected payload length.
+    pub const fn actual(self) -> usize {
+        self.actual
+    }
+
+    /// Maximum accepted payload length.
+    pub const fn maximum(self) -> usize {
+        MAX_RNS_INBOX_PAYLOAD_BYTES
+    }
+}
+
+/// One complete owned item returned by the experimental inbound RNS DATA mailbox.
+#[cfg(feature = "experimental-rns-inbox")]
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct RnsInboxItem {
+    id: NonZeroU64,
+    destination: DestinationHash,
+    payload_len: u16,
+    payload: [u8; MAX_RNS_INBOX_PAYLOAD_BYTES],
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+impl RnsInboxItem {
+    /// Copy one bounded payload into a fixed-capacity response owner.
+    pub fn new(
+        id: NonZeroU64,
+        destination: DestinationHash,
+        payload: &[u8],
+    ) -> Result<Self, RnsInboxPayloadTooLarge> {
+        if payload.len() > MAX_RNS_INBOX_PAYLOAD_BYTES {
+            return Err(RnsInboxPayloadTooLarge {
+                actual: payload.len(),
+            });
+        }
+        let mut owned = [0_u8; MAX_RNS_INBOX_PAYLOAD_BYTES];
+        owned[..payload.len()].copy_from_slice(payload);
+        Ok(Self {
+            id,
+            destination,
+            payload_len: payload.len() as u16,
+            payload: owned,
+        })
+    }
+
+    /// Device-assigned mailbox item identifier.
+    pub const fn id(&self) -> u64 {
+        self.id.get()
+    }
+
+    /// Local Reticulum destination that received this item.
+    pub const fn destination(&self) -> DestinationHash {
+        self.destination
+    }
+
+    /// Exact payload bytes, excluding unused fixed-buffer capacity.
+    pub fn payload(&self) -> &[u8] {
+        &self.payload[..self.payload_len as usize]
+    }
+
+    /// Valid payload length.
+    pub const fn payload_len(&self) -> u16 {
+        self.payload_len
+    }
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+impl core::fmt::Debug for RnsInboxItem {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("RnsInboxItem")
+            .field("id", &self.id)
+            .field("destination", &self.destination)
+            .field("payload_len", &self.payload_len)
+            .finish_non_exhaustive()
     }
 }
 
@@ -696,6 +891,9 @@ pub struct ApiErrorResponse {
 }
 
 /// Successful or failed logical response body.
+// The inbox variant deliberately owns its fixed-capacity payload so response
+// dispatch remains allocation-free and cannot retain a mailbox borrow.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum DeviceResponse {
@@ -705,6 +903,12 @@ pub enum DeviceResponse {
     IdentitySummary(IdentitySummary),
     /// Result of `submission.status`.
     SubmissionStatus(SubmissionStatus),
+    /// Result of `experimental.rns_inbox.status`.
+    #[cfg(feature = "experimental-rns-inbox")]
+    RnsInboxStatus(RnsInboxStatus),
+    /// Occupied result of `experimental.rns_inbox.peek`.
+    #[cfg(feature = "experimental-rns-inbox")]
+    RnsInboxPeek(RnsInboxItem),
     /// Accepted experimental outbound RNS DATA submission.
     #[cfg(feature = "experimental-rns-data")]
     SubmitRnsDataAccepted(SubmissionAccepted),
@@ -719,6 +923,10 @@ impl DeviceResponse {
             Self::SystemCapabilities(_) => OP_SYSTEM_CAPABILITIES,
             Self::IdentitySummary(_) => OP_IDENTITY_SUMMARY,
             Self::SubmissionStatus(_) => OP_SUBMISSION_STATUS,
+            #[cfg(feature = "experimental-rns-inbox")]
+            Self::RnsInboxStatus(_) => OP_EXPERIMENTAL_RNS_INBOX_STATUS,
+            #[cfg(feature = "experimental-rns-inbox")]
+            Self::RnsInboxPeek(_) => OP_EXPERIMENTAL_RNS_INBOX_PEEK,
             #[cfg(feature = "experimental-rns-data")]
             Self::SubmitRnsDataAccepted(_) => OP_EXPERIMENTAL_SUBMIT_RNS_DATA,
             Self::Error(_) => RESPONSE_ERROR,

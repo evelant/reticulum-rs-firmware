@@ -85,6 +85,7 @@ use reticulum_node_core::{
 };
 use reticulum_radio_lora_phy::IrqTimestampCapture;
 use reticulum_radio_tx_dispatch::{ExactLoRaAirtimePolicy, SoleRadioTxDispatcher};
+use reticulum_rns_inbox_store::InboxStoreState;
 use reticulum_tx_handoff::{AuthorizedFrameHandoff, DataPermitHandoff, OrdinaryPermitHandoff};
 use reticulum_tx_supervisor::{
     DataRouterCoordinator, NodeInterfaceSupervisor, OrdinaryRouterCoordinator,
@@ -467,9 +468,33 @@ async fn product_main(
             None
         }
     };
-    let storage_coordinator =
-        flash_owner.into_storage_coordinator(submission_runtime, credential_boot, device_api_id);
+    let inbox = match flash_owner.mount_inbox() {
+        Ok(inbox) => {
+            let depth = match inbox.state() {
+                InboxStoreState::Empty => 0,
+                InboxStoreState::Occupied(_) => 1,
+            };
+            info!(
+                "e290-node stage=rns-inbox-mount status=PASS profile=durable-qualification capacity=1 depth={depth} max_payload_bytes={} plaintext=true writes=0 erases=0 lora_routing=continue",
+                reticulum_rns_inbox_store::MAX_PAYLOAD_SIZE,
+            );
+            Some(inbox)
+        }
+        Err(reason) => {
+            error!(
+                "e290-node stage=rns-inbox-mount status=DISABLED reason={reason:?} lora_routing=continue inbound_client_delivery=closed"
+            );
+            None
+        }
+    };
+    let storage_coordinator = flash_owner.into_storage_coordinator(
+        submission_runtime,
+        inbox,
+        credential_boot,
+        device_api_id,
+    );
     let storage_service_available = storage_coordinator.submission_service_available();
+    let inbox_service_available = storage_coordinator.inbox_service_available();
     let credential_boot_state = storage_coordinator.credential_boot_state();
     let credential_binding = storage_coordinator.credential_binding();
     let credential_revision = storage_coordinator.credential_revision();
@@ -739,7 +764,7 @@ async fn product_main(
     spawner.spawn(node_task);
     spawner.spawn(usb_pairing_task);
     info!(
-        "e290-node stage=composition status=PASS tasks=3 interfaces=1 primary_transport=lora future_transport_actors=deferred node_journal=mounted resident_storage_available={storage_service_available} credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} preauth_initialization_bearer=usb-serial-jtag preauth_live_pairing_bearer=usb-serial-jtag pairing_button_gpio=21 authenticated_local_api=node-dispatch bearer_session=usb-authenticated-single-flight credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} admission=session-selected runtime_patch={} flash_assumption_bytes=16777216",
+        "e290-node stage=composition status=PASS tasks=3 interfaces=1 primary_transport=lora future_transport_actors=deferred node_journal=mounted resident_storage_available={storage_service_available} durable_rns_inbox_available={inbox_service_available} rns_inbox_capacity=1 credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} preauth_initialization_bearer=usb-serial-jtag preauth_live_pairing_bearer=usb-serial-jtag pairing_button_gpio=21 authenticated_local_api=node-dispatch bearer_session=usb-authenticated-single-flight credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} admission=session-selected runtime_patch={} flash_assumption_bytes=16777216",
         credential_binding.absolute_offset(),
         credential_binding.length(),
         config::DURABLE_RUNTIME_BYTES,

@@ -65,10 +65,24 @@ pub const NODE_JOURNAL_OFFSET: u32 = 0x0063_0000;
 /// Submission-journal partition length: exactly one journal format partition.
 pub const NODE_JOURNAL_LEN: u32 = 0x0010_0000;
 
+/// Durable inbound-message qualification partition label.
+pub const MESSAGE_STORE_LABEL: &str = "message_store";
+/// Padded partition-table bytes for [`MESSAGE_STORE_LABEL`].
+pub const MESSAGE_STORE_LABEL_BYTES: [u8; 16] = [
+    b'm', b'e', b's', b's', b'a', b'g', b'e', b'_', b's', b't', b'o', b'r', b'e', 0, 0, 0,
+];
+/// Inbound-message store partition absolute flash offset.
+pub const MESSAGE_STORE_OFFSET: u32 = 0x0073_0000;
+/// Inbound-message store partition length: exactly 2 MiB.
+pub const MESSAGE_STORE_LEN: u32 = 0x0020_0000;
+
 const _: () = assert!(NODE_IDENTITY_OFFSET + NODE_IDENTITY_LEN == ANNOUNCE_CLOCK_OFFSET);
 const _: () = assert!(ANNOUNCE_CLOCK_OFFSET + ANNOUNCE_CLOCK_LEN == API_CREDENTIALS_OFFSET);
 const _: () = assert!(API_CREDENTIALS_OFFSET.is_multiple_of(0x1000));
 const _: () = assert!(API_CREDENTIALS_LEN == 2 * 0x1000);
 const _: () = assert!(API_CREDENTIALS_OFFSET + API_CREDENTIALS_LEN == DEVICE_CONFIG_OFFSET);
 const _: () = assert!(DEVICE_CONFIG_OFFSET + DEVICE_CONFIG_LEN == NODE_JOURNAL_OFFSET);
-const _: () = assert!(NODE_JOURNAL_OFFSET + NODE_JOURNAL_LEN == 0x0073_0000);
+const _: () = assert!(NODE_JOURNAL_OFFSET + NODE_JOURNAL_LEN == MESSAGE_STORE_OFFSET);
+const _: () = assert!(MESSAGE_STORE_OFFSET.is_multiple_of(0x1000));
+const _: () = assert!(MESSAGE_STORE_LEN.is_multiple_of(0x1000));
+const _: () = assert!(MESSAGE_STORE_OFFSET + MESSAGE_STORE_LEN == 0x0093_0000);

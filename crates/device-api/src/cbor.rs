@@ -14,6 +14,11 @@ use crate::model::{
     IdempotencyKey, MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES, OP_EXPERIMENTAL_SUBMIT_RNS_DATA,
     SubmissionAccepted,
 };
+#[cfg(feature = "experimental-rns-inbox")]
+use crate::model::{
+    MAX_RNS_INBOX_PAYLOAD_BYTES, OP_EXPERIMENTAL_RNS_INBOX_PEEK, OP_EXPERIMENTAL_RNS_INBOX_STATUS,
+    RnsInboxItem, RnsInboxStatus,
+};
 
 const MAX_MAP_ENTRIES: u64 = 32;
 /// Maximum container/tag nesting accepted while validating an operation body
@@ -57,8 +62,28 @@ pub enum RequiredField {
     CapabilityMaxBodyBytes,
     /// Capability experimental submission payload limit at body key 6.
     CapabilityMaxSubmitPayloadBytes,
+    /// Capability experimental inbound RNS mailbox availability at body key 7.
+    CapabilityExperimentalRnsInbox,
+    /// Capability experimental inbound RNS mailbox payload limit at body key 8.
+    CapabilityMaxRnsInboxPayloadBytes,
     /// Identity summary primary destination hash at body key 0.
     IdentityPrimaryDestination,
+    /// Inbound RNS mailbox depth at body key 0.
+    RnsInboxDepth,
+    /// Inbound RNS mailbox capacity at body key 1.
+    RnsInboxCapacity,
+    /// Inbound RNS mailbox dropped counter at body key 2.
+    RnsInboxDroppedSinceBoot,
+    /// Inbound RNS mailbox payload limit at body key 3.
+    RnsInboxMaxPayloadBytes,
+    /// Inbound RNS mailbox durability flag at body key 4.
+    RnsInboxDurable,
+    /// Inbound RNS mailbox item identifier at body key 0.
+    RnsInboxItemId,
+    /// Inbound RNS mailbox destination hash at body key 1.
+    RnsInboxDestination,
+    /// Inbound RNS mailbox payload at body key 2.
+    RnsInboxPayload,
     /// Submission state at body key 1.
     SubmissionState,
     /// State-specific prepared packet length at body key 2.
@@ -125,6 +150,13 @@ pub enum DecodeError {
     },
     /// Experimental application payload exceeds its semantic limit.
     PayloadTooLarge {
+        /// Supplied byte count.
+        actual: usize,
+        /// Accepted byte count.
+        max: usize,
+    },
+    /// An inbound RNS mailbox payload exceeds its fixed response limit.
+    InboxPayloadTooLarge {
         /// Supplied byte count.
         actual: usize,
         /// Accepted byte count.
@@ -208,6 +240,10 @@ pub fn encode_request(
             put!(encoder.map(1));
             put!(encoder.u8(0));
             put!(encoder.u64(id.0));
+        }
+        #[cfg(feature = "experimental-rns-inbox")]
+        DeviceRequest::RnsInboxStatus | DeviceRequest::RnsInboxPeek => {
+            put!(encoder.map(0));
         }
         #[cfg(feature = "experimental-rns-data")]
         DeviceRequest::SubmitRnsData {
@@ -307,6 +343,14 @@ pub fn encode_response(
         DeviceResponse::SubmissionStatus(status) => {
             encode_submission_status(&mut encoder, status)?;
         }
+        #[cfg(feature = "experimental-rns-inbox")]
+        DeviceResponse::RnsInboxStatus(status) => {
+            encode_rns_inbox_status(&mut encoder, status)?;
+        }
+        #[cfg(feature = "experimental-rns-inbox")]
+        DeviceResponse::RnsInboxPeek(item) => {
+            encode_rns_inbox_item(&mut encoder, &item)?;
+        }
         #[cfg(feature = "experimental-rns-data")]
         DeviceResponse::SubmitRnsDataAccepted(accepted) => {
             encode_submission_accepted(&mut encoder, accepted)?;
@@ -361,6 +405,14 @@ pub fn decode_response(input: &[u8]) -> Result<ResponseEnvelope, DecodeError> {
         OP_SYSTEM_CAPABILITIES => DeviceResponse::SystemCapabilities(decode_capabilities(body)?),
         OP_IDENTITY_SUMMARY => DeviceResponse::IdentitySummary(decode_identity_summary(body)?),
         OP_SUBMISSION_STATUS => DeviceResponse::SubmissionStatus(decode_submission_status(body)?),
+        #[cfg(feature = "experimental-rns-inbox")]
+        OP_EXPERIMENTAL_RNS_INBOX_STATUS => {
+            DeviceResponse::RnsInboxStatus(decode_rns_inbox_status(body)?)
+        }
+        #[cfg(feature = "experimental-rns-inbox")]
+        OP_EXPERIMENTAL_RNS_INBOX_PEEK => {
+            DeviceResponse::RnsInboxPeek(decode_rns_inbox_item(body)?)
+        }
         #[cfg(feature = "experimental-rns-data")]
         OP_EXPERIMENTAL_SUBMIT_RNS_DATA => {
             DeviceResponse::SubmitRnsDataAccepted(decode_submission_accepted(body)?)
@@ -391,7 +443,7 @@ fn encode_capabilities(
     encoder: &mut SliceEncoder<'_>,
     capabilities: CapabilitySnapshot,
 ) -> Result<(), EncodeError> {
-    put!(encoder.map(7));
+    put!(encoder.map(9));
     put!(encoder.u8(0));
     encode_version(encoder, capabilities.api_version)?;
     put!(encoder.u8(1));
@@ -406,6 +458,44 @@ fn encode_capabilities(
     put!(encoder.u16(capabilities.max_body_bytes));
     put!(encoder.u8(6));
     put!(encoder.u16(capabilities.max_submit_rns_data_payload_bytes));
+    put!(encoder.u8(7));
+    put!(encoder.u8(capabilities.experimental_rns_inbox.wire_code()));
+    put!(encoder.u8(8));
+    put!(encoder.u16(capabilities.max_rns_inbox_payload_bytes));
+    Ok(())
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+fn encode_rns_inbox_status(
+    encoder: &mut SliceEncoder<'_>,
+    status: RnsInboxStatus,
+) -> Result<(), EncodeError> {
+    put!(encoder.map(5));
+    put!(encoder.u8(0));
+    put!(encoder.u16(status.depth));
+    put!(encoder.u8(1));
+    put!(encoder.u16(status.capacity));
+    put!(encoder.u8(2));
+    put!(encoder.u64(status.dropped_since_boot));
+    put!(encoder.u8(3));
+    put!(encoder.u16(status.max_payload_bytes));
+    put!(encoder.u8(4));
+    put!(encoder.bool(status.durable));
+    Ok(())
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+fn encode_rns_inbox_item(
+    encoder: &mut SliceEncoder<'_>,
+    item: &RnsInboxItem,
+) -> Result<(), EncodeError> {
+    put!(encoder.map(3));
+    put!(encoder.u8(0));
+    put!(encoder.u64(item.id()));
+    put!(encoder.u8(1));
+    put!(encoder.bytes(&item.destination().0));
+    put!(encoder.u8(2));
+    put!(encoder.bytes(item.payload()));
     Ok(())
 }
 
@@ -655,10 +745,31 @@ fn decode_request_body<'a>(
         OP_SYSTEM_CAPABILITIES => decode_capabilities_request(body),
         OP_IDENTITY_SUMMARY => decode_identity_summary_request(body),
         OP_SUBMISSION_STATUS => decode_status_request(body),
+        #[cfg(feature = "experimental-rns-inbox")]
+        OP_EXPERIMENTAL_RNS_INBOX_STATUS => {
+            decode_empty_request(body, DeviceRequest::RnsInboxStatus)
+        }
+        #[cfg(feature = "experimental-rns-inbox")]
+        OP_EXPERIMENTAL_RNS_INBOX_PEEK => decode_empty_request(body, DeviceRequest::RnsInboxPeek),
         #[cfg(feature = "experimental-rns-data")]
         OP_EXPERIMENTAL_SUBMIT_RNS_DATA => decode_submit_request(body),
         other => Err(DecodeError::UnsupportedOperation(other)),
     }
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+fn decode_empty_request(
+    body: &[u8],
+    request: DeviceRequest<'static>,
+) -> Result<DeviceRequest<'static>, DecodeError> {
+    let mut decoder = Decoder::new(body);
+    let entries = decode_map_len(&mut decoder)?;
+    for _ in 0..entries {
+        decoder.u64().map_err(|_| DecodeError::Malformed)?;
+        skip_strict(&mut decoder, 0)?;
+    }
+    finish_body(&decoder, body)?;
+    Ok(request)
 }
 
 fn decode_capabilities_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError> {
@@ -764,6 +875,8 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
     let mut max_message = None;
     let mut max_body = None;
     let mut max_payload = None;
+    let mut experimental_rns_inbox = None;
+    let mut max_rns_inbox_payload = None;
     for _ in 0..entries {
         let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
         match key {
@@ -811,6 +924,24 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
                 )?;
                 max_payload = Some(decoder.u16().map_err(|_| DecodeError::Malformed)?);
             }
+            7 => {
+                reject_duplicate(
+                    experimental_rns_inbox.is_some(),
+                    RequiredField::CapabilityExperimentalRnsInbox,
+                )?;
+                let value = decoder.u8().map_err(|_| DecodeError::Malformed)?;
+                experimental_rns_inbox = Some(decode_capability_availability(
+                    value,
+                    RequiredField::CapabilityExperimentalRnsInbox,
+                )?);
+            }
+            8 => {
+                reject_duplicate(
+                    max_rns_inbox_payload.is_some(),
+                    RequiredField::CapabilityMaxRnsInboxPayloadBytes,
+                )?;
+                max_rns_inbox_payload = Some(decoder.u16().map_err(|_| DecodeError::Malformed)?);
+            }
             _ => skip_strict(&mut decoder, 0)?,
         }
     }
@@ -831,6 +962,113 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
             max_payload,
             RequiredField::CapabilityMaxSubmitPayloadBytes,
         )?,
+        experimental_rns_inbox: experimental_rns_inbox
+            .unwrap_or(CapabilityAvailability::Unavailable),
+        max_rns_inbox_payload_bytes: max_rns_inbox_payload.unwrap_or(0),
+    })
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+fn decode_rns_inbox_status(body: &[u8]) -> Result<RnsInboxStatus, DecodeError> {
+    let mut decoder = Decoder::new(body);
+    let entries = decode_map_len(&mut decoder)?;
+    let mut depth = None;
+    let mut capacity = None;
+    let mut dropped_since_boot = None;
+    let mut max_payload_bytes = None;
+    let mut durable = None;
+    for _ in 0..entries {
+        let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
+        match key {
+            0 => {
+                reject_duplicate(depth.is_some(), RequiredField::RnsInboxDepth)?;
+                depth = Some(decoder.u16().map_err(|_| DecodeError::Malformed)?);
+            }
+            1 => {
+                reject_duplicate(capacity.is_some(), RequiredField::RnsInboxCapacity)?;
+                capacity = Some(decoder.u16().map_err(|_| DecodeError::Malformed)?);
+            }
+            2 => {
+                reject_duplicate(
+                    dropped_since_boot.is_some(),
+                    RequiredField::RnsInboxDroppedSinceBoot,
+                )?;
+                dropped_since_boot = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
+            }
+            3 => {
+                reject_duplicate(
+                    max_payload_bytes.is_some(),
+                    RequiredField::RnsInboxMaxPayloadBytes,
+                )?;
+                max_payload_bytes = Some(decoder.u16().map_err(|_| DecodeError::Malformed)?);
+            }
+            4 => {
+                reject_duplicate(durable.is_some(), RequiredField::RnsInboxDurable)?;
+                durable = Some(decoder.bool().map_err(|_| DecodeError::Malformed)?);
+            }
+            _ => skip_strict(&mut decoder, 0)?,
+        }
+    }
+    finish_body(&decoder, body)?;
+    Ok(RnsInboxStatus {
+        depth: require(depth, RequiredField::RnsInboxDepth)?,
+        capacity: require(capacity, RequiredField::RnsInboxCapacity)?,
+        dropped_since_boot: require(dropped_since_boot, RequiredField::RnsInboxDroppedSinceBoot)?,
+        max_payload_bytes: require(max_payload_bytes, RequiredField::RnsInboxMaxPayloadBytes)?,
+        durable: require(durable, RequiredField::RnsInboxDurable)?,
+    })
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+fn decode_rns_inbox_item(body: &[u8]) -> Result<RnsInboxItem, DecodeError> {
+    let mut decoder = Decoder::new(body);
+    let entries = decode_map_len(&mut decoder)?;
+    let mut id = None;
+    let mut destination = None;
+    let mut payload = None;
+    for _ in 0..entries {
+        let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
+        match key {
+            0 => {
+                reject_duplicate(id.is_some(), RequiredField::RnsInboxItemId)?;
+                id = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
+            }
+            1 => {
+                reject_duplicate(destination.is_some(), RequiredField::RnsInboxDestination)?;
+                destination = Some(DestinationHash(decode_fixed_bytes::<16>(
+                    &mut decoder,
+                    RequiredField::RnsInboxDestination,
+                )?));
+            }
+            2 => {
+                reject_duplicate(payload.is_some(), RequiredField::RnsInboxPayload)?;
+                let bytes = decoder.bytes().map_err(|_| DecodeError::Malformed)?;
+                if bytes.len() > MAX_RNS_INBOX_PAYLOAD_BYTES {
+                    return Err(DecodeError::InboxPayloadTooLarge {
+                        actual: bytes.len(),
+                        max: MAX_RNS_INBOX_PAYLOAD_BYTES,
+                    });
+                }
+                payload = Some(bytes);
+            }
+            _ => skip_strict(&mut decoder, 0)?,
+        }
+    }
+    finish_body(&decoder, body)?;
+    let id = core::num::NonZeroU64::new(require(id, RequiredField::RnsInboxItemId)?).ok_or(
+        DecodeError::InvalidValue {
+            field: RequiredField::RnsInboxItemId,
+            value: 0,
+        },
+    )?;
+    RnsInboxItem::new(
+        id,
+        require(destination, RequiredField::RnsInboxDestination)?,
+        require(payload, RequiredField::RnsInboxPayload)?,
+    )
+    .map_err(|too_large| DecodeError::InboxPayloadTooLarge {
+        actual: too_large.actual(),
+        max: too_large.maximum(),
     })
 }
 
@@ -986,12 +1224,19 @@ fn decode_fixed_bytes<const N: usize>(
 }
 
 fn decode_direct_radio_availability(value: u8) -> Result<CapabilityAvailability, DecodeError> {
+    decode_capability_availability(value, RequiredField::CapabilityDirectRadioTx)
+}
+
+fn decode_capability_availability(
+    value: u8,
+    field: RequiredField,
+) -> Result<CapabilityAvailability, DecodeError> {
     match value {
         0 => Ok(CapabilityAvailability::Unavailable),
         1 => Ok(CapabilityAvailability::Disabled),
         2 => Ok(CapabilityAvailability::Available),
         other => Err(DecodeError::InvalidValue {
-            field: RequiredField::CapabilityDirectRadioTx,
+            field,
             value: u64::from(other),
         }),
     }

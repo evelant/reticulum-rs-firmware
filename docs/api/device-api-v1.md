@@ -1,11 +1,13 @@
 # Device API v1 logical protocol
 
-Status: logical codec and portable authenticated dispatch implemented over a
-narrow durable-submission port. This document freezes the operation and field
-numbers exercised by `reticulum-device-api`; `reticulum-device-api-adapter`
-implements capabilities, the public primary-destination summary, and principal-
-scoped status in its default build plus target-safe durable experimental
-outbound RNS DATA submission behind an explicit feature. Separate portable
+Status: API 1.2 logical codec and portable authenticated dispatch implemented
+over separate narrow durable-submission and read-only inbound-mailbox ports.
+This document freezes the operation and field numbers exercised by
+`reticulum-device-api`; `reticulum-device-api-adapter` implements capabilities,
+the public primary-destination summary, and principal-scoped submission status
+in its default build, target-safe durable experimental outbound RNS DATA
+submission behind one explicit feature, and the experimental raw-RNS inbox
+status/peek operations behind another. Separate portable
 framing, immutable credential-authority, USB-
 qualification session and boot-lifetime authenticated-job handoff crates now
 exist. The session core emits only a credential ID/generation grant; the
@@ -51,7 +53,8 @@ permanent graph now also instantiates the feature-free session and handoff
 crates, a static depth-one authenticated request/reply handoff, and a separate
 node-side dispatch lane. That lane revalidates every opaque grant against the
 currently publishable authority and synchronously invokes the logical adapter
-through a submission-port view disjoint from credential ownership. The USB
+through disjoint submission and read-only inbox port views, both isolated from
+credential ownership. The USB
 task now composes the deliberately minimal first bearer: one authenticated
 handshake per connection, one request in flight, and terminal fault handling
 until USB reset or re-enumeration. It intentionally defers resumption, protocol
@@ -64,13 +67,19 @@ reads plus one durable experimental submission that crossed LoRa, was decrypted
 by a second permanent node, returned a valid Reticulum proof for the exact
 packet, and remained `Delivered` after sender USB re-enumeration. A product port
 may route an accepted submission through the node only after the durable
-barriers.
+barriers. That API 1.1 result proves peer receipt/decryption and Reticulum proof
+handling; it is not evidence that the receiving device persisted application
+data. API 1.2 additionally has bounded powered evidence for one maximum-size
+commit, authenticated status/peek before and after hard reset, exact raw
+readback, and drop-newest preservation. Controlled interruption and powered
+fault-isolation qualification remain open.
 
 ## Boundary
 
 The crate is `no_std`, allocation-free, and Rete-independent. It owns logical
-requests, responses, scalar capabilities, submission status, the indexed-CBOR
-codec, and a small common authorization policy. It does not contain:
+requests, responses, scalar capabilities, submission and inbox response types,
+the indexed-CBOR codec, and a small common authorization policy. It does not
+contain:
 
 - USB, BLE, Wi-Fi, WebSocket, COBS, length framing, reconnect, or chunking;
 - a node-core dispatcher, queue, storage, firmware, ESP, Embassy, or board code;
@@ -86,9 +95,12 @@ separately derive the trusted `DispatchContext` and validated
 provenance, or session assertion is accepted from CBOR input.
 
 `reticulum-device-api-adapter` is the separate allocation-free `no_std`
-dispatcher over a narrow `SubmissionPort`. The port exposes only runtime
-availability, principal-scoped status, and durable acceptance; its implementation
-retains every storage actor, operation-scoped journal view, and physical backend.
+dispatcher over a narrow `SubmissionPort` and, when enabled, a separate
+`InboundMailboxPort`. The submission port exposes only runtime availability,
+principal-scoped status, and durable acceptance. The inbox port exposes only
+availability, bounded status, and an owned copy of the oldest item; neither port
+exposes mutation or physical storage. Their product implementations retain every
+storage actor, operation-scoped view, and physical backend.
 The adapter repeats major-version validation,
 applies the codec's authorization policy to trusted context, always emits the
 current response version, echoes the request ID, and performs no direct flash,
@@ -98,14 +110,17 @@ principal IDs both return `NotFound`, so the adapter does not disclose another
 principal's durable records. A port reports unavailable service as
 `CapabilityUnavailable`; status fails closed with `Internal` while the durable
 owner has an ambiguous pending mutation or a latched fault and never publishes
-the deliberately lagging live index as if it were current. Public capabilities
-remain available in either condition.
+the deliberately lagging live index as if it were current. Inbox capability is
+advertised only while its exact durable store is mounted and enabled; there is
+no volatile fallback. Public capabilities remain available in either condition.
 
 ## Version and evolution rules
 
-The initial version was `1.0`; the current version is `1.1`, which adds
-`identity.summary`. A decoder accepts major version 1 with any minor version,
-skips unknown numeric map fields, and rejects another major version.
+The initial version was `1.0`; version `1.1` added `identity.summary`; the
+current version is `1.2`, which adds optional raw-RNS inbox capability fields
+and feature-gated experimental status/peek operations. A decoder accepts major
+version 1 with any minor version, skips unknown numeric map fields, and rejects
+another major version.
 Encoding an envelope with another major version fails with the typed
 `EncodeError::UnsupportedVersion` before any message is emitted. All encoder
 output uses definite maps, ascending numeric keys, and CBOR's preferred shortest
@@ -140,13 +155,15 @@ operation body or one unknown field value to eight levels.
 | operation body | 448 encoded bytes | before operation-specific decode |
 | fields per recognized API map | 32 | immediately after each API map header |
 | body/unknown-value container or tag nesting | 8 levels | strict allocation-free skip/validation |
-| experimental RNS DATA payload | 383 bytes | encode and decode |
+| experimental outbound RNS DATA payload | 383 bytes | encode and decode |
+| experimental inbound RNS inbox payload | 383 bytes | encode and decode |
 | destination hash | 16 bytes | decode |
 | idempotency key | 16 bytes | decode |
 | encoded-packet SHA-256 | 32 bytes | decode |
 
-The 383-byte payload limit matches the current Rete encrypted-DATA preparation
-boundary. It is not a promise that raw RNS submission will become a product API.
+The shared 383-byte ceiling matches the current Rete encrypted `SINGLE` DATA
+boundary. It is not a promise that either raw-RNS operation or the qualification
+record will become the product LXMF API or message-store format.
 
 ## Common envelope
 
@@ -170,16 +187,18 @@ authorization credential.
 | `0x0002` | `submission.status` | v1 | authenticated + `READ_SUBMISSION_STATUS` |
 | `0x0003` | `identity.summary` | v1.1 | public/read-only |
 | `0xf001` | `experimental.submit_rns_data` | feature-gated experimental | authenticated + `EXPERIMENTAL_SUBMIT_RNS_DATA` |
+| `0xf002` | `experimental.rns_inbox.status` | feature-gated experimental | authenticated principal; no permission bit |
+| `0xf003` | `experimental.rns_inbox.peek` | feature-gated experimental | authenticated principal; no permission bit |
 
 Numbers `0xf000..=0xffff` are experimental and can disappear or change without
 API compatibility. `0xf001` is compiled only with the target-safe
-`experimental-rns-data` Cargo feature. A build without that feature returns
-`UnsupportedOperation(0xf001)`. The adapter mirrors this
-feature boundary. Its capability response restricts the codec snapshot to the
-adapter's own compiled operation and the port's runtime availability, so Cargo
-feature unification on a separate
-`reticulum-device-api/experimental-rns-data` dependency edge cannot make an
-adapter default build advertise its missing dispatch arm.
+`experimental-rns-data` Cargo feature; `0xf002` and `0xf003` are compiled only
+with `experimental-rns-inbox`. A build without the corresponding feature
+returns `UnsupportedOperation`. The adapter mirrors both feature boundaries.
+Its capability response restricts the codec snapshot to the adapter's own
+compiled operations and each port's runtime availability, so Cargo feature
+unification on another dependency edge cannot make an adapter build advertise
+a missing dispatch arm.
 
 ### `system.capabilities` (`0x0001`)
 
@@ -197,6 +216,8 @@ Successful response body:
 | 4 | u16 | yes | maximum logical message bytes (512) |
 | 5 | u16 | yes | maximum encoded body bytes (448) |
 | 6 | u16 | yes | maximum experimental payload bytes (383) |
+| 7 | u8 | no | `experimental_rns_inbox`: 0 unavailable, 1 disabled, 2 available |
+| 8 | u16 | no | maximum experimental inbox payload bytes; 383 when implemented, otherwise 0 |
 
 `CapabilitySnapshot::current()` is device-owned and cannot advertise packet
 output or direct-radio TX. Key 2 says nothing about node-owned RNS traffic: an
@@ -204,7 +225,11 @@ accepted request advertised by key 3 may be routed over LoRa or any other
 eligible Reticulum interface without granting a client direct radio control. A
 higher dispatcher uses `CapabilitySnapshot::for_dispatch` to restrict that
 codec-build snapshot; it can disable a capability but cannot enable one omitted
-from the codec build.
+from the codec build. API 1.2 encoders emit keys 7 and 8. Decoders treat both as
+optional so API 1.0/1.1 capability maps without them decode as inbox unavailable
+with a zero limit. The E290 profile reports key 7 as available only after an
+exact durable inbox mount; a mount fault reports unavailable rather than a
+volatile `durable=false` substitute.
 
 ### `identity.summary` (`0x0003`)
 
@@ -374,6 +399,65 @@ original submission ID. Reusing it for different content returns immediate
 error 10 and must not mutate the original submission. The portable adapter
 derives the principal from `DispatchContext`; it never trusts request bytes.
 
+### `experimental.rns_inbox.status` (`0xf002`)
+
+This read-only operation exposes the bounded state of ADR 0011's durable
+raw-RNS qualification slot. It is not an LXMF inbox, a conversation model, or a
+general message-store API.
+
+Request body: a map with no recognized fields. Unknown fields are permitted for
+experimental evolution.
+
+Successful experimental response body:
+
+| Key | Type | Required | Meaning |
+| ---: | --- | --- | --- |
+| 0 | u16 | yes | retained item depth; 0 or 1 in the E290 qualification profile |
+| 1 | u16 | yes | retained item capacity; exactly 1 in that profile |
+| 2 | u64 | yes | saturating count of inbound items dropped since this boot |
+| 3 | u16 | yes | maximum retained payload bytes; exactly 383 |
+| 4 | bool | yes | whether retained items survive reboot; `true` for the mounted E290 store |
+
+The first eligible item is retained as item 1. While occupied, each newer
+inbound item is dropped rather than replacing the oldest item. The saturating
+drop counter increments exactly once for every projected DATA item that is not
+durably retained: an occupied slot, pressure behind the single deferred
+candidate, an oversize payload, unavailable or fault-disabled inbox service, or
+an admission fault. Deferral alone is not a drop. The counter is diagnostic
+runtime state: it resets on reboot and does not mutate the committed record.
+Payloads over 383 bytes are rejected without truncation. A
+successful E290 status response always reports `durable=true`; if the exact
+store did not mount or was disabled after a fault, the capability is unavailable
+and this operation returns `CapabilityUnavailable` instead of presenting a
+volatile mailbox.
+
+### `experimental.rns_inbox.peek` (`0xf003`)
+
+Request body: a map with no recognized fields. Unknown fields are permitted for
+experimental evolution.
+
+Successful occupied response body:
+
+| Key | Type | Required | Meaning |
+| ---: | --- | --- | --- |
+| 0 | u64 | yes | opaque, nonzero device-assigned item ID; exactly 1 in format 1 |
+| 1 | bytes(16) | yes | complete local Reticulum destination hash that received the DATA item |
+| 2 | bytes(0..383) | yes | exact decrypted RNS DATA payload |
+
+An empty mounted slot returns `NotFound`. Peek copies into an allocation-free,
+fixed-capacity response owner and does not consume or acknowledge the item.
+API 1.2 defines no acknowledgement, delete, overwrite, erase, reclamation, or
+garbage-collection operation, so a committed item remains until an explicit
+future developer/product migration or erase policy is designed outside this
+API. Destination and payload are plaintext at rest in this developer
+qualification format.
+
+Both inbox operations require an authenticated principal, but API 1.2 adds no
+persisted permission bit for them: any currently authenticated principal may
+read the retained item. This intentionally simple developer policy must be
+revisited before a production mailbox, multi-principal messaging, mutation, or
+wireless bearer is enabled.
+
 ## Responses and errors
 
 A successful response uses the corresponding operation number at envelope key
@@ -407,7 +491,9 @@ framing rules.
 - `identity.summary` requires no logical operation permission;
 - `submission.status` requires an authenticated principal and its read bit;
 - experimental outbound RNS DATA submission requires an authenticated principal
-  and `EXPERIMENTAL_SUBMIT_RNS_DATA`.
+  and `EXPERIMENTAL_SUBMIT_RNS_DATA`;
+- experimental RNS inbox status and peek require an authenticated principal but
+  no persisted permission bit in API 1.2.
 
 The logical codec can represent an unauthenticated context for internal callers
 and policy tests. ADR 0006's physical device-API bearers are stricter: every
@@ -417,6 +503,8 @@ pending or revoked credential is never converted to
 
 Authentication, ownership filtering, rate limiting, idempotency scope, physical
 presence, and high-assurance session encryption are not solved by this codec.
+The inbox's shared authenticated-principal read policy is qualification policy,
+not a general authorization decision for later LXMF messages.
 The portable adapter scopes status and experimental-operation idempotency by the
 principal from `DispatchContext`, never by bytes supplied in a request. The
 portable session core deliberately emits only a credential ID/generation grant.
@@ -428,8 +516,8 @@ moved out, but trusted linked code can reconstruct equivalent scalar facts with
 the public constructor. Immediate dispatch, no unauthenticated fallback and no
 port call after rejection remain composition rules, not an unforgeable Rust
 capability. The permanent E290 node now follows them: the resident credential
-runtime revalidates current authority, then a credential-disjoint
-submission-port view is borrowed only for synchronous adapter dispatch.
+runtime revalidates current authority, then credential-disjoint submission and
+read-only inbox port views are borrowed only for synchronous adapter dispatch.
 Revalidation failure returns the generic authentication-required response with
 zero port I/O; it never constructs an unauthenticated context. Principal and
 permissions come from the exact active record. Live authority
@@ -457,33 +545,37 @@ returns the original ID and retains the original evidence. See
 
 ## Golden vectors
 
-The canonical API 1.1 `system.capabilities` request for request ID 42 is:
+The canonical API 1.2 `system.capabilities` request for request ID 42 is:
 
 ```text
-a4 00 a2 00 01 01 01 01 18 2a 02 01 03 a0
+a4 00 a2 00 01 01 02 01 18 2a 02 01 03 a0
 ```
 
-The canonical API 1.1 `identity.summary` request for request ID 42 is:
+The canonical API 1.2 `identity.summary` request for request ID 42 is:
 
 ```text
-a4 00 a2 00 01 01 01 01 18 2a 02 03 03 a0
+a4 00 a2 00 01 01 02 01 18 2a 02 03 03 a0
 ```
 
-The wire tests freeze these requests, the identity response, both default and
-experimental capability responses, typed permission/capacity/idempotency error
-responses, the experimental submission request, and its submission-ID-only
-accepted response.
+The wire tests freeze these requests, the identity response, all feature
+compositions of the nine-field API 1.2 capability response, API 1.0/1.1 maps
+with absent inbox keys, typed permission/capacity/idempotency error responses,
+the experimental submission request and accepted response, and exact
+`0xf002`/`0xf003` inbox status/peek vectors, including rejection of a zero inbox
+item ID.
 They also cover every submission failure, state invariants, closed numeric
 enums, unknown fields, unknown operations, missing and duplicate known fields,
 every truncated golden prefix, trailing bytes,
 message/body/payload/nesting limits, indefinite-value rejection, fixed
 byte-string widths, borrowed payload storage, authorization, and the
-packet-output/direct-radio-TX safety values and the separate outbound-RNS
-submission advertisement.
+packet-output/direct-radio-TX safety values, separate outbound-RNS submission
+advertisement, authenticated-only inbox reads, empty `NotFound`, and bounded
+owned peek payloads.
 
 ## Validation profiles
 
-Run all three supported profiles explicitly from the workspace root:
+Run the default and each experimental feature composition explicitly from the
+workspace root:
 
 ```sh
 cargo test --locked -p reticulum-device-api
@@ -493,18 +585,26 @@ cargo test --locked -p reticulum-device-api --features experimental-rns-data
 cargo clippy --locked -p reticulum-device-api --all-targets \
   --features experimental-rns-data -- -D warnings
 
+cargo test --locked -p reticulum-device-api --features experimental-rns-inbox
+cargo clippy --locked -p reticulum-device-api --all-targets \
+  --features experimental-rns-inbox -- -D warnings
+
+cargo test --locked -p reticulum-device-api --all-features
+cargo clippy --locked -p reticulum-device-api --all-targets \
+  --all-features -- -D warnings
+
 cargo check --locked -p reticulum-device-api --no-default-features \
   --target riscv32imac-unknown-none-elf
 cargo check --locked -p reticulum-device-api --no-default-features \
-  --features experimental-rns-data --target riscv32imac-unknown-none-elf
+  --all-features --target riscv32imac-unknown-none-elf
 ```
 
-The first pair validates the default host profile, the second pair validates the
-experimental operation, and the final two commands prove both feature profiles
-remain `no_std` on an installed `target_os = "none"` target.
+The host commands validate the default, each independent experimental surface,
+and their composition. The final two commands prove the default and complete
+feature graph remain `no_std` on an installed `target_os = "none"` target.
 
-Validate authenticated dispatch independently in both host profiles and the
-default ESP32-S3 graph:
+Validate authenticated dispatch independently across the host feature profiles
+and the ESP32-S3 graph:
 
 ```sh
 cargo test --locked -p reticulum-device-api-adapter
@@ -514,15 +614,28 @@ cargo test --locked -p reticulum-device-api-adapter --features experimental-rns-
 cargo clippy --locked -p reticulum-device-api-adapter --all-targets \
   --features experimental-rns-data -- -D warnings
 
+cargo test --locked -p reticulum-device-api-adapter --features experimental-rns-inbox
+cargo clippy --locked -p reticulum-device-api-adapter --all-targets \
+  --features experimental-rns-inbox -- -D warnings
+
+cargo test --locked -p reticulum-device-api-adapter --all-features
+cargo clippy --locked -p reticulum-device-api-adapter --all-targets \
+  --all-features -- -D warnings
+
 cargo test --locked -p reticulum-device-api-adapter \
   --features reticulum-device-api/experimental-rns-data
 cargo clippy --locked -p reticulum-device-api-adapter --all-targets \
   --features reticulum-device-api/experimental-rns-data -- -D warnings
 
+cargo test --locked -p reticulum-device-api-adapter \
+  --features reticulum-device-api/experimental-rns-inbox
+cargo clippy --locked -p reticulum-device-api-adapter --all-targets \
+  --features reticulum-device-api/experimental-rns-inbox -- -D warnings
+
 cargo +esp check --locked --release -p reticulum-device-api-adapter \
-  --features experimental-rns-data --target xtensa-esp32s3-none-elf
+  --all-features --target xtensa-esp32s3-none-elf
 cargo +esp clippy --locked --release -p reticulum-device-api-adapter \
-  --features experimental-rns-data --target xtensa-esp32s3-none-elf -- -D warnings
+  --all-features --target xtensa-esp32s3-none-elf -- -D warnings
 ```
 
 Validate the separately bounded portable bearer-edge contracts independently
@@ -577,7 +690,10 @@ request context, version/capability behavior, principal isolation, every durable
 lifecycle mapping, maximum-size owned-payload acceptance/replay/conflict,
 acceptance across remount, stable capacity and identifier-exhaustion errors,
 faulted and pending status gating, wrong-binding rejection without I/O, and
-lost-write reconciliation. The session crate now exposes both server and public
+lost-write reconciliation. Its inbox profile separately covers authentication
+before either port, no-permission-bit reads, disjoint port dispatch, available/
+disabled/faulted capability mapping, empty `NotFound`, and an owned maximum-size
+peek response. The session crate now exposes both server and public
 allocation-free `no_std` client typestates. Its tests and the live-pairing tests
 plus their independent Python vectors cover canonical hello/proof derivation,
 direction-separated record tags, downgrade/reflection/replay/generation/reset
@@ -586,17 +702,19 @@ transcript byte, substituted continuations, activation confirmation, malformed
 shapes, and secret-owner drop behavior. Target checks exercise the portable
 layers directly on `no_std` bare-metal builds.
 
-The separate permanent-E290 composition gate covers the static depth-one
+The separate permanent-E290 composition gate now covers the static depth-one
 authenticated handoff, current-authority node dispatch through the disjoint
-submission-port view, retained reply pressure, and terminal malformed-owner
+submission and inbox-port views, retained reply pressure, and terminal malformed-owner
 quarantine in addition to the third USB/GPIO task,
 active-low stable-time debounce, an 8 ms missed-SOF suspension that retains its
 epoch and sequence until bus reset, connection-epoch and sequence exhaustion,
 duplicate/gap rejection, depth-one pressure, exact durable reply correlation,
 causal control/live ordering, and node-owned status/initialize plus live-
-pairing dispatch. Current exact suite totals are recorded in the E290 runbook;
-the earlier authenticated-node-foundation release image predates the minimal
-bearer.
+pairing dispatch. The API 1.2 inbox assertions in that composition gate are
+source/host evidence; the separate E290 runbook records the bounded powered
+commit/readback/reset/drop-newest run. Current exact suite totals are recorded
+there as well; the earlier authenticated-node-
+foundation release image predates the minimal bearer.
 Button/control arbitration is bounded. A stable High transition is latched
 before a later Low; a raw-sample gap of at least 20 ms cancels a possible hold
 and suppresses Low until a fresh debounced High. Once every response byte enters
@@ -620,10 +738,11 @@ than `u64::MAX - 2`.
 Both clients assert DTR and clear RTS; closing/reopening the TTY does not start a
 new epoch. A post-send I/O failure or request timeout leaves its last sequence
 consumed-or-ambiguous and requires a confirmed USB reset epoch before restarting
-at zero. After an ambiguous Activate, the current host cannot distinguish
-Pending from Active because authenticated-session reconciliation is not yet
-composed. It retains the state file and must not guess Active or invoke
-AbortCurrent. `resume` is a proof retry, not activation reconciliation.
+at zero. After an ambiguous Activate, `e290-pairing-live` does not yet enter an
+authenticated session to distinguish Pending from Active. It retains the state
+file and must not guess Active or invoke AbortCurrent. `resume` is a proof
+retry, not activation reconciliation; the firmware's ordinary authenticated
+session remains available through a separate fresh USB epoch.
 
 An earlier explicit-16-MiB image returned `initialization-required` and
 `physical-presence-required` from both boards without writing credentials. The
@@ -643,9 +762,10 @@ recovered sequence-zero `initialization-required`, and both credential
 partitions retained the same all-`0xff` digest. Its authenticated endpoint was
 dormant in that exact image, so successful post-write readback and powered
 authentication remain open; this is not evidence for the subsequently composed
-minimal bearer. The
-firmware selects no-op logging, leaving the COBS bootstrap as the sole
-application-owned USB byte stream. Powered macOS full re-enumeration replaced
+minimal bearer. The firmware selects no-op logging, leaving one shared
+COBS-framed owner to multiplex initialization control, live pairing, and
+authenticated-session records as the sole application-owned USB byte stream.
+Powered macOS full re-enumeration replaced
 the service and restored sequence zero after firmware detachment, USB-RAM scrub,
 and reattachment. A non-seizing in-place `ResetDevice` returned success but left
 the endpoint stale and is not an accepted recovery primitive. The image-readback
@@ -653,7 +773,7 @@ hard-reset reattachment path is bounded powered evidence, while suspend/resume,
 controlled cuts, and the ROM/bootloader interval before the application
 quarantine remain to be qualified.
 
-The subsequent API 1.1 image packaged a 686,176-byte application as a
+The powered API 1.1 image packaged a 686,176-byte application as a
 751,712-byte merged image with SHA-256
 `4285fcaa9df6a6f0314ed4735377ea986b0efcafafc2710ad7594489a49b4795`.
 Exact address-zero readbacks matched on both E290 boards. The authenticated
@@ -666,6 +786,9 @@ The receiver matched its local destination, decrypted the DATA packet, and
 returned a valid Reticulum proof; sender status became `Delivered` in about 2.6
 seconds. A full sender USB re-enumeration followed by a fresh authenticated
 session returned the same terminal state, length, and digest. This qualifies
-the exact USB-to-durable-runtime-to-LoRa-to-peer-proof path, not application-
-level message consumption, multi-hop routing, session resumption, or the
-deferred BLE/Wi-Fi bearers.
+the exact sender USB-to-durable-runtime-to-LoRa-to-peer-proof path. The proof
+means that the receiver accepted/decrypted the protocol packet and produced the
+Reticulum delivery proof; it does not mean the receiver committed the plaintext
+to the API 1.2 inbox. Application persistence/peek, multi-hop routing, session
+resumption, and the deferred BLE/Wi-Fi bearers remain unqualified on powered
+hardware.

@@ -13,7 +13,10 @@ use reticulum_announce_clock::{
     BootEpochReservation, FreshClockPolicy, ReserveError, reserve_next_boot_epoch,
 };
 use reticulum_device_api::{CapabilityAvailability, IdentitySummary};
-use reticulum_device_api_adapter::{SubmissionAcceptance, SubmissionPort, SubmissionPortError};
+use reticulum_device_api_adapter::{
+    InboundMailboxItem, InboundMailboxPort, InboundMailboxPortError, SubmissionAcceptance,
+    SubmissionPort, SubmissionPortError,
+};
 use reticulum_device_api_credential_store::{
     BoundCredentialStore, CredentialStoreBinding, CredentialStoreRecovery, MountedCredentialStore,
 };
@@ -46,21 +49,30 @@ use reticulum_heltec_vision_master_e290_node::credential_runtime::{
     OrdinarySessionSelectionRefusal,
 };
 use reticulum_heltec_vision_master_e290_node::cross_store_gate::{
-    CredentialPhysicalMutationGate, JournalMutationGate, credential_physical_mutation_gate,
+    CredentialPhysicalMutationGate, InboundMailboxMutationGate, JournalMutationGate,
+    credential_physical_mutation_gate, inbound_mailbox_mutation_gate,
     journal_mutation_gate as cross_store_journal_mutation_gate,
 };
 use reticulum_heltec_vision_master_e290_node::partition_contract::{
     ANNOUNCE_CLOCK_LABEL_BYTES, ANNOUNCE_CLOCK_LEN, ANNOUNCE_CLOCK_OFFSET,
     API_CREDENTIALS_LABEL_BYTES, API_CREDENTIALS_LEN, API_CREDENTIALS_OFFSET, DATA_PARTITION_TYPE,
-    DEVICE_CONFIG_LABEL_BYTES, DEVICE_CONFIG_LEN, DEVICE_CONFIG_OFFSET, NODE_IDENTITY_LABEL_BYTES,
-    NODE_IDENTITY_LEN, NODE_IDENTITY_OFFSET, NODE_JOURNAL_LABEL_BYTES, NODE_JOURNAL_LEN,
-    NODE_JOURNAL_OFFSET, NVS_DATA_SUBTYPE, REQUIRED_FLASH_BYTES, UNDEFINED_DATA_SUBTYPE,
+    DEVICE_CONFIG_LABEL_BYTES, DEVICE_CONFIG_LEN, DEVICE_CONFIG_OFFSET, MESSAGE_STORE_LABEL_BYTES,
+    MESSAGE_STORE_LEN, MESSAGE_STORE_OFFSET, NODE_IDENTITY_LABEL_BYTES, NODE_IDENTITY_LEN,
+    NODE_IDENTITY_OFFSET, NODE_JOURNAL_LABEL_BYTES, NODE_JOURNAL_LEN, NODE_JOURNAL_OFFSET,
+    NVS_DATA_SUBTYPE, REQUIRED_FLASH_BYTES, UNDEFINED_DATA_SUBTYPE,
 };
-use reticulum_heltec_vision_master_e290_node::{api_credentials_binding, node_journal_binding};
+use reticulum_heltec_vision_master_e290_node::{
+    api_credentials_binding, node_journal_binding, rns_inbox_binding,
+};
 use reticulum_node_core::{
     AuthorizedFrameObservation, MonotonicMillis, MonotonicSeconds, TxLeaseDeadline,
 };
 use reticulum_nor_flash_region::{PartitionNorFlash, RegionError};
+use reticulum_rns_inbox_store::{
+    BoundInboxStore, InboxAdmissionError, InboxAdmissionOutcome, InboxCandidate, InboxItemId,
+    InboxStoreBinding, InboxStoreMountError, InboxStoreState, MountedInboxStore,
+    mount as mount_inbox_store,
+};
 use reticulum_storage_actor::{
     AcceptanceProgress, BootRecoveryProgress, BoundJournal, DriveError, JournalBinding, MountError,
     ProjectorOperationError, StorageDeviceId,
@@ -99,6 +111,7 @@ pub(crate) enum ProductFlashOpenError {
         api_credentials: u8,
         device_config: u8,
         node_journal: u8,
+        message_store: u8,
     },
     /// One uniquely named required partition has the wrong type, range, or flags.
     PartitionShape(&'static str),
@@ -123,9 +136,10 @@ impl Display for ProductFlashOpenError {
                 api_credentials,
                 device_config,
                 node_journal,
+                message_store,
             } => write!(
                 formatter,
-                "partition-cardinality identity={identity} announce_clock={announce_clock} api_credentials={api_credentials} device_config={device_config} node_journal={node_journal}"
+                "partition-cardinality identity={identity} announce_clock={announce_clock} api_credentials={api_credentials} device_config={device_config} node_journal={node_journal} message_store={message_store}"
             ),
             Self::PartitionShape(name) => write!(formatter, "partition-shape name={name}"),
             Self::PartitionOverlap(name) => write!(formatter, "partition-overlap name={name}"),
@@ -163,6 +177,9 @@ pub(crate) struct BootJournalProvision {
 
 /// Failure while recognizing or establishing the canonical first journal.
 pub(crate) type BootJournalProvisionError = FirstProvisionError<ProductRegionError>;
+
+/// Failure while read-only mounting the bounded inbound qualification store.
+pub(crate) type BootInboxMountError = InboxStoreMountError<ProductRegionError>;
 
 /// Failure while strictly mounting or conservatively recovering the journal.
 #[derive(Debug)]
@@ -252,6 +269,7 @@ pub(crate) struct ProductFlashOwner {
     flash: &'static mut FlashStorage<'static>,
     journal_binding: JournalBinding,
     credential_binding: CredentialStoreBinding,
+    inbox_binding: InboxStoreBinding,
 }
 
 /// Resident sole owner of physical flash and durable submission scheduling.
@@ -267,6 +285,9 @@ pub(crate) struct ProductStorageCoordinator {
     credential_runtime: CredentialRuntime,
     runtime: Option<ProductSubmissionRuntime>,
     submission_service_enabled: bool,
+    inbox: Option<MountedInboxStore>,
+    inbox_service_enabled: bool,
+    inbox_dropped_since_boot: u64,
 }
 
 /// Short-lived logical API view over fields disjoint from credential authority.
@@ -280,6 +301,31 @@ struct ProductSubmissionPort<'a> {
     runtime: &'a mut Option<ProductSubmissionRuntime>,
     submission_service_enabled: bool,
     credential_physical_mutation_outstanding: bool,
+}
+
+/// Short-lived read-only logical API view over resident mailbox semantics.
+struct ProductInboundMailboxPort<'a> {
+    inbox: &'a Option<MountedInboxStore>,
+    service_enabled: bool,
+    dropped_since_boot: u64,
+}
+
+/// Product result of offering one decrypted local DATA item to durable storage.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "allocation-free deferral must return the exact fixed-capacity plaintext owner"
+)]
+pub(crate) enum ProductInboundAdmission {
+    /// The item became visible only after a complete commit and readback.
+    Committed(InboxItemId),
+    /// Another store retains physical mutation; retry this exact candidate.
+    Deferred(InboxCandidate),
+    /// The one qualification slot was already occupied; newest input was dropped.
+    DroppedFull,
+    /// No mounted mailbox service exists; newest input was dropped.
+    DroppedUnavailable,
+    /// A non-reconciled physical failure disabled inbox service for this boot.
+    DroppedFaulted(InboxAdmissionError<ProductRegionError>),
 }
 
 /// Product-level result of admission-time identity preflight and initialization policy.
@@ -371,7 +417,9 @@ pub(crate) trait ProductCredentialInitializationPort {
 const MAXIMUM_PRODUCT_STORAGE_COORDINATOR_CREDENTIAL_OVERHEAD_BYTES: usize =
     MAXIMUM_CREDENTIAL_RUNTIME_BYTES + 256;
 const MAXIMUM_PRODUCT_STORAGE_COORDINATOR_BYTES: usize = config::MAXIMUM_DURABLE_RUNTIME_BYTES
-    + MAXIMUM_PRODUCT_STORAGE_COORDINATOR_CREDENTIAL_OVERHEAD_BYTES;
+    + MAXIMUM_PRODUCT_STORAGE_COORDINATOR_CREDENTIAL_OVERHEAD_BYTES
+    + mem::size_of::<MountedInboxStore>()
+    + 128;
 const _: () = assert!(
     mem::size_of::<ProductStorageCoordinator>() <= MAXIMUM_PRODUCT_STORAGE_COORDINATOR_BYTES
 );
@@ -398,6 +446,7 @@ impl ProductFlashOwner {
             flash,
             journal_binding: node_journal_binding(storage_device_id),
             credential_binding: api_credentials_binding(storage_device_id),
+            inbox_binding: rns_inbox_binding(storage_device_id),
         })
     }
 
@@ -569,6 +618,17 @@ impl ProductFlashOwner {
         Ok((runtime, report))
     }
 
+    /// Mount the inbound qualification store without formatting erased media.
+    ///
+    /// A fault disables only client inbox service. The caller retains the sole
+    /// flash owner and may continue route-only LoRa operation.
+    pub(crate) fn mount_inbox(&mut self) -> Result<MountedInboxStore, BootInboxMountError> {
+        let region =
+            PartitionNorFlash::new(&mut *self.flash, MESSAGE_STORE_OFFSET, MESSAGE_STORE_LEN);
+        let mut access = BoundInboxStore::new(region, self.inbox_binding);
+        mount_inbox_store(&mut access)
+    }
+
     /// Transfer the sole physical flash owner into its resident coordinator.
     ///
     /// A missing runtime disables only durable local submission service. The
@@ -577,6 +637,7 @@ impl ProductFlashOwner {
     pub(crate) fn into_storage_coordinator(
         self,
         runtime: Option<ProductSubmissionRuntime>,
+        inbox: Option<MountedInboxStore>,
         credentials: BootCredentialStore,
         device_api_id: DeviceId,
     ) -> ProductStorageCoordinator {
@@ -586,12 +647,16 @@ impl ProductFlashOwner {
             device_api_id,
         );
         let submission_service_enabled = runtime.is_some();
+        let inbox_service_enabled = inbox.is_some();
         ProductStorageCoordinator {
             flash: self.flash,
             journal_binding: self.journal_binding,
             credential_runtime,
             runtime,
             submission_service_enabled,
+            inbox,
+            inbox_service_enabled,
+            inbox_dropped_since_boot: 0,
         }
     }
 }
@@ -650,6 +715,11 @@ impl ProductStorageCoordinator {
         self.submission_service_enabled && self.runtime.is_some()
     }
 
+    /// Whether the durable inbound qualification store mounted successfully.
+    pub(crate) const fn inbox_service_available(&self) -> bool {
+        self.inbox_service_enabled && self.inbox.is_some()
+    }
+
     /// Current non-secret resident live-pairing ownership.
     pub(crate) fn live_pairing_status(&self) -> CredentialPairingStatus {
         self.credential_runtime.live_pairing_status()
@@ -691,6 +761,17 @@ impl ProductStorageCoordinator {
         )
     }
 
+    fn inbound_mailbox_mutation_gate(&self) -> InboundMailboxMutationGate {
+        let (journal_actor_pending, journal_projector_pending) = self.journal_mutation_pending();
+        inbound_mailbox_mutation_gate(
+            self.inbox_service_available(),
+            self.credential_runtime
+                .credential_physical_mutation_outstanding(),
+            journal_actor_pending,
+            journal_projector_pending,
+        )
+    }
+
     fn submission_port(&mut self) -> ProductSubmissionPort<'_> {
         let credential_physical_mutation_outstanding = self
             .credential_runtime
@@ -704,8 +785,67 @@ impl ProductStorageCoordinator {
         }
     }
 
+    fn inbox_port(&self) -> ProductInboundMailboxPort<'_> {
+        ProductInboundMailboxPort {
+            inbox: &self.inbox,
+            service_enabled: self.inbox_service_enabled,
+            dropped_since_boot: self.inbox_dropped_since_boot,
+        }
+    }
+
+    /// Offer one exact decrypted DATA item to the one-entry durable mailbox.
+    ///
+    /// Deferral occurs before any mailbox I/O and returns the complete fixed
+    /// candidate. Full, unavailable, and fault outcomes implement the explicit
+    /// drop-newest policy and increment its saturating boot-local counter.
+    pub(crate) fn offer_inbound(&mut self, candidate: InboxCandidate) -> ProductInboundAdmission {
+        match self.inbound_mailbox_mutation_gate() {
+            InboundMailboxMutationGate::Ready => {}
+            InboundMailboxMutationGate::DeferredForCredentialMutation
+            | InboundMailboxMutationGate::DeferredForJournalMutation => {
+                return ProductInboundAdmission::Deferred(candidate);
+            }
+            InboundMailboxMutationGate::RuntimeUnavailable => {
+                self.record_inbound_drop();
+                return ProductInboundAdmission::DroppedUnavailable;
+            }
+        }
+
+        let binding = self
+            .inbox
+            .as_ref()
+            .expect("ready inbox gate requires a mounted runtime")
+            .binding();
+        let region =
+            PartitionNorFlash::new(&mut *self.flash, MESSAGE_STORE_OFFSET, MESSAGE_STORE_LEN);
+        let mut access = BoundInboxStore::new(region, binding);
+        let outcome = self
+            .inbox
+            .as_mut()
+            .expect("ready inbox gate requires a mounted runtime")
+            .accept(&mut access, candidate);
+        match outcome {
+            Ok(InboxAdmissionOutcome::Accepted(id)) => ProductInboundAdmission::Committed(id),
+            Ok(InboxAdmissionOutcome::Full(_candidate)) => {
+                self.record_inbound_drop();
+                ProductInboundAdmission::DroppedFull
+            }
+            Err(failure) => {
+                let (_candidate, error) = failure.into_parts();
+                self.inbox_service_enabled = false;
+                self.record_inbound_drop();
+                ProductInboundAdmission::DroppedFaulted(error)
+            }
+        }
+    }
+
+    /// Count one input discarded before it could be represented as a store candidate.
+    pub(crate) fn record_inbound_drop(&mut self) {
+        self.inbox_dropped_since_boot = self.inbox_dropped_since_boot.saturating_add(1);
+    }
+
     /// Dispatch one exact session-authenticated request while credential and
-    /// journal fields remain disjointly borrowed by the sole storage owner.
+    /// journal and inbox fields remain disjointly borrowed by the sole storage owner.
     /// The public identity summary is copied in from the node owner and is not
     /// stored in or derived by this flash coordinator.
     #[allow(
@@ -726,15 +866,28 @@ impl ProductStorageCoordinator {
             credential_runtime,
             runtime,
             submission_service_enabled,
+            inbox,
+            inbox_service_enabled,
+            inbox_dropped_since_boot,
         } = self;
-        let mut port = ProductSubmissionPort {
+        let mut submission_port = ProductSubmissionPort {
             flash,
             journal_binding: *journal_binding,
             runtime,
             submission_service_enabled: *submission_service_enabled,
             credential_physical_mutation_outstanding,
         };
-        credential_runtime.dispatch_authenticated_request(request, identity, &mut port)
+        let mut inbox_port = ProductInboundMailboxPort {
+            inbox,
+            service_enabled: *inbox_service_enabled,
+            dropped_since_boot: *inbox_dropped_since_boot,
+        };
+        credential_runtime.dispatch_authenticated_request(
+            request,
+            identity,
+            &mut submission_port,
+            &mut inbox_port,
+        )
     }
 
     /// Admit one ordinary authenticated session and return its exact selected
@@ -1105,6 +1258,71 @@ impl SubmissionPort for ProductStorageCoordinator {
     }
 }
 
+impl InboundMailboxPort for ProductInboundMailboxPort<'_> {
+    fn availability(&mut self) -> CapabilityAvailability {
+        if self.service_enabled && self.inbox.is_some() {
+            CapabilityAvailability::Available
+        } else {
+            CapabilityAvailability::Unavailable
+        }
+    }
+
+    fn status(&mut self) -> Result<reticulum_device_api::RnsInboxStatus, InboundMailboxPortError> {
+        if self.availability() != CapabilityAvailability::Available {
+            return Err(InboundMailboxPortError::Unavailable);
+        }
+        let inbox = self
+            .inbox
+            .as_ref()
+            .ok_or(InboundMailboxPortError::Unavailable)?;
+        let depth = match inbox.state() {
+            InboxStoreState::Empty => 0,
+            InboxStoreState::Occupied(_) => 1,
+        };
+        Ok(reticulum_device_api::RnsInboxStatus {
+            depth,
+            capacity: 1,
+            dropped_since_boot: self.dropped_since_boot,
+            max_payload_bytes: reticulum_rns_inbox_store::MAX_PAYLOAD_SIZE as u16,
+            durable: true,
+        })
+    }
+
+    fn peek(&mut self) -> Result<Option<InboundMailboxItem>, InboundMailboxPortError> {
+        if self.availability() != CapabilityAvailability::Available {
+            return Err(InboundMailboxPortError::Unavailable);
+        }
+        self.inbox
+            .as_ref()
+            .ok_or(InboundMailboxPortError::Unavailable)?
+            .item()
+            .map(|item| {
+                InboundMailboxItem::new(
+                    core::num::NonZeroU64::new(item.id().get())
+                        .expect("inbox-store item identifiers are nonzero"),
+                    reticulum_device_api::DestinationHash(*item.destination().as_bytes()),
+                    item.payload(),
+                )
+                .map_err(|_| InboundMailboxPortError::Faulted)
+            })
+            .transpose()
+    }
+}
+
+impl InboundMailboxPort for ProductStorageCoordinator {
+    fn availability(&mut self) -> CapabilityAvailability {
+        self.inbox_port().availability()
+    }
+
+    fn status(&mut self) -> Result<reticulum_device_api::RnsInboxStatus, InboundMailboxPortError> {
+        self.inbox_port().status()
+    }
+
+    fn peek(&mut self) -> Result<Option<InboundMailboxItem>, InboundMailboxPortError> {
+        self.inbox_port().peek()
+    }
+}
+
 fn map_submission_acceptance(progress: AcceptanceProgress) -> SubmissionAcceptance {
     match progress {
         AcceptanceProgress::Accepted(id) => SubmissionAcceptance::Accepted(id),
@@ -1154,11 +1372,13 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
     let mut credentials_count = 0_u8;
     let mut config_count = 0_u8;
     let mut journal_count = 0_u8;
+    let mut message_store_count = 0_u8;
     let mut identity_valid = false;
     let mut clock_valid = false;
     let mut credentials_valid = false;
     let mut config_valid = false;
     let mut journal_valid = false;
+    let mut message_store_valid = false;
 
     for entry in table.iter() {
         let label = entry.label();
@@ -1167,6 +1387,7 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
         let named_credentials = label == API_CREDENTIALS_LABEL_BYTES;
         let named_config = label == DEVICE_CONFIG_LABEL_BYTES;
         let named_journal = label == NODE_JOURNAL_LABEL_BYTES;
+        let named_message_store = label == MESSAGE_STORE_LABEL_BYTES;
         if named_identity {
             identity_count = identity_count.saturating_add(1);
         }
@@ -1181,6 +1402,9 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
         }
         if named_journal {
             journal_count = journal_count.saturating_add(1);
+        }
+        if named_message_store {
+            message_store_count = message_store_count.saturating_add(1);
         }
 
         let entry_end = entry
@@ -1217,6 +1441,12 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
                 NODE_JOURNAL_OFFSET,
                 NODE_JOURNAL_LEN,
                 named_journal,
+            ),
+            (
+                "message_store",
+                MESSAGE_STORE_OFFSET,
+                MESSAGE_STORE_LEN,
+                named_message_store,
             ),
         ] {
             let expected_end = offset + len;
@@ -1261,6 +1491,13 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
                 && entry.len() == NODE_JOURNAL_LEN
                 && plain_writable;
         }
+        if named_message_store {
+            message_store_valid = entry.raw_type() == DATA_PARTITION_TYPE
+                && entry.raw_subtype() == UNDEFINED_DATA_SUBTYPE
+                && entry.offset() == MESSAGE_STORE_OFFSET
+                && entry.len() == MESSAGE_STORE_LEN
+                && plain_writable;
+        }
     }
 
     if identity_count != 1
@@ -1268,6 +1505,7 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
         || credentials_count != 1
         || config_count != 1
         || journal_count != 1
+        || message_store_count != 1
     {
         return Err(ProductFlashOpenError::PartitionCardinality {
             identity: identity_count,
@@ -1275,6 +1513,7 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
             api_credentials: credentials_count,
             device_config: config_count,
             node_journal: journal_count,
+            message_store: message_store_count,
         });
     }
     for (valid, name) in [
@@ -1283,6 +1522,7 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
         (credentials_valid, "api_credentials"),
         (config_valid, "device_config"),
         (journal_valid, "node_journal"),
+        (message_store_valid, "message_store"),
     ] {
         if !valid {
             return Err(ProductFlashOpenError::PartitionShape(name));

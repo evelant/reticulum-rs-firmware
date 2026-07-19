@@ -33,6 +33,7 @@ mod live_admission_test_support;
 mod live_admission_tests;
 
 use reticulum_device_api_credential_store::{CredentialStoreBinding, CredentialStoreDeviceId};
+use reticulum_rns_inbox_store::{InboxStoreBinding, InboxStoreDeviceId};
 use reticulum_storage_actor::{JournalBinding, StorageDeviceId};
 
 /// Derive the coordinator's physical-flash identifier from the E290 eFuse MAC.
@@ -78,6 +79,20 @@ pub const fn api_credentials_binding(device: StorageDeviceId) -> CredentialStore
     )
 }
 
+/// Bind the durable inbound qualification store to the same physical flash ID.
+pub const fn rns_inbox_binding(device: StorageDeviceId) -> InboxStoreBinding {
+    let bytes = device.as_bytes();
+    InboxStoreBinding::new(
+        InboxStoreDeviceId::new([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+        ]),
+        partition_contract::MESSAGE_STORE_OFFSET as usize,
+        partition_contract::MESSAGE_STORE_LEN as usize,
+        reticulum_rns_inbox_store::PHYSICAL_FORMAT_VERSION,
+    )
+}
+
 const _: () = assert!(
     partition_contract::NODE_IDENTITY_LEN as usize
         == reticulum_device_identity_store::PARTITION_SIZE
@@ -92,6 +107,13 @@ const _: () = assert!(
     partition_contract::API_CREDENTIALS_LEN as usize
         == reticulum_device_api_credential_store::PARTITION_SIZE
 );
+const _: () = assert!(
+    partition_contract::MESSAGE_STORE_LEN as usize == reticulum_rns_inbox_store::PARTITION_SIZE
+);
+const _: () = assert!(
+    reticulum_rns_inbox_store::MAX_PAYLOAD_SIZE
+        == reticulum_device_api::MAX_RNS_INBOX_PAYLOAD_BYTES
+);
 
 #[cfg(test)]
 mod tests {
@@ -99,7 +121,7 @@ mod tests {
 
     use crate::{
         api_credentials_binding, config, device_api_id_from_eui48, node_journal_binding,
-        partition_contract, storage_device_id_from_eui48,
+        partition_contract, rns_inbox_binding, storage_device_id_from_eui48,
     };
     use reticulum_node_core::{NodeConfig, NodeCore, NodeIdentity, NodeInstanceId};
 
@@ -111,6 +133,8 @@ mod tests {
         assert_eq!(partition_contract::DEVICE_CONFIG_LEN, 0x0001_a000);
         assert_eq!(partition_contract::NODE_JOURNAL_OFFSET, 0x0063_0000);
         assert_eq!(partition_contract::NODE_JOURNAL_LEN, 0x0010_0000);
+        assert_eq!(partition_contract::MESSAGE_STORE_OFFSET, 0x0073_0000);
+        assert_eq!(partition_contract::MESSAGE_STORE_LEN, 0x0020_0000);
         assert_eq!(
             partition_contract::NODE_JOURNAL_LEN as usize,
             reticulum_storage_journal::PARTITION_SIZE
@@ -129,7 +153,11 @@ mod tests {
         );
         assert_eq!(
             partition_contract::NODE_JOURNAL_OFFSET + partition_contract::NODE_JOURNAL_LEN,
-            0x0073_0000
+            partition_contract::MESSAGE_STORE_OFFSET
+        );
+        assert_eq!(
+            partition_contract::MESSAGE_STORE_OFFSET + partition_contract::MESSAGE_STORE_LEN,
+            0x0093_0000
         );
         assert_eq!(
             partition_contract::API_CREDENTIALS_LABEL_BYTES,
@@ -142,6 +170,10 @@ mod tests {
         assert_eq!(
             partition_contract::NODE_JOURNAL_LABEL_BYTES,
             *b"node_journal\0\0\0\0"
+        );
+        assert_eq!(
+            partition_contract::MESSAGE_STORE_LABEL_BYTES,
+            *b"message_store\0\0\0"
         );
         let device = storage_device_id_from_eui48([0xac, 0xa7, 0x04, 0xe1, 0x3e, 0x88]);
         assert_eq!(device.as_bytes(), b"e290-flash\xac\xa7\x04\xe1\x3e\x88");
@@ -165,6 +197,14 @@ mod tests {
             credential_binding.layout_version(),
             reticulum_device_api_credential_store::PHYSICAL_FORMAT_VERSION
         );
+        let inbox_binding = rns_inbox_binding(device);
+        assert_eq!(inbox_binding.device().as_bytes(), device.as_bytes());
+        assert_eq!(inbox_binding.absolute_offset(), 0x0073_0000);
+        assert_eq!(inbox_binding.length(), 0x0020_0000);
+        assert_eq!(
+            inbox_binding.format_version(),
+            reticulum_rns_inbox_store::PHYSICAL_FORMAT_VERSION
+        );
     }
 
     #[test]
@@ -184,6 +224,7 @@ mod tests {
             "flash_owner.reserve_announce_epoch(fresh_clock_policy)",
             "flash_owner.boot_identity(&mut bootstrap_rng)",
             "flash_owner.mount_node_runtime(u64::from(announce_epoch.get()))",
+            "flash_owner.mount_inbox()",
         ] {
             let later = source
                 .find(later_operation)
@@ -452,9 +493,9 @@ mod tests {
         let storage = include_str!("platform_storage.rs");
         assert!(storage.contains("struct ProductSubmissionPort<'a>"));
         assert!(storage.contains(".select_ordinary_session(at, connection, credential_id)"));
-        assert!(storage.contains(
-            "credential_runtime.dispatch_authenticated_request(request, identity, &mut port)"
-        ));
+        assert!(storage.contains("credential_runtime.dispatch_authenticated_request("));
+        assert!(storage.contains("&mut submission_port,"));
+        assert!(storage.contains("&mut inbox_port,"));
 
         let usb = include_str!("usb_pairing_task.rs");
         assert!(usb.contains(

@@ -241,6 +241,77 @@ pub struct NodeActions {
     pub unroutable_packets: usize,
 }
 
+/// Product-owned plaintext from one native destination-DATA event.
+///
+/// Projection moves the native payload allocation into this value unchanged.
+/// It deliberately applies no mailbox capacity or payload-length policy: a
+/// caller can therefore observe DATA for future destination types whose
+/// plaintext limit differs from the current encrypted SINGLE-destination
+/// limit.
+#[must_use = "inbound DATA must be retained, delivered, or explicitly discarded"]
+pub struct InboundData {
+    destination: [u8; rete_core::TRUNCATED_HASH_LEN],
+    payload: Vec<u8>,
+}
+
+impl core::fmt::Debug for InboundData {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("InboundData")
+            .field("destination", &self.destination)
+            .field("payload_len", &self.payload.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl InboundData {
+    /// Complete destination hash addressed by the received DATA packet.
+    pub const fn destination(&self) -> &[u8; rete_core::TRUNCATED_HASH_LEN] {
+        &self.destination
+    }
+
+    /// Decrypted application payload.
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    /// Consume this value into its destination and exact moved payload owner.
+    pub fn into_parts(self) -> ([u8; rete_core::TRUNCATED_HASH_LEN], Vec<u8>) {
+        (self.destination, self.payload)
+    }
+}
+
+/// Result of projecting one native node event onto the inbound-DATA surface.
+#[must_use = "the projected DATA or unchanged non-DATA event must be handled"]
+pub enum InboundDataProjection {
+    /// Decrypted destination DATA with its original payload allocation.
+    Data(InboundData),
+    /// Any other native event, returned unchanged to its caller.
+    Other(NodeEvent),
+}
+
+impl core::fmt::Debug for InboundDataProjection {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Data(data) => formatter.debug_tuple("Data").field(data).finish(),
+            Self::Other(_) => formatter.write_str("Other(..)"),
+        }
+    }
+}
+
+/// Consume one native event and project destination DATA without cloning.
+pub fn project_inbound_data(event: NodeEvent) -> InboundDataProjection {
+    match event {
+        NodeEvent::DataReceived { dest_hash, payload } => {
+            InboundDataProjection::Data(InboundData {
+                destination: *dest_hash.as_bytes(),
+                payload,
+            })
+        }
+        other => InboundDataProjection::Other(other),
+    }
+}
+
 /// Whether this node only terminates traffic or also forwards ordinary RNS
 /// traffic for other nodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1647,6 +1718,8 @@ fn resolve_tick_actions(native: IngestOutcome) -> NodeActions {
 
 #[cfg(test)]
 mod tests {
+    use alloc::{format, vec};
+
     use super::*;
     use rete_core::{CONTEXT_LRPROOF, CONTEXT_LRRTT, PacketBuilder};
 
@@ -1733,6 +1806,109 @@ mod tests {
 
     type TestNode = EmbeddedNode<4, 2, 8, 2>;
     type TwoLinkNode = EmbeddedNode<4, 2, 8, 2>;
+
+    #[test]
+    fn inbound_data_projection_moves_the_exact_payload_owner() {
+        let expected_destination = [0x42; rete_core::TRUNCATED_HASH_LEN];
+        let mut payload = Vec::with_capacity(64);
+        payload.extend_from_slice(b"exact moved payload");
+        let expected_pointer = payload.as_ptr();
+        let expected_capacity = payload.capacity();
+
+        let projection = project_inbound_data(NodeEvent::DataReceived {
+            dest_hash: DestHash::from(expected_destination),
+            payload,
+        });
+        let InboundDataProjection::Data(data) = projection else {
+            panic!("destination DATA must project onto the product-owned value")
+        };
+        assert_eq!(data.destination(), &expected_destination);
+        assert_eq!(data.payload(), b"exact moved payload");
+
+        let (destination, payload) = data.into_parts();
+        assert_eq!(destination, expected_destination);
+        assert_eq!(payload.as_ptr(), expected_pointer);
+        assert_eq!(payload.capacity(), expected_capacity);
+    }
+
+    #[test]
+    fn inbound_data_projection_returns_non_data_event_unchanged() {
+        let expected_link = LinkId::from([0x7b; rete_core::TRUNCATED_HASH_LEN]);
+        let mut expected_data = Vec::with_capacity(48);
+        expected_data.extend_from_slice(b"unchanged link data");
+        let expected_pointer = expected_data.as_ptr();
+        let expected_capacity = expected_data.capacity();
+        let projection = project_inbound_data(NodeEvent::LinkData {
+            link_id: expected_link,
+            data: expected_data,
+            context: 0x5a,
+        });
+
+        let InboundDataProjection::Other(NodeEvent::LinkData {
+            link_id,
+            data,
+            context,
+        }) = projection
+        else {
+            panic!("non-DATA event must return through the unchanged projection")
+        };
+        assert_eq!(link_id, expected_link);
+        assert_eq!(context, 0x5a);
+        assert_eq!(data, b"unchanged link data");
+        assert_eq!(data.as_ptr(), expected_pointer);
+        assert_eq!(data.capacity(), expected_capacity);
+    }
+
+    #[test]
+    fn inbound_data_projection_preserves_maximum_encrypted_data() {
+        let payload = vec![0xa5; MAX_DATA_PAYLOAD];
+        let expected_pointer = payload.as_ptr();
+        let projection = project_inbound_data(NodeEvent::DataReceived {
+            dest_hash: DestHash::from([0x33; rete_core::TRUNCATED_HASH_LEN]),
+            payload,
+        });
+        let InboundDataProjection::Data(data) = projection else {
+            panic!("maximum encrypted DATA must project")
+        };
+        let (_, payload) = data.into_parts();
+        assert_eq!(payload.len(), MAX_DATA_PAYLOAD);
+        assert_eq!(payload.as_ptr(), expected_pointer);
+        assert!(payload.iter().all(|byte| *byte == 0xa5));
+    }
+
+    #[test]
+    fn inbound_data_projection_does_not_apply_an_encrypted_payload_limit() {
+        let payload = vec![0x5a; MAX_DATA_PAYLOAD + 1];
+        let projection = project_inbound_data(NodeEvent::DataReceived {
+            dest_hash: DestHash::from([0x66; rete_core::TRUNCATED_HASH_LEN]),
+            payload,
+        });
+        let InboundDataProjection::Data(data) = projection else {
+            panic!("projection must leave mailbox and destination-size policy to its caller")
+        };
+        assert_eq!(data.payload().len(), MAX_DATA_PAYLOAD + 1);
+    }
+
+    #[test]
+    fn inbound_data_debug_redacts_data_and_non_data_payloads() {
+        let destination = [0x42; rete_core::TRUNCATED_HASH_LEN];
+        let data = project_inbound_data(NodeEvent::DataReceived {
+            dest_hash: DestHash::from(destination),
+            payload: vec![0xde, 0xad, 0xbe, 0xef],
+        });
+        let data_debug = format!("{data:?}");
+        assert!(data_debug.contains("payload_len: 4"));
+        assert!(!data_debug.contains("222, 173, 190, 239"));
+
+        let other = project_inbound_data(NodeEvent::LinkData {
+            link_id: LinkId::from([0x24; rete_core::TRUNCATED_HASH_LEN]),
+            data: vec![0xca, 0xfe, 0xba, 0xbe],
+            context: 0x55,
+        });
+        let other_debug = format!("{other:?}");
+        assert_eq!(other_debug, "Other(..)");
+        assert!(!other_debug.contains("202, 254, 186, 190"));
+    }
 
     fn identity(tag: u8) -> Identity {
         Identity::from_seed(&[tag; 32]).unwrap()

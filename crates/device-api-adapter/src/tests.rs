@@ -350,6 +350,66 @@ impl SubmissionPort for UnavailablePort {
     }
 }
 
+#[cfg(feature = "experimental-rns-inbox")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FakeInboxCalls {
+    availability: usize,
+    status: usize,
+    peek: usize,
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+struct FakeInbox {
+    availability: CapabilityAvailability,
+    status: Result<api::RnsInboxStatus, InboundMailboxPortError>,
+    peek: Result<Option<InboundMailboxItem>, InboundMailboxPortError>,
+    calls: FakeInboxCalls,
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+impl FakeInbox {
+    fn available(peek: Option<InboundMailboxItem>) -> Self {
+        Self {
+            availability: CapabilityAvailability::Available,
+            status: Ok(api::RnsInboxStatus {
+                depth: u16::from(peek.is_some()),
+                capacity: 8,
+                dropped_since_boot: 3,
+                max_payload_bytes: api::MAX_RNS_INBOX_PAYLOAD_BYTES as u16,
+                durable: true,
+            }),
+            peek: Ok(peek),
+            calls: FakeInboxCalls {
+                availability: 0,
+                status: 0,
+                peek: 0,
+            },
+        }
+    }
+
+    fn calls(&self) -> FakeInboxCalls {
+        self.calls
+    }
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+impl InboundMailboxPort for FakeInbox {
+    fn availability(&mut self) -> CapabilityAvailability {
+        self.calls.availability += 1;
+        self.availability
+    }
+
+    fn status(&mut self) -> Result<api::RnsInboxStatus, InboundMailboxPortError> {
+        self.calls.status += 1;
+        self.status
+    }
+
+    fn peek(&mut self) -> Result<Option<InboundMailboxItem>, InboundMailboxPortError> {
+        self.calls.peek += 1;
+        self.peek
+    }
+}
+
 fn dispatch<const SUBMISSIONS: usize>(
     actor: &mut TestActor<SUBMISSIONS>,
     context: DispatchContext,
@@ -528,6 +588,340 @@ fn identity_summary_is_public_read_only_and_never_calls_submission_port() {
         assert_eq!(port.status_calls, 0);
         assert_eq!(port.acceptance_calls, 0);
     }
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+#[test]
+fn composite_identity_read_acquires_neither_port() {
+    let expected = identity_summary();
+    for context in [
+        DispatchContext::UNAUTHENTICATED,
+        authenticated(1, Permissions::NONE),
+    ] {
+        let mut submission = UnavailablePort::default();
+        let mut inbox = FakeInbox::available(None);
+        let response = super::dispatch_with_inbox(
+            &mut submission,
+            &mut inbox,
+            expected,
+            &context,
+            envelope(210, DeviceRequest::IdentitySummary),
+        );
+        assert_eq!(response.response, DeviceResponse::IdentitySummary(expected));
+        assert_eq!(submission.availability_calls, 0);
+        assert_eq!(submission.status_calls, 0);
+        assert_eq!(submission.acceptance_calls, 0);
+        assert_eq!(
+            inbox.calls(),
+            FakeInboxCalls {
+                availability: 0,
+                status: 0,
+                peek: 0,
+            }
+        );
+    }
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+#[test]
+fn composite_capabilities_report_each_port_without_cross_dispatch() {
+    let mut submission = UnavailablePort::default();
+    let mut inbox = FakeInbox::available(None);
+    let response = super::dispatch_with_inbox(
+        &mut submission,
+        &mut inbox,
+        identity_summary(),
+        &DispatchContext::UNAUTHENTICATED,
+        envelope(211, DeviceRequest::SystemCapabilities),
+    );
+    assert_eq!(
+        response.response,
+        DeviceResponse::SystemCapabilities(CapabilitySnapshot::for_dispatch_with_inbox(
+            false,
+            CapabilityAvailability::Available,
+        ))
+    );
+    assert_eq!(
+        submission.availability_calls,
+        usize::from(cfg!(feature = "experimental-rns-data"))
+    );
+    assert_eq!(submission.status_calls, 0);
+    assert_eq!(submission.acceptance_calls, 0);
+    assert_eq!(
+        inbox.calls(),
+        FakeInboxCalls {
+            availability: 1,
+            status: 0,
+            peek: 0,
+        }
+    );
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+#[test]
+fn inbox_authentication_rejection_precedes_both_ports() {
+    for request in [DeviceRequest::RnsInboxStatus, DeviceRequest::RnsInboxPeek] {
+        let mut submission = UnavailablePort::default();
+        let mut inbox = FakeInbox::available(None);
+        let response = super::dispatch_with_inbox(
+            &mut submission,
+            &mut inbox,
+            identity_summary(),
+            &DispatchContext::UNAUTHENTICATED,
+            envelope(212, request),
+        );
+        assert_eq!(
+            error_code(response.response),
+            ApiErrorCode::AuthenticationRequired
+        );
+        assert_eq!(submission.availability_calls, 0);
+        assert_eq!(submission.status_calls, 0);
+        assert_eq!(submission.acceptance_calls, 0);
+        assert_eq!(
+            inbox.calls(),
+            FakeInboxCalls {
+                availability: 0,
+                status: 0,
+                peek: 0,
+            }
+        );
+    }
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+#[test]
+fn inbox_status_uses_only_the_inbox_port_and_needs_no_permission_bit() {
+    let mut submission = UnavailablePort::default();
+    let mut inbox = FakeInbox::available(None);
+    let expected = inbox.status.unwrap();
+    let response = super::dispatch_with_inbox(
+        &mut submission,
+        &mut inbox,
+        identity_summary(),
+        &authenticated(1, Permissions::NONE),
+        envelope(213, DeviceRequest::RnsInboxStatus),
+    );
+    assert_eq!(response.response, DeviceResponse::RnsInboxStatus(expected));
+    assert_eq!(submission.availability_calls, 0);
+    assert_eq!(submission.status_calls, 0);
+    assert_eq!(submission.acceptance_calls, 0);
+    assert_eq!(
+        inbox.calls(),
+        FakeInboxCalls {
+            availability: 1,
+            status: 1,
+            peek: 0,
+        }
+    );
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+#[test]
+fn inbox_peek_returns_an_owned_item_and_empty_is_not_found() {
+    let semantic = InboundMailboxItem::new(
+        core::num::NonZeroU64::new(17).unwrap(),
+        api::DestinationHash([0x31; 16]),
+        b"received",
+    )
+    .unwrap();
+    let mut submission = UnavailablePort::default();
+    let mut occupied = FakeInbox::available(Some(semantic));
+    let response = super::dispatch_with_inbox(
+        &mut submission,
+        &mut occupied,
+        identity_summary(),
+        &authenticated(1, Permissions::NONE),
+        envelope(214, DeviceRequest::RnsInboxPeek),
+    );
+    let DeviceResponse::RnsInboxPeek(item) = response.response else {
+        panic!("expected occupied inbox response")
+    };
+    assert_eq!(item.id(), 17);
+    assert_eq!(item.destination(), api::DestinationHash([0x31; 16]));
+    assert_eq!(item.payload(), b"received");
+    assert_eq!(submission.availability_calls, 0);
+    assert_eq!(submission.status_calls, 0);
+    assert_eq!(submission.acceptance_calls, 0);
+    assert_eq!(
+        occupied.calls(),
+        FakeInboxCalls {
+            availability: 1,
+            status: 0,
+            peek: 1,
+        }
+    );
+
+    let mut empty = FakeInbox::available(None);
+    let response = super::dispatch_with_inbox(
+        &mut submission,
+        &mut empty,
+        identity_summary(),
+        &authenticated(1, Permissions::NONE),
+        envelope(215, DeviceRequest::RnsInboxPeek),
+    );
+    assert_eq!(
+        response.response,
+        DeviceResponse::Error(ApiErrorResponse {
+            code: ApiErrorCode::NotFound,
+            operation: Some(api::OP_EXPERIMENTAL_RNS_INBOX_PEEK),
+        })
+    );
+    assert_eq!(
+        empty.calls(),
+        FakeInboxCalls {
+            availability: 1,
+            status: 0,
+            peek: 1,
+        }
+    );
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+#[test]
+fn unavailable_inbox_is_not_entered_and_port_failures_are_closed() {
+    for request in [DeviceRequest::RnsInboxStatus, DeviceRequest::RnsInboxPeek] {
+        let mut submission = UnavailablePort::default();
+        let mut inbox = FakeInbox::available(None);
+        inbox.availability = CapabilityAvailability::Disabled;
+        let response = super::dispatch_with_inbox(
+            &mut submission,
+            &mut inbox,
+            identity_summary(),
+            &authenticated(1, Permissions::NONE),
+            envelope(216, request),
+        );
+        assert_eq!(
+            error_code(response.response),
+            ApiErrorCode::CapabilityUnavailable
+        );
+        assert_eq!(
+            inbox.calls(),
+            FakeInboxCalls {
+                availability: 1,
+                status: 0,
+                peek: 0,
+            }
+        );
+    }
+
+    for (port_error, api_error) in [
+        (
+            InboundMailboxPortError::Unavailable,
+            ApiErrorCode::CapabilityUnavailable,
+        ),
+        (InboundMailboxPortError::Busy, ApiErrorCode::Internal),
+        (InboundMailboxPortError::Backend, ApiErrorCode::Internal),
+        (InboundMailboxPortError::Faulted, ApiErrorCode::Internal),
+    ] {
+        for request in [DeviceRequest::RnsInboxStatus, DeviceRequest::RnsInboxPeek] {
+            let mut submission = UnavailablePort::default();
+            let mut inbox = FakeInbox::available(None);
+            inbox.status = Err(port_error);
+            inbox.peek = Err(port_error);
+            let response = super::dispatch_with_inbox(
+                &mut submission,
+                &mut inbox,
+                identity_summary(),
+                &authenticated(1, Permissions::NONE),
+                envelope(217, request),
+            );
+            assert_eq!(error_code(response.response), api_error);
+        }
+    }
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+#[test]
+fn composite_version_rejection_precedes_both_ports() {
+    let mut submission = UnavailablePort::default();
+    let mut inbox = FakeInbox::available(None);
+    let response = super::dispatch_with_inbox(
+        &mut submission,
+        &mut inbox,
+        identity_summary(),
+        &authenticated(1, Permissions::NONE),
+        RequestEnvelope {
+            version: ApiVersion {
+                major: ApiVersion::CURRENT.major + 1,
+                minor: 0,
+            },
+            request_id: RequestId(219),
+            request: DeviceRequest::RnsInboxPeek,
+        },
+    );
+    assert_eq!(
+        error_code(response.response),
+        ApiErrorCode::UnsupportedVersion
+    );
+    assert_eq!(submission.availability_calls, 0);
+    assert_eq!(submission.status_calls, 0);
+    assert_eq!(submission.acceptance_calls, 0);
+    assert_eq!(
+        inbox.calls(),
+        FakeInboxCalls {
+            availability: 0,
+            status: 0,
+            peek: 0,
+        }
+    );
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+#[test]
+fn existing_submission_dispatch_never_enters_the_inbox_port() {
+    let mut submission = mounted::<2>();
+    let mut inbox = FakeInbox::available(None);
+    let response = super::dispatch_with_inbox(
+        &mut submission,
+        &mut inbox,
+        identity_summary(),
+        &authenticated(1, Permissions::READ_SUBMISSION_STATUS),
+        envelope(
+            218,
+            DeviceRequest::SubmissionStatus {
+                id: ApiSubmissionId(99),
+            },
+        ),
+    );
+    assert_eq!(error_code(response.response), ApiErrorCode::NotFound);
+    assert_eq!(submission.port_calls, 2);
+    assert_eq!(
+        inbox.calls(),
+        FakeInboxCalls {
+            availability: 0,
+            status: 0,
+            peek: 0,
+        }
+    );
+}
+
+#[cfg(feature = "experimental-rns-inbox")]
+#[test]
+fn semantic_inbox_item_owns_and_bounds_its_payload() {
+    let mut payload = [0x42_u8; api::MAX_RNS_INBOX_PAYLOAD_BYTES];
+    let item = InboundMailboxItem::new(
+        core::num::NonZeroU64::new(9).unwrap(),
+        api::DestinationHash([0x21; 16]),
+        &payload,
+    )
+    .unwrap();
+    payload.fill(0);
+    assert_eq!(item.id(), 9);
+    assert_eq!(item.destination(), api::DestinationHash([0x21; 16]));
+    assert_eq!(item.payload(), &[0x42; api::MAX_RNS_INBOX_PAYLOAD_BYTES]);
+    let debug = std::format!("{item:?}");
+    assert!(debug.contains("payload_len: 383"));
+    assert!(!debug.contains("66, 66"));
+
+    let oversized = [0_u8; api::MAX_RNS_INBOX_PAYLOAD_BYTES + 1];
+    let error = InboundMailboxItem::new(
+        core::num::NonZeroU64::new(10).unwrap(),
+        api::DestinationHash([0; 16]),
+        &oversized,
+    )
+    .unwrap_err();
+    assert_eq!(error.actual(), api::MAX_RNS_INBOX_PAYLOAD_BYTES + 1);
+    assert_eq!(error.maximum(), api::MAX_RNS_INBOX_PAYLOAD_BYTES);
 }
 
 #[test]
