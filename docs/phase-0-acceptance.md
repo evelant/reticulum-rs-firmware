@@ -26,6 +26,11 @@ in Phase 0 to ensure the RNS integration can support correct Links/Resources
 and arbitrary LXMF bytes. NomadNet is a fixture/version lane only at this
 phase.
 
+The firmware dependency is currently pinned to integration-fork commit
+`9bceacdc27fe6e5f5b8df6e70eba560ef0930329`, retained locally and remotely as
+tag `firmware-pin-9bceacd`. No issue or pull request was opened for this pin;
+any future upstream issue or contribution still requires direct user approval.
+
 ## Scaffold gate
 
 The scaffold is complete only when all of these pass from a clean checkout:
@@ -179,6 +184,15 @@ and responses, proofs outside the exercised channel flow, IFAC, ratchets, live
 process interoperability, full routing behavior, Resources and multi-node
 loss/reordering scenarios remain open gates below.
 
+Separately, the exact pinned Rete selected validation set passes 591 tests: 239
+transport (155 library, 9 computed-vector, 40 forwarding, 30 Link-integration
+and 5 path-request), 125 stack (124 library and one integration), 143 LXMF
+library and 84 daemon library tests. CI directly runs the four current library
+targets, which total 506 tests; the 84 transport and one stack integration tests
+were also run for this pin to reach 591. This is not a count of every nested
+workspace test target. These regressions complement, but do not replace, the
+project's 111 released-Python checks or powered/multi-hop qualification.
+
 ### Initial capacity audit
 
 The initial heapless profile is explicitly `P=64` paths, `A=16` pending
@@ -198,11 +212,26 @@ remains deduplicated, while a fresh LINKREQUEST succeeds after a slot is
 released. The local preflight remains for stable product quotas and diagnostics
 because `NodeCore` does not yet surface the typed inbound disposition. Relayed
 LINKREQUESTs are rejected until Rete exposes transactional relay-table
-admission; ordinary announce/data transport remains available. The same audit
-found that identity, resource, relayed-link, announce-replay, announce-rate,
-path-request-throttle and packet-dedup occupancy are not all observable. In
-particular, `announce_rate` and `path_request_times` are separate `P`-sized
-maps whose insertions can fail silently; a failed path-request timestamp insert
+admission; ordinary announce/data transport remains available. At the current
+pin, a path-selected H1/H2 DATA packet requires the path's recorded receiving
+interface and returns an exact-interface outcome; the adapter maps it to
+`Only(interface)`, including an intentional return to the ingress slot for a
+shared-medium relay. Reverse state records both ingress and outbound slots. A
+reverse proof is consumed on its first attempt and routes back only when it
+arrives from the recorded outbound slot; a wrong-slot proof fails closed and
+cannot be replayed on the right slot. Link DATA and non-LRPROOF Link PROOF
+require stored direction and exact hops. LRPROOF additionally requires the
+responder-side interface, stored outbound hops, a known responder identity,
+successful reconstruction and a valid signature before routing or lifetime
+refresh. A targeted HEADER_2 LRPROOF is rejected instead of bypassing those
+canonical HEADER_1 checks through the generic H2 Link path. H2 LINKREQUEST
+records only Link-route state, not a redundant reverse entry.
+
+The same audit found that identity, resource, relayed-link, announce-replay,
+announce-rate, path-request-throttle and packet-dedup occupancy are not all
+observable. In particular, `announce_rate` and `path_request_times` are
+separate `P`-sized maps whose insertions can fail silently; a failed
+path-request timestamp insert
 can bypass throttling for a new destination. Packet `dedup` and announce-replay
 `announce_dedup` are separate `D`-sized rolling deques, and their occupancy is
 also not exposed. Reverse, relay-link, channel-receipt and several other
@@ -237,8 +266,10 @@ Together these boundaries currently enforce:
 - Python-compatible HEADER_2 ownership filtering, conservative dispatch gates,
   and reverse-table admission for ordinary H1/H2 DATA forwarding;
 - suppression of forwarding actions in endpoint profiles;
-- resolved `Only(interface)` and `AllExcept(interface)` actions while the
-  synchronous ingress source is still known;
+- resolved native `SourceInterface`, `ExactInterface(interface)` and
+  `AllExceptSource` actions as project `Only(source)`, `Only(interface)` and
+  `AllExcept(source)` while synchronous ingress is still known; an exact
+  same-source result remains exact rather than being suppressed as an echo;
 - pre-entropy dispatch/attempt reservation before caller-owned DATA
   preparation, with failure returning the exact same external buffer;
 - rejection of `PrepareDataRequest` when `deadline <= owner_now` before
@@ -444,6 +475,14 @@ Rete is not production-accepted until every hard gate passes. Implementation
 may proceed through validated portions of the stack, but a failing or missing
 gate keeps the affected network-facing capability disabled or strictly capped.
 It does not remove that capability from the product requirements.
+
+The current pin has focused host regressions for exact path/reverse/Link
+routing, wrong-interface one-shot reverse proofs, authenticated LRPROOF and
+same-interface dispatch, including rejection of targeted HEADER_2 LRPROOF.
+Those tests close the former implicit-interface fallback in the core; they do
+not close the hard gates for transactional reverse/relay-Link admission,
+Python multi-hop behavior, reboot path recovery, or a rerun at the current pin
+of the powered E290 reverse-proof scenario captured under `f6f5fb0`.
 
 ### 1. Target and dependency integrity
 

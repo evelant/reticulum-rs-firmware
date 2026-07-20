@@ -10,7 +10,31 @@ DATA/LXMF submission, client delivery, and full powered E290 qualification of
 the product image remain open.
 The permanent image's bounded source-`96e38aa` boot/interface/ordinary-TX smoke
 has passed, without controlled peer RX or DATA.
-**Rete pin:** `f6f5fb0637d00691e09fa0105be4df902405fee4`
+**Rete pin:** `9bceacdc27fe6e5f5b8df6e70eba560ef0930329`
+(`firmware-pin-9bceacd`)
+
+At this pin, native ingress distinguishes exact path/reverse/Link forwarding
+from genuine propagation. `PacketRouting::ExactInterface(id)` maps to the
+project-owned `Only(id)` target, while `AllExceptSource` maps to
+`AllExcept(source)`. An exact route is retained even when `id == source`, so a
+shared-medium interface can relay to another peer on the same actor slot.
+Reverse proofs are one-shot: only the recorded outbound interface can return
+them to the recorded ingress interface, and a wrong-interface proof is dropped
+while consuming that route. Link packets and non-LRPROOF Link proofs require
+the stored direction and hop count. LRPROOF is stricter: it must arrive from
+the responder-side interface at the stored remaining hops, the responder
+identity must be known and reconstructable, and its signature must validate
+before the Link entry is refreshed or the proof is forwarded. A targeted
+HEADER_2 LRPROOF is rejected instead of bypassing that canonical HEADER_1 path
+through generic Link transport.
+
+These routing corrections do not make relay admission transactional. Rete
+still does not expose a reserve/commit result for bounded relay-Link and
+reverse-table insertion, so `EmbeddedNode` keeps relayed LINKREQUEST disabled
+and preflights the admitted ordinary DATA relay paths. Rete snapshot loading
+also restores identities only. Saved path observations and cached announces
+remain inactive until a stable interface identity can be rebound explicitly;
+the node must relearn them after restart.
 
 ## Purpose and boundary
 

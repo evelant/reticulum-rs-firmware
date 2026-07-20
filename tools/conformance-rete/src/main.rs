@@ -582,7 +582,7 @@ fn verify_released_vectors() -> Result<usize, String> {
         "relay did not forward transit DATA",
     )?;
     require(
-        forwarded.actions.packets[0].target() == TxTarget::AllExcept(InterfaceId(2)),
+        forwarded.actions.packets[0].target() == TxTarget::Only(InterfaceId(1)),
         "relay DATA used unexpected routing",
     )?;
     let forwarded_packet = parse_packet(forwarded.actions.packets[0].bytes())

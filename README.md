@@ -72,6 +72,21 @@ remain open.
 Bitrate and cost are recorded but do not replace Reticulum routing. Until Rete
 paths carry an interface generation, an ID/configuration stays immutable for
 one node-owner lifetime or its learned paths must be purged before reuse.
+The current Rete pin, `9bceacdc27fe6e5f5b8df6e70eba560ef0930329`
+(`firmware-pin-9bceacd`), carries learned path, reverse, and Link decisions as
+exact interface targets instead of falling back to interface zero or generic
+broadcast. An exact target may intentionally equal the ingress slot, which is
+required to relay between peers on one shared LoRa interface. Reverse proofs
+are one-shot and return only from the interface to which the covered packet was
+forwarded; relayed Link proofs additionally require the stored direction and
+hop count, and LRPROOF requires a known, reconstructable responder identity and
+a valid signature. A targeted HEADER_2 LRPROOF is rejected instead of bypassing
+that canonical HEADER_1 validation through generic Link transport. Relay-table
+and reverse-table insertion failure is still not transactional, so the product
+adapter continues to reject relayed LINKREQUESTs and preflight the admitted
+DATA relay paths.
+Snapshot loading currently restores identities only; saved paths and cached
+announces remain inactive until stable interface rebinding is defined.
 
 The historical Tracker **Phase 1 receive vertical slice and bounded semantic
 transmit integration** remains the regression/HIL lane described below. Its
@@ -457,8 +472,17 @@ after frame exposure with an ordinary announce queued behind the DATA owner;
 LoRa lease offline, and permits no later host-radio TX or RX. This qualifies the
 software composition, not ESP32-S3 execution or RF hardware.
 The focused host clients pass 56 tests inside the 248-test xtask suite; the
-portable Rete integration and raw-RNS inbox store pass 43 and 17 tests,
+portable Rete integration and raw-RNS inbox store pass 45 and 17 tests,
 respectively.
+Those 45 tests exercise this repository's adapter and are separate from the
+pinned Rete fork's selected validation set. At
+`9bceacdc27fe6e5f5b8df6e70eba560ef0930329`, that set passes 591 tests: 239
+transport (155 library, 9 computed-vector, 40 forwarding, 30 Link-integration,
+and 5 path-request), 125 stack (124 library and one integration), 143 LXMF
+library, and 84 daemon library tests. CI directly runs the four current library
+targets, which total 506 tests; adding the 84 transport and one stack
+integration tests produces 591. This is a named selected set, not a count of
+every nested workspace test target.
 
 The journal's isolated powered storage HIL passed on
 board E9:44 from clean source `7b47113`: one counted capture spans raw-flash

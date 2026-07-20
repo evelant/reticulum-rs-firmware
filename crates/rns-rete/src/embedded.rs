@@ -2,9 +2,10 @@
 //!
 //! Rete's heapless storage bounds several maps, but its public `NodeCore`
 //! still permits oversized hosted ingress, silently loses some table
-//! insertions, and exposes source-relative routing after the source interface
-//! has been forgotten. This module owns the core and admits only the subset we
-//! can currently make deterministic and observable on embedded targets.
+//! insertions, and exposes interface routing after the native ingress context
+//! has been forgotten. This module owns the core and resolves that routing
+//! while the relevant context is still available, admitting only the subset we
+//! can make deterministic and observable on embedded targets.
 
 use alloc::vec::Vec;
 
@@ -40,12 +41,12 @@ pub const MAX_DATA_PAYLOAD: usize = rete_core::ENCRYPTED_MDU;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InterfaceId(pub u8);
 
-/// Firmware routing target with source-relative routing already resolved.
+/// Firmware routing target with native interface routing already resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxTarget {
     /// Send on every eligible interface.
     All,
-    /// Send only on the interface that supplied the triggering packet.
+    /// Send only on one exact interface selected from protocol or ingress state.
     Only(InterfaceId),
     /// Send on every eligible interface except the triggering interface.
     AllExcept(InterfaceId),
@@ -236,7 +237,7 @@ pub struct NodeActions {
     /// Packets with their interface target resolved while ingress context is
     /// still available.
     pub packets: Vec<TxPacket>,
-    /// Native source-relative actions dropped because no source interface was
+    /// Native source-dependent actions dropped because no source interface was
     /// available. This should remain zero for timer-driven work.
     pub unroutable_packets: usize,
 }
@@ -1307,7 +1308,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             let before_packets = native.packets.len();
             native
                 .packets
-                .retain(|packet| packet.routing != PacketRouting::AllExceptSource);
+                .retain(|packet| endpoint_retains_ingress_packet(packet.routing));
             self.ingress.endpoint_forward_suppressed = self
                 .ingress
                 .endpoint_forward_suppressed
@@ -1862,9 +1863,9 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         }
     }
 
-    /// Run timer maintenance. Timer-driven native output is expected to be
-    /// broadcast; any source-relative action is dropped and counted rather
-    /// than guessed onto an interface.
+    /// Run timer maintenance. Broadcast and exact-interface output can be
+    /// resolved without ingress context; source-dependent actions are dropped
+    /// and counted rather than guessed onto an interface.
     pub fn tick<R: RngCore + CryptoRng>(&mut self, now: u64, rng: &mut R) -> NodeActions {
         let native = self.core.handle_tick(now, rng);
         self.finish_tick(native)
@@ -1952,6 +1953,19 @@ fn correlation_tag(bytes: &[u8]) -> u64 {
     u64::from_le_bytes(prefix)
 }
 
+#[allow(
+    clippy::match_like_matches_macro,
+    reason = "an exhaustive match must fail to compile when Rete adds a routing policy"
+)]
+const fn endpoint_retains_ingress_packet(routing: PacketRouting) -> bool {
+    match routing {
+        PacketRouting::All => true,
+        PacketRouting::SourceInterface => true,
+        PacketRouting::ExactInterface(_) => false,
+        PacketRouting::AllExceptSource => false,
+    }
+}
+
 fn resolve_ingest_actions(native: IngestOutcome, source: InterfaceId) -> NodeActions {
     NodeActions {
         events: native.events,
@@ -1968,6 +1982,7 @@ fn resolve_packet(packet: OutboundPacket, source: InterfaceId) -> TxPacket {
     let target = match packet.routing {
         PacketRouting::All => TxTarget::All,
         PacketRouting::SourceInterface => TxTarget::Only(source),
+        PacketRouting::ExactInterface(interface) => TxTarget::Only(InterfaceId(interface)),
         PacketRouting::AllExceptSource => TxTarget::AllExcept(source),
     };
     TxPacket {
@@ -1980,10 +1995,15 @@ fn resolve_tick_actions(native: IngestOutcome) -> NodeActions {
     let mut packets = Vec::with_capacity(native.packets.len());
     let mut unroutable_packets = 0;
     for packet in native.packets {
-        if packet.routing == PacketRouting::All {
-            packets.push(TxPacket::broadcast(packet.data));
-        } else {
-            unroutable_packets += 1;
+        match packet.routing {
+            PacketRouting::All => packets.push(TxPacket::broadcast(packet.data)),
+            PacketRouting::ExactInterface(interface) => packets.push(TxPacket {
+                bytes: packet.data,
+                target: TxTarget::Only(InterfaceId(interface)),
+            }),
+            PacketRouting::SourceInterface | PacketRouting::AllExceptSource => {
+                unroutable_packets += 1;
+            }
         }
     }
     NodeActions {
@@ -2505,6 +2525,49 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_ingress_policy_suppresses_both_forwarding_routes() {
+        assert!(endpoint_retains_ingress_packet(PacketRouting::All));
+        assert!(endpoint_retains_ingress_packet(
+            PacketRouting::SourceInterface
+        ));
+        assert!(!endpoint_retains_ingress_packet(
+            PacketRouting::ExactInterface(9)
+        ));
+        assert!(!endpoint_retains_ingress_packet(
+            PacketRouting::AllExceptSource
+        ));
+    }
+
+    #[test]
+    fn tick_resolves_absolute_routes_and_counts_source_dependent_routes() {
+        let actions = resolve_tick_actions(IngestOutcome {
+            events: Vec::new(),
+            packets: vec![
+                OutboundPacket::broadcast(vec![0xa1]),
+                OutboundPacket {
+                    data: vec![0xb2],
+                    routing: PacketRouting::ExactInterface(9),
+                },
+                OutboundPacket {
+                    data: vec![0xc3],
+                    routing: PacketRouting::SourceInterface,
+                },
+                OutboundPacket {
+                    data: vec![0xd4],
+                    routing: PacketRouting::AllExceptSource,
+                },
+            ],
+        });
+
+        assert_eq!(actions.packets.len(), 2);
+        assert_eq!(actions.packets[0].bytes(), &[0xa1]);
+        assert_eq!(actions.packets[0].target(), TxTarget::All);
+        assert_eq!(actions.packets[1].bytes(), &[0xb2]);
+        assert_eq!(actions.packets[1].target(), TxTarget::Only(InterfaceId(9)));
+        assert_eq!(actions.unroutable_packets, 2);
+    }
+
+    #[test]
     fn forwarded_transport_proof_is_not_classified_as_locally_generated() {
         let mut transport = TestNode::new(
             identity(27),
@@ -2514,10 +2577,22 @@ mod tests {
         )
         .unwrap();
         let mut rng = CounterRng::default();
-        let destination = node(28).destination_hash();
-        transport
-            .register_peer(&identity(28), "reticulum", &["embedded"], 0)
-            .unwrap();
+        let mut destination_node = node(28);
+        let destination = destination_node.destination_hash();
+        destination_node.queue_announce(None, 0, &mut rng).unwrap();
+        let announce = destination_node
+            .flush_announces(0, &mut rng)
+            .into_iter()
+            .next()
+            .expect("the destination announce must be ready immediately");
+        let learned = transport.ingest(announce.bytes(), 0, InterfaceId(7), &mut rng);
+        assert_eq!(learned.disposition, IngressDisposition::Processed);
+        assert_eq!(
+            transport
+                .route(&destination)
+                .and_then(|route| route.received_on),
+            Some(InterfaceId(7))
+        );
         let mut data = [0u8; rete_core::MTU];
         let data_len = PacketBuilder::new(&mut data)
             .packet_type(PacketType::Data)
@@ -2530,6 +2605,11 @@ mod tests {
         let covered_hash = Packet::parse(&data[..data_len]).unwrap().compute_hash();
         let forwarded_data = transport.ingest(&data[..data_len], 1, InterfaceId(1), &mut rng);
         assert_eq!(forwarded_data.disposition, IngressDisposition::Processed);
+        assert_eq!(forwarded_data.actions.packets.len(), 1);
+        assert_eq!(
+            forwarded_data.actions.packets[0].target(),
+            TxTarget::Only(InterfaceId(7))
+        );
 
         let mut raw = [0u8; rete_core::MTU];
         let mut proof_payload = [0u8; 96];
@@ -2543,7 +2623,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let report = transport.ingest(&raw[..len], 2, InterfaceId(2), &mut rng);
+        let report = transport.ingest(&raw[..len], 2, InterfaceId(7), &mut rng);
 
         assert_eq!(report.disposition, IngressDisposition::Processed);
         assert_eq!(report.actions.packets.len(), 1);
@@ -2552,7 +2632,7 @@ mod tests {
         assert_eq!(report.metadata.generated_proof_tag(), None);
         assert_eq!(
             report.actions.packets[0].target(),
-            TxTarget::AllExcept(InterfaceId(2))
+            TxTarget::Only(InterfaceId(1))
         );
     }
 
@@ -2573,6 +2653,9 @@ mod tests {
             relay
                 .register_peer(&peer, "reticulum", &["embedded"], u64::from(tag))
                 .unwrap();
+            let mut path = rete_transport::Path::direct(u64::from(tag));
+            path.received_on = Some(7);
+            assert!(relay.core.transport.insert_path(destination, path));
             let mut raw = [0u8; rete_core::MTU];
             let len = PacketBuilder::new(&mut raw)
                 .packet_type(PacketType::Data)
@@ -2584,6 +2667,11 @@ mod tests {
                 .unwrap();
             let report = relay.ingest(&raw[..len], u64::from(tag), InterfaceId(tag), &mut rng);
             assert_eq!(report.disposition, IngressDisposition::Processed);
+            assert_eq!(report.actions.packets.len(), 1);
+            assert_eq!(
+                report.actions.packets[0].target(),
+                TxTarget::Only(InterfaceId(7))
+            );
         }
         assert_eq!(relay.metrics().capacity.reverse_entries.used, 4);
 
@@ -2593,6 +2681,9 @@ mod tests {
         relay
             .register_peer(&peer, "reticulum", &["embedded"], u64::from(overflow_tag))
             .unwrap();
+        let mut path = rete_transport::Path::direct(u64::from(overflow_tag));
+        path.received_on = Some(7);
+        assert!(relay.core.transport.insert_path(destination, path));
         let mut raw = [0u8; rete_core::MTU];
         let len = PacketBuilder::new(&mut raw)
             .packet_type(PacketType::Data)

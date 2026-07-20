@@ -12,13 +12,20 @@ API stay in this project; generic protocol and bounded-state corrections are
 the candidates for upstream review.
 
 The current firmware pin is
-`f6f5fb0637d00691e09fa0105be4df902405fee4` (`firmware-pin-f6f5fb0`). It adds
+`9bceacdc27fe6e5f5b8df6e70eba560ef0930329` (`firmware-pin-9bceacd`). It retains
 caller-owned DATA preparation, explicit receipt-capacity errors, fixed-capacity
 terminal sinks, exact DATA/channel terminal candidates, allocation-atomic
 proof/timeout delivery, full-hash receipt cancellation and core-aware LXMF
-sibling-attempt cleanup. The legacy LXMF
+sibling-attempt cleanup. It additionally carries exact-interface path,
+reverse, and Link forwarding through the stack and runtime adapters; one-shot
+reverse-proof interface validation; strict relayed LRPROOF direction, hop,
+identity, signature, and canonical-header validation; and identities-only
+snapshot restore while persisted path observations lack stable interface
+identity. The legacy LXMF
 event handler without mutable core access still leaves siblings to timeout.
-This candidate remains on the project fork; it has not been submitted upstream.
+This candidate remains on the project fork; no issue or pull request was opened
+for the newer lifecycle or routing work, and publication still requires direct
+user approval.
 
 ## 1. Transactional Link admission
 
@@ -86,11 +93,26 @@ local DATA, owned-Link DATA, proof/receipt or announce dispatch, so locally
 terminating traffic is dropped or misrouted. Endpoint-mode unmatched proofs
 also fall through as forwarding actions even though transport is disabled.
 
-Both targeted HEADER_2 relay and ordinary HEADER_1 DATA relay insert a reverse
-entry while ignoring a full bounded-map result. The packet is still forwarded,
-but its proof can no longer return. Expose lookup/capacity admission as one
-transactional forwarding operation and return a typed `Full` outcome before
-emitting the packet.
+The current pin removes interface-zero fallback from admitted forwarding.
+Ordinary H1/H2 DATA requires a path with a recorded receiving interface and
+emits that exact target, including the intentional same-interface case. A
+reverse entry records both ingress and outbound interfaces; its proof is
+one-shot, forwards only when received from that outbound interface, and is
+consumed and dropped on the wrong interface. Link DATA and non-LRPROOF Link
+proofs require the stored direction and exact hop count. LRPROOF can travel
+only from the responder-side outbound interface at the stored remaining hops
+to the initiator-side interface, after responder identity reconstruction and
+signature validation. Invalid direction, hop, identity, or signature does not
+refresh the Link entry. H2 LINKREQUEST now creates only its Link route, not a
+redundant reverse entry. A HEADER_2 LRPROOF targeted at the local transport
+identity is invalid rather than being allowed to bypass the canonical HEADER_1
+relay checks through generic H2 Link handling.
+
+Capacity admission remains open. Ordinary H1/H2 DATA can still be emitted
+after a bounded reverse-map insertion fails, and relay LINKREQUEST forwarding
+can still continue after a bounded `link_table` insertion fails. Expose each
+lookup/capacity admission as one transactional forwarding operation and return
+a typed `Full` outcome before emitting the packet.
 
 Add released-Python differential fixtures for valid 64/67-byte direct/local
 requests and negative destination-policy and transport-ID boundaries. Add
@@ -101,8 +123,8 @@ requests should then pass through the same canonical-shape validator.
 
 The local adapter mirrors Python's non-announce transport-ID filter, rejects
 native H2 classes that cannot yet be dispatched safely, suppresses endpoint
-forwarding actions, and preflights reverse capacity on the two admitted DATA
-relay paths.
+forwarding actions, maps native exact-interface outcomes without broadening
+them, and preflights reverse capacity on the two admitted DATA relay paths.
 
 ## 3. Announce retransmission role policy
 
@@ -269,11 +291,14 @@ both clocks on an offline device. Split the API into explicit wall and
 monotonic time types and test boot-without-wall-time behavior rather than
 silently emitting uptime as a Unix timestamp.
 
-Transport snapshots likewise persist `learned_at` and `last_accessed` values
-without recording the monotonic epoch or wall-time quality. Restoring raw
-pre-reboot ticks into a fresh monotonic epoch can extend or prematurely expire
-paths. Add a versioned snapshot-age representation and explicit rebase/drop
-policy. `SnapshotDetail::Full` should not claim broader recovery while it is
+Transport snapshots persist `learned_at`, `last_accessed`, and cached announce
+observations without a stable interface identity, monotonic epoch, or wall-time
+quality. The current pin takes the safe interim policy: `load_snapshot()`
+restores identities only, does not activate saved paths or cached announces,
+and therefore cannot advertise or forward on an unbound route after restart.
+Add a versioned snapshot-age representation plus a stable interface
+identity/generation and explicit rebind-or-drop policy before path restoration
+returns. `SnapshotDetail::Full` should not claim broader recovery while it is
 identical to `Standard`.
 
 Rete provides useful snapshot and ratchet-store traits, but no checked-in
@@ -299,14 +324,23 @@ that AP/Roaming interface mode actually reaches path learning and expiry.
 Transport policy and metadata should be generic; discovery, authentication,
 client sessions and device-API behavior remain in this project.
 
-`NodeCore::prepare_data_packet_into()` also returns bytes and a receipt but not
-the selected outbound interface. Python Reticulum sends ordinary destination
-DATA on the receiving interface recorded by the current path and broadcasts
-only when no such interface is known. The project adapter now snapshots Rete's
-`Path.received_on` and emits `Only(interface)` accordingly, retaining `All` for
-a manually registered/unknown-interface path. A generic upstream result should
-carry that route decision directly so sans-I/O callers do not need transport
-storage access or accidentally duplicate directed DATA across every interface.
+Ingress forwarding now carries the native decision directly as
+`PacketRouting::ExactInterface` or `AllExceptSource`. Embassy dispatch preserves
+an exact same-source slot, and Tokio sends a Direct slot normally or broadcasts
+to the other clients of a same-source Hub while excluding the originating
+client. Unknown exact indices are dropped. This closes the generic ingress
+route-result gap without coupling transport to LoRa.
+
+`NodeCore::prepare_data_packet_into()` still returns bytes and a receipt but not
+the selected outbound interface for locally originated DATA. Python Reticulum
+sends ordinary destination DATA on the receiving interface recorded by the
+current path and broadcasts only when no such interface is known. The project
+adapter snapshots Rete's `Path.received_on` and emits `Only(interface)`
+accordingly, retaining `All` for a manually registered/unknown-interface path.
+A generic outbound-preparation result should carry that decision directly so
+sans-I/O callers do not need transport storage access. Native interface indices
+also remain transient `u8` values without stable identity or incarnation, so
+dynamic interface reuse still requires explicit purge or rebinding.
 
 ## 11. Transactional DATA receipts and terminal reclamation
 
@@ -342,8 +376,8 @@ Make DATA preparation one transaction:
    receipt and entropy state.
 
 The generic fix is now the project pin
-`f6f5fb0637d00691e09fa0105be4df902405fee4`, reachable at fork tag
-`firmware-pin-f6f5fb0`. It returns caller-owned packet metadata plus a full
+`9bceacdc27fe6e5f5b8df6e70eba560ef0930329`, reachable at fork tag
+`firmware-pin-9bceacd`. It returns caller-owned packet metadata plus a full
 receipt token, reports registration and output-allocation failures, and
 atomically removes validated and timed-out receipts only after reserving their
 exact kind/full-hash terminal candidate. Link-typed channel proofs are resolved
@@ -353,9 +387,12 @@ match the stored full outbound hash and destination Link ID, and relayed
 HEADER_2 proofs bypass local terminal reservation. Direct Transport ingest and
 maintenance results are `must_use`; sink-aware NodeCore paths avoid duplicate
 receipt events; and the
-hosted daemon consumes LXMF terminal output. Focused transport, stack, LXMF and
-daemon library suites pass, all workspace targets check on the macOS host, and
-the affected no-default crates compile for `thumbv6m-none-eabi`. This newer
+hosted daemon consumes LXMF terminal output. The selected validation set passes
+591 tests: 239 transport, 125 stack, 143 LXMF library, and 84 daemon library.
+CI directly runs the 506 library tests; local validation adds 84 transport and
+one stack integration test. This is not a full nested-workspace test count. All
+workspace targets check on the macOS host, and the affected no-default crates
+compile for `thumbv6m-none-eabi`. This newer
 lifecycle work remains on the user's fork. No issue or pull request was opened,
 and publication elsewhere still requires the user's direct approval.
 
@@ -509,7 +546,7 @@ item.
    retain until merged or superseded.
 3. Endpoint announce rebroadcast policy: submitted as upstream draft PR 11;
    retain until merged or superseded.
-4. Relay-table admission/visibility and HEADER_2 dispatch.
+4. Relay-table admission/visibility and remaining HEADER_2 dispatch.
 5. Link event/timestamp semantics and channel receipts.
 6. Transactional DATA receipt admission, terminal status and reclamation.
 7. LXMF retry/receipt-attempt correlation.

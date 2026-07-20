@@ -2260,7 +2260,7 @@ mod tests {
         }
     }
 
-    fn source_relative_actions() -> (NodeActions, NodeActions) {
+    fn resolved_routing_actions() -> (NodeActions, NodeActions) {
         let mut rng = CounterRng::default();
 
         let mut sender = rns_node(41, EmbeddedNodeConfig::endpoint());
@@ -2294,14 +2294,28 @@ mod tests {
         );
 
         let mut relay_sender = rns_node(43, EmbeddedNodeConfig::endpoint());
-        let target = rns_node(44, EmbeddedNodeConfig::endpoint());
+        let mut target = rns_node(44, EmbeddedNodeConfig::endpoint());
         let mut relay = rns_node(45, EmbeddedNodeConfig::transport());
         relay_sender
             .register_peer(&rns_identity(44), "reticulum", &["ordinary-actions"], 3)
             .unwrap();
-        relay
-            .register_peer(&rns_identity(44), "reticulum", &["ordinary-actions"], 3)
-            .unwrap();
+        target.queue_announce(None, 3, &mut rng).unwrap();
+        let target_announce = target
+            .flush_announces(3, &mut rng)
+            .into_iter()
+            .next()
+            .expect("the target announce must be ready immediately");
+        let learned = relay.ingest(target_announce.bytes(), 3, RnsInterfaceId(9), &mut rng);
+        assert_eq!(
+            learned.disposition,
+            reticulum_rns_rete::IngressDisposition::Processed
+        );
+        assert_eq!(
+            relay
+                .route(&target.destination_hash())
+                .and_then(|route| route.received_on),
+            Some(RnsInterfaceId(9))
+        );
         let mut forwarded_bytes = [0u8; PACKET_CAPACITY];
         let forwarded = relay_sender
             .prepare_data_into(
@@ -2323,7 +2337,7 @@ mod tests {
         assert_eq!(forwarding.packets.len(), 1);
         assert_eq!(
             forwarding.packets[0].target(),
-            RnsTxTarget::AllExcept(RnsInterfaceId(5))
+            RnsTxTarget::Only(RnsInterfaceId(9))
         );
         (proof, forwarding)
     }
@@ -2652,7 +2666,7 @@ mod tests {
         owner.register_packet_buffer(&mut third_buffer).unwrap();
 
         let mut actions = announces(1);
-        let (mut proof, mut forwarding) = source_relative_actions();
+        let (mut proof, mut forwarding) = resolved_routing_actions();
         actions.events.append(&mut proof.events);
         actions.events.append(&mut forwarding.events);
         actions.packets.append(&mut proof.packets);
@@ -2671,7 +2685,7 @@ mod tests {
             [
                 RnsTxTarget::All,
                 RnsTxTarget::Only(RnsInterfaceId(7)),
-                RnsTxTarget::AllExcept(RnsInterfaceId(5)),
+                RnsTxTarget::Only(RnsInterfaceId(9)),
             ]
         );
 
@@ -2680,7 +2694,11 @@ mod tests {
             .admit(
                 actions,
                 &mut owners,
-                request(10, 100, interfaces((1 << 1) | (1 << 3) | (1 << 7))),
+                request(
+                    10,
+                    100,
+                    interfaces((1 << 1) | (1 << 3) | (1 << 7) | (1 << 9)),
+                ),
             )
             .unwrap();
         assert_eq!(batch.packet_count(), 3);
@@ -2709,11 +2727,8 @@ mod tests {
         assert_eq!(first.interface(), PacketInterfaceId::new(1));
         assert_eq!(second.target(), TxTarget::Only(PacketInterfaceId::new(7)));
         assert_eq!(second.interface(), PacketInterfaceId::new(7));
-        assert_eq!(
-            third.target(),
-            TxTarget::AllExcept(PacketInterfaceId::new(5))
-        );
-        assert_eq!(third.interface(), PacketInterfaceId::new(1));
+        assert_eq!(third.target(), TxTarget::Only(PacketInterfaceId::new(9)));
+        assert_eq!(third.interface(), PacketInterfaceId::new(9));
         assert_eq!(
             &first.buffer.bytes[..usize::from(first.packet_len())],
             expected[0].0
@@ -2741,8 +2756,14 @@ mod tests {
             OrdinaryCompletionDisposition::Quarantined(_) => panic!("valid fan-out quarantined"),
         };
         assert_eq!(first.interface(), PacketInterfaceId::new(7));
+        let first = match complete_unpermitted(&mut owner, first, owner_time(40)).unwrap() {
+            OrdinaryCompletionDisposition::Next(job) => job,
+            OrdinaryCompletionDisposition::Returned(_) => panic!("fan-out ended early"),
+            OrdinaryCompletionDisposition::Quarantined(_) => panic!("valid fan-out quarantined"),
+        };
+        assert_eq!(first.interface(), PacketInterfaceId::new(9));
         assert_eq!(first.generation(), first_generation);
-        let first_return = match complete_unpermitted(&mut owner, first, owner_time(40)).unwrap() {
+        let first_return = match complete_unpermitted(&mut owner, first, owner_time(50)).unwrap() {
             OrdinaryCompletionDisposition::Returned(value) => value,
             OrdinaryCompletionDisposition::Next(_) => panic!("fan-out did not finish"),
             OrdinaryCompletionDisposition::Quarantined(_) => panic!("valid return quarantined"),
@@ -2763,21 +2784,9 @@ mod tests {
             OrdinaryPacketReturnReason::RouteComplete
         );
 
-        let third = match complete_unpermitted(&mut owner, third, owner_time(40)).unwrap() {
-            OrdinaryCompletionDisposition::Next(job) => job,
-            OrdinaryCompletionDisposition::Returned(_) => panic!("all-except fan-out ended early"),
-            OrdinaryCompletionDisposition::Quarantined(_) => panic!("valid fan-out quarantined"),
-        };
-        assert_eq!(third.interface(), PacketInterfaceId::new(3));
-        let third = match complete_unpermitted(&mut owner, third, owner_time(50)).unwrap() {
-            OrdinaryCompletionDisposition::Next(job) => job,
-            OrdinaryCompletionDisposition::Returned(_) => panic!("all-except fan-out ended early"),
-            OrdinaryCompletionDisposition::Quarantined(_) => panic!("valid fan-out quarantined"),
-        };
-        assert_eq!(third.interface(), PacketInterfaceId::new(7));
-        let third_return = match complete_unpermitted(&mut owner, third, owner_time(60)).unwrap() {
+        let third_return = match complete_unpermitted(&mut owner, third, owner_time(50)).unwrap() {
             OrdinaryCompletionDisposition::Returned(value) => value,
-            OrdinaryCompletionDisposition::Next(_) => panic!("all-except fan-out did not finish"),
+            OrdinaryCompletionDisposition::Next(_) => panic!("only-target packet fanned out"),
             OrdinaryCompletionDisposition::Quarantined(_) => panic!("valid return quarantined"),
         };
         assert_eq!(

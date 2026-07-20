@@ -4470,8 +4470,8 @@ fn forbidden_radio_tx_dispatch_closure_category(
 
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 const RETE_GIT_SOURCE: &str = "git+https://github.com/evelant/rete.git?rev=\
-f6f5fb0637d00691e09fa0105be4df902405fee4#\
-f6f5fb0637d00691e09fa0105be4df902405fee4";
+9bceacdc27fe6e5f5b8df6e70eba560ef0930329#\
+9bceacdc27fe6e5f5b8df6e70eba560ef0930329";
 
 #[derive(Clone, Copy)]
 enum ReviewedClosureSource {

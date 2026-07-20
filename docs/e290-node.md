@@ -66,6 +66,15 @@ only one direct DATA/proof exchange; it does not claim sustained forwarding,
 multi-hop routing, LXMF, or general application-level message consumption,
 session resumption, or either deferred wireless bearer binding.
 
+The current source composition pins Rete commit
+`9bceacdc27fe6e5f5b8df6e70eba560ef0930329`, retained as tag
+`firmware-pin-9bceacd`. That pin is newer than the powered measurements recorded
+below. It removes implicit interface-zero/broadcast fallbacks and adds exact
+path, reverse and Link routing plus authenticated, fail-closed LRPROOF handling;
+those host regressions do not retroactively qualify the historical hardware
+run. No issue or pull request was opened for this pin, and any future upstream
+issue or contribution requires direct user approval.
+
 This target is the first executable product composition, not another HIL
 fixture. It starts a transport-mode Rete node, one E290 LoRa actor, receive and
 transmit scheduling, routed DATA and ordinary-action ownership, periodic
@@ -211,6 +220,24 @@ registering another interface descriptor, and spawning an actor that owns that
 slot. A composite authorization policy will dispatch resource accounting by
 interface. USB/BLE/Wi-Fi client access is a separate device-API capability and
 does not need to masquerade as a Reticulum packet interface.
+
+At the current Rete pin, native `SourceInterface`,
+`ExactInterface(interface)` and `AllExceptSource` outcomes resolve to project
+`Only(source)`, `Only(interface)` and `AllExcept(source)` actions before the
+asynchronous queue. Exact delivery to the ingress slot remains valid for a
+shared-medium LoRa relay rather than being suppressed as an echo. Path-selected
+H1/H2 DATA has no interface-zero fallback; reverse proofs are one-shot and
+accepted only from the stored outbound slot; Link DATA/PROOF direction and hops
+are checked; and LRPROOF must arrive from the responder side at the stored hop
+count and pass identity reconstruction and signature validation before routing
+or lifetime refresh. A targeted HEADER_2 LRPROOF is rejected rather than
+bypassing that canonical HEADER_1 validation through generic Link handling.
+Relayed LINKREQUEST remains disabled in this product profile because native
+relay-Link insertion is not yet transactional, and ordinary H1/H2 forwarding
+remains guarded by the adapter's reverse-capacity
+preflight. A Rete snapshot currently restores identities only. Saved paths are
+deliberately inactive after reboot until the node relearns them because a
+transient `u8` slot has no stable interface identity, generation or rebind.
 
 The initial fixed capacities are:
 
@@ -1031,8 +1058,15 @@ evidence output, sequential request IDs, version policy, polling terminal
 semantics, coalesced-record preservation, authenticated terminal binding, and
 submission-input non-disclosure. Together these 56 focused tests are part of
 the full 248-test xtask gate. The portable
-Rete integration and inbox-store suites independently pass 43 and 17 tests,
-respectively. Thirty-one of the xtask tests freeze the measurement decoder's
+Rete integration and inbox-store suites independently pass 45 and 17 tests,
+respectively. The 45 are project adapter tests; the exact nested Rete selected
+validation set separately passes 591 tests: 239 transport (155 library, 9
+computed-vector, 40 forwarding, 30 Link-integration and 5 path-request), 125
+stack (124 library and one integration), 143 LXMF library and 84 daemon library
+tests. CI directly runs the 506 current library tests; the 84 transport and one
+stack integration tests bring this named set to 591. It is not a count of every
+nested workspace test target.
+Thirty-one of the xtask tests freeze the measurement decoder's
 CLI, exact individual/combined ABI rendering, torn/header/sentinel/invariant
 rejection, input-file behavior, one-read checkpoint capture, strict final-ELF
 parsing, compiler-frame inventory, linker-stack derivation and the reviewed
@@ -1705,9 +1739,13 @@ returned those exact 383 bytes from destination
 commit on each board and in each direction, not bidirectional `Delivered`.
 The reverse proof or terminal status was not observed by the sender before its
 deadline; this product-level timeout is distinct from the zero radio-actor
-watchdog counters and remains a diagnostic residual. A final authenticated
-peek on `3f:88` likewise returned phase A's exact 383-byte payload from
-destination `83a09ed807a0a7c631386deaa0448fb9`.
+watchdog counters and remains a diagnostic residual. This capture used the
+preceding `f6f5fb0637d00691e09fa0105be4df902405fee4` Rete pin. The current
+`9bceacd` host suite now covers exact reverse-interface routing and proof
+consumption, but only a new powered run can determine whether that fixes this
+end-to-end timeout or whether another product boundary remains faulty. A final
+authenticated peek on `3f:88` likewise returned phase A's exact 383-byte
+payload from destination `83a09ed807a0a7c631386deaa0448fb9`.
 
 These are instrumented-workload observations, not production-image timing
 guarantees. The HIL enables allocator callbacks, updates atomic evidence, and
@@ -2036,8 +2074,9 @@ first smoke.
   live electrical power cuts, partial-body and partial-commit programming,
   backend error-after-write cases, sustained and forwarded traffic, concurrent
   durable activity, low-memory/allocation-failure pressure, and default-image
-  observation. Diagnose the reverse delivery-proof timeout before claiming
-  bidirectional delivery completion. Then design final LXMF/message storage and
+  observation. Rerun the reverse delivery-proof scenario at the current
+  `9bceacd` pin and diagnose any remaining timeout before claiming bidirectional
+  delivery completion. Then design final LXMF/message storage and
   device configuration with explicit wear, migration, reclamation,
   authorization, and cross-store ordering behavior.
 - Define and qualify the production key backup/recovery and at-rest protection
