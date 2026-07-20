@@ -12,7 +12,8 @@ API stay in this project; generic protocol and bounded-state corrections are
 the candidates for upstream review.
 
 The current firmware pin is
-`9bceacdc27fe6e5f5b8df6e70eba560ef0930329` (`firmware-pin-9bceacd`). It retains
+`fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2` (designated durable tag
+`firmware-pin-fb96ac1`). It retains
 caller-owned DATA preparation, explicit receipt-capacity errors, fixed-capacity
 terminal sinks, exact DATA/channel terminal candidates, allocation-atomic
 proof/timeout delivery, full-hash receipt cancellation and core-aware LXMF
@@ -21,15 +22,24 @@ reverse, and Link forwarding through the stack and runtime adapters; one-shot
 reverse-proof interface validation; strict relayed LRPROOF direction, hop,
 identity, signature, and canonical-header validation; and identities-only
 snapshot restore while persisted path observations lack stable interface
-identity. The legacy LXMF
+identity. The final routing tranche adds transactional relay-Link and H2 reverse
+admission, typed owned/relay Link-full and reverse full/conflict stack outcomes,
+owned-H2 local dispatch, pre-mutation foreign-H2 filtering, and separately
+observable relay-Link capacity. The current Link tranche additionally binds a
+responder to LINKREQUEST ingress and an initiator only after valid LRPROOF,
+routes established owned-Link output through `BoundInterface`, and rejects
+wrong-interface Link DATA/`RESOURCE_PRF` before dedup admission. The legacy LXMF
 event handler without mutable core access still leaves siblings to timeout.
 This candidate remains on the project fork; no issue or pull request was opened
 for the newer lifecycle or routing work, and publication still requires direct
-user approval.
+user approval. It has host and portable-target evidence but no retained E290
+ELF, flashed-image readback or powered proof; older artifact records remain
+bound to their recorded revisions.
 
-## 1. Transactional Link admission
+## 1. Transactional Link admission — completed for owned and H2 relay paths
 
-**Priority:** blocking relayed Links and production Link acceptance
+**Priority:** retain regression coverage; finish H1 interface roles and
+pending-Link parity
 
 Owned-Link admission is adopted in integration-fork revision
 `5ce8c4e437d3f2f07d302bc366ff06bacd6aff2d` and offered upstream in
@@ -46,22 +56,26 @@ Owned-Link admission is adopted in integration-fork revision
   while admitting a fresh request once capacity is available; and
 - suppresses `NodeCore` proof/event output when responder state is full.
 
-Relay admission remains open. Both HEADER_2 and fall-through relay paths ignore
-failure to insert the relay `link_table` entry, and HEADER_2 relay state is
-inserted before route availability is known. The public API must distinguish
-`Existing`, `Inserted`, and `Full` before forwarding and expose relay
-count/lookup in a read-only capacity snapshot.
+The current pin also makes H2 relay admission transactional. A
+LINKREQUEST/SINGLE naming this transport requires a usable exact path before
+state is inserted; the transport distinguishes existing, newly inserted, full,
+and missing-route outcomes. Full admission returns typed
+`LinkTableFull { table: Relay, .. }`, emits no forwarding packet and preserves
+Link/raw/dedup state except for the intentional replay-filter record. Missing
+routes leave no orphan Link entry. Relay-Link count is observable independently
+from locally owned Links. Focused tests cover full, existing, missing-route,
+fresh-retry and duplicate-retry behavior, and the 144-check project runner
+completes an A--B--C LINKREQUEST/LRPROOF/LRRTT/channel/proof flow.
 
-Remaining regression matrix:
+The remaining product gate is role classification, not relay capacity.
+Arbitrary remote H1 LINKREQUEST stays disabled until an interface role can
+distinguish remote ingress from the local-origin H1 compatibility path. Pending
+owned Links also need a released-Python parity audit for retained
+`expected_hops`. The local `EmbeddedNode` retains product-level owned-Link
+quota preflight for stable quotas and diagnostics.
 
-1. Fill a relay table and verify a new relayed request is rejected explicitly.
-2. Verify an existing relay Link ID is not misclassified as new capacity.
-3. Verify a missing route cannot leave orphan relay state.
-
-The local `EmbeddedNode` retains product-level owned-Link quota preflight and
-rejects relayed LINKREQUESTs until the remaining seam exists.
-
-## 2. LINKREQUEST validation, HEADER_2 dispatch and reverse admission
+## 2. LINKREQUEST validation, HEADER_2 dispatch and reverse admission — H2
+covered
 
 **Priority:** protocol correctness and hostile-input handling
 
@@ -75,23 +89,16 @@ or LRPROOF output. The adapter retains the same preflight because Rete still
 flattens this rejection to `Invalid`, while the product API reports a typed
 reason.
 
-Remaining local admission does not consult registered-destination direction or
-`accepts_links` policy. Locally terminating HEADER_2 requests also do not yet
-reach the direct/local validator consistently. Relay forwarding is a distinct
-operation: it should decide transport-ID ownership and capacity atomically,
-without treating a relay as the final endpoint responsible for destination
-shape policy.
-
-A HEADER_2 request addressed to the local transport is treated as relayed even
-when its final destination is local. Conversely, a HEADER_2 request addressed
-to another transport can fall through into the nominal HEADER_1 path.
-
-The same dispatch ordering affects other packet types. Non-announce HEADER_2
-packets naming a different transport can fall through native local/forwarding
-logic. A packet naming this transport enters the generic relay branch before
-local DATA, owned-Link DATA, proof/receipt or announce dispatch, so locally
-terminating traffic is dropped or misrouted. Endpoint-mode unmatched proofs
-also fall through as forwarding actions even though transport is disabled.
+The current pin closes the H2 ordering defect. Non-ANNOUNCE H2 traffic naming a
+foreign transport drops before state, statistics, dedup or raw-byte mutation;
+H2 ANNOUNCE deliberately enters ordinary validation regardless of transport
+ownership. Traffic naming this transport is normalized before typed dispatch:
+owned local DATA, LINKREQUEST, Link, proof and receipt traffic reaches the same
+handlers as canonical H1 input, and locally terminating LINKREQUEST still
+passes the adapter's destination direction, `accepts_links`, shape and capacity
+policy. Only nonlocal DATA/SINGLE and LINKREQUEST/SINGLE enter the narrow relay
+path, where exact route and state admission are one transaction. Endpoint-mode
+unmatched forwarding remains suppressed by the product adapter.
 
 The current pin removes interface-zero fallback from admitted forwarding.
 Ordinary H1/H2 DATA requires a path with a recorded receiving interface and
@@ -105,26 +112,25 @@ to the initiator-side interface, after responder identity reconstruction and
 signature validation. Invalid direction, hop, identity, or signature does not
 refresh the Link entry. H2 LINKREQUEST now creates only its Link route, not a
 redundant reverse entry. A HEADER_2 LRPROOF targeted at the local transport
-identity is invalid rather than being allowed to bypass the canonical HEADER_1
-relay checks through generic H2 Link handling.
+identity is normalized into the canonical validation path rather than being
+allowed to bypass it through generic H2 Link handling.
 
-Capacity admission remains open. Ordinary H1/H2 DATA can still be emitted
-after a bounded reverse-map insertion fails, and relay LINKREQUEST forwarding
-can still continue after a bounded `link_table` insertion fails. Expose each
-lookup/capacity admission as one transactional forwarding operation and return
-a typed `Full` outcome before emitting the packet.
+H2 capacity admission is now explicit. A new reverse route returns typed
+`ReverseTableFull` or `ReverseRouteConflict` before forwarding when it cannot be
+retained; idempotent insertion of the same exact pair succeeds without
+refreshing its timestamp. Relay Link failure likewise returns typed
+`LinkTableFull { table: Relay, .. }`. Each failure preserves existing state and
+raw bytes, emits no packet and remains deduplicated on exact replay. The adapter
+maps those native stack rejections directly and exposes separate relay-Link and
+reverse occupancy.
 
-Add released-Python differential fixtures for valid 64/67-byte direct/local
-requests and negative destination-policy and transport-ID boundaries. Add
-H1/H2 reverse-table exhaustion tests, locally terminating H2 request/DATA/proof
-cases and an endpoint unmatched-proof case. Dispatch should decide HEADER_2
-ownership before any local or relay allocation, and locally terminating
-requests should then pass through the same canonical-shape validator.
-
-The local adapter mirrors Python's non-announce transport-ID filter, rejects
-native H2 classes that cannot yet be dispatched safely, suppresses endpoint
-forwarding actions, maps native exact-interface outcomes without broadening
-them, and preflights reverse capacity on the two admitted DATA relay paths.
+Remaining work is narrower: add released-Python differential fixtures for all
+64/67-byte direct/local destination-policy and transport-ID boundaries, define
+explicit interface roles, then replace the H1 DATA guard and enable or reject
+remote H1 LINKREQUEST by role rather than packet shape alone. Audit pending
+owned-Link `expected_hops` against Python. Keep the H2 exhaustion, collision,
+owned-local, foreign-filter, endpoint suppression and three-node A--B--C
+regressions as permanent gates.
 
 ## 3. Announce retransmission role policy
 
@@ -151,6 +157,21 @@ folding them into the endpoint fix.
 
 **Priority:** application correctness and keepalive behavior
 
+The current pin closes the physical-interface routing part of this item. A
+responder binds to LINKREQUEST ingress; an initiator's initial learned path is
+only a request target, and the Link binds after valid LRPROOF ingress. Once
+bound, application calls and asynchronous close, keepalive, retransmit,
+request/response and Resource output carry `BoundInterface`. Only the initial
+LINKREQUEST may broadcast, and only when no learned path interface exists.
+Link DATA and `RESOURCE_PRF` received on another interface fail before dedup, so
+a later copy on the bound interface is not poisoned.
+
+That binding is a runtime interface slot, not a hosted client endpoint. On a
+Tokio shared `Hub`, synchronous output can retain the source client but
+asynchronous owned-Link output broadcasts to the other clients on the bound
+slot. Replace the scalar slot with endpoint-aware identity including reconnect
+generation before claiming Python-style per-client Link isolation.
+
 The responder currently emits `LinkEstablished` immediately after receiving a
 LINKREQUEST, while its state is still `Handshake` and data sending returns
 `LinkNotActive`. It emits a second `LinkEstablished` after LRRTT activates the
@@ -171,6 +192,13 @@ timeout results/counters and release-then-fresh-retry coverage.
 The local adapter suppresses premature establishment events and records the
 timestamp after best-effort Link data, but the native behavior needs its own
 tests and repair.
+
+Keepalive wire and role behavior is independently incompatible with released
+Python Reticulum. Python sends unencrypted `0xff` requests only from the
+initiator and unencrypted `0xfe` replies from the responder; Rete currently
+encrypts keepalives and allows both sides to initiate and answer. Align this
+state machine and add bidirectional differential fixtures without folding it
+into the completed interface-routing change.
 
 ## 5. Transactional channel receipts
 
@@ -200,18 +228,20 @@ proof removal, reuse after proof, retransmission and wraparound.
 
 ## 6. Explicit ingress dispositions
 
-**Priority:** diagnostics and recoverable failure
+**Priority:** broaden the completed capacity subset to all recoverable failures
 
-`NodeCore::handle_ingest()` maps native `LinkTableFull`, `Invalid` and
-`Duplicate` to the same empty outcome, and several decrypt/unknown-state
-failures are also empty without incrementing a unique counter. Add a
-disposition or typed drop reason alongside events/actions. It should cover
-parse, dedup, crypto, unknown destination/Link, capacity, policy, route and
-output-backpressure failures.
+`NodeCore::handle_ingest()` now returns `IngestOutcome::rejection` alongside
+events/actions for owned and relay `LinkTableFull`, `ReverseTableFull`, and
+`ReverseRouteConflict`. These public Copy/Eq values preserve the affected
+truncated hash where relevant, and runtime adapters carry them without
+flattening. The project maps all four to stable product dispositions and
+counters.
 
-The local adapter can recover `Invalid` and `Duplicate` only when transport
-counter deltas identify them; everything else remains `NoObservableOutcome`.
-The native `packets_sent` statistic is also incomplete at the pinned revision:
+The broader item remains open: ordinary `Invalid` and `Duplicate` outcomes,
+parse/crypto/unknown destination or Link, policy, route and output-backpressure
+failures are not all typed at the stack boundary. The local adapter still uses
+transport counter deltas for native `Invalid`/`Duplicate`, and some cases remain
+`NoObservableOutcome`. The native `packets_sent` statistic is also incomplete:
 it counts announce-queue output but not ordinary DATA, Link/channel, proof,
 close or keepalive packets. Define whether counters represent packet creation,
 interface enqueue or completed transmission, then count that boundary
@@ -342,6 +372,13 @@ sans-I/O callers do not need transport storage access. Native interface indices
 also remain transient `u8` values without stable identity or incarnation, so
 dynamic interface reuse still requires explicit purge or rebinding.
 
+Owned-Link output now adds `PacketRouting::BoundInterface` and resolves the
+scalar binding exactly on physical or Direct interfaces. A shared Tokio Hub is
+the remaining exception: asynchronous output lacks the source-client endpoint
+and broadcasts to that slot's siblings. The eventual interface identity must
+cover both physical slot incarnation and multiplexed client endpoint
+generation.
+
 ## 11. Transactional DATA receipts and terminal reclamation
 
 **Priority:** blocking sustained outbound DATA and the production device API
@@ -376,8 +413,8 @@ Make DATA preparation one transaction:
    receipt and entropy state.
 
 The generic fix is now the project pin
-`9bceacdc27fe6e5f5b8df6e70eba560ef0930329`, reachable at fork tag
-`firmware-pin-9bceacd`. It returns caller-owned packet metadata plus a full
+`fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2`, with designated fork tag
+`firmware-pin-fb96ac1`. It returns caller-owned packet metadata plus a full
 receipt token, reports registration and output-allocation failures, and
 atomically removes validated and timed-out receipts only after reserving their
 exact kind/full-hash terminal candidate. Link-typed channel proofs are resolved
@@ -388,10 +425,10 @@ HEADER_2 proofs bypass local terminal reservation. Direct Transport ingest and
 maintenance results are `must_use`; sink-aware NodeCore paths avoid duplicate
 receipt events; and the
 hosted daemon consumes LXMF terminal output. The selected validation set passes
-591 tests: 239 transport, 125 stack, 143 LXMF library, and 84 daemon library.
-CI directly runs the 506 library tests; local validation adds 84 transport and
-one stack integration test. This is not a full nested-workspace test count. All
-workspace targets check on the macOS host, and the affected no-default crates
+614 tests: 254 transport, 133 stack, 143 LXMF library, and 84 daemon library.
+The four library targets total 524 tests; local validation adds 89 transport
+and one stack integration test. This is not a full nested-workspace test count.
+All workspace targets check on the macOS host, and the affected no-default crates
 compile for `thumbv6m-none-eabi`. This newer
 lifecycle work remains on the user's fork. No issue or pull request was opened,
 and publication elsewhere still requires the user's direct approval.

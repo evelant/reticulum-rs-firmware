@@ -153,13 +153,14 @@ zeroize = { version = "=1.9.0", default-features = false }
 # deps. The integration history is based on upstream 9bcb7d3e and composes the
 # earlier focused validation, transactional owned-Link and endpoint announce
 # policy changes with caller-owned DATA preparation, allocation-atomic receipt
-# terminals, exact DATA/channel terminal candidates, and exact-interface
-# forwarding from learned path, reverse, and Link state. Fork tag
-# firmware-pin-9bceacd keeps this exact candidate reachable independently of its
+# terminals, exact DATA/channel terminal candidates, exact-interface
+# forwarding, owned HEADER_2 typed dispatch, and transactional bounded relay
+# Link/reverse admission with typed failures. Fork tag
+# firmware-pin-fb96ac1 keeps this exact candidate reachable independently of its
 # development branch.
-rete-core = { git = "https://github.com/evelant/rete.git", rev = "9bceacdc27fe6e5f5b8df6e70eba560ef0930329", default-features = false }
-rete-stack = { git = "https://github.com/evelant/rete.git", rev = "9bceacdc27fe6e5f5b8df6e70eba560ef0930329", default-features = false }
-rete-transport = { git = "https://github.com/evelant/rete.git", rev = "9bceacdc27fe6e5f5b8df6e70eba560ef0930329", default-features = false }
+rete-core = { git = "https://github.com/evelant/rete.git", rev = "fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2", default-features = false }
+rete-stack = { git = "https://github.com/evelant/rete.git", rev = "fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2", default-features = false }
+rete-transport = { git = "https://github.com/evelant/rete.git", rev = "fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2", default-features = false }
 
 [patch.crates-io]
 # Force every current and future graph consumer onto the one reviewed local

@@ -3,10 +3,10 @@
 //! Rete's heapless transport uses independent fixed-capacity collections. Some
 //! have recoverable overflow policies (path LRU eviction, dedup FIFO eviction,
 //! and an announce-queue `false` result). The pinned integration revision also
-//! makes owned-Link insertion transactional. The owning `EmbeddedNode` keeps
-//! the crate-private preflight here to enforce product quotas and stable local
-//! diagnostics before native packet construction. Relayed LINKREQUESTs remain
-//! fail-closed until upstream exposes transactional relay-table admission.
+//! makes owned- and relayed-Link insertion transactional. The owning
+//! `EmbeddedNode` keeps the crate-private outbound preflight here to enforce
+//! product quotas and stable local diagnostics before native packet
+//! construction.
 
 use rand_core::{CryptoRng, RngCore};
 use rete_core::{DestHash, LinkId};
@@ -40,9 +40,9 @@ impl CapacityUse {
 /// Publicly observable occupancy for a heapless Rete node.
 ///
 /// Rete does not currently expose occupancy for its identity, resource,
-/// relayed-link, announce-replay, announce-rate, path-request-throttle, or
-/// packet-dedup tables. Those collections therefore cannot be represented here
-/// without an upstream API change.
+/// announce-replay, announce-rate, path-request-throttle, or packet-dedup
+/// tables. Those collections therefore cannot be represented here without an
+/// upstream API change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HeaplessCapacitySnapshot {
     /// Learned destination paths. Full insertion evicts the LRU path.
@@ -51,7 +51,10 @@ pub struct HeaplessCapacitySnapshot {
     pub announces: CapacityUse,
     /// Locally owned link sessions. Full insertion must be rejected before send.
     pub links: CapacityUse,
-    /// Reverse-routing entries. Rete currently drops insertion failures.
+    /// Link routes retained on behalf of two remote endpoints.
+    pub relay_links: CapacityUse,
+    /// Reverse-routing entries. Transported H2 insertion is transactional;
+    /// the temporary H1 local-origin seam is guarded at the owning boundary.
     pub reverse_entries: CapacityUse,
     /// Pending DATA delivery-proof receipts. The pinned DATA path rejects full
     /// admission transactionally.
@@ -82,6 +85,10 @@ pub(crate) fn heapless_capacity_snapshot<
         },
         links: CapacityUse {
             used: node.transport.link_count(),
+            limit: L,
+        },
+        relay_links: CapacityUse {
+            used: node.transport.relay_link_count(),
             limit: L,
         },
         reverse_entries: CapacityUse {
@@ -295,6 +302,7 @@ mod tests {
         assert_eq!(snapshot.paths, CapacityUse { used: 0, limit: 64 });
         assert_eq!(snapshot.announces, CapacityUse { used: 0, limit: 16 });
         assert_eq!(snapshot.links, CapacityUse { used: 0, limit: 4 });
+        assert_eq!(snapshot.relay_links, CapacityUse { used: 0, limit: 4 });
         assert_eq!(snapshot.reverse_entries, CapacityUse { used: 0, limit: 64 });
         assert_eq!(snapshot.receipts, CapacityUse { used: 0, limit: 64 });
         assert_eq!(snapshot.channel_receipts, CapacityUse { used: 0, limit: 4 });
@@ -314,6 +322,7 @@ mod tests {
         assert_eq!(tiny_snapshot.announces.limit, 3);
         assert_eq!(tiny_snapshot.deduplication_limit, 5);
         assert_eq!(tiny_snapshot.links.limit, 2);
+        assert_eq!(tiny_snapshot.relay_links.limit, 2);
     }
 
     #[test]

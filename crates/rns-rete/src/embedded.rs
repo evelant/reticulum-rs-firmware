@@ -16,8 +16,8 @@ use rete_core::{
     DestHash, DestType, HeaderType, Identity, IdentityHash, LinkId, Packet, PacketType,
 };
 use rete_stack::{
-    DestinationType, Direction, IngestOutcome, NodeCore, NodeEvent, OutboundPacket, PacketRouting,
-    ReceiptToken,
+    DestinationType, Direction, IngestOutcome, IngestRejection, LinkTableKind, NodeCore, NodeEvent,
+    OutboundPacket, PacketRouting, ReceiptToken,
 };
 use rete_transport::{HeaplessStorage, LinkState, SendError};
 
@@ -227,6 +227,28 @@ impl TxPacket {
     }
 }
 
+/// Resolve a packet created without ingress context.
+///
+/// The pinned native origin APIs may select all interfaces or one retained
+/// exact interface. Source-relative routing would be an upstream contract
+/// violation: broadcasting it would leak traffic onto unrelated transports,
+/// while silently dropping it would strand already-mutated protocol state.
+fn resolve_origin_packet(packet: OutboundPacket) -> TxPacket {
+    let target = match packet.routing {
+        PacketRouting::All => TxTarget::All,
+        PacketRouting::ExactInterface(interface) | PacketRouting::BoundInterface(interface) => {
+            TxTarget::Only(InterfaceId(interface))
+        }
+        PacketRouting::SourceInterface | PacketRouting::AllExceptSource => {
+            panic!("pinned Rete origin API emitted source-relative routing")
+        }
+    };
+    TxPacket {
+        bytes: packet.data,
+        target,
+    }
+}
+
 /// Application events and resolved transmission actions from one core call.
 #[derive(Debug, Default)]
 #[must_use = "every protocol event, packet, and unroutable-action count must be drained or retained"]
@@ -319,8 +341,10 @@ pub fn project_inbound_data(event: NodeEvent) -> InboundDataProjection {
 pub enum NodeRole {
     /// Local endpoint only.
     Endpoint,
-    /// Forward announces and ordinary packets. Relayed LINKREQUEST admission
-    /// remains disabled until Rete exposes a transactional relay-table API.
+    /// Forward announces and ordinary packets. HEADER_2 relayed Link and DATA
+    /// admission is transactional; arbitrary HEADER_1 remote LINKREQUEST
+    /// ingress remains disabled until interface roles distinguish it from
+    /// local-origin injection.
     Transport,
 }
 
@@ -361,7 +385,7 @@ impl EmbeddedNodeConfig {
         }
     }
 
-    /// Transport profile with fail-closed relayed Link admission.
+    /// Transport profile with fail-closed bounded relay admission.
     pub const fn transport() -> Self {
         Self {
             role: NodeRole::Transport,
@@ -398,24 +422,24 @@ pub enum IngressDropReason {
     DestinationDoesNotAcceptLinks,
     /// A new locally owned Link would exceed the configured table.
     OwnedLinkTableFull { limit: usize },
+    /// A new relayed Link would exceed the configured relay table.
+    RelayLinkTableFull { limit: usize },
     /// Rete reported a local Link handshake but did not retain its state.
     LinkStateNotRetained,
-    /// Relayed Link state cannot yet be admitted transactionally through
-    /// Rete's public API.
-    RelayedLinksDisabled,
-    /// HEADER_2 LINKREQUEST dispatch is ambiguous or targets another
-    /// transport. It is rejected rather than falling through to local state.
-    UnsupportedHeader2LinkRequest,
+    /// Arbitrary remote HEADER_1 LINKREQUEST ingress remains disabled until
+    /// interface roles can distinguish it from local-origin injection.
+    Header1RemoteLinkRequestDisabled,
     /// A non-announce HEADER_2 packet names another transport identity.
     Header2NotAddressedToUs { transport_id: IdentityHash },
-    /// The pinned native dispatcher cannot safely terminate or route this
-    /// HEADER_2 packet class in the configured role.
-    UnsupportedHeader2Dispatch {
-        packet_type: PacketType,
-        destination_type: DestType,
-    },
     /// Forwarding would require reverse state that cannot be retained.
-    ReverseTableFull { limit: usize },
+    ReverseTableFull {
+        limit: usize,
+        truncated_hash: [u8; rete_core::TRUNCATED_HASH_LEN],
+    },
+    /// A truncated packet hash is already bound to a different reverse route.
+    ReverseRouteConflict {
+        truncated_hash: [u8; rete_core::TRUNCATED_HASH_LEN],
+    },
 }
 
 impl core::fmt::Display for IngressDropReason {
@@ -446,30 +470,29 @@ impl core::fmt::Display for IngressDropReason {
             Self::OwnedLinkTableFull { limit } => {
                 write!(f, "owned Link table is full (limit {limit})")
             }
+            Self::RelayLinkTableFull { limit } => {
+                write!(f, "relay Link table is full (limit {limit})")
+            }
             Self::LinkStateNotRetained => {
                 write!(
                     f,
                     "Rete emitted Link handshake output without retained state"
                 )
             }
-            Self::RelayedLinksDisabled => {
-                write!(f, "relayed Links require transactional Rete admission")
-            }
-            Self::UnsupportedHeader2LinkRequest => {
-                write!(f, "unsupported HEADER_2 LINKREQUEST dispatch")
+            Self::Header1RemoteLinkRequestDisabled => {
+                write!(
+                    f,
+                    "remote HEADER_1 LINKREQUEST requires an explicit ingress role"
+                )
             }
             Self::Header2NotAddressedToUs { transport_id } => {
                 write!(f, "HEADER_2 packet targets transport {transport_id:?}")
             }
-            Self::UnsupportedHeader2Dispatch {
-                packet_type,
-                destination_type,
-            } => write!(
-                f,
-                "unsupported HEADER_2 {packet_type:?}/{destination_type:?} dispatch"
-            ),
-            Self::ReverseTableFull { limit } => {
+            Self::ReverseTableFull { limit, .. } => {
                 write!(f, "reverse-routing table is full (limit {limit})")
+            }
+            Self::ReverseRouteConflict { truncated_hash } => {
+                write!(f, "reverse route conflicts for hash {truncated_hash:02x?}")
             }
         }
     }
@@ -646,8 +669,9 @@ pub struct IngressCounters {
     pub resource_disabled: u64,
     pub invalid_link_request: u64,
     pub owned_link_full: u64,
+    pub relay_link_full: u64,
     pub link_state_not_retained: u64,
-    pub relayed_links_disabled: u64,
+    pub header1_remote_link_request_disabled: u64,
     pub native_duplicate: u64,
     pub native_invalid: u64,
     pub native_no_outcome: u64,
@@ -655,6 +679,7 @@ pub struct IngressCounters {
     pub routing_invariant_drops: u64,
     pub header2_filtered: u64,
     pub reverse_table_full: u64,
+    pub reverse_route_conflict: u64,
     pub endpoint_forward_suppressed: u64,
 }
 
@@ -897,7 +922,6 @@ impl From<SendError> for EmbeddedSendError {
 }
 
 struct IngressPreflight {
-    inbound_link_id: Option<LinkId>,
     before_duplicate: u64,
     before_invalid: u64,
     metadata: IngressMetadata,
@@ -1130,6 +1154,20 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             })
     }
 
+    /// Resolve the interface selected by the retained path for locally
+    /// originated destination DATA. A peer without an observed ingress
+    /// interface deliberately retains Reticulum's unknown-path broadcast
+    /// fallback.
+    fn destination_target(&self, destination: &DestHash) -> TxTarget {
+        self.core
+            .transport
+            .get_path(destination)
+            .and_then(|path| path.received_on)
+            .map_or(TxTarget::All, |interface| {
+                TxTarget::Only(InterfaceId(interface))
+            })
+    }
+
     /// Current state of one locally owned Link.
     pub fn link_state(&self, link_id: &LinkId) -> Option<LinkState> {
         self.core.transport.get_link(link_id).map(|link| link.state)
@@ -1154,7 +1192,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         interface: InterfaceId,
         rng: &mut R,
     ) -> IngressReport {
-        let preflight = match self.preflight_ingest(raw) {
+        let preflight = match self.preflight_ingest(raw, interface) {
             Ok(preflight) => preflight,
             Err(report) => return report,
         };
@@ -1187,7 +1225,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         R: RngCore + CryptoRng,
         S: ReceiptTerminalSink,
     {
-        let preflight = match self.preflight_ingest(raw) {
+        let preflight = match self.preflight_ingest(raw, interface) {
             Ok(preflight) => preflight,
             Err(report) => return Ok(report),
         };
@@ -1211,7 +1249,11 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         Ok(self.finish_ingest(native, preflight, interface, native_sink.committed))
     }
 
-    fn preflight_ingest(&mut self, raw: &[u8]) -> Result<IngressPreflight, IngressReport> {
+    fn preflight_ingest(
+        &mut self,
+        raw: &[u8],
+        interface: InterfaceId,
+    ) -> Result<IngressPreflight, IngressReport> {
         self.ingress.seen = self.ingress.seen.saturating_add(1);
 
         if raw.len() > rete_core::MTU {
@@ -1235,6 +1277,10 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         };
         let metadata = IngressMetadata::parsed(&packet);
 
+        if let Err(reason) = self.preflight_header2(&packet) {
+            return Err(self.reject(reason, metadata));
+        }
+
         if packet.dest_type == DestType::Link && is_resource_context(packet.context) {
             return Err(self.reject(
                 IngressDropReason::ResourceIngressDisabled {
@@ -1244,25 +1290,18 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             ));
         }
 
-        if let Err(reason) = self.preflight_header2(&packet) {
+        if let Err(reason) = self.preflight_h1_reverse_admission(&packet, interface) {
             return Err(self.reject(reason, metadata));
         }
 
-        if let Err(reason) = self.preflight_h1_reverse_admission(&packet) {
-            return Err(self.reject(reason, metadata));
-        }
-
-        let inbound_link_id = if packet.packet_type == PacketType::LinkRequest {
+        if packet.packet_type == PacketType::LinkRequest {
             match self.preflight_link_request(&packet, raw) {
-                Ok(link_id) => link_id,
+                Ok(()) => {}
                 Err(reason) => return Err(self.reject(reason, metadata)),
             }
-        } else {
-            None
-        };
+        }
 
         Ok(IngressPreflight {
-            inbound_link_id,
             before_duplicate: self.core.transport.stats().packets_dropped_dedup,
             before_invalid: self.core.transport.stats().packets_dropped_invalid,
             metadata,
@@ -1276,15 +1315,41 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         interface: InterfaceId,
         terminal_commits: TerminalCommitCounts,
     ) -> IngressReport {
-        if let Some(link_id) = preflight.inbound_link_id {
-            let announced_establishment = native.events.iter().any(|event| {
-                matches!(event, NodeEvent::LinkEstablished { link_id: event_id } if *event_id == link_id)
-            });
-            if announced_establishment && self.core.transport.get_link(&link_id).is_none() {
-                self.ingress.link_state_not_retained =
-                    self.ingress.link_state_not_retained.saturating_add(1);
-                return self.reject(IngressDropReason::LinkStateNotRetained, preflight.metadata);
+        if let Some(rejection) = native.rejection.take() {
+            let reason = match rejection {
+                IngestRejection::LinkTableFull {
+                    table: LinkTableKind::Owned,
+                    ..
+                } => IngressDropReason::OwnedLinkTableFull { limit: LINKS },
+                IngestRejection::LinkTableFull {
+                    table: LinkTableKind::Relay,
+                    ..
+                } => IngressDropReason::RelayLinkTableFull { limit: LINKS },
+                IngestRejection::ReverseTableFull { truncated_hash } => {
+                    IngressDropReason::ReverseTableFull {
+                        limit: PATHS,
+                        truncated_hash,
+                    }
+                }
+                IngestRejection::ReverseRouteConflict { truncated_hash } => {
+                    IngressDropReason::ReverseRouteConflict { truncated_hash }
+                }
+            };
+            return self.reject(reason, preflight.metadata);
+        }
+
+        let unretained_link = native.events.iter().find_map(|event| match event {
+            NodeEvent::LinkEstablished { link_id }
+                if self.core.transport.get_link(link_id).is_none() =>
+            {
+                Some(*link_id)
             }
+            _ => None,
+        });
+        if unretained_link.is_some() {
+            self.ingress.link_state_not_retained =
+                self.ingress.link_state_not_retained.saturating_add(1);
+            return self.reject(IngressDropReason::LinkStateNotRetained, preflight.metadata);
         }
 
         // Rete currently emits LinkEstablished as soon as a responder has
@@ -1398,7 +1463,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         &mut self,
         packet: &Packet<'_>,
         raw: &[u8],
-    ) -> Result<Option<LinkId>, IngressDropReason> {
+    ) -> Result<(), IngressDropReason> {
         if packet.dest_type != DestType::Single {
             return Err(IngressDropReason::LinkRequestDestinationType(
                 packet.dest_type,
@@ -1414,22 +1479,12 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         }
 
         let destination = DestHash::from_slice(packet.destination_hash);
-        let local_transport = self.core.transport.local_identity_hash();
-        if packet.header_type == HeaderType::Header2 {
-            let targeted_to_us = local_transport.is_some()
-                && packet
-                    .transport_id
-                    .map(IdentityHash::from_slice)
-                    .is_some_and(|transport| Some(transport) == local_transport);
-            if targeted_to_us && !self.core.transport.is_local_destination(&destination) {
-                return Err(IngressDropReason::RelayedLinksDisabled);
-            }
-            return Err(IngressDropReason::UnsupportedHeader2LinkRequest);
-        }
-
         if !self.core.transport.is_local_destination(&destination) {
-            return if self.role == NodeRole::Transport {
-                Err(IngressDropReason::RelayedLinksDisabled)
+            return if self.role == NodeRole::Transport && packet.header_type == HeaderType::Header2
+            {
+                Ok(())
+            } else if self.role == NodeRole::Transport {
+                Err(IngressDropReason::Header1RemoteLinkRequestDisabled)
             } else {
                 Err(IngressDropReason::DestinationDoesNotAcceptLinks)
             };
@@ -1446,19 +1501,22 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         if !accepts {
             return Err(IngressDropReason::DestinationDoesNotAcceptLinks);
         }
-
         let link_id = rete_transport::compute_link_id(raw).map_err(IngressDropReason::Malformed)?;
-        let is_existing = self.core.transport.get_link(&link_id).is_some();
-        if !is_existing && self.core.transport.link_count() >= LINKS {
-            // Preserve Rete/Python packet-filter semantics without performing
-            // responder ECDH on a saturated node. Once capacity is available,
-            // an exact replay will be rejected by native ingest while a fresh
-            // LINKREQUEST with new ephemeral material can proceed.
+        if self.core.transport.get_link(&link_id).is_none()
+            && self.core.transport.link_count() >= LINKS
+        {
+            // Avoid responder ECDH when the product-owned table is already
+            // saturated while retaining the same full-hash retry contract as
+            // native transactional admission.
             let packet_hash = packet.compute_hash();
-            let _ = self.core.transport.is_duplicate(&packet_hash);
+            if self.core.transport.is_duplicate(&packet_hash) {
+                // Let native ingest produce its ordinary duplicate
+                // disposition without responder ECDH or state mutation.
+                return Ok(());
+            }
             return Err(IngressDropReason::OwnedLinkTableFull { limit: LINKS });
         }
-        Ok(Some(link_id))
+        Ok(())
     }
 
     fn preflight_header2(&self, packet: &Packet<'_>) -> Result<(), IngressDropReason> {
@@ -1475,73 +1533,26 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
 
         // Python Reticulum deliberately lets HEADER_2 announces fall through
         // normal announce validation, irrespective of their transport ID.
-        // Rete instead enters its targeted relay branch when the ID is ours.
         if packet.packet_type == PacketType::Announce {
-            return if self.role == NodeRole::Transport && transport_id == ours {
-                Err(IngressDropReason::UnsupportedHeader2Dispatch {
-                    packet_type: packet.packet_type,
-                    destination_type: packet.dest_type,
-                })
-            } else {
-                Ok(())
-            };
+            return Ok(());
         }
 
         if transport_id != ours {
             return Err(IngressDropReason::Header2NotAddressedToUs { transport_id });
         }
 
-        // LINKREQUEST has stricter destination and table admission below.
-        if packet.packet_type == PacketType::LinkRequest {
-            return Ok(());
-        }
-
-        let destination = DestHash::from_slice(packet.destination_hash);
-        match self.role {
-            NodeRole::Endpoint => {
-                let local_data = packet.packet_type == PacketType::Data
-                    && packet.dest_type != DestType::Link
-                    && self
-                        .core
-                        .get_destination(&destination)
-                        .is_some_and(|registered| {
-                            registered.direction == Direction::In
-                                && destination_type_matches(packet.dest_type, registered.dest_type)
-                        });
-                let owned_link = packet.packet_type == PacketType::Data
-                    && packet.dest_type == DestType::Link
-                    && self
-                        .core
-                        .transport
-                        .get_link(&LinkId::from_slice(destination.as_ref()))
-                        .is_some();
-                if local_data || owned_link || packet.packet_type == PacketType::Proof {
-                    Ok(())
-                } else {
-                    Err(IngressDropReason::UnsupportedHeader2Dispatch {
-                        packet_type: packet.packet_type,
-                        destination_type: packet.dest_type,
-                    })
-                }
-            }
-            NodeRole::Transport => {
-                let relayable = packet.packet_type == PacketType::Data
-                    && packet.dest_type != DestType::Link
-                    && destination != rete_transport::PATH_REQUEST_DEST
-                    && !self.core.transport.is_local_destination(&destination)
-                    && self.core.transport.get_path(&destination).is_some();
-                if !relayable {
-                    return Err(IngressDropReason::UnsupportedHeader2Dispatch {
-                        packet_type: packet.packet_type,
-                        destination_type: packet.dest_type,
-                    });
-                }
-                self.preflight_reverse_admission(packet)
-            }
-        }
+        // The pinned native dispatcher normalizes owned HEADER_2 local
+        // traffic and transactionally admits narrow DATA/SINGLE and
+        // LINKREQUEST/SINGLE relay traffic. Keep ownership filtering here for
+        // stable product diagnostics, then let typed native dispatch decide.
+        Ok(())
     }
 
-    fn preflight_h1_reverse_admission(&self, packet: &Packet<'_>) -> Result<(), IngressDropReason> {
+    fn preflight_h1_reverse_admission(
+        &mut self,
+        packet: &Packet<'_>,
+        interface: InterfaceId,
+    ) -> Result<(), IngressDropReason> {
         if self.role != NodeRole::Transport
             || packet.header_type != HeaderType::Header1
             || packet.packet_type != PacketType::Data
@@ -1557,17 +1568,45 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         {
             return Ok(());
         }
-        self.preflight_reverse_admission(packet)
-    }
-
-    fn preflight_reverse_admission(&self, packet: &Packet<'_>) -> Result<(), IngressDropReason> {
         let packet_hash = packet.compute_hash();
         let mut key = [0u8; rete_core::TRUNCATED_HASH_LEN];
         key.copy_from_slice(&packet_hash[..rete_core::TRUNCATED_HASH_LEN]);
-        if self.core.transport.get_reverse(&key).is_none()
-            && self.core.transport.reverse_count() >= PATHS
-        {
-            return Err(IngressDropReason::ReverseTableFull { limit: PATHS });
+        let Some(outbound) = self
+            .core
+            .transport
+            .get_path(&destination)
+            .and_then(|path| path.received_on)
+        else {
+            // A caller-registered identity can have a direct path without a
+            // learned interface. There is no usable route to reserve in that
+            // case, so leave fail-closed classification to native ingest.
+            return Ok(());
+        };
+        let reason = match self.core.transport.get_reverse(&key) {
+            Some(existing)
+                if existing.received_on != interface.0 || existing.forwarded_to != outbound =>
+            {
+                Some(IngressDropReason::ReverseRouteConflict {
+                    truncated_hash: key,
+                })
+            }
+            None if self.core.transport.reverse_count() >= PATHS => {
+                Some(IngressDropReason::ReverseTableFull {
+                    limit: PATHS,
+                    truncated_hash: key,
+                })
+            }
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            // Native H2 admission records the full packet hash before a typed
+            // rejection. Match that retry contract for the temporary H1
+            // local-origin compatibility shim. A replay is allowed into
+            // native ingest solely so it is classified as a duplicate.
+            if self.core.transport.is_duplicate(&packet_hash) {
+                return Ok(());
+            }
+            return Err(reason);
         }
         Ok(())
     }
@@ -1587,18 +1626,25 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             IngressDropReason::OwnedLinkTableFull { .. } => {
                 self.ingress.owned_link_full = self.ingress.owned_link_full.saturating_add(1);
             }
-            IngressDropReason::LinkStateNotRetained => {}
-            IngressDropReason::RelayedLinksDisabled
-            | IngressDropReason::UnsupportedHeader2LinkRequest => {
-                self.ingress.relayed_links_disabled =
-                    self.ingress.relayed_links_disabled.saturating_add(1);
+            IngressDropReason::RelayLinkTableFull { .. } => {
+                self.ingress.relay_link_full = self.ingress.relay_link_full.saturating_add(1);
             }
-            IngressDropReason::Header2NotAddressedToUs { .. }
-            | IngressDropReason::UnsupportedHeader2Dispatch { .. } => {
+            IngressDropReason::LinkStateNotRetained => {}
+            IngressDropReason::Header1RemoteLinkRequestDisabled => {
+                self.ingress.header1_remote_link_request_disabled = self
+                    .ingress
+                    .header1_remote_link_request_disabled
+                    .saturating_add(1);
+            }
+            IngressDropReason::Header2NotAddressedToUs { .. } => {
                 self.ingress.header2_filtered = self.ingress.header2_filtered.saturating_add(1);
             }
             IngressDropReason::ReverseTableFull { .. } => {
                 self.ingress.reverse_table_full = self.ingress.reverse_table_full.saturating_add(1);
+            }
+            IngressDropReason::ReverseRouteConflict { .. } => {
+                self.ingress.reverse_route_conflict =
+                    self.ingress.reverse_route_conflict.saturating_add(1);
             }
             IngressDropReason::LinkRequestDestinationType(_)
             | IngressDropReason::LinkRequestContext(_)
@@ -1643,18 +1689,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             return Err(PrepareDataError::ReceiptTableFull { limit: PATHS });
         }
 
-        // Reticulum sends ordinary destination DATA over the interface on
-        // which its current path was learned. A peer registered without an
-        // observed ingress interface remains an intentional all-interface
-        // fallback, matching unknown-path broadcast behavior.
-        let target = self
-            .core
-            .transport
-            .get_path(destination)
-            .and_then(|path| path.received_on)
-            .map_or(TxTarget::All, |interface| {
-                TxTarget::Only(InterfaceId(interface))
-            });
+        let target = self.destination_target(destination);
 
         let prepared = self
             .core
@@ -1673,6 +1708,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                 | SendError::LinkTableFull
                 | SendError::LinkNotFound
                 | SendError::LinkNotActive
+                | SendError::LinkInterfaceUnknown
                 | SendError::WindowFull
                 | SendError::OutputAllocationFailed
                 | SendError::ResourceLimit => PrepareDataError::Invariant,
@@ -1719,10 +1755,11 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             self.admission.receipt_table_full = self.admission.receipt_table_full.saturating_add(1);
             return Err(EmbeddedSendError::ReceiptTableFull { limit: PATHS });
         }
+        let target = self.destination_target(destination);
         let bytes = self
             .core
             .build_data_packet(destination, plaintext, rng, now)?;
-        Ok(TxPacket::broadcast(bytes))
+        Ok(TxPacket { bytes, target })
     }
 
     /// Initiate a locally owned Link only when Rete can retain its state.
@@ -1733,7 +1770,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         rng: &mut R,
     ) -> Result<(TxPacket, LinkId), LinkAdmissionError> {
         match try_initiate_heapless_link(&mut self.core, destination, now, rng) {
-            Ok((packet, link_id)) => Ok((TxPacket::broadcast(packet.data), link_id)),
+            Ok((packet, link_id)) => Ok((resolve_origin_packet(packet), link_id)),
             Err(error) => {
                 match error {
                     LinkAdmissionError::LinkTableFull { .. } => {
@@ -1776,7 +1813,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         if let Some(link) = self.core.transport.get_link_mut(link_id) {
             link.last_outbound = now;
         }
-        Ok(TxPacket::broadcast(packet.data))
+        Ok(resolve_origin_packet(packet))
     }
 
     /// Send a reliable channel message only while a receipt slot is available.
@@ -1806,7 +1843,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         let packet = self
             .core
             .send_channel_message(link_id, message_type, payload, now, rng)?;
-        Ok(TxPacket::broadcast(packet.data))
+        Ok(resolve_origin_packet(packet))
     }
 
     /// Queue a local announce with explicit queue and payload admission.
@@ -1855,10 +1892,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         let (packet, event) = self.core.close_link(link_id, rng);
         NodeActions {
             events: event.into_iter().collect(),
-            packets: packet
-                .into_iter()
-                .map(|packet| TxPacket::broadcast(packet.data))
-                .collect(),
+            packets: packet.into_iter().map(resolve_origin_packet).collect(),
             unroutable_packets: 0,
         }
     }
@@ -1929,16 +1963,6 @@ fn is_resource_context(context: u8) -> bool {
     )
 }
 
-fn destination_type_matches(wire: DestType, registered: DestinationType) -> bool {
-    matches!(
-        (wire, registered),
-        (DestType::Single, DestinationType::Single)
-            | (DestType::Group, DestinationType::Group)
-            | (DestType::Plain, DestinationType::Plain)
-            | (DestType::Link, DestinationType::Link)
-    )
-}
-
 fn saturating_u16(value: usize) -> (u16, bool) {
     match u16::try_from(value) {
         Ok(value) => (value, false),
@@ -1961,7 +1985,11 @@ const fn endpoint_retains_ingress_packet(routing: PacketRouting) -> bool {
     match routing {
         PacketRouting::All => true,
         PacketRouting::SourceInterface => true,
-        PacketRouting::ExactInterface(_) => false,
+        // Endpoint-mode native transport does not relay, so exact forwarding
+        // actions here are local rather than forwarding authority. Bound
+        // routing is emitted only by a locally owned Link.
+        PacketRouting::ExactInterface(_) => true,
+        PacketRouting::BoundInterface(_) => true,
         PacketRouting::AllExceptSource => false,
     }
 }
@@ -1982,7 +2010,9 @@ fn resolve_packet(packet: OutboundPacket, source: InterfaceId) -> TxPacket {
     let target = match packet.routing {
         PacketRouting::All => TxTarget::All,
         PacketRouting::SourceInterface => TxTarget::Only(source),
-        PacketRouting::ExactInterface(interface) => TxTarget::Only(InterfaceId(interface)),
+        PacketRouting::ExactInterface(interface) | PacketRouting::BoundInterface(interface) => {
+            TxTarget::Only(InterfaceId(interface))
+        }
         PacketRouting::AllExceptSource => TxTarget::AllExcept(source),
     };
     TxPacket {
@@ -1997,10 +2027,12 @@ fn resolve_tick_actions(native: IngestOutcome) -> NodeActions {
     for packet in native.packets {
         match packet.routing {
             PacketRouting::All => packets.push(TxPacket::broadcast(packet.data)),
-            PacketRouting::ExactInterface(interface) => packets.push(TxPacket {
-                bytes: packet.data,
-                target: TxTarget::Only(InterfaceId(interface)),
-            }),
+            PacketRouting::ExactInterface(interface) | PacketRouting::BoundInterface(interface) => {
+                packets.push(TxPacket {
+                    bytes: packet.data,
+                    target: TxTarget::Only(InterfaceId(interface)),
+                });
+            }
             PacketRouting::SourceInterface | PacketRouting::AllExceptSource => {
                 unroutable_packets += 1;
             }
@@ -2273,6 +2305,10 @@ mod tests {
         );
         assert_eq!(initiator.link_state(&link_id), Some(LinkState::Active));
         assert_eq!(established.actions.packets.len(), 1);
+        assert_eq!(
+            established.actions.packets[0].target,
+            TxTarget::Only(InterfaceId(3))
+        );
         let lrrtt = Packet::parse(&established.actions.packets[0].bytes).unwrap();
         assert_eq!(lrrtt.context, CONTEXT_LRRTT);
 
@@ -2296,12 +2332,28 @@ mod tests {
         let data = initiator
             .send_link_data(&link_id, b"bounded link payload", 110, &mut rng)
             .unwrap();
+        assert_eq!(data.target(), TxTarget::Only(InterfaceId(3)));
+        let dedup_before = responder.metrics().transport.packets_dropped_dedup;
+        let wrong_interface = responder.ingest(&data.bytes, 110, InterfaceId(8), &mut rng);
+        assert_eq!(
+            wrong_interface.disposition,
+            IngressDisposition::NativeInvalid
+        );
+        assert!(wrong_interface.actions.events.is_empty());
+        assert_eq!(
+            responder.metrics().transport.packets_dropped_dedup,
+            dedup_before
+        );
         let received = responder.ingest(&data.bytes, 110, InterfaceId(7), &mut rng);
         assert!(matches!(
             received.actions.events.first(),
             Some(NodeEvent::LinkData { link_id: id, data, .. })
                 if *id == link_id && data == b"bounded link payload"
         ));
+        assert_eq!(
+            responder.metrics().transport.packets_dropped_dedup,
+            dedup_before
+        );
         assert_eq!(initiator.metrics().admission.link_payload_too_large, 1);
     }
 
@@ -2366,29 +2418,41 @@ mod tests {
         assert_eq!(rejected_metrics.ingress.owned_link_full, 1);
         assert_eq!(rejected_metrics.capacity.links.used, 2);
 
+        let immediate_replay =
+            responder.ingest(&overflow_request.bytes, 4, InterfaceId(3), &mut rng);
+        assert_eq!(
+            immediate_replay.disposition,
+            IngressDisposition::NativeDuplicate
+        );
+        assert!(immediate_replay.actions.events.is_empty());
+        assert!(immediate_replay.actions.packets.is_empty());
+        assert_eq!(responder.metrics().ingress.owned_link_full, 1);
+        assert_eq!(responder.metrics().capacity.links.used, 2);
+        assert_eq!(rng.0, rng_before_rejection);
+
         let close = responder.close_link(&first_link_id.unwrap(), &mut rng);
         assert_eq!(close.packets.len(), 1);
         assert_eq!(close.events.len(), 1);
         assert_eq!(close.unroutable_packets, 0);
         assert_eq!(responder.metrics().capacity.links.used, 1);
 
-        let replay = responder.ingest(&overflow_request.bytes, 4, InterfaceId(3), &mut rng);
+        let replay = responder.ingest(&overflow_request.bytes, 5, InterfaceId(3), &mut rng);
         assert_eq!(replay.disposition, IngressDisposition::NativeDuplicate);
         assert!(replay.actions.events.is_empty());
         assert!(replay.actions.packets.is_empty());
         assert_eq!(responder.metrics().capacity.links.used, 1);
 
         let (fresh_request, fresh_link_id) =
-            overflow.initiate_link(destination, 5, &mut rng).unwrap();
+            overflow.initiate_link(destination, 6, &mut rng).unwrap();
         assert_ne!(fresh_link_id, overflow_link_id);
-        let fresh = responder.ingest(&fresh_request.bytes, 5, InterfaceId(3), &mut rng);
+        let fresh = responder.ingest(&fresh_request.bytes, 6, InterfaceId(3), &mut rng);
         assert_eq!(fresh.disposition, IngressDisposition::Processed);
         assert_eq!(fresh.actions.packets.len(), 1);
         assert_eq!(responder.metrics().capacity.links.used, 2);
     }
 
     #[test]
-    fn transport_rejects_relay_link_state_until_admission_is_transactional() {
+    fn transport_rejects_arbitrary_header1_relay_link_without_interface_roles() {
         let mut relay = TestNode::new(
             identity(20),
             "reticulum",
@@ -2406,13 +2470,110 @@ mod tests {
         let result = relay.ingest(&request.bytes, 1, InterfaceId(4), &mut rng);
         assert_eq!(
             result.disposition,
-            IngressDisposition::Rejected(IngressDropReason::RelayedLinksDisabled)
+            IngressDisposition::Rejected(IngressDropReason::Header1RemoteLinkRequestDisabled)
         );
         assert_eq!(relay.metrics().transport.packets_received, 0);
     }
 
     #[test]
-    fn header2_policy_filters_other_transports_and_unsafe_local_termination() {
+    fn header2_relay_link_capacity_is_typed_and_transactional() {
+        let mut relay = TestNode::new(
+            identity(30),
+            "reticulum",
+            &["relay"],
+            EmbeddedNodeConfig::transport(),
+        )
+        .unwrap();
+        let relay_identity = relay.identity_hash();
+        let mut rng = CounterRng::default();
+        let mut overflow_request = None;
+
+        for index in 0..3_u8 {
+            let responder_tag = 31 + index;
+            let responder_identity = identity(responder_tag);
+            let responder = node(responder_tag);
+            let destination = responder.destination_hash();
+            relay
+                .register_peer(
+                    &responder_identity,
+                    "reticulum",
+                    &["embedded"],
+                    u64::from(index),
+                )
+                .unwrap();
+            let mut relay_path = rete_transport::Path::direct(u64::from(index));
+            relay_path.received_on = Some(9);
+            assert!(relay.core.transport.insert_path(destination, relay_path));
+
+            let mut initiator = node(40 + index);
+            initiator
+                .register_peer(
+                    &responder_identity,
+                    "reticulum",
+                    &["embedded"],
+                    u64::from(index),
+                )
+                .unwrap();
+            let mut initiator_path =
+                rete_transport::Path::via_repeater(relay_identity, 2, u64::from(index));
+            initiator_path.received_on = Some(4);
+            assert!(
+                initiator
+                    .core
+                    .transport
+                    .insert_path(destination, initiator_path)
+            );
+            let (request, _) = initiator
+                .initiate_link(destination, u64::from(index + 1), &mut rng)
+                .unwrap();
+            assert_eq!(
+                Packet::parse(request.bytes()).unwrap().transport_id,
+                Some(relay_identity.as_ref())
+            );
+
+            let report = relay.ingest(
+                request.bytes(),
+                u64::from(index + 1),
+                InterfaceId(4),
+                &mut rng,
+            );
+            if index < 2 {
+                assert_eq!(report.disposition, IngressDisposition::Processed);
+                assert_eq!(report.actions.packets.len(), 1);
+                assert_eq!(
+                    report.actions.packets[0].target(),
+                    TxTarget::Only(InterfaceId(9))
+                );
+            } else {
+                assert_eq!(
+                    report.disposition,
+                    IngressDisposition::Rejected(IngressDropReason::RelayLinkTableFull {
+                        limit: 2,
+                    })
+                );
+                assert!(report.actions.packets.is_empty());
+                overflow_request = Some(request);
+            }
+        }
+
+        let metrics = relay.metrics();
+        assert_eq!(metrics.capacity.relay_links.used, 2);
+        assert_eq!(metrics.capacity.links.used, 0);
+        assert_eq!(metrics.ingress.relay_link_full, 1);
+        assert_eq!(metrics.transport.packets_received, 3);
+
+        let replay = relay.ingest(
+            overflow_request.as_ref().unwrap().bytes(),
+            10,
+            InterfaceId(4),
+            &mut rng,
+        );
+        assert_eq!(replay.disposition, IngressDisposition::NativeDuplicate);
+        assert_eq!(relay.metrics().capacity.relay_links.used, 2);
+    }
+
+    #[test]
+    fn header2_policy_filters_other_transports_and_admits_owned_local_termination() {
         let mut endpoint = node(23);
         let mut rng = CounterRng::default();
         let other_transport = [0xEE; rete_core::TRUNCATED_HASH_LEN];
@@ -2433,6 +2594,24 @@ mod tests {
         ));
         assert_eq!(endpoint.metrics().transport.packets_received, 0);
 
+        let mut raw = [0u8; rete_core::MTU];
+        let len = PacketBuilder::new(&mut raw)
+            .packet_type(PacketType::Data)
+            .dest_type(DestType::Link)
+            .destination_hash(&[0x7e; rete_core::TRUNCATED_HASH_LEN])
+            .context(CONTEXT_RESOURCE_ADV)
+            .payload(b"foreign resource")
+            .via(Some(&other_transport))
+            .build()
+            .unwrap();
+        let foreign_resource = endpoint.ingest(&raw[..len], 2, InterfaceId(1), &mut rng);
+        assert!(matches!(
+            foreign_resource.disposition,
+            IngressDisposition::Rejected(IngressDropReason::Header2NotAddressedToUs { .. })
+        ));
+        assert_eq!(endpoint.metrics().ingress.resource_disabled, 0);
+        assert_eq!(endpoint.metrics().ingress.header2_filtered, 2);
+
         let plain_destination = endpoint
             .register_destination(
                 "reticulum",
@@ -2445,6 +2624,24 @@ mod tests {
         let mut raw = [0u8; rete_core::MTU];
         let len = PacketBuilder::new(&mut raw)
             .packet_type(PacketType::Data)
+            .dest_type(DestType::Single)
+            .destination_hash(plain_destination.as_ref())
+            .context(0)
+            .payload(b"wrong destination type")
+            .via(Some(endpoint_transport.as_bytes()))
+            .build()
+            .unwrap();
+        let mismatched = endpoint.ingest(&raw[..len], 3, InterfaceId(1), &mut rng);
+        assert_eq!(
+            mismatched.disposition,
+            IngressDisposition::NoObservableOutcome
+        );
+        assert!(mismatched.actions.events.is_empty());
+        assert!(mismatched.actions.packets.is_empty());
+
+        let mut raw = [0u8; rete_core::MTU];
+        let len = PacketBuilder::new(&mut raw)
+            .packet_type(PacketType::Data)
             .dest_type(DestType::Plain)
             .destination_hash(plain_destination.as_ref())
             .context(0)
@@ -2452,7 +2649,7 @@ mod tests {
             .via(Some(endpoint_transport.as_bytes()))
             .build()
             .unwrap();
-        let admitted = endpoint.ingest(&raw[..len], 2, InterfaceId(1), &mut rng);
+        let admitted = endpoint.ingest(&raw[..len], 4, InterfaceId(1), &mut rng);
         assert!(matches!(
             admitted.actions.events.as_slice(),
             [NodeEvent::DataReceived { dest_hash, payload }]
@@ -2469,10 +2666,10 @@ mod tests {
             .via(Some(endpoint_transport.as_bytes()))
             .build()
             .unwrap();
-        let announce = endpoint.ingest(&raw[..len], 3, InterfaceId(1), &mut rng);
+        let announce = endpoint.ingest(&raw[..len], 5, InterfaceId(1), &mut rng);
         assert!(!matches!(
             announce.disposition,
-            IngressDisposition::Rejected(IngressDropReason::UnsupportedHeader2Dispatch { .. })
+            IngressDisposition::Rejected(_)
         ));
 
         let mut transport = TestNode::new(
@@ -2482,27 +2679,75 @@ mod tests {
             EmbeddedNodeConfig::transport(),
         )
         .unwrap();
+        let plain_destination = transport
+            .register_destination(
+                "reticulum",
+                &["transport-plain"],
+                DestinationType::Plain,
+                Direction::In,
+            )
+            .unwrap();
         let transport_identity = transport.identity_hash();
         let mut raw = [0u8; rete_core::MTU];
         let len = PacketBuilder::new(&mut raw)
             .packet_type(PacketType::Data)
-            .dest_type(DestType::Single)
-            .destination_hash(transport.destination_hash().as_ref())
+            .dest_type(DestType::Plain)
+            .destination_hash(plain_destination.as_ref())
             .context(0)
             .payload(b"must terminate locally")
             .via(Some(transport_identity.as_bytes()))
             .build()
             .unwrap();
-        let rejected = transport.ingest(&raw[..len], 2, InterfaceId(1), &mut rng);
+        let admitted = transport.ingest(&raw[..len], 2, InterfaceId(1), &mut rng);
+        assert_eq!(admitted.disposition, IngressDisposition::Processed);
         assert!(matches!(
-            rejected.disposition,
-            IngressDisposition::Rejected(IngressDropReason::UnsupportedHeader2Dispatch {
-                packet_type: PacketType::Data,
-                destination_type: DestType::Single,
-            })
+            admitted.actions.events.as_slice(),
+            [NodeEvent::DataReceived { dest_hash, payload }]
+                if *dest_hash == plain_destination && payload == b"must terminate locally"
         ));
-        assert_eq!(transport.metrics().ingress.header2_filtered, 1);
-        assert_eq!(transport.metrics().transport.packets_received, 0);
+        assert_eq!(transport.metrics().ingress.header2_filtered, 0);
+        assert_eq!(transport.metrics().transport.packets_received, 1);
+    }
+
+    #[test]
+    fn owned_header2_link_request_uses_canonical_local_admission() {
+        let mut responder = TestNode::new(
+            identity(26),
+            "reticulum",
+            &["embedded"],
+            EmbeddedNodeConfig::endpoint(),
+        )
+        .unwrap();
+        let destination = responder.destination_hash();
+        let responder_identity = identity(26);
+        let mut initiator = node(27);
+        initiator
+            .register_peer(&responder_identity, "reticulum", &["embedded"], 1)
+            .unwrap();
+        let mut path = rete_transport::Path::via_repeater(responder.identity_hash(), 1, 1);
+        path.received_on = Some(3);
+        assert!(initiator.core.transport.insert_path(destination, path));
+        let mut rng = CounterRng::default();
+        let (request, link_id) = initiator.initiate_link(destination, 2, &mut rng).unwrap();
+        assert_eq!(request.target(), TxTarget::Only(InterfaceId(3)));
+        let parsed = Packet::parse(request.bytes()).unwrap();
+        assert_eq!(parsed.header_type, HeaderType::Header2);
+        assert_eq!(
+            parsed.transport_id,
+            Some(responder.identity_hash().as_ref())
+        );
+
+        let report = responder.ingest(request.bytes(), 3, InterfaceId(8), &mut rng);
+        assert_eq!(report.disposition, IngressDisposition::Processed);
+        assert!(report.actions.events.is_empty());
+        assert_eq!(report.actions.packets.len(), 1);
+        assert_eq!(
+            report.actions.packets[0].target(),
+            TxTarget::Only(InterfaceId(8))
+        );
+        assert_eq!(responder.link_state(&link_id), Some(LinkState::Handshake));
+        assert_eq!(responder.metrics().capacity.links.used, 1);
+        assert_eq!(responder.metrics().capacity.relay_links.used, 0);
     }
 
     #[test]
@@ -2525,17 +2770,50 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_ingress_policy_suppresses_both_forwarding_routes() {
+    fn endpoint_ingress_policy_retains_owned_exact_and_suppresses_propagation() {
         assert!(endpoint_retains_ingress_packet(PacketRouting::All));
         assert!(endpoint_retains_ingress_packet(
             PacketRouting::SourceInterface
         ));
-        assert!(!endpoint_retains_ingress_packet(
+        assert!(endpoint_retains_ingress_packet(
             PacketRouting::ExactInterface(9)
+        ));
+        assert!(endpoint_retains_ingress_packet(
+            PacketRouting::BoundInterface(9)
         ));
         assert!(!endpoint_retains_ingress_packet(
             PacketRouting::AllExceptSource
         ));
+    }
+
+    #[test]
+    fn origin_packet_resolution_preserves_absolute_routing() {
+        let exact = resolve_origin_packet(OutboundPacket {
+            data: vec![0xa5],
+            routing: PacketRouting::ExactInterface(7),
+        });
+        assert_eq!(exact.bytes(), &[0xa5]);
+        assert_eq!(exact.target(), TxTarget::Only(InterfaceId(7)));
+
+        let bound = resolve_origin_packet(OutboundPacket {
+            data: vec![0xb5],
+            routing: PacketRouting::BoundInterface(8),
+        });
+        assert_eq!(bound.bytes(), &[0xb5]);
+        assert_eq!(bound.target(), TxTarget::Only(InterfaceId(8)));
+
+        let broadcast = resolve_origin_packet(OutboundPacket::broadcast(vec![0xb6]));
+        assert_eq!(broadcast.bytes(), &[0xb6]);
+        assert_eq!(broadcast.target(), TxTarget::All);
+    }
+
+    #[test]
+    #[should_panic(expected = "pinned Rete origin API emitted source-relative routing")]
+    fn origin_packet_resolution_rejects_source_context() {
+        let _ = resolve_origin_packet(OutboundPacket {
+            data: vec![0xc7],
+            routing: PacketRouting::SourceInterface,
+        });
     }
 
     #[test]
@@ -2549,6 +2827,10 @@ mod tests {
                     routing: PacketRouting::ExactInterface(9),
                 },
                 OutboundPacket {
+                    data: vec![0xb3],
+                    routing: PacketRouting::BoundInterface(8),
+                },
+                OutboundPacket {
                     data: vec![0xc3],
                     routing: PacketRouting::SourceInterface,
                 },
@@ -2557,13 +2839,16 @@ mod tests {
                     routing: PacketRouting::AllExceptSource,
                 },
             ],
+            rejection: None,
         });
 
-        assert_eq!(actions.packets.len(), 2);
+        assert_eq!(actions.packets.len(), 3);
         assert_eq!(actions.packets[0].bytes(), &[0xa1]);
         assert_eq!(actions.packets[0].target(), TxTarget::All);
         assert_eq!(actions.packets[1].bytes(), &[0xb2]);
         assert_eq!(actions.packets[1].target(), TxTarget::Only(InterfaceId(9)));
+        assert_eq!(actions.packets[2].bytes(), &[0xb3]);
+        assert_eq!(actions.packets[2].target(), TxTarget::Only(InterfaceId(8)));
         assert_eq!(actions.unroutable_packets, 2);
     }
 
@@ -2699,13 +2984,237 @@ mod tests {
             InterfaceId(overflow_tag),
             &mut rng,
         );
-        assert_eq!(
+        assert!(matches!(
             report.disposition,
-            IngressDisposition::Rejected(IngressDropReason::ReverseTableFull { limit: 4 })
-        );
+            IngressDisposition::Rejected(IngressDropReason::ReverseTableFull { limit: 4, .. })
+        ));
         assert!(report.actions.packets.is_empty());
         assert_eq!(relay.metrics().transport.packets_received, 4);
         assert_eq!(relay.metrics().ingress.reverse_table_full, 1);
+    }
+
+    #[test]
+    fn header1_reverse_shim_defers_unbound_peer_path_to_native_invalid() {
+        let mut relay = TestNode::new(
+            identity(75),
+            "reticulum",
+            &["relay"],
+            EmbeddedNodeConfig::transport(),
+        )
+        .unwrap();
+        let peer = identity(76);
+        let destination = node(76).destination_hash();
+        relay
+            .register_peer(&peer, "reticulum", &["embedded"], 1)
+            .unwrap();
+        assert_eq!(
+            relay
+                .core
+                .transport
+                .get_path(&destination)
+                .and_then(|path| path.received_on),
+            None
+        );
+
+        let mut raw = [0u8; rete_core::MTU];
+        let len = PacketBuilder::new(&mut raw)
+            .packet_type(PacketType::Data)
+            .dest_type(DestType::Single)
+            .destination_hash(destination.as_ref())
+            .context(0)
+            .payload(b"no learned egress")
+            .build()
+            .unwrap();
+        let mut rng = CounterRng::default();
+
+        let report = relay.ingest(&raw[..len], 2, InterfaceId(6), &mut rng);
+        assert_eq!(report.disposition, IngressDisposition::NativeInvalid);
+        assert!(report.actions.events.is_empty());
+        assert!(report.actions.packets.is_empty());
+        assert_eq!(relay.metrics().capacity.reverse_entries.used, 0);
+        assert_eq!(relay.metrics().ingress.native_invalid, 1);
+    }
+
+    #[test]
+    fn header2_reverse_capacity_rejection_is_typed_and_deduplicated() {
+        let mut relay = TestNode::new(
+            identity(80),
+            "reticulum",
+            &["relay"],
+            EmbeddedNodeConfig::transport(),
+        )
+        .unwrap();
+        let relay_identity = relay.identity_hash();
+        let mut rng = CounterRng::default();
+        let mut overflow = Vec::new();
+
+        for tag in 81..86_u8 {
+            let peer = identity(tag);
+            let destination = node(tag).destination_hash();
+            relay
+                .register_peer(&peer, "reticulum", &["embedded"], u64::from(tag))
+                .unwrap();
+            let mut path = rete_transport::Path::direct(u64::from(tag));
+            path.received_on = Some(7);
+            assert!(relay.core.transport.insert_path(destination, path));
+
+            let mut raw = [0u8; rete_core::MTU];
+            let len = PacketBuilder::new(&mut raw)
+                .packet_type(PacketType::Data)
+                .dest_type(DestType::Single)
+                .destination_hash(destination.as_ref())
+                .context(0)
+                .payload(&[tag])
+                .via(Some(relay_identity.as_bytes()))
+                .build()
+                .unwrap();
+            let report = relay.ingest(&raw[..len], u64::from(tag), InterfaceId(6), &mut rng);
+            if tag < 85 {
+                assert_eq!(report.disposition, IngressDisposition::Processed);
+                assert_eq!(report.actions.packets.len(), 1);
+                assert_eq!(
+                    report.actions.packets[0].target(),
+                    TxTarget::Only(InterfaceId(7))
+                );
+            } else {
+                assert!(matches!(
+                    report.disposition,
+                    IngressDisposition::Rejected(IngressDropReason::ReverseTableFull {
+                        limit: 4,
+                        ..
+                    })
+                ));
+                assert!(report.actions.packets.is_empty());
+                overflow.extend_from_slice(&raw[..len]);
+            }
+        }
+
+        let metrics = relay.metrics();
+        assert_eq!(metrics.capacity.reverse_entries.used, 4);
+        assert_eq!(metrics.ingress.reverse_table_full, 1);
+        assert_eq!(metrics.transport.packets_received, 5);
+
+        let replay = relay.ingest(&overflow, 90, InterfaceId(6), &mut rng);
+        assert_eq!(replay.disposition, IngressDisposition::NativeDuplicate);
+        assert_eq!(relay.metrics().capacity.reverse_entries.used, 4);
+    }
+
+    #[test]
+    fn native_reverse_route_conflict_maps_to_stable_product_diagnostics() {
+        let mut node = node(86);
+        let truncated_hash = [0x5a; rete_core::TRUNCATED_HASH_LEN];
+        let report = node.finish_ingest(
+            IngestOutcome {
+                events: Vec::new(),
+                packets: Vec::new(),
+                rejection: Some(IngestRejection::ReverseRouteConflict { truncated_hash }),
+            },
+            IngressPreflight {
+                before_duplicate: 0,
+                before_invalid: 0,
+                metadata: IngressMetadata::default(),
+            },
+            InterfaceId(1),
+            TerminalCommitCounts::default(),
+        );
+        assert_eq!(
+            report.disposition,
+            IngressDisposition::Rejected(IngressDropReason::ReverseRouteConflict {
+                truncated_hash,
+            })
+        );
+        assert!(report.actions.events.is_empty());
+        assert!(report.actions.packets.is_empty());
+        assert_eq!(node.metrics().ingress.reverse_route_conflict, 1);
+    }
+
+    #[test]
+    fn header1_reverse_shim_rejects_route_conflict_without_redirecting_state() {
+        let mut relay = TestNode::new(
+            identity(87),
+            "reticulum",
+            &["relay"],
+            EmbeddedNodeConfig::transport(),
+        )
+        .unwrap();
+        let peer = identity(88);
+        let destination = node(88).destination_hash();
+        relay
+            .register_peer(&peer, "reticulum", &["embedded"], 1)
+            .unwrap();
+        let mut path = rete_transport::Path::direct(1);
+        path.received_on = Some(7);
+        assert!(relay.core.transport.insert_path(destination, path));
+        let mut rng = CounterRng::default();
+
+        let mut raw = [0u8; rete_core::MTU];
+        let len = PacketBuilder::new(&mut raw)
+            .packet_type(PacketType::Data)
+            .dest_type(DestType::Single)
+            .destination_hash(destination.as_ref())
+            .context(0)
+            .payload(b"stable reverse route")
+            .build()
+            .unwrap();
+        let packet_hash = Packet::parse(&raw[..len]).unwrap().compute_hash();
+        let key: [u8; rete_core::TRUNCATED_HASH_LEN] = packet_hash[..rete_core::TRUNCATED_HASH_LEN]
+            .try_into()
+            .unwrap();
+        let first = relay.ingest(&raw[..len], 2, InterfaceId(6), &mut rng);
+        assert_eq!(first.disposition, IngressDisposition::Processed);
+        assert_eq!(first.actions.packets.len(), 1);
+        assert_eq!(
+            relay.core.transport.get_reverse(&key).map(|entry| (
+                entry.received_on,
+                entry.forwarded_to,
+                entry.timestamp
+            )),
+            Some((6, 7, 2))
+        );
+
+        // Evict the original full hash from the rolling dedup window while
+        // leaving the longer-lived reverse entry intact.
+        for tag in 0..8_u8 {
+            let mut filler = [0u8; rete_core::MTU];
+            let filler_len = PacketBuilder::new(&mut filler)
+                .packet_type(PacketType::Proof)
+                .dest_type(DestType::Single)
+                .destination_hash(&[tag; rete_core::TRUNCATED_HASH_LEN])
+                .context(0)
+                .payload(&[tag])
+                .build()
+                .unwrap();
+            let _ = relay.ingest(
+                &filler[..filler_len],
+                u64::from(tag + 3),
+                InterfaceId(9),
+                &mut rng,
+            );
+        }
+
+        let conflict = relay.ingest(&raw[..len], 20, InterfaceId(5), &mut rng);
+        assert_eq!(
+            conflict.disposition,
+            IngressDisposition::Rejected(IngressDropReason::ReverseRouteConflict {
+                truncated_hash: key,
+            })
+        );
+        assert!(conflict.actions.packets.is_empty());
+        assert_eq!(relay.metrics().ingress.reverse_route_conflict, 1);
+        assert_eq!(relay.metrics().transport.packets_forwarded, 1);
+        assert_eq!(
+            relay.core.transport.get_reverse(&key).map(|entry| (
+                entry.received_on,
+                entry.forwarded_to,
+                entry.timestamp
+            )),
+            Some((6, 7, 2))
+        );
+
+        let replay = relay.ingest(&raw[..len], 21, InterfaceId(5), &mut rng);
+        assert_eq!(replay.disposition, IngressDisposition::NativeDuplicate);
+        assert_eq!(relay.metrics().transport.packets_forwarded, 1);
+        assert_eq!(relay.metrics().capacity.reverse_entries.used, 1);
     }
 
     #[test]
@@ -3324,6 +3833,11 @@ mod tests {
         let message = initiator
             .send_channel_message(&link_id, 7, b"bounded channel proof", 110, &mut rng)
             .unwrap();
+        assert_eq!(
+            established.actions.packets[0].target(),
+            TxTarget::Only(InterfaceId(2))
+        );
+        assert_eq!(message.target(), TxTarget::Only(InterfaceId(2)));
         let receipt = ReceiptId(Packet::parse(message.bytes()).unwrap().compute_hash());
         let proof_actions = responder.ingest(message.bytes(), 110, InterfaceId(1), &mut rng);
         let generated_tag = proof_actions
@@ -3340,6 +3854,7 @@ mod tests {
                     .is_ok_and(|packet| packet.packet_type == PacketType::Proof)
             })
             .unwrap();
+        assert_eq!(proof.target(), TxTarget::Only(InterfaceId(1)));
         let mut sink = RecordingReceiptSink::default();
 
         let report = initiator

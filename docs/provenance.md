@@ -9,7 +9,7 @@ authoritative in the lockfile.
 | Component | Source | Pin | License used here | Build role |
 | --- | --- | --- | --- | --- |
 | Project-owned crates | This repository | current tree | MIT OR Apache-2.0 | Product and shared tooling |
-| Rete integration fork | <https://github.com/evelant/rete> | `9bceacdc27fe6e5f5b8df6e70eba560ef0930329` (durable tag `firmware-pin-9bceacd`), based on upstream `9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743` | Apache-2.0 option from retained upstream declaration | Provisional RNS foundation and firmware compile graph; includes canonical local LINKREQUEST validation, transactional owned-Link admission, endpoint announce policy, caller-owned DATA preparation, bounded receipt backpressure, allocation-atomic proof/timeout terminals, full-hash/Link-ID-bound DATA/channel terminal candidates, exact path/reverse/link forwarding, fail-closed LRPROOF relay validation, identities-only snapshot restoration, and LXMF attempt correlation. The first three generic changes were already offered in upstream PRs 7, 9 and 11; the newer lifecycle and routing work remains fork-local unless the user directly approves an upstream issue or PR. |
+| Rete integration fork | <https://github.com/evelant/rete> | `fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2` (designated durable tag `firmware-pin-fb96ac1`), based on upstream `9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743` | Apache-2.0 option from retained upstream declaration | Provisional RNS foundation and firmware compile graph; includes canonical local LINKREQUEST validation, transactional owned- and relay-Link admission, endpoint announce policy, caller-owned DATA preparation, bounded receipt backpressure, allocation-atomic proof/timeout terminals, full-hash/Link-ID-bound DATA/channel terminal candidates, exact path/reverse/link forwarding, typed reverse-full/conflict admission, owned HEADER_2 local dispatch, narrow exact-path HEADER_2 DATA/LINKREQUEST relay, foreign-H2 filtering, fail-closed LRPROOF validation, authenticated owned-Link interface binding and pre-dedup wrong-interface rejection, identities-only snapshot restoration, and LXMF attempt correlation. The first three generic changes were already offered in upstream PRs 7, 9 and 11; the newer lifecycle and routing work remains fork-local unless the user directly approves an upstream issue or PR. |
 | Leviculum | <https://codeberg.org/Lew_Palm/leviculum> | `5fb1db0e5e5a490291ee5f6b81312cf0c9de622a` | AGPL-3.0-or-later | Separate protocol oracle and fallback package |
 | esp-hal family | <https://github.com/esp-rs/esp-hal> | crates.io versions in lockfile | MIT OR Apache-2.0 | ESP32-S3 platform |
 | esp-rtos | Published crates.io 0.3.0 source vendored at `vendor/esp-rtos-0.3.0` | archive SHA-256 `551f90766e1527edaa0c91e8d559e9e2a60397b545e93357ac61fb31845e5712`; crate-recorded upstream commit `347003de8a48320bb7724f53045be3afa9204411`; exact tree and pristine/patched hashes in `VENDOR-HASHES.json` | MIT OR Apache-2.0, with canonical license texts added as project provenance files | Local CPU0 and CPU1 main-stack slice unit corrections; exact edits, mechanical integrity guard and removal condition are recorded in `PATCHES.md` |
@@ -17,13 +17,37 @@ authoritative in the lockfile.
 | embedded-hal / embedded-hal-async / embedded-hal-bus / lora-modulation | crates.io | exact versions in workspace and lockfile | MIT OR Apache-2.0 | Portable pin/SPI/profile contracts and the target-exclusive async SPI device |
 | Embassy futures/sync/time, static_cell and zeroize | crates.io | exact versions in workspace and lockfile | MIT OR Apache-2.0 | Bounded target coordination, in-place protocol ownership and temporary key cleanup |
 
-Commit `9bceacdc27fe6e5f5b8df6e70eba560ef0930329` is durably retained by
-`firmware-pin-9bceacd`. It adds exact-interface transport outcomes through the
+The designated durable tag for commit
+`fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2` is `firmware-pin-fb96ac1`. The pin
+adds exact-interface transport outcomes through the
 stack and Embassy/Tokio dispatch layers; one-shot reverse-proof interface
 validation; direction, hop, identity, signature, and canonical-header checks
-for relayed Link proofs; and identities-only snapshot restore until stable
-interface rebinding exists. No issue or pull request was opened for this newer
-work. Publishing it upstream still requires the user's direct approval.
+for relayed Link proofs; transactional owned/relay Link and H2 reverse
+admission; typed stack rejections for owned/relay Link exhaustion and reverse
+full/conflict; owned H2 local dispatch; and identities-only snapshot restore
+until stable interface rebinding exists. Relay-Link occupancy is independently
+observable. Arbitrary remote H1 LINKREQUEST and the guarded H1 DATA
+compatibility seam remain gated on explicit interface roles. No issue or pull
+request was opened for this newer work. Publishing it upstream still requires
+the user's direct approval.
+
+For locally owned Links, the responder binds LINKREQUEST ingress and the
+initiator binds only after valid LRPROOF ingress; preliminary path selection is
+not authoritative Link state. Established output carries `BoundInterface` and
+resolves to the exact physical interface. Only an initial LINKREQUEST whose
+path lacks a recorded interface may broadcast. Wrong-interface Link DATA and
+`RESOURCE_PRF` fail before dedup admission. This pin still stores only an
+interface-slot index: asynchronous output on a bound Tokio shared `Hub`
+broadcasts to sibling clients until endpoint-aware client identity and
+reconnect generation are retained. Pending-Link `expected_hops`, Python's
+unencrypted initiator-request/responder-reply keepalive behavior, and receipt
+replacement for fresh-hash channel retransmissions remain unresolved.
+
+Earlier build and powered-evidence records retain the Rete revisions and
+artifact hashes they actually used. In particular, records naming `9bceacd` or
+`f6f5fb0` remain historical evidence only and do not qualify this current pin.
+There is no retained E290 ELF, flashed-image readback or powered proof for
+`fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2` itself.
 
 Phase-1 normal/pressure and closure artifact manifests bind the project commit
 and its raw Git root tree; their tool inventories record the same pair and the

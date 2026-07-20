@@ -10,8 +10,12 @@ DATA/LXMF submission, client delivery, and full powered E290 qualification of
 the product image remain open.
 The permanent image's bounded source-`96e38aa` boot/interface/ordinary-TX smoke
 has passed, without controlled peer RX or DATA.
-**Rete pin:** `9bceacdc27fe6e5f5b8df6e70eba560ef0930329`
-(`firmware-pin-9bceacd`)
+**Rete pin:** `fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2`
+(designated durable tag `firmware-pin-fb96ac1`)
+
+This exact pin has no retained E290 ELF, flashed-image readback or powered
+proof. The source-`96e38aa` result above and later hardware/artifact records are
+historical evidence bound to the revisions they name.
 
 At this pin, native ingress distinguishes exact path/reverse/Link forwarding
 from genuine propagation. `PacketRouting::ExactInterface(id)` maps to the
@@ -25,16 +29,49 @@ the stored direction and hop count. LRPROOF is stricter: it must arrive from
 the responder-side interface at the stored remaining hops, the responder
 identity must be known and reconstructable, and its signature must validate
 before the Link entry is refreshed or the proof is forwarded. A targeted
-HEADER_2 LRPROOF is rejected instead of bypassing that canonical HEADER_1 path
-through generic Link transport.
+HEADER_2 LRPROOF is normalized into that canonical validation instead of
+bypassing it through generic Link transport; a valid proof retains exact relay
+routing, while an invalid one does not refresh the Link.
 
-These routing corrections do not make relay admission transactional. Rete
-still does not expose a reserve/commit result for bounded relay-Link and
-reverse-table insertion, so `EmbeddedNode` keeps relayed LINKREQUEST disabled
-and preflights the admitted ordinary DATA relay paths. Rete snapshot loading
-also restores identities only. Saved path observations and cached announces
-remain inactive until a stable interface identity can be rebound explicitly;
-the node must relearn them after restart.
+The current native stack also normalizes owned HEADER_2 local traffic into
+ordinary DATA, LINKREQUEST, Link and proof/receipt dispatch. Transported
+HEADER_2 DATA/SINGLE and LINKREQUEST/SINGLE require an exact path and admit
+reverse or relay-Link state transactionally before forwarding. Stack outcomes
+carry typed owned/relay `LinkTableFull`, `ReverseTableFull`, and
+`ReverseRouteConflict` rejections; the project adapter maps them without
+reconstructing failure from counters. Foreign non-ANNOUNCE H2 packets are
+filtered before state mutation, while H2 ANNOUNCE remains eligible for normal
+announce validation. Relay-Link occupancy is exposed separately from owned
+Links. The deterministic 144-check project conformance run includes a complete
+three-node A--B--C Link handshake, channel DATA and proof flow over two exact
+relay interfaces.
+
+Locally owned Link output has a separate authenticated binding. A responder
+binds to LINKREQUEST ingress. An initiator's learned path selects the initial
+request target but does not bind the Link; only a valid LRPROOF does so. Active
+application output and asynchronous close, keepalive, retransmit,
+request/response and Resource output carry `BoundInterface`, which the adapter
+maps to the exact physical interface. Only the initial LINKREQUEST may
+broadcast, and only when its path has no recorded interface. Link DATA and
+`RESOURCE_PRF` on another interface are rejected before dedup admission, so a
+later authoritative-interface copy remains eligible.
+
+This native binding is an interface slot, not a shared-instance client
+endpoint. Synchronous Tokio `Hub` output can retain the source client, but
+asynchronous owned-Link output broadcasts to sibling clients on that slot until
+Link state carries endpoint-aware client identity and reconnect generation.
+Pending-Link `expected_hops` still needs Python parity. Python's unencrypted,
+initiator-request/responder-reply keepalive exchange also differs from Rete's
+current encrypted bidirectional behavior, and channel retransmission still
+changes ciphertext/hash without replacing the original receipt.
+
+Arbitrary remote HEADER_1 LINKREQUEST remains disabled until interface roles
+distinguish it from local-origin injection. The temporary H1 DATA compatibility
+path guards reverse exhaustion and truncated-key conflicts before native
+ingress; pending owned Links still need a Python-parity audit for retained
+`expected_hops`. Rete snapshot loading restores identities only. Saved path
+observations and cached announces remain inactive until a stable interface
+identity can be rebound explicitly; the node must relearn them after restart.
 
 ## Purpose and boundary
 
@@ -477,17 +514,21 @@ layout guard keeps every packet array external. The current firmware allocates
 none of this TX path.
 
 `PATHS` bounds the current Rete path, reverse and destination-DATA receipt maps
-and the node-core attempt ledger. Rete's heapless maps require `PATHS` and
-`LINKS` to be powers of two greater than one; announce and deduplication deques
-require `ANNOUNCES > 0` and `DEDUPLICATION > 0`.
+and the node-core attempt ledger. `LINKS` independently bounds the owned and
+relay Link maps. Rete's heapless maps require `PATHS` and `LINKS` to be powers
+of two greater than one; announce and deduplication deques require
+`ANNOUNCES > 0` and `DEDUPLICATION > 0`.
 `capacity_profile_is_supported()` exposes that project-owned guard, and
 `NodeCore::new()` has compile-time assertions for a monomorphized invalid
 profile. Retained tombstones intentionally reduce new-attempt capacity until
 acknowledged.
 
-`CapacitySnapshot` reports registered buffers, queued/used/configured dispatch
-metadata, current/configured Rete receipts and active/terminal/used/configured
-attempt slots. It exposes no native Rete collection or packet bytes.
+Node-core's `CapacitySnapshot` reports registered buffers,
+queued/used/configured dispatch metadata, current/configured Rete receipts and
+active/terminal/used/configured attempt slots. The enclosing `EmbeddedNode`
+metrics separately report owned Links, relay Links and reverse occupancy. Both
+surfaces expose only scalar counts, never a native Rete collection or packet
+bytes.
 
 The crate itself uses no allocator API and compiles for generic bare metal.
 Its owned Rete node still has allocation-backed construction and ordinary

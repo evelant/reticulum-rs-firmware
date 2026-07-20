@@ -72,19 +72,49 @@ remain open.
 Bitrate and cost are recorded but do not replace Reticulum routing. Until Rete
 paths carry an interface generation, an ID/configuration stays immutable for
 one node-owner lifetime or its learned paths must be purged before reuse.
-The current Rete pin, `9bceacdc27fe6e5f5b8df6e70eba560ef0930329`
-(`firmware-pin-9bceacd`), carries learned path, reverse, and Link decisions as
+The current Rete pin, `fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2`
+(designated durable tag `firmware-pin-fb96ac1`), carries learned path, reverse,
+and Link decisions as
 exact interface targets instead of falling back to interface zero or generic
 broadcast. An exact target may intentionally equal the ingress slot, which is
 required to relay between peers on one shared LoRa interface. Reverse proofs
 are one-shot and return only from the interface to which the covered packet was
 forwarded; relayed Link proofs additionally require the stored direction and
 hop count, and LRPROOF requires a known, reconstructable responder identity and
-a valid signature. A targeted HEADER_2 LRPROOF is rejected instead of bypassing
-that canonical HEADER_1 validation through generic Link transport. Relay-table
-and reverse-table insertion failure is still not transactional, so the product
-adapter continues to reject relayed LINKREQUESTs and preflight the admitted
-DATA relay paths.
+a valid signature. A targeted HEADER_2 LRPROOF is normalized into that
+canonical validation instead of bypassing it through generic Link transport;
+only a direction-, hop-, identity- and signature-valid proof is forwarded. Owned
+HEADER_2 traffic now reaches normal local DATA, LINKREQUEST, Link, proof and
+receipt dispatch. Transported HEADER_2 DATA/SINGLE and LINKREQUEST/SINGLE use
+transactional exact-path relay admission; owned- and relay-Link exhaustion,
+reverse-table exhaustion, and truncated reverse-route conflicts are returned as
+typed ingress rejections without forwarding or partial routing state. Foreign
+non-ANNOUNCE HEADER_2 traffic is filtered before native state mutation, while
+HEADER_2 ANNOUNCE remains eligible for ordinary announce validation. Relay-Link
+occupancy is observable separately from locally owned Links. Arbitrary remote
+HEADER_1 LINKREQUEST remains fail-closed until interface roles distinguish it
+from local-origin injection, and HEADER_1 DATA retains a guarded compatibility
+shim for that same role boundary.
+
+Locally owned Links now acquire an authenticated interface binding instead of
+using a generic broadcast after establishment. A responder binds to the
+LINKREQUEST ingress interface; an initiator remains unbound after sending its
+request and binds only when a valid LRPROOF arrives. Subsequent application,
+close, keepalive, retransmit, request/response and Resource output carries
+native `BoundInterface`, which the project adapter resolves to the exact
+physical interface. Within this owned-Link lifecycle, only an initial
+LINKREQUEST whose path has no recorded interface may broadcast. Link DATA and
+`RESOURCE_PRF` received on another interface are rejected before deduplication,
+so a later copy on the authoritative interface is still admissible.
+
+The current binding is an interface-slot index, not a shared-host client
+endpoint. On Rete's Tokio `Hub`, synchronous output can retain the originating
+client, but asynchronous owned-Link output still broadcasts to sibling clients
+on the bound slot until endpoint-aware identity and reincarnation are carried
+through Link state. Remaining Python-parity work also includes pending-Link
+`expected_hops`, Python's unencrypted initiator-request/responder-reply
+keepalive wire behavior, and receipt replacement for channel retransmissions
+whose freshly randomized ciphertext changes the packet hash.
 Snapshot loading currently restores identities only; saved paths and cached
 announces remain inactive until stable interface rebinding is defined.
 
@@ -472,17 +502,25 @@ after frame exposure with an ordinary announce queued behind the DATA owner;
 LoRa lease offline, and permits no later host-radio TX or RX. This qualifies the
 software composition, not ESP32-S3 execution or RF hardware.
 The focused host clients pass 56 tests inside the 248-test xtask suite; the
-portable Rete integration and raw-RNS inbox store pass 45 and 17 tests,
+portable Rete integration and raw-RNS inbox store pass 53 and 17 tests,
 respectively.
-Those 45 tests exercise this repository's adapter and are separate from the
-pinned Rete fork's selected validation set. At
-`9bceacdc27fe6e5f5b8df6e70eba560ef0930329`, that set passes 591 tests: 239
-transport (155 library, 9 computed-vector, 40 forwarding, 30 Link-integration,
-and 5 path-request), 125 stack (124 library and one integration), 143 LXMF
-library, and 84 daemon library tests. CI directly runs the four current library
-targets, which total 506 tests; adding the 84 transport and one stack
-integration tests produces 591. This is a named selected set, not a count of
-every nested workspace test target.
+Those 53 tests exercise this repository's adapter and are separate from the
+pinned Rete fork's selected validation set. The project conformance runner now
+performs 144 checks, including a 32-check three-node A--B--C relayed Link,
+LRPROOF/LRRTT, encrypted channel DATA and proof flow through independent exact
+interface IDs. This is deterministic project-side conformance, not a powered or
+live-Python multi-hop claim. At
+`fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2`, the selected upstream set passes
+614 tests: 254 transport (165 library, 9 computed-vector, 43 forwarding, 32
+Link-integration, and 5 path-request), 133 stack (132 library and one
+integration), 143 LXMF library, and 84 daemon library tests. The four library
+targets total 524 tests; adding the 89 transport and one stack integration tests
+produces 614. This is a named selected set, not a count of every nested
+workspace test target.
+
+This pin has host and portable-target evidence only. It has no retained E290
+ELF, flashed-image readback or powered proof; all powered and ELF records below
+name their historical source and Rete revisions and remain historical evidence.
 
 The journal's isolated powered storage HIL passed on
 board E9:44 from clean source `7b47113`: one counted capture spans raw-flash

@@ -563,6 +563,10 @@ fn verify_released_vectors() -> Result<usize, String> {
     let outbound_packet = parse_packet(outbound.bytes())
         .map_err(|error| format!("sender emitted invalid live-path DATA: {error}"))?;
     require(
+        outbound.target() == TxTarget::Only(InterfaceId(2)),
+        "sender DATA did not retain its learned origin interface",
+    )?;
+    require(
         outbound_packet.transport_id == Some(relay_identity.as_ref()),
         "sender DATA did not target relay",
     )?;
@@ -599,7 +603,7 @@ fn verify_released_vectors() -> Result<usize, String> {
         relay.metrics().transport.packets_forwarded == 1,
         "relay forwarding counter did not advance",
     )?;
-    checks += 12;
+    checks += 13;
 
     // Complete the path at the identity that emitted the pinned Python
     // announce. This proves Rete's native endpoint can decrypt DATA addressed
@@ -742,7 +746,7 @@ fn verify_released_vectors() -> Result<usize, String> {
         "initiator did not emit exactly one LRRTT",
     )?;
     require(
-        initiator_established.actions.packets[0].target() == TxTarget::All,
+        initiator_established.actions.packets[0].target() == TxTarget::Only(initiator_interface),
         "LRRTT used unexpected routing",
     )?;
     let lrrtt = parse_packet(initiator_established.actions.packets[0].bytes())
@@ -786,7 +790,7 @@ fn verify_released_vectors() -> Result<usize, String> {
         )
         .map_err(|error| format!("initiator could not send encrypted Link DATA: {error}"))?;
     require(
-        encrypted_link_data.target() == TxTarget::All,
+        encrypted_link_data.target() == TxTarget::Only(initiator_interface),
         "encrypted Link DATA used unexpected routing",
     )?;
     let parsed_link_data = parse_packet(encrypted_link_data.bytes())
@@ -829,7 +833,7 @@ fn verify_released_vectors() -> Result<usize, String> {
         )
         .map_err(|error| format!("initiator could not send channel message: {error}"))?;
     require(
-        channel_data.target() == TxTarget::All,
+        channel_data.target() == TxTarget::Only(initiator_interface),
         "channel DATA used unexpected routing",
     )?;
     require(
@@ -915,7 +919,264 @@ fn verify_released_vectors() -> Result<usize, String> {
     )?;
     checks += 13;
 
+    checks += verify_three_node_relayed_link()?;
+
     Ok(checks)
+}
+
+/// Exercise the product-owned adapter across three independently routed node
+/// instances. Interface identifiers are deliberately local to each node; the
+/// relay must retain and select its two exact sides without treating the
+/// endpoint identifiers as globally meaningful.
+fn verify_three_node_relayed_link() -> Result<usize, String> {
+    let mut rng = CounterRng::default();
+    let mut node_a = new_conformance_node(&[0xa1; 32])
+        .map_err(|error| format!("could not construct relayed-Link initiator: {error}"))?;
+    let mut node_b = new_conformance_transport_node(&[0xb2; 32])
+        .map_err(|error| format!("could not construct relayed-Link transport: {error}"))?;
+    let mut node_c = new_conformance_node(&[0xc3; 32])
+        .map_err(|error| format!("could not construct relayed-Link responder: {error}"))?;
+
+    let a_to_b = InterfaceId(11);
+    let b_to_a = InterfaceId(21);
+    let b_to_c = InterfaceId(31);
+    let c_to_b = InterfaceId(41);
+    let now = 1_700_001_000;
+
+    node_c
+        .queue_announce(None, now, &mut rng)
+        .map_err(|error| format!("responder could not queue announce: {error}"))?;
+    let announce = node_c
+        .flush_announces(now, &mut rng)
+        .into_iter()
+        .next()
+        .ok_or_else(|| "responder announce was not immediately available".to_owned())?;
+    let learned_by_b = node_b.ingest(announce.bytes(), now, b_to_c, &mut rng);
+    require(
+        learned_by_b.actions.packets.len() == 1,
+        "transport did not relay responder announce",
+    )?;
+    let relayed_announce = &learned_by_b.actions.packets[0];
+    require(
+        relayed_announce.target() == TxTarget::All,
+        "transport announce did not use propagation routing",
+    )?;
+    let learned_by_a = node_a.ingest(relayed_announce.bytes(), now + 1, a_to_b, &mut rng);
+    require(
+        learned_by_a.actions.events.len() == 1,
+        "initiator did not observe responder announce through transport",
+    )?;
+    let route = node_a
+        .route(&node_c.destination_hash())
+        .ok_or_else(|| "initiator did not retain responder route".to_owned())?;
+    require(
+        route.via == Some(node_b.identity_hash()) && route.received_on == Some(a_to_b),
+        "initiator retained the wrong transport route",
+    )?;
+
+    let (request, link_id) = node_a
+        .initiate_link(node_c.destination_hash(), now + 2, &mut rng)
+        .map_err(|error| format!("initiator could not build relayed LINKREQUEST: {error}"))?;
+    let parsed_request = parse_packet(request.bytes())
+        .map_err(|error| format!("initiator emitted invalid relayed LINKREQUEST: {error}"))?;
+    require(
+        request.target() == TxTarget::Only(a_to_b),
+        "relayed LINKREQUEST used an unexpected origin route",
+    )?;
+    require(
+        parsed_request.transport_id == Some(node_b.identity_hash().as_ref()),
+        "relayed LINKREQUEST did not target the learned transport",
+    )?;
+    let forwarded_request = node_b.ingest(request.bytes(), now + 3, b_to_a, &mut rng);
+    require(
+        forwarded_request.actions.events.is_empty() && forwarded_request.actions.packets.len() == 1,
+        "transport did not forward exactly one relayed LINKREQUEST",
+    )?;
+    require(
+        forwarded_request.actions.packets[0].target() == TxTarget::Only(b_to_c),
+        "transport sent LINKREQUEST on the wrong exact interface",
+    )?;
+    require(
+        node_b.metrics().capacity.relay_links.used == 1
+            && node_b.metrics().capacity.links.used == 0,
+        "transport did not retain exactly one relay-owned Link route",
+    )?;
+    let parsed_forwarded_request = parse_packet(forwarded_request.actions.packets[0].bytes())
+        .map_err(|error| format!("transport emitted invalid LINKREQUEST: {error}"))?;
+    require(
+        parsed_forwarded_request.transport_id.is_none()
+            && parsed_forwarded_request.hops == parsed_request.hops.saturating_add(1),
+        "transport did not consume exactly one LINKREQUEST transport hop",
+    )?;
+
+    let responder_proof = node_c.ingest(
+        forwarded_request.actions.packets[0].bytes(),
+        now + 4,
+        c_to_b,
+        &mut rng,
+    );
+    require(
+        responder_proof.actions.events.is_empty() && responder_proof.actions.packets.len() == 1,
+        "responder did not retain handshake state and emit one LRPROOF",
+    )?;
+    require(
+        responder_proof.actions.packets[0].target() == TxTarget::Only(c_to_b),
+        "responder LRPROOF did not return to its source interface",
+    )?;
+    let parsed_responder_proof = parse_packet(responder_proof.actions.packets[0].bytes())
+        .map_err(|error| format!("responder emitted invalid LRPROOF: {error}"))?;
+    require(
+        parsed_responder_proof.packet_type == PacketType::Proof
+            && parsed_responder_proof.dest_type == DestType::Link
+            && parsed_responder_proof.context == 0xff,
+        "responder emitted a noncanonical LRPROOF",
+    )?;
+    let forwarded_proof = node_b.ingest(
+        responder_proof.actions.packets[0].bytes(),
+        now + 5,
+        b_to_c,
+        &mut rng,
+    );
+    require(
+        forwarded_proof.actions.events.is_empty() && forwarded_proof.actions.packets.len() == 1,
+        "transport did not validate and forward exactly one LRPROOF",
+    )?;
+    require(
+        forwarded_proof.actions.packets[0].target() == TxTarget::Only(b_to_a),
+        "transport returned LRPROOF on the wrong exact interface",
+    )?;
+    require(
+        parse_packet(forwarded_proof.actions.packets[0].bytes())
+            .map_err(|error| format!("transport emitted invalid relayed LRPROOF: {error}"))?
+            .hops
+            == parsed_responder_proof.hops.saturating_add(1),
+        "transport did not advance LRPROOF by exactly one hop",
+    )?;
+
+    let initiator_rtt = node_a.ingest(
+        forwarded_proof.actions.packets[0].bytes(),
+        now + 6,
+        a_to_b,
+        &mut rng,
+    );
+    require(
+        matches!(
+            initiator_rtt.actions.events.as_slice(),
+            [NodeEvent::LinkEstablished { link_id: event_id }] if *event_id == link_id
+        ) && initiator_rtt.actions.packets.len() == 1,
+        "initiator did not establish Link and emit one LRRTT",
+    )?;
+    require(
+        initiator_rtt.actions.packets[0].target() == TxTarget::Only(a_to_b),
+        "initiator LRRTT did not retain the authenticated Link interface",
+    )?;
+    let forwarded_rtt = node_b.ingest(
+        initiator_rtt.actions.packets[0].bytes(),
+        now + 7,
+        b_to_a,
+        &mut rng,
+    );
+    require(
+        forwarded_rtt.actions.events.is_empty() && forwarded_rtt.actions.packets.len() == 1,
+        "transport did not forward exactly one LRRTT",
+    )?;
+    require(
+        forwarded_rtt.actions.packets[0].target() == TxTarget::Only(b_to_c),
+        "transport sent LRRTT on the wrong exact interface",
+    )?;
+    let responder_established = node_c.ingest(
+        forwarded_rtt.actions.packets[0].bytes(),
+        now + 8,
+        c_to_b,
+        &mut rng,
+    );
+    require(
+        matches!(
+            responder_established.actions.events.as_slice(),
+            [NodeEvent::LinkEstablished { link_id: event_id }] if *event_id == link_id
+        ),
+        "responder did not establish Link after relayed LRRTT",
+    )?;
+    require(
+        node_a.link_state(&link_id) == Some(LinkState::Active)
+            && node_c.link_state(&link_id) == Some(LinkState::Active),
+        "relayed Link did not become active at both endpoints",
+    )?;
+
+    let channel = node_a
+        .send_channel_message(&link_id, 0x5151, b"three-node channel", now + 9, &mut rng)
+        .map_err(|error| format!("initiator could not send relayed channel DATA: {error}"))?;
+    require(
+        channel.target() == TxTarget::Only(a_to_b),
+        "initiator channel DATA did not retain the authenticated Link interface",
+    )?;
+    require(
+        node_a.metrics().capacity.channel_receipts.used == 1,
+        "initiator did not retain relayed channel receipt",
+    )?;
+    let relayed_channel = node_b.ingest(channel.bytes(), now + 10, b_to_a, &mut rng);
+    require(
+        relayed_channel.actions.events.is_empty() && relayed_channel.actions.packets.len() == 1,
+        "transport did not forward relayed channel DATA",
+    )?;
+    require(
+        relayed_channel.actions.packets[0].target() == TxTarget::Only(b_to_c),
+        "transport sent channel DATA on the wrong exact interface",
+    )?;
+    let channel_received = node_c.ingest(
+        relayed_channel.actions.packets[0].bytes(),
+        now + 11,
+        c_to_b,
+        &mut rng,
+    );
+    require(
+        matches!(
+            channel_received.actions.events.as_slice(),
+            [NodeEvent::ChannelMessages { link_id: event_id, messages }]
+                if *event_id == link_id
+                    && messages.as_slice() == [(0x5151, b"three-node channel".to_vec())]
+        ) && channel_received.actions.packets.len() == 1,
+        "responder did not deliver channel DATA and emit its proof",
+    )?;
+    require(
+        channel_received.actions.packets[0].target() == TxTarget::Only(c_to_b),
+        "responder channel proof did not return on its Link ingress interface",
+    )?;
+    let relayed_channel_proof = node_b.ingest(
+        channel_received.actions.packets[0].bytes(),
+        now + 12,
+        b_to_c,
+        &mut rng,
+    );
+    require(
+        relayed_channel_proof.actions.events.is_empty()
+            && relayed_channel_proof.actions.packets.len() == 1,
+        "transport did not forward channel proof",
+    )?;
+    require(
+        relayed_channel_proof.actions.packets[0].target() == TxTarget::Only(b_to_a),
+        "transport returned channel proof on the wrong exact interface",
+    )?;
+    let channel_delivered = node_a.ingest(
+        relayed_channel_proof.actions.packets[0].bytes(),
+        now + 13,
+        a_to_b,
+        &mut rng,
+    );
+    require(
+        matches!(
+            channel_delivered.actions.events.as_slice(),
+            [NodeEvent::ProofReceived { .. }]
+        ) && node_a.metrics().capacity.channel_receipts.used == 0,
+        "relayed channel proof did not complete the initiator receipt",
+    )?;
+    require(
+        node_b.metrics().capacity.relay_links.used == 1
+            && node_b.metrics().capacity.reverse_entries.used == 0,
+        "Link relay consumed unexpected transport capacity",
+    )?;
+
+    Ok(32)
 }
 
 fn decode_hex(field: &str, value: &str) -> Result<Vec<u8>, String> {
@@ -952,6 +1213,6 @@ mod tests {
 
     #[test]
     fn released_python_vectors_pass() {
-        assert_eq!(verify_released_vectors(), Ok(111));
+        assert_eq!(verify_released_vectors(), Ok(144));
     }
 }

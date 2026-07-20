@@ -6,12 +6,11 @@ Version 2.0, at your option.
 
 The default firmware evaluation graph uses the Rete integration fork from
 https://github.com/evelant/rete at revision
-9bceacdc27fe6e5f5b8df6e70eba560ef0930329, based on upstream
+fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2, based on upstream
 https://github.com/s-retlaw/rete revision
 9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743. The fork retains upstream's
 MIT OR Apache-2.0 declaration in its package metadata and README. Fork tag
-firmware-pin-9bceacd retains an additional durable reference to the pinned
-commit.
+firmware-pin-fb96ac1 is the designated durable reference for the pinned commit.
 
 The separate Leviculum comparison package is AGPL-3.0-or-later. See
 docs/provenance.md and Cargo.lock for the exact source and dependency graph.
