@@ -468,7 +468,13 @@ pub(crate) fn run(args: Vec<String>) -> ExitCode {
         }
     };
 
-    match transact(&options) {
+    let transaction = {
+        let stdout = io::stdout();
+        let mut stdout = stdout.lock();
+        transact(&options, &mut stdout)
+    };
+
+    match transaction {
         Ok(line) => {
             println!("{line}");
             ExitCode::SUCCESS
@@ -484,7 +490,7 @@ fn cli_error_line(reason: &str) -> String {
     format!("error: {reason}")
 }
 
-fn transact(options: &Options) -> Result<String, String> {
+fn transact(options: &Options, accepted_output: &mut dyn Write) -> Result<String, String> {
     let outputs = CommandOutputs::reserve(&options.command, options.evidence_output.as_deref())?;
     let deadline = Instant::now()
         .checked_add(options.timeout)
@@ -546,30 +552,25 @@ fn transact(options: &Options) -> Result<String, String> {
     )?;
 
     if matches!(&options.command, Command::SubmitAndWait { .. }) {
-        let submission_id = match response {
-            DeviceResponse::SubmitRnsDataAccepted(accepted) => accepted.id,
-            DeviceResponse::Error(error) => {
-                return Err(format_api_error(command_name(&options.command), error));
-            }
-            other => {
-                return Err(format!(
-                    "device returned response kind {} instead of {}",
-                    other.kind(),
-                    command_name(&options.command),
-                ));
-            }
-        };
-        let evidence_output = outputs.into_submit_evidence()?;
-        return wait_for_delivery(
-            &mut *port,
-            &mut reader,
-            session,
-            &mut request_ids,
-            deadline,
+        return continue_submit_and_wait(
+            response,
             device_id.as_bytes(),
             &session_id,
-            submission_id,
-            evidence_output,
+            accepted_output,
+            |submission_id| {
+                let evidence_output = outputs.into_submit_evidence()?;
+                wait_for_delivery(
+                    &mut *port,
+                    &mut reader,
+                    session,
+                    &mut request_ids,
+                    deadline,
+                    device_id.as_bytes(),
+                    &session_id,
+                    submission_id,
+                    evidence_output,
+                )
+            },
         );
     }
     drop(session);
@@ -580,6 +581,56 @@ fn transact(options: &Options) -> Result<String, String> {
         response,
         outputs,
     )
+}
+
+fn continue_submit_and_wait<F>(
+    response: DeviceResponse,
+    device_id: &[u8; 16],
+    session_id: &[u8; 16],
+    accepted_output: &mut dyn Write,
+    wait: F,
+) -> Result<String, String>
+where
+    F: FnOnce(SubmissionId) -> Result<String, String>,
+{
+    let submission_id = match response {
+        DeviceResponse::SubmitRnsDataAccepted(accepted) => accepted.id,
+        DeviceResponse::Error(error) => return Err(format_api_error("submit-and-wait", error)),
+        other => {
+            return Err(format!(
+                "device returned response kind {} instead of submit-and-wait",
+                other.kind(),
+            ));
+        }
+    };
+    write_submit_and_wait_accepted(accepted_output, device_id, session_id, submission_id)?;
+    wait(submission_id)
+}
+
+fn write_submit_and_wait_accepted(
+    output: &mut dyn Write,
+    device_id: &[u8; 16],
+    session_id: &[u8; 16],
+    submission_id: SubmissionId,
+) -> Result<(), String> {
+    let record = format!(
+        "command=submit-and-wait outcome=accepted device_id={} session_id={} submission_id={}\n",
+        hex(device_id),
+        hex(session_id),
+        submission_id.0,
+    );
+    output.write_all(record.as_bytes()).map_err(|error| {
+        format!(
+            "device accepted submission {} but the host could not write its accepted marker: {error}",
+            submission_id.0
+        )
+    })?;
+    output.flush().map_err(|error| {
+        format!(
+            "device accepted submission {} but the host could not flush its accepted marker: {error}",
+            submission_id.0
+        )
+    })
 }
 
 fn exchange<P: Read + Write + ?Sized>(
@@ -1377,8 +1428,10 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::{Cell, RefCell},
         fs,
         io::Cursor,
+        rc::Rc,
         sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -1452,16 +1505,72 @@ mod tests {
     }
 
     fn submit_and_wait_command() -> Command {
+        submit_and_wait_command_with_payload(b"private submission payload")
+    }
+
+    fn submit_and_wait_command_with_payload(payload: &[u8]) -> Command {
         Command::SubmitAndWait {
             destination: DestinationHash([
                 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
                 0x0e, 0x0f,
             ]),
-            payload: b"private submission payload".to_vec(),
+            payload: payload.to_vec(),
             idempotency_key: IdempotencyKey([
                 0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd,
                 0xfe, 0xff,
             ]),
+        }
+    }
+
+    struct TracedOutput {
+        bytes: Vec<u8>,
+        events: Rc<RefCell<Vec<&'static str>>>,
+    }
+
+    impl Write for TracedOutput {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.events.borrow_mut().push("accepted-write");
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.events.borrow_mut().push("accepted-flush");
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum AcceptedOutputFault {
+        Write,
+        Flush,
+    }
+
+    struct FaultingAcceptedOutput {
+        fault: AcceptedOutputFault,
+        bytes: Vec<u8>,
+    }
+
+    impl Write for FaultingAcceptedOutput {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if matches!(self.fault, AcceptedOutputFault::Write) {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "marker write fault",
+                ));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if matches!(self.fault, AcceptedOutputFault::Flush) {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "marker flush fault",
+                ));
+            }
+            Ok(())
         }
     }
 
@@ -1805,7 +1914,10 @@ mod tests {
             waiting.timeout,
             Duration::from_millis(DEFAULT_SUBMIT_AND_WAIT_TIMEOUT_MS)
         );
-        assert!(matches!(waiting.command, Command::SubmitAndWait { .. }));
+        assert_eq!(
+            waiting.command,
+            submit_and_wait_command_with_payload(b"Hello")
+        );
 
         let mut overridden = strings(&common);
         overridden.insert(0, "12000".to_owned());
@@ -2288,10 +2400,13 @@ mod tests {
             command: submit_and_wait_command(),
             evidence_output: Some(evidence_file.path.clone()),
         };
-        let error = transact(&options).expect_err("occupied evidence must fail before host I/O");
+        let mut accepted_output = Vec::new();
+        let error = transact(&options, &mut accepted_output)
+            .expect_err("occupied evidence must fail before host I/O");
         assert!(error.contains("could not create evidence output"));
         assert!(!error.contains("credential"));
         assert!(!error.contains("could not open"));
+        assert!(accepted_output.is_empty());
         assert_eq!(fs::read(&evidence_file.path).unwrap(), b"existing evidence");
 
         let reserved_file = TempOutput::new("uncommitted-evidence");
@@ -2328,6 +2443,175 @@ mod tests {
             "RNS inbox is empty (NotFound); no output file was created"
         );
         assert!(!output_file.path.exists());
+    }
+
+    #[test]
+    fn submit_and_wait_flushes_machine_accepted_marker_before_polling() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let mut output = TracedOutput {
+            bytes: Vec::new(),
+            events: Rc::clone(&events),
+        };
+        let poll_events = Rc::clone(&events);
+
+        let terminal = continue_submit_and_wait(
+            DeviceResponse::SubmitRnsDataAccepted(reticulum_device_api::SubmissionAccepted {
+                id: SubmissionId(42),
+            }),
+            &[0x11; 16],
+            &[0x22; 16],
+            &mut output,
+            move |submission_id| {
+                assert_eq!(submission_id, SubmissionId(42));
+                poll_events.borrow_mut().push("poll");
+                Ok("terminal-output".to_owned())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(terminal, "terminal-output");
+        assert_eq!(
+            events.borrow().as_slice(),
+            &["accepted-write", "accepted-flush", "poll"]
+        );
+        let marker = String::from_utf8(output.bytes).unwrap();
+        assert_eq!(
+            marker,
+            format!(
+                "command=submit-and-wait outcome=accepted device_id={} session_id={} submission_id=42\n",
+                "11".repeat(16),
+                "22".repeat(16),
+            )
+        );
+        let mut fields = marker.split_whitespace();
+        assert_eq!(fields.next(), Some("command=submit-and-wait"));
+        assert_eq!(fields.next(), Some("outcome=accepted"));
+        assert_eq!(
+            fields.next(),
+            Some(format!("device_id={}", "11".repeat(16)).as_str())
+        );
+        assert_eq!(
+            fields.next(),
+            Some(format!("session_id={}", "22".repeat(16)).as_str())
+        );
+        assert_eq!(fields.next(), Some("submission_id=42"));
+        assert_eq!(fields.next(), None);
+        assert!(!marker.contains("000102030405060708090a0b0c0d0e0f"));
+        assert!(!marker.contains(&hex(b"private submission payload")));
+        assert!(!marker.contains("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"));
+    }
+
+    #[test]
+    fn submit_and_wait_emits_no_marker_or_poll_before_device_acceptance() {
+        let mut output = Vec::new();
+        let polled = Cell::new(false);
+        let error = continue_submit_and_wait(
+            DeviceResponse::Error(reticulum_device_api::ApiErrorResponse {
+                code: reticulum_device_api::ApiErrorCode::CapacityExhausted,
+                operation: Some(reticulum_device_api::OP_EXPERIMENTAL_SUBMIT_RNS_DATA),
+            }),
+            &[0x11; 16],
+            &[0x22; 16],
+            &mut output,
+            |_| {
+                polled.set(true);
+                Ok("must not run".to_owned())
+            },
+        )
+        .expect_err("a rejected submission must remain a command error");
+
+        assert_eq!(
+            error,
+            format_api_error(
+                "submit-and-wait",
+                reticulum_device_api::ApiErrorResponse {
+                    code: reticulum_device_api::ApiErrorCode::CapacityExhausted,
+                    operation: Some(reticulum_device_api::OP_EXPERIMENTAL_SUBMIT_RNS_DATA),
+                },
+            )
+        );
+        assert!(output.is_empty());
+        assert!(!polled.get());
+    }
+
+    #[test]
+    fn accepted_marker_output_failure_stops_before_poll_and_cleans_evidence() {
+        for (fault, expected_error, bytes_were_written) in [
+            (AcceptedOutputFault::Write, "could not write", false),
+            (AcceptedOutputFault::Flush, "could not flush", true),
+        ] {
+            let evidence_file = TempOutput::new("accepted-output-fault");
+            let outputs =
+                CommandOutputs::reserve(&submit_and_wait_command(), Some(&evidence_file.path))
+                    .unwrap();
+            let polled = Rc::new(Cell::new(false));
+            let closure_polled = Rc::clone(&polled);
+            let mut output = FaultingAcceptedOutput {
+                fault,
+                bytes: Vec::new(),
+            };
+
+            let error = continue_submit_and_wait(
+                DeviceResponse::SubmitRnsDataAccepted(reticulum_device_api::SubmissionAccepted {
+                    id: SubmissionId(42),
+                }),
+                &[0x11; 16],
+                &[0x22; 16],
+                &mut output,
+                move |_| {
+                    closure_polled.set(true);
+                    drop(outputs);
+                    Ok("must not poll".to_owned())
+                },
+            )
+            .expect_err("an unobservable accepted marker must stop terminal polling");
+
+            assert!(error.contains(expected_error), "unexpected error: {error}");
+            assert!(error.contains("submission 42"));
+            assert!(!polled.get());
+            assert_eq!(!output.bytes.is_empty(), bytes_were_written);
+            assert!(
+                !evidence_file.path.exists(),
+                "an uncommitted evidence reservation must be removed"
+            );
+        }
+    }
+
+    #[test]
+    fn post_acceptance_wait_error_preserves_marker_and_cleans_evidence() {
+        let evidence_file = TempOutput::new("accepted-then-wait-fault");
+        let outputs =
+            CommandOutputs::reserve(&submit_and_wait_command(), Some(&evidence_file.path)).unwrap();
+        let mut output = Vec::new();
+
+        let error = continue_submit_and_wait(
+            DeviceResponse::SubmitRnsDataAccepted(reticulum_device_api::SubmissionAccepted {
+                id: SubmissionId(42),
+            }),
+            &[0x11; 16],
+            &[0x22; 16],
+            &mut output,
+            move |_| {
+                let evidence = outputs.into_submit_evidence()?;
+                drop(evidence);
+                Err("terminal wait transport fault".to_owned())
+            },
+        )
+        .expect_err("a wait failure must remain a command failure");
+
+        assert_eq!(error, "terminal wait transport fault");
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            format!(
+                "command=submit-and-wait outcome=accepted device_id={} session_id={} submission_id=42\n",
+                "11".repeat(16),
+                "22".repeat(16),
+            )
+        );
+        assert!(
+            !evidence_file.path.exists(),
+            "a nonterminal wait failure must not leave empty evidence"
+        );
     }
 
     #[test]

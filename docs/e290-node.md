@@ -525,8 +525,9 @@ cargo +stable run --locked -p xtask -- \
   --output "$OUT"
 ```
 
-`USB_SERIAL` is the exact uppercase colon-separated serial from the board table
-and `OUT` must name an absent directory. The command validates one initialized
+`USB_SERIAL` is the exact uppercase colon-separated serial from the board table,
+`EXPECTED_MAC` is the same board's lowercase eFuse MAC, and `OUT` must name an
+absent directory. The command validates one initialized
 256-byte RTME symbol immediately followed by one initialized 192-byte RPTE
 symbol in the final little-endian Xtensa ELF, then invokes exactly one
 serial-qualified `probe-rs read` for the contiguous 448-byte range. It never
@@ -583,8 +584,39 @@ preceding direction:
    Set `ESPFLASH_BIN_DIR` to the directory containing the working `espflash`
    binary and bind its version in the trial manifest. Never erase below
    `0x630000`; identity, announce clock, credentials, and device configuration
-   must survive. The repository has no identity-atomic `erase-region` helper,
-   so keep only the intended target attached while performing that raw erase.
+   must survive. Erase and verify the exact trial range through the same
+   identity-owning helper; `USB_SERIAL` must be the uppercase value from the
+   board table, and every invocation needs a fresh evidence prefix:
+
+   ```sh
+   PATH="$ESPFLASH_BIN_DIR:$PATH" \
+   python3.13 interop/python/e290_qualification_host.py erase-region \
+     --usb-serial "$USB_SERIAL" --expected-mac "$EXPECTED_MAC" \
+     --expected-flash-bytes 16777216 \
+     --evidence-prefix "$TRIAL/$BOARD/erase-runtime-range" \
+     --offset 0x630000 --length 0x300000
+   ```
+
+   Require the resulting `.erase-region.verified.json` to record offset
+   `6488064`, length/readback size `3145728`, and readback SHA-256
+   `908b6cfc9aef496dd5ab5c5540d80c6383ed6e92f86044574c996315381bc064`.
+   Despite the compatibility command name, this does not invoke espflash
+   4.5's native `erase-region`, because that action emits no DeviceInfo and
+   cannot attribute the destructive operation to a MAC. The helper uses
+   identity-reporting `write-bin` with a retained exact-length all-`0xff`
+   input. Sector alignment makes the erase-before-write span exact; an already
+   blank range may be checksum-skipped without weakening the required logical
+   all-`0xff` state. The verified record names the operation
+   `identity_bound_all_ff_write` and binds its action target, post-write target,
+   retained input hash, and independent read target. The helper scans every
+   readback byte for `0xff`, fails without a verified record on any mismatch,
+   and leaves the target in the loader. Full-flash,
+   exact-region, erase-readback, and merged-image readback destinations are
+   exclusively reserved as owner-only `0600` regular files before their read
+   action. `espflash` writes through a retained inherited descriptor, so a
+   raced visible-path symlink cannot redirect the dump. Only a fully verified
+   result becomes owner-read-only `0400`; failed output remains private
+   `0600` for diagnosis.
 2. Allocate a new 383-byte payload and a new 16-byte idempotency key. Retain
    their exact hex plus SHA-256 values; no payload or key may be reused across
    trials. Create one directory such as `trial-01-b-to-a`, with sender
@@ -616,14 +648,18 @@ preceding direction:
 4. Start exactly one `submit-and-wait` using the sender's Active credential,
    the receiver's fixed destination, that trial's payload/key, and
    `--evidence-output "$TRIAL/sender-terminal.json"`. The evidence path must
-   be absent and is reserved before the serial session begins. While it
-   remains active, capture both records about five seconds after submission.
-   If a terminal result wins that race, capture it immediately and mark the
-   five-second checkpoint `not-applicable`; never delay a terminal capture to
-   reach the clock time. Capture both again immediately after `Delivered`,
-   `delivery-timeout`, or another terminal result. A debugger capture halts its
-   target, so retain the capture times and do not treat resulting loop-gap
-   maxima as ordinary RF timing.
+   be absent and is reserved before the serial session begins. Start the
+   five-second timer only after stdout yields the explicitly flushed
+   `command=submit-and-wait outcome=accepted` record with the expected device,
+   session, and submission IDs; process launch or handshake start is not the
+   timing boundary. While that command remains active, capture both records
+   about five seconds after the accepted marker. If a terminal result wins
+   that race, capture it immediately and mark the five-second checkpoint
+   `not-applicable`; never delay a terminal capture to reach the clock time.
+   Capture both again immediately after `Delivered`, `delivery-timeout`, or
+   another terminal result. A debugger capture halts its target, so retain the
+   marker/capture times and do not treat resulting loop-gap maxima as ordinary
+   RF timing.
 5. Decode only matching-even snapshots; recapture any odd, mismatched, or torn
    record rather than accepting a partial checkpoint. After the terminal
    captures, reset and re-enumerate the receiver, then authenticate separately
@@ -1352,7 +1388,12 @@ supports these authenticated logical operations:
 - `submit-rns-data` with destination, payload, and idempotency key; and
 - `submit-and-wait [--evidence-output <absent-json>]`, which submits once and
   polls every 500 ms over the same authenticated session until `Delivered` or
-  a terminal failure, with optional device-terminal evidence.
+  a terminal failure, with optional device-terminal evidence. After the device
+  accepts and assigns the submission, it first writes and flushes
+  `command=submit-and-wait outcome=accepted device_id=<32-hex>
+  session_id=<32-hex> submission_id=<u64>` to stdout, before its first status
+  delay or poll. Pre-acceptance failures and device rejections emit no accepted
+  marker; the later terminal output and errors retain their existing forms.
 
 Read the public primary destination:
 
@@ -1847,6 +1888,11 @@ The read-only 2026-07-17 discovery snapshot was:
 Ports are not identities and can change after reset or reconnection. Before a
 future write:
 
+Set `EXPECTED_USB_SERIAL` to the selected board's exact uppercase native-USB
+serial (for example `AC:A7:04:E1:3E:88`) and `EXPECTED_MAC` to the same eFuse
+MAC in lowercase (for example `ac:a7:04:e1:3e:88`). Do not derive either value
+from the current callout-device name.
+
 1. Record the already-established `HT-RA62-HF` module identity for each board
    and keep a 915 MHz antenna attached.
 2. Re-run `espflash board-info --chip esp32s3` immediately before each write and
@@ -1865,18 +1911,17 @@ future write:
    BACKUP_DIR="e290-private-backup-$(date -u +%Y%m%dT%H%M%SZ)"
    mkdir -m 700 "$BACKUP_DIR"
    # BACKUP_DIR must reside on encrypted storage.
-   espflash read-flash --skip-update-check \
-     --port "$PORT" --chip esp32s3 \
-     --before default-reset --after no-reset --non-interactive \
-     0 0x1000000 "$BACKUP_DIR/flash-before.bin"
-   test "$(wc -c < "$BACKUP_DIR/flash-before.bin" | tr -d ' ')" = 16777216
-   chmod 600 "$BACKUP_DIR/flash-before.bin"
-   shasum -a 256 "$BACKUP_DIR/flash-before.bin" \
-     > "$BACKUP_DIR/flash-before.sha256"
+   python3.13 interop/python/e290_qualification_host.py read-flash \
+     --usb-serial "$EXPECTED_USB_SERIAL" --expected-mac "$EXPECTED_MAC" \
+     --expected-flash-bytes 16777216 \
+     --evidence-prefix "$BACKUP_DIR/full-flash-before" \
+     --output "$BACKUP_DIR/flash-before.bin"
    ```
 
-   Keep the board in the serial loader after this backup. Any later copy or
-   archive of the dump must retain equivalent access control and encryption.
+   The helper finalizes the dump owner-read-only (`0400`) after fd-bound hashing
+   and durable sync. Keep the board in the serial loader after this backup. Any
+   later copy or archive of the dump must retain equivalent access control and
+   encryption.
 4. Create the explicit 16 MiB merged image rather than invoking the 8 MiB
    workspace runner:
 
@@ -1889,63 +1934,57 @@ future write:
      --partition-table partitions/heltec-vision-master-e290-node.csv \
      --target-app-partition factory "$ELF" e290-node.bin
    IMAGE_BYTES="$(wc -c < e290-node.bin | tr -d ' ')"
+   IMAGE_SHA256="$(shasum -a 256 e290-node.bin | cut -d ' ' -f 1)"
    test "$IMAGE_BYTES" -le $((0x610000))
    ```
 
-5. Before the **first product provisioning boot**, after the backup, erase the
-   durability range. The unpadded merged image contains the bootloader,
+5. Before the **first product provisioning boot**, after the backup, logically
+   blank the durability range. The unpadded merged image contains the bootloader,
    partition table and application; it does not initialize
    `0x610000..0x930000`. Flashing it over arbitrary old bytes therefore does
    not create blank identity, clock, credential, configuration, journal, or
-   inbox media, and the firmware will correctly fail closed. Choose one destructive
-   preparation:
-
-   - erase the entire chip:
-
-     ```sh
-     espflash erase-flash --skip-update-check \
-       --port "$PORT" --chip esp32s3 \
-       --before default-reset --after no-reset --non-interactive
-     ```
-
-   - or preserve all other ranges and erase exactly the contiguous first-boot
-     durability/configuration region:
-
-     ```sh
-     espflash erase-region --skip-update-check \
-       --port "$PORT" --chip esp32s3 \
-       --before default-reset --after no-reset --non-interactive \
-       0x610000 0x320000
-     ```
-
-   In either case, verify the entire exclusive range before writing the image:
+   inbox media, and the firmware will correctly fail closed. Preserve all other
+   ranges and use the identity-owning helper's erase-equivalent all-`0xff`
+   write and readback to verify exactly the contiguous first-boot
+   durability/configuration region:
 
    ```sh
-   espflash read-flash --skip-update-check \
-     --port "$PORT" --chip esp32s3 \
-     --before default-reset --after no-reset --non-interactive \
-     0x610000 0x320000 "$BACKUP_DIR/durability-erased.bin"
-   test "$(wc -c < "$BACKUP_DIR/durability-erased.bin" | tr -d ' ')" = 3276800
-   test "$(LC_ALL=C tr -d '\377' < "$BACKUP_DIR/durability-erased.bin" \
-     | wc -c | tr -d ' ')" = 0
+   python3.13 interop/python/e290_qualification_host.py erase-region \
+     --usb-serial "$EXPECTED_USB_SERIAL" --expected-mac "$EXPECTED_MAC" \
+     --expected-flash-bytes 16777216 \
+     --evidence-prefix "$BACKUP_DIR/durability-erase" \
+     --offset 0x610000 --length 0x320000
    ```
 
-   Do not allow an intermediate normal boot between erase verification and the
+   This action accepts only the exact uppercase USB serial and 16 MiB target,
+   requires sector-aligned in-bounds operands, leaves every `espflash` phase in
+   `no-reset`, reads back exactly 3,276,800 bytes, scans the entire file for
+   `0xff`, and records its size and SHA-256 in
+   `.erase-region.verified.json`. Its `operation` must be
+   `identity_bound_all_ff_write`; a native `EraseRegion` claim is invalid. No
+   verified record means the blanking is not acceptable, even if `espflash`
+   reported success. Do not allow an intermediate normal boot between blanking verification and the
    merged-image write.
 6. Write and read back the exact merged image while leaving the board in the
    loader:
 
    ```sh
-   espflash write-bin --skip-update-check \
-     --port "$PORT" --chip esp32s3 \
-     --before default-reset --after no-reset --non-interactive \
-     0 e290-node.bin
-   espflash read-flash --skip-update-check \
-     --port "$PORT" --chip esp32s3 \
-     --before default-reset --after no-reset --non-interactive \
-     0 "$IMAGE_BYTES" "$BACKUP_DIR/e290-node-readback.bin"
-   cmp e290-node.bin "$BACKUP_DIR/e290-node-readback.bin"
+   python3.13 interop/python/e290_qualification_host.py flash-merged \
+     --usb-serial "$EXPECTED_USB_SERIAL" --expected-mac "$EXPECTED_MAC" \
+     --expected-flash-bytes 16777216 \
+     --evidence-prefix "$BACKUP_DIR/product-image-flash" \
+     --image e290-node.bin --expected-image-sha256 "$IMAGE_SHA256" \
+     --confirmed-radio-module HT-RA62-HF
    ```
+
+   The helper flashes a retained descriptor for the digest-qualified input,
+   validates the `write-bin` action's own chip/flash/MAC output, captures the
+   unchanged post-write USB mapping, and runs loader-preserving `board-info`
+   before readback. It then independently validates the `read-flash` action
+   identity and mapping. The verified JSON records distinct
+   `write_action_target`, `post_write_target`, and `read_target` facts; absence
+   of any phase evidence makes the write unverified even when `espflash`
+   returned success.
 
 7. On every **subsequent upgrade**, preserve a new secret full-flash backup but
    do not erase `node_identity`, `announce_clock`, `api_credentials`,
@@ -1954,9 +1993,35 @@ future write:
    `0x610000`. For an upgrade-layout check, read the complete application-data
    region `0x610000..0x930000` before the write, leave the board in the loader,
    read it again immediately afterward and require exact equality before the
-   first upgraded boot. A future partition-map, identity, journal, or message
-   format change requires an explicit migration procedure; it is not a normal
-   upgrade.
+   first upgraded boot:
+
+   ```sh
+   python3.13 interop/python/e290_qualification_host.py read-region \
+     --usb-serial "$EXPECTED_USB_SERIAL" --expected-mac "$EXPECTED_MAC" \
+     --expected-flash-bytes 16777216 \
+     --evidence-prefix "$BACKUP_DIR/upgrade-app-data-before" \
+     --offset 0x610000 --length 0x320000 \
+     --output "$BACKUP_DIR/upgrade-app-data-before.bin"
+   python3.13 interop/python/e290_qualification_host.py flash-merged \
+     --usb-serial "$EXPECTED_USB_SERIAL" --expected-mac "$EXPECTED_MAC" \
+     --expected-flash-bytes 16777216 \
+     --evidence-prefix "$BACKUP_DIR/upgrade-product-image-flash" \
+     --image e290-node.bin --expected-image-sha256 "$IMAGE_SHA256" \
+     --confirmed-radio-module HT-RA62-HF
+   python3.13 interop/python/e290_qualification_host.py read-region \
+     --usb-serial "$EXPECTED_USB_SERIAL" --expected-mac "$EXPECTED_MAC" \
+     --expected-flash-bytes 16777216 \
+     --evidence-prefix "$BACKUP_DIR/upgrade-app-data-after" \
+     --offset 0x610000 --length 0x320000 \
+     --output "$BACKUP_DIR/upgrade-app-data-after.bin"
+   cmp "$BACKUP_DIR/upgrade-app-data-before.bin" \
+     "$BACKUP_DIR/upgrade-app-data-after.bin"
+   ```
+
+   Each verified record binds the exact offset, length, output path, output
+   byte count and SHA-256 to the independently qualified board identity. A
+   future partition-map, identity, journal, or message format change requires
+   an explicit migration procedure; it is not a normal upgrade.
 
 ### Explicit schema-1 development-journal migration
 
@@ -1982,20 +2047,15 @@ range.
    Package it with the same explicit 16 MiB `espflash save-image` arguments
    above. Do not distribute or retain this exceptional build as the normal
    product image.
-3. Erase exactly the 1 MiB journal partition and verify every byte is erased:
+3. Apply the same identity-bound all-`0xff` erase-equivalent operation to the
+   exact 1 MiB journal partition and verify every byte is blank:
 
    ```sh
-   espflash erase-region --skip-update-check \
-     --port "$PORT" --chip esp32s3 \
-     --before default-reset --after no-reset --non-interactive \
-     0x630000 0x100000
-   espflash read-flash --skip-update-check \
-     --port "$PORT" --chip esp32s3 \
-     --before default-reset --after no-reset --non-interactive \
-     0x630000 0x100000 "$BACKUP_DIR/node-journal-erased.bin"
-   test "$(wc -c < "$BACKUP_DIR/node-journal-erased.bin" | tr -d ' ')" = 1048576
-   test "$(LC_ALL=C tr -d '\377' < "$BACKUP_DIR/node-journal-erased.bin" \
-     | wc -c | tr -d ' ')" = 0
+   python3.13 interop/python/e290_qualification_host.py erase-region \
+     --usb-serial "$EXPECTED_USB_SERIAL" --expected-mac "$EXPECTED_MAC" \
+     --expected-flash-bytes 16777216 \
+     --evidence-prefix "$BACKUP_DIR/node-journal-erase" \
+     --offset 0x630000 --length 0x100000
    ```
 
 4. Flash the one-shot feature image and boot it once. The permanent image now
@@ -2006,8 +2066,9 @@ range.
    separately reviewed diagnostic build/sink. The firmware still scans the
    complete partition before provisioning and rejects any schema-1, corrupt,
    torn, or otherwise programmed byte without a write or erase. If this one-
-   shot boot is interrupted during provision, erase and verify the same journal
-   range again; it does not repair programmed migration media.
+   shot boot is interrupted during provision, repeat the all-`0xff` operation
+   and verify the same journal range again; it does not repair programmed
+   migration media.
 5. Reflash the ordinary image without the feature, preserving the complete
    application-data range. Prove with the same independent readback/parser or
    separately reviewed diagnostic sink that it strictly mounts the existing

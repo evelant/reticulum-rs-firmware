@@ -394,6 +394,15 @@ can be queried through `submission.status`. The response contains no
 destination, payload, prepared packet, packet fragment, or packet-borrowing
 handle.
 
+The E290 host utility's `submit-and-wait` command writes and explicitly flushes
+one machine-readable stdout record immediately after authenticating this
+accepted response and before beginning status polling:
+`command=submit-and-wait outcome=accepted device_id=<32-hex>
+session_id=<32-hex> submission_id=<u64>`. A rejected request, malformed
+response, or host failure before authenticated acceptance emits no such record.
+This is a host-tool observation boundary, not an additional wire message or a
+change to acceptance semantics.
+
 The storage model scopes idempotency by the authenticated principal. Repeating
 the same key with identical semantic destination/payload content returns the
 original submission ID. Reusing it for different content returns immediate

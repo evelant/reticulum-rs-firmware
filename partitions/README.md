@@ -82,49 +82,35 @@ powered foreign-binding case generated this `3e:88` image and deliberately
 programmed it on `ac:a7:04:e1:3f:88`. A fixture generated for another MAC has a
 different encoded binding, digest, and whole-image hash.
 
-Before programming any fixture, protect the existing full-flash backup, identify
-the live port by eFuse MAC with `espflash board-info`, require the intended 16 MiB
-E290 with secure boot and flash encryption disabled, and keep its 915 MHz antenna
-attached. Program and verify only the exact `message_store` range; do not erase
-or rewrite identity, announce clock, credentials, configuration, or journal:
+The raw port-based fixture programming used to collect the 2026-07-19 powered
+matrix is historical evidence, not a current executable procedure. Those
+bounded runs targeted only `message_store` and captured a complete partition
+readback before boot, but their mutable port handoff does not meet the current
+identity-attribution standard. The old command block is intentionally omitted
+so it cannot be mistaken for an approved rerun path.
 
-```sh
-set -euo pipefail
-umask 077
-: "${PORT:?set PORT to the live E290 serial device}"
-EXPECTED_MAC=ac:a7:04:e1:3e:88
-EXPECTED_FIXTURE_SHA=a8a8d40f63a69c7e3df59f4af1960f241f464566a5ae9251c12209eb3334c66a
-BOARD_INFO=/secure/e290-board-info-before-fixture.txt
-FIXTURE=/secure/absent-message-store.bin
-READBACK=/secure/message-store-programmed.bin
-test ! -e "$BOARD_INFO"
-test ! -e "$READBACK"
+A future powered rerun must fail closed until the project-owned E290
+qualification helper gains a separately reviewed, identity-bound `write-region`
+operation. The current helper intentionally has no arbitrary `write-region`;
+do not substitute direct `espflash board-info`, `write-bin`, or `read-flash`
+commands. The new operation must:
 
-espflash board-info --skip-update-check \
-  --port "$PORT" --chip esp32s3 \
-  --after no-reset --non-interactive 2>&1 | tee "$BOARD_INFO"
-rg -qi "^MAC address:[[:space:]]+$EXPECTED_MAC$" "$BOARD_INFO"
-rg -q '^Flash size:[[:space:]]+16MB$' "$BOARD_INFO"
-rg -q '^Secure Boot: Disabled$' "$BOARD_INFO"
-rg -q '^Flash Encryption: Disabled$' "$BOARD_INFO"
-test "$(wc -c < "$FIXTURE" | tr -d ' ')" = 2097152
-test "$(shasum -a 256 "$FIXTURE" | awk '{print $1}')" = \
-  "$EXPECTED_FIXTURE_SHA"
-espflash write-bin --skip-update-check \
-  --port "$PORT" --chip esp32s3 \
-  --before default-reset --after no-reset --non-interactive \
-  0x730000 "$FIXTURE"
-espflash read-flash --skip-update-check \
-  --port "$PORT" --chip esp32s3 \
-  --before default-reset --after hard-reset --non-interactive \
-  0x730000 0x200000 "$READBACK"
-chmod 600 "$READBACK"
-cmp "$FIXTURE" "$READBACK"
-```
+- resolve an exact uppercase native-USB serial for every phase and require the
+  intended eFuse MAC, ESP32-S3, 16 MiB flash, disabled secure boot, and disabled
+  flash encryption;
+- copy, hash, and retain a read-only descriptor for the exact 2 MiB fixture,
+  then restrict the write to `message_store` without touching identity,
+  announce clock, credentials, configuration, or journal;
+- validate the write action's own DeviceInfo, then capture unchanged USB
+  mapping and loader-preserving post-write board information;
+- create a private retained-inode readback of the exact range, validate the read
+  action identity and mapping, and require exact byte count, fixture hash, and
+  full-file equality before publishing durable verified evidence.
 
-The final read captures the complete partition before its `hard-reset` action
-boots the installed firmware. Wait for USB re-enumeration before exercising the
-API or sending the qualifying peer packet.
+Protect a fresh full-flash backup and keep the 915 MHz antenna attached for any
+such rerun. The board must remain in the loader with no hard reset or ordinary
+firmware boot from preflight through verified-evidence publication; reset it
+deliberately only after that evidence is complete.
 
 The 2026-07-19 powered matrix covered partial claim, exact pre-commit, invalid
 digest, and foreign binding. In every boot, authenticated capabilities reported
@@ -146,37 +132,42 @@ erase and verify only `message_store`. The exact all-erased 2 MiB SHA-256 is
 ```sh
 set -euo pipefail
 umask 077
-: "${PORT:?set PORT to the live E290 serial device}"
+EXPECTED_USB_SERIAL=AC:A7:04:E1:3E:88
 EXPECTED_MAC=ac:a7:04:e1:3e:88
-BOARD_INFO=/secure/e290-board-info-before-inbox-erase.txt
-ERASED=/secure/message-store-erased.bin
-test ! -e "$BOARD_INFO"
-test ! -e "$ERASED"
+EXPECTED_FLASH_BYTES=16777216
+EVIDENCE_DIR=/secure/e290-message-store-reset
+ERASE_EVIDENCE_PREFIX="$EVIDENCE_DIR/message-store-erase"
+READ_EVIDENCE_PREFIX="$EVIDENCE_DIR/message-store-erased-read"
+ERASED="$EVIDENCE_DIR/message-store-erased.bin"
+test ! -e "$EVIDENCE_DIR"
+mkdir -m 700 "$EVIDENCE_DIR"
 
-espflash board-info --skip-update-check \
-  --port "$PORT" --chip esp32s3 \
-  --after no-reset --non-interactive 2>&1 | tee "$BOARD_INFO"
-rg -qi "^MAC address:[[:space:]]+$EXPECTED_MAC$" "$BOARD_INFO"
-rg -q '^Flash size:[[:space:]]+16MB$' "$BOARD_INFO"
-rg -q '^Secure Boot: Disabled$' "$BOARD_INFO"
-rg -q '^Flash Encryption: Disabled$' "$BOARD_INFO"
-espflash erase-region --skip-update-check \
-  --port "$PORT" --chip esp32s3 \
-  --before default-reset --after no-reset --non-interactive \
-  0x730000 0x200000
-espflash read-flash --skip-update-check \
-  --port "$PORT" --chip esp32s3 \
-  --before default-reset --after hard-reset --non-interactive \
-  0x730000 0x200000 "$ERASED"
-chmod 600 "$ERASED"
+python3.13 interop/python/e290_qualification_host.py erase-region \
+  --usb-serial "$EXPECTED_USB_SERIAL" --expected-mac "$EXPECTED_MAC" \
+  --expected-flash-bytes "$EXPECTED_FLASH_BYTES" \
+  --evidence-prefix "$ERASE_EVIDENCE_PREFIX" \
+  --offset 0x730000 --length 0x200000
+python3.13 interop/python/e290_qualification_host.py read-region \
+  --usb-serial "$EXPECTED_USB_SERIAL" --expected-mac "$EXPECTED_MAC" \
+  --expected-flash-bytes "$EXPECTED_FLASH_BYTES" \
+  --evidence-prefix "$READ_EVIDENCE_PREFIX" \
+  --offset 0x730000 --length 0x200000 --output "$ERASED"
+test -f "${ERASE_EVIDENCE_PREFIX}.erase-region.verified.json"
+test -f "${READ_EVIDENCE_PREFIX}.read-region.verified.json"
 test "$(wc -c < "$ERASED" | tr -d ' ')" = 2097152
 test "$(shasum -a 256 "$ERASED" | awk '{ print $1 }')" = \
   4bda3a28f4ffe603c0ec1258c0034d65a1a0d35ab7bd523a834608adabf03cc5
 test "$(LC_ALL=C tr -d '\377' < "$ERASED" | wc -c | tr -d ' ')" = 0
 ```
 
-Here too, the final read captures the erased range before hard-resetting into
-the installed ordinary firmware.
+The helper resolves the current port from the exact uppercase native-USB serial
+for each action, requires the matching eFuse MAC and 16 MiB security-qualified
+target, and refuses existing output or evidence paths. `erase-region` uses its
+identity-reporting all-`0xff` write/readback workflow rather than native
+`espflash erase-region`; the independent `read-region` capture remains private
+and owner-read-only after verification. Both actions leave the E290 in the
+loader. Reset it deliberately only after this evidence is complete and the
+ordinary firmware is ready to boot.
 
 ### Same-boot terminal-commit suppression HIL
 

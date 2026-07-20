@@ -284,14 +284,43 @@ expected chip, MAC, physical capacity, disabled secure boot, disabled flash
 encryption, and absence of flash-detection warnings. It invokes `board-info`
 with `--after no-reset`, verifies that the mapping is unchanged afterward, and
 owns the allowlisted full-capacity `read-flash`, qualification-image `flash`,
-hash-bound merged-image write/readback, or read-only post-run image-range
-verification immediately afterward with `--before no-reset`. It never returns
-a mutable port string to an intervening
-shell command. Each invocation needs a unique evidence prefix; the helper uses
-exclusive file creation and refuses an existing output or evidence path,
-including dotted-prefix aliases. RF-capable merged images additionally require
-an exact physical `HT-RA62-HF` module acknowledgement and matching ESP image
-header capacity before any hardware access.
+exact `read-region`, verified `erase-region` erase-equivalent blanking,
+hash-bound merged-image
+write/readback, or read-only post-run image-range verification immediately
+afterward with `--before no-reset`. The region actions additionally require the
+exact uppercase USB serial and a 16 MiB expected capacity. The `erase-region`
+subcommand deliberately does not use espflash 4.5's native `erase-region`,
+which emits no action DeviceInfo and cannot bind the destructive target. It
+instead passes an exact-length retained all-`0xff` input to identity-reporting
+`write-bin`; sector-aligned operands make its erase-before-write span exactly
+the requested range. Espflash may checksum-skip the physical write when the
+range is already blank, which is acceptable because the invariant is logical
+all-`0xff` state. Success still requires action chip/flash/MAC evidence and an
+exact-length readback whose entire contents are `0xff`. It never returns a
+mutable port string to an
+intervening shell command. Each invocation needs a unique evidence prefix; the
+helper uses exclusive file creation and refuses an existing output or evidence
+path, including dotted-prefix aliases. RF-capable merged images additionally
+require an exact physical `HT-RA62-HF` module acknowledgement and matching ESP
+image header capacity before any hardware access. Every flash dump is created
+as an owner-only `0600` regular file before `espflash` starts and is written
+through a retained inherited descriptor, so replacing its visible path with a
+symlink cannot redirect bytes into another file. A verified dump becomes
+owner-read-only `0400`; a failed or unverified dump remains private `0600`.
+Merged-image and qualification writes likewise consume retained, hash-bound
+input descriptors. Their verified records require the write action's own
+chip/flash/MAC observation, unchanged post-action USB mapping, and a
+loader-preserving post-write `board-info`; merged-image readback and read-only
+verification separately validate the read action identity and mapping.
+
+This stock-CLI all-`0xff` path closes evidence attribution, including the
+erase-B/swap-back-to-A case, because `write-bin` reports DeviceInfo on the same
+open connection used for the write. It cannot reject a board swapped after
+qualification *before* attempting the write, since stock `write-bin` has no
+expected-MAC gate. A future project-owned wrapper around the pinned espflash
+library can strengthen this to fail-before-destruction by checking DeviceInfo
+and erasing on one retained `Flasher`; until then, any wrong action MAC is a
+post-write failure with no verified record.
 
 Only after both boards have stable backups should the image be flashed with the
 project-owned low-address table. The helper derives the only accepted
