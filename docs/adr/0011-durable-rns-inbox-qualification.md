@@ -424,8 +424,8 @@ and forwarded transport proofs are explicitly excluded from generated
 delivery-proof counts. The default ELF excludes the record; the HIL ELF has one
 initialized 192-byte instance whose linked bytes are decoder-validated.
 
-The final diagnostic HIL merged image is 778,000 bytes with SHA-256
-`ae4d14112696aa27311d782d8e6b1479db5959f2e89b56ce3dc4ce3b41ddfb54`.
+The final `9bceacd` diagnostic HIL merged image is 779,184 bytes with SHA-256
+`fe5fae51d83ef248a46965f75dab87196c1e79c2b4a72797cdf995e9c99a3e15`.
 It passes build, graph, ELF, and static-stack gates but has not yet been flashed
 because both boards were absent after the preceding debugger-reset attempt.
 The immediately preceding 777,600-byte HIL image, SHA-256

@@ -433,7 +433,7 @@ default/HIL usable stacks must remain at least 170,984/170,288 bytes. The
 default ELF must exclude the proof trace; the HIL ELF must contain exactly one
 initialized 192-byte symbol whose linked bytes decode as a valid empty `RPTE`
 record. Record counts are diagnostic rather than policy: the current release
-ELFs contain 814 default and 830 HIL records, while both maxima are 52,752
+ELFs contain 816 default and 832 HIL records, while both maxima are 52,752
 bytes. CI runs
 Clippy and then relinks both profiles with
 `-C link-arg=-nostartfiles -Z emit-stack-sizes` in isolated target directories
@@ -465,16 +465,16 @@ historical artifacts while producing a new isolated pair:
 
 | Image | Text | Data | BSS | GNU total | Merged image |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Current default | 659,755 | 3,676 | 469,152 | 1,132,583 | 766,192 |
-| Current measurement + proof trace HIL | 671,719 | 4,180 | 468,648 | 1,144,547 | 778,000 |
-| Delta | +11,964 | +504 | -504 | +11,964 | +11,808 |
+| Current default | 661,147 | 3,676 | 469,152 | 1,133,975 | 767,552 |
+| Current measurement + proof trace HIL | 672,935 | 4,180 | 468,648 | 1,145,763 | 779,184 |
+| Delta | +11,788 | +504 | -504 | +11,788 | +11,632 |
 
-The current default/HIL ELF SHA-256 values are
-`95adc2b6c63db9ab38232d813938cf22c78c7876cd8d77b873af0bcbf8ebfd20`
-and `8c1106595155af306f135d35a8dc0d79dfb31b72393d1ffbd7c0e5cffdc2b135`.
+The current `9bceacd` default/HIL ELF SHA-256 values are
+`4d2b20271e92ce175e8acccdd8440344849e1c75dd3bd6a6994e4eefa343c2b2`
+and `8fcf71705a6f59a8346d42d8f5eda4228a84f90fa860d8f0becb5d9385ccf86e`.
 The corresponding merged-image values are
-`cb337e68fd1dcf366cf36297c27474595b2da0c0d16f548f9a84bd0b588fd974`
-and `ae4d14112696aa27311d782d8e6b1479db5959f2e89b56ce3dc4ce3b41ddfb54`.
+`b6a93f0ac20e1c151cd8797b4a0a0e3731da75c82b9bd623103b29c94ede82a9`
+and `fe5fae51d83ef248a46965f75dab87196c1e79c2b4a72797cdf995e9c99a3e15`.
 The added initialized trace record moves the HIL reservation/usable pair down
 by exactly 192 bytes to 170,352/170,288; the default pair is unchanged.
 
