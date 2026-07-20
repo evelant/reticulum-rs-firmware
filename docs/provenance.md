@@ -9,7 +9,7 @@ authoritative in the lockfile.
 | Component | Source | Pin | License used here | Build role |
 | --- | --- | --- | --- | --- |
 | Project-owned crates | This repository | current tree | MIT OR Apache-2.0 | Product and shared tooling |
-| Rete integration fork | <https://github.com/evelant/rete> | `fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2` (designated durable tag `firmware-pin-fb96ac1`), based on upstream `9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743` | Apache-2.0 option from retained upstream declaration | Provisional RNS foundation and firmware compile graph; includes canonical local LINKREQUEST validation, transactional owned- and relay-Link admission, endpoint announce policy, caller-owned DATA preparation, bounded receipt backpressure, allocation-atomic proof/timeout terminals, full-hash/Link-ID-bound DATA/channel terminal candidates, exact path/reverse/link forwarding, typed reverse-full/conflict admission, owned HEADER_2 local dispatch, narrow exact-path HEADER_2 DATA/LINKREQUEST relay, foreign-H2 filtering, fail-closed LRPROOF validation, authenticated owned-Link interface binding and pre-dedup wrong-interface rejection, identities-only snapshot restoration, and LXMF attempt correlation. The first three generic changes were already offered in upstream PRs 7, 9 and 11; the newer lifecycle and routing work remains fork-local unless the user directly approves an upstream issue or PR. |
+| Rete integration fork | <https://github.com/evelant/rete> | `6612f4d91593a8f26a77576bd56329a08b8d70ea` (designated durable tag `firmware-pin-6612f4d`), based on upstream `9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743` | Apache-2.0 option from retained upstream declaration | Provisional RNS foundation and firmware compile graph; includes canonical local LINKREQUEST validation, transactional owned- and relay-Link admission, endpoint announce policy, caller-owned DATA preparation, bounded receipt backpressure, allocation-atomic proof/timeout terminals, full-hash/Link-ID-bound DATA/channel terminal candidates, exact path/reverse/link forwarding, typed reverse-full/conflict admission, owned HEADER_2 local dispatch, narrow exact-path HEADER_2 DATA/LINKREQUEST relay, foreign-H2 filtering, fail-closed LRPROOF validation, authenticated owned-Link interface binding and pre-dedup wrong-interface rejection, Python-compatible keepalive lifecycle, identities-only snapshot restoration, and LXMF attempt correlation. The first three generic changes were already offered in upstream PRs 7, 9 and 11; the newer lifecycle and routing work remains fork-local unless the user directly approves an upstream issue or PR. |
 | Leviculum | <https://codeberg.org/Lew_Palm/leviculum> | `5fb1db0e5e5a490291ee5f6b81312cf0c9de622a` | AGPL-3.0-or-later | Separate protocol oracle and fallback package |
 | esp-hal family | <https://github.com/esp-rs/esp-hal> | crates.io versions in lockfile | MIT OR Apache-2.0 | ESP32-S3 platform |
 | esp-rtos | Published crates.io 0.3.0 source vendored at `vendor/esp-rtos-0.3.0` | archive SHA-256 `551f90766e1527edaa0c91e8d559e9e2a60397b545e93357ac61fb31845e5712`; crate-recorded upstream commit `347003de8a48320bb7724f53045be3afa9204411`; exact tree and pristine/patched hashes in `VENDOR-HASHES.json` | MIT OR Apache-2.0, with canonical license texts added as project provenance files | Local CPU0 and CPU1 main-stack slice unit corrections; exact edits, mechanical integrity guard and removal condition are recorded in `PATCHES.md` |
@@ -18,7 +18,8 @@ authoritative in the lockfile.
 | Embassy futures/sync/time, static_cell and zeroize | crates.io | exact versions in workspace and lockfile | MIT OR Apache-2.0 | Bounded target coordination, in-place protocol ownership and temporary key cleanup |
 
 The designated durable tag for commit
-`fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2` is `firmware-pin-fb96ac1`. The pin
+`6612f4d91593a8f26a77576bd56329a08b8d70ea` is
+`firmware-pin-6612f4d`. The pin
 adds exact-interface transport outcomes through the
 stack and Embassy/Tokio dispatch layers; one-shot reverse-proof interface
 validation; direction, hop, identity, signature, and canonical-header checks
@@ -39,15 +40,25 @@ path lacks a recorded interface may broadcast. Wrong-interface Link DATA and
 `RESOURCE_PRF` fail before dedup admission. This pin still stores only an
 interface-slot index: asynchronous output on a bound Tokio shared `Hub`
 broadcasts to sibling clients until endpoint-aware client identity and
-reconnect generation are retained. Pending-Link `expected_hops`, Python's
-unencrypted initiator-request/responder-reply keepalive behavior, and receipt
-replacement for fresh-hash channel retransmissions remain unresolved.
+reconnect generation are retained. This pin adds exact unencrypted 20-byte
+keepalives: the initiator alone emits `0xff` after both a full inbound-silence
+interval and a full interval since its previous probe, and the responder alone
+returns `0xfe`. Valid role-specific repeats bypass dedup only after
+bound-interface validation; lifecycle results are internal, and
+automatic output preflights and retains that route before advancing its timer.
+Stale begins after two intervals and preserves five seconds from the actual
+transition/final probe for any valid bound Link traffic to revive it.
+Pending-Link `expected_hops`, receipt replacement for fresh-hash channel
+retransmissions, and automatic timeout `LINKCLOSE` emission remain unresolved.
 
 Earlier build and powered-evidence records retain the Rete revisions and
 artifact hashes they actually used. In particular, records naming `9bceacd` or
 `f6f5fb0` remain historical evidence only and do not qualify this current pin.
-There is no retained E290 ELF, flashed-image readback or powered proof for
-`fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2` itself.
+The current pin's default E290 release ELF and merged image are build-qualified;
+the 767,696-byte merged image has SHA-256
+`f03ad20c839f9b0ee26e37b9f08e6e02edbabc4666a0b6dac2fd24f870146b7b`.
+There is no flashed-image readback or powered proof for
+`6612f4d91593a8f26a77576bd56329a08b8d70ea` itself.
 
 Phase-1 normal/pressure and closure artifact manifests bind the project commit
 and its raw Git root tree; their tool inventories record the same pair and the

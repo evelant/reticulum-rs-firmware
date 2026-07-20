@@ -10,12 +10,16 @@ DATA/LXMF submission, client delivery, and full powered E290 qualification of
 the product image remain open.
 The permanent image's bounded source-`96e38aa` boot/interface/ordinary-TX smoke
 has passed, without controlled peer RX or DATA.
-**Rete pin:** `fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2`
-(designated durable tag `firmware-pin-fb96ac1`)
+**Rete pin:** `6612f4d91593a8f26a77576bd56329a08b8d70ea`
+(designated durable tag `firmware-pin-6612f4d`)
 
-This exact pin has no retained E290 ELF, flashed-image readback or powered
-proof. The source-`96e38aa` result above and later hardware/artifact records are
-historical evidence bound to the revisions they name.
+This exact pin has host, portable-target, and default E290 build-only evidence:
+the merged image is 767,696 bytes, uses 702,160/6,291,456 application bytes
+(11.16%), and has SHA-256
+`f03ad20c839f9b0ee26e37b9f08e6e02edbabc4666a0b6dac2fd24f870146b7b`.
+It has no flashed-image readback or powered proof. The source-`96e38aa` result
+above and later powered records are historical evidence bound to the revisions
+they name.
 
 At this pin, native ingress distinguishes exact path/reverse/Link forwarding
 from genuine propagation. `PacketRouting::ExactInterface(id)` maps to the
@@ -42,9 +46,9 @@ carry typed owned/relay `LinkTableFull`, `ReverseTableFull`, and
 reconstructing failure from counters. Foreign non-ANNOUNCE H2 packets are
 filtered before state mutation, while H2 ANNOUNCE remains eligible for normal
 announce validation. Relay-Link occupancy is exposed separately from owned
-Links. The deterministic 144-check project conformance run includes a complete
+Links. The deterministic 184-check project conformance run includes a complete
 three-node A--B--C Link handshake, channel DATA and proof flow over two exact
-relay interfaces.
+relay interfaces, plus 40 exact keepalive lifecycle checks.
 
 Locally owned Link output has a separate authenticated binding. A responder
 binds to LINKREQUEST ingress. An initiator's learned path selects the initial
@@ -60,10 +64,17 @@ This native binding is an interface slot, not a shared-instance client
 endpoint. Synchronous Tokio `Hub` output can retain the source client, but
 asynchronous owned-Link output broadcasts to sibling clients on that slot until
 Link state carries endpoint-aware client identity and reconnect generation.
-Pending-Link `expected_hops` still needs Python parity. Python's unencrypted,
-initiator-request/responder-reply keepalive exchange also differs from Rete's
-current encrypted bidirectional behavior, and channel retransmission still
-changes ciphertext/hash without replacing the original receipt.
+Pending-Link `expected_hops` still needs Python parity. Keepalives now use exact
+unencrypted 20-byte `0xff` initiator requests and `0xfe` responder replies. The
+initiator alone probes after both a full inbound-silence interval and a full
+interval since its previous probe; deterministic valid repeats avoid dedup only
+after bound-interface admission, lifecycle traffic emits no
+application event, and automatic output preflights and retains the bound route
+before committing its timer. Stale starts after two intervals and keeps the
+full transition-relative five-second revival window; valid bound Link traffic
+revives it. Channel retransmission still changes ciphertext/hash without
+replacing the original receipt, and automatic timeout removal still emits no
+`LINKCLOSE` packet.
 
 Arbitrary remote HEADER_1 LINKREQUEST remains disabled until interface roles
 distinguish it from local-origin injection. The temporary H1 DATA compatibility

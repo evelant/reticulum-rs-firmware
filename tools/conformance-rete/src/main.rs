@@ -919,6 +919,220 @@ fn verify_released_vectors() -> Result<usize, String> {
     )?;
     checks += 13;
 
+    // Drive the established Link through a deliberately late watchdog tick.
+    // Native tick preparation must emit the initiator's final probe before the
+    // watchdog transitions the retained Link into its revival window.
+    let late_keepalive_at = 1_700_001_000;
+    let stale_keepalive = link_initiator.tick(late_keepalive_at, &mut link_rng);
+    require(
+        stale_keepalive.packets.len() == 1,
+        "late initiator tick did not emit exactly one keepalive",
+    )?;
+    require(
+        stale_keepalive.unroutable_packets == 0,
+        "late initiator keepalive was not routable from retained Link state",
+    )?;
+    require(
+        link_initiator.link_state(&link_id) == Some(LinkState::Stale),
+        "late initiator tick did not transition the Link to Stale",
+    )?;
+    let keepalive_request = &stale_keepalive.packets[0];
+    require(
+        keepalive_request.target() == TxTarget::Only(initiator_interface),
+        "initiator keepalive did not use its bound interface",
+    )?;
+    require(
+        keepalive_request.bytes().len() == 20,
+        "initiator keepalive carried unexpected encryption overhead",
+    )?;
+    require(
+        keepalive_request.bytes()[0] & 0xc0 == 0,
+        "initiator keepalive did not use HEADER_1",
+    )?;
+    let parsed_keepalive_request = parse_packet(keepalive_request.bytes())
+        .map_err(|error| format!("Rete emitted invalid keepalive request: {error}"))?;
+    require(
+        parsed_keepalive_request.packet_type == PacketType::Data,
+        "initiator keepalive used the wrong packet type",
+    )?;
+    require(
+        parsed_keepalive_request.dest_type == DestType::Link,
+        "initiator keepalive used the wrong destination type",
+    )?;
+    require(
+        parsed_keepalive_request.destination_hash == link_id.as_ref(),
+        "initiator keepalive was not addressed to its Link ID",
+    )?;
+    require(
+        parsed_keepalive_request.context == 0xfa,
+        "initiator keepalive used the wrong context",
+    )?;
+    require(
+        parsed_keepalive_request.payload == [0xff],
+        "initiator keepalive did not contain the exact FF request",
+    )?;
+
+    let responder_dedup_before = link_responder.metrics().transport.packets_dropped_dedup;
+    let keepalive_response = link_responder.ingest(
+        keepalive_request.bytes(),
+        late_keepalive_at,
+        responder_interface,
+        &mut link_rng,
+    );
+    require(
+        keepalive_response.actions.events.is_empty(),
+        "responder surfaced keepalive lifecycle traffic as an application event",
+    )?;
+    require(
+        keepalive_response.actions.packets.len() == 1,
+        "responder did not emit exactly one keepalive response",
+    )?;
+    require(
+        keepalive_response.actions.unroutable_packets == 0,
+        "responder keepalive response was not routable from ingress context",
+    )?;
+    let keepalive_reply = &keepalive_response.actions.packets[0];
+    require(
+        keepalive_reply.target() == TxTarget::Only(responder_interface),
+        "responder keepalive did not return on its bound interface",
+    )?;
+    require(
+        keepalive_reply.bytes().len() == 20,
+        "responder keepalive carried unexpected encryption overhead",
+    )?;
+    require(
+        keepalive_reply.bytes()[0] & 0xc0 == 0,
+        "responder keepalive did not use HEADER_1",
+    )?;
+    let parsed_keepalive_reply = parse_packet(keepalive_reply.bytes())
+        .map_err(|error| format!("Rete emitted invalid keepalive response: {error}"))?;
+    require(
+        parsed_keepalive_reply.packet_type == PacketType::Data,
+        "responder keepalive used the wrong packet type",
+    )?;
+    require(
+        parsed_keepalive_reply.dest_type == DestType::Link,
+        "responder keepalive used the wrong destination type",
+    )?;
+    require(
+        parsed_keepalive_reply.destination_hash == link_id.as_ref(),
+        "responder keepalive was not addressed to its Link ID",
+    )?;
+    require(
+        parsed_keepalive_reply.context == 0xfa,
+        "responder keepalive used the wrong context",
+    )?;
+    require(
+        parsed_keepalive_reply.payload == [0xfe],
+        "responder keepalive did not contain the exact FE response",
+    )?;
+    require(
+        link_responder.metrics().transport.packets_dropped_dedup == responder_dedup_before,
+        "first FF keepalive request entered packet deduplication",
+    )?;
+
+    let initiator_dedup_before = link_initiator.metrics().transport.packets_dropped_dedup;
+    let consumed_keepalive = link_initiator.ingest(
+        keepalive_reply.bytes(),
+        late_keepalive_at + 1,
+        initiator_interface,
+        &mut link_rng,
+    );
+    require(
+        consumed_keepalive.actions.events.is_empty(),
+        "initiator surfaced keepalive lifecycle traffic as an application event",
+    )?;
+    require(
+        consumed_keepalive.actions.packets.is_empty(),
+        "initiator emitted output after consuming a keepalive response",
+    )?;
+    require(
+        consumed_keepalive.actions.unroutable_packets == 0,
+        "initiator reported unroutable output after consuming a keepalive response",
+    )?;
+    require(
+        link_initiator.link_state(&link_id) == Some(LinkState::Active),
+        "valid FE keepalive response did not revive the stale initiator",
+    )?;
+    require(
+        link_initiator.metrics().transport.packets_dropped_dedup == initiator_dedup_before,
+        "first FE keepalive response entered packet deduplication",
+    )?;
+
+    // Replay the identical deterministic request and response once. Both must
+    // remain internal lifecycle traffic and bypass the ordinary packet filter.
+    let repeated_keepalive_response = link_responder.ingest(
+        keepalive_request.bytes(),
+        late_keepalive_at + 2,
+        responder_interface,
+        &mut link_rng,
+    );
+    require(
+        repeated_keepalive_response.actions.events.is_empty(),
+        "replayed FF surfaced as an application event",
+    )?;
+    require(
+        repeated_keepalive_response.actions.packets.len() == 1,
+        "replayed FF did not produce exactly one FE response",
+    )?;
+    require(
+        repeated_keepalive_response.actions.packets[0].target()
+            == TxTarget::Only(responder_interface),
+        "replayed FF response used the wrong interface",
+    )?;
+    require(
+        repeated_keepalive_response.actions.packets[0].bytes() == keepalive_reply.bytes(),
+        "replayed FF did not produce the identical deterministic FE response",
+    )?;
+    require(
+        link_responder.metrics().transport.packets_dropped_dedup == responder_dedup_before,
+        "replayed FF was suppressed by packet deduplication",
+    )?;
+
+    let repeated_keepalive_consumed = link_initiator.ingest(
+        repeated_keepalive_response.actions.packets[0].bytes(),
+        late_keepalive_at + 3,
+        initiator_interface,
+        &mut link_rng,
+    );
+    require(
+        repeated_keepalive_consumed.actions.events.is_empty(),
+        "replayed FE surfaced as an application event",
+    )?;
+    require(
+        repeated_keepalive_consumed.actions.packets.is_empty(),
+        "replayed FE produced unexpected output",
+    )?;
+    require(
+        repeated_keepalive_consumed.actions.unroutable_packets == 0,
+        "replayed FE produced unroutable output",
+    )?;
+    require(
+        link_initiator.link_state(&link_id) == Some(LinkState::Active),
+        "replayed FE did not retain the active initiator Link",
+    )?;
+    require(
+        link_initiator.metrics().transport.packets_dropped_dedup == initiator_dedup_before,
+        "replayed FE was suppressed by packet deduplication",
+    )?;
+
+    // Even after crossing its own stale deadline, the responder must never
+    // originate a keepalive request. Its watchdog may only retain the Link in
+    // the Stale revival window.
+    let responder_stale_tick = link_responder.tick(late_keepalive_at + 1_002, &mut link_rng);
+    require(
+        responder_stale_tick
+            .packets
+            .iter()
+            .all(|packet| parse_packet(packet.bytes()).is_ok_and(|parsed| parsed.context != 0xfa)),
+        "responder originated a keepalive request",
+    )?;
+    require(
+        link_responder.link_state(&link_id) == Some(LinkState::Stale),
+        "responder watchdog fixture did not cross the stale deadline",
+    )?;
+    checks += 40;
+
     checks += verify_three_node_relayed_link()?;
 
     Ok(checks)
@@ -1213,6 +1427,6 @@ mod tests {
 
     #[test]
     fn released_python_vectors_pass() {
-        assert_eq!(verify_released_vectors(), Ok(144));
+        assert_eq!(verify_released_vectors(), Ok(184));
     }
 }

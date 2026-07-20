@@ -72,8 +72,8 @@ remain open.
 Bitrate and cost are recorded but do not replace Reticulum routing. Until Rete
 paths carry an interface generation, an ID/configuration stays immutable for
 one node-owner lifetime or its learned paths must be purged before reuse.
-The current Rete pin, `fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2`
-(designated durable tag `firmware-pin-fb96ac1`), carries learned path, reverse,
+The current Rete pin, `6612f4d91593a8f26a77576bd56329a08b8d70ea`
+(designated durable tag `firmware-pin-6612f4d`), carries learned path, reverse,
 and Link decisions as
 exact interface targets instead of falling back to interface zero or generic
 broadcast. An exact target may intentionally equal the ingress slot, which is
@@ -111,10 +111,19 @@ The current binding is an interface-slot index, not a shared-host client
 endpoint. On Rete's Tokio `Hub`, synchronous output can retain the originating
 client, but asynchronous owned-Link output still broadcasts to sibling clients
 on the bound slot until endpoint-aware identity and reincarnation are carried
-through Link state. Remaining Python-parity work also includes pending-Link
-`expected_hops`, Python's unencrypted initiator-request/responder-reply
-keepalive wire behavior, and receipt replacement for channel retransmissions
-whose freshly randomized ciphertext changes the packet hash.
+through Link state. Keepalive wire and lifecycle parity is now implemented as
+exact unencrypted 20-byte Link DATA: only the initiator sends `0xff` after both
+a full inbound-silence interval and a full interval since its previous probe,
+only the responder returns `0xfe`, and neither packet becomes application data.
+Valid role-specific deterministic repeats bypass dedup only after the
+bound-interface gate; automatic probes and replies
+retain `BoundInterface`, and routing is preflighted before probe timestamps are
+committed. A Link becomes stale after two keepalive intervals and retains a
+full five-second revival window from the actual stale transition/final probe;
+valid bound Link traffic revives it. Remaining Link work includes pending-Link
+`expected_hops`, automatic timeout `LINKCLOSE` emission, and receipt replacement
+for channel retransmissions whose freshly randomized ciphertext changes the
+packet hash.
 Snapshot loading currently restores identities only; saved paths and cached
 announces remain inactive until stable interface rebinding is defined.
 
@@ -501,25 +510,29 @@ after frame exposure with an ordinary announce queued behind the DATA owner;
 `ActiveOwnerFailStopped` retains every owner and acknowledgement gate, takes the
 LoRa lease offline, and permits no later host-radio TX or RX. This qualifies the
 software composition, not ESP32-S3 execution or RF hardware.
-The focused host clients pass 56 tests inside the 248-test xtask suite; the
-portable Rete integration and raw-RNS inbox store pass 53 and 17 tests,
+The focused host clients pass 56 tests inside the 252-test xtask suite; the
+portable Rete integration and raw-RNS inbox store pass 54 and 17 tests,
 respectively.
-Those 53 tests exercise this repository's adapter and are separate from the
+Those 54 tests exercise this repository's adapter and are separate from the
 pinned Rete fork's selected validation set. The project conformance runner now
-performs 144 checks, including a 32-check three-node A--B--C relayed Link,
+performs 184 checks: 112 released-vector, adapter and direct-Link checks, 40
+keepalive lifecycle checks, and a 32-check three-node A--B--C relayed Link,
 LRPROOF/LRRTT, encrypted channel DATA and proof flow through independent exact
 interface IDs. This is deterministic project-side conformance, not a powered or
 live-Python multi-hop claim. At
-`fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2`, the selected upstream set passes
-614 tests: 254 transport (165 library, 9 computed-vector, 43 forwarding, 32
-Link-integration, and 5 path-request), 133 stack (132 library and one
-integration), 143 LXMF library, and 84 daemon library tests. The four library
-targets total 524 tests; adding the 89 transport and one stack integration tests
-produces 614. This is a named selected set, not a count of every nested
-workspace test target.
+`6612f4d91593a8f26a77576bd56329a08b8d70ea`, the selected upstream set passes
+621 tests: 259 transport (167 library plus 92 integration: 9 computed-vector,
+43 forwarding, 35 Link-integration, and 5 path-request), 135 stack (134 library
+and one integration), 143 LXMF library, and 84 daemon library tests. The four
+library targets total 528 tests; adding the 92 transport and one stack
+integration tests produces 621. This is a named selected set, not a count of
+every nested workspace test target.
 
-This pin has host and portable-target evidence only. It has no retained E290
-ELF, flashed-image readback or powered proof; all powered and ELF records below
+This pin has host, portable-target, and ESP32-S3 build-only evidence. Its
+default E290 release ELF links successfully, and the explicit 16 MiB package is
+767,696 bytes with application use 702,160/6,291,456 bytes (11.16%) and merged
+SHA-256 `f03ad20c839f9b0ee26e37b9f08e6e02edbabc4666a0b6dac2fd24f870146b7b`.
+It has no flashed-image readback or powered proof; all powered records below
 name their historical source and Rete revisions and remain historical evidence.
 
 The journal's isolated powered storage HIL passed on
@@ -631,8 +644,8 @@ a dependency tail identical to the default graph. The HIL
 module compiles only for feature-enabled host tests or feature-enabled Xtensa
 builds; the default ELF contains neither the hook nor its evidence symbol.
 
-After the matrix and HIL, the restored current default image remained 761,952
-bytes, now with SHA-256
+After the matrix and HIL, the restored 2026-07-19 default image remained
+761,952 bytes, with SHA-256
 `d26587a2506408ec40cd42facb9bb87cc9c32e79c2afd2e1ab09f0e1268641cb`.
 Both boards matched it exactly and booted with empty inboxes. These bounded
 results do not qualify physical power cuts, mount/commit timing, RAM/PSRAM

@@ -1608,7 +1608,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "rete-core"
 version = "0.1.0"
-source = "git+https://github.com/evelant/rete.git?rev=fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2#fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2"
+source = "git+https://github.com/evelant/rete.git?rev=6612f4d91593a8f26a77576bd56329a08b8d70ea#6612f4d91593a8f26a77576bd56329a08b8d70ea"
 dependencies = [
  "aes",
  "cbc",
@@ -1624,7 +1624,7 @@ dependencies = [
 [[package]]
 name = "rete-stack"
 version = "0.1.0"
-source = "git+https://github.com/evelant/rete.git?rev=fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2#fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2"
+source = "git+https://github.com/evelant/rete.git?rev=6612f4d91593a8f26a77576bd56329a08b8d70ea#6612f4d91593a8f26a77576bd56329a08b8d70ea"
 dependencies = [
  "embedded-io-async 0.6.1",
  "heapless 0.8.0",
@@ -1637,7 +1637,7 @@ dependencies = [
 [[package]]
 name = "rete-transport"
 version = "0.1.0"
-source = "git+https://github.com/evelant/rete.git?rev=fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2#fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2"
+source = "git+https://github.com/evelant/rete.git?rev=6612f4d91593a8f26a77576bd56329a08b8d70ea#6612f4d91593a8f26a77576bd56329a08b8d70ea"
 dependencies = [
  "heapless 0.8.0",
  "hkdf",

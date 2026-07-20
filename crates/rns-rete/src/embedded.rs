@@ -1708,6 +1708,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                 | SendError::LinkTableFull
                 | SendError::LinkNotFound
                 | SendError::LinkNotActive
+                | SendError::KeepaliveRoleMismatch
                 | SendError::LinkInterfaceUnknown
                 | SendError::WindowFull
                 | SendError::OutputAllocationFailed
@@ -2050,7 +2051,7 @@ mod tests {
     use alloc::{format, vec};
 
     use super::*;
-    use rete_core::{CONTEXT_LRPROOF, CONTEXT_LRRTT, PacketBuilder};
+    use rete_core::{CONTEXT_KEEPALIVE, CONTEXT_LRPROOF, CONTEXT_LRRTT, PacketBuilder};
 
     #[derive(Default)]
     struct CounterRng(u8);
@@ -2264,6 +2265,181 @@ mod tests {
         initiator
             .initiate_link(responder.destination_hash(), 100, rng)
             .unwrap()
+    }
+
+    fn establish_bound_link(
+        initiator: &mut TestNode,
+        responder: &mut TestNode,
+        rng: &mut CounterRng,
+    ) -> LinkId {
+        let (request, link_id) = link_request(initiator, responder, rng);
+        let proof = responder.ingest(request.bytes(), 100, InterfaceId(7), rng);
+        assert!(proof.actions.events.is_empty());
+        assert_eq!(proof.actions.packets.len(), 1);
+        assert_eq!(
+            proof.actions.packets[0].target(),
+            TxTarget::Only(InterfaceId(7))
+        );
+        assert_eq!(
+            Packet::parse(proof.actions.packets[0].bytes())
+                .unwrap()
+                .context,
+            CONTEXT_LRPROOF
+        );
+
+        let established =
+            initiator.ingest(proof.actions.packets[0].bytes(), 101, InterfaceId(3), rng);
+        assert_eq!(initiator.link_state(&link_id), Some(LinkState::Active));
+        assert_eq!(established.actions.packets.len(), 1);
+        assert_eq!(
+            established.actions.packets[0].target(),
+            TxTarget::Only(InterfaceId(3))
+        );
+        assert_eq!(
+            Packet::parse(established.actions.packets[0].bytes())
+                .unwrap()
+                .context,
+            CONTEXT_LRRTT
+        );
+
+        let active = responder.ingest(
+            established.actions.packets[0].bytes(),
+            102,
+            InterfaceId(7),
+            rng,
+        );
+        assert_eq!(active.disposition, IngressDisposition::Processed);
+        assert_eq!(responder.link_state(&link_id), Some(LinkState::Active));
+        link_id
+    }
+
+    #[test]
+    fn wrapper_keepalive_roundtrip_is_exact_internal_repeatable_and_bound() {
+        let mut initiator = node(1);
+        let mut responder = node(2);
+        let mut rng = CounterRng::default();
+        let link_id = establish_bound_link(&mut initiator, &mut responder, &mut rng);
+
+        // LRPROOF takes one whole monotonic second in this fixture, so Python's
+        // RTT-derived keepalive interval determines the first initiator probe.
+        let initiator_keepalive = rete_transport::compute_keepalive(1.0).0 as u64;
+        let request_at = 101 + initiator_keepalive;
+        let tick = initiator.tick(request_at, &mut rng);
+        let requests: Vec<_> = tick
+            .packets
+            .iter()
+            .filter(|packet| {
+                Packet::parse(packet.bytes())
+                    .is_ok_and(|parsed| parsed.context == CONTEXT_KEEPALIVE)
+            })
+            .collect();
+        assert_eq!(requests.len(), 1);
+        let request = requests[0];
+        assert_eq!(request.target(), TxTarget::Only(InterfaceId(3)));
+        assert_eq!(request.bytes().len(), 20);
+        let parsed_request = Packet::parse(request.bytes()).unwrap();
+        assert_eq!(parsed_request.packet_type, PacketType::Data);
+        assert_eq!(parsed_request.dest_type, DestType::Link);
+        assert_eq!(parsed_request.destination_hash, link_id.as_ref());
+        assert_eq!(parsed_request.payload, &[0xFF]);
+        assert!(matches!(
+            tick.events.as_slice(),
+            [NodeEvent::Tick {
+                closed_links: 0,
+                ..
+            }]
+        ));
+
+        let responder_dedup = responder.metrics().transport.packets_dropped_dedup;
+        let response = responder.ingest(request.bytes(), request_at, InterfaceId(7), &mut rng);
+        assert_eq!(response.disposition, IngressDisposition::Processed);
+        assert!(response.actions.events.is_empty());
+        assert_eq!(response.actions.packets.len(), 1);
+        assert_eq!(
+            response.actions.packets[0].target(),
+            TxTarget::Only(InterfaceId(7))
+        );
+        assert_eq!(response.actions.packets[0].bytes().len(), 20);
+        let parsed_response = Packet::parse(response.actions.packets[0].bytes()).unwrap();
+        assert_eq!(parsed_response.packet_type, PacketType::Data);
+        assert_eq!(parsed_response.dest_type, DestType::Link);
+        assert_eq!(parsed_response.destination_hash, link_id.as_ref());
+        assert_eq!(parsed_response.payload, &[0xFE]);
+        assert_eq!(
+            responder.metrics().transport.packets_dropped_dedup,
+            responder_dedup
+        );
+
+        let initiator_dedup = initiator.metrics().transport.packets_dropped_dedup;
+        let consumed = initiator.ingest(
+            response.actions.packets[0].bytes(),
+            request_at + 1,
+            InterfaceId(3),
+            &mut rng,
+        );
+        assert_eq!(
+            consumed.disposition,
+            IngressDisposition::NoObservableOutcome
+        );
+        assert!(consumed.actions.events.is_empty());
+        assert!(consumed.actions.packets.is_empty());
+        assert_eq!(
+            initiator.metrics().transport.packets_dropped_dedup,
+            initiator_dedup
+        );
+
+        // Replaying the identical deterministic FF and FE remains valid Link
+        // lifecycle traffic instead of falling into packet deduplication.
+        let repeated_response =
+            responder.ingest(request.bytes(), request_at + 2, InterfaceId(7), &mut rng);
+        assert_eq!(repeated_response.disposition, IngressDisposition::Processed);
+        assert!(repeated_response.actions.events.is_empty());
+        assert_eq!(repeated_response.actions.packets.len(), 1);
+        assert_eq!(
+            repeated_response.actions.packets[0].target(),
+            TxTarget::Only(InterfaceId(7))
+        );
+        assert_eq!(
+            repeated_response.actions.packets[0].bytes(),
+            response.actions.packets[0].bytes()
+        );
+        assert_eq!(
+            responder.metrics().transport.packets_dropped_dedup,
+            responder_dedup
+        );
+
+        let repeated_consumed = initiator.ingest(
+            repeated_response.actions.packets[0].bytes(),
+            request_at + 3,
+            InterfaceId(3),
+            &mut rng,
+        );
+        assert_eq!(
+            repeated_consumed.disposition,
+            IngressDisposition::NoObservableOutcome
+        );
+        assert!(repeated_consumed.actions.events.is_empty());
+        assert!(repeated_consumed.actions.packets.is_empty());
+        assert_eq!(
+            initiator.metrics().transport.packets_dropped_dedup,
+            initiator_dedup
+        );
+
+        // The responder's RTT is two seconds in this fixture. Even after a
+        // complete interval of inbound silence, it must never originate FF.
+        let responder_keepalive = rete_transport::compute_keepalive(2.0).0 as u64;
+        let responder_tick = responder.tick(request_at + 2 + responder_keepalive, &mut rng);
+        assert!(responder_tick.packets.iter().all(|packet| {
+            Packet::parse(packet.bytes()).is_ok_and(|parsed| parsed.context != CONTEXT_KEEPALIVE)
+        }));
+        assert!(matches!(
+            responder_tick.events.as_slice(),
+            [NodeEvent::Tick {
+                closed_links: 0,
+                ..
+            }]
+        ));
+        assert_eq!(responder.link_state(&link_id), Some(LinkState::Active));
     }
 
     #[test]

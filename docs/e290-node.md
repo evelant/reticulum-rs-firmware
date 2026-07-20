@@ -67,16 +67,22 @@ multi-hop routing, LXMF, or general application-level message consumption,
 session resumption, or either deferred wireless bearer binding.
 
 The current source composition pins Rete commit
-`fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2`, with designated durable tag
-`firmware-pin-fb96ac1`. That pin is newer than every powered measurement and
-build-artifact digest recorded below. It removes implicit
+`6612f4d91593a8f26a77576bd56329a08b8d70ea`, with designated durable tag
+`firmware-pin-6612f4d`. That pin is newer than every powered measurement and
+powered artifact recorded below. It removes implicit
 interface-zero/broadcast fallbacks, adds exact path/reverse/Link routing and
 authenticated fail-closed LRPROOF handling, and makes covered H2 relay/reverse
 admission transactional with typed failures. Those host regressions do not
-retroactively qualify a historical image or hardware run. The pin has no
-retained E290 ELF, flashed-image readback or powered proof of its own; every
-artifact and powered result below remains bound to its recorded historical
-source and Rete revision.
+retroactively qualify a historical image or hardware run. The pin's default
+E290 release build links with text/data/BSS of 661,359/3,676/469,152 bytes and
+an 11,926,468-byte ELF, SHA-256
+`c8aba21be78224adb672f978a798915bc91f638ec18ac45675ea445545469cd1`.
+The explicit 16 MiB merged image is 767,696 bytes, uses
+702,160/6,291,456 application bytes (11.16%), and has SHA-256
+`f03ad20c839f9b0ee26e37b9f08e6e02edbabc4666a0b6dac2fd24f870146b7b`.
+This is build-only evidence: the image has no flashed readback or powered proof.
+Every powered result below remains bound to its recorded historical source and
+Rete revision.
 
 For locally owned Links, a responder binds the LINKREQUEST ingress interface,
 while an initiator remains unbound until a valid LRPROOF supplies the
@@ -87,8 +93,17 @@ broadcast. Wrong-interface Link DATA and `RESOURCE_PRF` are rejected before
 deduplication, preserving a later correct-interface copy. This is currently an
 interface-slot binding: a Tokio shared `Hub` still broadcasts asynchronous
 owned-Link output to siblings until Link state carries endpoint-aware client
-identity. Pending-Link `expected_hops`, Python keepalive wire/role parity and
-fresh-hash channel-retransmission receipt replacement remain open.
+identity. Python keepalive wire/role parity is now host-qualified: exact
+unencrypted 20-byte `0xff` requests originate only from the initiator after both
+a full inbound-silence interval and a full prior-probe interval, and only the
+responder returns `0xfe`. Both are consumed internally, repeated valid frames
+bypass dedup only after the bound interface is accepted, and automatic output
+preflights and retains that exact route before committing its probe timer. Stale
+begins after two intervals and keeps a full five-second revival window from the
+actual transition/final probe; valid bound Link traffic revives it. Pending-Link
+`expected_hops`, fresh-hash channel retransmission receipt replacement, and
+automatic timeout `LINKCLOSE` emission
+remain open. This source result does not add powered keepalive evidence.
 
 No issue or pull
 request was opened for this newer fork-local work, and any future upstream
@@ -457,7 +472,7 @@ at most 52,752 bytes, both linker guard offsets must remain 60 bytes, and the
 default/HIL usable stacks must remain at least 170,984/170,288 bytes. The
 default ELF must exclude the proof trace; the HIL ELF must contain exactly one
 initialized 192-byte symbol whose linked bytes decode as a valid empty `RPTE`
-record. Record counts are diagnostic rather than policy: the current release
+record. Record counts are diagnostic rather than policy: the retained release
 ELFs contain 816 default and 832 HIL records, while both maxima are 52,752
 bytes. CI runs
 Clippy and then relinks both profiles with
@@ -506,7 +521,7 @@ by exactly 192 bytes to 170,352/170,288; the default pair is unchanged.
 Those historical artifacts passed build, graph, ELF, and static-stack gates but
 were not powered-qualified: both boards were absent after the preceding
 debugger-reset attempt. They do not describe an ELF built from the current
-`fb96ac1` pin. The immediately preceding 777,600-byte HIL image,
+`6612f4d` pin. The immediately preceding 777,600-byte HIL image,
 SHA-256
 `151a66cc92b83268050c61bfc983ad6d9452fac0626d260c26da877c552c800e`,
 did pass an identity-qualified flash and exact address-zero readback on board
@@ -749,10 +764,10 @@ retained two-board traffic HIL predates that source guard, but its exact linked
 disassembly has the complete scanner loop in the 32-byte caller frame, uses
 that live stack pointer as the exclusive read limit, and makes no call from the
 scan loop. The post-run hardening therefore does not invalidate the retained
-measurement. The current proof-trace image includes the guard and passes the
-static ELF gate; the predecessor has the one-board powered baseline above. The
-current image still needs exact powered readback plus its two-board traffic
-workload.
+measurement. The retained post-run proof-trace image includes the guard and
+passes the static ELF gate; the predecessor has the one-board powered baseline
+above. That retained diagnostic image still needs exact powered readback plus
+its two-board traffic workload.
 
 `node_identity`, `announce_clock`, and `api_credentials` use ESP-IDF's standard
 `data,undefined` subtype. All three have application-owned formats; the
@@ -1119,18 +1134,19 @@ identity formatting, inbox status/peek, owner-only non-overwriting payload and
 evidence output, sequential request IDs, version policy, polling terminal
 semantics, coalesced-record preservation, authenticated terminal binding, and
 submission-input non-disclosure. Together these 56 focused tests are part of
-the full 248-test xtask gate. The portable
-Rete integration and inbox-store suites independently pass 53 and 17 tests,
-respectively. The 53 are project adapter tests. The project conformance runner
-now performs 144 checks, including a 32-check deterministic three-node A--B--C
-relayed Link/LRPROOF/LRRTT/channel/proof flow; it is not powered or live-Python
+the full 252-test xtask gate. The portable
+Rete integration and inbox-store suites independently pass 54 and 17 tests,
+respectively. The 54 are project adapter tests. The project conformance runner
+now performs 184 checks: 112 released-vector, adapter and direct-Link checks,
+40 keepalive lifecycle checks, and a 32-check deterministic three-node A--B--C
+relayed Link/LRPROOF/LRRTT/channel/proof flow. It is not powered or live-Python
 multi-hop qualification. The exact nested Rete selected validation set
-separately passes 614 tests: 254 transport (165 library, 9 computed-vector, 43
-forwarding, 32 Link-integration and 5 path-request), 133 stack (132 library and
-one integration), 143 LXMF library and 84 daemon library tests. The four
-library targets total 524 tests; the 89 transport and one stack integration
-tests bring this named set to 614. It is not a count of every nested workspace
-test target.
+separately passes 621 tests: 259 transport (167 library plus 92 integration: 9
+computed-vector, 43 forwarding, 35 Link-integration and 5 path-request), 135
+stack (134 library and one integration), 143 LXMF library and 84 daemon library
+tests. The four library targets total 528 tests; the 92 transport and one stack
+integration tests bring this named set to 621. It is not a count of every
+nested workspace test target.
 Thirty-one of the xtask tests freeze the measurement decoder's
 CLI, exact individual/combined ABI rendering, torn/header/sentinel/invariant
 rejection, input-file behavior, one-read checkpoint capture, strict final-ELF
@@ -1811,7 +1827,7 @@ The reverse proof or terminal status was not observed by the sender before its
 deadline; this product-level timeout is distinct from the zero radio-actor
 watchdog counters and remains a diagnostic residual. This capture used the
 preceding `f6f5fb0637d00691e09fa0105be4df902405fee4` Rete pin. The current
-`fb96ac1` host suite now covers exact reverse-interface routing and proof
+`6612f4d` host suite now covers exact reverse-interface routing and proof
 consumption, typed transactional reverse admission, and a deterministic
 three-node relayed Link/channel/proof flow, but only a new powered run can
 determine whether that fixes this end-to-end timeout or whether another product
@@ -2167,7 +2183,7 @@ first smoke.
   backend error-after-write cases, sustained and forwarded traffic, concurrent
   durable activity, low-memory/allocation-failure pressure, and default-image
   observation. Rerun the reverse delivery-proof scenario at the current
-  `fb96ac1` pin and diagnose any remaining timeout before claiming bidirectional
+  `6612f4d` pin and diagnose any remaining timeout before claiming bidirectional
   delivery completion. Then design final LXMF/message storage and
   device configuration with explicit wear, migration, reclamation,
   authorization, and cross-store ordering behavior.

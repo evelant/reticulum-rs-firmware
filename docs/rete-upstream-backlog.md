@@ -12,8 +12,8 @@ API stay in this project; generic protocol and bounded-state corrections are
 the candidates for upstream review.
 
 The current firmware pin is
-`fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2` (designated durable tag
-`firmware-pin-fb96ac1`). It retains
+`6612f4d91593a8f26a77576bd56329a08b8d70ea` (designated durable tag
+`firmware-pin-6612f4d`). It retains
 caller-owned DATA preparation, explicit receipt-capacity errors, fixed-capacity
 terminal sinks, exact DATA/channel terminal candidates, allocation-atomic
 proof/timeout delivery, full-hash receipt cancellation and core-aware LXMF
@@ -28,13 +28,17 @@ owned-H2 local dispatch, pre-mutation foreign-H2 filtering, and separately
 observable relay-Link capacity. The current Link tranche additionally binds a
 responder to LINKREQUEST ingress and an initiator only after valid LRPROOF,
 routes established owned-Link output through `BoundInterface`, and rejects
-wrong-interface Link DATA/`RESOURCE_PRF` before dedup admission. The legacy LXMF
-event handler without mutable core access still leaves siblings to timeout.
+wrong-interface Link DATA/`RESOURCE_PRF` before dedup admission. It also carries
+the exact unencrypted, role-specific, full-interval keepalive state machine,
+deterministic-packet dedup exception, internal NodeCore lifecycle result, bound
+automatic routing, and transition-relative stale revival described below. The
+legacy LXMF event handler without mutable core access still leaves siblings to
+timeout.
 This candidate remains on the project fork; no issue or pull request was opened
 for the newer lifecycle or routing work, and publication still requires direct
-user approval. It has host and portable-target evidence but no retained E290
-ELF, flashed-image readback or powered proof; older artifact records remain
-bound to their recorded revisions.
+user approval. It has host, portable-target, and default E290 build-only
+evidence, but no flashed-image readback or powered proof; older artifact records
+remain bound to their recorded revisions.
 
 ## 1. Transactional Link admission — completed for owned and H2 relay paths
 
@@ -64,8 +68,9 @@ and missing-route outcomes. Full admission returns typed
 Link/raw/dedup state except for the intentional replay-filter record. Missing
 routes leave no orphan Link entry. Relay-Link count is observable independently
 from locally owned Links. Focused tests cover full, existing, missing-route,
-fresh-retry and duplicate-retry behavior, and the 144-check project runner
-completes an A--B--C LINKREQUEST/LRPROOF/LRRTT/channel/proof flow.
+fresh-retry and duplicate-retry behavior, and the 184-check project runner
+completes an A--B--C LINKREQUEST/LRPROOF/LRRTT/channel/proof flow plus 40 exact
+keepalive lifecycle checks.
 
 The remaining product gate is role classification, not relay capacity.
 Arbitrary remote H1 LINKREQUEST stays disabled until an interface role can
@@ -155,7 +160,7 @@ folding them into the endpoint fix.
 
 ## 4. Link state events and outbound activity
 
-**Priority:** application correctness and keepalive behavior
+**Priority:** application correctness and timeout behavior
 
 The current pin closes the physical-interface routing part of this item. A
 responder binds to LINKREQUEST ingress; an initiator's initial learned path is
@@ -180,8 +185,9 @@ for the transition to `Active`.
 
 Generic `build_link_data_packet()` users also do not update `last_outbound`.
 Best-effort Link data, identify, request and response traffic can therefore
-trigger unnecessary keepalives. Move outbound timestamp maintenance into the
-common successful packet builder or require `now` in the relevant APIs.
+leave native activity telemetry stale. Move outbound timestamp maintenance
+into the common successful packet builder or require `now` in the relevant
+APIs; keepalive scheduling no longer depends on this timestamp.
 
 `Transport::tick()` also never expires `Pending` or `Handshake` Links because
 `Link::check_stale()` handles only `Active` and `Stale`. An initiator that never
@@ -193,12 +199,23 @@ The local adapter suppresses premature establishment events and records the
 timestamp after best-effort Link data, but the native behavior needs its own
 tests and repair.
 
-Keepalive wire and role behavior is independently incompatible with released
-Python Reticulum. Python sends unencrypted `0xff` requests only from the
-initiator and unencrypted `0xfe` replies from the responder; Rete currently
-encrypts keepalives and allows both sides to initiate and answer. Align this
-state machine and add bidirectional differential fixtures without folding it
-into the completed interface-routing change.
+Keepalive wire, role, timer and stale-revival behavior is resolved at the
+current pin. Rete emits exact unencrypted 20-byte Link DATA frames: only the
+initiator sends `0xff`, after a full inbound-silence interval and no more often
+than a full interval since its previous probe; only the responder returns
+`0xfe`. Valid role-specific deterministic repeats bypass dedup only after the
+bound-interface gate. NodeCore consumes them without application events and
+preflights/carries `BoundInterface` before automatic construction commits the
+probe timestamp. Stale begins after two keepalive intervals and retains a full
+five-second revival window from the actual transition/final probe; keepalives
+and other valid bound Link traffic revive it. Strict malformed, wrong-role and
+legacy encrypted forms do not refresh liveness.
+
+Automatic watchdog timeout remains a separate residual: `Transport::tick()`
+removes the expired Link but does not build and route Python's timeout
+`LINKCLOSE`. Add a bounded timeout-outbound result that preserves the retained
+interface route until packet formation, without weakening the completed
+transition-relative grace behavior.
 
 ## 5. Transactional channel receipts
 
@@ -413,8 +430,8 @@ Make DATA preparation one transaction:
    receipt and entropy state.
 
 The generic fix is now the project pin
-`fb96ac102be4b2a2697484cd5b5c1e3f1adea6a2`, with designated fork tag
-`firmware-pin-fb96ac1`. It returns caller-owned packet metadata plus a full
+`6612f4d91593a8f26a77576bd56329a08b8d70ea`, with designated fork tag
+`firmware-pin-6612f4d`. It returns caller-owned packet metadata plus a full
 receipt token, reports registration and output-allocation failures, and
 atomically removes validated and timed-out receipts only after reserving their
 exact kind/full-hash terminal candidate. Link-typed channel proofs are resolved
@@ -425,9 +442,10 @@ HEADER_2 proofs bypass local terminal reservation. Direct Transport ingest and
 maintenance results are `must_use`; sink-aware NodeCore paths avoid duplicate
 receipt events; and the
 hosted daemon consumes LXMF terminal output. The selected validation set passes
-614 tests: 254 transport, 133 stack, 143 LXMF library, and 84 daemon library.
-The four library targets total 524 tests; local validation adds 89 transport
-and one stack integration test. This is not a full nested-workspace test count.
+621 tests: 259 transport (167 library plus 92 integration), 135 stack (134
+library plus one integration), 143 LXMF library, and 84 daemon library. The
+four library targets total 528 tests. This is not a full nested-workspace test
+count.
 All workspace targets check on the macOS host, and the affected no-default crates
 compile for `thumbv6m-none-eabi`. This newer
 lifecycle work remains on the user's fork. No issue or pull request was opened,
