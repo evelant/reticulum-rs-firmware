@@ -31,8 +31,8 @@ initialization control and all four live-pairing operations. The application
 also quarantines native USB at its earliest Rust entry before detached product
 initialization and canonical reattachment. Current source passes 129 default
 E290 host-library tests, 135 with the opt-in inbox commit-fault HIL feature, 145
-with the opt-in runtime-measurement HIL feature, 49 focused host-client tests
-inside the 231-test xtask suite, and target gates.
+with the opt-in runtime-measurement HIL feature, 56 focused host-client tests
+inside the 248-test xtask suite, and target gates.
 Both powered boards returned `initialization-required` and
 `physical-presence-required`; live Begin created no host key before physical
 presence, and full USB re-enumeration restored a fresh sequence-zero epoch.
@@ -2512,8 +2512,8 @@ CAD policy, formal electrical/RF, range, or regional release gates.
    API, multi-hop, range, fault or soak behavior from that separate fixture.
    Keep the Tracker pair as the second radio regression fixture.
 3. Preserve the 129-test default, 135-test commit-fault HIL, and 145-test
-   runtime-measurement HIL E290 host-library compositions, 49 focused
-   host-client, 231-test xtask, 43-test Rete-
+   runtime-measurement HIL E290 host-library compositions, 56 focused
+   host-client, 248-test xtask, 43-test Rete-
    integration, and 17-test inbox-store gates,
    including credential boot
    classification/order, the authenticated

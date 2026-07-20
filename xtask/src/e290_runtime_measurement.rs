@@ -5,11 +5,16 @@ use object::{
     Architecture, BinaryFormat, Endianness, Object, ObjectKind, ObjectSection, ObjectSymbol,
     SectionKind, SymbolSection,
 };
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::{
+    env,
+    ffi::OsString,
     fmt::Write as _,
-    fs,
-    path::{Path, PathBuf},
-    process::ExitCode,
+    fs::{self, File, OpenOptions},
+    io::Write as _,
+    path::{Component, Path, PathBuf},
+    process::{Command, ExitCode},
 };
 
 const WORD_COUNT: usize = 64;
@@ -22,7 +27,36 @@ const PROOF_WORD_COUNT: usize = 48;
 const PROOF_BYTE_SIZE: usize = PROOF_WORD_COUNT * size_of::<u32>();
 const PROOF_MAGIC: u32 = u32::from_le_bytes(*b"RPTE");
 const PROOF_VERSION: u32 = 1;
+const MEASUREMENT_EVIDENCE_SYMBOL_FRAGMENT: &str = "RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE";
 const PROOF_TRACE_EVIDENCE_SYMBOL_FRAGMENT: &str = "RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE";
+
+const CHECKPOINT_BYTE_SIZE: usize = BYTE_SIZE + PROOF_BYTE_SIZE;
+const CHECKPOINT_SCHEMA: &str = "reticulum.e290-runtime-checkpoint.v1";
+const CAPTURE_SCHEMA: &str = "reticulum.e290-runtime-checkpoint-capture.v1";
+const CAPTURE_INCOMPLETE_FILE: &str = "checkpoint.incomplete";
+const CAPTURE_COMPLETE_FILE: &str = "checkpoint.complete";
+const CAPTURE_RAW_FILE: &str = "checkpoint.bin";
+const CAPTURE_RUNTIME_FILE: &str = "runtime.bin";
+const CAPTURE_PROOF_FILE: &str = "proof-trace.bin";
+const CAPTURE_HUMAN_FILE: &str = "checkpoint.txt";
+const CAPTURE_JSON_FILE: &str = "checkpoint.json";
+const CAPTURE_MANIFEST_FILE: &str = "manifest.json";
+const PROBE_LAUNCH_DIRECTORY: &str = "probe-launch";
+const PROBE_CWD_DIRECTORY: &str = "probe-launch/cwd";
+const PROBE_HOME_DIRECTORY: &str = "probe-launch/home";
+const PROBE_CONFIG_FILE: &str = "probe-launch/cwd/.probe-rs.toml";
+const PROBE_CONFIG_NAMES: [&str; 4] = [
+    ".probe-rs.toml",
+    ".probe-rs.json",
+    ".probe-rs.yaml",
+    ".probe-rs.yml",
+];
+const CAPTURE_INCOMPLETE_CONTENT: &str =
+    "reticulum.e290-runtime-checkpoint-capture.v1\nstatus=incomplete\n";
+const EMPTY_PROBE_CONFIG: &[u8] = b"";
+const DEFAULT_PROBE_RS: &str = "probe-rs";
+const E290_PROBE_VID_PID: &str = "303a:1001";
+const PROBE_FAILURE_GUIDANCE: &str = "target halt/resume state is uncertain; abandon this checkpoint and trial, then recover or restart the board manually; capture-checkpoint will not reset or resume it";
 
 const PROOF_FLAG_ACTIVE: u32 = 1 << 0;
 const PROOF_FLAG_SATURATED: u32 = 1 << 1;
@@ -355,13 +389,43 @@ struct Options {
 enum CommandOptions {
     Decode(Options),
     DecodeProofTrace(Options),
+    DecodeCheckpoint(Options),
     InspectElf(ElfInspectionOptions),
+    CaptureCheckpoint(CaptureCheckpointOptions),
 }
 
 #[derive(Debug, Eq, PartialEq)]
 struct ElfInspectionOptions {
     default_elf: PathBuf,
     hil_elf: PathBuf,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct CaptureCheckpointOptions {
+    hil_elf: PathBuf,
+    usb_serial: String,
+    output: PathBuf,
+    probe_rs: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct EvidenceSymbol {
+    address: u64,
+    size_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CheckpointLayout {
+    runtime: EvidenceSymbol,
+    proof_trace: EvidenceSymbol,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PreparedCheckpointCapture {
+    elf_path: PathBuf,
+    elf_bytes: u64,
+    elf_sha256: String,
+    layout: CheckpointLayout,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -399,6 +463,99 @@ struct DecodedProofTraceEvidence {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TxPartitionDiagnostic {
+    expected_count: u32,
+    observed_count: u32,
+    consistent: Option<bool>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DecodedCheckpoint {
+    runtime: DecodedEvidence,
+    proof_trace: DecodedProofTraceEvidence,
+    tx_partition: TxPartitionDiagnostic,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProbeInvocation {
+    program: PathBuf,
+    arguments: Vec<OsString>,
+    current_directory: PathBuf,
+    home_directory: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProbeExit {
+    success: bool,
+    description: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct CaptureFileBinding {
+    path: String,
+    bytes: u64,
+    sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct CaptureElfBinding {
+    path: String,
+    bytes: u64,
+    sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct CaptureSymbolBinding {
+    address: String,
+    size_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct CaptureLayoutBinding {
+    runtime: CaptureSymbolBinding,
+    proof_trace: CaptureSymbolBinding,
+    contiguous_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct CaptureProbeBinding {
+    requested_program: String,
+    executable: CaptureElfBinding,
+    arguments: Vec<String>,
+    launch: CaptureProbeLaunchBinding,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct CaptureProbeLaunchBinding {
+    environment_policy: String,
+    environment_allowlist: Vec<String>,
+    current_directory: String,
+    home_directory: String,
+    empty_config: CaptureFileBinding,
+    executable_parent_config_policy: String,
+    rejected_config_names: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PreparedProbeLaunch {
+    executable_path: PathBuf,
+    executable_bytes: u64,
+    executable_sha256: String,
+    current_directory: PathBuf,
+    home_directory: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct CaptureManifest {
+    schema: String,
+    usb_serial: String,
+    hil_elf: CaptureElfBinding,
+    layout: CaptureLayoutBinding,
+    probe: CaptureProbeBinding,
+    files: Vec<CaptureFileBinding>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OutputValue {
     Number(u32),
     Bool(bool),
@@ -419,9 +576,11 @@ pub(crate) fn run(args: Vec<String>) -> ExitCode {
     let result = match options {
         CommandOptions::Decode(options) => execute(&options),
         CommandOptions::DecodeProofTrace(options) => execute_proof_trace(&options),
+        CommandOptions::DecodeCheckpoint(options) => execute_checkpoint(&options),
         CommandOptions::InspectElf(options) => {
             inspect_elf_pair(&options).map(|value| value.render())
         }
+        CommandOptions::CaptureCheckpoint(options) => execute_capture_checkpoint(&options),
     };
     match result {
         Ok(output) => {
@@ -441,8 +600,13 @@ fn usage() {
          --input <256-byte-bin> [--json]\n  cargo run -p xtask -- \
          e290-runtime-measurement decode-proof-trace \
          --input <192-byte-bin> [--json]\n  cargo run -p xtask -- \
+         e290-runtime-measurement decode-checkpoint \
+         --input <448-byte-bin> [--json]\n  cargo run -p xtask -- \
          e290-runtime-measurement inspect-elf --default-elf <path> \
-         --hil-elf <path>"
+         --hil-elf <path>\n  cargo run -p xtask -- \
+         e290-runtime-measurement capture-checkpoint --hil-elf <final-HIL-ELF> \
+         --usb-serial <UPPERCASE-E290-USB-SERIAL> --output <absent-directory> \
+         [--probe-rs <program>]\n\nThe capture command performs one debugger read only; it never resets, flashes, authenticates, or opens a serial port."
     );
 }
 
@@ -452,12 +616,27 @@ fn parse_command_options(args: &[String]) -> Result<CommandOptions, String> {
         Some("decode-proof-trace") => {
             parse_proof_trace_options(args).map(CommandOptions::DecodeProofTrace)
         }
+        Some("decode-checkpoint") => {
+            parse_checkpoint_options(args).map(CommandOptions::DecodeCheckpoint)
+        }
         Some("inspect-elf") => {
             parse_elf_inspection_options(&args[1..]).map(CommandOptions::InspectElf)
         }
+        Some("capture-checkpoint") => {
+            parse_capture_checkpoint_options(&args[1..]).map(CommandOptions::CaptureCheckpoint)
+        }
         Some(value) => Err(format!("unknown subcommand {value}")),
-        None => Err("decode or inspect-elf subcommand is required".to_owned()),
+        None => Err("e290-runtime-measurement subcommand is required".to_owned()),
     }
+}
+
+fn parse_checkpoint_options(args: &[String]) -> Result<Options, String> {
+    match args.first().map(String::as_str) {
+        Some("decode-checkpoint") => {}
+        Some(_) => return Err("subcommand must be decode-checkpoint".to_owned()),
+        None => return Err("decode-checkpoint subcommand is required".to_owned()),
+    }
+    parse_decode_input_options(&args[1..])
 }
 
 fn parse_proof_trace_options(args: &[String]) -> Result<Options, String> {
@@ -467,9 +646,13 @@ fn parse_proof_trace_options(args: &[String]) -> Result<Options, String> {
         None => return Err("decode-proof-trace subcommand is required".to_owned()),
     }
 
+    parse_decode_input_options(&args[1..])
+}
+
+fn parse_decode_input_options(args: &[String]) -> Result<Options, String> {
     let mut input = None;
     let mut json = false;
-    let mut index = 1;
+    let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
             "--input" => {
@@ -511,40 +694,47 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         None => return Err("decode subcommand is required".to_owned()),
     }
 
-    let mut input = None;
-    let mut json = false;
-    let mut index = 1;
+    parse_decode_input_options(&args[1..])
+}
+
+fn parse_capture_checkpoint_options(args: &[String]) -> Result<CaptureCheckpointOptions, String> {
+    let mut hil_elf = None;
+    let mut usb_serial = None;
+    let mut output = None;
+    let mut probe_rs = None;
+    let mut index = 0;
     while index < args.len() {
-        match args[index].as_str() {
-            "--input" => {
-                if input.is_some() {
-                    return Err("--input may be supplied only once".to_owned());
-                }
-                let value = args
-                    .get(index + 1)
-                    .filter(|value| !value.starts_with('-'))
-                    .ok_or_else(|| "--input requires a value".to_owned())?;
-                if value.is_empty() {
-                    return Err("--input must not be empty".to_owned());
-                }
-                input = Some(PathBuf::from(value));
-                index += 2;
-            }
-            "--json" => {
-                if json {
-                    return Err("--json may be supplied only once".to_owned());
-                }
-                json = true;
-                index += 1;
-            }
+        let (slot, option) = match args[index].as_str() {
+            "--hil-elf" => (&mut hil_elf, "--hil-elf"),
+            "--usb-serial" => (&mut usb_serial, "--usb-serial"),
+            "--output" => (&mut output, "--output"),
+            "--probe-rs" => (&mut probe_rs, "--probe-rs"),
             value if value.starts_with('-') => return Err(format!("unknown option {value}")),
             value => return Err(format!("unexpected argument {value}")),
+        };
+        if slot.is_some() {
+            return Err(format!("{option} may be supplied only once"));
         }
+        let value = args
+            .get(index + 1)
+            .filter(|value| !value.starts_with('-'))
+            .ok_or_else(|| format!("{option} requires a value"))?;
+        if value.is_empty() {
+            return Err(format!("{option} must not be empty"));
+        }
+        *slot = Some(value.clone());
+        index += 2;
     }
 
-    Ok(Options {
-        input: input.ok_or_else(|| "--input is required".to_owned())?,
-        json,
+    let hil_elf = hil_elf.ok_or_else(|| "--hil-elf is required".to_owned())?;
+    let usb_serial = usb_serial.ok_or_else(|| "--usb-serial is required".to_owned())?;
+    let output = output.ok_or_else(|| "--output is required".to_owned())?;
+    validate_e290_usb_serial(&usb_serial)?;
+    Ok(CaptureCheckpointOptions {
+        hil_elf: PathBuf::from(hil_elf),
+        usb_serial,
+        output: PathBuf::from(output),
+        probe_rs: PathBuf::from(probe_rs.unwrap_or_else(|| DEFAULT_PROBE_RS.to_owned())),
     })
 }
 
@@ -609,6 +799,730 @@ fn execute_proof_trace(options: &Options) -> Result<String, String> {
     })
 }
 
+fn execute_checkpoint(options: &Options) -> Result<String, String> {
+    let bytes = fs::read(&options.input).map_err(|error| {
+        format!(
+            "could not read --input {}: {error}",
+            options.input.display()
+        )
+    })?;
+    let checkpoint = DecodedCheckpoint::parse(&bytes)?;
+    Ok(if options.json {
+        checkpoint.render_json()
+    } else {
+        checkpoint.render_human()
+    })
+}
+
+fn execute_capture_checkpoint(options: &CaptureCheckpointOptions) -> Result<String, String> {
+    validate_e290_usb_serial(&options.usb_serial)?;
+    let prepared = inspect_checkpoint_capture_elf(&options.hil_elf)?;
+    capture_checkpoint_with(options, &prepared, run_probe_command)
+}
+
+fn run_probe_command(invocation: &ProbeInvocation) -> Result<ProbeExit, String> {
+    validate_probe_launch_isolation(invocation)?;
+    let mut command = Command::new(&invocation.program);
+    apply_sanitized_probe_launch(&mut command, invocation);
+    let status = command.status().map_err(|error| {
+        format!(
+            "could not invoke probe-rs program {}: {error}; {PROBE_FAILURE_GUIDANCE}",
+            invocation.program.display(),
+        )
+    })?;
+    validate_probe_launch_isolation(invocation)
+        .map_err(|error| format!("{error}; {PROBE_FAILURE_GUIDANCE}"))?;
+    Ok(ProbeExit {
+        success: status.success(),
+        description: status.to_string(),
+    })
+}
+
+fn apply_sanitized_probe_launch(command: &mut Command, invocation: &ProbeInvocation) {
+    command
+        .args(&invocation.arguments)
+        .env_clear()
+        .env("HOME", &invocation.home_directory)
+        .current_dir(&invocation.current_directory);
+}
+
+fn validate_probe_launch_isolation(invocation: &ProbeInvocation) -> Result<(), String> {
+    validate_exact_directory_entries(
+        &invocation.current_directory,
+        &[".probe-rs.toml"],
+        "isolated probe working directory",
+    )?;
+    validate_exact_directory_entries(
+        &invocation.home_directory,
+        &[],
+        "isolated probe HOME directory",
+    )?;
+    let config = invocation.current_directory.join(".probe-rs.toml");
+    let metadata = fs::symlink_metadata(&config).map_err(|error| {
+        format!(
+            "could not inspect isolated probe-rs configuration {}: {error}",
+            config.display()
+        )
+    })?;
+    if !metadata.file_type().is_file() || metadata.len() != 0 {
+        return Err(format!(
+            "isolated probe-rs configuration must remain one empty regular file: {}",
+            config.display()
+        ));
+    }
+    for name in &PROBE_CONFIG_NAMES[1..] {
+        ensure_absent(
+            &invocation.current_directory.join(name),
+            "alternate isolated probe-rs configuration",
+        )?;
+    }
+    reject_probe_configs(&invocation.home_directory, "isolated probe HOME")?;
+    let parent = invocation.program.parent().ok_or_else(|| {
+        format!(
+            "resolved probe-rs executable has no parent: {}",
+            invocation.program.display()
+        )
+    })?;
+    reject_probe_configs(parent, "resolved probe-rs executable parent")
+}
+
+fn validate_exact_directory_entries(
+    directory: &Path,
+    expected: &[&str],
+    description: &str,
+) -> Result<(), String> {
+    let mut actual = fs::read_dir(directory)
+        .map_err(|error| {
+            format!(
+                "could not list {description} {}: {error}",
+                directory.display()
+            )
+        })?
+        .map(|entry| {
+            let entry = entry.map_err(|error| {
+                format!(
+                    "could not inspect entry in {description} {}: {error}",
+                    directory.display()
+                )
+            })?;
+            entry
+                .file_name()
+                .into_string()
+                .map_err(|_| format!("{description} contains a non-UTF-8 entry"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    actual.sort();
+    let mut expected = expected
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<Vec<_>>();
+    expected.sort();
+    if actual != expected {
+        return Err(format!(
+            "{description} must have exact entries {expected:?}, got {actual:?}: {}",
+            directory.display()
+        ));
+    }
+    Ok(())
+}
+
+fn capture_checkpoint_with(
+    options: &CaptureCheckpointOptions,
+    prepared: &PreparedCheckpointCapture,
+    run_probe: impl FnOnce(&ProbeInvocation) -> Result<ProbeExit, String>,
+) -> Result<String, String> {
+    validate_e290_usb_serial(&options.usb_serial)?;
+    prepared.layout.validate()?;
+    let output = create_capture_output(&options.output)?;
+    utf8_path(&output, "checkpoint output")?;
+    utf8_path(&prepared.elf_path, "canonical HIL ELF")?;
+    let probe_launch = prepare_probe_launch(&output, &options.probe_rs)?;
+    let raw_path = output.join(CAPTURE_RAW_FILE);
+    ensure_absent(&raw_path, "raw checkpoint output")?;
+
+    let probe_selector = format!("{E290_PROBE_VID_PID}:{}", options.usb_serial);
+    let runtime_address = format!("0x{:x}", prepared.layout.runtime.address);
+    let arguments = [
+        OsString::from("read"),
+        OsString::from("--chip"),
+        OsString::from("esp32s3"),
+        OsString::from("--protocol"),
+        OsString::from("jtag"),
+        OsString::from("--probe"),
+        OsString::from(&probe_selector),
+        OsString::from("--non-interactive"),
+        OsString::from("--format"),
+        OsString::from("binary"),
+        OsString::from("--output"),
+        raw_path.as_os_str().to_owned(),
+        OsString::from("b8"),
+        OsString::from(&runtime_address),
+        OsString::from(CHECKPOINT_BYTE_SIZE.to_string()),
+    ]
+    .to_vec();
+    let invocation = ProbeInvocation {
+        program: probe_launch.executable_path.clone(),
+        arguments,
+        current_directory: probe_launch.current_directory.clone(),
+        home_directory: probe_launch.home_directory.clone(),
+    };
+    let probe_exit = match run_probe(&invocation) {
+        Ok(status) => status,
+        Err(error) => {
+            retain_external_output_after_probe_failure(&raw_path)
+                .map_err(|retention_error| format!("{error}; {retention_error}"))?;
+            return Err(error);
+        }
+    };
+    if !probe_exit.success {
+        let error = format!(
+            "probe-rs checkpoint read failed: {}; {PROBE_FAILURE_GUIDANCE}",
+            probe_exit.description,
+        );
+        retain_external_output_after_probe_failure(&raw_path)
+            .map_err(|retention_error| format!("{error}; {retention_error}"))?;
+        return Err(error);
+    }
+    sync_external_output_if_regular(&raw_path)?;
+
+    let raw = fs::read(&raw_path)
+        .map_err(|error| format!("could not read {}: {error}", raw_path.display()))?;
+    if raw.len() != CHECKPOINT_BYTE_SIZE {
+        return Err(format!(
+            "probe-rs checkpoint output must be exactly {CHECKPOINT_BYTE_SIZE} bytes, got {}",
+            raw.len()
+        ));
+    }
+    let checkpoint = DecodedCheckpoint::parse(&raw)?;
+    let runtime = &raw[..BYTE_SIZE];
+    let proof_trace = &raw[BYTE_SIZE..];
+    let human = format!("{}\n", checkpoint.render_human());
+    let json = format!("{}\n", checkpoint.render_json());
+
+    write_new_synced(&output.join(CAPTURE_RUNTIME_FILE), runtime)?;
+    write_new_synced(&output.join(CAPTURE_PROOF_FILE), proof_trace)?;
+    write_new_synced(&output.join(CAPTURE_HUMAN_FILE), human.as_bytes())?;
+    write_new_synced(&output.join(CAPTURE_JSON_FILE), json.as_bytes())?;
+
+    let files = [
+        CAPTURE_RAW_FILE,
+        CAPTURE_RUNTIME_FILE,
+        CAPTURE_PROOF_FILE,
+        CAPTURE_HUMAN_FILE,
+        CAPTURE_JSON_FILE,
+        PROBE_CONFIG_FILE,
+    ]
+    .into_iter()
+    .map(|path| capture_file_binding(&output, path))
+    .collect::<Result<Vec<_>, _>>()?;
+    let requested_probe_program = utf8_path(&options.probe_rs, "--probe-rs")?.to_owned();
+    let probe_arguments = invocation
+        .arguments
+        .iter()
+        .map(|argument| {
+            argument
+                .to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "probe-rs argument is not UTF-8".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let manifest = CaptureManifest {
+        schema: CAPTURE_SCHEMA.to_owned(),
+        usb_serial: options.usb_serial.clone(),
+        hil_elf: CaptureElfBinding {
+            path: utf8_path(&prepared.elf_path, "canonical HIL ELF")?.to_owned(),
+            bytes: prepared.elf_bytes,
+            sha256: prepared.elf_sha256.clone(),
+        },
+        layout: CaptureLayoutBinding {
+            runtime: capture_symbol_binding(prepared.layout.runtime),
+            proof_trace: capture_symbol_binding(prepared.layout.proof_trace),
+            contiguous_bytes: CHECKPOINT_BYTE_SIZE as u64,
+        },
+        probe: CaptureProbeBinding {
+            requested_program: requested_probe_program,
+            executable: CaptureElfBinding {
+                path: utf8_path(
+                    &probe_launch.executable_path,
+                    "resolved probe-rs executable",
+                )?
+                .to_owned(),
+                bytes: probe_launch.executable_bytes,
+                sha256: probe_launch.executable_sha256,
+            },
+            arguments: probe_arguments,
+            launch: CaptureProbeLaunchBinding {
+                environment_policy: "clear-then-set-allowlist".to_owned(),
+                environment_allowlist: vec!["HOME".to_owned()],
+                current_directory: utf8_path(
+                    &probe_launch.current_directory,
+                    "isolated probe-rs working directory",
+                )?
+                .to_owned(),
+                home_directory: utf8_path(
+                    &probe_launch.home_directory,
+                    "isolated probe-rs HOME directory",
+                )?
+                .to_owned(),
+                empty_config: capture_file_binding(&output, PROBE_CONFIG_FILE)?,
+                executable_parent_config_policy: "reject-any-known-default-config".to_owned(),
+                rejected_config_names: PROBE_CONFIG_NAMES.map(str::to_owned).to_vec(),
+            },
+        },
+        files,
+    };
+    let mut manifest_bytes = serde_json::to_vec_pretty(&manifest)
+        .map_err(|error| format!("could not encode checkpoint manifest: {error}"))?;
+    manifest_bytes.push(b'\n');
+    write_new_synced(&output.join(CAPTURE_MANIFEST_FILE), &manifest_bytes)?;
+    sync_directory(&output)?;
+
+    let manifest_sha256 = sha256_bytes(&manifest_bytes);
+    let complete =
+        format!("{CAPTURE_SCHEMA}\nstatus=complete\nmanifest_sha256={manifest_sha256}\n");
+    stage_and_commit_capture_marker(&output, complete.as_bytes())?;
+    Ok(format!("captured_checkpoint={}", output.display()))
+}
+
+fn capture_symbol_binding(symbol: EvidenceSymbol) -> CaptureSymbolBinding {
+    CaptureSymbolBinding {
+        address: format!("0x{:08x}", symbol.address),
+        size_bytes: symbol.size_bytes,
+    }
+}
+
+fn validate_e290_usb_serial(serial: &str) -> Result<(), String> {
+    let bytes = serial.as_bytes();
+    let valid = bytes.len() == 17
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            if matches!(index, 2 | 5 | 8 | 11 | 14) {
+                *byte == b':'
+            } else {
+                byte.is_ascii_digit() || (b'A'..=b'F').contains(byte)
+            }
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(
+            "--usb-serial must be exactly six uppercase hexadecimal octets separated by colons"
+                .to_owned(),
+        )
+    }
+}
+
+#[cfg(unix)]
+fn prepare_probe_launch(output: &Path, requested: &Path) -> Result<PreparedProbeLaunch, String> {
+    let launch_directory = output.join(PROBE_LAUNCH_DIRECTORY);
+    let current_directory = output.join(PROBE_CWD_DIRECTORY);
+    let home_directory = output.join(PROBE_HOME_DIRECTORY);
+    create_private_directory(&launch_directory, "probe launch")?;
+    create_private_directory(&current_directory, "probe working")?;
+    create_private_directory(&home_directory, "probe HOME")?;
+    write_new_synced(&output.join(PROBE_CONFIG_FILE), EMPTY_PROBE_CONFIG)?;
+    utf8_path(&current_directory, "isolated probe-rs working directory")?;
+    utf8_path(&home_directory, "isolated probe-rs HOME directory")?;
+    for name in &PROBE_CONFIG_NAMES[1..] {
+        ensure_absent(
+            &current_directory.join(name),
+            "alternate isolated probe-rs configuration",
+        )?;
+    }
+    reject_probe_configs(&home_directory, "isolated probe HOME")?;
+    sync_directory(&current_directory)?;
+    sync_directory(&home_directory)?;
+    sync_directory(&launch_directory)?;
+    sync_directory(output)?;
+
+    let executable_path = resolve_probe_executable(requested)?;
+    let parent = executable_path.parent().ok_or_else(|| {
+        format!(
+            "resolved probe-rs executable has no parent: {}",
+            executable_path.display()
+        )
+    })?;
+    reject_probe_configs(parent, "resolved probe-rs executable parent")?;
+    let metadata = fs::symlink_metadata(&executable_path).map_err(|error| {
+        format!(
+            "could not inspect resolved probe-rs executable {}: {error}",
+            executable_path.display()
+        )
+    })?;
+    Ok(PreparedProbeLaunch {
+        executable_path: executable_path.clone(),
+        executable_bytes: metadata.len(),
+        executable_sha256: sha256_file(&executable_path)?,
+        current_directory,
+        home_directory,
+    })
+}
+
+#[cfg(not(unix))]
+fn prepare_probe_launch(_output: &Path, _requested: &Path) -> Result<PreparedProbeLaunch, String> {
+    Err("capture-checkpoint requires a Unix host to isolate probe-rs configuration".to_owned())
+}
+
+#[cfg(unix)]
+fn create_private_directory(path: &Path, description: &str) -> Result<(), String> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(0o700);
+    builder.create(path).map_err(|error| {
+        format!(
+            "could not create {description} directory {}: {error}",
+            path.display()
+        )
+    })?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+        format!(
+            "could not set owner-only permissions on {description} directory {}: {error}",
+            path.display()
+        )
+    })
+}
+
+#[cfg(unix)]
+fn resolve_probe_executable(requested: &Path) -> Result<PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let candidate = if requested.components().count() == 1
+        && matches!(requested.components().next(), Some(Component::Normal(_)))
+    {
+        let path = env::var_os("PATH").ok_or_else(|| {
+            format!(
+                "cannot resolve probe-rs program {} because PATH is unset",
+                requested.display()
+            )
+        })?;
+        env::split_paths(&path)
+            .map(|directory| directory.join(requested))
+            .find(|candidate| {
+                fs::symlink_metadata(candidate).is_ok_and(|metadata| {
+                    metadata.file_type().is_file() || metadata.file_type().is_symlink()
+                })
+            })
+            .ok_or_else(|| {
+                format!(
+                    "could not find probe-rs program {} on PATH",
+                    requested.display()
+                )
+            })?
+    } else if requested.is_absolute() {
+        requested.to_owned()
+    } else {
+        env::current_dir()
+            .map_err(|error| format!("could not resolve current directory: {error}"))?
+            .join(requested)
+    };
+    let canonical = fs::canonicalize(&candidate).map_err(|error| {
+        format!(
+            "could not canonicalize probe-rs program {}: {error}",
+            candidate.display()
+        )
+    })?;
+    let metadata = fs::symlink_metadata(&canonical).map_err(|error| {
+        format!(
+            "could not inspect probe-rs program {}: {error}",
+            canonical.display()
+        )
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "probe-rs program must resolve to a regular file: {}",
+            canonical.display()
+        ));
+    }
+    if metadata.permissions().mode() & 0o111 == 0 {
+        return Err(format!(
+            "probe-rs program is not executable: {}",
+            canonical.display()
+        ));
+    }
+    utf8_path(&canonical, "resolved probe-rs executable")?;
+    Ok(canonical)
+}
+
+fn reject_probe_configs(directory: &Path, description: &str) -> Result<(), String> {
+    for name in PROBE_CONFIG_NAMES {
+        let path = directory.join(name);
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "could not inspect {description} configuration candidate {}: {error}",
+                    path.display()
+                ));
+            }
+            Ok(_) => {
+                return Err(format!(
+                    "refusing probe-rs launch because {description} contains default configuration {name}: {}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_capture_output(argument: &Path) -> Result<PathBuf, String> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    let output = resolve_absent_capture_output(argument)?;
+    let parent = output.parent().ok_or_else(|| {
+        format!(
+            "checkpoint output has no parent directory: {}",
+            output.display()
+        )
+    })?;
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(0o700);
+    builder.create(&output).map_err(|error| {
+        format!(
+            "could not create checkpoint output directory {}: {error}",
+            output.display()
+        )
+    })?;
+    fs::set_permissions(&output, fs::Permissions::from_mode(0o700)).map_err(|error| {
+        format!(
+            "could not set owner-only permissions on {}: {error}",
+            output.display()
+        )
+    })?;
+    write_new_synced(
+        &output.join(CAPTURE_INCOMPLETE_FILE),
+        CAPTURE_INCOMPLETE_CONTENT.as_bytes(),
+    )?;
+    sync_directory(&output)?;
+    sync_directory(parent)?;
+    Ok(output)
+}
+
+#[cfg(not(unix))]
+fn create_capture_output(_argument: &Path) -> Result<PathBuf, String> {
+    Err(
+        "capture-checkpoint requires a Unix host to enforce owner-only evidence permissions"
+            .to_owned(),
+    )
+}
+
+fn resolve_absent_capture_output(argument: &Path) -> Result<PathBuf, String> {
+    if argument.as_os_str().is_empty() {
+        return Err("--output must not be empty".to_owned());
+    }
+    let absolute = if argument.is_absolute() {
+        argument.to_owned()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| format!("could not resolve current directory: {error}"))?
+            .join(argument)
+    };
+    for component in absolute.components() {
+        if !matches!(
+            component,
+            Component::RootDir | Component::Prefix(_) | Component::Normal(_)
+        ) {
+            return Err(format!(
+                "--output must not contain '.' or '..' components: {}",
+                argument.display()
+            ));
+        }
+    }
+    let file_name = absolute.file_name().ok_or_else(|| {
+        format!(
+            "--output must name an absent directory: {}",
+            argument.display()
+        )
+    })?;
+    let parent = absolute
+        .parent()
+        .ok_or_else(|| format!("--output has no parent directory: {}", argument.display()))?;
+    let canonical_parent = fs::canonicalize(parent).map_err(|error| {
+        format!(
+            "could not canonicalize --output parent {}: {error}",
+            parent.display()
+        )
+    })?;
+    let output = canonical_parent.join(file_name);
+    ensure_absent(&output, "checkpoint output directory")?;
+    Ok(output)
+}
+
+fn ensure_absent(path: &Path, description: &str) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "could not inspect {description} {}: {error}",
+            path.display()
+        )),
+        Ok(_) => Err(format!("{description} must be absent: {}", path.display())),
+    }
+}
+
+fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| format!("could not create {}: {error}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|error| {
+                format!(
+                    "could not set owner-only permissions on {}: {error}",
+                    path.display()
+                )
+            })?;
+    }
+    file.write_all(bytes)
+        .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+    file.sync_all()
+        .map_err(|error| format!("could not sync {}: {error}", path.display()))
+}
+
+fn sync_external_output_if_regular(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        format!(
+            "could not inspect probe-rs output {}: {error}",
+            path.display()
+        )
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "probe-rs output must be a regular file: {}",
+            path.display()
+        ));
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| format!("could not open probe-rs output {}: {error}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|error| {
+                format!(
+                    "could not set owner-only permissions on probe-rs output {}: {error}",
+                    path.display()
+                )
+            })?;
+    }
+    file.sync_all()
+        .map_err(|error| format!("could not sync probe-rs output {}: {error}", path.display()))?;
+    let parent = path.parent().ok_or_else(|| {
+        format!(
+            "probe-rs output has no parent directory: {}",
+            path.display()
+        )
+    })?;
+    sync_directory(parent)
+}
+
+fn retain_external_output_after_probe_failure(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "could not inspect incomplete probe-rs output {}: {error}",
+            path.display()
+        )),
+        Ok(_) => sync_external_output_if_regular(path).map_err(|error| {
+            format!(
+                "could not durably retain incomplete probe-rs output {}: {error}",
+                path.display()
+            )
+        }),
+    }
+}
+
+fn capture_file_binding(output: &Path, relative: &str) -> Result<CaptureFileBinding, String> {
+    let path = output.join(relative);
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|error| format!("could not inspect capture file {}: {error}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "capture path must be a regular file: {}",
+            path.display()
+        ));
+    }
+    Ok(CaptureFileBinding {
+        path: relative.to_owned(),
+        bytes: metadata.len(),
+        sha256: sha256_file(&path)?,
+    })
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path)
+        .map_err(|error| format!("could not read {} for SHA-256: {error}", path.display()))?;
+    Ok(sha256_bytes(&bytes))
+}
+
+fn sha256_bytes(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
+
+fn utf8_path<'a>(path: &'a Path, description: &str) -> Result<&'a str, String> {
+    path.to_str()
+        .ok_or_else(|| format!("{description} path is not UTF-8: {}", path.display()))
+}
+
+fn stage_and_commit_capture_marker(output: &Path, complete: &[u8]) -> Result<(), String> {
+    let incomplete = output.join(CAPTURE_INCOMPLETE_FILE);
+    let completed = output.join(CAPTURE_COMPLETE_FILE);
+    ensure_absent(&completed, "completed checkpoint marker")?;
+    overwrite_regular_synced(&incomplete, complete)?;
+    sync_directory(output)?;
+    fs::rename(&incomplete, &completed).map_err(|error| {
+        format!(
+            "could not atomically complete checkpoint marker {} from {}: {error}",
+            completed.display(),
+            incomplete.display()
+        )
+    })?;
+    sync_directory(output)
+}
+
+fn overwrite_regular_synced(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("could not inspect {}: {error}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "refusing to overwrite non-regular file {}",
+            path.display()
+        ));
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|error| format!("could not open {} for overwrite: {error}", path.display()))?;
+    file.write_all(bytes)
+        .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+    file.sync_all()
+        .map_err(|error| format!("could not sync {}: {error}", path.display()))
+}
+
+fn sync_directory(path: &Path) -> Result<(), String> {
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            format!(
+                "could not durably sync directory {}: {error}",
+                path.display()
+            )
+        })
+}
+
 fn inspect_elf_pair(options: &ElfInspectionOptions) -> Result<ElfInspection, String> {
     let (default_stack_sizes, default_stack) = inspect_elf(&options.default_elf, "default E290")?;
     let (hil_stack_sizes, hil_stack) = inspect_elf(&options.hil_elf, "runtime-measurement HIL")?;
@@ -627,6 +1541,182 @@ fn inspect_elf_pair(options: &ElfInspectionOptions) -> Result<ElfInspection, Str
     };
     inspection.validate()?;
     Ok(inspection)
+}
+
+fn inspect_checkpoint_capture_elf(path: &Path) -> Result<PreparedCheckpointCapture, String> {
+    let canonical = fs::canonicalize(path)
+        .map_err(|error| format!("could not canonicalize HIL ELF {}: {error}", path.display()))?;
+    let metadata = fs::symlink_metadata(&canonical).map_err(|error| {
+        format!(
+            "could not inspect canonical HIL ELF {}: {error}",
+            canonical.display()
+        )
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "HIL ELF must resolve to a regular file: {}",
+            canonical.display()
+        ));
+    }
+    let bytes = fs::read(&canonical)
+        .map_err(|error| format!("could not read HIL ELF {}: {error}", canonical.display()))?;
+    let object = parse_xtensa_elf(&bytes, &canonical, "runtime-measurement HIL")?;
+    let runtime = inspect_checkpoint_symbol(
+        &object,
+        &canonical,
+        MEASUREMENT_EVIDENCE_SYMBOL_FRAGMENT,
+        "runtime-measurement",
+        BYTE_SIZE,
+        |initializer| DecodedEvidence::parse(initializer).map(|_| ()),
+    )?;
+    let proof_trace = inspect_checkpoint_symbol(
+        &object,
+        &canonical,
+        PROOF_TRACE_EVIDENCE_SYMBOL_FRAGMENT,
+        "proof-trace",
+        PROOF_BYTE_SIZE,
+        |initializer| {
+            let evidence = DecodedProofTraceEvidence::parse(initializer)?;
+            evidence.validate_empty_initializer()
+        },
+    )?;
+    let layout = CheckpointLayout {
+        runtime,
+        proof_trace,
+    };
+    layout.validate()?;
+    Ok(PreparedCheckpointCapture {
+        elf_path: canonical,
+        elf_bytes: u64::try_from(bytes.len())
+            .map_err(|_| "HIL ELF byte length does not fit u64".to_owned())?,
+        elf_sha256: sha256_bytes(&bytes),
+        layout,
+    })
+}
+
+fn inspect_checkpoint_symbol(
+    object: &object::File<'_>,
+    path: &Path,
+    symbol_fragment: &str,
+    description: &str,
+    expected_size: usize,
+    validate_initializer: impl FnOnce(&[u8]) -> Result<(), String>,
+) -> Result<EvidenceSymbol, String> {
+    let mut symbols = object.symbols().filter(|symbol| {
+        symbol
+            .name()
+            .is_ok_and(|name| name.contains(symbol_fragment))
+            && symbol.section() != SymbolSection::Undefined
+    });
+    let symbol = symbols.next().ok_or_else(|| {
+        format!(
+            "runtime-measurement HIL ELF {} must contain exactly one defined {symbol_fragment}, found 0",
+            path.display()
+        )
+    })?;
+    if symbols.next().is_some() {
+        return Err(format!(
+            "runtime-measurement HIL ELF {} must contain exactly one defined {symbol_fragment}, found more than one",
+            path.display()
+        ));
+    }
+    if symbol.size() != expected_size as u64 {
+        return Err(format!(
+            "runtime-measurement HIL ELF {} {description} symbol must be exactly {expected_size} bytes, got {}",
+            path.display(),
+            symbol.size()
+        ));
+    }
+    let section_index = match symbol.section() {
+        SymbolSection::Section(index) => index,
+        section => {
+            return Err(format!(
+                "runtime-measurement HIL ELF {} {description} symbol must belong to one initialized data section, got {section:?}",
+                path.display()
+            ));
+        }
+    };
+    let section = object.section_by_index(section_index).map_err(|error| {
+        format!(
+            "could not resolve runtime-measurement HIL {description} section in {}: {error}",
+            path.display()
+        )
+    })?;
+    if section.kind() == SectionKind::UninitializedData {
+        return Err(format!(
+            "runtime-measurement HIL ELF {} {description} symbol must be initialized, not BSS",
+            path.display()
+        ));
+    }
+    let offset = symbol
+        .address()
+        .checked_sub(section.address())
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| {
+            format!(
+                "runtime-measurement HIL ELF {} {description} symbol address is outside its section",
+                path.display()
+            )
+        })?;
+    let end = offset
+        .checked_add(expected_size)
+        .ok_or_else(|| format!("runtime-measurement HIL {description} symbol range overflows"))?;
+    let section_data = section.data().map_err(|error| {
+        format!(
+            "could not read runtime-measurement HIL {description} section in {}: {error}",
+            path.display()
+        )
+    })?;
+    let initializer = section_data.get(offset..end).ok_or_else(|| {
+        format!(
+            "runtime-measurement HIL ELF {} {description} symbol bytes are outside initialized section data",
+            path.display()
+        )
+    })?;
+    validate_initializer(initializer).map_err(|error| {
+        format!(
+            "runtime-measurement HIL ELF {} {description} symbol has invalid initialized ABI bytes: {error}",
+            path.display()
+        )
+    })?;
+    Ok(EvidenceSymbol {
+        address: symbol.address(),
+        size_bytes: symbol.size(),
+    })
+}
+
+impl CheckpointLayout {
+    fn validate(self) -> Result<(), String> {
+        if self.runtime.size_bytes != BYTE_SIZE as u64 {
+            return Err(format!(
+                "RTME symbol must be exactly {BYTE_SIZE} bytes, got {}",
+                self.runtime.size_bytes
+            ));
+        }
+        if self.proof_trace.size_bytes != PROOF_BYTE_SIZE as u64 {
+            return Err(format!(
+                "RPTE symbol must be exactly {PROOF_BYTE_SIZE} bytes, got {}",
+                self.proof_trace.size_bytes
+            ));
+        }
+        let expected_proof_address = self
+            .runtime
+            .address
+            .checked_add(BYTE_SIZE as u64)
+            .ok_or_else(|| "RTME symbol address overflows before RPTE".to_owned())?;
+        if self.proof_trace.address != expected_proof_address {
+            return Err(format!(
+                "RPTE symbol must start exactly {BYTE_SIZE} bytes after RTME: RTME=0x{:x}, expected RPTE=0x{expected_proof_address:x}, got RPTE=0x{:x}",
+                self.runtime.address, self.proof_trace.address
+            ));
+        }
+        let _ = self
+            .proof_trace
+            .address
+            .checked_add(self.proof_trace.size_bytes)
+            .ok_or_else(|| "contiguous RTME/RPTE capture range overflows".to_owned())?;
+        Ok(())
+    }
 }
 
 fn inspect_elf(path: &Path, label: &str) -> Result<(StackSizeInventory, StackLayout), String> {
@@ -1814,6 +2904,75 @@ impl DecodedProofTraceEvidence {
     }
 }
 
+impl DecodedCheckpoint {
+    fn parse(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() != CHECKPOINT_BYTE_SIZE {
+            return Err(format!(
+                "checkpoint input must be exactly {CHECKPOINT_BYTE_SIZE} bytes, got {}",
+                bytes.len()
+            ));
+        }
+        let runtime = DecodedEvidence::parse(&bytes[..BYTE_SIZE])
+            .map_err(|error| format!("invalid checkpoint RTME record: {error}"))?;
+        let proof_trace = DecodedProofTraceEvidence::parse(&bytes[BYTE_SIZE..])
+            .map_err(|error| format!("invalid checkpoint RPTE record: {error}"))?;
+        let expected_count = runtime.words[TX_COUNT_WORD];
+        let observed_count = proof_trace.words[PROOF_RADIO_TX_CONFIRMED_SUCCESS_COUNT_WORD]
+            .saturating_add(proof_trace.words[PROOF_RADIO_TX_NOT_CONFIRMED_SUCCESS_COUNT_WORD]);
+        let saturated = runtime.words[FLAGS_WORD] & FLAG_SATURATED != 0
+            || proof_trace.words[PROOF_FLAGS_WORD] & PROOF_FLAG_SATURATED != 0;
+        // RTME and RPTE each have a stable snapshot, but their sequence words
+        // are independent. A debugger halt can therefore land after RPTE has
+        // classified a TX and before the RTME operation guard completes. Keep
+        // absolute equality as a typed diagnostic; later multi-checkpoint
+        // qualification evaluates the invariant over stable deltas.
+        let tx_partition = TxPartitionDiagnostic {
+            expected_count,
+            observed_count,
+            consistent: (!saturated).then_some(expected_count == observed_count),
+        };
+        Ok(Self {
+            runtime,
+            proof_trace,
+            tx_partition,
+        })
+    }
+
+    fn render_human(&self) -> String {
+        let consistent = match self.tx_partition.consistent {
+            Some(true) => "true",
+            Some(false) => "false",
+            None => "unobserved-saturated",
+        };
+        let mut output = format!(
+            "schema={CHECKPOINT_SCHEMA}\nsize_bytes={CHECKPOINT_BYTE_SIZE}\ntx_partition_consistent={consistent}\ntx_partition_expected_count={}\ntx_partition_observed_count={}",
+            self.tx_partition.expected_count, self.tx_partition.observed_count
+        );
+        for line in self.runtime.render_human().lines() {
+            let _ = write!(output, "\nrtme.{line}");
+        }
+        for line in self.proof_trace.render_human().lines() {
+            let _ = write!(output, "\nrpte.{line}");
+        }
+        output
+    }
+
+    fn render_json(&self) -> String {
+        let consistent = match self.tx_partition.consistent {
+            Some(true) => "true",
+            Some(false) => "false",
+            None => "null",
+        };
+        format!(
+            "{{\"schema\":\"{CHECKPOINT_SCHEMA}\",\"size_bytes\":{CHECKPOINT_BYTE_SIZE},\"tx_partition_consistent\":{consistent},\"tx_partition_expected_count\":{},\"tx_partition_observed_count\":{},\"rtme\":{},\"rpte\":{}}}",
+            self.tx_partition.expected_count,
+            self.tx_partition.observed_count,
+            self.runtime.render_json(),
+            self.proof_trace.render_json(),
+        )
+    }
+}
+
 const fn is_minimum_word(word: usize) -> bool {
     matches!(
         word,
@@ -1826,6 +2985,7 @@ const fn is_minimum_word(word: usize) -> bool {
 
 const _: () = {
     assert!(PROOF_TRACE_LINKED_STACK_REDUCTION_BYTES == 192);
+    assert!(CHECKPOINT_BYTE_SIZE == 448);
     assert!(QUALIFIED_RAW_STACK_MARGIN_BYTES == 72_020);
     assert!(MAXIMUM_STACK_FRAME_BYTES == 52_752);
     assert!(MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES == 19_268);
@@ -1928,6 +3088,10 @@ mod tests {
         path: PathBuf,
     }
 
+    struct TempDirectory {
+        path: PathBuf,
+    }
+
     impl TempInput {
         fn new(bytes: &[u8]) -> Self {
             let sequence = NEXT_TEMP_INPUT.fetch_add(1, Ordering::Relaxed);
@@ -1948,6 +3112,29 @@ mod tests {
     impl Drop for TempInput {
         fn drop(&mut self) {
             let _ = fs::remove_file(&self.path);
+        }
+    }
+
+    impl TempDirectory {
+        fn new(label: &str) -> Self {
+            let sequence = NEXT_TEMP_INPUT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "reticulum-e290-rtme-{label}-{}-{sequence}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir(&path).expect("temporary test directory must be creatable");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
         }
     }
 
@@ -2307,7 +3494,10 @@ mod tests {
     #[test]
     fn elf_inspection_cli_rejects_incomplete_duplicate_and_unknown_arguments() {
         for (args, expected) in [
-            (strings(&[]), "decode or inspect-elf subcommand is required"),
+            (
+                strings(&[]),
+                "e290-runtime-measurement subcommand is required",
+            ),
             (strings(&["inspect"]), "unknown subcommand inspect"),
             (
                 strings(&["inspect-elf", "--hil-elf", "hil.elf"]),
@@ -3144,5 +4334,715 @@ mod tests {
         })
         .unwrap();
         assert!(serde_json::from_str::<serde_json::Value>(&json).is_ok());
+    }
+
+    fn checkpoint_fixture(
+        runtime_tx_count: u32,
+        confirmed_tx_count: u32,
+        not_confirmed_tx_count: u32,
+        runtime_saturated: bool,
+        proof_saturated: bool,
+    ) -> Vec<u8> {
+        let mut runtime = populated_words();
+        runtime[TX_COUNT_WORD] = runtime_tx_count;
+        if runtime_saturated {
+            runtime[FLAGS_WORD] |= FLAG_SATURATED;
+        }
+        let mut proof = proof_minimal_words();
+        proof[PROOF_RADIO_TX_CONFIRMED_SUCCESS_COUNT_WORD] = confirmed_tx_count;
+        proof[PROOF_RADIO_TX_NOT_CONFIRMED_SUCCESS_COUNT_WORD] = not_confirmed_tx_count;
+        if proof_saturated {
+            proof[PROOF_FLAGS_WORD] |= PROOF_FLAG_SATURATED;
+        }
+        let mut bytes = Vec::with_capacity(CHECKPOINT_BYTE_SIZE);
+        bytes.extend_from_slice(&encode(runtime));
+        bytes.extend_from_slice(&encode_proof(proof));
+        bytes
+    }
+
+    #[cfg(unix)]
+    fn fake_executable(temporary: &TempDirectory, name: &str, contents: &[u8]) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = temporary.path().join(format!("{name}-bin"));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join(name);
+        fs::write(&path, contents).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::canonicalize(path).unwrap()
+    }
+
+    #[test]
+    fn combined_checkpoint_requires_exact_typed_records_and_reports_tx_partition() {
+        for length in [0, CHECKPOINT_BYTE_SIZE - 1, CHECKPOINT_BYTE_SIZE + 1] {
+            let error = DecodedCheckpoint::parse(&vec![0; length])
+                .expect_err("wrong-size checkpoint was accepted");
+            assert_eq!(
+                error,
+                format!(
+                    "checkpoint input must be exactly {CHECKPOINT_BYTE_SIZE} bytes, got {length}"
+                )
+            );
+        }
+
+        let checkpoint = DecodedCheckpoint::parse(&checkpoint_fixture(4, 3, 1, false, false))
+            .expect("consistent combined checkpoint must decode");
+        assert_eq!(
+            checkpoint.tx_partition,
+            TxPartitionDiagnostic {
+                expected_count: 4,
+                observed_count: 4,
+                consistent: Some(true),
+            }
+        );
+
+        let mismatch = DecodedCheckpoint::parse(&checkpoint_fixture(4, 2, 1, false, false))
+            .expect("independently sequenced mismatch must remain valid evidence");
+        assert_eq!(mismatch.tx_partition.consistent, Some(false));
+        assert_eq!(mismatch.tx_partition.expected_count, 4);
+        assert_eq!(mismatch.tx_partition.observed_count, 3);
+
+        for (runtime_saturated, proof_saturated) in [(true, false), (false, true)] {
+            let saturated = DecodedCheckpoint::parse(&checkpoint_fixture(
+                4,
+                u32::MAX,
+                1,
+                runtime_saturated,
+                proof_saturated,
+            ))
+            .expect("saturated combined checkpoint must remain decodable");
+            assert_eq!(saturated.tx_partition.consistent, None);
+            assert_eq!(saturated.tx_partition.observed_count, u32::MAX);
+        }
+
+        let mut invalid_runtime = checkpoint_fixture(4, 3, 1, false, false);
+        invalid_runtime[MAGIC_WORD * 4..(MAGIC_WORD + 1) * 4]
+            .copy_from_slice(&u32::from_le_bytes(*b"NOPE").to_le_bytes());
+        assert!(
+            DecodedCheckpoint::parse(&invalid_runtime)
+                .unwrap_err()
+                .starts_with("invalid checkpoint RTME record:")
+        );
+        let mut invalid_proof = checkpoint_fixture(4, 3, 1, false, false);
+        let proof_magic = BYTE_SIZE + PROOF_MAGIC_WORD * 4;
+        invalid_proof[proof_magic..proof_magic + 4]
+            .copy_from_slice(&u32::from_le_bytes(*b"NOPE").to_le_bytes());
+        assert!(
+            DecodedCheckpoint::parse(&invalid_proof)
+                .unwrap_err()
+                .starts_with("invalid checkpoint RPTE record:")
+        );
+    }
+
+    #[test]
+    fn combined_checkpoint_cli_and_outputs_are_deterministic_and_typed() {
+        let expected = Options {
+            input: PathBuf::from("checkpoint.bin"),
+            json: true,
+        };
+        assert_eq!(
+            parse_checkpoint_options(&strings(&[
+                "decode-checkpoint",
+                "--json",
+                "--input",
+                "checkpoint.bin",
+            ])),
+            Ok(expected)
+        );
+        assert!(matches!(
+            parse_command_options(&strings(&[
+                "decode-checkpoint",
+                "--input",
+                "checkpoint.bin",
+            ])),
+            Ok(CommandOptions::DecodeCheckpoint(_))
+        ));
+        for (args, expected) in [
+            (strings(&["decode-checkpoint"]), "--input is required"),
+            (
+                strings(&["decode-checkpoint", "--input", "a", "--input", "b"]),
+                "--input may be supplied only once",
+            ),
+            (
+                strings(&["decode-checkpoint", "--input", "a", "--wat"]),
+                "unknown option --wat",
+            ),
+        ] {
+            assert_eq!(parse_checkpoint_options(&args).unwrap_err(), expected);
+        }
+
+        let input = TempInput::new(&checkpoint_fixture(4, 2, 1, false, false));
+        let human = execute_checkpoint(&Options {
+            input: input.path().to_owned(),
+            json: false,
+        })
+        .unwrap();
+        assert!(human.starts_with(
+            "schema=reticulum.e290-runtime-checkpoint.v1\nsize_bytes=448\ntx_partition_consistent=false\ntx_partition_expected_count=4\ntx_partition_observed_count=3\n"
+        ));
+        assert!(human.contains("rtme.operation.tx.count=4\n"));
+        assert!(human.contains("rpte.radio_tx.confirmed_success.count=2\n"));
+
+        let json = execute_checkpoint(&Options {
+            input: input.path().to_owned(),
+            json: true,
+        })
+        .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(json["schema"], CHECKPOINT_SCHEMA);
+        assert_eq!(json["size_bytes"], 448);
+        assert_eq!(json["tx_partition_consistent"], false);
+        assert_eq!(json["tx_partition_expected_count"], 4);
+        assert_eq!(json["tx_partition_observed_count"], 3);
+        assert_eq!(json["rtme"]["magic"], "RTME");
+        assert_eq!(json["rpte"]["magic"], "RPTE");
+
+        let saturated = DecodedCheckpoint::parse(&checkpoint_fixture(4, 3, 1, true, false))
+            .unwrap()
+            .render_json();
+        let saturated: serde_json::Value = serde_json::from_str(&saturated).unwrap();
+        assert!(saturated["tx_partition_consistent"].is_null());
+    }
+
+    #[test]
+    fn capture_cli_requires_exact_uppercase_usb_serial_and_flags() {
+        let expected = CaptureCheckpointOptions {
+            hil_elf: PathBuf::from("hil.elf"),
+            usb_serial: "AC:A7:04:E1:3E:88".to_owned(),
+            output: PathBuf::from("capture"),
+            probe_rs: PathBuf::from(DEFAULT_PROBE_RS),
+        };
+        assert_eq!(
+            parse_capture_checkpoint_options(&strings(&[
+                "--hil-elf",
+                "hil.elf",
+                "--usb-serial",
+                "AC:A7:04:E1:3E:88",
+                "--output",
+                "capture",
+            ])),
+            Ok(expected)
+        );
+        assert_eq!(
+            parse_capture_checkpoint_options(&strings(&[
+                "--output",
+                "capture",
+                "--probe-rs",
+                "/opt/probe-rs",
+                "--usb-serial",
+                "AC:A7:04:E1:3E:88",
+                "--hil-elf",
+                "hil.elf",
+            ]))
+            .unwrap()
+            .probe_rs,
+            PathBuf::from("/opt/probe-rs")
+        );
+        for serial in [
+            "ac:a7:04:e1:3e:88",
+            "AC-A7-04-E1-3E-88",
+            "AC:A7:04:E1:3E",
+            "AC:A7:04:E1:3G:88",
+            " AC:A7:04:E1:3E:88",
+        ] {
+            let error = parse_capture_checkpoint_options(&strings(&[
+                "--hil-elf",
+                "hil.elf",
+                "--usb-serial",
+                serial,
+                "--output",
+                "capture",
+            ]))
+            .expect_err("invalid USB serial was accepted");
+            assert!(
+                error.contains("six uppercase hexadecimal octets"),
+                "{error}"
+            );
+        }
+        for (args, expected) in [
+            (Vec::new(), "--hil-elf is required"),
+            (
+                strings(&["--hil-elf", "a", "--usb-serial", "AC:A7:04:E1:3E:88"]),
+                "--output is required",
+            ),
+            (
+                strings(&[
+                    "--hil-elf",
+                    "a",
+                    "--hil-elf",
+                    "b",
+                    "--usb-serial",
+                    "AC:A7:04:E1:3E:88",
+                    "--output",
+                    "capture",
+                ]),
+                "--hil-elf may be supplied only once",
+            ),
+            (strings(&["--wat", "value"]), "unknown option --wat"),
+        ] {
+            assert_eq!(
+                parse_capture_checkpoint_options(&args).unwrap_err(),
+                expected
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sanitized_probe_launch_clears_hostile_environment_cwd_and_home_presets() {
+        let temporary = TempDirectory::new("probe-sanitize");
+        let hostile_cwd = temporary.path().join("hostile-cwd");
+        let hostile_home = temporary.path().join("hostile-home");
+        let isolated_cwd = temporary.path().join("isolated-cwd");
+        let isolated_home = temporary.path().join("isolated-home");
+        for directory in [&hostile_cwd, &hostile_home, &isolated_cwd, &isolated_home] {
+            fs::create_dir(directory).unwrap();
+        }
+        fs::write(
+            hostile_cwd.join(".probe-rs.toml"),
+            b"connect_under_reset = true\n",
+        )
+        .unwrap();
+        fs::write(
+            hostile_home.join(".probe-rs.yaml"),
+            b"connect_under_reset: true\n",
+        )
+        .unwrap();
+        fs::write(isolated_cwd.join(".probe-rs.toml"), EMPTY_PROBE_CONFIG).unwrap();
+        let fake_probe = fake_executable(
+            &temporary,
+            "sanitized-probe",
+            br##"#!/bin/sh
+if [ "${PROBE_RS_CONNECT_UNDER_RESET+x}" = x ]; then exit 91; fi
+if [ "${PROBE_RS_CONFIG_PRESET+x}" = x ]; then exit 92; fi
+if [ -s .probe-rs.toml ]; then exit 93; fi
+if [ -e "$HOME/.probe-rs.toml" ] || [ -e "$HOME/.probe-rs.json" ] || [ -e "$HOME/.probe-rs.yaml" ] || [ -e "$HOME/.probe-rs.yml" ]; then exit 94; fi
+printf '%s\n' "$HOME" > observed-home
+pwd > observed-cwd
+"##,
+        );
+        let invocation = ProbeInvocation {
+            program: fake_probe,
+            arguments: Vec::new(),
+            current_directory: fs::canonicalize(&isolated_cwd).unwrap(),
+            home_directory: fs::canonicalize(&isolated_home).unwrap(),
+        };
+        let mut command = Command::new(&invocation.program);
+        command
+            .env("PROBE_RS_CONNECT_UNDER_RESET", "1")
+            .env("PROBE_RS_CONFIG_PRESET", "hostile")
+            .env("HOME", &hostile_home)
+            .current_dir(&hostile_cwd);
+        apply_sanitized_probe_launch(&mut command, &invocation);
+        let status = command.status().unwrap();
+        assert_eq!(status.code(), Some(0));
+        let observed_home = invocation.current_directory.join("observed-home");
+        let observed_cwd = invocation.current_directory.join("observed-cwd");
+        assert_eq!(
+            fs::read_to_string(&observed_home).unwrap(),
+            format!("{}\n", invocation.home_directory.display())
+        );
+        assert_eq!(
+            fs::read_to_string(&observed_cwd).unwrap(),
+            format!("{}\n", invocation.current_directory.display())
+        );
+        fs::remove_file(observed_home).unwrap();
+        fs::remove_file(observed_cwd).unwrap();
+        validate_probe_launch_isolation(&invocation).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_process_launch_failure_requires_manual_trial_abandonment() {
+        let temporary = TempDirectory::new("probe-launch-failure");
+        let isolated_cwd = temporary.path().join("isolated-cwd");
+        let isolated_home = temporary.path().join("isolated-home");
+        fs::create_dir(&isolated_cwd).unwrap();
+        fs::create_dir(&isolated_home).unwrap();
+        fs::write(isolated_cwd.join(".probe-rs.toml"), EMPTY_PROBE_CONFIG).unwrap();
+        let invocation = ProbeInvocation {
+            program: temporary.path().join("missing-probe-rs"),
+            arguments: Vec::new(),
+            current_directory: fs::canonicalize(&isolated_cwd).unwrap(),
+            home_directory: fs::canonicalize(&isolated_home).unwrap(),
+        };
+
+        let error = run_probe_command(&invocation)
+            .expect_err("missing probe-rs executable unexpectedly launched");
+        assert!(
+            error.contains("could not invoke probe-rs program"),
+            "{error}"
+        );
+        assert!(error.contains(PROBE_FAILURE_GUIDANCE), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_rejects_executable_parent_default_config_before_probe_invocation() {
+        let temporary = TempDirectory::new("probe-parent-config");
+        let elf = temporary.path().join("hil.elf");
+        fs::write(&elf, b"elf").unwrap();
+        let prepared = PreparedCheckpointCapture {
+            elf_path: fs::canonicalize(&elf).unwrap(),
+            elf_bytes: 3,
+            elf_sha256: sha256_bytes(b"elf"),
+            layout: CheckpointLayout {
+                runtime: EvidenceSymbol {
+                    address: 0x3fca_1000,
+                    size_bytes: BYTE_SIZE as u64,
+                },
+                proof_trace: EvidenceSymbol {
+                    address: 0x3fca_1100,
+                    size_bytes: PROOF_BYTE_SIZE as u64,
+                },
+            },
+        };
+        let fake_probe = fake_executable(&temporary, "hostile-probe", b"#!/bin/sh\nexit 0\n");
+        fs::write(
+            fake_probe.parent().unwrap().join(".probe-rs.json"),
+            br#"{"presets":{"hostile":["--connect-under-reset"]}}"#,
+        )
+        .unwrap();
+        let output = fs::canonicalize(temporary.path()).unwrap().join("capture");
+        let options = CaptureCheckpointOptions {
+            hil_elf: elf,
+            usb_serial: "AC:A7:04:E1:3F:88".to_owned(),
+            output: output.clone(),
+            probe_rs: fake_probe,
+        };
+        let mut invoked = false;
+        let error = capture_checkpoint_with(&options, &prepared, |_| {
+            invoked = true;
+            Ok(ProbeExit {
+                success: true,
+                description: "must not run".to_owned(),
+            })
+        })
+        .expect_err("executable-parent default config was accepted");
+        assert!(!invoked);
+        assert!(error.contains(".probe-rs.json"), "{error}");
+        assert!(error.contains("executable parent"), "{error}");
+        assert!(output.join(CAPTURE_INCOMPLETE_FILE).is_file());
+        assert_eq!(
+            fs::read(output.join(PROBE_CONFIG_FILE)).unwrap(),
+            EMPTY_PROBE_CONFIG
+        );
+        assert!(!output.join(CAPTURE_RAW_FILE).exists());
+        assert!(!output.join(CAPTURE_COMPLETE_FILE).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nonzero_probe_read_requires_manual_trial_abandonment_without_helper_reset() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = TempDirectory::new("probe-nonzero");
+        let elf = temporary.path().join("hil.elf");
+        fs::write(&elf, b"elf").unwrap();
+        let prepared = PreparedCheckpointCapture {
+            elf_path: fs::canonicalize(&elf).unwrap(),
+            elf_bytes: 3,
+            elf_sha256: sha256_bytes(b"elf"),
+            layout: CheckpointLayout {
+                runtime: EvidenceSymbol {
+                    address: 0x3fca_1000,
+                    size_bytes: BYTE_SIZE as u64,
+                },
+                proof_trace: EvidenceSymbol {
+                    address: 0x3fca_1100,
+                    size_bytes: PROOF_BYTE_SIZE as u64,
+                },
+            },
+        };
+        let fake_probe = fake_executable(&temporary, "failed-probe", b"#!/bin/sh\nexit 1\n");
+        let output = fs::canonicalize(temporary.path()).unwrap().join("capture");
+        let options = CaptureCheckpointOptions {
+            hil_elf: elf,
+            usb_serial: "AC:A7:04:E1:3F:88".to_owned(),
+            output: output.clone(),
+            probe_rs: fake_probe,
+        };
+        let mut invocations = 0;
+        let error = capture_checkpoint_with(&options, &prepared, |invocation| {
+            invocations += 1;
+            assert!(
+                !invocation
+                    .arguments
+                    .iter()
+                    .any(|argument| argument == "--connect-under-reset" || argument == "reset")
+            );
+            fs::write(
+                output.join(CAPTURE_RAW_FILE),
+                vec![0_u8; CHECKPOINT_BYTE_SIZE / 2],
+            )
+            .unwrap();
+            Ok(ProbeExit {
+                success: false,
+                description: "exit status: 1".to_owned(),
+            })
+        })
+        .expect_err("nonzero probe read was accepted");
+        assert_eq!(invocations, 1);
+        assert!(error.contains("exit status: 1"), "{error}");
+        assert!(error.contains(PROBE_FAILURE_GUIDANCE), "{error}");
+        assert!(output.join(CAPTURE_INCOMPLETE_FILE).is_file());
+        assert_eq!(
+            fs::metadata(output.join(CAPTURE_RAW_FILE))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert!(!output.join(CAPTURE_COMPLETE_FILE).exists());
+    }
+
+    #[test]
+    fn checkpoint_layout_requires_exact_adjacent_symbols_and_final_elf_parser_fails_closed() {
+        let valid = CheckpointLayout {
+            runtime: EvidenceSymbol {
+                address: 0x3fca_1000,
+                size_bytes: BYTE_SIZE as u64,
+            },
+            proof_trace: EvidenceSymbol {
+                address: 0x3fca_1100,
+                size_bytes: PROOF_BYTE_SIZE as u64,
+            },
+        };
+        valid.validate().unwrap();
+
+        let mut invalid = valid;
+        invalid.runtime.size_bytes -= 1;
+        assert!(invalid.validate().unwrap_err().contains("RTME symbol"));
+        let mut invalid = valid;
+        invalid.proof_trace.size_bytes -= 1;
+        assert!(invalid.validate().unwrap_err().contains("RPTE symbol"));
+        let mut invalid = valid;
+        invalid.proof_trace.address += 4;
+        assert!(
+            invalid
+                .validate()
+                .unwrap_err()
+                .contains("start exactly 256")
+        );
+        let overflow = CheckpointLayout {
+            runtime: EvidenceSymbol {
+                address: u64::MAX - 100,
+                size_bytes: BYTE_SIZE as u64,
+            },
+            proof_trace: EvidenceSymbol {
+                address: 0,
+                size_bytes: PROOF_BYTE_SIZE as u64,
+            },
+        };
+        assert!(overflow.validate().unwrap_err().contains("overflows"));
+
+        let not_an_elf = TempInput::new(b"not-an-elf");
+        let error = inspect_checkpoint_capture_elf(not_an_elf.path())
+            .expect_err("non-ELF capture artifact was accepted");
+        assert!(error.contains("could not parse runtime-measurement HIL ELF"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_uses_one_exact_probe_read_and_seals_synced_hashed_outputs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = TempDirectory::new("capture-success");
+        let elf = temporary.path().join("hil.elf");
+        let elf_bytes = b"bound HIL ELF fixture";
+        fs::write(&elf, elf_bytes).unwrap();
+        let prepared = PreparedCheckpointCapture {
+            elf_path: fs::canonicalize(&elf).unwrap(),
+            elf_bytes: elf_bytes.len() as u64,
+            elf_sha256: sha256_bytes(elf_bytes),
+            layout: CheckpointLayout {
+                runtime: EvidenceSymbol {
+                    address: 0x3fca_1000,
+                    size_bytes: BYTE_SIZE as u64,
+                },
+                proof_trace: EvidenceSymbol {
+                    address: 0x3fca_1100,
+                    size_bytes: PROOF_BYTE_SIZE as u64,
+                },
+            },
+        };
+        let output = fs::canonicalize(temporary.path()).unwrap().join("capture");
+        let fake_probe = fake_executable(&temporary, "fake-probe-rs", b"#!/bin/sh\nexit 0\n");
+        let options = CaptureCheckpointOptions {
+            hil_elf: elf,
+            usb_serial: "AC:A7:04:E1:3E:88".to_owned(),
+            output: output.clone(),
+            probe_rs: fake_probe.clone(),
+        };
+        let checkpoint = checkpoint_fixture(4, 3, 1, false, false);
+        let mut invocation_count = 0;
+        let result = capture_checkpoint_with(&options, &prepared, |invocation| {
+            invocation_count += 1;
+            assert_eq!(invocation.program, fake_probe);
+            assert_eq!(
+                invocation.current_directory,
+                output.join(PROBE_CWD_DIRECTORY)
+            );
+            assert_eq!(invocation.home_directory, output.join(PROBE_HOME_DIRECTORY));
+            assert_eq!(
+                fs::read(invocation.current_directory.join(".probe-rs.toml")).unwrap(),
+                EMPTY_PROBE_CONFIG
+            );
+            let expected = vec![
+                OsString::from("read"),
+                OsString::from("--chip"),
+                OsString::from("esp32s3"),
+                OsString::from("--protocol"),
+                OsString::from("jtag"),
+                OsString::from("--probe"),
+                OsString::from("303a:1001:AC:A7:04:E1:3E:88"),
+                OsString::from("--non-interactive"),
+                OsString::from("--format"),
+                OsString::from("binary"),
+                OsString::from("--output"),
+                output.join(CAPTURE_RAW_FILE).into_os_string(),
+                OsString::from("b8"),
+                OsString::from("0x3fca1000"),
+                OsString::from("448"),
+            ];
+            assert_eq!(invocation.arguments, expected);
+            fs::write(output.join(CAPTURE_RAW_FILE), &checkpoint).unwrap();
+            Ok(ProbeExit {
+                success: true,
+                description: "exit status: 0".to_owned(),
+            })
+        })
+        .unwrap();
+        assert_eq!(invocation_count, 1);
+        assert_eq!(result, format!("captured_checkpoint={}", output.display()));
+        assert!(!output.join(CAPTURE_INCOMPLETE_FILE).exists());
+        assert!(output.join(CAPTURE_COMPLETE_FILE).is_file());
+        assert_eq!(
+            fs::metadata(&output).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(fs::read(output.join(CAPTURE_RAW_FILE)).unwrap(), checkpoint);
+        assert_eq!(
+            fs::read(output.join(CAPTURE_RUNTIME_FILE)).unwrap(),
+            checkpoint[..BYTE_SIZE]
+        );
+        assert_eq!(
+            fs::read(output.join(CAPTURE_PROOF_FILE)).unwrap(),
+            checkpoint[BYTE_SIZE..]
+        );
+
+        let decoded: serde_json::Value =
+            serde_json::from_slice(&fs::read(output.join(CAPTURE_JSON_FILE)).unwrap()).unwrap();
+        assert_eq!(decoded["tx_partition_consistent"], true);
+        let manifest_bytes = fs::read(output.join(CAPTURE_MANIFEST_FILE)).unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+        assert_eq!(manifest["schema"], CAPTURE_SCHEMA);
+        assert_eq!(manifest["usb_serial"], "AC:A7:04:E1:3E:88");
+        assert_eq!(manifest["hil_elf"]["sha256"], sha256_bytes(elf_bytes));
+        assert_eq!(manifest["layout"]["runtime"]["address"], "0x3fca1000");
+        assert_eq!(manifest["layout"]["proof_trace"]["address"], "0x3fca1100");
+        assert_eq!(manifest["layout"]["contiguous_bytes"], 448);
+        assert_eq!(
+            manifest["probe"]["executable"]["path"],
+            fake_probe.to_str().unwrap()
+        );
+        assert_eq!(
+            manifest["probe"]["launch"]["environment_policy"],
+            "clear-then-set-allowlist"
+        );
+        assert_eq!(
+            manifest["probe"]["launch"]["environment_allowlist"],
+            serde_json::json!(["HOME"])
+        );
+        let manifest_current_directory = manifest["probe"]["launch"]["current_directory"]
+            .as_str()
+            .unwrap();
+        let manifest_home_directory = manifest["probe"]["launch"]["home_directory"]
+            .as_str()
+            .unwrap();
+        assert!(Path::new(manifest_current_directory).is_absolute());
+        assert!(Path::new(manifest_home_directory).is_absolute());
+        assert_eq!(
+            Path::new(manifest_current_directory),
+            output.join(PROBE_CWD_DIRECTORY)
+        );
+        assert_eq!(
+            Path::new(manifest_home_directory),
+            output.join(PROBE_HOME_DIRECTORY)
+        );
+        assert_eq!(
+            manifest["probe"]["launch"]["empty_config"]["sha256"],
+            sha256_bytes(EMPTY_PROBE_CONFIG)
+        );
+        assert_eq!(manifest["files"].as_array().unwrap().len(), 6);
+        for binding in manifest["files"].as_array().unwrap() {
+            let relative = binding["path"].as_str().unwrap();
+            let bytes = fs::read(output.join(relative)).unwrap();
+            assert_eq!(binding["bytes"], bytes.len() as u64);
+            assert_eq!(binding["sha256"], sha256_bytes(&bytes));
+        }
+        let complete = fs::read_to_string(output.join(CAPTURE_COMPLETE_FILE)).unwrap();
+        assert_eq!(
+            complete,
+            format!(
+                "{CAPTURE_SCHEMA}\nstatus=complete\nmanifest_sha256={}\n",
+                sha256_bytes(&manifest_bytes)
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_preserves_incomplete_raw_evidence_on_probe_or_size_failure() {
+        let temporary = TempDirectory::new("capture-incomplete");
+        let elf = temporary.path().join("hil.elf");
+        fs::write(&elf, b"elf").unwrap();
+        let prepared = PreparedCheckpointCapture {
+            elf_path: fs::canonicalize(&elf).unwrap(),
+            elf_bytes: 3,
+            elf_sha256: sha256_bytes(b"elf"),
+            layout: CheckpointLayout {
+                runtime: EvidenceSymbol {
+                    address: 0x3fca_1000,
+                    size_bytes: BYTE_SIZE as u64,
+                },
+                proof_trace: EvidenceSymbol {
+                    address: 0x3fca_1100,
+                    size_bytes: PROOF_BYTE_SIZE as u64,
+                },
+            },
+        };
+        let output = fs::canonicalize(temporary.path()).unwrap().join("capture");
+        let fake_probe = fake_executable(&temporary, "fake-probe-rs", b"#!/bin/sh\nexit 0\n");
+        let options = CaptureCheckpointOptions {
+            hil_elf: elf,
+            usb_serial: "AC:A7:04:E1:3F:88".to_owned(),
+            output: output.clone(),
+            probe_rs: fake_probe,
+        };
+        let error = capture_checkpoint_with(&options, &prepared, |invocation| {
+            let raw = invocation
+                .arguments
+                .iter()
+                .position(|argument| argument == "--output")
+                .and_then(|index| invocation.arguments.get(index + 1))
+                .map(PathBuf::from)
+                .unwrap();
+            fs::write(raw, vec![0_u8; CHECKPOINT_BYTE_SIZE - 1]).unwrap();
+            Ok(ProbeExit {
+                success: true,
+                description: "exit status: 0".to_owned(),
+            })
+        })
+        .expect_err("short debugger output was accepted");
+        assert!(error.contains("exactly 448 bytes, got 447"), "{error}");
+        assert!(output.join(CAPTURE_INCOMPLETE_FILE).is_file());
+        assert!(!output.join(CAPTURE_COMPLETE_FILE).exists());
+        assert_eq!(
+            fs::metadata(output.join(CAPTURE_RAW_FILE)).unwrap().len(),
+            (CHECKPOINT_BYTE_SIZE - 1) as u64
+        );
+        assert!(!output.join(CAPTURE_MANIFEST_FILE).exists());
     }
 }

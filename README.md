@@ -456,7 +456,7 @@ after frame exposure with an ordinary announce queued behind the DATA owner;
 `ActiveOwnerFailStopped` retains every owner and acknowledgement gate, takes the
 LoRa lease offline, and permits no later host-radio TX or RX. This qualifies the
 software composition, not ESP32-S3 execution or RF hardware.
-The focused host clients pass 49 tests inside the 231-test xtask suite; the
+The focused host clients pass 56 tests inside the 248-test xtask suite; the
 portable Rete integration and raw-RNS inbox store pass 43 and 17 tests,
 respectively.
 

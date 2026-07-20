@@ -2,7 +2,7 @@
 
 use std::{
     fmt::Write as _,
-    fs::OpenOptions,
+    fs::File,
     io::{self, Read, Write},
     num::NonZeroU32,
     path::{Path, PathBuf},
@@ -10,6 +10,9 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+use std::fs::OpenOptions;
 
 use rand_core::{CryptoRng, RngCore};
 use reticulum_device_api::{
@@ -23,6 +26,7 @@ use reticulum_device_api_session::{
     BearerBinding, ClientCredential, ClientHelloFlight, ClientParameters, ClientProofFlight,
     ClientRequestFlight, ClientSession, DeviceId,
 };
+use serde::{Deserialize, Serialize};
 use serialport::ClearBuffer;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -36,6 +40,66 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const OPEN_SETTLE_MS: u64 = 250;
 const IO_SLICE_MS: u64 = 100;
 const READ_BUFFER_CAPACITY: usize = 1_024;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum EvidenceSchema {
+    #[serde(rename = "reticulum.e290-authenticated-usb.evidence.v1")]
+    V1,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum EvidenceSubmissionFailure {
+    NoPath,
+    DeliveryTimeout,
+    Rejected,
+    Internal,
+}
+
+impl From<SubmissionFailure> for EvidenceSubmissionFailure {
+    fn from(failure: SubmissionFailure) -> Self {
+        match failure {
+            SubmissionFailure::NoPath => Self::NoPath,
+            SubmissionFailure::DeliveryTimeout => Self::DeliveryTimeout,
+            SubmissionFailure::Rejected => Self::Rejected,
+            SubmissionFailure::Internal => Self::Internal,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case", deny_unknown_fields)]
+enum SubmitTerminalEvidence {
+    Delivered {
+        submission_id: u64,
+        packet_len: u16,
+        encoded_packet_sha256: String,
+    },
+    Failed {
+        submission_id: u64,
+        reason: EvidenceSubmissionFailure,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "command", rename_all = "kebab-case", deny_unknown_fields)]
+enum AuthenticatedEvidenceV1 {
+    SubmitAndWait {
+        schema: EvidenceSchema,
+        device_id: String,
+        session_id: String,
+        terminal: SubmitTerminalEvidence,
+    },
+    RnsInboxPeek {
+        schema: EvidenceSchema,
+        device_id: String,
+        session_id: String,
+        item_id: u64,
+        destination: String,
+        length: u16,
+        payload_sha256: String,
+    },
+}
 
 #[derive(Debug, Eq, PartialEq)]
 enum Command {
@@ -93,7 +157,14 @@ impl RequestIds {
 enum WaitDecision {
     PollAgain,
     RetryInternal,
-    Delivered(reticulum_device_api::SubmissionStatus),
+    Delivered {
+        submission_id: SubmissionId,
+        details: reticulum_device_api::PreparedPacketDetails,
+    },
+    Failed {
+        submission_id: SubmissionId,
+        failure: SubmissionFailure,
+    },
 }
 
 struct Options {
@@ -101,6 +172,157 @@ struct Options {
     state_file: PathBuf,
     timeout: Duration,
     command: Command,
+    evidence_output: Option<PathBuf>,
+}
+
+struct ReservedOutput {
+    path: PathBuf,
+    file: Option<File>,
+    label: &'static str,
+    committed: bool,
+}
+
+impl ReservedOutput {
+    #[cfg(unix)]
+    fn create(path: &Path, label: &'static str) -> Result<Self, String> {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        options.mode(0o600);
+        let file = options.open(path).map_err(|error| {
+            format!(
+                "could not create {label} output {} without overwriting: {error}",
+                path.display()
+            )
+        })?;
+        let reservation = Self {
+            path: path.to_owned(),
+            file: Some(file),
+            label,
+            committed: false,
+        };
+        reservation
+            .file
+            .as_ref()
+            .expect("new reservation must retain its file")
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| {
+                format!(
+                    "could not restrict {label} output {} to owner-only permissions: {error}",
+                    path.display()
+                )
+            })?;
+        Ok(reservation)
+    }
+
+    #[cfg(not(unix))]
+    fn create(path: &Path, label: &'static str) -> Result<Self, String> {
+        Err(format!(
+            "could not create {label} output {}: owner-only output reservations require Unix file-permission support",
+            path.display()
+        ))
+    }
+
+    fn commit(mut self, bytes: &[u8]) -> Result<(), String> {
+        let file = self
+            .file
+            .as_mut()
+            .expect("uncommitted reservation must retain its file");
+        file.write_all(bytes).map_err(|error| {
+            format!(
+                "could not write {} output {}: {error}",
+                self.label,
+                self.path.display()
+            )
+        })?;
+        file.sync_all().map_err(|error| {
+            format!(
+                "could not sync {} output {}: {error}",
+                self.label,
+                self.path.display()
+            )
+        })?;
+        sync_output_parent(&self.path).map_err(|error| {
+            format!(
+                "could not sync {} output parent {}: {error}",
+                self.label,
+                output_parent(&self.path).display()
+            )
+        })?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for ReservedOutput {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.file.take();
+            if std::fs::remove_file(&self.path).is_ok() {
+                let _ = sync_output_parent(&self.path);
+            }
+        }
+    }
+}
+
+fn output_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn sync_output_parent(path: &Path) -> io::Result<()> {
+    File::open(output_parent(path))?.sync_all()
+}
+
+enum CommandOutputs {
+    None,
+    RnsInboxPeek {
+        payload: ReservedOutput,
+        evidence: Option<ReservedOutput>,
+    },
+    SubmitAndWait {
+        evidence: Option<ReservedOutput>,
+    },
+}
+
+impl CommandOutputs {
+    fn reserve(command: &Command, evidence_output: Option<&Path>) -> Result<Self, String> {
+        match command {
+            Command::RnsInboxPeek { output } => {
+                let payload = ReservedOutput::create(output, "inbox")?;
+                let evidence = evidence_output
+                    .map(|path| ReservedOutput::create(path, "evidence"))
+                    .transpose()?;
+                Ok(Self::RnsInboxPeek { payload, evidence })
+            }
+            Command::SubmitAndWait { .. } => {
+                let evidence = evidence_output
+                    .map(|path| ReservedOutput::create(path, "evidence"))
+                    .transpose()?;
+                Ok(Self::SubmitAndWait { evidence })
+            }
+            _ => {
+                debug_assert!(evidence_output.is_none());
+                Ok(Self::None)
+            }
+        }
+    }
+
+    fn into_submit_evidence(self) -> Result<Option<ReservedOutput>, String> {
+        match self {
+            Self::SubmitAndWait { evidence } => Ok(evidence),
+            _ => Err("internal output reservation mismatch for submit-and-wait".to_owned()),
+        }
+    }
+
+    fn into_peek(self) -> Result<(ReservedOutput, Option<ReservedOutput>), String> {
+        match self {
+            Self::RnsInboxPeek { payload, evidence } => Ok((payload, evidence)),
+            _ => Err("internal output reservation mismatch for rns-inbox-peek".to_owned()),
+        }
+    }
 }
 
 struct HostRng;
@@ -263,6 +485,7 @@ fn cli_error_line(reason: &str) -> String {
 }
 
 fn transact(options: &Options) -> Result<String, String> {
+    let outputs = CommandOutputs::reserve(&options.command, options.evidence_output.as_deref())?;
     let deadline = Instant::now()
         .checked_add(options.timeout)
         .ok_or_else(|| "--timeout-ms is too large for the host monotonic clock".to_owned())?;
@@ -336,6 +559,7 @@ fn transact(options: &Options) -> Result<String, String> {
                 ));
             }
         };
+        let evidence_output = outputs.into_submit_evidence()?;
         return wait_for_delivery(
             &mut *port,
             &mut reader,
@@ -345,6 +569,7 @@ fn transact(options: &Options) -> Result<String, String> {
             device_id.as_bytes(),
             &session_id,
             submission_id,
+            evidence_output,
         );
     }
     drop(session);
@@ -353,6 +578,7 @@ fn transact(options: &Options) -> Result<String, String> {
         device_id.as_bytes(),
         &session_id,
         response,
+        outputs,
     )
 }
 
@@ -421,6 +647,7 @@ fn format_one_shot_response(
     device_id: &[u8; 16],
     session_id: &[u8; 16],
     response: DeviceResponse,
+    outputs: CommandOutputs,
 ) -> Result<String, String> {
     match (command, response) {
         (Command::SystemCapabilities, DeviceResponse::SystemCapabilities(capabilities)) => {
@@ -457,7 +684,27 @@ fn format_one_shot_response(
             status.durable,
         )),
         (Command::RnsInboxPeek { output }, DeviceResponse::RnsInboxPeek(item)) => {
-            let payload_sha256 = write_rns_inbox_payload(output, item.payload())?;
+            let payload_sha256: [u8; 32] = Sha256::digest(item.payload()).into();
+            let (payload_output, evidence_output) = outputs.into_peek()?;
+            payload_output.commit(item.payload())?;
+            if let Some(evidence_output) = evidence_output {
+                write_authenticated_evidence(
+                    evidence_output,
+                    &AuthenticatedEvidenceV1::RnsInboxPeek {
+                        schema: EvidenceSchema::V1,
+                        device_id: hex(device_id),
+                        session_id: hex(session_id),
+                        item_id: item.id(),
+                        destination: hex(&item.destination().0),
+                        length: item.payload_len(),
+                        payload_sha256: hex(&payload_sha256),
+                    },
+                    &format!(
+                        "authenticated rns-inbox-peek item {} was received and its payload output was committed",
+                        item.id()
+                    ),
+                )?;
+            }
             Ok(format!(
                 "command=rns-inbox-peek outcome=ok device_id={} session_id={} item_id={} destination={} length={} sha256={} output={}",
                 hex(device_id),
@@ -529,33 +776,18 @@ fn command_request(command: &Command) -> DeviceRequest<'_> {
     }
 }
 
-fn write_rns_inbox_payload(path: &Path, payload: &[u8]) -> Result<[u8; 32], String> {
-    #[cfg(unix)]
-    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options.open(path).map_err(|error| {
-        format!(
-            "could not create inbox output {} without overwriting: {error}",
-            path.display()
-        )
+fn write_authenticated_evidence(
+    output: ReservedOutput,
+    evidence: &AuthenticatedEvidenceV1,
+    authenticated_context: &str,
+) -> Result<(), String> {
+    let mut bytes = serde_json::to_vec_pretty(evidence).map_err(|error| {
+        format!("{authenticated_context}; could not serialize evidence output: {error}")
     })?;
-    #[cfg(unix)]
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))
-        .map_err(|error| {
-            format!(
-                "could not restrict inbox output {} to owner-only permissions: {error}",
-                path.display()
-            )
-        })?;
-    file.write_all(payload)
-        .map_err(|error| format!("could not write inbox output {}: {error}", path.display()))?;
-    file.sync_all()
-        .map_err(|error| format!("could not sync inbox output {}: {error}", path.display()))?;
-    Ok(Sha256::digest(payload).into())
+    bytes.push(b'\n');
+    output
+        .commit(&bytes)
+        .map_err(|error| format!("{authenticated_context}; {error}"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -568,6 +800,7 @@ fn wait_for_delivery<P: Read + Write + ?Sized>(
     device_id: &[u8; 16],
     session_id: &[u8; 16],
     submission_id: SubmissionId,
+    mut evidence_output: Option<ReservedOutput>,
 ) -> Result<String, String> {
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -596,16 +829,91 @@ fn wait_for_delivery<P: Read + Write + ?Sized>(
             deadline,
         )?;
         session = restored;
-        match classify_wait_response(submission_id, response)? {
+        let decision = classify_wait_response(submission_id, response)?;
+        match decision {
             WaitDecision::PollAgain | WaitDecision::RetryInternal => {}
-            WaitDecision::Delivered(status) => {
-                return Ok(format_submission_status(
-                    "submit-and-wait",
+            terminal => {
+                return finish_wait_decision(
+                    terminal,
                     device_id,
                     session_id,
-                    status,
-                ));
+                    evidence_output.take(),
+                );
             }
+        }
+    }
+}
+
+fn finish_wait_decision(
+    decision: WaitDecision,
+    device_id: &[u8; 16],
+    session_id: &[u8; 16],
+    evidence_output: Option<ReservedOutput>,
+) -> Result<String, String> {
+    match decision {
+        WaitDecision::PollAgain | WaitDecision::RetryInternal => {
+            Err("internal nonterminal wait decision reached terminal handler".to_owned())
+        }
+        WaitDecision::Delivered {
+            submission_id,
+            details,
+        } => {
+            if let Some(evidence_output) = evidence_output {
+                let terminal_context = format!(
+                    "authenticated submission {} reached state=delivered",
+                    submission_id.0
+                );
+                write_authenticated_evidence(
+                    evidence_output,
+                    &AuthenticatedEvidenceV1::SubmitAndWait {
+                        schema: EvidenceSchema::V1,
+                        device_id: hex(device_id),
+                        session_id: hex(session_id),
+                        terminal: SubmitTerminalEvidence::Delivered {
+                            submission_id: submission_id.0,
+                            packet_len: details.packet_len,
+                            encoded_packet_sha256: hex(details.encoded_packet_sha256.as_bytes()),
+                        },
+                    },
+                    &terminal_context,
+                )?;
+            }
+            Ok(format_submission_status(
+                "submit-and-wait",
+                device_id,
+                session_id,
+                reticulum_device_api::SubmissionStatus {
+                    id: submission_id,
+                    state: SubmissionState::Delivered(details),
+                },
+            ))
+        }
+        WaitDecision::Failed {
+            submission_id,
+            failure,
+        } => {
+            let terminal_error = format!(
+                "submission {} reached state=failed failure={}",
+                submission_id.0,
+                failure_name(failure)
+            );
+            if let Some(evidence_output) = evidence_output {
+                let terminal_context = format!("authenticated {terminal_error}");
+                write_authenticated_evidence(
+                    evidence_output,
+                    &AuthenticatedEvidenceV1::SubmitAndWait {
+                        schema: EvidenceSchema::V1,
+                        device_id: hex(device_id),
+                        session_id: hex(session_id),
+                        terminal: SubmitTerminalEvidence::Failed {
+                            submission_id: submission_id.0,
+                            reason: failure.into(),
+                        },
+                    },
+                    &terminal_context,
+                )?;
+            }
+            Err(terminal_error)
         }
     }
 }
@@ -626,12 +934,14 @@ fn classify_wait_response(
                 SubmissionState::Queued
                 | SubmissionState::Preparing
                 | SubmissionState::AwaitingDelivery(_) => Ok(WaitDecision::PollAgain),
-                SubmissionState::Delivered(_) => Ok(WaitDecision::Delivered(status)),
-                SubmissionState::Failed(failure) => Err(format!(
-                    "submission {} reached state=failed failure={}",
-                    status.id.0,
-                    failure_name(failure)
-                )),
+                SubmissionState::Delivered(details) => Ok(WaitDecision::Delivered {
+                    submission_id: status.id,
+                    details,
+                }),
+                SubmissionState::Failed(failure) => Ok(WaitDecision::Failed {
+                    submission_id: status.id,
+                    failure,
+                }),
                 SubmissionState::Cancelled => Err(format!(
                     "submission {} reached state=cancelled",
                     status.id.0
@@ -714,6 +1024,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut idempotency_key = None;
     let mut submission_id = None;
     let mut output = None;
+    let mut evidence_output = None;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -767,6 +1078,13 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 index += 1;
                 output = Some(PathBuf::from(required_value(args.get(index), "--output")?));
             }
+            "--evidence-output" if evidence_output.is_none() => {
+                index += 1;
+                evidence_output = Some(PathBuf::from(required_value(
+                    args.get(index),
+                    "--evidence-output",
+                )?));
+            }
             "system-capabilities" if command.is_none() => {
                 command = Some(CommandKind::SystemCapabilities);
             }
@@ -785,7 +1103,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "submit-rns-data" if command.is_none() => command = Some(CommandKind::SubmitRnsData),
             "submit-and-wait" if command.is_none() => command = Some(CommandKind::SubmitAndWait),
             option @ ("--port" | "--state-file" | "--timeout-ms" | "--destination-hash"
-            | "--payload-hex" | "--idempotency-key" | "--submission-id" | "--output") => {
+            | "--payload-hex" | "--idempotency-key" | "--submission-id" | "--output"
+            | "--evidence-output") => {
                 return Err(format!("duplicate option {option}"));
             }
             command_name @ ("system-capabilities"
@@ -818,6 +1137,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 || idempotency_key.is_some()
                 || submission_id.is_some()
                 || output.is_some()
+                || evidence_output.is_some()
             {
                 return Err(format!(
                     "{} does not accept operation-specific arguments",
@@ -838,7 +1158,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 || submission_id.is_some()
             {
                 return Err(
-                    "rns-inbox-peek accepts only the operation-specific --output argument"
+                    "rns-inbox-peek accepts only the operation-specific --output and optional --evidence-output arguments"
                         .to_owned(),
                 );
             }
@@ -854,6 +1174,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
             }
             if output.is_some() {
                 return Err("submission-status does not accept --output".to_owned());
+            }
+            if evidence_output.is_some() {
+                return Err("submission-status does not accept --evidence-output".to_owned());
             }
             Command::SubmissionStatus {
                 id: submission_id
@@ -872,6 +1195,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     "{} does not accept --output",
                     command_kind_name(kind)
                 ));
+            }
+            if matches!(kind, CommandKind::SubmitRnsData) && evidence_output.is_some() {
+                return Err("submit-rns-data does not accept --evidence-output".to_owned());
             }
             let operation = command_kind_name(kind);
             let destination =
@@ -904,6 +1230,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         state_file: state_file.ok_or_else(|| "--state-file is required".to_owned())?,
         timeout: Duration::from_millis(timeout_ms.unwrap_or(default_timeout_ms)),
         command,
+        evidence_output,
     })
 }
 
@@ -1035,7 +1362,7 @@ const fn failure_name(failure: SubmissionFailure) -> &'static str {
 
 fn usage() {
     eprintln!(
-        "usage:\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] [system-capabilities]\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] identity-summary\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] rns-inbox-status\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] rns-inbox-peek --output <path>\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] --submission-id <u64> submission-status\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] --destination-hash <32-hex> --payload-hex <0-to-766-hex> --idempotency-key <32-hex> submit-rns-data\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64, default 45000>] --destination-hash <32-hex> --payload-hex <0-to-766-hex> --idempotency-key <32-hex> submit-and-wait"
+        "usage:\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] [system-capabilities]\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] identity-summary\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] rns-inbox-status\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] rns-inbox-peek --output <path> [--evidence-output <absent-json>]\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] --submission-id <u64> submission-status\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] --destination-hash <32-hex> --payload-hex <0-to-766-hex> --idempotency-key <32-hex> submit-rns-data\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64, default 45000>] --destination-hash <32-hex> --payload-hex <0-to-766-hex> --idempotency-key <32-hex> submit-and-wait [--evidence-output <absent-json>]"
     );
 }
 
@@ -1082,6 +1409,21 @@ mod tests {
                 )),
             }
         }
+
+        #[cfg(unix)]
+        fn bare(label: &str) -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("host clock must be after the Unix epoch")
+                .as_nanos();
+            let sequence = NEXT_TEMP_OUTPUT.fetch_add(1, Ordering::Relaxed);
+            Self {
+                path: PathBuf::from(format!(
+                    "reticulum-e290-authenticated-usb-{label}-{}-{nonce}-{sequence}",
+                    std::process::id(),
+                )),
+            }
+        }
     }
 
     impl Drop for TempOutput {
@@ -1109,6 +1451,20 @@ mod tests {
         )
     }
 
+    fn submit_and_wait_command() -> Command {
+        Command::SubmitAndWait {
+            destination: DestinationHash([
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+                0x0e, 0x0f,
+            ]),
+            payload: b"private submission payload".to_vec(),
+            idempotency_key: IdempotencyKey([
+                0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd,
+                0xfe, 0xff,
+            ]),
+        }
+    }
+
     #[test]
     fn parser_requires_one_port_and_active_state_file() {
         let parsed = parse(&strings(&[
@@ -1124,6 +1480,7 @@ mod tests {
         assert_eq!(parsed.state_file, PathBuf::from("/tmp/e290.key"));
         assert_eq!(parsed.timeout, Duration::from_millis(7000));
         assert_eq!(parsed.command, Command::SystemCapabilities);
+        assert_eq!(parsed.evidence_output, None);
 
         assert!(parse(&strings(&["--port", "/dev/test"])).is_err());
         assert!(parse(&strings(&["--state-file", "/tmp/e290.key"])).is_err());
@@ -1309,7 +1666,7 @@ mod tests {
             ]))
             .err()
             .unwrap(),
-            "rns-inbox-peek accepts only the operation-specific --output argument"
+            "rns-inbox-peek accepts only the operation-specific --output and optional --evidence-output arguments"
         );
     }
 
@@ -1415,6 +1772,7 @@ mod tests {
                     0x0d, 0x0e, 0x0f,
                 ]),
             )),
+            CommandOutputs::None,
         )
         .unwrap();
         assert_eq!(
@@ -1455,6 +1813,114 @@ mod tests {
         assert_eq!(
             parse(&overridden).unwrap().timeout,
             Duration::from_millis(12_000)
+        );
+    }
+
+    #[test]
+    fn parser_accepts_evidence_only_for_submit_and_wait_and_inbox_peek() {
+        let submit = parse(&strings(&[
+            "--destination-hash",
+            "000102030405060708090a0b0c0d0e0f",
+            "--payload-hex",
+            "48656c6c6f",
+            "--idempotency-key",
+            "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+            "--state-file",
+            "/tmp/e290.key",
+            "--evidence-output",
+            "/tmp/submit-evidence.json",
+            "--port",
+            "/dev/test",
+            "submit-and-wait",
+        ]))
+        .unwrap();
+        assert_eq!(
+            submit.evidence_output,
+            Some(PathBuf::from("/tmp/submit-evidence.json"))
+        );
+
+        let peek = parse(&strings(&[
+            "--output",
+            "/tmp/inbox.bin",
+            "rns-inbox-peek",
+            "--evidence-output",
+            "/tmp/peek-evidence.json",
+            "--state-file",
+            "/tmp/e290.key",
+            "--port",
+            "/dev/test",
+        ]))
+        .unwrap();
+        assert_eq!(
+            peek.evidence_output,
+            Some(PathBuf::from("/tmp/peek-evidence.json"))
+        );
+
+        for command in [
+            "system-capabilities",
+            "submission-status",
+            "submit-rns-data",
+        ] {
+            let mut arguments = strings(&[
+                "--port",
+                "/dev/test",
+                "--state-file",
+                "/tmp/e290.key",
+                "--evidence-output",
+                "/tmp/evidence.json",
+            ]);
+            match command {
+                "submission-status" => {
+                    arguments.extend(strings(&["--submission-id", "7"]));
+                }
+                "submit-rns-data" => {
+                    arguments.extend(strings(&[
+                        "--destination-hash",
+                        "000102030405060708090a0b0c0d0e0f",
+                        "--payload-hex",
+                        "00",
+                        "--idempotency-key",
+                        "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+                    ]));
+                }
+                _ => {}
+            }
+            arguments.push(command.to_owned());
+            assert!(parse(&arguments).is_err(), "{command} accepted evidence");
+        }
+
+        assert_eq!(
+            parse(&strings(&[
+                "--port",
+                "/dev/test",
+                "--state-file",
+                "/tmp/e290.key",
+                "rns-inbox-peek",
+                "--output",
+                "/tmp/inbox.bin",
+                "--evidence-output",
+            ]))
+            .err()
+            .unwrap(),
+            "--evidence-output requires a value"
+        );
+        assert_eq!(
+            parse(&strings(&[
+                "--port",
+                "/dev/test",
+                "--state-file",
+                "/tmp/e290.key",
+                "rns-inbox-peek",
+                "--output",
+                "/tmp/inbox.bin",
+                "--evidence-output",
+                "/tmp/one.json",
+                "--evidence-output",
+                "/tmp/two.json",
+            ]))
+            .err()
+            .unwrap(),
+            "duplicate option --evidence-output"
         );
     }
 
@@ -1605,6 +2071,7 @@ mod tests {
             &[0x11; 16],
             &[0x22; 16],
             DeviceResponse::SystemCapabilities(reticulum_device_api::CapabilitySnapshot::current()),
+            CommandOutputs::None,
         )
         .unwrap();
         assert!(output.contains("api=1.2"));
@@ -1625,6 +2092,7 @@ mod tests {
                 max_payload_bytes: 383,
                 durable: true,
             }),
+            CommandOutputs::None,
         )
         .unwrap();
         assert_eq!(
@@ -1642,6 +2110,7 @@ mod tests {
     fn inbox_peek_creates_private_exact_synced_output_and_reports_only_metadata() {
         const PAYLOAD: &[u8] = b"private inbox payload";
         let output_file = TempOutput::new("peek");
+        let evidence_file = TempOutput::new("peek-evidence");
         let command = Command::RnsInboxPeek {
             output: output_file.path.clone(),
         };
@@ -1654,11 +2123,13 @@ mod tests {
             PAYLOAD,
         )
         .unwrap();
+        let outputs = CommandOutputs::reserve(&command, Some(&evidence_file.path)).unwrap();
         let output = format_one_shot_response(
             &command,
             &[0x11; 16],
             &[0x22; 16],
             DeviceResponse::RnsInboxPeek(item),
+            outputs,
         )
         .unwrap();
 
@@ -1679,11 +2150,40 @@ mod tests {
         assert!(!output.contains("private inbox payload"));
         assert!(!output.contains(&hex(PAYLOAD)));
 
+        let evidence_bytes = fs::read(&evidence_file.path).unwrap();
+        assert_eq!(evidence_bytes.last(), Some(&b'\n'));
+        let evidence: AuthenticatedEvidenceV1 = serde_json::from_slice(&evidence_bytes).unwrap();
+        assert_eq!(
+            evidence,
+            AuthenticatedEvidenceV1::RnsInboxPeek {
+                schema: EvidenceSchema::V1,
+                device_id: "11".repeat(16),
+                session_id: "22".repeat(16),
+                item_id: 7,
+                destination: "000102030405060708090a0b0c0d0e0f".to_owned(),
+                length: PAYLOAD.len() as u16,
+                payload_sha256: hex(&expected_sha256),
+            }
+        );
+        let evidence_json = String::from_utf8(evidence_bytes).unwrap();
+        assert!(!evidence_json.contains("private inbox payload"));
+        assert!(!evidence_json.contains(&hex(PAYLOAD)));
+        assert!(!evidence_json.contains(&output_file.path.display().to_string()));
+        assert!(!evidence_json.contains(&evidence_file.path.display().to_string()));
+
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
             assert_eq!(
                 fs::metadata(&output_file.path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(&evidence_file.path)
                     .unwrap()
                     .permissions()
                     .mode()
@@ -1700,21 +2200,109 @@ mod tests {
         let command = Command::RnsInboxPeek {
             output: output_file.path.clone(),
         };
-        let item = reticulum_device_api::RnsInboxItem::new(
-            core::num::NonZeroU64::MIN,
-            DestinationHash([0x44; 16]),
-            b"replacement",
-        )
-        .unwrap();
-        let error = format_one_shot_response(
-            &command,
-            &[0x11; 16],
-            &[0x22; 16],
-            DeviceResponse::RnsInboxPeek(item),
-        )
-        .expect_err("create-new output must reject an existing path");
+        let error = CommandOutputs::reserve(&command, None)
+            .err()
+            .expect("create-new output must reject an existing path");
         assert!(error.contains("without overwriting"));
         assert_eq!(fs::read(&output_file.path).unwrap(), b"keep this");
+    }
+
+    #[test]
+    fn inbox_preflight_rejects_existing_evidence_and_output_aliases_without_residue() {
+        let output_file = TempOutput::new("preflight-payload");
+        let evidence_file = TempOutput::new("preflight-evidence");
+        fs::write(&evidence_file.path, b"keep evidence").unwrap();
+        let command = Command::RnsInboxPeek {
+            output: output_file.path.clone(),
+        };
+
+        let existing_error = CommandOutputs::reserve(&command, Some(&evidence_file.path))
+            .err()
+            .expect("an existing evidence file must fail preflight");
+        assert!(existing_error.contains("could not create evidence output"));
+        assert_eq!(fs::read(&evidence_file.path).unwrap(), b"keep evidence");
+        assert!(
+            !output_file.path.exists(),
+            "failed evidence reservation must remove the payload reservation"
+        );
+
+        let alias = output_file
+            .path
+            .parent()
+            .unwrap()
+            .join(".")
+            .join(output_file.path.file_name().unwrap());
+        let alias_error = CommandOutputs::reserve(&command, Some(&alias))
+            .err()
+            .expect("payload and evidence filesystem aliases must be rejected");
+        assert!(alias_error.contains("could not create evidence output"));
+        assert!(
+            !output_file.path.exists(),
+            "an alias collision must remove the payload reservation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reserved_output_commit_and_cleanup_sync_the_parent_for_bare_relative_paths() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let committed = TempOutput::bare("bare-commit");
+        assert_eq!(output_parent(&committed.path), Path::new("."));
+        ReservedOutput::create(&committed.path, "evidence")
+            .unwrap()
+            .commit(b"synced evidence\n")
+            .unwrap();
+        assert_eq!(fs::read(&committed.path).unwrap(), b"synced evidence\n");
+        assert_eq!(
+            fs::metadata(&committed.path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let uncommitted = TempOutput::bare("bare-cleanup");
+        let reservation = ReservedOutput::create(&uncommitted.path, "evidence").unwrap();
+        assert!(uncommitted.path.exists());
+        drop(reservation);
+        assert!(!uncommitted.path.exists());
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn secret_bearing_reservations_fail_closed_without_unix_permissions() {
+        let output = TempOutput::new("non-unix-permissions");
+        let error = ReservedOutput::create(&output.path, "evidence")
+            .err()
+            .expect("non-Unix hosts must not claim owner-only output");
+        assert!(error.contains("owner-only output reservations require Unix"));
+        assert!(!output.path.exists());
+    }
+
+    #[test]
+    fn evidence_preflight_precedes_credentials_and_serial_and_uncommitted_guard_cleans_up() {
+        let evidence_file = TempOutput::new("preflight-ordering");
+        fs::write(&evidence_file.path, b"existing evidence").unwrap();
+        let options = Options {
+            port: "/dev/this-port-must-not-be-opened".to_owned(),
+            state_file: PathBuf::from("/this/credential/must-not-be-read"),
+            timeout: Duration::from_millis(1),
+            command: submit_and_wait_command(),
+            evidence_output: Some(evidence_file.path.clone()),
+        };
+        let error = transact(&options).expect_err("occupied evidence must fail before host I/O");
+        assert!(error.contains("could not create evidence output"));
+        assert!(!error.contains("credential"));
+        assert!(!error.contains("could not open"));
+        assert_eq!(fs::read(&evidence_file.path).unwrap(), b"existing evidence");
+
+        let reserved_file = TempOutput::new("uncommitted-evidence");
+        let outputs =
+            CommandOutputs::reserve(&submit_and_wait_command(), Some(&reserved_file.path)).unwrap();
+        assert_eq!(fs::metadata(&reserved_file.path).unwrap().len(), 0);
+        drop(outputs);
+        assert!(
+            !reserved_file.path.exists(),
+            "host, transport, and deadline exits must remove an empty reservation"
+        );
     }
 
     #[test]
@@ -1723,6 +2311,7 @@ mod tests {
         let command = Command::RnsInboxPeek {
             output: output_file.path.clone(),
         };
+        let outputs = CommandOutputs::reserve(&command, None).unwrap();
         let error = format_one_shot_response(
             &command,
             &[0x11; 16],
@@ -1731,6 +2320,7 @@ mod tests {
                 code: reticulum_device_api::ApiErrorCode::NotFound,
                 operation: Some(reticulum_device_api::OP_EXPERIMENTAL_RNS_INBOX_PEEK),
             }),
+            outputs,
         )
         .expect_err("an empty inbox must be an explicit error");
         assert_eq!(
@@ -1782,6 +2372,168 @@ mod tests {
     }
 
     #[test]
+    fn submit_delivered_evidence_is_strict_private_and_excludes_submission_inputs() {
+        let evidence_file = TempOutput::new("submit-delivered-evidence");
+        let evidence_output =
+            CommandOutputs::reserve(&submit_and_wait_command(), Some(&evidence_file.path))
+                .unwrap()
+                .into_submit_evidence()
+                .unwrap();
+        let details = reticulum_device_api::PreparedPacketDetails {
+            packet_len: 97,
+            encoded_packet_sha256: reticulum_device_api::EncodedPacketSha256::new([0x33; 32]),
+        };
+
+        let line = finish_wait_decision(
+            WaitDecision::Delivered {
+                submission_id: SubmissionId(42),
+                details,
+            },
+            &[0x11; 16],
+            &[0x22; 16],
+            evidence_output,
+        )
+        .unwrap();
+        assert_eq!(
+            line,
+            format!(
+                "command=submit-and-wait outcome=ok device_id={} session_id={} submission_id=42 state=delivered packet_len=97 encoded_packet_sha256={}",
+                "11".repeat(16),
+                "22".repeat(16),
+                "33".repeat(32),
+            )
+        );
+
+        let evidence_bytes = fs::read(&evidence_file.path).unwrap();
+        assert_eq!(evidence_bytes.last(), Some(&b'\n'));
+        let evidence: AuthenticatedEvidenceV1 = serde_json::from_slice(&evidence_bytes).unwrap();
+        let expected = AuthenticatedEvidenceV1::SubmitAndWait {
+            schema: EvidenceSchema::V1,
+            device_id: "11".repeat(16),
+            session_id: "22".repeat(16),
+            terminal: SubmitTerminalEvidence::Delivered {
+                submission_id: 42,
+                packet_len: 97,
+                encoded_packet_sha256: "33".repeat(32),
+            },
+        };
+        assert_eq!(evidence, expected);
+
+        let evidence_json = String::from_utf8(evidence_bytes).unwrap();
+        assert!(!evidence_json.contains("000102030405060708090a0b0c0d0e0f"));
+        assert!(!evidence_json.contains(&hex(b"private submission payload")));
+        assert!(!evidence_json.contains("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"));
+        assert!(!evidence_json.contains(&evidence_file.path.display().to_string()));
+        assert!(!evidence_json.contains("state-file"));
+
+        let mut unknown_top_level = serde_json::to_value(&expected).unwrap();
+        unknown_top_level
+            .as_object_mut()
+            .unwrap()
+            .insert("unexpected".to_owned(), serde_json::json!(true));
+        assert!(
+            serde_json::from_value::<AuthenticatedEvidenceV1>(unknown_top_level).is_err(),
+            "v1 evidence must reject unknown top-level fields"
+        );
+        let mut unknown_terminal = serde_json::to_value(&expected).unwrap();
+        unknown_terminal["terminal"]
+            .as_object_mut()
+            .unwrap()
+            .insert("unexpected".to_owned(), serde_json::json!(true));
+        assert!(
+            serde_json::from_value::<AuthenticatedEvidenceV1>(unknown_terminal).is_err(),
+            "v1 evidence must reject unknown terminal fields"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(&evidence_file.path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn device_failed_delivery_timeout_writes_evidence_then_preserves_terminal_error() {
+        let evidence_file = TempOutput::new("submit-failed-evidence");
+        let evidence_output =
+            CommandOutputs::reserve(&submit_and_wait_command(), Some(&evidence_file.path))
+                .unwrap()
+                .into_submit_evidence()
+                .unwrap();
+        let error = finish_wait_decision(
+            WaitDecision::Failed {
+                submission_id: SubmissionId(42),
+                failure: SubmissionFailure::DeliveryTimeout,
+            },
+            &[0x11; 16],
+            &[0x22; 16],
+            evidence_output,
+        )
+        .expect_err("device failure remains a command failure after evidence is committed");
+        assert_eq!(
+            error,
+            "submission 42 reached state=failed failure=delivery-timeout"
+        );
+        assert_eq!(
+            serde_json::from_slice::<AuthenticatedEvidenceV1>(
+                &fs::read(&evidence_file.path).unwrap()
+            )
+            .unwrap(),
+            AuthenticatedEvidenceV1::SubmitAndWait {
+                schema: EvidenceSchema::V1,
+                device_id: "11".repeat(16),
+                session_id: "22".repeat(16),
+                terminal: SubmitTerminalEvidence::Failed {
+                    submission_id: 42,
+                    reason: EvidenceSubmissionFailure::DeliveryTimeout,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn terminal_evidence_write_error_retains_authenticated_terminal_context() {
+        let evidence_file = TempOutput::new("submit-evidence-write-error");
+        let mut evidence_output =
+            CommandOutputs::reserve(&submit_and_wait_command(), Some(&evidence_file.path))
+                .unwrap()
+                .into_submit_evidence()
+                .unwrap()
+                .unwrap();
+        evidence_output.file.take();
+        evidence_output.file = Some(File::open(&evidence_file.path).unwrap());
+
+        let error = finish_wait_decision(
+            WaitDecision::Delivered {
+                submission_id: SubmissionId(42),
+                details: reticulum_device_api::PreparedPacketDetails {
+                    packet_len: 97,
+                    encoded_packet_sha256: reticulum_device_api::EncodedPacketSha256::new(
+                        [0x33; 32],
+                    ),
+                },
+            },
+            &[0x11; 16],
+            &[0x22; 16],
+            Some(evidence_output),
+        )
+        .expect_err("read-only reservation handle must fail evidence commit");
+        assert!(error.contains("authenticated submission 42 reached state=delivered"));
+        assert!(error.contains("could not write evidence output"));
+        assert!(
+            !evidence_file.path.exists(),
+            "failed evidence commit must remove its incomplete reservation"
+        );
+    }
+
+    #[test]
     fn wait_state_machine_retries_only_internal_and_requires_delivered() {
         let id = SubmissionId(42);
         let status = |state| {
@@ -1805,15 +2557,19 @@ mod tests {
         );
         assert!(matches!(
             classify_wait_response(id, status(SubmissionState::Delivered(details))).unwrap(),
-            WaitDecision::Delivered(_)
+            WaitDecision::Delivered { .. }
         ));
-        assert!(
+        assert!(matches!(
             classify_wait_response(
                 id,
                 status(SubmissionState::Failed(SubmissionFailure::NoPath))
             )
-            .is_err()
-        );
+            .unwrap(),
+            WaitDecision::Failed {
+                failure: SubmissionFailure::NoPath,
+                ..
+            }
+        ));
         assert!(classify_wait_response(id, status(SubmissionState::Cancelled)).is_err());
 
         let api_error = |code| {

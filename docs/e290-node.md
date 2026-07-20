@@ -365,6 +365,22 @@ cargo +stable run --locked -p xtask -- \
   --input /path/to/proof-trace.bin [--json]
 ```
 
+For a checkpoint captured as the required contiguous `RTME || RPTE` range,
+decode and correlate both records together:
+
+```sh
+cargo +stable run --locked -p xtask -- \
+  e290-runtime-measurement decode-checkpoint \
+  --input /path/to/checkpoint.bin [--json]
+```
+
+The combined decoder reports the RTME TX-operation total beside the sum of
+the two RPTE TX-outcome counters. A mismatch is retained as a diagnostic, not
+a malformed-record error: the debugger can halt the actor after RPTE records
+the radio result but before the surrounding RTME operation guard completes.
+Stable baseline and terminal acceptance checkpoints still require the two
+totals to agree.
+
 Both records use matching-even sequence markers. Their record methods depend
 on the current single-core cooperative executor and never yield; the sequence
 protocol detects torn debugger reads but is not a multi-writer lock. A future
@@ -469,35 +485,47 @@ bindings are:
 
 Before using an artifact, rerun the strict default/HIL builds and ELF inspector
 above, package the explicit 16 MiB merged image, and bind its size and SHA-256
-to the trial manifest. Resolve both evidence addresses from that exact HIL ELF;
-do not copy addresses from an older build:
+to the trial manifest. Capture from the exact final HIL ELF; do not copy
+addresses from an older build:
 
 ```sh
 source ~/export-esp.sh
 HIL_ELF=target/e290-runtime-measurement-hil/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node
-xtensa-esp32s3-elf-nm -S --size-sort "$HIL_ELF" \
-  | rg 'RETICULUM_RUNTIME_(MEASUREMENT|PROOF_TRACE)_EVIDENCE'
+cargo +stable run --locked -p xtask -- \
+  e290-runtime-measurement capture-checkpoint \
+  --hil-elf "$HIL_ELF" \
+  --usb-serial "$USB_SERIAL" \
+  --output "$OUT"
 ```
 
-For each board and checkpoint, substitute those two addresses and the board's
-USB serial into one contiguous binary read such as below. `nm` prints bare
-hexadecimal; prefix each copied address with `0x` so `probe-rs` parses it as
-hexadecimal. Require `RPTE` to start exactly 256 bytes after `RTME`; a future
-link change that breaks that adjacency needs one explicitly held debugger
-session instead of two independently timed reads.
+`USB_SERIAL` is the exact uppercase colon-separated serial from the board table
+and `OUT` must name an absent directory. The command validates one initialized
+256-byte RTME symbol immediately followed by one initialized 192-byte RPTE
+symbol in the final little-endian Xtensa ELF, then invokes exactly one
+serial-qualified `probe-rs read` for the contiguous 448-byte range. It never
+resets, flashes, authenticates, or opens the serial port. The owner-only output
+contains the raw range, exact splits, human and JSON decodes, and a manifest
+binding the canonical ELF size/hash, symbol addresses, USB serial, debugger
+arguments, resolved debugger executable size/hash, isolated launch policy, and
+file hashes. The helper clears the inherited debugger environment, supplies
+only an isolated `HOME`, runs from an isolated working directory with an empty
+configuration, and refuses a default probe configuration beside the resolved
+executable. It retains an `incomplete` marker on failure and atomically replaces
+that marker with `checkpoint.complete` only after every derived artifact and
+manifest is durably synced.
 
-```sh
-test "$((RPTE_ADDRESS))" -eq "$((RTME_ADDRESS + 0x100))"
-probe-rs read --chip esp32s3 --protocol jtag \
-  --probe "303a:1001:$USB_SERIAL" --non-interactive \
-  --format binary --output "$OUT/checkpoint.bin" b8 "$RTME_ADDRESS" 448
-dd if="$OUT/checkpoint.bin" of="$OUT/runtime.bin" bs=256 count=1
-dd if="$OUT/checkpoint.bin" of="$OUT/proof-trace.bin" bs=1 skip=256 count=192
-```
+One 448-byte debugger read places both records on the same halted-target
+boundary. The matching-even sequence rule still applies to each split record
+independently. An RTME/RPTE TX-total mismatch is an explicit combined-decoder
+diagnostic and requires another stable capture for acceptance; it does not
+discard otherwise valid boundary evidence.
 
-One 448-byte debugger read keeps the RTME TX total and RPTE TX outcomes on the
-same halted-target boundary. The matching-even sequence rule still applies to
-each split record independently.
+`probe-rs 0.31` resumes all cores after a successful read, but a debugger/read
+failure can return before that resume and leave target state uncertain. Never
+continue a trial after `capture-checkpoint` leaves an `incomplete` marker:
+retain the failed directory as classified evidence, recover/reset both boards,
+and restart the complete clean trial. The helper deliberately does not guess at
+a second debugger resume or reset operation after failure.
 
 For every trial, perform all of the following rather than reusing state from a
 preceding direction:
@@ -559,7 +587,9 @@ preceding direction:
    only later terminal-minus-the-second-stable-baseline deltas are acceptance
    evidence.
 4. Start exactly one `submit-and-wait` using the sender's Active credential,
-   the receiver's fixed destination, and that trial's payload/key. While it
+   the receiver's fixed destination, that trial's payload/key, and
+   `--evidence-output "$TRIAL/sender-terminal.json"`. The evidence path must
+   be absent and is reserved before the serial session begins. While it
    remains active, capture both records about five seconds after submission.
    If a terminal result wins that race, capture it immediately and mark the
    five-second checkpoint `not-applicable`; never delay a terminal capture to
@@ -570,7 +600,9 @@ preceding direction:
 5. Decode only matching-even snapshots; recapture any odd, mismatched, or torn
    record rather than accepting a partial checkpoint. After the terminal
    captures, reset and re-enumerate the receiver, then authenticate separately
-   to peek and verify the exact durable destination/payload. This post-trial
+   to peek with an absent payload path plus
+   `--evidence-output "$TRIAL/receiver-peek.json"`, and verify the exact durable
+   destination/payload. This post-trial
    read must not be mixed into the proof-timing capture window.
 
 Evaluate terminal-minus-baseline deltas, not raw totals. Subtract only
@@ -993,16 +1025,18 @@ device-ID validation, pair/resume sequence headroom, owner-only reservation and
 atomic Pending persistence, fixed 96-byte binary layout, and atomic complete
 Pending-to-Active replacement that persists the HMAC-bound durable Active
 generation while retaining owner-only permissions, and secret-free output. The
-bounded authenticated client adds 22 tests for operation parsing, public-
-identity formatting, inbox status/peek, owner-only non-overwriting payload
-output, sequential request IDs, version policy, polling terminal semantics,
-coalesced-record preservation, and submission-input non-disclosure. Together
-these 49 focused tests are part of the full 231-test xtask gate. The portable
+bounded authenticated client adds 29 tests for operation parsing, public-
+identity formatting, inbox status/peek, owner-only non-overwriting payload and
+evidence output, sequential request IDs, version policy, polling terminal
+semantics, coalesced-record preservation, authenticated terminal binding, and
+submission-input non-disclosure. Together these 56 focused tests are part of
+the full 248-test xtask gate. The portable
 Rete integration and inbox-store suites independently pass 43 and 17 tests,
-respectively. Twenty-one of the xtask tests freeze the measurement decoder's
-CLI, exact ABI rendering, torn/header/sentinel/invariant rejection, input-file
-behavior, strict final-ELF parsing, compiler-frame inventory, linker-stack
-derivation and the reviewed static bounds.
+respectively. Thirty-one of the xtask tests freeze the measurement decoder's
+CLI, exact individual/combined ABI rendering, torn/header/sentinel/invariant
+rejection, input-file behavior, one-read checkpoint capture, strict final-ELF
+parsing, compiler-frame inventory, linker-stack derivation and the reviewed
+static bounds.
 
 Once all response bytes enter the endpoint FIFO, firmware requests hardware
 `WR_DONE` and releases the software response owner without waiting for a later
@@ -1277,12 +1311,14 @@ supports these authenticated logical operations:
 - `system-capabilities` (the default command);
 - `identity-summary`;
 - `rns-inbox-status` for the five bounded qualification-state scalars;
-- `rns-inbox-peek --output <path>` for an owner-only, non-overwriting copy of
-  the exact retained destination and payload;
+- `rns-inbox-peek --output <path> [--evidence-output <absent-json>]` for an
+  owner-only, non-overwriting copy of the exact retained payload plus optional
+  authenticated-result evidence containing its destination and metadata;
 - `submission-status` with `--submission-id`;
 - `submit-rns-data` with destination, payload, and idempotency key; and
-- `submit-and-wait`, which submits once and polls every 500 ms over the same
-  authenticated session until `Delivered` or a terminal failure.
+- `submit-and-wait [--evidence-output <absent-json>]`, which submits once and
+  polls every 500 ms over the same authenticated session until `Delivered` or
+  a terminal failure, with optional device-terminal evidence.
 
 Read the public primary destination:
 
@@ -1302,7 +1338,8 @@ cargo +stable run --locked -p xtask -- e290-authenticated-usb \
   --destination-hash <32-lowercase-hex> \
   --payload-hex <0-to-766-hex> \
   --idempotency-key <32-hex> \
-  submit-and-wait
+  submit-and-wait \
+  --evidence-output /secure/submit-terminal.json
 ```
 
 Observe the raw-RNS qualification inbox without consuming it:
@@ -1316,13 +1353,32 @@ cargo +stable run --locked -p xtask -- e290-authenticated-usb \
 cargo +stable run --locked -p xtask -- e290-authenticated-usb \
   --port /dev/cu.usbmodemXXXX \
   --state-file /secure/new-e290-pairing.key \
-  rns-inbox-peek --output /secure/inbox-item.bin
+  rns-inbox-peek \
+  --output /secure/inbox-item.bin \
+  --evidence-output /secure/inbox-item.json
 ```
 
 Peek refuses to replace an existing output file, creates a private file, syncs
-it, and prints only item metadata. The file contains plaintext destination and
-payload material and must be handled accordingly. Empty inbox returns a clear
-not-found result without creating output.
+it, and prints only item metadata. The binary file contains only the plaintext
+payload; its destination is printed as metadata and retained in the optional
+JSON sidecar. Both artifacts must be handled accordingly. Empty inbox returns
+a clear not-found result without creating output.
+
+The optional evidence sidecars are private, create-new, durably synced JSON.
+They bind the authenticated device and session to either the device-reported
+submission terminal (including exact delivered packet length/hash or terminal
+failure reason) or the independently hashed inbox payload and retained item
+metadata. Output paths are reserved before serial I/O, so an occupied or
+aliased path cannot consume a one-shot session and then produce only half of a
+result. Host transport/authentication errors, cancellation, and the host
+deadline do not masquerade as device-terminal evidence; ordinary errors remove
+empty reservations, while a process crash can leave an unmistakable empty
+reservation rather than overwrite prior evidence.
+
+The current secret-bearing payload/evidence writer requires Unix permission
+semantics and fails before credential or serial I/O on other hosts; a future
+cross-platform client must provide an equivalent private-file/ACL guarantee
+before enabling these exports.
 
 The command accepts only the canonical Active state-file format, verifies the
 device ID and credential generation during the handshake, preserves coalesced
