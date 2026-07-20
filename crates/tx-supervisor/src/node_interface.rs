@@ -151,7 +151,7 @@ mod tests {
         TxPacketBuffer, TxPermitRequirements, TxPermitReservation, TxPermitResourceId,
         TxPolicyDecision,
     };
-    use reticulum_rns_rete::IngressDisposition;
+    use reticulum_rns_rete::{IngressDisposition, PacketType};
     use reticulum_tx_handoff::{DataPermitHandoff, OrdinaryPermitHandoff};
     use std::boxed::Box;
     use std::vec::Vec;
@@ -767,6 +767,15 @@ mod tests {
         ));
         assert_eq!(processed.recycle_fault(), None);
         assert_eq!(processed.terminal_action_fault(), None);
+        let action_free_report = processed.into_report();
+        assert_eq!(
+            action_free_report.metadata.wire_packet_type(),
+            Some(PacketType::Announce),
+            "metadata must survive after the exact action envelope moves into retry ownership"
+        );
+        assert!(action_free_report.actions.events.is_empty());
+        assert!(action_free_report.actions.packets.is_empty());
+        assert_eq!(action_free_report.actions.unroutable_packets, 0);
         assert!(supervisor.ingress_actions_pending());
         assert_eq!(supervisor.terminal_ingress_action_fault(), None);
         let retained = supervisor
@@ -851,6 +860,7 @@ mod tests {
         let expected_deadline = admission().deadline();
         let report = IngressReport {
             disposition: IngressDisposition::Processed,
+            metadata: Default::default(),
             actions,
         };
 
@@ -1121,6 +1131,7 @@ mod tests {
                 buffer: buffer_id,
                 report: IngressReport {
                     disposition: IngressDisposition::Processed,
+                    metadata: Default::default(),
                     actions: NodeActions::default(),
                 },
                 actions_backpressured: None,

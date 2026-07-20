@@ -5,6 +5,8 @@ use core::{
     mem,
 };
 
+#[cfg(feature = "runtime-measurement-hil")]
+use embassy_time::Instant;
 use embedded_storage::nor_flash::ReadNorFlash;
 use esp_bootloader_esp_idf::partitions::{PARTITION_TABLE_MAX_LEN, read_partition_table};
 use esp_storage::{FlashStorage, FlashStorageError};
@@ -61,6 +63,8 @@ use reticulum_heltec_vision_master_e290_node::partition_contract::{
     NODE_IDENTITY_OFFSET, NODE_JOURNAL_LABEL_BYTES, NODE_JOURNAL_LEN, NODE_JOURNAL_OFFSET,
     NVS_DATA_SUBTYPE, REQUIRED_FLASH_BYTES, UNDEFINED_DATA_SUBTYPE,
 };
+#[cfg(feature = "runtime-measurement-hil")]
+use reticulum_heltec_vision_master_e290_node::runtime_measurement::RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE;
 use reticulum_heltec_vision_master_e290_node::{
     api_credentials_binding, node_journal_binding, rns_inbox_binding,
 };
@@ -94,6 +98,16 @@ use reticulum_heltec_vision_master_e290_node::durability_boot::JournalBootPolicy
 use reticulum_heltec_vision_master_e290_node::inbox_admission_fault_hil::{
     SuppressThirdWrite, observe_product_quarantine,
 };
+
+#[cfg(feature = "runtime-measurement-hil")]
+fn record_runtime_inbox_commit_started() {
+    RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE.record_inbox_commit_started(Instant::now().as_millis());
+}
+
+#[cfg(feature = "runtime-measurement-hil")]
+fn record_runtime_inbox_commit_finished() {
+    RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE.record_inbox_commit_finished(Instant::now().as_millis());
+}
 
 type ProductRegionError = RegionError<FlashStorageError>;
 pub(crate) type ProductSubmissionRuntime =
@@ -825,11 +839,15 @@ impl ProductStorageCoordinator {
         #[cfg(feature = "rns-inbox-commit-fault-hil")]
         let region = SuppressThirdWrite::new(region);
         let mut access = BoundInboxStore::new(region, binding);
+        #[cfg(feature = "runtime-measurement-hil")]
+        record_runtime_inbox_commit_started();
         let outcome = self
             .inbox
             .as_mut()
             .expect("ready inbox gate requires a mounted runtime")
             .accept(&mut access, candidate);
+        #[cfg(feature = "runtime-measurement-hil")]
+        record_runtime_inbox_commit_finished();
         match outcome {
             Ok(InboxAdmissionOutcome::Accepted(id)) => ProductInboundAdmission::Committed(id),
             Ok(InboxAdmissionOutcome::Full(_candidate)) => {

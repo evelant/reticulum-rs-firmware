@@ -580,6 +580,7 @@ jobs:
           default_elf="$RUNNER_TEMP/e290-default-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node"
           hil_elf="$RUNNER_TEMP/e290-runtime-measurement-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node"
           evidence=RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE
+          proof_trace_evidence=RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE
           marker=RETICULUM_RUNTIME_MEASUREMENT_STACK_MARKER
           alloc_hook=_esp_alloc_alloc
           dealloc_hook=_esp_alloc_dealloc
@@ -589,6 +590,10 @@ jobs:
 
           if grep -Fq "$evidence" <<<"$default_symbols"; then
             echo "::error title=Runtime-measurement evidence reached default E290 ELF::$evidence must remain HIL-only"
+            exit 1
+          fi
+          if grep -Fq "$proof_trace_evidence" <<<"$default_symbols"; then
+            echo "::error title=Proof-trace evidence reached default E290 ELF::$proof_trace_evidence must remain HIL-only"
             exit 1
           fi
           for identifier in "$marker" "$alloc_hook" "$dealloc_hook"; do
@@ -610,6 +615,12 @@ jobs:
             '$2 == "00000100" && $3 == "D" && index($NF, identifier) { found++ } END { exit found != 1 }' \
             <<<"$hil_symbols"; then
             echo "::error title=Runtime-measurement evidence ABI changed::Expected one exact 256-byte initialized evidence object"
+            exit 1
+          fi
+          if ! awk -v identifier="$proof_trace_evidence" \
+            '$2 == "000000c0" && $3 == "D" && index($NF, identifier) { found++ } END { exit found != 1 }' \
+            <<<"$hil_symbols"; then
+            echo "::error title=Proof-trace evidence ABI changed::Expected one exact 192-byte initialized evidence object"
             exit 1
           fi
 

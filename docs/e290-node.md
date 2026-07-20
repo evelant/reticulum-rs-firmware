@@ -331,7 +331,7 @@ the LoRa actor. A later Wi-Fi, BLE, USB or second-radio Reticulum actor can add
 its own actor observations through the same diagnostics boundary without
 changing the transport-neutral DATA projection or durable inbox contract.
 
-The HIL exposes one initialized, exact 256-byte `RTME` version-1 ABI. Its 64
+The HIL exposes an initialized, exact 256-byte `RTME` version-1 ABI. Its 64
 little-endian words contain a leading sequence marker, header/state, memory and
 stack snapshots, eight boot-phase last/maximum pairs, operation/scheduler
 aggregates, error/allocation counters, and a trailing sequence marker. A
@@ -347,6 +347,33 @@ cargo +stable run --locked -p xtask -- e290-runtime-measurement decode \
   --input /path/to/evidence.bin [--json]
 ```
 
+The same HIL now exposes a separate initialized, exact 192-byte `RPTE`
+version-1 proof trace. Its 48 words distinguish logical radio reassembly from
+ingress handoff outcomes, RNS disposition, locally generated explicit delivery
+proofs, delivered and timed-out receipt terminals, action pressure,
+correlation faults, confirmed versus not-confirmed-success radio-TX wrapper
+outcomes, and Ready-gate inbox-admission attempt boundaries. It retains only
+counts, millisecond timestamps, packet classification, and three compact
+first-eight-byte correlation tags; it contains no payload or complete hash.
+Tags are diagnostic aids for one isolated attempt, not cryptographic proof or
+globally unique identifiers. JSON renders each combined 64-bit tag as a fixed
+hex string so JavaScript clients cannot lose bits above `2^53`.
+
+```sh
+cargo +stable run --locked -p xtask -- \
+  e290-runtime-measurement decode-proof-trace \
+  --input /path/to/proof-trace.bin [--json]
+```
+
+Both records use matching-even sequence markers. Their record methods depend
+on the current single-core cooperative executor and never yield; the sequence
+protocol detects torn debugger reads but is not a multi-writer lock. A future
+multicore Wi-Fi/BLE actor must add synchronization or use a separate per-writer
+record. The always-present RNS metadata remains transport-neutral. Only the
+logical reassembly/enqueue hooks are LoRa-actor-specific, so another Reticulum
+interface can add its own ingress-frontier evidence without changing receipt
+or inbox semantics.
+
 The same project-local command inspects the two release ELFs used to preserve
 the static side of the stack bound:
 
@@ -359,9 +386,12 @@ cargo +stable run --locked -p xtask -- e290-runtime-measurement inspect-elf \
 It accepts only final little-endian 32-bit Xtensa `ET_EXEC` images with one
 nonempty, relocation-free `.stack_sizes` section. Both maximum frames must be
 at most 52,752 bytes, both linker guard offsets must remain 60 bytes, and the
-default/HIL usable stacks must remain at least 170,984/170,480 bytes. Record
-counts are diagnostic rather than policy: the retained release ELFs contain
-813 default and 822 HIL records, while both maxima are 52,752 bytes. CI runs
+default/HIL usable stacks must remain at least 170,984/170,288 bytes. The
+default ELF must exclude the proof trace; the HIL ELF must contain exactly one
+initialized 192-byte symbol whose linked bytes decode as a valid empty `RPTE`
+record. Record counts are diagnostic rather than policy: the current release
+ELFs contain 814 default and 830 HIL records, while both maxima are 52,752
+bytes. CI runs
 Clippy and then relinks both profiles with
 `-C link-arg=-nostartfiles -Z emit-stack-sizes` in isolated target directories
 immediately before this inspection.
@@ -387,21 +417,221 @@ after guard/scanner exclusions; the corresponding default reservation/usable
 pair is 171,048/170,984 bytes. The unchanged largest compiler-emitted frame is
 52,752 bytes.
 
+The later proof-trace diagnostic extension deliberately preserves those
+historical artifacts while producing a new isolated pair:
+
+| Image | Text | Data | BSS | GNU total | Merged image |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Current default | 659,755 | 3,676 | 469,152 | 1,132,583 | 766,192 |
+| Current measurement + proof trace HIL | 671,719 | 4,180 | 468,648 | 1,144,547 | 778,000 |
+| Delta | +11,964 | +504 | -504 | +11,964 | +11,808 |
+
+The current default/HIL ELF SHA-256 values are
+`95adc2b6c63db9ab38232d813938cf22c78c7876cd8d77b873af0bcbf8ebfd20`
+and `8c1106595155af306f135d35a8dc0d79dfb31b72393d1ffbd7c0e5cffdc2b135`.
+The corresponding merged-image values are
+`cb337e68fd1dcf366cf36297c27474595b2da0c0d16f548f9a84bd0b588fd974`
+and `ae4d14112696aa27311d782d8e6b1479db5959f2e89b56ce3dc4ce3b41ddfb54`.
+The added initialized trace record moves the HIL reservation/usable pair down
+by exactly 192 bytes to 170,352/170,288; the default pair is unchanged.
+
+These current artifacts pass build, graph, ELF, and static-stack gates but are
+not yet powered-qualified: both boards were absent after the preceding
+debugger-reset attempt. The immediately preceding 777,600-byte HIL image,
+SHA-256
+`151a66cc92b83268050c61bfc983ad6d9452fac0626d260c26da877c552c800e`,
+did pass an identity-qualified flash and exact address-zero readback on board
+`3e:88`. It used the same 192-byte `RPTE` layout but predated the current
+TX-outcome recording in words 45 and 46. At 30,835 ms uptime, after boot and
+before any authenticated request or Reticulum ingress, its `RTME` reported a
+72,020-byte painted stack margin, 904-byte maximum allocator use, 64,632-byte
+minimum internal free space, no external allocation, no failed allocation, no
+radio watchdog expiry, and no unexpected measurement error. `RPTE` decoded
+with stable sequence 4, no saturation or input inconsistency, zero logical RX,
+RNS ingress, proof, receipt terminal, correlation fault, and inbox-commit
+counts. Its only observations were two initial action-pressure observations at
+1,205 ms while the boot announce entered the ordinary transmit path; the two
+then-reserved TX-outcome words remained zero. This is powered boot-only
+evidence for the immediately preceding trace revision, not powered evidence
+for the current hashes or the pending two-board RF proof-timeout reproduction.
+The 72,020-byte raw margin leaves 19,268 bytes after subtracting the unchanged
+52,752-byte maximum compiler frame.
+
+### Decisive proof-correlation trial runbook
+
+Run four clean trials in `B→A`, `A→B`, `A→B`, `B→A` order. The fixed board
+bindings are:
+
+| Board | USB serial / MAC | Active credential | Primary destination |
+| --- | --- | --- | --- |
+| A | `AC:A7:04:E1:3E:88` / `ac:a7:04:e1:3e:88` | `/private/tmp/e290-rns-inbox-proof/3e-active.key` | `c99e8ff1ec8629e4e1290e14462ae8af` |
+| B | `AC:A7:04:E1:3F:88` / `ac:a7:04:e1:3f:88` | `/private/tmp/e290-rns-inbox-proof/3f-active.key` | `83a09ed807a0a7c631386deaa0448fb9` |
+
+Before using an artifact, rerun the strict default/HIL builds and ELF inspector
+above, package the explicit 16 MiB merged image, and bind its size and SHA-256
+to the trial manifest. Resolve both evidence addresses from that exact HIL ELF;
+do not copy addresses from an older build:
+
+```sh
+source ~/export-esp.sh
+HIL_ELF=target/e290-runtime-measurement-hil/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node
+xtensa-esp32s3-elf-nm -S --size-sort "$HIL_ELF" \
+  | rg 'RETICULUM_RUNTIME_(MEASUREMENT|PROOF_TRACE)_EVIDENCE'
+```
+
+For each board and checkpoint, substitute those two addresses and the board's
+USB serial into one contiguous binary read such as below. `nm` prints bare
+hexadecimal; prefix each copied address with `0x` so `probe-rs` parses it as
+hexadecimal. Require `RPTE` to start exactly 256 bytes after `RTME`; a future
+link change that breaks that adjacency needs one explicitly held debugger
+session instead of two independently timed reads.
+
+```sh
+test "$((RPTE_ADDRESS))" -eq "$((RTME_ADDRESS + 0x100))"
+probe-rs read --chip esp32s3 --protocol jtag \
+  --probe "303a:1001:$USB_SERIAL" --non-interactive \
+  --format binary --output "$OUT/checkpoint.bin" b8 "$RTME_ADDRESS" 448
+dd if="$OUT/checkpoint.bin" of="$OUT/runtime.bin" bs=256 count=1
+dd if="$OUT/checkpoint.bin" of="$OUT/proof-trace.bin" bs=1 skip=256 count=192
+```
+
+One 448-byte debugger read keeps the RTME TX total and RPTE TX outcomes on the
+same halted-target boundary. The matching-even sequence rule still applies to
+each split record independently.
+
+For every trial, perform all of the following rather than reusing state from a
+preceding direction:
+
+1. Identity-qualify each USB serial/MAC, preserve a fresh private full-flash
+   backup, and leave the board in the loader. Erase exactly
+   `0x630000..0x930000` on both boards, verify the complete 3 MiB range is
+   erased (the known all-`0xff` SHA-256 is
+   `908b6cfc9aef496dd5ab5c5540d80c6383ed6e92f86044574c996315381bc064`),
+   boot the documented one-shot schema-2 journal reprovision image, and verify
+   the 1 MiB journal SHA-256
+   `a6d0b254e7fee84f2f00c45f4075fdafc8f5630dc162cfaf22a72d4de0add054`.
+   Reflash the exact final proof-trace HIL image with the repository's
+   identity-owning helper and require its address-zero readback:
+
+   ```sh
+   IMAGE=/path/to/e290-node-runtime-measurement-proof-trace.bin
+   IMAGE_SHA256="$(shasum -a 256 "$IMAGE" | cut -d ' ' -f 1)"
+   PATH="$ESPFLASH_BIN_DIR:$PATH" \
+   python3.13 interop/python/e290_qualification_host.py flash-merged \
+     --usb-serial "$USB_SERIAL" --expected-mac "$EXPECTED_MAC" \
+     --expected-flash-bytes 16777216 \
+     --evidence-prefix "$TRIAL/$BOARD/flash" \
+     --image "$IMAGE" --expected-image-sha256 "$IMAGE_SHA256" \
+     --confirmed-radio-module HT-RA62-HF
+   ```
+
+   Set `ESPFLASH_BIN_DIR` to the directory containing the working `espflash`
+   binary and bind its version in the trial manifest. Never erase below
+   `0x630000`; identity, announce clock, credentials, and device configuration
+   must survive. The repository has no identity-atomic `erase-region` helper,
+   so keep only the intended target attached while performing that raw erase.
+2. Allocate a new 383-byte payload and a new 16-byte idempotency key. Retain
+   their exact hex plus SHA-256 values; no payload or key may be reused across
+   trials. Create one directory such as `trial-01-b-to-a`, with sender
+   `pre-route` and per-board `baseline`, `post-submit-5s-if-active`, and
+   `terminal` 448-byte captures, split RTME/RPTE binaries, and decoded JSON.
+   Record the ELF/image hashes, symbol addresses, board bindings, destination,
+   command start/end times, and terminal API result in that directory.
+3. Boot the sender first, allow its own boot TX to settle, and capture a stable
+   sender `pre-route` checkpoint. Boot the receiver last and allow its fresh
+   ANNOUNCE to reach the listening sender. The sender route-baseline minus
+   `pre-route` delta is the readiness oracle: require exactly one logical RX,
+   one successful ingress handoff, and one RNS ingress whose
+   `rns_ingress.last_disposition` is `processed` and
+   `rns_ingress.last_wire_packet_type` is `announce`, with zero ingress
+   failures, zero counts for every non-`processed` disposition, and zero
+   correlation faults. If it does not, reset both boards and restart the
+   complete trial; do not accumulate another receiver ANNOUNCE on the same
+   sender epoch. Before opening either
+   authenticated API, take two matching-even combined baseline checkpoints on
+   each board one second apart. Require `radio_tx.confirmed_success.count`,
+   `radio_tx.not_confirmed_success.count`, RTME `operation.tx.count`, and RTME
+   `operation.tx.timeout_count` to be unchanged between the pair. Other RTME
+   fields such as uptime and scheduler maxima may advance. Do not run
+   `identity-summary`, inbox status, or any other authenticated command before
+   submission: the current USB bearer permits one handshake per connection.
+   Raw TX counters need not be zero because either boot ANNOUNCE can contribute;
+   only later terminal-minus-the-second-stable-baseline deltas are acceptance
+   evidence.
+4. Start exactly one `submit-and-wait` using the sender's Active credential,
+   the receiver's fixed destination, and that trial's payload/key. While it
+   remains active, capture both records about five seconds after submission.
+   If a terminal result wins that race, capture it immediately and mark the
+   five-second checkpoint `not-applicable`; never delay a terminal capture to
+   reach the clock time. Capture both again immediately after `Delivered`,
+   `delivery-timeout`, or another terminal result. A debugger capture halts its
+   target, so retain the capture times and do not treat resulting loop-gap
+   maxima as ordinary RF timing.
+5. Decode only matching-even snapshots; recapture any odd, mismatched, or torn
+   record rather than accepting a partial checkpoint. After the terminal
+   captures, reset and re-enumerate the receiver, then authenticate separately
+   to peek and verify the exact durable destination/payload. This post-trial
+   read must not be mixed into the proof-timing capture window.
+
+Evaluate terminal-minus-baseline deltas, not raw totals. Subtract only
+monotonic `.count` fields. Evaluate `last_*`, `tag.*`, and `flags.*` fields as
+the value or transition at that checkpoint: enum/tag values and timestamps are
+not arithmetic counters. Use this acceptance matrix, where `G` is the
+receiver's terminal `tag.generated` value:
+
+| Boundary / decoder keys | Receiver | Sender after `Delivered` | Sender after `delivery-timeout` |
+| --- | --- | --- | --- |
+| Logical handoff: `logical_rx.completed.count`, `ingress.enqueue.count`, `ingress.fail.count` | `+1`, `+1`, `+0` for DATA | `+1`, `+1`, `+0` for PROOF | Deltas locate whether any proof reached reassembly or handoff; `ingress.fail` remains `+0` |
+| RNS: `rns_ingress.count`, `rns_ingress.last_disposition`, `rns_ingress.last_wire_packet_type`, and `disposition.processed.count`, `disposition.native_duplicate.count`, `disposition.native_invalid.count`, `disposition.no_observable_outcome.count`, `disposition.rejected.count` | `+1`, last values `processed` / `data`; every other disposition `+0` | `+1`, last values `processed` / `proof`; every other disposition `+0` | Deltas locate RNS rejection; every clean-path disposition other than `processed` is `+0` |
+| Proof action: `proof.generated.count`, `rns_ingress.last_emitted_packets`, `tag.generated`, `flags.generated_tag_present`, `flags.generated_tags_consistent`, `flags.input_inconsistent` | `+1`, last emitted `1`, present/consistent tag `G`, input-consistent | Generated-proof delta exactly `+0`; input-consistent | Generated-proof delta exactly `+0`; input-consistent; receiver zero after processed DATA identifies generation/action failure |
+| TX wrapper: `radio_tx.confirmed_success.count`, `radio_tx.not_confirmed_success.count`, RTME `operation.tx.count`, `operation.tx.timeout_count` | Confirmed success `+1`, not-confirmed `+0`, wrapper operation `+1`, timeout `+0` for the sole post-baseline proof action | Confirmed success `+1`, not-confirmed `+0`, wrapper operation `+1`, timeout `+0` for maximum DATA | Same sender TX gate; receiver outcome distinguishes confirmed logical TX completion from the earlier proof-action boundary |
+| Receipt terminal: `receipt.delivered.count`, `receipt.timeout.count`, `tag.delivered`, `tag.timeout`, and the matching `flags.delivered_tag_present`, `flags.delivered_tags_consistent`, `flags.timeout_tag_present`, `flags.timeout_tags_consistent` | Both deltas exactly `+0` | Delivered `+1` with present/consistent tag `G`; timeout `+0` | Timeout `+1` with present/consistent tag `G`; Delivered `+0` |
+| Inbox: `inbox.commit.count`, `inbox.commit.last_start_ms`, `inbox.commit.last_end_ms`, `flags.inbox_commit_in_progress`, `flags.inbox_commit_order_consistent`, authenticated peek | `+1`, paired/order-consistent and not in progress; exact durable destination/payload | Commit delta `+0` | Commit delta `+0` |
+
+The dispatch report carries no proof tag, so TX attribution depends on this
+fixture's exactly one receiver post-baseline emitted action, exactly one TX
+wrapper invocation, and absence of other ordinary work. Under those gates,
+receiver proof generation plus confirmed TX and sender logical-RX delta zero
+isolates the remaining uncertainty to over-air loss or a receive-blind
+interval. Sender logical RX without RNS processing moves it to handoff/RNS,
+while a correlation-fault delta identifies the terminal correlation boundary.
+`not_confirmed_success` deliberately combines pre-radio rejection, confirmed
+operation faults, and cancellation/cleanup ambiguity; it does not prove that
+zero RF energy or frames occurred. At every post-baseline checkpoint, each
+board's RTME `operation.tx.count` delta must equal the sum of its two RPTE
+TX-outcome deltas; otherwise treat the capture or instrumentation as
+inconsistent.
+
+Any saturation, input/tag inconsistency, torn snapshot, ingress-failure or
+correlation-fault delta, non-`processed` disposition, not-confirmed TX or radio
+watchdog, unexpected error, payload mismatch, extra receipt terminal, or tag mismatch
+prevents a clean-path qualification claim, but retain it as classified failure
+evidence. Enqueue deferrals and action pressure are retry observations and may
+increment more than once; retain their counts and times but do not require a
+one-transition total. Likewise, the inbox counter brackets a Ready-gate
+admission attempt, not only successful physical programming, so the durable
+peek remains the success oracle.
+
 The runtime watermark reports the deepest painted word observed modified on
 the CPU0/main-executor stack. It is not a historical minimum-stack-pointer
 proof: a frame can reserve untouched padding below its lowest write.
 Qualification must retain compiler-emitted frame evidence plus interrupt and
-nesting headroom. The powered run's 72,212-byte painted margin becomes a
-deliberately conservative 19,460 bytes after subtracting the 52,752-byte
-maximum frame; neither number is a universal stack guarantee.
+nesting headroom. The earlier two-board run's 72,212-byte painted margin became
+a deliberately conservative 19,460 bytes after subtracting the 52,752-byte
+maximum frame; the predecessor's one-board diagnostic baseline updates those
+values to 72,020/19,268 after the exact 192-byte linked-RAM cost. Neither pair
+is a universal stack guarantee.
 Current source also re-reads the innermost stack pointer immediately before
 each volatile word access and reports an address at or above it as changed,
 so scanner safety does not depend on Rust honoring an inlining request. The
-retained powered HIL predates that source guard, but its exact linked
+retained two-board traffic HIL predates that source guard, but its exact linked
 disassembly has the complete scanner loop in the 32-byte caller frame, uses
 that live stack pointer as the exclusive read limit, and makes no call from the
 scan loop. The post-run hardening therefore does not invalidate the retained
-measurement, but its newly linked image is not itself a powered result.
+measurement. The current proof-trace image includes the guard and passes the
+static ELF gate; the predecessor has the one-board powered baseline above. The
+current image still needs exact powered readback plus its two-board traffic
+workload.
 
 `node_identity`, `announce_clock`, and `api_credentials` use ESP-IDF's standard
 `data,undefined` subtype. All three have application-owned formats; the
@@ -718,7 +948,7 @@ identical to default; the measurement tail may add only the reviewed
 `esp-alloc/alloc-hooks` feature. The default ELF must contain neither fault nor
 measurement wrappers, hooks, markers or evidence identifiers.
 The 129-test default host library suite, 135-test commit-fault profile, and
-141-test runtime-measurement profile have
+145-test runtime-measurement profile have
 passing policy/product/credential-boot/
 credential-runtime/USB-control/live-routing tests, including the source-order
 regressions, every canonical empty-initialization byte cut, adversarial media changes between
@@ -767,9 +997,9 @@ bounded authenticated client adds 22 tests for operation parsing, public-
 identity formatting, inbox status/peek, owner-only non-overwriting payload
 output, sequential request IDs, version policy, polling terminal semantics,
 coalesced-record preservation, and submission-input non-disclosure. Together
-these 49 focused tests are part of the full 227-test xtask gate. The portable
-Rete integration and inbox-store suites independently pass 41 and 17 tests,
-respectively. Seventeen of the xtask tests freeze the measurement decoder's
+these 49 focused tests are part of the full 231-test xtask gate. The portable
+Rete integration and inbox-store suites independently pass 43 and 17 tests,
+respectively. Twenty-one of the xtask tests freeze the measurement decoder's
 CLI, exact ABI rendering, torn/header/sentinel/invariant rejection, input-file
 behavior, strict final-ELF parsing, compiler-frame inventory, linker-stack
 derivation and the reviewed static bounds.

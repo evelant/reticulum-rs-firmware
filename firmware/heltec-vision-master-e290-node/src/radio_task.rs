@@ -9,6 +9,7 @@ use log::{error, info, warn};
 #[cfg(feature = "runtime-measurement-hil")]
 use reticulum_heltec_vision_master_e290_node::runtime_measurement::{
     OperationKind as RuntimeOperationKind, RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE,
+    RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE,
 };
 use reticulum_interface_router::{
     ActorIngressSendError, AvailableIngressBuffer, InterfaceIngressActorHandoff,
@@ -17,6 +18,8 @@ use reticulum_interface_router::{
 use reticulum_radio_interface::{
     RNODE_HW_MTU, SX1262_FRAME_MTU, TimedReceiveOutcome, TimedRnodeRx,
 };
+#[cfg(feature = "runtime-measurement-hil")]
+use reticulum_radio_tx_dispatch::DispatchOutcome;
 use reticulum_radio_tx_dispatch::{
     AuthorizedFrameAcknowledgementProgress, DispatchReport, RadioOperationStep, RadioReceiveStep,
     RadioTxDispatcherChannel, RadioTxDispatcherPhase, RadioTxDispatcherStep, embassy_wait_until_us,
@@ -68,13 +71,23 @@ pub async fn run(
         }
         if let Some(packet) = sealed_pending.take() {
             match ingress.try_send(authority, packet) {
-                Ok(()) => {}
+                Ok(()) => {
+                    #[cfg(feature = "runtime-measurement-hil")]
+                    RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE
+                        .record_ingress_enqueued(now_us() / 1_000);
+                }
                 Err(failure) => match failure.reason() {
                     ActorIngressSendError::QueueFull(_) => {
+                        #[cfg(feature = "runtime-measurement-hil")]
+                        RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE
+                            .record_ingress_deferred(now_us() / 1_000);
                         let (_, packet) = failure.into_parts();
                         sealed_pending = Some(packet);
                     }
                     reason => {
+                        #[cfg(feature = "runtime-measurement-hil")]
+                        RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE
+                            .record_ingress_failed(now_us() / 1_000);
                         let (_, packet) = failure.into_parts();
                         error!(
                             "e290-node stage=lora-ingress status=FAIL reason={reason:?} action=quarantine-exact-ingress-owner-and-actor-fail-stop"
@@ -114,9 +127,15 @@ pub async fn run(
                             continue;
                         }
                         Ok(TimedReceiveOutcome::Packet { packet_len, .. }) => {
+                            #[cfg(feature = "runtime-measurement-hil")]
+                            RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE
+                                .record_logical_rx_completed(now_us() / 1_000);
                             let mut buffer = available.take().expect("RX requires an exact buffer");
                             let Some(destination) = buffer.capacity_mut().get_mut(..packet_len)
                             else {
+                                #[cfg(feature = "runtime-measurement-hil")]
+                                RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE
+                                    .record_ingress_failed(now_us() / 1_000);
                                 error!(
                                     "e290-node stage=lora-rx status=DROP reason=native-packet-capacity packet_len={packet_len}"
                                 );
@@ -127,13 +146,23 @@ pub async fn run(
                             destination.copy_from_slice(&native[..packet_len]);
                             match buffer.seal(packet_len) {
                                 Ok(packet) => match ingress.try_send(authority, packet) {
-                                    Ok(()) => {}
+                                    Ok(()) => {
+                                        #[cfg(feature = "runtime-measurement-hil")]
+                                        RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE
+                                            .record_ingress_enqueued(now_us() / 1_000);
+                                    }
                                     Err(failure) => match failure.reason() {
                                         ActorIngressSendError::QueueFull(_) => {
+                                            #[cfg(feature = "runtime-measurement-hil")]
+                                            RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE
+                                                .record_ingress_deferred(now_us() / 1_000);
                                             let (_, packet) = failure.into_parts();
                                             sealed_pending = Some(packet);
                                         }
                                         reason => {
+                                            #[cfg(feature = "runtime-measurement-hil")]
+                                            RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE
+                                                .record_ingress_failed(now_us() / 1_000);
                                             let (_, packet) = failure.into_parts();
                                             error!(
                                                 "e290-node stage=lora-ingress status=FAIL reason={reason:?} action=quarantine-exact-ingress-owner-and-actor-fail-stop"
@@ -144,6 +173,9 @@ pub async fn run(
                                     },
                                 },
                                 Err(failure) => {
+                                    #[cfg(feature = "runtime-measurement-hil")]
+                                    RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE
+                                        .record_ingress_failed(now_us() / 1_000);
                                     warn!(
                                         "e290-node stage=lora-rx status=DROP reason={:?} packet_len={packet_len}",
                                         failure.reason()
@@ -477,31 +509,40 @@ async fn run_radio_operation(
     {
         Ok(RadioOperationStep::Terminal(report)) => {
             if dispatcher.take_last_report() != Some(report) {
+                record_runtime_radio_tx_not_confirmed_success(operation);
                 error!(
                     "e290-node stage=lora-{operation} status=FAIL reason=terminal-report-mismatch action=actor-fail-stop"
                 );
                 (DispatchProgress::Disabled, false)
             } else {
+                record_runtime_radio_tx_terminal(operation, report);
                 log_dispatch_report(operation, report);
                 (DispatchProgress::Advanced, false)
             }
         }
         Ok(RadioOperationStep::Advanced | RadioOperationStep::CadObserved { .. }) => {
+            record_runtime_radio_tx_not_confirmed_success(operation);
             (DispatchProgress::Advanced, false)
         }
-        Ok(RadioOperationStep::NotReady) => (DispatchProgress::Advanced, false),
+        Ok(RadioOperationStep::NotReady) => {
+            record_runtime_radio_tx_not_confirmed_success(operation);
+            (DispatchProgress::Advanced, false)
+        }
         Ok(
             RadioOperationStep::CancelledFutureNeedsRecovery(_)
             | RadioOperationStep::ReceiveFutureNeedsRecovery,
         ) => {
+            record_runtime_radio_tx_not_confirmed_success(operation);
             recover_cancelled_and_drain(dispatcher).await;
             (DispatchProgress::Disabled, false)
         }
         Ok(RadioOperationStep::Disabled(fault)) => {
+            record_runtime_radio_tx_not_confirmed_success(operation);
             error!("e290-node stage=lora-{operation} status=FAIL reason={fault:?}");
             (DispatchProgress::Disabled, false)
         }
         Err(_) => {
+            record_runtime_radio_tx_not_confirmed_success(operation);
             error!(
                 "e290-node stage=lora-{operation} status=WATCHDOG-EXPIRED watchdog_us={watchdog_us} action=cancel-recover-actor-fail-stop"
             );
@@ -526,6 +567,29 @@ async fn run_radio_operation(
         RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_unexpected_error();
     }
     progress
+}
+
+#[cfg(feature = "runtime-measurement-hil")]
+fn record_runtime_radio_tx_terminal(operation: &str, report: DispatchReport) {
+    if operation != "tx" {
+        return;
+    }
+    let confirmed_success = report.outcome() == DispatchOutcome::Transmitted
+        && report
+            .progress()
+            .is_some_and(|progress| progress.completed_frame_count() == report.frame_count());
+    if confirmed_success {
+        RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE.record_radio_tx_confirmed_success();
+    } else {
+        RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE.record_radio_tx_not_confirmed_success();
+    }
+}
+
+#[cfg(feature = "runtime-measurement-hil")]
+fn record_runtime_radio_tx_not_confirmed_success(operation: &str) {
+    if operation == "tx" {
+        RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE.record_radio_tx_not_confirmed_success();
+    }
 }
 
 /// Contain a dropped radio future, pass any post-exposure DATA owner through

@@ -383,10 +383,10 @@ The project-local release gate now preserves the static inputs to the stack
 calculation. CI runs Clippy and then relinks isolated default and measurement
 ELFs with compiler `.stack_sizes` evidence; the inspector accepts only final
 little-endian Xtensa executables with no remaining section relocations. It caps
-both maximum frames at 52,752 bytes, requires the default/HIL usable stacks to
-remain at least 170,984/170,480 bytes, and fixes both linker guard offsets at
-60 bytes. This detects a static regression but does not replace the powered
-watermark or establish interrupt/nesting headroom.
+both maximum frames at 52,752 bytes, requires the default/current-HIL usable
+stacks to remain at least 170,984/170,288 bytes, and fixes both linker guard
+offsets at 60 bytes. This detects a static regression but does not replace the
+powered watermark or establish interrupt/nesting headroom.
 
 Phase A delivered one 383-byte payload from `3e:88` to `3f:88`; the receiver
 durably committed the exact payload and the sender reached `Delivered`. The
@@ -398,6 +398,61 @@ observations prove one bounded durable maximum-payload inbound commit on each
 board and in each direction, not bidirectional `Delivered`. The product-level
 proof/status timeout is not an RX, CAD, or TX driver-watchdog count and remains
 a diagnostic residual.
+
+The follow-up diagnosis establishes that Rete generates the delivery proof and
+the inbound DATA event in one synchronous ingress result and targets the proof
+to the source interface; no learned reverse route is required. The product
+currently persists the exposed DATA event before its ordinary proof action can
+be staged, adding roughly the measured inbox-commit interval to the reverse
+path. That delay is material to half-duplex overlap but remains far below the
+fixed 30-second receipt timeout and does not by itself explain phase B. The
+leading hypothesis is therefore a one-shot proof RF/reassembly loss or a
+sender receive-blind interval; proof ingress rejection/correlation is the next
+boundary to distinguish. No protocol correction is justified until that
+boundary is observed.
+
+The opt-in runtime HIL now adds a separate exact 192-byte `RPTE` version-1
+record without changing the existing 256-byte `RTME` ABI. It counts logical
+radio reassembly, ingress handoff outcomes and retry pressure, RNS dispositions,
+locally generated explicit delivery proofs, delivered and timed-out receipt
+terminals, action-pressure observations, correlation faults, confirmed versus
+not-confirmed-success TX-wrapper outcomes, and Ready-gate inbox-admission
+attempt boundaries. Compact generated/delivered/timeout tags use the first
+eight bytes of the covered receipt hash and are useful only as correlation aids
+under the controlled single-active-attempt fixture. LRPROOF handshake packets
+and forwarded transport proofs are explicitly excluded from generated
+delivery-proof counts. The default ELF excludes the record; the HIL ELF has one
+initialized 192-byte instance whose linked bytes are decoder-validated.
+
+The final diagnostic HIL merged image is 778,000 bytes with SHA-256
+`ae4d14112696aa27311d782d8e6b1479db5959f2e89b56ce3dc4ce3b41ddfb54`.
+It passes build, graph, ELF, and static-stack gates but has not yet been flashed
+because both boards were absent after the preceding debugger-reset attempt.
+The immediately preceding 777,600-byte HIL image, SHA-256
+`151a66cc92b83268050c61bfc983ad6d9452fac0626d260c26da877c552c800e`,
+matched an identity-qualified exact address-zero readback on `3e:88`. A powered
+boot-only baseline before any authenticated request decoded stable `RPTE`
+sequence 4 with no saturation/input inconsistency, zero
+RX/RNS/proof/receipt/correlation/inbox observations, and two boot-announce
+action-pressure observations. Its words 45 and 46 were still reserved, so this
+run does not power-qualify the final TX-outcome counters. The companion runtime
+record retained a 72,020-byte painted stack margin and zero radio watchdog
+expiries. The trace record costs exactly 192 bytes of linked HIL stack space;
+the default image is free of it. The decisive qualification remains four clean
+direction-balanced trials (`3f→3e`, `3e→3f`, `3e→3f`, `3f→3e`) with a unique
+maximum payload and idempotency key per trial. Both boards must be reset and
+independently reprovisioned before every trial; the sender boots first, the
+receiver boots last to supply a fresh ANNOUNCE, and no pre-submit authenticated
+request is allowed. Matching-even RTME/RPTE snapshots are retained at
+baseline, about five seconds after submission, and terminal result using
+addresses resolved from the exact HIL ELF. Receiver generated tags must
+correlate with sender Delivered or timeout tags, and durable payload readback
+remains the inbox success oracle.
+The complete artifact naming and counter/tag acceptance matrix are frozen in
+the [E290 runbook](../e290-node.md#decisive-proof-correlation-trial-runbook).
+Board `3f:88` must first be physically re-enumerated and recovered from its
+interrupted pre-write reset at this checkpoint; no result is claimed from the
+one-board baseline.
 
 These values are workload-specific instrumented observations. The HIL enables
 allocator callbacks, updates atomic evidence, scans roughly 170 KiB of stack

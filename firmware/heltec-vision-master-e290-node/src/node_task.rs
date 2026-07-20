@@ -23,6 +23,8 @@ use reticulum_device_api_session::AuthenticatedGrant;
 #[cfg(feature = "runtime-measurement-hil")]
 use reticulum_heltec_vision_master_e290_node::runtime_measurement::{
     OperationKind as RuntimeOperationKind, RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE,
+    RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE, RuntimeProofTraceIngressDisposition,
+    RuntimeProofTraceIngressMetadata, RuntimeProofTracePacketType,
 };
 use reticulum_heltec_vision_master_e290_node::{
     announce_time::BootAnnounceClock,
@@ -50,6 +52,8 @@ use reticulum_node_core::{
     AuthorizedFrameObservation, InboundDataProjection, MonotonicMillis, MonotonicSeconds,
     NodeActions, ReceiptCorrelationError, TxLeaseDeadline, project_inbound_data,
 };
+#[cfg(feature = "runtime-measurement-hil")]
+use reticulum_node_core::{IngressDisposition, IngressMetadata, PacketType};
 use reticulum_rns_inbox_store::{InboxCandidate, InboxDestination};
 use reticulum_storage_actor::{DriveError, ProjectorOperationError};
 use reticulum_submission_runtime::{FrameOfferProgress, RuntimeError, RuntimeStep};
@@ -577,6 +581,21 @@ pub async fn run(
                                     ) {
                                         NodeInterfaceTickResult::Accepted(accepted) => {
                                             let report = accepted.into_report();
+                                            #[cfg(feature = "runtime-measurement-hil")]
+                                            {
+                                                let trace_now_ms = now_millis();
+                                                RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE
+                                                    .record_receipt_timeouts(
+                                                        trace_now_ms,
+                                                        report.timed_out_attempts as u64,
+                                                        report.timed_out_attempt_tag,
+                                                        report.timed_out_attempt_tags_consistent,
+                                                    );
+                                                if report.correlation_fault.is_some() {
+                                                    RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE
+                                                        .record_correlation_fault(trace_now_ms);
+                                                }
+                                            }
                                             if let Some(fault) = report.correlation_fault {
                                                 observe_terminal_correlation_fault(
                                                     &mut terminal_correlation_fault,
@@ -589,6 +608,21 @@ pub async fn run(
                                         }
                                         NodeInterfaceTickResult::ActionOfferRejected(failure) => {
                                             let (report, failure) = failure.into_parts();
+                                            #[cfg(feature = "runtime-measurement-hil")]
+                                            {
+                                                let trace_now_ms = now_millis();
+                                                RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE
+                                                    .record_receipt_timeouts(
+                                                        trace_now_ms,
+                                                        report.timed_out_attempts as u64,
+                                                        report.timed_out_attempt_tag,
+                                                        report.timed_out_attempt_tags_consistent,
+                                                    );
+                                                if report.correlation_fault.is_some() {
+                                                    RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE
+                                                        .record_correlation_fault(trace_now_ms);
+                                                }
+                                            }
                                             if let Some(fault) = report.correlation_fault {
                                                 observe_terminal_correlation_fault(
                                                     &mut terminal_correlation_fault,
@@ -1510,7 +1544,11 @@ fn step_ingress(
                 &mut *state.quarantined_ingress_buffer,
             )
         }
-        NodeInterfaceIngressStep::ActionsBackpressured(_) => false,
+        NodeInterfaceIngressStep::ActionsBackpressured(_) => {
+            #[cfg(feature = "runtime-measurement-hil")]
+            RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE.record_action_pressure(now_millis());
+            false
+        }
         NodeInterfaceIngressStep::TerminalActionsPending(fault) => {
             *state.fail_closed_draining = true;
             if state.local_quarantine_available {
@@ -1542,6 +1580,8 @@ fn step_ingress(
             recycle_fault,
             ..
         } => {
+            #[cfg(feature = "runtime-measurement-hil")]
+            RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE.record_correlation_fault(now_millis());
             *state.fail_closed_draining = true;
             observe_terminal_correlation_fault(
                 &mut *state.terminal_correlation_fault,
@@ -1579,6 +1619,10 @@ fn step_ingress(
             true
         }
         NodeInterfaceIngressStep::Processed(processed) => {
+            #[cfg(feature = "runtime-measurement-hil")]
+            let actions_backpressured = processed.actions_backpressured().is_some();
+            #[cfg(feature = "runtime-measurement-hil")]
+            let trace_now_ms = now_millis();
             let recycle_fault = processed.recycle_fault();
             let retryable_recycle_pending = match recycle_fault {
                 Some(fault) if fault.is_retryable() => {
@@ -1597,7 +1641,20 @@ fn step_ingress(
                 None => false,
             };
             let terminal_action_fault = processed.terminal_action_fault();
-            let _ = processed.into_report();
+            let report = processed.into_report();
+            #[cfg(feature = "runtime-measurement-hil")]
+            {
+                if actions_backpressured || terminal_action_fault.is_some() {
+                    RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE.record_action_pressure(trace_now_ms);
+                }
+                RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE.record_rns_ingress(
+                    trace_now_ms,
+                    runtime_ingress_disposition(&report.disposition),
+                    runtime_ingress_metadata(report.metadata),
+                );
+            }
+            #[cfg(not(feature = "runtime-measurement-hil"))]
+            let _ = report;
             if let Some(fault) = terminal_action_fault {
                 *state.fail_closed_draining = true;
                 match config::terminal_ingress_disposition(retryable_recycle_pending) {
@@ -1737,6 +1794,8 @@ fn handle_action_offer_failure(
     failure: NodeInterfaceOrdinaryOfferFailure,
     stage: &'static str,
 ) -> ActionOfferHandling {
+    #[cfg(feature = "runtime-measurement-hil")]
+    RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE.record_action_pressure(now_millis());
     let reason = failure.reason();
     let (actions, admission) = failure.into_parts();
     match config::ordinary_offer_disposition(reason) {
@@ -1803,6 +1862,43 @@ fn terminal_transition_observation(transition: NodeInterfaceSupervisorTransition
         NodeInterfaceSupervisorTransition::OrdinaryPermit { .. } => 1 << 4,
         NodeInterfaceSupervisorTransition::CompletionAccepted { .. }
         | NodeInterfaceSupervisorTransition::Idle => 1 << 7,
+    }
+}
+
+#[cfg(feature = "runtime-measurement-hil")]
+fn runtime_ingress_disposition(
+    disposition: &IngressDisposition,
+) -> RuntimeProofTraceIngressDisposition {
+    match disposition {
+        IngressDisposition::Processed => RuntimeProofTraceIngressDisposition::Processed,
+        IngressDisposition::NativeDuplicate => RuntimeProofTraceIngressDisposition::NativeDuplicate,
+        IngressDisposition::NativeInvalid => RuntimeProofTraceIngressDisposition::NativeInvalid,
+        IngressDisposition::NoObservableOutcome => {
+            RuntimeProofTraceIngressDisposition::NoObservableOutcome
+        }
+        IngressDisposition::Rejected(_) => RuntimeProofTraceIngressDisposition::Rejected,
+    }
+}
+
+#[cfg(feature = "runtime-measurement-hil")]
+fn runtime_ingress_metadata(metadata: IngressMetadata) -> RuntimeProofTraceIngressMetadata {
+    RuntimeProofTraceIngressMetadata {
+        wire_packet_type: match metadata.wire_packet_type() {
+            None => RuntimeProofTracePacketType::Unparsed,
+            Some(PacketType::Data) => RuntimeProofTracePacketType::Data,
+            Some(PacketType::Announce) => RuntimeProofTracePacketType::Announce,
+            Some(PacketType::LinkRequest) => RuntimeProofTracePacketType::LinkRequest,
+            Some(PacketType::Proof) => RuntimeProofTracePacketType::Proof,
+        },
+        emitted_packets: u64::from(metadata.emitted_packets()),
+        generated_proof_actions: u64::from(metadata.generated_proof_actions()),
+        delivered_receipt_terminals: u64::from(metadata.delivered_receipt_terminals()),
+        timed_out_receipt_terminals: u64::from(metadata.timed_out_receipt_terminals()),
+        generated_proof_tag: metadata.generated_proof_tag(),
+        delivered_receipt_tag: metadata.delivered_receipt_tag(),
+        generated_proof_tags_consistent: metadata.generated_proof_tags_consistent(),
+        delivered_receipt_tags_consistent: metadata.delivered_receipt_tags_consistent(),
+        counts_saturated: metadata.counts_saturated(),
     }
 }
 

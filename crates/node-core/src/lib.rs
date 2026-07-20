@@ -32,7 +32,8 @@ use reticulum_rns_rete::{
     ReceiptTerminalSink, TxTarget as RnsTxTarget,
 };
 pub use reticulum_rns_rete::{
-    InboundData, InboundDataProjection, IngressReport, NodeActions, project_inbound_data,
+    InboundData, InboundDataProjection, IngressDisposition, IngressMetadata, IngressReport,
+    NodeActions, PacketType, project_inbound_data,
 };
 use sha2::{Digest, Sha256};
 
@@ -2014,6 +2015,11 @@ pub struct MaintenanceReport {
     pub actions: NodeActions,
     /// Number of DATA timeouts committed to terminal tombstones in this pass.
     pub timed_out_attempts: usize,
+    /// Compact first-eight-byte tag of the first timed-out receipt in this
+    /// maintenance pass.
+    pub timed_out_attempt_tag: Option<u64>,
+    /// Whether every timeout in this pass carried the same compact tag.
+    pub timed_out_attempt_tags_consistent: bool,
     /// A non-retryable mismatch between native receipts and the fixed ledger.
     pub correlation_fault: Option<ReceiptCorrelationError>,
 }
@@ -3142,6 +3148,8 @@ impl<
         MaintenanceReport {
             actions: report.actions,
             timed_out_attempts: report.timed_out_receipts,
+            timed_out_attempt_tag: report.timed_out_receipt_tag,
+            timed_out_attempt_tags_consistent: report.timed_out_receipt_tags_consistent,
             correlation_fault: fault.or_else(|| {
                 report
                     .receipt_terminals_deferred
@@ -5039,6 +5047,13 @@ mod tests {
 
         let report = sender.tick(time(132), &mut rng);
         assert_eq!(report.timed_out_attempts, 1);
+        assert_eq!(
+            report.timed_out_attempt_tag,
+            Some(u64::from_le_bytes(
+                job.attempt().as_bytes()[..8].try_into().unwrap()
+            ))
+        );
+        assert!(report.timed_out_attempt_tags_consistent);
         assert_eq!(report.correlation_fault, None);
         let terminal = sender.terminal_attempts().next().unwrap();
         assert_eq!(terminal.outcome(), AttemptOutcome::DeliveryTimeout);
@@ -5389,6 +5404,8 @@ mod tests {
 
         let report = sender.tick(time(132), &mut rng);
         assert_eq!(report.timed_out_attempts, 0);
+        assert_eq!(report.timed_out_attempt_tag, None);
+        assert!(report.timed_out_attempt_tags_consistent);
         assert_eq!(
             report.correlation_fault,
             Some(ReceiptCorrelationError::UnknownData {

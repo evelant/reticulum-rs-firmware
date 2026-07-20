@@ -450,6 +450,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                 self.last_raw_packet_sha256 = Some(raw_packet_sha256);
                 let IngressReport {
                     disposition,
+                    metadata: _,
                     actions,
                 } = self.node.ingest(
                     &self.packet[..packet_len],

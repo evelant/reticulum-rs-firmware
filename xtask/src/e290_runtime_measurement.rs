@@ -3,7 +3,7 @@
 
 use object::{
     Architecture, BinaryFormat, Endianness, Object, ObjectKind, ObjectSection, ObjectSymbol,
-    SymbolSection,
+    SectionKind, SymbolSection,
 };
 use std::{
     fmt::Write as _,
@@ -18,17 +18,186 @@ const MAGIC: u32 = u32::from_le_bytes(*b"RTME");
 const VERSION: u32 = 1;
 const UNOBSERVED_MINIMUM: u32 = u32::MAX;
 
+const PROOF_WORD_COUNT: usize = 48;
+const PROOF_BYTE_SIZE: usize = PROOF_WORD_COUNT * size_of::<u32>();
+const PROOF_MAGIC: u32 = u32::from_le_bytes(*b"RPTE");
+const PROOF_VERSION: u32 = 1;
+const PROOF_TRACE_EVIDENCE_SYMBOL_FRAGMENT: &str = "RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE";
+
+const PROOF_FLAG_ACTIVE: u32 = 1 << 0;
+const PROOF_FLAG_SATURATED: u32 = 1 << 1;
+const PROOF_FLAG_GENERATED_TAG_PRESENT: u32 = 1 << 2;
+const PROOF_FLAG_GENERATED_TAGS_CONSISTENT: u32 = 1 << 3;
+const PROOF_FLAG_DELIVERED_TAG_PRESENT: u32 = 1 << 4;
+const PROOF_FLAG_DELIVERED_TAGS_CONSISTENT: u32 = 1 << 5;
+const PROOF_FLAG_TIMEOUT_TAG_PRESENT: u32 = 1 << 6;
+const PROOF_FLAG_TIMEOUT_TAGS_CONSISTENT: u32 = 1 << 7;
+const PROOF_FLAG_INBOX_COMMIT_IN_PROGRESS: u32 = 1 << 8;
+const PROOF_FLAG_INBOX_COMMIT_ORDER_CONSISTENT: u32 = 1 << 9;
+const PROOF_FLAG_INPUT_INCONSISTENT: u32 = 1 << 10;
+const PROOF_KNOWN_FLAG_MASK: u32 = PROOF_FLAG_ACTIVE
+    | PROOF_FLAG_SATURATED
+    | PROOF_FLAG_GENERATED_TAG_PRESENT
+    | PROOF_FLAG_GENERATED_TAGS_CONSISTENT
+    | PROOF_FLAG_DELIVERED_TAG_PRESENT
+    | PROOF_FLAG_DELIVERED_TAGS_CONSISTENT
+    | PROOF_FLAG_TIMEOUT_TAG_PRESENT
+    | PROOF_FLAG_TIMEOUT_TAGS_CONSISTENT
+    | PROOF_FLAG_INBOX_COMMIT_IN_PROGRESS
+    | PROOF_FLAG_INBOX_COMMIT_ORDER_CONSISTENT
+    | PROOF_FLAG_INPUT_INCONSISTENT;
+
+const PROOF_FLAG_NAMES: [(&str, u32); 11] = [
+    ("flags.active", PROOF_FLAG_ACTIVE),
+    ("flags.saturated", PROOF_FLAG_SATURATED),
+    (
+        "flags.generated_tag_present",
+        PROOF_FLAG_GENERATED_TAG_PRESENT,
+    ),
+    (
+        "flags.generated_tags_consistent",
+        PROOF_FLAG_GENERATED_TAGS_CONSISTENT,
+    ),
+    (
+        "flags.delivered_tag_present",
+        PROOF_FLAG_DELIVERED_TAG_PRESENT,
+    ),
+    (
+        "flags.delivered_tags_consistent",
+        PROOF_FLAG_DELIVERED_TAGS_CONSISTENT,
+    ),
+    ("flags.timeout_tag_present", PROOF_FLAG_TIMEOUT_TAG_PRESENT),
+    (
+        "flags.timeout_tags_consistent",
+        PROOF_FLAG_TIMEOUT_TAGS_CONSISTENT,
+    ),
+    (
+        "flags.inbox_commit_in_progress",
+        PROOF_FLAG_INBOX_COMMIT_IN_PROGRESS,
+    ),
+    (
+        "flags.inbox_commit_order_consistent",
+        PROOF_FLAG_INBOX_COMMIT_ORDER_CONSISTENT,
+    ),
+    ("flags.input_inconsistent", PROOF_FLAG_INPUT_INCONSISTENT),
+];
+
+const PROOF_WORD_NAMES: [&str; PROOF_WORD_COUNT] = [
+    "snapshot_seq_begin",
+    "magic",
+    "version",
+    "size_bytes",
+    "flags.raw",
+    "logical_rx.completed.count",
+    "logical_rx.completed.last_ms",
+    "ingress.enqueue.count",
+    "ingress.enqueue.last_ms",
+    "ingress.defer.count",
+    "ingress.defer.last_ms",
+    "ingress.fail.count",
+    "ingress.fail.last_ms",
+    "rns_ingress.count",
+    "rns_ingress.last_ms",
+    "proof.generated.count",
+    "proof.generated.last_ms",
+    "receipt.delivered.count",
+    "receipt.delivered.last_ms",
+    "receipt.timeout.count",
+    "receipt.timeout.last_ms",
+    "action.pressure.count",
+    "action.pressure.last_ms",
+    "correlation.fault.count",
+    "correlation.fault.last_ms",
+    "inbox.commit.count",
+    "inbox.commit.last_start_ms",
+    "inbox.commit.last_end_ms",
+    "disposition.processed.count",
+    "disposition.native_duplicate.count",
+    "disposition.native_invalid.count",
+    "disposition.no_observable_outcome.count",
+    "disposition.rejected.count",
+    "rns_ingress.last_disposition",
+    "rns_ingress.last_wire_packet_type",
+    "rns_ingress.last_emitted_packets",
+    "rns_ingress.last_generated_proof_actions",
+    "rns_ingress.last_delivered_receipt_terminals",
+    "rns_ingress.last_timed_out_receipt_terminals",
+    "tag.generated.low",
+    "tag.generated.high",
+    "tag.delivered.low",
+    "tag.delivered.high",
+    "tag.timeout.low",
+    "tag.timeout.high",
+    "radio_tx.confirmed_success.count",
+    "radio_tx.not_confirmed_success.count",
+    "snapshot_seq_end",
+];
+
+const PROOF_SNAPSHOT_SEQ_BEGIN_WORD: usize = 0;
+const PROOF_MAGIC_WORD: usize = 1;
+const PROOF_VERSION_WORD: usize = 2;
+const PROOF_SIZE_WORD: usize = 3;
+const PROOF_FLAGS_WORD: usize = 4;
+const PROOF_LOGICAL_RX_COUNT_WORD: usize = 5;
+const PROOF_LOGICAL_RX_LAST_MS_WORD: usize = 6;
+const PROOF_INGRESS_ENQUEUE_COUNT_WORD: usize = 7;
+const PROOF_INGRESS_ENQUEUE_LAST_MS_WORD: usize = 8;
+const PROOF_INGRESS_DEFER_COUNT_WORD: usize = 9;
+const PROOF_INGRESS_DEFER_LAST_MS_WORD: usize = 10;
+const PROOF_INGRESS_FAIL_COUNT_WORD: usize = 11;
+const PROOF_INGRESS_FAIL_LAST_MS_WORD: usize = 12;
+const PROOF_RNS_INGRESS_COUNT_WORD: usize = 13;
+const PROOF_RNS_INGRESS_LAST_MS_WORD: usize = 14;
+const PROOF_GENERATED_COUNT_WORD: usize = 15;
+const PROOF_GENERATED_LAST_MS_WORD: usize = 16;
+const PROOF_DELIVERED_COUNT_WORD: usize = 17;
+const PROOF_DELIVERED_LAST_MS_WORD: usize = 18;
+const PROOF_TIMEOUT_COUNT_WORD: usize = 19;
+const PROOF_TIMEOUT_LAST_MS_WORD: usize = 20;
+const PROOF_ACTION_PRESSURE_COUNT_WORD: usize = 21;
+const PROOF_ACTION_PRESSURE_LAST_MS_WORD: usize = 22;
+const PROOF_CORRELATION_FAULT_COUNT_WORD: usize = 23;
+const PROOF_CORRELATION_FAULT_LAST_MS_WORD: usize = 24;
+const PROOF_INBOX_COMMIT_COUNT_WORD: usize = 25;
+const PROOF_INBOX_COMMIT_START_MS_WORD: usize = 26;
+const PROOF_INBOX_COMMIT_END_MS_WORD: usize = 27;
+const PROOF_DISPOSITION_PROCESSED_WORD: usize = 28;
+const PROOF_DISPOSITION_DUPLICATE_WORD: usize = 29;
+const PROOF_DISPOSITION_INVALID_WORD: usize = 30;
+const PROOF_DISPOSITION_NO_OUTCOME_WORD: usize = 31;
+const PROOF_DISPOSITION_REJECTED_WORD: usize = 32;
+const PROOF_LAST_DISPOSITION_WORD: usize = 33;
+const PROOF_LAST_PACKET_TYPE_WORD: usize = 34;
+const PROOF_LAST_EMITTED_PACKETS_WORD: usize = 35;
+const PROOF_LAST_GENERATED_ACTIONS_WORD: usize = 36;
+const PROOF_LAST_DELIVERED_TERMINALS_WORD: usize = 37;
+const PROOF_LAST_TIMED_OUT_TERMINALS_WORD: usize = 38;
+const PROOF_GENERATED_TAG_LOW_WORD: usize = 39;
+const PROOF_GENERATED_TAG_HIGH_WORD: usize = 40;
+const PROOF_DELIVERED_TAG_LOW_WORD: usize = 41;
+const PROOF_DELIVERED_TAG_HIGH_WORD: usize = 42;
+const PROOF_TIMEOUT_TAG_LOW_WORD: usize = 43;
+const PROOF_TIMEOUT_TAG_HIGH_WORD: usize = 44;
+const PROOF_RADIO_TX_CONFIRMED_SUCCESS_COUNT_WORD: usize = 45;
+const PROOF_RADIO_TX_NOT_CONFIRMED_SUCCESS_COUNT_WORD: usize = 46;
+const PROOF_SNAPSHOT_SEQ_END_WORD: usize = 47;
+
 // The powered 2026-07-20 qualification observed 72,212 bytes of raw painted
-// stack margin. Retaining at least 19,460 bytes after one worst-case compiler
-// frame therefore fixes the reviewed frame ceiling at 52,752 bytes. This does
-// not turn the modified-word watermark into minimum-SP proof; it prevents an
-// unreviewed compiler-frame regression from silently consuming that bound.
-const QUALIFIED_RAW_STACK_MARGIN_BYTES: u64 = 72_212;
-const MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES: u64 = 19_460;
-const MAXIMUM_STACK_FRAME_BYTES: u64 =
-    QUALIFIED_RAW_STACK_MARGIN_BYTES - MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES;
+// stack margin. RPTE v1 adds one exact 192-byte initialized internal-RAM
+// object, and the linked stack boundary moves down by the same 192 bytes. Until
+// a fresh powered trace supersedes it, carry the earlier watermark forward
+// conservatively after that exact linked-RAM deduction. This does not turn the
+// modified-word watermark into minimum-SP proof; the unchanged 52,752-byte
+// compiler-frame ceiling leaves a derived 19,268-byte margin.
+const PRIOR_QUALIFIED_RAW_STACK_MARGIN_BYTES: u64 = 72_212;
+const PROOF_TRACE_LINKED_STACK_REDUCTION_BYTES: u64 = PROOF_BYTE_SIZE as u64;
+const QUALIFIED_RAW_STACK_MARGIN_BYTES: u64 =
+    PRIOR_QUALIFIED_RAW_STACK_MARGIN_BYTES - PROOF_TRACE_LINKED_STACK_REDUCTION_BYTES;
+const MAXIMUM_STACK_FRAME_BYTES: u64 = 52_752;
+const MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES: u64 =
+    QUALIFIED_RAW_STACK_MARGIN_BYTES - MAXIMUM_STACK_FRAME_BYTES;
 const MINIMUM_DEFAULT_USABLE_STACK_BYTES: u64 = 170_984;
-const MINIMUM_HIL_USABLE_STACK_BYTES: u64 = 170_480;
+const MINIMUM_HIL_USABLE_STACK_BYTES: u64 = 170_288;
 const EXPECTED_STACK_GUARD_OFFSET_BYTES: u64 = 60;
 const STACK_GUARD_WORD_BYTES: u64 = size_of::<u32>() as u64;
 
@@ -185,6 +354,7 @@ struct Options {
 #[derive(Debug, Eq, PartialEq)]
 enum CommandOptions {
     Decode(Options),
+    DecodeProofTrace(Options),
     InspectElf(ElfInspectionOptions),
 }
 
@@ -211,13 +381,21 @@ struct StackLayout {
 struct ElfInspection {
     default_stack_sizes: StackSizeInventory,
     default_stack: StackLayout,
+    default_proof_trace_symbol_count: u64,
     hil_stack_sizes: StackSizeInventory,
     hil_stack: StackLayout,
+    hil_proof_trace_symbol_count: u64,
+    hil_proof_trace_symbol_size_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DecodedEvidence {
     words: [u32; WORD_COUNT],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DecodedProofTraceEvidence {
+    words: [u32; PROOF_WORD_COUNT],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -240,6 +418,7 @@ pub(crate) fn run(args: Vec<String>) -> ExitCode {
 
     let result = match options {
         CommandOptions::Decode(options) => execute(&options),
+        CommandOptions::DecodeProofTrace(options) => execute_proof_trace(&options),
         CommandOptions::InspectElf(options) => {
             inspect_elf_pair(&options).map(|value| value.render())
         }
@@ -260,6 +439,8 @@ fn usage() {
     eprintln!(
         "usage:\n  cargo run -p xtask -- e290-runtime-measurement decode \
          --input <256-byte-bin> [--json]\n  cargo run -p xtask -- \
+         e290-runtime-measurement decode-proof-trace \
+         --input <192-byte-bin> [--json]\n  cargo run -p xtask -- \
          e290-runtime-measurement inspect-elf --default-elf <path> \
          --hil-elf <path>"
     );
@@ -268,12 +449,59 @@ fn usage() {
 fn parse_command_options(args: &[String]) -> Result<CommandOptions, String> {
     match args.first().map(String::as_str) {
         Some("decode") => parse_options(args).map(CommandOptions::Decode),
+        Some("decode-proof-trace") => {
+            parse_proof_trace_options(args).map(CommandOptions::DecodeProofTrace)
+        }
         Some("inspect-elf") => {
             parse_elf_inspection_options(&args[1..]).map(CommandOptions::InspectElf)
         }
         Some(value) => Err(format!("unknown subcommand {value}")),
         None => Err("decode or inspect-elf subcommand is required".to_owned()),
     }
+}
+
+fn parse_proof_trace_options(args: &[String]) -> Result<Options, String> {
+    match args.first().map(String::as_str) {
+        Some("decode-proof-trace") => {}
+        Some(_) => return Err("subcommand must be decode-proof-trace".to_owned()),
+        None => return Err("decode-proof-trace subcommand is required".to_owned()),
+    }
+
+    let mut input = None;
+    let mut json = false;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--input" => {
+                if input.is_some() {
+                    return Err("--input may be supplied only once".to_owned());
+                }
+                let value = args
+                    .get(index + 1)
+                    .filter(|value| !value.starts_with('-'))
+                    .ok_or_else(|| "--input requires a value".to_owned())?;
+                if value.is_empty() {
+                    return Err("--input must not be empty".to_owned());
+                }
+                input = Some(PathBuf::from(value));
+                index += 2;
+            }
+            "--json" => {
+                if json {
+                    return Err("--json may be supplied only once".to_owned());
+                }
+                json = true;
+                index += 1;
+            }
+            value if value.starts_with('-') => return Err(format!("unknown option {value}")),
+            value => return Err(format!("unexpected argument {value}")),
+        }
+    }
+
+    Ok(Options {
+        input: input.ok_or_else(|| "--input is required".to_owned())?,
+        json,
+    })
 }
 
 fn parse_options(args: &[String]) -> Result<Options, String> {
@@ -366,14 +594,36 @@ fn execute(options: &Options) -> Result<String, String> {
     })
 }
 
+fn execute_proof_trace(options: &Options) -> Result<String, String> {
+    let bytes = fs::read(&options.input).map_err(|error| {
+        format!(
+            "could not read --input {}: {error}",
+            options.input.display()
+        )
+    })?;
+    let evidence = DecodedProofTraceEvidence::parse(&bytes)?;
+    Ok(if options.json {
+        evidence.render_json()
+    } else {
+        evidence.render_human()
+    })
+}
+
 fn inspect_elf_pair(options: &ElfInspectionOptions) -> Result<ElfInspection, String> {
     let (default_stack_sizes, default_stack) = inspect_elf(&options.default_elf, "default E290")?;
     let (hil_stack_sizes, hil_stack) = inspect_elf(&options.hil_elf, "runtime-measurement HIL")?;
+    let (default_proof_trace_symbol_count, _) =
+        inspect_proof_trace_symbol(&options.default_elf, "default E290", false)?;
+    let (hil_proof_trace_symbol_count, hil_proof_trace_symbol_size_bytes) =
+        inspect_proof_trace_symbol(&options.hil_elf, "runtime-measurement HIL", true)?;
     let inspection = ElfInspection {
         default_stack_sizes,
         default_stack,
+        default_proof_trace_symbol_count,
         hil_stack_sizes,
         hil_stack,
+        hil_proof_trace_symbol_count,
+        hil_proof_trace_symbol_size_bytes,
     };
     inspection.validate()?;
     Ok(inspection)
@@ -389,6 +639,110 @@ fn inspect_elf(path: &Path, label: &str) -> Result<(StackSizeInventory, StackLay
     let stack_start = unique_symbol_address(&object, path, label, "_stack_start_cpu0")?;
     let stack = calculate_stack_layout(label, stack_end, stack_guard, stack_start)?;
     Ok((stack_sizes, stack))
+}
+
+fn inspect_proof_trace_symbol(
+    path: &Path,
+    label: &str,
+    required: bool,
+) -> Result<(u64, u64), String> {
+    let bytes = fs::read(path)
+        .map_err(|error| format!("could not read {label} ELF {}: {error}", path.display()))?;
+    let object = parse_xtensa_elf(&bytes, path, label)?;
+    let mut symbols = object.symbols().filter(|symbol| {
+        symbol
+            .name()
+            .is_ok_and(|name| name.contains(PROOF_TRACE_EVIDENCE_SYMBOL_FRAGMENT))
+            && symbol.section() != SymbolSection::Undefined
+    });
+    let first = symbols.next();
+    let count = u64::from(first.is_some()) + symbols.count() as u64;
+    if !required {
+        if count != 0 {
+            return Err(format!(
+                "{label} ELF {} must exclude {PROOF_TRACE_EVIDENCE_SYMBOL_FRAGMENT}, found {count} defined symbols",
+                path.display()
+            ));
+        }
+        return Ok((0, 0));
+    }
+    if count != 1 {
+        return Err(format!(
+            "{label} ELF {} must contain exactly one defined {PROOF_TRACE_EVIDENCE_SYMBOL_FRAGMENT}, found {count}",
+            path.display()
+        ));
+    }
+
+    let symbol = first.expect("one required proof-trace symbol was counted");
+    if symbol.size() != PROOF_BYTE_SIZE as u64 {
+        return Err(format!(
+            "{label} ELF {} proof-trace symbol must be exactly {PROOF_BYTE_SIZE} bytes, got {}",
+            path.display(),
+            symbol.size()
+        ));
+    }
+    let section_index = match symbol.section() {
+        SymbolSection::Section(index) => index,
+        section => {
+            return Err(format!(
+                "{label} ELF {} proof-trace symbol must belong to one initialized data section, got {section:?}",
+                path.display()
+            ));
+        }
+    };
+    let section = object.section_by_index(section_index).map_err(|error| {
+        format!(
+            "could not resolve {label} proof-trace section in {}: {error}",
+            path.display()
+        )
+    })?;
+    if section.kind() == SectionKind::UninitializedData {
+        return Err(format!(
+            "{label} ELF {} proof-trace symbol must be initialized, not BSS",
+            path.display()
+        ));
+    }
+    let offset = symbol
+        .address()
+        .checked_sub(section.address())
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| {
+            format!(
+                "{label} ELF {} proof-trace symbol address is outside its section",
+                path.display()
+            )
+        })?;
+    let end = offset.checked_add(PROOF_BYTE_SIZE).ok_or_else(|| {
+        format!(
+            "{label} ELF {} proof-trace symbol range overflows",
+            path.display()
+        )
+    })?;
+    let section_data = section.data().map_err(|error| {
+        format!(
+            "could not read initialized {label} proof-trace section in {}: {error}",
+            path.display()
+        )
+    })?;
+    let initialized = section_data.get(offset..end).ok_or_else(|| {
+        format!(
+            "{label} ELF {} proof-trace symbol bytes are outside initialized section data",
+            path.display()
+        )
+    })?;
+    let evidence = DecodedProofTraceEvidence::parse(initialized).map_err(|error| {
+        format!(
+            "{label} ELF {} proof-trace symbol has invalid initialized ABI bytes: {error}",
+            path.display()
+        )
+    })?;
+    evidence.validate_empty_initializer().map_err(|error| {
+        format!(
+            "{label} ELF {} proof-trace symbol is not an empty initialized record: {error}",
+            path.display()
+        )
+    })?;
+    Ok((count, symbol.size()))
 }
 
 fn parse_xtensa_elf<'data>(
@@ -575,6 +929,20 @@ fn calculate_stack_layout(
 
 impl ElfInspection {
     fn validate(&self) -> Result<(), String> {
+        if self.default_proof_trace_symbol_count != 0 {
+            return Err(format!(
+                "default E290 must exclude proof-trace evidence, found {} symbols",
+                self.default_proof_trace_symbol_count
+            ));
+        }
+        if self.hil_proof_trace_symbol_count != 1
+            || self.hil_proof_trace_symbol_size_bytes != PROOF_BYTE_SIZE as u64
+        {
+            return Err(format!(
+                "runtime-measurement HIL must contain one initialized {PROOF_BYTE_SIZE}-byte proof-trace symbol, got count={} size={}",
+                self.hil_proof_trace_symbol_count, self.hil_proof_trace_symbol_size_bytes
+            ));
+        }
         for (label, inventory) in [
             ("default E290", self.default_stack_sizes),
             ("runtime-measurement HIL", self.hil_stack_sizes),
@@ -624,17 +992,20 @@ impl ElfInspection {
             .max(self.hil_stack_sizes.maximum_frame_bytes);
         let conservative_margin = QUALIFIED_RAW_STACK_MARGIN_BYTES.saturating_sub(worst_frame);
         format!(
-            "default.stack_size_records={}\ndefault.maximum_frame_bytes={}\ndefault.stack_reserved_bytes={}\ndefault.stack_usable_bytes={}\ndefault.stack_guard_offset_bytes={}\nhil.stack_size_records={}\nhil.maximum_frame_bytes={}\nhil.stack_reserved_bytes={}\nhil.stack_usable_bytes={}\nhil.stack_guard_offset_bytes={}\npolicy.maximum_frame_bytes={}\npolicy.minimum_default_usable_stack_bytes={}\npolicy.minimum_hil_usable_stack_bytes={}\npolicy.expected_stack_guard_offset_bytes={}\nqualification.raw_painted_margin_bytes={}\nqualification.conservative_margin_bytes={}",
+            "default.stack_size_records={}\ndefault.maximum_frame_bytes={}\ndefault.stack_reserved_bytes={}\ndefault.stack_usable_bytes={}\ndefault.stack_guard_offset_bytes={}\ndefault.proof_trace_symbol_count={}\nhil.stack_size_records={}\nhil.maximum_frame_bytes={}\nhil.stack_reserved_bytes={}\nhil.stack_usable_bytes={}\nhil.stack_guard_offset_bytes={}\nhil.proof_trace_symbol_count={}\nhil.proof_trace_symbol_size_bytes={}\npolicy.maximum_frame_bytes={}\npolicy.minimum_default_usable_stack_bytes={}\npolicy.minimum_hil_usable_stack_bytes={}\npolicy.expected_stack_guard_offset_bytes={}\nqualification.raw_painted_margin_bytes={}\nqualification.conservative_margin_bytes={}",
             self.default_stack_sizes.record_count,
             self.default_stack_sizes.maximum_frame_bytes,
             self.default_stack.reserved_bytes,
             self.default_stack.usable_bytes,
             self.default_stack.guard_offset_bytes,
+            self.default_proof_trace_symbol_count,
             self.hil_stack_sizes.record_count,
             self.hil_stack_sizes.maximum_frame_bytes,
             self.hil_stack.reserved_bytes,
             self.hil_stack.usable_bytes,
             self.hil_stack.guard_offset_bytes,
+            self.hil_proof_trace_symbol_count,
+            self.hil_proof_trace_symbol_size_bytes,
             MAXIMUM_STACK_FRAME_BYTES,
             MINIMUM_DEFAULT_USABLE_STACK_BYTES,
             MINIMUM_HIL_USABLE_STACK_BYTES,
@@ -1022,6 +1393,427 @@ impl DecodedEvidence {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProofOutputValue {
+    Number(u32),
+    WideNumber(u64),
+    Bool(bool),
+    Text(&'static str),
+    Unobserved,
+}
+
+impl DecodedProofTraceEvidence {
+    fn parse(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() != PROOF_BYTE_SIZE {
+            return Err(format!(
+                "proof-trace input must be exactly {PROOF_BYTE_SIZE} bytes, got {}",
+                bytes.len()
+            ));
+        }
+
+        let mut words = [0_u32; PROOF_WORD_COUNT];
+        for (word, bytes) in words.iter_mut().zip(bytes.chunks_exact(size_of::<u32>())) {
+            *word = u32::from_le_bytes(
+                bytes
+                    .try_into()
+                    .expect("an exact four-byte chunk must convert to one ABI word"),
+            );
+        }
+        let evidence = Self { words };
+        evidence.validate()?;
+        Ok(evidence)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        let begin = self.words[PROOF_SNAPSHOT_SEQ_BEGIN_WORD];
+        let end = self.words[PROOF_SNAPSHOT_SEQ_END_WORD];
+        if begin != end {
+            return Err(format!(
+                "proof-trace snapshot sequence markers must match, got begin={begin} end={end}"
+            ));
+        }
+        if begin & 1 != 0 {
+            return Err(format!(
+                "proof-trace snapshot sequence markers must be even, got {begin}"
+            ));
+        }
+        if self.words[PROOF_MAGIC_WORD] != PROOF_MAGIC {
+            return Err(format!(
+                "proof-trace magic must be RPTE, got 0x{:08x}",
+                self.words[PROOF_MAGIC_WORD]
+            ));
+        }
+        if self.words[PROOF_VERSION_WORD] != PROOF_VERSION {
+            return Err(format!(
+                "proof-trace version must be {PROOF_VERSION}, got {}",
+                self.words[PROOF_VERSION_WORD]
+            ));
+        }
+        if self.words[PROOF_SIZE_WORD] != PROOF_BYTE_SIZE as u32 {
+            return Err(format!(
+                "proof-trace size_bytes must be {PROOF_BYTE_SIZE}, got {}",
+                self.words[PROOF_SIZE_WORD]
+            ));
+        }
+
+        let flags = self.words[PROOF_FLAGS_WORD];
+        let unknown_flags = flags & !PROOF_KNOWN_FLAG_MASK;
+        if unknown_flags != 0 {
+            return Err(format!(
+                "proof-trace flags.raw contains unknown bits 0x{unknown_flags:08x}"
+            ));
+        }
+        if flags & PROOF_FLAG_ACTIVE == 0 {
+            return Err("proof-trace flags.active must be true".to_owned());
+        }
+
+        for (count, last) in [
+            (PROOF_LOGICAL_RX_COUNT_WORD, PROOF_LOGICAL_RX_LAST_MS_WORD),
+            (
+                PROOF_INGRESS_ENQUEUE_COUNT_WORD,
+                PROOF_INGRESS_ENQUEUE_LAST_MS_WORD,
+            ),
+            (
+                PROOF_INGRESS_DEFER_COUNT_WORD,
+                PROOF_INGRESS_DEFER_LAST_MS_WORD,
+            ),
+            (
+                PROOF_INGRESS_FAIL_COUNT_WORD,
+                PROOF_INGRESS_FAIL_LAST_MS_WORD,
+            ),
+            (PROOF_RNS_INGRESS_COUNT_WORD, PROOF_RNS_INGRESS_LAST_MS_WORD),
+            (PROOF_GENERATED_COUNT_WORD, PROOF_GENERATED_LAST_MS_WORD),
+            (PROOF_DELIVERED_COUNT_WORD, PROOF_DELIVERED_LAST_MS_WORD),
+            (PROOF_TIMEOUT_COUNT_WORD, PROOF_TIMEOUT_LAST_MS_WORD),
+            (
+                PROOF_ACTION_PRESSURE_COUNT_WORD,
+                PROOF_ACTION_PRESSURE_LAST_MS_WORD,
+            ),
+            (
+                PROOF_CORRELATION_FAULT_COUNT_WORD,
+                PROOF_CORRELATION_FAULT_LAST_MS_WORD,
+            ),
+        ] {
+            self.validate_count_timestamp(count, last)?;
+        }
+        self.validate_ingress()?;
+        self.validate_commit(flags)?;
+        self.validate_tag(
+            flags,
+            PROOF_GENERATED_COUNT_WORD,
+            PROOF_GENERATED_TAG_LOW_WORD,
+            PROOF_GENERATED_TAG_HIGH_WORD,
+            PROOF_FLAG_GENERATED_TAG_PRESENT,
+            PROOF_FLAG_GENERATED_TAGS_CONSISTENT,
+            "generated",
+        )?;
+        self.validate_tag(
+            flags,
+            PROOF_DELIVERED_COUNT_WORD,
+            PROOF_DELIVERED_TAG_LOW_WORD,
+            PROOF_DELIVERED_TAG_HIGH_WORD,
+            PROOF_FLAG_DELIVERED_TAG_PRESENT,
+            PROOF_FLAG_DELIVERED_TAGS_CONSISTENT,
+            "delivered",
+        )?;
+        self.validate_tag(
+            flags,
+            PROOF_TIMEOUT_COUNT_WORD,
+            PROOF_TIMEOUT_TAG_LOW_WORD,
+            PROOF_TIMEOUT_TAG_HIGH_WORD,
+            PROOF_FLAG_TIMEOUT_TAG_PRESENT,
+            PROOF_FLAG_TIMEOUT_TAGS_CONSISTENT,
+            "timeout",
+        )?;
+
+        Ok(())
+    }
+
+    fn validate_empty_initializer(&self) -> Result<(), String> {
+        for (word, name) in PROOF_WORD_NAMES.iter().copied().enumerate() {
+            let expected = match word {
+                PROOF_MAGIC_WORD => PROOF_MAGIC,
+                PROOF_VERSION_WORD => PROOF_VERSION,
+                PROOF_SIZE_WORD => PROOF_BYTE_SIZE as u32,
+                PROOF_FLAGS_WORD => PROOF_FLAG_ACTIVE | PROOF_FLAG_INBOX_COMMIT_ORDER_CONSISTENT,
+                _ => 0,
+            };
+            if self.words[word] != expected {
+                return Err(format!(
+                    "{name} must initialize to {expected}, got {}",
+                    self.words[word]
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_count_timestamp(&self, count: usize, last: usize) -> Result<(), String> {
+        if self.words[count] == 0 && self.words[last] != 0 {
+            return Err(format!(
+                "{} requires a nonzero {}",
+                PROOF_WORD_NAMES[last], PROOF_WORD_NAMES[count]
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_ingress(&self) -> Result<(), String> {
+        let ingress_count = self.words[PROOF_RNS_INGRESS_COUNT_WORD];
+        let dispositions = [
+            PROOF_DISPOSITION_PROCESSED_WORD,
+            PROOF_DISPOSITION_DUPLICATE_WORD,
+            PROOF_DISPOSITION_INVALID_WORD,
+            PROOF_DISPOSITION_NO_OUTCOME_WORD,
+            PROOF_DISPOSITION_REJECTED_WORD,
+        ];
+        let disposition_sum = dispositions
+            .into_iter()
+            .map(|word| u64::from(self.words[word]))
+            .sum::<u64>();
+        let ingress_aggregate_saturated = ingress_count == u32::MAX
+            || dispositions
+                .into_iter()
+                .any(|word| self.words[word] == u32::MAX);
+        if !ingress_aggregate_saturated && disposition_sum != u64::from(ingress_count) {
+            return Err(format!(
+                "proof-trace disposition counts sum to {disposition_sum}, expected rns_ingress.count={ingress_count}"
+            ));
+        }
+
+        let last_disposition = self.words[PROOF_LAST_DISPOSITION_WORD];
+        let last_packet_type = self.words[PROOF_LAST_PACKET_TYPE_WORD];
+        if ingress_count == 0 {
+            for word in [
+                PROOF_LAST_DISPOSITION_WORD,
+                PROOF_LAST_PACKET_TYPE_WORD,
+                PROOF_LAST_EMITTED_PACKETS_WORD,
+                PROOF_LAST_GENERATED_ACTIONS_WORD,
+                PROOF_LAST_DELIVERED_TERMINALS_WORD,
+                PROOF_LAST_TIMED_OUT_TERMINALS_WORD,
+            ] {
+                if self.words[word] != 0 {
+                    return Err(format!(
+                        "{} must be zero until rns_ingress.count is nonzero",
+                        PROOF_WORD_NAMES[word]
+                    ));
+                }
+            }
+        } else if !(1..=5).contains(&last_disposition) {
+            return Err(format!(
+                "rns_ingress.last_disposition must be in 1..=5, got {last_disposition}"
+            ));
+        }
+        if last_packet_type > 4 {
+            return Err(format!(
+                "rns_ingress.last_wire_packet_type must be in 0..=4, got {last_packet_type}"
+            ));
+        }
+        for (last_word, total_word) in [
+            (
+                PROOF_LAST_GENERATED_ACTIONS_WORD,
+                PROOF_GENERATED_COUNT_WORD,
+            ),
+            (
+                PROOF_LAST_DELIVERED_TERMINALS_WORD,
+                PROOF_DELIVERED_COUNT_WORD,
+            ),
+        ] {
+            if self.words[total_word] != u32::MAX && self.words[last_word] > self.words[total_word]
+            {
+                return Err(format!(
+                    "{} must not exceed {}",
+                    PROOF_WORD_NAMES[last_word], PROOF_WORD_NAMES[total_word]
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_commit(&self, flags: u32) -> Result<(), String> {
+        let count = self.words[PROOF_INBOX_COMMIT_COUNT_WORD];
+        if count == 0 {
+            for word in [
+                PROOF_INBOX_COMMIT_START_MS_WORD,
+                PROOF_INBOX_COMMIT_END_MS_WORD,
+            ] {
+                if self.words[word] != 0 {
+                    return Err(format!(
+                        "{} requires a nonzero inbox.commit.count",
+                        PROOF_WORD_NAMES[word]
+                    ));
+                }
+            }
+            if flags & PROOF_FLAG_INBOX_COMMIT_IN_PROGRESS != 0 {
+                return Err(
+                    "flags.inbox_commit_in_progress requires a nonzero inbox.commit.count"
+                        .to_owned(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn validate_tag(
+        &self,
+        flags: u32,
+        count_word: usize,
+        low_word: usize,
+        high_word: usize,
+        present_flag: u32,
+        consistency_flag: u32,
+        label: &str,
+    ) -> Result<(), String> {
+        let count = self.words[count_word];
+        let present = flags & present_flag != 0;
+        let consistent = flags & consistency_flag != 0;
+        if !present && (self.words[low_word] != 0 || self.words[high_word] != 0) {
+            return Err(format!(
+                "proof-trace {label} tag words must be zero when its presence flag is false"
+            ));
+        }
+        if count == 0 && (present || consistent) {
+            return Err(format!(
+                "proof-trace {label} tag flags require a nonzero {}",
+                PROOF_WORD_NAMES[count_word]
+            ));
+        }
+        Ok(())
+    }
+
+    fn render_human(&self) -> String {
+        let mut output = String::new();
+        self.for_each_output(|name, value| {
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(name);
+            output.push('=');
+            match value {
+                ProofOutputValue::Number(value) => {
+                    let _ = write!(output, "{value}");
+                }
+                ProofOutputValue::WideNumber(value) => {
+                    let _ = write!(output, "0x{value:016x}");
+                }
+                ProofOutputValue::Bool(value) => {
+                    output.push_str(if value { "true" } else { "false" });
+                }
+                ProofOutputValue::Text(value) => output.push_str(value),
+                ProofOutputValue::Unobserved => output.push_str("unobserved"),
+            }
+        });
+        output
+    }
+
+    fn render_json(&self) -> String {
+        let mut output = String::from("{");
+        let mut first = true;
+        self.for_each_output(|name, value| {
+            if !first {
+                output.push(',');
+            }
+            first = false;
+            output.push('"');
+            output.push_str(name);
+            output.push_str("\":");
+            match value {
+                ProofOutputValue::Number(value) => {
+                    let _ = write!(output, "{value}");
+                }
+                ProofOutputValue::WideNumber(value) => {
+                    let _ = write!(output, "\"0x{value:016x}\"");
+                }
+                ProofOutputValue::Bool(value) => {
+                    output.push_str(if value { "true" } else { "false" });
+                }
+                ProofOutputValue::Text(value) => {
+                    output.push('"');
+                    output.push_str(value);
+                    output.push('"');
+                }
+                ProofOutputValue::Unobserved => output.push_str("null"),
+            }
+        });
+        output.push('}');
+        output
+    }
+
+    fn for_each_output(&self, mut emit: impl FnMut(&'static str, ProofOutputValue)) {
+        for (word, name) in PROOF_WORD_NAMES.iter().copied().enumerate() {
+            let value = match word {
+                PROOF_MAGIC_WORD => ProofOutputValue::Text("RPTE"),
+                PROOF_LAST_DISPOSITION_WORD => self.last_disposition_value(),
+                PROOF_LAST_PACKET_TYPE_WORD => self.last_packet_type_value(),
+                _ => ProofOutputValue::Number(self.words[word]),
+            };
+            emit(name, value);
+            if word == PROOF_FLAGS_WORD {
+                for (flag_name, flag) in PROOF_FLAG_NAMES {
+                    emit(
+                        flag_name,
+                        ProofOutputValue::Bool(self.words[PROOF_FLAGS_WORD] & flag != 0),
+                    );
+                }
+            }
+        }
+        for (name, low, high, present) in [
+            (
+                "tag.generated",
+                PROOF_GENERATED_TAG_LOW_WORD,
+                PROOF_GENERATED_TAG_HIGH_WORD,
+                PROOF_FLAG_GENERATED_TAG_PRESENT,
+            ),
+            (
+                "tag.delivered",
+                PROOF_DELIVERED_TAG_LOW_WORD,
+                PROOF_DELIVERED_TAG_HIGH_WORD,
+                PROOF_FLAG_DELIVERED_TAG_PRESENT,
+            ),
+            (
+                "tag.timeout",
+                PROOF_TIMEOUT_TAG_LOW_WORD,
+                PROOF_TIMEOUT_TAG_HIGH_WORD,
+                PROOF_FLAG_TIMEOUT_TAG_PRESENT,
+            ),
+        ] {
+            let value = if self.words[PROOF_FLAGS_WORD] & present == 0 {
+                ProofOutputValue::Unobserved
+            } else {
+                ProofOutputValue::WideNumber(
+                    u64::from(self.words[low]) | (u64::from(self.words[high]) << 32),
+                )
+            };
+            emit(name, value);
+        }
+    }
+
+    fn last_disposition_value(&self) -> ProofOutputValue {
+        match self.words[PROOF_LAST_DISPOSITION_WORD] {
+            0 => ProofOutputValue::Unobserved,
+            1 => ProofOutputValue::Text("processed"),
+            2 => ProofOutputValue::Text("native_duplicate"),
+            3 => ProofOutputValue::Text("native_invalid"),
+            4 => ProofOutputValue::Text("no_observable_outcome"),
+            5 => ProofOutputValue::Text("rejected"),
+            _ => unreachable!("validation rejects unknown dispositions"),
+        }
+    }
+
+    fn last_packet_type_value(&self) -> ProofOutputValue {
+        match self.words[PROOF_LAST_PACKET_TYPE_WORD] {
+            0 if self.words[PROOF_RNS_INGRESS_COUNT_WORD] == 0 => ProofOutputValue::Unobserved,
+            0 => ProofOutputValue::Text("unparsed"),
+            1 => ProofOutputValue::Text("data"),
+            2 => ProofOutputValue::Text("announce"),
+            3 => ProofOutputValue::Text("link_request"),
+            4 => ProofOutputValue::Text("proof"),
+            _ => unreachable!("validation rejects unknown packet types"),
+        }
+    }
+}
+
 const fn is_minimum_word(word: usize) -> bool {
     matches!(
         word,
@@ -1033,7 +1825,10 @@ const fn is_minimum_word(word: usize) -> bool {
 }
 
 const _: () = {
+    assert!(PROOF_TRACE_LINKED_STACK_REDUCTION_BYTES == 192);
+    assert!(QUALIFIED_RAW_STACK_MARGIN_BYTES == 72_020);
     assert!(MAXIMUM_STACK_FRAME_BYTES == 52_752);
+    assert!(MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES == 19_268);
     assert!(
         MAXIMUM_STACK_FRAME_BYTES + MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES
             == QUALIFIED_RAW_STACK_MARGIN_BYTES
@@ -1057,11 +1852,67 @@ const _: () = {
     assert!(SNAPSHOT_SEQ_END_WORD + 1 == WORD_COUNT);
 };
 
+const _: () = {
+    assert!(PROOF_BYTE_SIZE == 192);
+    assert!(PROOF_WORD_NAMES.len() == PROOF_WORD_COUNT);
+    assert!(PROOF_SNAPSHOT_SEQ_BEGIN_WORD == 0);
+    assert!(PROOF_MAGIC_WORD == PROOF_SNAPSHOT_SEQ_BEGIN_WORD + 1);
+    assert!(PROOF_VERSION_WORD == PROOF_MAGIC_WORD + 1);
+    assert!(PROOF_SIZE_WORD == PROOF_VERSION_WORD + 1);
+    assert!(PROOF_FLAGS_WORD == PROOF_SIZE_WORD + 1);
+    assert!(PROOF_LOGICAL_RX_COUNT_WORD == PROOF_FLAGS_WORD + 1);
+    assert!(PROOF_LOGICAL_RX_LAST_MS_WORD == PROOF_LOGICAL_RX_COUNT_WORD + 1);
+    assert!(PROOF_INGRESS_ENQUEUE_COUNT_WORD == PROOF_LOGICAL_RX_LAST_MS_WORD + 1);
+    assert!(PROOF_INGRESS_ENQUEUE_LAST_MS_WORD == PROOF_INGRESS_ENQUEUE_COUNT_WORD + 1);
+    assert!(PROOF_INGRESS_DEFER_COUNT_WORD == PROOF_INGRESS_ENQUEUE_LAST_MS_WORD + 1);
+    assert!(PROOF_INGRESS_DEFER_LAST_MS_WORD == PROOF_INGRESS_DEFER_COUNT_WORD + 1);
+    assert!(PROOF_INGRESS_FAIL_COUNT_WORD == PROOF_INGRESS_DEFER_LAST_MS_WORD + 1);
+    assert!(PROOF_INGRESS_FAIL_LAST_MS_WORD == PROOF_INGRESS_FAIL_COUNT_WORD + 1);
+    assert!(PROOF_RNS_INGRESS_COUNT_WORD == PROOF_INGRESS_FAIL_LAST_MS_WORD + 1);
+    assert!(PROOF_RNS_INGRESS_LAST_MS_WORD == PROOF_RNS_INGRESS_COUNT_WORD + 1);
+    assert!(PROOF_GENERATED_COUNT_WORD == PROOF_RNS_INGRESS_LAST_MS_WORD + 1);
+    assert!(PROOF_GENERATED_LAST_MS_WORD == PROOF_GENERATED_COUNT_WORD + 1);
+    assert!(PROOF_DELIVERED_COUNT_WORD == PROOF_GENERATED_LAST_MS_WORD + 1);
+    assert!(PROOF_DELIVERED_LAST_MS_WORD == PROOF_DELIVERED_COUNT_WORD + 1);
+    assert!(PROOF_TIMEOUT_COUNT_WORD == PROOF_DELIVERED_LAST_MS_WORD + 1);
+    assert!(PROOF_TIMEOUT_LAST_MS_WORD == PROOF_TIMEOUT_COUNT_WORD + 1);
+    assert!(PROOF_ACTION_PRESSURE_COUNT_WORD == PROOF_TIMEOUT_LAST_MS_WORD + 1);
+    assert!(PROOF_ACTION_PRESSURE_LAST_MS_WORD == PROOF_ACTION_PRESSURE_COUNT_WORD + 1);
+    assert!(PROOF_CORRELATION_FAULT_COUNT_WORD == PROOF_ACTION_PRESSURE_LAST_MS_WORD + 1);
+    assert!(PROOF_CORRELATION_FAULT_LAST_MS_WORD == PROOF_CORRELATION_FAULT_COUNT_WORD + 1);
+    assert!(PROOF_INBOX_COMMIT_COUNT_WORD == PROOF_CORRELATION_FAULT_LAST_MS_WORD + 1);
+    assert!(PROOF_INBOX_COMMIT_START_MS_WORD == PROOF_INBOX_COMMIT_COUNT_WORD + 1);
+    assert!(PROOF_INBOX_COMMIT_END_MS_WORD == PROOF_INBOX_COMMIT_START_MS_WORD + 1);
+    assert!(PROOF_DISPOSITION_PROCESSED_WORD == PROOF_INBOX_COMMIT_END_MS_WORD + 1);
+    assert!(PROOF_DISPOSITION_REJECTED_WORD == PROOF_DISPOSITION_PROCESSED_WORD + 4);
+    assert!(PROOF_LAST_DISPOSITION_WORD == PROOF_DISPOSITION_REJECTED_WORD + 1);
+    assert!(PROOF_LAST_PACKET_TYPE_WORD == PROOF_LAST_DISPOSITION_WORD + 1);
+    assert!(PROOF_LAST_EMITTED_PACKETS_WORD == PROOF_LAST_PACKET_TYPE_WORD + 1);
+    assert!(PROOF_LAST_GENERATED_ACTIONS_WORD == PROOF_LAST_EMITTED_PACKETS_WORD + 1);
+    assert!(PROOF_LAST_DELIVERED_TERMINALS_WORD == PROOF_LAST_GENERATED_ACTIONS_WORD + 1);
+    assert!(PROOF_LAST_TIMED_OUT_TERMINALS_WORD == PROOF_LAST_DELIVERED_TERMINALS_WORD + 1);
+    assert!(PROOF_GENERATED_TAG_LOW_WORD == PROOF_LAST_TIMED_OUT_TERMINALS_WORD + 1);
+    assert!(PROOF_GENERATED_TAG_HIGH_WORD == PROOF_GENERATED_TAG_LOW_WORD + 1);
+    assert!(PROOF_DELIVERED_TAG_LOW_WORD == PROOF_GENERATED_TAG_HIGH_WORD + 1);
+    assert!(PROOF_DELIVERED_TAG_HIGH_WORD == PROOF_DELIVERED_TAG_LOW_WORD + 1);
+    assert!(PROOF_TIMEOUT_TAG_LOW_WORD == PROOF_DELIVERED_TAG_HIGH_WORD + 1);
+    assert!(PROOF_TIMEOUT_TAG_HIGH_WORD == PROOF_TIMEOUT_TAG_LOW_WORD + 1);
+    assert!(PROOF_RADIO_TX_CONFIRMED_SUCCESS_COUNT_WORD == PROOF_TIMEOUT_TAG_HIGH_WORD + 1);
+    assert!(
+        PROOF_RADIO_TX_NOT_CONFIRMED_SUCCESS_COUNT_WORD
+            == PROOF_RADIO_TX_CONFIRMED_SUCCESS_COUNT_WORD + 1
+    );
+    assert!(PROOF_SNAPSHOT_SEQ_END_WORD == PROOF_RADIO_TX_NOT_CONFIRMED_SUCCESS_COUNT_WORD + 1);
+    assert!(PROOF_SNAPSHOT_SEQ_END_WORD + 1 == PROOF_WORD_COUNT);
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use reticulum_heltec_vision_master_e290_node::runtime_measurement::{
-        BootPhase, HeapSnapshot, OperationKind, RuntimeMeasurementEvidence, StackSnapshot,
+        BootPhase, HeapSnapshot, OperationKind, RuntimeMeasurementEvidence,
+        RuntimeProofTraceEvidence, RuntimeProofTraceIngressDisposition,
+        RuntimeProofTraceIngressMetadata, RuntimeProofTracePacketType, StackSnapshot,
     };
     use std::{
         path::Path,
@@ -1568,22 +2419,45 @@ mod tests {
                 usable_bytes: 170_984,
                 guard_offset_bytes: 60,
             },
+            default_proof_trace_symbol_count: 0,
             hil_stack_sizes: StackSizeInventory {
                 record_count: 1_025,
                 maximum_frame_bytes: 52_752,
             },
             hil_stack: StackLayout {
-                reserved_bytes: 170_544,
-                usable_bytes: 170_480,
+                reserved_bytes: 170_352,
+                usable_bytes: 170_288,
                 guard_offset_bytes: 60,
             },
+            hil_proof_trace_symbol_count: 1,
+            hil_proof_trace_symbol_size_bytes: 192,
         };
         reviewed.validate().unwrap();
         let output = reviewed.render();
         assert!(output.contains("default.maximum_frame_bytes=52752\n"));
         assert!(output.contains("default.stack_usable_bytes=170984\n"));
-        assert!(output.contains("hil.stack_usable_bytes=170480\n"));
-        assert!(output.ends_with("qualification.conservative_margin_bytes=19460"));
+        assert!(output.contains("default.proof_trace_symbol_count=0\n"));
+        assert!(output.contains("hil.stack_usable_bytes=170288\n"));
+        assert!(output.contains("hil.proof_trace_symbol_count=1\n"));
+        assert!(output.contains("hil.proof_trace_symbol_size_bytes=192\n"));
+        assert!(output.ends_with("qualification.conservative_margin_bytes=19268"));
+
+        let mut regressed = reviewed;
+        regressed.default_proof_trace_symbol_count = 1;
+        assert!(regressed.validate().unwrap_err().contains("must exclude"));
+
+        let mut regressed = reviewed;
+        regressed.hil_proof_trace_symbol_count = 0;
+        assert!(
+            regressed
+                .validate()
+                .unwrap_err()
+                .contains("one initialized")
+        );
+
+        let mut regressed = reviewed;
+        regressed.hil_proof_trace_symbol_size_bytes = 191;
+        assert!(regressed.validate().unwrap_err().contains("size=191"));
 
         let mut regressed = reviewed;
         regressed.default_stack_sizes.maximum_frame_bytes += 1;
@@ -1608,7 +2482,7 @@ mod tests {
             regressed
                 .validate()
                 .unwrap_err()
-                .contains("usable stack 170479")
+                .contains("usable stack 170287")
         );
 
         let mut regressed = reviewed;
@@ -1968,5 +2842,307 @@ mod tests {
         })
         .unwrap_err();
         assert!(error.starts_with("could not read --input"), "{error}");
+    }
+
+    fn proof_minimal_words() -> [u32; PROOF_WORD_COUNT] {
+        let mut words = [0_u32; PROOF_WORD_COUNT];
+        words[PROOF_MAGIC_WORD] = PROOF_MAGIC;
+        words[PROOF_VERSION_WORD] = PROOF_VERSION;
+        words[PROOF_SIZE_WORD] = PROOF_BYTE_SIZE as u32;
+        words[PROOF_FLAGS_WORD] = PROOF_FLAG_ACTIVE | PROOF_FLAG_INBOX_COMMIT_ORDER_CONSISTENT;
+        words
+    }
+
+    fn encode_proof(words: [u32; PROOF_WORD_COUNT]) -> [u8; PROOF_BYTE_SIZE] {
+        let mut bytes = [0_u8; PROOF_BYTE_SIZE];
+        for (word, destination) in words
+            .into_iter()
+            .zip(bytes.chunks_exact_mut(size_of::<u32>()))
+        {
+            destination.copy_from_slice(&word.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn proof_producer_bytes(evidence: &RuntimeProofTraceEvidence) -> [u8; PROOF_BYTE_SIZE] {
+        assert_eq!(
+            size_of::<RuntimeProofTraceEvidence>(),
+            PROOF_BYTE_SIZE,
+            "proof producer ABI size changed"
+        );
+        let mut bytes = [0_u8; PROOF_BYTE_SIZE];
+        // SAFETY: the firmware module's compile-time assertions guarantee an
+        // exact repr(C) sequence of initialized four-byte fields with no
+        // padding. This test owns `evidence`, and no writer can mutate it while
+        // the matching-even snapshot is copied.
+        let source = unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::from_ref(evidence).cast::<u8>(),
+                size_of::<RuntimeProofTraceEvidence>(),
+            )
+        };
+        bytes.copy_from_slice(source);
+        bytes
+    }
+
+    fn populated_proof_evidence() -> RuntimeProofTraceEvidence {
+        let evidence = RuntimeProofTraceEvidence::new();
+        evidence.record_logical_rx_completed(10);
+        evidence.record_ingress_enqueued(11);
+        evidence.record_ingress_deferred(12);
+        evidence.record_ingress_failed(13);
+        evidence.record_rns_ingress(
+            14,
+            RuntimeProofTraceIngressDisposition::Processed,
+            RuntimeProofTraceIngressMetadata {
+                wire_packet_type: RuntimeProofTracePacketType::Proof,
+                emitted_packets: 2,
+                generated_proof_actions: 3,
+                delivered_receipt_terminals: 4,
+                timed_out_receipt_terminals: 0,
+                generated_proof_tag: Some(0x1122_3344_5566_7788),
+                delivered_receipt_tag: Some(0x8877_6655_4433_2211),
+                generated_proof_tags_consistent: true,
+                delivered_receipt_tags_consistent: false,
+                counts_saturated: false,
+            },
+        );
+        for (at, disposition) in [
+            (15, RuntimeProofTraceIngressDisposition::NativeDuplicate),
+            (16, RuntimeProofTraceIngressDisposition::NativeInvalid),
+            (17, RuntimeProofTraceIngressDisposition::NoObservableOutcome),
+            (18, RuntimeProofTraceIngressDisposition::Rejected),
+        ] {
+            evidence.record_rns_ingress(
+                at,
+                disposition,
+                RuntimeProofTraceIngressMetadata::default(),
+            );
+        }
+        evidence.record_receipt_timeouts(19, 2, Some(0xaabb_ccdd_eeff_0011), true);
+        evidence.record_action_pressure(20);
+        evidence.record_correlation_fault(21);
+        evidence.record_inbox_commit_started(22);
+        evidence.record_inbox_commit_finished(23);
+        evidence.record_radio_tx_confirmed_success();
+        evidence.record_radio_tx_not_confirmed_success();
+        evidence
+    }
+
+    #[test]
+    fn proof_decoder_requires_exact_stable_versioned_192_byte_abi() {
+        for length in [0, PROOF_BYTE_SIZE - 1, PROOF_BYTE_SIZE + 1] {
+            let error = DecodedProofTraceEvidence::parse(&vec![0; length])
+                .expect_err("wrong proof-trace size was accepted");
+            assert_eq!(
+                error,
+                format!("proof-trace input must be exactly {PROOF_BYTE_SIZE} bytes, got {length}")
+            );
+        }
+
+        let words = proof_minimal_words();
+        let empty = DecodedProofTraceEvidence::parse(&encode_proof(words)).unwrap();
+        assert_eq!(empty.words, words);
+        empty
+            .validate_empty_initializer()
+            .expect("canonical linked initializer must be empty");
+
+        let mut runtime_observation = words;
+        runtime_observation[PROOF_RADIO_TX_CONFIRMED_SUCCESS_COUNT_WORD] = 1;
+        let runtime_observation =
+            DecodedProofTraceEvidence::parse(&encode_proof(runtime_observation))
+                .expect("a nonempty runtime TX observation must decode");
+        assert!(
+            runtime_observation
+                .validate_empty_initializer()
+                .unwrap_err()
+                .contains("radio_tx.confirmed_success.count must initialize to 0")
+        );
+        for (word, value, expected) in [
+            (PROOF_MAGIC_WORD, u32::from_le_bytes(*b"NOPE"), "magic"),
+            (PROOF_VERSION_WORD, 2, "version"),
+            (PROOF_SIZE_WORD, 128, "size_bytes"),
+            (PROOF_FLAGS_WORD, 0, "flags.active"),
+            (
+                PROOF_FLAGS_WORD,
+                PROOF_FLAG_ACTIVE | PROOF_FLAG_INBOX_COMMIT_ORDER_CONSISTENT | (1 << 31),
+                "unknown bits",
+            ),
+        ] {
+            let mut malformed = words;
+            malformed[word] = value;
+            let error = DecodedProofTraceEvidence::parse(&encode_proof(malformed))
+                .expect_err("malformed proof-trace ABI was accepted");
+            assert!(error.contains(expected), "{error:?}");
+        }
+
+        let mut unstable = words;
+        unstable[PROOF_SNAPSHOT_SEQ_BEGIN_WORD] = 1;
+        unstable[PROOF_SNAPSHOT_SEQ_END_WORD] = 1;
+        assert!(
+            DecodedProofTraceEvidence::parse(&encode_proof(unstable))
+                .unwrap_err()
+                .contains("must be even")
+        );
+        unstable[PROOF_SNAPSHOT_SEQ_BEGIN_WORD] = 2;
+        assert!(
+            DecodedProofTraceEvidence::parse(&encode_proof(unstable))
+                .unwrap_err()
+                .contains("must match")
+        );
+    }
+
+    #[test]
+    fn firmware_proof_producer_layout_decodes_all_words_and_wide_tags() {
+        let evidence = populated_proof_evidence();
+        let decoded = DecodedProofTraceEvidence::parse(&proof_producer_bytes(&evidence))
+            .expect("firmware proof trace must satisfy its host decoder");
+        assert_eq!(decoded.words.len(), PROOF_WORD_COUNT);
+        assert_eq!(decoded.words[PROOF_SNAPSHOT_SEQ_BEGIN_WORD], 32);
+        assert_eq!(decoded.words[PROOF_SNAPSHOT_SEQ_END_WORD], 32);
+        assert_eq!(decoded.words[PROOF_LOGICAL_RX_COUNT_WORD], 1);
+        assert_eq!(decoded.words[PROOF_RNS_INGRESS_COUNT_WORD], 5);
+        assert_eq!(decoded.words[PROOF_GENERATED_COUNT_WORD], 3);
+        assert_eq!(decoded.words[PROOF_DELIVERED_COUNT_WORD], 4);
+        assert_eq!(decoded.words[PROOF_TIMEOUT_COUNT_WORD], 2);
+        assert_eq!(decoded.words[PROOF_DISPOSITION_PROCESSED_WORD], 1);
+        assert_eq!(decoded.words[PROOF_DISPOSITION_DUPLICATE_WORD], 1);
+        assert_eq!(decoded.words[PROOF_DISPOSITION_INVALID_WORD], 1);
+        assert_eq!(decoded.words[PROOF_DISPOSITION_NO_OUTCOME_WORD], 1);
+        assert_eq!(decoded.words[PROOF_DISPOSITION_REJECTED_WORD], 1);
+        assert_eq!(decoded.words[PROOF_LAST_DISPOSITION_WORD], 5);
+        assert_eq!(decoded.words[PROOF_LAST_PACKET_TYPE_WORD], 0);
+        assert_eq!(
+            decoded.words[PROOF_RADIO_TX_CONFIRMED_SUCCESS_COUNT_WORD],
+            1
+        );
+        assert_eq!(
+            decoded.words[PROOF_RADIO_TX_NOT_CONFIRMED_SUCCESS_COUNT_WORD],
+            1
+        );
+
+        let human = decoded.render_human();
+        assert!(human.starts_with("snapshot_seq_begin=32\nmagic=RPTE\nversion=1\n"));
+        assert!(human.contains("flags.generated_tag_present=true\n"));
+        assert!(human.contains("flags.delivered_tags_consistent=false\n"));
+        assert!(human.contains("rns_ingress.last_disposition=rejected\n"));
+        assert!(human.contains("rns_ingress.last_wire_packet_type=unparsed\n"));
+        assert!(human.contains(
+            "radio_tx.confirmed_success.count=1\nradio_tx.not_confirmed_success.count=1\n"
+        ));
+        assert!(human.contains("tag.generated=0x1122334455667788\n"));
+        assert!(human.contains("tag.delivered=0x8877665544332211\n"));
+        assert!(human.ends_with("tag.timeout=0xaabbccddeeff0011"));
+
+        let json: serde_json::Value = serde_json::from_str(&decoded.render_json()).unwrap();
+        let object = json.as_object().unwrap();
+        assert_eq!(object.len(), PROOF_WORD_COUNT + PROOF_FLAG_NAMES.len() + 3);
+        assert_eq!(object["magic"], "RPTE");
+        assert_eq!(object["tag.generated"], "0x1122334455667788");
+        assert_eq!(object["tag.delivered"], "0x8877665544332211");
+        assert_eq!(object["tag.timeout"], "0xaabbccddeeff0011");
+        assert_eq!(object["radio_tx.confirmed_success.count"], 1);
+        assert_eq!(object["radio_tx.not_confirmed_success.count"], 1);
+    }
+
+    #[test]
+    fn proof_decoder_rejects_cross_field_corruption_but_accepts_saturation() {
+        let producer = populated_proof_evidence();
+        let decoded = DecodedProofTraceEvidence::parse(&proof_producer_bytes(&producer)).unwrap();
+        let words = decoded.words;
+        for (word, value, expected) in [
+            (PROOF_DISPOSITION_REJECTED_WORD, 2, "disposition counts sum"),
+            (PROOF_LAST_DISPOSITION_WORD, 6, "must be in 1..=5"),
+            (PROOF_LAST_PACKET_TYPE_WORD, 5, "must be in 0..=4"),
+            (
+                PROOF_GENERATED_TAG_LOW_WORD,
+                0,
+                "generated tag words must be zero",
+            ),
+        ] {
+            let mut malformed = words;
+            malformed[word] = value;
+            if word == PROOF_GENERATED_TAG_LOW_WORD {
+                malformed[PROOF_FLAGS_WORD] &= !PROOF_FLAG_GENERATED_TAG_PRESENT;
+            }
+            let error = DecodedProofTraceEvidence::parse(&encode_proof(malformed))
+                .expect_err("cross-field corruption was accepted");
+            assert!(error.contains(expected), "{error:?}");
+        }
+
+        let mut saturated = words;
+        saturated[PROOF_FLAGS_WORD] |= PROOF_FLAG_SATURATED;
+        saturated[PROOF_RNS_INGRESS_COUNT_WORD] = u32::MAX;
+        saturated[PROOF_DISPOSITION_PROCESSED_WORD] = u32::MAX;
+        DecodedProofTraceEvidence::parse(&encode_proof(saturated))
+            .expect("saturated disposition aggregates remain decodable");
+
+        let mut unrelated_saturation = words;
+        unrelated_saturation[PROOF_FLAGS_WORD] |= PROOF_FLAG_SATURATED;
+        unrelated_saturation[PROOF_DISPOSITION_REJECTED_WORD] += 1;
+        assert!(
+            DecodedProofTraceEvidence::parse(&encode_proof(unrelated_saturation))
+                .unwrap_err()
+                .contains("disposition counts sum")
+        );
+
+        let mut unrelated_saturation = words;
+        unrelated_saturation[PROOF_FLAGS_WORD] |= PROOF_FLAG_SATURATED;
+        unrelated_saturation[PROOF_LAST_GENERATED_ACTIONS_WORD] =
+            unrelated_saturation[PROOF_GENERATED_COUNT_WORD] + 1;
+        assert!(
+            DecodedProofTraceEvidence::parse(&encode_proof(unrelated_saturation))
+                .unwrap_err()
+                .contains("must not exceed")
+        );
+    }
+
+    #[test]
+    fn proof_trace_cli_parses_and_executes_human_and_json_forms() {
+        let expected = Options {
+            input: PathBuf::from("proof.bin"),
+            json: true,
+        };
+        assert_eq!(
+            parse_proof_trace_options(&strings(&[
+                "decode-proof-trace",
+                "--json",
+                "--input",
+                "proof.bin",
+            ])),
+            Ok(expected)
+        );
+        assert!(matches!(
+            parse_command_options(&strings(&["decode-proof-trace", "--input", "proof.bin"])),
+            Ok(CommandOptions::DecodeProofTrace(_))
+        ));
+        for (args, expected) in [
+            (strings(&["decode-proof-trace"]), "--input is required"),
+            (
+                strings(&["decode-proof-trace", "--input", "a", "--input", "b"]),
+                "--input may be supplied only once",
+            ),
+            (
+                strings(&["decode-proof-trace", "--input", "a", "--wat"]),
+                "unknown option --wat",
+            ),
+        ] {
+            assert_eq!(parse_proof_trace_options(&args).unwrap_err(), expected);
+        }
+
+        let evidence = populated_proof_evidence();
+        let input = TempInput::new(&proof_producer_bytes(&evidence));
+        let human = execute_proof_trace(&Options {
+            input: input.path().to_owned(),
+            json: false,
+        })
+        .unwrap();
+        assert!(human.contains("proof.generated.count=3\n"));
+        let json = execute_proof_trace(&Options {
+            input: input.path().to_owned(),
+            json: true,
+        })
+        .unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(&json).is_ok());
     }
 }

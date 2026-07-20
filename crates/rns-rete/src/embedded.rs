@@ -10,9 +10,9 @@ use alloc::vec::Vec;
 
 use rand_core::{CryptoRng, RngCore};
 use rete_core::{
-    CONTEXT_RESOURCE, CONTEXT_RESOURCE_ADV, CONTEXT_RESOURCE_HMU, CONTEXT_RESOURCE_ICL,
-    CONTEXT_RESOURCE_PRF, CONTEXT_RESOURCE_RCL, CONTEXT_RESOURCE_REQ, DestHash, DestType,
-    HeaderType, Identity, IdentityHash, LinkId, Packet, PacketType,
+    CONTEXT_NONE, CONTEXT_RESOURCE, CONTEXT_RESOURCE_ADV, CONTEXT_RESOURCE_HMU,
+    CONTEXT_RESOURCE_ICL, CONTEXT_RESOURCE_PRF, CONTEXT_RESOURCE_RCL, CONTEXT_RESOURCE_REQ,
+    DestHash, DestType, HeaderType, Identity, IdentityHash, LinkId, Packet, PacketType,
 };
 use rete_stack::{
     DestinationType, Direction, IngestOutcome, NodeCore, NodeEvent, OutboundPacket, PacketRouting,
@@ -495,8 +495,143 @@ pub enum IngressDisposition {
 pub struct IngressReport {
     /// Processing or rejection classification.
     pub disposition: IngressDisposition,
+    /// Allocation-free wire/action/receipt correlation metadata.
+    pub metadata: IngressMetadata,
     /// Events and already-resolved transmission actions.
     pub actions: NodeActions,
+}
+
+/// Small allocation-free classification metadata for one synchronous ingress
+/// call.
+///
+/// This deliberately carries no complete hashes or payloads on the default
+/// product path. It preserves the minimum scalar evidence needed to
+/// distinguish an inbound PROOF, proof generation, and a committed receipt
+/// terminal after the allocation-backed actions have moved into their next
+/// owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IngressMetadata {
+    wire_packet_type: Option<PacketType>,
+    emitted_packets: u16,
+    generated_proof_actions: u16,
+    delivered_receipt_terminals: u16,
+    timed_out_receipt_terminals: u16,
+    generated_proof_tag: u64,
+    delivered_receipt_tag: u64,
+    generated_proof_tag_present: bool,
+    delivered_receipt_tag_present: bool,
+    generated_proof_tags_consistent: bool,
+    delivered_receipt_tags_consistent: bool,
+    counts_saturated: bool,
+}
+
+// Keep the always-present product-path evidence compact on both the 32-bit
+// firmware target and ordinary 64-bit host builds. This ceiling deliberately
+// allows layout padding without pinning a target-specific exact ABI.
+const _: () = assert!(core::mem::size_of::<IngressMetadata>() <= 40);
+
+// The report's non-action state must remain bounded independently of the
+// pointer width and allocation-backed `NodeActions` representation.
+const _: () =
+    assert!(core::mem::size_of::<IngressReport>() <= core::mem::size_of::<NodeActions>() + 64);
+
+impl IngressMetadata {
+    fn parsed(packet: &Packet<'_>) -> Self {
+        Self {
+            wire_packet_type: Some(packet.packet_type),
+            ..Self::default()
+        }
+    }
+
+    /// Packet type decoded from the admitted wire packet, when parsing reached
+    /// the common Reticulum header.
+    pub const fn wire_packet_type(self) -> Option<PacketType> {
+        self.wire_packet_type
+    }
+
+    /// Number of transmission actions returned by this ingress call.
+    pub const fn emitted_packets(self) -> u16 {
+        self.emitted_packets
+    }
+
+    /// Number of locally generated explicit delivery-PROOF actions returned to the source interface.
+    pub const fn generated_proof_actions(self) -> u16 {
+        self.generated_proof_actions
+    }
+
+    /// Number of delivered receipt terminals committed for this packet.
+    pub const fn delivered_receipt_terminals(self) -> u16 {
+        self.delivered_receipt_terminals
+    }
+
+    /// Number of timed-out receipt terminals committed for this packet.
+    ///
+    /// Ingress is not expected to commit timeouts; exposing the count keeps a
+    /// future violation distinct from delivery-proof success.
+    pub const fn timed_out_receipt_terminals(self) -> u16 {
+        self.timed_out_receipt_terminals
+    }
+
+    /// Compact diagnostic tag from the covered packet hash in the first
+    /// generated explicit PROOF payload.
+    ///
+    /// This is the first eight covered-hash bytes interpreted little-endian.
+    /// It is a correlation aid, not a cryptographic or globally unique
+    /// identifier. A generated PROOF with no explicit covered hash is still
+    /// counted but produces no tag.
+    pub const fn generated_proof_tag(self) -> Option<u64> {
+        if self.generated_proof_tag_present {
+            Some(self.generated_proof_tag)
+        } else {
+            None
+        }
+    }
+
+    /// Compact diagnostic tag from the first delivered receipt ID.
+    ///
+    /// This uses the same first-eight-byte convention as
+    /// [`Self::generated_proof_tag`].
+    pub const fn delivered_receipt_tag(self) -> Option<u64> {
+        if self.delivered_receipt_tag_present {
+            Some(self.delivered_receipt_tag)
+        } else {
+            None
+        }
+    }
+
+    /// Whether every generated explicit PROOF covered hash produced the same tag.
+    pub const fn generated_proof_tags_consistent(self) -> bool {
+        self.generated_proof_tags_consistent
+    }
+
+    /// Whether every delivered receipt produced the same tag.
+    pub const fn delivered_receipt_tags_consistent(self) -> bool {
+        self.delivered_receipt_tags_consistent
+    }
+
+    /// Whether any scalar action or terminal count exceeded `u16`.
+    pub const fn counts_saturated(self) -> bool {
+        self.counts_saturated
+    }
+}
+
+impl Default for IngressMetadata {
+    fn default() -> Self {
+        Self {
+            wire_packet_type: None,
+            emitted_packets: 0,
+            generated_proof_actions: 0,
+            delivered_receipt_terminals: 0,
+            timed_out_receipt_terminals: 0,
+            generated_proof_tag: 0,
+            delivered_receipt_tag: 0,
+            generated_proof_tag_present: false,
+            delivered_receipt_tag_present: false,
+            generated_proof_tags_consistent: true,
+            delivered_receipt_tags_consistent: true,
+            counts_saturated: false,
+        }
+    }
 }
 
 /// Monotonic counters owned by the firmware adapter.
@@ -621,6 +756,14 @@ pub struct ReceiptTickReport {
     pub actions: NodeActions,
     /// Number of destination-DATA timeouts committed to the supplied sink.
     pub timed_out_receipts: usize,
+    /// Compact diagnostic tag from the first timed-out receipt ID.
+    ///
+    /// This is the first eight hash bytes interpreted little-endian. It is a
+    /// bounded correlation aid, not a cryptographic or globally unique ID.
+    pub timed_out_receipt_tag: Option<u64>,
+    /// Whether every timeout committed in this pass carried the same compact
+    /// receipt tag.
+    pub timed_out_receipt_tags_consistent: bool,
     /// At least one expired receipt remains pending because no slot was
     /// available. The caller must retry maintenance after draining the sink.
     pub receipt_terminals_deferred: bool,
@@ -756,12 +899,52 @@ struct IngressPreflight {
     inbound_link_id: Option<LinkId>,
     before_duplicate: u64,
     before_invalid: u64,
+    metadata: IngressMetadata,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TerminalCommitCounts {
     delivered: usize,
     timed_out: usize,
+    first_delivered_tag: Option<u64>,
+    delivered_tags_consistent: bool,
+    first_timed_out_tag: Option<u64>,
+    timed_out_tags_consistent: bool,
+}
+
+impl Default for TerminalCommitCounts {
+    fn default() -> Self {
+        Self {
+            delivered: 0,
+            timed_out: 0,
+            first_delivered_tag: None,
+            delivered_tags_consistent: true,
+            first_timed_out_tag: None,
+            timed_out_tags_consistent: true,
+        }
+    }
+}
+
+impl TerminalCommitCounts {
+    fn record_delivered(&mut self, receipt: ReceiptId) {
+        let tag = correlation_tag(receipt.as_bytes());
+        if let Some(first) = self.first_delivered_tag {
+            self.delivered_tags_consistent &= first == tag;
+        } else {
+            self.first_delivered_tag = Some(tag);
+            self.delivered_tags_consistent = true;
+        }
+    }
+
+    fn record_timed_out(&mut self, receipt: ReceiptId) {
+        let tag = correlation_tag(receipt.as_bytes());
+        if let Some(first) = self.first_timed_out_tag {
+            self.timed_out_tags_consistent &= first == tag;
+        } else {
+            self.first_timed_out_tag = Some(tag);
+            self.timed_out_tags_consistent = true;
+        }
+    }
 }
 
 struct NativeReceiptSink<'a, S> {
@@ -819,10 +1002,12 @@ impl<R: ReceiptTerminalReservation> rete_stack::ReceiptTerminalReservation
         let terminal = match terminal {
             rete_stack::ReceiptTerminal::Delivered(_) => {
                 self.committed.delivered = self.committed.delivered.saturating_add(1);
+                self.committed.record_delivered(self.candidate.receipt());
                 ReceiptTerminal::Delivered(self.candidate)
             }
             rete_stack::ReceiptTerminal::Failed(_) => {
                 self.committed.timed_out = self.committed.timed_out.saturating_add(1);
+                self.committed.record_timed_out(self.candidate.receipt());
                 ReceiptTerminal::TimedOut(self.candidate)
             }
         };
@@ -973,7 +1158,12 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             Err(report) => return report,
         };
         let native = self.core.handle_ingest(raw, now, interface.0, rng);
-        self.finish_ingest(native, preflight, interface, 0)
+        self.finish_ingest(
+            native,
+            preflight,
+            interface,
+            TerminalCommitCounts::default(),
+        )
     }
 
     /// Process one complete base-MTU packet with allocation-atomic receipt
@@ -1017,43 +1207,54 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                 return Err(ReceiptReservationUnavailable);
             }
         };
-        let committed = native_sink.committed.delivered + native_sink.committed.timed_out;
-        Ok(self.finish_ingest(native, preflight, interface, committed))
+        Ok(self.finish_ingest(native, preflight, interface, native_sink.committed))
     }
 
     fn preflight_ingest(&mut self, raw: &[u8]) -> Result<IngressPreflight, IngressReport> {
         self.ingress.seen = self.ingress.seen.saturating_add(1);
 
         if raw.len() > rete_core::MTU {
-            return Err(self.reject(IngressDropReason::PacketTooLong {
-                actual: raw.len(),
-                maximum: rete_core::MTU,
-            }));
+            return Err(self.reject(
+                IngressDropReason::PacketTooLong {
+                    actual: raw.len(),
+                    maximum: rete_core::MTU,
+                },
+                IngressMetadata::default(),
+            ));
         }
 
         let packet = match Packet::parse(raw) {
             Ok(packet) => packet,
-            Err(error) => return Err(self.reject(IngressDropReason::Malformed(error))),
+            Err(error) => {
+                return Err(self.reject(
+                    IngressDropReason::Malformed(error),
+                    IngressMetadata::default(),
+                ));
+            }
         };
+        let metadata = IngressMetadata::parsed(&packet);
 
         if packet.dest_type == DestType::Link && is_resource_context(packet.context) {
-            return Err(self.reject(IngressDropReason::ResourceIngressDisabled {
-                context: packet.context,
-            }));
+            return Err(self.reject(
+                IngressDropReason::ResourceIngressDisabled {
+                    context: packet.context,
+                },
+                metadata,
+            ));
         }
 
         if let Err(reason) = self.preflight_header2(&packet) {
-            return Err(self.reject(reason));
+            return Err(self.reject(reason, metadata));
         }
 
         if let Err(reason) = self.preflight_h1_reverse_admission(&packet) {
-            return Err(self.reject(reason));
+            return Err(self.reject(reason, metadata));
         }
 
         let inbound_link_id = if packet.packet_type == PacketType::LinkRequest {
             match self.preflight_link_request(&packet, raw) {
                 Ok(link_id) => link_id,
-                Err(reason) => return Err(self.reject(reason)),
+                Err(reason) => return Err(self.reject(reason, metadata)),
             }
         } else {
             None
@@ -1063,6 +1264,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             inbound_link_id,
             before_duplicate: self.core.transport.stats().packets_dropped_dedup,
             before_invalid: self.core.transport.stats().packets_dropped_invalid,
+            metadata,
         })
     }
 
@@ -1071,7 +1273,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         mut native: IngestOutcome,
         preflight: IngressPreflight,
         interface: InterfaceId,
-        terminal_commits: usize,
+        terminal_commits: TerminalCommitCounts,
     ) -> IngressReport {
         if let Some(link_id) = preflight.inbound_link_id {
             let announced_establishment = native.events.iter().any(|event| {
@@ -1080,7 +1282,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             if announced_establishment && self.core.transport.get_link(&link_id).is_none() {
                 self.ingress.link_state_not_retained =
                     self.ingress.link_state_not_retained.saturating_add(1);
-                return self.reject(IngressDropReason::LinkStateNotRetained);
+                return self.reject(IngressDropReason::LinkStateNotRetained, preflight.metadata);
             }
         }
 
@@ -1120,15 +1322,73 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         } else if after.packets_dropped_invalid > preflight.before_invalid {
             self.ingress.native_invalid = self.ingress.native_invalid.saturating_add(1);
             IngressDisposition::NativeInvalid
-        } else if native.events.is_empty() && native.packets.is_empty() && terminal_commits == 0 {
+        } else if native.events.is_empty()
+            && native.packets.is_empty()
+            && terminal_commits.delivered == 0
+            && terminal_commits.timed_out == 0
+        {
             self.ingress.native_no_outcome = self.ingress.native_no_outcome.saturating_add(1);
             IngressDisposition::NoObservableOutcome
         } else {
             IngressDisposition::Processed
         };
 
+        let emitted_packets = native.packets.len();
+        let mut generated_proof_actions = 0_usize;
+        let mut generated_proof_tag = None;
+        let mut generated_proof_tags_consistent = true;
+        for outbound in &native.packets {
+            if outbound.routing != PacketRouting::SourceInterface {
+                continue;
+            }
+            let Ok(packet) = Packet::parse(&outbound.data) else {
+                continue;
+            };
+            // Explicit destination/channel delivery proofs use CONTEXT_NONE
+            // and start with the covered packet hash. LRPROOF is also a
+            // source-interface PROOF, but its payload starts with handshake
+            // signature material and must not enter delivery correlation.
+            if packet.packet_type != PacketType::Proof || packet.context != CONTEXT_NONE {
+                continue;
+            }
+            generated_proof_actions = generated_proof_actions.saturating_add(1);
+            let Some(covered_hash) = packet.payload.get(..32) else {
+                continue;
+            };
+            let tag = correlation_tag(covered_hash);
+            if let Some(first) = generated_proof_tag {
+                generated_proof_tags_consistent &= first == tag;
+            } else {
+                generated_proof_tag = Some(tag);
+            }
+        }
+        let (emitted_packets, emitted_saturated) = saturating_u16(emitted_packets);
+        let (generated_proof_actions, proof_saturated) = saturating_u16(generated_proof_actions);
+        let (delivered_receipt_terminals, delivered_saturated) =
+            saturating_u16(terminal_commits.delivered);
+        let (timed_out_receipt_terminals, timed_out_saturated) =
+            saturating_u16(terminal_commits.timed_out);
+        let metadata = IngressMetadata {
+            emitted_packets,
+            generated_proof_actions,
+            delivered_receipt_terminals,
+            timed_out_receipt_terminals,
+            generated_proof_tag: generated_proof_tag.unwrap_or(0),
+            delivered_receipt_tag: terminal_commits.first_delivered_tag.unwrap_or(0),
+            generated_proof_tag_present: generated_proof_tag.is_some(),
+            delivered_receipt_tag_present: terminal_commits.first_delivered_tag.is_some(),
+            generated_proof_tags_consistent,
+            delivered_receipt_tags_consistent: terminal_commits.delivered_tags_consistent,
+            counts_saturated: emitted_saturated
+                || proof_saturated
+                || delivered_saturated
+                || timed_out_saturated,
+            ..preflight.metadata
+        };
+
         IngressReport {
             disposition,
+            metadata,
             actions: resolve_ingest_actions(native, interface),
         }
     }
@@ -1311,7 +1571,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         Ok(())
     }
 
-    fn reject(&mut self, reason: IngressDropReason) -> IngressReport {
+    fn reject(&mut self, reason: IngressDropReason, metadata: IngressMetadata) -> IngressReport {
         self.ingress.rejected = self.ingress.rejected.saturating_add(1);
         match &reason {
             IngressDropReason::PacketTooLong { .. } => {
@@ -1349,6 +1609,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         }
         IngressReport {
             disposition: IngressDisposition::Rejected(reason),
+            metadata,
             actions: NodeActions::default(),
         }
     }
@@ -1638,6 +1899,8 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         ReceiptTickReport {
             actions: self.finish_tick(native.outcome),
             timed_out_receipts: native.failed_receipts,
+            timed_out_receipt_tag: native_sink.committed.first_timed_out_tag,
+            timed_out_receipt_tags_consistent: native_sink.committed.timed_out_tags_consistent,
             receipt_terminals_deferred: native.receipt_notifications_deferred,
         }
     }
@@ -1673,6 +1936,20 @@ fn destination_type_matches(wire: DestType, registered: DestinationType) -> bool
             | (DestType::Plain, DestinationType::Plain)
             | (DestType::Link, DestinationType::Link)
     )
+}
+
+fn saturating_u16(value: usize) -> (u16, bool) {
+    match u16::try_from(value) {
+        Ok(value) => (value, false),
+        Err(_) => (u16::MAX, true),
+    }
+}
+
+fn correlation_tag(bytes: &[u8]) -> u64 {
+    let prefix: [u8; 8] = bytes[..8]
+        .try_into()
+        .expect("Reticulum covered-packet and receipt hashes are at least eight bytes");
+    u64::from_le_bytes(prefix)
 }
 
 fn resolve_ingest_actions(native: IngestOutcome, source: InterfaceId) -> NodeActions {
@@ -1948,6 +2225,13 @@ mod tests {
 
         let response = responder.ingest(&request.bytes, 100, InterfaceId(7), &mut rng);
         assert_eq!(response.disposition, IngressDisposition::Processed);
+        assert_eq!(
+            response.metadata.wire_packet_type(),
+            Some(PacketType::LinkRequest)
+        );
+        assert_eq!(response.metadata.emitted_packets(), 1);
+        assert_eq!(response.metadata.generated_proof_actions(), 0);
+        assert_eq!(response.metadata.generated_proof_tag(), None);
         assert!(response.actions.events.is_empty());
         assert_eq!(
             responder.metrics().ingress.premature_link_events_suppressed,
@@ -2218,6 +2502,58 @@ mod tests {
         assert_eq!(report.disposition, IngressDisposition::NoObservableOutcome);
         assert!(report.actions.packets.is_empty());
         assert_eq!(endpoint.metrics().ingress.endpoint_forward_suppressed, 1);
+    }
+
+    #[test]
+    fn forwarded_transport_proof_is_not_classified_as_locally_generated() {
+        let mut transport = TestNode::new(
+            identity(27),
+            "reticulum",
+            &["transport"],
+            EmbeddedNodeConfig::transport(),
+        )
+        .unwrap();
+        let mut rng = CounterRng::default();
+        let destination = node(28).destination_hash();
+        transport
+            .register_peer(&identity(28), "reticulum", &["embedded"], 0)
+            .unwrap();
+        let mut data = [0u8; rete_core::MTU];
+        let data_len = PacketBuilder::new(&mut data)
+            .packet_type(PacketType::Data)
+            .dest_type(DestType::Single)
+            .destination_hash(destination.as_ref())
+            .context(0)
+            .payload(b"establish reverse entry")
+            .build()
+            .unwrap();
+        let covered_hash = Packet::parse(&data[..data_len]).unwrap().compute_hash();
+        let forwarded_data = transport.ingest(&data[..data_len], 1, InterfaceId(1), &mut rng);
+        assert_eq!(forwarded_data.disposition, IngressDisposition::Processed);
+
+        let mut raw = [0u8; rete_core::MTU];
+        let mut proof_payload = [0u8; 96];
+        proof_payload[..32].copy_from_slice(&covered_hash);
+        let len = PacketBuilder::new(&mut raw)
+            .packet_type(PacketType::Proof)
+            .dest_type(DestType::Single)
+            .destination_hash(&covered_hash[..rete_core::TRUNCATED_HASH_LEN])
+            .context(0)
+            .payload(&proof_payload)
+            .build()
+            .unwrap();
+
+        let report = transport.ingest(&raw[..len], 2, InterfaceId(2), &mut rng);
+
+        assert_eq!(report.disposition, IngressDisposition::Processed);
+        assert_eq!(report.actions.packets.len(), 1);
+        assert_eq!(report.metadata.emitted_packets(), 1);
+        assert_eq!(report.metadata.generated_proof_actions(), 0);
+        assert_eq!(report.metadata.generated_proof_tag(), None);
+        assert_eq!(
+            report.actions.packets[0].target(),
+            TxTarget::AllExcept(InterfaceId(2))
+        );
     }
 
     #[test]
@@ -2648,6 +2984,17 @@ mod tests {
             &mut rng,
         );
         assert_eq!(received.disposition, IngressDisposition::Processed);
+        assert_eq!(received.metadata.wire_packet_type(), Some(PacketType::Data));
+        assert_eq!(received.metadata.emitted_packets(), 1);
+        assert_eq!(received.metadata.generated_proof_actions(), 1);
+        assert_eq!(received.metadata.delivered_receipt_terminals(), 0);
+        assert_eq!(received.metadata.timed_out_receipt_terminals(), 0);
+        let proof_tag = received
+            .metadata
+            .generated_proof_tag()
+            .expect("one direct proof action has a correlation tag");
+        assert!(received.metadata.generated_proof_tags_consistent());
+        assert!(!received.metadata.counts_saturated());
         assert!(received.actions.events.iter().any(|event| matches!(
             event,
             NodeEvent::DataReceived { payload, .. } if payload == b"announced and proven"
@@ -2669,6 +3016,17 @@ mod tests {
             .ingest_with_receipt_sink(proof.bytes(), 102, InterfaceId(4), &mut rng, &mut sink)
             .unwrap();
         assert_eq!(delivered.disposition, IngressDisposition::Processed);
+        assert_eq!(
+            delivered.metadata.wire_packet_type(),
+            Some(PacketType::Proof)
+        );
+        assert_eq!(delivered.metadata.emitted_packets(), 0);
+        assert_eq!(delivered.metadata.generated_proof_actions(), 0);
+        assert_eq!(delivered.metadata.delivered_receipt_terminals(), 1);
+        assert_eq!(delivered.metadata.timed_out_receipt_terminals(), 0);
+        assert_eq!(delivered.metadata.delivered_receipt_tag(), Some(proof_tag));
+        assert!(delivered.metadata.delivered_receipt_tags_consistent());
+        assert!(!delivered.metadata.counts_saturated());
         assert_eq!(sink.terminals, [ReceiptTerminal::Delivered(expected)]);
         assert_eq!(sender.metrics().capacity.receipts.used, 0);
     }
@@ -2774,6 +3132,8 @@ mod tests {
 
         let deferred = sender.tick_with_receipt_sink(131, &mut rng, &mut sink);
         assert_eq!(deferred.timed_out_receipts, 0);
+        assert_eq!(deferred.timed_out_receipt_tag, None);
+        assert!(deferred.timed_out_receipt_tags_consistent);
         assert!(deferred.receipt_terminals_deferred);
         assert_eq!(sink.attempted, [expected]);
         assert!(sink.terminals.is_empty());
@@ -2786,6 +3146,11 @@ mod tests {
         sink.refuse = false;
         let completed = sender.tick_with_receipt_sink(132, &mut rng, &mut sink);
         assert_eq!(completed.timed_out_receipts, 1);
+        assert_eq!(
+            completed.timed_out_receipt_tag,
+            Some(correlation_tag(prepared.receipt().as_bytes()))
+        );
+        assert!(completed.timed_out_receipt_tags_consistent);
         assert!(!completed.receipt_terminals_deferred);
         assert!(
             completed
@@ -2797,6 +3162,51 @@ mod tests {
         assert_eq!(sink.attempted, [expected, expected]);
         assert_eq!(sink.terminals, [ReceiptTerminal::TimedOut(expected)]);
         assert_eq!(sink.active_reservations, 0);
+        assert_eq!(sender.metrics().capacity.receipts.used, 0);
+    }
+
+    #[test]
+    fn receipt_timeout_tags_report_a_mixed_maintenance_batch() {
+        let mut sender = node(88);
+        let receiver = node(89);
+        sender
+            .register_peer(&identity(89), "reticulum", &["embedded"], 100)
+            .unwrap();
+        let mut rng = CounterRng::default();
+        let mut output = [0u8; RNS_MTU];
+        let first = sender
+            .prepare_data_into(
+                &receiver.destination_hash(),
+                b"first timeout",
+                100,
+                &mut rng,
+                &mut output,
+            )
+            .unwrap();
+        let second = sender
+            .prepare_data_into(
+                &receiver.destination_hash(),
+                b"second timeout",
+                100,
+                &mut rng,
+                &mut output,
+            )
+            .unwrap();
+        let first_tag = correlation_tag(first.receipt().as_bytes());
+        let second_tag = correlation_tag(second.receipt().as_bytes());
+        assert_ne!(first_tag, second_tag);
+
+        let mut sink = RecordingReceiptSink::default();
+        let completed = sender.tick_with_receipt_sink(131, &mut rng, &mut sink);
+
+        assert_eq!(completed.timed_out_receipts, 2);
+        assert!(matches!(
+            completed.timed_out_receipt_tag,
+            Some(tag) if tag == first_tag || tag == second_tag
+        ));
+        assert!(!completed.timed_out_receipt_tags_consistent);
+        assert!(!completed.receipt_terminals_deferred);
+        assert_eq!(sink.terminals.len(), 2);
         assert_eq!(sender.metrics().capacity.receipts.used, 0);
     }
 
@@ -2825,6 +3235,11 @@ mod tests {
             .unwrap();
         let receipt = ReceiptId(Packet::parse(message.bytes()).unwrap().compute_hash());
         let proof_actions = responder.ingest(message.bytes(), 110, InterfaceId(1), &mut rng);
+        let generated_tag = proof_actions
+            .metadata
+            .generated_proof_tag()
+            .expect("channel PROOF carries the explicit covered packet hash");
+        assert_eq!(proof_actions.metadata.generated_proof_actions(), 1);
         let proof = proof_actions
             .actions
             .packets
@@ -2844,6 +3259,9 @@ mod tests {
             receipt,
         };
         assert_eq!(report.disposition, IngressDisposition::Processed);
+        assert_eq!(report.metadata.delivered_receipt_terminals(), 1);
+        assert_eq!(report.metadata.timed_out_receipt_terminals(), 0);
+        assert_eq!(report.metadata.delivered_receipt_tag(), Some(generated_tag));
         assert_eq!(sink.attempted, [expected]);
         assert_eq!(sink.terminals, [ReceiptTerminal::Delivered(expected)]);
         assert_eq!(initiator.metrics().capacity.channel_receipts.used, 0);

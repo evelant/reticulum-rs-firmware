@@ -1398,6 +1398,7 @@ fn validate_e290_inbox_commit_fault_hil_sources(
 }
 
 const E290_RUNTIME_MEASUREMENT_EVIDENCE: &str = "RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE";
+const E290_RUNTIME_PROOF_TRACE_EVIDENCE: &str = "RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE";
 const E290_RUNTIME_MEASUREMENT_STACK_MARKER: &str = "RETICULUM_RUNTIME_MEASUREMENT_STACK_MARKER";
 const E290_RUNTIME_MEASUREMENT_HOOKS: [&str; 2] = ["_esp_alloc_alloc", "_esp_alloc_dealloc"];
 
@@ -1491,6 +1492,19 @@ fn validate_e290_runtime_measurement_hil_sources(
             "the runtime-measurement evidence static must be retained with #[used]".to_owned(),
         );
     }
+    let proof_trace_definition = format!("pub static {E290_RUNTIME_PROOF_TRACE_EVIDENCE}");
+    if runtime.matches(&proof_trace_definition).count() != 1 {
+        return Err(
+            "the safe runtime-measurement module must own one public proof-trace evidence static"
+                .to_owned(),
+        );
+    }
+    let proof_trace_position = runtime
+        .find(&proof_trace_definition)
+        .expect("the proof-trace evidence definition count was checked");
+    if !immediately_preceded_by_exact_attribute(runtime, proof_trace_position, "#[used]") {
+        return Err("the proof-trace evidence static must be retained with #[used]".to_owned());
+    }
     if runtime.contains("no_mangle") {
         return Err(
             "the safe runtime-measurement evidence must retain its identifier without no_mangle"
@@ -1533,6 +1547,7 @@ fn validate_e290_runtime_measurement_hil_sources(
     let tracked_identifiers = [
         "runtime_measurement",
         E290_RUNTIME_MEASUREMENT_EVIDENCE,
+        E290_RUNTIME_PROOF_TRACE_EVIDENCE,
         E290_RUNTIME_MEASUREMENT_STACK_MARKER,
         E290_RUNTIME_MEASUREMENT_HOOKS[0],
         E290_RUNTIME_MEASUREMENT_HOOKS[1],
@@ -1553,6 +1568,11 @@ fn validate_e290_runtime_measurement_hil_sources(
             E290_RUNTIME_MEASUREMENT_EVIDENCE,
             SAFE_MODULE,
             "static RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE",
+        ),
+        (
+            E290_RUNTIME_PROOF_TRACE_EVIDENCE,
+            SAFE_MODULE,
+            "static RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE",
         ),
         (
             E290_RUNTIME_MEASUREMENT_STACK_MARKER,
@@ -8794,13 +8814,17 @@ pub mod runtime_measurement;
 mod runtime_measurement_stack_hil;
 
 #[cfg(feature = "runtime-measurement-hil")]
-use product::runtime_measurement::RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE;
+use product::runtime_measurement::{
+    RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE, RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE,
+};
 
 fn main() {
     #[cfg(feature = "runtime-measurement-hil")]
     let _monitor = runtime_measurement_stack_hil::Monitor::initialize();
     #[cfg(feature = "runtime-measurement-hil")]
     RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.sample();
+    #[cfg(feature = "runtime-measurement-hil")]
+    RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE.sample();
 }
 
 #[cfg(feature = "runtime-measurement-hil")]
@@ -8825,6 +8849,9 @@ impl Evidence {
 
 #[used]
 pub static RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE: Evidence = Evidence;
+
+#[used]
+pub static RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE: Evidence = Evidence;
 "#;
         let stack = r#"#[used]
 #[unsafe(no_mangle)]
@@ -8846,6 +8873,8 @@ fn sample(layout: Layout) {
         let radio = r#"fn run() {
     #[cfg(feature = "runtime-measurement-hil")]
     product::runtime_measurement::RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.sample();
+    #[cfg(feature = "runtime-measurement-hil")]
+    product::runtime_measurement::RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE.sample();
 }
 "#;
         let build = "CARGO_FEATURE_RUNTIME_MEASUREMENT_HIL\n\
@@ -8915,6 +8944,17 @@ fn sample(layout: Layout) {
             validate_e290_runtime_measurement_hil_sources(&ungated_evidence_use, &build).is_err()
         );
 
+        let ungated_proof_trace_use = mutate("/radio_task.rs", &|source| {
+            source.replace(
+                "    #[cfg(feature = \"runtime-measurement-hil\")]\n    product::runtime_measurement::RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE.sample();",
+                "    product::runtime_measurement::RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE.sample();",
+            )
+        });
+        assert!(
+            validate_e290_runtime_measurement_hil_sources(&ungated_proof_trace_use, &build)
+                .is_err()
+        );
+
         let ungated_hook = mutate("/main.rs", &|source| {
             source.replace(
                 "#[cfg(feature = \"runtime-measurement-hil\")]\n#[unsafe(no_mangle)]\nfn _esp_alloc_alloc",
@@ -8928,6 +8968,15 @@ fn sample(layout: Layout) {
         });
         assert!(
             validate_e290_runtime_measurement_hil_sources(&unretained_evidence, &build).is_err()
+        );
+        let unretained_proof_trace = mutate("/runtime_measurement.rs", &|source| {
+            source.replace(
+                "#[used]\npub static RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE",
+                "pub static RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE",
+            )
+        });
+        assert!(
+            validate_e290_runtime_measurement_hil_sources(&unretained_proof_trace, &build).is_err()
         );
         let unmangled_evidence = mutate("/runtime_measurement.rs", &|source| {
             source.replace("#[used]\n", "#[used]\n#[unsafe(no_mangle)]\n")

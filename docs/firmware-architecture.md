@@ -30,9 +30,9 @@ interrupt-linearized reset guard, and one exact-next decoder/sequence space for
 initialization control and all four live-pairing operations. The application
 also quarantines native USB at its earliest Rust entry before detached product
 initialization and canonical reattachment. Current source passes 129 default
-E290 host-library tests, 135 with the opt-in inbox commit-fault HIL feature, 141
+E290 host-library tests, 135 with the opt-in inbox commit-fault HIL feature, 145
 with the opt-in runtime-measurement HIL feature, 49 focused host-client tests
-inside the 227-test xtask suite, and target gates.
+inside the 231-test xtask suite, and target gates.
 Both powered boards returned `initialization-required` and
 `physical-presence-required`; live Begin created no host key before physical
 presence, and full USB re-enumeration restored a fresh sequence-zero epoch.
@@ -252,7 +252,7 @@ Claims in READMEs were not treated as proof of embedded portability.
 | `reticulum-radio-tx-dispatch`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The firmware-includable persistent serializer consumes the interface router's ticketed DATA/ordinary actor union and retains each ticket while keeping the two typestate families separate over one `SoleRnodeRadio`. It performs randomized initial/retry backoff and CAD, validates the actor-stamped interface configuration, maps the active radio fingerprint and aggregate airtime to node-core's opaque resource-and-units permit, revalidates before permit negotiation and after grant, exposes bytes once, and makes one logical one/two-frame RNode transmit. Every post-byte-exposure DATA completion, including cancellation and fault recovery, is gated with its router ticket and exact authorized-frame observation until an identical durable acknowledgement arrives. Request pressure and cancelled waits retain ownership; unexpected or mismatched acknowledgements fail closed while retaining both observations. `DispatchReport` is copy-only diagnosis, never ownership. RX start remains an explicit idle scheduler choice even when TX is queued, and phase-aware completion-capacity readiness never moves a retained completion. Its watchdog, final-frame metadata and fail-closed recovery retain exact owners/control values across completion pressure, partial or impossible progress, stale/lost replies, configuration drift, invalid RX metadata, radio faults, and dropped CAD/TX/RX futures. Host, strict Clippy, warning-free rustdoc, generic no-std and Xtensa gates pass. Its exact direct-dependency policy keeps Embassy Futures test-only. The first permanent E290 graph instantiates it as the sole LoRa actor dispatcher; target build/review gates and one bounded powered DATA/peer-proof path pass, while powered fault/soak/full qualification remains open |
 | `reticulum-tx-supervisor`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | `NodeInterfaceSupervisor` is the production portable aggregate: it owns the sole node-core, authoritative interface router, DATA and ordinary coordinators, one permit server per family and actor, and one shared policy. Its sealed fixed-pool ingress validates queue origin, current lease, online state and logical MTU, recycles the exact buffer, retries only a full return queue and `Busy` action pressure, and exposes every other buffer-return or action residue as an exact takeable terminal owner for quarantine. A bounded round-robin pass fairly scans completions, both coordinators and all permit services. The E290 node graph composes this aggregate; the older async `TxSupervisor` remains only a legacy RF-inert DATA-machine test aggregate |
 | `reticulum-heltec-vision-master-e290-node`, host and ESP32-S3 Xtensa | Pass (current source/test composition plus bounded powered end-to-end proofs) | The permanent graph composes the transport-neutral node, concrete LoRa actor, sole USB/GPIO owner, credential initialization and live pairing, authenticated session/admission, static request/reply handoff, current-authority logical dispatch, and the operation-scoped raw-RNS inbox qualification owner. The deliberately minimal USB profile permits one handshake per connection and one request in flight; a fault is terminal until reset/re-enumeration. It defers resumption, protocol retries, close records, encryption, rate limiting/attempt policy, repeated handshake attempts, and concurrency. The session/admission boundary is bearer-neutral for later BLE/Wi-Fi adapters and is not a Reticulum packet interface; concurrent bearers still require globally unique bearer-qualified epochs or disjoint reply lanes under one exclusivity coordinator. The powered 751,712-byte API 1.1 merged image matched exact address-zero readbacks on both E290s. One sender retained physical initialization and Active generation 3, then authenticated identity/submission/status operations drove durable DATA over LoRa to the second permanent node and received a valid proof; `Delivered` survived full USB re-enumeration. API 1.2 separately proves one maximum-payload commit, exact raw readback, authenticated status/peek before and after hard reset, drop-newest preservation of item 1, four exact cold-mount quarantine cases, and one opt-in same-boot missing-commit quarantine. Each cold-mount case was followed by one direct DATA/proof path; the HIL triggering path reached `Delivered` before quarantine was observed and does not establish post-quarantine RF. The runtime-measurement HIL adds one bounded durable maximum-payload commit on each board plus workload-specific heap, stack-watermark, mount/commit, loop-gap and actor-watchdog observations. None proves sustained routing or a physical power cut. Exact Pending/Abort readbacks, physical inbox cuts, suspend/resume, sustained/default-image runtime bounds, and full qualification remain open. Current test counts, size measurements, image digests, and exact powered evidence are recorded in the E290 runbook. |
-| `reticulum-heltec-vision-master-e290-node --features runtime-measurement-hil` | Pass (bounded powered measurement HIL; not a product mode) | The exact 768,624-byte HIL image matched both powered address-zero readbacks. Across baseline and two traffic phases with one maximum-payload durable inbound commit per board, it observed 988 bytes maximum registered-allocator use, no external/PSRAM allocator use, no failed allocation, 72,212 bytes raw painted stack margin, a 548,148 us maximum commit, a 1,065,406 us worst radio-loop gap, and zero RX/CAD/TX actor-watchdog counters. The stack value is a modified-word watermark rather than minimum-SP proof, and the 52,752-byte maximum compiler frame leaves a conservative 19,460-byte derived margin before interrupt/nesting allowance. CI now relinks isolated default/HIL images with compiler stack-size metadata, then the project-local ELF inspector enforces 52,752-byte frame ceilings, 170,984/170,480-byte usable-stack floors and exact 60-byte guard offsets. Allocator hooks, atomic updates, a roughly 170 KiB periodic stack scan, and debugger halts make these instrumented-workload observations rather than default-image timing. Only phase A reached sender `Delivered`; phase B committed at its receiver but ended in sender `delivery-timeout`. Sustained/forwarded traffic, concurrent durable work, pressure/failure cases, proof-timeout diagnosis, and production-image bounds remain open. |
+| `reticulum-heltec-vision-master-e290-node --features runtime-measurement-hil` | Pass (bounded powered measurement plus build-qualified proof trace; not a product mode) | The earlier exact 768,624-byte HIL matched both powered address-zero readbacks and bounded heap, stack, mount/commit timing, loop gaps and radio watchdogs across one maximum-payload commit per board. Only phase A reached sender `Delivered`; phase B committed at its receiver but ended in `delivery-timeout`. The final 778,000-byte extension preserves the 256-byte runtime ABI and adds a separate 192-byte trace for logical RX/handoff, RNS/proof/receipt correlation, confirmed/not-confirmed-success TX-wrapper outcomes, and Ready-gate inbox-admission boundaries. It passes build, graph, ELF and static-stack gates but is not yet flashed. Its 777,600-byte predecessor passed exact readback and a boot-only baseline on `3e:88`: 72,020 bytes raw painted margin, 19,268 bytes after the unchanged 52,752-byte maximum frame, no allocation/watchdog/trace fault, and zero pre-traffic proof/receipt observations; that predecessor still reserved the final TX-outcome words. CI requires 170,984/170,288-byte default/HIL usable-stack floors, exact 60-byte guards, no trace symbol in default and one valid initialized trace symbol in HIL. Four clean direction-balanced trials remain before any proof scheduling or radio correction; sustained/forwarded traffic, concurrent durable work, pressure/failure cases and production-image bounds also remain open. |
 | `reticulum-storage-model`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The allocation-free semantic journal model enforces canonical schema-2 records, exact authorization snapshots, principal-scoped idempotency across credential rotation, exact preflight/apply plans, monotonic conservative transmission uncertainty, and fail-closed complete replay; 26 integration tests plus one compile-fail doctest cover the boundary, which intentionally makes no physical-durability or flash-capacity claim |
 | `reticulum-submission-projector`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The fixed-capacity projector correlates volatile attempts with semantic records and withholds terminal/recovery acknowledgement behind exact persistence replies; 24 focused tests cover ordering, retries, native authorized-frame conversion, proof/timeout-before-frame races, faults and conservative reboot behavior. Completed slots deliberately do not retire without a future exact node-owner quiescence proof |
 | `reticulum-storage-journal`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The allocation-free backend fixes the 1 MiB/two-bank physical format 1 with semantic schema 2, full-bank replay, commit-last exact-readback append, a 162-acceptance lifetime ceiling, and source-preserving handoff compaction. Valid schema-1 manifests return typed unsupported-version with zero mutation only after the normal two-bank trajectory checks. An independently authorized first-provision API resumes every canonical A1 prefix/commit cut without erasing and rejects nonempty/off-trajectory media; 34 fake-NOR tests cover provisioning, semantic-version rejection, torn/lost append and compaction. The historical powered HIL qualifies only the unchanged physical clean path/software-reset behavior at its schema-1 source; schema-2 HIL remains to rerun |
@@ -488,7 +488,7 @@ retains its epoch and sequence until bus reset; broader powered lifecycle
 qualification is still required.
 
 The E290 library's 129-test default host suite, its 135-test opt-in inbox
-commit-fault HIL profile, and its 141-test opt-in runtime-measurement HIL
+commit-fault HIL profile, and its 145-test opt-in runtime-measurement HIL
 profile now qualify that three-task software composition,
 including the causal control/live frontier, shared pre-
 authentication decoder and sequence gate, exact durable reply correlation,
@@ -1849,15 +1849,44 @@ margin was 72,212 bytes, or 19,460 bytes after conservatively subtracting the
 largest 52,752-byte compiler-emitted frame; interrupt/nesting allowance is still
 unquantified. The release gate requires final little-endian Xtensa executables
 with resolved compiler stack-size records, caps the maximum frame at that
-52,752-byte value, and preserves the default/HIL linked usable stacks at
-170,984/170,480 bytes with exact 60-byte guard offsets. This guards the reviewed
-static inputs to the 19,460-byte calculation; it does not continuously reproduce
-the powered watermark. The zero PSRAM allocation observation does not imply the full
-appliance should avoid PSRAM. It reflects the current allocator order and
+52,752-byte value, and preserves the current default/HIL linked usable stacks
+at 170,984/170,288 bytes with exact 60-byte guard offsets. This preserves the
+static inputs to the predecessor baseline's 19,268-byte calculation; it does
+not continuously reproduce the powered watermark. The zero PSRAM allocation
+observation does not imply the full appliance should avoid PSRAM. It reflects
+the current allocator order and
 workload and reinforces the need for explicit placement of future Resource,
 LXMF, NomadNet, SPA and wireless-stack buffers. Extend this evidence under
 sustained/forwarded traffic, concurrent stores, low-memory/failing-allocation
 pressure and default-image diagnostics before selecting product quotas.
+
+The subsequent proof-timeout diagnostic slice keeps the 256-byte runtime ABI
+unchanged and adds a separate HIL-only 192-byte proof trace. Portable RNS
+metadata records packet class, generated explicit delivery-proof count/tag,
+and delivered terminal count/tag after action ownership moves; the E290 trace
+adds logical radio reassembly/handoff, receipt timeout, action-pressure
+observations, correlation fault, confirmed/not-confirmed-success TX-wrapper
+outcomes, and Ready-gate inbox-admission boundaries. It deliberately does not
+couple these protocol/storage facts to LoRa: only the reassembly/enqueue and TX
+execution frontiers are interface-actor-specific. LRPROOF and forwarded
+transport proofs cannot masquerade as locally generated delivery proofs.
+Compact 64-bit tags are bounded-test correlation aids, not security evidence;
+the TX wrapper report itself carries no proof tag, so exact attribution depends
+on the clean single-action fixture.
+
+The current linked default/HIL pair keeps the 52,752-byte maximum frame and
+170,984-byte default usable stack; the initialized proof record moves the HIL
+usable stack down exactly 192 bytes to 170,288. The default ELF has no
+proof-trace symbol; the HIL ELF has exactly one initialized 192-byte record.
+The final 778,000-byte HIL image passes build-only qualification. Its
+777,600-byte predecessor matched a powered `3e:88` readback and reported 72,020
+bytes of painted margin, or 19,268 bytes after the maximum-frame deduction,
+with no watchdog expiry, failed allocation, saturation, correlation, or
+trace-order fault. That predecessor retained words 45 and 46 as zeros and does
+not qualify the final TX-outcome instrumentation. The baseline validates the
+rest of the diagnostic mechanism only. Exact readback of the final image and
+four clean, direction-balanced maximum-payload trials remain required before
+changing proof scheduling, retry, or radio receive behavior.
 
 Current `esp-radio` documentation puts ordinary Wi-Fi modes in roughly the 47–63 KiB heap range before the rest of this product; coexistence adds more dynamic pressure. Establish release gates for image size, static RAM, idle free heap, minimum-ever heap, allocation failures, and stack high-water marks. A working build that survives only under ideal traffic is not a milestone pass.
 
@@ -2482,9 +2511,9 @@ CAD policy, formal electrical/RF, range, or regional release gates.
    immediate and post-capture readbacks. Do not infer permanent-node, storage,
    API, multi-hop, range, fault or soak behavior from that separate fixture.
    Keep the Tracker pair as the second radio regression fixture.
-3. Preserve the 129-test default, 135-test commit-fault HIL, and 141-test
+3. Preserve the 129-test default, 135-test commit-fault HIL, and 145-test
    runtime-measurement HIL E290 host-library compositions, 49 focused
-   host-client, 227-test xtask, 41-test Rete-
+   host-client, 231-test xtask, 43-test Rete-
    integration, and 17-test inbox-store gates,
    including credential boot
    classification/order, the authenticated
@@ -2502,8 +2531,8 @@ CAD policy, formal electrical/RF, range, or regional release gates.
    next sequencing, reset-generation/pull-off/RAM-scrub guard, shared control/
    live decoder, causal frontier, and bounded command/reply handoffs. Preserve
    the bounded powered status/physical-presence-required, full re-enumeration,
-   exact preceding-image readback, hard-reset reattachment, and current one-board
-   initialize/pair/Active-readback/reboot results; next complete exact
+   exact preceding-image readback, hard-reset reattachment, and predecessor
+   one-board initialize/pair/Active-readback/reboot results; next complete exact
    Pending/Abort readbacks, mutation ambiguity/fault cuts, the host reset
    compatibility matrix, and suspend/resume qualification.
    Preserve
