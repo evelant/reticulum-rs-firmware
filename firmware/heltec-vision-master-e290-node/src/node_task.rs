@@ -20,6 +20,10 @@ use reticulum_device_api_pairing_policy::{
     MonotonicMillis as PairingMillis, PolicyEvent,
 };
 use reticulum_device_api_session::AuthenticatedGrant;
+#[cfg(feature = "runtime-measurement-hil")]
+use reticulum_heltec_vision_master_e290_node::runtime_measurement::{
+    OperationKind as RuntimeOperationKind, RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE,
+};
 use reticulum_heltec_vision_master_e290_node::{
     announce_time::BootAnnounceClock,
     authenticated_api_node::AuthenticatedApiDispatchFailureKind,
@@ -306,8 +310,17 @@ pub async fn run(
     let mut pairing = PairingNodeState::new();
     let mut authenticated_api_state = AuthenticatedApiNodeState::new();
     let mut pending_inbound: Option<InboxCandidate> = None;
+    #[cfg(feature = "runtime-measurement-hil")]
+    let mut previous_node_loop_us = now_micros();
 
     loop {
+        #[cfg(feature = "runtime-measurement-hil")]
+        {
+            let loop_started_us = now_micros();
+            RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE
+                .record_node_loop_gap(loop_started_us.saturating_sub(previous_node_loop_us));
+            previous_node_loop_us = loop_started_us;
+        }
         let mut progressed = false;
 
         progressed |= step_pairing_frontier(
@@ -365,7 +378,15 @@ pub async fn run(
         if durability_service.can_offer_authorized_frame()
             && let Some(observation) = retained_frame
         {
-            match storage.offer_authorized_frame(observation) {
+            #[cfg(feature = "runtime-measurement-hil")]
+            let authorized_frame_started_us = now_micros();
+            let frame_offer = storage.offer_authorized_frame(observation);
+            #[cfg(feature = "runtime-measurement-hil")]
+            RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_operation(
+                RuntimeOperationKind::AuthorizedFrame,
+                now_micros().saturating_sub(authorized_frame_started_us),
+            );
+            match frame_offer {
                 Some(Ok(FrameOfferProgress::Retain)) => {}
                 Some(Ok(FrameOfferProgress::Durable)) => {
                     retained_frame = None;
@@ -669,13 +690,21 @@ pub async fn run(
                         let deadline = TxLeaseDeadline::new(MonotonicMillis::new(
                             owner_now.saturating_add(config::SUBMISSION_OWNER_LEASE_MS),
                         ));
-                        match storage.drive_submission_step(
+                        #[cfg(feature = "runtime-measurement-hil")]
+                        let submission_started_us = now_micros();
+                        let submission_step = storage.drive_submission_step(
                             supervisor,
                             MonotonicSeconds::new(now_seconds()),
                             MonotonicMillis::new(owner_now),
                             deadline,
                             &mut rng,
-                        ) {
+                        );
+                        #[cfg(feature = "runtime-measurement-hil")]
+                        RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_operation(
+                            RuntimeOperationKind::Submission,
+                            now_micros().saturating_sub(submission_started_us),
+                        );
+                        match submission_step {
                             ProductSubmissionDrive::Runtime(Ok(RuntimeStep::Idle)) => {
                                 durability_service = durability_service.runtime_progress();
                             }
@@ -858,7 +887,15 @@ fn drive_inbound_candidate(
     candidate: InboxCandidate,
 ) -> bool {
     let payload_len = candidate.payload().len();
-    match storage.offer_inbound(candidate) {
+    #[cfg(feature = "runtime-measurement-hil")]
+    let inbound_started_us = now_micros();
+    let admission = storage.offer_inbound(candidate);
+    #[cfg(feature = "runtime-measurement-hil")]
+    RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_operation(
+        RuntimeOperationKind::Inbound,
+        now_micros().saturating_sub(inbound_started_us),
+    );
+    match admission {
         ProductInboundAdmission::Committed(id) => {
             info!(
                 "e290-node stage=rns-inbox-admission status=COMMITTED item_id={} payload_len={payload_len} durability=commit-readback plaintext_at_rest=true proof_semantics=decrypt-only",
@@ -921,7 +958,15 @@ fn step_authenticated_api(
         else {
             unreachable!()
         };
-        match storage.dispatch_authenticated_request(request, identity) {
+        #[cfg(feature = "runtime-measurement-hil")]
+        let api_dispatch_started_us = now_micros();
+        let dispatch = storage.dispatch_authenticated_request(request, identity);
+        #[cfg(feature = "runtime-measurement-hil")]
+        RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_operation(
+            RuntimeOperationKind::ApiDispatch,
+            now_micros().saturating_sub(api_dispatch_started_us),
+        );
+        match dispatch {
             Ok(reply) => *state = AuthenticatedApiNodeState::PendingReply(reply),
             Err(failure) => {
                 let kind = failure.kind();
@@ -1763,6 +1808,11 @@ fn terminal_transition_observation(transition: NodeInterfaceSupervisorTransition
 
 fn now_millis() -> u64 {
     Instant::now().as_millis()
+}
+
+#[cfg(feature = "runtime-measurement-hil")]
+fn now_micros() -> u64 {
+    Instant::now().as_micros()
 }
 
 fn now_seconds() -> u64 {

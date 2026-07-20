@@ -6,8 +6,9 @@ strict review, graph, image-size, and same-image readback gates. Its third task
 owns a USB Serial/JTAG pre-authentication initialization and live-pairing bearer,
 one shared exact-next sequence space, debounced GPIO21 physical presence, an
 interrupt-linearized reset-epoch guard, and an application-entry USB boot
-quarantine. Powered work has completed both the first outbound API 1.1 path and
-the bounded API 1.2 raw-RNS inbox qualification path on the two E290s. In the
+quarantine. Powered work has completed the first outbound API 1.1 path, the
+bounded API 1.2 raw-RNS inbox qualification path, and a separate opt-in
+runtime-measurement slice on the two E290s. In the
 historical API 1.1 image, MAC `ac:a7:04:e1:3e:88` retained its button-confirmed
 empty-store initialization, durable Active generation 3, and host credential;
 MAC `ac:a7:04:e1:3f:88` owned a separate durable node identity. Matching exact
@@ -25,9 +26,14 @@ commit, invalid digest, and foreign-board binding media on the exact ordinary
 image. One opt-in image separately suppressed the terminal commit write and
 its triggering peer DATA/proof exchange completed first. Debugger-bound RAM,
 fresh authenticated API sessions, and raw flash then proved same-boot product
-quarantine. Neither fixture is an electrical
-power cut, and neither qualifies sustained routing, target timing/high-water
-behavior, LXMF, or a full mailbox. Earlier controls returned
+quarantine. The later measurement image observed one maximum-payload durable
+inbound commit on each board, zero RX/CAD/TX watchdog counters, and bounded
+heap, stack-watermark, boot, storage and scheduler values. Only the first sender
+reached `Delivered`; the reverse receiver committed the exact payload while its
+sender ended in `delivery-timeout`. Neither fault fixture is an electrical power
+cut. The measurement run is instrumented, bounded single-commit evidence, not
+sustained or production-image target-bounds qualification, LXMF, or a full
+mailbox. Earlier controls returned
 `initialization-required`, enforced GPIO21 for initialization and live Begin,
 rejected stale sequence zero, and restored a fresh epoch after full host
 re-enumeration. Both preceding boot-quarantined image readbacks matched exactly,
@@ -73,15 +79,13 @@ the firmware lifetime. Current source also strictly mounts ADR 0011's exact
 2 MiB `message_store`, projects transport-neutral decrypted DATA into its
 one-entry commit-last raw-RNS store, retains one candidate across cross-store
 deferral, and exposes authenticated API 1.2 status/peek through a separate
-  read-only port. A mount or admission fault disables only that inbox service.
-  The four cold-mount fixtures establish one direct peer DATA/decrypt/proof
-  exchange after boot quarantine; the same-boot HIL's triggering exchange
-  precedes the missing-commit quarantine. Neither establishes sustained or
-  multi-hop routing. An optional journal
-mount/recovery failure
-occurs before any durability-gated DATA owner can exist; it disables local
-durable submission service while the LoRa node still starts in route-only mode.
-The exact
+read-only port. A mount or admission fault disables only that inbox service.
+The four cold-mount fixtures establish one direct peer DATA/decrypt/proof
+exchange after boot quarantine; the same-boot HIL's triggering exchange
+precedes the missing-commit quarantine. Neither establishes sustained or
+multi-hop routing. An optional journal mount/recovery failure occurs before any
+durability-gated DATA owner can exist; it disables local durable submission
+service while the LoRa node still starts in route-only mode. The exact
 authorized-frame request/durable-echo handoff is source-composed and now passes
 cross-layer host qualification. The one-entry accepted-history cap is exercised
 by that harness solely as a composition profile and is not a product-capacity
@@ -285,9 +289,14 @@ The image autodetects ESP32-S3 PSRAM and refuses to continue unless the mapped
 capacity is between the qualified 8 MiB floor and the board datasheet's 16 MiB
 claim. Fixed channels, task storage, permit stores and ownership state remain
 in internal static RAM. The allocator receives 64 KiB of reclaimed internal
-RAM plus the detected PSRAM for growth-oriented protocol and future client
-allocations. Future atomic or `Arc`-backed allocations must be audited before
-placing their storage in external RAM.
+RAM followed by the detected PSRAM. Because `esp-alloc` searches registered
+regions in order, ordinary global allocations currently consume internal heap
+first and spill into PSRAM only when no internal hole fits. That is a measured
+baseline, not the intended long-term placement policy: large protocol/client
+payloads will need explicit external allocation, while atomics, synchronization,
+DMA/IRQ-visible state and flash-critical state must remain internal. Largest
+contiguous free space is not exposed by the pinned allocator and must not be
+inferred from total free bytes.
 
 The target requires a 16 MiB flash image/header and uses
 [`partitions/heltec-vision-master-e290-node.csv`](../partitions/heltec-vision-master-e290-node.csv):
@@ -307,6 +316,92 @@ The target requires a 16 MiB flash image/header and uses
 
 The workspace runner in `.cargo/config.toml` hardcodes an 8 MiB flash size and
 must not be used for this target.
+
+### Opt-in runtime-measurement HIL
+
+The non-default `runtime-measurement-hil` feature instruments the permanent
+product graph without changing its transport or storage ownership. It is
+mutually exclusive with `journal-schema2-dev-reprovision` and
+`rns-inbox-commit-fault-hil`, and its only dependency-graph addition below the
+product root is `esp-alloc/alloc-hooks`. The ordinary ELF contains neither the
+measurement evidence/stack marker nor allocator callbacks. Boot, storage,
+inbox, authenticated-API, allocator, stack and node-loop observations remain
+product/node concerns; RX, CAD, TX and radio-loop observations remain local to
+the LoRa actor. A later Wi-Fi, BLE, USB or second-radio Reticulum actor can add
+its own actor observations through the same diagnostics boundary without
+changing the transport-neutral DATA projection or durable inbox contract.
+
+The HIL exposes one initialized, exact 256-byte `RTME` version-1 ABI. Its 64
+little-endian words contain a leading sequence marker, header/state, memory and
+stack snapshots, eight boot-phase last/maximum pairs, operation/scheduler
+aggregates, error/allocation counters, and a trailing sequence marker. A
+low-to-high capture is valid only when the two markers match and are even; an
+odd or mismatched pair is a torn observation and must be discarded. Locate the
+evidence symbol from the exact ELF being measured rather than treating one
+run's RAM address as stable. The checked decoder rejects the wrong length,
+header, flags, sentinels, inconsistent counts/timings, impossible heap/stack
+relations, and unstable sequence markers:
+
+```sh
+cargo +stable run --locked -p xtask -- e290-runtime-measurement decode \
+  --input /path/to/evidence.bin [--json]
+```
+
+The same project-local command inspects the two release ELFs used to preserve
+the static side of the stack bound:
+
+```sh
+cargo +stable run --locked -p xtask -- e290-runtime-measurement inspect-elf \
+  --default-elf target/e290-default/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node \
+  --hil-elf target/e290-runtime-measurement-hil/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node
+```
+
+It accepts only final little-endian 32-bit Xtensa `ET_EXEC` images with one
+nonempty, relocation-free `.stack_sizes` section. Both maximum frames must be
+at most 52,752 bytes, both linker guard offsets must remain 60 bytes, and the
+default/HIL usable stacks must remain at least 170,984/170,480 bytes. Record
+counts are diagnostic rather than policy: the retained release ELFs contain
+813 default and 822 HIL records, while both maxima are 52,752 bytes. CI runs
+Clippy and then relinks both profiles with
+`-C link-arg=-nostartfiles -Z emit-stack-sizes` in isolated target directories
+immediately before this inspection.
+
+The exact release artifacts used for the 2026-07-20 powered run compare as
+follows. Paths embedded by the build can affect rebuild digests, so these
+identify the retained run artifacts rather than universal source digests.
+
+| Image | Text | Data | BSS | GNU total | Merged image |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Default | 655,347 | 3,676 | 469,152 | 1,128,175 | 761,792 |
+| Measurement HIL | 662,279 | 3,988 | 468,840 | 1,135,107 | 768,624 |
+| Delta | +6,932 | +312 | -312 | +6,932 | +6,832 |
+
+The default ELF and merged image have SHA-256
+`ddd3852bee960f837fd6c472fb525af92e00acc9077b71c8d8f5ab7fb269aed2`
+and `77b6a48e71d62facf39bae380387397dcbc79417c05372bc31c4a240f326b066`.
+The measurement ELF and merged image have SHA-256
+`84146930cad448f6aa5d4ecc8bd8493bb49de7b623ea9341ebc0b930c96f2aa8`
+and `c20032b04a87fc8c33982bd7e4a5788f59ae5a00f7d26a1caf9f6ecf0473fa14`.
+The HIL linker reserves 170,544 stack bytes, of which 170,480 are measured
+after guard/scanner exclusions; the corresponding default reservation/usable
+pair is 171,048/170,984 bytes. The unchanged largest compiler-emitted frame is
+52,752 bytes.
+
+The runtime watermark reports the deepest painted word observed modified on
+the CPU0/main-executor stack. It is not a historical minimum-stack-pointer
+proof: a frame can reserve untouched padding below its lowest write.
+Qualification must retain compiler-emitted frame evidence plus interrupt and
+nesting headroom. The powered run's 72,212-byte painted margin becomes a
+deliberately conservative 19,460 bytes after subtracting the 52,752-byte
+maximum frame; neither number is a universal stack guarantee.
+Current source also re-reads the innermost stack pointer immediately before
+each volatile word access and reports an address at or above it as changed,
+so scanner safety does not depend on Rust honoring an inlining request. The
+retained powered HIL predates that source guard, but its exact linked
+disassembly has the complete scanner loop in the 32-byte caller frame, uses
+that live stack pointer as the exclusive read limit, and makes no call from the
+scan loop. The post-run hardening therefore does not invalidate the retained
+measurement, but its newly linked image is not itself a powered result.
 
 `node_identity`, `announce_clock`, and `api_credentials` use ESP-IDF's standard
 `data,undefined` subtype. All three have application-owned formats; the
@@ -553,19 +648,29 @@ cargo +stable test --locked \
 cargo +stable clippy --locked \
   -p reticulum-heltec-vision-master-e290-node --lib --tests \
   --features rns-inbox-commit-fault-hil -- -D warnings
-cargo +stable test --locked -p xtask e290_rns_inbox_fixture
+cargo +stable test --locked \
+  -p reticulum-heltec-vision-master-e290-node --lib \
+  --features runtime-measurement-hil
+cargo +stable clippy --locked \
+  -p reticulum-heltec-vision-master-e290-node --lib --tests \
+  --features runtime-measurement-hil -- -D warnings
+cargo +stable test --locked -p xtask
 RUSTDOCFLAGS="-D warnings" cargo +stable doc --locked \
   -p reticulum-heltec-vision-master-e290-node --lib --no-deps
 cargo +stable run --locked -p xtask -- graph-policy
 
 source ~/export-esp.sh
-cargo +esp build --locked --release \
-  -p reticulum-heltec-vision-master-e290-node \
-  --target xtensa-esp32s3-none-elf
+CARGO_TARGET_DIR=target/e290-default \
+RUSTFLAGS='-C link-arg=-nostartfiles -Z emit-stack-sizes' \
 cargo +esp clippy --locked --release \
   -p reticulum-heltec-vision-master-e290-node \
   --bin reticulum-heltec-vision-master-e290-node \
   --target xtensa-esp32s3-none-elf -- -D warnings
+CARGO_TARGET_DIR=target/e290-default \
+RUSTFLAGS='-C link-arg=-nostartfiles -Z emit-stack-sizes' \
+cargo +esp build --locked --release \
+  -p reticulum-heltec-vision-master-e290-node \
+  --target xtensa-esp32s3-none-elf
 CARGO_TARGET_DIR=target/e290-inbox-commit-fault-hil \
 cargo +esp build --locked --release \
   -p reticulum-heltec-vision-master-e290-node \
@@ -577,21 +682,43 @@ cargo +esp clippy --locked --release \
   --bin reticulum-heltec-vision-master-e290-node \
   --no-default-features --features rns-inbox-commit-fault-hil \
   --target xtensa-esp32s3-none-elf -- -D warnings
+CARGO_TARGET_DIR=target/e290-runtime-measurement-hil \
+RUSTFLAGS='-C link-arg=-nostartfiles -Z emit-stack-sizes' \
+cargo +esp clippy --locked --release \
+  -p reticulum-heltec-vision-master-e290-node \
+  --bin reticulum-heltec-vision-master-e290-node \
+  --no-default-features --features runtime-measurement-hil \
+  --target xtensa-esp32s3-none-elf -- -D warnings
+CARGO_TARGET_DIR=target/e290-runtime-measurement-hil \
+RUSTFLAGS='-C link-arg=-nostartfiles -Z emit-stack-sizes' \
+cargo +esp build --locked --release \
+  -p reticulum-heltec-vision-master-e290-node \
+  --no-default-features --features runtime-measurement-hil \
+  --target xtensa-esp32s3-none-elf
+cargo +stable run --locked -p xtask -- e290-runtime-measurement inspect-elf \
+  --default-elf target/e290-default/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node \
+  --hil-elf target/e290-runtime-measurement-hil/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node
 ```
 
 The HIL ELF is isolated at
 `target/e290-inbox-commit-fault-hil/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node`.
 Package it only under a HIL-specific image name. The ordinary `e290-node.bin`
-procedure below must continue to use the default ELF under the workspace's
-normal `target` directory.
+procedure below must continue to use the isolated default ELF under
+`target/e290-default`.
+The runtime-measurement ELF is separately isolated under
+`target/e290-runtime-measurement-hil`; it is likewise never the source for the
+ordinary product image.
 
 The build script rejects an unreviewed `esp-rtos` main-stack implementation and
 links `linkall.x`. Debug Xtensa builds are compile-time rejected.
-The two development features are deliberately mutually exclusive, so an E290
-`--all-features` build is invalid. `graph-policy` separately inspects the
-ordinary and commit-fault roots and requires identical dependency tails. The
-default ELF must contain neither the fault wrapper nor its evidence identifier.
-The 129-test default host library suite and 135-test commit-fault profile have
+The three exceptional development/HIL features are pairwise mutually exclusive,
+so an E290 `--all-features` build is invalid. `graph-policy` separately inspects
+the ordinary and exceptional roots. The commit-fault dependency tail must be
+identical to default; the measurement tail may add only the reviewed
+`esp-alloc/alloc-hooks` feature. The default ELF must contain neither fault nor
+measurement wrappers, hooks, markers or evidence identifiers.
+The 129-test default host library suite, 135-test commit-fault profile, and
+141-test runtime-measurement profile have
 passing policy/product/credential-boot/
 credential-runtime/USB-control/live-routing tests, including the source-order
 regressions, every canonical empty-initialization byte cut, adversarial media changes between
@@ -640,9 +767,12 @@ bounded authenticated client adds 22 tests for operation parsing, public-
 identity formatting, inbox status/peek, owner-only non-overwriting payload
 output, sequential request IDs, version policy, polling terminal semantics,
 coalesced-record preservation, and submission-input non-disclosure. Together
-these 49 focused tests are part of the full 209-test xtask gate. The portable
+these 49 focused tests are part of the full 227-test xtask gate. The portable
 Rete integration and inbox-store suites independently pass 41 and 17 tests,
-respectively.
+respectively. Seventeen of the xtask tests freeze the measurement decoder's
+CLI, exact ABI rendering, torn/header/sentinel/invariant rejection, input-file
+behavior, strict final-ELF parsing, compiler-frame inventory, linker-stack
+derivation and the reviewed static bounds.
 
 Once all response bytes enter the endpoint FIFO, firmware requests hardware
 `WR_DONE` and releases the software response owner without waiting for a later
@@ -681,8 +811,10 @@ lower bound before deeper callees and interrupt context. The linked CPU0 stack
 reservation is 176,268 bytes in the default image and 176,276 bytes in the
 migration-permitted image. These compiler records are not runtime high-water
 evidence, and the 52,752-byte maximum exceeds the Tracker-only 48 KiB frame
-ceiling; an E290-specific static gate plus powered stack instrumentation remain
-required.
+ceiling. The E290-specific gate above now rejects a larger frame, a smaller
+linked usable stack, a changed guard offset or missing/unresolved compiler
+evidence in either final ELF. Broader powered stack qualification remains
+required; the bounded HIL baseline above is not closure.
 
 The earlier credential-runtime-composed release at source `5f3f259` is
 659,035 bytes text, 11,464 bytes initialized data, and 461,364 bytes BSS/
@@ -1220,6 +1352,105 @@ The default ELF contains neither the fault evidence identifier nor the wrapper
 string. Fresh authenticated status on each restored board reported depth 0,
 capacity 1, dropped 0, maximum 383, and `durable=true`.
 
+### Powered runtime-measurement HIL
+
+On 2026-07-20, both E290s received the exact 768,624-byte measurement image
+identified above, and both complete address-zero readbacks matched it. Each
+debugger capture copied the exact 256-byte evidence object from low to high and
+was accepted only after the decoder observed matching even sequence markers,
+the complete version-1 header, initialized heap/stack state, intact guard, and
+internally consistent counters. Baseline captures were followed by fresh board
+resets before traffic so debugger pause time did not inflate the traffic-phase
+loop gaps.
+
+The six accepted baseline/phase captures across the two maximum-payload traffic
+phases produced these bounded maxima/minima:
+
+| Measurement | Bounded observation |
+| --- | ---: |
+| Detected PSRAM | 8,388,608 bytes |
+| Registered global heap | 8,454,144 bytes |
+| Maximum global-allocator use | 988 bytes |
+| Minimum internal heap free | 64,548 bytes |
+| External/PSRAM allocator use | 0 bytes |
+| Failed allocations / unexpected errors | 0 / 0 |
+| CPU0 measured stack usable | 170,480 bytes |
+| Modified-word high-water | 98,268 bytes |
+| Raw painted margin | 72,212 bytes |
+| Margin after subtracting maximum compiler frame | 19,460 bytes |
+| Composition ready | 816,645--821,073 us |
+| Journal cold mount | 134,498--137,373 us |
+| Inbox cold mount | 545,258--545,674 us |
+| Maximum-payload inbound commit | 548,073--548,148 us |
+| Worst node loop gap | 646,388 us |
+| Worst radio loop gap | 1,065,406 us |
+| RX / CAD / TX operation maxima | 933,255 / 38,229 / 885,258 us |
+| RX / CAD / TX actor-watchdog timeouts | 0 / 0 / 0 |
+| Measurement-task maximum lateness | 422,138 us |
+| Measurement-task maximum work | 1,767 us |
+
+The heap values describe the registered global allocator under this specific
+LoRa/node/API workload. They do not include static reservations, DMA-visible or
+interrupt-owned memory, or future client and wireless stacks. In particular,
+zero observed PSRAM allocation does not imply that the full appliance should
+avoid PSRAM: the current allocator searches the 64 KiB internal region first,
+and this workload never exhausted it. Resource, LXMF, NomadNet, SPA and future
+wireless buffers still require an explicit internal/external placement policy.
+The stack observations have the modified-word/minimum-SP limitation documented
+above and must retain static frame plus interrupt/nesting headroom.
+
+Phase A submitted a maximum 383-byte payload from `3e:88` to `3f:88`. The
+payload SHA-256 was
+`a24462c3c6b5ef334180bd948e3696e3ea45e69c66558ef8000d03402d8ed34f`;
+the 483-byte encoded Reticulum packet SHA-256 was
+`5930069b8fa8274f3aac3f13cb3a108221137a60ffb6aaa69144b27bb4cd771a`.
+The receiver durably committed the exact payload and the sender reached
+`Delivered`. An immediate reverse submission returned `no-path`, showing that
+the preceding DATA/proof exchange had not left a usable return path in this
+run. It also consumed the reverse board's one-entry qualification journal.
+
+After explicit journal-only reprovisioning and a fresh peer ANNOUNCE, phase B
+submitted a different maximum payload from `3f:88` to `3e:88`, with SHA-256
+`762461ea015e00e3b5b7071b8ecb720afdc51a71c7c1145563fa0893e9d3653d`.
+The receiver recorded one 548,073-us inbound commit and authenticated peek
+returned those exact 383 bytes from destination
+`c99e8ff1ec8629e4e1290e14462ae8af`. The sender nevertheless terminated in
+`delivery-timeout`. Thus the two phases establish one bounded durable inbound
+commit on each board and in each direction, not bidirectional `Delivered`.
+The reverse proof or terminal status was not observed by the sender before its
+deadline; this product-level timeout is distinct from the zero radio-actor
+watchdog counters and remains a diagnostic residual. A final authenticated
+peek on `3f:88` likewise returned phase A's exact 383-byte payload from
+destination `83a09ed807a0a7c631386deaa0448fb9`.
+
+These are instrumented-workload observations, not production-image timing
+guarantees. The HIL enables allocator callbacks, updates atomic evidence, and
+scans roughly 170 KiB of painted stack every second. Debugger capture halts the
+target even though the traffic phases were reset after their baseline captures.
+Zero actor-watchdog counters therefore means no measured RX, CAD or TX watchdog
+fired; it does not prove every soft deadline or a sustained, forwarded,
+multi-hop, concurrent-store, low-memory or allocation-failure workload. The
+measurement slice does not move persistence or routing ownership into the LoRa
+actor and qualifies no other Reticulum transport. ADR 0011 target-bounds
+criterion 10 now has this bounded baseline but remains open.
+
+After capture, both boards' exact contiguous `node_journal` plus
+`message_store` range was erased. Each complete 3 MiB readback contained zero
+non-`0xff` bytes and had SHA-256
+`908b6cfc9aef496dd5ab5c5540d80c6383ed6e92f86044574c996315381bc064`.
+The one-shot journal image then provisioned an identical empty schema-2 journal
+on each board; both 1 MiB readbacks had SHA-256
+`a6d0b254e7fee84f2f00c45f4075fdafc8f5630dc162cfaf22a72d4de0add054`
+and no programmed byte after the first 160-byte manifest area. Independent
+reads proved the identity and credential/configuration ranges remained exact
+matches for their pre-HIL full-flash backups. Finally, both boards received the
+761,792-byte feature-free image and returned exact address-zero readbacks with
+SHA-256
+`77b6a48e71d62facf39bae380387397dcbc79417c05372bc31c4a240f326b066`.
+Each ordinary boot advertised submission plus inbox service, and a fresh
+authenticated session reported inbox depth 0, capacity 1, dropped 0, maximum
+383, and `durable=true`.
+
 On 2026-07-18, the historical control-only 652,992-byte merged image (SHA-256
 `1727a14b58a076d65ea12feb61b564d5dfc66d6c6f0b9a8ddd39fc773332705c`) was
 flashed with the explicit 16 MiB E290 partition table to both boards. Both MAC
@@ -1326,7 +1557,7 @@ future write:
    workspace runner:
 
    ```sh
-   ELF=target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node
+   ELF=target/e290-default/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node
    espflash save-image --skip-update-check \
      --chip esp32s3 --merge --skip-padding \
      --flash-mode dio --flash-freq 80mhz --flash-size 16mb \
@@ -1515,12 +1746,14 @@ first smoke.
   behavior already pass. A later product-capacity policy must not weaken the same
   durability contract, and future interface actors fail-stop only their
   affected actor.
-- Qualify ADR 0011's existing raw-RNS inbox across live electrical power cuts,
-  partial-body and partial-commit programming, backend error-after-write cases,
-  mount/commit timing, watchdog/radio deadlines, sustained traffic, and
-  internal-RAM/PSRAM high-water. Then design final
-  LXMF/message storage and device configuration with explicit wear, migration,
-  reclamation, authorization, and cross-store ordering behavior.
+- Extend ADR 0011's bounded single-commit timing/high-water baseline across
+  live electrical power cuts, partial-body and partial-commit programming,
+  backend error-after-write cases, sustained and forwarded traffic, concurrent
+  durable activity, low-memory/allocation-failure pressure, and default-image
+  observation. Diagnose the reverse delivery-proof timeout before claiming
+  bidirectional delivery completion. Then design final LXMF/message storage and
+  device configuration with explicit wear, migration, reclamation,
+  authorization, and cross-store ordering behavior.
 - Define and qualify the production key backup/recovery and at-rest protection
   policy. The current developer image deliberately requires flash encryption
   disabled and stores its mirrored private identity in plaintext.
@@ -1543,8 +1776,9 @@ first smoke.
   image fails inert at `EpochExhausted`; production may instead require an
   explicit identity rotation/reprovisioning workflow, but must never wrap.
 - Replace the 1 ms node poll with a combined readiness/deadline wait.
-- Extend the completed controlled two-board API 1.1 DATA/proof and API 1.2
-  inbox/fault-isolation runs with electrical power cuts, sustained traffic,
-  multi-hop/Resource coverage, and full product memory/timing qualification.
+- Extend the completed controlled two-board API 1.1 DATA/proof, API 1.2
+  inbox/fault-isolation, and bounded runtime-measurement runs with electrical
+  power cuts, sustained traffic, multi-hop/Resource coverage, concurrent-store
+  pressure, and full production-image memory/timing qualification.
 - Keep display and GNSS/location integration stubbed until the network,
   persistence and client ownership paths are stable.

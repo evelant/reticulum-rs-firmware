@@ -6,6 +6,10 @@ use embassy_futures::yield_now;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use log::{error, info, warn};
+#[cfg(feature = "runtime-measurement-hil")]
+use reticulum_heltec_vision_master_e290_node::runtime_measurement::{
+    OperationKind as RuntimeOperationKind, RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE,
+};
 use reticulum_interface_router::{
     ActorIngressSendError, AvailableIngressBuffer, InterfaceIngressActorHandoff,
     InterfaceIngressAuthority, SealedIngressPacket,
@@ -51,8 +55,17 @@ pub async fn run(
     );
     RADIO_READY.signal(());
     LORA_ONLINE.wait().await;
+    #[cfg(feature = "runtime-measurement-hil")]
+    let mut previous_radio_loop_us = now_us();
 
     loop {
+        #[cfg(feature = "runtime-measurement-hil")]
+        {
+            let loop_started_us = now_us();
+            RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE
+                .record_radio_loop_gap(loop_started_us.saturating_sub(previous_radio_loop_us));
+            previous_radio_loop_us = loop_started_us;
+        }
         if let Some(packet) = sealed_pending.take() {
             match ingress.try_send(authority, packet) {
                 Ok(()) => {}
@@ -215,6 +228,7 @@ pub async fn run(
     }
 }
 
+#[cfg(not(feature = "runtime-measurement-hil"))]
 async fn receive_once(
     dispatcher: &mut ProductDispatcher,
     physical: &mut [u8; SX1262_FRAME_MTU],
@@ -238,6 +252,50 @@ async fn receive_once(
             )
         }
     }
+}
+
+#[cfg(feature = "runtime-measurement-hil")]
+async fn receive_once(
+    dispatcher: &mut ProductDispatcher,
+    physical: &mut [u8; SX1262_FRAME_MTU],
+) -> RadioReceiveStep {
+    let receive_started_us = now_us();
+    let watchdog = dispatcher.maximum_receive_operation_us().get();
+    let receive = match dispatcher.start_receive(physical) {
+        Ok(receive) => receive,
+        Err(step) => {
+            RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_operation(
+                RuntimeOperationKind::Receive,
+                now_us().saturating_sub(receive_started_us),
+            );
+            return step;
+        }
+    };
+    let (step, timed_out) = match with_timeout(Duration::from_micros(watchdog), receive).await {
+        Ok(step) => (step, false),
+        Err(_) => {
+            error!(
+                "e290-node stage=lora-rx status=WATCHDOG-EXPIRED watchdog_us={watchdog} action=cancel-recover-actor-fail-stop"
+            );
+            recover_cancelled_and_drain(dispatcher).await;
+            (
+                RadioReceiveStep::Disabled(
+                    dispatcher
+                        .fault()
+                        .unwrap_or(reticulum_radio_tx_dispatch::DispatcherFault::ReceiveCancelled),
+                ),
+                true,
+            )
+        }
+    };
+    RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_operation(
+        RuntimeOperationKind::Receive,
+        now_us().saturating_sub(receive_started_us),
+    );
+    if timed_out {
+        RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_radio_timeout(RuntimeOperationKind::Receive);
+    }
+    step
 }
 
 enum DispatchProgress {
@@ -357,6 +415,7 @@ async fn wait_until_or(
     DispatchProgress::Advanced
 }
 
+#[cfg(not(feature = "runtime-measurement-hil"))]
 async fn run_radio_operation(
     dispatcher: &mut ProductDispatcher,
     watchdog_us: u64,
@@ -401,6 +460,72 @@ async fn run_radio_operation(
             DispatchProgress::Disabled
         }
     }
+}
+
+#[cfg(feature = "runtime-measurement-hil")]
+async fn run_radio_operation(
+    dispatcher: &mut ProductDispatcher,
+    watchdog_us: u64,
+    operation: &'static str,
+) -> DispatchProgress {
+    let operation_started_us = now_us();
+    let (progress, timed_out) = match with_timeout(
+        Duration::from_micros(watchdog_us),
+        dispatcher.perform_radio_operation(now_us()),
+    )
+    .await
+    {
+        Ok(RadioOperationStep::Terminal(report)) => {
+            if dispatcher.take_last_report() != Some(report) {
+                error!(
+                    "e290-node stage=lora-{operation} status=FAIL reason=terminal-report-mismatch action=actor-fail-stop"
+                );
+                (DispatchProgress::Disabled, false)
+            } else {
+                log_dispatch_report(operation, report);
+                (DispatchProgress::Advanced, false)
+            }
+        }
+        Ok(RadioOperationStep::Advanced | RadioOperationStep::CadObserved { .. }) => {
+            (DispatchProgress::Advanced, false)
+        }
+        Ok(RadioOperationStep::NotReady) => (DispatchProgress::Advanced, false),
+        Ok(
+            RadioOperationStep::CancelledFutureNeedsRecovery(_)
+            | RadioOperationStep::ReceiveFutureNeedsRecovery,
+        ) => {
+            recover_cancelled_and_drain(dispatcher).await;
+            (DispatchProgress::Disabled, false)
+        }
+        Ok(RadioOperationStep::Disabled(fault)) => {
+            error!("e290-node stage=lora-{operation} status=FAIL reason={fault:?}");
+            (DispatchProgress::Disabled, false)
+        }
+        Err(_) => {
+            error!(
+                "e290-node stage=lora-{operation} status=WATCHDOG-EXPIRED watchdog_us={watchdog_us} action=cancel-recover-actor-fail-stop"
+            );
+            recover_cancelled_and_drain(dispatcher).await;
+            (DispatchProgress::Disabled, true)
+        }
+    };
+    let measurement_kind = match operation {
+        "cad" => Some(RuntimeOperationKind::Cad),
+        "tx" => Some(RuntimeOperationKind::Transmit),
+        _ => None,
+    };
+    if let Some(measurement_kind) = measurement_kind {
+        RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_operation(
+            measurement_kind,
+            now_us().saturating_sub(operation_started_us),
+        );
+        if timed_out {
+            RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_radio_timeout(measurement_kind);
+        }
+    } else {
+        RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_unexpected_error();
+    }
+    progress
 }
 
 /// Contain a dropped radio future, pass any post-exposure DATA owner through

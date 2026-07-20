@@ -13,6 +13,7 @@ autobins = false
 default = []
 journal-schema2-dev-reprovision = []
 rns-inbox-commit-fault-hil = []
+runtime-measurement-hil = ["esp-alloc/alloc-hooks"]
 
 [dependencies]
 reticulum-announce-clock = { path = "../../crates/announce-clock", default-features = false }

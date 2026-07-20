@@ -1,10 +1,10 @@
 # ADR 0011: Durable raw-RNS inbox qualification slice
 
-- **Status:** accepted and implemented; the bounded end-to-end proof, powered
-  cold-mount fault matrix, and same-boot missing-commit isolation proof are
-  complete, while physical power cuts and target-bounds qualification remain open
+- **Status:** accepted and implemented; bounded end-to-end, powered
+  fault-isolation, and bounded target-measurement evidence exist, while physical
+  power cuts and full target-bounds qualification remain open
 - **Date:** 2026-07-18
-- **Powered evidence updated:** 2026-07-19
+- **Powered evidence updated:** 2026-07-20
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0003](0003-lora-first-interface-fabric.md),
   [ADR 0004](0004-sole-flash-coordinator.md),
@@ -346,6 +346,75 @@ an electrical interruption, brownout, arbitrary-stage or partial-program fault,
 backend error-after-write test, persistent counter, timing measurement, or
 authorization to ship the feature.
 
+## Powered target-bounds evidence
+
+On 2026-07-20, the separate non-default `runtime-measurement-hil` image ran the
+permanent E290 graph on both boards. The feature is mutually exclusive with the
+other two exceptional feature profiles and adds only `esp-alloc/alloc-hooks`
+below the product root. Its exact 256-byte initialized `RTME` version-1 ABI brackets each
+low-to-high debugger capture with matching even sequence markers; an odd or
+mismatched pair is rejected as torn. The default ELF excludes the evidence,
+stack marker, stack-initialization hook, and allocator callbacks.
+
+The 768,624-byte HIL image had SHA-256
+`c20032b04a87fc8c33982bd7e4a5788f59ae5a00f7d26a1caf9f6ecf0473fa14`
+and matched complete address-zero readbacks on both boards. The corresponding
+default image was 761,792 bytes with SHA-256
+`77b6a48e71d62facf39bae380387397dcbc79417c05372bc31c4a240f326b066`.
+Across six accepted baseline/phase captures around the two traffic phases, the
+measurement HIL observed:
+
+| Bound | Observation |
+| --- | ---: |
+| Registered heap / detected PSRAM | 8,454,144 / 8,388,608 bytes |
+| Maximum allocator use / minimum internal free | 988 / 64,548 bytes |
+| External allocator use / failed allocations | 0 / 0 bytes/count |
+| CPU0 usable stack / modified-word high-water | 170,480 / 98,268 bytes |
+| Raw painted margin / margin after the 52,752-byte maximum frame | 72,212 / 19,460 bytes |
+| Journal / inbox cold mount | 134,498--137,373 / 545,258--545,674 us |
+| Maximum-payload inbound commit | 548,073--548,148 us |
+| Worst node / radio loop gap | 646,388 / 1,065,406 us |
+| RX / CAD / TX operation maximum | 933,255 / 38,229 / 885,258 us |
+| RX / CAD / TX actor-watchdog count | 0 / 0 / 0 |
+| Measurement lateness / work | 422,138 / 1,767 us |
+| Unexpected measurement errors | 0 |
+
+The project-local release gate now preserves the static inputs to the stack
+calculation. CI runs Clippy and then relinks isolated default and measurement
+ELFs with compiler `.stack_sizes` evidence; the inspector accepts only final
+little-endian Xtensa executables with no remaining section relocations. It caps
+both maximum frames at 52,752 bytes, requires the default/HIL usable stacks to
+remain at least 170,984/170,480 bytes, and fixes both linker guard offsets at
+60 bytes. This detects a static regression but does not replace the powered
+watermark or establish interrupt/nesting headroom.
+
+Phase A delivered one 383-byte payload from `3e:88` to `3f:88`; the receiver
+durably committed the exact payload and the sender reached `Delivered`. The
+immediate reverse attempt returned `no-path`. After explicit journal-only
+reprovisioning and a fresh peer ANNOUNCE, phase B sent a different 383-byte
+payload from `3f:88` to `3e:88`. The receiver recorded and exposed the exact
+durable item, but the sender terminated in `delivery-timeout`. These compatible
+observations prove one bounded durable maximum-payload inbound commit on each
+board and in each direction, not bidirectional `Delivered`. The product-level
+proof/status timeout is not an RX, CAD, or TX driver-watchdog count and remains
+a diagnostic residual.
+
+These values are workload-specific instrumented observations. The HIL enables
+allocator callbacks, updates atomic evidence, scans roughly 170 KiB of stack
+every second, and is captured by a target-halting debugger. Baseline captures
+were followed by resets before traffic, but the instrumentation itself still
+perturbs scheduling. No sustained, forwarded, multi-hop, concurrent-store,
+low-memory, or allocation-failure workload ran. Heap values cover the registered
+global allocator, not static, DMA, interrupt, or future-client memory. The stack
+watermark reports the deepest painted word observed modified, not a historical
+minimum stack pointer; static frame evidence and interrupt/nesting headroom
+remain required. This HIL qualifies only the current LoRa actor and does not
+change or prove the transport-neutral projection across heterogeneous links.
+After capture, exact 3 MiB all-erased readbacks, one-shot journal provisioning,
+protected-range comparisons, exact default-image readbacks, and authenticated
+empty-inbox status returned both boards to the ordinary feature-free image; the
+full hashes are retained in the E290 runbook.
+
 ## Consequences
 
 - The first inbound persistence proof exercises the real transport-neutral
@@ -427,13 +496,22 @@ graph, with exact evidence retained in the runbook:
     coordinator stall blocks qualification even when the stored bytes are
     correct.
 
-As of 2026-07-19, criteria 1 through 8 have their bounded host, target, or
+As of 2026-07-20, criteria 1 through 8 have their bounded host, target, or
 powered evidence. Criterion 9 has powered evidence for the four selected
 cold-mount cases and one same-boot terminal-commit suppression, including one
 direct DATA/proof exchange in each case; its broader ordinary/sustained routing
-claim remains open. Criterion 10 remains open. Physical power interruption at
-claim, body/digest, and commit boundaries is also still required even though the
-exhaustive host fault model and deterministic target suppression pass.
+claim remains open. Criterion 10 now has bounded evidence for image/static size,
+cold journal and inbox mount, one maximum-payload commit on each board,
+registered-heap behavior, CPU0/main-executor stack watermarking, actor watchdog
+counters, and LoRa scheduling impact. It remains open because the workload was
+neither sustained nor forwarded, the reverse sender ended in a product-level
+delivery timeout despite receiver commit, and the opt-in instrumentation
+perturbs the measured scheduler. The stack watermark also requires static frame
+and interrupt/nesting headroom. No RX, CAD, or TX actor watchdog fired in the
+bounded run, but that does not close the broader deadline requirement. Physical
+power interruption at claim, body/digest, and commit boundaries is also still
+required even though the exhaustive host fault model and deterministic target
+suppression pass.
 
 Passing these criteria authorizes work on the real LXMF queue design. It does
 not promote physical format 1, HMAC-only USB, plaintext storage, or the shared

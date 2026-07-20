@@ -19,9 +19,13 @@ fn require_development_feature_contract() {
     let journal_reprovision =
         env::var_os("CARGO_FEATURE_JOURNAL_SCHEMA2_DEV_REPROVISION").is_some();
     let inbox_commit_fault = env::var_os("CARGO_FEATURE_RNS_INBOX_COMMIT_FAULT_HIL").is_some();
+    let runtime_measurement = env::var_os("CARGO_FEATURE_RUNTIME_MEASUREMENT_HIL").is_some();
     assert!(
-        !(journal_reprovision && inbox_commit_fault),
-        "journal-schema2-dev-reprovision and rns-inbox-commit-fault-hil are mutually exclusive"
+        usize::from(journal_reprovision)
+            + usize::from(inbox_commit_fault)
+            + usize::from(runtime_measurement)
+            <= 1,
+        "journal-schema2-dev-reprovision, rns-inbox-commit-fault-hil, and runtime-measurement-hil are mutually exclusive"
     );
 }
 

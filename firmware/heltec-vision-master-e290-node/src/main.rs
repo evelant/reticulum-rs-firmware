@@ -24,12 +24,13 @@
 mod node_task;
 mod platform_storage;
 mod radio_task;
+#[cfg(feature = "runtime-measurement-hil")]
+mod runtime_measurement_stack_hil;
 mod usb_pairing_task;
 
-use core::{
-    future::{Future, pending},
-    mem,
-};
+#[cfg(not(feature = "runtime-measurement-hil"))]
+use core::future::pending;
+use core::{future::Future, mem};
 
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
@@ -37,6 +38,8 @@ use embassy_time::{Delay, Duration, Instant, Timer, with_timeout};
 use embedded_hal::digital::{Error as DigitalError, ErrorKind, ErrorType};
 use embedded_hal_async::digital::Wait;
 use embedded_hal_bus::spi::ExclusiveDevice;
+#[cfg(feature = "runtime-measurement-hil")]
+use esp_alloc::{EspHeap, MemoryCapability};
 use esp_backtrace as _;
 use esp_hal::{
     Async,
@@ -65,6 +68,11 @@ use reticulum_device_api_session::{
     ServerParameters,
 };
 use reticulum_device_identity_store::IdentityMirrorCoverage;
+#[cfg(feature = "runtime-measurement-hil")]
+use reticulum_heltec_vision_master_e290_node::runtime_measurement::{
+    BootPhase as RuntimeBootPhase, HeapSnapshot as RuntimeHeapSnapshot,
+    RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE, StackSnapshot as RuntimeStackSnapshot,
+};
 use reticulum_heltec_vision_master_e290_node::{
     config,
     credential_boot::CredentialBootState,
@@ -264,6 +272,18 @@ async fn product_main(
     // poll, before logging, entropy, PSRAM initialization or radio construction.
     let radio_reset = Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default());
     let radio_nss = Output::new(peripherals.GPIO8, Level::High, OutputConfig::default());
+    #[cfg(feature = "runtime-measurement-hil")]
+    let mut runtime_stack = match runtime_measurement_stack_hil::StackWatermarkMonitor::initialize()
+    {
+        Ok(monitor) => monitor,
+        Err(reason) => {
+            RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE
+                .record_initialization_error(reason.evidence_code());
+            loop {
+                core::hint::spin_loop();
+            }
+        }
+    };
 
     let base_mac = esp_hal::efuse::base_mac_address();
     let base_mac_bytes = base_mac.as_bytes();
@@ -320,6 +340,17 @@ async fn product_main(
     let software_interrupts =
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timers.timer0, software_interrupts.software_interrupt0);
+    #[cfg(feature = "runtime-measurement-hil")]
+    let runtime_measurement_started_us = monotonic_us();
+    #[cfg(feature = "runtime-measurement-hil")]
+    {
+        let measurement_work_started_us = monotonic_us();
+        RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_psram_bytes(psram_bytes as u64);
+        record_runtime_heap_snapshot(&esp_alloc::HEAP);
+        record_runtime_stack_snapshot(&mut runtime_stack);
+        RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE
+            .record_measurement_work(monotonic_us().saturating_sub(measurement_work_started_us));
+    }
 
     let _entropy_source = TrngSource::new(peripherals.RNG, peripherals.ADC1);
     let mut bootstrap_rng = match Trng::try_new() {
@@ -329,6 +360,8 @@ async fn product_main(
             inert_forever().await
         }
     };
+    #[cfg(feature = "runtime-measurement-hil")]
+    let credential_boot_started_us = monotonic_us();
     let flash = FLASH_STORAGE.init(FlashStorage::new(peripherals.FLASH));
     let mut flash_owner = match ProductFlashOwner::open(flash, storage_device_id) {
         Ok(owner) => owner,
@@ -342,6 +375,13 @@ async fn product_main(
     );
     let credential_boot = flash_owner.boot_credentials();
     log_credential_boot(&credential_boot);
+    #[cfg(feature = "runtime-measurement-hil")]
+    RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_boot_phase(
+        RuntimeBootPhase::CredentialBoot,
+        monotonic_us().saturating_sub(credential_boot_started_us),
+    );
+    #[cfg(feature = "runtime-measurement-hil")]
+    let identity_preflight_started_us = monotonic_us();
     let identity_preflight = match flash_owner.inspect_identity() {
         Ok(preflight) => preflight,
         Err(reason) => {
@@ -349,6 +389,11 @@ async fn product_main(
             inert_forever().await
         }
     };
+    #[cfg(feature = "runtime-measurement-hil")]
+    RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_boot_phase(
+        RuntimeBootPhase::IdentityPreflight,
+        monotonic_us().saturating_sub(identity_preflight_started_us),
+    );
     let fresh_clock_policy = announce_clock_policy(identity_preflight);
     let journal_reprovision_policy = BUILD_JOURNAL_REPROVISION_POLICY;
     let journal_policy = journal_boot_policy(identity_preflight, journal_reprovision_policy);
@@ -367,7 +412,15 @@ async fn product_main(
     info!(
         "e290-node stage=identity-preflight status=PASS state={identity_preflight:?} announce_clock_policy={fresh_clock_policy:?} journal_reprovision_policy={journal_reprovision_policy:?} journal_policy={journal_policy:?} writes=0 erases=0"
     );
-    match flash_owner.provision_node_journal(journal_policy) {
+    #[cfg(feature = "runtime-measurement-hil")]
+    let journal_provision_started_us = monotonic_us();
+    let journal_provision = flash_owner.provision_node_journal(journal_policy);
+    #[cfg(feature = "runtime-measurement-hil")]
+    RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_boot_phase(
+        RuntimeBootPhase::JournalProvision,
+        monotonic_us().saturating_sub(journal_provision_started_us),
+    );
+    match journal_provision {
         Ok(Some(report)) => info!(
             "e290-node stage=node-journal-provision status=PASS policy={journal_policy:?} bank={:?} generation={} records={} accepted={} writes={} erases={}",
             report.state.bank(),
@@ -387,7 +440,15 @@ async fn product_main(
             inert_forever().await
         }
     }
-    let boot_epoch = match flash_owner.reserve_announce_epoch(fresh_clock_policy) {
+    #[cfg(feature = "runtime-measurement-hil")]
+    let announce_epoch_started_us = monotonic_us();
+    let boot_epoch_result = flash_owner.reserve_announce_epoch(fresh_clock_policy);
+    #[cfg(feature = "runtime-measurement-hil")]
+    RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_boot_phase(
+        RuntimeBootPhase::AnnounceEpoch,
+        monotonic_us().saturating_sub(announce_epoch_started_us),
+    );
+    let boot_epoch = match boot_epoch_result {
         Ok(epoch) => epoch,
         Err(reason) => {
             error!("e290-node stage=announce-clock status=FAIL reason={reason:?}");
@@ -405,7 +466,15 @@ async fn product_main(
         boot_epoch.raw_write_calls,
         boot_epoch.raw_erase_calls,
     );
-    let boot_identity = match flash_owner.boot_identity(&mut bootstrap_rng) {
+    #[cfg(feature = "runtime-measurement-hil")]
+    let identity_boot_started_us = monotonic_us();
+    let boot_identity_result = flash_owner.boot_identity(&mut bootstrap_rng);
+    #[cfg(feature = "runtime-measurement-hil")]
+    RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_boot_phase(
+        RuntimeBootPhase::IdentityBoot,
+        monotonic_us().saturating_sub(identity_boot_started_us),
+    );
+    let boot_identity = match boot_identity_result {
         Ok(identity) => identity,
         Err(reason) => {
             error!("e290-node stage=identity-store status=FAIL reason={reason:?}");
@@ -440,7 +509,15 @@ async fn product_main(
     );
     drop(boot_identity);
 
-    let submission_runtime = match flash_owner.mount_node_runtime(u64::from(announce_epoch.get())) {
+    #[cfg(feature = "runtime-measurement-hil")]
+    let journal_mount_started_us = monotonic_us();
+    let journal_mount_result = flash_owner.mount_node_runtime(u64::from(announce_epoch.get()));
+    #[cfg(feature = "runtime-measurement-hil")]
+    RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_boot_phase(
+        RuntimeBootPhase::JournalMount,
+        monotonic_us().saturating_sub(journal_mount_started_us),
+    );
+    let submission_runtime = match journal_mount_result {
         Ok((runtime, journal_report)) => {
             info!(
                 "e290-node stage=node-journal-recovery status=PASS boot_sequence={} profile=bounded-live-admission accepted_limit={} bank={:?} generation={} records={} accepted={} replayed={} queued={} already_final={} finalized={} writes={} erases={} service_gate=open flash_owner=resident",
@@ -468,7 +545,15 @@ async fn product_main(
             None
         }
     };
-    let inbox = match flash_owner.mount_inbox() {
+    #[cfg(feature = "runtime-measurement-hil")]
+    let inbox_mount_started_us = monotonic_us();
+    let inbox_mount_result = flash_owner.mount_inbox();
+    #[cfg(feature = "runtime-measurement-hil")]
+    RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_boot_phase(
+        RuntimeBootPhase::InboxMount,
+        monotonic_us().saturating_sub(inbox_mount_started_us),
+    );
+    let inbox = match inbox_mount_result {
         Ok(inbox) => {
             let depth = match inbox.state() {
                 InboxStoreState::Empty => 0,
@@ -643,6 +728,8 @@ async fn product_main(
         }
     };
 
+    #[cfg(feature = "runtime-measurement-hil")]
+    let radio_init_started_us = monotonic_us();
     let spi = match Spi::new(
         peripherals.SPI2,
         SpiConfig::default()
@@ -688,6 +775,11 @@ async fn product_main(
             inert_forever().await
         }
     };
+    #[cfg(feature = "runtime-measurement-hil")]
+    RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_boot_phase(
+        RuntimeBootPhase::RadioInit,
+        monotonic_us().saturating_sub(radio_init_started_us),
+    );
     let dispatcher = DISPATCHER.init(SoleRadioTxDispatcher::new(
         radio,
         radio_rng,
@@ -763,6 +855,9 @@ async fn product_main(
     spawner.spawn(radio_task);
     spawner.spawn(node_task);
     spawner.spawn(usb_pairing_task);
+    #[cfg(feature = "runtime-measurement-hil")]
+    RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE
+        .record_composition_ready(monotonic_us().saturating_sub(runtime_measurement_started_us));
     info!(
         "e290-node stage=composition status=PASS tasks=3 interfaces=1 primary_transport=lora future_transport_actors=deferred node_journal=mounted resident_storage_available={storage_service_available} durable_rns_inbox_available={inbox_service_available} rns_inbox_capacity=1 credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} preauth_initialization_bearer=usb-serial-jtag preauth_live_pairing_bearer=usb-serial-jtag pairing_button_gpio=21 authenticated_local_api=node-dispatch bearer_session=usb-authenticated-single-flight credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} admission=session-selected runtime_patch={} flash_assumption_bytes=16777216",
         credential_binding.absolute_offset(),
@@ -771,6 +866,29 @@ async fn product_main(
         env!("RETICULUM_ESP_RTOS_MAIN_STACK_PATCH"),
     );
 
+    #[cfg(feature = "runtime-measurement-hil")]
+    {
+        const SAMPLE_INTERVAL_US: u64 = 1_000_000;
+        let mut next_sample_us = monotonic_us().saturating_add(SAMPLE_INTERVAL_US);
+        loop {
+            Timer::at(Instant::from_micros(next_sample_us)).await;
+            let sampled_at_us = monotonic_us();
+            RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE
+                .record_measurement_lateness(sampled_at_us.saturating_sub(next_sample_us));
+            RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_uptime_ms(
+                sampled_at_us.saturating_sub(runtime_measurement_started_us) / 1_000,
+            );
+            let measurement_work_started_us = monotonic_us();
+            record_runtime_heap_snapshot(&esp_alloc::HEAP);
+            record_runtime_stack_snapshot(&mut runtime_stack);
+            RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_measurement_work(
+                monotonic_us().saturating_sub(measurement_work_started_us),
+            );
+            next_sample_us = sampled_at_us.saturating_add(SAMPLE_INTERVAL_US);
+        }
+    }
+
+    #[cfg(not(feature = "runtime-measurement-hil"))]
     pending().await
 }
 
@@ -811,6 +929,78 @@ fn log_credential_boot(report: &BootCredentialStore) {
             binding.length(),
         ),
     }
+}
+
+#[cfg(feature = "runtime-measurement-hil")]
+fn record_runtime_heap_snapshot(heap: &EspHeap) {
+    let stats = heap.stats();
+    let mut internal_current_bytes = 0_u64;
+    let mut internal_free_bytes = 0_u64;
+    let mut external_current_bytes = 0_u64;
+    let mut external_free_bytes = 0_u64;
+    for region in stats.region_stats.iter().flatten() {
+        if region.capabilities.contains(MemoryCapability::Internal) {
+            internal_current_bytes = internal_current_bytes.saturating_add(region.used as u64);
+            internal_free_bytes = internal_free_bytes.saturating_add(region.free as u64);
+        }
+        if region.capabilities.contains(MemoryCapability::External) {
+            external_current_bytes = external_current_bytes.saturating_add(region.used as u64);
+            external_free_bytes = external_free_bytes.saturating_add(region.free as u64);
+        }
+    }
+    RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_heap_snapshot(RuntimeHeapSnapshot {
+        total_bytes: stats.size as u64,
+        current_bytes: stats.current_usage as u64,
+        maximum_bytes: stats.max_usage as u64,
+        free_bytes: stats.size.saturating_sub(stats.current_usage) as u64,
+        internal_current_bytes,
+        internal_free_bytes,
+        external_current_bytes,
+        external_free_bytes,
+    });
+}
+
+#[cfg(feature = "runtime-measurement-hil")]
+fn record_runtime_stack_snapshot(
+    monitor: &mut runtime_measurement_stack_hil::StackWatermarkMonitor,
+) {
+    let metrics = monitor.sample();
+    RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_stack_snapshot(RuntimeStackSnapshot {
+        reserved_bytes: u64::from(metrics.stack_reserved_bytes),
+        usable_bytes: u64::from(metrics.stack_usable_above_guard_bytes),
+        painted_bytes: u64::from(metrics.startup_painted_bytes),
+        high_water_bytes: u64::from(metrics.high_water_used_bytes),
+        remaining_bytes: u64::from(metrics.minimum_remaining_above_guard_bytes),
+        guard_offset_bytes: u64::from(metrics.stack_guard_offset_bytes),
+        scan_valid: metrics.scan_valid,
+        guard_intact: metrics.stack_guard_intact,
+    });
+}
+
+#[cfg(feature = "runtime-measurement-hil")]
+#[unsafe(no_mangle)]
+fn _esp_alloc_alloc(
+    heap: &::esp_alloc::EspHeap,
+    _capabilities: ::esp_alloc::export::enumset::EnumSet<::esp_alloc::MemoryCapability>,
+    pointer: usize,
+    _size: usize,
+) {
+    let success = pointer != 0;
+    RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_allocation(success);
+    if success {
+        // The allocator invokes this hook after releasing its lock. The stats
+        // path is allocation-free, so it can safely capture exact regional
+        // post-allocation minima without recursion.
+        record_runtime_heap_snapshot(heap);
+    }
+}
+
+#[cfg(feature = "runtime-measurement-hil")]
+#[unsafe(no_mangle)]
+fn _esp_alloc_dealloc(_heap: &::esp_alloc::EspHeap, _pointer: usize, _size: usize) {
+    // esp-alloc calls this hook before deallocation. A pre-free snapshot cannot
+    // improve a high-water/minimum-free bound, and the periodic sampler will
+    // refresh current values after the free completes.
 }
 
 fn monotonic_us() -> u64 {

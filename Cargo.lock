@@ -2952,6 +2952,7 @@ dependencies = [
  "reticulum-device-api-pairing",
  "reticulum-device-api-pairing-control",
  "reticulum-device-api-session",
+ "reticulum-heltec-vision-master-e290-node",
  "reticulum-phase1-rx-local-data",
  "reticulum-rns-inbox-store",
  "reticulum-rns-rete",

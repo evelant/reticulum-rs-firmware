@@ -105,11 +105,16 @@ pub enum StackWatermarkLayoutError {
 /// Result of one watermark scan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StackWatermarkScan {
-    /// Conservative lowest address reached by this or an earlier stack frame.
+    /// Lowest address whose painted word was observed changed.
+    ///
+    /// This is not a historical minimum-SP proof: an earlier frame may have
+    /// reserved untouched padding below its lowest write. Qualification must
+    /// retain compiler-emitted maximum-frame evidence and headroom alongside
+    /// this runtime watermark.
     pub lowest_observed_address: u32,
-    /// Bytes from `lowest_observed_address` to the stack top.
+    /// Bytes from the lowest observed changed/current-scan address to the top.
     pub high_water_used_bytes: u32,
-    /// Remaining bytes between the guard word and the lowest observed address.
+    /// Observed painted margin above the guard, before static frame headroom.
     pub remaining_above_guard_bytes: u32,
     /// Number of volatile word reads requested from the caller.
     pub words_read: u32,

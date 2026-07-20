@@ -24,6 +24,8 @@ pub mod live_pairing_node;
 pub mod pairing_control_handoff;
 pub mod pairing_control_mapping;
 pub mod partition_contract;
+#[cfg(feature = "runtime-measurement-hil")]
+pub mod runtime_measurement;
 pub mod session_admission_handoff;
 pub mod usb_authenticated_session;
 pub mod usb_pairing_policy;
@@ -568,7 +570,7 @@ mod tests {
             .find("if let Some(observation) = pending_frame_acknowledgement.take()")
             .expect("node loop must retain its authorized-frame owner");
         let journal = source
-            .find("match storage.drive_submission_step(")
+            .find("let submission_step = storage.drive_submission_step(")
             .expect("node loop must retain its journal drive");
         assert!(pairing < frame);
         assert!(pairing < journal);

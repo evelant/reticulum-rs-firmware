@@ -78,20 +78,48 @@ jobs:
           -p reticulum-heltec-vision-master-e290-node --lib --tests
           --features rns-inbox-commit-fault-hil -- -D warnings
 
+      - name: Permanent E290 runtime-measurement HIL host tests
+        run: >-
+          cargo test --locked
+          -p reticulum-heltec-vision-master-e290-node --lib
+          --features runtime-measurement-hil
+
+      - name: Permanent E290 runtime-measurement HIL host Clippy
+        run: >-
+          cargo clippy --locked
+          -p reticulum-heltec-vision-master-e290-node --lib --tests
+          --features runtime-measurement-hil -- -D warnings
+
       - name: Reject combined E290 development features
         shell: bash
         run: |
           set -euo pipefail
-          log="$RUNNER_TEMP/e290-combined-development-features.log"
+          expected='journal-schema2-dev-reprovision, rns-inbox-commit-fault-hil, and runtime-measurement-hil are mutually exclusive'
+          feature_pairs=(
+            'journal-schema2-dev-reprovision,rns-inbox-commit-fault-hil'
+            'journal-schema2-dev-reprovision,runtime-measurement-hil'
+            'rns-inbox-commit-fault-hil,runtime-measurement-hil'
+          )
+
+          for features in "${feature_pairs[@]}"; do
+            log="$RUNNER_TEMP/e290-combined-$(tr ',' '-' <<<"$features").log"
+            if cargo check --locked \
+              -p reticulum-heltec-vision-master-e290-node \
+              --no-default-features --features "$features" >"$log" 2>&1; then
+              echo "::error title=Combined E290 development features accepted::$features must remain mutually exclusive"
+              exit 1
+            fi
+            grep -F "$expected" "$log"
+          done
+
+          log="$RUNNER_TEMP/e290-all-development-features.log"
           if cargo check --locked \
             -p reticulum-heltec-vision-master-e290-node \
             --all-features >"$log" 2>&1; then
-            echo "::error title=Combined E290 development features accepted::The two destructive development profiles must remain mutually exclusive"
+            echo "::error title=All E290 development features accepted::The development profiles must remain mutually exclusive"
             exit 1
           fi
-          grep -F \
-            'journal-schema2-dev-reprovision and rns-inbox-commit-fault-hil are mutually exclusive' \
-            "$log"
+          grep -F "$expected" "$log"
 
       - name: Permanent E290 node rustdoc
         env:
@@ -412,6 +440,9 @@ jobs:
           -- -D warnings
 
       - name: Link permanent LoRa-first Vision Master E290 node
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/e290-default-target
+          RUSTFLAGS: -C link-arg=-nostartfiles -Z emit-stack-sizes
         run: >-
           cargo +esp build --locked --release
           -p reticulum-heltec-vision-master-e290-node
@@ -423,7 +454,7 @@ jobs:
           set -euo pipefail
           table_bin="$RUNNER_TEMP/e290-node-partitions.bin"
           image="$RUNNER_TEMP/e290-node.bin"
-          elf="target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node"
+          elf="$RUNNER_TEMP/e290-default-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node"
 
           espflash partition-table --skip-update-check --to-binary \
             --output "$table_bin" \
@@ -438,6 +469,9 @@ jobs:
           test -s "$image"
 
       - name: Strict clippy for permanent LoRa-first Vision Master E290 node
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/e290-default-target
+          RUSTFLAGS: -C link-arg=-nostartfiles -Z emit-stack-sizes
         run: >-
           cargo +esp clippy --locked --release
           -p reticulum-heltec-vision-master-e290-node
@@ -467,7 +501,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          default_elf="target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node"
+          default_elf="$RUNNER_TEMP/e290-default-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node"
           hil_elf="$RUNNER_TEMP/e290-inbox-commit-fault-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node"
           identifier=RETICULUM_INBOX_ADMISSION_FAULT_HIL_EVIDENCE
 
@@ -491,6 +525,283 @@ jobs:
             '$2 == "00000028" && index($NF, identifier) { found++ } END { exit found != 1 }' \
             <<<"$hil_symbols"; then
             echo "::error title=Commit-fault evidence ABI changed::Expected one exact 40-byte evidence object"
+            exit 1
+          fi
+
+      - name: Link E290 runtime-measurement HIL
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/e290-runtime-measurement-target
+          RUSTFLAGS: -C link-arg=-nostartfiles -Z emit-stack-sizes
+        run: >-
+          cargo +esp build --locked --release
+          -p reticulum-heltec-vision-master-e290-node
+          --no-default-features --features runtime-measurement-hil
+          --target xtensa-esp32s3-none-elf
+
+      - name: Strict clippy for E290 runtime-measurement HIL
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/e290-runtime-measurement-target
+          RUSTFLAGS: -C link-arg=-nostartfiles -Z emit-stack-sizes
+        run: >-
+          cargo +esp clippy --locked --release
+          -p reticulum-heltec-vision-master-e290-node
+          --bin reticulum-heltec-vision-master-e290-node
+          --no-default-features --features runtime-measurement-hil
+          --target xtensa-esp32s3-none-elf
+          -- -D warnings
+
+      - name: Relink stack-evidenced E290 images after Clippy
+        shell: bash
+        run: |
+          set -euo pipefail
+          export RUSTFLAGS='-C link-arg=-nostartfiles -Z emit-stack-sizes'
+          CARGO_TARGET_DIR="$RUNNER_TEMP/e290-default-target" \
+            cargo +esp build --locked --release \
+            -p reticulum-heltec-vision-master-e290-node \
+            --target xtensa-esp32s3-none-elf
+          CARGO_TARGET_DIR="$RUNNER_TEMP/e290-runtime-measurement-target" \
+            cargo +esp build --locked --release \
+            -p reticulum-heltec-vision-master-e290-node \
+            --no-default-features --features runtime-measurement-hil \
+            --target xtensa-esp32s3-none-elf
+
+      - name: Enforce E290 compiler-frame and linked-stack bounds
+        run: >-
+          cargo run --locked -p xtask -- e290-runtime-measurement inspect-elf
+          --default-elf
+          "$RUNNER_TEMP/e290-default-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node"
+          --hil-elf
+          "$RUNNER_TEMP/e290-runtime-measurement-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node"
+
+      - name: Enforce E290 runtime-measurement ELF isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          default_elf="$RUNNER_TEMP/e290-default-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node"
+          hil_elf="$RUNNER_TEMP/e290-runtime-measurement-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node"
+          evidence=RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE
+          marker=RETICULUM_RUNTIME_MEASUREMENT_STACK_MARKER
+          alloc_hook=_esp_alloc_alloc
+          dealloc_hook=_esp_alloc_dealloc
+
+          default_symbols="$(xtensa-esp32s3-elf-nm -S --defined-only "$default_elf")"
+          hil_symbols="$(xtensa-esp32s3-elf-nm -S --defined-only "$hil_elf")"
+
+          if grep -Fq "$evidence" <<<"$default_symbols"; then
+            echo "::error title=Runtime-measurement evidence reached default E290 ELF::$evidence must remain HIL-only"
+            exit 1
+          fi
+          for identifier in "$marker" "$alloc_hook" "$dealloc_hook"; do
+            if awk -v identifier="$identifier" \
+              '$NF == identifier { found++ } END { exit found == 0 }' \
+              <<<"$default_symbols"; then
+              echo "::error title=Runtime-measurement identifier reached default E290 ELF::$identifier must remain HIL-only"
+              exit 1
+            fi
+          done
+
+          if ! awk -v identifier="$evidence" \
+            'index($NF, identifier) { found++ } END { exit found != 1 }' \
+            <<<"$hil_symbols"; then
+            echo "::error title=Runtime-measurement evidence symbol count changed::Expected one debugger-visible evidence object"
+            exit 1
+          fi
+          if ! awk -v identifier="$evidence" \
+            '$2 == "00000100" && $3 == "D" && index($NF, identifier) { found++ } END { exit found != 1 }' \
+            <<<"$hil_symbols"; then
+            echo "::error title=Runtime-measurement evidence ABI changed::Expected one exact 256-byte initialized evidence object"
+            exit 1
+          fi
+
+          for identifier in "$marker" "$alloc_hook"; do
+            if ! awk -v identifier="$identifier" \
+              '$NF == identifier { found++ } END { exit found != 1 }' \
+              <<<"$hil_symbols"; then
+              echo "::error title=Runtime-measurement HIL hook count changed::Expected exactly one $identifier symbol"
+              exit 1
+            fi
+          done
+          if ! awk -v identifier="$dealloc_hook" \
+            '$NF == identifier { found++ } END { exit found > 1 }' \
+            <<<"$hil_symbols"; then
+            echo "::error title=Runtime-measurement HIL deallocation hook duplicated::Expected at most one $dealloc_hook symbol"
+            exit 1
+          fi
+          # The current graph has no linked global-deallocation path, so LTO
+          # may legitimately omit this source-defined callback. Source/graph
+          # policy still requires the exact definition and alloc-hooks feature.
+
+          marker_record="$(awk -v identifier="$marker" \
+            '$NF == identifier { print $1, $2, $3 }' <<<"$hil_symbols")"
+          read -r marker_address marker_size marker_type <<<"$marker_record"
+          if [[ "$marker_size" != 00000020 || "$marker_type" != B ]]; then
+            echo "::error title=Runtime-measurement stack marker ABI changed::Expected one exact 32-byte NOBITS marker"
+            exit 1
+          fi
+
+          hil_sections="$(xtensa-esp32s3-elf-readelf -SW "$hil_elf")"
+          noinit_address="$(awk '
+            {
+              for (field = 1; field <= NF; field++) {
+                if ($field == ".noinit" && $(field + 1) == "NOBITS") {
+                  print $(field + 2)
+                }
+              }
+            }
+          ' <<<"$hil_sections")"
+          if [[ -z "$noinit_address" || "$noinit_address" != "$marker_address" ]] ||
+             ! grep -Eq '[[:space:]]\.noinit[[:space:]]+NOBITS[[:space:]]+[0-9a-f]+[[:space:]]+[0-9a-f]+[[:space:]]+000020[[:space:]]' <<<"$hil_sections"; then
+            echo "::error title=Runtime-measurement marker section changed::Expected the exact marker as the sole 32-byte NOBITS .noinit payload"
+            exit 1
+          fi
+
+          stack_end_address="$(awk '$NF == "_stack_end_cpu0" { print $1 }' <<<"$hil_symbols")"
+          stack_guard_address="$(awk '$NF == "__stack_chk_guard" { print $1 }' <<<"$hil_symbols")"
+          stack_start_address="$(awk '$NF == "_stack_start_cpu0" { print $1 }' <<<"$hil_symbols")"
+          if [[ -z "$stack_end_address" || -z "$stack_guard_address" || -z "$stack_start_address" ]] ||
+             (( 0x$stack_end_address != 0x$marker_address + 0x$marker_size )) ||
+             (( 0x$stack_guard_address - 0x$stack_end_address != 60 )) ||
+             (( 0x$stack_start_address <= 0x$stack_guard_address )); then
+            echo "::error title=Runtime-measurement stack link layout changed::Expected marker, stack bottom, 60-byte guard offset, and stack top in reviewed order"
+            exit 1
+          fi
+
+          if ! awk '$2 == "0000004a" && $3 == "T" && $NF == "__zero_bss" { found++ } END { exit found != 1 }' \
+            <<<"$hil_symbols"; then
+            echo "::error title=Runtime-measurement reset hook changed::Expected one strong 74-byte __zero_bss override"
+            exit 1
+          fi
+          zero_bss_disassembly="$(xtensa-esp32s3-elf-objdump -d --disassemble=__zero_bss "$hil_elf")"
+          zero_bss_instructions="$(awk '
+            /^[[:space:]]*[0-9a-f]+:/ {
+              instruction = $0
+              sub(/^[[:space:]]*[0-9a-f]+:[[:space:]]+[0-9a-f]+[[:space:]]+/, "", instruction)
+              sub(/[[:space:]]+[0-9a-f]+[[:space:]]+<[^>]+>([[:space:]]+[(][^)]*[)])?[[:space:]]*$/, "", instruction)
+              sub(/,[[:space:]]*$/, "", instruction)
+              gsub(/[[:space:]]+/, " ", instruction)
+              print instruction
+            }
+          ' <<<"$zero_bss_disassembly")"
+          expected_zero_bss_instructions="$(cat <<'EOF'
+          entry a1, 0
+          l32r a2
+          l32r a3
+          or a4, a1, a1
+          l32r a5
+          bgeu a2, a4
+          beq a2, a3
+          xor a6, a2, a5
+          s32i.n a6, a2, 0
+          addi.n a2, a2, 4
+          j
+          l32r a2
+          l32r a5
+          s32i.n a5, a2, 0
+          l32r a5
+          s32i.n a5, a2, 4
+          l32r a5
+          s32i.n a5, a2, 8
+          l32r a5
+          s32i.n a5, a2, 12
+          s32i.n a4, a2, 16
+          s32i.n a3, a2, 20
+          l32i.n a6, a3, 0
+          s32i.n a6, a2, 24
+          l32r a5
+          s32i.n a5, a2, 28
+          memw
+          movi.n a2, 1
+          retw.n
+          EOF
+          )"
+          if [[ "$zero_bss_instructions" != "$expected_zero_bss_instructions" ]]; then
+            echo "::error title=Runtime-measurement reset hook instruction sequence changed::Review the exact opcode, register, and immediate sequence"
+            diff -u \
+              <(printf '%s\n' "$expected_zero_bss_instructions") \
+              <(printf '%s\n' "$zero_bss_instructions") || true
+            exit 1
+          fi
+
+          for branch_contract in \
+            'bgeu[[:space:]]+a2, a4, [0-9a-f]+ <__zero_bss\+0x1f>' \
+            'beq[[:space:]]+a2, a3, [0-9a-f]+ <__zero_bss\+0x1a>' \
+            'j[[:space:]]+[0-9a-f]+ <__zero_bss\+0xf>'; do
+            if ! grep -Eq "$branch_contract" <<<"$zero_bss_disassembly"; then
+              echo "::error title=Runtime-measurement reset hook control flow changed::Missing reviewed relative branch $branch_contract"
+              exit 1
+            fi
+          done
+
+          # Resolve every l32r through the linked .rwtext bytes. The expected
+          # values derive from final-link symbols where possible, so this
+          # proves the reviewed stack/guard/marker semantics without pinning
+          # their absolute DRAM addresses.
+          literal_addresses="$(awk '$3 == "l32r" { print $5 }' <<<"$zero_bss_disassembly")"
+          literal_count="$(awk 'NF { count++ } END { print count + 0 }' <<<"$literal_addresses")"
+          if [[ "$literal_count" != 9 ]]; then
+            echo "::error title=Runtime-measurement reset hook literal count changed::Expected exactly nine l32r operations"
+            exit 1
+          fi
+          read -r rwtext_address rwtext_size < <(awk '
+            {
+              for (field = 1; field <= NF; field++) {
+                if ($field == ".rwtext" && $(field + 1) == "PROGBITS") {
+                  print $(field + 2), $(field + 4)
+                }
+              }
+            }
+          ' <<<"$hil_sections")
+          if [[ -z "$rwtext_address" || -z "$rwtext_size" ]]; then
+            echo "::error title=Runtime-measurement RAM text section missing::Cannot resolve reset-hook literals"
+            exit 1
+          fi
+          rwtext_image="$(mktemp)"
+          trap 'rm -f "$rwtext_image"' EXIT
+          xtensa-esp32s3-elf-objcopy --dump-section ".rwtext=$rwtext_image" "$hil_elf"
+
+          u32_le_bytes() {
+            local value=$((16#$1))
+            printf '%02x%02x%02x%02x' \
+              "$((value & 0xff))" \
+              "$(((value >> 8) & 0xff))" \
+              "$(((value >> 16) & 0xff))" \
+              "$(((value >> 24) & 0xff))"
+          }
+          actual_literal_values="$({
+            for literal_address in $literal_addresses; do
+              if (( 0x$literal_address < 0x$rwtext_address ||
+                    0x$literal_address + 4 > 0x$rwtext_address + 0x$rwtext_size )); then
+                echo "::error title=Runtime-measurement reset hook literal escaped .rwtext::$literal_address" >&2
+                exit 1
+              fi
+              literal_offset=$((0x$literal_address - 0x$rwtext_address))
+              od -An -N4 -j "$literal_offset" -tx1 "$rwtext_image" \
+                | tr -d '[:space:]'
+              printf '\n'
+            done
+          })"
+          expected_literal_values="$({
+            # a53c9e71 is STACK_WATERMARK_PATTERN_SEED; 57535452 is
+            # u32::from_le_bytes(*b"RTSW"), followed by its bitwise inverse.
+            for value in \
+              "$stack_end_address" \
+              "$stack_guard_address" \
+              a53c9e71 \
+              "$marker_address" \
+              57535452 \
+              a8acabad \
+              "$stack_end_address" \
+              "$stack_start_address" \
+              a53c9e71; do
+              u32_le_bytes "$value"
+              printf '\n'
+            done
+          })"
+          if [[ "$actual_literal_values" != "$expected_literal_values" ]]; then
+            echo "::error title=Runtime-measurement reset hook literal semantics changed::Expected stack bottom, guard, seed, marker, magic pair, stack bounds, and seed in reviewed order"
+            diff -u \
+              <(printf '%s\n' "$expected_literal_values") \
+              <(printf '%s\n' "$actual_literal_values") || true
             exit 1
           fi
 
@@ -662,10 +973,13 @@ jobs:
             "$RUNNER_TEMP/phase1-rx-normal-pressure/firmware.elf" \
             360448 12288 475136 840000
           check_size e290-node \
-            "$release/reticulum-heltec-vision-master-e290-node" \
+            "$RUNNER_TEMP/e290-default-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node" \
             720896 16384 475136 1180000
           check_size e290-inbox-commit-fault-hil \
             "$RUNNER_TEMP/e290-inbox-commit-fault-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node" \
+            720896 16384 475136 1180000
+          check_size e290-runtime-measurement-hil \
+            "$RUNNER_TEMP/e290-runtime-measurement-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node" \
             720896 16384 475136 1180000
 
       - name: Enforce lab retained-state and startup-stack link contracts

@@ -16,6 +16,7 @@ mod e290_authenticated_usb;
 mod e290_pairing_control;
 mod e290_pairing_live;
 mod e290_rns_inbox_fixture;
+mod e290_runtime_measurement;
 mod phase1_closure;
 mod phase1_hil;
 mod phase1_image;
@@ -36,6 +37,7 @@ fn main() -> ExitCode {
         Some("e290-pairing-live") => e290_pairing_live::run(args.collect()),
         Some("e290-authenticated-usb") => e290_authenticated_usb::run(args.collect()),
         Some("e290-rns-inbox-fixture") => e290_rns_inbox_fixture::run(args.collect()),
+        Some("e290-runtime-measurement") => e290_runtime_measurement::run(args.collect()),
         Some("check-rns-vectors") if args.next().is_none() => check_rns_vectors(),
         Some("check-rnode-hil-vectors") if args.next().is_none() => check_rnode_hil_vectors(),
         Some("graph-policy") if args.next().is_none() => graph_policy(),
@@ -51,7 +53,7 @@ fn main() -> ExitCode {
         _ => {
             eprintln!(
                 "usage: cargo run -p xtask -- \
-                 <doctor|build-tracker|e290-pairing-control|e290-pairing-live|e290-authenticated-usb|e290-rns-inbox-fixture|check-rns-vectors|check-rnode-hil-vectors|graph-policy|rx-api-policy|print-rx-api-surface|phase1-rx-hil-artifacts|phase1-rx-closure-artifacts|phase1-rx-powered-evidence>"
+                 <doctor|build-tracker|e290-pairing-control|e290-pairing-live|e290-authenticated-usb|e290-rns-inbox-fixture|e290-runtime-measurement|check-rns-vectors|check-rnode-hil-vectors|graph-policy|rx-api-policy|print-rx-api-surface|phase1-rx-hil-artifacts|phase1-rx-closure-artifacts|phase1-rx-powered-evidence>"
             );
             ExitCode::from(2)
         }
@@ -228,6 +230,10 @@ fn graph_policy() -> ExitCode {
     }
     if let Err(error) = validate_e290_inbox_commit_fault_hil_workspace(&root) {
         eprintln!("error: E290 inbox commit-fault HIL source boundary: {error}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(error) = validate_e290_runtime_measurement_hil_workspace(&root) {
+        eprintln!("error: E290 runtime-measurement HIL source boundary: {error}");
         return ExitCode::FAILURE;
     }
     let mut product_graphs = Vec::new();
@@ -425,6 +431,29 @@ fn graph_policy() -> ExitCode {
         }
     };
 
+    let e290_runtime_measurement_hil = match capture(
+        "cargo",
+        [
+            "tree",
+            "--locked",
+            "-p",
+            "reticulum-heltec-vision-master-e290-node",
+            "--no-default-features",
+            "--features",
+            "runtime-measurement-hil",
+            "--target",
+            "all",
+            "--format",
+            "{p} features=[{f}]",
+        ],
+    ) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!("error: could not inspect E290 runtime-measurement HIL graph: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let comparison = match capture(
         "cargo",
         [
@@ -555,6 +584,13 @@ fn graph_policy() -> ExitCode {
         eprintln!("error: {error}");
         failed = true;
     }
+    if let Err(error) = validate_e290_runtime_measurement_hil_graph_boundary(
+        &e290_node,
+        &e290_runtime_measurement_hil,
+    ) {
+        eprintln!("error: {error}");
+        failed = true;
+    }
     for forbidden in ["rete-core", "rete-stack", "rete-transport", "rete-lxmf"] {
         if cargo_tree_contains_package(&comparison, forbidden) {
             eprintln!("error: Leviculum comparison graph contains forbidden {forbidden}");
@@ -643,8 +679,8 @@ fn graph_policy() -> ExitCode {
         ExitCode::FAILURE
     } else {
         println!(
-            "ok: all safe, RX, HIL and all-features all-target product graphs, the RF-inert physical-storage HIL graph, the separately hazardous default-sentinel, Tracker semantic-announce/semantic-round-trip and E290 semantic-round-trip TX HIL graphs, the permanent and inbox commit-fault E290 node graphs and the Leviculum \
-             comparison graph are isolated; the returned-radio-fault and inbound-commit-fault hooks are feature-exclusive; \
+            "ok: all safe, RX, HIL and all-features all-target product graphs, the RF-inert physical-storage HIL graph, the separately hazardous default-sentinel, Tracker semantic-announce/semantic-round-trip and E290 semantic-round-trip TX HIL graphs, the permanent, inbox commit-fault and runtime-measurement E290 node graphs and the Leviculum \
+             comparison graph are isolated; the returned-radio-fault, inbound-commit-fault and runtime-measurement hooks are feature-exclusive; \
              legacy Tracker firmware direct dependencies use only the RX façade and every-feature resolution \
              excludes TX ownership and pre-integration durable crates; resolved Rete packages match reported \
              source/revision; esp-rtos and lora-phy resolve only to their reviewed local patches, \
@@ -1255,6 +1291,7 @@ fn validate_e290_semantic_hil_graph_boundary(tree: &str) -> Result<(), String> {
 }
 
 const E290_INBOX_COMMIT_FAULT_HIL_FEATURE: &str = "rns-inbox-commit-fault-hil";
+const E290_RUNTIME_MEASUREMENT_HIL_FEATURE: &str = "runtime-measurement-hil";
 
 fn validate_e290_inbox_commit_fault_hil_workspace(workspace: &Path) -> Result<(), String> {
     let product = workspace.join("firmware/heltec-vision-master-e290-node");
@@ -1336,7 +1373,8 @@ fn validate_e290_inbox_commit_fault_hil_sources(
     for required in [
         "CARGO_FEATURE_JOURNAL_SCHEMA2_DEV_REPROVISION",
         "CARGO_FEATURE_RNS_INBOX_COMMIT_FAULT_HIL",
-        "journal-schema2-dev-reprovision and rns-inbox-commit-fault-hil are mutually exclusive",
+        "CARGO_FEATURE_RUNTIME_MEASUREMENT_HIL",
+        "journal-schema2-dev-reprovision, rns-inbox-commit-fault-hil, and runtime-measurement-hil are mutually exclusive",
     ] {
         if !build.contains(required) {
             return Err(format!("the E290 build policy is missing {required:?}"));
@@ -1359,6 +1397,449 @@ fn validate_e290_inbox_commit_fault_hil_sources(
     Ok(())
 }
 
+const E290_RUNTIME_MEASUREMENT_EVIDENCE: &str = "RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE";
+const E290_RUNTIME_MEASUREMENT_STACK_MARKER: &str = "RETICULUM_RUNTIME_MEASUREMENT_STACK_MARKER";
+const E290_RUNTIME_MEASUREMENT_HOOKS: [&str; 2] = ["_esp_alloc_alloc", "_esp_alloc_dealloc"];
+
+fn validate_e290_runtime_measurement_hil_workspace(workspace: &Path) -> Result<(), String> {
+    let product = workspace.join("firmware/heltec-vision-master-e290-node");
+    let mut sources = Vec::new();
+    collect_workspace_rust_sources(workspace, &product.join("src"), &mut sources)?;
+    let build = fs::read_to_string(product.join("build.rs"))
+        .map_err(|error| format!("could not read E290 build policy: {error}"))?;
+    validate_e290_runtime_measurement_hil_sources(&sources, &build)
+}
+
+fn validate_e290_runtime_measurement_hil_sources(
+    sources: &[(String, String)],
+    build: &str,
+) -> Result<(), String> {
+    const PRODUCT: &str = "firmware/heltec-vision-master-e290-node/src/";
+    const LIBRARY: &str = "firmware/heltec-vision-master-e290-node/src/lib.rs";
+    const MAIN: &str = "firmware/heltec-vision-master-e290-node/src/main.rs";
+    const SAFE_MODULE: &str = "firmware/heltec-vision-master-e290-node/src/runtime_measurement.rs";
+    const STACK_MODULE: &str =
+        "firmware/heltec-vision-master-e290-node/src/runtime_measurement_stack_hil.rs";
+
+    let exact_source = |path: &str| -> Result<&str, String> {
+        let matching = sources
+            .iter()
+            .filter(|(candidate, _)| candidate == path)
+            .collect::<Vec<_>>();
+        if matching.len() != 1 {
+            return Err(format!(
+                "runtime-measurement source policy expected exactly one {path}, found {}",
+                matching.len()
+            ));
+        }
+        Ok(matching[0].1.as_str())
+    };
+
+    let library = exact_source(LIBRARY)?;
+    let main = exact_source(MAIN)?;
+    let runtime = exact_source(SAFE_MODULE)?;
+    let stack = exact_source(STACK_MODULE)?;
+
+    let library_declaration = format!(
+        "#[cfg(feature = \"{E290_RUNTIME_MEASUREMENT_HIL_FEATURE}\")]\npub mod runtime_measurement;"
+    );
+    if library.matches(&library_declaration).count() != 1
+        || library.matches("runtime_measurement").count() != 1
+    {
+        return Err(
+            "the safe runtime-measurement module must have one exact feature-gated library declaration"
+                .to_owned(),
+        );
+    }
+
+    let stack_declaration = format!(
+        "#[cfg(feature = \"{E290_RUNTIME_MEASUREMENT_HIL_FEATURE}\")]\nmod runtime_measurement_stack_hil;"
+    );
+    if main.matches(&stack_declaration).count() != 1 {
+        return Err(
+            "the target stack-watermark module must have one exact runtime-measurement feature gate"
+                .to_owned(),
+        );
+    }
+    let stack_call = "runtime_measurement_stack_hil::";
+    let stack_call_sites = main
+        .lines()
+        .filter(|line| {
+            line.find(stack_call)
+                .is_some_and(|position| line[position + stack_call.len()..].contains('('))
+        })
+        .count();
+    if stack_call_sites != 1 {
+        return Err(
+            "the target main must contain exactly one runtime-measurement stack initialization site"
+                .to_owned(),
+        );
+    }
+
+    let evidence_definition = format!("pub static {E290_RUNTIME_MEASUREMENT_EVIDENCE}");
+    if runtime.matches(&evidence_definition).count() != 1 {
+        return Err(
+            "the safe runtime-measurement module must own one public debugger evidence static"
+                .to_owned(),
+        );
+    }
+    let evidence_position = runtime
+        .find(&evidence_definition)
+        .expect("the evidence definition count was checked");
+    if !immediately_preceded_by_exact_attribute(runtime, evidence_position, "#[used]") {
+        return Err(
+            "the runtime-measurement evidence static must be retained with #[used]".to_owned(),
+        );
+    }
+    if runtime.contains("no_mangle") {
+        return Err(
+            "the safe runtime-measurement evidence must retain its identifier without no_mangle"
+                .to_owned(),
+        );
+    }
+
+    let marker_definition = format!("static mut {E290_RUNTIME_MEASUREMENT_STACK_MARKER}");
+    if stack.matches(&marker_definition).count() != 1
+        || !stack.contains("#[used]")
+        || !stack.contains("#[unsafe(no_mangle)]")
+        || !stack.contains("__zero_bss")
+    {
+        return Err(
+            "the target stack module must own one retained startup marker and reset-time stack hook"
+                .to_owned(),
+        );
+    }
+    for required in [
+        "let innermost_sp = current_stack_pointer();",
+        "if address >= innermost_sp {",
+        "!stack_watermark_word(address)",
+    ] {
+        if stack.matches(required).count() != 1 {
+            return Err(format!(
+                "the target stack scanner must retain one per-read live-frame guard containing {required:?}"
+            ));
+        }
+    }
+
+    for required in [
+        "CARGO_FEATURE_RUNTIME_MEASUREMENT_HIL",
+        "journal-schema2-dev-reprovision, rns-inbox-commit-fault-hil, and runtime-measurement-hil are mutually exclusive",
+    ] {
+        if !build.contains(required) {
+            return Err(format!("the E290 build policy is missing {required:?}"));
+        }
+    }
+
+    let tracked_identifiers = [
+        "runtime_measurement",
+        E290_RUNTIME_MEASUREMENT_EVIDENCE,
+        E290_RUNTIME_MEASUREMENT_STACK_MARKER,
+        E290_RUNTIME_MEASUREMENT_HOOKS[0],
+        E290_RUNTIME_MEASUREMENT_HOOKS[1],
+    ];
+    for (path, source) in sources {
+        if !path.starts_with(PRODUCT) {
+            return Err(format!(
+                "runtime-measurement source inventory escaped the E290 product: {path}"
+            ));
+        }
+        if path != LIBRARY && path != SAFE_MODULE && path != STACK_MODULE {
+            validate_runtime_measurement_consumer_source(path, source, &tracked_identifiers)?;
+        }
+    }
+
+    for (identifier, expected_path, definition_fragment) in [
+        (
+            E290_RUNTIME_MEASUREMENT_EVIDENCE,
+            SAFE_MODULE,
+            "static RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE",
+        ),
+        (
+            E290_RUNTIME_MEASUREMENT_STACK_MARKER,
+            STACK_MODULE,
+            "static mut RETICULUM_RUNTIME_MEASUREMENT_STACK_MARKER",
+        ),
+    ] {
+        let definitions = sources
+            .iter()
+            .filter(|(_, source)| source.contains(definition_fragment))
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>();
+        if definitions != [expected_path] {
+            return Err(format!(
+                "{identifier} must be defined only in {expected_path}, observed {definitions:?}"
+            ));
+        }
+    }
+    for hook in E290_RUNTIME_MEASUREMENT_HOOKS {
+        let definition = format!("fn {hook}");
+        let definitions = sources
+            .iter()
+            .filter(|(_, source)| source.contains(&definition))
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>();
+        if definitions.len() != 1 {
+            return Err(format!(
+                "runtime-measurement HIL must define exactly one {hook} allocator callback, observed {definitions:?}"
+            ));
+        }
+    }
+    let allocator_hook = concat!(
+        "#[cfg(feature = \"runtime-measurement-hil\")]\n",
+        "#[unsafe(no_mangle)]\n",
+        "fn _esp_alloc_alloc(\n",
+        "    heap: &::esp_alloc::EspHeap,\n",
+        "    _capabilities: ::esp_alloc::export::enumset::EnumSet<::esp_alloc::MemoryCapability>,\n",
+        "    pointer: usize,\n",
+        "    _size: usize,\n",
+        ") {",
+    );
+    let deallocator_hook = concat!(
+        "#[cfg(feature = \"runtime-measurement-hil\")]\n",
+        "#[unsafe(no_mangle)]\n",
+        "fn _esp_alloc_dealloc(_heap: &::esp_alloc::EspHeap, _pointer: usize, _size: usize) {",
+    );
+    if main.matches(allocator_hook).count() != 1 || main.matches(deallocator_hook).count() != 1 {
+        return Err(
+            "the runtime-measurement allocator callbacks must retain their exact pinned esp-alloc 0.10 Rust ABI, attributes, parameter order, and unit return"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_runtime_measurement_consumer_source(
+    path: &str,
+    source: &str,
+    tracked_identifiers: &[&str],
+) -> Result<(), String> {
+    let file = syn::parse_file(source)
+        .map_err(|error| format!("could not parse runtime-measurement consumer {path}: {error}"))?;
+    for item in &file.items {
+        let rendered = item.to_token_stream().to_string();
+        if !contains_any_identifier(&rendered, tracked_identifiers) {
+            continue;
+        }
+        if tokens_start_with_feature_cfg(&rendered, E290_RUNTIME_MEASUREMENT_HIL_FEATURE) {
+            continue;
+        }
+        if let Item::Fn(function) = item {
+            let signature = function.sig.to_token_stream().to_string();
+            if contains_any_identifier(&signature, tracked_identifiers) {
+                return Err(format!(
+                    "runtime-measurement identifier in {path} function signature is not directly feature-gated"
+                ));
+            }
+            validate_runtime_measurement_consumer_block(
+                path,
+                &function.block,
+                tracked_identifiers,
+            )?;
+            continue;
+        }
+        return Err(format!(
+            "runtime-measurement identifier in {path} is not directly feature-gated"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_runtime_measurement_consumer_block(
+    path: &str,
+    block: &syn::Block,
+    tracked_identifiers: &[&str],
+) -> Result<(), String> {
+    for statement in &block.stmts {
+        let rendered = statement.to_token_stream().to_string();
+        if !contains_any_identifier(&rendered, tracked_identifiers) {
+            continue;
+        }
+        if tokens_start_with_feature_cfg(&rendered, E290_RUNTIME_MEASUREMENT_HIL_FEATURE) {
+            continue;
+        }
+        match statement {
+            syn::Stmt::Item(Item::Fn(function)) => validate_runtime_measurement_consumer_block(
+                path,
+                &function.block,
+                tracked_identifiers,
+            )?,
+            syn::Stmt::Local(local) => {
+                let pattern = local.pat.to_token_stream().to_string();
+                if contains_any_identifier(&pattern, tracked_identifiers) {
+                    return Err(format!(
+                        "runtime-measurement local binding in {path} is not directly feature-gated"
+                    ));
+                }
+                let initializer = local.init.as_ref().ok_or_else(|| {
+                    format!(
+                        "runtime-measurement local statement in {path} has no feature-gated initializer"
+                    )
+                })?;
+                validate_runtime_measurement_consumer_expression(
+                    path,
+                    &initializer.expr,
+                    tracked_identifiers,
+                )?;
+                if let Some((_, diverge)) = &initializer.diverge {
+                    validate_runtime_measurement_consumer_expression(
+                        path,
+                        diverge,
+                        tracked_identifiers,
+                    )?;
+                }
+            }
+            syn::Stmt::Expr(expression, _) => validate_runtime_measurement_consumer_expression(
+                path,
+                expression,
+                tracked_identifiers,
+            )?,
+            _ => {
+                return Err(format!(
+                    "runtime-measurement statement in {path} is not directly feature-gated"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_runtime_measurement_consumer_expression(
+    path: &str,
+    expression: &syn::Expr,
+    tracked_identifiers: &[&str],
+) -> Result<(), String> {
+    let rendered = expression.to_token_stream().to_string();
+    if !contains_any_identifier(&rendered, tracked_identifiers)
+        || tokens_start_with_feature_cfg(&rendered, E290_RUNTIME_MEASUREMENT_HIL_FEATURE)
+    {
+        return Ok(());
+    }
+
+    match expression {
+        syn::Expr::Async(expression) => validate_runtime_measurement_consumer_block(
+            path,
+            &expression.block,
+            tracked_identifiers,
+        ),
+        syn::Expr::Block(expression) => validate_runtime_measurement_consumer_block(
+            path,
+            &expression.block,
+            tracked_identifiers,
+        ),
+        syn::Expr::Const(expression) => validate_runtime_measurement_consumer_block(
+            path,
+            &expression.block,
+            tracked_identifiers,
+        ),
+        syn::Expr::ForLoop(expression) => {
+            if contains_any_identifier(
+                &expression.expr.to_token_stream().to_string(),
+                tracked_identifiers,
+            ) {
+                return Err(format!(
+                    "runtime-measurement loop input in {path} is not directly feature-gated"
+                ));
+            }
+            validate_runtime_measurement_consumer_block(path, &expression.body, tracked_identifiers)
+        }
+        syn::Expr::If(expression) => {
+            if contains_any_identifier(
+                &expression.cond.to_token_stream().to_string(),
+                tracked_identifiers,
+            ) {
+                return Err(format!(
+                    "runtime-measurement condition in {path} is not directly feature-gated"
+                ));
+            }
+            validate_runtime_measurement_consumer_block(
+                path,
+                &expression.then_branch,
+                tracked_identifiers,
+            )?;
+            if let Some((_, otherwise)) = &expression.else_branch {
+                validate_runtime_measurement_consumer_expression(
+                    path,
+                    otherwise,
+                    tracked_identifiers,
+                )?;
+            }
+            Ok(())
+        }
+        syn::Expr::Loop(expression) => {
+            validate_runtime_measurement_consumer_block(path, &expression.body, tracked_identifiers)
+        }
+        syn::Expr::Match(expression) => {
+            if contains_any_identifier(
+                &expression.expr.to_token_stream().to_string(),
+                tracked_identifiers,
+            ) {
+                return Err(format!(
+                    "runtime-measurement match input in {path} is not directly feature-gated"
+                ));
+            }
+            for arm in &expression.arms {
+                let rendered = arm.to_token_stream().to_string();
+                if !contains_any_identifier(&rendered, tracked_identifiers)
+                    || tokens_start_with_feature_cfg(
+                        &rendered,
+                        E290_RUNTIME_MEASUREMENT_HIL_FEATURE,
+                    )
+                {
+                    continue;
+                }
+                validate_runtime_measurement_consumer_expression(
+                    path,
+                    &arm.body,
+                    tracked_identifiers,
+                )?;
+            }
+            Ok(())
+        }
+        syn::Expr::TryBlock(expression) => validate_runtime_measurement_consumer_block(
+            path,
+            &expression.block,
+            tracked_identifiers,
+        ),
+        syn::Expr::Unsafe(expression) => validate_runtime_measurement_consumer_block(
+            path,
+            &expression.block,
+            tracked_identifiers,
+        ),
+        syn::Expr::While(expression) => {
+            if contains_any_identifier(
+                &expression.cond.to_token_stream().to_string(),
+                tracked_identifiers,
+            ) {
+                return Err(format!(
+                    "runtime-measurement loop condition in {path} is not directly feature-gated"
+                ));
+            }
+            validate_runtime_measurement_consumer_block(path, &expression.body, tracked_identifiers)
+        }
+        _ => Err(format!(
+            "runtime-measurement expression in {path} is not directly feature-gated"
+        )),
+    }
+}
+
+fn contains_any_identifier(rendered: &str, identifiers: &[&str]) -> bool {
+    identifiers
+        .iter()
+        .any(|identifier| rendered.contains(identifier))
+}
+
+fn tokens_start_with_feature_cfg(rendered: &str, feature: &str) -> bool {
+    rendered.starts_with(&format!("# [cfg (feature = \"{feature}\")]"))
+}
+
+fn immediately_preceded_by_exact_attribute(source: &str, position: usize, attribute: &str) -> bool {
+    let statement_line = source[..position].rfind('\n').map_or(0, |index| index + 1);
+    source[..statement_line]
+        .lines()
+        .next_back()
+        .is_some_and(|line| line.trim() == attribute)
+}
+
 fn immediately_preceded_by_feature_cfg(source: &str, position: usize, feature: &str) -> bool {
     let statement_line = source[..position].rfind('\n').map_or(0, |index| index + 1);
     source[..statement_line]
@@ -1367,8 +1848,9 @@ fn immediately_preceded_by_feature_cfg(source: &str, position: usize, feature: &
         .is_some_and(|line| line.trim() == format!("#[cfg(feature = \"{feature}\")]"))
 }
 
-const E290_NODE_GRAPH_REQUIRED: [&str; 37] = [
+const E290_NODE_GRAPH_REQUIRED: [&str; 38] = [
     "embedded-storage",
+    "esp-alloc",
     "esp-storage",
     "reticulum-announce-clock",
     "reticulum-board-heltec-vision-master-e290",
@@ -1439,6 +1921,63 @@ fn validate_e290_inbox_commit_fault_hil_graph_boundary(
     if permanent_dependencies != hil_dependencies {
         return Err(
             "E290 inbox commit-fault HIL must change only the product root feature, not the dependency graph"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_e290_runtime_measurement_hil_graph_boundary(
+    permanent: &str,
+    hil: &str,
+) -> Result<(), String> {
+    validate_e290_node_graph_for_root_features(
+        hil,
+        E290_RUNTIME_MEASUREMENT_HIL_FEATURE,
+        "E290 runtime-measurement HIL",
+    )?;
+
+    const DEFAULT_ESP_ALLOC_FEATURES: &str =
+        "features=[compat,default,esp32s3,global-allocator,internal-heap-stats]";
+    const HIL_ESP_ALLOC_FEATURES: &str =
+        "features=[alloc-hooks,compat,default,esp32s3,global-allocator,internal-heap-stats]";
+    let has_exact_features = |line: &&str, features: &str| {
+        line.ends_with(features) || line.ends_with(&format!("{features} (*)"))
+    };
+
+    let permanent_esp_alloc = permanent
+        .lines()
+        .filter(|line| line.contains("esp-alloc "))
+        .collect::<Vec<_>>();
+    let hil_esp_alloc = hil
+        .lines()
+        .filter(|line| line.contains("esp-alloc "))
+        .collect::<Vec<_>>();
+    if permanent_esp_alloc.is_empty()
+        || permanent_esp_alloc.len() != hil_esp_alloc.len()
+        || permanent_esp_alloc
+            .iter()
+            .any(|line| !has_exact_features(line, DEFAULT_ESP_ALLOC_FEATURES))
+        || hil_esp_alloc
+            .iter()
+            .any(|line| !has_exact_features(line, HIL_ESP_ALLOC_FEATURES))
+    {
+        return Err(
+            "E290 runtime-measurement HIL must add only esp-alloc/alloc-hooks to every resolved esp-alloc edge"
+                .to_owned(),
+        );
+    }
+
+    let normalized = hil
+        .replacen(
+            &format!("features=[{E290_RUNTIME_MEASUREMENT_HIL_FEATURE}]"),
+            "features=[default]",
+            1,
+        )
+        .replace(HIL_ESP_ALLOC_FEATURES, DEFAULT_ESP_ALLOC_FEATURES);
+    if permanent != normalized {
+        return Err(
+            "E290 runtime-measurement HIL may change only the product root feature and esp-alloc/alloc-hooks; package and all other dependency feature lines must match default"
                 .to_owned(),
         );
     }
@@ -1539,11 +2078,12 @@ fn validate_e290_node_feature_boundary(
     let expected_features = serde_json::json!({
         "default": [],
         "journal-schema2-dev-reprovision": [],
-        "rns-inbox-commit-fault-hil": []
+        "rns-inbox-commit-fault-hil": [],
+        "runtime-measurement-hil": ["esp-alloc/alloc-hooks"]
     });
     if serde_json::Value::Object(features.clone()) != expected_features {
         return Err(format!(
-            "{package_name} must expose only an empty default and the two empty opt-in development features"
+            "{package_name} must expose only an empty default, two empty opt-in development features, and runtime-measurement-hil enabling only esp-alloc/alloc-hooks"
         ));
     }
     let dependencies = package["dependencies"]
@@ -1647,6 +2187,15 @@ fn validate_e290_node_feature_boundary(
         None,
         false,
         &[],
+    )?;
+    validate_exact_target_registry_dependency(
+        dependencies,
+        package_name,
+        "esp-alloc",
+        "=0.10.0",
+        "cfg(target_arch = \"xtensa\")",
+        true,
+        &["esp32s3", "global-allocator", "internal-heap-stats"],
     )?;
     validate_exact_target_registry_dependency(
         dependencies,
@@ -7815,6 +8364,11 @@ mod tests {
     }
 
     fn e290_node_metadata_fixture(root: &Path) -> serde_json::Value {
+        let mut esp_alloc = handoff_dependency_fixture("esp-alloc", "=0.10.0", None);
+        esp_alloc["features"] =
+            serde_json::json!(["esp32s3", "global-allocator", "internal-heap-stats"]);
+        esp_alloc["target"] = serde_json::json!("cfg(target_arch = \"xtensa\")");
+        esp_alloc["uses_default_features"] = serde_json::Value::Bool(true);
         let mut esp_println = handoff_dependency_fixture("esp-println", "=0.17.0", None);
         esp_println["features"] = serde_json::json!(["esp32s3", "log-04", "no-op"]);
         esp_println["target"] = serde_json::json!("cfg(target_arch = \"xtensa\")");
@@ -7831,7 +8385,8 @@ mod tests {
                 "features": {
                     "default": [],
                     "journal-schema2-dev-reprovision": [],
-                    "rns-inbox-commit-fault-hil": []
+                    "rns-inbox-commit-fault-hil": [],
+                    "runtime-measurement-hil": ["esp-alloc/alloc-hooks"]
                 },
                 "dependencies": [
                     handoff_path_dependency_fixture(
@@ -7892,6 +8447,7 @@ mod tests {
                     embedded_storage_dev,
                     handoff_dependency_fixture("rand_core", "=0.6.4", None),
                     handoff_dependency_fixture("zeroize", "=1.9.0", None),
+                    esp_alloc,
                     esp_println,
                 ]
             }]
@@ -7902,6 +8458,7 @@ mod tests {
     fn permanent_e290_node_graph_is_lora_first_with_transport_neutral_durability() {
         let valid = "reticulum-heltec-vision-master-e290-node v0.1.0 features=[default]\n\
                      ├── embedded-storage v0.3.1 features=[]\n\
+                     ├── esp-alloc v0.10.0 features=[compat,default,esp32s3,global-allocator,internal-heap-stats]\n\
                      ├── esp-println v0.17.0 features=[esp32s3,log-04,no-op]\n\
                      ├── esp-storage v0.9.0 features=[critical-section,esp32s3]\n\
                      ├── reticulum-announce-clock v0.1.0 features=[]\n\
@@ -7945,6 +8502,17 @@ mod tests {
             1,
         );
         validate_e290_inbox_commit_fault_hil_graph_boundary(valid, &hil).unwrap();
+        let runtime_hil = valid
+            .replacen(
+                "features=[default]",
+                "features=[runtime-measurement-hil]",
+                1,
+            )
+            .replace(
+                "features=[compat,default,esp32s3,global-allocator,internal-heap-stats]",
+                "features=[alloc-hooks,compat,default,esp32s3,global-allocator,internal-heap-stats]",
+            );
+        validate_e290_runtime_measurement_hil_graph_boundary(valid, &runtime_hil).unwrap();
 
         for missing in E290_NODE_GRAPH_REQUIRED {
             let tree = valid.replace(missing, "missing-required-package");
@@ -7960,6 +8528,7 @@ mod tests {
         for hidden in [
             "default,journal-schema2-dev-reprovision",
             "default,rns-inbox-commit-fault-hil",
+            "default,runtime-measurement-hil",
         ] {
             let hidden_feature = valid.replacen(
                 "reticulum-heltec-vision-master-e290-node v0.1.0 features=[default]",
@@ -7971,6 +8540,7 @@ mod tests {
         for hidden in [
             "default,rns-inbox-commit-fault-hil",
             "journal-schema2-dev-reprovision,rns-inbox-commit-fault-hil",
+            "rns-inbox-commit-fault-hil,runtime-measurement-hil",
         ] {
             let hidden_feature = hil.replacen(
                 "features=[rns-inbox-commit-fault-hil]",
@@ -7986,6 +8556,32 @@ mod tests {
         assert!(
             validate_e290_inbox_commit_fault_hil_graph_boundary(valid, &changed_hil_tail).is_err()
         );
+
+        for hidden in [
+            "default,runtime-measurement-hil",
+            "journal-schema2-dev-reprovision,runtime-measurement-hil",
+            "rns-inbox-commit-fault-hil,runtime-measurement-hil",
+        ] {
+            let hidden_feature = runtime_hil.replacen(
+                "features=[runtime-measurement-hil]",
+                &format!("features=[{hidden}]"),
+                1,
+            );
+            assert!(
+                validate_e290_runtime_measurement_hil_graph_boundary(valid, &hidden_feature)
+                    .is_err()
+            );
+        }
+        for changed in [
+            runtime_hil.replace("alloc-hooks,", ""),
+            runtime_hil.replace(
+                "alloc-hooks,compat",
+                "alloc-hooks,compat,unreviewed-feature",
+            ),
+            format!("{runtime_hil}\n└── unreviewed-runtime-measurement-edge v0.1.0 features=[]"),
+        ] {
+            assert!(validate_e290_runtime_measurement_hil_graph_boundary(valid, &changed).is_err());
+        }
 
         for package in ["reticulum-device-api", "reticulum-device-api-adapter"] {
             let expected =
@@ -8031,7 +8627,7 @@ mod tests {
     }
 
     #[test]
-    fn permanent_e290_node_development_features_remain_empty_and_opt_in() {
+    fn permanent_e290_node_development_features_remain_exact_and_opt_in() {
         let root = workspace_root();
         let baseline = e290_node_metadata_fixture(&root);
         validate_e290_node_feature_boundary(&baseline.to_string(), &root).unwrap();
@@ -8040,35 +8636,70 @@ mod tests {
             serde_json::json!({
                 "default": ["journal-schema2-dev-reprovision"],
                 "journal-schema2-dev-reprovision": [],
-                "rns-inbox-commit-fault-hil": []
+                "rns-inbox-commit-fault-hil": [],
+                "runtime-measurement-hil": ["esp-alloc/alloc-hooks"]
             }),
             serde_json::json!({
                 "default": ["rns-inbox-commit-fault-hil"],
                 "journal-schema2-dev-reprovision": [],
-                "rns-inbox-commit-fault-hil": []
+                "rns-inbox-commit-fault-hil": [],
+                "runtime-measurement-hil": ["esp-alloc/alloc-hooks"]
+            }),
+            serde_json::json!({
+                "default": ["runtime-measurement-hil"],
+                "journal-schema2-dev-reprovision": [],
+                "rns-inbox-commit-fault-hil": [],
+                "runtime-measurement-hil": ["esp-alloc/alloc-hooks"]
             }),
             serde_json::json!({
                 "default": [],
                 "journal-schema2-dev-reprovision": ["dep:unreviewed"],
-                "rns-inbox-commit-fault-hil": []
+                "rns-inbox-commit-fault-hil": [],
+                "runtime-measurement-hil": ["esp-alloc/alloc-hooks"]
             }),
             serde_json::json!({
                 "default": [],
                 "journal-schema2-dev-reprovision": [],
-                "rns-inbox-commit-fault-hil": ["dep:unreviewed"]
+                "rns-inbox-commit-fault-hil": ["dep:unreviewed"],
+                "runtime-measurement-hil": ["esp-alloc/alloc-hooks"]
             }),
             serde_json::json!({
                 "default": [],
                 "journal-schema2-dev-reprovision": [],
                 "rns-inbox-commit-fault-hil": [],
+                "runtime-measurement-hil": []
+            }),
+            serde_json::json!({
+                "default": [],
+                "journal-schema2-dev-reprovision": [],
+                "rns-inbox-commit-fault-hil": [],
+                "runtime-measurement-hil": ["esp-alloc/alloc-hooks", "dep:unreviewed"]
+            }),
+            serde_json::json!({
+                "default": [],
+                "journal-schema2-dev-reprovision": [],
+                "rns-inbox-commit-fault-hil": [],
+                "runtime-measurement-hil": ["esp-alloc/alloc-hooks"],
                 "future-transport": []
             }),
             serde_json::json!({
                 "default": [],
-                "journal-schema2-dev-reprovision": []
+                "journal-schema2-dev-reprovision": [],
+                "rns-inbox-commit-fault-hil": []
             }),
             serde_json::json!({
                 "default": [],
+                "rns-inbox-commit-fault-hil": [],
+                "runtime-measurement-hil": ["esp-alloc/alloc-hooks"]
+            }),
+            serde_json::json!({
+                "default": [],
+                "journal-schema2-dev-reprovision": [],
+                "runtime-measurement-hil": ["esp-alloc/alloc-hooks"]
+            }),
+            serde_json::json!({
+                "default": [],
+                "journal-schema2-dev-reprovision": [],
                 "rns-inbox-commit-fault-hil": []
             }),
         ] {
@@ -8100,7 +8731,8 @@ pub mod inbox_admission_fault_hil;
                            /// Count one input discarded\n";
         let build = "CARGO_FEATURE_JOURNAL_SCHEMA2_DEV_REPROVISION\n\
                      CARGO_FEATURE_RNS_INBOX_COMMIT_FAULT_HIL\n\
-                     journal-schema2-dev-reprovision and rns-inbox-commit-fault-hil are mutually exclusive";
+                     CARGO_FEATURE_RUNTIME_MEASUREMENT_HIL\n\
+                     journal-schema2-dev-reprovision, rns-inbox-commit-fault-hil, and runtime-measurement-hil are mutually exclusive";
         let fixture = "#[used]\n\
                        pub static RETICULUM_INBOX_ADMISSION_FAULT_HIL_EVIDENCE: Evidence = Evidence;\n\
                        pub struct SuppressThirdWrite<F>(F);";
@@ -8148,6 +8780,195 @@ pub mod inbox_admission_fault_hil;
                 storage,
                 build,
                 &format!("{fixture}\n#[unsafe(no_mangle)]"),
+            )
+            .is_err()
+        );
+    }
+
+    fn e290_runtime_measurement_source_fixture() -> (Vec<(String, String)>, String) {
+        let product = "firmware/heltec-vision-master-e290-node/src";
+        let library = r#"#[cfg(feature = "runtime-measurement-hil")]
+pub mod runtime_measurement;
+"#;
+        let main = r#"#[cfg(feature = "runtime-measurement-hil")]
+mod runtime_measurement_stack_hil;
+
+#[cfg(feature = "runtime-measurement-hil")]
+use product::runtime_measurement::RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE;
+
+fn main() {
+    #[cfg(feature = "runtime-measurement-hil")]
+    let _monitor = runtime_measurement_stack_hil::Monitor::initialize();
+    #[cfg(feature = "runtime-measurement-hil")]
+    RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.sample();
+}
+
+#[cfg(feature = "runtime-measurement-hil")]
+#[unsafe(no_mangle)]
+fn _esp_alloc_alloc(
+    heap: &::esp_alloc::EspHeap,
+    _capabilities: ::esp_alloc::export::enumset::EnumSet<::esp_alloc::MemoryCapability>,
+    pointer: usize,
+    _size: usize,
+) {
+}
+
+#[cfg(feature = "runtime-measurement-hil")]
+#[unsafe(no_mangle)]
+fn _esp_alloc_dealloc(_heap: &::esp_alloc::EspHeap, _pointer: usize, _size: usize) {}
+"#;
+        let runtime = r#"pub struct Evidence;
+
+impl Evidence {
+    pub fn sample(&self) {}
+}
+
+#[used]
+pub static RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE: Evidence = Evidence;
+"#;
+        let stack = r#"#[used]
+#[unsafe(no_mangle)]
+static mut RETICULUM_RUNTIME_MEASUREMENT_STACK_MARKER: u32 = 0;
+
+core::arch::global_asm!("__zero_bss");
+
+fn sample(layout: Layout) {
+    scan_stack_watermark(layout, |address| {
+        let innermost_sp = current_stack_pointer();
+        if address >= innermost_sp {
+            !stack_watermark_word(address)
+        } else {
+            read_word(address)
+        }
+    });
+}
+"#;
+        let radio = r#"fn run() {
+    #[cfg(feature = "runtime-measurement-hil")]
+    product::runtime_measurement::RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.sample();
+}
+"#;
+        let build = "CARGO_FEATURE_RUNTIME_MEASUREMENT_HIL\n\
+                     journal-schema2-dev-reprovision, rns-inbox-commit-fault-hil, and runtime-measurement-hil are mutually exclusive";
+        (
+            vec![
+                (format!("{product}/lib.rs"), library.to_owned()),
+                (format!("{product}/main.rs"), main.to_owned()),
+                (
+                    format!("{product}/runtime_measurement.rs"),
+                    runtime.to_owned(),
+                ),
+                (
+                    format!("{product}/runtime_measurement_stack_hil.rs"),
+                    stack.to_owned(),
+                ),
+                (format!("{product}/radio_task.rs"), radio.to_owned()),
+            ],
+            build.to_owned(),
+        )
+    }
+
+    #[test]
+    fn e290_runtime_measurement_sources_are_exactly_feature_contained() {
+        let (sources, build) = e290_runtime_measurement_source_fixture();
+        validate_e290_runtime_measurement_hil_sources(&sources, &build).unwrap();
+
+        let mutate = |path: &str, rewrite: &dyn Fn(&str) -> String| {
+            sources
+                .iter()
+                .map(|(candidate, source)| {
+                    if candidate.ends_with(path) {
+                        (candidate.clone(), rewrite(source))
+                    } else {
+                        (candidate.clone(), source.clone())
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let ungated_library = mutate("/lib.rs", &|source| {
+            source.replace("#[cfg(feature = \"runtime-measurement-hil\")]\n", "")
+        });
+        assert!(validate_e290_runtime_measurement_hil_sources(&ungated_library, &build).is_err());
+
+        let ungated_stack_module = mutate("/main.rs", &|source| {
+            source.replacen("#[cfg(feature = \"runtime-measurement-hil\")]\n", "", 1)
+        });
+        assert!(
+            validate_e290_runtime_measurement_hil_sources(&ungated_stack_module, &build).is_err()
+        );
+
+        let ungated_stack_call = mutate("/main.rs", &|source| {
+            source.replace(
+                "    #[cfg(feature = \"runtime-measurement-hil\")]\n    let _monitor = runtime_measurement_stack_hil::Monitor::initialize();",
+                "    let _monitor = runtime_measurement_stack_hil::Monitor::initialize();",
+            )
+        });
+        assert!(
+            validate_e290_runtime_measurement_hil_sources(&ungated_stack_call, &build).is_err()
+        );
+
+        let ungated_evidence_use = mutate("/radio_task.rs", &|source| {
+            source.replace("    #[cfg(feature = \"runtime-measurement-hil\")]\n", "")
+        });
+        assert!(
+            validate_e290_runtime_measurement_hil_sources(&ungated_evidence_use, &build).is_err()
+        );
+
+        let ungated_hook = mutate("/main.rs", &|source| {
+            source.replace(
+                "#[cfg(feature = \"runtime-measurement-hil\")]\n#[unsafe(no_mangle)]\nfn _esp_alloc_alloc",
+                "#[unsafe(no_mangle)]\nfn _esp_alloc_alloc",
+            )
+        });
+        assert!(validate_e290_runtime_measurement_hil_sources(&ungated_hook, &build).is_err());
+
+        let unretained_evidence = mutate("/runtime_measurement.rs", &|source| {
+            source.replace("#[used]\n", "")
+        });
+        assert!(
+            validate_e290_runtime_measurement_hil_sources(&unretained_evidence, &build).is_err()
+        );
+        let unmangled_evidence = mutate("/runtime_measurement.rs", &|source| {
+            source.replace("#[used]\n", "#[used]\n#[unsafe(no_mangle)]\n")
+        });
+        assert!(
+            validate_e290_runtime_measurement_hil_sources(&unmangled_evidence, &build).is_err()
+        );
+
+        let unchecked_live_frame = mutate("/runtime_measurement_stack_hil.rs", &|source| {
+            source.replace("if address >= innermost_sp {", "if false {")
+        });
+        assert!(
+            validate_e290_runtime_measurement_hil_sources(&unchecked_live_frame, &build).is_err()
+        );
+
+        let missing_hook = mutate("/main.rs", &|source| {
+            source.replace(
+                "#[cfg(feature = \"runtime-measurement-hil\")]\n#[unsafe(no_mangle)]\nfn _esp_alloc_dealloc(_heap: &::esp_alloc::EspHeap, _pointer: usize, _size: usize) {}\n",
+                "",
+            )
+        });
+        assert!(validate_e290_runtime_measurement_hil_sources(&missing_hook, &build).is_err());
+
+        let wrong_hook_abi = mutate("/main.rs", &|source| {
+            source.replacen("pointer: usize", "pointer: u32", 1)
+        });
+        assert!(validate_e290_runtime_measurement_hil_sources(&wrong_hook_abi, &build).is_err());
+
+        let mangled_hook = mutate("/main.rs", &|source| {
+            source.replacen(
+                "#[unsafe(no_mangle)]\nfn _esp_alloc_alloc",
+                "fn _esp_alloc_alloc",
+                1,
+            )
+        });
+        assert!(validate_e290_runtime_measurement_hil_sources(&mangled_hook, &build).is_err());
+
+        assert!(
+            validate_e290_runtime_measurement_hil_sources(
+                &sources,
+                &build.replace("CARGO_FEATURE_RUNTIME_MEASUREMENT_HIL", "missing"),
             )
             .is_err()
         );
@@ -8440,6 +9261,54 @@ pub mod inbox_admission_fault_hil;
             assert!(
                 validate_e290_node_feature_boundary(&drifted.to_string(), &root).is_err(),
                 "permanent node accepted esp-println {label} drift"
+            );
+        }
+
+        let mut missing_esp_alloc = baseline.clone();
+        fixture_package_mut(
+            &mut missing_esp_alloc,
+            "reticulum-heltec-vision-master-e290-node",
+        )["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|dependency| dependency["name"].as_str() != Some("esp-alloc"));
+        assert!(
+            validate_e290_node_feature_boundary(&missing_esp_alloc.to_string(), &root).is_err()
+        );
+        for (field, value) in [
+            ("req", serde_json::json!("^0.10")),
+            (
+                "source",
+                serde_json::json!("registry+https://example.invalid/index"),
+            ),
+            (
+                "path",
+                serde_json::json!(root.join("vendor/lookalike-esp-alloc")),
+            ),
+            ("kind", serde_json::json!("dev")),
+            ("optional", serde_json::json!(true)),
+            ("rename", serde_json::json!("allocator")),
+            ("target", serde_json::Value::Null),
+            ("uses_default_features", serde_json::json!(false)),
+            (
+                "features",
+                serde_json::json!([
+                    "alloc-hooks",
+                    "esp32s3",
+                    "global-allocator",
+                    "internal-heap-stats"
+                ]),
+            ),
+        ] {
+            let mut drifted = baseline.clone();
+            fixture_dependency_mut(
+                fixture_package_mut(&mut drifted, "reticulum-heltec-vision-master-e290-node"),
+                "esp-alloc",
+                None,
+            )[field] = value;
+            assert!(
+                validate_e290_node_feature_boundary(&drifted.to_string(), &root).is_err(),
+                "permanent node accepted esp-alloc {field} drift"
             );
         }
 

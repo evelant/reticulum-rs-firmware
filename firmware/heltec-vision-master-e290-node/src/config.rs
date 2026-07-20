@@ -79,10 +79,12 @@ pub const LORA_ADVERTISED_BITRATE: AdvertisedBitrate = match AdvertisedBitrate::
 
 /// Reclaimed internal SRAM assigned to the global allocator.
 ///
-/// Ownership machines and Embassy task state remain in internal static RAM;
-/// the qualified external allocator carries growth-oriented protocol/client
-/// allocations. Sixty-four KiB leaves the E290 link layout enough internal
-/// space for the fixed 4-DATA/8-ordinary profile.
+/// Ownership machines and Embassy task state remain in internal static RAM.
+/// This region is registered before PSRAM, so ordinary global allocations use
+/// it first and spill into external RAM only when no internal hole fits. An
+/// explicit placement policy is still required before large protocol/client
+/// allocations are enabled. Sixty-four KiB leaves the E290 link layout enough
+/// internal space for the fixed 4-DATA/8-ordinary profile.
 pub const INTERNAL_HEAP_BYTES: usize = 64 * 1024;
 /// Qualified minimum external RAM required by this product profile.
 pub const MINIMUM_PSRAM_BYTES: usize = 8 * 1024 * 1024;

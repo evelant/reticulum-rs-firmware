@@ -34,3 +34,6 @@ sha2.workspace = true
 syn = { version = "=2.0.118", features = ["full", "parsing", "printing"] }
 tar = "=0.4.46"
 zeroize.workspace = true
+
+[dev-dependencies]
+reticulum-heltec-vision-master-e290-node = { path = "../firmware/heltec-vision-master-e290-node", default-features = false, features = ["runtime-measurement-hil"] }
