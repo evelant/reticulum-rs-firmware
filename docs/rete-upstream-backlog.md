@@ -12,8 +12,8 @@ API stay in this project; generic protocol and bounded-state corrections are
 the candidates for upstream review.
 
 The current firmware pin is
-`4e69dc89fd8e40b02cf4ea2d8ad634ee2e7c09ce` (designated durable tag
-`firmware-pin-4e69dc8`). It retains
+`8b5d65283cd370dee4cbb17594ef9c88d2805416` (designated durable tag
+`firmware-pin-8b5d652`). It retains
 caller-owned DATA preparation, explicit receipt-capacity errors, fixed-capacity
 terminal sinks, exact DATA/channel terminal candidates, allocation-atomic
 proof/timeout delivery, full-hash receipt cancellation and core-aware LXMF
@@ -28,7 +28,11 @@ owned-H2 local dispatch, pre-mutation foreign-H2 filtering, and separately
 observable relay-Link capacity. The current Link tranche additionally binds a
 responder to LINKREQUEST ingress and an initiator only after valid LRPROOF,
 routes established owned-Link output through `BoundInterface`, and rejects
-wrong-interface Link DATA/`RESOURCE_PRF` before dedup admission. It also carries
+wrong-interface Link DATA/`RESOURCE_PRF` before dedup admission. It snapshots a
+known path's hops when an initiator creates a Link, uses the
+`PATHFINDER_M = 128` wildcard for an unknown path, rejects LRPROOF hop mismatch
+before deduplication/state mutation, and teaches a responder its post-ingress
+hop only from authenticated, decrypted LRRTT. It also carries
 the exact unencrypted, role-specific, full-interval keepalive state machine,
 deterministic-packet dedup exception, internal NodeCore lifecycle result, bound
 automatic routing, and transition-relative stale revival described below. The
@@ -46,8 +50,8 @@ remain bound to their recorded revisions.
 
 ## 1. Transactional Link admission — completed for owned and H2 relay paths
 
-**Priority:** retain regression coverage; finish H1 interface roles and
-pending-Link parity
+**Priority:** retain regression coverage; finish H1 interface roles and LRRTT
+payload parity
 
 Owned-Link admission is adopted in integration-fork revision
 `5ce8c4e437d3f2f07d302bc366ff06bacd6aff2d` and offered upstream in
@@ -72,17 +76,16 @@ and missing-route outcomes. Full admission returns typed
 Link/raw/dedup state except for the intentional replay-filter record. Missing
 routes leave no orphan Link entry. Relay-Link count is observable independently
 from locally owned Links. Focused tests cover full, existing, missing-route,
-fresh-retry and duplicate-retry behavior, and the 192-check project runner
+fresh-retry and duplicate-retry behavior, and the 195-check project runner
 completes an A--B--C LINKREQUEST/LRPROOF/LRRTT/channel/proof flow, includes 8
 Channel retry/receipt-replacement checks, and includes 40 exact keepalive
 lifecycle checks.
 
 The remaining product gate is role classification, not relay capacity.
 Arbitrary remote H1 LINKREQUEST stays disabled until an interface role can
-distinguish remote ingress from the local-origin H1 compatibility path. Pending
-owned Links also need a released-Python parity audit for retained
-`expected_hops`. The local `EmbeddedNode` retains product-level owned-Link
-quota preflight for stable quotas and diagnostics.
+distinguish remote ingress from the local-origin H1 compatibility path. The
+local `EmbeddedNode` retains product-level owned-Link quota preflight for stable
+quotas and diagnostics.
 
 ## 2. LINKREQUEST validation, HEADER_2 dispatch and reverse admission — H2
 covered
@@ -137,10 +140,10 @@ reverse occupancy.
 Remaining work is narrower: add released-Python differential fixtures for all
 64/67-byte direct/local destination-policy and transport-ID boundaries, define
 explicit interface roles, then replace the H1 DATA guard and enable or reject
-remote H1 LINKREQUEST by role rather than packet shape alone. Audit pending
-owned-Link `expected_hops` against Python. Keep the H2 exhaustion, collision,
-owned-local, foreign-filter, endpoint suppression and three-node A--B--C
-regressions as permanent gates.
+remote H1 LINKREQUEST by role rather than packet shape alone. Keep the H2
+exhaustion, collision, owned-local, foreign-filter, endpoint suppression,
+pending-Link expected-hop, and three-node A--B--C regressions as permanent
+gates.
 
 ## 3. Announce retransmission role policy
 
@@ -187,6 +190,17 @@ LINKREQUEST, while its state is still `Handshake` and data sending returns
 `LinkNotActive`. It emits a second `LinkEstablished` after LRRTT activates the
 Link. Prefer a distinct pending/request event, or reserve `LinkEstablished`
 for the transition to `Active`.
+
+Expected-hop admission is resolved at this pin, but LRRTT payload
+interoperability is not. Python encodes its RTT as a MessagePack numeric value
+and the responder uses the greater of the local measurement and peer RTT. Rete
+currently sends a raw four-byte timestamp body and ignores the decrypted LRRTT
+payload. Authentication and decryption therefore protect the carrier but do
+not validate its semantics: a malformed authenticated LRRTT can establish the
+Link and teach the responder's expected hops. Add bounded MessagePack numeric
+encoding and decoding, released-Python cross-language vectors, finite/range
+checks, and require successful payload validation before establishment,
+expected-hop mutation, or an Active/established event.
 
 Generic `build_link_data_packet()` users also do not update `last_outbound`.
 Best-effort Link data, identify, request and response traffic can therefore
@@ -450,8 +464,8 @@ Make DATA preparation one transaction:
    receipt and entropy state.
 
 The generic fix is now the project pin
-`4e69dc89fd8e40b02cf4ea2d8ad634ee2e7c09ce`, with designated fork tag
-`firmware-pin-4e69dc8`. It returns caller-owned packet metadata plus a full
+`8b5d65283cd370dee4cbb17594ef9c88d2805416`, with designated fork tag
+`firmware-pin-8b5d652`. It returns caller-owned packet metadata plus a full
 receipt token, reports registration and output-allocation failures, and
 atomically removes validated and timed-out receipts only after reserving their
 exact kind/full-hash terminal candidate. Link-typed channel proofs are resolved
@@ -462,9 +476,9 @@ HEADER_2 proofs bypass local terminal reservation. Direct Transport ingest and
 maintenance results are `must_use`; sink-aware NodeCore paths avoid duplicate
 receipt events; and the
 hosted daemon consumes LXMF terminal output. The selected validation set passes
-634 tests: 270 transport (173 library plus 97 integration), 137 stack (136
+635 tests: 271 transport (174 library plus 97 integration), 137 stack (136
 library plus one integration), 143 LXMF library, and 84 daemon library. The
-four library targets total 536 tests. This is not a full nested-workspace test
+four library targets total 537 tests. This is not a full nested-workspace test
 count.
 The selected host suites pass on macOS, and the affected no-default transport
 and stack crates compile for `riscv32imac-unknown-none-elf`. This newer

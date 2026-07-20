@@ -4,8 +4,8 @@ use rand_core::{CryptoRng, RngCore};
 use reticulum_radio_interface::{RNODE_HW_MTU, ReceiveOutcome, RnodeRxReassembler};
 use reticulum_rns_rete::{
     DestHash, DestType, DestinationType, Direction, EmbeddedNodeConfig, Identity,
-    InitialEmbeddedNode, InterfaceId, LinkState, NodeEvent, PacketType, TxTarget,
-    build_announce_packet, identity_from_private_key, new_conformance_node,
+    IngressDisposition, InitialEmbeddedNode, InterfaceId, LinkState, NodeEvent, PacketType,
+    TxTarget, build_announce_packet, identity_from_private_key, new_conformance_node,
     new_conformance_transport_node, parse_announce_packet, parse_packet,
 };
 use serde::Deserialize;
@@ -1242,7 +1242,9 @@ fn verify_three_node_relayed_link() -> Result<usize, String> {
         .route(&node_c.destination_hash())
         .ok_or_else(|| "initiator did not retain responder route".to_owned())?;
     require(
-        route.via == Some(node_b.identity_hash()) && route.received_on == Some(a_to_b),
+        route.via == Some(node_b.identity_hash())
+            && route.hops == 2
+            && route.received_on == Some(a_to_b),
         "initiator retained the wrong transport route",
     )?;
 
@@ -1317,12 +1319,34 @@ fn verify_three_node_relayed_link() -> Result<usize, String> {
         forwarded_proof.actions.packets[0].target() == TxTarget::Only(b_to_a),
         "transport returned LRPROOF on the wrong exact interface",
     )?;
+    let parsed_forwarded_proof = parse_packet(forwarded_proof.actions.packets[0].bytes())
+        .map_err(|error| format!("transport emitted invalid relayed LRPROOF: {error}"))?;
     require(
-        parse_packet(forwarded_proof.actions.packets[0].bytes())
-            .map_err(|error| format!("transport emitted invalid relayed LRPROOF: {error}"))?
-            .hops
-            == parsed_responder_proof.hops.saturating_add(1),
+        parsed_forwarded_proof.hops == parsed_responder_proof.hops.saturating_add(1),
         "transport did not advance LRPROOF by exactly one hop",
+    )?;
+
+    // The hop byte is outside the proof hash/signature. A valid LRPROOF at the
+    // wrong retained path height must fail before dedup, so the untouched copy
+    // below can still establish the pending Link.
+    let dedup_before_wrong_hop = node_a.metrics().transport.packets_dropped_dedup;
+    let mut wrong_hop_proof = forwarded_proof.actions.packets[0].bytes().to_vec();
+    wrong_hop_proof[1] = parsed_forwarded_proof.hops.saturating_add(1);
+    let wrong_hop = node_a.ingest(&wrong_hop_proof, now + 6, a_to_b, &mut rng);
+    require(
+        wrong_hop.disposition == IngressDisposition::NativeInvalid,
+        "initiator did not classify wrong-hop LRPROOF as invalid",
+    )?;
+    require(
+        wrong_hop.actions.events.is_empty()
+            && wrong_hop.actions.packets.is_empty()
+            && wrong_hop.actions.unroutable_packets == 0
+            && node_a.link_state(&link_id) == Some(LinkState::Handshake),
+        "wrong-hop LRPROOF mutated or emitted pending-Link state",
+    )?;
+    require(
+        node_a.metrics().transport.packets_dropped_dedup == dedup_before_wrong_hop,
+        "wrong-hop LRPROOF poisoned the initiator dedup window",
     )?;
 
     let initiator_rtt = node_a.ingest(
@@ -1448,7 +1472,7 @@ fn verify_three_node_relayed_link() -> Result<usize, String> {
         "Link relay consumed unexpected transport capacity",
     )?;
 
-    Ok(32)
+    Ok(35)
 }
 
 fn decode_hex(field: &str, value: &str) -> Result<Vec<u8>, String> {
@@ -1485,6 +1509,6 @@ mod tests {
 
     #[test]
     fn released_python_vectors_pass() {
-        assert_eq!(verify_released_vectors(), Ok(192));
+        assert_eq!(verify_released_vectors(), Ok(195));
     }
 }

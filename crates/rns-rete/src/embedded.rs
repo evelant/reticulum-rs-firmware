@@ -2314,6 +2314,49 @@ mod tests {
     }
 
     #[test]
+    fn wrapper_rejects_wrong_hop_lrproof_before_dedup_and_accepts_correct_copy() {
+        let mut initiator = node(1);
+        let mut responder = node(2);
+        let mut rng = CounterRng::default();
+        let (request, link_id) = link_request(&mut initiator, &responder, &mut rng);
+        let proof = responder.ingest(request.bytes(), 100, InterfaceId(7), &mut rng);
+        assert_eq!(proof.actions.packets.len(), 1);
+        let proof_bytes = proof.actions.packets[0].bytes();
+        assert_eq!(Packet::parse(proof_bytes).unwrap().hops, 0);
+
+        // A registered direct path expects one hop after local ingress. The
+        // modified wire byte produces two, but does not alter the proof hash.
+        let mut wrong_hops = proof_bytes.to_vec();
+        wrong_hops[1] = 1;
+        let dedup_before = initiator.metrics().transport.packets_dropped_dedup;
+        let rejected = initiator.ingest(&wrong_hops, 101, InterfaceId(3), &mut rng);
+        assert_eq!(rejected.disposition, IngressDisposition::NativeInvalid);
+        assert!(rejected.actions.events.is_empty());
+        assert!(rejected.actions.packets.is_empty());
+        assert_eq!(rejected.actions.unroutable_packets, 0);
+        assert_eq!(initiator.link_state(&link_id), Some(LinkState::Handshake));
+        assert_eq!(
+            initiator.metrics().transport.packets_dropped_dedup,
+            dedup_before
+        );
+
+        let established = initiator.ingest(proof_bytes, 102, InterfaceId(3), &mut rng);
+        assert_eq!(established.disposition, IngressDisposition::Processed);
+        assert_eq!(initiator.link_state(&link_id), Some(LinkState::Active));
+        assert_eq!(established.actions.packets.len(), 1);
+        assert_eq!(
+            established.actions.packets[0].target(),
+            TxTarget::Only(InterfaceId(3))
+        );
+        assert_eq!(
+            Packet::parse(established.actions.packets[0].bytes())
+                .unwrap()
+                .context,
+            CONTEXT_LRRTT
+        );
+    }
+
+    #[test]
     fn wrapper_keepalive_roundtrip_is_exact_internal_repeatable_and_bound() {
         let mut initiator = node(1);
         let mut responder = node(2);

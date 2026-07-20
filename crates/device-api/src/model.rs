@@ -1,6 +1,9 @@
 //! Rete-independent logical API model and authorization vocabulary.
 
-use core::{convert::Infallible, marker::PhantomData, num::NonZeroU64, ops::BitOr};
+use core::{convert::Infallible, marker::PhantomData, ops::BitOr};
+
+#[cfg(feature = "experimental-rns-inbox")]
+use core::num::NonZeroU64;
 
 /// Device API v1 major version.
 pub const API_VERSION_MAJOR: u16 = 1;

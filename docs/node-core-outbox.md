@@ -10,13 +10,13 @@ DATA/LXMF submission, client delivery, and full powered E290 qualification of
 the product image remain open.
 The permanent image's bounded source-`96e38aa` boot/interface/ordinary-TX smoke
 has passed, without controlled peer RX or DATA.
-**Rete pin:** `4e69dc89fd8e40b02cf4ea2d8ad634ee2e7c09ce`
-(designated durable tag `firmware-pin-4e69dc8`)
+**Rete pin:** `8b5d65283cd370dee4cbb17594ef9c88d2805416`
+(designated durable tag `firmware-pin-8b5d652`)
 
 This exact pin has host, portable-target, and default E290 build-only evidence:
-the merged image is 774,688 bytes, uses 709,152/6,291,456 application bytes
-(11.27%), and has SHA-256
-`0af8fc1d09cfc9a7fb09740ac859c6477a90a8474d467884c3dc6641f4585e4d`.
+the merged image is 775,104 bytes, uses 709,568/6,291,456 application bytes
+(11.28%), and has SHA-256
+`5ec7f0e2555d72136aa917c4011507706e1880c9603b15b1ca40efc1cbc555e4`.
 It has no flashed-image readback or powered proof. The source-`96e38aa` result
 above and later powered records are historical evidence bound to the revisions
 they name.
@@ -46,10 +46,10 @@ carry typed owned/relay `LinkTableFull`, `ReverseTableFull`, and
 reconstructing failure from counters. Foreign non-ANNOUNCE H2 packets are
 filtered before state mutation, while H2 ANNOUNCE remains eligible for normal
 announce validation. Relay-Link occupancy is exposed separately from owned
-Links. The deterministic 192-check project conformance run includes a complete
+Links. The deterministic 195-check project conformance run includes a complete
 three-node A--B--C Link handshake, channel DATA and proof flow over two exact
-relay interfaces, 8 fresh-ciphertext retry/receipt-replacement checks, plus 40
-exact keepalive lifecycle checks.
+relay interfaces, pre-dedup wrong-hop LRPROOF rejection, 8 fresh-ciphertext
+retry/receipt-replacement checks, plus 40 exact keepalive lifecycle checks.
 
 Locally owned Link output has a separate authenticated binding. A responder
 binds to LINKREQUEST ingress. An initiator's learned path selects the initial
@@ -61,12 +61,24 @@ broadcast, and only when its path has no recorded interface. Link DATA and
 `RESOURCE_PRF` on another interface are rejected before dedup admission, so a
 later authoritative-interface copy remains eligible.
 
+Pending-Link expected hops are now retained explicitly. An initiator snapshots
+the known path's hops when it creates the Link, or records the
+`PATHFINDER_M = 128` wildcard if no path is known. A mismatched LRPROOF is
+rejected before deduplication or Link-state mutation. The responder starts
+without an expectation and records the post-ingress hop only from
+authenticated, decrypted LRRTT. LRRTT payload parity is still open: Python
+sends a MessagePack RTT and uses the greater of the local and peer RTT, while
+Rete sends a raw four-byte timestamp and ignores the decrypted payload. A
+malformed but authenticated LRRTT can therefore establish and teach hops. The
+repair requires bounded MessagePack numeric encoding and decoding,
+cross-language vectors, and validation before any state mutation.
+
 This native binding is an interface slot, not a shared-instance client
 endpoint. Synchronous Tokio `Hub` output can retain the source client, but
 asynchronous owned-Link output broadcasts to sibling clients on that slot until
 Link state carries endpoint-aware client identity and reconnect generation.
-Pending-Link `expected_hops` still needs Python parity. Keepalives now use exact
-unencrypted 20-byte `0xff` initiator requests and `0xfe` responder replies. The
+Keepalives now use exact unencrypted 20-byte `0xff` initiator requests and
+`0xfe` responder replies. The
 initiator alone probes after both a full inbound-silence interval and a full
 interval since its previous probe; deterministic valid repeats avoid dedup only
 after bound-interface admission, lifecycle traffic emits no
@@ -85,8 +97,7 @@ and a product sizing/throughput decision.
 Arbitrary remote HEADER_1 LINKREQUEST remains disabled until interface roles
 distinguish it from local-origin injection. The temporary H1 DATA compatibility
 path guards reverse exhaustion and truncated-key conflicts before native
-ingress; pending owned Links still need a Python-parity audit for retained
-`expected_hops`. Rete snapshot loading restores identities only. Saved path
+ingress. Rete snapshot loading restores identities only. Saved path
 observations and cached announces remain inactive until a stable interface
 identity can be rebound explicitly; the node must relearn them after restart.
 

@@ -114,7 +114,7 @@ fn check_rnode_hil_vectors() -> ExitCode {
             "test",
             "--locked",
             "-p",
-            "reticulum-rns-rete",
+            "reticulum-rns-rete-rx",
             "--test",
             "rnode_hil_vectors",
         ],
@@ -4470,8 +4470,8 @@ fn forbidden_radio_tx_dispatch_closure_category(
 
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 const RETE_GIT_SOURCE: &str = "git+https://github.com/evelant/rete.git?rev=\
-4e69dc89fd8e40b02cf4ea2d8ad634ee2e7c09ce#\
-4e69dc89fd8e40b02cf4ea2d8ad634ee2e7c09ce";
+8b5d65283cd370dee4cbb17594ef9c88d2805416#\
+8b5d65283cd370dee4cbb17594ef9c88d2805416";
 
 #[derive(Clone, Copy)]
 enum ReviewedClosureSource {

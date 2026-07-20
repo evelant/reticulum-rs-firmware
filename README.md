@@ -72,8 +72,8 @@ remain open.
 Bitrate and cost are recorded but do not replace Reticulum routing. Until Rete
 paths carry an interface generation, an ID/configuration stays immutable for
 one node-owner lifetime or its learned paths must be purged before reuse.
-The current Rete pin, `4e69dc89fd8e40b02cf4ea2d8ad634ee2e7c09ce`
-(designated durable tag `firmware-pin-4e69dc8`), carries learned path, reverse,
+The current Rete pin, `8b5d65283cd370dee4cbb17594ef9c88d2805416`
+(designated durable tag `firmware-pin-8b5d652`), carries learned path, reverse,
 and Link decisions as
 exact interface targets instead of falling back to interface zero or generic
 broadcast. An exact target may intentionally equal the ingress slot, which is
@@ -126,11 +126,21 @@ Maintenance discovers immutable retry tokens, NodeCore preflights the
 authoritative Link route, and fresh-ciphertext retries atomically replace the
 envelope's sole live receipt/proof target before retry, window, and timestamp
 state commits. Obsolete proofs fail closed, replacement works at full receipt
-capacity, and Link removal reclaims channel receipts. Remaining Link work
-includes pending-Link `expected_hops`, automatic timeout `LINKCLOSE` emission,
-and shared-Hub endpoint/reincarnation identity. Adaptive channel windows can
-also exceed the product's `L` receipt capacity; that produces typed
-backpressure and remains a sizing/throughput policy decision.
+capacity, and Link removal reclaims channel receipts. Pending-Link hop parity
+is now explicit: an initiator snapshots the known path's hops when it creates
+the Link, or uses the `PATHFINDER_M = 128` wildcard when no path is known;
+LRPROOF hop mismatches are rejected before deduplication or Link-state mutation.
+A responder records the post-ingress hop only after authenticating and
+decrypting LRRTT. LRRTT payload parity remains separate: Python sends a
+MessagePack RTT and uses the greater of the local and peer RTT, while Rete sends
+a raw four-byte timestamp and ignores the decrypted body. Consequently, a
+malformed but authenticated LRRTT can currently establish the Link and teach
+its hop count. Close that gap with bounded MessagePack numeric encoding and
+decoding, cross-language vectors, and payload validation before state mutation.
+Remaining Link work includes automatic timeout `LINKCLOSE` emission and
+shared-Hub endpoint/reincarnation identity. Adaptive channel windows can also
+exceed the product's `L` receipt capacity; that produces typed backpressure and
+remains a sizing/throughput policy decision.
 Snapshot loading currently restores identities only; saved paths and cached
 announces remain inactive until stable interface rebinding is defined.
 
@@ -518,28 +528,28 @@ after frame exposure with an ordinary announce queued behind the DATA owner;
 LoRa lease offline, and permits no later host-radio TX or RX. This qualifies the
 software composition, not ESP32-S3 execution or RF hardware.
 The focused host clients pass 56 tests inside the 252-test xtask suite; the
-portable Rete integration and raw-RNS inbox store pass 55 and 17 tests,
+portable Rete integration and raw-RNS inbox store pass 56 and 17 tests,
 respectively.
-Those 55 tests exercise this repository's adapter and are separate from the
+Those 56 tests exercise this repository's adapter and are separate from the
 pinned Rete fork's selected validation set. The project conformance runner now
-performs 192 checks: 112 released-vector, adapter and direct-Link checks, 8
-channel-retry lifecycle checks, 40 keepalive lifecycle checks, and a 32-check
+performs 195 checks: 112 released-vector, adapter and direct-Link checks, 8
+channel-retry lifecycle checks, 40 keepalive lifecycle checks, and a 35-check
 three-node A--B--C relayed Link,
 LRPROOF/LRRTT, encrypted channel DATA and proof flow through independent exact
 interface IDs. This is deterministic project-side conformance, not a powered or
 live-Python multi-hop claim. At
-`4e69dc89fd8e40b02cf4ea2d8ad634ee2e7c09ce`, the selected upstream set passes
-634 tests: 270 transport (173 library plus 97 integration: 9 computed-vector,
+`8b5d65283cd370dee4cbb17594ef9c88d2805416`, the selected upstream set passes
+635 tests: 271 transport (174 library plus 97 integration: 9 computed-vector,
 43 forwarding, 40 Link-integration, and 5 path-request), 137 stack (136 library
 and one integration), 143 LXMF library, and 84 daemon library tests. The four
-library targets total 536 tests; adding the 97 transport and one stack
-integration tests produces 634. This is a named selected set, not a count of
+library targets total 537 tests; adding the 97 transport and one stack
+integration tests produces 635. This is a named selected set, not a count of
 every nested workspace test target.
 
 This pin has host, portable-target, and ESP32-S3 build-only evidence. Its
 default E290 release ELF links successfully, and the explicit 16 MiB package is
-774,688 bytes with application use 709,152/6,291,456 bytes (11.27%) and merged
-SHA-256 `0af8fc1d09cfc9a7fb09740ac859c6477a90a8474d467884c3dc6641f4585e4d`.
+775,104 bytes with application use 709,568/6,291,456 bytes (11.28%) and merged
+SHA-256 `5ec7f0e2555d72136aa917c4011507706e1880c9603b15b1ca40efc1cbc555e4`.
 It has no flashed-image readback or powered proof; all powered records below
 name their historical source and Rete revisions and remain historical evidence.
 
