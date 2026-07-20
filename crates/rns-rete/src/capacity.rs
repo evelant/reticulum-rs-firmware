@@ -59,7 +59,8 @@ pub struct HeaplessCapacitySnapshot {
     /// Pending DATA delivery-proof receipts. The pinned DATA path rejects full
     /// admission transactionally.
     pub receipts: CapacityUse,
-    /// Pending channel receipts. Rete currently drops insertion failures.
+    /// Pending channel receipts. Admission and retry replacement are
+    /// transactional; a full table returns typed backpressure.
     pub channel_receipts: CapacityUse,
     /// Configured rolling packet-deduplication window; occupancy is not exposed.
     pub deduplication_limit: usize,

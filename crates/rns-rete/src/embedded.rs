@@ -3458,6 +3458,51 @@ mod tests {
     }
 
     #[test]
+    fn wrapper_tick_preflights_channel_retry_route_before_entropy_or_state() {
+        let mut initiator = node(1);
+        let responder = node(2);
+        let mut rng = CounterRng::default();
+        let (request, link_id) = link_request(&mut initiator, &responder, &mut rng);
+        let request = Packet::parse(request.bytes()).unwrap();
+        let responder_link =
+            rete_transport::Link::from_request(link_id, request.payload, &mut rng, 100).unwrap();
+        let responder_identity = identity(2);
+        let proof = responder_link.build_proof(&responder_identity).unwrap();
+        let link = initiator.core.transport.get_link_mut(&link_id).unwrap();
+        link.validate_proof(&proof, &responder_identity).unwrap();
+        link.activate(100);
+        assert_eq!(link.bound_interface(), None);
+
+        initiator
+            .core
+            .transport
+            .send_channel_message(&link_id, 0x4242, b"route before retry", 200, &mut rng)
+            .unwrap();
+        let link = initiator.core.transport.get_link(&link_id).unwrap();
+        let last_outbound = link.last_outbound;
+        let window = link.channel().unwrap().window();
+        let rng_before_tick = rng.0;
+
+        let actions = initiator.tick(216, &mut rng);
+        assert!(actions.packets.is_empty());
+        assert_eq!(actions.unroutable_packets, 0);
+        assert_eq!(rng.0, rng_before_tick);
+        let link = initiator.core.transport.get_link(&link_id).unwrap();
+        assert_eq!(link.last_outbound, last_outbound);
+        assert_eq!(link.channel().unwrap().window(), window);
+        assert_eq!(link.channel().unwrap().pending_count(), 1);
+        assert_eq!(initiator.metrics().capacity.channel_receipts.used, 1);
+        assert!(matches!(
+            initiator
+                .core
+                .transport
+                .pending_channel_maintenance(216)
+                .as_slice(),
+            [rete_transport::ChannelMaintenanceAction::Retransmit(_)]
+        ));
+    }
+
+    #[test]
     fn channel_payload_preflight_runs_before_native_queue_mutation() {
         let mut initiator = node(1);
         let mut responder = node(2);
@@ -4014,14 +4059,15 @@ mod tests {
             TxTarget::Only(InterfaceId(2))
         );
         assert_eq!(message.target(), TxTarget::Only(InterfaceId(2)));
-        let receipt = ReceiptId(Packet::parse(message.bytes()).unwrap().compute_hash());
-        let proof_actions = responder.ingest(message.bytes(), 110, InterfaceId(1), &mut rng);
-        let generated_tag = proof_actions
+        let initial_receipt = ReceiptId(Packet::parse(message.bytes()).unwrap().compute_hash());
+        let initial_proof_actions =
+            responder.ingest(message.bytes(), 110, InterfaceId(1), &mut rng);
+        let initial_generated_tag = initial_proof_actions
             .metadata
             .generated_proof_tag()
             .expect("channel PROOF carries the explicit covered packet hash");
-        assert_eq!(proof_actions.metadata.generated_proof_actions(), 1);
-        let proof = proof_actions
+        assert_eq!(initial_proof_actions.metadata.generated_proof_actions(), 1);
+        let initial_proof = initial_proof_actions
             .actions
             .packets
             .iter()
@@ -4030,20 +4076,79 @@ mod tests {
                     .is_ok_and(|packet| packet.packet_type == PacketType::Proof)
             })
             .unwrap();
-        assert_eq!(proof.target(), TxTarget::Only(InterfaceId(1)));
+        assert_eq!(initial_proof.target(), TxTarget::Only(InterfaceId(1)));
+        assert_eq!(initiator.metrics().capacity.channel_receipts.used, 1);
+
+        // Deliberately lose the initial proof. A retry uses fresh ciphertext
+        // and atomically replaces the sole retained receipt/proof target.
+        let retry_actions = initiator.tick(126, &mut rng);
+        assert_eq!(retry_actions.packets.len(), 1);
+        assert_eq!(retry_actions.unroutable_packets, 0);
+        let retry = &retry_actions.packets[0];
+        assert_eq!(retry.target(), TxTarget::Only(InterfaceId(2)));
+        let retry_receipt = ReceiptId(Packet::parse(retry.bytes()).unwrap().compute_hash());
+        assert_ne!(retry_receipt, initial_receipt);
+        assert_eq!(initiator.metrics().capacity.channel_receipts.used, 1);
+
+        let retry_proof_actions = responder.ingest(retry.bytes(), 126, InterfaceId(1), &mut rng);
+        assert!(retry_proof_actions.actions.events.is_empty());
+        assert_eq!(retry_proof_actions.metadata.generated_proof_actions(), 1);
+        let retry_generated_tag = retry_proof_actions
+            .metadata
+            .generated_proof_tag()
+            .expect("replacement channel PROOF carries the retry packet hash");
+        assert_ne!(retry_generated_tag, initial_generated_tag);
+        let retry_proof = retry_proof_actions
+            .actions
+            .packets
+            .iter()
+            .find(|packet| {
+                Packet::parse(packet.bytes())
+                    .is_ok_and(|packet| packet.packet_type == PacketType::Proof)
+            })
+            .unwrap();
+        assert_eq!(retry_proof.target(), TxTarget::Only(InterfaceId(1)));
+
         let mut sink = RecordingReceiptSink::default();
 
-        let report = initiator
-            .ingest_with_receipt_sink(proof.bytes(), 111, InterfaceId(2), &mut rng, &mut sink)
+        let obsolete = initiator
+            .ingest_with_receipt_sink(
+                initial_proof.bytes(),
+                127,
+                InterfaceId(2),
+                &mut rng,
+                &mut sink,
+            )
             .unwrap();
         let expected = ReceiptCandidate {
             kind: ReceiptKind::Channel,
-            receipt,
+            receipt: retry_receipt,
         };
+        assert_eq!(
+            obsolete.disposition,
+            IngressDisposition::NoObservableOutcome
+        );
+        assert_eq!(obsolete.metadata.delivered_receipt_terminals(), 0);
+        assert!(sink.attempted.is_empty());
+        assert!(sink.terminals.is_empty());
+        assert_eq!(initiator.metrics().capacity.channel_receipts.used, 1);
+
+        let report = initiator
+            .ingest_with_receipt_sink(
+                retry_proof.bytes(),
+                128,
+                InterfaceId(2),
+                &mut rng,
+                &mut sink,
+            )
+            .unwrap();
         assert_eq!(report.disposition, IngressDisposition::Processed);
         assert_eq!(report.metadata.delivered_receipt_terminals(), 1);
         assert_eq!(report.metadata.timed_out_receipt_terminals(), 0);
-        assert_eq!(report.metadata.delivered_receipt_tag(), Some(generated_tag));
+        assert_eq!(
+            report.metadata.delivered_receipt_tag(),
+            Some(retry_generated_tag)
+        );
         assert_eq!(sink.attempted, [expected]);
         assert_eq!(sink.terminals, [ReceiptTerminal::Delivered(expected)]);
         assert_eq!(initiator.metrics().capacity.channel_receipts.used, 0);

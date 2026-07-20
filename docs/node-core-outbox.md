@@ -10,13 +10,13 @@ DATA/LXMF submission, client delivery, and full powered E290 qualification of
 the product image remain open.
 The permanent image's bounded source-`96e38aa` boot/interface/ordinary-TX smoke
 has passed, without controlled peer RX or DATA.
-**Rete pin:** `6612f4d91593a8f26a77576bd56329a08b8d70ea`
-(designated durable tag `firmware-pin-6612f4d`)
+**Rete pin:** `4e69dc89fd8e40b02cf4ea2d8ad634ee2e7c09ce`
+(designated durable tag `firmware-pin-4e69dc8`)
 
 This exact pin has host, portable-target, and default E290 build-only evidence:
-the merged image is 767,696 bytes, uses 702,160/6,291,456 application bytes
-(11.16%), and has SHA-256
-`f03ad20c839f9b0ee26e37b9f08e6e02edbabc4666a0b6dac2fd24f870146b7b`.
+the merged image is 774,688 bytes, uses 709,152/6,291,456 application bytes
+(11.27%), and has SHA-256
+`0af8fc1d09cfc9a7fb09740ac859c6477a90a8474d467884c3dc6641f4585e4d`.
 It has no flashed-image readback or powered proof. The source-`96e38aa` result
 above and later powered records are historical evidence bound to the revisions
 they name.
@@ -46,9 +46,10 @@ carry typed owned/relay `LinkTableFull`, `ReverseTableFull`, and
 reconstructing failure from counters. Foreign non-ANNOUNCE H2 packets are
 filtered before state mutation, while H2 ANNOUNCE remains eligible for normal
 announce validation. Relay-Link occupancy is exposed separately from owned
-Links. The deterministic 184-check project conformance run includes a complete
+Links. The deterministic 192-check project conformance run includes a complete
 three-node A--B--C Link handshake, channel DATA and proof flow over two exact
-relay interfaces, plus 40 exact keepalive lifecycle checks.
+relay interfaces, 8 fresh-ciphertext retry/receipt-replacement checks, plus 40
+exact keepalive lifecycle checks.
 
 Locally owned Link output has a separate authenticated binding. A responder
 binds to LINKREQUEST ingress. An initiator's learned path selects the initial
@@ -72,9 +73,14 @@ after bound-interface admission, lifecycle traffic emits no
 application event, and automatic output preflights and retains the bound route
 before committing its timer. Stale starts after two intervals and keeps the
 full transition-relative five-second revival window; valid bound Link traffic
-revives it. Channel retransmission still changes ciphertext/hash without
-replacing the original receipt, and automatic timeout removal still emits no
-`LINKCLOSE` packet.
+revives it. Channel send preflights MDU, pending-window and receipt capacity;
+maintenance discovers immutable retry tokens; NodeCore preflights the bound
+route; and a fresh-ciphertext retry atomically replaces the envelope's sole
+receipt before retry/window/timestamp state commits. Obsolete proofs fail
+closed, full-table replacement succeeds in place, and Link removal reclaims
+channel receipts. Automatic timeout removal still emits no `LINKCLOSE` packet.
+Receipt capacity below an adaptive channel window remains typed backpressure
+and a product sizing/throughput decision.
 
 Arbitrary remote HEADER_1 LINKREQUEST remains disabled until interface roles
 distinguish it from local-origin injection. The temporary H1 DATA compatibility

@@ -72,8 +72,8 @@ remain open.
 Bitrate and cost are recorded but do not replace Reticulum routing. Until Rete
 paths carry an interface generation, an ID/configuration stays immutable for
 one node-owner lifetime or its learned paths must be purged before reuse.
-The current Rete pin, `6612f4d91593a8f26a77576bd56329a08b8d70ea`
-(designated durable tag `firmware-pin-6612f4d`), carries learned path, reverse,
+The current Rete pin, `4e69dc89fd8e40b02cf4ea2d8ad634ee2e7c09ce`
+(designated durable tag `firmware-pin-4e69dc8`), carries learned path, reverse,
 and Link decisions as
 exact interface targets instead of falling back to interface zero or generic
 broadcast. An exact target may intentionally equal the ingress slot, which is
@@ -120,10 +120,17 @@ bound-interface gate; automatic probes and replies
 retain `BoundInterface`, and routing is preflighted before probe timestamps are
 committed. A Link becomes stale after two keepalive intervals and retains a
 full five-second revival window from the actual stale transition/final probe;
-valid bound Link traffic revives it. Remaining Link work includes pending-Link
-`expected_hops`, automatic timeout `LINKCLOSE` emission, and receipt replacement
-for channel retransmissions whose freshly randomized ciphertext changes the
-packet hash.
+valid bound Link traffic revives it. Channel sends now preflight MDU, pending
+window allocation, and receipt capacity before entropy or logical mutation.
+Maintenance discovers immutable retry tokens, NodeCore preflights the
+authoritative Link route, and fresh-ciphertext retries atomically replace the
+envelope's sole live receipt/proof target before retry, window, and timestamp
+state commits. Obsolete proofs fail closed, replacement works at full receipt
+capacity, and Link removal reclaims channel receipts. Remaining Link work
+includes pending-Link `expected_hops`, automatic timeout `LINKCLOSE` emission,
+and shared-Hub endpoint/reincarnation identity. Adaptive channel windows can
+also exceed the product's `L` receipt capacity; that produces typed
+backpressure and remains a sizing/throughput policy decision.
 Snapshot loading currently restores identities only; saved paths and cached
 announces remain inactive until stable interface rebinding is defined.
 
@@ -511,27 +518,28 @@ after frame exposure with an ordinary announce queued behind the DATA owner;
 LoRa lease offline, and permits no later host-radio TX or RX. This qualifies the
 software composition, not ESP32-S3 execution or RF hardware.
 The focused host clients pass 56 tests inside the 252-test xtask suite; the
-portable Rete integration and raw-RNS inbox store pass 54 and 17 tests,
+portable Rete integration and raw-RNS inbox store pass 55 and 17 tests,
 respectively.
-Those 54 tests exercise this repository's adapter and are separate from the
+Those 55 tests exercise this repository's adapter and are separate from the
 pinned Rete fork's selected validation set. The project conformance runner now
-performs 184 checks: 112 released-vector, adapter and direct-Link checks, 40
-keepalive lifecycle checks, and a 32-check three-node A--B--C relayed Link,
+performs 192 checks: 112 released-vector, adapter and direct-Link checks, 8
+channel-retry lifecycle checks, 40 keepalive lifecycle checks, and a 32-check
+three-node A--B--C relayed Link,
 LRPROOF/LRRTT, encrypted channel DATA and proof flow through independent exact
 interface IDs. This is deterministic project-side conformance, not a powered or
 live-Python multi-hop claim. At
-`6612f4d91593a8f26a77576bd56329a08b8d70ea`, the selected upstream set passes
-621 tests: 259 transport (167 library plus 92 integration: 9 computed-vector,
-43 forwarding, 35 Link-integration, and 5 path-request), 135 stack (134 library
+`4e69dc89fd8e40b02cf4ea2d8ad634ee2e7c09ce`, the selected upstream set passes
+634 tests: 270 transport (173 library plus 97 integration: 9 computed-vector,
+43 forwarding, 40 Link-integration, and 5 path-request), 137 stack (136 library
 and one integration), 143 LXMF library, and 84 daemon library tests. The four
-library targets total 528 tests; adding the 92 transport and one stack
-integration tests produces 621. This is a named selected set, not a count of
+library targets total 536 tests; adding the 97 transport and one stack
+integration tests produces 634. This is a named selected set, not a count of
 every nested workspace test target.
 
 This pin has host, portable-target, and ESP32-S3 build-only evidence. Its
 default E290 release ELF links successfully, and the explicit 16 MiB package is
-767,696 bytes with application use 702,160/6,291,456 bytes (11.16%) and merged
-SHA-256 `f03ad20c839f9b0ee26e37b9f08e6e02edbabc4666a0b6dac2fd24f870146b7b`.
+774,688 bytes with application use 709,152/6,291,456 bytes (11.27%) and merged
+SHA-256 `0af8fc1d09cfc9a7fb09740ac859c6477a90a8474d467884c3dc6641f4585e4d`.
 It has no flashed-image readback or powered proof; all powered records below
 name their historical source and Rete revisions and remain historical evidence.
 

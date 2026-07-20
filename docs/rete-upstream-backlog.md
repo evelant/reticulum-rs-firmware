@@ -12,8 +12,8 @@ API stay in this project; generic protocol and bounded-state corrections are
 the candidates for upstream review.
 
 The current firmware pin is
-`6612f4d91593a8f26a77576bd56329a08b8d70ea` (designated durable tag
-`firmware-pin-6612f4d`). It retains
+`4e69dc89fd8e40b02cf4ea2d8ad634ee2e7c09ce` (designated durable tag
+`firmware-pin-4e69dc8`). It retains
 caller-owned DATA preparation, explicit receipt-capacity errors, fixed-capacity
 terminal sinks, exact DATA/channel terminal candidates, allocation-atomic
 proof/timeout delivery, full-hash receipt cancellation and core-aware LXMF
@@ -32,8 +32,12 @@ wrong-interface Link DATA/`RESOURCE_PRF` before dedup admission. It also carries
 the exact unencrypted, role-specific, full-interval keepalive state machine,
 deterministic-packet dedup exception, internal NodeCore lifecycle result, bound
 automatic routing, and transition-relative stale revival described below. The
-legacy LXMF event handler without mutable core access still leaves siblings to
-timeout.
+same pin makes initial Channel send and fresh-ciphertext retry receipt-atomic,
+preflights the authoritative Link route before entropy or retry mutation,
+replaces one envelope's sole proof target in place, rejects stale retry tokens
+and obsolete proofs, and reclaims channel receipts on every Link removal path.
+The legacy LXMF event handler without mutable core access still leaves siblings
+to timeout.
 This candidate remains on the project fork; no issue or pull request was opened
 for the newer lifecycle or routing work, and publication still requires direct
 user approval. It has host, portable-target, and default E290 build-only
@@ -68,9 +72,10 @@ and missing-route outcomes. Full admission returns typed
 Link/raw/dedup state except for the intentional replay-filter record. Missing
 routes leave no orphan Link entry. Relay-Link count is observable independently
 from locally owned Links. Focused tests cover full, existing, missing-route,
-fresh-retry and duplicate-retry behavior, and the 184-check project runner
-completes an A--B--C LINKREQUEST/LRPROOF/LRRTT/channel/proof flow plus 40 exact
-keepalive lifecycle checks.
+fresh-retry and duplicate-retry behavior, and the 192-check project runner
+completes an A--B--C LINKREQUEST/LRPROOF/LRRTT/channel/proof flow, includes 8
+Channel retry/receipt-replacement checks, and includes 40 exact keepalive
+lifecycle checks.
 
 The remaining product gate is role classification, not relay capacity.
 Arbitrary remote H1 LINKREQUEST stays disabled until an interface role can
@@ -217,31 +222,46 @@ removes the expired Link but does not build and route Python's timeout
 interface route until packet formation, without weakening the completed
 transition-relative grace behavior.
 
-## 5. Transactional channel receipts
+## 5. Transactional channel receipts — completed for bounded send/retry lifecycle
 
-**Priority:** reliable delivery
+**Priority:** retain regressions; size receipt capacity against product window
+policy
 
-The adaptive channel window can grow beyond the heapless channel-receipt table
-capacity `L`. `send_channel_message()` mutates channel state and builds a
-packet before ignoring receipt insertion failure. A valid proof for such a
-packet is then unmatchable and the envelope remains pending.
+The current pin closes the former send and retransmission correctness defects:
 
-Channel retransmission rebuilds the encrypted packet with fresh randomness but
-does not replace/register the corresponding full-hash receipt. A proof for the
-retransmission is therefore also unmatchable even when the original insertion
-succeeded. Receipt replacement must be transactional with retransmit state and
-must retain any still-valid sibling hashes until one proof wins or the attempt
-set fails.
+- initial send preflights negotiated MDU, live-sequence reuse, pending-window
+  allocation, channel-receipt capacity, and output allocation before consuming
+  entropy or mutating sequence, window, retry, or timestamp state;
+- one pending envelope has exactly one live full-hash receipt/proof target;
+- maintenance discovers a non-cloneable token bound to the Link session,
+  generation, sequence, retry count, and timestamp, then NodeCore preflights
+  the authoritative Link route before fresh encryption or retry mutation;
+- a successful fresh-ciphertext retry atomically moves the sole proof target
+  from H0 to H1 and only then commits retry/window/timestamp state. H0 is
+  intentionally obsolete after H1 exists; this is not an LXMF-style sibling
+  attempt set;
+- exact-hash and truncated-key collisions reject without mutation, and
+  capacity-neutral H0-to-H1 replacement succeeds when the receipt map is full;
+- route failure consumes no entropy or retry, and generation/session checks
+  make stale discovery and ABA-style token reuse fail closed;
+- timestamp zero at boot, sequence wrap/reuse, out-of-order duplicate retry
+  reception, proof after teardown discovery, every owned-Link removal path,
+  and product receipt-sink backpressure have focused regressions; and
+- only H1 can reserve and commit the product-owned Channel terminal after
+  replacement; H0 leaves both the sink and the one retained receipt unchanged.
 
-It also queues the envelope and advances the channel sequence before packet
-construction. A payload larger than the negotiated Link MDU can therefore
-return an error while leaving an unsent message pending. Validate the per-Link
-payload limit before channel mutation, not only the fixed receipt capacity.
+The remaining capacity question is policy rather than proof correlation.
+`HeaplessStorage<..., L>` still sizes channel receipts with the Link table while
+the adaptive channel window can grow beyond `L`; a larger window therefore
+receives a correct typed backpressure response. Either size receipts
+independently or cap product window policy to the configured receipt budget.
 
-Either size receipt storage independently for the configured channel window,
-or preflight/rollback the complete send transaction. A full receipt table must
-return a typed error before sequence/window state changes. Test the boundary,
-proof removal, reuse after proof, retransmission and wraparound.
+Released-Python parity also remains separate follow-up work: compare dynamic
+retry timeout, whether the maximum-tries count includes the initial send,
+slow-RTT initial-window selection, and per-envelope window shrink behavior.
+Automatic timeout `LINKCLOSE` remains item 4. Hosted fallible allocation and
+fully sink-backed NodeCore outputs remain item 7; do not duplicate CBC sizing
+math merely to reduce the current correctness-first retry output reservation.
 
 ## 6. Explicit ingress dispositions
 
@@ -430,8 +450,8 @@ Make DATA preparation one transaction:
    receipt and entropy state.
 
 The generic fix is now the project pin
-`6612f4d91593a8f26a77576bd56329a08b8d70ea`, with designated fork tag
-`firmware-pin-6612f4d`. It returns caller-owned packet metadata plus a full
+`4e69dc89fd8e40b02cf4ea2d8ad634ee2e7c09ce`, with designated fork tag
+`firmware-pin-4e69dc8`. It returns caller-owned packet metadata plus a full
 receipt token, reports registration and output-allocation failures, and
 atomically removes validated and timed-out receipts only after reserving their
 exact kind/full-hash terminal candidate. Link-typed channel proofs are resolved
@@ -442,12 +462,12 @@ HEADER_2 proofs bypass local terminal reservation. Direct Transport ingest and
 maintenance results are `must_use`; sink-aware NodeCore paths avoid duplicate
 receipt events; and the
 hosted daemon consumes LXMF terminal output. The selected validation set passes
-621 tests: 259 transport (167 library plus 92 integration), 135 stack (134
+634 tests: 270 transport (173 library plus 97 integration), 137 stack (136
 library plus one integration), 143 LXMF library, and 84 daemon library. The
-four library targets total 528 tests. This is not a full nested-workspace test
+four library targets total 536 tests. This is not a full nested-workspace test
 count.
-All workspace targets check on the macOS host, and the affected no-default crates
-compile for `thumbv6m-none-eabi`. This newer
+The selected host suites pass on macOS, and the affected no-default transport
+and stack crates compile for `riscv32imac-unknown-none-elf`. This newer
 lifecycle work remains on the user's fork. No issue or pull request was opened,
 and publication elsewhere still requires the user's direct approval.
 
@@ -602,7 +622,7 @@ item.
 3. Endpoint announce rebroadcast policy: submitted as upstream draft PR 11;
    retain until merged or superseded.
 4. Relay-table admission/visibility and remaining HEADER_2 dispatch.
-5. Link event/timestamp semantics and channel receipts.
+5. Link event/timestamp semantics; retain the completed Channel-receipt patch.
 6. Transactional DATA receipt admission, terminal status and reclamation.
 7. LXMF retry/receipt-attempt correlation.
 8. Explicit ingress dispositions and full capacity snapshots.

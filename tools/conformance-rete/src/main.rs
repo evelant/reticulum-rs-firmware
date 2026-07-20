@@ -866,7 +866,65 @@ fn verify_released_vectors() -> Result<usize, String> {
         received_channel.actions.packets[0].target() == TxTarget::Only(responder_interface),
         "channel proof was not resolved to its source interface",
     )?;
-    let channel_proof = parse_packet(received_channel.actions.packets[0].bytes())
+
+    // Lose the initial proof. The retry must retain exactly one receipt while
+    // replacing its sole valid proof target with fresh ciphertext/hash.
+    let channel_retry = link_initiator.tick(1_700_000_136, &mut link_rng);
+    require(
+        channel_retry.packets.len() == 1,
+        "timed-out channel DATA did not emit exactly one retry",
+    )?;
+    require(
+        channel_retry.unroutable_packets == 0
+            && channel_retry.packets[0].target() == TxTarget::Only(initiator_interface),
+        "channel retry did not retain its bound interface",
+    )?;
+    let parsed_retry = parse_packet(channel_retry.packets[0].bytes())
+        .map_err(|error| format!("Rete emitted invalid channel retry: {error}"))?;
+    require(
+        parsed_retry.context == 0x0e,
+        "channel retry used the wrong context",
+    )?;
+    let retry_packet_hash = parsed_retry.compute_hash();
+    require(
+        retry_packet_hash != channel_packet_hash,
+        "channel retry reused the initial packet hash",
+    )?;
+    require(
+        link_initiator.metrics().capacity.channel_receipts.used == 1,
+        "channel retry did not replace its receipt in place",
+    )?;
+
+    let received_retry = link_responder.ingest(
+        channel_retry.packets[0].bytes(),
+        1_700_000_136,
+        responder_interface,
+        &mut link_rng,
+    );
+    require(
+        received_retry.actions.events.is_empty(),
+        "duplicate channel envelope was delivered twice",
+    )?;
+    require(
+        received_retry.actions.packets.len() == 1
+            && received_retry.actions.packets[0].target() == TxTarget::Only(responder_interface),
+        "duplicate channel envelope did not emit one bound replacement proof",
+    )?;
+
+    let obsolete_proof = link_initiator.ingest(
+        received_channel.actions.packets[0].bytes(),
+        1_700_000_137,
+        initiator_interface,
+        &mut link_rng,
+    );
+    require(
+        obsolete_proof.actions.events.is_empty()
+            && link_initiator.metrics().capacity.channel_receipts.used == 1,
+        "obsolete channel proof completed or removed the replacement receipt",
+    )?;
+    checks += 8;
+
+    let channel_proof = parse_packet(received_retry.actions.packets[0].bytes())
         .map_err(|error| format!("Rete emitted invalid channel proof: {error}"))?;
     require(
         channel_proof.packet_type == PacketType::Proof,
@@ -885,8 +943,8 @@ fn verify_released_vectors() -> Result<usize, String> {
         "channel proof was not addressed to its Link ID",
     )?;
     let received_proof = link_initiator.ingest(
-        received_channel.actions.packets[0].bytes(),
-        1_700_000_121,
+        received_retry.actions.packets[0].bytes(),
+        1_700_000_138,
         initiator_interface,
         &mut link_rng,
     );
@@ -902,14 +960,14 @@ fn verify_released_vectors() -> Result<usize, String> {
         _ => unreachable!("ProofReceived shape was checked above"),
     };
     require(
-        received_packet_hash == channel_packet_hash,
+        received_packet_hash == retry_packet_hash,
         "channel proof acknowledged the wrong DATA packet hash",
     )?;
     require(
         link_initiator.metrics().capacity.channel_receipts.used == 0,
         "channel proof did not clear its receipt",
     )?;
-    let after_ack = link_initiator.tick(1_700_000_136, &mut link_rng);
+    let after_ack = link_initiator.tick(1_700_000_154, &mut link_rng);
     require(
         !after_ack
             .packets
@@ -1427,6 +1485,6 @@ mod tests {
 
     #[test]
     fn released_python_vectors_pass() {
-        assert_eq!(verify_released_vectors(), Ok(184));
+        assert_eq!(verify_released_vectors(), Ok(192));
     }
 }
