@@ -1,7 +1,10 @@
 # ADR 0004: Sole flash coordinator with operation-scoped store access
 
-- **Status:** accepted
+- **Status:** accepted and implemented for the current identity, announce-clock,
+  credential, submission-journal, and raw-RNS inbox domains; final
+  configuration, LXMF/message storage, and OTA transactions remain open
 - **Date:** 2026-07-17
+- **Powered evidence updated:** 2026-07-19
 - **Decision owners:** project maintainers
 
 ## Context
@@ -35,8 +38,10 @@ Permanent E290 composition has one resident storage coordinator containing the
 only `FlashStorage`, the validated partition map, and the optional successfully
 mounted durable submission runtime. It also retains the exact credential-store
 binding, credential boot classification, and any successfully mounted
-`MountedCredentialStore`. It is the ownership point for future enabled stores
-as well. No node, radio, USB, BLE, Wi-Fi, UI, or client task
+`MountedCredentialStore`. ADR 0011 now adds the exact `message_store` binding,
+read-only boot classification, optional mounted one-entry inbox, and short-lived
+admission views to that same coordinator. It is the ownership point for future
+enabled stores as well. No node, radio, USB, BLE, Wi-Fi, UI, or client task
 receives a raw flash owner or a generic read/write/erase capability.
 
 The node supervisor and storage coordinator currently remain in one Embassy
@@ -108,7 +113,11 @@ attempt failed.
   pairing are routed through the pre-authentication USB records. The first
   authenticated API/session firmware lane is composed as a minimal single-
   flight USB bearer; one bounded powered handshake/identity/submission/peer-
-  proof/status path passes.
+  proof/status path passes. ADR 0011's bounded powered inbox work additionally
+  passes exact commit/readback/reset/drop-newest, four fail-closed cold-mount
+  cases, and one feature-only same-boot missing-commit quarantine. Each mount
+  case retained a byte-identical complete partition while one direct peer DATA/
+  proof exchange completed; this is not sustained-routing or power-cut evidence.
 - A journal strict-mount, supported-history, or recovery failure during boot
   occurs before any durability-gated DATA owner can exist and disables only
   local durable submission service. The sole flash owner remains resident and
@@ -128,8 +137,10 @@ attempt failed.
   storage ownership, durability-policy, cap, or frame-
   handoff qualification. This is the complete primary LoRa software slice; a
   speculative second Reticulum transport is neither required nor composed.
-- Device configuration and message storage can be added without changing the
-  Reticulum interface fabric or handing out shared flash handles.
+- The temporary one-entry raw-RNS `message_store` is implemented without
+  changing the Reticulum interface fabric or handing out shared flash handles.
+  Final device configuration and LXMF/message storage can reuse the same
+  operation-scoped ownership rule but require their own formats and ordering.
 - Synchronous ROM flash calls still block cooperative execution. Journal scans,
   writes, sector/block erases, and compaction must be measured against radio
   deadlines; compaction may require an incremental state machine with bounded
@@ -143,25 +154,31 @@ attempt failed.
 ## Staged implementation
 
 The backend-independent actor/runtime, resident E290 operation-scoped
-coordinator, exact authorized-frame request/durable-echo handoff, one-entry cap,
-and ADR 0005 fault behavior are implemented and pass cross-layer host
-composition tests. The minimal external USB API edge now passes its first
-bounded powered live-storage proof.
+coordinator, exact authorized-frame request/durable-echo handoff, one-entry
+submission cap, checked raw-RNS inbox, and ADR 0005 fault behavior are
+implemented and pass cross-layer host composition tests. The minimal external
+USB API edge passes its first bounded powered live-storage proof; inbox evidence
+now also covers bounded commit/reset/drop-newest, cold-mount isolation, and one
+same-boot terminal-commit suppression. Actual powered cuts and target timing/
+memory bounds remain open.
 
 1. Preserve ADR 0009 credential boot ownership, the routed explicit
    initialization/live-pairing lifecycle, and the implemented authority,
    framing, session, handoff, and first authenticated local USB API bearer.
    Preserve its powered happy path while qualifying zero-write authorization
    rejection and broader failure/lifecycle cases.
-2. With both physical `HT-RA62-HF` markings now confirmed, qualify E290 first provisioning,
-   strict mount, boot recovery, resident ownership, authorized-frame handoff,
-   ADR 0005 failure isolation, and pre-owner route-only degradation on both
-   boards, including controlled powered cuts. The source-`96e38aa` erased-media
-   smoke now supplies hardware evidence only for boot, zero-mutation credential
-   classification, empty-journal mount, LoRa readiness, and ordinary TX.
+2. With both physical `HT-RA62-HF` markings confirmed, preserve the completed
+   bounded first provisioning, strict inbox mount matrix, resident ownership,
+   authorized-frame handoff, and same-boot inbox quarantine evidence. Continue
+   qualification across actual controlled power cuts, credential/journal
+   ambiguity, target timing/high-water, watchdog behavior, and broader route-
+   only operation; one direct DATA/proof exchange per inbox fault does not prove
+   sustained or forwarded routing.
 3. Select a product-capacity policy beyond the host-qualified one-entry
    composition cap without weakening durability or principal isolation.
-4. Add checked `message_store` partition validation, then typed configuration
-   and message operations with explicit cross-store ordering.
+4. Preserve the implemented checked `message_store` validation, exact binding,
+   one-entry raw-RNS mount/admission operations, and generalized cross-store
+   exclusion. Add typed configuration and final LXMF/message operations only
+   with explicit format, migration, reclamation, and cross-store ordering.
 5. Split storage into another Embassy task only if measurement warrants it; if
    split, exchange high-level durable commands and exact ownership tokens.

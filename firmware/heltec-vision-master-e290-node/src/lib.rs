@@ -14,6 +14,11 @@ pub mod credential_runtime;
 pub mod cross_store_gate;
 pub mod durability_boot;
 pub mod durability_policy;
+#[cfg(all(
+    feature = "rns-inbox-commit-fault-hil",
+    any(test, target_arch = "xtensa")
+))]
+pub mod inbox_admission_fault_hil;
 pub mod live_pairing_handoff;
 pub mod live_pairing_node;
 pub mod pairing_control_handoff;

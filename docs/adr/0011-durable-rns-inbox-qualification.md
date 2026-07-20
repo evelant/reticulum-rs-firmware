@@ -1,8 +1,10 @@
 # ADR 0011: Durable raw-RNS inbox qualification slice
 
-- **Status:** accepted and implemented; the bounded end-to-end powered proof is
-  complete, while target fault-isolation and timing qualification remain open
+- **Status:** accepted and implemented; the bounded end-to-end proof, powered
+  cold-mount fault matrix, and same-boot missing-commit isolation proof are
+  complete, while physical power cuts and target-bounds qualification remain open
 - **Date:** 2026-07-18
+- **Powered evidence updated:** 2026-07-19
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0003](0003-lora-first-interface-fabric.md),
   [ADR 0004](0004-sole-flash-coordinator.md),
@@ -11,11 +13,12 @@
 
 ## Context
 
-The permanent E290 image can receive, decrypt, and validate Reticulum DATA,
-and its transport-neutral Rete integration can surface the resulting plaintext
-to project code. It does not yet prove that an inbound application payload can
-cross the Reticulum boundary, survive a reset or power loss, and remain
-observable through the authenticated local API.
+Before this decision, the permanent E290 image could receive, decrypt, and
+validate Reticulum DATA, and its transport-neutral Rete integration could
+surface the resulting plaintext to project code. It had not proved that an
+inbound application payload could cross the Reticulum boundary, survive a
+reset, and remain observable through the authenticated local API, nor had it
+defined fail-closed power-loss behavior.
 
 A volatile mailbox would exercise task scheduling and API encoding, but it
 would skip the hardest property of a standalone node: useful traffic must not
@@ -270,6 +273,79 @@ export, migrate, or erase policy. This ADR promises only that the raw DATA item
 and its durability behavior are sufficient to qualify the end-to-end boundary;
 it does not promise on-media compatibility with the product queue.
 
+## Powered fault-isolation evidence
+
+### Deterministic cold-mount matrix
+
+On 2026-07-19, `cargo +stable run --locked -p xtask --
+e290-rns-inbox-fixture` generated complete 2 MiB partition images from a
+canonical record first committed through this crate's public `mount`/`accept`
+path. The tool requires an absent output, a 12-character lowercase source MAC,
+and exactly one mode. It creates the output without replacement at mode `0600`,
+synchronizes it, and prints only mode, length, and SHA-256. For source MAC
+`aca704e13e88`, the reviewed vectors are:
+
+| Mode/use | Exact programmed state | SHA-256 |
+| --- | --- | --- |
+| `interrupted-claim` | First 16 claim bytes programmed; every later byte erased | `4b9e6dad1415850588c001b17053e893ab1316aaa1b6d584082170d049f871f0` |
+| `interrupted-commit` | Exact claim, body, and digest through byte 543; complete commit marker and remainder erased | `a8a8d40f63a69c7e3df59f4af1960f241f464566a5ae9251c12209eb3334c66a` |
+| `invalid-digest` | Exact committed record with one digest bit monotonically cleared | `bb24e892d435a0b6888cc16f8733f096015a36f0f19dcd8a22e0978602e55ad5` |
+| `committed`, used as foreign binding | Exact committed record bound to `ac:a7:04:e1:3e:88`, programmed on `ac:a7:04:e1:3f:88` | `dee21d3c72a914ac00627c49a119631999dc9e986ce18897b9a171254c79561b` |
+
+The first three cases were programmed on `3e:88`; the fourth deliberately put a
+valid `3e:88` record on `3f:88`. In all four powered boots, authenticated
+capabilities reported inbox availability and maximum payload as `0/0`, status
+and peek returned `CapabilityUnavailable` (code 7), and peek created no output.
+One fresh peer LoRa DATA packet per case reached `Delivered` through the
+receiver's proof transmission. The complete post-traffic 2 MiB readback remained
+byte-identical to the injected fixture. This proves read-only fail-closed mount,
+API suppression, no volatile fallback, no repair/admission write on disabled
+media, and one bounded direct DATA/decrypt/proof exchange per case. It does not
+prove sustained routing, forwarding, multi-hop operation, or a physical power
+cut. The all-erased 2 MiB setup image used elsewhere in the qualification has
+SHA-256
+`4bda3a28f4ffe603c0ec1258c0034d65a1a0d35ab7bd523a834608adabf03cc5`.
+
+### Same-boot missing-commit isolation
+
+The non-default E290 feature `rns-inbox-commit-fault-hil` is a deterministic
+target fault-injection fixture, not a product mode. It forwards the first two
+inbox NOR writes, acknowledges the third without programming the terminal
+commit marker, and forwards every later operation. It is mutually exclusive with
+`journal-schema2-dev-reprovision` and graph policy requires its dependency graph
+to be identical to the normal product graph; only the product root feature may
+differ.
+
+The 762,672-byte merged HIL image had SHA-256
+`e693afad19c2eac28d958f902c1b8148ae360a6b54abb14338195ef595515239`.
+On erased inbox media, one 147-byte peer packet with encoded-byte SHA-256
+`0084ad098f2109b390d7c4568ba4a2dcd5285ac40062e55c9709665b2aebc73a`
+reached `Delivered`. In that same boot, the receiver then reported the
+commit-stage readback mismatch and inbox-service quarantine. The ELF-bound 40-byte
+`RIAF` evidence structure at RAM address `0x3fc8bf7c` reported, in order,
+`write_calls=3`, `commit_suppressed=1`,
+`expected_commit_readback_mismatch=1`,
+`unexpected_admission_failure=0`, `service_disabled=1`, and
+`dropped_since_boot=1`.
+
+The resulting complete store had SHA-256
+`ad6d549f73681da7453870606fb34eeabad75b387f081176103562d84e5700c7`.
+Its first 576 bytes had SHA-256
+`acb43e7be289c5c4f822441670ce11554b6386ca3e1cfcee47907ee82c81d7f8`;
+the exact claim, body, and digest were present and every byte from the commit
+marker at 544 through the end of the partition was `0xff`. The RAM evidence was
+captured before reset because it is deliberately boot-local and nondurable. The
+ordinary 761,952-byte image was then restored with exact SHA-256
+`d26587a2506408ec40cd42facb9bb87cc9c32e79c2afd2e1ab09f0e1268641cb`.
+
+This HIL proves target execution of one deliberately missing commit write,
+commit readback detection, same-boot drop accounting, and local service
+quarantine after the triggering direct Reticulum proof completed. It does not
+establish post-quarantine RF operation and is not
+an electrical interruption, brownout, arbitrary-stage or partial-program fault,
+backend error-after-write test, persistent counter, timing measurement, or
+authorization to ship the feature.
+
 ## Consequences
 
 - The first inbound persistence proof exercises the real transport-neutral
@@ -279,17 +355,19 @@ it does not promise on-media compatibility with the product queue.
   commit. Clients and tests must not report a message as durably inboxed from
   proof evidence alone.
 - The format and host fault model restore an exact committed record after
-  reboot or a post-commit power cut, but powered fault-isolation and target-
-  bounds confirmation remain exit criteria. Capacity one and the absence of
-  acknowledgement or reclamation make it deliberately unsuitable for normal
-  messaging. Repeating destructive qualification may require an explicit
-  developer erase/reflash.
+  reboot or a post-commit power cut. Powered evidence now covers the four
+  selected cold-mount faults and one deterministic same-boot missing-commit
+  admission. Actual electrical cuts and target-bounds confirmation remain exit
+  criteria. Capacity one and the absence of acknowledgement or reclamation make
+  it deliberately unsuitable for normal messaging. Repeating destructive
+  qualification requires an explicit developer erase/reflash.
 - Reserving 2 MiB for a 576-byte record wastes space in format 1 but avoids
   repartitioning before the real message store is designed.
 - One occupied item is never displaced by traffic bursts. Newest-drop behavior
   is deterministic and RAM-bounded, at the cost of losing all later messages.
-- A corrupt or interrupted inbox disables only local inbox service. The node
-  continues ordinary Reticulum LoRa routing and proof behavior.
+- A corrupt or interrupted inbox disables only local inbox service. One direct
+  DATA/decrypt/proof exchange per tested fault remained available; sustained or
+  forwarded routing has not been qualified by these runs.
 - All authenticated developer principals can read the retained plaintext item.
   This is simple enough for qualification but is not the final authorization or
   confidentiality policy.
@@ -348,6 +426,14 @@ graph, with exact evidence retained in the runbook:
     scheduling impact are recorded. Any missed radio deadline or unbounded
     coordinator stall blocks qualification even when the stored bytes are
     correct.
+
+As of 2026-07-19, criteria 1 through 8 have their bounded host, target, or
+powered evidence. Criterion 9 has powered evidence for the four selected
+cold-mount cases and one same-boot terminal-commit suppression, including one
+direct DATA/proof exchange in each case; its broader ordinary/sustained routing
+claim remains open. Criterion 10 remains open. Physical power interruption at
+claim, body/digest, and commit boundaries is also still required even though the
+exhaustive host fault model and deterministic target suppression pass.
 
 Passing these criteria authorizes work on the real LXMF queue design. It does
 not promote physical format 1, HMAC-only USB, plaintext storage, or the shared

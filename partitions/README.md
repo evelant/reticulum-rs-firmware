@@ -48,6 +48,215 @@ the first 576 bytes were the canonical record and every remaining byte was
 `0xff`. This is qualification evidence for the temporary one-entry format, not
 authorization to treat the range as a general or LXMF message store.
 
+## E290 raw-inbox fault fixtures
+
+The host-only `e290-rns-inbox-fixture` command generates one complete,
+deterministic 2 MiB `message_store` image. It first creates a canonical record
+through the public `reticulum-rns-inbox-store` mount/admission API, then applies
+one reviewed physical-state transformation. It does not open or write a board.
+The parser requires an absent output path, one 12-character lowercase MAC
+without separators, and exactly one mode. Output is create-new, mode `0600`,
+synchronized before success, and summarized only by mode, length, and SHA-256.
+
+```sh
+umask 077
+cargo +stable run --locked -p xtask -- e290-rns-inbox-fixture \
+  --output /secure/absent-message-store.bin \
+  --source-mac aca704e13e88 \
+  interrupted-commit
+```
+
+`--source-mac` is the physical binding encoded in the record, not necessarily
+the board on which a deliberate foreign-binding test will program it. For MAC
+`ac:a7:04:e1:3e:88`, the fixed nonsecret fixture record produces:
+
+| Mode | Exact state | 2 MiB SHA-256 |
+| --- | --- | --- |
+| `interrupted-claim` | First 16 bytes of the 32-byte claim programmed; every later byte `0xff` | `4b9e6dad1415850588c001b17053e893ab1316aaa1b6d584082170d049f871f0` |
+| `interrupted-commit` | Exact claim, body, and digest at `0..544`; commit and remainder at `544..0x200000` entirely `0xff` | `a8a8d40f63a69c7e3df59f4af1960f241f464566a5ae9251c12209eb3334c66a` |
+| `invalid-digest` | Exact committed record with one programmed digest bit monotonically cleared | `bb24e892d435a0b6888cc16f8733f096015a36f0f19dcd8a22e0978602e55ad5` |
+| `committed` | Canonical matching committed record | `dee21d3c72a914ac00627c49a119631999dc9e986ce18897b9a171254c79561b` |
+
+`committed` mounts occupied only under the matching device/range binding. The
+powered foreign-binding case generated this `3e:88` image and deliberately
+programmed it on `ac:a7:04:e1:3f:88`. A fixture generated for another MAC has a
+different encoded binding, digest, and whole-image hash.
+
+Before programming any fixture, protect the existing full-flash backup, identify
+the live port by eFuse MAC with `espflash board-info`, require the intended 16 MiB
+E290 with secure boot and flash encryption disabled, and keep its 915 MHz antenna
+attached. Program and verify only the exact `message_store` range; do not erase
+or rewrite identity, announce clock, credentials, configuration, or journal:
+
+```sh
+set -euo pipefail
+umask 077
+: "${PORT:?set PORT to the live E290 serial device}"
+EXPECTED_MAC=ac:a7:04:e1:3e:88
+EXPECTED_FIXTURE_SHA=a8a8d40f63a69c7e3df59f4af1960f241f464566a5ae9251c12209eb3334c66a
+BOARD_INFO=/secure/e290-board-info-before-fixture.txt
+FIXTURE=/secure/absent-message-store.bin
+READBACK=/secure/message-store-programmed.bin
+test ! -e "$BOARD_INFO"
+test ! -e "$READBACK"
+
+espflash board-info --skip-update-check \
+  --port "$PORT" --chip esp32s3 \
+  --after no-reset --non-interactive 2>&1 | tee "$BOARD_INFO"
+rg -qi "^MAC address:[[:space:]]+$EXPECTED_MAC$" "$BOARD_INFO"
+rg -q '^Flash size:[[:space:]]+16MB$' "$BOARD_INFO"
+rg -q '^Secure Boot: Disabled$' "$BOARD_INFO"
+rg -q '^Flash Encryption: Disabled$' "$BOARD_INFO"
+test "$(wc -c < "$FIXTURE" | tr -d ' ')" = 2097152
+test "$(shasum -a 256 "$FIXTURE" | awk '{print $1}')" = \
+  "$EXPECTED_FIXTURE_SHA"
+espflash write-bin --skip-update-check \
+  --port "$PORT" --chip esp32s3 \
+  --before default-reset --after no-reset --non-interactive \
+  0x730000 "$FIXTURE"
+espflash read-flash --skip-update-check \
+  --port "$PORT" --chip esp32s3 \
+  --before default-reset --after hard-reset --non-interactive \
+  0x730000 0x200000 "$READBACK"
+chmod 600 "$READBACK"
+cmp "$FIXTURE" "$READBACK"
+```
+
+The final read captures the complete partition before its `hard-reset` action
+boots the installed firmware. Wait for USB re-enumeration before exercising the
+API or sending the qualifying peer packet.
+
+The 2026-07-19 powered matrix covered partial claim, exact pre-commit, invalid
+digest, and foreign binding. In every boot, authenticated capabilities reported
+inbox availability/max payload `0/0`; status and peek returned
+`CapabilityUnavailable` (code 7); peek left its requested output absent; one
+fresh direct peer DATA packet reached `Delivered` through the receiver's proof
+transmission; and the post-traffic complete store remained byte-identical to the
+fixture. The respective after-traffic hashes were the four hashes above. This is
+target evidence for read-only fail-closed mount, API suppression, no volatile
+fallback, and no repair/admission write while disabled. It is one bounded direct
+DATA/decrypt/proof exchange per state, not sustained routing, forwarding,
+multi-hop behavior, or a physical power cut.
+
+Normal firmware intentionally cannot repair these states. After evidence is
+captured and before returning the development board to an empty inbox, explicitly
+erase and verify only `message_store`. The exact all-erased 2 MiB SHA-256 is
+`4bda3a28f4ffe603c0ec1258c0034d65a1a0d35ab7bd523a834608adabf03cc5`:
+
+```sh
+set -euo pipefail
+umask 077
+: "${PORT:?set PORT to the live E290 serial device}"
+EXPECTED_MAC=ac:a7:04:e1:3e:88
+BOARD_INFO=/secure/e290-board-info-before-inbox-erase.txt
+ERASED=/secure/message-store-erased.bin
+test ! -e "$BOARD_INFO"
+test ! -e "$ERASED"
+
+espflash board-info --skip-update-check \
+  --port "$PORT" --chip esp32s3 \
+  --after no-reset --non-interactive 2>&1 | tee "$BOARD_INFO"
+rg -qi "^MAC address:[[:space:]]+$EXPECTED_MAC$" "$BOARD_INFO"
+rg -q '^Flash size:[[:space:]]+16MB$' "$BOARD_INFO"
+rg -q '^Secure Boot: Disabled$' "$BOARD_INFO"
+rg -q '^Flash Encryption: Disabled$' "$BOARD_INFO"
+espflash erase-region --skip-update-check \
+  --port "$PORT" --chip esp32s3 \
+  --before default-reset --after no-reset --non-interactive \
+  0x730000 0x200000
+espflash read-flash --skip-update-check \
+  --port "$PORT" --chip esp32s3 \
+  --before default-reset --after hard-reset --non-interactive \
+  0x730000 0x200000 "$ERASED"
+chmod 600 "$ERASED"
+test "$(wc -c < "$ERASED" | tr -d ' ')" = 2097152
+test "$(shasum -a 256 "$ERASED" | awk '{ print $1 }')" = \
+  4bda3a28f4ffe603c0ec1258c0034d65a1a0d35ab7bd523a834608adabf03cc5
+test "$(LC_ALL=C tr -d '\377' < "$ERASED" | wc -c | tr -d ' ')" = 0
+```
+
+Here too, the final read captures the erased range before hard-resetting into
+the installed ordinary firmware.
+
+### Same-boot terminal-commit suppression HIL
+
+The separate non-default feature `rns-inbox-commit-fault-hil` changes no package
+dependency. It wraps only an inbox admission, forwards claim and body/digest
+writes, returns success without programming write three, then lets production
+readback detect the absent terminal commit and execute its normal quarantine
+path. The feature is mutually exclusive with
+`journal-schema2-dev-reprovision`; never combine them, use `--all-features`, or
+retain this image as the ordinary firmware.
+
+Run the complete E290 build gate in
+[`docs/e290-node.md`](../docs/e290-node.md). Its focused fixture/feature checks
+include:
+
+```sh
+cargo +stable test --locked -p xtask e290_rns_inbox_fixture
+cargo +stable test --locked \
+  -p reticulum-heltec-vision-master-e290-node --lib \
+  --features rns-inbox-commit-fault-hil
+cargo +stable clippy --locked \
+  -p reticulum-heltec-vision-master-e290-node --lib --tests \
+  --features rns-inbox-commit-fault-hil -- -D warnings
+cargo +stable run --locked -p xtask -- graph-policy
+```
+
+```sh
+source ~/export-esp.sh
+CARGO_TARGET_DIR=target/e290-inbox-commit-fault-hil \
+cargo +esp build --locked --release \
+  -p reticulum-heltec-vision-master-e290-node \
+  --no-default-features \
+  --features rns-inbox-commit-fault-hil \
+  --target xtensa-esp32s3-none-elf
+CARGO_TARGET_DIR=target/e290-inbox-commit-fault-hil \
+cargo +esp clippy --locked --release \
+  -p reticulum-heltec-vision-master-e290-node \
+  --bin reticulum-heltec-vision-master-e290-node \
+  --no-default-features \
+  --features rns-inbox-commit-fault-hil \
+  --target xtensa-esp32s3-none-elf -- -D warnings
+```
+
+The isolated HIL ELF is
+`target/e290-inbox-commit-fault-hil/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node`.
+Package it only with a HIL-specific output name; do not overwrite the ordinary
+default ELF or `e290-node.bin`.
+
+The digest below identifies the retained artifact physically flashed and read
+back during qualification, not a universal rebuild digest: target-directory
+paths can change bytes embedded in the ELF and merged image.
+
+The exact 762,672-byte merged HIL image had SHA-256
+`e693afad19c2eac28d958f902c1b8148ae360a6b54abb14338195ef595515239`.
+Starting from the verified erased store above, one 147-byte peer packet with
+encoded-byte SHA-256
+`0084ad098f2109b390d7c4568ba4a2dcd5285ac40062e55c9709665b2aebc73a`
+reached `Delivered`. Before any reset, the ELF-bound 40-byte `RIAF` evidence at
+RAM address `0x3fc8bf7c` reported three write calls, one suppressed commit, one
+expected commit readback mismatch, zero unexpected failures, disabled service,
+and one boot-local dropped candidate: `3/1/1/0/1/1`.
+
+The resulting 2 MiB store SHA-256 was
+`ad6d549f73681da7453870606fb34eeabad75b387f081176103562d84e5700c7`.
+Its first-record SHA-256 was
+`acb43e7be289c5c4f822441670ce11554b6386ca3e1cfcee47907ee82c81d7f8`:
+claim/body/digest were exact and every byte from the commit marker at 544 through
+the end was `0xff`. Capture the RAM evidence before any reset; those counters are
+not persistent state. After this destructive HIL, explicitly erase/verify the
+store and restore the default image. The restored 761,952-byte ordinary image
+had exact SHA-256
+`d26587a2506408ec40cd42facb9bb87cc9c32e79c2afd2e1ab09f0e1268641cb`.
+
+This HIL is deterministic same-boot write suppression on real target storage,
+not an electrical interruption, brownout, arbitrary claim/body/partial-commit
+cut, backend error-after-write test, timing/high-water measurement, endurance
+test, or full mailbox qualification. Neither the fixture tool nor this feature
+changes ADR 0011's plaintext, capacity-one, no-acknowledgement, no-deletion, and
+no-reclamation limits.
+
 `node_identity` contains the same plaintext 64-byte Reticulum private material
 in two commit-last, SHA-256-protected 4 KiB mirrors. Its complete preflight is
 read-only: blank/recognized-torn media is vacant, matching valid media is
@@ -93,7 +302,9 @@ product store; do not repeat the provisioning erase. The exact guarded sequence 
 the workspace's 8 MiB runner. Both connected modules are confirmed
 `HT-RA62-HF`. The layout and host/build checks alone do not establish powered
 behavior; the separately recorded permanent-image API 1.1 and bounded API 1.2
-runs provide the current two-board evidence under the limits in that runbook.
+runs plus the 2026-07-19 cold-mount matrix and same-boot commit-suppression HIL
+provide the current two-board evidence under the limits above and in that
+runbook. Actual power cuts and target timing/high-water remain open.
 
 `heltec-vision-master-e290-semantic-hil.csv` is the explicit hazardous RF HIL
 layout for the qualified 16 MiB E290 pair. It reserves NVS and PHY-init ranges

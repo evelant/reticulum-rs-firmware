@@ -2940,6 +2940,7 @@ dependencies = [
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "embedded-storage",
  "getrandom",
  "md-5",
  "object",
@@ -2952,6 +2953,7 @@ dependencies = [
  "reticulum-device-api-pairing-control",
  "reticulum-device-api-session",
  "reticulum-phase1-rx-local-data",
+ "reticulum-rns-inbox-store",
  "reticulum-rns-rete",
  "serde",
  "serde_json",

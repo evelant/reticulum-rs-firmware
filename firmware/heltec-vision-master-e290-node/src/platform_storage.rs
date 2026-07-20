@@ -90,6 +90,10 @@ use reticulum_submission_runtime::{
 
 use crate::config;
 use reticulum_heltec_vision_master_e290_node::durability_boot::JournalBootPolicy;
+#[cfg(feature = "rns-inbox-commit-fault-hil")]
+use reticulum_heltec_vision_master_e290_node::inbox_admission_fault_hil::{
+    SuppressThirdWrite, observe_product_quarantine,
+};
 
 type ProductRegionError = RegionError<FlashStorageError>;
 pub(crate) type ProductSubmissionRuntime =
@@ -818,6 +822,8 @@ impl ProductStorageCoordinator {
             .binding();
         let region =
             PartitionNorFlash::new(&mut *self.flash, MESSAGE_STORE_OFFSET, MESSAGE_STORE_LEN);
+        #[cfg(feature = "rns-inbox-commit-fault-hil")]
+        let region = SuppressThirdWrite::new(region);
         let mut access = BoundInboxStore::new(region, binding);
         let outcome = self
             .inbox
@@ -834,6 +840,12 @@ impl ProductStorageCoordinator {
                 let (_candidate, error) = failure.into_parts();
                 self.inbox_service_enabled = false;
                 self.record_inbound_drop();
+                #[cfg(feature = "rns-inbox-commit-fault-hil")]
+                observe_product_quarantine(
+                    &error,
+                    !self.inbox_service_enabled,
+                    self.inbox_dropped_since_boot,
+                );
                 ProductInboundAdmission::DroppedFaulted(error)
             }
         }

@@ -63,8 +63,12 @@ LoRa dispatcher and the E290 radio owner; it is software-composition-qualified,
 build-verified, and powered-qualified on both development boards for the bounded
 boot/credential/ordinary-TX path, one authenticated API 1.1 outbound DATA/proof
 round trip, and API 1.2 raw-RNS inbox commit/readback/hard-reset/drop-newest
-behavior. Controlled power cuts, inbox fault isolation, target high-water/timing,
-LXMF, and full-product qualification remain open.
+behavior. A 2026-07-19 powered matrix additionally proves four exact cold-mount
+fail-closed cases, each followed by one direct Reticulum DATA/proof exchange.
+A separate feature-gated path proves that its triggering DATA/proof exchange
+completed before same-boot commit-mismatch quarantine was observed. Physical
+power cuts, target high-water/timing, LXMF, and full-product qualification
+remain open.
 Bitrate and cost are recorded but do not replace Reticulum routing. Until Rete
 paths carry an interface generation, an ID/configuration stays immutable for
 one node-owner lifetime or its learned paths must be purged before reuse.
@@ -435,8 +439,9 @@ store/pairing decision in
 experimental host tests/clippy plus the corresponding ESP32-S3 Xtensa checks
 pass.
 
-The E290 library now has 129 passing host tests, including the resident live-
-pairing lifecycle, its causal control/live frontier, shared USB decoder and
+The default E290 library now has 129 passing host tests, and the opt-in inbox
+commit-fault HIL profile has 135. Both cover the resident live-pairing
+lifecycle, its causal control/live frontier, shared USB decoder and
 sequence gate, secret-owning handoff, initialization/product policy,
 authenticated inbox-port isolation, and
 two real cross-layer composition tests. The happy path rejects
@@ -451,7 +456,7 @@ after frame exposure with an ordinary announce queued behind the DATA owner;
 `ActiveOwnerFailStopped` retains every owner and acknowledgement gate, takes the
 LoRa lease offline, and permits no later host-radio TX or RX. This qualifies the
 software composition, not ESP32-S3 execution or RF hardware.
-The focused host clients pass 49 tests inside the 197-test xtask suite; the
+The focused host clients pass 49 tests inside the 209-test xtask suite; the
 portable Rete integration and raw-RNS inbox store pass 41 and 17 tests,
 respectively.
 
@@ -511,11 +516,11 @@ same 131-byte packet length and encoded-byte SHA-256
 `df937860f5225deb9d2350c6f3a46f33bd659ccbcb6b47267add47c9a287a4fe`.
 This qualifies controlled peer RX/DATA/proof, successful pairing/authentication,
 powered credential initialization, and the bounded permanent outbound owner
-graph. It does not qualify application-level inbox consumption, power-cut
-recovery, suspend/resume, stack high-water, heap pressure, or the full product.
+graph. It does not qualify application-level inbox consumption, physical power-
+cut recovery, suspend/resume, stack high-water, heap pressure, or the full product.
 
-The final post-audit API 1.2 source packages a 696,416-byte application as a
-761,952-byte merged image with SHA-256
+The original post-audit API 1.2 qualification packages a 696,416-byte
+application as a 761,952-byte merged image with SHA-256
 `ba10b04408368c3f5cbcc91f5d514f454595a7812986764c1e95ef528cc71f03`;
 both E290 address-zero readbacks matched exactly. Starting from an explicitly
 erased sender inbox, a 383-byte DATA payload reached `Delivered`, published
@@ -524,11 +529,52 @@ valid packet also reached `Delivered`, incremented the boot-local drop count,
 and left item 1 unchanged. The final exact 2 MiB partition dump had SHA-256
 `f50dab680d46ef20cd875eff778296a3b92f9d7eef34684f29eedc10b468d724`:
 the first 576 bytes were the canonical record and the complete remainder was
-erased. The E290 runbook records the final artifact and readbacks, both
-delivered-packet hashes, the record, stored digest, payload, reset/remount, and
-failed-attempt workflow evidence. This bounded result does not qualify
-controlled cuts, inbox fault isolation, timing/high-water, LXMF, or a full
-mailbox.
+erased. The E290 runbook records that qualification artifact and its readbacks,
+both delivered-packet hashes, the record, stored digest, payload, reset/remount, and
+failed-attempt workflow evidence.
+
+The 2026-07-19 cold-mount matrix reused that exact default image against four
+deterministic 2 MiB fixtures. Their SHA-256 values were partial claim
+`4b9e6dad1415850588c001b17053e893ab1316aaa1b6d584082170d049f871f0`,
+complete precommit record with no commit marker
+`a8a8d40f63a69c7e3df59f4af1960f241f464566a5ae9251c12209eb3334c66a`,
+invalid digest
+`bb24e892d435a0b6888cc16f8733f096015a36f0f19dcd8a22e0978602e55ad5`,
+and a valid record bound to the other board
+`dee21d3c72a914ac00627c49a119631999dc9e986ce18897b9a171254c79561b`.
+Every cold boot advertised inbox availability/maximum as `0/0`; authenticated
+status and peek both returned code 7, peek created no output, one direct DATA
+exchange still reached `Delivered`, and the complete fixture remained
+byte-for-byte unchanged. This qualifies read-only mount classification and
+local inbox-service isolation for those four exact states. It is not evidence
+of a physical cut occurring during a flash program operation.
+
+The separate `rns-inbox-commit-fault-hil` image is 762,672 bytes, SHA-256
+`e693afad19c2eac28d958f902c1b8148ae360a6b54abb14338195ef595515239`.
+It acknowledged but suppressed only the third inbox program call. A 147-byte
+packet with encoded SHA-256
+`0084ad098f2109b390d7c4568ba4a2dcd5285ac40062e55c9709665b2aebc73a`
+still reached `Delivered`; the fixed RAM evidence at `0x3fc8bf7c` reported
+write calls/suppressed commits/expected commit mismatches/unexpected failures/
+service disabled/dropped as `3/1/1/0/1/1`. USB-only re-enumeration left that
+RAM evidence unchanged and the inbox API unavailable. The exact raw store,
+SHA-256
+`ad6d549f73681da7453870606fb34eeabad75b387f081176103562d84e5700c7`,
+had all 544 bytes at offsets 0 through 543 programmed and non-`0xff`; every byte
+from offset 544 through the end remained erased. The separate deterministic
+interrupted-commit matrix qualifies cold-mount classification of this physical
+state class; the contained rerun did not add a post-reset API observation.
+Graph policy proves that this HIL changes only the product root feature and has
+a dependency tail identical to the default graph. The HIL
+module compiles only for feature-enabled host tests or feature-enabled Xtensa
+builds; the default ELF contains neither the hook nor its evidence symbol.
+
+After the matrix and HIL, the restored current default image remained 761,952
+bytes, now with SHA-256
+`d26587a2506408ec40cd42facb9bb87cc9c32e79c2afd2e1ab09f0e1268641cb`.
+Both boards matched it exactly and booted with empty inboxes. These bounded
+results do not qualify physical power cuts, mount/commit timing, RAM/PSRAM
+high-water, watchdog/radio scheduling, LXMF, or a full mailbox.
 
 Device-API dispatch is a separate portable integration boundary: the
 target-safe authenticated adapter,
@@ -608,8 +654,10 @@ durability handoff and ADR 0005 active-owner fail-stop now pass cross-layer host
 composition tests. Powered live external admission now passes its bounded
 credential initialization, authenticated USB handshake/request/reply, durable
 submission, physical LoRa peer-proof path, and bounded API 1.2 raw-RNS inbox
-commit/readback/reset/drop-newest workflow. Broader lifecycle/fault work and
-the final application message edge remain—not credential-store boot composition, the
+commit/readback/reset/drop-newest workflow, four exact cold-mount fault states,
+and one same-boot simulated commit-suppression path. Broader lifecycle work,
+physical-interruption qualification, and the final application message edge
+remain—not credential-store boot composition, the
 frozen pairing/session cryptography, another semantic authority, durability
 policy, partition, or capacity decision. The feature-free
 ADR 0009 admission policy, resident
@@ -618,8 +666,8 @@ permanent E290 graph. The pre-authentication initialization and live-pairing
 codecs, debounced physical presence, sole USB byte owner, reset-epoch guard,
 bounded command/reply handoffs, static authenticated handoff, node-side
 current-authority dispatch, and the minimal credential-backed USB session state
-machine are composed. Next qualify controlled inbox power cuts and fault
-isolation plus target timing/high-water, then design durable LXMF/configuration
+machine are composed. Next qualify physical inbox power cuts plus target
+timing/high-water, then design durable LXMF/configuration
 hosting and complete client delivery.
 The node-side routing
 boundary remains interface-neutral so additional Reticulum links can be added
@@ -780,10 +828,11 @@ The [permanent E290 node runbook](docs/e290-node.md) describes the first
 LoRa-first three-task node/LoRa/USB product composition, its fixed capacities, 16 MiB partition
 layout, durable identity/announce ordering, build gates, API 1.1 outbound proof,
 API 1.2 raw-RNS inbox evidence, and remaining storage/client blockers. The
-powered record now includes controlled permanent-image peer DATA/proof plus
-bounded inbox commit/readback/hard-reset/drop-newest behavior. It does not
-substitute for controlled power cuts, inbox fault isolation, sustained/multi-hop
-traffic, target timing/high-water, LXMF, or full-product qualification.
+powered record now includes controlled permanent-image peer DATA/proof, bounded
+inbox commit/readback/hard-reset/drop-newest behavior, the four-state exact
+cold-mount matrix, and the feature-gated same-boot commit-suppression HIL. It
+does not substitute for physical power cuts, sustained/multi-hop traffic,
+target timing/high-water, LXMF, or full-product qualification.
 
 The receive-only lab binary has no frequency or modulation defaults. A known
 host/RNode-compatible build example is:

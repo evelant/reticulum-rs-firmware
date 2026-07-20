@@ -71,8 +71,9 @@ barriers. That API 1.1 result proves peer receipt/decryption and Reticulum proof
 handling; it is not evidence that the receiving device persisted application
 data. API 1.2 additionally has bounded powered evidence for one maximum-size
 commit, authenticated status/peek before and after hard reset, exact raw
-readback, and drop-newest preservation. Controlled interruption and powered
-fault-isolation qualification remain open.
+readback, and drop-newest preservation. Bounded powered software-fault
+isolation now covers mount rejection and one same-boot commit failure as
+described below; controlled physical cuts remain open.
 
 ## Boundary
 
@@ -457,6 +458,39 @@ persisted permission bit for them: any currently authenticated principal may
 read the retained item. This intentionally simple developer policy must be
 revisited before a production mailbox, multi-principal messaging, mutation, or
 wireless bearer is enabled.
+
+### Powered inbox fault-isolation evidence
+
+Four powered E290 boots exercised deterministic mount faults: an interrupted
+claim, an interrupted commit, an invalid digest, and a valid committed record
+bound to board 3e but mounted on board 3f. In every case, `system.capabilities`
+reported inbox availability 0 and maximum inbox payload 0. Authenticated
+`experimental.rns_inbox.status` and `experimental.rns_inbox.peek` each returned
+`CapabilityUnavailable` (error code 7), and the peek client created no output
+file. One direct peer DATA/proof exchange nevertheless reached `Delivered` in
+each case. This is bounded evidence that these four local mount failures
+quarantine the inbox capability without disabling the exercised direct
+Reticulum path; it is not a routing soak or a claim about every storage fault.
+
+A separate powered same-boot admission-fault image first advertised inbox
+availability 2 (`Available`) and the 383-byte limit. Its software NOR wrapper
+forwarded the claim and body writes, acknowledged but suppressed the terminal
+commit write, and the exact commit-stage readback mismatch disabled inbox
+service and counted the candidate as dropped. After USB-only re-enumerations
+established fresh one-shot authenticated sessions, capabilities reported inbox
+availability 0 and limit 0; separate status and peek sessions again returned
+error 7, and peek created no output file. The
+debugger-visible RAM evidence remained `3/1/1/0/1/1`, in the fixed order
+`write_calls`, `commit_suppressed`, `expected_commit_readback_mismatch`,
+`unexpected_admission_failure`, `service_disabled`, and
+`dropped_since_boot`. Retaining those same-boot counters across USB detaches and
+reattachments establishes that this observation did not depend on a CPU reset.
+
+Neither fault path changes the API 1.2 wire encoding, operation numbers,
+authentication handshake, or inbox authorization policy. Both are deliberately
+narrow software-injection qualifications: they do not simulate a physical
+power cut, and each routing observation covers one direct peer packet rather
+than sustained routing, multi-hop behavior, or a full mailbox lifecycle.
 
 ## Responses and errors
 

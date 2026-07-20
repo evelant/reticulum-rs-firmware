@@ -66,6 +66,33 @@ jobs:
           cargo clippy --locked
           -p reticulum-heltec-vision-master-e290-node --lib -- -D warnings
 
+      - name: Permanent E290 inbox commit-fault HIL host tests
+        run: >-
+          cargo test --locked
+          -p reticulum-heltec-vision-master-e290-node --lib
+          --features rns-inbox-commit-fault-hil
+
+      - name: Permanent E290 inbox commit-fault HIL host Clippy
+        run: >-
+          cargo clippy --locked
+          -p reticulum-heltec-vision-master-e290-node --lib --tests
+          --features rns-inbox-commit-fault-hil -- -D warnings
+
+      - name: Reject combined E290 development features
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/e290-combined-development-features.log"
+          if cargo check --locked \
+            -p reticulum-heltec-vision-master-e290-node \
+            --all-features >"$log" 2>&1; then
+            echo "::error title=Combined E290 development features accepted::The two destructive development profiles must remain mutually exclusive"
+            exit 1
+          fi
+          grep -F \
+            'journal-schema2-dev-reprovision and rns-inbox-commit-fault-hil are mutually exclusive' \
+            "$log"
+
       - name: Permanent E290 node rustdoc
         env:
           RUSTDOCFLAGS: -D warnings
@@ -418,6 +445,55 @@ jobs:
           --target xtensa-esp32s3-none-elf
           -- -D warnings
 
+      - name: Link E290 inbox commit-fault HIL
+        run: >-
+          CARGO_TARGET_DIR="$RUNNER_TEMP/e290-inbox-commit-fault-target"
+          cargo +esp build --locked --release
+          -p reticulum-heltec-vision-master-e290-node
+          --no-default-features --features rns-inbox-commit-fault-hil
+          --target xtensa-esp32s3-none-elf
+
+      - name: Strict clippy for E290 inbox commit-fault HIL
+        run: >-
+          CARGO_TARGET_DIR="$RUNNER_TEMP/e290-inbox-commit-fault-target"
+          cargo +esp clippy --locked --release
+          -p reticulum-heltec-vision-master-e290-node
+          --bin reticulum-heltec-vision-master-e290-node
+          --no-default-features --features rns-inbox-commit-fault-hil
+          --target xtensa-esp32s3-none-elf
+          -- -D warnings
+
+      - name: Enforce E290 inbox commit-fault ELF isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          default_elf="target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node"
+          hil_elf="$RUNNER_TEMP/e290-inbox-commit-fault-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node"
+          identifier=RETICULUM_INBOX_ADMISSION_FAULT_HIL_EVIDENCE
+
+          default_symbols="$(xtensa-esp32s3-elf-nm -S --defined-only "$default_elf")"
+          hil_symbols="$(xtensa-esp32s3-elf-nm -S --defined-only "$hil_elf")"
+          if grep -Fq "$identifier" <<<"$default_symbols"; then
+            echo "::error title=Commit-fault evidence reached default E290 ELF::The destructive HIL hook must remain absent"
+            exit 1
+          fi
+          if strings "$default_elf" \
+            | grep -E 'SuppressThirdWrite|RETICULUM_INBOX_ADMISSION_FAULT_HIL_EVIDENCE' \
+              >/dev/null; then
+            echo "::error title=Commit-fault implementation reached default E290 ELF::The destructive HIL module must remain absent"
+            exit 1
+          fi
+          if [[ "$(grep -Fc "$identifier" <<<"$hil_symbols")" != 1 ]]; then
+            echo "::error title=Commit-fault evidence symbol count changed::Expected one debugger-visible evidence object"
+            exit 1
+          fi
+          if ! awk -v identifier="$identifier" \
+            '$2 == "00000028" && index($NF, identifier) { found++ } END { exit found != 1 }' \
+            <<<"$hil_symbols"; then
+            echo "::error title=Commit-fault evidence ABI changed::Expected one exact 40-byte evidence object"
+            exit 1
+          fi
+
       - name: Link RF-inert Tracker physical-storage HIL
         run: >-
           cargo +esp build --locked --release
@@ -575,9 +651,9 @@ jobs:
           # BSS includes the linker-reserved stack and moves inversely with
           # initialized data. The total cap is an aggregate image-growth guard,
           # not a substitute for section-level or runtime DRAM measurements.
-          # The 2026-07-18 minimal authenticated-USB E290 node baseline is
-          # 640587/3596/469232/1113415. Its unchanged caps retain about 12%
-          # text, 78% data, 1% BSS and 6% aggregate headroom while the full
+          # The 2026-07-18 API 1.2 E290 node baseline is
+          # 655511/3676/469152/1128339. Its caps retain about 9% text, 77%
+          # data, 1% BSS and 4% aggregate headroom while the full
           # appliance is still expected to grow under reviewed measurements.
           release=target/xtensa-esp32s3-none-elf/release
           check_size safe-idle "$release/reticulum-heltec-tracker-v2" \
@@ -587,6 +663,9 @@ jobs:
             360448 12288 475136 840000
           check_size e290-node \
             "$release/reticulum-heltec-vision-master-e290-node" \
+            720896 16384 475136 1180000
+          check_size e290-inbox-commit-fault-hil \
+            "$RUNNER_TEMP/e290-inbox-commit-fault-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node" \
             720896 16384 475136 1180000
 
       - name: Enforce lab retained-state and startup-stack link contracts

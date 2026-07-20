@@ -15,6 +15,7 @@ use syn::{Fields, ImplItem, Item, Type, Visibility};
 mod e290_authenticated_usb;
 mod e290_pairing_control;
 mod e290_pairing_live;
+mod e290_rns_inbox_fixture;
 mod phase1_closure;
 mod phase1_hil;
 mod phase1_image;
@@ -34,6 +35,7 @@ fn main() -> ExitCode {
         Some("e290-pairing-control") => e290_pairing_control::run(args.collect()),
         Some("e290-pairing-live") => e290_pairing_live::run(args.collect()),
         Some("e290-authenticated-usb") => e290_authenticated_usb::run(args.collect()),
+        Some("e290-rns-inbox-fixture") => e290_rns_inbox_fixture::run(args.collect()),
         Some("check-rns-vectors") if args.next().is_none() => check_rns_vectors(),
         Some("check-rnode-hil-vectors") if args.next().is_none() => check_rnode_hil_vectors(),
         Some("graph-policy") if args.next().is_none() => graph_policy(),
@@ -49,7 +51,7 @@ fn main() -> ExitCode {
         _ => {
             eprintln!(
                 "usage: cargo run -p xtask -- \
-                 <doctor|build-tracker|e290-pairing-control|e290-pairing-live|e290-authenticated-usb|check-rns-vectors|check-rnode-hil-vectors|graph-policy|rx-api-policy|print-rx-api-surface|phase1-rx-hil-artifacts|phase1-rx-closure-artifacts|phase1-rx-powered-evidence>"
+                 <doctor|build-tracker|e290-pairing-control|e290-pairing-live|e290-authenticated-usb|e290-rns-inbox-fixture|check-rns-vectors|check-rnode-hil-vectors|graph-policy|rx-api-policy|print-rx-api-surface|phase1-rx-hil-artifacts|phase1-rx-closure-artifacts|phase1-rx-powered-evidence>"
             );
             ExitCode::from(2)
         }
@@ -224,6 +226,10 @@ fn graph_policy() -> ExitCode {
         eprintln!("error: credential-store integration source boundary: {error}");
         return ExitCode::FAILURE;
     }
+    if let Err(error) = validate_e290_inbox_commit_fault_hil_workspace(&root) {
+        eprintln!("error: E290 inbox commit-fault HIL source boundary: {error}");
+        return ExitCode::FAILURE;
+    }
     let mut product_graphs = Vec::new();
     for feature in [
         "safe-idle",
@@ -396,6 +402,29 @@ fn graph_policy() -> ExitCode {
         }
     };
 
+    let e290_inbox_commit_fault_hil = match capture(
+        "cargo",
+        [
+            "tree",
+            "--locked",
+            "-p",
+            "reticulum-heltec-vision-master-e290-node",
+            "--no-default-features",
+            "--features",
+            "rns-inbox-commit-fault-hil",
+            "--target",
+            "all",
+            "--format",
+            "{p} features=[{f}]",
+        ],
+    ) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!("error: could not inspect E290 inbox commit-fault HIL graph: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let comparison = match capture(
         "cargo",
         [
@@ -519,6 +548,13 @@ fn graph_policy() -> ExitCode {
         eprintln!("error: {error}");
         failed = true;
     }
+    if let Err(error) = validate_e290_inbox_commit_fault_hil_graph_boundary(
+        &e290_node,
+        &e290_inbox_commit_fault_hil,
+    ) {
+        eprintln!("error: {error}");
+        failed = true;
+    }
     for forbidden in ["rete-core", "rete-stack", "rete-transport", "rete-lxmf"] {
         if cargo_tree_contains_package(&comparison, forbidden) {
             eprintln!("error: Leviculum comparison graph contains forbidden {forbidden}");
@@ -607,8 +643,8 @@ fn graph_policy() -> ExitCode {
         ExitCode::FAILURE
     } else {
         println!(
-            "ok: all safe, RX, HIL and all-features all-target product graphs, the RF-inert physical-storage HIL graph, the separately hazardous default-sentinel, Tracker semantic-announce/semantic-round-trip and E290 semantic-round-trip TX HIL graphs, the permanent E290 node graph and the Leviculum \
-             comparison graph are isolated; the returned-fault hook is feature-exclusive; \
+            "ok: all safe, RX, HIL and all-features all-target product graphs, the RF-inert physical-storage HIL graph, the separately hazardous default-sentinel, Tracker semantic-announce/semantic-round-trip and E290 semantic-round-trip TX HIL graphs, the permanent and inbox commit-fault E290 node graphs and the Leviculum \
+             comparison graph are isolated; the returned-radio-fault and inbound-commit-fault hooks are feature-exclusive; \
              legacy Tracker firmware direct dependencies use only the RX façade and every-feature resolution \
              excludes TX ownership and pre-integration durable crates; resolved Rete packages match reported \
              source/revision; esp-rtos and lora-phy resolve only to their reviewed local patches, \
@@ -1218,6 +1254,119 @@ fn validate_e290_semantic_hil_graph_boundary(tree: &str) -> Result<(), String> {
     Ok(())
 }
 
+const E290_INBOX_COMMIT_FAULT_HIL_FEATURE: &str = "rns-inbox-commit-fault-hil";
+
+fn validate_e290_inbox_commit_fault_hil_workspace(workspace: &Path) -> Result<(), String> {
+    let product = workspace.join("firmware/heltec-vision-master-e290-node");
+    let library = fs::read_to_string(product.join("src/lib.rs"))
+        .map_err(|error| format!("could not read E290 library source: {error}"))?;
+    let storage = fs::read_to_string(product.join("src/platform_storage.rs"))
+        .map_err(|error| format!("could not read E290 storage-owner source: {error}"))?;
+    let build = fs::read_to_string(product.join("build.rs"))
+        .map_err(|error| format!("could not read E290 build policy: {error}"))?;
+    let fixture = fs::read_to_string(product.join("src/inbox_admission_fault_hil.rs"))
+        .map_err(|error| format!("could not read E290 commit-fault fixture: {error}"))?;
+    validate_e290_inbox_commit_fault_hil_sources(&library, &storage, &build, &fixture)
+}
+
+fn validate_e290_inbox_commit_fault_hil_sources(
+    library: &str,
+    storage: &str,
+    build: &str,
+    fixture: &str,
+) -> Result<(), String> {
+    let module_declaration = format!(
+        "#[cfg(all(\n    feature = \"{E290_INBOX_COMMIT_FAULT_HIL_FEATURE}\",\n    any(test, target_arch = \"xtensa\")\n))]\npub mod inbox_admission_fault_hil;"
+    );
+    if library.matches(&module_declaration).count() != 1 {
+        return Err(
+            "the commit-fault module must have one exact feature-and-test-or-Xtensa-gated library declaration"
+                .to_owned(),
+        );
+    }
+
+    let constructor = "SuppressThirdWrite::new(region)";
+    let observation = "observe_product_quarantine(";
+    if storage.matches(constructor).count() != 1 || storage.matches(observation).count() != 1 {
+        return Err(
+            "the storage owner must contain one wrapper construction and one quarantine observation"
+                .to_owned(),
+        );
+    }
+    let offer_start = storage
+        .find("pub(crate) fn offer_inbound(")
+        .ok_or_else(|| "the storage owner has no inbound-offer method".to_owned())?;
+    let offer_tail = &storage[offer_start..];
+    let offer_end = offer_tail
+        .find("/// Count one input discarded")
+        .ok_or_else(|| "the inbound-offer method has no stable end boundary".to_owned())?;
+    let offer = &offer_tail[..offer_end];
+    let wrapper_position = offer
+        .find(constructor)
+        .ok_or_else(|| "the commit-fault wrapper is not scoped to inbound offer".to_owned())?;
+    let disable_position = offer
+        .find("self.inbox_service_enabled = false;")
+        .ok_or_else(|| "the inbound fault path does not disable inbox service".to_owned())?;
+    let drop_position = offer[disable_position..]
+        .find("self.record_inbound_drop();")
+        .map(|offset| disable_position + offset)
+        .ok_or_else(|| "the inbound fault path does not record its dropped candidate".to_owned())?;
+    let observation_position = offer
+        .find(observation)
+        .ok_or_else(|| "the quarantine observation is not scoped to inbound offer".to_owned())?;
+    if !(disable_position < drop_position && drop_position < observation_position) {
+        return Err(
+            "quarantine evidence must be published after service disablement and drop accounting"
+                .to_owned(),
+        );
+    }
+    for (position, label) in [
+        (wrapper_position, "wrapper construction"),
+        (observation_position, "quarantine observation"),
+    ] {
+        if !immediately_preceded_by_feature_cfg(
+            offer,
+            position,
+            E290_INBOX_COMMIT_FAULT_HIL_FEATURE,
+        ) {
+            return Err(format!("the {label} is not directly feature-gated"));
+        }
+    }
+
+    for required in [
+        "CARGO_FEATURE_JOURNAL_SCHEMA2_DEV_REPROVISION",
+        "CARGO_FEATURE_RNS_INBOX_COMMIT_FAULT_HIL",
+        "journal-schema2-dev-reprovision and rns-inbox-commit-fault-hil are mutually exclusive",
+    ] {
+        if !build.contains(required) {
+            return Err(format!("the E290 build policy is missing {required:?}"));
+        }
+    }
+    for required in [
+        "pub struct SuppressThirdWrite",
+        "RETICULUM_INBOX_ADMISSION_FAULT_HIL_EVIDENCE",
+        "#[used]",
+    ] {
+        if !fixture.contains(required) {
+            return Err(format!("the commit-fault fixture is missing {required:?}"));
+        }
+    }
+    if fixture.contains("no_mangle") {
+        return Err(
+            "the safe library fixture must retain its debugger symbol without no_mangle".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn immediately_preceded_by_feature_cfg(source: &str, position: usize, feature: &str) -> bool {
+    let statement_line = source[..position].rfind('\n').map_or(0, |index| index + 1);
+    source[..statement_line]
+        .lines()
+        .next_back()
+        .is_some_and(|line| line.trim() == format!("#[cfg(feature = \"{feature}\")]"))
+}
+
 const E290_NODE_GRAPH_REQUIRED: [&str; 37] = [
     "embedded-storage",
     "esp-storage",
@@ -1273,17 +1422,43 @@ const E290_NODE_GRAPH_FORBIDDEN: [&str; 11] = [
 ];
 
 fn validate_e290_node_graph_boundary(tree: &str) -> Result<(), String> {
+    validate_e290_node_graph_for_root_features(tree, "default", "permanent E290 node")
+}
+
+fn validate_e290_inbox_commit_fault_hil_graph_boundary(
+    permanent: &str,
+    hil: &str,
+) -> Result<(), String> {
+    validate_e290_node_graph_for_root_features(
+        hil,
+        E290_INBOX_COMMIT_FAULT_HIL_FEATURE,
+        "E290 inbox commit-fault HIL",
+    )?;
+    let permanent_dependencies = permanent.lines().skip(1).collect::<Vec<_>>();
+    let hil_dependencies = hil.lines().skip(1).collect::<Vec<_>>();
+    if permanent_dependencies != hil_dependencies {
+        return Err(
+            "E290 inbox commit-fault HIL must change only the product root feature, not the dependency graph"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_e290_node_graph_for_root_features(
+    tree: &str,
+    expected_root_features: &str,
+    profile: &str,
+) -> Result<(), String> {
     for required in E290_NODE_GRAPH_REQUIRED {
         if !cargo_tree_contains_package(tree, required) {
-            return Err(format!(
-                "permanent E290 node graph is missing required {required}"
-            ));
+            return Err(format!("{profile} graph is missing required {required}"));
         }
     }
     for forbidden in E290_NODE_GRAPH_FORBIDDEN {
         if cargo_tree_contains_package(tree, forbidden) {
             return Err(format!(
-                "permanent E290 node graph contains deferred or foreign package {forbidden}"
+                "{profile} graph contains deferred or foreign package {forbidden}"
             ));
         }
     }
@@ -1291,20 +1466,21 @@ fn validate_e290_node_graph_boundary(tree: &str) -> Result<(), String> {
     let root_line = tree
         .lines()
         .find(|line| line.starts_with("reticulum-heltec-vision-master-e290-node "))
-        .ok_or_else(|| "permanent E290 node graph has no product root".to_owned())?;
-    if !root_line.ends_with("features=[default]") {
+        .ok_or_else(|| format!("{profile} graph has no product root"))?;
+    let expected_root_suffix = format!("features=[{expected_root_features}]");
+    if !root_line.ends_with(&expected_root_suffix) {
         return Err(format!(
-            "permanent E290 node must enable only its empty default feature, observed {root_line}"
+            "{profile} must enable only {expected_root_features}, observed {root_line}"
         ));
     }
     for package in ["reticulum-device-api ", "reticulum-device-api-adapter "] {
         let line = tree
             .lines()
             .find(|line| line.contains(package))
-            .ok_or_else(|| format!("permanent E290 node graph has no {package}line"))?;
+            .ok_or_else(|| format!("{profile} graph has no {package}line"))?;
         if !line.ends_with("features=[experimental-rns-data,experimental-rns-inbox]") {
             return Err(format!(
-                "permanent E290 node must enable only target-safe experimental RNS DATA and durable inbox operations on {package}, observed {line}"
+                "{profile} must enable only target-safe experimental RNS DATA and durable inbox operations on {package}, observed {line}"
             ));
         }
     }
@@ -1322,20 +1498,20 @@ fn validate_e290_node_graph_boundary(tree: &str) -> Result<(), String> {
         let line = tree
             .lines()
             .find(|line| line.contains(package))
-            .ok_or_else(|| format!("permanent E290 node graph has no {package}line"))?;
+            .ok_or_else(|| format!("{profile} graph has no {package}line"))?;
         if !line.ends_with("features=[]") {
             return Err(format!(
-                "permanent E290 node must keep the durable inbox, credential, authentication, and pre-authentication control packages feature-free; observed {line}"
+                "{profile} must keep the durable inbox, credential, authentication, and pre-authentication control packages feature-free; observed {line}"
             ));
         }
     }
     let println_line = tree
         .lines()
         .find(|line| line.contains("esp-println "))
-        .ok_or_else(|| "permanent E290 node graph has no esp-println line".to_owned())?;
+        .ok_or_else(|| format!("{profile} graph has no esp-println line"))?;
     if !println_line.ends_with("features=[esp32s3,log-04,no-op]") {
         return Err(format!(
-            "permanent E290 node must reserve USB Serial/JTAG by enabling only the no-op esp-println backend, observed {println_line}"
+            "{profile} must reserve USB Serial/JTAG by enabling only the no-op esp-println backend, observed {println_line}"
         ));
     }
     Ok(())
@@ -1362,11 +1538,12 @@ fn validate_e290_node_feature_boundary(
         .ok_or_else(|| format!("{package_name} package has no feature map"))?;
     let expected_features = serde_json::json!({
         "default": [],
-        "journal-schema2-dev-reprovision": []
+        "journal-schema2-dev-reprovision": [],
+        "rns-inbox-commit-fault-hil": []
     });
     if serde_json::Value::Object(features.clone()) != expected_features {
         return Err(format!(
-            "{package_name} must expose only an empty default and an empty opt-in journal-schema2-dev-reprovision feature"
+            "{package_name} must expose only an empty default and the two empty opt-in development features"
         ));
     }
     let dependencies = package["dependencies"]
@@ -1434,6 +1611,24 @@ fn validate_e290_node_feature_boundary(
         "reticulum-device-api-session",
         &workspace.join("crates/device-api-session"),
         false,
+    )?;
+    validate_exact_target_registry_dependency(
+        dependencies,
+        package_name,
+        "embedded-storage",
+        "=0.3.1",
+        "cfg(target_arch = \"xtensa\")",
+        false,
+        &[],
+    )?;
+    validate_exact_registry_dependency(
+        dependencies,
+        package_name,
+        "embedded-storage",
+        "=0.3.1",
+        Some("dev"),
+        false,
+        &[],
     )?;
     validate_exact_registry_dependency(
         dependencies,
@@ -7623,6 +7818,11 @@ mod tests {
         let mut esp_println = handoff_dependency_fixture("esp-println", "=0.17.0", None);
         esp_println["features"] = serde_json::json!(["esp32s3", "log-04", "no-op"]);
         esp_println["target"] = serde_json::json!("cfg(target_arch = \"xtensa\")");
+        let mut embedded_storage_target =
+            handoff_dependency_fixture("embedded-storage", "=0.3.1", None);
+        embedded_storage_target["target"] = serde_json::json!("cfg(target_arch = \"xtensa\")");
+        let embedded_storage_dev =
+            handoff_dependency_fixture("embedded-storage", "=0.3.1", Some("dev"));
         serde_json::json!({
             "packages": [{
                 "name": "reticulum-heltec-vision-master-e290-node",
@@ -7630,7 +7830,8 @@ mod tests {
                 "manifest_path": root.join("firmware/heltec-vision-master-e290-node/Cargo.toml"),
                 "features": {
                     "default": [],
-                    "journal-schema2-dev-reprovision": []
+                    "journal-schema2-dev-reprovision": [],
+                    "rns-inbox-commit-fault-hil": []
                 },
                 "dependencies": [
                     handoff_path_dependency_fixture(
@@ -7687,6 +7888,8 @@ mod tests {
                         &root.join("crates/device-api-session"),
                         None,
                     ),
+                    embedded_storage_target,
+                    embedded_storage_dev,
                     handoff_dependency_fixture("rand_core", "=0.6.4", None),
                     handoff_dependency_fixture("zeroize", "=1.9.0", None),
                     esp_println,
@@ -7736,6 +7939,12 @@ mod tests {
                      ├── reticulum-tx-supervisor v0.1.0 features=[]\n\
                      └── static_cell v2.1.1 features=[]";
         validate_e290_node_graph_boundary(valid).unwrap();
+        let hil = valid.replacen(
+            "features=[default]",
+            "features=[rns-inbox-commit-fault-hil]",
+            1,
+        );
+        validate_e290_inbox_commit_fault_hil_graph_boundary(valid, &hil).unwrap();
 
         for missing in E290_NODE_GRAPH_REQUIRED {
             let tree = valid.replace(missing, "missing-required-package");
@@ -7748,12 +7957,35 @@ mod tests {
             assert!(error.contains(forbidden), "{error}");
         }
 
-        let hidden_feature = valid.replacen(
-            "reticulum-heltec-vision-master-e290-node v0.1.0 features=[default]",
-            "reticulum-heltec-vision-master-e290-node v0.1.0 features=[default,journal-schema2-dev-reprovision]",
-            1,
+        for hidden in [
+            "default,journal-schema2-dev-reprovision",
+            "default,rns-inbox-commit-fault-hil",
+        ] {
+            let hidden_feature = valid.replacen(
+                "reticulum-heltec-vision-master-e290-node v0.1.0 features=[default]",
+                &format!("reticulum-heltec-vision-master-e290-node v0.1.0 features=[{hidden}]"),
+                1,
+            );
+            assert!(validate_e290_node_graph_boundary(&hidden_feature).is_err());
+        }
+        for hidden in [
+            "default,rns-inbox-commit-fault-hil",
+            "journal-schema2-dev-reprovision,rns-inbox-commit-fault-hil",
+        ] {
+            let hidden_feature = hil.replacen(
+                "features=[rns-inbox-commit-fault-hil]",
+                &format!("features=[{hidden}]"),
+                1,
+            );
+            assert!(
+                validate_e290_inbox_commit_fault_hil_graph_boundary(valid, &hidden_feature)
+                    .is_err()
+            );
+        }
+        let changed_hil_tail = format!("{hil}\n└── unreviewed-hil-edge v0.1.0 features=[]");
+        assert!(
+            validate_e290_inbox_commit_fault_hil_graph_boundary(valid, &changed_hil_tail).is_err()
         );
-        assert!(validate_e290_node_graph_boundary(&hidden_feature).is_err());
 
         for package in ["reticulum-device-api", "reticulum-device-api-adapter"] {
             let expected =
@@ -7799,7 +8031,7 @@ mod tests {
     }
 
     #[test]
-    fn permanent_e290_node_migration_feature_remains_empty_and_opt_in() {
+    fn permanent_e290_node_development_features_remain_empty_and_opt_in() {
         let root = workspace_root();
         let baseline = e290_node_metadata_fixture(&root);
         validate_e290_node_feature_boundary(&baseline.to_string(), &root).unwrap();
@@ -7807,23 +8039,118 @@ mod tests {
         for drifted_features in [
             serde_json::json!({
                 "default": ["journal-schema2-dev-reprovision"],
-                "journal-schema2-dev-reprovision": []
+                "journal-schema2-dev-reprovision": [],
+                "rns-inbox-commit-fault-hil": []
+            }),
+            serde_json::json!({
+                "default": ["rns-inbox-commit-fault-hil"],
+                "journal-schema2-dev-reprovision": [],
+                "rns-inbox-commit-fault-hil": []
             }),
             serde_json::json!({
                 "default": [],
-                "journal-schema2-dev-reprovision": ["dep:unreviewed"]
+                "journal-schema2-dev-reprovision": ["dep:unreviewed"],
+                "rns-inbox-commit-fault-hil": []
             }),
             serde_json::json!({
                 "default": [],
                 "journal-schema2-dev-reprovision": [],
+                "rns-inbox-commit-fault-hil": ["dep:unreviewed"]
+            }),
+            serde_json::json!({
+                "default": [],
+                "journal-schema2-dev-reprovision": [],
+                "rns-inbox-commit-fault-hil": [],
                 "future-transport": []
             }),
-            serde_json::json!({"default": []}),
+            serde_json::json!({
+                "default": [],
+                "journal-schema2-dev-reprovision": []
+            }),
+            serde_json::json!({
+                "default": [],
+                "rns-inbox-commit-fault-hil": []
+            }),
         ] {
             let mut drifted = baseline.clone();
             drifted["packages"][0]["features"] = drifted_features;
             assert!(validate_e290_node_feature_boundary(&drifted.to_string(), &root).is_err());
         }
+    }
+
+    #[test]
+    fn e290_commit_fault_hil_source_topology_is_narrow_and_feature_gated() {
+        let library = r#"#[cfg(all(
+    feature = "rns-inbox-commit-fault-hil",
+    any(test, target_arch = "xtensa")
+))]
+pub mod inbox_admission_fault_hil;
+"#;
+        let storage = "pub(crate) fn offer_inbound(\n\
+                       ) {\n\
+                           let region = PartitionNorFlash::new();\n\
+                           #[cfg(feature = \"rns-inbox-commit-fault-hil\")]\n\
+                           let region = SuppressThirdWrite::new(region);\n\
+                           self.inbox_service_enabled = false;\n\
+                           self.record_inbound_drop();\n\
+                           #[cfg(feature = \"rns-inbox-commit-fault-hil\")]\n\
+                           observe_product_quarantine(&error, true, 1);\n\
+                       }\n\
+                       \n\
+                           /// Count one input discarded\n";
+        let build = "CARGO_FEATURE_JOURNAL_SCHEMA2_DEV_REPROVISION\n\
+                     CARGO_FEATURE_RNS_INBOX_COMMIT_FAULT_HIL\n\
+                     journal-schema2-dev-reprovision and rns-inbox-commit-fault-hil are mutually exclusive";
+        let fixture = "#[used]\n\
+                       pub static RETICULUM_INBOX_ADMISSION_FAULT_HIL_EVIDENCE: Evidence = Evidence;\n\
+                       pub struct SuppressThirdWrite<F>(F);";
+        validate_e290_inbox_commit_fault_hil_sources(library, storage, build, fixture).unwrap();
+
+        let ungated_library = library.replace(
+            "#[cfg(all(\n    feature = \"rns-inbox-commit-fault-hil\",\n    any(test, target_arch = \"xtensa\")\n))]\n",
+            "",
+        );
+        assert!(
+            validate_e290_inbox_commit_fault_hil_sources(
+                &ungated_library,
+                storage,
+                build,
+                fixture,
+            )
+            .is_err()
+        );
+        for ungated in [
+            storage.replacen("#[cfg(feature = \"rns-inbox-commit-fault-hil\")]\n", "", 1),
+            storage.replacen("#[cfg(feature = \"rns-inbox-commit-fault-hil\")]\n", "", 2),
+            storage.replace(
+                "self.record_inbound_drop();\n",
+                "observe_product_quarantine(&error, true, 1);\nself.record_inbound_drop();\n",
+            ),
+        ] {
+            assert!(
+                validate_e290_inbox_commit_fault_hil_sources(library, &ungated, build, fixture,)
+                    .is_err()
+            );
+        }
+
+        assert!(
+            validate_e290_inbox_commit_fault_hil_sources(
+                library,
+                storage,
+                &build.replace("CARGO_FEATURE_RNS_INBOX_COMMIT_FAULT_HIL", "missing"),
+                fixture,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_e290_inbox_commit_fault_hil_sources(
+                library,
+                storage,
+                build,
+                &format!("{fixture}\n#[unsafe(no_mangle)]"),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -7949,7 +8276,11 @@ mod tests {
             }
         }
 
-        for (dependency_name, requirement) in [("rand_core", "=0.6.4"), ("zeroize", "=1.9.0")] {
+        for (dependency_name, requirement) in [
+            ("embedded-storage", "=0.3.1"),
+            ("rand_core", "=0.6.4"),
+            ("zeroize", "=1.9.0"),
+        ] {
             let mut missing = baseline.clone();
             fixture_package_mut(&mut missing, "reticulum-heltec-vision-master-e290-node")
                 ["dependencies"]
@@ -7981,6 +8312,43 @@ mod tests {
             assert!(
                 validate_e290_node_feature_boundary(&defaults.to_string(), &root).is_err(),
                 "permanent node accepted {dependency_name} default features"
+            );
+        }
+
+        for (field, value) in [
+            ("kind", serde_json::json!("dev")),
+            ("target", serde_json::Value::Null),
+            ("optional", serde_json::json!(true)),
+            ("features", serde_json::json!(["default"])),
+        ] {
+            let mut drifted = baseline.clone();
+            fixture_dependency_mut(
+                fixture_package_mut(&mut drifted, "reticulum-heltec-vision-master-e290-node"),
+                "embedded-storage",
+                None,
+            )[field] = value;
+            assert!(
+                validate_e290_node_feature_boundary(&drifted.to_string(), &root).is_err(),
+                "permanent node accepted embedded-storage {field} drift"
+            );
+        }
+        for (field, value) in [
+            ("kind", serde_json::Value::Null),
+            ("target", serde_json::json!("cfg(target_arch = \"xtensa\")")),
+            ("req", serde_json::json!("^0.3.1")),
+            ("optional", serde_json::json!(true)),
+            ("uses_default_features", serde_json::json!(true)),
+            ("features", serde_json::json!(["default"])),
+        ] {
+            let mut drifted = baseline.clone();
+            fixture_dependency_mut(
+                fixture_package_mut(&mut drifted, "reticulum-heltec-vision-master-e290-node"),
+                "embedded-storage",
+                Some("dev"),
+            )[field] = value;
+            assert!(
+                validate_e290_node_feature_boundary(&drifted.to_string(), &root).is_err(),
+                "permanent node accepted dev embedded-storage {field} drift"
             );
         }
 

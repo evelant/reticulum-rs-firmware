@@ -12,6 +12,7 @@ name = "xtask"
 path = "src/main.rs"
 
 [dependencies]
+embedded-storage.workspace = true
 getrandom = "=0.3.4"
 md-5 = "=0.10.6"
 quote = "=1.0.46"
@@ -23,6 +24,7 @@ reticulum-device-api-pairing = { path = "../crates/device-api-pairing", default-
 reticulum-device-api-pairing-control = { path = "../crates/device-api-pairing-control", default-features = false }
 reticulum-device-api-session = { path = "../crates/device-api-session", default-features = false }
 reticulum-rns-rete = { path = "../crates/rns-rete", default-features = false }
+reticulum-rns-inbox-store = { path = "../crates/rns-inbox-store", default-features = false }
 object = { version = "=0.37.3", default-features = false, features = ["read", "std"] }
 reticulum-phase1-rx-local-data = { path = "../tools/phase1-rx-local-data" }
 serde.workspace = true

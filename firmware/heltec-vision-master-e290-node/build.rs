@@ -7,6 +7,7 @@ mod partition_contract;
 const ESP_RTOS_MAIN_STACK_PATCH_ID: &str = "esp-rtos-0.3.0-cpu0-cpu1-main-stack-words-v2";
 
 fn main() {
+    require_development_feature_contract();
     require_esp_rtos_main_stack_patch();
     require_partition_contract();
     if env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("xtensa") {
@@ -14,12 +15,23 @@ fn main() {
     }
 }
 
+fn require_development_feature_contract() {
+    let journal_reprovision =
+        env::var_os("CARGO_FEATURE_JOURNAL_SCHEMA2_DEV_REPROVISION").is_some();
+    let inbox_commit_fault = env::var_os("CARGO_FEATURE_RNS_INBOX_COMMIT_FAULT_HIL").is_some();
+    assert!(
+        !(journal_reprovision && inbox_commit_fault),
+        "journal-schema2-dev-reprovision and rns-inbox-commit-fault-hil are mutually exclusive"
+    );
+}
+
 fn require_partition_contract() {
     use partition_contract::{
         ANNOUNCE_CLOCK_LABEL, ANNOUNCE_CLOCK_LEN, ANNOUNCE_CLOCK_OFFSET, API_CREDENTIALS_LABEL,
         API_CREDENTIALS_LEN, API_CREDENTIALS_OFFSET, DEVICE_CONFIG_LABEL, DEVICE_CONFIG_LEN,
-        DEVICE_CONFIG_OFFSET, NODE_IDENTITY_LABEL, NODE_IDENTITY_LEN, NODE_IDENTITY_OFFSET,
-        NODE_JOURNAL_LABEL, NODE_JOURNAL_LEN, NODE_JOURNAL_OFFSET,
+        DEVICE_CONFIG_OFFSET, MESSAGE_STORE_LABEL, MESSAGE_STORE_LEN, MESSAGE_STORE_OFFSET,
+        NODE_IDENTITY_LABEL, NODE_IDENTITY_LEN, NODE_IDENTITY_OFFSET, NODE_JOURNAL_LABEL,
+        NODE_JOURNAL_LEN, NODE_JOURNAL_OFFSET,
     };
 
     let path = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap())
@@ -64,6 +76,12 @@ fn require_partition_contract() {
             "undefined",
             NODE_JOURNAL_OFFSET,
             NODE_JOURNAL_LEN,
+        ),
+        (
+            MESSAGE_STORE_LABEL,
+            "undefined",
+            MESSAGE_STORE_OFFSET,
+            MESSAGE_STORE_LEN,
         ),
     ];
 

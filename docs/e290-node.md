@@ -19,9 +19,15 @@ generation 3 on `3f:88`. A maximum 383-byte DATA item sent from `3f:88` reached
 hard reboot, and remained observable through authenticated status and peek. A
 second valid DATA item reached `Delivered` but left item 1 unchanged and raised
 the boot-local drop counter from zero to one. This closes the bounded commit,
-exact readback, hard-reset survival, and drop-newest proof. It does not qualify
-controlled power cuts, fault isolation, target timing/high-water behavior,
-LXMF, or a full mailbox. Earlier controls returned
+exact readback, hard-reset survival, and drop-newest proof. A later four-case
+cold-mount matrix proved fail-closed isolation for partial claim, missing
+commit, invalid digest, and foreign-board binding media on the exact ordinary
+image. One opt-in image separately suppressed the terminal commit write and
+its triggering peer DATA/proof exchange completed first. Debugger-bound RAM,
+fresh authenticated API sessions, and raw flash then proved same-boot product
+quarantine. Neither fixture is an electrical
+power cut, and neither qualifies sustained routing, target timing/high-water
+behavior, LXMF, or a full mailbox. Earlier controls returned
 `initialization-required`, enforced GPIO21 for initialization and live Begin,
 rejected stale sequence zero, and restored a fresh epoch after full host
 re-enumeration. Both preceding boot-quarantined image readbacks matched exactly,
@@ -48,9 +54,11 @@ binding/suite is added and qualified. Powered evidence now qualifies
 authenticated capabilities and identity reads, sequential request/response
 flights in one session, durable submission, LoRa DATA delivery, peer decrypt/
 proof, terminal projection, API 1.2 durable raw-RNS status/peek before and after
-a hard reset, and one drop-newest observation. It does not claim LXMF or general
-application-level message consumption, session resumption, or either deferred
-wireless bearer binding.
+a hard reset, one drop-newest observation, four bounded cold-mount quarantine
+cases, and one same-boot missing-commit quarantine. Each fault case includes
+only one direct DATA/proof exchange; it does not claim sustained forwarding,
+multi-hop routing, LXMF, or general application-level message consumption,
+session resumption, or either deferred wireless bearer binding.
 
 This target is the first executable product composition, not another HIL
 fixture. It starts a transport-mode Rete node, one E290 LoRa actor, receive and
@@ -61,12 +69,16 @@ first-provisions the exact node-journal partition, and strictly completes a
 submission-runtime recovery gate before constructing node or radio service. It
 then transfers the sole flash backend and mounted runtime into a resident
 operation-scoped storage coordinator that the node task schedules throughout
-the firmware lifetime. Current source also read-only mounts ADR 0011's exact
+the firmware lifetime. Current source also strictly mounts ADR 0011's exact
 2 MiB `message_store`, projects transport-neutral decrypted DATA into its
 one-entry commit-last raw-RNS store, retains one candidate across cross-store
 deferral, and exposes authenticated API 1.2 status/peek through a separate
-read-only port. A mount or admission fault disables only that inbox service;
-ordinary Reticulum traffic continues. An optional journal mount/recovery failure
+  read-only port. A mount or admission fault disables only that inbox service.
+  The four cold-mount fixtures establish one direct peer DATA/decrypt/proof
+  exchange after boot quarantine; the same-boot HIL's triggering exchange
+  precedes the missing-commit quarantine. Neither establishes sustained or
+  multi-hop routing. An optional journal
+mount/recovery failure
 occurs before any durability-gated DATA owner can exist; it disables local
 durable submission service while the LoRa node still starts in route-only mode.
 The exact
@@ -535,6 +547,13 @@ cargo +stable test --locked \
   -p reticulum-heltec-vision-master-e290-node --lib
 cargo +stable clippy --locked \
   -p reticulum-heltec-vision-master-e290-node --lib -- -D warnings
+cargo +stable test --locked \
+  -p reticulum-heltec-vision-master-e290-node --lib \
+  --features rns-inbox-commit-fault-hil
+cargo +stable clippy --locked \
+  -p reticulum-heltec-vision-master-e290-node --lib --tests \
+  --features rns-inbox-commit-fault-hil -- -D warnings
+cargo +stable test --locked -p xtask e290_rns_inbox_fixture
 RUSTDOCFLAGS="-D warnings" cargo +stable doc --locked \
   -p reticulum-heltec-vision-master-e290-node --lib --no-deps
 cargo +stable run --locked -p xtask -- graph-policy
@@ -547,11 +566,33 @@ cargo +esp clippy --locked --release \
   -p reticulum-heltec-vision-master-e290-node \
   --bin reticulum-heltec-vision-master-e290-node \
   --target xtensa-esp32s3-none-elf -- -D warnings
+CARGO_TARGET_DIR=target/e290-inbox-commit-fault-hil \
+cargo +esp build --locked --release \
+  -p reticulum-heltec-vision-master-e290-node \
+  --no-default-features --features rns-inbox-commit-fault-hil \
+  --target xtensa-esp32s3-none-elf
+CARGO_TARGET_DIR=target/e290-inbox-commit-fault-hil \
+cargo +esp clippy --locked --release \
+  -p reticulum-heltec-vision-master-e290-node \
+  --bin reticulum-heltec-vision-master-e290-node \
+  --no-default-features --features rns-inbox-commit-fault-hil \
+  --target xtensa-esp32s3-none-elf -- -D warnings
 ```
+
+The HIL ELF is isolated at
+`target/e290-inbox-commit-fault-hil/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node`.
+Package it only under a HIL-specific image name. The ordinary `e290-node.bin`
+procedure below must continue to use the default ELF under the workspace's
+normal `target` directory.
 
 The build script rejects an unreviewed `esp-rtos` main-stack implementation and
 links `linkall.x`. Debug Xtensa builds are compile-time rejected.
-The 129-test host library suite has passing policy/product/credential-boot/
+The two development features are deliberately mutually exclusive, so an E290
+`--all-features` build is invalid. `graph-policy` separately inspects the
+ordinary and commit-fault roots and requires identical dependency tails. The
+default ELF must contain neither the fault wrapper nor its evidence identifier.
+The 129-test default host library suite and 135-test commit-fault profile have
+passing policy/product/credential-boot/
 credential-runtime/USB-control/live-routing tests, including the source-order
 regressions, every canonical empty-initialization byte cut, adversarial media changes between
 mount and classification, off-trajectory media, and classifier failure phases,
@@ -599,7 +640,7 @@ bounded authenticated client adds 22 tests for operation parsing, public-
 identity formatting, inbox status/peek, owner-only non-overwriting payload
 output, sequential request IDs, version policy, polling terminal semantics,
 coalesced-record preservation, and submission-input non-disclosure. Together
-these 49 focused tests are part of the full 197-test xtask gate. The portable
+these 49 focused tests are part of the full 209-test xtask gate. The portable
 Rete integration and inbox-store suites independently pass 41 and 17 tests,
 respectively.
 
@@ -1051,10 +1092,133 @@ hard-reset survival, and drop-newest proof. A final raw-read-induced hard reset
 remounted the occupied record at depth 1 with `dropped_since_boot=0`, confirming
 that the drop counter is boot-local while the item is durable.
 
-It does not qualify a controlled power cut at claim/body/commit boundaries,
-corrupt-media or admission-fault isolation on hardware, mount/commit timing,
-internal-RAM or PSRAM high-water, watchdog/radio-deadline effects, LXMF, or a
-full mailbox.
+That happy-path run did not itself qualify a controlled power cut, corrupt-media
+mount, or admission fault. The two bounded software-fault subsets are addressed
+below. Electrical claim/body/commit cuts, partial-body and partial-commit media,
+backend error-after-write behavior, mount/commit timing, internal-RAM or PSRAM
+high-water, watchdog/radio-deadline effects, endurance, encryption, LXMF, and a
+full mailbox remain open.
+
+### Powered cold-mount fault matrix
+
+On 2026-07-19, four deterministic, board-bound 2 MiB `message_store` fixtures
+were installed and exercised against the exact ordinary 761,952-byte API 1.2
+image above, SHA-256
+`ba10b04408368c3f5cbcc91f5d514f454595a7812986764c1e95ef528cc71f03`:
+
+| Mounted case | Fixture SHA-256 | Direct peer packet after quarantine |
+| --- | --- | --- |
+| interrupted claim on `3e:88` | `4b9e6dad1415850588c001b17053e893ab1316aaa1b6d584082170d049f871f0` | 147 bytes; `dc9877ac09c335c696b3141d87e92e27bc92e482b7fcb69433bf2225ba4e3fcf` |
+| exact pre-commit record on `3e:88` | `a8a8d40f63a69c7e3df59f4af1960f241f464566a5ae9251c12209eb3334c66a` | 131 bytes; `6bd4f9f009b8598b1edbf9b2364695b1e39e01272e17fa64622cd34ef7f341b8` |
+| invalid digest on `3e:88` | `bb24e892d435a0b6888cc16f8733f096015a36f0f19dcd8a22e0978602e55ad5` | 131 bytes; `85dfe3219dc0463c60577d10eb5cda634d2c2c3060d6266bcd861e6dad4c4b95` |
+| valid `3e:88` record mounted on `3f:88` | `dee21d3c72a914ac00627c49a119631999dc9e986ce18897b9a171254c79561b` | 131 bytes; `3af3ce5a327a303e37e2b90ad80d6186e0ceda496da31da56905ec5d78d2d874` |
+
+For every case, authenticated capabilities reported inbox availability and
+maximum payload as `0/0`; status and peek returned `CapabilityUnavailable`
+(code 7, operations 61442 and 61443); peek created no output; one fresh direct
+peer DATA packet was decrypted and answered with a valid proof so its sender
+reached `Delivered`; and a complete post-traffic dump remained byte-identical
+to the injected fixture. This proves bounded node/RF continuation and
+non-mutation after quarantine for one controlled packet per case. It is not
+sustained routing, forwarding, multi-hop, or soak evidence.
+
+The fixture generator uses the real public store mount/accept path, emits only
+an owner-restricted create-new file, and prints mode, length, and SHA-256:
+
+```sh
+cargo +stable run --locked -p xtask -- e290-rns-inbox-fixture \
+  --output /secure/absent-message-store.bin \
+  --source-mac aca704e13e88 \
+  interrupted-commit
+```
+
+The four modes are `interrupted-claim`, `interrupted-commit`, `invalid-digest`,
+and `committed`. `committed` is healthy only for the source MAC used to generate
+it; installing that image on the other board creates the binding-mismatch case.
+The all-erased 2 MiB setup image had SHA-256
+`4bda3a28f4ffe603c0ec1258c0034d65a1a0d35ab7bd523a834608adabf03cc5`.
+The tool does not access hardware, and ordinary firmware did not erase, repair,
+or rewrite any injected fixture. These preprogrammed states model stable cut
+trajectories; they are not live electrical power cuts.
+
+### Powered same-boot commit-fault HIL
+
+The non-default `rns-inbox-commit-fault-hil` image wraps only the inbound
+admission operation. It forwards the first two NOR writes, acknowledges but
+suppresses write call three, and forwards any later write. The store therefore
+reads back an erased terminal commit marker after successfully programming and
+checking claim plus body/digest. The feature is empty, opt-in, absent from the
+default dependency graph below the root, and mutually exclusive with
+`journal-schema2-dev-reprovision`.
+
+The module itself compiles only for feature-enabled host tests or
+feature-enabled Xtensa builds. `embedded-storage` therefore remains an Xtensa
+normal dependency and a host-test dev dependency, rather than becoming part of
+the ordinary host product graph.
+
+The exact HIL build reported 656,223 bytes text, 3,716 bytes initialized data,
+469,112 bytes BSS/reservations, and 1,129,051 bytes total. Its 697,136-byte
+application was packaged as a 762,672-byte merged image with SHA-256
+`e693afad19c2eac28d958f902c1b8148ae360a6b54abb14338195ef595515239`;
+MAC `ac:a7:04:e1:3e:88` read back that exact image before the measured boot. The
+corresponding ELF had SHA-256
+`8409c94653cd6e10e4eca198365f6fe06f282711907a61b9271977f2da9037c6`.
+Those digests identify the retained artifacts physically flashed and read back
+for this run. They are not universal rebuild digests: build-directory paths can
+change bytes embedded in the ELF and merged image.
+Its unique 40-byte `RIAF` evidence object was bound from that ELF to RAM address
+`0x3fc8bf7c`. Version 1 stores magic/version/size followed by write calls,
+suppressed commits, expected commit mismatches, unexpected failures, service
+disabled, and the low/high words of the boot-local drop count.
+
+Before traffic, authenticated capabilities on `3e:88` reported inbox available
+with maximum payload 383, while the ten 32-bit evidence words were
+`RIAF/1/40/0/0/0/0/0/0/0`. Board `3f:88` then submitted one payload to
+destination `c99e8ff1ec8629e4e1290e14462ae8af`. The 147-byte encoded DATA packet,
+SHA-256
+`0084ad098f2109b390d7c4568ba4a2dcd5285ac40062e55c9709665b2aebc73a`,
+was decrypted by `3e:88`; its proof drove submission 1 to `Delivered`. Product
+readback classified the admission as `ReadbackMismatch { stage: Commit }`,
+disabled inbox service, and recorded one dropped candidate. Debugger evidence
+then reported writes/suppressed/expected/unexpected/disabled/drop as
+`3/1/1/0/1/1`.
+
+A series of macOS USB-only re-enumerations established fresh one-shot
+authenticated sessions without rebooting the CPU. Capabilities then reported
+inbox `0/0`; separate status and peek sessions again returned code 7; peek
+created no file; and the same nonzero RAM evidence remained unchanged. That
+retained snapshot is the direct no-CPU-reset witness. Only after those API and
+RAM observations was flash read. The exact 2,097,152-byte dump had
+SHA-256
+`ad6d549f73681da7453870606fb34eeabad75b387f081176103562d84e5700c7`.
+Its first record had SHA-256
+`acb43e7be289c5c4f822441670ce11554b6386ca3e1cfcee47907ee82c81d7f8`;
+all 544 bytes at relative offsets 0 through 543 were programmed and non-`0xff`,
+while every byte from relative offset 544 through partition end was `0xff`.
+The first capture wrapper exited nonzero only because its post-read assertion
+still expected the superseded 543-byte prefix. Direct checks of the preserved
+dump established the exact length, hashes, 544-byte programmed prefix, and
+fully erased tail reported here.
+The deterministic interrupted-commit matrix separately qualifies cold-mount
+classification of this state class; the contained rerun did not add a post-reset
+API observation.
+
+The software-suppressed write is controlled admission-fault evidence, not a
+brownout, torn page program, or timing measurement. It covers one candidate and
+one direct DATA/proof exchange. Partial-body/live partial-commit cuts, backend
+errors after physical mutation, sustained or forwarded traffic, watchdog
+effects, memory high-water, and final mailbox behavior remain open.
+
+After capture, both boards' contiguous journal plus inbox range was erased and
+verified with zero non-`0xff` bytes; each 3 MiB readback had SHA-256
+`908b6cfc9aef496dd5ab5c5540d80c6383ed6e92f86044574c996315381bc064`.
+Both journals were explicitly reprovisioned, then both boards received the new
+default 761,952-byte image and returned exact address-zero readbacks with
+SHA-256
+`d26587a2506408ec40cd42facb9bb87cc9c32e79c2afd2e1ab09f0e1268641cb`.
+The default ELF contains neither the fault evidence identifier nor the wrapper
+string. Fresh authenticated status on each restored board reported depth 0,
+capacity 1, dropped 0, maximum 383, and `durable=true`.
 
 On 2026-07-18, the historical control-only 652,992-byte merged image (SHA-256
 `1727a14b58a076d65ea12feb61b564d5dfc66d6c6f0b9a8ddd39fc773332705c`) was
@@ -1306,10 +1470,12 @@ Autonomous images with
 `app_data=None` do not originate a controlled fragmented or transit packet.
 The later API 1.1 permanent-image run supplied controlled peer DATA/proof and
 terminal status, and the API 1.2 run separately supplied receiver-side durable
-raw-RNS commit/peek/reset/drop-newest evidence. Fragment reassembly,
-forwarding, multi-hop, and broader protocol behavior still require dedicated
-fixtures; neither later run changes the deliberately narrow claim of this first
-smoke.
+raw-RNS commit/peek/reset/drop-newest evidence. The subsequent mount matrix and
+commit-write HIL add bounded fail-closed isolation plus one direct DATA/proof
+exchange per injected state. Fragment reassembly, forwarding, multi-hop,
+sustained routing, and broader protocol behavior still require dedicated
+fixtures; none of the later runs changes the deliberately narrow claim of this
+first smoke.
 
 ## Product blockers after this slice
 
@@ -1338,7 +1504,9 @@ smoke.
   identity, authenticated RNS DATA, durable runtime, real LoRa peer proof,
   sequential status, and fresh post-re-enumeration session path. Also preserve
   API 1.2's exact one-entry inbox binding/format, authenticated status/peek, and
-  powered commit/readback/hard-reset/drop-newest evidence.
+  powered commit/readback/hard-reset/drop-newest evidence, the four-case
+  cold-mount quarantine matrix, and the same-boot missing-commit admission
+  quarantine.
   Resumption, retries, close records, encryption, rate/attempt policy, repeated
   attempts, and concurrency remain later hardening work; the transport-neutral
   admission boundary must remain reusable by BLE and Wi-Fi, whose session
@@ -1347,9 +1515,10 @@ smoke.
   behavior already pass. A later product-capacity policy must not weaken the same
   durability contract, and future interface actors fail-stop only their
   affected actor.
-- Qualify ADR 0011's existing raw-RNS inbox across controlled power cuts,
-  corrupt/mismatched mounts, admission-fault isolation, mount/commit timing,
-  watchdog/radio deadlines, and internal-RAM/PSRAM high-water. Then design final
+- Qualify ADR 0011's existing raw-RNS inbox across live electrical power cuts,
+  partial-body and partial-commit programming, backend error-after-write cases,
+  mount/commit timing, watchdog/radio deadlines, sustained traffic, and
+  internal-RAM/PSRAM high-water. Then design final
   LXMF/message storage and device configuration with explicit wear, migration,
   reclamation, authorization, and cross-store ordering behavior.
 - Define and qualify the production key backup/recovery and at-rest protection
@@ -1375,7 +1544,7 @@ smoke.
   explicit identity rotation/reprovisioning workflow, but must never wrap.
 - Replace the 1 ms node poll with a combined readiness/deadline wait.
 - Extend the completed controlled two-board API 1.1 DATA/proof and API 1.2
-  inbox runs with powered fault isolation, power cuts, sustained traffic,
+  inbox/fault-isolation runs with electrical power cuts, sustained traffic,
   multi-hop/Resource coverage, and full product memory/timing qualification.
 - Keep display and GNSS/location integration stubbed until the network,
   persistence and client ownership paths are stable.

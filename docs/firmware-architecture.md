@@ -29,8 +29,9 @@ composes USB Serial/JTAG, debounced GPIO21, boot-lifetime connection epochs, an
 interrupt-linearized reset guard, and one exact-next decoder/sequence space for
 initialization control and all four live-pairing operations. The application
 also quarantines native USB at its earliest Rust entry before detached product
-initialization and canonical reattachment. Current source passes 129 E290
-host-library tests, 49 focused host-client tests, and target gates.
+initialization and canonical reattachment. Current source passes 129 default
+E290 host-library tests, 135 with the opt-in inbox commit-fault HIL feature, 49
+focused host-client tests inside the 209-test xtask suite, and target gates.
 Both powered boards returned `initialization-required` and
 `physical-presence-required`; live Begin created no host key before physical
 presence, and full USB re-enumeration restored a fresh sequence-zero epoch.
@@ -80,22 +81,36 @@ establishes Reticulum packet receipt/decryption, not receiver-side application
 persistence.
 Current source advances the logical protocol to API 1.2 and composes a separate
 one-entry durable raw-RNS inbox qualification store, drop-newest admission, and
-authenticated read-only status/peek surface. Its 761,952-byte final post-audit
-merged image, SHA-256
+authenticated read-only status/peek surface. The original 761,952-byte post-
+audit qualification image, SHA-256
 `ba10b04408368c3f5cbcc91f5d514f454595a7812986764c1e95ef528cc71f03`,
 matched both exact address-zero readbacks. A bounded powered run proves maximum-
 payload commit/readback, authenticated peek before and after hard reset, and
 drop-newest preservation of item 1. The final exact 2 MiB partition readback
-contained one canonical 576-byte record and a completely erased remainder. It
-is neither an LXMF store nor a full mailbox. Broader lifecycle/session,
-controlled-cut, fault-isolation, timing and high-water qualification remain
-next. Host, portable-target, ESP32-S3 build, packaging and review gates pass;
+contained one canonical 576-byte record and a completely erased remainder.
+On 2026-07-19, that exact image also failed closed on four deterministic cold-
+mount states: partial claim, complete precommit record, invalid digest, and a
+valid record bound to the other board. Each case advertised inbox `0/0`,
+returned code 7 for status and peek with no peek output, left the complete 2 MiB
+fixture unchanged, and still completed one direct DATA/proof exchange to
+`Delivered`. A separate 762,672-byte feature-gated image, SHA-256
+`e693afad19c2eac28d958f902c1b8148ae360a6b54abb14338195ef595515239`,
+suppressed its third inbox write. The triggering packet reached `Delivered`, and
+the same boot then proved commit-mismatch quarantine and one drop; that packet
+does not establish post-quarantine RF. Its dependency tail was identical to
+the default graph; the default ELF excludes the hook and evidence symbol. The
+current restored default image is 761,952 bytes, SHA-256
+`d26587a2506408ec40cd42facb9bb87cc9c32e79c2afd2e1ab09f0e1268641cb`;
+both boards matched it exactly and booted with empty inboxes. These are bounded
+exact-state and simulated-admission-fault results, not physical power-cut,
+sustained-routing, timing/high-water, LXMF, or full-mailbox qualification. Host,
+portable-target, ESP32-S3 build, packaging and review gates pass;
 the isolated
 E290 same-image ANNOUNCE/DATA/proof HIL and its pre/post image readbacks passed,
 and the permanent E290 node passed its first two-board powered boot/credential/
 ordinary-TX smoke with exact image and credential-partition readback; Tracker
 ANNOUNCE/DATA/proof and isolated storage HIL also passed<br>
-**Date:** 2026-07-18<br>
+**Date:** 2026-07-19<br>
 **Primary full-stack target:** Heltec Vision Master E290-HF, ESP32-S3R8 + HT-RA62/SX1262<br>
 **Qualified radio regression target:** Heltec Wireless Tracker V2.3, ESP32-S3FN8 + SX1262 + KCT8103L<br>
 **Product goal:** an always-on, self-contained, heterogeneous-interface Reticulum transport and LXMF store-and-forward node, with optional onboard messaging and NomadNet clients controlled over USB, BLE, or Wi-Fi
@@ -217,14 +232,14 @@ Claims in READMEs were not treated as proof of embedded portability.
 | `reticulum-heltec-vision-master-e290-semantic-hil`, host and ESP32-S3 Xtensa | Pass (powered same-image functional HIL) | The MAC-gated hazardous image assigned the two connected `HT-RA62-HF` E290s complementary roles and composed the E290 radio owner with a four-packet signed-ANNOUNCE/encrypted-DATA/delivery-proof exchange. Every TX required deadline-bounded clear CAD, each role used its exact two-packet budget, the DATA receipt reached `Delivered`, and both radios shut down. The dedicated fail-closed verifier bound the exact physical MAC/role pair, profile, state sequence, semantic ingress, two CAD observations per board, all four cross-board packet hashes and the DATA receipt; nineteen positive/negative tests pass. Both immediate and post-capture readbacks matched the same 421,296-byte image, SHA-256 `4584abdff80ab4b3151bf5168a364dc30016e29230f51f06195661b455a01085`. This isolated result excludes the permanent graph, storage/API/LXMF, multi-hop, range, fault and soak qualification |
 | `reticulum-node-core`, generic bare-metal and ESP32-S3 Xtensa | Pass | External-buffer DATA dispatch metadata, an independent atomic ordinary-action owner with parallel permit/authorized-byte/completion/quarantine typestates, exact attempt ledger, deterministic routing, opaque interface-resource permits, exact deadlines, retained recovery, explicit proof policy and bounded announce operations compile without `std` on both targets. It has no async or radio linkage and is now owned by the permanent E290 node task through `NodeInterfaceSupervisor` |
 | `reticulum-nor-flash-region`, generic bare-metal and ESP32-S3 Xtensa | Pass | A checked raw-NOR partition view translates exact relative reads/programs/erases onto one caller-owned backend, forwards `MultiwriteNorFlash`, rejects range/absolute-end overflow before access, and counts mutation attempts without owning a platform driver |
-| `reticulum-rns-inbox-store`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (portable one-entry qualification store) | The allocation-free crate binds an exact 2 MiB range to a physical device ID, absolute offset, length, and format version. Format 1 owns one fixed 576-byte record with a claim, canonical destination/383-byte payload body plus domain-separated SHA-256, and a commit marker programmed last; every later partition byte must remain erased. Read-only mount distinguishes erased, exact occupied, interrupted, unknown, corrupt, noncanonical, and wrongly bound media without mutation. Admission reconciles exact readback, including a lost commit reply, but issues no erase and exposes no acknowledgement, deletion, or reclamation operation. Seventeen fake-NOR tests plus strict Clippy/rustdoc and generic/Xtensa `no_std` checks pass. The product composition has bounded powered commit/readback/hard-reset/drop-newest evidence; controlled cuts and fault isolation remain open. This is ADR 0011's raw-RNS durability qualification record, not an LXMF store or product mailbox |
+| `reticulum-rns-inbox-store`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (portable one-entry qualification store) | The allocation-free crate binds an exact 2 MiB range to a physical device ID, absolute offset, length, and format version. Format 1 owns one fixed 576-byte record with a claim, canonical destination/383-byte payload body plus domain-separated SHA-256, and a commit marker programmed last; every later partition byte must remain erased. Read-only mount distinguishes erased, exact occupied, interrupted, unknown, corrupt, noncanonical, and wrongly bound media without mutation. Admission reconciles exact readback, including a lost commit reply, but issues no erase and exposes no acknowledgement, deletion, or reclamation operation. Seventeen fake-NOR tests plus strict Clippy/rustdoc and generic/Xtensa `no_std` checks pass. The product composition has bounded powered commit/readback/hard-reset/drop-newest evidence, four exact fail-closed cold-mount cases, and one feature-gated same-boot missing-commit quarantine. Physical power cuts, broader fault trajectories, and target timing/high-water remain open. This is ADR 0011's raw-RNS durability qualification record, not an LXMF store or product mailbox |
 | `reticulum-device-identity-store`, generic bare-metal and ESP32-S3 Xtensa | Pass | The allocation-free 8 KiB format preflights without mutation, provisions or imports exact Reticulum X25519/Ed25519 private material into two commit-last 4 KiB mirrors, repairs only from a valid authority, zeroizes scratch, and fails closed on unknown bytes, committed corruption or key conflict. Generated X25519 bytes alone are clamped; reload/import bytes remain exact |
 | `reticulum-announce-clock`, generic bare-metal and ESP32-S3 Xtensa | Pass | The allocation-free 8 KiB two-sector append journal commits the next 20-bit boot epoch to both sectors before return. A typed 20-bit per-boot ordinal produces the complete 40-bit announce emission order; blank media requires an explicit first-provision policy, while an existing identity with missing high-water state fails without mutation. Exhaustive write/erase cuts and lost replies never reuse a returned epoch |
 | `reticulum-tx-handoff`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | DATA handoff provides static one-time common-origin role splitting and pool-sized owning channels. The production ordinary path has a separate permit-only depth-one request/reply store because ticketed ordinary jobs and completions use the interface router's per-actor queues. A separate depth-one authorized-frame pair carries exact observation requests from an interface dispatcher and exact durable echoes from the node owner. All sends return complete values under pressure, and cancellation-safe waits never reserve or discard them. The E290 graph composes the permit and authorized-frame handoffs needed by `NodeInterfaceSupervisor` and the LoRa actor; the legacy DATA job/return harness remains RF-inert |
 | `reticulum-tx-dispatch`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The RF-inert dispatcher, permit server, and exact-owner-bound fixed per-slot node DATA machine retain owners/control values across backpressure, synchronously prepare from parked owners, use cancellation-safe short waits, park recovered owners until exact acknowledgement, and fail closed at the permit recovery grace. The permanent E290 graph reaches these DATA machines through `NodeInterfaceSupervisor`; their legacy job/return harness remains separate and RF-inert |
 | `reticulum-radio-tx-dispatch`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The firmware-includable persistent serializer consumes the interface router's ticketed DATA/ordinary actor union and retains each ticket while keeping the two typestate families separate over one `SoleRnodeRadio`. It performs randomized initial/retry backoff and CAD, validates the actor-stamped interface configuration, maps the active radio fingerprint and aggregate airtime to node-core's opaque resource-and-units permit, revalidates before permit negotiation and after grant, exposes bytes once, and makes one logical one/two-frame RNode transmit. Every post-byte-exposure DATA completion, including cancellation and fault recovery, is gated with its router ticket and exact authorized-frame observation until an identical durable acknowledgement arrives. Request pressure and cancelled waits retain ownership; unexpected or mismatched acknowledgements fail closed while retaining both observations. `DispatchReport` is copy-only diagnosis, never ownership. RX start remains an explicit idle scheduler choice even when TX is queued, and phase-aware completion-capacity readiness never moves a retained completion. Its watchdog, final-frame metadata and fail-closed recovery retain exact owners/control values across completion pressure, partial or impossible progress, stale/lost replies, configuration drift, invalid RX metadata, radio faults, and dropped CAD/TX/RX futures. Host, strict Clippy, warning-free rustdoc, generic no-std and Xtensa gates pass. Its exact direct-dependency policy keeps Embassy Futures test-only. The first permanent E290 graph instantiates it as the sole LoRa actor dispatcher; target build/review gates and one bounded powered DATA/peer-proof path pass, while powered fault/soak/full qualification remains open |
 | `reticulum-tx-supervisor`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | `NodeInterfaceSupervisor` is the production portable aggregate: it owns the sole node-core, authoritative interface router, DATA and ordinary coordinators, one permit server per family and actor, and one shared policy. Its sealed fixed-pool ingress validates queue origin, current lease, online state and logical MTU, recycles the exact buffer, retries only a full return queue and `Busy` action pressure, and exposes every other buffer-return or action residue as an exact takeable terminal owner for quarantine. A bounded round-robin pass fairly scans completions, both coordinators and all permit services. The E290 node graph composes this aggregate; the older async `TxSupervisor` remains only a legacy RF-inert DATA-machine test aggregate |
-| `reticulum-heltec-vision-master-e290-node`, host and ESP32-S3 Xtensa | Pass (current source/test composition plus bounded powered end-to-end proofs) | The permanent graph composes the transport-neutral node, concrete LoRa actor, sole USB/GPIO owner, credential initialization and live pairing, authenticated session/admission, static request/reply handoff, current-authority logical dispatch, and the operation-scoped raw-RNS inbox qualification owner. The deliberately minimal USB profile permits one handshake per connection and one request in flight; a fault is terminal until reset/re-enumeration. It defers resumption, protocol retries, close records, encryption, rate limiting/attempt policy, repeated handshake attempts, and concurrency. The session/admission boundary is bearer-neutral for later BLE/Wi-Fi adapters and is not a Reticulum packet interface; concurrent bearers still require globally unique bearer-qualified epochs or disjoint reply lanes under one exclusivity coordinator. The powered 751,712-byte API 1.1 merged image matched exact address-zero readbacks on both E290s. One sender retained physical initialization and Active generation 3, then authenticated identity/submission/status operations drove durable DATA over LoRa to the second permanent node and received a valid proof; `Delivered` survived full USB re-enumeration. API 1.2 separately proves one maximum-payload commit, exact raw readback, authenticated status/peek before and after hard reset, and drop-newest preservation of item 1. Exact Pending/Abort readbacks, controlled inbox cuts/fault isolation, suspend/resume, runtime high-water, and full qualification remain open. Current test counts, size measurements, image digest, and exact powered evidence are recorded in the E290 runbook. |
+| `reticulum-heltec-vision-master-e290-node`, host and ESP32-S3 Xtensa | Pass (current source/test composition plus bounded powered end-to-end proofs) | The permanent graph composes the transport-neutral node, concrete LoRa actor, sole USB/GPIO owner, credential initialization and live pairing, authenticated session/admission, static request/reply handoff, current-authority logical dispatch, and the operation-scoped raw-RNS inbox qualification owner. The deliberately minimal USB profile permits one handshake per connection and one request in flight; a fault is terminal until reset/re-enumeration. It defers resumption, protocol retries, close records, encryption, rate limiting/attempt policy, repeated handshake attempts, and concurrency. The session/admission boundary is bearer-neutral for later BLE/Wi-Fi adapters and is not a Reticulum packet interface; concurrent bearers still require globally unique bearer-qualified epochs or disjoint reply lanes under one exclusivity coordinator. The powered 751,712-byte API 1.1 merged image matched exact address-zero readbacks on both E290s. One sender retained physical initialization and Active generation 3, then authenticated identity/submission/status operations drove durable DATA over LoRa to the second permanent node and received a valid proof; `Delivered` survived full USB re-enumeration. API 1.2 separately proves one maximum-payload commit, exact raw readback, authenticated status/peek before and after hard reset, drop-newest preservation of item 1, four exact cold-mount quarantine cases, and one opt-in same-boot missing-commit quarantine. Each cold-mount case was followed by one direct DATA/proof path; the HIL triggering path reached `Delivered` before quarantine was observed and does not establish post-quarantine RF. None proves sustained routing or a physical power cut. Exact Pending/Abort readbacks, physical inbox cuts, suspend/resume, runtime high-water, and full qualification remain open. Current test counts, size measurements, image digests, and exact powered evidence are recorded in the E290 runbook. |
 | `reticulum-storage-model`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The allocation-free semantic journal model enforces canonical schema-2 records, exact authorization snapshots, principal-scoped idempotency across credential rotation, exact preflight/apply plans, monotonic conservative transmission uncertainty, and fail-closed complete replay; 26 integration tests plus one compile-fail doctest cover the boundary, which intentionally makes no physical-durability or flash-capacity claim |
 | `reticulum-submission-projector`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The fixed-capacity projector correlates volatile attempts with semantic records and withholds terminal/recovery acknowledgement behind exact persistence replies; 24 focused tests cover ordering, retries, native authorized-frame conversion, proof/timeout-before-frame races, faults and conservative reboot behavior. Completed slots deliberately do not retire without a future exact node-owner quiescence proof |
 | `reticulum-storage-journal`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The allocation-free backend fixes the 1 MiB/two-bank physical format 1 with semantic schema 2, full-bank replay, commit-last exact-readback append, a 162-acceptance lifetime ceiling, and source-preserving handoff compaction. Valid schema-1 manifests return typed unsupported-version with zero mutation only after the normal two-bank trajectory checks. An independently authorized first-provision API resumes every canonical A1 prefix/commit cut without erasing and rejects nonempty/off-trajectory media; 34 fake-NOR tests cover provisioning, semantic-version rejection, torn/lost append and compaction. The historical powered HIL qualifies only the unchanged physical clean path/software-reset behavior at its schema-1 source; schema-2 HIL remains to rerun |
@@ -459,8 +474,9 @@ The current 8 ms missed-SOF suspension
 retains its epoch and sequence until bus reset; broader powered lifecycle
 qualification is still required.
 
-The E290 library's 129-test host suite now qualifies that three-task software
-composition, including the causal control/live frontier, shared pre-
+The E290 library's 129-test default host suite, and its 135-test opt-in inbox
+commit-fault HIL profile, now qualify that three-task software composition,
+including the causal control/live frontier, shared pre-
 authentication decoder and sequence gate, exact durable reply correlation,
 reset-generation guard, policy/product/credential-boot/credential-runtime/
 cross-store/USB-control/session-admission tests,
@@ -1149,9 +1165,13 @@ status/peek through a separate read-only port. Capacity is one, the maximum
 payload is 383 bytes, overflow drops newest, and no acknowledgement, deletion,
 erase, or reclamation exists. This is intentionally not local LXMF intent
 submission, an LXMF message store, a general mailbox, or complete client
-delivery. A bounded powered run now covers commit/readback, authenticated peek,
-hard-reset survival, and drop-newest preservation; controlled cuts, fault
-isolation, timing/high-water, and full mailbox behavior remain open. LoRa
+delivery. A bounded powered run covers commit/readback, authenticated peek,
+hard-reset survival, and drop-newest preservation. The 2026-07-19 extension
+covers four exact fail-closed cold-mount states, each followed by one direct
+DATA/proof exchange. A separate feature-gated triggering exchange reached
+`Delivered` before same-boot missing-commit quarantine was observed. Physical
+cuts, broader program-fault trajectories, sustained routing,
+timing/high-water, and full mailbox behavior remain open. LoRa
 remains the first and primary complete transport; later packet interfaces enter
 through independent actors/adapters behind the same node and durability
 contracts, not through a speculative parallel adapter now.
@@ -1923,9 +1943,52 @@ durability boundary only. It is not the logical `messages` store listed above,
 an LXMF codec/router, a propagation queue, a conversation mailbox, or a format
 compatibility promise for any of them. Host/fake-NOR and target-composition
 gates pass. A bounded powered run proves canonical commit/readback, authenticated
-peek before and after hard reset, and drop-newest while preserving item 1;
-controlled cuts, corrupt-media/admission-fault isolation, timing, watchdog/radio
-deadlines, and memory high-water remain open.
+peek before and after hard reset, and drop-newest while preserving item 1.
+
+The 2026-07-19 cold-mount matrix reused the exact 761,952-byte default image,
+SHA-256
+`ba10b04408368c3f5cbcc91f5d514f454595a7812986764c1e95ef528cc71f03`,
+against complete 2 MiB fixtures for partial claim
+(`4b9e6dad1415850588c001b17053e893ab1316aaa1b6d584082170d049f871f0`),
+complete precommit with no marker
+(`a8a8d40f63a69c7e3df59f4af1960f241f464566a5ae9251c12209eb3334c66a`),
+invalid digest
+(`bb24e892d435a0b6888cc16f8733f096015a36f0f19dcd8a22e0978602e55ad5`),
+and a valid record bound to the other board
+(`dee21d3c72a914ac00627c49a119631999dc9e986ce18897b9a171254c79561b`).
+Every cold boot advertised inbox availability/maximum `0/0`; authenticated
+status and peek returned code 7, peek created no output, one direct DATA/proof
+exchange reached `Delivered`, and the complete fixture remained byte-identical.
+This proves read-only mount classification and local inbox-service isolation for
+those four exact stable states, not a physical interruption during programming,
+sustained routing, forwarding, or multi-hop behavior.
+
+The separate feature-gated same-boot fixture produced a 762,672-byte merged
+image, SHA-256
+`e693afad19c2eac28d958f902c1b8148ae360a6b54abb14338195ef595515239`.
+It acknowledged but suppressed only the third inbox program call. The triggering
+147-byte packet, encoded SHA-256
+`0084ad098f2109b390d7c4568ba4a2dcd5285ac40062e55c9709665b2aebc73a`,
+reached `Delivered`. In that same boot, the fixed evidence at RAM address
+`0x3fc8bf7c` reported writes/suppressed commits/expected commit mismatches/unexpected
+failures/service disabled/dropped as `3/1/1/0/1/1`. USB-only re-enumeration
+left that evidence unchanged while the inbox API remained unavailable. The
+complete raw store, SHA-256
+`ad6d549f73681da7453870606fb34eeabad75b387f081176103562d84e5700c7`,
+had all 544 bytes at offsets 0 through 543 programmed and non-`0xff`, and only
+`0xff` from offset 544 through partition end. The deterministic
+interrupted-commit matrix separately qualifies cold-mount classification of
+this state class; the contained rerun did not add a post-reset API observation.
+
+Graph policy proves that only the product-root feature differs and that the HIL
+dependency tail is identical to default; the default ELF contains neither the
+hook nor its evidence symbol. The HIL module is source-contained to
+feature-enabled host tests and feature-enabled Xtensa builds. After capture,
+the current restored default image remained 761,952 bytes, SHA-256
+`d26587a2506408ec40cd42facb9bb87cc9c32e79c2afd2e1ab09f0e1268641cb`.
+Both boards matched it exactly and booted with empty inboxes. Physical power
+cuts, partial live programs, backend error-after-write trajectories, mount/
+commit timing, watchdog/radio deadlines, and memory high-water remain open.
 
 The physical crate uses NOR semantics through `embedded-storage`; the Tracker
 HIL supplies a checked partition-relative `esp-storage` adapter and never uses
@@ -2175,12 +2238,15 @@ paths are powered-qualified. Remaining live-lifecycle states, application inbox
 delivery, power-cut/high-water testing, multi-hop/Resource coverage, and
 sustained qualification remain open. Current source now narrows the application-
 inbox step to ADR 0011's one-entry raw-RNS durability probe plus API 1.2
-status/peek. Its host and target composition passes, and a bounded powered run
-closes exact commit/readback, hard-reset observation, authenticated peek, and
-drop-newest preservation of item 1. Controlled cuts, corrupt-media/admission-
-fault isolation, timing, watchdog/radio-deadline, and memory-high-water exit
-criteria remain open; this does not advance Phase 3's LXMF router/message-store
-deliverables.
+status/peek. Its host and target composition passes, and bounded powered runs
+close exact commit/readback, hard-reset observation, authenticated peek,
+drop-newest preservation of item 1, read-only quarantine for four exact cold-
+mount states, and one same-boot missing-commit quarantine. Each cold-mount case
+retained only one direct DATA/proof exchange; the HIL triggering exchange
+reached `Delivered` before quarantine was observed. Physical cuts, additional live
+program-fault trajectories, sustained routing, timing, watchdog/radio-deadline,
+and memory-high-water exit criteria remain open; this does not advance Phase 3's
+LXMF router/message-store deliverables.
 
 Deliverables:
 
@@ -2358,10 +2424,12 @@ compatibility plus the E290 functional PHY/framing, signed-ANNOUNCE, encrypted
 DATA and delivery-proof boundary. The permanent-image evidence additionally
 closes basic boot/credential/ordinary-TX, bounded control/authentication, and one
 API 1.1 outbound DATA/peer-proof/status path. API 1.2 additionally closes one
-bounded inbound commit/readback/authenticated-peek/hard-reset/drop-newest path.
-It does not close controlled interruption recovery, inbox fault isolation,
-heterogeneous forwarding, multi-hop behavior, Links/Resources, LXMF, sustained
-memory, busy-CAD policy, formal electrical/RF, range, or regional release gates.
+bounded inbound commit/readback/authenticated-peek/hard-reset/drop-newest path,
+read-only isolation for four exact cold-mount faults, and one simulated same-
+boot commit fault. It does not close physical interruption recovery, other live
+program-fault trajectories, sustained routing under quarantine, heterogeneous
+forwarding, multi-hop behavior, Links/Resources, LXMF, sustained memory, busy-
+CAD policy, formal electrical/RF, range, or regional release gates.
 
 1. Preserve the permanent E290 image's host, portable-target, strict Xtensa,
    merged-image and dependency-graph gates in CI. Continue enforcing separate
@@ -2374,8 +2442,9 @@ memory, busy-CAD policy, formal electrical/RF, range, or regional release gates.
    immediate and post-capture readbacks. Do not infer permanent-node, storage,
    API, multi-hop, range, fault or soak behavior from that separate fixture.
    Keep the Tracker pair as the second radio regression fixture.
-3. Preserve the 129-test E290 host-library composition, 49 focused host-client,
-   197-test xtask, 41-test Rete-integration, and 17-test inbox-store gates,
+3. Preserve the 129-test default and 135-test opt-in HIL E290 host-library
+   compositions, 49 focused host-client, 209-test xtask, 41-test Rete-
+   integration, and 17-test inbox-store gates,
    including credential boot
    classification/order, the authenticated
    happy path and wrong-binding `ActiveOwnerFailStopped` path. Preserve the now
@@ -2404,31 +2473,38 @@ memory, busy-CAD policy, formal electrical/RF, range, or regional release gates.
    real LoRa peer proof. Preserve the current API 1.2 codec/adapter and ADR
    0011 one-entry inbox-store gates: exact 2 MiB binding, commit-last format,
    capacity one, drop-newest, 383-byte maximum, authenticated read-only status/
-   peek, no erase/acknowledgement/deletion path, and the bounded powered commit/
-   readback/hard-reset/drop-newest result. Extend that narrow raw-RNS slice with
-   controlled cuts, fault isolation, timing and high-water evidence before
-   designing the separate LXMF/message admission surface. Keep the admission and
+   peek, no erase/acknowledgement/deletion path, the bounded powered commit/
+   readback/hard-reset/drop-newest result, all four exact cold-mount fixtures,
+   and the same-boot commit-suppression HIL. Extend that narrow raw-RNS slice
+   with physical cuts, additional live program-fault trajectories, timing and
+   high-water evidence before designing the separate LXMF/message admission
+   surface. Keep the admission and
    node-dispatch boundary reusable by later BLE/Wi-Fi bearers, with a separately
    implemented and qualified session suite for each binding. Select the real
    capacity policy beyond this one-entry qualification profile. Preserve durable
    acceptance before Rete preparation and durable terminal projection before
    acknowledgement.
-4. Preserve ADR 0011's completed bounded powered end-to-end result without
+4. Preserve ADR 0011's completed bounded powered end-to-end results without
    rewriting the historical API 1.1 proof as persistence evidence: the maximum-
    size DATA packet independently reached `Delivered`, exact status/peek and raw
    partition readback proved item 1, hard reset preserved it, and a newer packet
-   incremented the boot-local drop counter without replacement. Next retain
-   equivalent exact image/partition/serial evidence across controlled power cuts
-   and corrupt/mismatched mount cases while measuring mount/commit timing,
-   internal/PSRAM high-water, watchdog behavior, and radio-deadline impact. Do
-   not call this LXMF or a full mailbox.
+   incremented the boot-local drop counter without replacement. Preserve the
+   exact image, fixture, API, peer-proof, RAM, and raw-store evidence for the
+   four cold-mount cases and same-boot missing-commit HIL. Next retain equivalent
+   evidence across physical power cuts and additional partial-program/backend-
+   error trajectories while measuring mount/commit timing, internal/PSRAM high-
+   water, watchdog behavior, and radio-deadline impact. Do not call this LXMF or
+   a full mailbox.
 5. Qualify the implemented durable identity/announce-clock and resident
-   operation-scoped storage coordinator across reset and controlled power cuts,
+   operation-scoped storage coordinator across reset and controlled physical
+   power cuts,
    including inbox claim/body/commit boundaries and cross-store exclusion.
    Optional journal failure before an active DATA owner must continue to isolate
-   only local durable service while route-only LoRa remains available. An inbox
-   mount/admission fault must disable only its API capability while ordinary
-   Reticulum receive/transmit/routing continues.
+   only local durable service while route-only LoRa remains available. Preserve
+   the demonstrated inbox behavior: each of the four exact mount faults and the
+   one injected admission fault disabled only its API capability while one
+   direct Reticulum DATA/proof exchange completed. Extend that evidence to
+   physical cuts and sustained ordinary receive/transmit/routing.
 6. After the complete LoRa-first permanent path is stable, select and add one
    non-LoRa Reticulum actor to prove heterogeneous ingress, learned-path
    selection and forwarding. A USB stream actor is the leading candidate, but
