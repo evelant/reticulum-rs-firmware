@@ -593,6 +593,31 @@ mod tests {
     }
 
     #[test]
+    fn protocol_dispatch_invariant_failure_offlines_the_sole_interface_before_drain() {
+        let source = include_str!("node_task.rs");
+        let routed = source
+            .find("enter_protocol_dispatch_fail_stop(")
+            .expect("protocol dispatch rejection must enter the interface fail-stop");
+        let disposition = source
+            .find("ProtocolDispatchConfirmationDisposition::TerminalFailClosedDrain")
+            .expect("protocol dispatch rejection must retain its terminal policy");
+        assert!(disposition < routed);
+
+        let helper = source
+            .split("fn enter_protocol_dispatch_fail_stop(")
+            .nth(1)
+            .and_then(|tail| tail.split("fn step_ingress(").next())
+            .expect("protocol dispatch fail-stop helper must remain explicit");
+        let offline = helper
+            .find("supervisor.set_interface_online(online.lease(), false)")
+            .expect("protocol dispatch fail-stop must offline the sole transport");
+        let drain = helper
+            .find("*fail_closed_draining = true;")
+            .expect("protocol dispatch fail-stop must retain exact-owner drainage");
+        assert!(offline < drain);
+    }
+
+    #[test]
     fn primary_destination_contract_matches_released_python_vector() {
         let private_key = decode_hex::<64>(
             "408b27d3097eea5a46bf2ab6433a7234a33d5e49957b13ec7acc2ca08e1a13c7\

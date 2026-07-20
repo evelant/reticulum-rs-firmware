@@ -114,8 +114,11 @@ diagnostic only. The uncoordinated attempt missed the peer boot because host
 tool delay exhausted E0's receive windows. The coordinated predecessor
 exchanged both ANNOUNCEs and then exposed a time-domain implementation bug:
 RNode fragment deadlines are expressed in high-resolution ticks while Rete
-protocol time is expressed in seconds. The final image supplies those domains
-separately, which is also the required permanent-runtime design.
+protocol time at that revision was expressed in seconds. The final historical
+image supplied those domains separately. The permanent-runtime design now
+separates microsecond radio/RNode time, precise microsecond Link instants,
+coarse DATA/receipt deadlines, and the packet-owner clock; this is a design
+clarification, not a retroactive claim about that artifact.
 
 Build this mode explicitly with:
 

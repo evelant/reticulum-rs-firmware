@@ -2,7 +2,7 @@
 
 ## Released-Python RNS foundation
 
-`rns-1.3.8.json` is the first deterministic released-Python foundation corpus.
+`rns-1.3.8.json` is the deterministic schema-2 released-Python foundation corpus.
 It covers a stable test-only identity, signed announce, plain packet, packet
 hashes and their exact wire bytes. It also freezes canonical LRRTT float64
 messages and released u-msgpack 2.7.1 decode/formula behavior for alternate
@@ -10,12 +10,32 @@ numeric types, non-finite values, trailing bytes and malformed objects. Its
 peer revision, vendored codec digest and generator are embedded in the file and
 checked by the host conformance runner.
 
+The LRRTT lifecycle section source-hash-binds both released `Link.py` and
+`Packet.py`. Its request-order probes execute released `Link.__init__`,
+`Link.validate_request`, `Link.prove`, and `Packet.send` through a recorded
+`Transport.outbound` boundary: Python samples initiator `request_time` before
+LINKREQUEST send and responder `request_time` after LRPROOF send returns. The
+probe enumerates every substituted clock, path lookup, registration, watchdog,
+and outbound hook rather than presenting the harness as an unmodified network
+run.
+
+Five case-unique ciphertexts are then passed directly to released
+`Link.receive`: valid `Handshake`, valid `Active` repeat, valid `Stale` repeat,
+Stale decrypt failure, and authenticated malformed Active LRRTT. They freeze
+Python's immutable request anchor, clock ordering, RTT/activation/keepalive,
+callback, liveness, and teardown observations. This direct-call corpus does
+not exercise `Transport` exact-replay deduplication or all of the real
+teardown's external side effects; its recording teardown replacement and other
+field scaffolding are listed in `probe_scaffolding`.
+
 This is intentionally only the first slice. The Phase-0 validation contract
 still requires released-peer HEADER_2, encrypted packet, proof, IFAC, ratchet,
 complete Link, Resource and multi-node vectors, plus the independent LXMF
-corpus. The LRRTT cases describe Python behavior. Firmware conformance matches
-its numeric-scalar and first-object semantics for pending handshakes;
-active-responder repeat handling remains a separate state-machine gap.
+corpus. The LRRTT cases describe released Python behavior. Firmware
+conformance matches the scalar/first-object and request-anchor semantics, but
+deliberately authenticates before updating liveness: unlike Python's
+pre-decrypt update, a corrupt stale LRRTT does not revive a Rete Link. Rete's
+own transport tests cover exact raw replay deduplication separately.
 
 ## Phase-1 RNode receive corpus
 

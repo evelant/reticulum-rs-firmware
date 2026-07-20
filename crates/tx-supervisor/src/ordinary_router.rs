@@ -15,8 +15,8 @@ use reticulum_node_core::{
     OrdinaryCompletionError, OrdinaryCompletionFailure, OrdinaryPacketReturnParkFailure,
     OrdinaryPacketSlotId, OrdinaryPreparedPacket, OrdinaryQuarantineReason, OrdinaryTxCompletion,
     OrdinaryTxJob, OrdinaryTxPermitReply, OrdinaryTxPermitRequest, OrdinaryTxQuarantine,
-    PacketInterfaceId, TxAuthorizationCandidate, TxAuthorizationPolicy, TxCompletionCode,
-    TxLeaseDeadline, TxOwnerScope, TxPolicyDecision, TxPolicyDenial,
+    OutboundProtocolToken, PacketInterfaceId, TxAuthorizationCandidate, TxAuthorizationPolicy,
+    TxCompletionCode, TxLeaseDeadline, TxOwnerScope, TxPolicyDecision, TxPolicyDenial,
 };
 
 /// Product policy for ordinary jobs rejected before they enter an actor queue.
@@ -407,6 +407,12 @@ pub enum OrdinaryRouterStep {
         slot: OrdinaryPacketSlotId,
         /// Selected interface.
         interface: PacketInterfaceId,
+        /// Opaque LINKREQUEST or LRPROOF timing token, when present.
+        protocol_token: Option<OutboundProtocolToken>,
+        /// Whether this is the packet generation's first successful router
+        /// dispatch. A false confirmation is terminal for this hop, but is
+        /// expected after a previously confirmed serialized fan-out hop.
+        first_dispatch: bool,
     },
     /// The selected actor queue was full; the exact job remains retained.
     RouteBackpressured {
@@ -512,6 +518,7 @@ pub struct OrdinaryRouterCoordinator<const PACKET_BUFFERS: usize> {
     rejected_actions: Option<OrdinaryRouterRejectedActions>,
     pending_jobs: [Option<OrdinaryTxJob<'static>>; PACKET_BUFFERS],
     active: [Option<OrdinaryPreparedPacket>; PACKET_BUFFERS],
+    dispatch_accepted: [bool; PACKET_BUFFERS],
     pending_completions: [Option<OrdinaryTxCompletion<'static>>; PACKET_BUFFERS],
     route_cursor: usize,
     completion_cursor: usize,
@@ -570,6 +577,7 @@ impl<const PACKET_BUFFERS: usize> OrdinaryRouterCoordinator<PACKET_BUFFERS> {
             rejected_actions: None,
             pending_jobs: core::array::from_fn(|_| None),
             active: core::array::from_fn(|_| None),
+            dispatch_accepted: [false; PACKET_BUFFERS],
             pending_completions: core::array::from_fn(|_| None),
             route_cursor: 0,
             completion_cursor: 0,
@@ -935,9 +943,12 @@ impl<const PACKET_BUFFERS: usize> OrdinaryRouterCoordinator<PACKET_BUFFERS> {
                 self.active[index] = None;
                 let slot = returned.prepared().slot_id();
                 match self.pool.park_return(returned) {
-                    Ok(_) => Some(OrdinaryRouterStep::Completion(
-                        OrdinaryRouterCompletionProgress::Returned { slot },
-                    )),
+                    Ok(_) => {
+                        self.dispatch_accepted[index] = false;
+                        Some(OrdinaryRouterStep::Completion(
+                            OrdinaryRouterCompletionProgress::Returned { slot },
+                        ))
+                    }
                     Err(failure) => {
                         let fault = OrdinaryRouterFault::Parking(failure.reason());
                         self.set_slot_fault(
@@ -994,7 +1005,14 @@ impl<const PACKET_BUFFERS: usize> OrdinaryRouterCoordinator<PACKET_BUFFERS> {
         match router.try_route_ordinary(job) {
             Ok(_) => {
                 self.active[index] = Some(prepared);
-                Some(OrdinaryRouterStep::Routed { slot, interface })
+                let first_dispatch = !self.dispatch_accepted[index];
+                self.dispatch_accepted[index] = true;
+                Some(OrdinaryRouterStep::Routed {
+                    slot,
+                    interface,
+                    protocol_token: prepared.protocol_token(),
+                    first_dispatch,
+                })
             }
             Err(failure) => {
                 let reason = failure.reason();
@@ -1091,6 +1109,7 @@ impl<const PACKET_BUFFERS: usize> OrdinaryRouterCoordinator<PACKET_BUFFERS> {
         if self.pending_jobs[index].is_some()
             || self.active[index].is_some()
             || self.pending_completions[index].is_some()
+            || self.dispatch_accepted[index]
         {
             self.set_slot_fault(
                 index,
@@ -1466,6 +1485,157 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn routed_protocol_metadata_marks_only_the_first_serialized_fanout_hop_required() {
+        let mut owner_node = node(73);
+        let mut coordinator = coordinator::<1>(&mut owner_node);
+        let (mut router, mut actors, _) = configure_router::<1>();
+        let mut rng = CounterRng::default();
+        let mut initiator = rns_node(74);
+        let responder = rns_node(75);
+        let (packet, _) = initiator
+            .initiate_link(responder.destination_hash(), 1, &mut rng)
+            .expect("test LINKREQUEST must construct");
+        let token = packet
+            .protocol_token()
+            .expect("LINKREQUEST must carry a timing token");
+        let mut actions = NodeActions::default();
+        actions.packets.push(packet);
+
+        coordinator
+            .try_offer_actions(actions, admission(10))
+            .unwrap_or_else(|failure| {
+                panic!(
+                    "coordinator must accept one LINKREQUEST: {:?}",
+                    failure.reason()
+                )
+            });
+        assert_eq!(
+            coordinator.step(&mut router, MonotonicMillis::new(10)),
+            OrdinaryRouterStep::ActionsAdmitted { packet_count: 1 }
+        );
+        assert_eq!(
+            coordinator.step(&mut router, MonotonicMillis::new(10)),
+            OrdinaryRouterStep::NonPacketActionsReady
+        );
+        let _ = coordinator.take_non_packet_actions().unwrap();
+        assert!(matches!(
+            coordinator.step(&mut router, MonotonicMillis::new(10)),
+            OrdinaryRouterStep::PacketStaged { .. }
+        ));
+        assert!(matches!(
+            coordinator.step(&mut router, MonotonicMillis::new(10)),
+            OrdinaryRouterStep::Routed {
+                interface,
+                protocol_token: Some(actual),
+                first_dispatch: true,
+                ..
+            } if interface == PacketInterfaceId::new(2) && actual == token
+        ));
+
+        let InterfaceTxJob::Ordinary(first) = actors[0]
+            .try_receive_job()
+            .expect("first interface must receive the LINKREQUEST")
+        else {
+            panic!("LINKREQUEST changed owner family")
+        };
+        let (ticket, first) = first.into_parts();
+        let completion = ticket
+            .complete(
+                first
+                    .return_unpermitted()
+                    .complete(TxCompletionCode::new(0x420)),
+            )
+            .expect("ticket must bind the first fan-out hop");
+        actors[0]
+            .try_send_completion(completion)
+            .expect("first completion queue must accept the owner");
+        let OutboundCompletion::Ordinary(completion) = router
+            .try_receive_completion()
+            .expect("router completion read must succeed")
+            .expect("first completion must be ready")
+        else {
+            panic!("LINKREQUEST completion changed owner family")
+        };
+        coordinator
+            .try_accept_completion(completion)
+            .unwrap_or_else(|failure| {
+                panic!("first completion must correlate: {:?}", failure.reason())
+            });
+        assert!(matches!(
+            coordinator.step(&mut router, MonotonicMillis::new(20)),
+            OrdinaryRouterStep::Completion(OrdinaryRouterCompletionProgress::Next {
+                interface,
+                ..
+            }) if interface == PacketInterfaceId::new(9)
+        ));
+        assert!(matches!(
+            coordinator.step(&mut router, MonotonicMillis::new(20)),
+            OrdinaryRouterStep::Routed {
+                interface,
+                protocol_token: Some(actual),
+                first_dispatch: false,
+                ..
+            } if interface == PacketInterfaceId::new(9) && actual == token
+        ));
+    }
+
+    #[test]
+    fn rejected_route_does_not_consume_the_first_successful_dispatch_edge() {
+        let mut owner_node = node(76);
+        let mut coordinator = coordinator::<1>(&mut owner_node);
+        let (mut router, _actors, descriptors) = configure_router::<1>();
+        let mut rng = CounterRng::default();
+        let mut initiator = rns_node(77);
+        let responder = rns_node(78);
+        let (packet, _) = initiator
+            .initiate_link(responder.destination_hash(), 1, &mut rng)
+            .expect("test LINKREQUEST must construct");
+        let token = packet.protocol_token().unwrap();
+        let mut actions = NodeActions::default();
+        actions.packets.push(packet);
+
+        coordinator
+            .try_offer_actions(actions, admission(10))
+            .unwrap_or_else(|failure| panic!("offer failed: {:?}", failure.reason()));
+        assert!(matches!(
+            coordinator.step(&mut router, MonotonicMillis::new(10)),
+            OrdinaryRouterStep::ActionsAdmitted { .. }
+        ));
+        assert_eq!(
+            coordinator.step(&mut router, MonotonicMillis::new(10)),
+            OrdinaryRouterStep::NonPacketActionsReady
+        );
+        let _ = coordinator.take_non_packet_actions().unwrap();
+        assert!(matches!(
+            coordinator.step(&mut router, MonotonicMillis::new(10)),
+            OrdinaryRouterStep::PacketStaged { .. }
+        ));
+        router
+            .set_online(descriptors[0].lease(), false)
+            .expect("first route must go offline after admission");
+        assert!(matches!(
+            coordinator.step(&mut router, MonotonicMillis::new(10)),
+            OrdinaryRouterStep::RouteRejected { .. }
+        ));
+        assert!(matches!(
+            coordinator.step(&mut router, MonotonicMillis::new(11)),
+            OrdinaryRouterStep::Completion(OrdinaryRouterCompletionProgress::Next {
+                interface,
+                ..
+            }) if interface == PacketInterfaceId::new(9)
+        ));
+        assert!(matches!(
+            coordinator.step(&mut router, MonotonicMillis::new(11)),
+            OrdinaryRouterStep::Routed {
+                interface,
+                protocol_token: Some(actual),
+                first_dispatch: true,
+                ..
+            } if interface == PacketInterfaceId::new(9) && actual == token
+        ));
+    }
+
     struct Allow;
 
     impl TxAuthorizationPolicy for Allow {
@@ -1538,6 +1708,8 @@ mod tests {
             OrdinaryRouterStep::Routed {
                 slot: expected_slot,
                 interface: PacketInterfaceId::new(9),
+                protocol_token: None,
+                first_dispatch: false,
             }
         );
 

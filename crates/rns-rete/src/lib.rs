@@ -21,6 +21,8 @@ use reticulum_rns_conformance::{CandidateMetadata, CandidateStatus};
 pub mod capacity;
 pub mod embedded;
 
+#[cfg(any(test, feature = "conformance"))]
+pub use embedded::ConformanceLinkSnapshot;
 pub use embedded::{
     AdmissionCounters, AnnounceAdmissionError, DestinationRegistrationError, EmbeddedNode,
     EmbeddedNodeConfig, EmbeddedNodeMetrics, EmbeddedSendError, InboundData, InboundDataProjection,
@@ -31,12 +33,16 @@ pub use embedded::{
     ReceiptTerminalReservation, ReceiptTerminalSink, ReceiptTickReport, RouteSnapshot,
     TransportCounters, TxPacket, TxTarget, project_inbound_data,
 };
-pub use rete_core::{DestHash, DestType, Identity, IdentityHash, LinkId, Packet, PacketType};
+pub use rete_core::{
+    DestHash, DestType, Identity, IdentityHash, LinkId, MonotonicDuration, MonotonicInstant,
+    Packet, PacketType,
+};
+pub use rete_stack::node_core::{OutboundDispatchInterval, OutboundProtocolToken};
 pub use rete_stack::{DestinationType, Direction, NodeEvent};
 pub use rete_transport::{AnnounceError, AnnounceInfo, LinkState};
 
 /// Reviewed Rete integration-fork source revision.
-pub const SOURCE_REVISION: &str = "14c7b4955a1ff6903e87cc40b42498f7869b6f4f";
+pub const SOURCE_REVISION: &str = "90570cafc812b3025011cb690ec74a27f287cb3f";
 
 /// Initial table capacities used only to obtain comparable Phase-0 numbers.
 pub mod probe_capacity {

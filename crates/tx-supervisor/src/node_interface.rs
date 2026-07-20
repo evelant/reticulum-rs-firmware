@@ -12,11 +12,12 @@ use reticulum_interface_router::{
 };
 use reticulum_node_core::{
     AcknowledgeError, AnnounceAdmissionError, AnnounceEmissionTime, AttemptHandle,
-    CapacitySnapshot, DestinationHash, IngressReport, MaintenanceReport, MonotonicMillis,
-    MonotonicSeconds, NodeActions, NodeCore, OrdinaryActionCapacitySnapshot,
-    OrdinaryPreparedPacket, PacketInterfaceId, PreparedPacket, ReceiptCorrelationError,
-    TerminalAttempt, TerminalAttempts, TxAuthorizationPolicy, TxLeaseDeadline, TxMaintenanceReport,
-    TxOwnerScope, TxRecoveryObservation,
+    CapacitySnapshot, DestinationHash, IngressReport, MaintenanceReport, MonotonicInstant,
+    MonotonicMillis, MonotonicSeconds, NodeActions, NodeCore, OrdinaryActionCapacitySnapshot,
+    OrdinaryPreparedPacket, OutboundDispatchInterval, OutboundProtocolToken, PacketInterfaceId,
+    PreparedPacket, ReceiptCorrelationError, TerminalAttempt, TerminalAttempts,
+    TxAuthorizationPolicy, TxLeaseDeadline, TxMaintenanceReport, TxOwnerScope,
+    TxRecoveryObservation,
 };
 use reticulum_tx_handoff::{
     DataPairedPermitHandoff, DispatcherPermitHandoff, OrdinaryDispatcherPermitHandoff,
@@ -680,11 +681,15 @@ mod tests {
             .try_send(authority, sealed)
             .expect("completed packet queue has capacity");
 
-        let processed =
-            match supervisor.step_ingress(MonotonicSeconds::new(30), admission(), &mut rng) {
-                NodeInterfaceIngressStep::Processed(processed) => processed,
-                _ => panic!("current queued ingress must process"),
-            };
+        let processed = match supervisor.step_ingress_at(
+            MonotonicSeconds::new(30),
+            MonotonicInstant::from_micros(30_125_000),
+            admission(),
+            &mut rng,
+        ) {
+            NodeInterfaceIngressStep::Processed(processed) => processed,
+            _ => panic!("current queued ingress must process"),
+        };
         assert_eq!(processed.buffer(), first_id);
         assert_eq!(processed.recycle_fault(), None);
         assert_eq!(processed.actions_backpressured(), None);
@@ -1250,13 +1255,17 @@ mod tests {
             NodeInterfaceSupervisorTransition::Data(DataRouterStep::Completion(_))
         ));
 
-        let accepted =
-            match supervisor.tick(MonotonicSeconds::new(1_000_000), admission(), &mut rng) {
-                NodeInterfaceTickResult::Accepted(accepted) => accepted,
-                NodeInterfaceTickResult::ActionOfferRejected(_) => {
-                    panic!("idle ordinary coordinator accepts tick actions")
-                }
-            };
+        let accepted = match supervisor.tick_at(
+            MonotonicSeconds::new(1_000_000),
+            MonotonicInstant::from_micros(1_000_000_875_000),
+            admission(),
+            &mut rng,
+        ) {
+            NodeInterfaceTickResult::Accepted(accepted) => accepted,
+            NodeInterfaceTickResult::ActionOfferRejected(_) => {
+                panic!("idle ordinary coordinator accepts tick actions")
+            }
+        };
         let report = accepted.into_report();
         assert_eq!(report.timed_out_attempts, 1);
         assert_eq!(report.correlation_fault, None);
@@ -1898,6 +1907,9 @@ impl NodeInterfaceTickActionFailure {
 
 /// Result of one protocol timer tick and immediate action admission attempt.
 #[must_use = "timer actions and correlation faults require explicit handling"]
+// The portable no_std boundary must return the exact allocation-backed action
+// owner inline on rejection; boxing would hide the ownership contract.
+#[allow(clippy::large_enum_variant)]
 pub enum NodeInterfaceTickResult {
     /// Every returned action entered the ordinary coordinator.
     Accepted(NodeInterfaceTickAccepted),
@@ -1908,6 +1920,9 @@ pub enum NodeInterfaceTickResult {
 /// Result of flushing queued local announces and immediately admitting their
 /// exact action envelope.
 #[must_use = "flushed announce actions require explicit admission handling"]
+// The portable no_std boundary must return the exact allocation-backed action
+// owner inline on rejection; boxing would hide the ownership contract.
+#[allow(clippy::large_enum_variant)]
 pub enum NodeInterfaceAnnounceFlushResult {
     /// Every flushed announce action entered the ordinary coordinator.
     Accepted,
@@ -2339,6 +2354,24 @@ where
         self.router.set_online(lease, online)
     }
 
+    /// Confirm the bounded synchronous egress-handoff interval for one
+    /// token-bearing ordinary protocol packet.
+    ///
+    /// This edge is successful interface/router acceptance, not physical
+    /// transmission completion. The first matching serialized fan-out hop
+    /// wins; callers use the `first_dispatch` field on the corresponding
+    /// [`OrdinaryRouterStep::Routed`] transition to distinguish a rejected
+    /// first confirmation from an expected false result on a later hop.
+    pub fn confirm_outbound_protocol(
+        &mut self,
+        token: OutboundProtocolToken,
+        interface: PacketInterfaceId,
+        interval: OutboundDispatchInterval,
+    ) -> bool {
+        self.node
+            .confirm_outbound_protocol(token, interface, interval)
+    }
+
     /// Test-only generation change used to exercise stale completion recovery.
     ///
     /// Production code cannot safely reuse a generation while native RNS path
@@ -2425,6 +2458,25 @@ where
     where
         R: RngCore + CryptoRng,
     {
+        self.step_ingress_at(
+            rns_now,
+            MonotonicInstant::from_secs(rns_now.get()),
+            admission,
+            rng,
+        )
+    }
+
+    /// Precise Link-clock variant of [`Self::step_ingress`].
+    pub fn step_ingress_at<R>(
+        &mut self,
+        rns_now: MonotonicSeconds,
+        link_now: MonotonicInstant,
+        admission: OrdinaryRouterAdmission,
+        rng: &mut R,
+    ) -> NodeInterfaceIngressStep
+    where
+        R: RngCore + CryptoRng,
+    {
         if let Some(pending) = self.pending_ingress_recycle.take() {
             let buffer = pending.status.buffer;
             return match self.router.try_return_ingress_buffer(pending.packet) {
@@ -2467,7 +2519,9 @@ where
             Ok(Some(ingress)) => {
                 let interface = ingress.interface();
                 let packet = ingress.into_packet();
-                let result = self.node.ingest(packet.as_ref(), rns_now, interface, rng);
+                let result =
+                    self.node
+                        .ingest_at(packet.as_ref(), rns_now, link_now, interface, rng);
                 self.finish_queued_ingress(result, packet, admission)
             }
             Ok(None) => NodeInterfaceIngressStep::Idle,
@@ -2640,7 +2694,21 @@ where
     where
         R: RngCore + CryptoRng,
     {
-        let mut report = self.node.tick(now, rng);
+        self.tick_at(now, MonotonicInstant::from_secs(now.get()), admission, rng)
+    }
+
+    /// Precise Link-clock variant of [`Self::tick`].
+    pub fn tick_at<R>(
+        &mut self,
+        now: MonotonicSeconds,
+        link_now: MonotonicInstant,
+        admission: OrdinaryRouterAdmission,
+        rng: &mut R,
+    ) -> NodeInterfaceTickResult
+    where
+        R: RngCore + CryptoRng,
+    {
+        let mut report = self.node.tick_at(now, link_now, rng);
         let actions = mem::take(&mut report.actions);
         if Self::actions_are_empty(&actions) {
             return NodeInterfaceTickResult::Accepted(NodeInterfaceTickAccepted { report });

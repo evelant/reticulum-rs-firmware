@@ -33,7 +33,8 @@ use reticulum_rns_rete::{
 };
 pub use reticulum_rns_rete::{
     InboundData, InboundDataProjection, IngressDisposition, IngressMetadata, IngressReport,
-    NodeActions, PacketType, project_inbound_data,
+    MonotonicInstant, NodeActions, OutboundDispatchInterval, OutboundProtocolToken, PacketType,
+    project_inbound_data,
 };
 use sha2::{Digest, Sha256};
 
@@ -2308,6 +2309,22 @@ impl<
         DestinationHash::new(*self.rns.destination_hash().as_bytes())
     }
 
+    /// Confirm the synchronous interface-egress handoff for one token-bearing
+    /// LINKREQUEST or LRPROOF packet.
+    ///
+    /// The first matching interface confirmation wins. A `false` return can
+    /// therefore mean either that the token/interface/state was rejected or
+    /// that an earlier serialized fan-out hop already confirmed this packet.
+    pub fn confirm_outbound_protocol(
+        &mut self,
+        token: OutboundProtocolToken,
+        interface: PacketInterfaceId,
+        interval: OutboundDispatchInterval,
+    ) -> bool {
+        self.rns
+            .confirm_outbound_protocol(token, interface.into_rns(), interval)
+    }
+
     /// Caller-supplied identity of this in-memory node-owner incarnation.
     pub const fn instance_id(&self) -> NodeInstanceId {
         self.instance
@@ -3113,11 +3130,35 @@ impl<
         interface: PacketInterfaceId,
         rng: &mut R,
     ) -> Result<IngressReport, ReceiptCorrelationError> {
+        self.ingest_at(
+            raw,
+            now,
+            MonotonicInstant::from_secs(now.get()),
+            interface,
+            rng,
+        )
+    }
+
+    /// Precise Link-clock variant of [`Self::ingest`].
+    pub fn ingest_at<R: RngCore + CryptoRng>(
+        &mut self,
+        raw: &[u8],
+        now: MonotonicSeconds,
+        link_now: MonotonicInstant,
+        interface: PacketInterfaceId,
+        rng: &mut R,
+    ) -> Result<IngressReport, ReceiptCorrelationError> {
         let (result, fault) = {
             let (rns, attempts) = (&mut self.rns, &mut self.attempts);
             let mut sink = AttemptReceiptSink::new(attempts);
-            let result =
-                rns.ingest_with_receipt_sink(raw, now.get(), interface.into_rns(), rng, &mut sink);
+            let result = rns.ingest_with_receipt_sink_at(
+                raw,
+                now.get(),
+                link_now,
+                interface.into_rns(),
+                rng,
+                &mut sink,
+            );
             (result, sink.fault)
         };
 
@@ -3139,10 +3180,20 @@ impl<
         now: MonotonicSeconds,
         rng: &mut R,
     ) -> MaintenanceReport {
+        self.tick_at(now, MonotonicInstant::from_secs(now.get()), rng)
+    }
+
+    /// Precise Link-clock variant of [`Self::tick`].
+    pub fn tick_at<R: RngCore + CryptoRng>(
+        &mut self,
+        now: MonotonicSeconds,
+        link_now: MonotonicInstant,
+        rng: &mut R,
+    ) -> MaintenanceReport {
         let (report, fault) = {
             let (rns, attempts) = (&mut self.rns, &mut self.attempts);
             let mut sink = AttemptReceiptSink::new(attempts);
-            let report = rns.tick_with_receipt_sink(now.get(), rng, &mut sink);
+            let report = rns.tick_with_receipt_sink_at(now.get(), link_now, rng, &mut sink);
             (report, sink.fault)
         };
         MaintenanceReport {
@@ -5416,6 +5467,43 @@ mod tests {
         assert!(report.actions.packets.is_empty());
         assert_eq!(sender.capacities().receipts_used, 1);
         assert_eq!(sender.capacities().dispatches_queued, 1);
+    }
+
+    #[test]
+    fn outbound_protocol_confirmation_delegates_the_exact_interface_and_interval() {
+        let mut initiator = node::<4, 0>(40, "protocol-confirm-initiator");
+        let mut responder = node::<4, 0>(41, "protocol-confirm-responder");
+        let responder_destination = responder.rns.destination_hash();
+        assert!(
+            responder
+                .rns
+                .set_accepts_links(&responder_destination, true)
+        );
+        let mut rng = CounterRng::default();
+        let (request, _) = initiator
+            .rns
+            .initiate_link(responder_destination, 100, &mut rng)
+            .expect("test LINKREQUEST must construct");
+        let report = responder
+            .ingest_at(
+                request.bytes(),
+                time(100),
+                MonotonicInstant::from_micros(100_062_500),
+                PacketInterfaceId::new(7),
+                &mut rng,
+            )
+            .expect("test LINKREQUEST must not hit receipt correlation");
+        let token = report.actions.packets[0]
+            .protocol_token()
+            .expect("LRPROOF must carry a protocol timing token");
+        let interval = OutboundDispatchInterval::new(
+            MonotonicInstant::from_micros(100_125_000),
+            MonotonicInstant::from_micros(100_250_000),
+        )
+        .unwrap();
+
+        assert!(responder.confirm_outbound_protocol(token, PacketInterfaceId::new(7), interval));
+        assert!(!responder.confirm_outbound_protocol(token, PacketInterfaceId::new(7), interval));
     }
 
     #[test]

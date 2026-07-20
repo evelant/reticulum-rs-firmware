@@ -10,15 +10,23 @@ DATA/LXMF submission, client delivery, and full powered E290 qualification of
 the product image remain open.
 The permanent image's bounded source-`96e38aa` boot/interface/ordinary-TX smoke
 has passed, without controlled peer RX or DATA.
-**Rete pin:** `14c7b4955a1ff6903e87cc40b42498f7869b6f4f`
-(designated durable tag `firmware-pin-14c7b49`)
+**Rete pin:** `90570cafc812b3025011cb690ec74a27f287cb3f`
+(designated durable tag `firmware-pin-90570ca`)
 
-This exact pin has host and portable-target LRRTT validation and a build-only
-E290 package. The 776,464-byte merged image uses 710,928/6,291,456 application
-bytes (11.30%) and has SHA-256
+The preceding `14c7b4955a1ff6903e87cc40b42498f7869b6f4f` pin had host and
+portable-target LRRTT validation and a build-only E290 package. Its 776,464-byte
+merged image uses 710,928/6,291,456 application bytes (11.30%) and has SHA-256
 `7b11c6f6a3c039d46ab0117fd362920aaa40145e7f27cbc6fa0a8a84a7ab3571`.
-It has no flashed-image readback or powered proof. The source-`96e38aa` result
-above and later powered records remain bound to the revisions they name.
+It has no flashed-image readback or powered proof. The current pin needs a new
+powered run, but its build-only default E290 release is now known: text/data/BSS
+674,431/3,676/469,152 bytes (1,147,259 bytes total by GNU size), a 780,448-byte
+merged image using 714,912/6,291,456 application bytes (11.36%), ELF SHA-256
+`d370039c3872d34a74b9bbc0b52567a24be607bc01ea660b6dfbd8d5dd12072d`, and
+merged SHA-256
+`a912bb6c910c0145a9431f2a94b95a0a6560662678c457fc9c49e8641050b72c`.
+It is unflashed and unpowered because neither E290 currently enumerates. The
+source-`96e38aa` result above and later powered records
+remain bound to the revisions they name.
 
 At this pin, native ingress distinguishes exact path/reverse/Link forwarding
 from genuine propagation. `PacketRouting::ExactInterface(id)` maps to the
@@ -45,11 +53,12 @@ carry typed owned/relay `LinkTableFull`, `ReverseTableFull`, and
 reconstructing failure from counters. Foreign non-ANNOUNCE H2 packets are
 filtered before state mutation, while H2 ANNOUNCE remains eligible for normal
 announce validation. Relay-Link occupancy is exposed separately from owned
-Links. The deterministic 235-check project conformance run includes 40
-released-Python LRRTT MessagePack checks and a complete
+Links. The previously validated deterministic 235-check project conformance run
+included 40 released-Python LRRTT MessagePack checks and a complete
 three-node A--B--C Link handshake, channel DATA and proof flow over two exact
 relay interfaces, pre-dedup wrong-hop LRPROOF rejection, 8 fresh-ciphertext
-retry/receipt-replacement checks, plus 40 exact keepalive lifecycle checks.
+retry/receipt-replacement checks, plus 40 exact keepalive lifecycle checks. The
+current schema-2 lifecycle/candidate runner passes 647 checks.
 
 Locally owned Link output has a separate authenticated binding. A responder
 binds to LINKREQUEST ingress. An initiator's learned path selects the initial
@@ -69,13 +78,29 @@ without an expectation and records the post-ingress hop only from
 authenticated, decrypted LRRTT. Pending-handshake payload parity is now
 covered: Rete emits canonical MessagePack float64, accepts Python u-msgpack's
 numeric scalar families and first-object/trailing-byte behavior, and uses the
-greater local or peer RTT with Python ordering. A malformed or nonnumeric
-authenticated LRRTT is rejected before hop or Active-state mutation, emits a
-best-effort encrypted `LINKCLOSE` on the bound interface, reclaims Link-owned
-state, and produces one close without replaying the teardown. Active-responder
-repeat LRRTT remains a nonblocking gap until immutable `request_time` is
-retained, and RTT timing remains whole-second `u64`/`f32` rather than Python's
-double-precision wall-clock measurement.
+greater local or peer RTT with Python ordering. The request anchor is immutable
+and precise Link time uses microsecond `MonotonicInstant`/
+`MonotonicDuration` values with binary64 RTT. An opaque, non-repeating
+eight-byte token binds LINKREQUEST or LRPROOF output to the first successful
+interface confirmation. The initiator uses the confirmed egress interval's
+start; the responder uses its completion. This is the generic ordinary-router/
+interface acceptance boundary, not physical LoRa RF `TxDone`.
+
+Fresh authenticated LRRTT is valid in `Handshake`, `Active`, or `Stale`.
+Initial activation emits establishment once; Active updates and Stale
+reactivation emit `LinkRttUpdated` without duplicating establishment counters.
+Exact raw replay is deduplicated. Authenticated malformed or nonnumeric LRRTT
+tears down all three states, with `links_failed` incremented only for
+Handshake. Zero RTT is retained with 5-second keepalive and 10-second stale
+floors; otherwise stale grace is `4 * RTT + 5 seconds`. Rete intentionally
+authenticates before liveness mutation, so a corrupt stale LRRTT cannot revive
+the Link even though released Python performs its liveness update first.
+
+The adapter passes precise `*_at` ingress/tick values and confirms at the
+transport-neutral ordinary-router handoff. Rete's upstream Tokio and Embassy
+runners remain coarse/unconfirmed. Rete also uses one pre-decrypt ingress
+sample across one bounded synchronous handler, while Python's method samples
+three times internally.
 
 This native binding is an interface slot, not a shared-instance client
 endpoint. Synchronous Tokio `Hub` output can retain the source client, but
@@ -87,9 +112,10 @@ initiator alone probes after both a full inbound-silence interval and a full
 interval since its previous probe; deterministic valid repeats avoid dedup only
 after bound-interface admission, lifecycle traffic emits no
 application event, and automatic output preflights and retains the bound route
-before committing its timer. Stale starts after two intervals and keeps the
-full transition-relative five-second revival window; valid bound Link traffic
-revives it. Channel send preflights MDU, pending-window and receipt capacity;
+before committing its timer. Stale starts after two intervals and keeps a
+transition-relative `4 * RTT + 5 seconds` revival window (five seconds when RTT
+is zero); valid bound Link traffic revives it. Channel send preflights MDU,
+pending-window and receipt capacity;
 maintenance discovers immutable retry tokens; NodeCore preflights the bound
 route; and a fresh-ciphertext retry atomically replaces the envelope's sole
 receipt before retry/window/timestamp state commits. Obsolete proofs fail
@@ -307,8 +333,9 @@ transmitted”, not proof that hardware started or completed RF.
 ## Preparation transaction
 
 `prepare_data_into_slot()` accepts a registered available buffer, a
-`PrepareDataRequest`, and entropy. The request keeps the RNS whole-second clock
-separate from the packet-owner millisecond clock and includes the destination,
+`PrepareDataRequest`, and entropy. The DATA/receipt path keeps its coarse RNS
+deadline clock separate from both precise microsecond Link timing and the
+packet-owner millisecond clock. The request includes the destination,
 plaintext, `owner_now`, `TxLeaseDeadline`, and a synchronous snapshot of
 enabled packet interfaces:
 

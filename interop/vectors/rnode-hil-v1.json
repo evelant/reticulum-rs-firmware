@@ -2,7 +2,7 @@
   "generator": {
     "command": "python interop/python/generate_rnode_hil_vectors.py",
     "deterministic": true,
-    "rns_vectors_sha256": "c8d0e67f2503db0bdc1ae693d45cd864f98b5dbbb0d6d0957d0e3fdcacf5878c",
+    "rns_vectors_sha256": "dc0d41649a5acf58685146dd8d2fd22ba5d61998a8d490e855e3b7ee593ae8e7",
     "script": "interop/python/generate_rnode_hil_vectors.py",
     "source_sha256": "6cc51e34c321c068fcedd9e4e174fb4d381aa4989ceac976806b48f16d51226f"
   },

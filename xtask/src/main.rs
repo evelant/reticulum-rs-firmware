@@ -64,6 +64,17 @@ fn check_rnode_hil_vectors() -> ExitCode {
     let root = workspace_root();
     let python = env::var_os("PYTHON").unwrap_or_else(|| "python3".into());
     let generator = root.join("interop/python/generate_rnode_hil_vectors.py");
+    let mut python_paths = vec![root.join("interop/python")];
+    if let Some(existing) = env::var_os("PYTHONPATH") {
+        python_paths.extend(env::split_paths(&existing));
+    }
+    let python_path = match env::join_paths(python_paths) {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("could not construct the RNode HIL Python path: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     let vector_status = Command::new(&python)
         .current_dir(&root)
@@ -94,7 +105,7 @@ fn check_rnode_hil_vectors() -> ExitCode {
             "test_*.py",
             "-v",
         ])
-        .env("PYTHONPATH", root.join("interop/python"))
+        .env("PYTHONPATH", python_path)
         .status();
     match test_status {
         Ok(status) if status.success() => {}
@@ -4484,8 +4495,8 @@ fn forbidden_radio_tx_dispatch_closure_category(
 
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 const RETE_GIT_SOURCE: &str = "git+https://github.com/evelant/rete.git?rev=\
-14c7b4955a1ff6903e87cc40b42498f7869b6f4f#\
-14c7b4955a1ff6903e87cc40b42498f7869b6f4f";
+90570cafc812b3025011cb690ec74a27f287cb3f#\
+90570cafc812b3025011cb690ec74a27f287cb3f";
 
 #[derive(Clone, Copy)]
 enum ReviewedClosureSource {

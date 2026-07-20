@@ -7,7 +7,7 @@
 
 use core::fmt;
 
-use reticulum_rns_rete::NodeActions;
+use reticulum_rns_rete::{NodeActions, OutboundProtocolToken};
 
 use crate::{
     InterfaceSet, MonotonicMillis, PACKET_CAPACITY, PacketInterfaceId, TxAuthorizationCandidate,
@@ -51,6 +51,7 @@ pub struct OrdinaryPreparedPacket {
     target: TxTarget,
     interface: PacketInterfaceId,
     remaining_interfaces: InterfaceSet,
+    protocol_token: Option<OutboundProtocolToken>,
     deadline: TxLeaseDeadline,
 }
 
@@ -83,6 +84,11 @@ impl OrdinaryPreparedPacket {
     /// Interfaces still awaiting a serialized fan-out attempt.
     pub const fn remaining_interfaces(self) -> InterfaceSet {
         self.remaining_interfaces
+    }
+
+    /// Opaque LINKREQUEST or LRPROOF dispatch marker, when present.
+    pub const fn protocol_token(self) -> Option<OutboundProtocolToken> {
+        self.protocol_token
     }
 
     /// Monotonic deadline for this complete packet owner.
@@ -470,6 +476,11 @@ impl<'a> OrdinaryTxJob<'a> {
     /// Packet-owner deadline.
     pub const fn deadline(&self) -> TxLeaseDeadline {
         self.packet.deadline
+    }
+
+    /// Opaque LINKREQUEST or LRPROOF dispatch marker, when present.
+    pub const fn protocol_token(&self) -> Option<OutboundProtocolToken> {
+        self.packet.protocol_token
     }
 
     /// Consume routed ownership into a permit-pending owner and scalar request.
@@ -1481,6 +1492,7 @@ impl<const PACKET_BUFFERS: usize> OrdinaryActionOwner<PACKET_BUFFERS> {
                 target,
                 interface,
                 remaining_interfaces: route.remaining(),
+                protocol_token: packet.protocol_token(),
                 deadline: request.deadline,
             });
         }
@@ -1509,11 +1521,12 @@ impl<const PACKET_BUFFERS: usize> OrdinaryActionOwner<PACKET_BUFFERS> {
         for (packet_index, (packet, buffer_owner)) in
             packets.into_iter().zip(buffers.iter_mut()).enumerate()
         {
-            let (bytes, native_target) = packet.into_parts();
+            let (bytes, native_target, protocol_token) = packet.into_parts();
             let prepared = prepared_packets[packet_index]
                 .expect("reservation retained one metadata owner per packet");
             debug_assert_eq!(usize::from(prepared.packet_len), bytes.len());
             debug_assert_eq!(prepared.target, TxTarget::from_rns(native_target));
+            debug_assert_eq!(prepared.protocol_token, protocol_token);
             let buffer: &'a mut OrdinaryPacketBuffer = buffer_owner;
             buffer.bytes[..bytes.len()].copy_from_slice(&bytes);
             jobs[packet_index] = Some(OrdinaryTxJob {
@@ -1685,6 +1698,7 @@ impl<const PACKET_BUFFERS: usize> OrdinaryActionOwner<PACKET_BUFFERS> {
                 target,
                 interface,
                 remaining_interfaces: route.remaining(),
+                protocol_token: packet.protocol_token(),
                 deadline: request.deadline,
             });
         }
@@ -1719,11 +1733,12 @@ impl<const PACKET_BUFFERS: usize> OrdinaryActionOwner<PACKET_BUFFERS> {
             let buffer = pool.parked[pool_index]
                 .take()
                 .expect("selected owner remained parked until ownership transfer");
-            let (bytes, native_target) = packet.into_parts();
+            let (bytes, native_target, protocol_token) = packet.into_parts();
             let prepared = prepared_packets[packet_index]
                 .expect("reservation retained one metadata owner per packet");
             debug_assert_eq!(usize::from(prepared.packet_len), bytes.len());
             debug_assert_eq!(prepared.target, TxTarget::from_rns(native_target));
+            debug_assert_eq!(prepared.protocol_token, protocol_token);
             buffer.bytes[..bytes.len()].copy_from_slice(&bytes);
             jobs[packet_index] = Some(OrdinaryTxJob {
                 buffer,
@@ -3657,5 +3672,47 @@ mod tests {
         assert_eq!(after.attempts_used, 0);
         assert_eq!(after.dispatches_used, 0);
         assert_eq!(after.packet_buffers_registered, 1);
+    }
+
+    #[test]
+    fn protocol_token_survives_serialized_fanout() {
+        let mut rng = CounterRng::default();
+        let mut initiator = rns_node(90, EmbeddedNodeConfig::endpoint());
+        let responder = rns_node(91, EmbeddedNodeConfig::endpoint());
+        let (request_packet, _) = initiator
+            .initiate_link(responder.destination_hash(), 1, &mut rng)
+            .expect("test LINKREQUEST must construct");
+        let token = request_packet
+            .protocol_token()
+            .expect("LINKREQUEST must carry a protocol timing token");
+        let mut actions = NodeActions::default();
+        actions.packets.push(request_packet);
+
+        let mut core = node(92, NodeRole::Endpoint);
+        let mut owner = core.take_ordinary_action_owner::<1>().unwrap();
+        let mut buffer = OrdinaryPacketBuffer::new();
+        owner.register_packet_buffer(&mut buffer).unwrap();
+        let mut buffers = [&mut buffer];
+        let mut batch = owner
+            .admit(
+                actions,
+                &mut buffers,
+                request(10, 100, interfaces((1 << 2) | (1 << 9))),
+            )
+            .unwrap();
+
+        let first = batch.take_next_packet().unwrap();
+        assert_eq!(first.protocol_token(), Some(token));
+        assert_eq!(first.interface(), PacketInterfaceId::new(2));
+
+        let second = match complete_unpermitted(&mut owner, first, owner_time(20)).unwrap() {
+            OrdinaryCompletionDisposition::Next(job) => job,
+            OrdinaryCompletionDisposition::Returned(_) => panic!("fan-out ended early"),
+            OrdinaryCompletionDisposition::Quarantined(_) => {
+                panic!("valid token-bearing fan-out quarantined")
+            }
+        };
+        assert_eq!(second.protocol_token(), Some(token));
+        assert_eq!(second.interface(), PacketInterfaceId::new(9));
     }
 }

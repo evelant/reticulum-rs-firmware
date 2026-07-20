@@ -12,8 +12,8 @@ API stay in this project; generic protocol and bounded-state corrections are
 the candidates for upstream review.
 
 The current firmware pin is
-`14c7b4955a1ff6903e87cc40b42498f7869b6f4f` (designated durable tag
-`firmware-pin-14c7b49`). It retains
+`90570cafc812b3025011cb690ec74a27f287cb3f` (designated durable tag
+`firmware-pin-90570ca`). It retains
 caller-owned DATA preparation, explicit receipt-capacity errors, fixed-capacity
 terminal sinks, exact DATA/channel terminal candidates, allocation-atomic
 proof/timeout delivery, full-hash receipt cancellation and core-aware LXMF
@@ -33,8 +33,9 @@ known path's hops when an initiator creates a Link, uses the
 `PATHFINDER_M = 128` wildcard for an unknown path, rejects LRPROOF hop mismatch
 before deduplication/state mutation, and teaches a responder its post-ingress
 hop only from authenticated, decrypted LRRTT. It also carries pending-handshake
-MessagePack LRRTT parity and authenticated-malformed teardown, plus the exact
-unencrypted, role-specific, full-interval keepalive state machine,
+MessagePack LRRTT parity, microsecond/binary64 dispatch-confirmed timing,
+Handshake/Active/Stale refresh and authenticated-malformed teardown, plus the
+exact unencrypted, role-specific, full-interval keepalive state machine,
 deterministic-packet dedup exception, internal NodeCore lifecycle result, bound
 automatic routing, and transition-relative stale revival described below. The
 same pin makes initial Channel send and fresh-ciphertext retry receipt-atomic,
@@ -45,15 +46,18 @@ The legacy LXMF event handler without mutable core access still leaves siblings
 to timeout.
 This candidate remains on the project fork; no issue or pull request was opened
 for the newer lifecycle or routing work, and publication still requires direct
-user approval. It has host and portable-target LRRTT validation, but no new
-powered qualification. Its current E290 default/HIL metrics are build-only,
-with no flashed-image readback or powered proof; older artifact records remain
-bound to their recorded revisions.
+user approval. The preceding pin has host/portable and build-only E290
+evidence. The current pin passes its root host/portable validation, 647-check
+schema-2 conformance run, and default/HIL E290 build gates. Its default package
+is a 780,448-byte merged image using 714,912/6,291,456 application bytes
+(11.36%); the runtime-measurement HIL package is 792,048 bytes using
+726,512/6,291,456 (11.55%). Both are build-only, unflashed, and unpowered
+because neither E290 currently enumerates; older
+artifact records remain bound to their recorded revisions.
 
 ## 1. Transactional Link admission — completed for owned and H2 relay paths
 
-**Priority:** retain regression coverage; finish H1 interface roles and the
-remaining active-responder/timing LRRTT parity
+**Priority:** retain regression coverage and finish H1 interface roles
 
 Owned-Link admission is adopted in integration-fork revision
 `5ce8c4e437d3f2f07d302bc366ff06bacd6aff2d` and offered upstream in
@@ -78,10 +82,11 @@ and missing-route outcomes. Full admission returns typed
 Link/raw/dedup state except for the intentional replay-filter record. Missing
 routes leave no orphan Link entry. Relay-Link count is observable independently
 from locally owned Links. Focused tests cover full, existing, missing-route,
-fresh-retry and duplicate-retry behavior, and the 235-check project runner
-completes an A--B--C LINKREQUEST/LRPROOF/LRRTT/channel/proof flow, includes 8
+fresh-retry and duplicate-retry behavior. The previous 235-check project runner
+completed an A--B--C LINKREQUEST/LRPROOF/LRRTT/channel/proof flow, including 8
 Channel retry/receipt-replacement checks, 40 released-Python LRRTT MessagePack
-checks, and 40 exact keepalive lifecycle checks.
+checks, and 40 exact keepalive lifecycle checks. The schema-2 lifecycle/
+candidate suite does not yet have a final published count.
 
 The remaining product gate is role classification, not relay capacity.
 Arbitrary remote H1 LINKREQUEST stays disabled until an interface role can
@@ -187,25 +192,36 @@ asynchronous owned-Link output broadcasts to the other clients on the bound
 slot. Replace the scalar slot with endpoint-aware identity including reconnect
 generation before claiming Python-style per-client Link isolation.
 
-The responder currently emits `LinkEstablished` immediately after receiving a
-LINKREQUEST, while its state is still `Handshake` and data sending returns
-`LinkNotActive`. It emits a second `LinkEstablished` after LRRTT activates the
-Link. Prefer a distinct pending/request event, or reserve `LinkEstablished`
-for the transition to `Active`.
+The current pin reserves `LinkEstablished` for the first transition to
+`Active`. The project adapter retains a defensive suppression guard, but it is
+now expected to observe zero premature native events.
 
-Expected-hop admission and pending-handshake LRRTT payload interoperability are
+Expected-hop admission and LRRTT payload/lifecycle interoperability are
 resolved at this pin. Rete emits canonical MessagePack float64, accepts the
 numeric scalar families and first-object/trailing-byte behavior returned by
 Python's u-msgpack, and selects the greater local or peer RTT with Python
-ordering, including non-finite values. A malformed or nonnumeric authenticated
-LRRTT is rejected before establishment or expected-hop mutation, emits a
-best-effort encrypted `LINKCLOSE` on the bound interface, unconditionally
-reclaims Link-owned state, and produces one terminal close without replay
-duplication. Two nonblocking parity items remain: Python reprocesses LRRTT on
-an Active responder, which requires immutable `request_time` rather than
-Rete's mutable `last_outbound`, and Rete still measures RTT in whole-second
-`u64` time and stores `f32` rather than using Python's double-precision
-wall-clock measurement.
+ordering, including non-finite values. It retains the immutable request anchor,
+uses microsecond `MonotonicInstant`/`MonotonicDuration`, and stores RTT as
+binary64. Opaque, non-repeating eight-byte tokens correlate LINKREQUEST and
+LRPROOF output with only the first successful interface confirmation. The
+initiator anchors at the egress interval start and responder at completion;
+this means router/interface handoff, not physical RF `TxDone`.
+
+Fresh authenticated LRRTT is processed in `Handshake`, `Active`, and `Stale`.
+Repeats emit `LinkRttUpdated` without a second establishment event or statistic,
+and exact raw replay remains deduplicated. Authenticated malformed LRRTT tears
+down any of those states; only Handshake increments `links_failed`. Zero RTT
+retains the 5-second keepalive/10-second stale floor, while dynamic stale grace
+is `4 * RTT + 5 seconds`. Authentication deliberately precedes liveness
+mutation, so corrupt stale LRRTT does not revive Rete even though released
+Python updates liveness first.
+
+The core accepts one precise pre-decrypt ingress sample for its bounded
+synchronous handler, rather than reproducing Python's three internal samples.
+The firmware adapter uses precise `*_at` paths and confirms ordinary-router
+acceptance. The generic upstream Tokio/Embassy runners remain coarse and
+unconfirmed, so adopting this dispatch contract there remains contribution
+work.
 
 Generic `build_link_data_packet()` users also do not update `last_outbound`.
 Best-effort Link data, identify, request and response traffic can therefore
@@ -219,9 +235,8 @@ receives LRPROOF, or a responder that never receives LRRTT, can therefore hold
 a bounded owned-Link slot indefinitely. Add explicit establishment deadlines,
 timeout results/counters and release-then-fresh-retry coverage.
 
-The local adapter suppresses premature establishment events and records the
-timestamp after best-effort Link data, but the native behavior needs its own
-tests and repair.
+The local adapter's old establishment suppression remains as an expected-zero
+defensive invariant. It still records the timestamp after best-effort Link data.
 
 Keepalive wire, role, timer and stale-revival behavior is resolved at the
 current pin. Rete emits exact unencrypted 20-byte Link DATA frames: only the
@@ -230,9 +245,10 @@ than a full interval since its previous probe; only the responder returns
 `0xfe`. Valid role-specific deterministic repeats bypass dedup only after the
 bound-interface gate. NodeCore consumes them without application events and
 preflights/carries `BoundInterface` before automatic construction commits the
-probe timestamp. Stale begins after two keepalive intervals and retains a full
-five-second revival window from the actual transition/final probe; keepalives
-and other valid bound Link traffic revive it. Strict malformed, wrong-role and
+probe timestamp. Stale begins after two keepalive intervals and retains a
+`4 * RTT + 5 seconds` revival window from the actual transition/final probe
+(five seconds when RTT is zero); keepalives and other valid bound Link traffic
+revive it. Strict malformed, wrong-role and
 legacy encrypted forms do not refresh liveness.
 
 Automatic watchdog timeout remains a separate residual: `Transport::tick()`
@@ -469,8 +485,8 @@ Make DATA preparation one transaction:
    receipt and entropy state.
 
 The generic fix is now retained by project pin
-`14c7b4955a1ff6903e87cc40b42498f7869b6f4f`, with designated fork tag
-`firmware-pin-14c7b49`. It returns caller-owned packet metadata plus a full
+`90570cafc812b3025011cb690ec74a27f287cb3f`, with designated fork tag
+`firmware-pin-90570ca`. It returns caller-owned packet metadata plus a full
 receipt token, reports registration and output-allocation failures, and
 atomically removes validated and timed-out receipts only after reserving their
 exact kind/full-hash terminal candidate. Link-typed channel proofs are resolved

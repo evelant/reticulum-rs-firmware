@@ -9,7 +9,7 @@
 //! construction.
 
 use rand_core::{CryptoRng, RngCore};
-use rete_core::{DestHash, LinkId};
+use rete_core::{DestHash, LinkId, MonotonicInstant};
 use rete_stack::{NodeCore, OutboundPacket};
 use rete_transport::{HeaplessStorage, SendError};
 
@@ -160,6 +160,7 @@ impl core::fmt::Display for LinkAdmissionError {
 /// `SendError::LinkTableFull`, and the retained-state check remains a defensive
 /// invariant. This guard is safe because a `NodeCore` is mutably borrowed for
 /// the entire operation.
+#[cfg(test)]
 pub(crate) fn try_initiate_heapless_link<
     R: RngCore + CryptoRng,
     const P: usize,
@@ -172,11 +173,34 @@ pub(crate) fn try_initiate_heapless_link<
     now: u64,
     rng: &mut R,
 ) -> Result<(OutboundPacket, LinkId), LinkAdmissionError> {
+    try_initiate_heapless_link_at(
+        node,
+        destination,
+        now,
+        MonotonicInstant::from_secs(now),
+        rng,
+    )
+}
+
+/// Guarded Link initiation with a precise monotonic request origin.
+pub(crate) fn try_initiate_heapless_link_at<
+    R: RngCore + CryptoRng,
+    const P: usize,
+    const A: usize,
+    const D: usize,
+    const L: usize,
+>(
+    node: &mut NodeCore<HeaplessStorage<P, A, D, L>>,
+    destination: DestHash,
+    now: u64,
+    link_now: MonotonicInstant,
+    rng: &mut R,
+) -> Result<(OutboundPacket, LinkId), LinkAdmissionError> {
     if node.transport.link_count() >= L {
         return Err(LinkAdmissionError::LinkTableFull { limit: L });
     }
 
-    let result = match node.initiate_link(destination, now, rng) {
+    let result = match node.initiate_link_at(destination, now, link_now, rng) {
         Ok(result) => result,
         Err(SendError::LinkTableFull) => {
             return Err(LinkAdmissionError::LinkTableFull { limit: L });

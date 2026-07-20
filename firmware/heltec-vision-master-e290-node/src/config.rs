@@ -255,6 +255,29 @@ pub enum SupervisorTransitionDisposition {
     TerminalFailClosedDrain,
 }
 
+/// Product handling for one token-bearing router-dispatch confirmation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProtocolDispatchConfirmationDisposition {
+    /// RNS accepted this interface and timing interval.
+    Confirmed,
+    /// RNS had already accepted an earlier serialized fan-out interface.
+    EarlierFanoutConfirmed,
+    /// The first router acceptance could not confirm its required RNS edge.
+    TerminalFailClosedDrain,
+}
+
+/// Distinguish expected fan-out idempotence from a rejected first dispatch.
+pub const fn protocol_dispatch_confirmation_disposition(
+    first_dispatch: bool,
+    confirmed: bool,
+) -> ProtocolDispatchConfirmationDisposition {
+    match (first_dispatch, confirmed) {
+        (_, true) => ProtocolDispatchConfirmationDisposition::Confirmed,
+        (false, false) => ProtocolDispatchConfirmationDisposition::EarlierFanoutConfirmed,
+        (true, false) => ProtocolDispatchConfirmationDisposition::TerminalFailClosedDrain,
+    }
+}
+
 /// Classify terminal local faults without stopping forced denial/completion
 /// drainage for owners already in motion.
 pub const fn supervisor_transition_disposition(
@@ -511,6 +534,26 @@ mod tests {
                 step: OrdinaryPermitServerStep::InternalInvariant,
             }),
             SupervisorTransitionDisposition::TerminalFailClosedDrain
+        );
+    }
+
+    #[test]
+    fn protocol_dispatch_confirmation_fails_closed_only_on_the_first_hop() {
+        assert_eq!(
+            protocol_dispatch_confirmation_disposition(true, true),
+            ProtocolDispatchConfirmationDisposition::Confirmed
+        );
+        assert_eq!(
+            protocol_dispatch_confirmation_disposition(false, true),
+            ProtocolDispatchConfirmationDisposition::Confirmed
+        );
+        assert_eq!(
+            protocol_dispatch_confirmation_disposition(false, false),
+            ProtocolDispatchConfirmationDisposition::EarlierFanoutConfirmed
+        );
+        assert_eq!(
+            protocol_dispatch_confirmation_disposition(true, false),
+            ProtocolDispatchConfirmationDisposition::TerminalFailClosedDrain
         );
     }
 }

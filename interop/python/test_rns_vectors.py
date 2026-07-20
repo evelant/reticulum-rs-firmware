@@ -23,10 +23,18 @@ class ReleasedRnsVectorTests(unittest.TestCase):
             case["name"]: case for case in cls.lrrtt["canonical_float64"]
         }
         cls.cases = {case["name"]: case for case in cls.lrrtt["decode_cases"]}
+        cls.lifecycle = cls.generated["lrrtt_lifecycle"]
+        cls.request_ordering = cls.lifecycle["request_time_ordering"]
+        cls.responder_lifecycle = cls.lifecycle["responder_lifecycle"]
+        cls.lifecycle_cases = {
+            case["name"]: case
+            for case in cls.responder_lifecycle["cases"]
+        }
 
     def test_committed_corpus_matches_pinned_generator(self) -> None:
         committed = json.loads(CORPUS.read_text(encoding="utf-8"))
         self.assertEqual(committed, self.generated)
+        self.assertEqual(self.generated["schema"], 2)
 
     def test_vendored_umsgpack_identity_is_frozen(self) -> None:
         self.assertEqual(self.lrrtt["umsgpack_version"], "2.7.1")
@@ -222,6 +230,180 @@ class ReleasedRnsVectorTests(unittest.TestCase):
 
         # Python's json module otherwise emits NaN and Infinity tokens by default.
         json.dumps(self.generated, allow_nan=False)
+
+    def test_request_time_samples_straddle_released_send_boundaries(self) -> None:
+        self.assertEqual(
+            self.lifecycle["link_source_sha256"],
+            "57122235df52704221c8c3645b8609de4c1cffd8b7b18e2de114b4b291d73725",
+        )
+        self.assertEqual(
+            self.lifecycle["packet_source_sha256"],
+            "ea6741a67cccbdf0a85a8eb42408ac5fe056deb10a533e3db25de4abb3111f1a",
+        )
+        initiator = self.request_ordering["initiator"]
+        self.assertEqual(
+            initiator["released_methods"],
+            ["RNS.Link.__init__", "RNS.Packet.send"],
+        )
+        self.assertEqual(
+            initiator["observed_event_order"],
+            [
+                "request_time_sample",
+                "transport_outbound_link_request",
+                "last_outbound_sample",
+            ],
+        )
+        self.assertEqual(
+            initiator["request_time"]["f64_bits_hex"],
+            "4024000000000000",
+        )
+        self.assertEqual(
+            initiator["last_outbound"]["f64_bits_hex"],
+            "4025000000000000",
+        )
+
+        responder = self.request_ordering["responder"]
+        self.assertEqual(
+            responder["released_methods"],
+            [
+                "RNS.Link.validate_request",
+                "RNS.Link.prove",
+                "RNS.Packet.send",
+            ],
+        )
+        self.assertEqual(
+            responder["observed_event_order"],
+            [
+                "proof_packet_last_outbound_sample",
+                "transport_outbound_link_proof",
+                "proof_had_outbound_sample",
+                "request_time_sample",
+                "last_inbound_sample",
+            ],
+        )
+        self.assertEqual(
+            responder["request_time"]["f64_bits_hex"],
+            "4034400000000000",
+        )
+        self.assertEqual(
+            responder["last_inbound"]["f64_bits_hex"],
+            "4034800000000000",
+        )
+
+    def test_valid_lrrtt_repeats_use_immutable_request_time_and_callback(self) -> None:
+        lifecycle_cases = list(self.lifecycle_cases.values())
+        ciphertexts = [case["ciphertext_hex"] for case in lifecycle_cases]
+        self.assertEqual(len(ciphertexts), len(set(ciphertexts)))
+        self.assertTrue(all(len(bytes.fromhex(value)) == 29 for value in ciphertexts))
+        self.assertTrue(
+            all(
+                case["ciphertext_provenance"]
+                == "case-unique synthetic bytes passed directly to RNS.Link.receive"
+                for case in lifecycle_cases
+            )
+        )
+        self.assertFalse(
+            self.responder_lifecycle["transport_exact_replay_dedup_exercised"]
+        )
+        self.assertIn(
+            "passed directly to RNS.Link.receive",
+            self.responder_lifecycle["ingress_scope"],
+        )
+        self.assertIn(
+            "exact-replay deduplication is outside this corpus",
+            self.responder_lifecycle["ingress_scope"],
+        )
+
+        expected = {
+            "handshake_valid": ("HANDSHAKE", "3fd0000000000000", 1, 2),
+            "active_valid_repeat": ("ACTIVE", "3ff4000000000000", 2, 3),
+            "stale_valid_repeat": ("STALE", "4002000000000000", 3, 4),
+        }
+        for name, (state_before, rtt_bits, callback_count, hops) in expected.items():
+            with self.subTest(name=name):
+                case = self.lifecycle_cases[name]
+                self.assertEqual(case["state_before"], state_before)
+                self.assertEqual(case["state_after"], "ACTIVE")
+                self.assertEqual(case["request_time_before"], case["request_time_after"])
+                self.assertEqual(
+                    case["request_time_after"]["f64_bits_hex"],
+                    "4059000000000000",
+                )
+                self.assertEqual(case["rtt_after"]["f64_bits_hex"], rtt_bits)
+                self.assertEqual(case["callback_delta"], 1)
+                self.assertEqual(case["callback_count_after"], callback_count)
+                self.assertEqual(case["expected_hops_after"], hops)
+                self.assertEqual(case["teardown_delta"], 0)
+
+        callbacks = self.responder_lifecycle["callback_observations"]
+        self.assertEqual([callback["state"] for callback in callbacks], ["ACTIVE"] * 3)
+        self.assertEqual(
+            [callback["rtt"]["f64_bits_hex"] for callback in callbacks],
+            ["3fd0000000000000", "3ff4000000000000", "4002000000000000"],
+        )
+        self.assertEqual(
+            [callback["expected_hops"] for callback in callbacks],
+            [2, 3, 4],
+        )
+
+    def test_stale_valid_repeat_reactivates_and_refreshes_activation(self) -> None:
+        case = self.lifecycle_cases["stale_valid_repeat"]
+        self.assertEqual(case["state_before"], "STALE")
+        self.assertEqual(case["state_after"], "ACTIVE")
+        self.assertEqual(
+            case["activated_at_before"]["f64_bits_hex"],
+            "4059580000000000",
+        )
+        self.assertEqual(
+            case["activated_at_after"]["f64_bits_hex"],
+            "4059980000000000",
+        )
+        self.assertEqual(
+            case["observed_clock_order"],
+            [
+                "receive_liveness_sample",
+                "measured_rtt_sample",
+                "activation_sample",
+            ],
+        )
+
+    def test_decrypt_failure_refreshes_liveness_without_callback_or_teardown(self) -> None:
+        case = self.lifecycle_cases["stale_decrypt_failure_repeat"]
+        self.assertEqual(case["state_before"], "STALE")
+        self.assertEqual(case["state_after"], "ACTIVE")
+        self.assertEqual(case["rtt_before"], case["rtt_after"])
+        self.assertEqual(case["activated_at_before"], case["activated_at_after"])
+        self.assertEqual(
+            case["last_inbound_after"]["f64_bits_hex"],
+            "4059c80000000000",
+        )
+        self.assertEqual(case["last_data_after"], case["last_inbound_after"])
+        self.assertEqual(case["expected_hops_after"], 4)
+        self.assertEqual(case["callback_delta"], 0)
+        self.assertEqual(case["teardown_delta"], 0)
+        self.assertEqual(
+            case["observed_clock_order"],
+            ["receive_liveness_sample", "measured_rtt_sample"],
+        )
+
+    def test_authenticated_malformed_active_repeat_tears_down(self) -> None:
+        case = self.lifecycle_cases["active_authenticated_malformed_repeat"]
+        self.assertEqual(
+            self.responder_lifecycle["authenticated_malformed_plaintext_hex"],
+            "c1",
+        )
+        self.assertEqual(case["state_before"], "ACTIVE")
+        self.assertEqual(case["state_after"], "CLOSED")
+        self.assertEqual(case["request_time_before"], case["request_time_after"])
+        self.assertEqual(case["rtt_before"], case["rtt_after"])
+        self.assertEqual(case["expected_hops_after"], 4)
+        self.assertEqual(case["callback_delta"], 0)
+        self.assertEqual(case["teardown_delta"], 1)
+        self.assertEqual(case["teardown_count_after"], 1)
+        self.assertEqual(
+            case["last_inbound_after"]["f64_bits_hex"],
+            "405a080000000000",
+        )
 
 
 if __name__ == "__main__":

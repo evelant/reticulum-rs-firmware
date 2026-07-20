@@ -29,8 +29,8 @@ composes USB Serial/JTAG, debounced GPIO21, boot-lifetime connection epochs, an
 interrupt-linearized reset guard, and one exact-next decoder/sequence space for
 initialization control and all four live-pairing operations. The application
 also quarantines native USB at its earliest Rust entry before detached product
-initialization and canonical reattachment. Current source passes 129 default
-E290 host-library tests, 135 with the opt-in inbox commit-fault HIL feature, 145
+initialization and canonical reattachment. Current source passes 131 default
+E290 host-library tests, 137 with the opt-in inbox commit-fault HIL feature, 147
 with the opt-in runtime-measurement HIL feature, 56 focused host-client tests
 inside the 252-test xtask suite, and target gates.
 Both powered boards returned `initialization-required` and
@@ -111,12 +111,14 @@ use, 72,212 bytes of raw painted stack margin, a 548,148 us worst commit, a
 1,065,406 us worst radio-loop gap, and zero RX/CAD/TX actor-watchdog counters.
 Only phase A reached sender `Delivered`; phase B's receiver committed the exact
 item while its sender ended in `delivery-timeout`. That capture used Rete pin
-`f6f5fb0637d00691e09fa0105be4df902405fee4`; the current `14c7b49` host
+`f6f5fb0637d00691e09fa0105be4df902405fee4`; the preceding `14c7b49` host
 regressions cover exact reverse-interface/proof behavior, typed transactional
 reverse admission, a deterministic three-node relay flow, pending-Link
 expected-hop enforcement, keepalives, and atomic channel retry receipt
 replacement, plus pending-handshake MessagePack LRRTT validation and
-authenticated-malformed teardown, but require a new powered rerun.
+authenticated-malformed teardown. The current `90570ca` pin adds the precise
+LRRTT lifecycle/timing contract but still requires root validation, an E290
+build, and a new powered rerun.
 These are instrumented,
 bounded-workload observations, not
 closure of sustained or production-image target bounds. After that capture,
@@ -204,7 +206,7 @@ The local repositories were inspected at these revisions. These are moving proje
 
 | Reference | Snapshot | License | Useful material | Verdict |
 | --- | ---: | --- | --- | --- |
-| `reference/rete` | `14c7b4955a1ff6903e87cc40b42498f7869b6f4f` integration fork (designated tag `firmware-pin-14c7b49`), based on `9bcb7d3e` | MIT OR Apache-2.0 declared in Cargo/README; license texts absent | Runtime-agnostic `no_std` RNS, bounded transport storage, RNode LoRa interface, compiling Embassy ESP32-S3/SX1262/Wi-Fi example, canonical local LINKREQUEST validation, transactional owned/relay-Link and H2 reverse admission, typed capacity/conflict rejections, endpoint announce policy, caller-owned DATA preparation, allocation-atomic receipt terminals, transactional fresh-ciphertext Channel retries and sole-receipt replacement, full-hash/Link-ID-bound DATA/channel terminal candidates, owned-H2 local dispatch, exact path/reverse/Link forwarding, fail-closed LRPROOF validation, authenticated owned-Link interface binding, pending-Link expected-hop enforcement, Python-compatible keepalive lifecycle, and pending-handshake MessagePack LRRTT validation with authenticated-malformed teardown | Provisional RNS foundation; pre-release, Resource is whole-buffered, H1 interface-role classification remains explicit product work, persisted paths remain inactive without stable interface rebinding, a shared Tokio Hub lacks endpoint-aware Link identity, Active-responder repeat LRRTT still needs immutable `request_time`, RTT timing remains whole-second `u64`/`f32` rather than Python double wall-clock, adaptive channel windows can exceed product receipt capacity, automatic timeout `LINKCLOSE` emission remains open, and current LXMF is wire-incompatible; missing canonical license files are notice/provenance hygiene, not an evaluation blocker |
+| `reference/rete` | `90570cafc812b3025011cb690ec74a27f287cb3f` integration fork (designated tag `firmware-pin-90570ca`), based on `9bcb7d3e` | MIT OR Apache-2.0 declared in Cargo/README; license texts absent | Runtime-agnostic `no_std` RNS, bounded transport storage, RNode LoRa interface, compiling Embassy ESP32-S3/SX1262/Wi-Fi example, canonical local LINKREQUEST validation, transactional owned/relay-Link and H2 reverse admission, typed capacity/conflict rejections, endpoint announce policy, caller-owned DATA preparation, allocation-atomic receipt terminals, transactional fresh-ciphertext Channel retries and sole-receipt replacement, full-hash/Link-ID-bound DATA/channel terminal candidates, owned-H2 local dispatch, exact path/reverse/Link forwarding, fail-closed LRPROOF validation, authenticated owned-Link interface binding, pending-Link expected-hop enforcement, Python-compatible keepalive lifecycle, microsecond/binary64 LRRTT dispatch timing, Handshake/Active/Stale refresh, and authenticated-malformed teardown | Provisional RNS foundation; pre-release, Resource is whole-buffered, H1 interface-role classification remains explicit product work, persisted paths remain inactive without stable interface rebinding, a shared Tokio Hub lacks endpoint-aware Link identity, generic Tokio/Embassy runners remain coarse and do not confirm dispatch tokens, adaptive channel windows can exceed product receipt capacity, automatic timeout `LINKCLOSE` emission remains open, and current LXMF is wire-incompatible; missing canonical license files are notice/provenance hygiene, not an evaluation blocker |
 | `reference/leviculum` | `5fb1db0` | AGPL-3.0-or-later | Complete sans-I/O RNS core, strong tests, RNode framing, nRF Embassy firmware, current Micron parser and substantial NomadNet client | Independent RNS oracle and fallback; no LXMF |
 | `reference/LXMF` | `fab12ad9` | accepted Reticulum License | Current authoritative Python LXMF behavior, router, propagation node and fixtures | Primary pinned compatibility peer; source may also be reused when useful with its conditions/notices preserved |
 | `reference/LXMF-rs` | `0859680` | EPL-2.0 | Broad LXMF/RNS behavior, wire formats, parity fixtures, announce codecs, paper messages, stamps/tickets, router semantics | Approved direct-reuse source for the EPL product path; several wire/state modules are extractable, while the full runtime still needs a substantial bare-metal refactor |
@@ -244,7 +246,7 @@ Claims in READMEs were not treated as proof of embedded portability.
 | `rete-core`, `rete-transport`, `rete-stack`, and `rete-lxmf-core`, no defaults, `thumbv6m-none-eabi` | Pass | The layers are genuinely bare-metal buildable; compilation does not cure the LXMF correctness gaps documented below |
 | Focused `rete` core/transport/LXMF host suites at the reviewed upstream snapshot | 391 pass | Historical selection evidence for wire, crypto, forwarding, link/resource, and LXMF codec behavior; this is not evidence for the later lifecycle patch or a complete Python/RF conformance claim |
 | Historical `8b5d652` selected routing/receipt/keepalive/LXMF validation set | 635 pass | The four library targets were 174 transport, 136 stack, 143 LXMF and 84 daemon tests, totaling 537. That pin was also run through 97 transport integration tests (9 computed-vector, 43 forwarding, 40 Link-integration and 5 path-request) and one stack integration test, producing the selected 635-test total. It is not a count of every nested workspace test target. All-target host and portable `no_std` checks remain separate compile gates |
-| `reticulum-conformance-rete` project runner | 235 pass | The 112 released-vector, adapter and direct-Link checks are joined by 40 released-Python LRRTT MessagePack checks, 8 channel-retry lifecycle checks, 40 exact keepalive lifecycle checks and 35 deterministic three-node A--B--C checks covering learned transport routing, exact-interface LINKREQUEST/LRPROOF/LRRTT relay, pending-Link wrong-hop LRPROOF rejection before deduplication, bound endpoint output, encrypted channel DATA/proof delivery, receipt completion and separate owned/relay/reverse capacity. This is project-side conformance, not powered or live-Python multi-hop qualification |
+| `reticulum-conformance-rete` project runner | 647 pass | The historical 235-check baseline joined 112 released-vector, adapter and direct-Link checks with 40 released-Python LRRTT MessagePack checks, 8 channel-retry lifecycle checks, 40 exact keepalive lifecycle checks and 35 deterministic three-node A--B--C checks covering learned transport routing, exact-interface LINKREQUEST/LRPROOF/LRRTT relay, pending-Link wrong-hop LRPROOF rejection before deduplication, bound endpoint output, encrypted channel DATA/proof delivery, receipt completion and separate owned/relay/reverse capacity. The current schema-2 lifecycle/candidate runner expands that coverage and passes 647 checks. This is project-side conformance, not powered or live-Python multi-hop qualification |
 | `reticulum-radio-interface`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | Allocation-free RNode framing/reassembly distinguishes the 500-byte RNS, 508-byte interface and 255-byte physical limits; conservative whole-microsecond one/two-frame RF airtime ceilings use exact SX126x bandwidth-code divisors, and a permit-gated state machine enforces randomized initial contention, bounded CAD retries, clear-observation freshness, explicit setup/turnaround/reconciliation bounds, aggregate reservation and strict owner deadlines. Its 89 focused tests, strict Clippy and warning-free rustdoc pass |
 | `reticulum-semantic-roundtrip-hil`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (test fixture only) | The allocation-free board-independent crate owns the stable public test identities, deterministic signed-announce vector, four-step ANNOUNCE/DATA/proof state machine, exact payload and RNode-frame policy. Seven all-feature tests include a real two-Rete-node encrypted round trip and strict failure cases. Six-byte identity selectors preserve the qualified wire fixture but cannot authorize hardware; each board wrapper independently maps exact eFuse MACs to roles, and graph policy excludes this crate from permanent firmware |
 | `reticulum-board-heltec-vision-master-e290`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (design facts only) | The HAL-free crate is the exhaustive compiled GPIO ownership map for the supplied V0.3.1 design, validates complete channels against the fitted HT-RA62-HF 863--928 MHz range, and fixes reset-low/NSS-high inert boot with no implicit frequency or TX power. Eight focused tests cover exact pin collisions/ownership and display/radio disjointness, named aliases, RF boundaries, safe state and the conservative 8 MiB design PSRAM floor. It intentionally makes no connected-board, qualified-memory or flash-capacity claim |
@@ -261,7 +263,7 @@ Claims in READMEs were not treated as proof of embedded portability.
 | `reticulum-radio-tx-dispatch`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The firmware-includable persistent serializer consumes the interface router's ticketed DATA/ordinary actor union and retains each ticket while keeping the two typestate families separate over one `SoleRnodeRadio`. It performs randomized initial/retry backoff and CAD, validates the actor-stamped interface configuration, maps the active radio fingerprint and aggregate airtime to node-core's opaque resource-and-units permit, revalidates before permit negotiation and after grant, exposes bytes once, and makes one logical one/two-frame RNode transmit. Every post-byte-exposure DATA completion, including cancellation and fault recovery, is gated with its router ticket and exact authorized-frame observation until an identical durable acknowledgement arrives. Request pressure and cancelled waits retain ownership; unexpected or mismatched acknowledgements fail closed while retaining both observations. `DispatchReport` is copy-only diagnosis, never ownership. RX start remains an explicit idle scheduler choice even when TX is queued, and phase-aware completion-capacity readiness never moves a retained completion. Its watchdog, final-frame metadata and fail-closed recovery retain exact owners/control values across completion pressure, partial or impossible progress, stale/lost replies, configuration drift, invalid RX metadata, radio faults, and dropped CAD/TX/RX futures. Host, strict Clippy, warning-free rustdoc, generic no-std and Xtensa gates pass. Its exact direct-dependency policy keeps Embassy Futures test-only. The first permanent E290 graph instantiates it as the sole LoRa actor dispatcher; target build/review gates and one bounded powered DATA/peer-proof path pass, while powered fault/soak/full qualification remains open |
 | `reticulum-tx-supervisor`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | `NodeInterfaceSupervisor` is the production portable aggregate: it owns the sole node-core, authoritative interface router, DATA and ordinary coordinators, one permit server per family and actor, and one shared policy. Its sealed fixed-pool ingress validates queue origin, current lease, online state and logical MTU, recycles the exact buffer, retries only a full return queue and `Busy` action pressure, and exposes every other buffer-return or action residue as an exact takeable terminal owner for quarantine. A bounded round-robin pass fairly scans completions, both coordinators and all permit services. The E290 node graph composes this aggregate; the older async `TxSupervisor` remains only a legacy RF-inert DATA-machine test aggregate |
 | `reticulum-heltec-vision-master-e290-node`, host and ESP32-S3 Xtensa | Pass (current source/test composition plus bounded powered end-to-end proofs) | The permanent graph composes the transport-neutral node, concrete LoRa actor, sole USB/GPIO owner, credential initialization and live pairing, authenticated session/admission, static request/reply handoff, current-authority logical dispatch, and the operation-scoped raw-RNS inbox qualification owner. The deliberately minimal USB profile permits one handshake per connection and one request in flight; a fault is terminal until reset/re-enumeration. It defers resumption, protocol retries, close records, encryption, rate limiting/attempt policy, repeated handshake attempts, and concurrency. The session/admission boundary is bearer-neutral for later BLE/Wi-Fi adapters and is not a Reticulum packet interface; concurrent bearers still require globally unique bearer-qualified epochs or disjoint reply lanes under one exclusivity coordinator. The powered 751,712-byte API 1.1 merged image matched exact address-zero readbacks on both E290s. One sender retained physical initialization and Active generation 3, then authenticated identity/submission/status operations drove durable DATA over LoRa to the second permanent node and received a valid proof; `Delivered` survived full USB re-enumeration. API 1.2 separately proves one maximum-payload commit, exact raw readback, authenticated status/peek before and after hard reset, drop-newest preservation of item 1, four exact cold-mount quarantine cases, and one opt-in same-boot missing-commit quarantine. Each cold-mount case was followed by one direct DATA/proof path; the HIL triggering path reached `Delivered` before quarantine was observed and does not establish post-quarantine RF. The runtime-measurement HIL adds one bounded durable maximum-payload commit on each board plus workload-specific heap, stack-watermark, mount/commit, loop-gap and actor-watchdog observations. None proves sustained routing or a physical power cut. Exact Pending/Abort readbacks, physical inbox cuts, suspend/resume, sustained/default-image runtime bounds, and full qualification remain open. Current test counts, size measurements, image digests, and exact powered evidence are recorded in the E290 runbook. |
-| `reticulum-heltec-vision-master-e290-node --features runtime-measurement-hil` | Pass (bounded powered measurement plus current build-qualified proof trace; not a product mode) | The earlier exact 768,624-byte HIL matched both powered address-zero readbacks and bounded heap, stack, mount/commit timing, loop gaps and radio watchdogs across one maximum-payload commit per board. Only phase A reached sender `Delivered`; phase B committed at its receiver but ended in `delivery-timeout`. That powered capture used Rete `f6f5fb0`; the current `14c7b49` host regressions cover exact reverse-interface/proof behavior, transactional reverse admission, deterministic three-node relay, pending-Link expected-hop enforcement, Python-compatible keepalive lifecycle, atomic channel retry receipt replacement, and pending-handshake MessagePack LRRTT validation with authenticated-malformed teardown, but do not retroactively qualify it, so a new powered rerun remains required. The historical `9bceacd` 779,184-byte extension preserves the 256-byte runtime ABI and adds a separate 192-byte trace for logical RX/handoff, RNS/proof/receipt correlation, confirmed/not-confirmed-success TX-wrapper outcomes, and Ready-gate inbox-admission boundaries. It passed build, graph, ELF and static-stack gates but was not flashed. Its 777,600-byte predecessor passed exact readback and a boot-only baseline on `3e:88`: 72,020 bytes raw painted margin, 19,268 bytes after the unchanged 52,752-byte maximum frame, no allocation/watchdog/trace fault, and zero pre-traffic proof/receipt observations; that predecessor still reserved the final TX-outcome words. Historical CI bounds were 170,984/170,288-byte default/HIL usable-stack floors with exact 60-byte guards, no trace symbol in default and one valid initialized trace symbol in HIL. The current `14c7b49` default build links as a 12,084,612-byte ELF and packages as a 776,464-byte merged image using 710,928/6,291,456 application bytes (11.30%); its default/HIL pair has 839/856 stack-size records and passes the 53,152-byte frame, 170,424/169,728-byte usable-stack, 60-byte guard and proof-symbol gates. The conservative margin remains 18,308 bytes after linked-RAM and frame deductions. It has no flashed readback or powered proof. Four clean direction-balanced trials remain before any proof scheduling or radio correction; sustained/forwarded traffic, concurrent durable work, pressure/failure cases and production-image bounds also remain open. |
+| `reticulum-heltec-vision-master-e290-node --features runtime-measurement-hil` | Pass (historical bounded powered measurement and current build-qualified proof trace; not a product mode) | The earlier exact 768,624-byte HIL matched both powered address-zero readbacks and bounded heap, stack, mount/commit timing, loop gaps and radio watchdogs across one maximum-payload commit per board. Only phase A reached sender `Delivered`; phase B committed at its receiver but ended in `delivery-timeout`. That powered capture used Rete `f6f5fb0`; the later `14c7b49` host regressions cover exact reverse-interface/proof behavior, transactional reverse admission, deterministic three-node relay, pending-Link expected-hop enforcement, Python-compatible keepalive lifecycle, atomic channel retry receipt replacement, and pending-handshake MessagePack LRRTT validation with authenticated-malformed teardown, but do not retroactively qualify it. The current `90570ca` pin adds the precise lifecycle/timing contract and passes root validation plus default/HIL E290 build gates, but still needs a powered rerun. The historical `9bceacd` 779,184-byte extension preserves the 256-byte runtime ABI and adds a separate 192-byte trace for logical RX/handoff, RNS/proof/receipt correlation, confirmed/not-confirmed-success TX-wrapper outcomes, and Ready-gate inbox-admission boundaries. It passed build, graph, ELF and static-stack gates but was not flashed. Its 777,600-byte predecessor passed exact readback and a boot-only baseline on `3e:88`: 72,020 bytes raw painted margin, 19,268 bytes after the unchanged 52,752-byte maximum frame, no allocation/watchdog/trace fault, and zero pre-traffic proof/receipt observations; that predecessor still reserved the final TX-outcome words. Historical CI bounds were 170,984/170,288-byte default/HIL usable-stack floors with exact 60-byte guards, no trace symbol in default and one valid initialized trace symbol in HIL. The `14c7b49` default build links as a 12,084,612-byte ELF and packages as a 776,464-byte merged image using 710,928/6,291,456 application bytes (11.30%); its default/HIL pair had 839/856 stack-size records and passed the then-current 53,152-byte frame, 170,424/169,728-byte usable-stack, 60-byte guard and proof-symbol gates. Its conservative margin was 18,308 bytes after linked-RAM and frame deductions. It has no flashed readback or powered proof. The current pair has 845/862 records, a 53,680-byte maximum frame, 167,648/166,952-byte usable stacks, 68,684 bytes of carried raw painted margin, and a 15,004-byte conservative margin. These qualify an internal task stack, not non-PSRAM board compatibility. Four clean direction-balanced trials remain before any proof scheduling or radio correction; sustained/forwarded traffic, concurrent durable work, pressure/failure cases and production-image bounds also remain open. |
 | `reticulum-storage-model`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The allocation-free semantic journal model enforces canonical schema-2 records, exact authorization snapshots, principal-scoped idempotency across credential rotation, exact preflight/apply plans, monotonic conservative transmission uncertainty, and fail-closed complete replay; 26 integration tests plus one compile-fail doctest cover the boundary, which intentionally makes no physical-durability or flash-capacity claim |
 | `reticulum-submission-projector`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The fixed-capacity projector correlates volatile attempts with semantic records and withholds terminal/recovery acknowledgement behind exact persistence replies; 24 focused tests cover ordering, retries, native authorized-frame conversion, proof/timeout-before-frame races, faults and conservative reboot behavior. Completed slots deliberately do not retire without a future exact node-owner quiescence proof |
 | `reticulum-storage-journal`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The allocation-free backend fixes the 1 MiB/two-bank physical format 1 with semantic schema 2, full-bank replay, commit-last exact-readback append, a 162-acceptance lifetime ceiling, and source-preserving handoff compaction. Valid schema-1 manifests return typed unsupported-version with zero mutation only after the normal two-bank trajectory checks. An independently authorized first-provision API resumes every canonical A1 prefix/commit cut without erasing and rejects nonempty/off-trajectory media; 34 fake-NOR tests cover provisioning, semantic-version rejection, torn/lost append and compaction. The historical powered HIL qualifies only the unchanged physical clean path/software-reset behavior at its schema-1 source; schema-2 HIL remains to rerun |
@@ -363,7 +365,7 @@ The reviewed upstream base had a sustained outbound-DATA blocker:
 `NodeCore::build_data_packet()` could release a packet after silently failing
 to retain its receipt, and proof/timeout terminal state was not reclaimed
 through a caller-reservable boundary. The current project pin
-`14c7b4955a1ff6903e87cc40b42498f7869b6f4f` retains that generic lifecycle fix. DATA
+`90570cafc812b3025011cb690ec74a27f287cb3f` retains that generic lifecycle fix. DATA
 preparation can write into caller-owned storage, returns a full receipt token,
 and rejects bounded-table admission transactionally. Valid-proof processing
 first identifies the exact DATA or channel candidate, while destination-DATA
@@ -417,8 +419,9 @@ and LINKREQUEST/SINGLE require an exact path and admit reverse or relay-Link
 state transactionally before forwarding. Stack ingress reports typed
 owned/relay `LinkTableFull`, `ReverseTableFull`, and `ReverseRouteConflict`
 without forwarding or partial route state; H2 LINKREQUEST retains a Link route
-rather than a redundant reverse entry. The 235-check project conformance run
-adds 40 released-Python LRRTT MessagePack checks and exercises a complete
+rather than a redundant reverse entry. The previously validated 235-check
+project conformance run added 40 released-Python LRRTT MessagePack checks and
+exercised a complete
 A--B--C relayed Link handshake and encrypted channel proof flow, including
 wrong-hop LRPROOF rejection before replay admission. Remaining
 routing work includes live-Python multi-hop, explicit H1 interface roles, and
@@ -441,17 +444,42 @@ changes cannot alter that expectation; an unknown path stores the
 `PATHFINDER_M = 128` wildcard. LRPROOF compares its post-ingress hop with that
 snapshot before deduplication or Link-state mutation. A responder begins
 without an expected hop and records the post-ingress hop only after LRRTT has
-been authenticated and decrypted. Pending-handshake LRRTT payload parity is now
-covered. Rete emits canonical MessagePack float64, accepts the numeric scalar
-families and first-object/trailing-byte behavior of Python's u-msgpack, and
-selects the greater local or peer RTT with Python ordering. Malformed or
-nonnumeric authenticated LRRTT is rejected before establishment or hop-state
-mutation and causes best-effort encrypted `LINKCLOSE`, unconditional
-Link-owned-state reclamation, and one terminal close without replay
-duplication. Python's Active-responder repeat LRRTT remains a nonblocking gap
-until Rete retains immutable `request_time`; Rete's whole-second `u64`
-measurement and `f32` storage also remain less precise than Python's
-double-precision wall-clock measurement.
+been authenticated and decrypted. LRRTT payload parity covers canonical
+MessagePack float64 output, Python u-msgpack numeric scalar families and
+first-object/trailing-byte behavior, and Python's greater-local-or-peer RTT
+ordering. The request anchor is immutable. Link time uses microsecond
+`MonotonicInstant`/`MonotonicDuration` and binary64 RTT. An opaque,
+non-repeating eight-byte token accepts only the first successful interface
+confirmation for each LINKREQUEST or LRPROOF. The confirmed egress interval's
+start anchors an initiator and its completion anchors a responder. The firmware
+confirmation point is generic ordinary-router/interface acceptance, not
+physical LoRa RF `TxDone`, so the contract remains transport-neutral.
+
+Fresh authenticated LRRTT is handled in `Handshake`, `Active`, and `Stale`.
+Initial activation emits `LinkEstablished` once; Active updates and Stale
+reactivation refresh RTT, activation, hop, and keepalive state and emit
+`LinkRttUpdated` without another establishment statistic. Exact raw replay is
+deduplicated. Authenticated malformed or nonnumeric LRRTT tears down all three
+states; only a Handshake failure increments `links_failed`. A measured zero RTT
+stays zero and uses 5-second keepalive and 10-second stale floors. Nonzero RTT
+uses dynamic stale grace `4 * RTT + 5 seconds`.
+
+Rete intentionally authenticates before mutating liveness, so corrupt stale
+LRRTT does not revive a Link; released Python 1.3.8 samples liveness before
+decrypting. Rete also accepts one precise pre-decrypt ingress sample for its
+bounded synchronous handler rather than reproducing Python's three internal
+samples. The firmware adapter invokes precise `*_at` ingress/tick paths and
+confirms output at ordinary-router acceptance. Rete's generic Tokio and Embassy
+runners retain coarse/unconfirmed compatibility paths.
+
+The released-Python schema-2 corpus source-hash-binds `Link.py` and `Packet.py`.
+It executes the released request/proof/send methods through a recorded
+`Transport.outbound` boundary, then drives five case-unique packets directly
+through released `Link.receive`: valid Handshake, Active repeat, Stale repeat,
+Stale decrypt failure, and authenticated malformed Active LRRTT. Its declared
+scaffolding means this is a method/lifecycle oracle, not a complete network
+run: `Transport` exact-replay deduplication and the full teardown's external
+side effects are outside that Python probe and covered separately in Rust.
 
 The stored binding is still only a transient `u8` interface slot. Rete's Tokio
 shared `Hub` can target the source client for synchronous output, but
@@ -465,20 +493,37 @@ inbound-silence interval and a full interval since the previous probe, and valid
 repeats bypass dedup only after bound-interface admission. NodeCore consumes the
 lifecycle result without an application event, preflights and retains the bound
 route before committing the probe timer, and starts Stale after two intervals
-with a full five-second revival window from the actual transition/final probe.
-Valid bound Link traffic also revives Stale. Reliable Channel retries use the
+with a `4 * RTT + 5 seconds` revival window from the actual transition/final
+probe (five seconds when RTT is zero). Valid bound Link traffic also revives
+Stale. Reliable Channel retries use the
 same bound-route preflight and transactional receipt replacement described
 above; an unroutable retry leaves entropy, proof target, window, retry count and
 timestamps unchanged. Automatic timeout removal still emits no `LINKCLOSE`;
 shared-Hub endpoint/reincarnation identity is the other owned-Link routing
 residual.
 
-The current pin's build-only default E290 release packages as a 776,464-byte
-merged image using 710,928/6,291,456 application bytes (11.30%), with SHA-256
+The preceding `14c7b49` pin's build-only default E290 release packages as a
+776,464-byte merged image using 710,928/6,291,456 application bytes (11.30%),
+with SHA-256
 `7b11c6f6a3c039d46ab0117fd362920aaa40145e7f27cbc6fa0a8a84a7ab3571`.
-It has no flashed-image readback or powered proof. Historical artifact and
-powered records elsewhere in this document remain bound to the project and
-Rete revisions they name.
+It has no flashed-image readback or powered proof. The current `90570ca` pin
+has a build-only default release with text/data/BSS of
+674,431/3,676/469,152 bytes (1,147,259 bytes total by GNU size). Its ELF
+SHA-256 is
+`d370039c3872d34a74b9bbc0b52567a24be607bc01ea660b6dfbd8d5dd12072d`.
+The explicit 16 MiB package is a 780,448-byte merged image, uses
+714,912/6,291,456 application bytes (11.36%), and has SHA-256
+`a912bb6c910c0145a9431f2a94b95a0a6560662678c457fc9c49e8641050b72c`.
+The current runtime-measurement HIL links with text/data/BSS of
+686,203/4,180/468,648 bytes (1,159,031 bytes total), and its ELF has SHA-256
+`5aaa4c7029b35b55c5f2eb0f673c04ac11ae695c09a8cc1d1797990fe0a4ab30`.
+Its 792,048-byte merged image uses 726,512/6,291,456 application bytes (11.55%)
+and has SHA-256
+`938d944c9373638b475e48e804fc0211b92da1ef49d0e875233d052b19064881`.
+Both are unflashed and unpowered because neither E290 currently enumerates; a
+new powered run remains required. Historical artifact and powered records
+elsewhere in this document remain bound to the project and Rete revisions they
+name.
 
 The project adapter exposes the new path without native Rete receipt or error
 types. `EmbeddedNode::prepare_data_into()` accepts exactly one 500-byte output
@@ -603,8 +648,8 @@ The current 8 ms missed-SOF suspension
 retains its epoch and sequence until bus reset; broader powered lifecycle
 qualification is still required.
 
-The E290 library's 129-test default host suite, its 135-test opt-in inbox
-commit-fault HIL profile, and its 145-test opt-in runtime-measurement HIL
+The E290 library's 131-test default host suite, its 137-test opt-in inbox
+commit-fault HIL profile, and its 147-test opt-in runtime-measurement HIL
 profile now qualify that three-task software composition,
 including the causal control/live frontier, shared pre-
 authentication decoder and sequence gate, exact durable reply correlation,
@@ -759,9 +804,11 @@ boundary is now composed: `tx-supervisor` has a feature-free dependency on
 `interface-router` and consumes only queue-dequeued owners validated from
 sealed packets. The first permanent E290 source graph instantiates that
 router, the concrete E290 actor/real-radio dispatcher, and
-`NodeInterfaceSupervisor`. It preserves the separate microsecond radio and
-whole-second protocol clocks and keeps LoRa permit meaning inside the selected
-actor. Journal provisioning and strict recovery occur before that graph starts;
+`NodeInterfaceSupervisor`. It preserves a microsecond radio/RNode clock,
+microsecond precise Link `MonotonicInstant` timing, coarse DATA/receipt
+deadlines, and the packet-owner millisecond clock as distinct domains. LoRa
+permit meaning stays inside the selected actor. Journal provisioning and strict
+recovery occur before that graph starts;
 the sole flash backend and mounted runtime then remain in an operation-scoped
 coordinator driven by the node task. If optional journal mount/recovery fails
 during boot, before any durability-gated DATA owner can exist, that local
@@ -1972,12 +2019,16 @@ margin was 72,212 bytes, or 19,460 bytes after conservatively subtracting the
 largest 52,752-byte compiler-emitted frame; interrupt/nesting allowance is still
 unquantified. Those are historical powered measurements. The current release
 gate requires final little-endian Xtensa executables with resolved compiler
-stack-size records, caps the maximum frame at 53,152 bytes, and preserves the
-current default/HIL linked usable stacks at 170,424/169,728 bytes with exact
-60-byte guard offsets. It deducts the 192-byte proof trace and another exact
-560 bytes of subsequent linked-RAM growth from the powered raw margin before
-applying the current frame, yielding a conservative 71,460/18,308-byte
-carry-forward. This does not continuously reproduce the powered watermark.
+stack-size records, caps the maximum frame at 53,680 bytes, and preserves the
+current default/HIL linked usable stacks at 167,648/166,952 bytes with exact
+60-byte guard offsets. The current pair contains 845/862 records. It deducts
+3,336 bytes of exact post-proof linked internal-RAM growth from the powered
+boot-only 72,020-byte raw margin before applying the current frame, yielding a
+conservative 68,684/15,004-byte carry-forward. This does not continuously
+reproduce the powered watermark. The ceiling qualifies the internal CPU0/main-
+executor task stack, which PSRAM cannot back; it is not a compatibility ceiling
+for non-PSRAM ESP32 boards. The full E290 profile already requires PSRAM for
+separate product capacity, while Tracker V2 remains a reduced profile.
 The zero PSRAM allocation
 observation does not imply the full appliance should avoid PSRAM. It reflects
 the current allocator order and
@@ -2013,11 +2064,15 @@ not qualify the final TX-outcome instrumentation. The baseline validates the
 rest of the diagnostic mechanism only. Exact readback of the final image and
 four clean, direction-balanced maximum-payload trials remain required before
 changing proof scheduling, retry, or radio receive behavior. The preceding
-`8b5d652` default/HIL pair independently passed the updated 53,152-byte frame,
-170,424/169,728-byte usable-stack, exact-guard and proof-symbol gates, but was
-not flashed. The current `14c7b49` pair has 839/856 stack-size records, passes
-the same bounds with an 18,308-byte conservative margin, and is likewise
-unflashed.
+`8b5d652` default/HIL pair independently passed the then-current 53,152-byte
+frame, 170,424/169,728-byte usable-stack, exact-guard and proof-symbol gates,
+but was not flashed. The later `14c7b49` pair had 839/856 stack-size records,
+passed those same bounds with an 18,308-byte conservative margin, and was
+likewise unflashed. The current `90570ca` pair passes the updated 53,680-byte
+frame, 167,648/166,952-byte usable-stack, exact-guard and proof-symbol gates
+with 845/862 records and a 15,004-byte conservative margin. Its default package
+is build-only, unflashed, and unpowered because neither E290 currently
+enumerates.
 
 Current `esp-radio` documentation puts ordinary Wi-Fi modes in roughly the 47–63 KiB heap range before the rest of this product; coexistence adds more dynamic pressure. Establish release gates for image size, static RAM, idle free heap, minimum-ever heap, allocation failures, and stack high-water marks. A working build that survives only under ideal traffic is not a milestone pass.
 
@@ -2633,8 +2688,9 @@ CAD policy, formal electrical/RF, range, or regional release gates.
 
 1. Preserve the permanent E290 image's host, portable-target, strict Xtensa,
    merged-image and dependency-graph gates in CI. Continue enforcing separate
-   monotonic-microsecond radio/RNode time, whole-second protocol deadlines and
-   separately durable 40-bit local announce-emission order, bounded
+   monotonic-microsecond radio/RNode time, precise microsecond Link instants,
+   coarse DATA/receipt deadlines, the packet-owner clock, and separately
+   durable 40-bit local announce-emission order, bounded
    TX/RX fairness, immutable interface configuration for the node lifetime,
    exact completion reconciliation, and explicit terminal-owner quarantine.
 2. Preserve the completed E290 semantic-HIL record as the functional
@@ -2642,10 +2698,11 @@ CAD policy, formal electrical/RF, range, or regional release gates.
    immediate and post-capture readbacks. Do not infer permanent-node, storage,
    API, multi-hop, range, fault or soak behavior from that separate fixture.
    Keep the Tracker pair as the second radio regression fixture.
-3. Preserve the 129-test default, 135-test commit-fault HIL, and 145-test
+3. Preserve the 131-test default, 137-test commit-fault HIL, and 147-test
    runtime-measurement HIL E290 host-library compositions, 56 focused
-   host-client, 252-test xtask, 58-test Rete integration, 235-check Rete
-   conformance, and 17-test inbox-store gates,
+   host-client, 252-test xtask, 58-test Rete integration, 647-check schema-2
+   Rete conformance, and 17-test inbox-store gates. Retain the historical
+   235-check baseline only as preceding evidence,
    including credential boot
    classification/order, the authenticated
    happy path and wrong-binding `ActiveOwnerFailStopped` path. Preserve the now

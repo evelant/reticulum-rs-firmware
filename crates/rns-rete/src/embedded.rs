@@ -13,8 +13,10 @@ use rand_core::{CryptoRng, RngCore};
 use rete_core::{
     CONTEXT_NONE, CONTEXT_RESOURCE, CONTEXT_RESOURCE_ADV, CONTEXT_RESOURCE_HMU,
     CONTEXT_RESOURCE_ICL, CONTEXT_RESOURCE_PRF, CONTEXT_RESOURCE_RCL, CONTEXT_RESOURCE_REQ,
-    DestHash, DestType, HeaderType, Identity, IdentityHash, LinkId, Packet, PacketType,
+    DestHash, DestType, HeaderType, Identity, IdentityHash, LinkId, MonotonicInstant, Packet,
+    PacketType,
 };
+use rete_stack::node_core::{OutboundDispatchInterval, OutboundProtocolToken};
 use rete_stack::{
     DestinationType, Direction, IngestOutcome, IngestRejection, LinkTableKind, NodeCore, NodeEvent,
     OutboundPacket, PacketRouting, ReceiptToken,
@@ -23,7 +25,7 @@ use rete_transport::{HeaplessStorage, LinkState, SendError};
 
 use crate::capacity::{
     HeaplessCapacitySnapshot, LinkAdmissionError, heapless_capacity_snapshot,
-    try_initiate_heapless_link,
+    try_initiate_heapless_link_at,
 };
 
 /// Largest application payload that can be queued in one base-MTU channel
@@ -200,6 +202,8 @@ pub struct TxPacket {
     bytes: Vec<u8>,
     /// Interfaces on which the packet may be sent.
     target: TxTarget,
+    /// Opaque marker returned after the selected interface accepts dispatch.
+    protocol_token: Option<OutboundProtocolToken>,
 }
 
 impl TxPacket {
@@ -207,6 +211,7 @@ impl TxPacket {
         Self {
             bytes,
             target: TxTarget::All,
+            protocol_token: None,
         }
     }
 
@@ -220,11 +225,45 @@ impl TxPacket {
         self.target
     }
 
-    /// Consume the packet without separating its bytes from its routing
-    /// authorization.
-    pub fn into_parts(self) -> (Vec<u8>, TxTarget) {
-        (self.bytes, self.target)
+    /// Opaque timing marker for LINKREQUEST or LRPROOF egress confirmation.
+    pub const fn protocol_token(&self) -> Option<OutboundProtocolToken> {
+        self.protocol_token
     }
+
+    /// Consume the packet into bytes, routing authorization and timing marker.
+    pub fn into_parts(self) -> (Vec<u8>, TxTarget, Option<OutboundProtocolToken>) {
+        (self.bytes, self.target, self.protocol_token)
+    }
+}
+
+/// Read-only native Link timing state exposed only to conformance tests.
+#[cfg(any(test, feature = "conformance"))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConformanceLinkSnapshot {
+    /// Native lifecycle state.
+    pub state: LinkState,
+    /// Negotiated binary64 RTT in seconds.
+    pub rtt: f64,
+    /// Immutable provisional or dispatch-confirmed request origin.
+    pub request_started_at: MonotonicInstant,
+    /// Whether runtime dispatch replaced the provisional request origin.
+    pub request_time_confirmed: bool,
+    /// Interface whose first successful dispatch confirmed the request edge.
+    pub request_dispatch_interface: Option<u8>,
+    /// Interface bound by authenticated Link establishment traffic.
+    pub bound_interface: Option<u8>,
+    /// Retained or learned hop count.
+    pub expected_hops: Option<u8>,
+    /// Last authenticated inbound activity.
+    pub last_inbound: MonotonicInstant,
+    /// Last outbound activity recorded by the protocol core.
+    pub last_outbound: MonotonicInstant,
+    /// Last outbound keepalive probe.
+    pub last_keepalive: MonotonicInstant,
+    /// Current precise keepalive interval.
+    pub keepalive_interval: rete_core::MonotonicDuration,
+    /// Current precise stale interval.
+    pub stale_time: rete_core::MonotonicDuration,
 }
 
 /// Resolve a packet created without ingress context.
@@ -234,6 +273,7 @@ impl TxPacket {
 /// violation: broadcasting it would leak traffic onto unrelated transports,
 /// while silently dropping it would strand already-mutated protocol state.
 fn resolve_origin_packet(packet: OutboundPacket) -> TxPacket {
+    let protocol_token = packet.protocol_token();
     let target = match packet.routing {
         PacketRouting::All => TxTarget::All,
         PacketRouting::ExactInterface(interface) | PacketRouting::BoundInterface(interface) => {
@@ -246,6 +286,7 @@ fn resolve_origin_packet(packet: OutboundPacket) -> TxPacket {
     TxPacket {
         bytes: packet.data,
         target,
+        protocol_token,
     }
 }
 
@@ -426,6 +467,10 @@ pub enum IngressDropReason {
     RelayLinkTableFull { limit: usize },
     /// Rete reported a local Link handshake but did not retain its state.
     LinkStateNotRetained,
+    /// A valid LINKREQUEST could not receive a unique egress timing token.
+    ProtocolTokenExhausted { link_id: LinkId },
+    /// A fresh egress timing token could not be bound to the admitted Link.
+    ProtocolTokenAssignmentFailed { link_id: LinkId },
     /// Arbitrary remote HEADER_1 LINKREQUEST ingress remains disabled until
     /// interface roles can distinguish it from local-origin injection.
     Header1RemoteLinkRequestDisabled,
@@ -477,6 +522,15 @@ impl core::fmt::Display for IngressDropReason {
                 write!(
                     f,
                     "Rete emitted Link handshake output without retained state"
+                )
+            }
+            Self::ProtocolTokenExhausted { link_id } => {
+                write!(f, "protocol timing token exhausted for Link {link_id:02x?}")
+            }
+            Self::ProtocolTokenAssignmentFailed { link_id } => {
+                write!(
+                    f,
+                    "protocol timing token assignment failed for Link {link_id:02x?}"
                 )
             }
             Self::Header1RemoteLinkRequestDisabled => {
@@ -671,6 +725,8 @@ pub struct IngressCounters {
     pub owned_link_full: u64,
     pub relay_link_full: u64,
     pub link_state_not_retained: u64,
+    pub protocol_token_exhausted: u64,
+    pub protocol_token_assignment_failed: u64,
     pub header1_remote_link_request_disabled: u64,
     pub native_duplicate: u64,
     pub native_invalid: u64,
@@ -692,6 +748,8 @@ pub struct AdmissionCounters {
     pub outbound_link_full: u64,
     pub outbound_link_collision: u64,
     pub outbound_link_not_retained: u64,
+    pub outbound_protocol_token_exhausted: u64,
+    pub outbound_protocol_token_assignment_failed: u64,
     pub receipt_table_full: u64,
     pub channel_receipt_table_full: u64,
     pub channel_payload_too_large: u64,
@@ -1175,10 +1233,59 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
 
     /// Current negotiated round-trip time for one locally owned Link.
     ///
-    /// The value is a read-only lifecycle snapshot in seconds. It is absent
-    /// after the Link has been purged.
-    pub fn link_rtt(&self, link_id: &LinkId) -> Option<f32> {
+    /// The value is a read-only binary64 lifecycle snapshot in seconds. It is
+    /// absent after the Link has been purged.
+    pub fn link_rtt(&self, link_id: &LinkId) -> Option<f64> {
         self.core.transport.get_link(link_id).map(|link| link.rtt)
+    }
+
+    /// Inspect precise native Link timing state for host conformance only.
+    #[cfg(any(test, feature = "conformance"))]
+    pub fn link_snapshot_for_conformance(
+        &self,
+        link_id: &LinkId,
+    ) -> Option<ConformanceLinkSnapshot> {
+        self.core
+            .transport
+            .get_link(link_id)
+            .map(|link| ConformanceLinkSnapshot {
+                state: link.state,
+                rtt: link.rtt,
+                request_started_at: link.request_started_at(),
+                request_time_confirmed: link.request_time_confirmed(),
+                request_dispatch_interface: link.request_dispatch_interface(),
+                bound_interface: link.bound_interface(),
+                expected_hops: link.expected_hops(),
+                last_inbound: link.last_inbound,
+                last_outbound: link.last_outbound,
+                last_keepalive: link.last_keepalive,
+                keepalive_interval: link.keepalive_interval,
+                stale_time: link.stale_time,
+            })
+    }
+
+    /// Build one fresh encrypted LRRTT packet for host lifecycle conformance.
+    #[cfg(any(test, feature = "conformance"))]
+    pub fn build_lrrtt_for_conformance<R: RngCore + CryptoRng>(
+        &self,
+        link_id: &LinkId,
+        encoded_plaintext: &[u8],
+        rng: &mut R,
+    ) -> Result<TxPacket, SendError> {
+        let interface = self
+            .core
+            .transport
+            .link_interface(link_id)
+            .ok_or(SendError::LinkInterfaceUnknown)?;
+        let bytes = self
+            .core
+            .transport
+            .build_lrrtt_packet(link_id, encoded_plaintext, rng)?;
+        Ok(TxPacket {
+            bytes,
+            target: TxTarget::Only(InterfaceId(interface)),
+            protocol_token: None,
+        })
     }
 
     /// Allocation-free metrics and capacity snapshot.
@@ -1200,11 +1307,30 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         interface: InterfaceId,
         rng: &mut R,
     ) -> IngressReport {
+        self.ingest_at(raw, now, MonotonicInstant::from_secs(now), interface, rng)
+    }
+
+    /// Process a complete base-MTU packet with a precise monotonic Link clock.
+    ///
+    /// The pinned core reuses this synchronous pre-decrypt ingress sample for
+    /// liveness, RTT measurement and activation. Python samples those internal
+    /// edges separately; the resulting approximation is bounded by one LRRTT
+    /// handler execution.
+    pub fn ingest_at<R: RngCore + CryptoRng>(
+        &mut self,
+        raw: &[u8],
+        now: u64,
+        link_now: MonotonicInstant,
+        interface: InterfaceId,
+        rng: &mut R,
+    ) -> IngressReport {
         let preflight = match self.preflight_ingest(raw, interface) {
             Ok(preflight) => preflight,
             Err(report) => return report,
         };
-        let native = self.core.handle_ingest(raw, now, interface.0, rng);
+        let native = self
+            .core
+            .handle_ingest_at(raw, now, link_now, interface.0, rng);
         self.finish_ingest(
             native,
             preflight,
@@ -1233,14 +1359,40 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         R: RngCore + CryptoRng,
         S: ReceiptTerminalSink,
     {
+        self.ingest_with_receipt_sink_at(
+            raw,
+            now,
+            MonotonicInstant::from_secs(now),
+            interface,
+            rng,
+            sink,
+        )
+    }
+
+    /// Precise Link-clock variant of [`Self::ingest_with_receipt_sink`] with
+    /// the same single-sample ingress semantics as [`Self::ingest_at`].
+    pub fn ingest_with_receipt_sink_at<R, S>(
+        &mut self,
+        raw: &[u8],
+        now: u64,
+        link_now: MonotonicInstant,
+        interface: InterfaceId,
+        rng: &mut R,
+        sink: &mut S,
+    ) -> Result<IngressReport, ReceiptReservationUnavailable>
+    where
+        R: RngCore + CryptoRng,
+        S: ReceiptTerminalSink,
+    {
         let preflight = match self.preflight_ingest(raw, interface) {
             Ok(preflight) => preflight,
             Err(report) => return Ok(report),
         };
         let mut native_sink = NativeReceiptSink::new(sink);
-        let native = match self.core.handle_ingest_with_receipt_sink(
+        let native = match self.core.handle_ingest_with_receipt_sink_at(
             raw,
             now,
+            link_now,
             interface.0,
             rng,
             &mut native_sink,
@@ -1342,6 +1494,12 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                 IngestRejection::ReverseRouteConflict { truncated_hash } => {
                     IngressDropReason::ReverseRouteConflict { truncated_hash }
                 }
+                IngestRejection::ProtocolTokenExhausted { link_id } => {
+                    IngressDropReason::ProtocolTokenExhausted { link_id }
+                }
+                IngestRejection::ProtocolTokenAssignmentFailed { link_id } => {
+                    IngressDropReason::ProtocolTokenAssignmentFailed { link_id }
+                }
             };
             return self.reject(reason, preflight.metadata);
         }
@@ -1360,9 +1518,9 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             return self.reject(IngressDropReason::LinkStateNotRetained, preflight.metadata);
         }
 
-        // Rete currently emits LinkEstablished as soon as a responder has
-        // produced LRPROOF, while its Link is still Handshake and unusable.
-        // Firmware observes establishment only after the native state is Active.
+        // Defensive invariant: the pinned Rete revision emits establishment
+        // only after authenticated LRRTT activation. Retain the state check so
+        // a future native regression cannot leak a premature product event.
         let before_events = native.events.len();
         native.events.retain(|event| match event {
             NodeEvent::LinkEstablished { link_id } => self
@@ -1638,6 +1796,16 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                 self.ingress.relay_link_full = self.ingress.relay_link_full.saturating_add(1);
             }
             IngressDropReason::LinkStateNotRetained => {}
+            IngressDropReason::ProtocolTokenExhausted { .. } => {
+                self.ingress.protocol_token_exhausted =
+                    self.ingress.protocol_token_exhausted.saturating_add(1);
+            }
+            IngressDropReason::ProtocolTokenAssignmentFailed { .. } => {
+                self.ingress.protocol_token_assignment_failed = self
+                    .ingress
+                    .protocol_token_assignment_failed
+                    .saturating_add(1);
+            }
             IngressDropReason::Header1RemoteLinkRequestDisabled => {
                 self.ingress.header1_remote_link_request_disabled = self
                     .ingress
@@ -1720,6 +1888,8 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                 | SendError::LinkInterfaceUnknown
                 | SendError::WindowFull
                 | SendError::OutputAllocationFailed
+                | SendError::ProtocolTokenExhausted
+                | SendError::ProtocolTokenAssignmentFailed
                 | SendError::ResourceLimit => PrepareDataError::Invariant,
             })?;
         Ok(PreparedData {
@@ -1768,7 +1938,11 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         let bytes = self
             .core
             .build_data_packet(destination, plaintext, rng, now)?;
-        Ok(TxPacket { bytes, target })
+        Ok(TxPacket {
+            bytes,
+            target,
+            protocol_token: None,
+        })
     }
 
     /// Initiate a locally owned Link only when Rete can retain its state.
@@ -1778,7 +1952,18 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         now: u64,
         rng: &mut R,
     ) -> Result<(TxPacket, LinkId), LinkAdmissionError> {
-        match try_initiate_heapless_link(&mut self.core, destination, now, rng) {
+        self.initiate_link_at(destination, now, MonotonicInstant::from_secs(now), rng)
+    }
+
+    /// Initiate a locally owned Link with a precise provisional request time.
+    pub fn initiate_link_at<R: RngCore + CryptoRng>(
+        &mut self,
+        destination: DestHash,
+        now: u64,
+        link_now: MonotonicInstant,
+        rng: &mut R,
+    ) -> Result<(TxPacket, LinkId), LinkAdmissionError> {
+        match try_initiate_heapless_link_at(&mut self.core, destination, now, link_now, rng) {
             Ok((packet, link_id)) => Ok((resolve_origin_packet(packet), link_id)),
             Err(error) => {
                 match error {
@@ -1794,11 +1979,38 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                         self.admission.outbound_link_not_retained =
                             self.admission.outbound_link_not_retained.saturating_add(1);
                     }
+                    LinkAdmissionError::Rete(SendError::ProtocolTokenExhausted) => {
+                        self.admission.outbound_protocol_token_exhausted = self
+                            .admission
+                            .outbound_protocol_token_exhausted
+                            .saturating_add(1);
+                    }
+                    LinkAdmissionError::Rete(SendError::ProtocolTokenAssignmentFailed) => {
+                        self.admission.outbound_protocol_token_assignment_failed = self
+                            .admission
+                            .outbound_protocol_token_assignment_failed
+                            .saturating_add(1);
+                    }
                     LinkAdmissionError::Rete(_) => {}
                 }
                 Err(error)
             }
         }
+    }
+
+    /// Confirm that an interface accepted one token-bearing protocol packet.
+    ///
+    /// The first valid interface confirmation wins. A false return therefore
+    /// means the token/interface/state did not match or another fan-out hop
+    /// already confirmed the same packet.
+    pub fn confirm_outbound_protocol(
+        &mut self,
+        token: OutboundProtocolToken,
+        interface: InterfaceId,
+        interval: OutboundDispatchInterval,
+    ) -> bool {
+        self.core
+            .confirm_outbound_protocol(token, interface.0, interval)
     }
 
     /// Send bounded best-effort data over an active Link.
@@ -1820,7 +2032,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         }
         let packet = self.core.send_link_data(link_id, data, rng)?;
         if let Some(link) = self.core.transport.get_link_mut(link_id) {
-            link.last_outbound = now;
+            link.last_outbound = MonotonicInstant::from_secs(now);
         }
         Ok(resolve_origin_packet(packet))
     }
@@ -1910,7 +2122,17 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
     /// resolved without ingress context; source-dependent actions are dropped
     /// and counted rather than guessed onto an interface.
     pub fn tick<R: RngCore + CryptoRng>(&mut self, now: u64, rng: &mut R) -> NodeActions {
-        let native = self.core.handle_tick(now, rng);
+        self.tick_at(now, MonotonicInstant::from_secs(now), rng)
+    }
+
+    /// Run timer maintenance with a precise monotonic Link clock.
+    pub fn tick_at<R: RngCore + CryptoRng>(
+        &mut self,
+        now: u64,
+        link_now: MonotonicInstant,
+        rng: &mut R,
+    ) -> NodeActions {
+        let native = self.core.handle_tick_at(now, link_now, rng);
         self.finish_tick(native)
     }
 
@@ -1929,10 +2151,25 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         R: RngCore + CryptoRng,
         S: ReceiptTerminalSink,
     {
+        self.tick_with_receipt_sink_at(now, MonotonicInstant::from_secs(now), rng, sink)
+    }
+
+    /// Precise Link-clock variant of [`Self::tick_with_receipt_sink`].
+    pub fn tick_with_receipt_sink_at<R, S>(
+        &mut self,
+        now: u64,
+        link_now: MonotonicInstant,
+        rng: &mut R,
+        sink: &mut S,
+    ) -> ReceiptTickReport
+    where
+        R: RngCore + CryptoRng,
+        S: ReceiptTerminalSink,
+    {
         let mut native_sink = NativeReceiptSink::new(sink);
-        let native = self
-            .core
-            .handle_tick_with_receipt_sink(now, rng, &mut native_sink);
+        let native =
+            self.core
+                .handle_tick_with_receipt_sink_at(now, link_now, rng, &mut native_sink);
         debug_assert_eq!(native.failed_receipts, native_sink.committed.timed_out);
         if native.receipt_notifications_deferred {
             self.receipt_terminals.reservation_backpressure = self
@@ -2016,6 +2253,7 @@ fn resolve_ingest_actions(native: IngestOutcome, source: InterfaceId) -> NodeAct
 }
 
 fn resolve_packet(packet: OutboundPacket, source: InterfaceId) -> TxPacket {
+    let protocol_token = packet.protocol_token();
     let target = match packet.routing {
         PacketRouting::All => TxTarget::All,
         PacketRouting::SourceInterface => TxTarget::Only(source),
@@ -2027,6 +2265,7 @@ fn resolve_packet(packet: OutboundPacket, source: InterfaceId) -> TxPacket {
     TxPacket {
         bytes: packet.data,
         target,
+        protocol_token,
     }
 }
 
@@ -2034,12 +2273,18 @@ fn resolve_tick_actions(native: IngestOutcome) -> NodeActions {
     let mut packets = Vec::with_capacity(native.packets.len());
     let mut unroutable_packets = 0;
     for packet in native.packets {
+        let protocol_token = packet.protocol_token();
         match packet.routing {
-            PacketRouting::All => packets.push(TxPacket::broadcast(packet.data)),
+            PacketRouting::All => packets.push(TxPacket {
+                bytes: packet.data,
+                target: TxTarget::All,
+                protocol_token,
+            }),
             PacketRouting::ExactInterface(interface) | PacketRouting::BoundInterface(interface) => {
                 packets.push(TxPacket {
                     bytes: packet.data,
                     target: TxTarget::Only(InterfaceId(interface)),
+                    protocol_token,
                 });
             }
             PacketRouting::SourceInterface | PacketRouting::AllExceptSource => {
@@ -2474,9 +2719,15 @@ mod tests {
         let mut rng = CounterRng::default();
         let link_id = establish_bound_link(&mut initiator, &mut responder, &mut rng);
 
-        // LRPROOF takes one whole monotonic second in this fixture, so Python's
-        // RTT-derived keepalive interval determines the first initiator probe.
-        let initiator_keepalive = rete_transport::compute_keepalive(1.0).0 as u64;
+        // LRPROOF takes one whole monotonic second in this fixture. The
+        // compatibility tick supplies whole seconds, so round the precise
+        // RTT-derived interval upward to the first representable due instant.
+        let initiator_keepalive_micros = initiator
+            .link_snapshot_for_conformance(&link_id)
+            .unwrap()
+            .keepalive_interval
+            .as_micros();
+        let initiator_keepalive = initiator_keepalive_micros.saturating_add(999_999) / 1_000_000;
         let request_at = 101 + initiator_keepalive;
         let tick = initiator.tick(request_at, &mut rng);
         let requests: Vec<_> = tick
@@ -2581,7 +2832,12 @@ mod tests {
 
         // The responder's RTT is two seconds in this fixture. Even after a
         // complete interval of inbound silence, it must never originate FF.
-        let responder_keepalive = rete_transport::compute_keepalive(2.0).0 as u64;
+        let responder_keepalive_micros = responder
+            .link_snapshot_for_conformance(&link_id)
+            .unwrap()
+            .keepalive_interval
+            .as_micros();
+        let responder_keepalive = responder_keepalive_micros.saturating_add(999_999) / 1_000_000;
         let responder_tick = responder.tick(request_at + 2 + responder_keepalive, &mut rng);
         assert!(responder_tick.packets.iter().all(|packet| {
             Packet::parse(packet.bytes()).is_ok_and(|parsed| parsed.context != CONTEXT_KEEPALIVE)
@@ -2617,7 +2873,7 @@ mod tests {
         assert!(response.actions.events.is_empty());
         assert_eq!(
             responder.metrics().ingress.premature_link_events_suppressed,
-            1
+            0
         );
         assert_eq!(response.actions.packets.len(), 1);
         assert_eq!(
@@ -3118,17 +3374,17 @@ mod tests {
 
     #[test]
     fn origin_packet_resolution_preserves_absolute_routing() {
-        let exact = resolve_origin_packet(OutboundPacket {
-            data: vec![0xa5],
-            routing: PacketRouting::ExactInterface(7),
-        });
+        let exact = resolve_origin_packet(OutboundPacket::new(
+            vec![0xa5],
+            PacketRouting::ExactInterface(7),
+        ));
         assert_eq!(exact.bytes(), &[0xa5]);
         assert_eq!(exact.target(), TxTarget::Only(InterfaceId(7)));
 
-        let bound = resolve_origin_packet(OutboundPacket {
-            data: vec![0xb5],
-            routing: PacketRouting::BoundInterface(8),
-        });
+        let bound = resolve_origin_packet(OutboundPacket::new(
+            vec![0xb5],
+            PacketRouting::BoundInterface(8),
+        ));
         assert_eq!(bound.bytes(), &[0xb5]);
         assert_eq!(bound.target(), TxTarget::Only(InterfaceId(8)));
 
@@ -3140,10 +3396,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "pinned Rete origin API emitted source-relative routing")]
     fn origin_packet_resolution_rejects_source_context() {
-        let _ = resolve_origin_packet(OutboundPacket {
-            data: vec![0xc7],
-            routing: PacketRouting::SourceInterface,
-        });
+        let _ = resolve_origin_packet(OutboundPacket::new(
+            vec![0xc7],
+            PacketRouting::SourceInterface,
+        ));
     }
 
     #[test]
@@ -3152,22 +3408,10 @@ mod tests {
             events: Vec::new(),
             packets: vec![
                 OutboundPacket::broadcast(vec![0xa1]),
-                OutboundPacket {
-                    data: vec![0xb2],
-                    routing: PacketRouting::ExactInterface(9),
-                },
-                OutboundPacket {
-                    data: vec![0xb3],
-                    routing: PacketRouting::BoundInterface(8),
-                },
-                OutboundPacket {
-                    data: vec![0xc3],
-                    routing: PacketRouting::SourceInterface,
-                },
-                OutboundPacket {
-                    data: vec![0xd4],
-                    routing: PacketRouting::AllExceptSource,
-                },
+                OutboundPacket::new(vec![0xb2], PacketRouting::ExactInterface(9)),
+                OutboundPacket::new(vec![0xb3], PacketRouting::BoundInterface(8)),
+                OutboundPacket::new(vec![0xc3], PacketRouting::SourceInterface),
+                OutboundPacket::new(vec![0xd4], PacketRouting::AllExceptSource),
             ],
             rejection: None,
         });

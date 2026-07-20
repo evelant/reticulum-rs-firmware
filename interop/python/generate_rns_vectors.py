@@ -29,6 +29,32 @@ EXPECTED_UMSGPACK = "2.7.1"
 LRRTT_MEASURED_RTT = 0.25
 
 
+class ScriptedClock:
+    """Deterministic clock that also records ordering at mocked I/O boundaries."""
+
+    def __init__(self, samples: list[tuple[str, float]]):
+        self._samples = iter(samples)
+        self.events: list[str] = []
+
+    def time(self) -> float:
+        try:
+            label, value = next(self._samples)
+        except StopIteration as error:
+            raise RuntimeError("released RNS sampled the clock more often than expected") from error
+        self.events.append(label)
+        return value
+
+    def mark(self, event: str) -> None:
+        self.events.append(event)
+
+    def assert_exhausted(self) -> None:
+        try:
+            next(self._samples)
+        except StopIteration:
+            return
+        raise RuntimeError("released RNS sampled the clock fewer times than expected")
+
+
 def released_peer() -> dict[str, str]:
     """Read the small released-Reticulum table without adding a TOML package."""
     manifest = PEER_MANIFEST.read_text(encoding="utf-8")
@@ -292,6 +318,429 @@ def lrrtt_messagepack_vectors() -> dict[str, object]:
     }
 
 
+def f64_timing_value(value: float | None) -> dict[str, str] | None:
+    """Describe one finite Python timing value without JSON float ambiguity."""
+    if value is None:
+        return None
+    if type(value) is not float or not math.isfinite(value):
+        raise TypeError("LRRTT lifecycle timings must be finite Python floats")
+    return {
+        "decimal": repr(value),
+        "f64_bits_hex": struct.pack(">d", value).hex(),
+    }
+
+
+def timing_interval_value(value: int | float) -> dict[str, str]:
+    """Preserve Python's numeric type for derived keepalive intervals."""
+    if type(value) is int:
+        return {"python_type": "int", "decimal": str(value)}
+    described = f64_timing_value(value)
+    if described is None:
+        raise TypeError("LRRTT lifecycle intervals cannot be None")
+    return {"python_type": "float", **described}
+
+
+def link_state_name(status: int) -> str:
+    """Give the released Link status constants stable corpus names."""
+    names = {
+        RNS.Link.PENDING: "PENDING",
+        RNS.Link.HANDSHAKE: "HANDSHAKE",
+        RNS.Link.ACTIVE: "ACTIVE",
+        RNS.Link.STALE: "STALE",
+        RNS.Link.CLOSED: "CLOSED",
+    }
+    try:
+        return names[status]
+    except KeyError as error:
+        raise RuntimeError(f"unexpected released Link state {status}") from error
+
+
+def lrrtt_request_time_ordering(identity: RNS.Identity) -> dict[str, object]:
+    """Execute released Link setup paths around deterministic send boundaries."""
+    link_module = import_module("RNS.Link")
+    packet_module = import_module("RNS.Packet")
+    outgoing_destination = RNS.Destination(
+        identity,
+        RNS.Destination.OUT,
+        RNS.Destination.SINGLE,
+        "reticulum_rs_firmware",
+        "lrrtt_timing",
+    )
+
+    initiator_clock = ScriptedClock(
+        [
+            ("request_time_sample", 10.0),
+            ("last_outbound_sample", 10.5),
+        ]
+    )
+
+    def observe_link_request_egress(packet: RNS.Packet) -> bool:
+        if packet.packet_type != RNS.Packet.LINKREQUEST:
+            raise RuntimeError("initiator probe egress was not a link request")
+        initiator_clock.mark("transport_outbound_link_request")
+        packet.sent = True
+        return True
+
+    with (
+        patch.object(link_module, "time", initiator_clock),
+        patch.object(packet_module, "time", initiator_clock),
+        patch.object(RNS.Transport, "hops_to", return_value=1),
+        patch.object(
+            RNS.Transport,
+            "next_hop_interface_hw_mtu",
+            return_value=None,
+        ),
+        patch.object(RNS.Transport, "register_link"),
+        patch.object(
+            RNS.Transport,
+            "outbound",
+            new=observe_link_request_egress,
+        ),
+        patch.object(RNS.Link, "start_watchdog"),
+    ):
+        initiator = RNS.Link(outgoing_destination)
+    initiator_clock.assert_exhausted()
+
+    responder_clock = ScriptedClock(
+        [
+            ("proof_packet_last_outbound_sample", 20.0),
+            ("proof_had_outbound_sample", 20.125),
+            ("request_time_sample", 20.25),
+            ("last_inbound_sample", 20.5),
+        ]
+    )
+    owner = SimpleNamespace(identity=fixed_identity("lrrtt-responder"))
+    peer_public_key = fixed_identity("lrrtt-initiator").get_public_key()
+    interface = object()
+    receiving_destination = RNS.Destination(
+        owner.identity,
+        RNS.Destination.IN,
+        RNS.Destination.SINGLE,
+        "reticulum_rs_firmware",
+        "lrrtt_timing_responder",
+    )
+    request_packet = RNS.Packet(
+        receiving_destination,
+        peer_public_key,
+        packet_type=RNS.Packet.LINKREQUEST,
+    )
+    request_packet.hops = 1
+    request_packet.pack()
+    request_packet.receiving_interface = interface
+    request_packet.rssi = 0.0
+    request_packet.snr = 0.0
+    request_packet.q = 0.0
+
+    def observe_link_proof_egress(packet: RNS.Packet) -> bool:
+        if (
+            packet.packet_type != RNS.Packet.PROOF
+            or packet.context != RNS.Packet.LRPROOF
+        ):
+            raise RuntimeError("responder probe egress was not an LRPROOF")
+        responder_clock.mark("transport_outbound_link_proof")
+        packet.sent = True
+        return True
+
+    with (
+        patch.object(link_module, "time", responder_clock),
+        patch.object(packet_module, "time", responder_clock),
+        patch.object(RNS.Link, "start_watchdog"),
+        patch.object(RNS.Transport, "register_link"),
+        patch.object(
+            RNS.Transport,
+            "outbound",
+            new=observe_link_proof_egress,
+        ),
+    ):
+        responder = RNS.Link.validate_request(
+            owner,
+            peer_public_key,
+            request_packet,
+        )
+    responder_clock.assert_exhausted()
+    if responder is None:
+        raise RuntimeError("released RNS rejected the deterministic LRRTT request probe")
+
+    return {
+        "initiator": {
+            "released_methods": ["RNS.Link.__init__", "RNS.Packet.send"],
+            "observed_event_order": initiator_clock.events,
+            "request_time": f64_timing_value(initiator.request_time),
+            "last_outbound": f64_timing_value(initiator.last_outbound),
+            "semantic": "request_time is sampled before link request send",
+        },
+        "responder": {
+            "released_methods": [
+                "RNS.Link.validate_request",
+                "RNS.Link.prove",
+                "RNS.Packet.send",
+            ],
+            "observed_event_order": responder_clock.events,
+            "request_time": f64_timing_value(responder.request_time),
+            "last_inbound": f64_timing_value(responder.last_inbound),
+            "semantic": "request_time is sampled after link proof send returns",
+        },
+    }
+
+
+class ProbeToken:
+    """Minimal authenticated-decrypt boundary used by released Link.decrypt."""
+
+    def __init__(self, plaintext: bytes | None, *, fail_authentication: bool = False):
+        self.plaintext = plaintext
+        self.fail_authentication = fail_authentication
+
+    def decrypt(self, _ciphertext: bytes) -> bytes:
+        if self.fail_authentication:
+            raise ValueError("deterministic authentication failure")
+        if self.plaintext is None:
+            raise RuntimeError("successful probe decrypt requires plaintext")
+        return self.plaintext
+
+
+def make_lrrtt_responder_probe(
+    callback_observations: list[dict[str, object]],
+    teardown_observations: list[str],
+) -> RNS.Link:
+    """Build only the fields consumed by released Link.receive/rtt_packet."""
+    link = object.__new__(RNS.Link)
+    link.initiator = False
+    link.status = RNS.Link.HANDSHAKE
+    link.request_time = 100.0
+    link.rtt = None
+    link.activated_at = None
+    link.expected_hops = None
+    link.establishment_cost = 100
+    link.establishment_rate = None
+    link.keepalive = RNS.Link.KEEPALIVE
+    link.stale_time = RNS.Link.STALE_TIME
+    link.attached_interface = object()
+    link.last_inbound = 0.0
+    link.last_outbound = 0.0
+    link.last_keepalive = 0.0
+    link.last_proof = 0.0
+    link.last_data = 0.0
+    link.rx = 0
+    link.rxbytes = 0
+    link.link_id = bytes(16)
+    link.token = ProbeToken(umsgpack.packb(0.125))
+    link.derived_key = None
+    link._Link__update_phy_stats = lambda *_args, **_kwargs: None
+
+    def established_callback(callback_link: RNS.Link) -> None:
+        callback_observations.append(
+            {
+                "state": link_state_name(callback_link.status),
+                "rtt": f64_timing_value(callback_link.rtt),
+                "activated_at": f64_timing_value(callback_link.activated_at),
+                "expected_hops": callback_link.expected_hops,
+            }
+        )
+
+    link.owner = SimpleNamespace(
+        callbacks=SimpleNamespace(link_established=established_callback)
+    )
+
+    def observe_teardown() -> None:
+        teardown_observations.append("teardown")
+        link.status = RNS.Link.CLOSED
+
+    # The actual Link.rtt_packet method decides whether this boundary is called;
+    # the network-emitting teardown implementation is replaced for determinism.
+    link.teardown = observe_teardown
+    return link
+
+
+def lrrtt_responder_lifecycle() -> dict[str, object]:
+    """Execute repeated LRRTT DATA packets through released Link.receive."""
+    link_module = import_module("RNS.Link")
+    callback_observations: list[dict[str, object]] = []
+    teardown_observations: list[str] = []
+    link = make_lrrtt_responder_probe(
+        callback_observations,
+        teardown_observations,
+    )
+
+    def run_case(
+        name: str,
+        *,
+        clock_samples: list[tuple[str, float]],
+        token: ProbeToken,
+        ciphertext_marker: int,
+        hops: int,
+        forced_state: int | None = None,
+    ) -> dict[str, object]:
+        if forced_state is not None:
+            link.status = forced_state
+        state_before = link.status
+        request_time_before = link.request_time
+        rtt_before = link.rtt
+        activated_before = link.activated_at
+        callback_count_before = len(callback_observations)
+        teardown_count_before = len(teardown_observations)
+        link.token = token
+        ciphertext = b"deterministic-encrypted-lrrt" + bytes([ciphertext_marker])
+        packet = SimpleNamespace(
+            data=ciphertext,
+            context=RNS.Packet.LRRTT,
+            packet_type=RNS.Packet.DATA,
+            hops=hops,
+            receiving_interface=link.attached_interface,
+        )
+        clock = ScriptedClock(clock_samples)
+        with patch.object(link_module, "time", clock):
+            RNS.Link.receive(link, packet)
+        clock.assert_exhausted()
+        return {
+            "name": name,
+            "ciphertext_hex": ciphertext.hex(),
+            "ciphertext_provenance": (
+                "case-unique synthetic bytes passed directly to RNS.Link.receive"
+            ),
+            "state_before": link_state_name(state_before),
+            "state_after": link_state_name(link.status),
+            "observed_clock_order": clock.events,
+            "request_time_before": f64_timing_value(request_time_before),
+            "request_time_after": f64_timing_value(link.request_time),
+            "rtt_before": f64_timing_value(rtt_before),
+            "rtt_after": f64_timing_value(link.rtt),
+            "activated_at_before": f64_timing_value(activated_before),
+            "activated_at_after": f64_timing_value(link.activated_at),
+            "last_inbound_after": f64_timing_value(link.last_inbound),
+            "last_data_after": f64_timing_value(link.last_data),
+            "expected_hops_after": link.expected_hops,
+            "keepalive_after": timing_interval_value(link.keepalive),
+            "stale_time_after": timing_interval_value(link.stale_time),
+            "callback_delta": len(callback_observations) - callback_count_before,
+            "callback_count_after": len(callback_observations),
+            "teardown_delta": len(teardown_observations) - teardown_count_before,
+            "teardown_count_after": len(teardown_observations),
+            "rx_after": link.rx,
+            "rxbytes_after": link.rxbytes,
+        }
+
+    cases = [
+        run_case(
+            "handshake_valid",
+            clock_samples=[
+                ("receive_liveness_sample", 100.125),
+                ("measured_rtt_sample", 100.25),
+                ("activation_sample", 100.375),
+            ],
+            token=ProbeToken(umsgpack.packb(0.125)),
+            ciphertext_marker=1,
+            hops=2,
+        ),
+        run_case(
+            "active_valid_repeat",
+            clock_samples=[
+                ("receive_liveness_sample", 101.125),
+                ("measured_rtt_sample", 101.25),
+                ("activation_sample", 101.375),
+            ],
+            token=ProbeToken(umsgpack.packb(0.125)),
+            ciphertext_marker=2,
+            hops=3,
+        ),
+        run_case(
+            "stale_valid_repeat",
+            clock_samples=[
+                ("receive_liveness_sample", 102.125),
+                ("measured_rtt_sample", 102.25),
+                ("activation_sample", 102.375),
+            ],
+            token=ProbeToken(umsgpack.packb(0.125)),
+            ciphertext_marker=3,
+            hops=4,
+            forced_state=RNS.Link.STALE,
+        ),
+        run_case(
+            "stale_decrypt_failure_repeat",
+            clock_samples=[
+                ("receive_liveness_sample", 103.125),
+                ("measured_rtt_sample", 103.25),
+            ],
+            token=ProbeToken(None, fail_authentication=True),
+            ciphertext_marker=4,
+            hops=5,
+            forced_state=RNS.Link.STALE,
+        ),
+        run_case(
+            "active_authenticated_malformed_repeat",
+            clock_samples=[
+                ("receive_liveness_sample", 104.125),
+                ("measured_rtt_sample", 104.25),
+            ],
+            token=ProbeToken(bytes.fromhex("c1")),
+            ciphertext_marker=5,
+            hops=6,
+        ),
+    ]
+    ciphertexts = [case["ciphertext_hex"] for case in cases]
+    if len(set(ciphertexts)) != len(ciphertexts):
+        raise RuntimeError("LRRTT lifecycle probe ciphertexts must be case-unique")
+    return {
+        "released_entrypoint": "RNS.Link.receive -> RNS.Link.rtt_packet",
+        "ingress_scope": (
+            "each case is passed directly to RNS.Link.receive; RNS.Transport "
+            "inbound exact-replay deduplication is outside this corpus"
+        ),
+        "transport_exact_replay_dedup_exercised": False,
+        "request_time_semantic": (
+            "immutable responder request_time; each valid repeat measures from "
+            "the original post-proof sample"
+        ),
+        "peer_rtt_wire_hex": umsgpack.packb(0.125).hex(),
+        "authenticated_malformed_plaintext_hex": "c1",
+        "teardown_boundary": (
+            "RNS.Link.rtt_packet calls Link.teardown; the probe replaces that "
+            "method with a recorder that sets CLOSED, so teardown packet "
+            "egress, key purge and close callbacks are not exercised"
+        ),
+        "cases": cases,
+        "callback_observations": callback_observations,
+    }
+
+
+def lrrtt_lifecycle_vectors(identity: RNS.Identity) -> dict[str, object]:
+    """Freeze released RNS 1.3.8 LRRTT timing and repeat-state behavior."""
+    link_source = Path(import_module("RNS.Link").__file__)
+    packet_source = Path(import_module("RNS.Packet").__file__)
+    return {
+        "origin": (
+            "source-hash-backed deterministic method probes: request ordering "
+            "executes released Link.__init__, Link.validate_request, Link.prove "
+            "and Packet.send through a recorded Transport.outbound boundary; "
+            "lifecycle cases directly invoke released Link.receive, "
+            "Link.rtt_packet and Link.decrypt on a field-scaffolded Link"
+        ),
+        "link_source_sha256": hashlib.sha256(link_source.read_bytes()).hexdigest(),
+        "packet_source_sha256": hashlib.sha256(packet_source.read_bytes()).hexdigest(),
+        "clock": "Python time.time() float seconds",
+        "probe_scaffolding": {
+            "request_time_ordering": [
+                "fixed identities and an actual RNS.Packet link request",
+                "scripted RNS.Link and RNS.Packet module clocks",
+                "fixed Transport hop and next-hop MTU lookups for the initiator",
+                "no-op Transport.register_link",
+                "recorded Transport.outbound instead of interface/network egress",
+                "no-op Link.start_watchdog",
+            ],
+            "responder_lifecycle": [
+                "Link allocated without its constructor and required fields populated",
+                "scripted RNS.Link module clock",
+                "ProbeToken substituted at the cryptographic token decrypt boundary",
+                "no-op Link physical-statistics updater",
+                "recording owner link-established callback",
+                "recording Link.teardown replacement that sets CLOSED",
+                "case-unique synthetic packets passed directly to Link.receive",
+            ],
+        },
+        "request_time_ordering": lrrtt_request_time_ordering(identity),
+        "responder_lifecycle": lrrtt_responder_lifecycle(),
+    }
+
+
 def build_vectors() -> dict[str, object]:
     peer = released_peer()
     if sys.version_info[:3] != EXPECTED_PYTHON:
@@ -369,7 +818,7 @@ def build_vectors() -> dict[str, object]:
         assert public_key == identity.get_public_key()
 
         return {
-            "schema": 1,
+            "schema": 2,
             "protocol": "Reticulum",
             "lane": "released",
             "peer": {
@@ -387,10 +836,11 @@ def build_vectors() -> dict[str, object]:
                 "requirements_sha256": hashlib.sha256(REQUIREMENTS.read_bytes()).hexdigest(),
                 "deterministic": True,
                 "notes": (
-                    "The corpus excludes encrypted packet creation because "
-                    "Python correctly uses a fresh ephemeral key and IV. "
-                    "LRRTT cases record released-peer decode and RTT-formula "
-                    "behavior; firmware checks pending-handshake payload parity "
+                    "The foundation packet corpus excludes encrypted packet "
+                    "creation because Python correctly uses a fresh ephemeral "
+                    "key and IV. LRRTT sections record released-peer decode, "
+                    "RTT-formula, request-clock ordering and direct Link.receive "
+                    "repeat-lifecycle behavior; candidate conformance is checked "
                     "separately."
                 ),
             },
@@ -427,6 +877,7 @@ def build_vectors() -> dict[str, object]:
                 "packet_hash_hex": plain_packet.packet_hash.hex(),
             },
             "lrrtt_messagepack": lrrtt_messagepack_vectors(),
+            "lrrtt_lifecycle": lrrtt_lifecycle_vectors(identity),
         }
 
 

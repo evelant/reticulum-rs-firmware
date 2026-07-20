@@ -49,8 +49,9 @@ use reticulum_heltec_vision_master_e290_node::{
 };
 use reticulum_interface_router::{InterfaceDescriptor, SealedIngressPacket};
 use reticulum_node_core::{
-    AuthorizedFrameObservation, InboundDataProjection, MonotonicMillis, MonotonicSeconds,
-    NodeActions, ReceiptCorrelationError, TxLeaseDeadline, project_inbound_data,
+    AuthorizedFrameObservation, InboundDataProjection, MonotonicInstant, MonotonicMillis,
+    MonotonicSeconds, NodeActions, OutboundDispatchInterval, ReceiptCorrelationError,
+    TxLeaseDeadline, project_inbound_data,
 };
 #[cfg(feature = "runtime-measurement-hil")]
 use reticulum_node_core::{IngressDisposition, IngressMetadata, PacketType};
@@ -61,7 +62,7 @@ use reticulum_tx_handoff::AuthorizedFrameNodeHandoff;
 use reticulum_tx_supervisor::{
     NodeInterfaceAnnounceFlushResult, NodeInterfaceIngressActionFault,
     NodeInterfaceIngressRecycleFault, NodeInterfaceIngressStep, NodeInterfaceOrdinaryOfferFailure,
-    NodeInterfaceSupervisorTransition, NodeInterfaceTickResult,
+    NodeInterfaceSupervisorTransition, NodeInterfaceTickResult, OrdinaryRouterStep,
 };
 
 use crate::{
@@ -513,8 +514,51 @@ pub async fn run(
                     }
                 }
                 1 => {
+                    let dispatch_started_at = MonotonicInstant::from_micros(now_micros());
                     let pass = supervisor.step(MonotonicMillis::new(now_millis()));
+                    let dispatch_completed_at = MonotonicInstant::from_micros(now_micros());
                     let transition = pass.transition();
+                    if let NodeInterfaceSupervisorTransition::Ordinary(
+                        OrdinaryRouterStep::Routed {
+                            interface,
+                            protocol_token: Some(token),
+                            first_dispatch,
+                            ..
+                        },
+                    ) = transition
+                    {
+                        let confirmation = OutboundDispatchInterval::new(
+                            dispatch_started_at,
+                            dispatch_completed_at,
+                        )
+                        .map(|interval| {
+                            supervisor.confirm_outbound_protocol(token, interface, interval)
+                        });
+                        let disposition = confirmation.map(|confirmed| {
+                            config::protocol_dispatch_confirmation_disposition(
+                                first_dispatch,
+                                confirmed,
+                            )
+                        });
+                        if disposition.is_none()
+                            || matches!(
+                                disposition,
+                                Some(
+                                    config::ProtocolDispatchConfirmationDisposition::TerminalFailClosedDrain
+                                )
+                            )
+                        {
+                            enter_protocol_dispatch_fail_stop(
+                                supervisor,
+                                online,
+                                &mut fail_closed_draining,
+                                interface,
+                                first_dispatch,
+                                disposition.is_some(),
+                            );
+                            progressed = true;
+                        }
+                    }
                     match config::supervisor_transition_disposition(transition) {
                         config::SupervisorTransitionDisposition::Idle => {}
                         config::SupervisorTransitionDisposition::Progress => progressed = true,
@@ -574,9 +618,11 @@ pub async fn run(
                                 {
                                     next_tick_seconds =
                                         now.saturating_add(config::PROTOCOL_TICK_INTERVAL_SECONDS);
-                                    match supervisor.tick(
-                                        MonotonicSeconds::new(now),
-                                        config::ordinary_admission(now_millis()),
+                                    let link_now = MonotonicInstant::from_micros(now_micros());
+                                    match supervisor.tick_at(
+                                        MonotonicSeconds::new(link_now.as_secs()),
+                                        link_now,
+                                        config::ordinary_admission(link_now.as_micros() / 1_000),
                                         &mut rng,
                                     ) {
                                         NodeInterfaceTickResult::Accepted(accepted) => {
@@ -1521,14 +1567,44 @@ fn enter_active_owner_durability_fail_stop(
     *fail_closed_draining = true;
 }
 
+fn enter_protocol_dispatch_fail_stop(
+    supervisor: &mut ProductSupervisor,
+    online: InterfaceDescriptor,
+    fail_closed_draining: &mut bool,
+    routed_interface: reticulum_node_core::PacketInterfaceId,
+    first_dispatch: bool,
+    interval_ordered: bool,
+) {
+    match supervisor.set_interface_online(online.lease(), false) {
+        Ok(offline) => error!(
+            "e290-node stage=protocol-dispatch-confirmation status=INTERFACE-FAIL-STOP routed_interface={} interface={} generation={} online={} first_dispatch={} interval_ordered={} edge=router-egress-acceptance-not-rf-txdone action=deny-fresh-interface-work-and-drain-retained-owners",
+            routed_interface.get(),
+            offline.lease().interface().get(),
+            offline.lease().generation().get(),
+            offline.is_online(),
+            first_dispatch,
+            interval_ordered,
+        ),
+        Err(reason) => error!(
+            "e290-node stage=protocol-dispatch-confirmation status=FAIL trigger=interface-offline:{reason:?} routed_interface={} first_dispatch={} interval_ordered={} edge=router-egress-acceptance-not-rf-txdone action=fail-closed-drain",
+            routed_interface.get(),
+            first_dispatch,
+            interval_ordered,
+        ),
+    }
+    *fail_closed_draining = true;
+}
+
 fn step_ingress(
     supervisor: &mut ProductSupervisor,
     rng: &mut Trng,
     mut state: IngressDrainState<'_>,
 ) -> bool {
-    match supervisor.step_ingress(
-        MonotonicSeconds::new(now_seconds()),
-        config::ordinary_admission(now_millis()),
+    let link_now = MonotonicInstant::from_micros(now_micros());
+    match supervisor.step_ingress_at(
+        MonotonicSeconds::new(link_now.as_secs()),
+        link_now,
+        config::ordinary_admission(link_now.as_micros() / 1_000),
         rng,
     ) {
         NodeInterfaceIngressStep::Idle => false,
@@ -1906,7 +1982,6 @@ fn now_millis() -> u64 {
     Instant::now().as_millis()
 }
 
-#[cfg(feature = "runtime-measurement-hil")]
 fn now_micros() -> u64 {
     Instant::now().as_micros()
 }

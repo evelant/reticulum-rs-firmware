@@ -67,22 +67,31 @@ multi-hop routing, LXMF, or general application-level message consumption,
 session resumption, or either deferred wireless bearer binding.
 
 The current source composition pins Rete commit
-`14c7b4955a1ff6903e87cc40b42498f7869b6f4f`, with designated durable tag
-`firmware-pin-14c7b49`. That pin is newer than every powered measurement and
+`90570cafc812b3025011cb690ec74a27f287cb3f`, with designated durable tag
+`firmware-pin-90570ca`. That pin is newer than every powered measurement and
 powered artifact recorded below. It removes implicit
 interface-zero/broadcast fallbacks, adds exact path/reverse/Link routing and
 authenticated fail-closed LRPROOF handling, and makes covered H2 relay/reverse
-admission transactional with typed failures. It also adds pending-handshake
-MessagePack LRRTT parity and authenticated-malformed teardown. Those host
-regressions do not retroactively qualify a historical image or hardware run.
-The current build-only default E290 release links with text/data/BSS of
+admission transactional with typed failures. It also adds precise
+microsecond/binary64 LRRTT timing, dispatch confirmation, Active/Stale updates,
+and authenticated-malformed teardown. Those changes do not retroactively
+qualify a historical image or hardware run. The preceding `14c7b49`
+build-only default E290 release links with text/data/BSS of
 670,407/3,676/469,152 bytes and a 12,084,612-byte ELF, SHA-256
 `d0b457165f8ec80a677f963e0608a5b9510970fde23458567b4f31e3b319822a`.
 Its explicit 16 MiB package is a 776,464-byte merged image, uses
 710,928/6,291,456 application bytes (11.30%), and has SHA-256
 `7b11c6f6a3c039d46ab0117fd362920aaa40145e7f27cbc6fa0a8a84a7ab3571`.
-This is build-only evidence: the image has no flashed readback or powered
-proof.
+This is build-only evidence for the preceding pin: the image has no flashed
+readback or powered proof. The current pin's build-only default release links
+with text/data/BSS of 674,431/3,676/469,152 bytes (1,147,259 bytes total by GNU
+size), and its ELF has SHA-256
+`d370039c3872d34a74b9bbc0b52567a24be607bc01ea660b6dfbd8d5dd12072d`.
+Its explicit 16 MiB package is a 780,448-byte merged image, uses
+714,912/6,291,456 application bytes (11.36%), and has SHA-256
+`a912bb6c910c0145a9431f2a94b95a0a6560662678c457fc9c49e8641050b72c`.
+It is build-only, unflashed, and unpowered because neither E290 currently
+enumerates. A new powered run remains required.
 Every powered result below remains bound to its recorded historical source and
 Rete revision.
 
@@ -101,8 +110,9 @@ a full inbound-silence interval and a full prior-probe interval, and only the
 responder returns `0xfe`. Both are consumed internally, repeated valid frames
 bypass dedup only after the bound interface is accepted, and automatic output
 preflights and retains that exact route before committing its probe timer. Stale
-begins after two intervals and keeps a full five-second revival window from the
-actual transition/final probe; valid bound Link traffic revives it. An
+begins after two intervals and keeps a `4 * RTT + 5 seconds` revival window from
+the actual transition/final probe (five seconds when RTT is zero); valid bound
+Link traffic revives it. An
 initiator now snapshots a known path's hops when the pending Link is created,
 or uses the `PATHFINDER_M = 128` wildcard when no path is known. LRPROOF hop
 mismatches fail before deduplication or state mutation, and a responder records
@@ -110,12 +120,26 @@ the post-ingress hop only from authenticated, decrypted LRRTT. Pending-handshake
 payload parity is now covered: Rete emits canonical MessagePack float64,
 accepts Python u-msgpack numeric scalars and first-object/trailing-byte
 behavior, and selects the greater local or peer RTT with Python ordering.
-Malformed or nonnumeric authenticated LRRTT is rejected before hop or Active
-mutation and causes best-effort encrypted `LINKCLOSE`, unconditional
-Link-owned-state reclamation, and one terminal close without replay
-duplication. Active-responder repeat LRRTT remains a nonblocking gap until Rete
-retains immutable `request_time`; RTT timing also remains whole-second
-`u64`/`f32` rather than Python's double-precision wall-clock measurement.
+Rete retains an immutable request anchor, uses microsecond
+`MonotonicInstant`/`MonotonicDuration`, and stores RTT as binary64. An opaque,
+non-repeating eight-byte token accepts only the first successful interface
+confirmation. Initiator LINKREQUEST uses the confirmed egress interval start;
+responder LRPROOF uses its completion. The firmware confirms at generic
+ordinary-router/interface acceptance, not physical LoRa RF `TxDone`.
+
+Fresh authenticated LRRTT is processed in `Handshake`, `Active`, and `Stale`.
+Only initial activation emits `LinkEstablished`; repeats/reactivation emit
+`LinkRttUpdated`, refresh RTT/activation/hop/keepalive state, and do not
+duplicate establishment statistics. Exact raw replay remains deduplicated.
+Authenticated malformed LRRTT tears down all three states, with
+`links_failed` incremented only for Handshake. Zero RTT retains the 5-second
+keepalive/10-second stale floors; nonzero RTT uses `4 * RTT + 5 seconds` stale
+grace. Rete deliberately authenticates before liveness mutation, so corrupt
+stale LRRTT does not revive a Link as it does under released Python's ordering.
+It uses one pre-decrypt ingress sample for one bounded synchronous handler,
+where Python takes three internal samples. The firmware adapter uses precise
+`*_at` paths and confirms at the transport-neutral ordinary router; upstream
+Tokio/Embassy runners remain coarse/unconfirmed.
 Shared-Hub endpoint/reincarnation identity and automatic timeout `LINKCLOSE`
 emission also remain open. Channel sends now preflight MDU,
 pending-window and receipt capacity; retries preflight the exact Link route and
@@ -489,25 +513,39 @@ cargo +stable run --locked -p xtask -- e290-runtime-measurement inspect-elf \
 
 It accepts only final little-endian 32-bit Xtensa `ET_EXEC` images with one
 nonempty, relocation-free `.stack_sizes` section. Both maximum frames must be
-at most 53,152 bytes, both linker guard offsets must remain 60 bytes, and the
-default/HIL usable stacks must remain at least 170,424/169,728 bytes. The
+at most 53,680 bytes, both linker guard offsets must remain 60 bytes, and the
+default/HIL usable stacks must remain at least 167,648/166,952 bytes. The
 default ELF must exclude the proof trace; the HIL ELF must contain exactly one
 initialized 192-byte symbol whose linked bytes decode as a valid empty `RPTE`
 record. Record counts are diagnostic rather than policy: the current build-only
-pair contains 839 default and 856 HIL records, and both maxima are 53,152
+pair contains 845 default and 862 HIL records, and both maxima are 53,680
 bytes. The retained powered release ELFs described below instead
 contain 816/832 records with 52,752-byte maxima. CI runs Clippy and then
 relinks both current profiles with
 `-C link-arg=-nostartfiles -Z emit-stack-sizes` in isolated target directories
 immediately before this inspection.
 
-The current build-only HIL links with text/data/BSS of
-683,147/4,180/468,648 bytes and a 12,233,984-byte ELF, SHA-256
-`7241d88c2996bae38a2d0f08090b7d4d278c543dcc702e2fb3386bd4b8279b8d`.
-The default/HIL usable stacks are 170,424/169,728 bytes, both guard offsets are
-60 bytes, and the unchanged conservative margin after linked-RAM and maximum-
-frame deductions is 18,308 bytes. These are static build measurements, not a
-powered high-water result.
+The current default/HIL usable stacks are 167,648/166,952 bytes, both guard
+offsets are 60 bytes, and the carried raw painted margin is 68,684 bytes after
+deducting 3,336 bytes of linked internal-RAM growth from the 72,020-byte powered
+boot-only baseline. Subtracting the current 53,680-byte maximum frame leaves a
+15,004-byte conservative margin. These are static build measurements and a
+deliberately conservative carry-forward calculation, not a new powered
+high-water result. This ceiling qualifies the E290's internal CPU0/main-
+executor task stack; it is not a compatibility ceiling for non-PSRAM ESP32
+boards, and PSRAM cannot back this internal task stack. The full E290 profile
+already requires PSRAM for its separate application/storage capacity, while
+Tracker V2 remains a separately sized reduced profile.
+
+The current build-only runtime-measurement HIL links with text/data/BSS of
+686,203/4,180/468,648 bytes (1,159,031 bytes total by GNU size), and its ELF
+has SHA-256
+`5aaa4c7029b35b55c5f2eb0f673c04ac11ae695c09a8cc1d1797990fe0a4ab30`.
+Its explicit 16 MiB package uses 726,512/6,291,456 application bytes (11.55%)
+and produces a 792,048-byte merged image with SHA-256
+`938d944c9373638b475e48e804fc0211b92da1ef49d0e875233d052b19064881`.
+Like the current default package, it is unflashed and unpowered because neither
+E290 currently enumerates.
 
 The exact release artifacts used for the 2026-07-20 powered run compare as
 follows. Paths embedded by the build can affect rebuild digests, so these
@@ -550,9 +588,9 @@ by exactly 192 bytes to 170,352/170,288; the default pair is unchanged.
 
 Those historical artifacts passed build, graph, ELF, and static-stack gates but
 were not powered-qualified: both boards were absent after the preceding
-debugger-reset attempt. They do not describe an ELF built from either the
-preceding `8b5d652` or current `14c7b49` pin. The immediately preceding
-777,600-byte HIL image,
+debugger-reset attempt. They do not describe an ELF built from the preceding
+`8b5d652` or `14c7b49` pins, or from the current `90570ca` pin. The immediately
+preceding 777,600-byte HIL image,
 SHA-256
 `151a66cc92b83268050c61bfc983ad6d9452fac0626d260c26da877c552c800e`,
 did pass an identity-qualified flash and exact address-zero readback on board
@@ -571,9 +609,9 @@ evidence for the immediately preceding trace revision, not powered evidence
 for the current hashes or the pending two-board RF proof-timeout reproduction.
 The 72,020-byte raw margin leaves 19,268 bytes after subtracting the unchanged
 52,752-byte maximum compiler frame in that artifact. Current static policy
-conservatively deducts another exact 560 bytes of subsequent linked-RAM growth,
-then subtracts the current 53,152-byte maximum: 71,460 carried-forward raw
-bytes and 18,308 bytes remain. This is build-qualified carry-forward, not a
+conservatively deducts 3,336 bytes of subsequent linked internal-RAM growth,
+then subtracts the current 53,680-byte maximum: 68,684 carried-forward raw
+bytes and 15,004 bytes remain. This is build-qualified carry-forward, not a
 fresh powered watermark.
 
 ### Decisive proof-correlation trial runbook
@@ -792,8 +830,10 @@ a deliberately conservative 19,460 bytes after subtracting the 52,752-byte
 maximum frame; the predecessor's one-board diagnostic baseline updates those
 values to 72,020/19,268 after the exact 192-byte linked-RAM cost. Neither pair
 is a universal stack guarantee. Current static policy further carries those
-values to 71,460/18,308 after exact post-proof linked-RAM growth and the current
-53,152-byte frame; that likewise is not a new powered observation.
+values to 68,684/15,004 after 3,336 bytes of exact post-proof linked internal-
+RAM growth and the current 53,680-byte frame; that likewise is not a new
+powered observation. This is an internal CPU0/main-executor task-stack bound,
+not a no-PSRAM board-support ceiling.
 Current source also re-reads the innermost stack pointer immediately before
 each volatile word access and reports an address at or above it as changed,
 so scanner safety does not depend on Rust honoring an inlining request. The
@@ -1120,8 +1160,8 @@ the ordinary and exceptional roots. The commit-fault dependency tail must be
 identical to default; the measurement tail may add only the reviewed
 `esp-alloc/alloc-hooks` feature. The default ELF must contain neither fault nor
 measurement wrappers, hooks, markers or evidence identifiers.
-The 129-test default host library suite, 135-test commit-fault profile, and
-145-test runtime-measurement profile have
+The 131-test default host library suite, 137-test commit-fault profile, and
+147-test runtime-measurement profile have
 passing policy/product/credential-boot/
 credential-runtime/USB-control/live-routing tests, including the source-order
 regressions, every canonical empty-initialization byte cut, adversarial media changes between
@@ -1170,14 +1210,15 @@ bounded authenticated client adds 29 tests for operation parsing, public-
 identity formatting, inbox status/peek, owner-only non-overwriting payload and
 evidence output, sequential request IDs, version policy, polling terminal
 semantics, coalesced-record preservation, authenticated terminal binding, and
-submission-input non-disclosure. Together these 56 focused tests are part of
-the full 252-test xtask gate. The portable
-Rete integration and inbox-store suites independently pass 58 and 17 tests,
-respectively. The 58 are project adapter tests. The project conformance runner
-now performs 235 checks: 112 released-vector, adapter and direct-Link checks,
+submission-input non-disclosure. These 56 focused tests are part of the
+passing 252-test xtask gate, while the portable Rete integration and inbox-store
+suites have 58 and 17 tests. The 58 are project adapter tests. The previously
+validated project conformance baseline performed
+235 checks: 112 released-vector, adapter and direct-Link checks,
 40 released-Python LRRTT MessagePack checks, 8 channel-retry lifecycle checks,
 40 keepalive lifecycle checks, and a 35-check deterministic three-node A--B--C
-relayed Link/LRPROOF/LRRTT/channel/proof flow.
+relayed Link/LRPROOF/LRRTT/channel/proof flow. The current schema-2
+lifecycle/candidate runner passes 647 checks.
 It is not powered or live-Python multi-hop qualification. The preceding
 `8b5d652` nested Rete selected validation set separately passed 635 tests: 271
 transport (174
@@ -1866,16 +1907,17 @@ commit on each board and in each direction, not bidirectional `Delivered`.
 The reverse proof or terminal status was not observed by the sender before its
 deadline; this product-level timeout is distinct from the zero radio-actor
 watchdog counters and remains a diagnostic residual. This capture used the
-preceding `f6f5fb0637d00691e09fa0105be4df902405fee4` Rete pin. The current
-`14c7b49` host suite now covers exact reverse-interface routing and proof
+preceding `f6f5fb0637d00691e09fa0105be4df902405fee4` Rete pin. The preceding
+`14c7b49` host suite covers exact reverse-interface routing and proof
 consumption, typed transactional reverse admission, a deterministic three-node
 relayed Link/channel/proof flow, pending-Link expected-hop enforcement, and
 atomic channel retry receipt replacement, plus pending-handshake MessagePack
-LRRTT validation and authenticated-malformed teardown,
-but only a new powered run can determine whether that fixes this end-to-end
-timeout or whether another product boundary remains faulty. A final
-authenticated peek on `3f:88` likewise returned phase A's exact 383-byte
-payload from destination `83a09ed807a0a7c631386deaa0448fb9`.
+LRRTT validation and authenticated-malformed teardown. The current `90570ca`
+lifecycle/timing change passes the root validation and E290 build gates; only
+a new powered run can determine whether the combined behavior
+fixes this end-to-end timeout or whether another product boundary remains
+faulty. A final authenticated peek on `3f:88` likewise returned phase A's exact
+383-byte payload from destination `83a09ed807a0a7c631386deaa0448fb9`.
 
 These are instrumented-workload observations, not production-image timing
 guarantees. The HIL enables allocator callbacks, updates atomic evidence, and
@@ -2225,7 +2267,7 @@ first smoke.
   backend error-after-write cases, sustained and forwarded traffic, concurrent
   durable activity, low-memory/allocation-failure pressure, and default-image
   observation. Rerun the reverse delivery-proof scenario at the current
-  `14c7b49` pin and diagnose any remaining timeout before claiming bidirectional
+  `90570ca` pin and diagnose any remaining timeout before claiming bidirectional
   delivery completion. Then design final LXMF/message storage and
   device configuration with explicit wear, migration, reclamation,
   authorization, and cross-store ordering behavior.

@@ -382,14 +382,18 @@ measurement HIL observed:
 The project-local release gate preserves the current static inputs to the stack
 calculation. CI runs Clippy and then relinks isolated default and measurement
 ELFs with compiler `.stack_sizes` evidence; the inspector accepts only final
-little-endian Xtensa executables with no remaining section relocations. It now
-caps both maximum frames at 53,152 bytes, requires the default/current-HIL
-usable stacks to remain at least 170,424/169,728 bytes, and fixes both linker
-guard offsets at 60 bytes. After the exact proof-trace and subsequent linked-RAM
-deductions, it conservatively carries the powered raw margin forward as 71,460
-bytes and leaves 18,308 bytes after the current maximum frame. This detects a
-static regression but does not replace the powered watermark or establish
-interrupt/nesting headroom.
+little-endian Xtensa executables with no remaining section relocations. For the
+current `90570ca` pair it caps both maximum frames at 53,680 bytes, requires the
+default/current-HIL usable stacks to remain at least 167,648/166,952 bytes, and
+fixes both linker guard offsets at 60 bytes. After the 192-byte proof-trace
+object and 3,336 bytes of exact subsequent linked internal-RAM growth, it
+conservatively carries the powered raw margin forward as 68,684 bytes and
+leaves 15,004 bytes after the current maximum frame. This detects a static
+regression but does not replace the
+powered watermark or establish interrupt/nesting headroom. It qualifies the
+E290 CPU0/main-executor stack, which remains in internal SRAM; it is not a
+compatibility ceiling for non-PSRAM boards. The full E290 profile separately
+requires PSRAM, while Tracker V2 remains a reduced profile.
 
 Phase A delivered one 383-byte payload from `3e:88` to `3f:88`; the receiver
 durably committed the exact payload and the sender reached `Delivered`. The
