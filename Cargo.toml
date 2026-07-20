@@ -158,11 +158,11 @@ zeroize = { version = "=1.9.0", default-features = false }
 # Link/reverse admission with typed failures, authenticated Link-interface
 # binding, Python-compatible Link keepalive/liveness and pending-proof hop
 # behavior, and receipt-atomic Channel retries. Fork tag
-# firmware-pin-8b5d652 keeps this exact candidate reachable independently of
+# firmware-pin-14c7b49 keeps this exact candidate reachable independently of
 # its development branch.
-rete-core = { git = "https://github.com/evelant/rete.git", rev = "8b5d65283cd370dee4cbb17594ef9c88d2805416", default-features = false }
-rete-stack = { git = "https://github.com/evelant/rete.git", rev = "8b5d65283cd370dee4cbb17594ef9c88d2805416", default-features = false }
-rete-transport = { git = "https://github.com/evelant/rete.git", rev = "8b5d65283cd370dee4cbb17594ef9c88d2805416", default-features = false }
+rete-core = { git = "https://github.com/evelant/rete.git", rev = "14c7b4955a1ff6903e87cc40b42498f7869b6f4f", default-features = false }
+rete-stack = { git = "https://github.com/evelant/rete.git", rev = "14c7b4955a1ff6903e87cc40b42498f7869b6f4f", default-features = false }
+rete-transport = { git = "https://github.com/evelant/rete.git", rev = "14c7b4955a1ff6903e87cc40b42498f7869b6f4f", default-features = false }
 
 [patch.crates-io]
 # Force every current and future graph consumer onto the one reviewed local

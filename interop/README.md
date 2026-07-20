@@ -31,6 +31,14 @@ uses a fresh ephemeral key and IV, so byte equality would not be reproducible.
 Separate semantic tests will decrypt Python ciphertext and encrypt Rust data
 for Python as the Link/Resource lanes are added.
 
+The same corpus contains 28 deterministic LRRTT MessagePack cases generated
+with RNS 1.3.8's vendored u-msgpack 2.7.1. They freeze canonical float64 bytes,
+all integer width tags, float32, booleans, exact non-finite bit patterns,
+first-object/trailing-byte behavior and malformed decoding. The recorded
+`max(measured_rtt, unpacked)` result documents the released Link implementation
+and is checked separately against the firmware's pending-handshake numeric
+admission behavior.
+
 ## Local device-API session lane
 
 `vectors/device-api-session-v1.json` freezes the non-secret inputs, exact hello

@@ -17,12 +17,12 @@
   "generator": {
     "command": "python interop/python/generate_rns_vectors.py",
     "deterministic": true,
-    "notes": "The corpus excludes encrypted packet creation because Python correctly uses a fresh ephemeral key and IV.",
+    "notes": "The corpus excludes encrypted packet creation because Python correctly uses a fresh ephemeral key and IV. LRRTT cases record released-peer decode and RTT-formula behavior; firmware checks pending-handshake payload parity separately.",
     "python_version": "3.13.7",
     "requirements": "interop/python/requirements-rns-1.3.8.txt",
     "requirements_sha256": "41f5f67517d580539e65a324cb3bbe5bbec24659f3eabe1f06701e3305ff3258",
     "script": "interop/python/generate_rns_vectors.py",
-    "source_sha256": "6160a811707e829cf85d0e230a4d472e2c1453914e2c21f19654603c9dc5a5ff"
+    "source_sha256": "cecc9174e97829aa08a5abbbdaa8927a8f024ce5520f72c784bbe063e17cfb97"
   },
   "identity": {
     "identity_hash_hex": "fd9f121e293bf4a415dd74366ff75f69",
@@ -34,6 +34,449 @@
     "test_only": true
   },
   "lane": "released",
+  "lrrtt_messagepack": {
+    "canonical_float64": [
+      {
+        "input_decimal": "0.001",
+        "name": "float64_0.001",
+        "python_rns_rtt_formula": {
+          "f64_bits_hex": "3fd0000000000000",
+          "python_type": "float",
+          "result": "value",
+          "value_class": "finite"
+        },
+        "python_unpack": {
+          "f64_bits_hex": "3f50624dd2f1a9fc",
+          "python_type": "float",
+          "result": "value",
+          "value_class": "finite"
+        },
+        "wire_hex": "cb3f50624dd2f1a9fc"
+      },
+      {
+        "input_decimal": "0.125",
+        "name": "float64_0.125",
+        "python_rns_rtt_formula": {
+          "f64_bits_hex": "3fd0000000000000",
+          "python_type": "float",
+          "result": "value",
+          "value_class": "finite"
+        },
+        "python_unpack": {
+          "f64_bits_hex": "3fc0000000000000",
+          "python_type": "float",
+          "result": "value",
+          "value_class": "finite"
+        },
+        "wire_hex": "cb3fc0000000000000"
+      },
+      {
+        "input_decimal": "1.0",
+        "name": "float64_1.0",
+        "python_rns_rtt_formula": {
+          "f64_bits_hex": "3ff0000000000000",
+          "python_type": "float",
+          "result": "value",
+          "value_class": "finite"
+        },
+        "python_unpack": {
+          "f64_bits_hex": "3ff0000000000000",
+          "python_type": "float",
+          "result": "value",
+          "value_class": "finite"
+        },
+        "wire_hex": "cb3ff0000000000000"
+      }
+    ],
+    "decode_cases": [
+      {
+        "name": "float32_0.125",
+        "python_rns_rtt_formula": {
+          "f64_bits_hex": "3fd0000000000000",
+          "python_type": "float",
+          "result": "value",
+          "value_class": "finite"
+        },
+        "python_unpack": {
+          "f64_bits_hex": "3fc0000000000000",
+          "python_type": "float",
+          "result": "value",
+          "value_class": "finite"
+        },
+        "wire_hex": "ca3e000000"
+      },
+      {
+        "name": "positive_fixint_1",
+        "python_rns_rtt_formula": {
+          "decimal": "1",
+          "python_type": "int",
+          "result": "value",
+          "value_class": "integer"
+        },
+        "python_unpack": {
+          "decimal": "1",
+          "python_type": "int",
+          "result": "value",
+          "value_class": "integer"
+        },
+        "wire_hex": "01"
+      },
+      {
+        "name": "negative_fixint_minus_1",
+        "python_rns_rtt_formula": {
+          "f64_bits_hex": "3fd0000000000000",
+          "python_type": "float",
+          "result": "value",
+          "value_class": "finite"
+        },
+        "python_unpack": {
+          "decimal": "-1",
+          "python_type": "int",
+          "result": "value",
+          "value_class": "integer"
+        },
+        "wire_hex": "ff"
+      },
+      {
+        "name": "uint8_1",
+        "python_rns_rtt_formula": {
+          "decimal": "1",
+          "python_type": "int",
+          "result": "value",
+          "value_class": "integer"
+        },
+        "python_unpack": {
+          "decimal": "1",
+          "python_type": "int",
+          "result": "value",
+          "value_class": "integer"
+        },
+        "wire_hex": "cc01"
+      },
+      {
+        "name": "uint16_1",
+        "python_rns_rtt_formula": {
+          "decimal": "1",
+          "python_type": "int",
+          "result": "value",
+          "value_class": "integer"
+        },
+        "python_unpack": {
+          "decimal": "1",
+          "python_type": "int",
+          "result": "value",
+          "value_class": "integer"
+        },
+        "wire_hex": "cd0001"
+      },
+      {
+        "name": "uint32_1",
+        "python_rns_rtt_formula": {
+          "decimal": "1",
+          "python_type": "int",
+          "result": "value",
+          "value_class": "integer"
+        },
+        "python_unpack": {
+          "decimal": "1",
+          "python_type": "int",
+          "result": "value",
+          "value_class": "integer"
+        },
+        "wire_hex": "ce00000001"
+      },
+      {
+        "name": "uint64_1",
+        "python_rns_rtt_formula": {
+          "decimal": "1",
+          "python_type": "int",
+          "result": "value",
+          "value_class": "integer"
+        },
+        "python_unpack": {
+          "decimal": "1",
+          "python_type": "int",
+          "result": "value",
+          "value_class": "integer"
+        },
+        "wire_hex": "cf0000000000000001"
+      },
+      {
+        "name": "int8_minus_1",
+        "python_rns_rtt_formula": {
+          "f64_bits_hex": "3fd0000000000000",
+          "python_type": "float",
+          "result": "value",
+          "value_class": "finite"
+        },
+        "python_unpack": {
+          "decimal": "-1",
+          "python_type": "int",
+          "result": "value",
+          "value_class": "integer"
+        },
+        "wire_hex": "d0ff"
+      },
+      {
+        "name": "int16_minus_1",
+        "python_rns_rtt_formula": {
+          "f64_bits_hex": "3fd0000000000000",
+          "python_type": "float",
+          "result": "value",
+          "value_class": "finite"
+        },
+        "python_unpack": {
+          "decimal": "-1",
+          "python_type": "int",
+          "result": "value",
+          "value_class": "integer"
+        },
+        "wire_hex": "d1ffff"
+      },
+      {
+        "name": "int32_minus_1",
+        "python_rns_rtt_formula": {
+          "f64_bits_hex": "3fd0000000000000",
+          "python_type": "float",
+          "result": "value",
+          "value_class": "finite"
+        },
+        "python_unpack": {
+          "decimal": "-1",
+          "python_type": "int",
+          "result": "value",
+          "value_class": "integer"
+        },
+        "wire_hex": "d2ffffffff"
+      },
+      {
+        "name": "int64_minus_1",
+        "python_rns_rtt_formula": {
+          "f64_bits_hex": "3fd0000000000000",
+          "python_type": "float",
+          "result": "value",
+          "value_class": "finite"
+        },
+        "python_unpack": {
+          "decimal": "-1",
+          "python_type": "int",
+          "result": "value",
+          "value_class": "integer"
+        },
+        "wire_hex": "d3ffffffffffffffff"
+      },
+      {
+        "name": "boolean_false",
+        "python_rns_rtt_formula": {
+          "f64_bits_hex": "3fd0000000000000",
+          "python_type": "float",
+          "result": "value",
+          "value_class": "finite"
+        },
+        "python_unpack": {
+          "python_type": "bool",
+          "result": "value",
+          "value": false,
+          "value_class": "boolean"
+        },
+        "wire_hex": "c2"
+      },
+      {
+        "name": "boolean_true",
+        "python_rns_rtt_formula": {
+          "python_type": "bool",
+          "result": "value",
+          "value": true,
+          "value_class": "boolean"
+        },
+        "python_unpack": {
+          "python_type": "bool",
+          "result": "value",
+          "value": true,
+          "value_class": "boolean"
+        },
+        "wire_hex": "c3"
+      },
+      {
+        "name": "float64_positive_infinity",
+        "python_rns_rtt_formula": {
+          "f64_bits_hex": "7ff0000000000000",
+          "python_type": "float",
+          "result": "value",
+          "value_class": "positive_infinity"
+        },
+        "python_unpack": {
+          "f64_bits_hex": "7ff0000000000000",
+          "python_type": "float",
+          "result": "value",
+          "value_class": "positive_infinity"
+        },
+        "wire_hex": "cb7ff0000000000000"
+      },
+      {
+        "name": "float64_negative_infinity",
+        "python_rns_rtt_formula": {
+          "f64_bits_hex": "3fd0000000000000",
+          "python_type": "float",
+          "result": "value",
+          "value_class": "finite"
+        },
+        "python_unpack": {
+          "f64_bits_hex": "fff0000000000000",
+          "python_type": "float",
+          "result": "value",
+          "value_class": "negative_infinity"
+        },
+        "wire_hex": "cbfff0000000000000"
+      },
+      {
+        "name": "float64_nan_payload_1",
+        "python_rns_rtt_formula": {
+          "f64_bits_hex": "3fd0000000000000",
+          "python_type": "float",
+          "result": "value",
+          "value_class": "finite"
+        },
+        "python_unpack": {
+          "f64_bits_hex": "7ff8000000000001",
+          "python_type": "float",
+          "result": "value",
+          "value_class": "nan"
+        },
+        "wire_hex": "cb7ff8000000000001"
+      },
+      {
+        "first_object_wire_hex": "cb3ff0000000000000",
+        "name": "float64_1.0_with_trailing_nil_and_reserved",
+        "python_rns_rtt_formula": {
+          "f64_bits_hex": "3ff0000000000000",
+          "python_type": "float",
+          "result": "value",
+          "value_class": "finite"
+        },
+        "python_unpack": {
+          "f64_bits_hex": "3ff0000000000000",
+          "python_type": "float",
+          "result": "value",
+          "value_class": "finite"
+        },
+        "trailing_hex": "c0c1",
+        "wire_hex": "cb3ff0000000000000c0c1"
+      },
+      {
+        "first_object_wire_hex": "65",
+        "name": "legacy_rete_raw_u32_timestamp",
+        "python_rns_rtt_formula": {
+          "decimal": "101",
+          "python_type": "int",
+          "result": "value",
+          "value_class": "integer"
+        },
+        "python_unpack": {
+          "decimal": "101",
+          "python_type": "int",
+          "result": "value",
+          "value_class": "integer"
+        },
+        "trailing_hex": "53f100",
+        "wire_hex": "6553f100"
+      },
+      {
+        "name": "nil",
+        "python_rns_rtt_formula": {
+          "exception_type": "TypeError",
+          "result": "exception"
+        },
+        "python_unpack": {
+          "python_type": "NoneType",
+          "result": "value",
+          "value_class": "nil"
+        },
+        "wire_hex": "c0"
+      },
+      {
+        "name": "string_1.0",
+        "python_rns_rtt_formula": {
+          "exception_type": "TypeError",
+          "result": "exception"
+        },
+        "python_unpack": {
+          "python_type": "str",
+          "result": "value",
+          "utf8_hex": "312e30",
+          "value_class": "string"
+        },
+        "wire_hex": "a3312e30"
+      },
+      {
+        "name": "array_float64_1.0",
+        "python_rns_rtt_formula": {
+          "exception_type": "TypeError",
+          "result": "exception"
+        },
+        "python_unpack": {
+          "length": 1,
+          "python_type": "list",
+          "result": "value",
+          "value_class": "array"
+        },
+        "wire_hex": "91cb3ff0000000000000"
+      },
+      {
+        "name": "map_rtt_float64_1.0",
+        "python_rns_rtt_formula": {
+          "exception_type": "TypeError",
+          "result": "exception"
+        },
+        "python_unpack": {
+          "length": 1,
+          "python_type": "dict",
+          "result": "value",
+          "value_class": "map"
+        },
+        "wire_hex": "81a3727474cb3ff0000000000000"
+      },
+      {
+        "name": "empty",
+        "python_rns_rtt_formula": {
+          "result": "not_run"
+        },
+        "python_unpack": {
+          "exception_type": "InsufficientDataException",
+          "result": "exception"
+        },
+        "wire_hex": ""
+      },
+      {
+        "name": "truncated_float64_1.0",
+        "python_rns_rtt_formula": {
+          "result": "not_run"
+        },
+        "python_unpack": {
+          "exception_type": "InsufficientDataException",
+          "result": "exception"
+        },
+        "wire_hex": "cb3ff00000"
+      },
+      {
+        "name": "reserved_code",
+        "python_rns_rtt_formula": {
+          "result": "not_run"
+        },
+        "python_unpack": {
+          "exception_type": "ReservedCodeException",
+          "result": "exception"
+        },
+        "wire_hex": "c1"
+      }
+    ],
+    "measured_rtt_decimal": "0.25",
+    "origin": "decoded by RNS 1.3.8's vendored RNS.vendor.umsgpack; canonical float64 cases are encoded by that same module",
+    "rns_rtt_formula": "max(0.25, umsgpack.unpackb(plaintext))",
+    "scope": "This records released-peer behavior; firmware conformance separately verifies pending-handshake numeric payload semantics.",
+    "umsgpack_source_sha256": "f3f78e1281e13f96089a6b2dbac6e6d927e48b2049461c82e4be4a6e591e8d45",
+    "umsgpack_version": "2.7.1"
+  },
   "peer": {
     "package": "rns",
     "repository": "https://github.com/markqvist/Reticulum.git",

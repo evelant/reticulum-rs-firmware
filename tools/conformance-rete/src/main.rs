@@ -1,12 +1,14 @@
-use std::process::ExitCode;
+use std::{collections::BTreeSet, process::ExitCode};
 
 use rand_core::{CryptoRng, RngCore};
 use reticulum_radio_interface::{RNODE_HW_MTU, ReceiveOutcome, RnodeRxReassembler};
 use reticulum_rns_rete::{
     DestHash, DestType, DestinationType, Direction, EmbeddedNodeConfig, Identity,
     IngressDisposition, InitialEmbeddedNode, InterfaceId, LinkState, NodeEvent, PacketType,
-    TxTarget, build_announce_packet, identity_from_private_key, new_conformance_node,
+    TxTarget, build_announce_packet, decode_lrrtt_number_for_conformance,
+    encode_lrrtt_float64_for_conformance, identity_from_private_key, new_conformance_node,
     new_conformance_transport_node, parse_announce_packet, parse_packet,
+    select_lrrtt_for_conformance,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -29,6 +31,7 @@ struct Corpus {
     identity: IdentityVector,
     announce: AnnounceVector,
     plain_data: PlainDataVector,
+    lrrtt_messagepack: LrrttMessagepackVector,
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,6 +90,45 @@ struct PlainDataVector {
     destination_hash_hex: String,
     raw_hex: String,
     packet_hash_hex: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LrrttMessagepackVector {
+    origin: String,
+    scope: String,
+    umsgpack_version: String,
+    umsgpack_source_sha256: String,
+    measured_rtt_decimal: String,
+    rns_rtt_formula: String,
+    canonical_float64: Vec<LrrttCase>,
+    decode_cases: Vec<LrrttCase>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LrrttCase {
+    name: String,
+    wire_hex: String,
+    #[serde(default)]
+    input_decimal: Option<String>,
+    #[serde(default)]
+    first_object_wire_hex: Option<String>,
+    #[serde(default)]
+    trailing_hex: Option<String>,
+    python_unpack: PythonValueOutcome,
+    python_rns_rtt_formula: PythonValueOutcome,
+}
+
+#[derive(Debug, Deserialize)]
+struct PythonValueOutcome {
+    result: String,
+    #[serde(default)]
+    value_class: Option<String>,
+    #[serde(default)]
+    f64_bits_hex: Option<String>,
+    #[serde(default)]
+    decimal: Option<String>,
+    #[serde(default)]
+    value: Option<bool>,
 }
 
 #[derive(Default)]
@@ -219,7 +261,7 @@ fn verify_released_vectors() -> Result<usize, String> {
     )?;
     require(
         corpus.generator.notes
-            == "The corpus excludes encrypted packet creation because Python correctly uses a fresh ephemeral key and IV.",
+            == "The corpus excludes encrypted packet creation because Python correctly uses a fresh ephemeral key and IV. LRRTT cases record released-peer decode and RTT-formula behavior; firmware checks pending-handshake payload parity separately.",
         "unexpected generator normalization notes",
     )?;
     require(
@@ -231,6 +273,8 @@ fn verify_released_vectors() -> Result<usize, String> {
         "generator requirements hash drift",
     )?;
     checks += 8;
+
+    checks += verify_lrrtt_messagepack(&corpus.lrrtt_messagepack)?;
 
     let private_key = decode_hex("identity.private_key_hex", &corpus.identity.private_key_hex)?;
     let identity = identity_from_private_key(&private_key)
@@ -1475,6 +1519,235 @@ fn verify_three_node_relayed_link() -> Result<usize, String> {
     Ok(35)
 }
 
+fn verify_lrrtt_messagepack(vectors: &LrrttMessagepackVector) -> Result<usize, String> {
+    require(
+        vectors.origin
+            == "decoded by RNS 1.3.8's vendored RNS.vendor.umsgpack; canonical float64 cases are encoded by that same module",
+        "unexpected LRRTT vector origin",
+    )?;
+    require(
+        vectors.scope
+            == "This records released-peer behavior; firmware conformance separately verifies pending-handshake numeric payload semantics.",
+        "unexpected LRRTT vector scope",
+    )?;
+    require(
+        vectors.umsgpack_version == "2.7.1",
+        "released LRRTT u-msgpack version drift",
+    )?;
+    require(
+        vectors.umsgpack_source_sha256
+            == "f3f78e1281e13f96089a6b2dbac6e6d927e48b2049461c82e4be4a6e591e8d45",
+        "released LRRTT u-msgpack source drift",
+    )?;
+    require(
+        vectors.measured_rtt_decimal == "0.25",
+        "unexpected LRRTT measured-RTT fixture",
+    )?;
+    require(
+        vectors.rns_rtt_formula == "max(0.25, umsgpack.unpackb(plaintext))",
+        "unexpected released LRRTT formula",
+    )?;
+
+    require(
+        vectors.canonical_float64.len() == 3,
+        "released LRRTT corpus must contain three canonical encodes",
+    )?;
+    require(
+        vectors.decode_cases.len() == 25,
+        "released LRRTT corpus must contain 25 decode cases",
+    )?;
+
+    const EXPECTED_CASES: [&str; 28] = [
+        "float64_0.001",
+        "float64_0.125",
+        "float64_1.0",
+        "float32_0.125",
+        "positive_fixint_1",
+        "negative_fixint_minus_1",
+        "uint8_1",
+        "uint16_1",
+        "uint32_1",
+        "uint64_1",
+        "int8_minus_1",
+        "int16_minus_1",
+        "int32_minus_1",
+        "int64_minus_1",
+        "boolean_false",
+        "boolean_true",
+        "float64_positive_infinity",
+        "float64_negative_infinity",
+        "float64_nan_payload_1",
+        "float64_1.0_with_trailing_nil_and_reserved",
+        "legacy_rete_raw_u32_timestamp",
+        "nil",
+        "string_1.0",
+        "array_float64_1.0",
+        "map_rtt_float64_1.0",
+        "empty",
+        "truncated_float64_1.0",
+        "reserved_code",
+    ];
+    let expected_names: BTreeSet<_> = EXPECTED_CASES.into_iter().collect();
+    let actual_names: BTreeSet<_> = vectors
+        .canonical_float64
+        .iter()
+        .chain(&vectors.decode_cases)
+        .map(|case| case.name.as_str())
+        .collect();
+    require(
+        actual_names == expected_names,
+        "released LRRTT case names drifted or contain duplicates",
+    )?;
+
+    let measured_rtt = vectors
+        .measured_rtt_decimal
+        .parse::<f64>()
+        .map_err(|error| format!("invalid measured LRRTT decimal: {error}"))?;
+    for case in &vectors.canonical_float64 {
+        let input = case
+            .input_decimal
+            .as_deref()
+            .ok_or_else(|| format!("{} has no canonical input decimal", case.name))?
+            .parse::<f64>()
+            .map_err(|error| format!("invalid {} input decimal: {error}", case.name))?;
+        let expected_wire = decode_hex(&format!("{}.wire_hex", case.name), &case.wire_hex)?;
+        require(
+            encode_lrrtt_float64_for_conformance(input) == expected_wire,
+            &format!("{} is not Rete's canonical float64 encoding", case.name),
+        )?;
+        verify_lrrtt_case(case, measured_rtt)?;
+    }
+    for case in &vectors.decode_cases {
+        require(
+            case.input_decimal.is_none(),
+            &format!("decode-only case {} has a canonical input", case.name),
+        )?;
+        verify_lrrtt_case(case, measured_rtt)?;
+    }
+
+    // Six provenance checks, three corpus-shape checks, all 28 decode/formula
+    // cases, and three exact canonical encoder comparisons.
+    Ok(40)
+}
+
+fn verify_lrrtt_case(case: &LrrttCase, measured_rtt: f64) -> Result<(), String> {
+    let wire = decode_hex(&format!("{}.wire_hex", case.name), &case.wire_hex)?;
+    let expected_decoded = python_numeric_value(&case.name, &case.python_unpack)?;
+    let decoded = decode_lrrtt_number_for_conformance(&wire);
+
+    let Some(expected_decoded) = expected_decoded else {
+        require(
+            decoded.is_err(),
+            &format!("Rete accepted nonnumeric or malformed LRRTT {}", case.name),
+        )?;
+        require(
+            matches!(
+                case.python_rns_rtt_formula.result.as_str(),
+                "exception" | "not_run"
+            ),
+            &format!("{} has an unexpected Python formula outcome", case.name),
+        )?;
+        return Ok(());
+    };
+
+    let decoded =
+        decoded.map_err(|error| format!("Rete rejected numeric LRRTT {}: {error}", case.name))?;
+    require_float_bits(
+        &format!("{} decoded value", case.name),
+        decoded.value,
+        expected_decoded,
+    )?;
+
+    match (&case.first_object_wire_hex, &case.trailing_hex) {
+        (Some(first_hex), Some(trailing_hex)) => {
+            let first = decode_hex(&format!("{}.first_object_wire_hex", case.name), first_hex)?;
+            let trailing = decode_hex(&format!("{}.trailing_hex", case.name), trailing_hex)?;
+            require(
+                wire.starts_with(&first) && wire[first.len()..] == trailing,
+                &format!("{} first-object/trailing split is inconsistent", case.name),
+            )?;
+            require(
+                decoded.consumed == first.len(),
+                &format!("Rete consumed trailing bytes in {}", case.name),
+            )?;
+        }
+        (None, None) => require(
+            decoded.consumed == wire.len(),
+            &format!(
+                "Rete did not consume the complete LRRTT object {}",
+                case.name
+            ),
+        )?,
+        _ => {
+            return Err(format!(
+                "{} has an incomplete trailing-byte split",
+                case.name
+            ));
+        }
+    }
+
+    let expected_selected = python_numeric_value(&case.name, &case.python_rns_rtt_formula)?
+        .ok_or_else(|| format!("numeric LRRTT {} has no Python formula value", case.name))?;
+    let selected = select_lrrtt_for_conformance(measured_rtt, decoded.value);
+    require_float_bits(
+        &format!("{} Python max semantics", case.name),
+        selected,
+        expected_selected,
+    )
+}
+
+fn python_numeric_value(
+    case_name: &str,
+    outcome: &PythonValueOutcome,
+) -> Result<Option<f64>, String> {
+    match outcome.result.as_str() {
+        "exception" | "not_run" => return Ok(None),
+        "value" => {}
+        other => return Err(format!("{case_name} has unknown Python outcome {other}")),
+    }
+
+    match outcome.value_class.as_deref() {
+        Some("finite" | "positive_infinity" | "negative_infinity" | "nan") => {
+            let bits_hex = outcome
+                .f64_bits_hex
+                .as_deref()
+                .ok_or_else(|| format!("{case_name} has no float bits"))?;
+            let bytes = decode_hex(&format!("{case_name}.f64_bits_hex"), bits_hex)?;
+            let bits: [u8; 8] = bytes
+                .try_into()
+                .map_err(|_| format!("{case_name} float bits are not eight bytes"))?;
+            Ok(Some(f64::from_be_bytes(bits)))
+        }
+        Some("integer") => outcome
+            .decimal
+            .as_deref()
+            .ok_or_else(|| format!("{case_name} has no integer decimal"))?
+            .parse::<f64>()
+            .map(Some)
+            .map_err(|error| format!("invalid {case_name} integer decimal: {error}")),
+        Some("boolean") => outcome
+            .value
+            .map(|value| Some(if value { 1.0 } else { 0.0 }))
+            .ok_or_else(|| format!("{case_name} has no boolean value")),
+        Some("nil" | "string" | "array" | "map") | None => Ok(None),
+        Some(other) => Err(format!(
+            "{case_name} has unknown Python value class {other}"
+        )),
+    }
+}
+
+fn require_float_bits(label: &str, actual: f64, expected: f64) -> Result<(), String> {
+    if actual.to_bits() == expected.to_bits() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label} mismatch: expected {:016x}, got {:016x}",
+            expected.to_bits(),
+            actual.to_bits()
+        ))
+    }
+}
+
 fn decode_hex(field: &str, value: &str) -> Result<Vec<u8>, String> {
     hex::decode(value).map_err(|error| format!("invalid {field}: {error}"))
 }
@@ -1509,6 +1782,6 @@ mod tests {
 
     #[test]
     fn released_python_vectors_pass() {
-        assert_eq!(verify_released_vectors(), Ok(195));
+        assert_eq!(verify_released_vectors(), Ok(235));
     }
 }

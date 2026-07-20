@@ -8,20 +8,25 @@ import hashlib
 import importlib.metadata
 from importlib import import_module
 import json
+import math
 from pathlib import Path
 import re
+import struct
 import sys
 import tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import RNS
+from RNS.vendor import umsgpack
 
 
 DEFAULT_OUTPUT = Path(__file__).parents[1] / "vectors" / "rns-1.3.8.json"
 PEER_MANIFEST = Path(__file__).parents[1] / "peers.toml"
 REQUIREMENTS = Path(__file__).with_name("requirements-rns-1.3.8.txt")
 EXPECTED_PYTHON = (3, 13, 7)
+EXPECTED_UMSGPACK = "2.7.1"
+LRRTT_MEASURED_RTT = 0.25
 
 
 def released_peer() -> dict[str, str]:
@@ -97,6 +102,194 @@ def verify_installed_peer(peer: dict[str, str]) -> str:
 def packet_hashable_part(raw: bytes) -> bytes:
     """Return Python Reticulum's HEADER_1 packet hash input."""
     return bytes([raw[0] & 0x0F]) + raw[2:]
+
+
+def describe_python_value(value: object) -> dict[str, object]:
+    """Represent an unpacked value without non-standard JSON numbers."""
+    if type(value) is bool:
+        return {
+            "python_type": "bool",
+            "value_class": "boolean",
+            "value": value,
+        }
+    if type(value) is int:
+        return {
+            "python_type": "int",
+            "value_class": "integer",
+            "decimal": str(value),
+        }
+    if type(value) is float:
+        if math.isnan(value):
+            value_class = "nan"
+        elif value == math.inf:
+            value_class = "positive_infinity"
+        elif value == -math.inf:
+            value_class = "negative_infinity"
+        else:
+            value_class = "finite"
+        return {
+            "python_type": "float",
+            "value_class": value_class,
+            "f64_bits_hex": struct.pack(">d", value).hex(),
+        }
+    if value is None:
+        return {"python_type": "NoneType", "value_class": "nil"}
+    if type(value) is str:
+        return {
+            "python_type": "str",
+            "value_class": "string",
+            "utf8_hex": value.encode("utf-8").hex(),
+        }
+    if type(value) is list:
+        return {
+            "python_type": "list",
+            "value_class": "array",
+            "length": len(value),
+        }
+    if type(value) is dict:
+        return {
+            "python_type": "dict",
+            "value_class": "map",
+            "length": len(value),
+        }
+    raise TypeError(f"unsupported deterministic vector value {type(value).__name__}")
+
+
+def unpack_outcome(payload: bytes) -> tuple[dict[str, object], object | None]:
+    """Run the released peer's unpacker and return a JSON-safe outcome."""
+    try:
+        value = umsgpack.unpackb(payload)
+    except Exception as error:
+        return (
+            {
+                "result": "exception",
+                "exception_type": type(error).__name__,
+            },
+            None,
+        )
+    return ({"result": "value", **describe_python_value(value)}, value)
+
+
+def rns_rtt_formula_outcome(value: object) -> dict[str, object]:
+    """Exercise RNS 1.3.8's exact ``max(measured_rtt, unpacked)`` formula."""
+    try:
+        rtt = max(LRRTT_MEASURED_RTT, value)
+    except Exception as error:
+        return {
+            "result": "exception",
+            "exception_type": type(error).__name__,
+        }
+    return {"result": "value", **describe_python_value(rtt)}
+
+
+def lrrtt_case(
+    name: str,
+    payload: bytes,
+    *,
+    first_object: bytes | None = None,
+    trailing: bytes | None = None,
+) -> dict[str, object]:
+    """Describe released u-msgpack and Link RTT behavior for one payload."""
+    unpacked, value = unpack_outcome(payload)
+    case: dict[str, object] = {
+        "name": name,
+        "wire_hex": payload.hex(),
+        "python_unpack": unpacked,
+    }
+    if first_object is not None:
+        case["first_object_wire_hex"] = first_object.hex()
+    if trailing is not None:
+        case["trailing_hex"] = trailing.hex()
+    if unpacked["result"] == "value":
+        case["python_rns_rtt_formula"] = rns_rtt_formula_outcome(value)
+    else:
+        case["python_rns_rtt_formula"] = {"result": "not_run"}
+    return case
+
+
+def lrrtt_messagepack_vectors() -> dict[str, object]:
+    """Generate LRRTT scalar and malformed cases from vendored u-msgpack."""
+    if umsgpack.__version__ != EXPECTED_UMSGPACK:
+        raise RuntimeError(
+            f"expected vendored u-msgpack {EXPECTED_UMSGPACK}, "
+            f"found {umsgpack.__version__}"
+        )
+
+    canonical_values = ("0.001", "0.125", "1.0")
+    canonical_float64 = []
+    for decimal in canonical_values:
+        value = float(decimal)
+        payload = umsgpack.packb(value)
+        if not payload.startswith(b"\xcb"):
+            raise RuntimeError("released u-msgpack no longer defaults to float64")
+        canonical_float64.append(
+            {
+                "input_decimal": decimal,
+                **lrrtt_case(f"float64_{decimal}", payload),
+            }
+        )
+
+    first_object = umsgpack.packb(1.0)
+    trailing = b"\xc0\xc1"
+    legacy_timestamp = (1_700_000_000).to_bytes(4, "big")
+    decode_cases = [
+        lrrtt_case(
+            "float32_0.125",
+            umsgpack.packb(0.125, force_float_precision="single"),
+        ),
+        lrrtt_case("positive_fixint_1", bytes.fromhex("01")),
+        lrrtt_case("negative_fixint_minus_1", bytes.fromhex("ff")),
+        lrrtt_case("uint8_1", bytes.fromhex("cc01")),
+        lrrtt_case("uint16_1", bytes.fromhex("cd0001")),
+        lrrtt_case("uint32_1", bytes.fromhex("ce00000001")),
+        lrrtt_case("uint64_1", bytes.fromhex("cf0000000000000001")),
+        lrrtt_case("int8_minus_1", bytes.fromhex("d0ff")),
+        lrrtt_case("int16_minus_1", bytes.fromhex("d1ffff")),
+        lrrtt_case("int32_minus_1", bytes.fromhex("d2ffffffff")),
+        lrrtt_case("int64_minus_1", bytes.fromhex("d3ffffffffffffffff")),
+        lrrtt_case("boolean_false", umsgpack.packb(False)),
+        lrrtt_case("boolean_true", umsgpack.packb(True)),
+        lrrtt_case("float64_positive_infinity", bytes.fromhex("cb7ff0000000000000")),
+        lrrtt_case("float64_negative_infinity", bytes.fromhex("cbfff0000000000000")),
+        lrrtt_case("float64_nan_payload_1", bytes.fromhex("cb7ff8000000000001")),
+        lrrtt_case(
+            "float64_1.0_with_trailing_nil_and_reserved",
+            first_object + trailing,
+            first_object=first_object,
+            trailing=trailing,
+        ),
+        lrrtt_case(
+            "legacy_rete_raw_u32_timestamp",
+            legacy_timestamp,
+            first_object=legacy_timestamp[:1],
+            trailing=legacy_timestamp[1:],
+        ),
+        lrrtt_case("nil", umsgpack.packb(None)),
+        lrrtt_case("string_1.0", umsgpack.packb("1.0")),
+        lrrtt_case("array_float64_1.0", umsgpack.packb([1.0])),
+        lrrtt_case("map_rtt_float64_1.0", umsgpack.packb({"rtt": 1.0})),
+        lrrtt_case("empty", b""),
+        lrrtt_case("truncated_float64_1.0", first_object[:5]),
+        lrrtt_case("reserved_code", b"\xc1"),
+    ]
+
+    source = Path(umsgpack.__file__)
+    return {
+        "origin": (
+            "decoded by RNS 1.3.8's vendored RNS.vendor.umsgpack; canonical "
+            "float64 cases are encoded by that same module"
+        ),
+        "scope": (
+            "This records released-peer behavior; firmware conformance separately "
+            "verifies pending-handshake numeric payload semantics."
+        ),
+        "umsgpack_version": umsgpack.__version__,
+        "umsgpack_source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "measured_rtt_decimal": str(LRRTT_MEASURED_RTT),
+        "rns_rtt_formula": "max(0.25, umsgpack.unpackb(plaintext))",
+        "canonical_float64": canonical_float64,
+        "decode_cases": decode_cases,
+    }
 
 
 def build_vectors() -> dict[str, object]:
@@ -195,7 +388,10 @@ def build_vectors() -> dict[str, object]:
                 "deterministic": True,
                 "notes": (
                     "The corpus excludes encrypted packet creation because "
-                    "Python correctly uses a fresh ephemeral key and IV."
+                    "Python correctly uses a fresh ephemeral key and IV. "
+                    "LRRTT cases record released-peer decode and RTT-formula "
+                    "behavior; firmware checks pending-handshake payload parity "
+                    "separately."
                 ),
             },
             "identity": {
@@ -230,6 +426,7 @@ def build_vectors() -> dict[str, object]:
                 "raw_hex": plain_packet.raw.hex(),
                 "packet_hash_hex": plain_packet.packet_hash.hex(),
             },
+            "lrrtt_messagepack": lrrtt_messagepack_vectors(),
         }
 
 

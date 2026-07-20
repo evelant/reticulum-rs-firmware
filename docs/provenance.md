@@ -9,7 +9,7 @@ authoritative in the lockfile.
 | Component | Source | Pin | License used here | Build role |
 | --- | --- | --- | --- | --- |
 | Project-owned crates | This repository | current tree | MIT OR Apache-2.0 | Product and shared tooling |
-| Rete integration fork | <https://github.com/evelant/rete> | `8b5d65283cd370dee4cbb17594ef9c88d2805416` (designated durable tag `firmware-pin-8b5d652`), based on upstream `9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743` | Apache-2.0 option from retained upstream declaration | Provisional RNS foundation and firmware compile graph; includes canonical local LINKREQUEST validation, transactional owned- and relay-Link admission, endpoint announce policy, caller-owned DATA preparation, bounded receipt backpressure, allocation-atomic proof/timeout terminals, transactional channel send/retry receipt replacement, full-hash/Link-ID-bound DATA/channel terminal candidates, exact path/reverse/link forwarding, typed reverse-full/conflict admission, owned HEADER_2 local dispatch, narrow exact-path HEADER_2 DATA/LINKREQUEST relay, foreign-H2 filtering, fail-closed LRPROOF validation, authenticated owned-Link interface binding and pre-dedup wrong-interface rejection, pending-Link expected-hop enforcement, Python-compatible keepalive lifecycle, identities-only snapshot restoration, and LXMF attempt correlation. The first three generic changes were already offered in upstream PRs 7, 9 and 11; the newer lifecycle and routing work remains fork-local unless the user directly approves an upstream issue or PR. |
+| Rete integration fork | <https://github.com/evelant/rete> | `14c7b4955a1ff6903e87cc40b42498f7869b6f4f` (designated durable tag `firmware-pin-14c7b49`), based on upstream `9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743` | Apache-2.0 option from retained upstream declaration | Provisional RNS foundation and firmware compile graph; includes canonical local LINKREQUEST validation, transactional owned- and relay-Link admission, endpoint announce policy, caller-owned DATA preparation, bounded receipt backpressure, allocation-atomic proof/timeout terminals, transactional channel send/retry receipt replacement, full-hash/Link-ID-bound DATA/channel terminal candidates, exact path/reverse/link forwarding, typed reverse-full/conflict admission, owned HEADER_2 local dispatch, narrow exact-path HEADER_2 DATA/LINKREQUEST relay, foreign-H2 filtering, fail-closed LRPROOF validation, authenticated owned-Link interface binding and pre-dedup wrong-interface rejection, pending-Link expected-hop enforcement, Python-compatible keepalive lifecycle, pending-handshake MessagePack LRRTT validation and authenticated-malformed teardown, identities-only snapshot restoration, and LXMF attempt correlation. The first three generic changes were already offered in upstream PRs 7, 9 and 11; the newer lifecycle and routing work remains fork-local unless the user directly approves an upstream issue or PR. |
 | Leviculum | <https://codeberg.org/Lew_Palm/leviculum> | `5fb1db0e5e5a490291ee5f6b81312cf0c9de622a` | AGPL-3.0-or-later | Separate protocol oracle and fallback package |
 | esp-hal family | <https://github.com/esp-rs/esp-hal> | crates.io versions in lockfile | MIT OR Apache-2.0 | ESP32-S3 platform |
 | esp-rtos | Published crates.io 0.3.0 source vendored at `vendor/esp-rtos-0.3.0` | archive SHA-256 `551f90766e1527edaa0c91e8d559e9e2a60397b545e93357ac61fb31845e5712`; crate-recorded upstream commit `347003de8a48320bb7724f53045be3afa9204411`; exact tree and pristine/patched hashes in `VENDOR-HASHES.json` | MIT OR Apache-2.0, with canonical license texts added as project provenance files | Local CPU0 and CPU1 main-stack slice unit corrections; exact edits, mechanical integrity guard and removal condition are recorded in `PATCHES.md` |
@@ -18,8 +18,8 @@ authoritative in the lockfile.
 | Embassy futures/sync/time, static_cell and zeroize | crates.io | exact versions in workspace and lockfile | MIT OR Apache-2.0 | Bounded target coordination, in-place protocol ownership and temporary key cleanup |
 
 The designated durable tag for commit
-`8b5d65283cd370dee4cbb17594ef9c88d2805416` is
-`firmware-pin-8b5d652`. The pin
+`14c7b4955a1ff6903e87cc40b42498f7869b6f4f` is
+`firmware-pin-14c7b49`. The pin
 adds exact-interface transport outcomes through the
 stack and Embassy/Tokio dispatch layers; one-shot reverse-proof interface
 validation; direction, hop, identity, signature, and canonical-header checks
@@ -56,24 +56,28 @@ Pending-Link expected hops are now retained as an initiation-time known-path
 snapshot, or as the `PATHFINDER_M = 128` wildcard when no path is known.
 LRPROOF mismatch fails before deduplication or Link-state mutation, and a
 responder records the post-ingress hop only from authenticated, decrypted
-LRRTT. LRRTT payload interoperability remains unresolved: Python sends a
-MessagePack RTT and uses the greater of local and peer RTT, while Rete sends a
-raw four-byte timestamp and ignores the decrypted body. A malformed but
-authenticated LRRTT can therefore establish and teach hops. This needs bounded
-MessagePack numeric encode/decode, cross-language vectors, and validation
-before state mutation. Shared-Hub endpoint/reincarnation identity and automatic
-timeout `LINKCLOSE` emission also remain unresolved. Adaptive channel windows
+LRRTT. Pending-handshake LRRTT interoperability is now covered: Rete emits
+canonical MessagePack float64, accepts the numeric scalar families and
+first-object/trailing-byte behavior of Python's u-msgpack, and selects the
+greater local or peer RTT with Python ordering. Malformed or nonnumeric
+authenticated LRRTT is rejected before hop or Active-state mutation and causes
+best-effort encrypted `LINKCLOSE`, unconditional Link-owned-state reclamation,
+and one terminal close without replay duplication. Python's Active-responder
+repeat LRRTT remains a nonblocking gap until Rete retains immutable
+`request_time`; Rete's whole-second `u64` measurement and `f32` storage also
+remain less precise than Python's double-precision wall-clock timing.
+Shared-Hub endpoint/reincarnation identity and automatic timeout `LINKCLOSE`
+emission also remain unresolved. Adaptive channel windows
 larger than receipt capacity produce typed backpressure and remain a product
 sizing/throughput policy.
 
 Earlier build and powered-evidence records retain the Rete revisions and
-artifact hashes they actually used. In particular, records naming `9bceacd` or
-`f6f5fb0` remain historical evidence only and do not qualify this current pin.
-The current pin's default E290 release ELF and merged image are build-qualified;
-the 775,104-byte merged image has SHA-256
-`5ec7f0e2555d72136aa917c4011507706e1880c9603b15b1ca40efc1cbc555e4`.
-There is no flashed-image readback or powered proof for
-`8b5d65283cd370dee4cbb17594ef9c88d2805416` itself.
+artifact hashes they actually used. In particular, records naming `9bceacd`,
+`f6f5fb0`, or `8b5d652` remain historical evidence only and do not qualify the
+current pin. The current pin's build-only default E290 release packages as a
+776,464-byte merged image with SHA-256
+`7b11c6f6a3c039d46ab0117fd362920aaa40145e7f27cbc6fa0a8a84a7ab3571`.
+It has no flashed-image readback or powered proof.
 
 Phase-1 normal/pressure and closure artifact manifests bind the project commit
 and its raw Git root tree; their tool inventories record the same pair and the

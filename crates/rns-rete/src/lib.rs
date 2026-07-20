@@ -36,7 +36,7 @@ pub use rete_stack::{DestinationType, Direction, NodeEvent};
 pub use rete_transport::{AnnounceError, AnnounceInfo, LinkState};
 
 /// Reviewed Rete integration-fork source revision.
-pub const SOURCE_REVISION: &str = "8b5d65283cd370dee4cbb17594ef9c88d2805416";
+pub const SOURCE_REVISION: &str = "14c7b4955a1ff6903e87cc40b42498f7869b6f4f";
 
 /// Initial table capacities used only to obtain comparable Phase-0 numbers.
 pub mod probe_capacity {
@@ -132,6 +132,51 @@ pub fn build_announce_packet<R: RngCore + CryptoRng>(
 /// intentionally preserves Rete's support for negotiated MTUs above 500 bytes.
 pub fn parse_packet(raw: &[u8]) -> Result<Packet<'_>, rete_core::Error> {
     Packet::parse(raw)
+}
+
+/// Result of decoding the first MessagePack number in an LRRTT plaintext.
+///
+/// This is a conformance-only view of Rete's native decoder. `consumed` makes
+/// Python `umsgpack.unpackb()`'s first-object/trailing-byte behavior observable
+/// without exposing any mutable transport state.
+#[cfg(any(test, feature = "conformance"))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConformanceLrrttNumber {
+    /// Numeric value returned by Rete's MessagePack decoder.
+    pub value: f64,
+    /// Bytes consumed by the first decoded object.
+    pub consumed: usize,
+}
+
+/// Decode the first Python-compatible numeric LRRTT MessagePack object.
+#[cfg(any(test, feature = "conformance"))]
+pub fn decode_lrrtt_number_for_conformance(
+    plaintext: &[u8],
+) -> Result<ConformanceLrrttNumber, rete_core::msgpack::MsgpackError> {
+    let mut consumed = 0;
+    let value = rete_core::msgpack::read_float64(plaintext, &mut consumed)?;
+    Ok(ConformanceLrrttNumber { value, consumed })
+}
+
+/// Encode one LRRTT value with Rete's canonical MessagePack float64 writer.
+#[cfg(any(test, feature = "conformance"))]
+pub fn encode_lrrtt_float64_for_conformance(value: f64) -> alloc::vec::Vec<u8> {
+    let mut encoded = alloc::vec::Vec::with_capacity(9);
+    rete_core::msgpack::write_float64(&mut encoded, value);
+    encoded
+}
+
+/// Apply Python's `max(measured_rtt, peer_rtt)` comparison order.
+///
+/// The explicit comparison is significant for NaN: a peer NaN does not
+/// replace a finite local measurement.
+#[cfg(any(test, feature = "conformance"))]
+pub fn select_lrrtt_for_conformance(measured_rtt: f64, peer_rtt: f64) -> f64 {
+    if peer_rtt > measured_rtt {
+        peer_rtt
+    } else {
+        measured_rtt
+    }
 }
 
 /// A parsed packet together with its cryptographically validated announce
@@ -282,6 +327,21 @@ mod tests {
         assert_eq!(metadata().source, "https://github.com/evelant/rete");
         assert_eq!(metadata().revision, SOURCE_REVISION);
         assert!(!KNOWN_ALLOCATION_GAPS.is_empty());
+    }
+
+    #[test]
+    fn lrrtt_conformance_helpers_preserve_python_scalar_rules() {
+        let encoded = encode_lrrtt_float64_for_conformance(0.125);
+        assert_eq!(encoded, unhex("cb3fc0000000000000"));
+
+        let decoded = decode_lrrtt_number_for_conformance(&[
+            0xcb, 0x3f, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0,
+        ])
+        .unwrap();
+        assert_eq!(decoded.value, 0.125);
+        assert_eq!(decoded.consumed, 9);
+        assert_eq!(select_lrrtt_for_conformance(0.25, decoded.value), 0.25);
+        assert_eq!(select_lrrtt_for_conformance(0.25, f64::NAN), 0.25);
     }
 
     #[test]

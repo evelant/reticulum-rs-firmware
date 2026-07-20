@@ -126,6 +126,7 @@ fn check_rns_vectors() -> ExitCode {
     let root = workspace_root();
     let python = env::var_os("PYTHON").unwrap_or_else(|| "python3".into());
     let script = root.join("interop/python/generate_rns_vectors.py");
+    let tests = root.join("interop/python/test_rns_vectors.py");
 
     let vector_status = Command::new(&python)
         .current_dir(&root)
@@ -144,6 +145,19 @@ fn check_rns_vectors() -> ExitCode {
         }
         Err(error) => {
             eprintln!("could not run Python vector generator: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
+
+    let test_status = Command::new(&python).current_dir(&root).arg(tests).status();
+    match test_status {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            eprintln!("released Python RNS vector tests exited with {status}");
+            return ExitCode::FAILURE;
+        }
+        Err(error) => {
+            eprintln!("could not run released Python RNS vector tests: {error}");
             return ExitCode::FAILURE;
         }
     }
@@ -4470,8 +4484,8 @@ fn forbidden_radio_tx_dispatch_closure_category(
 
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 const RETE_GIT_SOURCE: &str = "git+https://github.com/evelant/rete.git?rev=\
-8b5d65283cd370dee4cbb17594ef9c88d2805416#\
-8b5d65283cd370dee4cbb17594ef9c88d2805416";
+14c7b4955a1ff6903e87cc40b42498f7869b6f4f#\
+14c7b4955a1ff6903e87cc40b42498f7869b6f4f";
 
 #[derive(Clone, Copy)]
 enum ReviewedClosureSource {

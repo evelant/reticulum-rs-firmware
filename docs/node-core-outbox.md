@@ -10,16 +10,15 @@ DATA/LXMF submission, client delivery, and full powered E290 qualification of
 the product image remain open.
 The permanent image's bounded source-`96e38aa` boot/interface/ordinary-TX smoke
 has passed, without controlled peer RX or DATA.
-**Rete pin:** `8b5d65283cd370dee4cbb17594ef9c88d2805416`
-(designated durable tag `firmware-pin-8b5d652`)
+**Rete pin:** `14c7b4955a1ff6903e87cc40b42498f7869b6f4f`
+(designated durable tag `firmware-pin-14c7b49`)
 
-This exact pin has host, portable-target, and default E290 build-only evidence:
-the merged image is 775,104 bytes, uses 709,568/6,291,456 application bytes
-(11.28%), and has SHA-256
-`5ec7f0e2555d72136aa917c4011507706e1880c9603b15b1ca40efc1cbc555e4`.
+This exact pin has host and portable-target LRRTT validation and a build-only
+E290 package. The 776,464-byte merged image uses 710,928/6,291,456 application
+bytes (11.30%) and has SHA-256
+`7b11c6f6a3c039d46ab0117fd362920aaa40145e7f27cbc6fa0a8a84a7ab3571`.
 It has no flashed-image readback or powered proof. The source-`96e38aa` result
-above and later powered records are historical evidence bound to the revisions
-they name.
+above and later powered records remain bound to the revisions they name.
 
 At this pin, native ingress distinguishes exact path/reverse/Link forwarding
 from genuine propagation. `PacketRouting::ExactInterface(id)` maps to the
@@ -46,7 +45,8 @@ carry typed owned/relay `LinkTableFull`, `ReverseTableFull`, and
 reconstructing failure from counters. Foreign non-ANNOUNCE H2 packets are
 filtered before state mutation, while H2 ANNOUNCE remains eligible for normal
 announce validation. Relay-Link occupancy is exposed separately from owned
-Links. The deterministic 195-check project conformance run includes a complete
+Links. The deterministic 235-check project conformance run includes 40
+released-Python LRRTT MessagePack checks and a complete
 three-node A--B--C Link handshake, channel DATA and proof flow over two exact
 relay interfaces, pre-dedup wrong-hop LRPROOF rejection, 8 fresh-ciphertext
 retry/receipt-replacement checks, plus 40 exact keepalive lifecycle checks.
@@ -66,12 +66,16 @@ the known path's hops when it creates the Link, or records the
 `PATHFINDER_M = 128` wildcard if no path is known. A mismatched LRPROOF is
 rejected before deduplication or Link-state mutation. The responder starts
 without an expectation and records the post-ingress hop only from
-authenticated, decrypted LRRTT. LRRTT payload parity is still open: Python
-sends a MessagePack RTT and uses the greater of the local and peer RTT, while
-Rete sends a raw four-byte timestamp and ignores the decrypted payload. A
-malformed but authenticated LRRTT can therefore establish and teach hops. The
-repair requires bounded MessagePack numeric encoding and decoding,
-cross-language vectors, and validation before any state mutation.
+authenticated, decrypted LRRTT. Pending-handshake payload parity is now
+covered: Rete emits canonical MessagePack float64, accepts Python u-msgpack's
+numeric scalar families and first-object/trailing-byte behavior, and uses the
+greater local or peer RTT with Python ordering. A malformed or nonnumeric
+authenticated LRRTT is rejected before hop or Active-state mutation, emits a
+best-effort encrypted `LINKCLOSE` on the bound interface, reclaims Link-owned
+state, and produces one close without replaying the teardown. Active-responder
+repeat LRRTT remains a nonblocking gap until immutable `request_time` is
+retained, and RTT timing remains whole-second `u64`/`f32` rather than Python's
+double-precision wall-clock measurement.
 
 This native binding is an interface slot, not a shared-instance client
 endpoint. Synchronous Tokio `Hub` output can retain the source client, but

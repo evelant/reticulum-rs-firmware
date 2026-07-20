@@ -12,8 +12,8 @@ API stay in this project; generic protocol and bounded-state corrections are
 the candidates for upstream review.
 
 The current firmware pin is
-`8b5d65283cd370dee4cbb17594ef9c88d2805416` (designated durable tag
-`firmware-pin-8b5d652`). It retains
+`14c7b4955a1ff6903e87cc40b42498f7869b6f4f` (designated durable tag
+`firmware-pin-14c7b49`). It retains
 caller-owned DATA preparation, explicit receipt-capacity errors, fixed-capacity
 terminal sinks, exact DATA/channel terminal candidates, allocation-atomic
 proof/timeout delivery, full-hash receipt cancellation and core-aware LXMF
@@ -32,8 +32,9 @@ wrong-interface Link DATA/`RESOURCE_PRF` before dedup admission. It snapshots a
 known path's hops when an initiator creates a Link, uses the
 `PATHFINDER_M = 128` wildcard for an unknown path, rejects LRPROOF hop mismatch
 before deduplication/state mutation, and teaches a responder its post-ingress
-hop only from authenticated, decrypted LRRTT. It also carries
-the exact unencrypted, role-specific, full-interval keepalive state machine,
+hop only from authenticated, decrypted LRRTT. It also carries pending-handshake
+MessagePack LRRTT parity and authenticated-malformed teardown, plus the exact
+unencrypted, role-specific, full-interval keepalive state machine,
 deterministic-packet dedup exception, internal NodeCore lifecycle result, bound
 automatic routing, and transition-relative stale revival described below. The
 same pin makes initial Channel send and fresh-ciphertext retry receipt-atomic,
@@ -44,14 +45,15 @@ The legacy LXMF event handler without mutable core access still leaves siblings
 to timeout.
 This candidate remains on the project fork; no issue or pull request was opened
 for the newer lifecycle or routing work, and publication still requires direct
-user approval. It has host, portable-target, and default E290 build-only
-evidence, but no flashed-image readback or powered proof; older artifact records
-remain bound to their recorded revisions.
+user approval. It has host and portable-target LRRTT validation, but no new
+powered qualification. Its current E290 default/HIL metrics are build-only,
+with no flashed-image readback or powered proof; older artifact records remain
+bound to their recorded revisions.
 
 ## 1. Transactional Link admission — completed for owned and H2 relay paths
 
-**Priority:** retain regression coverage; finish H1 interface roles and LRRTT
-payload parity
+**Priority:** retain regression coverage; finish H1 interface roles and the
+remaining active-responder/timing LRRTT parity
 
 Owned-Link admission is adopted in integration-fork revision
 `5ce8c4e437d3f2f07d302bc366ff06bacd6aff2d` and offered upstream in
@@ -76,10 +78,10 @@ and missing-route outcomes. Full admission returns typed
 Link/raw/dedup state except for the intentional replay-filter record. Missing
 routes leave no orphan Link entry. Relay-Link count is observable independently
 from locally owned Links. Focused tests cover full, existing, missing-route,
-fresh-retry and duplicate-retry behavior, and the 195-check project runner
+fresh-retry and duplicate-retry behavior, and the 235-check project runner
 completes an A--B--C LINKREQUEST/LRPROOF/LRRTT/channel/proof flow, includes 8
-Channel retry/receipt-replacement checks, and includes 40 exact keepalive
-lifecycle checks.
+Channel retry/receipt-replacement checks, 40 released-Python LRRTT MessagePack
+checks, and 40 exact keepalive lifecycle checks.
 
 The remaining product gate is role classification, not relay capacity.
 Arbitrary remote H1 LINKREQUEST stays disabled until an interface role can
@@ -191,16 +193,19 @@ LINKREQUEST, while its state is still `Handshake` and data sending returns
 Link. Prefer a distinct pending/request event, or reserve `LinkEstablished`
 for the transition to `Active`.
 
-Expected-hop admission is resolved at this pin, but LRRTT payload
-interoperability is not. Python encodes its RTT as a MessagePack numeric value
-and the responder uses the greater of the local measurement and peer RTT. Rete
-currently sends a raw four-byte timestamp body and ignores the decrypted LRRTT
-payload. Authentication and decryption therefore protect the carrier but do
-not validate its semantics: a malformed authenticated LRRTT can establish the
-Link and teach the responder's expected hops. Add bounded MessagePack numeric
-encoding and decoding, released-Python cross-language vectors, finite/range
-checks, and require successful payload validation before establishment,
-expected-hop mutation, or an Active/established event.
+Expected-hop admission and pending-handshake LRRTT payload interoperability are
+resolved at this pin. Rete emits canonical MessagePack float64, accepts the
+numeric scalar families and first-object/trailing-byte behavior returned by
+Python's u-msgpack, and selects the greater local or peer RTT with Python
+ordering, including non-finite values. A malformed or nonnumeric authenticated
+LRRTT is rejected before establishment or expected-hop mutation, emits a
+best-effort encrypted `LINKCLOSE` on the bound interface, unconditionally
+reclaims Link-owned state, and produces one terminal close without replay
+duplication. Two nonblocking parity items remain: Python reprocesses LRRTT on
+an Active responder, which requires immutable `request_time` rather than
+Rete's mutable `last_outbound`, and Rete still measures RTT in whole-second
+`u64` time and stores `f32` rather than using Python's double-precision
+wall-clock measurement.
 
 Generic `build_link_data_packet()` users also do not update `last_outbound`.
 Best-effort Link data, identify, request and response traffic can therefore
@@ -463,9 +468,9 @@ Make DATA preparation one transaction:
    more than `P` operations, plus full-table rejection with unchanged path,
    receipt and entropy state.
 
-The generic fix is now the project pin
-`8b5d65283cd370dee4cbb17594ef9c88d2805416`, with designated fork tag
-`firmware-pin-8b5d652`. It returns caller-owned packet metadata plus a full
+The generic fix is now retained by project pin
+`14c7b4955a1ff6903e87cc40b42498f7869b6f4f`, with designated fork tag
+`firmware-pin-14c7b49`. It returns caller-owned packet metadata plus a full
 receipt token, reports registration and output-allocation failures, and
 atomically removes validated and timed-out receipts only after reserving their
 exact kind/full-hash terminal candidate. Link-typed channel proofs are resolved

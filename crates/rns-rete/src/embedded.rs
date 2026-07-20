@@ -1173,6 +1173,14 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         self.core.transport.get_link(link_id).map(|link| link.state)
     }
 
+    /// Current negotiated round-trip time for one locally owned Link.
+    ///
+    /// The value is a read-only lifecycle snapshot in seconds. It is absent
+    /// after the Link has been purged.
+    pub fn link_rtt(&self, link_id: &LinkId) -> Option<f32> {
+        self.core.transport.get_link(link_id).map(|link| link.rtt)
+    }
+
     /// Allocation-free metrics and capacity snapshot.
     pub fn metrics(&self) -> EmbeddedNodeMetrics {
         EmbeddedNodeMetrics {
@@ -2051,7 +2059,9 @@ mod tests {
     use alloc::{format, vec};
 
     use super::*;
-    use rete_core::{CONTEXT_KEEPALIVE, CONTEXT_LRPROOF, CONTEXT_LRRTT, PacketBuilder};
+    use rete_core::{
+        CONTEXT_KEEPALIVE, CONTEXT_LINKCLOSE, CONTEXT_LRPROOF, CONTEXT_LRRTT, PacketBuilder,
+    };
 
     #[derive(Default)]
     struct CounterRng(u8);
@@ -2290,6 +2300,7 @@ mod tests {
         let established =
             initiator.ingest(proof.actions.packets[0].bytes(), 101, InterfaceId(3), rng);
         assert_eq!(initiator.link_state(&link_id), Some(LinkState::Active));
+        assert_eq!(initiator.link_rtt(&link_id), Some(1.0));
         assert_eq!(established.actions.packets.len(), 1);
         assert_eq!(
             established.actions.packets[0].target(),
@@ -2310,7 +2321,107 @@ mod tests {
         );
         assert_eq!(active.disposition, IngressDisposition::Processed);
         assert_eq!(responder.link_state(&link_id), Some(LinkState::Active));
+        assert_eq!(responder.link_rtt(&link_id), Some(2.0));
         link_id
+    }
+
+    #[test]
+    fn authenticated_malformed_lrrtt_closes_once_on_bound_interface() {
+        let mut initiator = node(1);
+        let mut responder = node(2);
+        let mut rng = CounterRng::default();
+        let (request, link_id) = link_request(&mut initiator, &responder, &mut rng);
+        let proof = responder.ingest(request.bytes(), 100, InterfaceId(7), &mut rng);
+        assert_eq!(responder.link_state(&link_id), Some(LinkState::Handshake));
+        assert!(proof.actions.events.is_empty());
+        assert_eq!(proof.actions.packets.len(), 1);
+
+        // Validating LRPROOF gives the initiator the negotiated session key.
+        // Build nil as an encrypted LRRTT plaintext through that key, while
+        // deliberately discarding the automatically generated valid LRRTT.
+        let established = initiator.ingest(
+            proof.actions.packets[0].bytes(),
+            101,
+            InterfaceId(3),
+            &mut rng,
+        );
+        assert!(matches!(
+            established.actions.events.as_slice(),
+            [NodeEvent::LinkEstablished { link_id: event_id }] if *event_id == link_id
+        ));
+        let malformed = initiator
+            .core
+            .transport
+            .build_lrrtt_packet(&link_id, &[0xc0], &mut rng)
+            .unwrap();
+
+        let counters_before = responder.metrics().transport;
+        let closed = responder.ingest(&malformed, 102, InterfaceId(7), &mut rng);
+        assert_eq!(closed.disposition, IngressDisposition::NativeInvalid);
+        assert!(matches!(
+            closed.actions.events.as_slice(),
+            [NodeEvent::LinkClosed { link_id: event_id }] if *event_id == link_id
+        ));
+        assert_eq!(closed.actions.packets.len(), 1);
+        assert_eq!(
+            closed.actions.packets[0].target(),
+            TxTarget::Only(InterfaceId(7))
+        );
+        let linkclose = Packet::parse(closed.actions.packets[0].bytes()).unwrap();
+        assert_eq!(linkclose.packet_type, PacketType::Data);
+        assert_eq!(linkclose.dest_type, DestType::Link);
+        assert_eq!(linkclose.destination_hash, link_id.as_ref());
+        assert_eq!(linkclose.context, CONTEXT_LINKCLOSE);
+        assert_eq!(responder.link_state(&link_id), None);
+        assert_eq!(responder.link_rtt(&link_id), None);
+        let counters_after = responder.metrics().transport;
+        assert_eq!(
+            counters_after.packets_dropped_invalid,
+            counters_before.packets_dropped_invalid + 1
+        );
+        assert_eq!(
+            counters_after.links_failed,
+            counters_before.links_failed + 1
+        );
+        assert_eq!(
+            counters_after.links_closed,
+            counters_before.links_closed + 1
+        );
+        assert_eq!(
+            counters_after.links_established,
+            counters_before.links_established
+        );
+
+        // The close packet is authenticated with the retained Link key and is
+        // accepted by its peer, while replaying malformed LRRTT cannot emit a
+        // second close or lifecycle event after responder state was purged.
+        let peer_closed = initiator.ingest(
+            closed.actions.packets[0].bytes(),
+            103,
+            InterfaceId(3),
+            &mut rng,
+        );
+        assert!(matches!(
+            peer_closed.actions.events.as_slice(),
+            [NodeEvent::LinkClosed { link_id: event_id }] if *event_id == link_id
+        ));
+        assert_eq!(initiator.link_state(&link_id), None);
+
+        let replayed = responder.ingest(&malformed, 104, InterfaceId(7), &mut rng);
+        assert!(replayed.actions.events.is_empty());
+        assert!(replayed.actions.packets.is_empty());
+        assert_eq!(responder.link_state(&link_id), None);
+        let counters_replayed = responder.metrics().transport;
+        assert_eq!(
+            counters_replayed.packets_dropped_invalid,
+            counters_after.packets_dropped_invalid
+        );
+        assert_eq!(counters_replayed.links_failed, counters_after.links_failed);
+        assert_eq!(counters_replayed.links_closed, counters_after.links_closed);
+        assert_eq!(
+            counters_replayed.links_established,
+            counters_after.links_established
+        );
     }
 
     #[test]

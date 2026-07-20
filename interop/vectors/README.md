@@ -4,12 +4,18 @@
 
 `rns-1.3.8.json` is the first deterministic released-Python foundation corpus.
 It covers a stable test-only identity, signed announce, plain packet, packet
-hashes and their exact wire bytes. Its peer revision and generator are embedded
-in the file and checked by the host conformance runner.
+hashes and their exact wire bytes. It also freezes canonical LRRTT float64
+messages and released u-msgpack 2.7.1 decode/formula behavior for alternate
+numeric types, non-finite values, trailing bytes and malformed objects. Its
+peer revision, vendored codec digest and generator are embedded in the file and
+checked by the host conformance runner.
 
 This is intentionally only the first slice. The Phase-0 validation contract
-still requires HEADER_2, encrypted packets, proofs, IFAC, ratchets, Links,
-Resources and multi-node behavior, plus the independent LXMF corpus.
+still requires released-peer HEADER_2, encrypted packet, proof, IFAC, ratchet,
+complete Link, Resource and multi-node vectors, plus the independent LXMF
+corpus. The LRRTT cases describe Python behavior. Firmware conformance matches
+its numeric-scalar and first-object semantics for pending handshakes;
+active-responder repeat handling remains a separate state-machine gap.
 
 ## Phase-1 RNode receive corpus
 
