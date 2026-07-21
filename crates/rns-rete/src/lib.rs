@@ -28,7 +28,8 @@ pub use application_events::{
     ApplicationEventDiscardReason, ApplicationEventGeneration, ApplicationEventId,
     ApplicationEventLease, ApplicationEventOfferError, ApplicationEventOfferFailure,
     ApplicationEventOfferReport, ApplicationEventOwner, ApplicationEventOwnerCounters,
-    ApplicationEventQuarantineReason, ApplicationEventSequence, ApplicationEventSlot,
+    ApplicationEventQuarantineReason, ApplicationEventRetryError, ApplicationEventRetryFailure,
+    ApplicationEventRetryToken, ApplicationEventSequence, ApplicationEventSlot,
     ApplicationEventSlotId, DelayedProofTransaction, DelayedProofTransactionError,
     DelayedProofTransactionFailure, RetainedProofCommitSuccess,
 };

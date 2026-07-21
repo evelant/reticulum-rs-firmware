@@ -5,9 +5,11 @@
 //! caller-provided slot and the proof's event index is valid. Consumers lease
 //! one event at a time in FIFO order. Resolving a lease transfers, discards, or
 //! quarantines its exact event and proof; dropping an unresolved lease
-//! quarantines both instead of silently releasing their slot.
+//! quarantines both instead of silently releasing their slot. A consumer may
+//! also retain an opaque backing-slot retry token so backoff can reacquire the
+//! exact quarantine without treating a scalar event ID as authority.
 
-use core::{fmt, mem};
+use core::{fmt, marker::PhantomData, mem, ptr};
 
 use crate::delayed_proofs::{
     DelayedProofId, DelayedProofOwner, DelayedProofReservation, DelayedProofReservationError,
@@ -81,6 +83,135 @@ pub enum ApplicationEventQuarantineReason {
     ConsumerFault,
     /// A lease left scope without an explicit disposition.
     UnresolvedLeaseDropped,
+}
+
+/// Why an exact retry token did not reacquire its quarantined event.
+///
+/// These values are diagnostics only. The unchanged opaque
+/// [`ApplicationEventRetryToken`] returned by [`ApplicationEventRetryFailure`]
+/// remains the structural retry authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApplicationEventRetryError {
+    /// The token's backing slot is not at the same stable index in this
+    /// owner, even if this owner happens to contain an equal scalar event ID.
+    ForeignOwner,
+    /// The backing slot has since been reused for a newer event incarnation.
+    StaleGeneration {
+        /// Generation named by the retry token.
+        token: ApplicationEventGeneration,
+        /// Generation currently occupying the backing slot.
+        current: ApplicationEventGeneration,
+    },
+    /// The event incarnation no longer has the FIFO sequence captured by the
+    /// retry token.
+    StaleSequence {
+        /// FIFO sequence named by the retry token.
+        token: ApplicationEventSequence,
+        /// FIFO sequence currently attached to the backing slot.
+        current: ApplicationEventSequence,
+    },
+    /// The exact event is no longer quarantined.
+    NotQuarantined,
+    /// Another recovery path changed why the exact event is quarantined.
+    QuarantineChanged {
+        /// Reason captured when the retry token was created.
+        token: ApplicationEventQuarantineReason,
+        /// Current quarantine reason on the backing slot.
+        current: ApplicationEventQuarantineReason,
+    },
+}
+
+/// Opaque structural authority to retry one exact quarantined event.
+///
+/// A token is created only by
+/// [`ApplicationEventLease::quarantine_for_retry`]. Its private backing-slot
+/// provenance disambiguates independent owners whose scalar
+/// [`ApplicationEventId`] values happen to be equal. The token is deliberately
+/// neither `Copy` nor `Clone`; retry consumes it, and a rejected retry returns
+/// the same token unchanged. It owns no allocation and never dereferences its
+/// private provenance address.
+///
+/// The storage lifetime prevents the token from outliving and subsequently
+/// authorizing unrelated storage that happens to reuse the same address.
+/// Keeping a token does not borrow the [`ApplicationEventOwner`], so the owner
+/// may process other slots while product policy waits for retry backoff.
+///
+/// ```compile_fail
+/// use reticulum_rns_rete::ApplicationEventRetryToken;
+///
+/// fn duplicate(token: ApplicationEventRetryToken<'_>) {
+///     let _second_authority = token.clone();
+/// }
+/// ```
+#[must_use = "a retry token retains exact structural authority for its deferred retry"]
+pub struct ApplicationEventRetryToken<'slots> {
+    slot_address: usize,
+    id: ApplicationEventId,
+    sequence: ApplicationEventSequence,
+    reason: ApplicationEventQuarantineReason,
+    storage: PhantomData<&'slots ()>,
+}
+
+impl ApplicationEventRetryToken<'_> {
+    /// Scalar event identity for diagnostics and backoff bookkeeping.
+    ///
+    /// This value is not retry authority; callers must return this complete
+    /// token to [`ApplicationEventOwner::try_reacquire_quarantined`].
+    pub const fn event_id(&self) -> ApplicationEventId {
+        self.id
+    }
+
+    /// Original FIFO sequence for diagnostics.
+    pub const fn sequence(&self) -> ApplicationEventSequence {
+        self.sequence
+    }
+
+    /// Reason supplied when the exact event was deferred for retry.
+    pub const fn reason(&self) -> ApplicationEventQuarantineReason {
+        self.reason
+    }
+}
+
+impl fmt::Debug for ApplicationEventRetryToken<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ApplicationEventRetryToken")
+            .field("event_id", &self.id)
+            .field("sequence", &self.sequence)
+            .field("reason", &self.reason)
+            .field("slot_provenance", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Rejected exact retry preserving its opaque authority unchanged.
+#[must_use = "a rejected retry still owns the exact retry authority"]
+pub struct ApplicationEventRetryFailure<'slots> {
+    reason: ApplicationEventRetryError,
+    token: ApplicationEventRetryToken<'slots>,
+}
+
+impl<'slots> ApplicationEventRetryFailure<'slots> {
+    /// Typed reason the event was not reacquired.
+    pub const fn reason(&self) -> ApplicationEventRetryError {
+        self.reason
+    }
+
+    /// Recover the unchanged structural authority for inspection or another
+    /// retry against its original owner.
+    pub fn into_token(self) -> ApplicationEventRetryToken<'slots> {
+        self.token
+    }
+}
+
+impl fmt::Debug for ApplicationEventRetryFailure<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ApplicationEventRetryFailure")
+            .field("reason", &self.reason)
+            .field("token", &self.token)
+            .finish()
+    }
 }
 
 /// Product-owned reason an application event was intentionally destroyed.
@@ -238,6 +369,12 @@ pub struct ApplicationEventOwnerCounters {
     pub policy_rejected_discards: u64,
     /// Explicit consumer quarantine dispositions.
     pub explicit_quarantines: u64,
+    /// Explicit quarantine dispositions that returned exact retry authority.
+    pub retry_quarantines: u64,
+    /// Exact quarantined events reacquired through their structural token.
+    pub retry_reacquisitions: u64,
+    /// Exact retry tokens rejected without mutating any event slot or token.
+    pub retry_reacquisition_rejections: u64,
     /// Unresolved leases converted to quarantine dispositions on drop.
     pub unresolved_lease_quarantines: u64,
     /// Offers rejected because current occupancy left too few slots.
@@ -619,6 +756,117 @@ impl<'slots> ApplicationEventOwner<'slots> {
     /// Lease the oldest quarantined event for recovery or final disposition.
     pub fn lease_next_quarantined(&mut self) -> Option<ApplicationEventLease<'_, 'slots>> {
         self.lease_oldest(true)
+    }
+
+    /// Reacquire the exact quarantined event authorized by one structural
+    /// retry token.
+    ///
+    /// Physical slot provenance is checked before scalar identity. A token
+    /// from another owner therefore cannot authorize an equal slot/generation
+    /// pair. Every rejection returns the same opaque token and leaves every
+    /// event slot unchanged; only rejection diagnostics advance.
+    #[allow(
+        clippy::result_large_err,
+        reason = "the error must preserve the exact allocation-free retry token"
+    )]
+    pub fn try_reacquire_quarantined<'owner, 'token_slots>(
+        &'owner mut self,
+        token: ApplicationEventRetryToken<'token_slots>,
+    ) -> Result<ApplicationEventLease<'owner, 'slots>, ApplicationEventRetryFailure<'token_slots>>
+    {
+        let Some(index) = self
+            .slots
+            .iter()
+            .position(|slot| ptr::from_ref(slot).addr() == token.slot_address)
+        else {
+            self.counters.retry_reacquisition_rejections = self
+                .counters
+                .retry_reacquisition_rejections
+                .saturating_add(1);
+            return Err(ApplicationEventRetryFailure {
+                reason: ApplicationEventRetryError::ForeignOwner,
+                token,
+            });
+        };
+
+        if index != token.id.slot.0 {
+            self.counters.retry_reacquisition_rejections = self
+                .counters
+                .retry_reacquisition_rejections
+                .saturating_add(1);
+            return Err(ApplicationEventRetryFailure {
+                reason: ApplicationEventRetryError::ForeignOwner,
+                token,
+            });
+        }
+
+        let slot = &self.slots[index];
+        let current_generation = ApplicationEventGeneration(slot.generation);
+        if current_generation != token.id.generation {
+            self.counters.retry_reacquisition_rejections = self
+                .counters
+                .retry_reacquisition_rejections
+                .saturating_add(1);
+            return Err(ApplicationEventRetryFailure {
+                reason: ApplicationEventRetryError::StaleGeneration {
+                    token: token.id.generation,
+                    current: current_generation,
+                },
+                token,
+            });
+        }
+
+        let current_reason = match slot.state {
+            ApplicationEventSlotState::Quarantined(reason) => reason,
+            _ => {
+                self.counters.retry_reacquisition_rejections = self
+                    .counters
+                    .retry_reacquisition_rejections
+                    .saturating_add(1);
+                return Err(ApplicationEventRetryFailure {
+                    reason: ApplicationEventRetryError::NotQuarantined,
+                    token,
+                });
+            }
+        };
+        let current_sequence = ApplicationEventSequence(slot.sequence);
+        if current_sequence != token.sequence {
+            self.counters.retry_reacquisition_rejections = self
+                .counters
+                .retry_reacquisition_rejections
+                .saturating_add(1);
+            return Err(ApplicationEventRetryFailure {
+                reason: ApplicationEventRetryError::StaleSequence {
+                    token: token.sequence,
+                    current: current_sequence,
+                },
+                token,
+            });
+        }
+        if current_reason != token.reason {
+            self.counters.retry_reacquisition_rejections = self
+                .counters
+                .retry_reacquisition_rejections
+                .saturating_add(1);
+            return Err(ApplicationEventRetryFailure {
+                reason: ApplicationEventRetryError::QuarantineChanged {
+                    token: token.reason,
+                    current: current_reason,
+                },
+                token,
+            });
+        }
+
+        let slot = &mut self.slots[index];
+        slot.state = ApplicationEventSlotState::Leased;
+        self.counters.retry_reacquisitions = self.counters.retry_reacquisitions.saturating_add(1);
+        Ok(ApplicationEventLease {
+            owner: self,
+            id: token.id,
+            sequence: token.sequence,
+            prior_quarantine: Some(current_reason),
+            resolved: false,
+        })
     }
 
     fn lease_oldest(&mut self, quarantined: bool) -> Option<ApplicationEventLease<'_, 'slots>> {
@@ -1053,6 +1301,33 @@ impl<'owner, 'slots> ApplicationEventLease<'owner, 'slots> {
             self.owner.counters.explicit_quarantines.saturating_add(1);
         self.resolved = true;
     }
+
+    /// Retain this exact event and return structural authority for a later
+    /// backoff retry.
+    ///
+    /// Unlike the scalar [`Self::id`], the returned opaque token carries
+    /// private backing-slot provenance. It can therefore be presented to
+    /// [`ApplicationEventOwner::try_reacquire_quarantined`] without allowing a
+    /// different owner whose event has an equal ID to be substituted.
+    pub fn quarantine_for_retry(
+        mut self,
+        reason: ApplicationEventQuarantineReason,
+    ) -> ApplicationEventRetryToken<'slots> {
+        let slot_address = ptr::from_ref(&self.owner.slots[self.id.slot.0]).addr();
+        self.owner.quarantine_slot(self.id, reason);
+        self.owner.counters.explicit_quarantines =
+            self.owner.counters.explicit_quarantines.saturating_add(1);
+        self.owner.counters.retry_quarantines =
+            self.owner.counters.retry_quarantines.saturating_add(1);
+        self.resolved = true;
+        ApplicationEventRetryToken {
+            slot_address,
+            id: self.id,
+            sequence: self.sequence,
+            reason,
+            storage: PhantomData,
+        }
+    }
 }
 
 impl fmt::Debug for ApplicationEventLease<'_, '_> {
@@ -1130,6 +1405,8 @@ mod tests {
     }
 
     impl CryptoRng for CounterRng {}
+
+    fn assert_send<T: Send>() {}
 
     type TestRnsNode = EmbeddedNode<4, 4, 8, 2>;
 
@@ -1290,6 +1567,218 @@ mod tests {
         assert_eq!(owner.counters().discarded_events, 1);
         assert_eq!(owner.counters().superseded_discards, 1);
         assert_eq!(owner.counters().explicit_quarantines, 1);
+    }
+
+    #[test]
+    fn retry_token_survives_backoff_work_and_reacquires_the_exact_event() {
+        assert_send::<ApplicationEventRetryToken<'static>>();
+        assert_send::<ApplicationEventRetryFailure<'static>>();
+
+        let source = InterfaceId(6);
+        let retained = retained_data_actions(0x71, source);
+        let proof_pointer = retained
+            .events
+            .retained_proof()
+            .expect("retained proof is privately attached")
+            .packet_bytes_ptr();
+        let mut slots = [ApplicationEventSlot::new(), ApplicationEventSlot::new()];
+        let mut owner = ApplicationEventOwner::new(&mut slots);
+        owner
+            .try_offer_actions(retained)
+            .expect("proof-bearing event fits");
+        owner
+            .try_offer_actions(actions(&[0x72]))
+            .expect("independent event fits");
+
+        let retained = owner.lease_next().expect("retained event is oldest");
+        let retained_id = retained.id();
+        let retained_sequence = retained.sequence();
+        let payload_pointer = match retained.event() {
+            ApplicationEvent::DataReceived { payload, .. } => payload.as_ptr(),
+            _ => panic!("retained fixture changed event kind"),
+        };
+        let token =
+            retained.quarantine_for_retry(ApplicationEventQuarantineReason::ConsumerDeferred);
+        assert_eq!(token.event_id(), retained_id);
+        assert_eq!(token.sequence(), retained_sequence);
+        assert_eq!(
+            token.reason(),
+            ApplicationEventQuarantineReason::ConsumerDeferred
+        );
+        assert_eq!(owner.capacities().quarantined, 1);
+
+        owner
+            .lease_next()
+            .expect("token does not borrow the owner during backoff")
+            .discard(ApplicationEventDiscardReason::MaintenanceCoalesced);
+        let lease = owner
+            .try_reacquire_quarantined(token)
+            .expect("the structural token reacquires its exact event");
+        assert_eq!(lease.id(), retained_id);
+        assert_eq!(lease.sequence(), retained_sequence);
+        assert_eq!(
+            lease.quarantine_reason(),
+            Some(ApplicationEventQuarantineReason::ConsumerDeferred)
+        );
+        assert!(lease.has_retained_proof());
+        assert!(matches!(
+            lease.event(),
+            ApplicationEvent::DataReceived { payload, .. }
+                if payload.as_ptr() == payload_pointer && payload.as_slice() == [0x71, 0x72]
+        ));
+
+        let mut proof_slots = [DelayedProofSlot::new()];
+        let mut proof_owner = DelayedProofOwner::new(&mut proof_slots);
+        let committed = lease
+            .try_reserve_delayed(&mut proof_owner)
+            .expect("reacquired proof-bearing event reserves proof capacity")
+            .acknowledge_into_ready();
+        assert_eq!(committed.event_id(), retained_id);
+        let actions = proof_owner
+            .lease_next()
+            .expect("the same proof became ready")
+            .release_actions();
+        assert_eq!(actions.packets[0].bytes().as_ptr(), proof_pointer);
+        assert_eq!(owner.counters().retry_quarantines, 1);
+        assert_eq!(owner.counters().retry_reacquisitions, 1);
+        assert_eq!(owner.counters().retry_reacquisition_rejections, 0);
+    }
+
+    #[test]
+    fn retry_token_rejects_an_independent_owner_with_an_equal_scalar_id() {
+        let mut first_slots = [ApplicationEventSlot::new()];
+        let mut second_slots = [ApplicationEventSlot::new()];
+        let mut first_owner = ApplicationEventOwner::new(&mut first_slots);
+        let mut second_owner = ApplicationEventOwner::new(&mut second_slots);
+        first_owner
+            .try_offer_actions(actions(&[0x81]))
+            .expect("first event fits");
+        second_owner
+            .try_offer_actions(actions(&[0x82]))
+            .expect("second event fits");
+
+        let first = first_owner.lease_next().expect("first event is ready");
+        let first_payload_pointer = match first.event() {
+            ApplicationEvent::DataReceived { payload, .. } => payload.as_ptr(),
+            _ => panic!("first fixture changed event kind"),
+        };
+        let first_token =
+            first.quarantine_for_retry(ApplicationEventQuarantineReason::ConsumerDeferred);
+        let second = second_owner.lease_next().expect("second event is ready");
+        assert_eq!(second.id(), first_token.event_id());
+        second.quarantine(ApplicationEventQuarantineReason::ConsumerDeferred);
+
+        let token_id = first_token.event_id();
+        let token_sequence = first_token.sequence();
+        let token_reason = first_token.reason();
+        let failure = second_owner
+            .try_reacquire_quarantined(first_token)
+            .expect_err("equal scalar identity from another owner is not authority");
+        assert_eq!(failure.reason(), ApplicationEventRetryError::ForeignOwner);
+        assert_eq!(second_owner.capacities().quarantined, 1);
+        assert_eq!(second_owner.counters().retry_reacquisition_rejections, 1);
+
+        let first_token = failure.into_token();
+        assert_eq!(first_token.event_id(), token_id);
+        assert_eq!(first_token.sequence(), token_sequence);
+        assert_eq!(first_token.reason(), token_reason);
+        let first = first_owner
+            .try_reacquire_quarantined(first_token)
+            .expect("the unchanged token still authorizes its original owner");
+        assert!(matches!(
+            first.event(),
+            ApplicationEvent::DataReceived { destination, payload }
+                if destination[0] == 0x81 && payload.as_ptr() == first_payload_pointer
+        ));
+        first.discard(ApplicationEventDiscardReason::Superseded);
+        second_owner
+            .lease_next_quarantined()
+            .expect("foreign rejection left the second event untouched")
+            .discard(ApplicationEventDiscardReason::Superseded);
+    }
+
+    #[test]
+    fn same_event_retry_tokens_serialize_without_authorizing_another_incarnation() {
+        let mut slots = [ApplicationEventSlot::new()];
+        let mut owner = ApplicationEventOwner::new(&mut slots);
+        owner
+            .try_offer_actions(actions(&[0x89]))
+            .expect("event fits");
+        let first = owner.lease_next().expect("event is ready");
+        let event_id = first.id();
+        let first = first.quarantine_for_retry(ApplicationEventQuarantineReason::ConsumerDeferred);
+
+        let same_event = owner
+            .lease_next_quarantined()
+            .expect("ordinary recovery may inspect the same exact event");
+        assert_eq!(same_event.id(), event_id);
+        let second =
+            same_event.quarantine_for_retry(ApplicationEventQuarantineReason::ConsumerDeferred);
+        assert_eq!(first.event_id(), second.event_id());
+        assert_eq!(first.sequence(), second.sequence());
+
+        let lease = owner
+            .try_reacquire_quarantined(first)
+            .expect("one token serially reacquires the event");
+        assert_eq!(lease.id(), event_id);
+        drop(lease);
+        assert_eq!(owner.capacities().quarantined, 1);
+
+        let lease = owner
+            .try_reacquire_quarantined(second)
+            .expect("a coexisting token still names only the unchanged event");
+        assert_eq!(lease.id(), event_id);
+        assert_eq!(data_tag(lease.event()), 0x89);
+        lease.discard(ApplicationEventDiscardReason::Superseded);
+        assert_eq!(owner.counters().retry_quarantines, 2);
+        assert_eq!(owner.counters().retry_reacquisitions, 2);
+    }
+
+    #[test]
+    fn stale_retry_token_cannot_authorize_a_reused_slot_generation() {
+        let mut slots = [ApplicationEventSlot::new()];
+        let mut owner = ApplicationEventOwner::new(&mut slots);
+        owner
+            .try_offer_actions(actions(&[0x91]))
+            .expect("first event fits");
+        let first = owner.lease_next().expect("first event is ready");
+        let first_id = first.id();
+        let stale = first.quarantine_for_retry(ApplicationEventQuarantineReason::ConsumerDeferred);
+
+        owner
+            .lease_next_quarantined()
+            .expect("ordinary recovery remains an explicit escape hatch")
+            .discard(ApplicationEventDiscardReason::Superseded);
+        owner
+            .try_offer_actions(actions(&[0x92]))
+            .expect("the same physical slot is reused");
+        let current = owner.lease_next().expect("replacement event is ready");
+        let current_id = current.id();
+        assert_eq!(current_id.slot(), first_id.slot());
+        assert!(current_id.generation() > first_id.generation());
+        let current =
+            current.quarantine_for_retry(ApplicationEventQuarantineReason::ConsumerDeferred);
+
+        let failure = owner
+            .try_reacquire_quarantined(stale)
+            .expect_err("stale generation cannot authorize the replacement event");
+        assert_eq!(
+            failure.reason(),
+            ApplicationEventRetryError::StaleGeneration {
+                token: first_id.generation(),
+                current: current_id.generation(),
+            }
+        );
+        assert_eq!(owner.capacities().quarantined, 1);
+        assert_eq!(owner.counters().retry_reacquisition_rejections, 1);
+        drop(failure.into_token());
+
+        let replacement = owner
+            .try_reacquire_quarantined(current)
+            .expect("the replacement event still requires its fresh token");
+        assert_eq!(replacement.id(), current_id);
+        assert_eq!(data_tag(replacement.event()), 0x92);
+        replacement.discard(ApplicationEventDiscardReason::Superseded);
     }
 
     #[test]

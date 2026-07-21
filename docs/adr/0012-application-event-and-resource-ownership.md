@@ -92,6 +92,27 @@ dispositions fail without touching a newer slot generation. Diagnostics count
 explicit dispositions and pressure; counters do not substitute for retained
 ownership.
 
+A consumer that intends to retry after backoff uses `quarantine_for_retry`.
+That disposition returns an opaque, non-`Clone` structural token containing a
+private backing-slot address plus the event generation, FIFO sequence, and
+quarantine reason. `ApplicationEventId` remains diagnostic metadata and is not
+accepted as retry authority. Exact reacquisition first checks that the backing
+slot occurs at the same stable index in the presented owner, then checks every
+captured incarnation field. A foreign owner with an equal scalar ID, a reused
+slot generation, or a changed quarantine fails without mutating any event slot
+and returns the unchanged token; only rejection diagnostics advance. The
+address is never dereferenced, and a storage lifetime prevents address reuse
+while a token remains live. It is represented privately as `usize` so a
+static-storage token remains `Send` when carried across an Embassy task await;
+the public type exposes no address or constructor.
+
+The ordinary FIFO quarantine path remains an explicit manual-recovery escape
+hatch. It can inspect the same unchanged event and therefore can produce more
+than one retry token for that one incarnation. Such tokens serialize through
+the owner's exclusive lease, authorize only that exact backing-slot
+generation/sequence/reason, and all become stale once the slot is resolved and
+reused. They are not globally unique job identifiers.
+
 `NodeInterfaceSupervisor` drains complete non-packet action envelopes into a
 passed application-event owner only when the whole batch fits. Capacity
 pressure leaves the exact envelope at the existing ordinary boundary. Packet
@@ -187,8 +208,9 @@ The first implementation must prove:
 1. exhaustive projection of every pinned native event, including pointer-
    stable move tests for owned payload allocations;
 2. all-or-nothing mixed event-batch admission and exact return under pressure;
-3. FIFO generation reuse, stale/duplicate disposition rejection, and
-   unresolved-lease quarantine;
+3. FIFO generation reuse, unresolved-lease quarantine, foreign equal-ID and
+   stale structural-retry rejection, and safe serialization of same-event
+   retry tokens;
 4. survival of supervisor busy/retry and tick-produced events;
 5. packet/completion/lifecycle progress while application output is pressured;
 6. explicit E290 dispositions for DATA and every non-DATA event class, with no
