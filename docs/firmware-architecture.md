@@ -32,7 +32,7 @@ also quarantines native USB at its earliest Rust entry before detached product
 initialization and canonical reattachment. Current source passes 134 default
 E290 host-library tests, 140 with the opt-in inbox commit-fault HIL feature, 150
 with the opt-in runtime-measurement HIL feature, 56 focused host-client tests
-inside the 252-test xtask suite, and target gates.
+inside the 256-test xtask suite, and target gates.
 Both powered boards returned `initialization-required` and
 `physical-presence-required`; live Begin created no host key before physical
 presence, and full USB re-enumeration restored a fresh sequence-zero epoch.
@@ -249,6 +249,7 @@ Claims in READMEs were not treated as proof of embedded portability.
 | Historical `8b5d652` selected routing/receipt/keepalive/LXMF validation set | 635 pass | The four library targets were 174 transport, 136 stack, 143 LXMF and 84 daemon tests, totaling 537. That pin was also run through 97 transport integration tests (9 computed-vector, 43 forwarding, 40 Link-integration and 5 path-request) and one stack integration test, producing the selected 635-test total. It is not a count of every nested workspace test target. All-target host and portable `no_std` checks remain separate compile gates |
 | `reticulum-conformance-rete` project runner | 647 pass | The historical 235-check baseline joined 112 released-vector, adapter and direct-Link checks with 40 released-Python LRRTT MessagePack checks, 8 channel-retry lifecycle checks, 40 exact keepalive lifecycle checks and 35 deterministic three-node A--B--C checks covering learned transport routing, exact-interface LINKREQUEST/LRPROOF/LRRTT relay, pending-Link wrong-hop LRPROOF rejection before deduplication, bound endpoint output, encrypted channel DATA/proof delivery, receipt completion and separate owned/relay/reverse capacity. The current schema-2 lifecycle/candidate runner expands that coverage and passes 647 checks. This is project-side conformance, not powered or live-Python multi-hop qualification |
 | `reticulum-lxmf-wire`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (wire/authentication foundation only) | The independently authored allocation-free `no_std` crate normalizes destination DATA, Link DATA context `NONE`, and completed Resource carriers into borrowed views with explicit byte/cardinality/value/scan/depth limits. It preserves raw exact-four hashing, admits only proven canonical first-four stamped forms, binds full RNS public keys to `lxmf.delivery` source hashes, requires public-key A and signature R to be non-identity prime-subgroup points, streams Ed25519 verification, and crosses a separate destination-bound receiver stamp-policy typestate for trusted prior tickets or streamed 3,000-round proof of work. Its first MessagePack tranche supports nil/boolean/integer/string/binary/generic-extension map keys, rejects Python-equal duplicates, and fails closed on float/container keys and timestamp extension normalization. Three unit plus eleven integration tests consume eight positive, one noncanonical inbound, and six negative pinned-Python fixtures; ten Python authority tests, strict Clippy/rustdoc, RISC-V/Xtensa checks, and an exact 15-package normal-closure policy pass. This does not provide encoding, announces, durable delivery, Resource segmentation, a mailbox/router, RF interoperability, or live actor integration; proof-of-work validation remains synchronous work that must not run in the sole network actor |
+| `reticulum-lxmf-ingress`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (portable opportunistic admission only) | The `no_std` adapter performs no admission-time allocation: it borrows an already owned ADR 0012 application event, admits only destination DATA addressed to an explicitly supplied local `lxmf.delivery` destination, resolves the source public key by value, and returns a zero-copy validated carrier plus fixed scalar evidence under caller-selected wire and stamp policies. Its normal closure deliberately includes the alloc-backed `node-core`/Rete application-event adapter; graph policy instead proves that it adds no platform, board, radio, firmware, storage, device-API, supervisor, or executor layer. Typed unrelated, deferred, rejected, and validated outcomes preserve ownership; missing identities and incomplete stamp work remain retryable state rather than invalid-message claims. Nine tests cover Python fixtures, exact-buffer borrowing, lookup/destination/context isolation, successful and failed stamp policy, unsupported carrier deferral, class-preserving failures, owner retention, and a Python-valid 391-byte carrier beyond the test-only 383-byte raw-inbox limit. Non-`NONE` Link DATA is unrelated; context-`NONE` Link DATA and Resource completion remain deferred because current events lack a Link-to-local-destination binding. Construction-time additional-destination registration and read-only identity recall now cross narrow node/supervisor seams, but the permanent E290 image does not yet register or schedule this service, and no durable mailbox or powered LXMF claim follows |
 | `reticulum-radio-interface`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | Allocation-free RNode framing/reassembly distinguishes the 500-byte RNS, 508-byte interface and 255-byte physical limits; conservative whole-microsecond one/two-frame RF airtime ceilings use exact SX126x bandwidth-code divisors, and a permit-gated state machine enforces randomized initial contention, bounded CAD retries, clear-observation freshness, explicit setup/turnaround/reconciliation bounds, aggregate reservation and strict owner deadlines. Its 89 focused tests, strict Clippy and warning-free rustdoc pass |
 | `reticulum-semantic-roundtrip-hil`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (test fixture only) | The allocation-free board-independent crate owns the stable public test identities, deterministic signed-announce vector, four-step ANNOUNCE/DATA/proof state machine, exact payload and RNode-frame policy. Seven all-feature tests include a real two-Rete-node encrypted round trip and strict failure cases. Six-byte identity selectors preserve the qualified wire fixture but cannot authorize hardware; each board wrapper independently maps exact eFuse MACs to roles, and graph policy excludes this crate from permanent firmware |
 | `reticulum-board-heltec-vision-master-e290`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (design facts only) | The HAL-free crate is the exhaustive compiled GPIO ownership map for the supplied V0.3.1 design, validates complete channels against the fitted HT-RA62-HF 863--928 MHz range, and fixes reset-low/NSS-high inert boot with no implicit frequency or TX power. Eight focused tests cover exact pin collisions/ownership and display/radio disjointness, named aliases, RF boundaries, safe state and the conservative 8 MiB design PSRAM floor. It intentionally makes no connected-board, qualified-memory or flash-capacity claim |
@@ -1129,6 +1130,7 @@ crates/
   rns-rete-rx/                    # RNode RX adapter and opaque receive-only façade
   rns-inbox-store/                # one-entry raw-NOR inbound DATA qualification store
   lxmf-wire/                      # allocation-free borrowed LXMF wire validation
+  lxmf-ingress/                   # retained application-event admission
   lxmf-router/                    # delivery queues, links/resources, retries
   lxmf-propagation/               # deposit/retrieve/peer sync/culling state machine
   nomad-protocol/                 # node/path/form/file/cache state, no renderer
@@ -1182,8 +1184,9 @@ docs/
   provenance.md                   # added at implementation start
 ```
 
-`node-core`, `interface-router`, `tx-handoff`, `tx-dispatch`, `tx-supervisor`, `lxmf-wire`,
-`lxmf-router`, `lxmf-propagation`, `nomad-protocol`, `micron-parser`,
+`node-core`, `interface-router`, `tx-handoff`, `tx-dispatch`, `tx-supervisor`,
+`lxmf-wire`, `lxmf-ingress`, `lxmf-router`, `lxmf-propagation`,
+`nomad-protocol`, `micron-parser`,
 `device-api`, `device-api-adapter`, `device-api-framing`,
 `device-api-pairing-control`, `device-api-pairing`,
 `device-api-credentials`, `device-api-credential-store`,
@@ -1563,9 +1566,21 @@ validates raw MessagePack fields instead of constructing a lossy value tree;
 the first tranche supports nil/boolean/integer/string/binary/generic-extension
 map keys and fails closed on float/container keys and timestamp extension
 normalization. A hard nesting cap of 32 and caller-selected byte, cardinality,
-total-value, scan-step, and proof-of-work budgets bound work. The future
-`lxmf-model`, engine, durable stores, and bounded RNS Resource service remain
-separate, transport-neutral components.
+total-value, scan-step, and proof-of-work budgets bound work.
+
+`reticulum-lxmf-ingress` now joins that validator to the project-owned
+application-event boundary without consuming or copying the event. The caller
+supplies the exact local `lxmf.delivery` destination, a by-value announced
+identity resolver, bounds, and stamp policy. Only opportunistic destination
+DATA is admitted in this tranche. Link DATA with a non-`NONE` context is
+unrelated; context-`NONE` Link DATA and completed Resources remain explicitly
+deferred until an owned Link-to-local-destination binding and the bounded
+Resource service exist. A missing identity or unfinished bounded stamp
+calculation is deferred, while structural, signature, and policy failures stay
+distinct. The future `lxmf-model`, engine, durable stores, and bounded RNS
+Resource service remain separate, transport-neutral components; validated
+bytes must be durably retained before their application-event lease is
+acknowledged.
 
 The streaming Ed25519 path requires the signing key and signature `R` point to
 be non-identity members of the prime-order subgroup before verification. This
@@ -2807,7 +2822,7 @@ CAD policy, formal electrical/RF, range, or regional release gates.
    Keep the Tracker pair as the second radio regression fixture.
 3. Preserve the 134-test default, 140-test commit-fault HIL, and 150-test
    runtime-measurement HIL E290 host-library compositions, 56 focused
-   host-client, 252-test xtask, 58-test Rete integration, 647-check schema-2
+   host-client, 256-test xtask, 58-test Rete integration, 647-check schema-2
    Rete conformance, and 17-test inbox-store gates. Retain the historical
    235-check baseline only as preceding evidence,
    including credential boot
@@ -2845,8 +2860,10 @@ CAD policy, formal electrical/RF, range, or regional release gates.
    live program-fault trajectories, sustained and forwarded traffic, concurrent
    durable activity, low-memory/failing-allocation cases, and production/default-
    image observation. Diagnose the reverse delivery-proof timeout before
-   claiming bidirectional completion or designing the separate LXMF/message
-   admission surface. Keep the admission and
+   claiming bidirectional completion. Preserve the now-implemented portable
+   LXMF opportunistic-admission seam while designing its separate durable
+   semantic owner; do not compose either into the target until retention before
+   event acknowledgement is explicit. Keep the admission and
    node-dispatch boundary reusable by later BLE/Wi-Fi bearers, with a separately
    implemented and qualified session suite for each binding. Select the real
    capacity policy beyond this one-entry qualification profile. Preserve durable
@@ -2886,9 +2903,13 @@ CAD policy, formal electrical/RF, range, or regional release gates.
    internal/PSRAM allocations and treat the Tracker `16/4/32/2` capacity
    profile as a constrained regression profile, not the full-appliance ceiling.
 
-The LXMF wire/resource work can continue on the host, but it should not enlarge
-the first radio HIL image or couple protocol qualification to a SPA/mobile
-client choice.
+The LXMF wire, ingress, and future Resource work can continue on the host, but
+it should not enlarge the first radio HIL image before the current bidirectional
+permanent-node proof trial is closed or couple protocol qualification to a
+SPA/mobile client choice. The next LXMF slice is the transport-neutral durable
+semantic owner: it must retain accepted bytes/state before acknowledging the
+application-event lease and must not inherit the temporary raw-inbox schema or
+capacity.
 
 ## Primary sources
 

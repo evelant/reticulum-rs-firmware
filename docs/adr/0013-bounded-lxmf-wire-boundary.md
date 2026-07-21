@@ -1,6 +1,6 @@
 # ADR 0013: Bounded LXMF wire and service ownership boundary
 
-- **Status:** accepted for the first wire tranche
+- **Status:** accepted for the first wire and application-ingress tranches
 - **Date:** 2026-07-20
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0002](0002-rete-provisional-foundation.md),
@@ -148,6 +148,39 @@ lanes will add current Python LXMF and independent clients. A discovered
 version difference becomes an explicit version/policy decision; it is not
 silently normalized into a private firmware dialect.
 
+### Join application events through a separate ingress adapter
+
+The project owns `crates/lxmf-ingress`, registered as
+`reticulum-lxmf-ingress`. It depends normally only on `node-core` and
+`lxmf-wire`; the temporary raw-RNS inbox is a test-only dependency. The adapter
+borrows an ADR 0012 `ApplicationEvent`, checks that destination DATA addresses
+the one explicitly supplied local `lxmf.delivery` destination, obtains the
+announced source public key by value through a caller-owned lookup, and applies
+the caller's wire limits and stamp policy. A validated result borrows the exact
+event payload and copies only bounded scalar correlation evidence.
+
+Classification never consumes the event. Unrelated events, work or identity
+state that requires deferral, conclusive validation rejection, and complete
+validation are distinct outcomes. Missing source identity and incomplete
+stamp-validation work remain deferred; they are not evidence of an invalid
+message. The caller must retain, quarantine, durably commit, or explicitly
+discard the event before acknowledging its owner lease.
+
+This first adapter tranche admits only opportunistic destination DATA. Link
+DATA with any context other than RNS `NONE` is unrelated and remains available
+to its actual service. Context-`NONE` Link DATA and Resource-complete events do
+not prove that their Link terminates at the local LXMF destination, so only
+those possible LXMF carriers are explicitly deferred even though the wire crate
+can normalize their bytes. This avoids treating carrier shape as application
+ownership. Native Resource ingress stays disabled until its segmentation and
+streaming-storage contract is bounded.
+
+`node-core` exposes only a construction-time registration helper for an
+additional inbound Single destination and a read-only, by-value identity
+lookup. The permanent supervisor forwards only the identity lookup. The E290
+firmware does not yet register or schedule the LXMF service, so these portable
+seams are not powered LXMF evidence.
+
 ### Reuse LXMF-rs selectively and preserve attribution
 
 LXMF-rs is an approved implementation reference and source for selective
@@ -196,6 +229,8 @@ of RNS or LXMF protocol state.
   their input owner.
 - Semantic consumers must copy only selected bounded values or retain a stable
   blob/message owner; they cannot keep an event slot borrowed indefinitely.
+- The ingress adapter cannot acknowledge or drop an application event. Durable
+  semantic acceptance remains a separate owner transition to design and test.
 - Full-product PSRAM can enlarge engine/store/blob quotas, but does not weaken
   wire limits or permit network-controlled allocation.
 - Proof-of-work validation is allocation-free but still performs the protocol's
@@ -206,15 +241,17 @@ of RNS or LXMF protocol state.
   system. Additional Reticulum interfaces and local API bearers reuse the same
   validated-message boundary.
 - The temporary ADR 0011 raw-RNS record remains qualification evidence, not the
-  LXMF mailbox schema.
+  LXMF mailbox schema. Its 383-byte payload limit is not imported into the
+  product ingress graph; a test proves that the Python-valid 391-byte
+  opportunistic carrier remains admissible.
 
 ## Acceptance evidence
 
-The first tranche must prove:
+The first wire and application-ingress tranches must prove:
 
-1. allocation-free `#![no_std]` compilation on a generic bare-metal target and
-   strict host tests without an allocator, board, transport actor, or Rete node
-   dependency;
+1. allocation-free `#![no_std]` compilation of the wire crate on a generic
+   bare-metal target and strict host tests without an allocator, board,
+   transport actor, or Rete node dependency;
 2. byte-exact parsing, normalization, Python-rule hashing, signature/source
    validation, and message-ID results for every supported Python LXMF 1.0.1
    foundation fixture, including separate four-item raw and five-item
@@ -230,8 +267,16 @@ The first tranche must prove:
    scan-work, unsupported arity/noncanonical stamped encoding, truncation, and
    trailing-data cases; and
 6. dependency-graph and provenance checks that preserve the project-owned,
-   Rete-adapter, and any future EPL-derived source boundaries.
+   Rete-adapter, and any future EPL-derived source boundaries; and
+7. `#![no_std]`, zero-copy application-event admission that performs no new
+   allocation, with explicit destination ownership, by-value source lookup,
+   distinct retry/rejection outcomes, retained event ownership, and an explicit
+   regression against importing the raw-inbox size limit. Its reviewed normal
+   closure may include the existing alloc-backed `node-core`/Rete event adapter,
+   but no platform, board, radio, firmware, storage, device-API, supervisor, or
+   executor package.
 
-This evidence establishes only the wire and validation foundation. It does not
-claim durable send/receive, RNS Resource transfer, retries, propagation,
+This evidence establishes the wire/validation foundation and its portable
+opportunistic application-event ingress seam. It does not claim target-firmware
+composition, durable send/receive, RNS Resource transfer, retries, propagation,
 NomadNet, RF interoperability, or a complete LXMF service.

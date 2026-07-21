@@ -37,6 +37,9 @@ pub const MAX_CHANNEL_PAYLOAD: usize =
 /// Base Reticulum packet MTU used by the embedded radio profile.
 pub const RNS_MTU: usize = rete_core::MTU;
 
+/// RNS Link DATA context that carries ordinary application bytes.
+pub const LINK_DATA_CONTEXT_NONE: u8 = CONTEXT_NONE;
+
 /// Largest plaintext accepted by destination-DATA encryption at the base MTU.
 pub const MAX_DATA_PAYLOAD: usize = rete_core::ENCRYPTED_MDU;
 
@@ -1782,6 +1785,15 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         *self.core.dest_hash()
     }
 
+    /// Copy a public key previously authenticated by a destination announce.
+    ///
+    /// This is a read-only view of the bounded native identity table. Returning
+    /// the fixed-size key by value prevents an application worker from holding
+    /// a borrow into the sole mutable RNS owner while it verifies a signature.
+    pub fn recall_identity(&self, destination: &DestHash) -> Option<[u8; 64]> {
+        self.core.transport.recall_identity(destination).copied()
+    }
+
     /// Local identity hash without allocating a formatted string.
     pub fn identity_hash(&self) -> IdentityHash {
         self.core.identity().hash()
@@ -3468,6 +3480,31 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn learned_destination_identity_is_copied_without_exposing_native_storage() {
+        let peer = identity(201);
+        let expected_public_key = peer.public_key();
+        let peer_destination = TestNode::new(
+            identity(201),
+            "lxmf",
+            &["delivery"],
+            EmbeddedNodeConfig::endpoint(),
+        )
+        .unwrap()
+        .destination_hash();
+        let mut owner = node(200);
+
+        owner
+            .register_peer(&peer, "lxmf", &["delivery"], 1)
+            .unwrap();
+
+        assert_eq!(
+            owner.recall_identity(&peer_destination),
+            Some(expected_public_key)
+        );
+        assert_eq!(owner.recall_identity(&DestHash::from([0xee; 16])), None);
+    }
+
     fn link_request(
         initiator: &mut TestNode,
         responder: &TestNode,
@@ -4407,6 +4444,10 @@ mod tests {
             .expect("the destination announce must be ready immediately");
         let learned = transport.ingest(announce.bytes(), 0, InterfaceId(7), &mut rng);
         assert_eq!(learned.disposition, IngressDisposition::Processed);
+        assert_eq!(
+            transport.recall_identity(&destination),
+            Some(identity(28).public_key())
+        );
         assert_eq!(
             transport
                 .route(&destination)

@@ -176,10 +176,14 @@ jobs:
           -p reticulum-device-api-session
           --no-deps
 
-      - name: LXMF wire rustdoc
+      - name: LXMF ingress and wire rustdoc
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --locked -p reticulum-lxmf-wire --no-deps
+        run: >-
+          cargo doc --locked
+          -p reticulum-lxmf-ingress
+          -p reticulum-lxmf-wire
+          --no-deps
 
       - name: Released-Python foundation vectors
         env:
@@ -198,7 +202,9 @@ jobs:
             python interop/python/generate_lxmf_1_0_1_vectors.py --check
           PYTHONPATH="$lxmf_python" \
             python interop/python/test_lxmf_1_0_1_vectors.py
-          cargo test --locked -p reticulum-lxmf-wire
+          cargo test --locked \
+            -p reticulum-lxmf-ingress \
+            -p reticulum-lxmf-wire
 
       - name: Independent device API session and pairing vectors
         run: |
@@ -239,6 +245,7 @@ jobs:
           -p reticulum-device-identity-store
           -p reticulum-announce-clock
           -p reticulum-interface-router
+          -p reticulum-lxmf-ingress
           -p reticulum-lxmf-wire
           -p reticulum-node-core
           -p reticulum-nor-flash-region
@@ -404,6 +411,7 @@ jobs:
           -p reticulum-device-api-session
           -p reticulum-device-identity-store
           -p reticulum-announce-clock
+          -p reticulum-lxmf-ingress
           -p reticulum-lxmf-wire
           -p reticulum-node-core
           -p reticulum-nor-flash-region

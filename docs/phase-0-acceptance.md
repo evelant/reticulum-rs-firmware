@@ -75,6 +75,7 @@ The scaffold is complete only when all of these pass from a clean checkout:
 cargo test --locked
 cargo run --locked -p reticulum-conformance-rete
 cargo test --locked -p reticulum-rns-leviculum
+cargo test --locked -p reticulum-lxmf-ingress
 cargo test --locked -p reticulum-lxmf-wire
 cargo check --locked \
   -p reticulum-device-api \
@@ -85,6 +86,7 @@ cargo check --locked \
   -p reticulum-device-api-pairing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
+  -p reticulum-lxmf-ingress \
   -p reticulum-lxmf-wire \
   -p reticulum-node-core \
   -p reticulum-storage-model \
@@ -109,6 +111,7 @@ cargo +esp check --locked \
   -p reticulum-device-api-pairing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
+  -p reticulum-lxmf-ingress \
   -p reticulum-lxmf-wire \
   -p reticulum-node-core \
   -p reticulum-board-heltec-vision-master-e290 \
@@ -678,9 +681,16 @@ claim it as a new validated baseline.
 
 ### 6. LXMF-enabling vectors
 
-The first checked Python LXMF 1.0.1 corpus and `reticulum-lxmf-wire` tranche
-now cover the supported foundation forms below. Before production-accepting
-the RNS foundation, retain and extend Python-derived LXMF fixtures covering:
+The first checked Python LXMF 1.0.1 corpus, `reticulum-lxmf-wire` tranche, and
+the separate `reticulum-lxmf-ingress` application-event adapter now cover the
+supported foundation forms below. The ingress adapter admits only explicitly
+owned opportunistic destination DATA, resolves source identities by value, and
+returns a borrowed validated view without consuming the event. Non-`NONE` Link
+DATA is unrelated; context-`NONE` Link DATA and Resource completion remain
+explicitly deferred until their local-destination binding and bounded Resource
+ownership are available. Before
+production-accepting the RNS foundation, retain and extend Python-derived LXMF
+fixtures covering:
 
 - heterogeneous MessagePack keys and values, including unknown structured
   fields; the current allocation-free parser accepts nil/boolean/integer/

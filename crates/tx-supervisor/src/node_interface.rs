@@ -352,6 +352,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn permanent_aggregate_forwards_only_a_copied_identity_lookup() {
+        let (supervisor, _actors, destination) = build::<1, 1>(60);
+
+        assert_eq!(
+            supervisor.recall_identity(&destination),
+            Some(identity(61).public_key())
+        );
+        assert_eq!(
+            supervisor.recall_identity(&DestinationHash::new([0xee; 16])),
+            None
+        );
+    }
+
     fn properties(config: u32) -> InterfaceProperties {
         InterfaceProperties::new(
             LogicalMtu::try_new(500).expect("test MTU is nonzero"),
@@ -2854,6 +2868,15 @@ where
     /// Primary local Reticulum destination owned by this aggregate.
     pub fn destination_hash(&self) -> DestinationHash {
         self.node.destination_hash()
+    }
+
+    /// Copy a public key learned for one announced Reticulum destination.
+    ///
+    /// The permanent aggregate retains sole mutable node ownership. This
+    /// fixed-size read-only query lets an application worker verify an LXMF
+    /// source without exposing the inner node or borrowing native storage.
+    pub fn recall_identity(&self, destination: &DestinationHash) -> Option<[u8; 64]> {
+        self.node.recall_identity(destination)
     }
 
     /// Register one stable interface identity offline in a vacant actor slot.

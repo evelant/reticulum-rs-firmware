@@ -1,0 +1,21 @@
+[package]
+name = "reticulum-lxmf-ingress"
+description = "Transport-neutral admission of LXMF application events"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reticulum-lxmf-wire = { path = "../lxmf-wire", default-features = false }
+reticulum-node-core = { path = "../node-core", default-features = false }
+
+[dev-dependencies]
+hex.workspace = true
+reticulum-rns-inbox-store = { path = "../rns-inbox-store", default-features = false }
+serde.workspace = true
+serde_json.workspace = true
+
+[lib]
+path = "src/lib.rs"

@@ -2004,6 +2004,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "reticulum-lxmf-ingress"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "reticulum-lxmf-wire",
+ "reticulum-node-core",
+ "reticulum-rns-inbox-store",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "reticulum-lxmf-wire"
 version = "0.1.0"
 dependencies = [

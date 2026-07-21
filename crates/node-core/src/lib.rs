@@ -24,7 +24,9 @@ use core::num::NonZeroU64;
 use rand_core::{CryptoRng, RngCore};
 use reticulum_rns_rete::{
     AnnounceAdmissionError as RnsAnnounceAdmissionError, DestHash as RnsDestinationHash,
-    EmbeddedNode as RnsNode, EmbeddedNodeConfig as RnsNodeConfig, Identity as RnsIdentity,
+    DestinationRegistrationError as RnsDestinationRegistrationError,
+    DestinationType as RnsDestinationType, Direction as RnsDirection, EmbeddedNode as RnsNode,
+    EmbeddedNodeConfig as RnsNodeConfig, Identity as RnsIdentity,
     InboundProofPolicy as RnsInboundProofPolicy, InterfaceId as RnsInterfaceId,
     NodeRole as RnsNodeRole, PrepareDataError as RnsPrepareDataError,
     PreparedData as RnsPreparedData, RNS_MTU, ReceiptCandidate, ReceiptKind,
@@ -73,6 +75,10 @@ pub const MAX_DATA_PAYLOAD: usize = reticulum_rns_rete::MAX_DATA_PAYLOAD;
 
 /// Largest application-data payload accepted for one local announce.
 pub const MAX_ANNOUNCE_APP_DATA: usize = reticulum_rns_rete::MAX_ANNOUNCE_APP_DATA;
+
+/// Link DATA context that carries ordinary application bytes rather than an
+/// RNS control or service message.
+pub const APPLICATION_LINK_CONTEXT_NONE: u8 = reticulum_rns_rete::LINK_DATA_CONTEXT_NONE;
 
 /// Whether Rete's current heapless backend can instantiate these table
 /// capacities.
@@ -542,6 +548,27 @@ impl Default for NodeConfig {
 pub enum NodeConstructionError {
     /// RNS rejected the application name, aspects, identity, or destination.
     InvalidRnsConfiguration,
+}
+
+/// Failure to register one additional inbound single-identity destination.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalDestinationRegistrationError {
+    /// The construction-time additional-destination quota is exhausted.
+    LimitReached {
+        /// Configured maximum additional destinations.
+        limit: usize,
+    },
+    /// RNS rejected the application name, aspects, or destination construction.
+    InvalidRnsConfiguration,
+}
+
+impl From<RnsDestinationRegistrationError> for LocalDestinationRegistrationError {
+    fn from(error: RnsDestinationRegistrationError) -> Self {
+        match error {
+            RnsDestinationRegistrationError::LimitReached { limit } => Self::LimitReached { limit },
+            RnsDestinationRegistrationError::Rete(_) => Self::InvalidRnsConfiguration,
+        }
+    }
 }
 
 /// Failure to cache one peer identity for deterministic direct sending.
@@ -2317,6 +2344,37 @@ impl<
         DestinationHash::new(*self.rns.destination_hash().as_bytes())
     }
 
+    /// Register one additional inbound encrypted destination owned by this
+    /// node identity.
+    ///
+    /// Protocol services such as `lxmf.delivery` call this before the node is
+    /// moved into the permanent interface supervisor. The narrow wrapper does
+    /// not expose Rete destination objects or mutable protocol state.
+    pub fn register_inbound_single_destination(
+        &mut self,
+        app_name: &str,
+        aspects: &[&str],
+    ) -> Result<DestinationHash, LocalDestinationRegistrationError> {
+        self.rns
+            .register_destination(
+                app_name,
+                aspects,
+                RnsDestinationType::Single,
+                RnsDirection::In,
+            )
+            .map(|destination| DestinationHash::new(*destination.as_bytes()))
+            .map_err(LocalDestinationRegistrationError::from)
+    }
+
+    /// Copy a public key learned for one announced destination.
+    ///
+    /// Returning the fixed-size value by copy keeps signature verification
+    /// independent of the sole mutable RNS owner's borrow lifetime.
+    pub fn recall_identity(&self, destination: &DestinationHash) -> Option<[u8; 64]> {
+        let destination = RnsDestinationHash::from(*destination.as_bytes());
+        self.rns.recall_identity(&destination)
+    }
+
     /// Confirm the synchronous interface-egress handoff for one token-bearing
     /// LINKREQUEST or LRPROOF packet.
     ///
@@ -3775,6 +3833,61 @@ mod tests {
             NodeConfig::endpoint(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn additional_inbound_destination_and_identity_lookup_remain_narrow_and_bounded() {
+        let mut owner = node_with_instance::<8, 0>(50, "embedded", 0x90);
+        let primary = owner.destination_hash();
+        let delivery = owner
+            .register_inbound_single_destination("lxmf", &["delivery"])
+            .unwrap();
+        assert_ne!(delivery, primary);
+
+        let mut rebuilt = node_with_instance::<8, 0>(50, "embedded", 0x91);
+        assert_eq!(
+            rebuilt
+                .register_inbound_single_destination("lxmf", &["delivery"])
+                .unwrap(),
+            delivery
+        );
+
+        for aspect in ["propagation", "stamp", "control"] {
+            owner
+                .register_inbound_single_destination("lxmf", &[aspect])
+                .unwrap();
+        }
+        assert_eq!(
+            owner.register_inbound_single_destination("lxmf", &["overflow"]),
+            Err(LocalDestinationRegistrationError::LimitReached { limit: 4 })
+        );
+
+        let peer = NodeCore::<8, 2, 8, 2, 0>::new(
+            identity(51),
+            "lxmf",
+            &["delivery"],
+            NodeInstanceId::new([0x92; 16]),
+            NodeConfig::endpoint(),
+        )
+        .unwrap();
+        let peer_destination = peer.destination_hash();
+        let peer_public_key = identity(51).public_key();
+        owner
+            .register_peer(
+                &identity(51),
+                "lxmf",
+                &["delivery"],
+                MonotonicSeconds::new(1),
+            )
+            .unwrap();
+        assert_eq!(
+            owner.recall_identity(&peer_destination),
+            Some(peer_public_key)
+        );
+        assert_eq!(
+            owner.recall_identity(&DestinationHash::new([0xee; 16])),
+            None
+        );
     }
 
     const fn time(seconds: u64) -> MonotonicSeconds {

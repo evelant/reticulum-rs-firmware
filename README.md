@@ -562,7 +562,7 @@ after frame exposure with an ordinary announce queued behind the DATA owner;
 LoRa lease offline, and permits no later host-radio TX or RX. This qualifies the
 software composition, not ESP32-S3 execution or RF hardware.
 The current root gates include 56 focused host-client tests inside the passing
-252-test xtask suite, plus 60 portable Rete-integration and 17 raw-RNS inbox
+256-test xtask suite, plus 60 portable Rete-integration and 17 raw-RNS inbox
 store tests. The 60 integration tests exercise this repository's adapter and are separate
 from the pinned Rete fork's selected validation set. The previously validated
 project conformance baseline performed 235 checks: 112 released-vector, adapter and
@@ -824,11 +824,17 @@ bounded command/reply handoffs, static authenticated handoff, node-side
 current-authority dispatch, and the minimal credential-backed USB session state
 machine are composed. ADR 0012 now fixes the application-event owner, and ADR
 0013 plus the Python-derived LXMF 1.0.1 corpus establish the allocation-free,
-destination-bound wire/signature/stamp validation boundary. Next connect that
-validated LXMF output to the application-event owner, then design the separate
-durable model, engine, store, configuration hosting, and client-delivery
-services. The raw-RNS inbox remains qualification evidence rather than a
-product mailbox. Native RNS Resource ingress stays disabled until its
+destination-bound wire/signature/stamp validation boundary. The separate
+`reticulum-lxmf-ingress` adapter now borrows an explicitly owned
+`lxmf.delivery` application event, resolves its announced source identity by
+value, and classifies opportunistic DATA without copying or consuming it.
+Non-`NONE` Link DATA remains unrelated; context-`NONE` Link DATA and Resource
+completion are explicitly deferred until the application event can bind their
+Link to the local LXMF destination. Next
+design the separate durable model, engine, store, configuration hosting, and
+client-delivery services, then compose durable acceptance before acknowledging
+the retained event. The raw-RNS inbox remains qualification evidence rather
+than a product mailbox. Native RNS Resource ingress stays disabled until its
 allocation and streaming-storage boundary is bounded.
 The node-side routing
 boundary remains interface-neutral so additional Reticulum links can be added
@@ -891,6 +897,7 @@ cargo run -p xtask -- doctor
 
 ```sh
 cargo test --locked
+cargo test --locked -p reticulum-lxmf-ingress
 cargo test --locked -p reticulum-lxmf-wire
 cargo test --locked -p reticulum-device-api --features experimental-rns-data
 cargo test --locked -p reticulum-device-api-adapter \
@@ -926,6 +933,7 @@ cargo check --locked \
   -p reticulum-device-api-pairing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
+  -p reticulum-lxmf-ingress \
   -p reticulum-lxmf-wire \
   -p reticulum-node-core \
   -p reticulum-radio-lora-phy \
@@ -953,6 +961,7 @@ cargo +esp check --locked \
   -p reticulum-device-api-pairing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
+  -p reticulum-lxmf-ingress \
   -p reticulum-lxmf-wire \
   -p reticulum-rns-inbox-store \
   -p reticulum-node-core \

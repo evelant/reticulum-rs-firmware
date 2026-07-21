@@ -1269,7 +1269,7 @@ identity formatting, inbox status/peek, owner-only non-overwriting payload and
 evidence output, sequential request IDs, version policy, polling terminal
 semantics, coalesced-record preservation, authenticated terminal binding, and
 submission-input non-disclosure. These 56 focused tests are part of the
-passing 252-test xtask gate, while the portable Rete integration and inbox-store
+passing 256-test xtask gate, while the portable Rete integration and inbox-store
 suites have 58 and 17 tests. The 58 are project adapter tests. The previously
 validated project conformance baseline performed
 235 checks: 112 released-vector, adapter and direct-Link checks,

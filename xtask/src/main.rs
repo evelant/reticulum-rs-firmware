@@ -586,6 +586,35 @@ fn graph_policy() -> ExitCode {
         }
     };
 
+    // Resolve the application-ingress crate on the same generic bare-metal
+    // target so its policy describes only shipped normal edges. In particular,
+    // the host-side durable inbox fixture must not leak into this closure.
+    let lxmf_ingress_closure = match capture_stdout_at(
+        "cargo",
+        [
+            "tree",
+            "--locked",
+            "-p",
+            "reticulum-lxmf-ingress",
+            "--edges",
+            "normal",
+            "--target",
+            "riscv32imac-unknown-none-elf",
+            "--prefix",
+            "none",
+            "--no-dedupe",
+            "--format",
+            "{p}\t{f}",
+        ],
+        &root,
+    ) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!("error: could not inspect LXMF ingress generic bare-metal closure: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let mut failed = false;
     for (feature, product) in &product_graphs {
         if let Err(error) = validate_product_graph_boundary(feature, product) {
@@ -711,6 +740,10 @@ fn graph_policy() -> ExitCode {
             .map_err(|error| format!("LXMF wire dependency boundary: {error}"))?;
         validate_lxmf_wire_resolved_closure(&json, &lxmf_wire_closure, &root)
             .map_err(|error| format!("LXMF wire generic bare-metal closure: {error}"))?;
+        validate_lxmf_ingress_dependency_boundary(&json, &root)
+            .map_err(|error| format!("LXMF ingress dependency boundary: {error}"))?;
+        validate_lxmf_ingress_resolved_closure(&json, &lxmf_ingress_closure, &root)
+            .map_err(|error| format!("LXMF ingress generic bare-metal closure: {error}"))?;
         validate_storage_model_dependency_boundary(&json, &root)
             .map_err(|error| format!("durable storage model dependency boundary: {error}"))?;
         validate_storage_journal_dependency_boundary(&json, &root)
@@ -764,6 +797,7 @@ fn graph_policy() -> ExitCode {
              the bounded LXMF wire crate has only its five reviewed default-feature-disabled cryptographic \
              normal edges, the single reviewed streaming-verification feature and three host-test edges, and its generic bare-metal normal closure exactly \
              matches the reviewed registry identities without std, alloc, Rete, platform, radio or storage packages; \
+             the featureless transport-neutral LXMF ingress crate has exactly its reviewed feature-disabled node-core and LXMF-wire normal edges plus its dev-only durable inbox and host-test fixtures, while its generic bare-metal normal closure exactly matches the reviewed identities and excludes platform, board, radio, firmware, storage, device-API, supervisor and executor packages; \
              the portable identity, announce-clock and NOR-region crates use only their exact reviewed embedded-storage, rand_core, SHA-256 and zeroize subsets; the durable inbound RNS inbox store uses only exact feature-free embedded-storage and SHA-256 pins; the durable \
              storage model uses only reviewed minicbor and SHA-256 edges; \
              the physical storage journal uses only reviewed embedded-storage, storage-model and SHA-256 edges; \
@@ -4554,6 +4588,105 @@ fn validate_lxmf_wire_dependency_boundary(
     Ok(())
 }
 
+fn validate_lxmf_ingress_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    const PACKAGE_NAME: &str = "reticulum-lxmf-ingress";
+
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let package = exact_local_package(
+        packages,
+        workspace,
+        PACKAGE_NAME,
+        "crates/lxmf-ingress/Cargo.toml",
+    )?;
+
+    let features = package["features"]
+        .as_object()
+        .ok_or_else(|| format!("{PACKAGE_NAME} package has no feature map"))?;
+    if !features.is_empty() {
+        return Err(format!(
+            "{PACKAGE_NAME} must expose no Cargo feature surface"
+        ));
+    }
+
+    let dependencies = package["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{PACKAGE_NAME} package has no dependency array"))?;
+    if dependencies
+        .iter()
+        .any(|dependency| dependency["kind"].as_str() == Some("build"))
+    {
+        return Err(format!("{PACKAGE_NAME} must not have build dependencies"));
+    }
+    if dependencies.len() != 6 {
+        return Err(format!(
+            "{PACKAGE_NAME} must have exactly two reviewed normal and four reviewed development dependencies, found {}",
+            dependencies.len()
+        ));
+    }
+
+    let normal_count = dependencies
+        .iter()
+        .filter(|dependency| dependency["kind"].is_null())
+        .count();
+    let development_count = dependencies
+        .iter()
+        .filter(|dependency| dependency["kind"].as_str() == Some("dev"))
+        .count();
+    if normal_count != 2 || development_count != 4 {
+        return Err(format!(
+            "{PACKAGE_NAME} dependency kinds must be exactly two normal and four development edges, found {normal_count} normal and {development_count} development"
+        ));
+    }
+
+    validate_exact_local_dependency(
+        dependencies,
+        PACKAGE_NAME,
+        "reticulum-lxmf-wire",
+        &workspace.join("crates/lxmf-wire"),
+        false,
+    )?;
+    validate_exact_local_dependency(
+        dependencies,
+        PACKAGE_NAME,
+        "reticulum-node-core",
+        &workspace.join("crates/node-core"),
+        false,
+    )?;
+    validate_exact_local_dependency_with_kind(
+        dependencies,
+        PACKAGE_NAME,
+        "reticulum-rns-inbox-store",
+        &workspace.join("crates/rns-inbox-store"),
+        Some("dev"),
+        false,
+        &[],
+    )?;
+    for (name, requirement, features) in [
+        ("hex", "=0.4.3", &[][..]),
+        ("serde", "=1.0.228", &["derive"][..]),
+        ("serde_json", "=1.0.149", &[][..]),
+    ] {
+        validate_exact_registry_dependency(
+            dependencies,
+            PACKAGE_NAME,
+            name,
+            requirement,
+            Some("dev"),
+            true,
+            features,
+        )?;
+    }
+
+    Ok(())
+}
+
 fn forbidden_radio_tx_dispatch_closure_category(
     package: &serde_json::Value,
     workspace: &Path,
@@ -4625,6 +4758,92 @@ fn forbidden_radio_tx_dispatch_closure_category(
                         && crate_directory != "radio-tx-dispatch"
                     {
                         Some("concrete radio driver")
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        })
+}
+
+fn forbidden_lxmf_ingress_closure_category(
+    package: &serde_json::Value,
+    workspace: &Path,
+) -> Option<&'static str> {
+    let name = package["name"].as_str()?;
+    if name.starts_with("reticulum-board-") {
+        return Some("board");
+    }
+    if name == "lora-modulation"
+        || name == "lora-phy"
+        || name.starts_with("sx126")
+        || name.starts_with("sx127")
+        || name.starts_with("sx128")
+        || name.starts_with("radio-sx")
+        || name.starts_with("reticulum-radio-")
+    {
+        return Some("radio");
+    }
+    if name.starts_with("esp-")
+        || name.starts_with("esp32")
+        || name.starts_with("nrf")
+        || name.starts_with("rp2040")
+    {
+        return Some("platform");
+    }
+    if name.starts_with("reticulum-heltec-") {
+        return Some("firmware");
+    }
+    if name.starts_with("reticulum-device-api") {
+        return Some("device API");
+    }
+    if name == "reticulum-tx-supervisor" {
+        return Some("supervisor");
+    }
+    if name.starts_with("embassy-executor") {
+        return Some("executor");
+    }
+    if name == "reticulum-rns-inbox-store"
+        || name.starts_with("reticulum-storage-")
+        || name == "reticulum-nor-flash-region"
+        || name == "embedded-storage"
+        || name == "embedded-storage-async"
+        || name.ends_with("-storage")
+    {
+        return Some("storage");
+    }
+
+    package["manifest_path"]
+        .as_str()
+        .and_then(|path| Path::new(path).strip_prefix(workspace).ok())
+        .and_then(|relative| {
+            let mut components = relative.components();
+            match (components.next(), components.next()) {
+                (Some(Component::Normal(first)), _) if first == OsStr::new("firmware") => {
+                    Some("firmware")
+                }
+                (Some(Component::Normal(first)), Some(Component::Normal(second)))
+                    if first == OsStr::new("crates") =>
+                {
+                    let crate_directory = second.to_str()?;
+                    if crate_directory.starts_with("board-") {
+                        Some("board")
+                    } else if crate_directory.starts_with("radio-") {
+                        Some("radio")
+                    } else if crate_directory.starts_with("esp-") {
+                        Some("platform")
+                    } else if crate_directory.starts_with("device-api") {
+                        Some("device API")
+                    } else if crate_directory == "tx-supervisor" {
+                        Some("supervisor")
+                    } else if crate_directory.contains("executor") {
+                        Some("executor")
+                    } else if crate_directory.starts_with("storage-")
+                        || crate_directory == "rns-inbox-store"
+                        || crate_directory == "nor-flash-region"
+                    {
+                        Some("storage")
                     } else {
                         None
                     }
@@ -4713,6 +4932,75 @@ const LXMF_WIRE_REVIEWED_CLOSURE: [ReviewedClosurePackage; 15] = [
     closure_registry("signature", "2.2.0", &[]),
     closure_registry("subtle", "2.6.1", &[]),
     closure_registry("typenum", "1.20.1", &[]),
+];
+
+const LXMF_INGRESS_REVIEWED_CLOSURE: [ReviewedClosurePackage; 40] = [
+    closure_registry("aes", "0.8.4", &[]),
+    closure_registry("block-buffer", "0.10.4", &[]),
+    closure_registry("byteorder", "1.5.0", &[]),
+    closure_registry("cbc", "0.1.2", &[]),
+    closure_registry("cfg-if", "1.0.4", &[]),
+    closure_registry("cipher", "0.4.4", &[]),
+    closure_registry("crypto-common", "0.1.7", &[]),
+    closure_registry("curve25519-dalek", "4.1.3", &["digest", "zeroize"]),
+    closure_registry(
+        "digest",
+        "0.10.7",
+        &["block-buffer", "core-api", "default", "mac", "subtle"],
+    ),
+    closure_registry("ed25519", "2.2.3", &[]),
+    closure_registry("ed25519-dalek", "2.2.0", &["hazmat", "zeroize"]),
+    closure_registry("embedded-io", "0.6.1", &[]),
+    closure_registry("embedded-io-async", "0.6.1", &[]),
+    closure_registry("generic-array", "0.14.7", &["more_lengths"]),
+    closure_registry("hash32", "0.3.1", &[]),
+    closure_registry("heapless", "0.8.0", &[]),
+    closure_registry("hkdf", "0.12.4", &[]),
+    closure_registry("hmac", "0.12.1", &[]),
+    closure_registry("inout", "0.1.4", &[]),
+    closure_registry("proc-macro2", "1.0.106", &["default", "proc-macro"]),
+    closure_registry("quote", "1.0.46", &["default", "proc-macro"]),
+    closure_registry("rand_core", "0.6.4", &[]),
+    closure_git("rete-core", "0.1.0", &["alloc", "default"]),
+    closure_git("rete-stack", "0.1.0", &["alloc"]),
+    closure_git("rete-transport", "0.1.0", &[]),
+    closure_local(
+        "reticulum-lxmf-ingress",
+        "crates/lxmf-ingress/Cargo.toml",
+        &[],
+    ),
+    closure_local("reticulum-lxmf-wire", "crates/lxmf-wire/Cargo.toml", &[]),
+    closure_local("reticulum-node-core", "crates/node-core/Cargo.toml", &[]),
+    closure_local(
+        "reticulum-rns-conformance",
+        "crates/rns-conformance/Cargo.toml",
+        &[],
+    ),
+    closure_local("reticulum-rns-rete", "crates/rns-rete/Cargo.toml", &[]),
+    closure_registry("sha2", "0.10.9", &[]),
+    closure_registry("signature", "2.2.0", &[]),
+    closure_registry("stable_deref_trait", "1.2.1", &[]),
+    closure_registry("subtle", "2.6.1", &[]),
+    closure_registry(
+        "syn",
+        "2.0.118",
+        &[
+            "clone-impls",
+            "default",
+            "derive",
+            "extra-traits",
+            "full",
+            "parsing",
+            "printing",
+            "proc-macro",
+            "visit",
+        ],
+    ),
+    closure_registry("typenum", "1.20.1", &[]),
+    closure_registry("unicode-ident", "1.0.24", &[]),
+    closure_registry("x25519-dalek", "2.0.1", &["static_secrets", "zeroize"]),
+    closure_registry("zeroize", "1.9.0", &["derive", "zeroize_derive"]),
+    closure_registry("zeroize_derive", "1.5.0", &[]),
 ];
 
 const RADIO_TX_DISPATCH_REVIEWED_CLOSURE: [ReviewedClosurePackage; 64] = [
@@ -5006,6 +5294,21 @@ fn validate_lxmf_wire_resolved_closure(
         &LXMF_WIRE_REVIEWED_CLOSURE,
         "LXMF wire",
         None,
+    )
+}
+
+fn validate_lxmf_ingress_resolved_closure(
+    metadata_json: &str,
+    cargo_tree: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    validate_reviewed_resolved_closure(
+        metadata_json,
+        cargo_tree,
+        workspace,
+        &LXMF_INGRESS_REVIEWED_CLOSURE,
+        "LXMF ingress",
+        Some(forbidden_lxmf_ingress_closure_category),
     )
 }
 
@@ -9857,6 +10160,7 @@ fn sample(layout: Layout) {
         validate_tx_dispatch_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_radio_tx_dispatch_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_lxmf_wire_dependency_boundary(&metadata.to_string(), &root).unwrap();
+        validate_lxmf_ingress_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_storage_model_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_storage_journal_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_storage_actor_dependency_boundary(&metadata.to_string(), &root).unwrap();
@@ -11159,6 +11463,131 @@ fn sample(layout: Layout) {
     }
 
     #[test]
+    fn lxmf_ingress_boundary_allows_only_exact_portable_and_test_edges() {
+        let root = workspace_root();
+        let baseline = serde_json::json!({
+            "packages": [lxmf_ingress_package_fixture(&root)],
+        });
+        validate_lxmf_ingress_dependency_boundary(&baseline.to_string(), &root).unwrap();
+
+        let mut wrong_manifest = baseline.clone();
+        fixture_package_mut(&mut wrong_manifest, "reticulum-lxmf-ingress")["manifest_path"] =
+            serde_json::json!(root.join("crates/lookalike-lxmf-ingress/Cargo.toml"));
+        assert!(
+            validate_lxmf_ingress_dependency_boundary(&wrong_manifest.to_string(), &root).is_err()
+        );
+
+        let mut nonlocal = baseline.clone();
+        fixture_package_mut(&mut nonlocal, "reticulum-lxmf-ingress")["source"] =
+            serde_json::json!(CRATES_IO_SOURCE);
+        assert!(validate_lxmf_ingress_dependency_boundary(&nonlocal.to_string(), &root).is_err());
+
+        let mut duplicate = baseline.clone();
+        duplicate["packages"]
+            .as_array_mut()
+            .unwrap()
+            .push(lxmf_ingress_package_fixture(&root));
+        assert!(validate_lxmf_ingress_dependency_boundary(&duplicate.to_string(), &root).is_err());
+
+        let mut extra_feature = baseline.clone();
+        fixture_package_mut(&mut extra_feature, "reticulum-lxmf-ingress")["features"]["std"] =
+            serde_json::json!([]);
+        assert!(
+            validate_lxmf_ingress_dependency_boundary(&extra_feature.to_string(), &root).is_err()
+        );
+
+        let mut build = baseline.clone();
+        let mut build_dependency = handoff_dependency_fixture("cc", "=1.0.0", None);
+        build_dependency["kind"] = serde_json::json!("build");
+        fixture_package_mut(&mut build, "reticulum-lxmf-ingress")["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(build_dependency);
+        assert!(validate_lxmf_ingress_dependency_boundary(&build.to_string(), &root).is_err());
+
+        for (name, kind, reviewed_defaults) in [
+            ("reticulum-lxmf-wire", None, false),
+            ("reticulum-node-core", None, false),
+            ("reticulum-rns-inbox-store", Some("dev"), false),
+            ("hex", Some("dev"), true),
+            ("serde", Some("dev"), true),
+            ("serde_json", Some("dev"), true),
+        ] {
+            for (field, value) in [
+                ("req", serde_json::json!("=0.0.0")),
+                (
+                    "source",
+                    serde_json::json!("registry+https://example.invalid/index"),
+                ),
+                (
+                    "path",
+                    serde_json::json!(root.join("crates/unreviewed-dependency")),
+                ),
+                ("optional", serde_json::json!(true)),
+                ("rename", serde_json::json!("renamed-dependency")),
+                ("target", serde_json::json!("cfg(target_os = \"none\")")),
+                (
+                    "uses_default_features",
+                    serde_json::json!(!reviewed_defaults),
+                ),
+                ("features", serde_json::json!(["std"])),
+            ] {
+                let mut changed = baseline.clone();
+                fixture_dependency_mut(
+                    fixture_package_mut(&mut changed, "reticulum-lxmf-ingress"),
+                    name,
+                    kind,
+                )[field] = value;
+                assert!(
+                    validate_lxmf_ingress_dependency_boundary(&changed.to_string(), &root).is_err(),
+                    "dependency {name} accepted changed {field}"
+                );
+            }
+        }
+
+        let mut normal_promoted_to_dev = baseline.clone();
+        fixture_dependency_mut(
+            fixture_package_mut(&mut normal_promoted_to_dev, "reticulum-lxmf-ingress"),
+            "reticulum-node-core",
+            None,
+        )["kind"] = serde_json::json!("dev");
+        assert!(
+            validate_lxmf_ingress_dependency_boundary(&normal_promoted_to_dev.to_string(), &root,)
+                .is_err()
+        );
+
+        let mut dev_promoted_to_normal = baseline.clone();
+        fixture_dependency_mut(
+            fixture_package_mut(&mut dev_promoted_to_normal, "reticulum-lxmf-ingress"),
+            "reticulum-rns-inbox-store",
+            Some("dev"),
+        )["kind"] = serde_json::Value::Null;
+        assert!(
+            validate_lxmf_ingress_dependency_boundary(&dev_promoted_to_normal.to_string(), &root,)
+                .is_err()
+        );
+
+        let mut missing = baseline.clone();
+        fixture_package_mut(&mut missing, "reticulum-lxmf-ingress")["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|dependency| dependency["name"].as_str() != Some("reticulum-lxmf-wire"));
+        assert!(validate_lxmf_ingress_dependency_boundary(&missing.to_string(), &root).is_err());
+
+        let mut extra = baseline;
+        fixture_package_mut(&mut extra, "reticulum-lxmf-ingress")["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(handoff_path_dependency_fixture(
+                "reticulum-radio-interface",
+                "*",
+                &root.join("crates/radio-interface"),
+                None,
+            ));
+        assert!(validate_lxmf_ingress_dependency_boundary(&extra.to_string(), &root).is_err());
+    }
+
+    #[test]
     fn radio_tx_dispatch_resolved_closure_is_an_exact_identity_and_feature_set() {
         let root = workspace_root();
         let (baseline_metadata, baseline_tree) = radio_tx_dispatch_reviewed_closure_fixture(&root);
@@ -11408,6 +11837,199 @@ fn sample(layout: Layout) {
         )
         .unwrap_err();
         assert!(missing_error.contains("hmac"));
+    }
+
+    #[test]
+    fn lxmf_ingress_resolved_closure_is_exact_and_excludes_nonportable_layers() {
+        let root = workspace_root();
+        let (baseline_metadata, baseline_tree) = lxmf_ingress_reviewed_closure_fixture(&root);
+        validate_lxmf_ingress_resolved_closure(
+            &baseline_metadata.to_string(),
+            &baseline_tree,
+            &root,
+        )
+        .unwrap();
+        assert!(!cargo_tree_contains_package(
+            &baseline_tree,
+            "reticulum-rns-inbox-store"
+        ));
+
+        for (name, version, category) in [
+            ("esp-hal", "1.0.0", "platform"),
+            ("lora-phy", "3.0.1", "radio"),
+            ("embedded-storage", "0.3.1", "storage"),
+            ("embassy-executor", "0.9.1", "executor"),
+        ] {
+            let mut metadata = baseline_metadata.clone();
+            let mut tree = baseline_tree.clone();
+            add_registry_closure_fixture_package(&mut metadata, &mut tree, &root, name, version);
+            let error = validate_lxmf_ingress_resolved_closure(&metadata.to_string(), &tree, &root)
+                .unwrap_err();
+            assert!(
+                error.contains(name) && error.contains(category),
+                "{category} package {name}: {error}"
+            );
+        }
+
+        for (name, relative_manifest, category) in [
+            (
+                "reticulum-board-heltec-vision-master-e290",
+                "crates/board-heltec-vision-master-e290/Cargo.toml",
+                "board",
+            ),
+            (
+                "reticulum-heltec-vision-master-e290-node",
+                "firmware/heltec-vision-master-e290-node/Cargo.toml",
+                "firmware",
+            ),
+            (
+                "reticulum-rns-inbox-store",
+                "crates/rns-inbox-store/Cargo.toml",
+                "storage",
+            ),
+            (
+                "reticulum-device-api",
+                "crates/device-api/Cargo.toml",
+                "device API",
+            ),
+            (
+                "reticulum-tx-supervisor",
+                "crates/tx-supervisor/Cargo.toml",
+                "supervisor",
+            ),
+        ] {
+            let mut metadata = baseline_metadata.clone();
+            let mut tree = baseline_tree.clone();
+            add_local_closure_fixture_package(
+                &mut metadata,
+                &mut tree,
+                &root,
+                name,
+                "0.1.0",
+                relative_manifest,
+            );
+            let error = validate_lxmf_ingress_resolved_closure(&metadata.to_string(), &tree, &root)
+                .unwrap_err();
+            assert!(
+                error.contains(name) && error.contains(category),
+                "{category} package {name}: {error}"
+            );
+        }
+
+        let mut unclassified_metadata = baseline_metadata.clone();
+        let mut unclassified_tree = baseline_tree.clone();
+        add_local_closure_fixture_package(
+            &mut unclassified_metadata,
+            &mut unclassified_tree,
+            &root,
+            "unreviewed-portable-wrapper",
+            "0.1.0",
+            "crates/unreviewed-portable-wrapper/Cargo.toml",
+        );
+        assert!(
+            validate_lxmf_ingress_resolved_closure(
+                &unclassified_metadata.to_string(),
+                &unclassified_tree,
+                &root,
+            )
+            .is_err()
+        );
+
+        let mut wrong_version = baseline_metadata.clone();
+        wrong_version["packages"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|package| package["name"].as_str() == Some("sha2"))
+            .unwrap()["version"] = serde_json::json!("0.10.8");
+        let wrong_version_tree = baseline_tree.replace("sha2 v0.10.9\t", "sha2 v0.10.8\t");
+        assert!(
+            validate_lxmf_ingress_resolved_closure(
+                &wrong_version.to_string(),
+                &wrong_version_tree,
+                &root,
+            )
+            .is_err()
+        );
+
+        let mut wrong_source = baseline_metadata.clone();
+        wrong_source["packages"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|package| package["name"].as_str() == Some("hkdf"))
+            .unwrap()["source"] = serde_json::json!("registry+https://example.invalid/index");
+        assert!(
+            validate_lxmf_ingress_resolved_closure(
+                &wrong_source.to_string(),
+                &baseline_tree,
+                &root,
+            )
+            .is_err()
+        );
+
+        let mut wrong_path = baseline_metadata.clone();
+        wrong_path["packages"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|package| package["name"].as_str() == Some("reticulum-lxmf-ingress"))
+            .unwrap()["manifest_path"] =
+            serde_json::json!(root.join("crates/lookalike-lxmf-ingress/Cargo.toml"));
+        assert!(
+            validate_lxmf_ingress_resolved_closure(&wrong_path.to_string(), &baseline_tree, &root,)
+                .is_err()
+        );
+
+        let feature_drift_tree = baseline_tree.replace(
+            &format!(
+                "reticulum-node-core v0.1.0 ({})\t\n",
+                root.join("crates/node-core").display()
+            ),
+            &format!(
+                "reticulum-node-core v0.1.0 ({})\tstd\n",
+                root.join("crates/node-core").display()
+            ),
+        );
+        let feature_error = validate_lxmf_ingress_resolved_closure(
+            &baseline_metadata.to_string(),
+            &feature_drift_tree,
+            &root,
+        )
+        .unwrap_err();
+        assert!(
+            feature_error.contains("reticulum-node-core") && feature_error.contains("features"),
+            "{feature_error}"
+        );
+
+        let missing_tree = baseline_tree.replace("hmac v0.12.1\t\n", "");
+        let missing_error = validate_lxmf_ingress_resolved_closure(
+            &baseline_metadata.to_string(),
+            &missing_tree,
+            &root,
+        )
+        .unwrap_err();
+        assert!(missing_error.contains("hmac"));
+
+        let mut duplicate_metadata = baseline_metadata.clone();
+        let duplicate_sha2 = duplicate_metadata["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|package| package["name"].as_str() == Some("sha2"))
+            .unwrap()
+            .clone();
+        duplicate_metadata["packages"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate_sha2);
+        let duplicate_error = validate_lxmf_ingress_resolved_closure(
+            &duplicate_metadata.to_string(),
+            &baseline_tree,
+            &root,
+        )
+        .unwrap_err();
+        assert!(duplicate_error.contains("sha2") && duplicate_error.contains("found 2"));
     }
 
     #[test]
@@ -12621,6 +13243,7 @@ fn sample(layout: Layout) {
                 device_api_adapter_package_fixture(root),
                 radio_tx_dispatch_package_fixture(root),
                 lxmf_wire_package_fixture(root),
+                lxmf_ingress_package_fixture(root),
                 radio_interface_package_fixture(root),
                 e290_board_facts_package_fixture(root),
                 lora_phy_radio_package_fixture(root),
@@ -12810,6 +13433,46 @@ fn sample(layout: Layout) {
         })
     }
 
+    fn lxmf_ingress_package_fixture(root: &Path) -> serde_json::Value {
+        let mut hex = handoff_dependency_fixture("hex", "=0.4.3", Some("dev"));
+        hex["uses_default_features"] = serde_json::Value::Bool(true);
+        let mut serde = handoff_dependency_fixture("serde", "=1.0.228", Some("dev"));
+        serde["uses_default_features"] = serde_json::Value::Bool(true);
+        serde["features"] = serde_json::json!(["derive"]);
+        let mut serde_json = handoff_dependency_fixture("serde_json", "=1.0.149", Some("dev"));
+        serde_json["uses_default_features"] = serde_json::Value::Bool(true);
+
+        serde_json::json!({
+            "name": "reticulum-lxmf-ingress",
+            "source": null,
+            "manifest_path": root.join("crates/lxmf-ingress/Cargo.toml"),
+            "features": {},
+            "dependencies": [
+                handoff_path_dependency_fixture(
+                    "reticulum-lxmf-wire",
+                    "*",
+                    &root.join("crates/lxmf-wire"),
+                    None,
+                ),
+                handoff_path_dependency_fixture(
+                    "reticulum-node-core",
+                    "*",
+                    &root.join("crates/node-core"),
+                    None,
+                ),
+                hex,
+                handoff_path_dependency_fixture(
+                    "reticulum-rns-inbox-store",
+                    "*",
+                    &root.join("crates/rns-inbox-store"),
+                    Some("dev"),
+                ),
+                serde,
+                serde_json,
+            ],
+        })
+    }
+
     fn radio_interface_package_fixture(root: &Path) -> serde_json::Value {
         let mut conformance = handoff_path_dependency_fixture(
             "reticulum-rns-conformance",
@@ -12957,6 +13620,10 @@ fn sample(layout: Layout) {
 
     fn lxmf_wire_reviewed_closure_fixture(root: &Path) -> (serde_json::Value, String) {
         reviewed_closure_fixture(root, &LXMF_WIRE_REVIEWED_CLOSURE)
+    }
+
+    fn lxmf_ingress_reviewed_closure_fixture(root: &Path) -> (serde_json::Value, String) {
+        reviewed_closure_fixture(root, &LXMF_INGRESS_REVIEWED_CLOSURE)
     }
 
     fn add_registry_closure_fixture_package(
