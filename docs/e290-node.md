@@ -121,7 +121,11 @@ Its explicit 16 MiB package is a 789,504-byte merged image, uses
 723,968/6,291,456 application bytes (11.51%), and has SHA-256
 `1796f161c480d0348e3d47fd8f3cda5fda5b51aa38ad6024aaad04c8ba1751ce`.
 That merged image matched an exact readback on `3e:88`, where authenticated
-`identity-summary` succeeded. The unavailable `3f:88` prevented a current
+`identity-summary` succeeded. A target-scoped rebuild of the corresponding
+runtime-measurement HIL then matched another exact `3e:88` readback and
+produced the bounded authenticated checkpoint recorded below. The board was
+subsequently restored to an exact-readback rebuilt default image and again
+served `identity-summary`. The unavailable `3f:88` prevented a current
 two-board lifecycle/RF run.
 Every powered result below remains bound to its recorded historical source and
 Rete revision.
@@ -573,15 +577,32 @@ boards, and PSRAM cannot back this internal task stack. The full E290 profile
 already requires PSRAM for its separate application/storage capacity, while
 Tracker V2 remains a separately sized reduced profile.
 
-The current build-only runtime-measurement HIL links with text/data/BSS of
-695,315/4,180/468,648 bytes (1,168,143 bytes total by GNU size). Its
-12,498,356-byte ELF has SHA-256
-`4ca4eef73ff1babd00750d4a635f7644d73d1a3ae1cde4fb1dbdb434937bcfca`.
+The target-scoped current runtime-measurement HIL rebuild links with
+text/data/BSS of 695,315/4,180/468,648 bytes (1,168,143 bytes total by GNU
+size). Its 12,498,348-byte ELF has SHA-256
+`c84363dff0801a1679dd786b5070c4662962d299f0269efc0cd72ff9c09b8e2a`.
 Its explicit 16 MiB package uses 734,944/6,291,456 application bytes (11.68%)
 and produces an 800,480-byte merged image with SHA-256
-`ec23bf0a7b20b7364e12cba6ebc90aa3e0ce761650413e1ad9d6186eeecf1662`.
-The HIL image remains unflashed and unpowered; the current one-board evidence
-above is for the default image only.
+`058a969e0b9e099f6a5febd1b59f4a70cfd3ea932e8f0738a2ddb4b3e5569119`.
+That image matched an exact address-zero readback on `3e:88`.
+
+At uptime 108,940 ms, an authenticated API checkpoint reported 8,388,608
+bytes of PSRAM, 928 bytes of maximum allocator use, 64,608 bytes of minimum
+internal-heap free, and no external-heap allocation. The painted main stack
+retained 63,828 bytes; subtracting the unchanged 53,680-byte compiler-emitted
+maximum frame leaves a 10,148-byte conservative powered margin before the
+still-unquantified interrupt/nesting allowance. One authenticated API dispatch
+completed with a 594-us maximum. The checkpoint recorded zero unexpected
+errors, failed allocations, RX/CAD/TX watchdog timeouts, correlation faults,
+and not-confirmed-success transmissions; both observed radio transmissions
+were confirmed successful. This is a bounded one-board idle/API/TX checkpoint,
+not a sustained workload or two-board RF result.
+
+After the checkpoint, `3e:88` was restored to a rebuilt 789,504-byte default
+package with SHA-256
+`a67afa72681558dc02fd0575a18711b2b3c05b365a66af45441b7cb8dd3a2577`.
+The address-zero readback matched exactly and authenticated
+`identity-summary` succeeded. Board `3f:88` still did not enumerate.
 
 The exact release artifacts used for the 2026-07-20 powered run compare as
 follows. Paths embedded by the build can affect rebuild digests, so these

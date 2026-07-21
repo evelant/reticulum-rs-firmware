@@ -17,6 +17,9 @@ class LxmfVectorTests(unittest.TestCase):
         cls.messages = {
             case["name"]: case for case in cls.generated["messages"]
         }
+        cls.inbound_oracles = {
+            case["name"]: case for case in cls.generated["inbound_oracles"]
+        }
 
     def test_committed_corpus_matches_python_authority(self) -> None:
         committed = json.loads(vectors.DEFAULT_OUTPUT.read_text(encoding="utf-8"))
@@ -76,6 +79,32 @@ class LxmfVectorTests(unittest.TestCase):
                         hashed_part + message_id,
                     )
                 )
+
+    def test_noncanonical_exact_four_inbound_hashes_received_bytes(self) -> None:
+        case = self.inbound_oracles["exact_four_array16_raw_hash"]
+        received_payload = bytes.fromhex(case["received_payload_hex"])
+        canonical_repack = vectors.umsgpack.packb(
+            vectors.umsgpack.unpackb(received_payload)
+        )
+        self.assertEqual(canonical_repack.hex(), case["canonical_repack_hex"])
+        self.assertNotEqual(canonical_repack, received_payload)
+
+        destination = bytes.fromhex(case["destination_hash_hex"])
+        source = bytes.fromhex(case["source_hash_hex"])
+        hashed_part = destination + source + received_payload
+        message_id = hashlib.sha256(hashed_part).digest()
+        self.assertEqual(message_id.hex(), case["message_id_hex"])
+        source_identity, _, _, _ = vectors._ensure_rns()
+        self.assertTrue(
+            source_identity.validate(
+                bytes.fromhex(case["signature_hex"]),
+                hashed_part + message_id,
+            )
+        )
+        self.assertEqual(
+            vectors.parse_outcome(bytes.fromhex(case["full_wire_hex"])),
+            case["python_parse"],
+        )
 
     def test_rich_fields_preserve_binary_and_nested_messagepack_types(self) -> None:
         case = self.messages["rich_fields"]

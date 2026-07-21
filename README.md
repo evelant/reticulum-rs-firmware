@@ -594,15 +594,25 @@ event ownership default E290 release links with text/data/BSS of
 The explicit 16 MiB package is a 789,504-byte merged image, uses
 723,968/6,291,456 application bytes (11.51%), and has SHA-256
 `1796f161c480d0348e3d47fd8f3cda5fda5b51aa38ad6024aaad04c8ba1751ce`.
-The current runtime-measurement HIL links with text/data/BSS of
-695,315/4,180/468,648 bytes (1,168,143 bytes total), packages as an 800,480-byte
-merged image using 734,944/6,291,456 application bytes (11.68%), and has
-ELF/merged SHA-256 values
-`4ca4eef73ff1babd00750d4a635f7644d73d1a3ae1cde4fb1dbdb434937bcfca` and
-`ec23bf0a7b20b7364e12cba6ebc90aa3e0ce761650413e1ad9d6186eeecf1662`.
-The default image matched an exact address-zero readback on `3e:88` and served
-an authenticated `identity-summary`; the HIL remains unflashed, and `3f:88`
-did not enumerate for this run.
+The target-scoped current runtime-measurement HIL rebuild links with
+text/data/BSS of 695,315/4,180/468,648 bytes (1,168,143 bytes total). Its
+12,498,348-byte ELF has SHA-256
+`c84363dff0801a1679dd786b5070c4662962d299f0269efc0cd72ff9c09b8e2a`;
+the 800,480-byte merged image uses 734,944/6,291,456 application bytes (11.68%)
+and has SHA-256
+`058a969e0b9e099f6a5febd1b59f4a70cfd3ea932e8f0738a2ddb4b3e5569119`.
+That HIL matched an exact address-zero readback on `3e:88`. At uptime
+108,940 ms, an authenticated API checkpoint reported 8 MiB PSRAM, 928 bytes
+maximum heap use, 64,608 bytes minimum internal-heap free, no external-heap
+use, and 63,828 bytes of painted stack remaining. Subtracting the unchanged
+53,680-byte maximum frame leaves a 10,148-byte conservative powered margin.
+One API dispatch completed in at most 594 us; the checkpoint recorded no
+unexpected error, failed allocation, radio watchdog timeout, or correlation
+fault, and both radio transmissions were confirmed successful. The board was
+then restored to an exact-readback 789,504-byte default rebuild, SHA-256
+`a67afa72681558dc02fd0575a18711b2b3c05b365a66af45441b7cb8dd3a2577`,
+and served an authenticated `identity-summary`. Board `3f:88` still did not
+enumerate, so this is not current two-board lifecycle/RF qualification.
 All powered records below remain bound to the source and Rete revisions they
 name.
 
@@ -812,12 +822,14 @@ permanent E290 graph. The pre-authentication initialization and live-pairing
 codecs, debounced physical presence, sole USB byte owner, reset-epoch guard,
 bounded command/reply handoffs, static authenticated handoff, node-side
 current-authority dispatch, and the minimal credential-backed USB session state
-machine are composed. Next qualify physical inbox power cuts plus target
-timing/high-water while replacing the destructive native-event edge with ADR
-0012's fixed application-event owner and Python-derived LXMF compatibility
-corpus; then design durable LXMF/configuration hosting and complete client
-delivery. Native RNS Resource ingress stays disabled until its allocation and
-streaming-storage boundary is bounded.
+machine are composed. ADR 0012 now fixes the application-event owner, and ADR
+0013 plus the Python-derived LXMF 1.0.1 corpus establish the allocation-free,
+destination-bound wire/signature/stamp validation boundary. Next connect that
+validated LXMF output to the application-event owner, then design the separate
+durable model, engine, store, configuration hosting, and client-delivery
+services. The raw-RNS inbox remains qualification evidence rather than a
+product mailbox. Native RNS Resource ingress stays disabled until its
+allocation and streaming-storage boundary is bounded.
 The node-side routing
 boundary remains interface-neutral so additional Reticulum links can be added
 later through adapters without rewriting the LoRa actor or protocol owner; no
@@ -840,6 +852,7 @@ second transport is required to qualify the first LoRa vertical slice.
 - [Wired developer pairing protocol](docs/adr/0010-device-api-live-pairing-protocol.md)
 - [Durable raw-RNS inbox qualification](docs/adr/0011-durable-rns-inbox-qualification.md)
 - [Application-event ownership and bounded RNS Resource admission](docs/adr/0012-application-event-and-resource-ownership.md)
+- [Bounded LXMF wire and service ownership boundary](docs/adr/0013-bounded-lxmf-wire-boundary.md)
 - [Transport-neutral interface registry and router](docs/interface-router.md)
 - [Phase-0 validation contract](docs/phase-0-acceptance.md)
 - [Phase-1 receive-only slice](docs/phase-1-rx-slice.md)
@@ -878,6 +891,7 @@ cargo run -p xtask -- doctor
 
 ```sh
 cargo test --locked
+cargo test --locked -p reticulum-lxmf-wire
 cargo test --locked -p reticulum-device-api --features experimental-rns-data
 cargo test --locked -p reticulum-device-api-adapter \
   --features experimental-rns-data
@@ -890,6 +904,13 @@ python3 interop/python/generate_device_api_session_vectors.py --check
 python3 interop/python/test_device_api_session_vectors.py
 python3 interop/python/generate_device_api_pairing_vectors.py --check
 python3 interop/python/test_device_api_pairing_vectors.py
+LXMF_PYTHON="$(mktemp -d)"
+python3 -m pip install --target "$LXMF_PYTHON" \
+  -r interop/python/requirements-lxmf-1.0.1.txt
+PYTHONPATH="$LXMF_PYTHON" \
+  python3 interop/python/generate_lxmf_1_0_1_vectors.py --check
+PYTHONPATH="$LXMF_PYTHON" \
+  python3 interop/python/test_lxmf_1_0_1_vectors.py
 cargo run --locked -p reticulum-conformance-rete
 cargo check --locked \
   -p reticulum-rns-conformance \
@@ -905,6 +926,7 @@ cargo check --locked \
   -p reticulum-device-api-pairing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
+  -p reticulum-lxmf-wire \
   -p reticulum-node-core \
   -p reticulum-radio-lora-phy \
   -p reticulum-radio-tx-dispatch \
@@ -931,6 +953,7 @@ cargo +esp check --locked \
   -p reticulum-device-api-pairing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
+  -p reticulum-lxmf-wire \
   -p reticulum-rns-inbox-store \
   -p reticulum-node-core \
   -p reticulum-board-heltec-vision-master-e290 \

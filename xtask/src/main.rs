@@ -557,6 +557,35 @@ fn graph_policy() -> ExitCode {
         }
     };
 
+    // Use the actual generic bare-metal target rather than target-all feature
+    // unification: this is the allocation-free closure shipped by the portable
+    // wire crate, including its exact cryptographic feature selections.
+    let lxmf_wire_closure = match capture_stdout_at(
+        "cargo",
+        [
+            "tree",
+            "--locked",
+            "-p",
+            "reticulum-lxmf-wire",
+            "--edges",
+            "normal",
+            "--target",
+            "riscv32imac-unknown-none-elf",
+            "--prefix",
+            "none",
+            "--no-dedupe",
+            "--format",
+            "{p}\t{f}",
+        ],
+        &root,
+    ) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!("error: could not inspect LXMF wire generic bare-metal closure: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let mut failed = false;
     for (feature, product) in &product_graphs {
         if let Err(error) = validate_product_graph_boundary(feature, product) {
@@ -678,6 +707,10 @@ fn graph_policy() -> ExitCode {
             .map_err(|error| format!("real radio TX dispatcher dependency boundary: {error}"))?;
         validate_radio_tx_dispatch_resolved_closure(&json, &radio_tx_dispatch_closure, &root)
             .map_err(|error| format!("real radio TX dispatcher resolved closure: {error}"))?;
+        validate_lxmf_wire_dependency_boundary(&json, &root)
+            .map_err(|error| format!("LXMF wire dependency boundary: {error}"))?;
+        validate_lxmf_wire_resolved_closure(&json, &lxmf_wire_closure, &root)
+            .map_err(|error| format!("LXMF wire generic bare-metal closure: {error}"))?;
         validate_storage_model_dependency_boundary(&json, &root)
             .map_err(|error| format!("durable storage model dependency boundary: {error}"))?;
         validate_storage_journal_dependency_boundary(&json, &root)
@@ -728,6 +761,9 @@ fn graph_policy() -> ExitCode {
              edges plus test-only Embassy Futures and static storage, and its target-all normal \
              closure exactly matches all 64 reviewed local \
              path or registry/Git source identities and dispatcher-specific enabled-feature sets; \
+             the bounded LXMF wire crate has only its five reviewed default-feature-disabled cryptographic \
+             normal edges, the single reviewed streaming-verification feature and three host-test edges, and its generic bare-metal normal closure exactly \
+             matches the reviewed registry identities without std, alloc, Rete, platform, radio or storage packages; \
              the portable identity, announce-clock and NOR-region crates use only their exact reviewed embedded-storage, rand_core, SHA-256 and zeroize subsets; the durable inbound RNS inbox store uses only exact feature-free embedded-storage and SHA-256 pins; the durable \
              storage model uses only reviewed minicbor and SHA-256 edges; \
              the physical storage journal uses only reviewed embedded-storage, storage-model and SHA-256 edges; \
@@ -4413,6 +4449,111 @@ fn validate_radio_tx_dispatch_dependency_boundary(
     Ok(())
 }
 
+fn validate_lxmf_wire_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    const PACKAGE_NAME: &str = "reticulum-lxmf-wire";
+
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let expected_manifest = workspace.join("crates/lxmf-wire/Cargo.toml");
+    let matching = packages
+        .iter()
+        .filter(|package| {
+            package["name"].as_str() == Some(PACKAGE_NAME)
+                && package["source"].is_null()
+                && package["manifest_path"].as_str().map(Path::new)
+                    == Some(expected_manifest.as_path())
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err(format!(
+            "expected exactly one local {PACKAGE_NAME} package at {}, found {}",
+            expected_manifest.display(),
+            matching.len()
+        ));
+    }
+    let package = matching[0];
+
+    let features = package["features"]
+        .as_object()
+        .ok_or_else(|| format!("{PACKAGE_NAME} package has no feature map"))?;
+    if !features.is_empty() {
+        return Err(format!(
+            "{PACKAGE_NAME} must expose no Cargo feature surface"
+        ));
+    }
+
+    let dependencies = package["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{PACKAGE_NAME} package has no dependency array"))?;
+    if dependencies
+        .iter()
+        .any(|dependency| dependency["kind"].as_str() == Some("build"))
+    {
+        return Err(format!("{PACKAGE_NAME} must not have build dependencies"));
+    }
+    if dependencies.len() != 8 {
+        return Err(format!(
+            "{PACKAGE_NAME} must have exactly five reviewed normal and three reviewed development dependencies, found {}",
+            dependencies.len()
+        ));
+    }
+
+    let normal_count = dependencies
+        .iter()
+        .filter(|dependency| dependency["kind"].is_null())
+        .count();
+    let development_count = dependencies
+        .iter()
+        .filter(|dependency| dependency["kind"].as_str() == Some("dev"))
+        .count();
+    if normal_count != 5 || development_count != 3 {
+        return Err(format!(
+            "{PACKAGE_NAME} dependency kinds must be exactly five normal and three development edges, found {normal_count} normal and {development_count} development"
+        ));
+    }
+
+    for (name, requirement, features) in [
+        ("curve25519-dalek", "=4.1.3", &[][..]),
+        ("ed25519-dalek", "=2.2.0", &["hazmat"][..]),
+        ("hkdf", "=0.12.4", &[][..]),
+        ("sha2", "=0.10.9", &[][..]),
+        ("subtle", "=2.6.1", &[][..]),
+    ] {
+        validate_exact_registry_dependency(
+            dependencies,
+            PACKAGE_NAME,
+            name,
+            requirement,
+            None,
+            false,
+            features,
+        )?;
+    }
+    for (name, requirement, features) in [
+        ("hex", "=0.4.3", &[][..]),
+        ("serde", "=1.0.228", &["derive"][..]),
+        ("serde_json", "=1.0.149", &[][..]),
+    ] {
+        validate_exact_registry_dependency(
+            dependencies,
+            PACKAGE_NAME,
+            name,
+            requirement,
+            Some("dev"),
+            true,
+            features,
+        )?;
+    }
+
+    Ok(())
+}
+
 fn forbidden_radio_tx_dispatch_closure_category(
     package: &serde_json::Value,
     workspace: &Path,
@@ -4551,6 +4692,28 @@ const fn closure_local(
         features,
     }
 }
+
+const LXMF_WIRE_REVIEWED_CLOSURE: [ReviewedClosurePackage; 15] = [
+    closure_registry("block-buffer", "0.10.4", &[]),
+    closure_registry("cfg-if", "1.0.4", &[]),
+    closure_registry("crypto-common", "0.1.7", &[]),
+    closure_registry("curve25519-dalek", "4.1.3", &["digest"]),
+    closure_registry(
+        "digest",
+        "0.10.7",
+        &["block-buffer", "core-api", "default", "mac", "subtle"],
+    ),
+    closure_registry("ed25519", "2.2.3", &[]),
+    closure_registry("ed25519-dalek", "2.2.0", &["hazmat"]),
+    closure_registry("generic-array", "0.14.7", &["more_lengths"]),
+    closure_registry("hkdf", "0.12.4", &[]),
+    closure_registry("hmac", "0.12.1", &[]),
+    closure_local("reticulum-lxmf-wire", "crates/lxmf-wire/Cargo.toml", &[]),
+    closure_registry("sha2", "0.10.9", &[]),
+    closure_registry("signature", "2.2.0", &[]),
+    closure_registry("subtle", "2.6.1", &[]),
+    closure_registry("typenum", "1.20.1", &[]),
+];
 
 const RADIO_TX_DISPATCH_REVIEWED_CLOSURE: [ReviewedClosurePackage; 64] = [
     closure_registry("aes", "0.8.4", &[]),
@@ -4704,10 +4867,13 @@ fn metadata_matches_reviewed_closure_package(
     }
 }
 
-fn validate_radio_tx_dispatch_resolved_closure(
+fn validate_reviewed_resolved_closure(
     metadata_json: &str,
     cargo_tree: &str,
     workspace: &Path,
+    reviewed_closure: &[ReviewedClosurePackage],
+    boundary: &str,
+    forbidden_category: Option<fn(&serde_json::Value, &Path) -> Option<&'static str>>,
 ) -> Result<(), String> {
     let metadata: serde_json::Value = serde_json::from_str(metadata_json)
         .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
@@ -4715,7 +4881,7 @@ fn validate_radio_tx_dispatch_resolved_closure(
         .as_array()
         .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
 
-    let expected_displays = RADIO_TX_DISPATCH_REVIEWED_CLOSURE
+    let expected_displays = reviewed_closure
         .iter()
         .copied()
         .map(|package| reviewed_closure_display(package, workspace))
@@ -4744,25 +4910,27 @@ fn validate_radio_tx_dispatch_resolved_closure(
                 .next()
                 .and_then(|version| version.strip_prefix('v'))
                 .unwrap_or("<unknown>");
-            let category = packages
-                .iter()
-                .filter(|package| {
-                    package["name"].as_str() == Some(name)
-                        && package["version"].as_str() == Some(version)
-                })
-                .find_map(|package| {
-                    forbidden_radio_tx_dispatch_closure_category(package, workspace)
-                });
+            let category = forbidden_category.and_then(|classify| {
+                packages
+                    .iter()
+                    .filter(|package| {
+                        package["name"].as_str() == Some(name)
+                            && package["version"].as_str() == Some(version)
+                    })
+                    .find_map(|package| classify(package, workspace))
+            });
             return Err(if let Some(category) = category {
                 format!(
-                    "resolved normal closure contains unreviewed {category} package identity {display}"
+                    "{boundary} resolved normal closure contains unreviewed {category} package identity {display}"
                 )
             } else {
-                format!("resolved normal closure contains unreviewed package identity {display}")
+                format!(
+                    "{boundary} resolved normal closure contains unreviewed package identity {display}"
+                )
             });
         }
         let reviewed_index = reviewed_indices[0];
-        let reviewed = RADIO_TX_DISPATCH_REVIEWED_CLOSURE[reviewed_index];
+        let reviewed = reviewed_closure[reviewed_index];
         let matching_metadata = packages
             .iter()
             .filter(|package| {
@@ -4795,8 +4963,8 @@ fn validate_radio_tx_dispatch_resolved_closure(
         seen.insert(reviewed_index);
     }
 
-    if seen.len() != RADIO_TX_DISPATCH_REVIEWED_CLOSURE.len() {
-        let missing = RADIO_TX_DISPATCH_REVIEWED_CLOSURE
+    if seen.len() != reviewed_closure.len() {
+        let missing = reviewed_closure
             .iter()
             .enumerate()
             .filter(|(index, _package)| !seen.contains(index))
@@ -4809,6 +4977,36 @@ fn validate_radio_tx_dispatch_resolved_closure(
     }
 
     Ok(())
+}
+
+fn validate_radio_tx_dispatch_resolved_closure(
+    metadata_json: &str,
+    cargo_tree: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    validate_reviewed_resolved_closure(
+        metadata_json,
+        cargo_tree,
+        workspace,
+        &RADIO_TX_DISPATCH_REVIEWED_CLOSURE,
+        "radio TX dispatcher",
+        Some(forbidden_radio_tx_dispatch_closure_category),
+    )
+}
+
+fn validate_lxmf_wire_resolved_closure(
+    metadata_json: &str,
+    cargo_tree: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    validate_reviewed_resolved_closure(
+        metadata_json,
+        cargo_tree,
+        workspace,
+        &LXMF_WIRE_REVIEWED_CLOSURE,
+        "LXMF wire",
+        None,
+    )
 }
 
 fn validate_storage_model_dependency_boundary(
@@ -9658,6 +9856,7 @@ fn sample(layout: Layout) {
         validate_tx_handoff_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_tx_dispatch_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_radio_tx_dispatch_dependency_boundary(&metadata.to_string(), &root).unwrap();
+        validate_lxmf_wire_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_storage_model_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_storage_journal_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_storage_actor_dependency_boundary(&metadata.to_string(), &root).unwrap();
@@ -10859,6 +11058,107 @@ fn sample(layout: Layout) {
     }
 
     #[test]
+    fn lxmf_wire_boundary_allows_only_exact_crypto_and_host_test_edges() {
+        let root = workspace_root();
+        let baseline = serde_json::json!({
+            "packages": [lxmf_wire_package_fixture(&root)],
+        });
+        validate_lxmf_wire_dependency_boundary(&baseline.to_string(), &root).unwrap();
+
+        let mut wrong_manifest = baseline.clone();
+        fixture_package_mut(&mut wrong_manifest, "reticulum-lxmf-wire")["manifest_path"] =
+            serde_json::json!(root.join("crates/lookalike-lxmf-wire/Cargo.toml"));
+        assert!(
+            validate_lxmf_wire_dependency_boundary(&wrong_manifest.to_string(), &root).is_err()
+        );
+
+        let mut duplicate = baseline.clone();
+        duplicate["packages"]
+            .as_array_mut()
+            .unwrap()
+            .push(lxmf_wire_package_fixture(&root));
+        assert!(validate_lxmf_wire_dependency_boundary(&duplicate.to_string(), &root).is_err());
+
+        let mut extra_feature = baseline.clone();
+        fixture_package_mut(&mut extra_feature, "reticulum-lxmf-wire")["features"]["std"] =
+            serde_json::json!([]);
+        assert!(validate_lxmf_wire_dependency_boundary(&extra_feature.to_string(), &root).is_err());
+
+        let mut build = baseline.clone();
+        let mut build_dependency = handoff_dependency_fixture("cc", "=1.0.0", None);
+        build_dependency["kind"] = serde_json::json!("build");
+        fixture_package_mut(&mut build, "reticulum-lxmf-wire")["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(build_dependency);
+        assert!(validate_lxmf_wire_dependency_boundary(&build.to_string(), &root).is_err());
+
+        for (name, kind, reviewed_defaults) in [
+            ("curve25519-dalek", None, false),
+            ("ed25519-dalek", None, false),
+            ("hkdf", None, false),
+            ("sha2", None, false),
+            ("subtle", None, false),
+            ("hex", Some("dev"), true),
+            ("serde", Some("dev"), true),
+            ("serde_json", Some("dev"), true),
+        ] {
+            for (field, value) in [
+                ("req", serde_json::json!("=0.0.0")),
+                (
+                    "source",
+                    serde_json::json!("registry+https://example.invalid/index"),
+                ),
+                (
+                    "path",
+                    serde_json::json!(root.join("crates/unreviewed-dependency")),
+                ),
+                ("optional", serde_json::json!(true)),
+                ("rename", serde_json::json!("renamed-dependency")),
+                ("target", serde_json::json!("cfg(target_os = \"none\")")),
+                (
+                    "uses_default_features",
+                    serde_json::json!(!reviewed_defaults),
+                ),
+                ("features", serde_json::json!(["std"])),
+            ] {
+                let mut changed = baseline.clone();
+                fixture_dependency_mut(
+                    fixture_package_mut(&mut changed, "reticulum-lxmf-wire"),
+                    name,
+                    kind,
+                )[field] = value;
+                assert!(
+                    validate_lxmf_wire_dependency_boundary(&changed.to_string(), &root).is_err(),
+                    "dependency {name} accepted changed {field}"
+                );
+            }
+        }
+
+        let mut normal_promoted_to_dev = baseline.clone();
+        fixture_dependency_mut(
+            fixture_package_mut(&mut normal_promoted_to_dev, "reticulum-lxmf-wire"),
+            "sha2",
+            None,
+        )["kind"] = serde_json::json!("dev");
+        assert!(
+            validate_lxmf_wire_dependency_boundary(&normal_promoted_to_dev.to_string(), &root)
+                .is_err()
+        );
+
+        let mut dev_promoted_to_normal = baseline.clone();
+        fixture_dependency_mut(
+            fixture_package_mut(&mut dev_promoted_to_normal, "reticulum-lxmf-wire"),
+            "hex",
+            Some("dev"),
+        )["kind"] = serde_json::Value::Null;
+        assert!(
+            validate_lxmf_wire_dependency_boundary(&dev_promoted_to_normal.to_string(), &root)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn radio_tx_dispatch_resolved_closure_is_an_exact_identity_and_feature_set() {
         let root = workspace_root();
         let (baseline_metadata, baseline_tree) = radio_tx_dispatch_reviewed_closure_fixture(&root);
@@ -10996,6 +11296,118 @@ fn sample(layout: Layout) {
             feature_error.contains("embassy-sync") && feature_error.contains("features"),
             "{feature_error}"
         );
+    }
+
+    #[test]
+    fn lxmf_wire_resolved_closure_is_an_exact_bare_metal_identity_and_feature_set() {
+        let root = workspace_root();
+        let (baseline_metadata, baseline_tree) = lxmf_wire_reviewed_closure_fixture(&root);
+        validate_lxmf_wire_resolved_closure(&baseline_metadata.to_string(), &baseline_tree, &root)
+            .unwrap();
+
+        for (name, version) in [
+            ("rete-core", "0.1.0"),
+            ("alloc-wrapper", "1.0.0"),
+            ("std-wrapper", "1.0.0"),
+        ] {
+            let mut metadata = baseline_metadata.clone();
+            let mut tree = baseline_tree.clone();
+            add_registry_closure_fixture_package(&mut metadata, &mut tree, &root, name, version);
+            let error = validate_lxmf_wire_resolved_closure(&metadata.to_string(), &tree, &root)
+                .unwrap_err();
+            assert!(error.contains(name), "registry package {name}: {error}");
+        }
+
+        let mut local_metadata = baseline_metadata.clone();
+        let mut local_tree = baseline_tree.clone();
+        add_local_closure_fixture_package(
+            &mut local_metadata,
+            &mut local_tree,
+            &root,
+            "reticulum-board-heltec-vision-master-e290",
+            "0.1.0",
+            "crates/board-heltec-vision-master-e290/Cargo.toml",
+        );
+        let local_error =
+            validate_lxmf_wire_resolved_closure(&local_metadata.to_string(), &local_tree, &root)
+                .unwrap_err();
+        assert!(local_error.contains("reticulum-board-heltec-vision-master-e290"));
+
+        let mut wrong_version = baseline_metadata.clone();
+        wrong_version["packages"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|package| package["name"].as_str() == Some("sha2"))
+            .unwrap()["version"] = serde_json::json!("0.10.8");
+        let wrong_version_tree = baseline_tree.replace("sha2 v0.10.9\t", "sha2 v0.10.8\t");
+        let wrong_version_error = validate_lxmf_wire_resolved_closure(
+            &wrong_version.to_string(),
+            &wrong_version_tree,
+            &root,
+        )
+        .unwrap_err();
+        assert!(wrong_version_error.contains("sha2"));
+
+        let mut wrong_source = baseline_metadata.clone();
+        wrong_source["packages"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|package| package["name"].as_str() == Some("hkdf"))
+            .unwrap()["source"] = serde_json::json!("registry+https://example.invalid/index");
+        let wrong_source_error =
+            validate_lxmf_wire_resolved_closure(&wrong_source.to_string(), &baseline_tree, &root)
+                .unwrap_err();
+        assert!(wrong_source_error.contains("hkdf"));
+
+        let mut wrong_path = baseline_metadata.clone();
+        wrong_path["packages"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|package| package["name"].as_str() == Some("reticulum-lxmf-wire"))
+            .unwrap()["manifest_path"] =
+            serde_json::json!(root.join("crates/lookalike-lxmf-wire/Cargo.toml"));
+        let wrong_path_error =
+            validate_lxmf_wire_resolved_closure(&wrong_path.to_string(), &baseline_tree, &root)
+                .unwrap_err();
+        assert!(wrong_path_error.contains("reticulum-lxmf-wire"));
+
+        for (reviewed, changed, package) in [
+            (
+                "ed25519-dalek v2.2.0\thazmat\n",
+                "ed25519-dalek v2.2.0\talloc,hazmat\n",
+                "ed25519-dalek",
+            ),
+            ("sha2 v0.10.9\t\n", "sha2 v0.10.9\tstd\n", "sha2"),
+            (
+                "ed25519-dalek v2.2.0\thazmat\n",
+                "ed25519-dalek v2.2.0\thazmat,hazmat\n",
+                "ed25519-dalek",
+            ),
+        ] {
+            let changed_tree = baseline_tree.replace(reviewed, changed);
+            let error = validate_lxmf_wire_resolved_closure(
+                &baseline_metadata.to_string(),
+                &changed_tree,
+                &root,
+            )
+            .unwrap_err();
+            assert!(
+                error.contains(package),
+                "feature drift for {package}: {error}"
+            );
+        }
+
+        let missing_tree = baseline_tree.replace("hmac v0.12.1\t\n", "");
+        let missing_error = validate_lxmf_wire_resolved_closure(
+            &baseline_metadata.to_string(),
+            &missing_tree,
+            &root,
+        )
+        .unwrap_err();
+        assert!(missing_error.contains("hmac"));
     }
 
     #[test]
@@ -12208,6 +12620,7 @@ fn sample(layout: Layout) {
                 storage_actor_package_fixture(root),
                 device_api_adapter_package_fixture(root),
                 radio_tx_dispatch_package_fixture(root),
+                lxmf_wire_package_fixture(root),
                 radio_interface_package_fixture(root),
                 e290_board_facts_package_fixture(root),
                 lora_phy_radio_package_fixture(root),
@@ -12367,6 +12780,36 @@ fn sample(layout: Layout) {
         })
     }
 
+    fn lxmf_wire_package_fixture(root: &Path) -> serde_json::Value {
+        let mut ed25519_dalek = handoff_dependency_fixture("ed25519-dalek", "=2.2.0", None);
+        ed25519_dalek["features"] = serde_json::json!(["hazmat"]);
+
+        let mut hex = handoff_dependency_fixture("hex", "=0.4.3", Some("dev"));
+        hex["uses_default_features"] = serde_json::Value::Bool(true);
+        let mut serde = handoff_dependency_fixture("serde", "=1.0.228", Some("dev"));
+        serde["uses_default_features"] = serde_json::Value::Bool(true);
+        serde["features"] = serde_json::json!(["derive"]);
+        let mut serde_json = handoff_dependency_fixture("serde_json", "=1.0.149", Some("dev"));
+        serde_json["uses_default_features"] = serde_json::Value::Bool(true);
+
+        serde_json::json!({
+            "name": "reticulum-lxmf-wire",
+            "source": null,
+            "manifest_path": root.join("crates/lxmf-wire/Cargo.toml"),
+            "features": {},
+            "dependencies": [
+                handoff_dependency_fixture("curve25519-dalek", "=4.1.3", None),
+                ed25519_dalek,
+                handoff_dependency_fixture("hkdf", "=0.12.4", None),
+                handoff_dependency_fixture("sha2", "=0.10.9", None),
+                handoff_dependency_fixture("subtle", "=2.6.1", None),
+                hex,
+                serde,
+                serde_json,
+            ],
+        })
+    }
+
     fn radio_interface_package_fixture(root: &Path) -> serde_json::Value {
         let mut conformance = handoff_path_dependency_fixture(
             "reticulum-rns-conformance",
@@ -12460,8 +12903,11 @@ fn sample(layout: Layout) {
         })
     }
 
-    fn radio_tx_dispatch_reviewed_closure_fixture(root: &Path) -> (serde_json::Value, String) {
-        let packages = RADIO_TX_DISPATCH_REVIEWED_CLOSURE
+    fn reviewed_closure_fixture(
+        root: &Path,
+        reviewed_closure: &[ReviewedClosurePackage],
+    ) -> (serde_json::Value, String) {
+        let packages = reviewed_closure
             .iter()
             .copied()
             .map(|package| {
@@ -12496,13 +12942,21 @@ fn sample(layout: Layout) {
             })
             .collect::<Vec<_>>();
         let mut tree = String::new();
-        for package in RADIO_TX_DISPATCH_REVIEWED_CLOSURE {
+        for package in reviewed_closure.iter().copied() {
             tree.push_str(&reviewed_closure_display(package, root).unwrap());
             tree.push('\t');
             tree.push_str(&package.features.join(","));
             tree.push('\n');
         }
         (serde_json::json!({ "packages": packages }), tree)
+    }
+
+    fn radio_tx_dispatch_reviewed_closure_fixture(root: &Path) -> (serde_json::Value, String) {
+        reviewed_closure_fixture(root, &RADIO_TX_DISPATCH_REVIEWED_CLOSURE)
+    }
+
+    fn lxmf_wire_reviewed_closure_fixture(root: &Path) -> (serde_json::Value, String) {
+        reviewed_closure_fixture(root, &LXMF_WIRE_REVIEWED_CLOSURE)
     }
 
     fn add_registry_closure_fixture_package(

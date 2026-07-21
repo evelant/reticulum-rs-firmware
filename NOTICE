@@ -6,11 +6,26 @@ Version 2.0, at your option.
 
 The default firmware evaluation graph uses the Rete integration fork from
 https://github.com/evelant/rete at revision
-8b5d65283cd370dee4cbb17594ef9c88d2805416, based on upstream
+90570cafc812b3025011cb690ec74a27f287cb3f, based on upstream
 https://github.com/s-retlaw/rete revision
 9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743. The fork retains upstream's
 MIT OR Apache-2.0 declaration in its package metadata and README. Fork tag
-firmware-pin-8b5d652 is the designated durable reference for the pinned commit.
+firmware-pin-90570ca is the designated durable reference for the pinned commit.
+
+The checked LXMF compatibility corpus is generated from Python LXMF 1.0.1 at
+revision fab12ad9bf9f997797034950f289fe41a79dcf5a and Python RNS at revision
+50e03a24e8e10256363f6b73af7f6804ddb90e6f. Their exact Reticulum License
+notices are retained in LICENSE-RETICULUM for LXMF and
+LICENSE-RETICULUM-RNS for RNS. Those sources are protocol authorities and test
+peers; they are not linked into the firmware. Project-owned
+`reticulum-lxmf-wire` source is independently implemented from the documented
+wire behavior and remains under the project's MIT OR Apache-2.0 terms.
+
+Two Ed25519 mixed-order regression encodings are retained from C2SP/CCTV
+revision 5ea85644bd035c555900a2f707f7e4c31ea65ced: vector 50's public-key
+encoding and vector 7's signature-R encoding. That test data is BSD-3-Clause;
+its exact copyright notice, conditions, and disclaimer are retained in
+LICENSE-CCTV. It is test-only data and is not linked into firmware binaries.
 
 The separate Leviculum comparison package is AGPL-3.0-or-later. See
 docs/provenance.md and Cargo.lock for the exact source and dependency graph.

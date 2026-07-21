@@ -3,8 +3,9 @@
 
 The generator imports the exact Python LXMF and RNS implementations pinned in
 ``requirements-lxmf-1.0.1.txt``.  It does not import Rust or Rete code.  Fixed
-identity private keys in this file are public test material copied from the
-Precursor LXMF interoperability oracle; they are not usable credentials.
+identity private keys in this file match public interoperability fixture input
+parameters also used by the Precursor oracle; they are behavioral test facts,
+not copied implementation source or usable credentials.
 """
 
 from __future__ import annotations
@@ -467,6 +468,59 @@ def _negative_mutations(messages: dict[str, dict[str, object]]) -> list[dict[str
     return output
 
 
+def _inbound_oracles(messages: dict[str, dict[str, object]]) -> list[dict[str, object]]:
+    """Build valid Python-inbound forms that LXMessage.pack does not emit."""
+    source_identity, _, _, _ = _ensure_rns()
+    basic = messages["basic_binary"]
+    destination = bytes.fromhex(basic["destination_hash_hex"])
+    source = bytes.fromhex(basic["source_hash_hex"])
+    canonical_payload = bytes.fromhex(basic["wire_payload_hex"])
+    assert canonical_payload[0] == 0x94
+
+    # Python outbound packing chooses fixarray, but inbound LXMF hashes the
+    # exact received payload whenever the decoded array has exactly four
+    # values. Array16 therefore needs a fresh signature over its raw bytes.
+    received_payload = b"\xdc\x00\x04" + canonical_payload[1:]
+    decoded = umsgpack.unpackb(received_payload)
+    assert isinstance(decoded, list) and len(decoded) == 4
+    canonical_repack = umsgpack.packb(decoded)
+    assert canonical_repack == canonical_payload
+    assert canonical_repack != received_payload
+
+    hashed_part = destination + source + received_payload
+    message_id = RNS.Identity.full_hash(hashed_part)
+    signature = source_identity.sign(hashed_part + message_id)
+    full_wire = destination + source + signature + received_payload
+    python_parse = parse_outcome(full_wire)
+    assert python_parse == {
+        "result": "message",
+        "message_id_hex": message_id.hex(),
+        "signature_validated": True,
+        "unverified_reason": None,
+    }
+
+    return [
+        {
+            "name": "exact_four_array16_raw_hash",
+            "description": (
+                "Python-valid noncanonical Array16 envelope proving that an "
+                "exact-four inbound payload is hashed byte-for-byte"
+            ),
+            "origin": "constructed and validated by pinned Python LXMF 1.0.1",
+            "hashed_payload_rule": "received_payload_bytes_unchanged",
+            "destination_hash_hex": destination.hex(),
+            "source_hash_hex": source.hex(),
+            "source_public_key_hex": source_identity.get_public_key().hex(),
+            "received_payload_hex": received_payload.hex(),
+            "canonical_repack_hex": canonical_repack.hex(),
+            "message_id_hex": message_id.hex(),
+            "signature_hex": signature.hex(),
+            "full_wire_hex": full_wire.hex(),
+            "python_parse": python_parse,
+        }
+    ]
+
+
 def build_vectors() -> dict[str, object]:
     provenance = authority_provenance()
     _ensure_rns()
@@ -630,8 +684,11 @@ def build_vectors() -> dict[str, object]:
         "wire_contract": {
             "full_layout": "destination_hash[16] || source_hash[16] || signature[64] || msgpack_payload",
             "payload": "msgpack([timestamp, title, content, fields, optional_stamp])",
-            "message_id": "SHA-256(destination_hash || source_hash || msgpack(payload_without_stamp))",
-            "signature": "Ed25519(destination_hash || source_hash || msgpack(payload_without_stamp) || message_id)",
+            "hashed_payload_exact_four": "received msgpack_payload bytes unchanged when the decoded array has exactly four items",
+            "hashed_payload_stamped": "RNS.vendor.umsgpack.packb(decoded_payload[:4]) when the decoded array has more than four items; this corpus emits exactly five",
+            "fixture_payload4_hex": "canonical first-four encoding recorded for Python-generated outbound fixtures; it is not evidence that noncanonical exact-four input is re-encoded",
+            "message_id": "SHA-256(destination_hash || source_hash || hashed_payload)",
+            "signature": "Ed25519(destination_hash || source_hash || hashed_payload || message_id)",
             "opportunistic_ingress": "destination hash implied by RNS DATA; LXMF bytes begin at source hash",
             "direct_packet_ingress": "complete LXMF bytes in LinkData context NONE",
             "direct_resource_ingress": "complete LXMF bytes in ResourceComplete",
@@ -655,9 +712,11 @@ def build_vectors() -> dict[str, object]:
                 "32-byte proof-of-work stamp",
                 "16-byte ticket-derived stamp and FIELD_TICKET",
                 "packet and Resource threshold boundaries",
+                "valid noncanonical exact-four inbound raw-byte hashing",
                 "negative signature, content, source, truncation, and stamp mutations",
             ],
             "deferred": [
+                "broader valid noncanonical Python-inbound canonicalization fixtures",
                 "propagation encryption and propagation-node envelopes",
                 "Paper representation",
                 "router persistence, retries, deduplication, and message sync",
@@ -665,6 +724,7 @@ def build_vectors() -> dict[str, object]:
             ],
         },
         "messages": ordered_messages,
+        "inbound_oracles": _inbound_oracles(messages),
         "negative_mutations": _negative_mutations(messages),
         "known_rete_incompatibilities": [
             "rete-lxmf-core models fields as u8-to-bytes instead of arbitrary MessagePack values",

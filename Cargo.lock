@@ -2004,6 +2004,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "reticulum-lxmf-wire"
+version = "0.1.0"
+dependencies = [
+ "curve25519-dalek",
+ "ed25519-dalek",
+ "hex",
+ "hkdf",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+]
+
+[[package]]
 name = "reticulum-node-core"
 version = "0.1.0"
 dependencies = [

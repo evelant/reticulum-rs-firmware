@@ -16,6 +16,7 @@ authoritative in the lockfile.
 | lora-phy | Published crates.io 3.0.1 source vendored at `vendor/lora-phy-3.0.1` | archive SHA-256 `61471c3b2909789e3332083577f6cf6c41a4fcf37674ef15156bcbb20504ac65`; crate-recorded upstream commit `ca04c2284eb00e015528933ea5159cd1ff36142d`; exact tree and pristine/patched hashes in `VENDOR-HASHES.json` | MIT OR Apache-2.0 | SX126x radio owner with an atomic, default-preserving board override for high-power PA/OCP/encoded power, default-no-op post-initialization and early-TX RF-path hooks, and public standby state synchronization; exact edits, integrity guard and removal condition are recorded in `PATCHES.md` |
 | embedded-hal / embedded-hal-async / embedded-hal-bus / lora-modulation | crates.io | exact versions in workspace and lockfile | MIT OR Apache-2.0 | Portable pin/SPI/profile contracts and the target-exclusive async SPI device |
 | Embassy futures/sync/time, static_cell and zeroize | crates.io | exact versions in workspace and lockfile | MIT OR Apache-2.0 | Bounded target coordination, in-place protocol ownership and temporary key cleanup |
+| C2SP/CCTV Ed25519 vectors | <https://github.com/C2SP/CCTV/tree/5ea85644bd035c555900a2f707f7e4c31ea65ced/ed25519vectors> | `5ea85644bd035c555900a2f707f7e4c31ea65ced`; vector 50 public-key encoding and vector 7 signature-R encoding only | BSD-3-Clause; exact upstream text in `LICENSE-CCTV` | Test-only mixed-order point regression data; not linked into firmware |
 
 The designated durable tag for commit
 `90570cafc812b3025011cb690ec74a27f287cb3f` is
@@ -99,14 +100,24 @@ and has SHA-256
 `1796f161c480d0348e3d47fd8f3cda5fda5b51aa38ad6024aaad04c8ba1751ce`.
 That image matched an exact `3e:88` readback and served an authenticated
 `identity-summary`; `3f:88` did not enumerate, so a current two-board
-lifecycle/RF run remains open. The current runtime-measurement HIL links with
-text/data/BSS of 695,315/4,180/468,648 bytes (1,168,143 bytes total); its
-12,498,356-byte ELF has SHA-256
+lifecycle/RF run remains open. The initial current runtime-measurement HIL
+links with text/data/BSS of 695,315/4,180/468,648 bytes (1,168,143 bytes total);
+its 12,498,356-byte ELF has SHA-256
 `4ca4eef73ff1babd00750d4a635f7644d73d1a3ae1cde4fb1dbdb434937bcfca`,
 and its 800,480-byte merged image uses 734,944/6,291,456 application bytes
 (11.68%) with SHA-256
 `ec23bf0a7b20b7364e12cba6ebc90aa3e0ce761650413e1ad9d6186eeecf1662`.
-The current HIL remains unflashed and unpowered.
+A target-scoped rebuild retained those section/application sizes. Its
+12,498,348-byte ELF has SHA-256
+`c84363dff0801a1679dd786b5070c4662962d299f0269efc0cd72ff9c09b8e2a`,
+and its 800,480-byte merged image has SHA-256
+`058a969e0b9e099f6a5febd1b59f4a70cfd3ea932e8f0738a2ddb4b3e5569119`.
+That package matched an exact `3e:88` readback and produced the authenticated
+108,940-ms bounded memory/API/two-confirmed-TX checkpoint recorded in the E290
+runbook. The board was then restored to an exact-readback 789,504-byte default
+rebuild, SHA-256
+`a67afa72681558dc02fd0575a18711b2b3c05b365a66af45441b7cb8dd3a2577`,
+and served `identity-summary`. Board `3f:88` remained absent.
 
 Phase-1 normal/pressure and closure artifact manifests bind the project commit
 and its raw Git root tree; their tool inventories record the same pair and the
@@ -251,17 +262,47 @@ checkouts are research evidence only. A useful local snapshot does not grant a
 build dependency or permission to copy code without recording the source and
 license here.
 
+The first `reticulum-lxmf-wire` compatibility corpus uses CPython 3.13.7,
+Python LXMF 1.0.1 at revision
+`fab12ad9bf9f997797034950f289fe41a79dcf5a`, and Python RNS 1.3.5 at revision
+`50e03a24e8e10256363f6b73af7f6804ddb90e6f`. The generated corpus records
+the Reticulum License, exact authority-source and u-msgpack digests, and the
+distinct upstream notices retained in `LICENSE-RETICULUM` for LXMF and
+`LICENSE-RETICULUM-RNS` for RNS. Its generator SHA-256 is
+`3a6f07a6380fc18ca533e1b31a7b2a25d9059a668e7e91a689f600a1893c20b0`, and its
+requirements SHA-256 is
+`f7876030b5e143e89bea278c2dc4892cd58c47f5709b72c2cc848861670b1c86`.
+Those Python packages are version-pinned test/reference authorities; no Python
+implementation source is linked into the firmware crate. The crate enables
+`ed25519-dalek`'s `hazmat` feature only for its allocation-free streaming
+verification API and uses feature-disabled `curve25519-dalek` directly to
+enforce the prime-order subgroup checks required by the strict firmware
+profile. The exact locked normal closure is independently guarded and contains
+no allocator, standard library, Rete, board, executor, or transport dependency.
+The two exact C2SP/CCTV mixed-order point encodings used to pin that stricter
+behavior come from vector 50's public key and vector 7's signature R at revision
+`5ea85644bd035c555900a2f707f7e4c31ea65ced`. Their BSD-3-Clause notice is
+retained verbatim in `LICENSE-CCTV` (SHA-256
+`9fe727c21f00a770a683a4c8491bf24203ec839628bad09b026258c5afc17076`).
+
 ## Future derived-code boundaries
 
-- Reused or modified LXMF-rs source will live in an explicitly EPL-2.0 crate,
-  with SPDX identifiers and source file/commit notes. It will not inherit the
-  workspace MIT/Apache declaration.
-- Directly reused Reticulum/LXMF Python reference source retains the Reticulum
-  License and notice.
+- The initial `reticulum-lxmf-wire` source is independently authored against
+  the Python corpus and remains under the workspace `MIT OR Apache-2.0`
+  declaration. It contains no copied or modified LXMF-rs implementation source.
+- Any future directly copied or modified LXMF-rs source will live in an
+  explicitly EPL-2.0 file or crate, with SPDX identifiers, notices, and source
+  file/commit notes. That derived source will not inherit the workspace
+  MIT/Apache declaration.
+- Any future directly reused Reticulum/LXMF Python reference source retains the
+  Reticulum License and notice; using the pinned implementation as a test peer
+  or generated-byte authority does not itself make project source a copy.
 - AGPL implementation code is linked only in coherent AGPL packages or
   binaries. It is otherwise used as a black-box peer or behavioral reference.
 - Source without a clear grant, including the reviewed Precursor root, is not
-  copied until its license is clarified.
+  copied until its license is clarified. Reusing its published deterministic
+  interoperability input parameters as behavioral facts does not copy its
+  implementation source; their origin remains identified in the generator.
 
 ## Release requirements
 

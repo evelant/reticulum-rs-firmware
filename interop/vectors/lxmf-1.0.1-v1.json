@@ -37,7 +37,29 @@
     "source_public_key_hex": "50a61409b1ddd0325e9b16b700e719e9772c07000b1bd7786e907c653d20495d8a875fff1eb38451577acd5afee405456568dd7c89e090863a0557bc7af49f17"
   },
   "generator": "interop/python/generate_lxmf_1_0_1_vectors.py",
-  "generator_source_sha256": "7b7d66fa70e821ccf23220aa21f8de2a0aeaa9392ac1f0a5055915fd8a7f0ae4",
+  "generator_source_sha256": "3a6f07a6380fc18ca533e1b31a7b2a25d9059a668e7e91a689f600a1893c20b0",
+  "inbound_oracles": [
+    {
+      "canonical_repack_hex": "94cb41d954fc40000000c4094772656574696e6773c41648656c6c6f2066726f6d20507974686f6e204c584d4680",
+      "description": "Python-valid noncanonical Array16 envelope proving that an exact-four inbound payload is hashed byte-for-byte",
+      "destination_hash_hex": "021e68345db8a80c29d0c2f193baa5f4",
+      "full_wire_hex": "021e68345db8a80c29d0c2f193baa5f420f7e44b55b06cff39719106f2bd1fd2a8fdc38ba2c49ba914f83f5dde0ba87d4f746a574c3a050a2cef246a6674fba735fd43b9abb855a108c202d453a7c7b3a7f3374d31af24a7f88633980c4f9506dc0004cb41d954fc40000000c4094772656574696e6773c41648656c6c6f2066726f6d20507974686f6e204c584d4680",
+      "hashed_payload_rule": "received_payload_bytes_unchanged",
+      "message_id_hex": "18a81cd9cbb178b2aa625aeec58492983a34174f2d78215c69e3e69c43411f89",
+      "name": "exact_four_array16_raw_hash",
+      "origin": "constructed and validated by pinned Python LXMF 1.0.1",
+      "python_parse": {
+        "message_id_hex": "18a81cd9cbb178b2aa625aeec58492983a34174f2d78215c69e3e69c43411f89",
+        "result": "message",
+        "signature_validated": true,
+        "unverified_reason": null
+      },
+      "received_payload_hex": "dc0004cb41d954fc40000000c4094772656574696e6773c41648656c6c6f2066726f6d20507974686f6e204c584d4680",
+      "signature_hex": "a8fdc38ba2c49ba914f83f5dde0ba87d4f746a574c3a050a2cef246a6674fba735fd43b9abb855a108c202d453a7c7b3a7f3374d31af24a7f88633980c4f9506",
+      "source_hash_hex": "20f7e44b55b06cff39719106f2bd1fd2",
+      "source_public_key_hex": "50a61409b1ddd0325e9b16b700e719e9772c07000b1bd7786e907c653d20495d8a875fff1eb38451577acd5afee405456568dd7c89e090863a0557bc7af49f17"
+    }
+  ],
   "known_rete_incompatibilities": [
     "rete-lxmf-core models fields as u8-to-bytes instead of arbitrary MessagePack values",
     "rete-lxmf-core models stamps and tickets as two bytes instead of 32 and 16 bytes",
@@ -624,6 +646,7 @@
   "schema": 1,
   "scope": {
     "deferred": [
+      "broader valid noncanonical Python-inbound canonicalization fixtures",
       "propagation encryption and propagation-node envelopes",
       "Paper representation",
       "router persistence, retries, deduplication, and message sync",
@@ -639,16 +662,20 @@
       "32-byte proof-of-work stamp",
       "16-byte ticket-derived stamp and FIELD_TICKET",
       "packet and Resource threshold boundaries",
+      "valid noncanonical exact-four inbound raw-byte hashing",
       "negative signature, content, source, truncation, and stamp mutations"
     ]
   },
   "wire_contract": {
     "direct_packet_ingress": "complete LXMF bytes in LinkData context NONE",
     "direct_resource_ingress": "complete LXMF bytes in ResourceComplete",
+    "fixture_payload4_hex": "canonical first-four encoding recorded for Python-generated outbound fixtures; it is not evidence that noncanonical exact-four input is re-encoded",
     "full_layout": "destination_hash[16] || source_hash[16] || signature[64] || msgpack_payload",
-    "message_id": "SHA-256(destination_hash || source_hash || msgpack(payload_without_stamp))",
+    "hashed_payload_exact_four": "received msgpack_payload bytes unchanged when the decoded array has exactly four items",
+    "hashed_payload_stamped": "RNS.vendor.umsgpack.packb(decoded_payload[:4]) when the decoded array has more than four items; this corpus emits exactly five",
+    "message_id": "SHA-256(destination_hash || source_hash || hashed_payload)",
     "opportunistic_ingress": "destination hash implied by RNS DATA; LXMF bytes begin at source hash",
     "payload": "msgpack([timestamp, title, content, fields, optional_stamp])",
-    "signature": "Ed25519(destination_hash || source_hash || msgpack(payload_without_stamp) || message_id)"
+    "signature": "Ed25519(destination_hash || source_hash || hashed_payload || message_id)"
   }
 }

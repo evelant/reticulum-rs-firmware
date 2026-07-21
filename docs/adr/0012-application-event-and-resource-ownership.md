@@ -137,11 +137,12 @@ failed-to-build reject packet must all have explicit states.
 ### Establish LXMF compatibility before selecting a runtime
 
 The first LXMF tranche is a deterministic Python-LXMF-derived wire corpus, not
-an embedded client. It covers binary title/content, arbitrary known and unknown
-MessagePack field keys and values, exact hashes/signatures, 32-byte proof-of-
-work stamps, 16-byte tickets, opportunistic/direct boundaries, and direct
-packet/Resource boundaries. Each fixture records its generator, released
-Python/RNS/LXMF versions, source revision, and exact bytes.
+an embedded client. It covers binary title/content, heterogeneous known and
+unknown MessagePack fields within ADR 0013's typed first-tranche exclusions,
+exact hashes/signatures, 32-byte proof-of-work stamps, 16-byte tickets,
+opportunistic/direct boundaries, and direct packet/Resource boundaries. Each
+fixture records its generator, pinned Python/RNS/LXMF versions, source revision,
+and exact bytes.
 
 The corpus treats released Python LXMF as the compatibility authority.
 Precursor's Python-generated vectors and the `no_std + alloc` LXMF-rs wire

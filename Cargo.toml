@@ -21,6 +21,7 @@ members = [
     "crates/device-identity-store",
     "crates/interface-router",
     "crates/lab-rx-returned-fault-hil",
+    "crates/lxmf-wire",
     "crates/node-core",
     "crates/nor-flash-region",
     "crates/radio-lora-phy",
@@ -71,6 +72,7 @@ default-members = [
     "crates/device-identity-store",
     "crates/interface-router",
     "crates/lab-rx-returned-fault-hil",
+    "crates/lxmf-wire",
     "crates/node-core",
     "crates/nor-flash-region",
     "crates/radio-lora-phy",
@@ -109,6 +111,8 @@ embassy-futures = { version = "=0.1.2", default-features = false }
 embassy-sync = { version = "=0.8.0", default-features = false }
 embassy-time = { version = "=0.5.0", default-features = false }
 critical-section = { version = "=1.2.0", default-features = false }
+curve25519-dalek = { version = "=4.1.3", default-features = false }
+ed25519-dalek = { version = "=2.2.0", default-features = false }
 embedded-hal = "=1.0.0"
 embedded-hal-async = "=1.0.0"
 embedded-hal-bus = { version = "=0.3.0", default-features = false, features = ["async"] }

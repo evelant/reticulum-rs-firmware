@@ -53,9 +53,15 @@ gates. Its default package is a 789,504-byte merged image using
 723,968/6,291,456 application bytes (11.51%); it matched an exact `3e:88`
 readback and served an authenticated `identity-summary`. The runtime-
 measurement HIL package is 800,480 bytes using 734,944/6,291,456 (11.68%) and
-remains unflashed. `3f:88` did not enumerate, so
-the current two-board lifecycle/RF run remains open; older artifact records
-remain bound to their recorded revisions.
+its target-scoped rebuild matched an exact `3e:88` readback. The authenticated
+108,940-ms checkpoint retained 63,828 painted stack bytes (10,148 after the
+maximum-frame deduction), recorded two confirmed transmissions, and observed
+no unexpected error, failed allocation, watchdog timeout, or correlation
+fault. The board was restored
+to an exact-readback 789,504-byte default rebuild and served
+`identity-summary`. Board `3f:88` did not enumerate, so the current two-board
+lifecycle/RF run remains open; older artifact records remain bound to their
+recorded revisions.
 
 ## 1. Transactional Link admission — completed for owned and H2 relay paths
 
