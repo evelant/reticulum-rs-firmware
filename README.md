@@ -835,17 +835,19 @@ semantic model, variable-extent append-only NOR store, and durable-ingress
 lease adapter. Exact normalized LXMF bytes stream from the retained event into
 the store without a message-sized copy, and only a verified durable receipt can
 acknowledge that event. Replays, alternate valid stamps, and forced
-same-ID/different-material conflicts remain distinct. The portable tranche is
-not yet target composition. Rete can now retain an exact inbound proof beside
-its application event, and the durable-ingress owner reserves fixed delayed-
-proof capacity before store I/O, returns the exact combined lease on failure,
-and makes that proof ready only after a new or already-durable receipt. It does
-not drain or transmit ready proofs. The permanent E290 graph still uses its
-existing immediate-proof policy and does not yet compose the LXMF store,
-delayed-proof owner, or ready-proof drain, so remote durable-delivery semantics
-are not yet claimed. The raw-RNS inbox remains qualification evidence rather
-than a product mailbox. Native RNS Resource ingress stays disabled until its
-allocation and streaming-storage boundary is bounded.
+same-ID/different-material conflicts remain distinct. The permanent E290 graph
+now allocates the store's 512-slot opaque index in PSRAM and read-only mounts a
+dedicated 2 MiB `lxmf_store` partition at boot. Rete can retain an exact inbound
+proof beside its application event, and the portable durable-ingress owner
+reserves fixed delayed-proof capacity before store I/O, returns the exact
+combined lease on failure, and makes that proof ready only after a new or
+already-durable receipt. That ingress and proof machinery are not yet product
+composition: the E290 graph does not register an `lxmf.delivery` destination,
+admit LXMF messages, select retained-proof policy, own delayed-proof capacity,
+or drain ready proofs. It therefore still makes no remote durable-delivery
+claim. The raw-RNS inbox remains qualification evidence rather than a product
+mailbox. Native RNS Resource ingress stays disabled until its allocation and
+streaming-storage boundary is bounded.
 The node-side routing
 boundary remains interface-neutral so additional Reticulum links can be added
 later through adapters without rewriting the LoRa actor or protocol owner; no

@@ -875,7 +875,7 @@ fn graph_policy() -> ExitCode {
              authenticated session layer has only its exact reviewed cryptographic, device-API, credentials, framing and handoff normal edges plus its exact test-only hex, semantic-adapter and storage-model fixtures; \
              the Rete integration and node-core normal closures contain no RNode, radio-interface, LoRa or board package; \
              the shared lora-phy owner and E290 radio wrapper have only their exact reviewed HAL, framing, board and test edges; \
-             the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the permanent E290 node reaches the LoRa-first node/router/dispatcher graph, exact portable identity, credential-store authority, announce-clock, NOR-region, durable-submission and durable inbound-RNS-inbox layers, both target-safe experimental device-API semantic ports, the featureless framed USB pre-authentication control codec, the resident live-pairing lifecycle and a minimal boot-lifetime USB authenticated-session bearer with transport-neutral admission and node-side dispatch while excluding onboard clients and foreign Tracker/HIL packages; \
+             the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the permanent E290 node reaches the LoRa-first node/router/dispatcher graph, exact portable identity, credential-store authority, announce-clock, NOR-region, durable-submission and durable inbound-RNS-inbox layers, the feature-free LXMF model/store mount and explicit external allocator, both target-safe experimental device-API semantic ports, the featureless framed USB pre-authentication control codec, the resident live-pairing lifecycle and a minimal boot-lifetime USB authenticated-session bearer with transport-neutral admission and node-side dispatch while excluding LXMF durable ingress, onboard clients and foreign Tracker/HIL packages; \
              the interface router has only its reviewed node-core and Embassy Sync normal edges plus test-only rand_core and RNS fixture edges; \
              the TX handoff, RF-inert dispatcher and supervisor use only their reviewed node-core, \
              interface-router ingress, handoff, dispatcher, Embassy Sync/Futures/Time, rand_core \
@@ -890,7 +890,7 @@ fn graph_policy() -> ExitCode {
              normal edges, the single reviewed streaming-verification feature and three host-test edges, and its generic bare-metal normal closure exactly \
              matches the reviewed registry identities without std, alloc, Rete, platform, radio or storage packages; \
              the featureless transport-neutral LXMF ingress crate has exactly its reviewed feature-disabled node-core and LXMF-wire normal edges plus its dev-only durable inbox and host-test fixtures, while its generic bare-metal normal closure exactly matches the reviewed identities and excludes platform, board, radio, firmware, storage, device-API, supervisor and executor packages; \
-             the dependency-free LXMF model, append-only LXMF store and durable-ingress owner retain their exact reviewed manifests and generic bare-metal closures; the store normal closure reaches only the model, embedded-storage and SHA-256 while its development surface adds only the reviewed LXMF-wire/hex/serde corpus fixtures, durable ingress reaches only its four reviewed portable owner edges plus exact host-test embedded-storage/hex/serde and Rete retained-proof fixture edges, and none of the new ownership closures can acquire the raw inbox, submission durability, board, radio, platform, firmware, device-API, supervisor or executor graphs; all three remain absent from product and HIL compositions until target integration is explicitly reviewed; \
+             the dependency-free LXMF model, append-only LXMF store and durable-ingress owner retain their exact reviewed manifests and generic bare-metal closures; the store normal closure reaches only the model, embedded-storage and SHA-256 while its development surface adds only the reviewed LXMF-wire/hex/serde corpus fixtures, durable ingress reaches only its four reviewed portable owner edges plus exact host-test embedded-storage/hex/serde and Rete retained-proof fixture edges, and none of the new ownership closures can acquire the raw inbox, submission durability, board, radio, platform, firmware, device-API, supervisor or executor graphs; the model/store are now composed feature-free only for the permanent E290 read-only mount while durable ingress remains absent from every product and HIL composition; \
              the portable identity, announce-clock and NOR-region crates use only their exact reviewed embedded-storage, rand_core, SHA-256 and zeroize subsets; the durable inbound RNS inbox store uses only exact feature-free embedded-storage and SHA-256 pins; the durable \
              storage model uses only reviewed minicbor and SHA-256 edges; \
              the physical storage journal uses only reviewed embedded-storage, storage-model and SHA-256 edges; \
@@ -2071,7 +2071,8 @@ fn immediately_preceded_by_feature_cfg(source: &str, position: usize, feature: &
         .is_some_and(|line| line.trim() == format!("#[cfg(feature = \"{feature}\")]"))
 }
 
-const E290_NODE_GRAPH_REQUIRED: [&str; 38] = [
+const E290_NODE_GRAPH_REQUIRED: [&str; 41] = [
+    "allocator-api2",
     "embedded-storage",
     "esp-alloc",
     "esp-storage",
@@ -2090,6 +2091,8 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 38] = [
     "reticulum-device-api-session",
     "reticulum-device-identity-store",
     "reticulum-interface-router",
+    "reticulum-lxmf-model",
+    "reticulum-lxmf-store",
     "reticulum-node-core",
     "reticulum-nor-flash-region",
     "reticulum-radio-interface",
@@ -2112,7 +2115,7 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 38] = [
     "static_cell",
 ];
 
-const E290_NODE_GRAPH_FORBIDDEN: [&str; 14] = [
+const E290_NODE_GRAPH_FORBIDDEN: [&str; 12] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -2122,8 +2125,6 @@ const E290_NODE_GRAPH_FORBIDDEN: [&str; 14] = [
     "reticulum-heltec-vision-master-e290-semantic-hil",
     "reticulum-lab-rx-returned-fault-hil",
     "reticulum-lxmf-durable-ingress",
-    "reticulum-lxmf-model",
-    "reticulum-lxmf-store",
     "reticulum-rns-leviculum",
     "reticulum-rns-rete-rx",
     "reticulum-semantic-roundtrip-hil",
@@ -2251,6 +2252,7 @@ fn validate_e290_node_graph_for_root_features(
     }
     for package in [
         "reticulum-rns-inbox-store ",
+        "reticulum-lxmf-store ",
         "reticulum-device-api-credential-store ",
         "reticulum-device-api-credentials ",
         "reticulum-device-api-framing ",
@@ -2269,6 +2271,15 @@ fn validate_e290_node_graph_for_root_features(
                 "{profile} must keep the durable inbox, credential, authentication, and pre-authentication control packages feature-free; observed {line}"
             ));
         }
+    }
+    let allocator_line = tree
+        .lines()
+        .find(|line| line.contains("allocator-api2 "))
+        .ok_or_else(|| format!("{profile} graph has no allocator-api2 line"))?;
+    if !allocator_line.ends_with("features=[alloc]") {
+        return Err(format!(
+            "{profile} must enable only allocator-api2's alloc surface for explicit external placement, observed {allocator_line}"
+        ));
     }
     let println_line = tree
         .lines()
@@ -2315,6 +2326,13 @@ fn validate_e290_node_feature_boundary(
     let dependencies = package["dependencies"]
         .as_array()
         .ok_or_else(|| format!("{package_name} package has no dependency array"))?;
+    validate_exact_local_dependency(
+        dependencies,
+        package_name,
+        "reticulum-lxmf-store",
+        &workspace.join("crates/lxmf-store"),
+        false,
+    )?;
     validate_exact_local_dependency(
         dependencies,
         package_name,
@@ -2377,6 +2395,15 @@ fn validate_e290_node_feature_boundary(
         "reticulum-device-api-session",
         &workspace.join("crates/device-api-session"),
         false,
+    )?;
+    validate_exact_target_registry_dependency(
+        dependencies,
+        package_name,
+        "allocator-api2",
+        "=0.3.1",
+        "cfg(target_arch = \"xtensa\")",
+        false,
+        &["alloc"],
     )?;
     validate_exact_target_registry_dependency(
         dependencies,
@@ -9432,6 +9459,9 @@ mod tests {
     }
 
     fn e290_node_metadata_fixture(root: &Path) -> serde_json::Value {
+        let mut allocator_api = handoff_dependency_fixture("allocator-api2", "=0.3.1", None);
+        allocator_api["features"] = serde_json::json!(["alloc"]);
+        allocator_api["target"] = serde_json::json!("cfg(target_arch = \"xtensa\")");
         let mut esp_alloc = handoff_dependency_fixture("esp-alloc", "=0.10.0", None);
         esp_alloc["features"] =
             serde_json::json!(["esp32s3", "global-allocator", "internal-heap-stats"]);
@@ -9457,6 +9487,12 @@ mod tests {
                     "runtime-measurement-hil": ["esp-alloc/alloc-hooks"]
                 },
                 "dependencies": [
+                    handoff_path_dependency_fixture(
+                        "reticulum-lxmf-store",
+                        "*",
+                        &root.join("crates/lxmf-store"),
+                        None,
+                    ),
                     handoff_path_dependency_fixture(
                         "reticulum-rns-inbox-store",
                         "*",
@@ -9515,6 +9551,7 @@ mod tests {
                     embedded_storage_dev,
                     handoff_dependency_fixture("rand_core", "=0.6.4", None),
                     handoff_dependency_fixture("zeroize", "=1.9.0", None),
+                    allocator_api,
                     esp_alloc,
                     esp_println,
                 ]
@@ -9525,6 +9562,7 @@ mod tests {
     #[test]
     fn permanent_e290_node_graph_is_lora_first_with_transport_neutral_durability() {
         let valid = "reticulum-heltec-vision-master-e290-node v0.1.0 features=[default]\n\
+                     ├── allocator-api2 v0.3.1 features=[alloc]\n\
                      ├── embedded-storage v0.3.1 features=[]\n\
                      ├── esp-alloc v0.10.0 features=[compat,default,esp32s3,global-allocator,internal-heap-stats]\n\
                      ├── esp-println v0.17.0 features=[esp32s3,log-04,no-op]\n\
@@ -9545,6 +9583,8 @@ mod tests {
                      ├── reticulum-device-api-session v0.1.0 features=[]\n\
                      ├── reticulum-device-identity-store v0.1.0 features=[]\n\
                      ├── reticulum-interface-router v0.1.0 features=[]\n\
+                     ├── reticulum-lxmf-store v0.1.0 features=[]\n\
+                     │   └── reticulum-lxmf-model v0.1.0 features=[]\n\
                      ├── reticulum-node-core v0.1.0 features=[]\n\
                      │   └── reticulum-rns-rete v0.1.0 features=[]\n\
                      │       ├── rete-core v0.1.0 features=[alloc,default]\n\
@@ -9663,6 +9703,7 @@ mod tests {
         }
         for package in [
             "reticulum-rns-inbox-store",
+            "reticulum-lxmf-store",
             "reticulum-device-api-credential-store",
             "reticulum-device-api-credentials",
             "reticulum-device-api-framing",
@@ -9680,6 +9721,12 @@ mod tests {
                 "permanent node accepted feature drift on feature-free package {package}"
             );
         }
+
+        let allocator_drift = valid.replace(
+            "allocator-api2 v0.3.1 features=[alloc]",
+            "allocator-api2 v0.3.1 features=[alloc,std]",
+        );
+        assert!(validate_e290_node_graph_boundary(&allocator_drift).is_err());
 
         for forbidden_backend in ["auto", "jtag-serial", "uart"] {
             let feature_drift = valid.replacen(
@@ -10072,12 +10119,17 @@ fn sample(layout: Layout) {
     }
 
     #[test]
-    fn permanent_e290_node_requires_exact_direct_authentication_dependencies() {
+    fn permanent_e290_node_requires_exact_direct_storage_and_authentication_dependencies() {
         let root = workspace_root();
         let baseline = e290_node_metadata_fixture(&root);
         validate_e290_node_feature_boundary(&baseline.to_string(), &root).unwrap();
 
         for (dependency_name, wrong_path, rename) in [
+            (
+                "reticulum-lxmf-store",
+                "crates/not-the-lxmf-store",
+                "lxmf-store",
+            ),
             (
                 "reticulum-rns-inbox-store",
                 "crates/not-the-rns-inbox-store",
@@ -10192,6 +10244,35 @@ fn sample(layout: Layout) {
                     "permanent node accepted {dependency_name} {label} drift"
                 );
             }
+        }
+
+        for (field, value) in [
+            ("req", serde_json::json!("^0.3")),
+            (
+                "source",
+                serde_json::json!("registry+https://example.invalid/index"),
+            ),
+            (
+                "path",
+                serde_json::json!(root.join("vendor/lookalike-allocator-api2")),
+            ),
+            ("kind", serde_json::json!("dev")),
+            ("optional", serde_json::json!(true)),
+            ("rename", serde_json::json!("external-allocator")),
+            ("target", serde_json::Value::Null),
+            ("uses_default_features", serde_json::json!(true)),
+            ("features", serde_json::json!(["alloc", "std"])),
+        ] {
+            let mut drifted = baseline.clone();
+            fixture_dependency_mut(
+                fixture_package_mut(&mut drifted, "reticulum-heltec-vision-master-e290-node"),
+                "allocator-api2",
+                None,
+            )[field] = value;
+            assert!(
+                validate_e290_node_feature_boundary(&drifted.to_string(), &root).is_err(),
+                "permanent node accepted allocator-api2 {field} drift"
+            );
         }
 
         for (dependency_name, requirement) in [
@@ -10447,7 +10528,7 @@ fn sample(layout: Layout) {
     }
 
     #[test]
-    fn durable_lxmf_owners_remain_preintegration_in_every_product_and_hil_graph() {
+    fn lxmf_store_is_composed_only_in_e290_while_ingress_remains_preintegration() {
         for (label, forbidden) in [
             ("Tracker product", &PRODUCT_GRAPH_FORBIDDEN[..]),
             ("storage HIL", &STORAGE_HIL_GRAPH_FORBIDDEN[..]),
@@ -10457,7 +10538,6 @@ fn sample(layout: Layout) {
                 &SEMANTIC_TX_HIL_GRAPH_FORBIDDEN[..],
             ),
             ("E290 semantic HIL", &E290_SEMANTIC_HIL_GRAPH_FORBIDDEN[..]),
-            ("permanent E290 node", &E290_NODE_GRAPH_FORBIDDEN[..]),
         ] {
             for package in [
                 "reticulum-lxmf-model",
@@ -10470,6 +10550,11 @@ fn sample(layout: Layout) {
                 );
             }
         }
+        for package in ["reticulum-lxmf-model", "reticulum-lxmf-store"] {
+            assert!(E290_NODE_GRAPH_REQUIRED.contains(&package));
+            assert!(!E290_NODE_GRAPH_FORBIDDEN.contains(&package));
+        }
+        assert!(E290_NODE_GRAPH_FORBIDDEN.contains(&"reticulum-lxmf-durable-ingress"));
     }
 
     #[test]

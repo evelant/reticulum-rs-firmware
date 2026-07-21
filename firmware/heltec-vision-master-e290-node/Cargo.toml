@@ -30,6 +30,7 @@ reticulum-device-api-pairing-policy = { path = "../../crates/device-api-pairing-
 reticulum-device-api-session = { path = "../../crates/device-api-session", default-features = false }
 reticulum-device-identity-store = { path = "../../crates/device-identity-store", default-features = false }
 reticulum-interface-router = { path = "../../crates/interface-router", default-features = false }
+reticulum-lxmf-store = { path = "../../crates/lxmf-store", default-features = false }
 reticulum-node-core = { path = "../../crates/node-core", default-features = false }
 reticulum-nor-flash-region = { path = "../../crates/nor-flash-region", default-features = false }
 reticulum-radio-interface = { path = "../../crates/radio-interface", default-features = false }
@@ -45,6 +46,7 @@ rand_core.workspace = true
 zeroize.workspace = true
 
 [target.'cfg(target_arch = "xtensa")'.dependencies]
+allocator-api2 = { workspace = true, features = ["alloc"] }
 reticulum-radio-lora-phy = { path = "../../crates/radio-lora-phy" }
 reticulum-tx-handoff = { path = "../../crates/tx-handoff", default-features = false }
 

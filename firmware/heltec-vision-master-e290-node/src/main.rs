@@ -32,12 +32,14 @@ mod usb_pairing_task;
 use core::future::pending;
 use core::{future::Future, mem};
 
+use allocator_api2::vec::Vec;
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Delay, Duration, Instant, Timer, with_timeout};
 use embedded_hal::digital::{Error as DigitalError, ErrorKind, ErrorType};
 use embedded_hal_async::digital::Wait;
 use embedded_hal_bus::spi::ExclusiveDevice;
+use esp_alloc::ExternalMemory;
 #[cfg(feature = "runtime-measurement-hil")]
 use esp_alloc::{EspHeap, MemoryCapability};
 use esp_backtrace as _;
@@ -87,6 +89,7 @@ use reticulum_heltec_vision_master_e290_node::{
     storage_device_id_from_eui48,
 };
 use reticulum_interface_router::InterfaceFabric;
+use reticulum_lxmf_store::LxmfStoreIndexSlot;
 use reticulum_node_core::{
     ApplicationEventOwner, ApplicationEventSlot, InboundProofPolicy, NodeConfig, NodeCore,
     NodeIdentity, NodeInstanceId, OrdinaryBufferPool, OrdinaryPacketBuffer, PacketInterfaceId,
@@ -321,7 +324,15 @@ async fn product_main(
         ram_frequency: SpiRamFreq::Freq40m,
     };
     let psram = Psram::new(peripherals.PSRAM, psram_config);
-    let (_, psram_bytes) = psram.raw_parts();
+    let (psram_start, psram_bytes) = psram.raw_parts();
+    let psram_start_address = psram_start as usize;
+    let psram_end_address = match psram_start_address.checked_add(psram_bytes) {
+        Some(end) => end,
+        None => {
+            error!("e290-node stage=psram status=FAIL reason=mapped-range-overflow");
+            inert_forever().await
+        }
+    };
     if !(config::MINIMUM_PSRAM_BYTES..=config::MAXIMUM_PSRAM_BYTES).contains(&psram_bytes) {
         error!(
             "e290-node stage=psram status=FAIL expected_bytes={}..={} actual_bytes={psram_bytes}",
@@ -341,6 +352,76 @@ async fn product_main(
     let software_interrupts =
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timers.timer0, software_interrupts.software_interrupt0);
+
+    let mut lxmf_index = Vec::new_in(ExternalMemory);
+    if lxmf_index
+        .try_reserve_exact(config::LXMF_INDEX_SLOTS)
+        .is_err()
+    {
+        error!(
+            "e290-node stage=lxmf-index status=FAIL reason=external-allocation slots={} expected_bytes={}",
+            config::LXMF_INDEX_SLOTS,
+            config::LXMF_INDEX_STORAGE_BYTES,
+        );
+        inert_forever().await
+    }
+    if lxmf_index.capacity() < config::LXMF_INDEX_SLOTS {
+        error!(
+            "e290-node stage=lxmf-index status=FAIL reason=allocation-capacity expected_slots={} actual_slots={}",
+            config::LXMF_INDEX_SLOTS,
+            lxmf_index.capacity(),
+        );
+        inert_forever().await
+    }
+    for _ in 0..config::LXMF_INDEX_SLOTS {
+        if lxmf_index
+            .push_within_capacity(LxmfStoreIndexSlot::new())
+            .is_err()
+        {
+            error!(
+                "e290-node stage=lxmf-index status=FAIL reason=initialization-capacity expected_slots={} initialized_slots={}",
+                config::LXMF_INDEX_SLOTS,
+                lxmf_index.len(),
+            );
+            inert_forever().await
+        }
+    }
+    let lxmf_index_bytes = mem::size_of_val(lxmf_index.as_slice());
+    let lxmf_index_start = lxmf_index.as_ptr() as usize;
+    let lxmf_index_end = match lxmf_index_start.checked_add(lxmf_index_bytes) {
+        Some(end) => end,
+        None => {
+            error!("e290-node stage=lxmf-index status=FAIL reason=allocation-range-overflow");
+            inert_forever().await
+        }
+    };
+    if lxmf_index.len() != config::LXMF_INDEX_SLOTS
+        || lxmf_index_bytes != config::LXMF_INDEX_STORAGE_BYTES
+    {
+        error!(
+            "e290-node stage=lxmf-index status=FAIL reason=initialized-size expected_slots={} actual_slots={} expected_bytes={} actual_bytes={lxmf_index_bytes}",
+            config::LXMF_INDEX_SLOTS,
+            lxmf_index.len(),
+            config::LXMF_INDEX_STORAGE_BYTES,
+        );
+        inert_forever().await
+    }
+    if !lxmf_index_start.is_multiple_of(mem::align_of::<LxmfStoreIndexSlot>())
+        || lxmf_index_start < psram_start_address
+        || lxmf_index_end > psram_end_address
+    {
+        error!(
+            "e290-node stage=lxmf-index status=FAIL reason=external-address allocation_start=0x{lxmf_index_start:08x} allocation_end=0x{lxmf_index_end:08x} psram_start=0x{psram_start_address:08x} psram_end=0x{psram_end_address:08x} alignment={}",
+            mem::align_of::<LxmfStoreIndexSlot>(),
+        );
+        inert_forever().await
+    }
+    info!(
+        "e290-node stage=lxmf-index status=PASS ownership=boot-lifetime-external slots={} reserved_slots={} bytes={lxmf_index_bytes} start=0x{lxmf_index_start:08x} end=0x{lxmf_index_end:08x}",
+        config::LXMF_INDEX_SLOTS,
+        lxmf_index.capacity(),
+    );
+    let lxmf_index: &'static mut [LxmfStoreIndexSlot] = lxmf_index.leak();
     #[cfg(feature = "runtime-measurement-hil")]
     let runtime_measurement_started_us = monotonic_us();
     #[cfg(feature = "runtime-measurement-hil")]
@@ -573,14 +654,33 @@ async fn product_main(
             None
         }
     };
+    let lxmf = match flash_owner.mount_lxmf(lxmf_index) {
+        Ok(lxmf) => {
+            info!(
+                "e290-node stage=lxmf-store-mount status=PASS profile=mounted-not-admitted index_slots={} messages={} consumed_extents={} partition=0x930000..0xb30000 plaintext=true writes=0 erases=0 lxmf_delivery_admission=closed lora_routing=continue",
+                config::LXMF_INDEX_SLOTS,
+                lxmf.message_count(),
+                lxmf.consumed_extents(),
+            );
+            Some(lxmf)
+        }
+        Err(reason) => {
+            error!(
+                "e290-node stage=lxmf-store-mount status=DISABLED reason={reason:?} lora_routing=continue lxmf_delivery_admission=closed"
+            );
+            None
+        }
+    };
     let storage_coordinator = flash_owner.into_storage_coordinator(
         submission_runtime,
         inbox,
+        lxmf,
         credential_boot,
         device_api_id,
     );
     let storage_service_available = storage_coordinator.submission_service_available();
     let inbox_service_available = storage_coordinator.inbox_service_available();
+    let lxmf_service_available = storage_coordinator.lxmf_service_available();
     let credential_boot_state = storage_coordinator.credential_boot_state();
     let credential_binding = storage_coordinator.credential_binding();
     let credential_revision = storage_coordinator.credential_revision();
@@ -863,7 +963,8 @@ async fn product_main(
     RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE
         .record_composition_ready(monotonic_us().saturating_sub(runtime_measurement_started_us));
     info!(
-        "e290-node stage=composition status=PASS tasks=3 interfaces=1 primary_transport=lora future_transport_actors=deferred node_journal=mounted resident_storage_available={storage_service_available} durable_rns_inbox_available={inbox_service_available} rns_inbox_capacity=1 credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} preauth_initialization_bearer=usb-serial-jtag preauth_live_pairing_bearer=usb-serial-jtag pairing_button_gpio=21 authenticated_local_api=node-dispatch bearer_session=usb-authenticated-single-flight credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} admission=session-selected runtime_patch={} flash_assumption_bytes=16777216",
+        "e290-node stage=composition status=PASS tasks=3 interfaces=1 primary_transport=lora future_transport_actors=deferred node_journal=mounted resident_storage_available={storage_service_available} durable_rns_inbox_available={inbox_service_available} rns_inbox_capacity=1 lxmf_store_available={lxmf_service_available} lxmf_index_slots={} lxmf_delivery_admission=closed credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} preauth_initialization_bearer=usb-serial-jtag preauth_live_pairing_bearer=usb-serial-jtag pairing_button_gpio=21 authenticated_local_api=node-dispatch bearer_session=usb-authenticated-single-flight credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} admission=session-selected runtime_patch={} flash_assumption_bytes=16777216",
+        config::LXMF_INDEX_SLOTS,
         credential_binding.absolute_offset(),
         credential_binding.length(),
         config::DURABLE_RUNTIME_BYTES,

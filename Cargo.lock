@@ -1896,6 +1896,7 @@ dependencies = [
 name = "reticulum-heltec-vision-master-e290-node"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "critical-section",
  "embassy-executor",
  "embassy-futures",
@@ -1928,6 +1929,7 @@ dependencies = [
  "reticulum-device-api-session",
  "reticulum-device-identity-store",
  "reticulum-interface-router",
+ "reticulum-lxmf-store",
  "reticulum-node-core",
  "reticulum-nor-flash-region",
  "reticulum-radio-interface",

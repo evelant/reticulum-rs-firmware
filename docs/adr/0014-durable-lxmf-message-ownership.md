@@ -1,7 +1,7 @@
 # ADR 0014: Durable LXMF message ownership
 
-- **Status:** accepted for the first portable store and event-owner tranche;
-  target composition remains deferred
+- **Status:** accepted for the portable store/event-owner tranche and E290
+  read-only store mount; destination admission remains deferred
 - **Date:** 2026-07-21
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0004](0004-sole-flash-coordinator.md),
@@ -115,17 +115,16 @@ programmed wire padding, digest mismatch, unsupported format, incompatible
 geometry, or an undersized RAM index fails closed. Mount does not erase or
 repair media.
 
-The partition length is a product-layout choice, not a crate constant. If the
-E290's current 2 MiB raw-inbox qualification range were explicitly and
-destructively reformatted for format 1, overhead would leave exactly 1,834,752
-bytes for one large normalized record and provide 512 one-extent slots for
-current opportunistic messages. The two formats cannot coexist in that range;
-selecting and migrating the product layout remains target-composition work. The
-released-Python maximum opportunistic carrier is 391 bytes, or 407 normalized
-bytes, and fits in one extent. There is no imported 383-byte ceiling. Future
-Resource ingress may stream larger bodies into the same kind of blob owner
-under an explicit board/product limit; it must not require an equally large
-PSRAM allocation.
+The partition length is a product-layout choice, not a crate constant. The
+E290 now assigns a separate 2 MiB `lxmf_store` range at
+`0x930000..0xb30000`, preserving the existing 2 MiB raw-inbox qualification
+range byte-for-byte. Format overhead leaves exactly 1,834,752 bytes for one
+large normalized record and provides 512 one-extent slots for current
+opportunistic messages. The released-Python maximum opportunistic carrier is
+391 bytes, or 407 normalized bytes, and fits in one extent. There is no
+imported 383-byte ceiling. Future Resource ingress may stream larger bodies
+into the same kind of blob owner under an explicit board/product limit; it
+must not require an equally large PSRAM allocation.
 
 A format-1 record carries a `u16` extent count, so its one-record maximum is
 capped at 65,535 extents even when the partition is larger. A prospective
@@ -195,10 +194,12 @@ tests using a real retained Rete DATA/proof pair and the released Python
 `basic_binary` LXMF fixture prove new and replay commits, capacity-before-I/O,
 and lost-terminal-write retry without duplicate ready proofs.
 
-The permanent E290 node still configures its existing immediate-proof policy.
-It does not yet register the LXMF destination, mount this store, provide delayed
-event/proof capacity, or drain ready proofs through the ordinary router.
-Therefore the portable tranche still does **not** prove that a remote sender's
+The permanent E290 node still configures its existing primary destination's
+immediate-proof policy. It now validates and read-only mounts the separate LXMF
+partition into 512 caller-owned slots explicitly allocated in PSRAM, but it
+does not register the LXMF destination, admit an application event, provide
+delayed-proof capacity, or drain ready proofs through the ordinary router.
+Therefore this target tranche still does **not** prove that a remote sender's
 delivery receipt from the powered product means the LXMF record was durable.
 The existing raw-inbox evidence must not be relabelled as this stronger claim.
 
@@ -210,19 +211,20 @@ The existing raw-inbox evidence must not be relabelled as this stronger claim.
 - Full-product and reduced profiles choose explicit wire, record, index, and
   total-storage limits. A reduced board may disable the LXMF store without
   narrowing the full-feature protocol design.
-- The fixed, caller-backed RAM index is also profile-owned. A full 512-entry
-  E290 index must be deliberately placed and measured against PSRAM/static-
-  memory and task-stack policy during target composition; the portable API
-  must not turn a convenient small stack allocation into a product capacity
-  ceiling.
+- The fixed, caller-backed RAM index is also profile-owned. The E290 allocates
+  its full 512-entry index through `ExternalMemory`, validates the exact
+  initialized slice inside the detected PSRAM mapping, and retains it for the
+  boot. Powered high-water measurement remains a separate qualification step;
+  the portable API does not turn a convenient small stack allocation into a
+  product capacity ceiling.
 - The first format trades space for simple power-loss isolation: one interrupted
   append retires extents until later compaction. That is bounded and observable,
   but not yet an endurance-ready mailbox.
 - Exact bytes remain available to future LXMF, NomadNet, Micron, and API layers;
   lossy UTF-8 or JSON projections cannot become the durable authority.
 - Resource reception, propagation, outgoing encode/send/retry, tickets and
-  ratchets, read/delete/tombstone state, client APIs, and target composition
-  remain explicit later tranches.
+  ratchets, read/delete/tombstone state, client APIs, and target destination/
+  ingress/proof composition remain explicit later tranches.
 
 ## Acceptance evidence
 

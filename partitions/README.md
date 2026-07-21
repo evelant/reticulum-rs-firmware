@@ -13,7 +13,8 @@
 | `device_config` | `0x616000..0x630000` | 104 KiB | Reserved, not wired |
 | `node_journal` | `0x630000..0x730000` | 1 MiB | Resident operation-scoped submission runtime |
 | `message_store` | `0x730000..0x930000` | 2 MiB | Wired raw-RNS inbox qualification slot; not an LXMF store |
-| unpartitioned | `0x930000..0x1000000` | 6.8125 MiB | OTA/layout decision |
+| `lxmf_store` | `0x930000..0xb30000` | 2 MiB | Wired append-only LXMF store; mounted read-only at boot, admission not yet composed |
+| unpartitioned | `0xb30000..0x1000000` | 4.8125 MiB | OTA/layout decision |
 
 The journal and message-store offsets are unchanged. The previously unwired
 `device_config` reservation is split into a dedicated 8 KiB
@@ -25,6 +26,14 @@ auto-provisions erased media. The journal, message store,
 identity, announce clock, and credential range use ESP-IDF's standard
 `data,undefined` subtype. No unsupported numeric subtype is used to imply
 application ownership.
+
+The separate `lxmf_store` range preserves every byte and meaning of
+`message_store`. Boot binds it to the same eFuse-derived physical device ID,
+mounts format 1 through the sole flash owner, and builds an exact 512-slot
+opaque index in explicitly allocated PSRAM. This stage registers no
+`lxmf.delivery` destination, consumes no application event, commits no LXMF
+candidate, and releases no delayed proof. A successful mount is storage
+composition only, not LXMF delivery admission or powered durability evidence.
 
 The complete `message_store` range is now bound to the deliberately temporary
 [ADR 0011](../docs/adr/0011-durable-rns-inbox-qualification.md) format-1
@@ -272,8 +281,9 @@ canonical empty A1 journal trajectory before committing identity. Provisioning
 never erases; after identity is committed, only strict mount is allowed. Boot
 drives the submission runtime through complete conservative recovery and then
 retains it behind the resident operation-scoped flash coordinator. Device
-configuration and final LXMF/message storage remain deferred. The wired inbox
-is only the one-entry raw-RNS qualification format above.
+configuration remains deferred. The wired inbox is only the one-entry raw-RNS
+qualification format above; the separate LXMF store is read-only mounted at
+boot but has no destination, admission, or proof composition yet.
 The product does not start protocol service unless clock reservation, journal
 mount/recovery, and redundant identity coverage all succeed. LoRa is the
 primary first transport slice.
@@ -285,8 +295,8 @@ Raw full-flash dumps now contain a private key after provisioning. Set
 `umask 077` before creating them and retain them only with restricted
 permissions on encrypted storage. After the required backup and before the
 first product boot, perform either a full-chip erase or an exact, readback-
-verified erase of `0x610000..0x930000`, including the complete `message_store`.
-The unpadded merged image does not
+verified erase of `0x610000..0xb30000`, including the complete `message_store`
+and `lxmf_store`. The unpadded merged image does not
 initialize those data partitions. Subsequent upgrades must preserve every
 product store; do not repeat the provisioning erase. The exact guarded sequence is in
 [`docs/e290-node.md`](../docs/e290-node.md). This table must not be used through

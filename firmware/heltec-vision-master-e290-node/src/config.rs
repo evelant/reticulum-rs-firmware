@@ -44,6 +44,18 @@ pub const APPLICATION_EVENT_SLOTS: usize = 16;
 /// Internal static RAM occupied by the fixed application-event slot array.
 pub const APPLICATION_EVENT_STORAGE_BYTES: usize =
     core::mem::size_of::<[reticulum_node_core::ApplicationEventSlot; APPLICATION_EVENT_SLOTS]>();
+/// Caller-owned LXMF index slots retained in external PSRAM for the full boot.
+pub const LXMF_INDEX_SLOTS: usize =
+    crate::partition_contract::LXMF_STORE_LEN as usize / reticulum_lxmf_store::EXTENT_SIZE;
+/// Exact initialized byte span occupied by the external LXMF index slice.
+pub const LXMF_INDEX_STORAGE_BYTES: usize =
+    core::mem::size_of::<reticulum_lxmf_store::LxmfStoreIndexSlot>() * LXMF_INDEX_SLOTS;
+const _: () = assert!(
+    (crate::partition_contract::LXMF_STORE_LEN as usize)
+        .is_multiple_of(reticulum_lxmf_store::EXTENT_SIZE)
+);
+const _: () = assert!(LXMF_INDEX_SLOTS == 512);
+const _: () = assert!(LXMF_INDEX_STORAGE_BYTES > 0);
 /// Concrete interface actors in the first LoRa-only executable profile.
 pub const INTERFACE_SLOTS: usize = 1;
 /// Jobs, completions and ingress buffers available per concrete actor.

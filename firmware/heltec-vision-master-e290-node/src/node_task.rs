@@ -845,6 +845,15 @@ pub async fn run(
                                     "e290-node stage=durable-submission status=DEFERRED reason=credential-mutation-in-flight retry_not_before_ms={retry_not_before_ms}"
                                 );
                             }
+                            ProductSubmissionDrive::DeferredForLxmfMutation => {
+                                let retry_not_before_ms =
+                                    owner_now.saturating_add(config::STORAGE_RETRY_BACKOFF_MS);
+                                durability_service =
+                                    durability_service.retry_at(retry_not_before_ms);
+                                info!(
+                                    "e290-node stage=durable-submission status=DEFERRED reason=lxmf-mutation-in-flight retry_not_before_ms={retry_not_before_ms}"
+                                );
+                            }
                             ProductSubmissionDrive::Runtime(Err(reason)) => {
                                 storage.disable_submission_service();
                                 let previous = durability_service;
@@ -1244,12 +1253,16 @@ fn step_pairing_frontier(
             state.pending_session_admission_reply =
                 Some(SessionAdmissionReply::new(connection, outcome));
             progressed = true;
-        } else if next_lane == Some(PairingCommandLane::Live) {
-            progressed |= admit_live_pairing_command(storage, state, rng);
+        } else if next_lane == Some(PairingCommandLane::Live)
+            && state
+                .live_retry_not_before_ms
+                .is_none_or(|deadline| now_millis >= deadline)
+        {
+            progressed |= admit_live_pairing_command(storage, state, rng, now_millis);
             if state.pending_live_command.is_some() {
-                // Journal-owned mutation is causally after this request. Keep
-                // later policy events and timeout polls behind the retained
-                // command until journal ownership settles.
+                // A conflicting cross-store mutation is causally after this
+                // request. Keep later policy events and timeout polls behind
+                // the retained command until storage ownership settles.
                 break;
             }
         } else if next_lane == Some(PairingCommandLane::Control) {
@@ -1366,6 +1379,12 @@ fn handle_pairing_control_command(
                         | ProductInitializationRequest::DeferredForJournalMutation => {
                             InitializeResult::Retrying
                         }
+                        ProductInitializationRequest::DeferredForLxmfMutation => {
+                            info!(
+                                "e290-node stage=credential-initialization status=DEFERRED reason=lxmf-mutation-in-flight"
+                            );
+                            InitializeResult::Retrying
+                        }
                         ProductInitializationRequest::Runtime(Err(refusal)) => {
                             public_initialization_refusal(refusal)
                         }
@@ -1391,6 +1410,7 @@ fn admit_live_pairing_command(
     storage: &mut ProductStorageCoordinator,
     state: &mut PairingNodeState,
     rng: &mut Trng,
+    now_millis: u64,
 ) -> bool {
     let command = state
         .pending_live_command
@@ -1409,10 +1429,19 @@ fn admit_live_pairing_command(
         ));
         return true;
     }
+    state.live_retry_not_before_ms = None;
 
     match storage.request_live_pairing(at, connection, request, rng) {
         ProductLivePairingAdmission::DeferredForJournalMutation(request) => {
             state.pending_live_command = Some(LivePairingCommand::new(at, connection, request));
+        }
+        ProductLivePairingAdmission::DeferredForLxmfMutation(request) => {
+            let retry_not_before_ms = now_millis.saturating_add(config::STORAGE_RETRY_BACKOFF_MS);
+            state.pending_live_command = Some(LivePairingCommand::new(at, connection, request));
+            state.live_retry_not_before_ms = Some(retry_not_before_ms);
+            info!(
+                "e290-node stage=credential-live-pairing status=DEFERRED reason=lxmf-mutation-in-flight retry_not_before_ms={retry_not_before_ms}"
+            );
         }
         ProductLivePairingAdmission::Immediate(response) => {
             if response.sequence() == sequence && kind.matches_response(&response) {

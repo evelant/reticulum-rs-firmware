@@ -40,6 +40,7 @@ mod live_admission_test_support;
 mod live_admission_tests;
 
 use reticulum_device_api_credential_store::{CredentialStoreBinding, CredentialStoreDeviceId};
+use reticulum_lxmf_store::{LxmfStoreBinding, LxmfStoreDeviceId};
 use reticulum_rns_inbox_store::{InboxStoreBinding, InboxStoreDeviceId};
 use reticulum_storage_actor::{JournalBinding, StorageDeviceId};
 
@@ -100,6 +101,20 @@ pub const fn rns_inbox_binding(device: StorageDeviceId) -> InboxStoreBinding {
     )
 }
 
+/// Bind the append-only LXMF store to the same physical E290 flash ID.
+pub const fn lxmf_store_binding(device: StorageDeviceId) -> LxmfStoreBinding {
+    let bytes = device.as_bytes();
+    LxmfStoreBinding::new(
+        LxmfStoreDeviceId::new([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+        ]),
+        partition_contract::LXMF_STORE_OFFSET as usize,
+        partition_contract::LXMF_STORE_LEN as usize,
+        reticulum_lxmf_store::PHYSICAL_FORMAT_VERSION,
+    )
+}
+
 const _: () = assert!(
     partition_contract::NODE_IDENTITY_LEN as usize
         == reticulum_device_identity_store::PARTITION_SIZE
@@ -127,8 +142,8 @@ mod tests {
     extern crate std;
 
     use crate::{
-        api_credentials_binding, config, device_api_id_from_eui48, node_journal_binding,
-        partition_contract, rns_inbox_binding, storage_device_id_from_eui48,
+        api_credentials_binding, config, device_api_id_from_eui48, lxmf_store_binding,
+        node_journal_binding, partition_contract, rns_inbox_binding, storage_device_id_from_eui48,
     };
     use reticulum_node_core::{NodeConfig, NodeCore, NodeIdentity, NodeInstanceId};
 
@@ -142,6 +157,8 @@ mod tests {
         assert_eq!(partition_contract::NODE_JOURNAL_LEN, 0x0010_0000);
         assert_eq!(partition_contract::MESSAGE_STORE_OFFSET, 0x0073_0000);
         assert_eq!(partition_contract::MESSAGE_STORE_LEN, 0x0020_0000);
+        assert_eq!(partition_contract::LXMF_STORE_OFFSET, 0x0093_0000);
+        assert_eq!(partition_contract::LXMF_STORE_LEN, 0x0020_0000);
         assert_eq!(
             partition_contract::NODE_JOURNAL_LEN as usize,
             reticulum_storage_journal::PARTITION_SIZE
@@ -164,7 +181,11 @@ mod tests {
         );
         assert_eq!(
             partition_contract::MESSAGE_STORE_OFFSET + partition_contract::MESSAGE_STORE_LEN,
-            0x0093_0000
+            partition_contract::LXMF_STORE_OFFSET
+        );
+        assert_eq!(
+            partition_contract::LXMF_STORE_OFFSET + partition_contract::LXMF_STORE_LEN,
+            0x00b3_0000
         );
         assert_eq!(
             partition_contract::API_CREDENTIALS_LABEL_BYTES,
@@ -181,6 +202,10 @@ mod tests {
         assert_eq!(
             partition_contract::MESSAGE_STORE_LABEL_BYTES,
             *b"message_store\0\0\0"
+        );
+        assert_eq!(
+            partition_contract::LXMF_STORE_LABEL_BYTES,
+            *b"lxmf_store\0\0\0\0\0\0"
         );
         let device = storage_device_id_from_eui48([0xac, 0xa7, 0x04, 0xe1, 0x3e, 0x88]);
         assert_eq!(device.as_bytes(), b"e290-flash\xac\xa7\x04\xe1\x3e\x88");
@@ -212,6 +237,14 @@ mod tests {
             inbox_binding.format_version(),
             reticulum_rns_inbox_store::PHYSICAL_FORMAT_VERSION
         );
+        let lxmf_binding = lxmf_store_binding(device);
+        assert_eq!(lxmf_binding.device().as_bytes(), device.as_bytes());
+        assert_eq!(lxmf_binding.absolute_offset(), 0x0093_0000);
+        assert_eq!(lxmf_binding.length(), 0x0020_0000);
+        assert_eq!(
+            lxmf_binding.format_version(),
+            reticulum_lxmf_store::PHYSICAL_FORMAT_VERSION
+        );
     }
 
     #[test]
@@ -232,6 +265,7 @@ mod tests {
             "flash_owner.boot_identity(&mut bootstrap_rng)",
             "flash_owner.mount_node_runtime(u64::from(announce_epoch.get()))",
             "flash_owner.mount_inbox()",
+            "flash_owner.mount_lxmf(lxmf_index)",
         ] {
             let later = source
                 .find(later_operation)
@@ -241,6 +275,40 @@ mod tests {
                 "credential boot must precede {later_operation}"
             );
         }
+    }
+
+    #[test]
+    fn lxmf_index_is_external_mounted_and_not_yet_admitted() {
+        assert_eq!(
+            config::LXMF_INDEX_SLOTS,
+            partition_contract::LXMF_STORE_LEN as usize / reticulum_lxmf_store::EXTENT_SIZE
+        );
+        assert_eq!(config::LXMF_INDEX_SLOTS, 512);
+
+        let main = include_str!("main.rs");
+        assert!(main.contains("Vec::new_in(ExternalMemory)"));
+        assert!(main.contains(".try_reserve_exact(config::LXMF_INDEX_SLOTS)"));
+        assert!(main.contains("lxmf_index.len() != config::LXMF_INDEX_SLOTS"));
+        assert!(main.contains("let lxmf_index: &'static mut [LxmfStoreIndexSlot]"));
+        assert!(main.contains("flash_owner.mount_lxmf(lxmf_index)"));
+        assert!(main.contains("lxmf_delivery_admission=closed"));
+        assert!(!main.contains("RNS_LXMF_ASPECTS"));
+
+        let storage = include_str!("platform_storage.rs");
+        assert!(storage.contains("lxmf: Option<MountedLxmfStore<'static>>"));
+        let offer = storage
+            .split("pub(crate) fn offer_authorized_frame(")
+            .nth(1)
+            .and_then(|tail| tail.split("/// Advance at most one durable").next())
+            .expect("the journal projection offer must have a stable source boundary");
+        let gate = offer
+            .find("journal_projection_gate(self.lxmf_mutation_pending())")
+            .expect("LXMF pending mutation must gate journal projection");
+        let mutation = offer
+            .find("offer_authorized_frame(observation)")
+            .expect("the runtime projection call must remain explicit");
+        assert!(gate < mutation);
+        assert!(offer.contains("return Some(Ok(FrameOfferProgress::Retain));"));
     }
 
     #[test]

@@ -448,6 +448,14 @@ DMA/IRQ-visible state and flash-critical state must remain internal. Largest
 contiguous free space is not exposed by the pinned allocator and must not be
 inferred from total free bytes.
 
+The first explicit placement is now the LXMF store index. Its 512 opaque slots
+are derived from the exact 2 MiB partition length divided by the store's 4 KiB
+extent size, allocated with `ExternalMemory` after PSRAM registration, checked
+for exact initialized length/bytes/alignment and containment in the detected
+PSRAM mapping, then leaked as a boot-lifetime slice. Allocation or validation
+failure leaves the product inert. This does not place application-event or
+delayed-proof slots in PSRAM.
+
 The target requires a 16 MiB flash image/header and uses
 [`partitions/heltec-vision-master-e290-node.csv`](../partitions/heltec-vision-master-e290-node.csv):
 
@@ -462,7 +470,8 @@ The target requires a 16 MiB flash image/header and uses
 | Device config | `0x616000` | 104 KiB | Reserved, not wired |
 | Node journal | `0x630000` | 1 MiB | Resident operation-scoped submission runtime; one-entry qualification cap; authenticated submission and post-re-enumeration terminal status powered-qualified |
 | Message store | `0x730000` | 2 MiB | Wired ADR 0011 format-1 raw-RNS inbox; one 576-byte commit-last item; 383-byte maximum; not LXMF |
-| Unallocated | `0x930000` | 6.8125 MiB | OTA/layout decision |
+| LXMF store | `0x930000` | 2 MiB | Wired ADR 0014 append-only store; 512-slot PSRAM index; mounted but not admitted |
+| Unallocated | `0xb30000` | 4.8125 MiB | OTA/layout decision |
 
 The workspace runner in `.cargo/config.toml` hardcodes an 8 MiB flash size and
 must not be used for this target.
@@ -676,6 +685,12 @@ fresh powered watermark.
 
 Run four clean trials in `B→A`, `A→B`, `A→B`, `B→A` order. The fixed board
 bindings are:
+
+This runbook is pinned to the exact pre-stage-4 `bac2dcc` proof-correlation
+artifact. Its `0x930000` upper boundary, 3 MiB erase/readback length, and known
+all-`0xff` hash are deliberately artifact-specific historical evidence. Do not
+silently substitute the current `0xb30000` product boundary or recompute those
+published values when reproducing that artifact.
 
 | Board | USB serial / MAC | Active credential | Primary destination |
 | --- | --- | --- | --- |
@@ -913,10 +928,12 @@ through identity, durable submission, sequential status, peer proof, and a
 post-re-enumeration terminal status read.
 `device_config` retains the standard NVS subtype while it is unwired; the
 application-owned journal and wired raw-RNS inbox retain `data,undefined`.
-Their labels and ranges remain distinct. The complete `message_store` range is
+The append-only LXMF store also retains `data,undefined`; all labels and ranges
+remain distinct. The complete `message_store` range is
 bound to the physical device ID, absolute offset, length, and inbox physical
-format version 1. Numeric custom subtypes are only valid with custom partition
-types in the image tooling and are not used here.
+format version 1. The separate `lxmf_store` is bound to the same device ID and
+its own exact range/format version. Numeric custom subtypes are only valid with
+custom partition types in the image tooling and are not used here.
 
 ### Durable identity, journal and announce ordering
 
@@ -1050,6 +1067,16 @@ credential or journal mutation owns flash, and otherwise commits or drops newest
 without erase, overwrite, acknowledgement, deletion, or reclamation. Mount or
 admission failure disables only inbox capability for that boot and leaves
 ordinary Reticulum routing/proof work available.
+
+The coordinator now also read-only mounts the separate 2 MiB `lxmf_store`
+through its caller-owned 512-slot PSRAM index and retains the mounted owner for
+the boot. Its pending-mutation fact participates in every credential, journal,
+and raw-inbox physical-mutation gate. The inverse LXMF gate admits its own
+pending state to the store so only the store can structurally validate an exact
+retry; credential or journal ownership still defers it. No `lxmf.delivery`
+destination, durable-ingress call, delayed-proof pool, ready-proof drain, or
+node-task LXMF ingestion is enabled yet. Mount success therefore cannot be
+reported as end-to-end LXMF durability.
 
 Journal mount, unsupported history, or recovery failure is isolated because it
 occurs during boot before a durability-gated DATA owner can exist: the
@@ -2130,24 +2157,24 @@ from the current callout-device name.
 5. Before the **first product provisioning boot**, after the backup, logically
    blank the durability range. The unpadded merged image contains the bootloader,
    partition table and application; it does not initialize
-   `0x610000..0x930000`. Flashing it over arbitrary old bytes therefore does
+   `0x610000..0xb30000`. Flashing it over arbitrary old bytes therefore does
    not create blank identity, clock, credential, configuration, journal, or
-   inbox media, and the firmware will correctly fail closed. Preserve all other
-   ranges and use the identity-owning helper's erase-equivalent all-`0xff`
-   write and readback to verify exactly the contiguous first-boot
-   durability/configuration region:
+   raw-inbox or LXMF-store media, and the firmware will correctly fail closed.
+   Preserve all other ranges and use the identity-owning helper's
+   erase-equivalent all-`0xff` write and readback to verify exactly the
+   contiguous first-boot durability/configuration region:
 
    ```sh
    python3.13 interop/python/e290_qualification_host.py erase-region \
      --usb-serial "$EXPECTED_USB_SERIAL" --expected-mac "$EXPECTED_MAC" \
      --expected-flash-bytes 16777216 \
      --evidence-prefix "$BACKUP_DIR/durability-erase" \
-     --offset 0x610000 --length 0x320000
+     --offset 0x610000 --length 0x520000
    ```
 
    This action accepts only the exact uppercase USB serial and 16 MiB target,
    requires sector-aligned in-bounds operands, leaves every `espflash` phase in
-   `no-reset`, reads back exactly 3,276,800 bytes, scans the entire file for
+   `no-reset`, reads back exactly 5,373,952 bytes, scans the entire file for
    `0xff`, and records its size and SHA-256 in
    `.erase-region.verified.json`. Its `operation` must be
    `identity_bound_all_ff_write`; a native `EraseRegion` claim is invalid. No
@@ -2175,12 +2202,31 @@ from the current callout-device name.
    of any phase evidence makes the write unverified even when `espflash`
    returned success.
 
-7. On every **subsequent upgrade**, preserve a new secret full-flash backup but
-   do not erase `node_identity`, `announce_clock`, `api_credentials`,
-   `node_journal`, or any newer product store. The unpadded merged-image write
-   must stop at or below
+7. A first install from any pre-`lxmf_store` partition layout requires a
+   one-time migration because `0x930000..0xb30000` was previously unallocated
+   and cannot be assumed erased. After the new secret full-flash backup and
+   while the board remains in the loader, blank and readback-verify exactly the
+   new partition before the first image with this layout is booted:
+
+   ```sh
+   python3.13 interop/python/e290_qualification_host.py erase-region \
+     --usb-serial "$EXPECTED_USB_SERIAL" --expected-mac "$EXPECTED_MAC" \
+     --expected-flash-bytes 16777216 \
+     --evidence-prefix "$BACKUP_DIR/lxmf-store-first-install" \
+     --offset 0x930000 --length 0x200000
+   ```
+
+   Require the verified record to bind offset `0x930000`, length and readback
+   size `0x200000` / 2,097,152 bytes, and an all-`0xff` readback to the qualified
+   board identity. Do not boot the new image without that record. This migration
+   must never erase or rewrite `message_store` or any earlier product range.
+
+   On every **subsequent upgrade after that partition exists**, preserve a new
+   secret full-flash backup but do not erase `node_identity`, `announce_clock`,
+   `api_credentials`, `node_journal`, `message_store`, `lxmf_store`, or any
+   newer product store. The unpadded merged-image write must stop at or below
    `0x610000`. For an upgrade-layout check, read the complete application-data
-   region `0x610000..0x930000` before the write, leave the board in the loader,
+   region `0x610000..0xb30000` before the write, leave the board in the loader,
    read it again immediately afterward and require exact equality before the
    first upgraded boot:
 
@@ -2189,7 +2235,7 @@ from the current callout-device name.
      --usb-serial "$EXPECTED_USB_SERIAL" --expected-mac "$EXPECTED_MAC" \
      --expected-flash-bytes 16777216 \
      --evidence-prefix "$BACKUP_DIR/upgrade-app-data-before" \
-     --offset 0x610000 --length 0x320000 \
+     --offset 0x610000 --length 0x520000 \
      --output "$BACKUP_DIR/upgrade-app-data-before.bin"
    python3.13 interop/python/e290_qualification_host.py flash-merged \
      --usb-serial "$EXPECTED_USB_SERIAL" --expected-mac "$EXPECTED_MAC" \
@@ -2201,14 +2247,15 @@ from the current callout-device name.
      --usb-serial "$EXPECTED_USB_SERIAL" --expected-mac "$EXPECTED_MAC" \
      --expected-flash-bytes 16777216 \
      --evidence-prefix "$BACKUP_DIR/upgrade-app-data-after" \
-     --offset 0x610000 --length 0x320000 \
+     --offset 0x610000 --length 0x520000 \
      --output "$BACKUP_DIR/upgrade-app-data-after.bin"
    cmp "$BACKUP_DIR/upgrade-app-data-before.bin" \
      "$BACKUP_DIR/upgrade-app-data-after.bin"
    ```
 
-   Each verified record binds the exact offset, length, output path, output
-   byte count and SHA-256 to the independently qualified board identity. A
+   Each verified record binds the exact offset, `0x520000` length, 5,373,952
+   output bytes, output path, and SHA-256 to the independently qualified board
+   identity. A
    future partition-map, identity, journal, or message format change requires
    an explicit migration procedure; it is not a normal upgrade.
 

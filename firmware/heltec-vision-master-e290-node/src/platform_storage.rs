@@ -52,21 +52,26 @@ use reticulum_heltec_vision_master_e290_node::credential_runtime::{
 };
 use reticulum_heltec_vision_master_e290_node::cross_store_gate::{
     CredentialPhysicalMutationGate, InboundMailboxMutationGate, JournalMutationGate,
-    credential_physical_mutation_gate, inbound_mailbox_mutation_gate,
-    journal_mutation_gate as cross_store_journal_mutation_gate,
+    JournalProjectionGate, credential_physical_mutation_gate, inbound_mailbox_mutation_gate,
+    journal_mutation_gate as cross_store_journal_mutation_gate, journal_projection_gate,
 };
 use reticulum_heltec_vision_master_e290_node::partition_contract::{
     ANNOUNCE_CLOCK_LABEL_BYTES, ANNOUNCE_CLOCK_LEN, ANNOUNCE_CLOCK_OFFSET,
     API_CREDENTIALS_LABEL_BYTES, API_CREDENTIALS_LEN, API_CREDENTIALS_OFFSET, DATA_PARTITION_TYPE,
-    DEVICE_CONFIG_LABEL_BYTES, DEVICE_CONFIG_LEN, DEVICE_CONFIG_OFFSET, MESSAGE_STORE_LABEL_BYTES,
-    MESSAGE_STORE_LEN, MESSAGE_STORE_OFFSET, NODE_IDENTITY_LABEL_BYTES, NODE_IDENTITY_LEN,
-    NODE_IDENTITY_OFFSET, NODE_JOURNAL_LABEL_BYTES, NODE_JOURNAL_LEN, NODE_JOURNAL_OFFSET,
-    NVS_DATA_SUBTYPE, REQUIRED_FLASH_BYTES, UNDEFINED_DATA_SUBTYPE,
+    DEVICE_CONFIG_LABEL_BYTES, DEVICE_CONFIG_LEN, DEVICE_CONFIG_OFFSET, LXMF_STORE_LABEL_BYTES,
+    LXMF_STORE_LEN, LXMF_STORE_OFFSET, MESSAGE_STORE_LABEL_BYTES, MESSAGE_STORE_LEN,
+    MESSAGE_STORE_OFFSET, NODE_IDENTITY_LABEL_BYTES, NODE_IDENTITY_LEN, NODE_IDENTITY_OFFSET,
+    NODE_JOURNAL_LABEL_BYTES, NODE_JOURNAL_LEN, NODE_JOURNAL_OFFSET, NVS_DATA_SUBTYPE,
+    REQUIRED_FLASH_BYTES, UNDEFINED_DATA_SUBTYPE,
 };
 #[cfg(feature = "runtime-measurement-hil")]
 use reticulum_heltec_vision_master_e290_node::runtime_measurement::RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE;
 use reticulum_heltec_vision_master_e290_node::{
-    api_credentials_binding, node_journal_binding, rns_inbox_binding,
+    api_credentials_binding, lxmf_store_binding, node_journal_binding, rns_inbox_binding,
+};
+use reticulum_lxmf_store::{
+    BoundLxmfStore, LxmfStoreBinding, LxmfStoreIndexSlot, LxmfStoreMountError, MountedLxmfStore,
+    mount as mount_lxmf_store,
 };
 use reticulum_node_core::{
     AuthorizedFrameObservation, MonotonicMillis, MonotonicSeconds, TxLeaseDeadline,
@@ -130,6 +135,7 @@ pub(crate) enum ProductFlashOpenError {
         device_config: u8,
         node_journal: u8,
         message_store: u8,
+        lxmf_store: u8,
     },
     /// One uniquely named required partition has the wrong type, range, or flags.
     PartitionShape(&'static str),
@@ -155,9 +161,10 @@ impl Display for ProductFlashOpenError {
                 device_config,
                 node_journal,
                 message_store,
+                lxmf_store,
             } => write!(
                 formatter,
-                "partition-cardinality identity={identity} announce_clock={announce_clock} api_credentials={api_credentials} device_config={device_config} node_journal={node_journal} message_store={message_store}"
+                "partition-cardinality identity={identity} announce_clock={announce_clock} api_credentials={api_credentials} device_config={device_config} node_journal={node_journal} message_store={message_store} lxmf_store={lxmf_store}"
             ),
             Self::PartitionShape(name) => write!(formatter, "partition-shape name={name}"),
             Self::PartitionOverlap(name) => write!(formatter, "partition-overlap name={name}"),
@@ -198,6 +205,9 @@ pub(crate) type BootJournalProvisionError = FirstProvisionError<ProductRegionErr
 
 /// Failure while read-only mounting the bounded inbound qualification store.
 pub(crate) type BootInboxMountError = InboxStoreMountError<ProductRegionError>;
+
+/// Failure while read-only mounting the append-only LXMF store.
+pub(crate) type BootLxmfMountError = LxmfStoreMountError<ProductRegionError>;
 
 /// Failure while strictly mounting or conservatively recovering the journal.
 #[derive(Debug)]
@@ -288,6 +298,7 @@ pub(crate) struct ProductFlashOwner {
     journal_binding: JournalBinding,
     credential_binding: CredentialStoreBinding,
     inbox_binding: InboxStoreBinding,
+    lxmf_binding: LxmfStoreBinding,
 }
 
 /// Resident sole owner of physical flash and durable submission scheduling.
@@ -306,6 +317,8 @@ pub(crate) struct ProductStorageCoordinator {
     inbox: Option<MountedInboxStore>,
     inbox_service_enabled: bool,
     inbox_dropped_since_boot: u64,
+    lxmf: Option<MountedLxmfStore<'static>>,
+    lxmf_service_enabled: bool,
 }
 
 /// Short-lived logical API view over fields disjoint from credential authority.
@@ -319,6 +332,7 @@ struct ProductSubmissionPort<'a> {
     runtime: &'a mut Option<ProductSubmissionRuntime>,
     submission_service_enabled: bool,
     credential_physical_mutation_outstanding: bool,
+    lxmf_mutation_pending: bool,
 }
 
 /// Short-lived read-only logical API view over resident mailbox semantics.
@@ -352,6 +366,8 @@ pub(crate) enum ProductInitializationRequest {
     IdentityUnavailable,
     /// Retained journal mutation work must settle before policy admission.
     DeferredForJournalMutation,
+    /// Retained LXMF mutation work must settle before policy admission.
+    DeferredForLxmfMutation,
     /// Fresh identity preflight completed and the resident runtime decided.
     Runtime(Result<InitializationAccepted, InitializationRequestRefusal>),
 }
@@ -368,6 +384,8 @@ pub(crate) enum ProductInitializationDrive {
 pub(crate) enum ProductLivePairingAdmission {
     /// Journal mutation is still retained; the exact request owner must retry.
     DeferredForJournalMutation(PairingRequest),
+    /// LXMF mutation is still retained; the exact request owner must retry.
+    DeferredForLxmfMutation(PairingRequest),
     /// A challenge or coarse refusal is immediately ready for the bearer.
     Immediate(PairingResponse),
     /// One durable mutation was admitted and must be driven before replying.
@@ -380,6 +398,8 @@ pub(crate) enum ProductSubmissionDrive {
     Runtime(Result<RuntimeStep, RuntimeError<ProductRegionError>>),
     /// Credential initialization, live pairing, or recovery owns mutation access.
     DeferredForCredentialMutation,
+    /// An exact LXMF mutation owns physical access until reconciliation.
+    DeferredForLxmfMutation,
     /// Durable submission service has no usable resident runtime.
     RuntimeUnavailable,
 }
@@ -437,6 +457,7 @@ const MAXIMUM_PRODUCT_STORAGE_COORDINATOR_CREDENTIAL_OVERHEAD_BYTES: usize =
 const MAXIMUM_PRODUCT_STORAGE_COORDINATOR_BYTES: usize = config::MAXIMUM_DURABLE_RUNTIME_BYTES
     + MAXIMUM_PRODUCT_STORAGE_COORDINATOR_CREDENTIAL_OVERHEAD_BYTES
     + mem::size_of::<MountedInboxStore>()
+    + mem::size_of::<MountedLxmfStore<'static>>()
     + 128;
 const _: () = assert!(
     mem::size_of::<ProductStorageCoordinator>() <= MAXIMUM_PRODUCT_STORAGE_COORDINATOR_BYTES
@@ -465,6 +486,7 @@ impl ProductFlashOwner {
             journal_binding: node_journal_binding(storage_device_id),
             credential_binding: api_credentials_binding(storage_device_id),
             inbox_binding: rns_inbox_binding(storage_device_id),
+            lxmf_binding: lxmf_store_binding(storage_device_id),
         })
     }
 
@@ -647,6 +669,19 @@ impl ProductFlashOwner {
         mount_inbox_store(&mut access)
     }
 
+    /// Mount the append-only LXMF store into the exact boot-lifetime index.
+    ///
+    /// Mount is read-only. A failure disables only the future LXMF delivery
+    /// service while the sole flash owner continues routing and existing stores.
+    pub(crate) fn mount_lxmf(
+        &mut self,
+        index: &'static mut [LxmfStoreIndexSlot],
+    ) -> Result<MountedLxmfStore<'static>, BootLxmfMountError> {
+        let region = PartitionNorFlash::new(&mut *self.flash, LXMF_STORE_OFFSET, LXMF_STORE_LEN);
+        let mut access = BoundLxmfStore::new(region, self.lxmf_binding);
+        mount_lxmf_store(&mut access, index)
+    }
+
     /// Transfer the sole physical flash owner into its resident coordinator.
     ///
     /// A missing runtime disables only durable local submission service. The
@@ -656,6 +691,7 @@ impl ProductFlashOwner {
         self,
         runtime: Option<ProductSubmissionRuntime>,
         inbox: Option<MountedInboxStore>,
+        lxmf: Option<MountedLxmfStore<'static>>,
         credentials: BootCredentialStore,
         device_api_id: DeviceId,
     ) -> ProductStorageCoordinator {
@@ -666,6 +702,7 @@ impl ProductFlashOwner {
         );
         let submission_service_enabled = runtime.is_some();
         let inbox_service_enabled = inbox.is_some();
+        let lxmf_service_enabled = lxmf.is_some();
         ProductStorageCoordinator {
             flash: self.flash,
             journal_binding: self.journal_binding,
@@ -675,6 +712,8 @@ impl ProductFlashOwner {
             inbox,
             inbox_service_enabled,
             inbox_dropped_since_boot: 0,
+            lxmf,
+            lxmf_service_enabled,
         }
     }
 }
@@ -738,6 +777,14 @@ impl ProductStorageCoordinator {
         self.inbox_service_enabled && self.inbox.is_some()
     }
 
+    /// Whether the append-only LXMF store mounted into its external index.
+    ///
+    /// This reports only mounted storage composition. No LXMF destination or
+    /// application-event admission is enabled by this stage.
+    pub(crate) const fn lxmf_service_available(&self) -> bool {
+        self.lxmf_service_enabled && self.lxmf.is_some()
+    }
+
     /// Current non-secret resident live-pairing ownership.
     pub(crate) fn live_pairing_status(&self) -> CredentialPairingStatus {
         self.credential_runtime.live_pairing_status()
@@ -768,7 +815,11 @@ impl ProductStorageCoordinator {
 
     fn credential_physical_mutation_gate(&self) -> CredentialPhysicalMutationGate {
         let (journal_actor_pending, journal_projector_pending) = self.journal_mutation_pending();
-        credential_physical_mutation_gate(journal_actor_pending, journal_projector_pending)
+        credential_physical_mutation_gate(
+            journal_actor_pending,
+            journal_projector_pending,
+            self.lxmf_mutation_pending(),
+        )
     }
 
     fn journal_mutation_gate(&self) -> JournalMutationGate {
@@ -776,6 +827,7 @@ impl ProductStorageCoordinator {
             self.submission_service_available(),
             self.credential_runtime
                 .credential_physical_mutation_outstanding(),
+            self.lxmf_mutation_pending(),
         )
     }
 
@@ -787,19 +839,28 @@ impl ProductStorageCoordinator {
                 .credential_physical_mutation_outstanding(),
             journal_actor_pending,
             journal_projector_pending,
+            self.lxmf_mutation_pending(),
         )
+    }
+
+    fn lxmf_mutation_pending(&self) -> bool {
+        self.lxmf
+            .as_ref()
+            .is_some_and(MountedLxmfStore::has_pending_mutation)
     }
 
     fn submission_port(&mut self) -> ProductSubmissionPort<'_> {
         let credential_physical_mutation_outstanding = self
             .credential_runtime
             .credential_physical_mutation_outstanding();
+        let lxmf_mutation_pending = self.lxmf_mutation_pending();
         ProductSubmissionPort {
             flash: &mut *self.flash,
             journal_binding: self.journal_binding,
             runtime: &mut self.runtime,
             submission_service_enabled: self.submission_service_enabled,
             credential_physical_mutation_outstanding,
+            lxmf_mutation_pending,
         }
     }
 
@@ -820,7 +881,8 @@ impl ProductStorageCoordinator {
         match self.inbound_mailbox_mutation_gate() {
             InboundMailboxMutationGate::Ready => {}
             InboundMailboxMutationGate::DeferredForCredentialMutation
-            | InboundMailboxMutationGate::DeferredForJournalMutation => {
+            | InboundMailboxMutationGate::DeferredForJournalMutation
+            | InboundMailboxMutationGate::DeferredForLxmfMutation => {
                 return ProductInboundAdmission::Deferred(candidate);
             }
             InboundMailboxMutationGate::RuntimeUnavailable => {
@@ -890,6 +952,7 @@ impl ProductStorageCoordinator {
         let credential_physical_mutation_outstanding = self
             .credential_runtime
             .credential_physical_mutation_outstanding();
+        let lxmf_mutation_pending = self.lxmf_mutation_pending();
         let Self {
             flash,
             journal_binding,
@@ -899,6 +962,8 @@ impl ProductStorageCoordinator {
             inbox,
             inbox_service_enabled,
             inbox_dropped_since_boot,
+            lxmf: _,
+            lxmf_service_enabled: _,
         } = self;
         let mut submission_port = ProductSubmissionPort {
             flash,
@@ -906,6 +971,7 @@ impl ProductStorageCoordinator {
             runtime,
             submission_service_enabled: *submission_service_enabled,
             credential_physical_mutation_outstanding,
+            lxmf_mutation_pending,
         };
         let mut inbox_port = ProductInboundMailboxPort {
             inbox,
@@ -949,11 +1015,16 @@ impl ProductStorageCoordinator {
         R: RngCore + CryptoRng,
     {
         let mutation_request = !matches!(&request, PairingRequest::ProofStart(_));
-        if mutation_request
-            && self.credential_physical_mutation_gate()
-                == CredentialPhysicalMutationGate::DeferredForJournalMutation
-        {
-            return ProductLivePairingAdmission::DeferredForJournalMutation(request);
+        if mutation_request {
+            match self.credential_physical_mutation_gate() {
+                CredentialPhysicalMutationGate::Ready => {}
+                CredentialPhysicalMutationGate::DeferredForJournalMutation => {
+                    return ProductLivePairingAdmission::DeferredForJournalMutation(request);
+                }
+                CredentialPhysicalMutationGate::DeferredForLxmfMutation => {
+                    return ProductLivePairingAdmission::DeferredForLxmfMutation(request);
+                }
+            }
         }
 
         match request {
@@ -1038,13 +1109,20 @@ impl ProductStorageCoordinator {
     ///
     /// The interface actor must retain and re-offer the observation until the
     /// runtime reports `Durable`. This projection-only step never borrows or
-    /// touches physical flash.
+    /// touches physical flash. It still defers while LXMF owns ambiguous
+    /// mutation because projection can create journal persistence work and
+    /// deadlock the two retained owners.
     pub(crate) fn offer_authorized_frame(
         &mut self,
         observation: AuthorizedFrameObservation,
     ) -> Option<Result<FrameOfferProgress, RuntimeControlError>> {
         if !self.submission_service_enabled {
             return None;
+        }
+        if journal_projection_gate(self.lxmf_mutation_pending())
+            == JournalProjectionGate::RetainForLxmfMutation
+        {
+            return Some(Ok(FrameOfferProgress::Retain));
         }
         Some(self.runtime.as_mut()?.offer_authorized_frame(observation))
     }
@@ -1070,6 +1148,9 @@ impl ProductStorageCoordinator {
             JournalMutationGate::Ready => {}
             JournalMutationGate::DeferredForCredentialMutation => {
                 return ProductSubmissionDrive::DeferredForCredentialMutation;
+            }
+            JournalMutationGate::DeferredForLxmfMutation => {
+                return ProductSubmissionDrive::DeferredForLxmfMutation;
             }
             JournalMutationGate::RuntimeUnavailable => {
                 return ProductSubmissionDrive::RuntimeUnavailable;
@@ -1140,11 +1221,14 @@ impl ProductCredentialInitializationPort for ProductStorageCoordinator {
         now: PairingMillis,
         connection: ConnectionId,
     ) -> ProductInitializationRequest {
-        if matches!(
-            self.credential_physical_mutation_gate(),
-            CredentialPhysicalMutationGate::DeferredForJournalMutation
-        ) {
-            return ProductInitializationRequest::DeferredForJournalMutation;
+        match self.credential_physical_mutation_gate() {
+            CredentialPhysicalMutationGate::Ready => {}
+            CredentialPhysicalMutationGate::DeferredForJournalMutation => {
+                return ProductInitializationRequest::DeferredForJournalMutation;
+            }
+            CredentialPhysicalMutationGate::DeferredForLxmfMutation => {
+                return ProductInitializationRequest::DeferredForLxmfMutation;
+            }
         }
 
         let identity_preflight = {
@@ -1231,9 +1315,13 @@ impl SubmissionPort for ProductSubmissionPort<'_> {
         match cross_store_journal_mutation_gate(
             self.submission_service_enabled && self.runtime.is_some(),
             self.credential_physical_mutation_outstanding,
+            self.lxmf_mutation_pending,
         ) {
             JournalMutationGate::Ready => {}
             JournalMutationGate::DeferredForCredentialMutation => {
+                return Err(SubmissionPortError::Busy);
+            }
+            JournalMutationGate::DeferredForLxmfMutation => {
                 return Err(SubmissionPortError::Busy);
             }
             JournalMutationGate::RuntimeUnavailable => {
@@ -1403,12 +1491,14 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
     let mut config_count = 0_u8;
     let mut journal_count = 0_u8;
     let mut message_store_count = 0_u8;
+    let mut lxmf_store_count = 0_u8;
     let mut identity_valid = false;
     let mut clock_valid = false;
     let mut credentials_valid = false;
     let mut config_valid = false;
     let mut journal_valid = false;
     let mut message_store_valid = false;
+    let mut lxmf_store_valid = false;
 
     for entry in table.iter() {
         let label = entry.label();
@@ -1418,6 +1508,7 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
         let named_config = label == DEVICE_CONFIG_LABEL_BYTES;
         let named_journal = label == NODE_JOURNAL_LABEL_BYTES;
         let named_message_store = label == MESSAGE_STORE_LABEL_BYTES;
+        let named_lxmf_store = label == LXMF_STORE_LABEL_BYTES;
         if named_identity {
             identity_count = identity_count.saturating_add(1);
         }
@@ -1435,6 +1526,9 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
         }
         if named_message_store {
             message_store_count = message_store_count.saturating_add(1);
+        }
+        if named_lxmf_store {
+            lxmf_store_count = lxmf_store_count.saturating_add(1);
         }
 
         let entry_end = entry
@@ -1477,6 +1571,12 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
                 MESSAGE_STORE_OFFSET,
                 MESSAGE_STORE_LEN,
                 named_message_store,
+            ),
+            (
+                "lxmf_store",
+                LXMF_STORE_OFFSET,
+                LXMF_STORE_LEN,
+                named_lxmf_store,
             ),
         ] {
             let expected_end = offset + len;
@@ -1528,6 +1628,13 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
                 && entry.len() == MESSAGE_STORE_LEN
                 && plain_writable;
         }
+        if named_lxmf_store {
+            lxmf_store_valid = entry.raw_type() == DATA_PARTITION_TYPE
+                && entry.raw_subtype() == UNDEFINED_DATA_SUBTYPE
+                && entry.offset() == LXMF_STORE_OFFSET
+                && entry.len() == LXMF_STORE_LEN
+                && plain_writable;
+        }
     }
 
     if identity_count != 1
@@ -1536,6 +1643,7 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
         || config_count != 1
         || journal_count != 1
         || message_store_count != 1
+        || lxmf_store_count != 1
     {
         return Err(ProductFlashOpenError::PartitionCardinality {
             identity: identity_count,
@@ -1544,6 +1652,7 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
             device_config: config_count,
             node_journal: journal_count,
             message_store: message_store_count,
+            lxmf_store: lxmf_store_count,
         });
     }
     for (valid, name) in [
@@ -1553,6 +1662,7 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
         (config_valid, "device_config"),
         (journal_valid, "node_journal"),
         (message_store_valid, "message_store"),
+        (lxmf_store_valid, "lxmf_store"),
     ] {
         if !valid {
             return Err(ProductFlashOpenError::PartitionShape(name));

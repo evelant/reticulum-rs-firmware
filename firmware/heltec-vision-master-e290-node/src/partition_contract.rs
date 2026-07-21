@@ -76,6 +76,17 @@ pub const MESSAGE_STORE_OFFSET: u32 = 0x0073_0000;
 /// Inbound-message store partition length: exactly 2 MiB.
 pub const MESSAGE_STORE_LEN: u32 = 0x0020_0000;
 
+/// Permanent append-only LXMF message-store partition label.
+pub const LXMF_STORE_LABEL: &str = "lxmf_store";
+/// Padded partition-table bytes for [`LXMF_STORE_LABEL`].
+pub const LXMF_STORE_LABEL_BYTES: [u8; 16] = [
+    b'l', b'x', b'm', b'f', b'_', b's', b't', b'o', b'r', b'e', 0, 0, 0, 0, 0, 0,
+];
+/// LXMF message-store partition absolute flash offset.
+pub const LXMF_STORE_OFFSET: u32 = 0x0093_0000;
+/// LXMF message-store partition length: exactly 2 MiB.
+pub const LXMF_STORE_LEN: u32 = 0x0020_0000;
+
 const _: () = assert!(NODE_IDENTITY_OFFSET + NODE_IDENTITY_LEN == ANNOUNCE_CLOCK_OFFSET);
 const _: () = assert!(ANNOUNCE_CLOCK_OFFSET + ANNOUNCE_CLOCK_LEN == API_CREDENTIALS_OFFSET);
 const _: () = assert!(API_CREDENTIALS_OFFSET.is_multiple_of(0x1000));
@@ -85,4 +96,7 @@ const _: () = assert!(DEVICE_CONFIG_OFFSET + DEVICE_CONFIG_LEN == NODE_JOURNAL_O
 const _: () = assert!(NODE_JOURNAL_OFFSET + NODE_JOURNAL_LEN == MESSAGE_STORE_OFFSET);
 const _: () = assert!(MESSAGE_STORE_OFFSET.is_multiple_of(0x1000));
 const _: () = assert!(MESSAGE_STORE_LEN.is_multiple_of(0x1000));
-const _: () = assert!(MESSAGE_STORE_OFFSET + MESSAGE_STORE_LEN == 0x0093_0000);
+const _: () = assert!(MESSAGE_STORE_OFFSET + MESSAGE_STORE_LEN == LXMF_STORE_OFFSET);
+const _: () = assert!(LXMF_STORE_OFFSET.is_multiple_of(0x1000));
+const _: () = assert!(LXMF_STORE_LEN.is_multiple_of(0x1000));
+const _: () = assert!(LXMF_STORE_OFFSET + LXMF_STORE_LEN == 0x00b3_0000);

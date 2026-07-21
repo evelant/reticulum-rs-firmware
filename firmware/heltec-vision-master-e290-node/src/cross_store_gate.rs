@@ -1,12 +1,9 @@
 //! Pure cross-store physical-mutation exclusion for the permanent E290 flash owner.
 //!
-//! The credential store, durable submission journal, and bounded inbound
-//! mailbox share one physical flash backend. The product coordinator serializes
-//! every physical operation, while
-//! these decisions make the stronger semantic rule explicit: retained journal
-//! actor or projector work blocks admission of a credential physical mutation,
-//! and any outstanding credential physical mutation blocks journal mutation
-//! until credential ownership reaches a stable non-mutating state.
+//! The credential store, durable submission journal, bounded raw-RNS inbox, and
+//! append-only LXMF store share one physical flash backend. The product
+//! coordinator serializes every physical operation, while these decisions make
+//! the stronger semantic exclusion rules explicit for retained mutations.
 //!
 //! Challenge-only credential work such as ProofStart neither owns nor initiates
 //! physical mutation and intentionally does not consult the credential gate.
@@ -18,6 +15,8 @@ pub enum CredentialPhysicalMutationGate {
     Ready,
     /// Journal-owned physical progress must settle before credential admission.
     DeferredForJournalMutation,
+    /// LXMF-owned physical progress must settle before credential admission.
+    DeferredForLxmfMutation,
 }
 
 /// Decide whether credential physical-mutation admission may run.
@@ -29,9 +28,12 @@ pub enum CredentialPhysicalMutationGate {
 pub const fn credential_physical_mutation_gate(
     journal_actor_pending: bool,
     journal_projector_pending: bool,
+    lxmf_mutation_pending: bool,
 ) -> CredentialPhysicalMutationGate {
     if journal_actor_pending || journal_projector_pending {
         CredentialPhysicalMutationGate::DeferredForJournalMutation
+    } else if lxmf_mutation_pending {
+        CredentialPhysicalMutationGate::DeferredForLxmfMutation
     } else {
         CredentialPhysicalMutationGate::Ready
     }
@@ -44,6 +46,8 @@ pub enum JournalMutationGate {
     Ready,
     /// Credential-owned physical progress must settle before journal mutation.
     DeferredForCredentialMutation,
+    /// LXMF-owned physical progress must settle before journal mutation.
+    DeferredForLxmfMutation,
     /// Durable submission service has no usable resident runtime.
     RuntimeUnavailable,
 }
@@ -57,13 +61,38 @@ pub enum JournalMutationGate {
 pub const fn journal_mutation_gate(
     runtime_available: bool,
     credential_physical_mutation_outstanding: bool,
+    lxmf_mutation_pending: bool,
 ) -> JournalMutationGate {
     if credential_physical_mutation_outstanding {
         JournalMutationGate::DeferredForCredentialMutation
+    } else if lxmf_mutation_pending {
+        JournalMutationGate::DeferredForLxmfMutation
     } else if !runtime_available {
         JournalMutationGate::RuntimeUnavailable
     } else {
         JournalMutationGate::Ready
+    }
+}
+
+/// Admission decision before backend-free journal projection can retain work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JournalProjectionGate {
+    /// Projection may run and can create journal persistence work.
+    Ready,
+    /// Preserve the exact frame outside the runtime until LXMF reconciliation.
+    RetainForLxmfMutation,
+}
+
+/// Prevent journal projection from creating a cross-store retry deadlock.
+///
+/// Projection itself does not touch flash, but it can retain journal
+/// persistence. Creating that owner while LXMF already retains an ambiguous
+/// mutation would block each store behind the other.
+pub const fn journal_projection_gate(lxmf_mutation_pending: bool) -> JournalProjectionGate {
+    if lxmf_mutation_pending {
+        JournalProjectionGate::RetainForLxmfMutation
+    } else {
+        JournalProjectionGate::Ready
     }
 }
 
@@ -76,6 +105,8 @@ pub enum InboundMailboxMutationGate {
     DeferredForCredentialMutation,
     /// Submission-journal physical progress must settle before mailbox admission.
     DeferredForJournalMutation,
+    /// LXMF-owned physical progress must settle before mailbox admission.
+    DeferredForLxmfMutation,
     /// The inbound mailbox has no usable resident runtime.
     RuntimeUnavailable,
 }
@@ -92,11 +123,14 @@ pub const fn inbound_mailbox_mutation_gate(
     credential_physical_mutation_outstanding: bool,
     journal_actor_pending: bool,
     journal_projector_pending: bool,
+    lxmf_mutation_pending: bool,
 ) -> InboundMailboxMutationGate {
     if credential_physical_mutation_outstanding {
         InboundMailboxMutationGate::DeferredForCredentialMutation
     } else if journal_actor_pending || journal_projector_pending {
         InboundMailboxMutationGate::DeferredForJournalMutation
+    } else if lxmf_mutation_pending {
+        InboundMailboxMutationGate::DeferredForLxmfMutation
     } else if !runtime_available {
         InboundMailboxMutationGate::RuntimeUnavailable
     } else {
@@ -104,101 +138,196 @@ pub const fn inbound_mailbox_mutation_gate(
     }
 }
 
+/// Product decision before a future LXMF candidate can reach the mounted store.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LxmfMutationGate {
+    /// Other stores are stable; the LXMF store must now validate the candidate.
+    Ready,
+    /// Credential-owned physical progress must settle before LXMF admission.
+    DeferredForCredentialMutation,
+    /// Submission-journal physical progress must settle before LXMF admission.
+    DeferredForJournalMutation,
+    /// The LXMF store has no usable resident runtime.
+    RuntimeUnavailable,
+}
+
+/// Decide whether a future exact LXMF candidate may reach store validation.
+///
+/// `lxmf_mutation_pending` is deliberately not a blocking condition. Only the
+/// mounted store owns enough information to prove that a candidate is the exact
+/// retry of its retained mutation; it rejects a different candidate before
+/// physical I/O. Blocking here on the store's own pending bit would deadlock the
+/// only structurally valid reconciliation path.
+pub const fn lxmf_mutation_gate(
+    runtime_available: bool,
+    credential_physical_mutation_outstanding: bool,
+    journal_actor_pending: bool,
+    journal_projector_pending: bool,
+    lxmf_mutation_pending: bool,
+) -> LxmfMutationGate {
+    let _ = lxmf_mutation_pending;
+    if credential_physical_mutation_outstanding {
+        LxmfMutationGate::DeferredForCredentialMutation
+    } else if journal_actor_pending || journal_projector_pending {
+        LxmfMutationGate::DeferredForJournalMutation
+    } else if !runtime_available {
+        LxmfMutationGate::RuntimeUnavailable
+    } else {
+        LxmfMutationGate::Ready
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         CredentialPhysicalMutationGate, InboundMailboxMutationGate, JournalMutationGate,
-        credential_physical_mutation_gate, inbound_mailbox_mutation_gate, journal_mutation_gate,
+        JournalProjectionGate, LxmfMutationGate, credential_physical_mutation_gate,
+        inbound_mailbox_mutation_gate, journal_mutation_gate, journal_projection_gate,
+        lxmf_mutation_gate,
     };
 
     #[test]
-    fn either_retained_journal_owner_blocks_credential_physical_mutation() {
-        let cases = [
-            (false, false, CredentialPhysicalMutationGate::Ready),
-            (
-                true,
-                false,
-                CredentialPhysicalMutationGate::DeferredForJournalMutation,
-            ),
-            (
-                false,
-                true,
-                CredentialPhysicalMutationGate::DeferredForJournalMutation,
-            ),
-            (
-                true,
-                true,
-                CredentialPhysicalMutationGate::DeferredForJournalMutation,
-            ),
-        ];
-
-        for (actor_pending, projector_pending, expected) in cases {
-            assert_eq!(
-                credential_physical_mutation_gate(actor_pending, projector_pending),
-                expected,
-                "actor_pending={actor_pending}, projector_pending={projector_pending}",
-            );
+    fn credential_gate_truth_table_covers_both_journal_owners_and_lxmf() {
+        for actor_pending in [false, true] {
+            for projector_pending in [false, true] {
+                for lxmf_pending in [false, true] {
+                    let expected = if actor_pending || projector_pending {
+                        CredentialPhysicalMutationGate::DeferredForJournalMutation
+                    } else if lxmf_pending {
+                        CredentialPhysicalMutationGate::DeferredForLxmfMutation
+                    } else {
+                        CredentialPhysicalMutationGate::Ready
+                    };
+                    assert_eq!(
+                        credential_physical_mutation_gate(
+                            actor_pending,
+                            projector_pending,
+                            lxmf_pending,
+                        ),
+                        expected,
+                        "actor={actor_pending} projector={projector_pending} lxmf={lxmf_pending}",
+                    );
+                }
+            }
         }
     }
 
     #[test]
     fn any_outstanding_credential_physical_mutation_blocks_journal_mutation() {
         for runtime_available in [false, true] {
-            assert_eq!(
-                journal_mutation_gate(runtime_available, true),
-                JournalMutationGate::DeferredForCredentialMutation,
-                "runtime_available={runtime_available}",
-            );
+            for lxmf_pending in [false, true] {
+                assert_eq!(
+                    journal_mutation_gate(runtime_available, true, lxmf_pending),
+                    JournalMutationGate::DeferredForCredentialMutation,
+                    "runtime_available={runtime_available} lxmf={lxmf_pending}",
+                );
+            }
         }
     }
 
     #[test]
-    fn journal_runtime_state_controls_admission_without_credential_ownership() {
-        assert_eq!(
-            journal_mutation_gate(true, false),
-            JournalMutationGate::Ready
-        );
-        assert_eq!(
-            journal_mutation_gate(false, false),
-            JournalMutationGate::RuntimeUnavailable
-        );
-    }
-
-    #[test]
-    fn credential_deferral_is_never_reported_as_runtime_unavailable() {
-        let deferred = journal_mutation_gate(false, true);
-
-        assert_eq!(deferred, JournalMutationGate::DeferredForCredentialMutation);
-        assert_ne!(deferred, JournalMutationGate::RuntimeUnavailable);
-    }
-
-    #[test]
-    fn inbox_commit_waits_for_every_retained_mutation_owner() {
-        assert_eq!(
-            inbound_mailbox_mutation_gate(true, false, false, false),
-            InboundMailboxMutationGate::Ready
-        );
-        assert_eq!(
-            inbound_mailbox_mutation_gate(true, true, false, false),
-            InboundMailboxMutationGate::DeferredForCredentialMutation
-        );
-        for (actor, projector) in [(true, false), (false, true), (true, true)] {
-            assert_eq!(
-                inbound_mailbox_mutation_gate(true, false, actor, projector),
-                InboundMailboxMutationGate::DeferredForJournalMutation
-            );
+    fn journal_gate_truth_table_covers_runtime_credentials_and_lxmf() {
+        for runtime_available in [false, true] {
+            for credential_pending in [false, true] {
+                for lxmf_pending in [false, true] {
+                    let expected = if credential_pending {
+                        JournalMutationGate::DeferredForCredentialMutation
+                    } else if lxmf_pending {
+                        JournalMutationGate::DeferredForLxmfMutation
+                    } else if !runtime_available {
+                        JournalMutationGate::RuntimeUnavailable
+                    } else {
+                        JournalMutationGate::Ready
+                    };
+                    assert_eq!(
+                        journal_mutation_gate(runtime_available, credential_pending, lxmf_pending,),
+                        expected,
+                        "runtime={runtime_available} credential={credential_pending} lxmf={lxmf_pending}",
+                    );
+                }
+            }
         }
+    }
+
+    #[test]
+    fn journal_projection_retains_the_frame_while_lxmf_owns_reconciliation() {
+        assert_eq!(journal_projection_gate(false), JournalProjectionGate::Ready);
         assert_eq!(
-            inbound_mailbox_mutation_gate(false, false, false, false),
-            InboundMailboxMutationGate::RuntimeUnavailable
+            journal_projection_gate(true),
+            JournalProjectionGate::RetainForLxmfMutation
         );
     }
 
     #[test]
-    fn credential_ownership_outranks_other_inbox_unavailability() {
-        assert_eq!(
-            inbound_mailbox_mutation_gate(false, true, true, true),
-            InboundMailboxMutationGate::DeferredForCredentialMutation
-        );
+    fn inbox_gate_truth_table_covers_every_retained_mutation_owner() {
+        for runtime_available in [false, true] {
+            for credential_pending in [false, true] {
+                for actor_pending in [false, true] {
+                    for projector_pending in [false, true] {
+                        for lxmf_pending in [false, true] {
+                            let expected = if credential_pending {
+                                InboundMailboxMutationGate::DeferredForCredentialMutation
+                            } else if actor_pending || projector_pending {
+                                InboundMailboxMutationGate::DeferredForJournalMutation
+                            } else if lxmf_pending {
+                                InboundMailboxMutationGate::DeferredForLxmfMutation
+                            } else if !runtime_available {
+                                InboundMailboxMutationGate::RuntimeUnavailable
+                            } else {
+                                InboundMailboxMutationGate::Ready
+                            };
+                            assert_eq!(
+                                inbound_mailbox_mutation_gate(
+                                    runtime_available,
+                                    credential_pending,
+                                    actor_pending,
+                                    projector_pending,
+                                    lxmf_pending,
+                                ),
+                                expected,
+                                "runtime={runtime_available} credential={credential_pending} actor={actor_pending} projector={projector_pending} lxmf={lxmf_pending}",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lxmf_gate_truth_table_never_deadlocks_its_own_exact_retry() {
+        for runtime_available in [false, true] {
+            for credential_pending in [false, true] {
+                for actor_pending in [false, true] {
+                    for projector_pending in [false, true] {
+                        let expected = if credential_pending {
+                            LxmfMutationGate::DeferredForCredentialMutation
+                        } else if actor_pending || projector_pending {
+                            LxmfMutationGate::DeferredForJournalMutation
+                        } else if !runtime_available {
+                            LxmfMutationGate::RuntimeUnavailable
+                        } else {
+                            LxmfMutationGate::Ready
+                        };
+                        let without_pending = lxmf_mutation_gate(
+                            runtime_available,
+                            credential_pending,
+                            actor_pending,
+                            projector_pending,
+                            false,
+                        );
+                        let with_pending = lxmf_mutation_gate(
+                            runtime_available,
+                            credential_pending,
+                            actor_pending,
+                            projector_pending,
+                            true,
+                        );
+                        assert_eq!(without_pending, expected);
+                        assert_eq!(with_pending, expected);
+                    }
+                }
+            }
+        }
     }
 }
