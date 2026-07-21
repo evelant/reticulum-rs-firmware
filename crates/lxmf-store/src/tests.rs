@@ -16,6 +16,10 @@ const STORE_OFFSET: usize = 0x73_0000;
 const DEVICE: LxmfStoreDeviceId = LxmfStoreDeviceId::new([0x5a; 16]);
 const CORPUS_JSON: &str = include_str!("../../../interop/vectors/lxmf-1.0.1-v1.json");
 
+fn index<const N: usize>() -> [LxmfStoreIndexSlot; N] {
+    [const { LxmfStoreIndexSlot::new() }; N]
+}
+
 #[derive(Deserialize)]
 struct Corpus {
     messages: Vec<CorpusMessage>,
@@ -325,7 +329,8 @@ fn commit_mount_and_remount_preserve_receipt_and_metadata() {
     let wire = complete_wire(0x22, 600, 0xa5);
     let candidate = complete_candidate(&wire, 1, 9, 0x22, 7, normal_stamp());
     let mut access = bound(TestNor::erased(PARTITION_SIZE));
-    let mut mounted = mount::<_, 4>(&mut access).unwrap();
+    let mut mounted_index = index::<4>();
+    let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
     let receipt = match mounted.commit(&mut access, candidate).unwrap() {
         LxmfCommitOutcome::Committed(receipt) => receipt,
         other => panic!("unexpected outcome {other:?}"),
@@ -340,7 +345,8 @@ fn commit_mount_and_remount_preserve_receipt_and_metadata() {
 
     let flash = access.into_backend();
     let mut remounted_access = bound(flash);
-    let remounted = mount::<_, 4>(&mut remounted_access).unwrap();
+    let mut remounted_index = index::<4>();
+    let remounted = mount(&mut remounted_access, &mut remounted_index).unwrap();
     assert_eq!(remounted.message_count(), 1);
     assert_eq!(remounted.receipt(receipt.handle()), Some(receipt));
     assert_eq!(
@@ -374,12 +380,18 @@ fn opportunistic_391_byte_carrier_exceeds_old_qualification_ceiling() {
     )
     .unwrap();
     let mut access = bound(TestNor::erased(PARTITION_SIZE));
-    let mut mounted = mount::<_, 4>(&mut access).unwrap();
+    let mut mounted_index = index::<4>();
+    let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
     assert!(matches!(
         mounted.commit(&mut access, candidate),
         Ok(LxmfCommitOutcome::Committed(_))
     ));
-    assert_eq!(mount::<_, 4>(&mut access).unwrap().message_count(), 1);
+    assert_eq!(
+        mount(&mut access, &mut index::<4>())
+            .unwrap()
+            .message_count(),
+        1
+    );
 }
 
 #[test]
@@ -461,7 +473,8 @@ fn released_python_corpus_commits_remounts_and_retains_exact_full_wire() {
         };
         let candidate = InboundMessageCandidate::new(metadata, wire).unwrap();
         let mut access = bound(TestNor::erased(PARTITION_SIZE));
-        let mut mounted = mount::<_, 2>(&mut access).unwrap();
+        let mut mounted_index = index::<2>();
+        let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
         let receipt = match mounted.commit(&mut access, candidate).unwrap() {
             LxmfCommitOutcome::Committed(receipt) => receipt,
             other => panic!("{name}: unexpected {other:?}"),
@@ -471,7 +484,8 @@ fn released_python_corpus_commits_remounts_and_retains_exact_full_wire() {
             full_wire.as_slice(),
             "{name}: exact normalized bytes"
         );
-        let remounted = mount::<_, 2>(&mut access).unwrap();
+        let mut remounted_index = index::<2>();
+        let remounted = mount(&mut access, &mut remounted_index).unwrap();
         assert_eq!(remounted.receipt(receipt.handle()), Some(receipt), "{name}");
         assert_eq!(
             remounted.metadata(receipt.handle()),
@@ -486,7 +500,8 @@ fn multiple_variable_extent_records_append_and_remount() {
     let first_wire = complete_wire(0x21, 100, 1);
     let second_wire = complete_wire(0x22, 4000, 2);
     let mut access = bound(TestNor::erased(PARTITION_SIZE));
-    let mut mounted = mount::<_, 4>(&mut access).unwrap();
+    let mut mounted_index = index::<4>();
+    let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
     let first = mounted
         .commit(
             &mut access,
@@ -503,7 +518,12 @@ fn multiple_variable_extent_records_append_and_remount() {
     assert!(matches!(second, LxmfCommitOutcome::Committed(_)));
     assert_eq!(mounted.message_count(), 2);
     assert_eq!(mounted.consumed_extents(), 3);
-    assert_eq!(mount::<_, 4>(&mut access).unwrap().message_count(), 2);
+    assert_eq!(
+        mount(&mut access, &mut index::<4>())
+            .unwrap()
+            .message_count(),
+        2
+    );
 }
 
 #[test]
@@ -530,7 +550,8 @@ fn opportunistic_segments_cross_segment_and_extent_boundaries_without_coalescing
     )
     .unwrap();
     let mut access = bound(TestNor::erased(PARTITION_SIZE));
-    let mut mounted = mount::<_, 4>(&mut access).unwrap();
+    let mut mounted_index = index::<4>();
+    let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
     mounted.commit(&mut access, candidate).unwrap();
     assert_eq!(mounted.consumed_extents(), 2);
     assert_eq!(
@@ -546,7 +567,12 @@ fn opportunistic_segments_cross_segment_and_extent_boundaries_without_coalescing
             ..EXTENT_SIZE + EXTENT_HEADER_SIZE + carrier.len() - (EXTENT_PAYLOAD_SIZE - 16)],
         &carrier[EXTENT_PAYLOAD_SIZE - 16..]
     );
-    assert_eq!(mount::<_, 4>(&mut access).unwrap().message_count(), 1);
+    assert_eq!(
+        mount(&mut access, &mut index::<4>())
+            .unwrap()
+            .message_count(),
+        1
+    );
 }
 
 #[test]
@@ -554,7 +580,8 @@ fn exact_and_alternative_stamp_replays_do_not_write() {
     let first_wire = complete_wire(0x22, 400, 0x10);
     let alternative_wire = complete_wire(0x22, 400, 0x20);
     let mut access = bound(TestNor::erased(PARTITION_SIZE));
-    let mut mounted = mount::<_, 4>(&mut access).unwrap();
+    let mut mounted_index = index::<4>();
+    let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
     let first_candidate = complete_candidate(
         &first_wire,
         7,
@@ -595,7 +622,8 @@ fn exact_and_alternative_stamp_replays_do_not_write() {
 fn same_id_with_conflicting_authenticated_material_fails_closed() {
     let wire = complete_wire(0x22, 100, 1);
     let mut access = bound(TestNor::erased(PARTITION_SIZE));
-    let mut mounted = mount::<_, 4>(&mut access).unwrap();
+    let mut mounted_index = index::<4>();
+    let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
     mounted
         .commit(
             &mut access,
@@ -615,7 +643,8 @@ fn same_id_with_conflicting_authenticated_material_fails_closed() {
 fn physical_full_and_ram_index_full_are_distinct_and_nonmutating() {
     let too_large_wire = complete_wire(0x22, FINAL_EXTENT_PAYLOAD_SIZE + 1, 1);
     let mut one_extent = BoundLxmfStore::new(TestNor::erased(EXTENT_SIZE), binding(EXTENT_SIZE));
-    let mut mounted = mount::<_, 2>(&mut one_extent).unwrap();
+    let mut mounted_index = index::<2>();
+    let mut mounted = mount(&mut one_extent, &mut mounted_index).unwrap();
     assert!(matches!(
         mounted
             .commit(
@@ -634,7 +663,8 @@ fn physical_full_and_ram_index_full_are_distinct_and_nonmutating() {
     let first_wire = complete_wire(0x22, 100, 1);
     let second_wire = complete_wire(0x23, 100, 2);
     let mut access = bound(TestNor::erased(PARTITION_SIZE));
-    let mut indexed = mount::<_, 1>(&mut access).unwrap();
+    let mut single_index = index::<1>();
+    let mut indexed = mount(&mut access, &mut single_index).unwrap();
     indexed
         .commit(
             &mut access,
@@ -654,7 +684,7 @@ fn physical_full_and_ram_index_full_are_distinct_and_nonmutating() {
     ));
     assert_eq!(access.backend().writes, writes);
     assert!(matches!(
-        mount::<_, 0>(&mut access),
+        mount(&mut access, &mut index::<0>()),
         Err(LxmfStoreMountError::IndexCapacityExceeded {
             required: 1,
             capacity: 0
@@ -663,11 +693,116 @@ fn physical_full_and_ram_index_full_are_distinct_and_nonmutating() {
 }
 
 #[test]
+fn caller_index_capacity_is_exact_for_zero_one_and_multiple_slots() {
+    let wires = [
+        complete_wire(0x21, 100, 1),
+        complete_wire(0x22, 100, 2),
+        complete_wire(0x23, 100, 3),
+        complete_wire(0x24, 100, 4),
+    ];
+
+    let mut zero_access = bound(TestNor::erased(PARTITION_SIZE));
+    let mut zero_index = index::<0>();
+    let mut zero = mount(&mut zero_access, &mut zero_index).unwrap();
+    assert_eq!(zero.message_count(), 0);
+    assert!(matches!(
+        zero.commit(
+            &mut zero_access,
+            complete_candidate(&wires[0], 1, 1, 0x21, 1, normal_stamp()),
+        )
+        .unwrap_err()
+        .error(),
+        LxmfCommitError::IndexFull { capacity: 0 }
+    ));
+    assert_eq!(zero_access.backend().writes, 0);
+
+    let mut one_access = bound(TestNor::erased(PARTITION_SIZE));
+    let mut one_index = index::<1>();
+    let mut one = mount(&mut one_access, &mut one_index).unwrap();
+    one.commit(
+        &mut one_access,
+        complete_candidate(&wires[0], 1, 1, 0x21, 1, normal_stamp()),
+    )
+    .unwrap();
+    let one_writes = one_access.backend().writes;
+    assert!(matches!(
+        one.commit(
+            &mut one_access,
+            complete_candidate(&wires[1], 2, 2, 0x22, 2, normal_stamp()),
+        )
+        .unwrap_err()
+        .error(),
+        LxmfCommitError::IndexFull { capacity: 1 }
+    ));
+    assert_eq!(one.message_count(), 1);
+    assert_eq!(one_access.backend().writes, one_writes);
+
+    let mut multiple_access = bound(TestNor::erased(PARTITION_SIZE));
+    let mut multiple_index = index::<3>();
+    let mut multiple = mount(&mut multiple_access, &mut multiple_index).unwrap();
+    for (index, wire) in wires[..3].iter().enumerate() {
+        let tag = (index + 1) as u8;
+        multiple
+            .commit(
+                &mut multiple_access,
+                complete_candidate(wire, tag, tag, 0x20 + tag, u64::from(tag), normal_stamp()),
+            )
+            .unwrap();
+    }
+    let multiple_writes = multiple_access.backend().writes;
+    assert_eq!(multiple.message_count(), 3);
+    assert_eq!(multiple.receipts().count(), 3);
+    assert!(matches!(
+        multiple
+            .commit(
+                &mut multiple_access,
+                complete_candidate(&wires[3], 4, 4, 0x24, 4, normal_stamp()),
+            )
+            .unwrap_err()
+            .error(),
+        LxmfCommitError::IndexFull { capacity: 3 }
+    ));
+    assert_eq!(multiple_access.backend().writes, multiple_writes);
+}
+
+#[test]
+fn remount_resets_and_reconstructs_the_complete_caller_index() {
+    let wire = complete_wire(0x22, 100, 1);
+    let candidate = complete_candidate(&wire, 1, 1, 0x22, 1, normal_stamp());
+    let mut access = bound(TestNor::erased(PARTITION_SIZE));
+    let mut caller_index = index::<2>();
+    let receipt = {
+        let mut mounted = mount(&mut access, &mut caller_index).unwrap();
+        match mounted.commit(&mut access, candidate).unwrap() {
+            LxmfCommitOutcome::Committed(receipt) => receipt,
+            other => panic!("unexpected outcome {other:?}"),
+        }
+    };
+    assert!(caller_index[0].entry.is_some());
+    caller_index[1].entry = caller_index[0].entry;
+
+    {
+        let remounted = mount(&mut access, &mut caller_index).unwrap();
+        assert_eq!(remounted.message_count(), 1);
+        assert_eq!(remounted.receipt(receipt.handle()), Some(receipt));
+    }
+    assert!(caller_index[0].entry.is_some());
+    assert!(caller_index[1].entry.is_none());
+
+    access.backend_mut().bytes.fill(0xff);
+    let empty = mount(&mut access, &mut caller_index).unwrap();
+    assert_eq!(empty.message_count(), 0);
+    drop(empty);
+    assert!(caller_index.iter().all(|slot| slot.entry.is_none()));
+}
+
+#[test]
 fn wrong_operation_binding_is_rejected_with_zero_io() {
     let wire = complete_wire(0x22, 100, 1);
     let candidate = complete_candidate(&wire, 1, 1, 0x22, 1, normal_stamp());
     let mut access = bound(TestNor::erased(PARTITION_SIZE));
-    let mut mounted = mount::<_, 2>(&mut access).unwrap();
+    let mut mounted_index = index::<2>();
+    let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
     let mut wrong = BoundLxmfStore::new(
         TestNor::erased(PARTITION_SIZE),
         LxmfStoreBinding::new(
@@ -693,7 +828,11 @@ fn ambiguous_write_blocks_unrelated_mutation_and_exact_retry_reconciles() {
     let candidate = complete_candidate(&wire, 1, 1, 0x22, 1, normal_stamp());
     let other = complete_candidate(&other_wire, 2, 2, 0x23, 2, normal_stamp());
     let mut access = bound(TestNor::erased(PARTITION_SIZE));
-    let mut mounted = mount::<_, 4>(&mut access).unwrap();
+    let mut mounted_index = index::<4>();
+    let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
+    let message_id = candidate.metadata().message_id();
+    assert!(!mounted.has_pending_mutation());
+    assert_eq!(mounted.pending_message_id(), None);
     access
         .backend_mut()
         .fail_write_after(3, WriteFault::Partial(73));
@@ -704,17 +843,23 @@ fn ambiguous_write_blocks_unrelated_mutation_and_exact_retry_reconciles() {
             ..
         }
     ));
+    assert!(mounted.has_pending_mutation());
+    assert_eq!(mounted.pending_message_id(), Some(message_id));
     let writes = access.backend().writes;
     assert!(matches!(
         mounted.commit(&mut access, other).unwrap_err().error(),
         LxmfCommitError::AmbiguousMutationPending { .. }
     ));
+    assert!(mounted.has_pending_mutation());
+    assert_eq!(mounted.pending_message_id(), Some(message_id));
     assert_eq!(access.backend().writes, writes);
     assert!(matches!(
         mounted.commit(&mut access, candidate),
         Ok(LxmfCommitOutcome::Committed(_))
     ));
     assert_eq!(mounted.message_count(), 1);
+    assert!(!mounted.has_pending_mutation());
+    assert_eq!(mounted.pending_message_id(), None);
 }
 
 #[test]
@@ -722,7 +867,8 @@ fn readback_fault_latches_and_retry_completes_same_candidate() {
     let wire = complete_wire(0x22, 600, 1);
     let candidate = complete_candidate(&wire, 1, 1, 0x22, 1, normal_stamp());
     let mut access = bound(TestNor::erased(PARTITION_SIZE));
-    let mut mounted = mount::<_, 4>(&mut access).unwrap();
+    let mut mounted_index = index::<4>();
+    let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
     access.backend_mut().fail_read_after(16);
     assert!(matches!(
         mounted.commit(&mut access, candidate).unwrap_err().error(),
@@ -742,14 +888,16 @@ fn every_write_prefix_is_invisible_after_power_loss_and_retryable_in_place() {
     let wire = complete_wire(0x22, 600, 1);
     let candidate = complete_candidate(&wire, 1, 1, 0x22, 1, normal_stamp());
     let mut baseline = bound(TestNor::erased(PARTITION_SIZE));
-    let mut mounted = mount::<_, 4>(&mut baseline).unwrap();
+    let mut baseline_index = index::<4>();
+    let mut mounted = mount(&mut baseline, &mut baseline_index).unwrap();
     mounted.commit(&mut baseline, candidate).unwrap();
     let total_writes = baseline.backend().writes;
     assert!(total_writes >= 6);
 
     for successful_writes in 0..total_writes {
         let mut access = bound(TestNor::erased(PARTITION_SIZE));
-        let mut mounted = mount::<_, 4>(&mut access).unwrap();
+        let mut mounted_index = index::<4>();
+        let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
         access
             .backend_mut()
             .fail_write_after(successful_writes, WriteFault::Partial(1));
@@ -759,7 +907,8 @@ fn every_write_prefix_is_invisible_after_power_loss_and_retryable_in_place() {
         );
         let interrupted_flash = access.backend().clone();
         let mut remount_access = bound(interrupted_flash);
-        let remounted = mount::<_, 4>(&mut remount_access).unwrap();
+        let mut remounted_index = index::<4>();
+        let remounted = mount(&mut remount_access, &mut remounted_index).unwrap();
         assert_eq!(remounted.message_count(), 0, "prefix {successful_writes}");
         assert!(matches!(
             mounted.commit(&mut access, candidate),
@@ -774,14 +923,16 @@ fn every_multi_extent_power_cut_reboots_retires_and_appends_exactly_once() {
     let wire = complete_wire(0x22, 7_000, 1);
     let candidate = complete_candidate(&wire, 1, 1, 0x22, 1, normal_stamp());
     let mut baseline = BoundLxmfStore::new(TestNor::erased(SIX_EXTENTS), binding(SIX_EXTENTS));
-    let mut baseline_mounted = mount::<_, 4>(&mut baseline).unwrap();
+    let mut baseline_index = index::<4>();
+    let mut baseline_mounted = mount(&mut baseline, &mut baseline_index).unwrap();
     baseline_mounted.commit(&mut baseline, candidate).unwrap();
     let total_writes = baseline.backend().writes;
 
     for successful_writes in 0..total_writes {
         let mut interrupted =
             BoundLxmfStore::new(TestNor::erased(SIX_EXTENTS), binding(SIX_EXTENTS));
-        let mut before_reset = mount::<_, 4>(&mut interrupted).unwrap();
+        let mut before_reset_index = index::<4>();
+        let mut before_reset = mount(&mut interrupted, &mut before_reset_index).unwrap();
         interrupted
             .backend_mut()
             .fail_write_after(successful_writes, WriteFault::Partial(1));
@@ -789,7 +940,8 @@ fn every_multi_extent_power_cut_reboots_retires_and_appends_exactly_once() {
 
         let interrupted_flash = interrupted.into_backend();
         let mut rebooted_access = BoundLxmfStore::new(interrupted_flash, binding(SIX_EXTENTS));
-        let mut rebooted = mount::<_, 4>(&mut rebooted_access).unwrap();
+        let mut rebooted_index = index::<4>();
+        let mut rebooted = mount(&mut rebooted_access, &mut rebooted_index).unwrap();
         assert_eq!(
             rebooted.message_count(),
             0,
@@ -799,7 +951,8 @@ fn every_multi_extent_power_cut_reboots_retires_and_appends_exactly_once() {
             LxmfCommitOutcome::Committed(receipt) => receipt,
             other => panic!("cut at write {successful_writes}: {other:?}"),
         };
-        let final_mount = mount::<_, 4>(&mut rebooted_access).unwrap();
+        let mut final_index = index::<4>();
+        let final_mount = mount(&mut rebooted_access, &mut final_index).unwrap();
         assert_eq!(final_mount.message_count(), 1, "cut at {successful_writes}");
         assert_eq!(
             final_mount
@@ -818,13 +971,16 @@ fn sparse_torn_claim_and_header_are_recognized_but_never_visible() {
     let candidate = complete_candidate(&wire, 1, 1, 0x22, 1, normal_stamp());
     for failed_write in [0, 1] {
         let mut access = bound(TestNor::erased(PARTITION_SIZE));
-        let mut mounted = mount::<_, 4>(&mut access).unwrap();
+        let mut mounted_index = index::<4>();
+        let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
         access
             .backend_mut()
             .fail_write_after(failed_write, WriteFault::Sparse);
         assert!(mounted.commit(&mut access, candidate).is_err());
         assert_eq!(
-            mount::<_, 4>(&mut access).unwrap().message_count(),
+            mount(&mut access, &mut index::<4>())
+                .unwrap()
+                .message_count(),
             0,
             "sparse failure at program call {failed_write}"
         );
@@ -836,13 +992,15 @@ fn lost_success_at_every_program_call_is_reconciled_by_readback() {
     let wire = complete_wire(0x22, 600, 1);
     let candidate = complete_candidate(&wire, 1, 1, 0x22, 1, normal_stamp());
     let mut baseline = bound(TestNor::erased(PARTITION_SIZE));
-    let mut mounted = mount::<_, 4>(&mut baseline).unwrap();
+    let mut baseline_index = index::<4>();
+    let mut mounted = mount(&mut baseline, &mut baseline_index).unwrap();
     mounted.commit(&mut baseline, candidate).unwrap();
     let total_writes = baseline.backend().writes;
 
     for lost_call in 0..total_writes {
         let mut access = bound(TestNor::erased(PARTITION_SIZE));
-        let mut mounted = mount::<_, 4>(&mut access).unwrap();
+        let mut mounted_index = index::<4>();
+        let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
         access
             .backend_mut()
             .fail_write_after(lost_call, WriteFault::LostReply);
@@ -850,7 +1008,12 @@ fn lost_success_at_every_program_call_is_reconciled_by_readback() {
             mounted.commit(&mut access, candidate),
             Ok(LxmfCommitOutcome::Committed(_))
         ));
-        assert_eq!(mount::<_, 4>(&mut access).unwrap().message_count(), 1);
+        assert_eq!(
+            mount(&mut access, &mut index::<4>())
+                .unwrap()
+                .message_count(),
+            1
+        );
     }
 }
 
@@ -863,12 +1026,26 @@ fn durable_commit_with_lost_readback_retries_as_already_durable_without_writing(
         (24, LxmfProgramStage::Verification),
     ] {
         let mut access = bound(TestNor::erased(PARTITION_SIZE));
-        let mut mounted = mount::<_, 4>(&mut access).unwrap();
+        let mut mounted_index = index::<4>();
+        let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
         access.backend_mut().fail_read_after(successful_reads);
         assert!(matches!(
             mounted.commit(&mut access, candidate).unwrap_err().error(),
             LxmfCommitError::Backend { stage, .. } if *stage == expected_stage
         ));
+        assert!(mounted.has_pending_mutation());
+        assert_eq!(
+            mounted.pending_message_id(),
+            Some(candidate.metadata().message_id())
+        );
+
+        let mut reset_access = bound(access.backend().clone());
+        let mut reset_index = index::<4>();
+        let reset = mount(&mut reset_access, &mut reset_index).unwrap();
+        assert_eq!(reset.message_count(), 1);
+        assert!(!reset.has_pending_mutation());
+        assert_eq!(reset.pending_message_id(), None);
+
         let writes = access.backend().writes;
         assert!(matches!(
             mounted.commit(&mut access, candidate),
@@ -876,6 +1053,8 @@ fn durable_commit_with_lost_readback_retries_as_already_durable_without_writing(
         ));
         assert_eq!(access.backend().writes, writes);
         assert_eq!(mounted.message_count(), 1);
+        assert!(!mounted.has_pending_mutation());
+        assert_eq!(mounted.pending_message_id(), None);
     }
 }
 
@@ -884,12 +1063,14 @@ fn partially_programmed_terminal_marker_is_completed_by_same_candidate_retry() {
     let wire = complete_wire(0x22, 600, 1);
     let candidate = complete_candidate(&wire, 1, 1, 0x22, 1, normal_stamp());
     let mut baseline = bound(TestNor::erased(PARTITION_SIZE));
-    let mut baseline_mounted = mount::<_, 4>(&mut baseline).unwrap();
+    let mut baseline_index = index::<4>();
+    let mut baseline_mounted = mount(&mut baseline, &mut baseline_index).unwrap();
     baseline_mounted.commit(&mut baseline, candidate).unwrap();
     let writes_before_terminal = baseline.backend().writes - 1;
 
     let mut access = bound(TestNor::erased(PARTITION_SIZE));
-    let mut mounted = mount::<_, 4>(&mut access).unwrap();
+    let mut mounted_index = index::<4>();
+    let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
     access
         .backend_mut()
         .fail_write_after(writes_before_terminal, WriteFault::Partial(240));
@@ -900,7 +1081,12 @@ fn partially_programmed_terminal_marker_is_completed_by_same_candidate_retry() {
             ..
         }
     ));
-    assert_eq!(mount::<_, 4>(&mut access).unwrap().message_count(), 0);
+    assert_eq!(
+        mount(&mut access, &mut index::<4>())
+            .unwrap()
+            .message_count(),
+        0
+    );
     assert!(matches!(
         mounted.commit(&mut access, candidate),
         Ok(LxmfCommitOutcome::Committed(_))
@@ -912,11 +1098,12 @@ fn exact_commit_marker_with_corrupt_header_fails_closed() {
     let wire = complete_wire(0x22, 600, 1);
     let candidate = complete_candidate(&wire, 1, 1, 0x22, 1, normal_stamp());
     let mut access = bound(TestNor::erased(PARTITION_SIZE));
-    let mut mounted = mount::<_, 4>(&mut access).unwrap();
+    let mut mounted_index = index::<4>();
+    let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
     mounted.commit(&mut access, candidate).unwrap();
     access.backend_mut().bytes[HEADER_TIMESTAMP_OFFSET] &= 0xfe;
     assert!(matches!(
-        mount::<_, 4>(&mut access),
+        mount(&mut access, &mut index::<4>()),
         Err(LxmfStoreMountError::Fault(
             LxmfStoreFault::CommittedHeaderCorrupt { extent: 0 }
         ))
@@ -928,11 +1115,12 @@ fn committed_programmed_wire_padding_fails_closed() {
     let wire = complete_wire(0x22, 600, 1);
     let candidate = complete_candidate(&wire, 1, 1, 0x22, 1, normal_stamp());
     let mut access = bound(TestNor::erased(PARTITION_SIZE));
-    let mut mounted = mount::<_, 4>(&mut access).unwrap();
+    let mut mounted_index = index::<4>();
+    let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
     mounted.commit(&mut access, candidate).unwrap();
     access.backend_mut().bytes[EXTENT_HEADER_SIZE + wire.len()] = 0x7f;
     assert!(matches!(
-        mount::<_, 4>(&mut access),
+        mount(&mut access, &mut index::<4>()),
         Err(LxmfStoreMountError::Fault(
             LxmfStoreFault::CommittedWirePaddingProgrammed { extent: 0 }
         ))
@@ -944,7 +1132,7 @@ fn unclaimed_programmed_media_fails_closed() {
     let mut access = bound(TestNor::erased(PARTITION_SIZE));
     access.backend_mut().bytes[EXTENT_HEADER_SIZE + 17] = 0x7f;
     assert!(matches!(
-        mount::<_, 4>(&mut access),
+        mount(&mut access, &mut index::<4>()),
         Err(LxmfStoreMountError::Fault(
             LxmfStoreFault::UnknownProgrammedExtent { extent: 0 }
         ))
@@ -970,7 +1158,7 @@ fn incomplete_multi_extent_header_cannot_hide_unknown_programmed_interior_media(
         .copy_from_slice(&expected_continuation[HEADER_MAGIC_OFFSET..HEADER_VERSION_OFFSET]);
 
     assert!(matches!(
-        mount::<_, 4>(&mut access),
+        mount(&mut access, &mut index::<4>()),
         Err(LxmfStoreMountError::Fault(
             LxmfStoreFault::UnknownProgrammedExtent { extent: 1 }
         ))
@@ -982,7 +1170,8 @@ fn incomplete_multi_extent_header_cannot_hide_committed_interior_record() {
     let inner_wire = complete_wire(0x33, 100, 2);
     let inner_candidate = complete_candidate(&inner_wire, 2, 2, 0x33, 2, normal_stamp());
     let mut inner = bound(TestNor::erased(PARTITION_SIZE));
-    let mut inner_mounted = mount::<_, 4>(&mut inner).unwrap();
+    let mut inner_index = index::<4>();
+    let mut inner_mounted = mount(&mut inner, &mut inner_index).unwrap();
     inner_mounted.commit(&mut inner, inner_candidate).unwrap();
 
     let outer_wire = complete_wire(0x22, 7_000, 1);
@@ -993,7 +1182,7 @@ fn incomplete_multi_extent_header_cannot_hide_committed_interior_record() {
         .copy_from_slice(&inner.backend().bytes[..EXTENT_SIZE]);
 
     assert!(matches!(
-        mount::<_, 4>(&mut access),
+        mount(&mut access, &mut index::<4>()),
         Err(LxmfStoreMountError::Fault(
             LxmfStoreFault::UnknownCommittedExtent { extent: 1 }
         ))
@@ -1005,13 +1194,15 @@ fn pending_retry_cannot_hide_committed_interior_record() {
     let inner_wire = complete_wire(0x33, 100, 2);
     let inner_candidate = complete_candidate(&inner_wire, 2, 2, 0x33, 2, normal_stamp());
     let mut inner = bound(TestNor::erased(PARTITION_SIZE));
-    let mut inner_mounted = mount::<_, 4>(&mut inner).unwrap();
+    let mut inner_index = index::<4>();
+    let mut inner_mounted = mount(&mut inner, &mut inner_index).unwrap();
     inner_mounted.commit(&mut inner, inner_candidate).unwrap();
 
     let wire = complete_wire(0x22, 7_000, 1);
     let candidate = complete_candidate(&wire, 1, 1, 0x22, 1, normal_stamp());
     let mut access = bound(TestNor::erased(PARTITION_SIZE));
-    let mut mounted = mount::<_, 4>(&mut access).unwrap();
+    let mut mounted_index = index::<4>();
+    let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
     access.backend_mut().fail_read_after(0);
     assert!(matches!(
         mounted.commit(&mut access, candidate).unwrap_err().error(),
@@ -1048,7 +1239,7 @@ fn standalone_continuation_with_incomplete_marker_fails_closed() {
     access.backend_mut().bytes[..EXTENT_HEADER_SIZE].copy_from_slice(&header);
 
     assert!(matches!(
-        mount::<_, 4>(&mut access),
+        mount(&mut access, &mut index::<4>()),
         Err(LxmfStoreMountError::Fault(
             LxmfStoreFault::UnknownProgrammedExtent { extent: 0 }
         ))
@@ -1072,7 +1263,7 @@ fn decoded_record_start_extending_beyond_bound_range_fails_closed() {
         .copy_from_slice(&header);
 
     assert!(matches!(
-        mount::<_, 4>(&mut access),
+        mount(&mut access, &mut index::<4>()),
         Err(LxmfStoreMountError::Fault(
             LxmfStoreFault::UnknownProgrammedExtent { extent: 2 }
         ))
@@ -1084,7 +1275,8 @@ fn duplicate_committed_handle_fails_closed() {
     let first_wire = complete_wire(0x22, 100, 1);
     let second_wire = complete_wire(0x23, 100, 2);
     let mut first = bound(TestNor::erased(PARTITION_SIZE));
-    let mut first_mounted = mount::<_, 4>(&mut first).unwrap();
+    let mut first_index = index::<4>();
+    let mut first_mounted = mount(&mut first, &mut first_index).unwrap();
     first_mounted
         .commit(
             &mut first,
@@ -1092,7 +1284,8 @@ fn duplicate_committed_handle_fails_closed() {
         )
         .unwrap();
     let mut second = bound(TestNor::erased(PARTITION_SIZE));
-    let mut second_mounted = mount::<_, 4>(&mut second).unwrap();
+    let mut second_index = index::<4>();
+    let mut second_mounted = mount(&mut second, &mut second_index).unwrap();
     second_mounted
         .commit(
             &mut second,
@@ -1102,7 +1295,7 @@ fn duplicate_committed_handle_fails_closed() {
     first.backend_mut().bytes[EXTENT_SIZE..EXTENT_SIZE * 2]
         .copy_from_slice(&second.backend().bytes[..EXTENT_SIZE]);
     assert!(matches!(
-        mount::<_, 4>(&mut first),
+        mount(&mut first, &mut index::<4>()),
         Err(LxmfStoreMountError::Fault(
             LxmfStoreFault::DuplicateCommittedHandle { handle }
         )) if handle.get() == 1
@@ -1112,5 +1305,13 @@ fn duplicate_committed_handle_fails_closed() {
 #[test]
 fn runtime_state_and_candidate_never_contain_a_whole_message_buffer() {
     assert!(core::mem::size_of::<InboundMessageCandidate<'_>>() < 256);
-    assert!(core::mem::size_of::<MountedLxmfStore<4>>() < EXTENT_SIZE);
+    let mounted_bytes = core::mem::size_of::<MountedLxmfStore<'static>>();
+    let slot_bytes = core::mem::size_of::<LxmfStoreIndexSlot>();
+    assert!(mounted_bytes < EXTENT_SIZE);
+    assert!(slot_bytes > 0);
+    assert_eq!(
+        core::mem::size_of::<[LxmfStoreIndexSlot; 512]>(),
+        slot_bytes * 512
+    );
+    assert!(mounted_bytes < core::mem::size_of::<[LxmfStoreIndexSlot; 4]>());
 }

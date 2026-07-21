@@ -545,18 +545,41 @@ struct PendingMutation {
     handle: MessageHandle,
 }
 
-/// Mounted runtime state with a caller-selected fixed committed-message index.
+/// Caller-owned storage for one committed-message index entry.
+///
+/// The entry remains private so only a mounted store can interpret or mutate
+/// it. Construct the product-selected number of slots outside the mounted
+/// owner, then pass the complete mutable slice to [`mount`].
+#[must_use = "an LXMF index slot must outlive the mounted store that borrows it"]
+pub struct LxmfStoreIndexSlot {
+    entry: Option<IndexEntry>,
+}
+
+impl LxmfStoreIndexSlot {
+    /// Construct one empty reusable index slot.
+    pub const fn new() -> Self {
+        Self { entry: None }
+    }
+}
+
+impl Default for LxmfStoreIndexSlot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Mounted runtime state borrowing a caller-owned committed-message index.
 #[must_use = "mounted durable ownership must be retained or deliberately discarded"]
-pub struct MountedLxmfStore<const M: usize> {
+pub struct MountedLxmfStore<'index> {
     binding: LxmfStoreBinding,
-    entries: [Option<IndexEntry>; M],
+    entries: &'index mut [LxmfStoreIndexSlot],
     entry_count: usize,
     append_extent: usize,
     next_handle: u64,
     pending: Option<PendingMutation>,
 }
 
-impl<const M: usize> MountedLxmfStore<M> {
+impl MountedLxmfStore<'_> {
     /// Exact physical binding established by mount.
     pub const fn binding(&self) -> LxmfStoreBinding {
         self.binding
@@ -565,6 +588,20 @@ impl<const M: usize> MountedLxmfStore<M> {
     /// Number of committed logical messages in the fixed RAM index.
     pub const fn message_count(&self) -> usize {
         self.entry_count
+    }
+
+    /// Whether an exact physical mutation has an ambiguous result awaiting
+    /// reconciliation with the same message.
+    pub const fn has_pending_mutation(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Message identity whose exact physical mutation awaits reconciliation.
+    pub const fn pending_message_id(&self) -> Option<MessageId> {
+        match self.pending {
+            Some(pending) => Some(pending.replay.authenticated().message_id()),
+            None => None,
+        }
     }
 
     /// Extents committed, retired, or conservatively reserved by this mount.
@@ -591,7 +628,7 @@ impl<const M: usize> MountedLxmfStore<M> {
     pub fn receipt(&self, handle: MessageHandle) -> Option<DurableMessageReceipt> {
         self.entries[..self.entry_count]
             .iter()
-            .flatten()
+            .filter_map(|slot| slot.entry.as_ref())
             .find(|entry| entry.receipt.handle() == handle)
             .map(|entry| entry.receipt)
     }
@@ -600,7 +637,7 @@ impl<const M: usize> MountedLxmfStore<M> {
     pub fn metadata(&self, handle: MessageHandle) -> Option<InboundMessageMetadata> {
         self.entries[..self.entry_count]
             .iter()
-            .flatten()
+            .filter_map(|slot| slot.entry.as_ref())
             .find(|entry| entry.receipt.handle() == handle)
             .map(|entry| entry.metadata)
     }
@@ -609,7 +646,7 @@ impl<const M: usize> MountedLxmfStore<M> {
     pub fn receipts(&self) -> impl Iterator<Item = DurableMessageReceipt> + '_ {
         self.entries[..self.entry_count]
             .iter()
-            .flatten()
+            .filter_map(|slot| slot.entry.as_ref())
             .map(|entry| entry.receipt)
     }
 
@@ -658,10 +695,12 @@ impl<const M: usize> MountedLxmfStore<M> {
                 },
             ));
         }
-        if self.entry_count == M {
+        if self.entry_count == self.entries.len() {
             return Err(LxmfCommitFailure::new(
                 candidate,
-                LxmfCommitError::IndexFull { capacity: M },
+                LxmfCommitError::IndexFull {
+                    capacity: self.entries.len(),
+                },
             ));
         }
 
@@ -917,14 +956,13 @@ impl<const M: usize> MountedLxmfStore<M> {
     fn entry_for_message(&self, id: MessageId) -> Option<IndexEntry> {
         self.entries[..self.entry_count]
             .iter()
-            .flatten()
-            .copied()
+            .filter_map(|slot| slot.entry)
             .find(|entry| entry.receipt.message_id() == id)
     }
 
     fn install_entry(&mut self, entry: IndexEntry) {
         if self.entry_for_message(entry.receipt.message_id()).is_none() {
-            self.entries[self.entry_count] = Some(entry);
+            self.entries[self.entry_count].entry = Some(entry);
             self.entry_count += 1;
         }
     }
@@ -938,18 +976,23 @@ impl<const M: usize> MountedLxmfStore<M> {
     }
 }
 
-/// Mount a complete exact-range read-only view without programming or erasing.
-pub fn mount<A, const M: usize>(
+/// Mount a complete exact-range read-only view into caller-owned index slots
+/// without programming or erasing.
+pub fn mount<'index, A>(
     access: &mut A,
-) -> Result<MountedLxmfStore<M>, LxmfStoreMountError<A::Error>>
+    index: &'index mut [LxmfStoreIndexSlot],
+) -> Result<MountedLxmfStore<'index>, LxmfStoreMountError<A::Error>>
 where
     A: BoundLxmfStoreReadAccess,
 {
     let binding = validate_read_access(access).map_err(LxmfStoreMountError::Binding)?;
+    for slot in index.iter_mut() {
+        slot.entry = None;
+    }
     let total_extents = binding.length() / EXTENT_SIZE;
     let mut mounted = MountedLxmfStore {
         binding,
-        entries: [None; M],
+        entries: index,
         entry_count: 0,
         append_extent: 0,
         next_handle: 1,
@@ -1099,7 +1142,7 @@ where
         }
         if mounted.entries[..mounted.entry_count]
             .iter()
-            .flatten()
+            .filter_map(|slot| slot.entry.as_ref())
             .any(|existing| existing.receipt.handle() == entry.receipt.handle())
         {
             return Err(LxmfStoreMountError::Fault(
@@ -1108,10 +1151,10 @@ where
                 },
             ));
         }
-        if mounted.entry_count == M {
+        if mounted.entry_count == mounted.entries.len() {
             return Err(LxmfStoreMountError::IndexCapacityExceeded {
                 required: mounted.entry_count + 1,
-                capacity: M,
+                capacity: mounted.entries.len(),
             });
         }
         mounted.install_entry(entry);

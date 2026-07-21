@@ -242,7 +242,7 @@ impl<E: fmt::Debug> fmt::Debug for DurableIngressOutcome<'_, '_, E> {
 /// reservation and returns the original proof-bearing lease. This operation
 /// never drains or transmits a ready proof.
 #[allow(clippy::too_many_arguments)]
-pub fn commit_application_event<'owner, 'slots, 'proof_slots, R, A, const MESSAGES: usize>(
+pub fn commit_application_event<'owner, 'slots, 'proof_slots, R, A>(
     lease: ApplicationEventLease<'owner, 'slots>,
     proof_mode: DurableIngressProofMode,
     delayed_proofs: &mut DelayedProofOwner<'proof_slots>,
@@ -250,7 +250,7 @@ pub fn commit_application_event<'owner, 'slots, 'proof_slots, R, A, const MESSAG
     limits: WireLimits,
     source_identities: &R,
     stamp_policy: StampPolicy<'_>,
-    store: &mut MountedLxmfStore<MESSAGES>,
+    store: &mut MountedLxmfStore<'_>,
     access: &mut A,
 ) -> DurableIngressOutcome<'owner, 'slots, A::Error>
 where
@@ -377,11 +377,11 @@ where
     })
 }
 
-fn commit_proofless<'owner, 'slots, A, const MESSAGES: usize>(
+fn commit_proofless<'owner, 'slots, A>(
     lease: ApplicationEventLease<'owner, 'slots>,
     evidence: ValidatedIngressEvidence,
     metadata: InboundMessageMetadata,
-    store: &mut MountedLxmfStore<MESSAGES>,
+    store: &mut MountedLxmfStore<'_>,
     access: &mut A,
 ) -> DurableIngressOutcome<'owner, 'slots, A::Error>
 where

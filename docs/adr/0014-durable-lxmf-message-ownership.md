@@ -107,9 +107,9 @@ media and resynchronize at every erase boundary. Commit streams and reads back
 the content and footer after all repeated headers, then programs the terminal
 marker last. Only a complete final decode can issue a durable receipt.
 
-A mount scans the complete bound range. Committed records enter a
-caller-capacity-bounded RAM index. Recognized interrupted records consume their
-reserved extents but are not visible. Unclaimed programmed media, duplicate
+A mount scans the complete bound range. Committed records enter an opaque,
+caller-backed, capacity-bounded RAM index slot slice. Recognized interrupted
+records consume their reserved extents but are not visible. Unclaimed programmed media, duplicate
 logical handles, conflicting logical records, invalid committed metadata,
 programmed wire padding, digest mismatch, unsupported format, incompatible
 geometry, or an undersized RAM index fails closed. Mount does not erase or
@@ -210,10 +210,11 @@ The existing raw-inbox evidence must not be relabelled as this stronger claim.
 - Full-product and reduced profiles choose explicit wire, record, index, and
   total-storage limits. A reduced board may disable the LXMF store without
   narrowing the full-feature protocol design.
-- The fixed RAM index is also profile-owned. A full 512-entry E290 index must
-  be deliberately placed and measured against PSRAM/static-memory and task-
-  stack policy during target composition; the portable API must not turn a
-  convenient small stack allocation into a product capacity ceiling.
+- The fixed, caller-backed RAM index is also profile-owned. A full 512-entry
+  E290 index must be deliberately placed and measured against PSRAM/static-
+  memory and task-stack policy during target composition; the portable API
+  must not turn a convenient small stack allocation into a product capacity
+  ceiling.
 - The first format trades space for simple power-loss isolation: one interrupted
   append retires extents until later compaction. That is bounded and observable,
   but not yet an endurance-ready mailbox.

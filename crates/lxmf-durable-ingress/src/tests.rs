@@ -9,8 +9,8 @@ use embedded_storage::nor_flash::{
 use rand_core::{CryptoRng, RngCore};
 use reticulum_lxmf_ingress::{LocalDeliveryDestination, StampPolicy, WireLimits};
 use reticulum_lxmf_store::{
-    BoundLxmfStore, LxmfProgramStage, LxmfStoreBinding, LxmfStoreDeviceId, PHYSICAL_FORMAT_VERSION,
-    RECORD_FOOTER_SIZE, mount,
+    BoundLxmfStore, LxmfProgramStage, LxmfStoreBinding, LxmfStoreDeviceId, LxmfStoreIndexSlot,
+    PHYSICAL_FORMAT_VERSION, RECORD_FOOTER_SIZE, mount,
 };
 use reticulum_node_core::{
     ApplicationEvent, ApplicationEventOwner, ApplicationEventQuarantineReason,
@@ -92,6 +92,10 @@ fn binding() -> LxmfStoreBinding {
         PARTITION_SIZE,
         PHYSICAL_FORMAT_VERSION,
     )
+}
+
+fn store_index<const N: usize>() -> [LxmfStoreIndexSlot; N] {
+    core::array::from_fn(|_| LxmfStoreIndexSlot::new())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -326,13 +330,13 @@ fn proof_bearing_actions(fixture: &MessageFixture) -> NodeActions {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn commit_proofless_event<'owner, 'slots, R, A, const MESSAGES: usize>(
+fn commit_proofless_event<'owner, 'slots, R, A>(
     lease: ApplicationEventLease<'owner, 'slots>,
     local_destination: LocalDeliveryDestination,
     limits: WireLimits,
     source_identities: &R,
     stamp_policy: StampPolicy<'_>,
-    store: &mut MountedLxmfStore<MESSAGES>,
+    store: &mut MountedLxmfStore<'_>,
     access: &mut A,
 ) -> DurableIngressOutcome<'owner, 'slots, A::Error>
 where
@@ -409,7 +413,8 @@ fn required_mode_returns_exact_proofless_lease_before_store_io() {
     let public_key = array::<64>(&fixture.source_public_key_hex);
     let resolver = |candidate: &[u8; 16]| (candidate == &source).then_some(public_key);
     let mut access = BoundLxmfStore::new(FakeNor::erased(), binding());
-    let mut store = mount::<_, 1>(&mut access).expect("empty store mounts");
+    let mut index = store_index::<1>();
+    let mut store = mount(&mut access, &mut index).expect("empty store mounts");
     let io_before = (
         access.backend().reads,
         access.backend().writes,
@@ -475,7 +480,8 @@ fn retained_proof_is_preclassified_then_capacity_checked_before_store_io() {
     let public_key = array::<64>(&fixture.source_public_key_hex);
     let resolver = |candidate: &[u8; 16]| (candidate == &source).then_some(public_key);
     let mut access = BoundLxmfStore::new(FakeNor::erased(), binding());
-    let mut store = mount::<_, 1>(&mut access).expect("empty store mounts");
+    let mut index = store_index::<1>();
+    let mut store = mount(&mut access, &mut index).expect("empty store mounts");
     let io_before = (
         access.backend().reads,
         access.backend().writes,
@@ -567,7 +573,8 @@ fn retained_basic_binary_new_and_replay_each_queue_one_ready_proof() {
     let public_key = array::<64>(&fixture.source_public_key_hex);
     let resolver = |candidate: &[u8; 16]| (candidate == &source).then_some(public_key);
     let mut access = BoundLxmfStore::new(FakeNor::erased(), binding());
-    let mut store = mount::<_, 2>(&mut access).expect("empty store mounts");
+    let mut index = store_index::<2>();
+    let mut store = mount(&mut access, &mut index).expect("empty store mounts");
     let mut event_slots = [ApplicationEventSlot::new()];
     let mut event_owner = ApplicationEventOwner::new(&mut event_slots);
     let mut proof_slots = [DelayedProofSlot::new(), DelayedProofSlot::new()];
@@ -653,7 +660,8 @@ fn retained_lost_commit_reply_retry_queues_exactly_one_ready_proof() {
     let public_key = array::<64>(&fixture.source_public_key_hex);
     let resolver = |candidate: &[u8; 16]| (candidate == &source).then_some(public_key);
     let mut access = BoundLxmfStore::new(FakeNor::erased(), binding());
-    let mut store = mount::<_, 1>(&mut access).expect("empty store mounts");
+    let mut index = store_index::<1>();
+    let mut store = mount(&mut access, &mut index).expect("empty store mounts");
     access.backend_mut().lose_commit_reply();
     let mut event_slots = [ApplicationEventSlot::new()];
     let mut event_owner = ApplicationEventOwner::new(&mut event_slots);
@@ -691,8 +699,9 @@ fn retained_lost_commit_reply_retry_queues_exactly_one_ready_proof() {
     assert_eq!(delayed_proofs.capacities().ready, 0);
     assert_eq!(delayed_proofs.counters().reservations_created, 1);
     assert_eq!(delayed_proofs.counters().reservations_released, 1);
+    let mut remount_index = store_index::<1>();
     assert_eq!(
-        mount::<_, 1>(&mut access)
+        mount(&mut access, &mut remount_index)
             .expect("terminal write reached physical media")
             .message_count(),
         1
@@ -758,7 +767,8 @@ fn python_maximum_opportunistic_event_commits_before_acknowledgement_and_replays
     let public_key = array::<64>(&fixture.source_public_key_hex);
     let resolver = |candidate: &[u8; 16]| (candidate == &source).then_some(public_key);
     let mut access = BoundLxmfStore::new(FakeNor::erased(), binding());
-    let mut store = mount::<_, 2>(&mut access).expect("empty store mounts");
+    let mut index = store_index::<2>();
+    let mut store = mount(&mut access, &mut index).expect("empty store mounts");
     let mut slots = [ApplicationEventSlot::new()];
     let mut owner = ApplicationEventOwner::new(&mut slots);
 
@@ -821,7 +831,8 @@ fn unrelated_deferred_and_rejected_outcomes_return_the_exact_lease() {
     let resolver = |candidate: &[u8; 16]| (candidate == &source).then_some(public_key);
     let missing = |_candidate: &[u8; 16]| None::<[u8; 64]>;
     let mut access = BoundLxmfStore::new(FakeNor::erased(), binding());
-    let mut store = mount::<_, 2>(&mut access).expect("empty store mounts");
+    let mut index = store_index::<2>();
+    let mut store = mount(&mut access, &mut index).expect("empty store mounts");
     let mut slots = [ApplicationEventSlot::new()];
     let mut owner = ApplicationEventOwner::new(&mut slots);
 
@@ -935,7 +946,9 @@ fn store_capacity_and_backend_failures_return_the_exact_unacknowledged_lease() {
     let resolver = |candidate: &[u8; 16]| (candidate == &source).then_some(public_key);
 
     let mut zero_access = BoundLxmfStore::new(FakeNor::erased(), binding());
-    let mut zero_store = mount::<_, 0>(&mut zero_access).expect("zero-entry store mounts empty");
+    let mut zero_index = store_index::<0>();
+    let mut zero_store =
+        mount(&mut zero_access, &mut zero_index).expect("zero-entry store mounts empty");
     let mut zero_slots = [ApplicationEventSlot::new()];
     let mut zero_owner = ApplicationEventOwner::new(&mut zero_slots);
     let blocked_event = event(&fixture);
@@ -975,7 +988,9 @@ fn store_capacity_and_backend_failures_return_the_exact_unacknowledged_lease() {
     assert_eq!(zero_owner.counters().acknowledged_events, 0);
 
     let mut failed_access = BoundLxmfStore::new(FakeNor::erased(), binding());
-    let mut failed_store = mount::<_, 1>(&mut failed_access).expect("empty store mounts");
+    let mut failed_index = store_index::<1>();
+    let mut failed_store =
+        mount(&mut failed_access, &mut failed_index).expect("empty store mounts");
     failed_access.backend_mut().fail_next_write();
     let mut failed_slots = [ApplicationEventSlot::new()];
     let mut failed_owner = ApplicationEventOwner::new(&mut failed_slots);
@@ -1018,7 +1033,8 @@ fn commit_marker_lost_success_retains_exact_lease_until_same_lease_retry_is_dura
     let public_key = array::<64>(&fixture.source_public_key_hex);
     let resolver = |candidate: &[u8; 16]| (candidate == &source).then_some(public_key);
     let mut access = BoundLxmfStore::new(FakeNor::erased(), binding());
-    let mut store = mount::<_, 1>(&mut access).expect("empty store mounts");
+    let mut index = store_index::<1>();
+    let mut store = mount(&mut access, &mut index).expect("empty store mounts");
     access.backend_mut().lose_commit_reply();
     let mut slots = [ApplicationEventSlot::new()];
     let mut owner = ApplicationEventOwner::new(&mut slots);
@@ -1051,8 +1067,9 @@ fn commit_marker_lost_success_retains_exact_lease_until_same_lease_retry_is_dura
         })
     ));
     assert_eq!(store.message_count(), 0);
+    let mut remount_index = store_index::<1>();
     assert_eq!(
-        mount::<_, 1>(&mut access)
+        mount(&mut access, &mut remount_index)
             .expect("the lost reply followed physical commit")
             .message_count(),
         1
@@ -1091,7 +1108,8 @@ fn wrong_binding_returns_exact_lease_without_touching_the_supplied_backend() {
     let public_key = array::<64>(&fixture.source_public_key_hex);
     let resolver = |candidate: &[u8; 16]| (candidate == &source).then_some(public_key);
     let mut mounted_access = BoundLxmfStore::new(FakeNor::erased(), binding());
-    let mut store = mount::<_, 1>(&mut mounted_access).expect("empty store mounts");
+    let mut index = store_index::<1>();
+    let mut store = mount(&mut mounted_access, &mut index).expect("empty store mounts");
     let mut wrong_access = BoundLxmfStore::new(
         FakeNor::erased(),
         LxmfStoreBinding::new(
@@ -1152,7 +1170,8 @@ fn same_id_different_authenticated_material_collision_returns_exact_lease() {
     let public_key = array::<64>(&fixture.source_public_key_hex);
     let resolver = |candidate: &[u8; 16]| (candidate == &source).then_some(public_key);
     let mut access = BoundLxmfStore::new(FakeNor::erased(), binding());
-    let mut store = mount::<_, 2>(&mut access).expect("empty store mounts");
+    let mut index = store_index::<2>();
+    let mut store = mount(&mut access, &mut index).expect("empty store mounts");
 
     let seed_event = event(&fixture);
     let IngressOutcome::Validated(validated) = validate_application_event(
