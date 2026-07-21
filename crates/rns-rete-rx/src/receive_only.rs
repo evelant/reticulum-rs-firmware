@@ -529,25 +529,15 @@ fn usize_to_u64(value: usize) -> u64 {
 }
 
 fn suppress_actions(actions: NodeActions) -> SuppressedActions {
-    // Exact destructuring is intentional: a new outbound action field in the
-    // Rete owner must fail compilation until this safety boundary is reviewed.
-    let NodeActions {
-        events,
-        proof_sidecars,
-        packets,
-        unroutable_packets,
-    } = actions;
-    let suppressed = SuppressedActions {
-        events: usize_to_u64(events.len()),
-        packets: usize_to_u64(packets.len()),
-        unroutable_packets: usize_to_u64(unroutable_packets),
-    };
-
-    // Destroy every allocation-backed action before returning scalar counts.
-    drop(events);
-    drop(proof_sidecars);
-    drop(packets);
-    suppressed
+    // `NodeActions::discard` owns the exhaustive schema freeze: adding an
+    // owning action field fails there until every destruction boundary is
+    // reviewed.
+    let discarded = actions.discard();
+    SuppressedActions {
+        events: usize_to_u64(discarded.events()),
+        packets: usize_to_u64(discarded.packets()),
+        unroutable_packets: usize_to_u64(discarded.unroutable_packets()),
+    }
 }
 
 fn accumulate_suppressed(total: &mut SuppressedActions, update: SuppressedActions) {

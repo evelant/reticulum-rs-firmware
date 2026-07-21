@@ -560,12 +560,11 @@ fn application_event_owner_retains_event_until_caller_disposes_lease() {
     let mut slots = [ApplicationEventSlot::new()];
     let mut owner = ApplicationEventOwner::new(&mut slots);
     owner
-        .try_offer_actions(NodeActions {
-            events: vec![opportunistic_event(fixture)],
-            proof_sidecars: vec![],
-            packets: vec![],
-            unroutable_packets: 0,
-        })
+        .try_offer_actions(NodeActions::without_retained_proofs(
+            vec![opportunistic_event(fixture)],
+            vec![],
+            0,
+        ))
         .expect("event owner admission");
 
     let lease = owner.lease_next().expect("ready event");

@@ -543,11 +543,15 @@ mod tests {
         let mut rng = CounterRng::default();
         let payload = vec![0x51, 0x52, 0x53];
         let payload_pointer = payload.as_ptr();
-        let mut actions = standalone_announce(32, &mut rng);
-        actions.events.push(ApplicationEvent::DataReceived {
-            destination: [0x41; 16],
-            payload,
-        });
+        let mut announce = standalone_announce(32, &mut rng);
+        let actions = NodeActions::without_retained_proofs(
+            vec![ApplicationEvent::DataReceived {
+                destination: [0x41; 16],
+                payload,
+            }],
+            core::mem::take(&mut announce.packets),
+            announce.unroutable_packets,
+        );
         supervisor
             .try_offer_actions(actions, admission())
             .unwrap_or_else(|failure| panic!("ordinary offer: {:?}", failure.reason()));
@@ -653,24 +657,26 @@ mod tests {
         let mut slots = [ApplicationEventSlot::new()];
         let mut owner = ApplicationEventOwner::new(&mut slots);
         owner
-            .try_offer_actions(NodeActions {
-                events: vec![ApplicationEvent::Tick {
+            .try_offer_actions(NodeActions::without_retained_proofs(
+                vec![ApplicationEvent::Tick {
                     expired_paths: 1,
                     closed_links: 0,
                 }],
-                ..NodeActions::default()
-            })
+                vec![],
+                0,
+            ))
             .expect("first event fills the owner");
 
         supervisor
             .try_offer_actions(
-                NodeActions {
-                    events: vec![ApplicationEvent::DataReceived {
+                NodeActions::without_retained_proofs(
+                    vec![ApplicationEvent::DataReceived {
                         destination: [0x61; 16],
                         payload: vec![0x71, 0x72],
                     }],
-                    ..NodeActions::default()
-                },
+                    vec![],
+                    0,
+                ),
                 admission(),
             )
             .unwrap_or_else(|failure| panic!("ordinary offer: {:?}", failure.reason()));
@@ -1168,10 +1174,7 @@ mod tests {
         for (index, (reason, expected)) in cases.into_iter().enumerate() {
             let failure = NodeInterfaceOrdinaryOfferFailure {
                 reason,
-                actions: NodeActions {
-                    unroutable_packets: index + 1,
-                    ..NodeActions::default()
-                },
+                actions: NodeActions::without_retained_proofs(vec![], vec![], index + 1),
                 admission: admission(),
             };
             assert!(matches!(
@@ -3228,7 +3231,7 @@ where
     }
 
     fn actions_are_empty(actions: &NodeActions) -> bool {
-        actions.events.is_empty() && actions.packets.is_empty() && actions.unroutable_packets == 0
+        actions.is_empty()
     }
 
     /// Run one protocol timer tick and immediately offer every returned action

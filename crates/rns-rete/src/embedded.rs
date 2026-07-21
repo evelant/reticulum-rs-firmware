@@ -23,7 +23,6 @@ use rete_stack::{
     RequestFailReason as NativeRequestFailReason,
 };
 use rete_transport::{HeaplessStorage, LinkState, SendError};
-use sha2::{Digest as _, Sha256};
 
 use crate::capacity::{
     HeaplessCapacitySnapshot, LinkAdmissionError, heapless_capacity_snapshot,
@@ -217,15 +216,8 @@ pub struct TxPacket {
 /// it to re-enter the ordinary transmission path. Its packet bytes, covered
 /// hash and source interface are deliberately absent from `Debug` output.
 #[must_use = "a retained inbound proof must be released or explicitly discarded"]
-pub struct RetainedInboundProof {
+pub(crate) struct RetainedInboundProof {
     packet: TxPacket,
-}
-
-impl RetainedInboundProof {
-    /// Consume this owner into the exact proof packet Rete constructed.
-    pub fn into_packet(self) -> TxPacket {
-        self.packet
-    }
 }
 
 impl core::fmt::Debug for RetainedInboundProof {
@@ -237,63 +229,61 @@ impl core::fmt::Debug for RetainedInboundProof {
     }
 }
 
-/// Move-only proof sidecar bound to one exact semantic event index.
+impl RetainedInboundProof {
+    pub(crate) fn into_packet(self) -> TxPacket {
+        self.packet
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn retained_proof_for_owner_test(marker: u8) -> (RetainedInboundProof, *const u8) {
+    let bytes = alloc::vec![marker; 37];
+    let pointer = bytes.as_ptr();
+    (
+        RetainedInboundProof {
+            packet: TxPacket {
+                bytes,
+                target: TxTarget::Only(InterfaceId(marker)),
+                protocol_token: None,
+            },
+        },
+        pointer,
+    )
+}
+
+/// Move-only proof owner bound to one exact semantic event index.
 ///
-/// Keeping this owner outside [`ApplicationEvent`] preserves the transport-
-/// neutral event contract. The index is visible for atomic owner validation;
-/// proof bytes, hashes and interface routing remain redacted.
-#[must_use = "an application-event proof sidecar must stay bound to its event"]
-pub struct ApplicationEventProofSidecar {
+/// Keeping this owner inside [`ApplicationEvents`] but outside
+/// [`ApplicationEvent`] preserves the transport-neutral event contract. The
+/// public wrapper exposes only immutable semantic events, so safe downstream
+/// code cannot separate this proof from the collection it was created beside.
+#[must_use = "a retained application proof must stay owned with its event collection"]
+pub(crate) struct RetainedApplicationProof {
     event_index: usize,
-    event_binding: [u8; 32],
     proof: RetainedInboundProof,
 }
 
-impl ApplicationEventProofSidecar {
-    /// Zero-based index in the accompanying [`NodeActions::events`] vector.
-    pub const fn event_index(&self) -> usize {
+impl RetainedApplicationProof {
+    /// Zero-based index in the accompanying semantic-event collection.
+    pub(crate) const fn event_index(&self) -> usize {
         self.event_index
     }
 
-    /// Whether this sidecar still names the exact DATA event semantics it was
-    /// created beside.
-    ///
-    /// The private binding prevents a caller from replacing or reordering the
-    /// publicly owned event vector while retaining proof authority. Neither
-    /// payload bytes nor their digest are exposed.
-    pub fn is_bound_to(&self, event_index: usize, event: &ApplicationEvent) -> bool {
-        let ApplicationEvent::DataReceived {
-            destination,
-            payload,
-        } = event
-        else {
-            return false;
-        };
-        self.event_index == event_index
-            && self.event_binding == data_event_binding(destination, payload)
-    }
-
     /// Consume into the exact event index and sole retained-proof owner.
-    pub fn into_parts(self) -> (usize, RetainedInboundProof) {
+    pub(crate) fn into_parts(self) -> (usize, RetainedInboundProof) {
         (self.event_index, self.proof)
     }
+
+    #[cfg(test)]
+    pub(crate) fn packet_bytes_ptr(&self) -> *const u8 {
+        self.proof.packet.bytes.as_ptr()
+    }
 }
 
-fn data_event_binding(
-    destination: &[u8; rete_core::TRUNCATED_HASH_LEN],
-    payload: &[u8],
-) -> [u8; 32] {
-    let mut digest = Sha256::new();
-    digest.update(b"reticulum-rns-rete retained DATA event binding v1\0");
-    digest.update(destination);
-    digest.update(payload);
-    digest.finalize().into()
-}
-
-impl core::fmt::Debug for ApplicationEventProofSidecar {
+impl core::fmt::Debug for RetainedApplicationProof {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
-            .debug_struct("ApplicationEventProofSidecar")
+            .debug_struct("RetainedApplicationProof")
             .field("event_index", &self.event_index)
             .field("proof_present", &true)
             .finish()
@@ -1021,20 +1011,225 @@ fn project_application_event(event: NativeNodeEvent) -> ApplicationEvent {
     }
 }
 
+/// Read-only application-event collection owned by one [`NodeActions`]
+/// envelope.
+///
+/// Its vector and optional retained-proof owner move as one opaque value and
+/// cannot be separated or mutated by downstream safe code. The public field
+/// shape still supports existing read-only `.as_slice()`, `.len()`,
+/// `.is_empty()`, `.first()`, `.iter()`, and indexing call sites.
+pub struct ApplicationEvents {
+    events: Vec<ApplicationEvent>,
+    retained_proof: Option<RetainedApplicationProof>,
+}
+
+impl ApplicationEvents {
+    fn without_retained_proofs(events: Vec<ApplicationEvent>) -> Self {
+        Self {
+            events,
+            retained_proof: None,
+        }
+    }
+
+    fn retained(events: Vec<ApplicationEvent>, retained_proof: RetainedApplicationProof) -> Self {
+        Self {
+            events,
+            retained_proof: Some(retained_proof),
+        }
+    }
+
+    pub(crate) const fn retained_proof(&self) -> Option<&RetainedApplicationProof> {
+        self.retained_proof.as_ref()
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<ApplicationEvent>, Option<RetainedApplicationProof>) {
+        (self.events, self.retained_proof)
+    }
+
+    fn owns_no_actions(&self) -> bool {
+        let Self {
+            events,
+            retained_proof,
+        } = self;
+        events.is_empty() && retained_proof.is_none()
+    }
+
+    fn retained_proof_count(&self) -> usize {
+        usize::from(self.retained_proof.is_some())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_semantic_events_for_test(&mut self) {
+        self.events.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_semantic_event_for_test(
+        &mut self,
+        index: usize,
+        event: ApplicationEvent,
+    ) {
+        self.events[index] = event;
+    }
+
+    /// All transport-neutral events in original order.
+    pub fn as_slice(&self) -> &[ApplicationEvent] {
+        self.events.as_slice()
+    }
+
+    /// Number of transport-neutral events.
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    /// Whether no transport-neutral event is owned.
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
+    /// First event, if present.
+    pub fn first(&self) -> Option<&ApplicationEvent> {
+        self.events.first()
+    }
+
+    /// Event at one exact index, if present.
+    pub fn get(&self, index: usize) -> Option<&ApplicationEvent> {
+        self.events.get(index)
+    }
+
+    /// Iterate over immutable events in original order.
+    pub fn iter(&self) -> core::slice::Iter<'_, ApplicationEvent> {
+        self.events.iter()
+    }
+
+    /// Stable allocation pointer for read-only ownership-correlation tests.
+    pub fn as_ptr(&self) -> *const ApplicationEvent {
+        self.events.as_ptr()
+    }
+
+    /// Current event-vector capacity for read-only ownership tests.
+    pub fn capacity(&self) -> usize {
+        self.events.capacity()
+    }
+}
+
+impl Default for ApplicationEvents {
+    fn default() -> Self {
+        Self::without_retained_proofs(Vec::new())
+    }
+}
+
+impl core::fmt::Debug for ApplicationEvents {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("ApplicationEvents")
+            .field("len", &self.events.len())
+            .field("retained_proof_bound", &self.retained_proof.is_some())
+            .field("events", &"<redacted>")
+            .finish()
+    }
+}
+
+impl core::ops::Index<usize> for ApplicationEvents {
+    type Output = ApplicationEvent;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.events[index]
+    }
+}
+
 /// Application events and resolved transmission actions from one core call.
 #[derive(Debug, Default)]
 #[must_use = "every protocol event, packet, and unroutable-action count must be drained or retained"]
 pub struct NodeActions {
     /// Exhaustive project-owned events with exact moved payload owners.
-    pub events: Vec<ApplicationEvent>,
-    /// Move-only retained proofs bound by exact index to `events`.
-    pub proof_sidecars: Vec<ApplicationEventProofSidecar>,
+    pub events: ApplicationEvents,
     /// Packets with their interface target resolved while ingress context is
     /// still available.
     pub packets: Vec<TxPacket>,
     /// Native source-dependent actions dropped because no source interface was
     /// available. This should remain zero for timer-driven work.
     pub unroutable_packets: usize,
+}
+
+/// Scalar counts returned when a complete action envelope is intentionally
+/// destroyed without routing its contents.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DiscardedNodeActionCounts {
+    events: usize,
+    packets: usize,
+    unroutable_packets: usize,
+}
+
+impl DiscardedNodeActionCounts {
+    /// Application events destroyed with the envelope.
+    pub const fn events(self) -> usize {
+        self.events
+    }
+
+    /// Outbound packets destroyed with the envelope, including any privately
+    /// retained proof owner.
+    pub const fn packets(self) -> usize {
+        self.packets
+    }
+
+    /// Source-dependent actions already classified as unroutable upstream.
+    pub const fn unroutable_packets(self) -> usize {
+        self.unroutable_packets
+    }
+}
+
+impl NodeActions {
+    /// Construct an action envelope that cannot contain retained proof
+    /// authority.
+    pub fn without_retained_proofs(
+        events: Vec<ApplicationEvent>,
+        packets: Vec<TxPacket>,
+        unroutable_packets: usize,
+    ) -> Self {
+        Self {
+            events: ApplicationEvents::without_retained_proofs(events),
+            packets,
+            unroutable_packets,
+        }
+    }
+
+    /// Whether this envelope owns no event, retained proof, packet, or
+    /// unroutable-action observation.
+    pub fn is_empty(&self) -> bool {
+        let Self {
+            events,
+            packets,
+            unroutable_packets,
+        } = self;
+        events.owns_no_actions() && packets.is_empty() && *unroutable_packets == 0
+    }
+
+    /// Number of retained proofs privately bound to events in this envelope.
+    pub fn retained_proof_count(&self) -> usize {
+        self.events.retained_proof_count()
+    }
+
+    /// Intentionally destroy every action and return only exhaustive scalar
+    /// counts.
+    ///
+    /// Exact destructuring here deliberately makes a future owning field fail
+    /// compilation until this destruction boundary is reviewed.
+    pub fn discard(self) -> DiscardedNodeActionCounts {
+        let Self {
+            events,
+            packets,
+            unroutable_packets,
+        } = self;
+        let counts = DiscardedNodeActionCounts {
+            events: events.len(),
+            packets: packets.len().saturating_add(events.retained_proof_count()),
+            unroutable_packets,
+        };
+        drop(events);
+        drop(packets);
+        counts
+    }
 }
 
 /// Product-owned plaintext from one native destination-DATA event.
@@ -3000,12 +3195,11 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         rng: &mut R,
     ) -> NodeActions {
         let (packet, event) = self.core.close_link(link_id, rng);
-        NodeActions {
-            events: event.into_iter().map(project_application_event).collect(),
-            proof_sidecars: Vec::new(),
-            packets: packet.into_iter().map(resolve_origin_packet).collect(),
-            unroutable_packets: 0,
-        }
+        NodeActions::without_retained_proofs(
+            event.into_iter().map(project_application_event).collect(),
+            packet.into_iter().map(resolve_origin_packet).collect(),
+            0,
+        )
     }
 
     /// Run timer maintenance. Broadcast and exact-interface output can be
@@ -3190,20 +3384,17 @@ fn intercept_retained_inbound_proof(
     native: &mut IngestOutcome,
     expected: Option<RetainedProofExpectation>,
     source: InterfaceId,
-) -> Result<Option<ApplicationEventProofSidecar>, RetainedProofInvariant> {
+) -> Result<Option<RetainedApplicationProof>, RetainedProofInvariant> {
     let Some(expected) = expected else {
         return Ok(None);
     };
     let mut data_event_count = 0_usize;
     let mut matching_event = None;
     for (index, event) in native.events.iter().enumerate() {
-        if let NativeNodeEvent::DataReceived { dest_hash, payload } = event {
+        if let NativeNodeEvent::DataReceived { dest_hash, .. } = event {
             data_event_count = data_event_count.saturating_add(1);
             if *dest_hash == expected.destination {
-                matching_event = Some((
-                    index,
-                    data_event_binding(dest_hash.as_bytes(), payload.as_slice()),
-                ));
+                matching_event = Some(index);
             }
         }
     }
@@ -3212,7 +3403,7 @@ fn intercept_retained_inbound_proof(
             actual: data_event_count,
         });
     }
-    let Some((event_index, event_binding)) = matching_event else {
+    let Some(event_index) = matching_event else {
         return Err(RetainedProofInvariant::DataEventDestination);
     };
 
@@ -3248,9 +3439,8 @@ fn intercept_retained_inbound_proof(
         RetainedProofCandidate::Unrelated => unreachable!("unrelated packets were not retained"),
     }
 
-    Ok(Some(ApplicationEventProofSidecar {
+    Ok(Some(RetainedApplicationProof {
         event_index,
-        event_binding,
         proof: RetainedInboundProof {
             packet: resolve_packet(packet, source),
         },
@@ -3260,15 +3450,19 @@ fn intercept_retained_inbound_proof(
 fn resolve_ingest_actions(
     native: IngestOutcome,
     source: InterfaceId,
-    retained_proof: Option<ApplicationEventProofSidecar>,
+    retained_proof: Option<RetainedApplicationProof>,
 ) -> NodeActions {
+    let events = native
+        .events
+        .into_iter()
+        .map(project_application_event)
+        .collect();
+    let events = match retained_proof {
+        Some(retained_proof) => ApplicationEvents::retained(events, retained_proof),
+        None => ApplicationEvents::without_retained_proofs(events),
+    };
     NodeActions {
-        events: native
-            .events
-            .into_iter()
-            .map(project_application_event)
-            .collect(),
-        proof_sidecars: retained_proof.into_iter().collect(),
+        events,
         packets: native
             .packets
             .into_iter()
@@ -3319,12 +3513,13 @@ fn resolve_tick_actions(native: IngestOutcome) -> NodeActions {
         }
     }
     NodeActions {
-        events: native
-            .events
-            .into_iter()
-            .map(project_application_event)
-            .collect(),
-        proof_sidecars: Vec::new(),
+        events: ApplicationEvents::without_retained_proofs(
+            native
+                .events
+                .into_iter()
+                .map(project_application_event)
+                .collect(),
+        ),
         packets,
         unroutable_packets,
     }
@@ -5663,8 +5858,8 @@ mod tests {
         assert_eq!(retained_report.metadata.emitted_packets(), 0);
         assert_eq!(retained_report.metadata.generated_proof_actions(), 0);
         assert!(retained_report.actions.packets.is_empty());
-        assert_eq!(retained_report.actions.proof_sidecars.len(), 1);
-        let event = retained_report.actions.events.pop().unwrap();
+        assert_eq!(retained_report.actions.retained_proof_count(), 1);
+        let event = retained_report.actions.events.events.pop().unwrap();
         let event_debug = format!("{event:?}");
         assert!(!event_debug.contains("InterfaceId(23)"));
 
@@ -5673,16 +5868,21 @@ mod tests {
         };
         let (_, payload) = data.into_parts();
         assert_eq!(payload, b"retain until durable");
-        let sidecar = retained_report.actions.proof_sidecars.pop().unwrap();
-        assert_eq!(sidecar.event_index(), 0);
-        let sidecar_debug = format!("{sidecar:?}");
+        let retained_proof = retained_report
+            .actions
+            .events
+            .retained_proof
+            .take()
+            .unwrap();
+        assert_eq!(retained_proof.event_index(), 0);
+        let retained_proof_debug = format!("{retained_proof:?}");
         assert_eq!(
-            sidecar_debug,
-            "ApplicationEventProofSidecar { event_index: 0, proof_present: true }"
+            retained_proof_debug,
+            "RetainedApplicationProof { event_index: 0, proof_present: true }"
         );
-        assert!(!sidecar_debug.contains("InterfaceId"));
-        assert!(!sidecar_debug.contains('['));
-        let (event_index, owner) = sidecar.into_parts();
+        assert!(!retained_proof_debug.contains("InterfaceId"));
+        assert!(!retained_proof_debug.contains('['));
+        let (event_index, owner) = retained_proof.into_parts();
         assert_eq!(event_index, 0);
 
         let released = owner.into_packet();
@@ -5750,7 +5950,7 @@ mod tests {
             &mut rng,
         );
         assert_eq!(primary_report.actions.packets.len(), 1);
-        assert!(primary_report.actions.proof_sidecars.is_empty());
+        assert_eq!(primary_report.actions.retained_proof_count(), 0);
         assert!(matches!(
             primary_report.actions.events.as_slice(),
             [ApplicationEvent::DataReceived { destination, .. }]
@@ -5773,10 +5973,15 @@ mod tests {
             panic!("the selected additional destination must retain its proof")
         };
         assert_eq!(*destination, *additional.as_bytes());
-        let sidecar = additional_report.actions.proof_sidecars.pop().unwrap();
-        assert_eq!(sidecar.event_index(), 0);
+        let retained_proof = additional_report
+            .actions
+            .events
+            .retained_proof
+            .take()
+            .unwrap();
+        assert_eq!(retained_proof.event_index(), 0);
         assert_eq!(
-            sidecar.into_parts().1.into_packet().target(),
+            retained_proof.into_parts().1.into_packet().target(),
             TxTarget::Only(InterfaceId(9))
         );
     }
@@ -6086,16 +6291,16 @@ mod tests {
             packets: vec![exact()],
             rejection: None,
         };
-        let sidecar =
+        let retained_proof =
             intercept_retained_inbound_proof(&mut indexed, Some(expected), InterfaceId(6))
                 .unwrap()
                 .unwrap();
-        assert_eq!(sidecar.event_index(), 1);
+        assert_eq!(retained_proof.event_index(), 1);
         assert!(indexed.packets.is_empty());
     }
 
     #[test]
-    fn retained_proof_invariant_rejection_publishes_no_event_packet_or_sidecar() {
+    fn retained_proof_invariant_rejection_publishes_no_event_or_packet_owner() {
         let mut receiver = node(101);
         let destination = receiver.destination_hash();
         let report = receiver.finish_ingest(
@@ -6127,7 +6332,7 @@ mod tests {
         );
         assert!(report.actions.events.is_empty());
         assert!(report.actions.packets.is_empty());
-        assert!(report.actions.proof_sidecars.is_empty());
+        assert_eq!(report.actions.retained_proof_count(), 0);
         assert_eq!(receiver.metrics().ingress.retained_proof_invariant, 1);
     }
 

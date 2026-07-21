@@ -598,6 +598,10 @@ impl<const PACKET_BUFFERS: usize> OrdinaryRouterCoordinator<PACKET_BUFFERS> {
     /// Active actor jobs do not block this boundary. If too few packet buffers
     /// are currently free, [`Self::step`] retains the envelope and reports
     /// admission backpressure until exact owners return.
+    #[allow(
+        clippy::result_large_err,
+        reason = "offer failure must preserve the exact action envelope and admission owner"
+    )]
     pub fn try_offer_actions(
         &mut self,
         actions: NodeActions,

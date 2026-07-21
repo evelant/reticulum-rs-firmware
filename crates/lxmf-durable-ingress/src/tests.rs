@@ -205,12 +205,7 @@ fn offer<'owner, 'slots>(
     event: ApplicationEvent,
 ) -> ApplicationEventLease<'owner, 'slots> {
     owner
-        .try_offer_actions(NodeActions {
-            events: vec![event],
-            proof_sidecars: vec![],
-            packets: vec![],
-            unroutable_packets: 0,
-        })
+        .try_offer_actions(NodeActions::without_retained_proofs(vec![event], vec![], 0))
         .expect("event owner capacity");
     owner.lease_next().expect("offered event lease")
 }

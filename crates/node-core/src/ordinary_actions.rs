@@ -1375,6 +1375,10 @@ impl<const PACKET_BUFFERS: usize> OrdinaryActionOwner<PACKET_BUFFERS> {
     /// scopes. A permanent machine with static buffers must use
     /// [`Self::admit_from_pool`]; borrowing a static slice here would also make
     /// the slice itself unavailable for later owner recycling.
+    #[allow(
+        clippy::result_large_err,
+        reason = "atomic admission failure must return the exact action owner without allocation"
+    )]
     pub fn admit<'a>(
         &mut self,
         actions: NodeActions,
@@ -1552,6 +1556,10 @@ impl<const PACKET_BUFFERS: usize> OrdinaryActionOwner<PACKET_BUFFERS> {
     /// slot order. Every admission check completes before any owner is removed,
     /// so an error leaves all parked pointers, owner metadata, packet bytes, and
     /// the original [`NodeActions`] unchanged.
+    #[allow(
+        clippy::result_large_err,
+        reason = "atomic admission failure must return the exact action owner without allocation"
+    )]
     pub fn admit_from_pool<'buf>(
         &mut self,
         actions: NodeActions,
@@ -2269,10 +2277,11 @@ mod tests {
             node.queue_announce(Some(&[index as u8]), 1, &mut rng)
                 .unwrap();
         }
-        NodeActions {
-            packets: node.flush_announces(1, &mut rng),
-            ..NodeActions::default()
-        }
+        NodeActions::without_retained_proofs(
+            std::vec::Vec::new(),
+            node.flush_announces(1, &mut rng),
+            0,
+        )
     }
 
     fn resolved_routing_actions() -> (NodeActions, NodeActions) {
@@ -2680,12 +2689,13 @@ mod tests {
         owner.register_packet_buffer(&mut second_buffer).unwrap();
         owner.register_packet_buffer(&mut third_buffer).unwrap();
 
-        let mut actions = announces(1);
-        let (mut proof, mut forwarding) = resolved_routing_actions();
-        actions.events.append(&mut proof.events);
-        actions.events.append(&mut forwarding.events);
-        actions.packets.append(&mut proof.packets);
-        actions.packets.append(&mut forwarding.packets);
+        let mut announce = announces(1);
+        let (mut actions, mut forwarding) = resolved_routing_actions();
+        assert!(forwarding.events.is_empty());
+        let mut packets = core::mem::take(&mut announce.packets);
+        packets.append(&mut actions.packets);
+        packets.append(&mut forwarding.packets);
+        actions.packets = packets;
         actions.unroutable_packets = 9;
         let expected: std::vec::Vec<_> = actions
             .packets

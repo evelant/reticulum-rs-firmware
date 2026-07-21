@@ -17,7 +17,6 @@ rete-core.workspace = true
 rete-stack = { workspace = true, features = ["alloc"] }
 rete-transport.workspace = true
 rand_core.workspace = true
-sha2.workspace = true
 
 [dev-dependencies]
 hex.workspace = true

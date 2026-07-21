@@ -34,22 +34,23 @@ use reticulum_rns_rete::{
     ReceiptTerminalSink, TxTarget as RnsTxTarget,
 };
 pub use reticulum_rns_rete::{
-    ApplicationEvent, ApplicationEventKind, ApplicationRequestFailReason, InboundData,
+    ApplicationEvent, ApplicationEventAcknowledgeFailure, ApplicationEventCapacitySnapshot,
+    ApplicationEventDiscardReason, ApplicationEventGeneration, ApplicationEventId,
+    ApplicationEventKind, ApplicationEventLease, ApplicationEventOfferError,
+    ApplicationEventOfferFailure, ApplicationEventOfferReport, ApplicationEventOwner,
+    ApplicationEventOwnerCounters, ApplicationEventQuarantineReason, ApplicationEventSequence,
+    ApplicationEventSlot, ApplicationEventSlotId, ApplicationRequestFailReason,
+    DelayedProofCapacitySnapshot, DelayedProofGeneration, DelayedProofId, DelayedProofLease,
+    DelayedProofOwner, DelayedProofOwnerCounters, DelayedProofReservationError,
+    DelayedProofSequence, DelayedProofSlot, DelayedProofSlotId, DelayedProofTransaction,
+    DelayedProofTransactionError, DelayedProofTransactionFailure, InboundData,
     InboundDataProjection, IngressDisposition, IngressMetadata, IngressReport, MonotonicInstant,
-    NodeActions, OutboundDispatchInterval, OutboundProtocolToken, PacketType, project_inbound_data,
+    NodeActions, OutboundDispatchInterval, OutboundProtocolToken, PacketType,
+    RetainedProofCommitSuccess, project_inbound_data,
 };
 use sha2::{Digest, Sha256};
 
-mod application_events;
 mod ordinary_actions;
-
-pub use application_events::{
-    AcknowledgedApplicationEvent, ApplicationEventCapacitySnapshot, ApplicationEventDiscardReason,
-    ApplicationEventGeneration, ApplicationEventId, ApplicationEventLease,
-    ApplicationEventOfferError, ApplicationEventOfferFailure, ApplicationEventOfferReport,
-    ApplicationEventOwner, ApplicationEventOwnerCounters, ApplicationEventQuarantineReason,
-    ApplicationEventSequence, ApplicationEventSlot, ApplicationEventSlotId,
-};
 pub use ordinary_actions::{
     OrdinaryActionAdmissionError, OrdinaryActionAdmissionFailure, OrdinaryActionAdmissionRequest,
     OrdinaryActionBatch, OrdinaryActionCapacitySnapshot, OrdinaryActionOwner,
@@ -2474,10 +2475,11 @@ impl<
         now: MonotonicSeconds,
         rng: &mut R,
     ) -> NodeActions {
-        NodeActions {
-            packets: self.rns.flush_announces(now.get(), rng),
-            ..NodeActions::default()
-        }
+        NodeActions::without_retained_proofs(
+            Default::default(),
+            self.rns.flush_announces(now.get(), rng),
+            0,
+        )
     }
 
     /// Register one externally allocated packet buffer with this owner.

@@ -2151,7 +2151,6 @@ dependencies = [
  "rete-stack",
  "rete-transport",
  "reticulum-rns-conformance",
- "sha2",
 ]
 
 [[package]]

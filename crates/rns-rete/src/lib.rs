@@ -18,21 +18,38 @@ use rete_stack::NodeCore;
 use rete_transport::{HeaplessStorage, Transport};
 use reticulum_rns_conformance::{CandidateMetadata, CandidateStatus};
 
+mod application_events;
 pub mod capacity;
+mod delayed_proofs;
 pub mod embedded;
+
+pub use application_events::{
+    ApplicationEventAcknowledgeFailure, ApplicationEventCapacitySnapshot,
+    ApplicationEventDiscardReason, ApplicationEventGeneration, ApplicationEventId,
+    ApplicationEventLease, ApplicationEventOfferError, ApplicationEventOfferFailure,
+    ApplicationEventOfferReport, ApplicationEventOwner, ApplicationEventOwnerCounters,
+    ApplicationEventQuarantineReason, ApplicationEventSequence, ApplicationEventSlot,
+    ApplicationEventSlotId, DelayedProofTransaction, DelayedProofTransactionError,
+    DelayedProofTransactionFailure, RetainedProofCommitSuccess,
+};
+pub use delayed_proofs::{
+    DelayedProofCapacitySnapshot, DelayedProofGeneration, DelayedProofId, DelayedProofLease,
+    DelayedProofOwner, DelayedProofOwnerCounters, DelayedProofReservationError,
+    DelayedProofSequence, DelayedProofSlot, DelayedProofSlotId,
+};
 
 #[cfg(any(test, feature = "conformance"))]
 pub use embedded::ConformanceLinkSnapshot;
 pub use embedded::{
     AdmissionCounters, AnnounceAdmissionError, ApplicationEvent, ApplicationEventKind,
-    ApplicationEventProofSidecar, ApplicationRequestFailReason, DestinationRegistrationError,
-    EmbeddedNode, EmbeddedNodeConfig, EmbeddedNodeMetrics, EmbeddedSendError, InboundData,
-    InboundDataProjection, InboundProofPolicy, InboundProofPolicyError, IngressCounters,
-    IngressDisposition, IngressDropReason, IngressMetadata, IngressReport, InterfaceId,
-    LINK_DATA_CONTEXT_NONE, MAX_CHANNEL_PAYLOAD, MAX_DATA_PAYLOAD, NodeActions, NodeRole,
-    PrepareDataError, PreparedData, RNS_MTU, ReceiptCandidate, ReceiptId, ReceiptKind,
-    ReceiptReservationUnavailable, ReceiptTerminal, ReceiptTerminalCounters,
-    ReceiptTerminalReservation, ReceiptTerminalSink, ReceiptTickReport, RetainedInboundProof,
+    ApplicationEvents, ApplicationRequestFailReason, DestinationRegistrationError,
+    DiscardedNodeActionCounts, EmbeddedNode, EmbeddedNodeConfig, EmbeddedNodeMetrics,
+    EmbeddedSendError, InboundData, InboundDataProjection, InboundProofPolicy,
+    InboundProofPolicyError, IngressCounters, IngressDisposition, IngressDropReason,
+    IngressMetadata, IngressReport, InterfaceId, LINK_DATA_CONTEXT_NONE, MAX_CHANNEL_PAYLOAD,
+    MAX_DATA_PAYLOAD, NodeActions, NodeRole, PrepareDataError, PreparedData, RNS_MTU,
+    ReceiptCandidate, ReceiptId, ReceiptKind, ReceiptReservationUnavailable, ReceiptTerminal,
+    ReceiptTerminalCounters, ReceiptTerminalReservation, ReceiptTerminalSink, ReceiptTickReport,
     RetainedProofInvariant, RouteSnapshot, TransportCounters, TxPacket, TxTarget,
     project_inbound_data,
 };
