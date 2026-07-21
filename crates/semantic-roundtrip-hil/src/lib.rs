@@ -656,7 +656,7 @@ mod tests {
     use reticulum_rns_rete::RNS_MTU;
     #[cfg(feature = "semantic-roundtrip-hil")]
     use reticulum_rns_rete::{
-        IngressDisposition, InterfaceId, NodeEvent, ReceiptCandidate,
+        ApplicationEvent, IngressDisposition, InterfaceId, ReceiptCandidate,
         ReceiptReservationUnavailable, ReceiptTerminal, ReceiptTerminalReservation,
         ReceiptTerminalSink, TxTarget,
     };
@@ -902,8 +902,8 @@ mod tests {
         assert_eq!(report.actions.events.len(), 1);
         assert!(matches!(
             report.actions.events.first(),
-            Some(NodeEvent::AnnounceReceived { dest_hash, .. })
-                if *dest_hash == initiator_destination
+            Some(ApplicationEvent::AnnounceReceived { destination, .. })
+                if *destination == *initiator_destination.as_bytes()
         ));
         assert!(report.actions.packets.is_empty());
         assert_eq!(report.actions.unroutable_packets, 0);
@@ -934,8 +934,8 @@ mod tests {
         assert_eq!(report.actions.events.len(), 1);
         assert!(matches!(
             report.actions.events.first(),
-            Some(NodeEvent::AnnounceReceived { dest_hash, .. })
-                if *dest_hash == responder_destination
+            Some(ApplicationEvent::AnnounceReceived { destination, .. })
+                if *destination == *responder_destination.as_bytes()
         ));
         assert!(report.actions.packets.is_empty());
         assert_eq!(report.actions.unroutable_packets, 0);
@@ -967,8 +967,8 @@ mod tests {
         assert_eq!(received.actions.events.len(), 1);
         assert!(matches!(
             received.actions.events.first(),
-            Some(NodeEvent::DataReceived { dest_hash, payload: received })
-                if *dest_hash == responder_destination && received == &payload
+            Some(ApplicationEvent::DataReceived { destination, payload: received })
+                if *destination == *responder_destination.as_bytes() && received == &payload
         ));
         assert_eq!(received.actions.packets.len(), 1);
         assert_eq!(received.actions.unroutable_packets, 0);

@@ -3,9 +3,9 @@ use std::{collections::BTreeSet, process::ExitCode};
 use rand_core::{CryptoRng, RngCore};
 use reticulum_radio_interface::{RNODE_HW_MTU, ReceiveOutcome, RnodeRxReassembler};
 use reticulum_rns_rete::{
-    DestHash, DestType, DestinationType, Direction, EmbeddedNodeConfig, Identity,
+    ApplicationEvent, DestHash, DestType, DestinationType, Direction, EmbeddedNodeConfig, Identity,
     IngressDisposition, InitialEmbeddedNode, InterfaceId, LinkId, LinkState, MonotonicInstant,
-    NodeEvent, OutboundDispatchInterval, PacketType, TxTarget, build_announce_packet,
+    OutboundDispatchInterval, PacketType, TxTarget, build_announce_packet,
     decode_lrrtt_number_for_conformance, encode_lrrtt_float64_for_conformance,
     identity_from_private_key, new_conformance_node, new_conformance_transport_node,
     parse_announce_packet, parse_packet, select_lrrtt_for_conformance,
@@ -550,9 +550,12 @@ fn verify_released_vectors() -> Result<usize, String> {
         "plain fixture emitted the wrong event count",
     )?;
     match plain_report.actions.events.first() {
-        Some(NodeEvent::DataReceived { dest_hash, payload }) => {
+        Some(ApplicationEvent::DataReceived {
+            destination,
+            payload,
+        }) => {
             require(
-                *dest_hash == registered_plain,
+                *destination == *registered_plain.as_bytes(),
                 "plain event destination mismatch",
             )?;
             require_hex_eq(
@@ -627,18 +630,18 @@ fn verify_released_vectors() -> Result<usize, String> {
         "relay emitted the wrong event count",
     )?;
     match relay_report.actions.events.first() {
-        Some(NodeEvent::AnnounceReceived {
-            dest_hash,
-            identity_hash,
+        Some(ApplicationEvent::AnnounceReceived {
+            destination,
+            identity,
             hops,
             app_data,
         }) => {
             require(
-                dest_hash.as_ref() == announce_dest,
+                destination.as_slice() == announce_dest,
                 "relay announce destination mismatch",
             )?;
             require(
-                *identity_hash == announce_identity,
+                *identity == *announce_identity.as_bytes(),
                 "relay announce identity mismatch",
             )?;
             require(*hops == 1, "relay announce hop count mismatch")?;
@@ -682,11 +685,11 @@ fn verify_released_vectors() -> Result<usize, String> {
         "sender emitted the wrong event count",
     )?;
     match sender_report.actions.events.first() {
-        Some(NodeEvent::AnnounceReceived {
-            dest_hash, hops, ..
+        Some(ApplicationEvent::AnnounceReceived {
+            destination, hops, ..
         }) => {
             require(
-                dest_hash.as_ref() == announce_dest,
+                destination.as_slice() == announce_dest,
                 "sender learned wrong destination",
             )?;
             require(*hops == 2, "sender learned wrong relayed hop count")?;
@@ -788,9 +791,12 @@ fn verify_released_vectors() -> Result<usize, String> {
         "endpoint emitted the wrong event count",
     )?;
     match endpoint_report.actions.events.first() {
-        Some(NodeEvent::DataReceived { dest_hash, payload }) => {
+        Some(ApplicationEvent::DataReceived {
+            destination,
+            payload,
+        }) => {
             require(
-                *dest_hash == announce_dest_hash,
+                *destination == *announce_dest_hash.as_bytes(),
                 "decrypted DATA destination mismatch",
             )?;
             require(
@@ -930,7 +936,8 @@ fn verify_released_vectors() -> Result<usize, String> {
     require(
         matches!(
             initiator_established.actions.events.as_slice(),
-            [NodeEvent::LinkEstablished { link_id: event_id }] if *event_id == link_id
+            [ApplicationEvent::LinkEstablished { link: event_id }]
+                if *event_id == *link_id.as_bytes()
         ),
         "initiator did not emit LinkEstablished for LRPROOF",
     )?;
@@ -965,7 +972,8 @@ fn verify_released_vectors() -> Result<usize, String> {
     require(
         matches!(
             responder_established.actions.events.as_slice(),
-            [NodeEvent::LinkEstablished { link_id: event_id }] if *event_id == link_id
+            [ApplicationEvent::LinkEstablished { link: event_id }]
+                if *event_id == *link_id.as_bytes()
         ),
         "responder did not emit LinkEstablished for LRRTT",
     )?;
@@ -1051,8 +1059,12 @@ fn verify_released_vectors() -> Result<usize, String> {
     require(
         matches!(
             active_repeat.actions.events.as_slice(),
-            [NodeEvent::LinkRttUpdated { link_id: event_id, rtt }]
-                if *event_id == link_id && rtt.to_bits() == 0.5_f64.to_bits()
+            [ApplicationEvent::LinkRttUpdated {
+                link: event_id,
+                rtt_seconds,
+            }]
+                if *event_id == *link_id.as_bytes()
+                    && rtt_seconds.to_bits() == 0.5_f64.to_bits()
         ),
         "fresh active LRRTT repeat did not emit one RTT-update event",
     )?;
@@ -1099,8 +1111,14 @@ fn verify_released_vectors() -> Result<usize, String> {
     require(
         matches!(
             received_link_data.actions.events.as_slice(),
-            [NodeEvent::LinkData { link_id: event_id, data, context }]
-                if *event_id == link_id && data == b"embedded Link payload" && *context == 0
+            [ApplicationEvent::LinkData {
+                link: event_id,
+                data,
+                context,
+            }]
+                if *event_id == *link_id.as_bytes()
+                    && data == b"embedded Link payload"
+                    && *context == 0
         ),
         "responder did not emit decrypted LinkData",
     )?;
@@ -1139,8 +1157,11 @@ fn verify_released_vectors() -> Result<usize, String> {
     require(
         matches!(
             received_channel.actions.events.as_slice(),
-            [NodeEvent::ChannelMessages { link_id: event_id, messages }]
-                if *event_id == link_id
+            [ApplicationEvent::ChannelMessages {
+                link: event_id,
+                messages,
+            }]
+                if *event_id == *link_id.as_bytes()
                     && messages.as_slice() == [(0x4242, b"reliable Link payload".to_vec())]
         ),
         "responder did not emit the reliable channel message",
@@ -1238,12 +1259,12 @@ fn verify_released_vectors() -> Result<usize, String> {
     require(
         matches!(
             received_proof.actions.events.as_slice(),
-            [NodeEvent::ProofReceived { .. }]
+            [ApplicationEvent::ProofReceived { .. }]
         ),
         "channel proof did not emit ProofReceived",
     )?;
     let received_packet_hash = match received_proof.actions.events.as_slice() {
-        [NodeEvent::ProofReceived { packet_hash }] => *packet_hash,
+        [ApplicationEvent::ProofReceived { packet_hash }] => *packet_hash,
         _ => unreachable!("ProofReceived shape was checked above"),
     };
     require(
@@ -1560,11 +1581,11 @@ fn verify_lrrtt_candidate_lifecycle() -> Result<usize, String> {
     );
     let updated_rtt = match revived.actions.events.as_slice() {
         [
-            NodeEvent::LinkRttUpdated {
-                link_id: event_id,
-                rtt,
+            ApplicationEvent::LinkRttUpdated {
+                link: event_id,
+                rtt_seconds,
             },
-        ] if *event_id == stale_repeat.link_id => *rtt,
+        ] if *event_id == *stale_repeat.link_id.as_bytes() => *rtt_seconds,
         _ => return Err("stale LRRTT repeat did not emit exactly one LinkRttUpdated".to_owned()),
     };
     checks += 1;
@@ -1680,7 +1701,8 @@ fn verify_lrrtt_candidate_lifecycle() -> Result<usize, String> {
         require(
             matches!(
                 closed.actions.events.as_slice(),
-                [NodeEvent::LinkClosed { link_id: event_id }] if *event_id == fixture.link_id
+                [ApplicationEvent::LinkClosed { link: event_id }]
+                    if *event_id == *fixture.link_id.as_bytes()
             ),
             &format!("authenticated malformed {label} LRRTT did not emit one LinkClosed"),
         )?;
@@ -1899,7 +1921,8 @@ fn prepare_candidate_link(
     require(
         matches!(
             established.actions.events.as_slice(),
-            [NodeEvent::LinkEstablished { link_id: event_id }] if *event_id == link_id
+            [ApplicationEvent::LinkEstablished { link: event_id }]
+                if *event_id == *link_id.as_bytes()
         ) && established.actions.packets.len() == 1
             && initiator.link_state(&link_id) == Some(LinkState::Active),
         &format!("{label}: initiator did not establish and emit one LRRTT"),
@@ -1936,7 +1959,8 @@ fn activate_candidate_responder(
     require(
         matches!(
             established.actions.events.as_slice(),
-            [NodeEvent::LinkEstablished { link_id: event_id }] if *event_id == fixture.link_id
+            [ApplicationEvent::LinkEstablished { link: event_id }]
+                if *event_id == *fixture.link_id.as_bytes()
         ) && established.actions.packets.is_empty()
             && fixture.responder.link_state(&fixture.link_id) == Some(LinkState::Active),
         "candidate responder did not establish from its first LRRTT",
@@ -2105,7 +2129,8 @@ fn verify_three_node_relayed_link() -> Result<usize, String> {
     require(
         matches!(
             initiator_rtt.actions.events.as_slice(),
-            [NodeEvent::LinkEstablished { link_id: event_id }] if *event_id == link_id
+            [ApplicationEvent::LinkEstablished { link: event_id }]
+                if *event_id == *link_id.as_bytes()
         ) && initiator_rtt.actions.packets.len() == 1,
         "initiator did not establish Link and emit one LRRTT",
     )?;
@@ -2136,7 +2161,8 @@ fn verify_three_node_relayed_link() -> Result<usize, String> {
     require(
         matches!(
             responder_established.actions.events.as_slice(),
-            [NodeEvent::LinkEstablished { link_id: event_id }] if *event_id == link_id
+            [ApplicationEvent::LinkEstablished { link: event_id }]
+                if *event_id == *link_id.as_bytes()
         ),
         "responder did not establish Link after relayed LRRTT",
     )?;
@@ -2175,8 +2201,11 @@ fn verify_three_node_relayed_link() -> Result<usize, String> {
     require(
         matches!(
             channel_received.actions.events.as_slice(),
-            [NodeEvent::ChannelMessages { link_id: event_id, messages }]
-                if *event_id == link_id
+            [ApplicationEvent::ChannelMessages {
+                link: event_id,
+                messages,
+            }]
+                if *event_id == *link_id.as_bytes()
                     && messages.as_slice() == [(0x5151, b"three-node channel".to_vec())]
         ) && channel_received.actions.packets.len() == 1,
         "responder did not deliver channel DATA and emit its proof",
@@ -2209,7 +2238,7 @@ fn verify_three_node_relayed_link() -> Result<usize, String> {
     require(
         matches!(
             channel_delivered.actions.events.as_slice(),
-            [NodeEvent::ProofReceived { .. }]
+            [ApplicationEvent::ProofReceived { .. }]
         ) && node_a.metrics().capacity.channel_receipts.used == 0,
         "relayed channel proof did not complete the initiator receipt",
     )?;

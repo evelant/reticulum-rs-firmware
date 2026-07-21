@@ -14,9 +14,10 @@ use reticulum_interface_router::{
     SealedIngressPacket,
 };
 use reticulum_node_core::{
-    AcknowledgeError, AnnounceAdmissionError, AnnounceEmissionTime, AttemptHandle,
-    CapacitySnapshot, DestinationHash, IngressReport, MaintenanceReport, MonotonicInstant,
-    MonotonicMillis, MonotonicSeconds, NodeActions, NodeCore, OrdinaryActionCapacitySnapshot,
+    AcknowledgeError, AnnounceAdmissionError, AnnounceEmissionTime, ApplicationEventOfferError,
+    ApplicationEventOfferReport, ApplicationEventOwner, AttemptHandle, CapacitySnapshot,
+    DestinationHash, IngressReport, MaintenanceReport, MonotonicInstant, MonotonicMillis,
+    MonotonicSeconds, NodeActions, NodeCore, OrdinaryActionCapacitySnapshot,
     OrdinaryPreparedPacket, OutboundDispatchInterval, OutboundProtocolToken, PacketInterfaceId,
     PreparedPacket, ReceiptCorrelationError, TerminalAttempt, TerminalAttempts,
     TxAuthorizationPolicy, TxLeaseDeadline, TxMaintenanceReport, TxOwnerScope,
@@ -150,15 +151,15 @@ mod tests {
         InterfaceConfigId, InterfaceCost, InterfaceTxJob, LogicalMtu,
     };
     use reticulum_node_core::{
-        DestinationHash, NodeConfig, NodeIdentity, NodeInstanceId, OrdinaryBufferPool,
-        OrdinaryPacketBuffer, PermitResolution, TxAuthorizationCandidate, TxCompletionCode,
-        TxPacketBuffer, TxPermitRequirements, TxPermitReservation, TxPermitResourceId,
-        TxPolicyDecision,
+        ApplicationEvent, ApplicationEventDiscardReason, ApplicationEventSlot, DestinationHash,
+        NodeConfig, NodeIdentity, NodeInstanceId, OrdinaryBufferPool, OrdinaryPacketBuffer,
+        PermitResolution, TxAuthorizationCandidate, TxCompletionCode, TxPacketBuffer,
+        TxPermitRequirements, TxPermitReservation, TxPermitResourceId, TxPolicyDecision,
     };
     use reticulum_rns_rete::{IngressDisposition, PacketType};
     use reticulum_tx_handoff::{DataPermitHandoff, OrdinaryPermitHandoff};
     use std::boxed::Box;
-    use std::vec::Vec;
+    use std::{vec, vec::Vec};
 
     use super::*;
     use crate::{
@@ -439,6 +440,22 @@ mod tests {
             .expect("permit requirements are nonzero")
     }
 
+    fn drain_and_discard_application_events<const SLOTS: usize, const DEPTH: usize>(
+        supervisor: &mut TestSupervisor<SLOTS, DEPTH>,
+    ) -> ApplicationEventOfferReport {
+        let mut slots = [const { ApplicationEventSlot::new() }; 16];
+        let mut owner = ApplicationEventOwner::new(&mut slots);
+        let NodeInterfaceApplicationEventDrain::Drained(report) =
+            supervisor.drain_application_events(&mut owner)
+        else {
+            panic!("ready test events must fit the temporary owner")
+        };
+        while let Some(lease) = owner.lease_next() {
+            lease.discard(ApplicationEventDiscardReason::ConsumerUnavailable);
+        }
+        report
+    }
+
     #[test]
     fn shared_queue_pressure_does_not_starve_the_other_family() {
         let (mut supervisor, [actor], destination) = build::<1, 1>(1);
@@ -466,10 +483,7 @@ mod tests {
                 NodeInterfaceSupervisorTransition::Ordinary(
                     OrdinaryRouterStep::NonPacketActionsReady,
                 ) => {
-                    let output = supervisor
-                        .take_non_packet_actions()
-                        .expect("non-packet output remains explicit");
-                    assert!(output.packets.is_empty());
+                    let _ = drain_and_discard_application_events(&mut supervisor);
                 }
                 NodeInterfaceSupervisorTransition::Ordinary(OrdinaryRouterStep::PacketStaged {
                     ..
@@ -501,6 +515,184 @@ mod tests {
             interface.try_receive_job(),
             Some(InterfaceTxJob::Ordinary(_))
         ));
+    }
+
+    #[test]
+    fn oversized_application_batch_stays_exact_while_ordinary_packet_progresses() {
+        let (mut supervisor, [actor], _) = build::<1, 1>(2);
+        register(
+            &mut supervisor,
+            core::slice::from_ref(&actor).try_into().unwrap(),
+            [true],
+        );
+        let (mut interface, _data_permit, _ordinary_permit) = actor.into_parts();
+        let mut rng = CounterRng::default();
+        let payload = vec![0x51, 0x52, 0x53];
+        let payload_pointer = payload.as_ptr();
+        let mut actions = standalone_announce(32, &mut rng);
+        actions.events.push(ApplicationEvent::DataReceived {
+            destination: [0x41; 16],
+            payload,
+        });
+        supervisor
+            .try_offer_actions(actions, admission())
+            .unwrap_or_else(|failure| panic!("ordinary offer: {:?}", failure.reason()));
+
+        let mut non_packet_ready = false;
+        for _ in 0..16 {
+            if matches!(
+                supervisor.step(MonotonicMillis::new(10)).transition(),
+                NodeInterfaceSupervisorTransition::Ordinary(
+                    OrdinaryRouterStep::NonPacketActionsReady
+                )
+            ) {
+                non_packet_ready = true;
+                break;
+            }
+        }
+        assert!(non_packet_ready);
+
+        let mut no_slots: [ApplicationEventSlot; 0] = [];
+        let mut zero_capacity = ApplicationEventOwner::new(&mut no_slots);
+        assert_eq!(
+            supervisor.drain_application_events(&mut zero_capacity),
+            NodeInterfaceApplicationEventDrain::Retained(
+                ApplicationEventOfferError::BatchTooLarge {
+                    required: 1,
+                    capacity: 0,
+                }
+            )
+        );
+
+        let mut packet_progressed = false;
+        let mut routed_job = None;
+        for _ in 0..16 {
+            if matches!(
+                supervisor.step(MonotonicMillis::new(11)).transition(),
+                NodeInterfaceSupervisorTransition::Ordinary(
+                    OrdinaryRouterStep::PacketStaged { .. }
+                ) | NodeInterfaceSupervisorTransition::Ordinary(OrdinaryRouterStep::Routed { .. })
+            ) {
+                packet_progressed = true;
+            }
+            if let Some(job) = interface.try_receive_job() {
+                routed_job = Some(job);
+                break;
+            }
+        }
+        assert!(packet_progressed);
+
+        let InterfaceTxJob::Ordinary(job) =
+            routed_job.expect("ordinary packet reaches its actor despite event pressure")
+        else {
+            panic!("ordinary packet changed owner family")
+        };
+        let (ticket, job) = job.into_parts();
+        let completion = ticket
+            .complete(
+                job.return_unpermitted()
+                    .complete(TxCompletionCode::new(0x734)),
+            )
+            .expect("ticket binds the exact ordinary completion");
+        interface
+            .try_send_completion(completion)
+            .expect("completion queue has capacity");
+        let mut completion_accepted = false;
+        let mut completion_reconciled = false;
+        for _ in 0..16 {
+            match supervisor.step(MonotonicMillis::new(12)).transition() {
+                NodeInterfaceSupervisorTransition::CompletionAccepted {
+                    family: NodeInterfaceCompletionFamily::Ordinary,
+                    ..
+                } => completion_accepted = true,
+                NodeInterfaceSupervisorTransition::Ordinary(OrdinaryRouterStep::Completion(_)) => {
+                    completion_reconciled = true;
+                }
+                _ => {}
+            }
+            if completion_accepted && completion_reconciled {
+                break;
+            }
+        }
+        assert!(completion_accepted);
+        assert!(completion_reconciled);
+
+        let mut slots = [ApplicationEventSlot::new()];
+        let mut owner = ApplicationEventOwner::new(&mut slots);
+        let NodeInterfaceApplicationEventDrain::Drained(report) =
+            supervisor.drain_application_events(&mut owner)
+        else {
+            panic!("retained event must drain after replacing owner capacity")
+        };
+        assert_eq!(report.accepted_events(), 1);
+        let lease = owner.lease_next().expect("exact retained event is ready");
+        let ApplicationEvent::DataReceived { payload, .. } = lease.event() else {
+            panic!("application event changed variant")
+        };
+        assert_eq!(payload.as_ptr(), payload_pointer);
+        let _ = lease.acknowledge();
+    }
+
+    #[test]
+    fn full_application_owner_retains_supervisor_envelope_for_retry() {
+        let (mut supervisor, _actors, _) = build::<1, 1>(4);
+        let mut slots = [ApplicationEventSlot::new()];
+        let mut owner = ApplicationEventOwner::new(&mut slots);
+        owner
+            .try_offer_actions(NodeActions {
+                events: vec![ApplicationEvent::Tick {
+                    expired_paths: 1,
+                    closed_links: 0,
+                }],
+                ..NodeActions::default()
+            })
+            .expect("first event fills the owner");
+
+        supervisor
+            .try_offer_actions(
+                NodeActions {
+                    events: vec![ApplicationEvent::DataReceived {
+                        destination: [0x61; 16],
+                        payload: vec![0x71, 0x72],
+                    }],
+                    ..NodeActions::default()
+                },
+                admission(),
+            )
+            .unwrap_or_else(|failure| panic!("ordinary offer: {:?}", failure.reason()));
+        for _ in 0..16 {
+            if matches!(
+                supervisor.step(MonotonicMillis::new(10)).transition(),
+                NodeInterfaceSupervisorTransition::Ordinary(
+                    OrdinaryRouterStep::NonPacketActionsReady
+                )
+            ) {
+                break;
+            }
+        }
+        assert_eq!(
+            supervisor.drain_application_events(&mut owner),
+            NodeInterfaceApplicationEventDrain::Retained(ApplicationEventOfferError::Full {
+                required: 1,
+                available: 0,
+            })
+        );
+        owner
+            .lease_next()
+            .expect("existing event remains ready")
+            .discard(ApplicationEventDiscardReason::MaintenanceCoalesced);
+        assert!(matches!(
+            supervisor.drain_application_events(&mut owner),
+            NodeInterfaceApplicationEventDrain::Drained(report)
+                if report.accepted_events() == 1
+        ));
+        let lease = owner.lease_next().expect("retried event is ready");
+        let ApplicationEvent::DataReceived { payload, .. } = lease.event() else {
+            panic!("application event changed variant")
+        };
+        assert_eq!(payload.as_slice(), [0x71, 0x72]);
+        lease.discard(ApplicationEventDiscardReason::ConsumerUnavailable);
+        assert_eq!(owner.counters().full_rejections, 1);
     }
 
     #[test]
@@ -583,7 +775,7 @@ mod tests {
                 NodeInterfaceSupervisorTransition::Ordinary(
                     OrdinaryRouterStep::NonPacketActionsReady,
                 ) => {
-                    let _ = supervisor.take_non_packet_actions();
+                    let _ = drain_and_discard_application_events(&mut supervisor);
                 }
                 NodeInterfaceSupervisorTransition::Ordinary(OrdinaryRouterStep::Routed {
                     ..
@@ -651,7 +843,7 @@ mod tests {
                     OrdinaryRouterStep::NonPacketActionsReady
                 )
             ) {
-                let _ = supervisor.take_non_packet_actions();
+                let _ = drain_and_discard_application_events(&mut supervisor);
             }
             if let Some(job) = interface.try_receive_job() {
                 held_jobs.push(job);
@@ -829,7 +1021,7 @@ mod tests {
                     OrdinaryRouterStep::NonPacketActionsReady
                 )
             ) {
-                let _ = supervisor.take_non_packet_actions();
+                let _ = drain_and_discard_application_events(&mut supervisor);
             }
             if let Some(job) = tx.try_receive_job() {
                 held_jobs.push(job);
@@ -1286,11 +1478,7 @@ mod tests {
                     OrdinaryRouterStep::NonPacketActionsReady
                 )
             ) {
-                events = supervisor
-                    .take_non_packet_actions()
-                    .expect("tick events remain explicit")
-                    .events
-                    .len();
+                events = drain_and_discard_application_events(&mut supervisor).accepted_events();
                 break;
             }
         }
@@ -1326,7 +1514,7 @@ mod tests {
                     OrdinaryRouterStep::NonPacketActionsReady
                 )
             ) {
-                let _ = supervisor.take_non_packet_actions();
+                let _ = drain_and_discard_application_events(&mut supervisor);
             }
         }
         let job = first_job.unwrap_or_else(|| {
@@ -1369,7 +1557,7 @@ mod tests {
                     OrdinaryRouterStep::NonPacketActionsReady
                 )
             ) {
-                let _ = supervisor.take_non_packet_actions();
+                let _ = drain_and_discard_application_events(&mut supervisor);
             }
         }
         let newly_disabled = newly_disabled.unwrap_or_else(|| {
@@ -1453,7 +1641,7 @@ mod tests {
                     OrdinaryRouterStep::NonPacketActionsReady
                 )
             ) {
-                let _ = supervisor.take_non_packet_actions();
+                let _ = drain_and_discard_application_events(&mut supervisor);
             }
         }
         let ordinary_job = ordinary_job.unwrap_or_else(|| {
@@ -1488,7 +1676,7 @@ mod tests {
                 NodeInterfaceSupervisorTransition::Ordinary(
                     OrdinaryRouterStep::NonPacketActionsReady,
                 ) => {
-                    let _ = supervisor.take_non_packet_actions();
+                    let _ = drain_and_discard_application_events(&mut supervisor);
                 }
                 _ => {}
             }
@@ -2179,6 +2367,21 @@ pub enum NodeInterfaceOrdinaryOfferError {
     Fault(NodeInterfaceSupervisorFault),
     /// Ordinary coordinator-local offer rejection.
     Coordinator(OrdinaryRouterOfferError),
+}
+
+/// Result of draining one ordinary non-packet envelope into the application
+/// event owner supplied by the caller.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[must_use = "application-event drain progress and retained pressure must be observed"]
+pub enum NodeInterfaceApplicationEventDrain {
+    /// The ordinary coordinator has no non-packet envelope ready.
+    Idle,
+    /// Every event entered caller-owned slots atomically.
+    Drained(ApplicationEventOfferReport),
+    /// The exact unchanged envelope remains in the ordinary coordinator.
+    /// [`ApplicationEventOfferError::Full`] is retryable; all other reasons
+    /// require product policy or replacement owner capacity.
+    Retained(ApplicationEventOfferError),
 }
 
 /// Failed aggregate ordinary offer retaining the exact action envelope.
@@ -3080,10 +3283,22 @@ where
         }
     }
 
-    /// Take events and unroutable counts from the last admitted ordinary
-    /// envelope. Its packet vector is empty.
-    pub fn take_non_packet_actions(&mut self) -> Option<NodeActions> {
-        self.ordinary.take_non_packet_actions()
+    /// Atomically drain one ready non-packet action envelope into a
+    /// caller-provided, transport-neutral application-event owner.
+    ///
+    /// If the owner is full or the complete batch cannot fit, the ordinary
+    /// coordinator immediately recovers the exact unchanged `NodeActions`
+    /// allocation. Existing packet routes, completions, and lifecycle work
+    /// remain independently progressable through [`Self::step`].
+    pub fn drain_application_events(
+        &mut self,
+        owner: &mut ApplicationEventOwner<'_>,
+    ) -> NodeInterfaceApplicationEventDrain {
+        match self.ordinary.drain_application_events(owner) {
+            Ok(Some(report)) => NodeInterfaceApplicationEventDrain::Drained(report),
+            Ok(None) => NodeInterfaceApplicationEventDrain::Idle,
+            Err(reason) => NodeInterfaceApplicationEventDrain::Retained(reason),
+        }
     }
 
     /// Take one recoverably rejected ordinary envelope.

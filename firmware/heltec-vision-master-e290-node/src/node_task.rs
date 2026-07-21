@@ -49,9 +49,10 @@ use reticulum_heltec_vision_master_e290_node::{
 };
 use reticulum_interface_router::{InterfaceDescriptor, SealedIngressPacket};
 use reticulum_node_core::{
-    AuthorizedFrameObservation, InboundDataProjection, MonotonicInstant, MonotonicMillis,
-    MonotonicSeconds, NodeActions, OutboundDispatchInterval, ReceiptCorrelationError,
-    TxLeaseDeadline, project_inbound_data,
+    ApplicationEvent, ApplicationEventDiscardReason, ApplicationEventOfferError,
+    ApplicationEventOwner, ApplicationEventQuarantineReason, AuthorizedFrameObservation,
+    MonotonicInstant, MonotonicMillis, MonotonicSeconds, NodeActions, OutboundDispatchInterval,
+    ReceiptCorrelationError, TxLeaseDeadline,
 };
 #[cfg(feature = "runtime-measurement-hil")]
 use reticulum_node_core::{IngressDisposition, IngressMetadata, PacketType};
@@ -60,9 +61,10 @@ use reticulum_storage_actor::{DriveError, ProjectorOperationError};
 use reticulum_submission_runtime::{FrameOfferProgress, RuntimeError, RuntimeStep};
 use reticulum_tx_handoff::AuthorizedFrameNodeHandoff;
 use reticulum_tx_supervisor::{
-    NodeInterfaceAnnounceFlushResult, NodeInterfaceIngressActionFault,
-    NodeInterfaceIngressRecycleFault, NodeInterfaceIngressStep, NodeInterfaceOrdinaryOfferFailure,
-    NodeInterfaceSupervisorTransition, NodeInterfaceTickResult, OrdinaryRouterStep,
+    NodeInterfaceAnnounceFlushResult, NodeInterfaceApplicationEventDrain,
+    NodeInterfaceIngressActionFault, NodeInterfaceIngressRecycleFault, NodeInterfaceIngressStep,
+    NodeInterfaceOrdinaryOfferFailure, NodeInterfaceSupervisorTransition, NodeInterfaceTickResult,
+    OrdinaryRouterStep,
 };
 
 use crate::{
@@ -260,6 +262,7 @@ impl PairingNodeState {
 pub async fn run(
     supervisor: &'static mut ProductSupervisor,
     storage: &'static mut ProductStorageCoordinator,
+    mut application_events: ApplicationEventOwner<'static>,
     handoffs: NodeHandoffs,
     offline_descriptor: InterfaceDescriptor,
     announce_epoch: BootEpoch,
@@ -304,6 +307,7 @@ pub async fn run(
     let mut pairing = PairingNodeState::new();
     let mut authenticated_api_state = AuthenticatedApiNodeState::new();
     let mut pending_inbound: Option<InboxCandidate> = None;
+    let mut application_event_drain_fault: Option<ApplicationEventOfferError> = None;
     #[cfg(feature = "runtime-measurement-hil")]
     let mut previous_node_loop_us = now_micros();
 
@@ -907,50 +911,31 @@ pub async fn run(
                 lane + 1
             };
 
-            if let Some(output) = supervisor.take_non_packet_actions() {
-                let event_count = output.events.len();
-                let mut inbound_data = 0_usize;
-                let mut other_events = 0_usize;
-                for event in output.events {
-                    match project_inbound_data(event) {
-                        InboundDataProjection::Data(data) => {
-                            inbound_data = inbound_data.saturating_add(1);
-                            let (destination, payload) = data.into_parts();
-                            match InboxCandidate::new(InboxDestination::new(destination), &payload)
-                            {
-                                Ok(candidate) if pending_inbound.is_none() => {
-                                    let _ = drive_inbound_candidate(
-                                        storage,
-                                        &mut pending_inbound,
-                                        candidate,
-                                    );
-                                }
-                                Ok(_candidate) => {
-                                    storage.record_inbound_drop();
-                                    warn!(
-                                        "e290-node stage=rns-inbox-admission status=DROPPED reason=pending-candidate-capacity overflow_policy=drop-newest payload_len={} proof_semantics=decrypt-only",
-                                        payload.len(),
-                                    );
-                                }
-                                Err(reason) => {
-                                    storage.record_inbound_drop();
-                                    warn!(
-                                        "e290-node stage=rns-inbox-admission status=DROPPED reason={reason:?} overflow_policy=drop-newest proof_semantics=decrypt-only"
-                                    );
-                                }
-                            }
-                        }
-                        InboundDataProjection::Other(_event) => {
-                            other_events = other_events.saturating_add(1);
-                        }
+            if application_event_drain_fault.is_none() {
+                match supervisor.drain_application_events(&mut application_events) {
+                    NodeInterfaceApplicationEventDrain::Idle => {}
+                    NodeInterfaceApplicationEventDrain::Drained(report) => {
+                        info!(
+                            "e290-node stage=application-event-handoff status=ADMITTED events={} unroutable={} owner_capacity={} consumer=transport-neutral",
+                            report.accepted_events(),
+                            report.unroutable_packets(),
+                            config::APPLICATION_EVENT_SLOTS,
+                        );
+                        progressed = true;
+                    }
+                    NodeInterfaceApplicationEventDrain::Retained(reason)
+                        if reason.is_retryable() => {}
+                    NodeInterfaceApplicationEventDrain::Retained(reason) => {
+                        error!(
+                            "e290-node stage=application-event-handoff status=QUARANTINED reason={reason:?} exact_actions=retained-in-supervisor packet_completion_lifecycle=continue"
+                        );
+                        application_event_drain_fault = Some(reason);
+                        progressed = true;
                     }
                 }
-                info!(
-                    "e290-node stage=local-output status=HANDLED events={event_count} inbound_data={inbound_data} other_events={other_events} unroutable={} inbound_client_delivery=durable-rns-inbox other_event_delivery=not-yet-wired",
-                    output.unroutable_packets,
-                );
-                progressed = true;
             }
+            progressed |=
+                drive_one_application_event(&mut application_events, storage, &mut pending_inbound);
             if fail_closed_draining {
                 // Keep terminal local evidence live while portable machines
                 // finish forced denials and exact completion return.
@@ -971,6 +956,92 @@ pub async fn run(
             Timer::after(Duration::from_millis(config::NODE_POLL_INTERVAL_MS)).await;
         }
     }
+}
+
+fn drive_one_application_event(
+    owner: &mut ApplicationEventOwner<'static>,
+    storage: &mut ProductStorageCoordinator,
+    pending_inbound: &mut Option<InboxCandidate>,
+) -> bool {
+    let Some(lease) = owner.lease_next() else {
+        return false;
+    };
+    let event_id = lease.id();
+    let sequence = lease.sequence();
+    let kind = lease.event().kind();
+
+    match lease.event() {
+        ApplicationEvent::DataReceived {
+            destination,
+            payload,
+        } => match InboxCandidate::new(InboxDestination::new(*destination), payload) {
+            Ok(candidate) if pending_inbound.is_none() => {
+                let payload_len = payload.len();
+                let _ = drive_inbound_candidate(storage, pending_inbound, candidate);
+                let event = lease.acknowledge();
+                drop(event);
+                info!(
+                    "e290-node stage=application-event-consumer status=ACKNOWLEDGED kind={kind} slot={} generation={} sequence={} consumer=durable-rns-inbox payload_len={payload_len}",
+                    event_id.slot().get(),
+                    event_id.generation().get(),
+                    sequence.get(),
+                );
+            }
+            Ok(_candidate) => {
+                let payload_len = payload.len();
+                storage.record_inbound_drop();
+                warn!(
+                    "e290-node stage=rns-inbox-admission status=DROPPED reason=pending-candidate-capacity overflow_policy=drop-newest payload_len={payload_len} proof_semantics=decrypt-only"
+                );
+                lease.discard(ApplicationEventDiscardReason::DownstreamCapacity);
+            }
+            Err(reason) => {
+                storage.record_inbound_drop();
+                warn!(
+                    "e290-node stage=rns-inbox-admission status=DROPPED reason={reason:?} overflow_policy=drop-newest proof_semantics=decrypt-only"
+                );
+                lease.discard(ApplicationEventDiscardReason::InvalidPayload);
+            }
+        },
+        ApplicationEvent::Tick { .. } => {
+            lease.discard(ApplicationEventDiscardReason::MaintenanceCoalesced);
+        }
+        ApplicationEvent::ResourceOffered { .. }
+        | ApplicationEvent::ResourceProgress { .. }
+        | ApplicationEvent::ResourceComplete { .. }
+        | ApplicationEvent::ResourceFailed { .. }
+        | ApplicationEvent::ResourceRejected { .. }
+        | ApplicationEvent::RequestProgress { .. } => {
+            error!(
+                "e290-node stage=application-event-consumer status=QUARANTINED kind={kind} slot={} generation={} sequence={} reason=resource-ingress-disabled-invariant",
+                event_id.slot().get(),
+                event_id.generation().get(),
+                sequence.get(),
+            );
+            lease.quarantine(ApplicationEventQuarantineReason::ConsumerFault);
+        }
+        ApplicationEvent::AnnounceReceived { .. }
+        | ApplicationEvent::ProofReceived { .. }
+        | ApplicationEvent::ReceiptFailed { .. }
+        | ApplicationEvent::LinkEstablished { .. }
+        | ApplicationEvent::LinkRttUpdated { .. }
+        | ApplicationEvent::LinkData { .. }
+        | ApplicationEvent::ChannelMessages { .. }
+        | ApplicationEvent::RequestReceived { .. }
+        | ApplicationEvent::ResponseReceived { .. }
+        | ApplicationEvent::LinkClosed { .. }
+        | ApplicationEvent::LinkIdentified { .. }
+        | ApplicationEvent::RequestFailed { .. } => {
+            warn!(
+                "e290-node stage=application-event-consumer status=DISCARDED kind={kind} slot={} generation={} sequence={} reason=consumer-unavailable future_consumer=lxmf-or-application-service",
+                event_id.slot().get(),
+                event_id.generation().get(),
+                sequence.get(),
+            );
+            lease.discard(ApplicationEventDiscardReason::ConsumerUnavailable);
+        }
+    }
+    true
 }
 
 fn drive_inbound_candidate(

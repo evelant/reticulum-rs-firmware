@@ -48,7 +48,7 @@ use reticulum_radio_interface::{
 };
 use reticulum_radio_lora_phy::IrqTimestampCapture;
 use reticulum_rns_rete::{
-    DestHash, IngressDisposition, InterfaceId, NodeEvent, Packet, PacketType, RNS_MTU,
+    ApplicationEvent, DestHash, IngressDisposition, InterfaceId, Packet, PacketType, RNS_MTU,
     ReceiptCandidate, ReceiptId, ReceiptKind, ReceiptReservationUnavailable, ReceiptTerminal,
     ReceiptTerminalReservation, ReceiptTerminalSink, TxTarget,
 };
@@ -728,7 +728,8 @@ fn ingest_announce<G: RngCore + CryptoRng>(
     let report = node.ingest(raw, transport_seconds(), HIL_INTERFACE, rng);
     let exact_event = matches!(
         report.actions.events.as_slice(),
-        [NodeEvent::AnnounceReceived { dest_hash, .. }] if dest_hash == expected_peer
+        [ApplicationEvent::AnnounceReceived { destination, .. }]
+            if *destination == *expected_peer.as_bytes()
     );
     if report.disposition != IngressDisposition::Processed
         || !exact_event
@@ -955,8 +956,11 @@ where
             );
             let payload_is_exact = matches!(
                 report.actions.events.as_slice(),
-                [NodeEvent::DataReceived { dest_hash, payload: observed }]
-                    if dest_hash == &local_destination
+                [ApplicationEvent::DataReceived {
+                    destination,
+                    payload: observed,
+                }]
+                    if *destination == *local_destination.as_bytes()
                         && validate_semantic_roundtrip_payload(
                             observed,
                             initiator_destination.as_bytes(),

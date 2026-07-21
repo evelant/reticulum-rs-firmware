@@ -225,7 +225,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use reticulum_rns_rete::{
-        EmbeddedNodeConfig, Identity, IngressDisposition, InterfaceId, NodeEvent,
+        ApplicationEvent, EmbeddedNodeConfig, Identity, IngressDisposition, InterfaceId,
     };
 
     use super::*;
@@ -265,8 +265,11 @@ mod tests {
         assert_eq!(report.disposition, IngressDisposition::Processed);
         assert!(matches!(
             report.actions.events.as_slice(),
-            [NodeEvent::DataReceived { dest_hash, payload }]
-                if *dest_hash == DestHash::from(destination) && payload == PLAINTEXT
+            [ApplicationEvent::DataReceived {
+                destination: observed_destination,
+                payload,
+            }]
+                if *observed_destination == destination && payload == PLAINTEXT
         ));
     }
 

@@ -2112,7 +2112,7 @@ mod tests {
     };
     use rand_core::{CryptoRng, RngCore};
     use reticulum_rns_rete::{
-        EmbeddedNode, EmbeddedNodeConfig, InterfaceId as RnsInterfaceId, NodeEvent,
+        ApplicationEvent, EmbeddedNode, EmbeddedNodeConfig, InterfaceId as RnsInterfaceId,
         TxTarget as RnsTxTarget,
     };
 
@@ -2721,7 +2721,7 @@ mod tests {
         assert!(batch.non_packet_actions().packets.is_empty());
         assert_eq!(batch.non_packet_actions().unroutable_packets, 9);
         assert!(batch.non_packet_actions().events.iter().any(|event| {
-            matches!(event, NodeEvent::DataReceived { payload, .. } if payload == b"proof action")
+            matches!(event, ApplicationEvent::DataReceived { payload, .. } if payload == b"proof action")
         }));
         let retained = batch.take_non_packet_actions();
         assert_eq!(retained.unroutable_packets, 9);

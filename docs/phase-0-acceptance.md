@@ -36,20 +36,21 @@ The preceding `14c7b4955a1ff6903e87cc40b42498f7869b6f4f` pin had host and
 portable-target LRRTT validation and a build-only E290 package. Its 776,464-byte
 merged image uses 710,928/6,291,456 application bytes (11.30%) and has SHA-256
 `7b11c6f6a3c039d46ab0117fd362920aaa40145e7f27cbc6fa0a8a84a7ab3571`.
-It has no flashed-image readback or powered proof. The current pin still
-requires a two-board powered run before lifecycle/RF qualification. Its default
-E290 release links with text/data/BSS of 679,375/3,676/469,152 bytes (1,152,203
-bytes total by GNU size). Its 12,220,340-byte ELF has SHA-256
-`d18ac44b2bf68d1e6bf79c562f0431bcba66c739388d31d50e29a2f7fa60a81f`.
-The 785,360-byte merged image uses 719,824/6,291,456 application bytes (11.44%)
+It has no flashed-image readback or powered proof. The current application-
+event release still requires a two-board powered run before lifecycle/RF
+qualification. Its default E290 release links with text/data/BSS of
+684,167/3,676/469,152 bytes (1,156,995 bytes total by GNU size). Its
+12,345,320-byte ELF has SHA-256
+`ebb34e7176a8e61b6969ebf99d7dac97c6e674ef5e583bbf931a34e8b6e970a2`.
+The 789,504-byte merged image uses 723,968/6,291,456 application bytes (11.51%)
 and has SHA-256
-`826707513fec45a24940f20f5798c790b04d8b1f85158605f4bbae972b5267d6`.
+`1796f161c480d0348e3d47fd8f3cda5fda5b51aa38ad6024aaad04c8ba1751ce`.
 That default image matched an exact `3e:88` readback and served an authenticated
 `identity-summary`; `3f:88` did not enumerate. The current runtime-measurement
-HIL packages as 795,552 bytes with application use 730,016/6,291,456 (11.60%);
-its 12,365,360-byte ELF and merged image have SHA-256 values
-`f4eacf22785b6d4f583d1ce2ca8ad3e992611a0f99e202befb7551dcd5e41e3e` and
-`62b35fbd20d7a16d8129f4ba2b425cd1e6859e87438e25cc571b7465d41dddf7`.
+HIL packages as 800,480 bytes with application use 734,944/6,291,456 (11.68%);
+its 12,498,356-byte ELF and merged image have SHA-256 values
+`4ca4eef73ff1babd00750d4a635f7644d73d1a3ae1cde4fb1dbdb434937bcfca` and
+`ec23bf0a7b20b7364e12cba6ebc90aa3e0ce761650413e1ad9d6186eeecf1662`.
 The current HIL is unflashed and unpowered. Every powered result below remains
 bound to the project and Rete revisions recorded with it.
 

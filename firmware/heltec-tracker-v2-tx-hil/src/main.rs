@@ -84,8 +84,8 @@ use reticulum_radio_interface::{SX1262_FRAME_MTU, frame_rns_packet};
 use reticulum_rns_rete::RNS_MTU;
 #[cfg(feature = "semantic-roundtrip-hil")]
 use reticulum_rns_rete::{
-    DestHash, IngressDisposition, InterfaceId, NodeEvent, Packet, PacketType, ReceiptCandidate,
-    ReceiptId, ReceiptKind, ReceiptReservationUnavailable, ReceiptTerminal,
+    ApplicationEvent, DestHash, IngressDisposition, InterfaceId, Packet, PacketType,
+    ReceiptCandidate, ReceiptId, ReceiptKind, ReceiptReservationUnavailable, ReceiptTerminal,
     ReceiptTerminalReservation, ReceiptTerminalSink, TxTarget,
 };
 #[cfg(feature = "semantic-roundtrip-hil")]
@@ -957,7 +957,8 @@ fn ingest_semantic_announce(
     log_semantic_roundtrip_heap("after-announce-validation", role);
     let event_is_exact = matches!(
         report.actions.events.as_slice(),
-        [NodeEvent::AnnounceReceived { dest_hash, .. }] if dest_hash == peer_destination
+        [ApplicationEvent::AnnounceReceived { destination, .. }]
+            if *destination == *peer_destination.as_bytes()
     );
     if report.disposition != IngressDisposition::Processed
         || !event_is_exact
@@ -1302,8 +1303,11 @@ where
             log_semantic_roundtrip_heap("after-data-decrypt-and-proof", role);
             let payload_is_exact = matches!(
                 report.actions.events.as_slice(),
-                [NodeEvent::DataReceived { dest_hash, payload }]
-                    if dest_hash == &local_destination
+                [ApplicationEvent::DataReceived {
+                    destination,
+                    payload,
+                }]
+                    if *destination == *local_destination.as_bytes()
                         && validate_semantic_roundtrip_payload(
                             payload,
                             initiator_destination.as_bytes(),

@@ -51,15 +51,16 @@ pub use data_router::{
 };
 
 pub use node_interface::{
-    NodeInterfaceActorPorts, NodeInterfaceAnnounceFlushResult, NodeInterfaceCompletionFamily,
-    NodeInterfaceCompletionOrigin, NodeInterfaceCompletionResidue, NodeInterfaceDataPrepareResult,
-    NodeInterfaceIngressActionFault, NodeInterfaceIngressRecycleFault, NodeInterfaceIngressStep,
-    NodeInterfaceOrdinaryOfferError, NodeInterfaceOrdinaryOfferFailure,
-    NodeInterfaceQueuedIngressProcessed, NodeInterfaceSupervisor,
-    NodeInterfaceSupervisorBuildError, NodeInterfaceSupervisorBuildFailure,
-    NodeInterfaceSupervisorBuildSuccess, NodeInterfaceSupervisorFault, NodeInterfaceSupervisorPass,
-    NodeInterfaceSupervisorTransition, NodeInterfaceTerminalIngressActions,
-    NodeInterfaceTickAccepted, NodeInterfaceTickActionFailure, NodeInterfaceTickResult,
+    NodeInterfaceActorPorts, NodeInterfaceAnnounceFlushResult, NodeInterfaceApplicationEventDrain,
+    NodeInterfaceCompletionFamily, NodeInterfaceCompletionOrigin, NodeInterfaceCompletionResidue,
+    NodeInterfaceDataPrepareResult, NodeInterfaceIngressActionFault,
+    NodeInterfaceIngressRecycleFault, NodeInterfaceIngressStep, NodeInterfaceOrdinaryOfferError,
+    NodeInterfaceOrdinaryOfferFailure, NodeInterfaceQueuedIngressProcessed,
+    NodeInterfaceSupervisor, NodeInterfaceSupervisorBuildError,
+    NodeInterfaceSupervisorBuildFailure, NodeInterfaceSupervisorBuildSuccess,
+    NodeInterfaceSupervisorFault, NodeInterfaceSupervisorPass, NodeInterfaceSupervisorTransition,
+    NodeInterfaceTerminalIngressActions, NodeInterfaceTickAccepted, NodeInterfaceTickActionFailure,
+    NodeInterfaceTickResult,
 };
 
 pub use ordinary_permit::{

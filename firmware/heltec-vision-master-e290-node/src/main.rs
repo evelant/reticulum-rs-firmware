@@ -88,8 +88,9 @@ use reticulum_heltec_vision_master_e290_node::{
 };
 use reticulum_interface_router::InterfaceFabric;
 use reticulum_node_core::{
-    InboundProofPolicy, NodeConfig, NodeCore, NodeIdentity, NodeInstanceId, OrdinaryBufferPool,
-    OrdinaryPacketBuffer, PacketInterfaceId, TxPacketBuffer,
+    ApplicationEventOwner, ApplicationEventSlot, InboundProofPolicy, NodeConfig, NodeCore,
+    NodeIdentity, NodeInstanceId, OrdinaryBufferPool, OrdinaryPacketBuffer, PacketInterfaceId,
+    TxPacketBuffer,
 };
 use reticulum_radio_lora_phy::IrqTimestampCapture;
 use reticulum_radio_tx_dispatch::{ExactLoRaAirtimePolicy, SoleRadioTxDispatcher};
@@ -150,6 +151,9 @@ static AUTHORIZED_FRAME: StaticCell<AuthorizedFrameHandoff<CriticalSectionRawMut
 static DATA_PACKET_STORAGE: StaticCell<[TxPacketBuffer; config::DATA_BUFFERS]> = StaticCell::new();
 static ORDINARY_PACKET_STORAGE: StaticCell<[OrdinaryPacketBuffer; config::ORDINARY_BUFFERS]> =
     StaticCell::new();
+static APPLICATION_EVENT_STORAGE: StaticCell<
+    [ApplicationEventSlot; config::APPLICATION_EVENT_SLOTS],
+> = StaticCell::new();
 static SUPERVISOR: StaticCell<ProductSupervisor> = StaticCell::new();
 static DISPATCHER: StaticCell<ProductDispatcher> = StaticCell::new();
 static FLASH_STORAGE: StaticCell<FlashStorage<'static>> = StaticCell::new();
@@ -786,6 +790,9 @@ async fn product_main(
         config::dispatcher_config(),
     ));
     let supervisor = SUPERVISOR.init(supervisor);
+    let application_event_storage = APPLICATION_EVENT_STORAGE
+        .init([const { ApplicationEventSlot::new() }; config::APPLICATION_EVENT_SLOTS]);
+    let application_events = ApplicationEventOwner::new(application_event_storage);
     let (usb_pairing_handoff, node_pairing_handoff) =
         PAIRING_CONTROL.init(PairingControlHandoff::new()).split();
     let (usb_live_pairing_handoff, node_live_pairing_handoff) =
@@ -810,6 +817,7 @@ async fn product_main(
     let node_task = match node_task::run(
         supervisor,
         storage_coordinator,
+        application_events,
         node_task::NodeHandoffs::new(
             node_pairing_handoff,
             node_live_pairing_handoff,

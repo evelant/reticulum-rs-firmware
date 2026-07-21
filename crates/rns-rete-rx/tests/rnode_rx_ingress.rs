@@ -7,8 +7,8 @@ use reticulum_radio_interface::{
     SX1262_FRAME_MTU, TimedReceiveError, TimedReceiveOutcome, TimedRnodeRx,
 };
 use reticulum_rns_rete::{
-    DestHash, DestType, EmbeddedNodeConfig, Identity, IngressDisposition, IngressDropReason,
-    InitialEmbeddedNode, InterfaceId, NodeEvent, Packet,
+    ApplicationEvent, DestHash, DestType, EmbeddedNodeConfig, Identity, IngressDisposition,
+    IngressDropReason, InitialEmbeddedNode, InterfaceId, Packet,
 };
 use reticulum_rns_rete_rx::{
     ReceiveOnlyClockSample, ReceiveOnlyIngressOutcome, ReceiveOnlyInterfaceId, ReceiveOnlyRete,
@@ -173,13 +173,13 @@ fn python_announce_crosses_rnode_rx_and_embedded_ingress() {
     assert_eq!(report.actions.unroutable_packets, 0);
     assert_eq!(report.actions.events.len(), 1);
     match &report.actions.events[0] {
-        NodeEvent::AnnounceReceived {
-            dest_hash,
+        ApplicationEvent::AnnounceReceived {
+            destination,
             hops,
             app_data,
             ..
         } => {
-            assert_eq!(*dest_hash, expected_destination);
+            assert_eq!(*destination, *expected_destination.as_bytes());
             // Rete reports the packet after the receiving hop has been applied;
             // the immutable Python fixture remains at its transmitted hop count.
             assert_eq!(*hops, parsed.hops.saturating_add(1));

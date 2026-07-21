@@ -383,13 +383,13 @@ The project-local release gate preserves the current static inputs to the stack
 calculation. CI runs Clippy and then relinks isolated default and measurement
 ELFs with compiler `.stack_sizes` evidence; the inspector accepts only final
 little-endian Xtensa executables with no remaining section relocations. For the
-current `90570ca` pair it caps both maximum frames at 53,680 bytes, requires the
-default/current-HIL usable stacks to remain at least 167,440/166,744 bytes, and
-fixes both linker guard offsets at 60 bytes. After the 192-byte proof-trace
-object and 3,544 bytes of exact subsequent linked internal-RAM growth, it
-conservatively carries the powered raw margin forward as 68,476 bytes and
-leaves 14,796 bytes after the current maximum frame. This detects a static
-regression but does not replace the
+current application-event pair it caps both maximum frames at 53,680 bytes,
+requires the default/current-HIL usable stacks to remain at least
+165,032/164,336 bytes, and fixes both linker guard offsets at 60 bytes. After
+the 192-byte proof-trace object and 5,952 bytes of exact subsequent linked
+internal-RAM growth, it conservatively carries the powered raw margin forward
+as 66,068 bytes and leaves 12,388 bytes after the current maximum frame. This
+detects a static regression but does not replace the
 powered watermark or establish interrupt/nesting headroom. It qualifies the
 E290 CPU0/main-executor stack, which remains in internal SRAM; it is not a
 compatibility ceiling for non-PSRAM boards. The full E290 profile separately

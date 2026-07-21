@@ -18,8 +18,9 @@ use rete_core::{
 };
 use rete_stack::node_core::{OutboundDispatchInterval, OutboundProtocolToken};
 use rete_stack::{
-    DestinationType, Direction, IngestOutcome, IngestRejection, LinkTableKind, NodeCore, NodeEvent,
-    OutboundPacket, PacketRouting, ReceiptToken,
+    DestinationType, Direction, IngestOutcome, IngestRejection, LinkTableKind, NodeCore,
+    NodeEvent as NativeNodeEvent, OutboundPacket, PacketRouting, ReceiptToken,
+    RequestFailReason as NativeRequestFailReason,
 };
 use rete_transport::{HeaplessStorage, LinkState, SendError};
 
@@ -290,13 +291,649 @@ fn resolve_origin_packet(packet: OutboundPacket) -> TxPacket {
     }
 }
 
+/// Product-owned reason a pending Link request failed.
+///
+/// This deliberately mirrors the complete pinned native reason set without
+/// exposing Rete's enum in the firmware-facing event surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplicationRequestFailReason {
+    /// The request timed out.
+    Timeout,
+    /// The Link closed before a response arrived.
+    LinkClosed,
+    /// The response Resource transfer failed.
+    ResourceFailed,
+}
+
+/// Payload-free classification for one [`ApplicationEvent`].
+///
+/// The stable labels expose no packet body, key material, or identifier bytes,
+/// so callers can record explicit delivery/discard policy without formatting
+/// the owned event itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ApplicationEventKind {
+    /// A valid announce was received.
+    AnnounceReceived,
+    /// Decrypted DATA was addressed to a local destination.
+    DataReceived,
+    /// A valid proof covered one sent packet.
+    ProofReceived,
+    /// One sent-packet receipt expired.
+    ReceiptFailed,
+    /// A locally owned Link became active.
+    LinkEstablished,
+    /// An authenticated LRRTT updated one active Link.
+    LinkRttUpdated,
+    /// Decrypted best-effort data arrived on an active Link.
+    LinkData,
+    /// One or more reliable Channel messages arrived on a Link.
+    ChannelMessages,
+    /// A Link request arrived.
+    RequestReceived,
+    /// A Link response arrived.
+    ResponseReceived,
+    /// A locally owned Link closed.
+    LinkClosed,
+    /// A remote peer authenticated its identity on a Link.
+    LinkIdentified,
+    /// A Resource advertisement was retained by the native core.
+    ResourceOffered,
+    /// Resource transfer progress was reported.
+    ResourceProgress,
+    /// A Resource transfer completed.
+    ResourceComplete,
+    /// A Resource transfer failed.
+    ResourceFailed,
+    /// A peer rejected one Resource sent by this node.
+    ResourceRejected,
+    /// A pending Link request failed.
+    RequestFailed,
+    /// Response-as-Resource progress was reported for a pending request.
+    RequestProgress,
+    /// Periodic protocol maintenance completed.
+    Tick,
+}
+
+impl ApplicationEventKind {
+    /// Return a stable payload-free label suitable for logs and metrics.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AnnounceReceived => "announce_received",
+            Self::DataReceived => "data_received",
+            Self::ProofReceived => "proof_received",
+            Self::ReceiptFailed => "receipt_failed",
+            Self::LinkEstablished => "link_established",
+            Self::LinkRttUpdated => "link_rtt_updated",
+            Self::LinkData => "link_data",
+            Self::ChannelMessages => "channel_messages",
+            Self::RequestReceived => "request_received",
+            Self::ResponseReceived => "response_received",
+            Self::LinkClosed => "link_closed",
+            Self::LinkIdentified => "link_identified",
+            Self::ResourceOffered => "resource_offered",
+            Self::ResourceProgress => "resource_progress",
+            Self::ResourceComplete => "resource_complete",
+            Self::ResourceFailed => "resource_failed",
+            Self::ResourceRejected => "resource_rejected",
+            Self::RequestFailed => "request_failed",
+            Self::RequestProgress => "request_progress",
+            Self::Tick => "tick",
+        }
+    }
+}
+
+impl core::fmt::Display for ApplicationEventKind {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// One product-owned application event projected from the pinned Rete core.
+///
+/// Every protocol identifier is copied into a stable byte array. Allocation-
+/// backed bodies move directly from the native event without cloning. The enum
+/// intentionally does not implement `Clone`: each payload has one exact owner
+/// that the caller must retain, deliver, or explicitly discard.
+#[must_use = "application events must be retained, delivered, or explicitly discarded"]
+pub enum ApplicationEvent {
+    /// A valid announce was received.
+    AnnounceReceived {
+        /// Destination hash of the announcing identity.
+        destination: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Identity hash of the announcer.
+        identity: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Hop count at receipt.
+        hops: u8,
+        /// Owned announce application data.
+        app_data: Option<Vec<u8>>,
+    },
+    /// Decrypted DATA addressed to one local destination.
+    DataReceived {
+        /// Addressed destination hash.
+        destination: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Exact moved plaintext owner.
+        payload: Vec<u8>,
+    },
+    /// A valid proof covered one sent packet.
+    ProofReceived {
+        /// Complete covered packet hash.
+        packet_hash: [u8; 32],
+    },
+    /// One sent-packet receipt expired.
+    ReceiptFailed {
+        /// Complete expired packet hash.
+        packet_hash: [u8; 32],
+    },
+    /// A locally owned Link became active.
+    LinkEstablished {
+        /// Stable Link identifier bytes.
+        link: [u8; rete_core::TRUNCATED_HASH_LEN],
+    },
+    /// An authenticated LRRTT updated one active Link.
+    LinkRttUpdated {
+        /// Stable Link identifier bytes.
+        link: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Updated round-trip time in seconds.
+        rtt_seconds: f64,
+    },
+    /// Decrypted best-effort data arrived on an active Link.
+    LinkData {
+        /// Stable Link identifier bytes.
+        link: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Exact moved plaintext owner.
+        data: Vec<u8>,
+        /// Reticulum Link context byte.
+        context: u8,
+    },
+    /// One or more reliable Channel messages arrived on a Link.
+    ChannelMessages {
+        /// Stable Link identifier bytes.
+        link: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Exact moved `(message_type, payload)` owners.
+        messages: Vec<(u16, Vec<u8>)>,
+    },
+    /// A Link request arrived.
+    RequestReceived {
+        /// Stable Link identifier bytes.
+        link: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Stable request identifier bytes.
+        request: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Stable request-path hash bytes.
+        path: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Exact moved request body.
+        data: Vec<u8>,
+    },
+    /// A Link response arrived.
+    ResponseReceived {
+        /// Stable Link identifier bytes.
+        link: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Stable request identifier bytes.
+        request: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Exact moved response body.
+        data: Vec<u8>,
+    },
+    /// A locally owned Link closed.
+    LinkClosed {
+        /// Stable Link identifier bytes.
+        link: [u8; rete_core::TRUNCATED_HASH_LEN],
+    },
+    /// A remote peer authenticated its identity on a Link.
+    LinkIdentified {
+        /// Stable Link identifier bytes.
+        link: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Stable remote identity hash bytes.
+        identity: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Remote public key. Debug output is redacted.
+        public_key: [u8; 64],
+    },
+    /// A Resource advertisement was retained by the native core.
+    ///
+    /// The current embedded ingress gate rejects every Resource context, so
+    /// this variant documents the future lossless surface without enabling it.
+    ResourceOffered {
+        /// Stable Link identifier bytes.
+        link: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Truncated Resource hash.
+        resource_hash: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Advertised transfer size.
+        total_size: usize,
+    },
+    /// Resource transfer progress.
+    ResourceProgress {
+        /// Stable Link identifier bytes.
+        link: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Truncated Resource hash.
+        resource_hash: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Received parts.
+        current: usize,
+        /// Expected parts.
+        total: usize,
+    },
+    /// A Resource transfer completed.
+    ResourceComplete {
+        /// Stable Link identifier bytes.
+        link: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Truncated Resource hash.
+        resource_hash: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Exact moved assembled body.
+        data: Vec<u8>,
+    },
+    /// A Resource transfer failed.
+    ResourceFailed {
+        /// Stable Link identifier bytes.
+        link: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Truncated Resource hash.
+        resource_hash: [u8; rete_core::TRUNCATED_HASH_LEN],
+    },
+    /// A peer rejected one Resource sent by this node.
+    ResourceRejected {
+        /// Stable Link identifier bytes.
+        link: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Truncated Resource hash.
+        resource_hash: [u8; rete_core::TRUNCATED_HASH_LEN],
+    },
+    /// A pending Link request failed.
+    RequestFailed {
+        /// Stable Link identifier bytes.
+        link: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Stable request identifier bytes.
+        request: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Typed terminal reason.
+        reason: ApplicationRequestFailReason,
+    },
+    /// Response-as-Resource progress for a pending Link request.
+    RequestProgress {
+        /// Stable Link identifier bytes.
+        link: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Stable request identifier bytes.
+        request: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Received parts.
+        current: usize,
+        /// Expected parts.
+        total: usize,
+    },
+    /// Periodic protocol maintenance completed.
+    Tick {
+        /// Paths expired by this tick.
+        expired_paths: usize,
+        /// Links closed for staleness by this tick.
+        closed_links: usize,
+    },
+}
+
+impl ApplicationEvent {
+    /// Classify this event without inspecting or formatting owned payloads.
+    ///
+    /// This match intentionally has no wildcard. Adding a project event must
+    /// therefore define its explicit logging and discard-policy classification.
+    pub fn kind(&self) -> ApplicationEventKind {
+        match self {
+            Self::AnnounceReceived { .. } => ApplicationEventKind::AnnounceReceived,
+            Self::DataReceived { .. } => ApplicationEventKind::DataReceived,
+            Self::ProofReceived { .. } => ApplicationEventKind::ProofReceived,
+            Self::ReceiptFailed { .. } => ApplicationEventKind::ReceiptFailed,
+            Self::LinkEstablished { .. } => ApplicationEventKind::LinkEstablished,
+            Self::LinkRttUpdated { .. } => ApplicationEventKind::LinkRttUpdated,
+            Self::LinkData { .. } => ApplicationEventKind::LinkData,
+            Self::ChannelMessages { .. } => ApplicationEventKind::ChannelMessages,
+            Self::RequestReceived { .. } => ApplicationEventKind::RequestReceived,
+            Self::ResponseReceived { .. } => ApplicationEventKind::ResponseReceived,
+            Self::LinkClosed { .. } => ApplicationEventKind::LinkClosed,
+            Self::LinkIdentified { .. } => ApplicationEventKind::LinkIdentified,
+            Self::ResourceOffered { .. } => ApplicationEventKind::ResourceOffered,
+            Self::ResourceProgress { .. } => ApplicationEventKind::ResourceProgress,
+            Self::ResourceComplete { .. } => ApplicationEventKind::ResourceComplete,
+            Self::ResourceFailed { .. } => ApplicationEventKind::ResourceFailed,
+            Self::ResourceRejected { .. } => ApplicationEventKind::ResourceRejected,
+            Self::RequestFailed { .. } => ApplicationEventKind::RequestFailed,
+            Self::RequestProgress { .. } => ApplicationEventKind::RequestProgress,
+            Self::Tick { .. } => ApplicationEventKind::Tick,
+        }
+    }
+}
+
+impl core::fmt::Debug for ApplicationEvent {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::AnnounceReceived {
+                destination,
+                identity,
+                hops,
+                app_data,
+            } => formatter
+                .debug_struct("AnnounceReceived")
+                .field("destination", destination)
+                .field("identity", identity)
+                .field("hops", hops)
+                .field("app_data_len", &app_data.as_ref().map(Vec::len))
+                .finish(),
+            Self::DataReceived {
+                destination,
+                payload,
+            } => formatter
+                .debug_struct("DataReceived")
+                .field("destination", destination)
+                .field("payload_len", &payload.len())
+                .finish(),
+            Self::ProofReceived { packet_hash } => formatter
+                .debug_struct("ProofReceived")
+                .field("packet_hash", packet_hash)
+                .finish(),
+            Self::ReceiptFailed { packet_hash } => formatter
+                .debug_struct("ReceiptFailed")
+                .field("packet_hash", packet_hash)
+                .finish(),
+            Self::LinkEstablished { link } => formatter
+                .debug_struct("LinkEstablished")
+                .field("link", link)
+                .finish(),
+            Self::LinkRttUpdated { link, rtt_seconds } => formatter
+                .debug_struct("LinkRttUpdated")
+                .field("link", link)
+                .field("rtt_seconds", rtt_seconds)
+                .finish(),
+            Self::LinkData {
+                link,
+                data,
+                context,
+            } => formatter
+                .debug_struct("LinkData")
+                .field("link", link)
+                .field("data_len", &data.len())
+                .field("context", context)
+                .finish(),
+            Self::ChannelMessages { link, messages } => formatter
+                .debug_struct("ChannelMessages")
+                .field("link", link)
+                .field("message_count", &messages.len())
+                .field(
+                    "payload_bytes",
+                    &messages
+                        .iter()
+                        .map(|(_, payload)| payload.len())
+                        .sum::<usize>(),
+                )
+                .finish(),
+            Self::RequestReceived {
+                link,
+                request,
+                path,
+                data,
+            } => formatter
+                .debug_struct("RequestReceived")
+                .field("link", link)
+                .field("request", request)
+                .field("path", path)
+                .field("data_len", &data.len())
+                .finish(),
+            Self::ResponseReceived {
+                link,
+                request,
+                data,
+            } => formatter
+                .debug_struct("ResponseReceived")
+                .field("link", link)
+                .field("request", request)
+                .field("data_len", &data.len())
+                .finish(),
+            Self::LinkClosed { link } => formatter
+                .debug_struct("LinkClosed")
+                .field("link", link)
+                .finish(),
+            Self::LinkIdentified { link, identity, .. } => formatter
+                .debug_struct("LinkIdentified")
+                .field("link", link)
+                .field("identity", identity)
+                .field("public_key", &"[redacted; 64 bytes]")
+                .finish(),
+            Self::ResourceOffered {
+                link,
+                resource_hash,
+                total_size,
+            } => formatter
+                .debug_struct("ResourceOffered")
+                .field("link", link)
+                .field("resource_hash", resource_hash)
+                .field("total_size", total_size)
+                .finish(),
+            Self::ResourceProgress {
+                link,
+                resource_hash,
+                current,
+                total,
+            } => formatter
+                .debug_struct("ResourceProgress")
+                .field("link", link)
+                .field("resource_hash", resource_hash)
+                .field("current", current)
+                .field("total", total)
+                .finish(),
+            Self::ResourceComplete {
+                link,
+                resource_hash,
+                data,
+            } => formatter
+                .debug_struct("ResourceComplete")
+                .field("link", link)
+                .field("resource_hash", resource_hash)
+                .field("data_len", &data.len())
+                .finish(),
+            Self::ResourceFailed {
+                link,
+                resource_hash,
+            } => formatter
+                .debug_struct("ResourceFailed")
+                .field("link", link)
+                .field("resource_hash", resource_hash)
+                .finish(),
+            Self::ResourceRejected {
+                link,
+                resource_hash,
+            } => formatter
+                .debug_struct("ResourceRejected")
+                .field("link", link)
+                .field("resource_hash", resource_hash)
+                .finish(),
+            Self::RequestFailed {
+                link,
+                request,
+                reason,
+            } => formatter
+                .debug_struct("RequestFailed")
+                .field("link", link)
+                .field("request", request)
+                .field("reason", reason)
+                .finish(),
+            Self::RequestProgress {
+                link,
+                request,
+                current,
+                total,
+            } => formatter
+                .debug_struct("RequestProgress")
+                .field("link", link)
+                .field("request", request)
+                .field("current", current)
+                .field("total", total)
+                .finish(),
+            Self::Tick {
+                expired_paths,
+                closed_links,
+            } => formatter
+                .debug_struct("Tick")
+                .field("expired_paths", expired_paths)
+                .field("closed_links", closed_links)
+                .finish(),
+        }
+    }
+}
+
+/// Consume one pinned native event into the exhaustive project-owned surface.
+///
+/// This match intentionally has no wildcard so a Rete update that adds an event
+/// cannot compile until its ownership and redaction policy is reviewed here.
+fn project_application_event(event: NativeNodeEvent) -> ApplicationEvent {
+    match event {
+        NativeNodeEvent::AnnounceReceived {
+            dest_hash,
+            identity_hash,
+            hops,
+            app_data,
+        } => ApplicationEvent::AnnounceReceived {
+            destination: *dest_hash.as_bytes(),
+            identity: *identity_hash.as_bytes(),
+            hops,
+            app_data,
+        },
+        NativeNodeEvent::DataReceived { dest_hash, payload } => ApplicationEvent::DataReceived {
+            destination: *dest_hash.as_bytes(),
+            payload,
+        },
+        NativeNodeEvent::ProofReceived { packet_hash } => {
+            ApplicationEvent::ProofReceived { packet_hash }
+        }
+        NativeNodeEvent::ReceiptFailed { packet_hash } => {
+            ApplicationEvent::ReceiptFailed { packet_hash }
+        }
+        NativeNodeEvent::LinkEstablished { link_id } => ApplicationEvent::LinkEstablished {
+            link: *link_id.as_bytes(),
+        },
+        NativeNodeEvent::LinkRttUpdated { link_id, rtt } => ApplicationEvent::LinkRttUpdated {
+            link: *link_id.as_bytes(),
+            rtt_seconds: rtt,
+        },
+        NativeNodeEvent::LinkData {
+            link_id,
+            data,
+            context,
+        } => ApplicationEvent::LinkData {
+            link: *link_id.as_bytes(),
+            data,
+            context,
+        },
+        NativeNodeEvent::ChannelMessages { link_id, messages } => {
+            ApplicationEvent::ChannelMessages {
+                link: *link_id.as_bytes(),
+                messages,
+            }
+        }
+        NativeNodeEvent::RequestReceived {
+            link_id,
+            request_id,
+            path_hash,
+            data,
+        } => ApplicationEvent::RequestReceived {
+            link: *link_id.as_bytes(),
+            request: *request_id.as_bytes(),
+            path: *path_hash.as_bytes(),
+            data,
+        },
+        NativeNodeEvent::ResponseReceived {
+            link_id,
+            request_id,
+            data,
+        } => ApplicationEvent::ResponseReceived {
+            link: *link_id.as_bytes(),
+            request: *request_id.as_bytes(),
+            data,
+        },
+        NativeNodeEvent::LinkClosed { link_id } => ApplicationEvent::LinkClosed {
+            link: *link_id.as_bytes(),
+        },
+        NativeNodeEvent::LinkIdentified {
+            link_id,
+            identity_hash,
+            public_key,
+        } => ApplicationEvent::LinkIdentified {
+            link: *link_id.as_bytes(),
+            identity: *identity_hash.as_bytes(),
+            public_key,
+        },
+        NativeNodeEvent::ResourceOffered {
+            link_id,
+            resource_hash,
+            total_size,
+        } => ApplicationEvent::ResourceOffered {
+            link: *link_id.as_bytes(),
+            resource_hash,
+            total_size,
+        },
+        NativeNodeEvent::ResourceProgress {
+            link_id,
+            resource_hash,
+            current,
+            total,
+        } => ApplicationEvent::ResourceProgress {
+            link: *link_id.as_bytes(),
+            resource_hash,
+            current,
+            total,
+        },
+        NativeNodeEvent::ResourceComplete {
+            link_id,
+            resource_hash,
+            data,
+        } => ApplicationEvent::ResourceComplete {
+            link: *link_id.as_bytes(),
+            resource_hash,
+            data,
+        },
+        NativeNodeEvent::ResourceFailed {
+            link_id,
+            resource_hash,
+        } => ApplicationEvent::ResourceFailed {
+            link: *link_id.as_bytes(),
+            resource_hash,
+        },
+        NativeNodeEvent::ResourceRejected {
+            link_id,
+            resource_hash,
+        } => ApplicationEvent::ResourceRejected {
+            link: *link_id.as_bytes(),
+            resource_hash,
+        },
+        NativeNodeEvent::RequestFailed {
+            link_id,
+            request_id,
+            reason,
+        } => ApplicationEvent::RequestFailed {
+            link: *link_id.as_bytes(),
+            request: *request_id.as_bytes(),
+            reason: match reason {
+                NativeRequestFailReason::Timeout => ApplicationRequestFailReason::Timeout,
+                NativeRequestFailReason::LinkClosed => ApplicationRequestFailReason::LinkClosed,
+                NativeRequestFailReason::ResourceFailed => {
+                    ApplicationRequestFailReason::ResourceFailed
+                }
+            },
+        },
+        NativeNodeEvent::RequestProgress {
+            link_id,
+            request_id,
+            current,
+            total,
+        } => ApplicationEvent::RequestProgress {
+            link: *link_id.as_bytes(),
+            request: *request_id.as_bytes(),
+            current,
+            total,
+        },
+        NativeNodeEvent::Tick {
+            expired_paths,
+            closed_links,
+        } => ApplicationEvent::Tick {
+            expired_paths,
+            closed_links,
+        },
+    }
+}
+
 /// Application events and resolved transmission actions from one core call.
 #[derive(Debug, Default)]
 #[must_use = "every protocol event, packet, and unroutable-action count must be drained or retained"]
 pub struct NodeActions {
-    /// Native Rete events. These remain provisional because several variants
-    /// contain allocation-backed payloads.
-    pub events: Vec<NodeEvent>,
+    /// Exhaustive project-owned events with exact moved payload owners.
+    pub events: Vec<ApplicationEvent>,
     /// Packets with their interface target resolved while ingress context is
     /// still available.
     pub packets: Vec<TxPacket>,
@@ -345,13 +982,13 @@ impl InboundData {
     }
 }
 
-/// Result of projecting one native node event onto the inbound-DATA surface.
+/// Result of projecting one application event onto the inbound-DATA surface.
 #[must_use = "the projected DATA or unchanged non-DATA event must be handled"]
 pub enum InboundDataProjection {
     /// Decrypted destination DATA with its original payload allocation.
     Data(InboundData),
-    /// Any other native event, returned unchanged to its caller.
-    Other(NodeEvent),
+    /// Any other application event, returned unchanged to its caller.
+    Other(ApplicationEvent),
 }
 
 impl core::fmt::Debug for InboundDataProjection {
@@ -363,15 +1000,16 @@ impl core::fmt::Debug for InboundDataProjection {
     }
 }
 
-/// Consume one native event and project destination DATA without cloning.
-pub fn project_inbound_data(event: NodeEvent) -> InboundDataProjection {
+/// Consume one application event and project destination DATA without cloning.
+pub fn project_inbound_data(event: ApplicationEvent) -> InboundDataProjection {
     match event {
-        NodeEvent::DataReceived { dest_hash, payload } => {
-            InboundDataProjection::Data(InboundData {
-                destination: *dest_hash.as_bytes(),
-                payload,
-            })
-        }
+        ApplicationEvent::DataReceived {
+            destination,
+            payload,
+        } => InboundDataProjection::Data(InboundData {
+            destination,
+            payload,
+        }),
         other => InboundDataProjection::Other(other),
     }
 }
@@ -1505,7 +2143,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         }
 
         let unretained_link = native.events.iter().find_map(|event| match event {
-            NodeEvent::LinkEstablished { link_id }
+            NativeNodeEvent::LinkEstablished { link_id }
                 if self.core.transport.get_link(link_id).is_none() =>
             {
                 Some(*link_id)
@@ -1523,7 +2161,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         // a future native regression cannot leak a premature product event.
         let before_events = native.events.len();
         native.events.retain(|event| match event {
-            NodeEvent::LinkEstablished { link_id } => self
+            NativeNodeEvent::LinkEstablished { link_id } => self
                 .core
                 .transport
                 .get_link(link_id)
@@ -2112,7 +2750,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
     ) -> NodeActions {
         let (packet, event) = self.core.close_link(link_id, rng);
         NodeActions {
-            events: event.into_iter().collect(),
+            events: event.into_iter().map(project_application_event).collect(),
             packets: packet.into_iter().map(resolve_origin_packet).collect(),
             unroutable_packets: 0,
         }
@@ -2242,7 +2880,11 @@ const fn endpoint_retains_ingress_packet(routing: PacketRouting) -> bool {
 
 fn resolve_ingest_actions(native: IngestOutcome, source: InterfaceId) -> NodeActions {
     NodeActions {
-        events: native.events,
+        events: native
+            .events
+            .into_iter()
+            .map(project_application_event)
+            .collect(),
         packets: native
             .packets
             .into_iter()
@@ -2293,7 +2935,11 @@ fn resolve_tick_actions(native: IngestOutcome) -> NodeActions {
         }
     }
     NodeActions {
-        events: native.events,
+        events: native
+            .events
+            .into_iter()
+            .map(project_application_event)
+            .collect(),
         packets,
         unroutable_packets,
     }
@@ -2400,10 +3046,11 @@ mod tests {
         let expected_pointer = payload.as_ptr();
         let expected_capacity = payload.capacity();
 
-        let projection = project_inbound_data(NodeEvent::DataReceived {
-            dest_hash: DestHash::from(expected_destination),
-            payload,
-        });
+        let projection =
+            project_inbound_data(project_application_event(NativeNodeEvent::DataReceived {
+                dest_hash: DestHash::from(expected_destination),
+                payload,
+            }));
         let InboundDataProjection::Data(data) = projection else {
             panic!("destination DATA must project onto the product-owned value")
         };
@@ -2423,21 +3070,22 @@ mod tests {
         expected_data.extend_from_slice(b"unchanged link data");
         let expected_pointer = expected_data.as_ptr();
         let expected_capacity = expected_data.capacity();
-        let projection = project_inbound_data(NodeEvent::LinkData {
-            link_id: expected_link,
-            data: expected_data,
-            context: 0x5a,
-        });
+        let projection =
+            project_inbound_data(project_application_event(NativeNodeEvent::LinkData {
+                link_id: expected_link,
+                data: expected_data,
+                context: 0x5a,
+            }));
 
-        let InboundDataProjection::Other(NodeEvent::LinkData {
-            link_id,
+        let InboundDataProjection::Other(ApplicationEvent::LinkData {
+            link,
             data,
             context,
         }) = projection
         else {
             panic!("non-DATA event must return through the unchanged projection")
         };
-        assert_eq!(link_id, expected_link);
+        assert_eq!(link, *expected_link.as_bytes());
         assert_eq!(context, 0x5a);
         assert_eq!(data, b"unchanged link data");
         assert_eq!(data.as_ptr(), expected_pointer);
@@ -2448,8 +3096,8 @@ mod tests {
     fn inbound_data_projection_preserves_maximum_encrypted_data() {
         let payload = vec![0xa5; MAX_DATA_PAYLOAD];
         let expected_pointer = payload.as_ptr();
-        let projection = project_inbound_data(NodeEvent::DataReceived {
-            dest_hash: DestHash::from([0x33; rete_core::TRUNCATED_HASH_LEN]),
+        let projection = project_inbound_data(ApplicationEvent::DataReceived {
+            destination: [0x33; rete_core::TRUNCATED_HASH_LEN],
             payload,
         });
         let InboundDataProjection::Data(data) = projection else {
@@ -2464,8 +3112,8 @@ mod tests {
     #[test]
     fn inbound_data_projection_does_not_apply_an_encrypted_payload_limit() {
         let payload = vec![0x5a; MAX_DATA_PAYLOAD + 1];
-        let projection = project_inbound_data(NodeEvent::DataReceived {
-            dest_hash: DestHash::from([0x66; rete_core::TRUNCATED_HASH_LEN]),
+        let projection = project_inbound_data(ApplicationEvent::DataReceived {
+            destination: [0x66; rete_core::TRUNCATED_HASH_LEN],
             payload,
         });
         let InboundDataProjection::Data(data) = projection else {
@@ -2477,22 +3125,333 @@ mod tests {
     #[test]
     fn inbound_data_debug_redacts_data_and_non_data_payloads() {
         let destination = [0x42; rete_core::TRUNCATED_HASH_LEN];
-        let data = project_inbound_data(NodeEvent::DataReceived {
-            dest_hash: DestHash::from(destination),
+        let data = project_inbound_data(ApplicationEvent::DataReceived {
+            destination,
             payload: vec![0xde, 0xad, 0xbe, 0xef],
         });
         let data_debug = format!("{data:?}");
         assert!(data_debug.contains("payload_len: 4"));
         assert!(!data_debug.contains("222, 173, 190, 239"));
 
-        let other = project_inbound_data(NodeEvent::LinkData {
-            link_id: LinkId::from([0x24; rete_core::TRUNCATED_HASH_LEN]),
+        let other = project_inbound_data(ApplicationEvent::LinkData {
+            link: [0x24; rete_core::TRUNCATED_HASH_LEN],
             data: vec![0xca, 0xfe, 0xba, 0xbe],
             context: 0x55,
         });
         let other_debug = format!("{other:?}");
         assert_eq!(other_debug, "Other(..)");
         assert!(!other_debug.contains("202, 254, 186, 190"));
+    }
+
+    #[test]
+    fn application_event_projection_covers_every_pinned_native_variant() {
+        let link = LinkId::from([0x11; rete_core::TRUNCATED_HASH_LEN]);
+        let destination = DestHash::from([0x22; rete_core::TRUNCATED_HASH_LEN]);
+        let identity = IdentityHash::from([0x33; rete_core::TRUNCATED_HASH_LEN]);
+        let request = rete_core::RequestId::from([0x44; rete_core::TRUNCATED_HASH_LEN]);
+        let path = rete_core::PathHash::from([0x55; rete_core::TRUNCATED_HASH_LEN]);
+        let resource_hash = [0x66; rete_core::TRUNCATED_HASH_LEN];
+
+        let projected: Vec<_> = vec![
+            NativeNodeEvent::AnnounceReceived {
+                dest_hash: destination,
+                identity_hash: identity,
+                hops: 3,
+                app_data: Some(vec![0xa1, 0xa2]),
+            },
+            NativeNodeEvent::DataReceived {
+                dest_hash: destination,
+                payload: vec![0xb1, 0xb2],
+            },
+            NativeNodeEvent::ProofReceived {
+                packet_hash: [0xc1; 32],
+            },
+            NativeNodeEvent::ReceiptFailed {
+                packet_hash: [0xc2; 32],
+            },
+            NativeNodeEvent::LinkEstablished { link_id: link },
+            NativeNodeEvent::LinkRttUpdated {
+                link_id: link,
+                rtt: 1.25,
+            },
+            NativeNodeEvent::LinkData {
+                link_id: link,
+                data: vec![0xd1, 0xd2],
+                context: 7,
+            },
+            NativeNodeEvent::ChannelMessages {
+                link_id: link,
+                messages: vec![(9, vec![0xe1, 0xe2])],
+            },
+            NativeNodeEvent::RequestReceived {
+                link_id: link,
+                request_id: request,
+                path_hash: path,
+                data: vec![0xf1, 0xf2],
+            },
+            NativeNodeEvent::ResponseReceived {
+                link_id: link,
+                request_id: request,
+                data: vec![0xf3, 0xf4],
+            },
+            NativeNodeEvent::LinkClosed { link_id: link },
+            NativeNodeEvent::LinkIdentified {
+                link_id: link,
+                identity_hash: identity,
+                public_key: [0x77; 64],
+            },
+            NativeNodeEvent::ResourceOffered {
+                link_id: link,
+                resource_hash,
+                total_size: 123,
+            },
+            NativeNodeEvent::ResourceProgress {
+                link_id: link,
+                resource_hash,
+                current: 2,
+                total: 4,
+            },
+            NativeNodeEvent::ResourceComplete {
+                link_id: link,
+                resource_hash,
+                data: vec![0x81, 0x82],
+            },
+            NativeNodeEvent::ResourceFailed {
+                link_id: link,
+                resource_hash,
+            },
+            NativeNodeEvent::ResourceRejected {
+                link_id: link,
+                resource_hash,
+            },
+            NativeNodeEvent::RequestFailed {
+                link_id: link,
+                request_id: request,
+                reason: NativeRequestFailReason::ResourceFailed,
+            },
+            NativeNodeEvent::RequestProgress {
+                link_id: link,
+                request_id: request,
+                current: 5,
+                total: 8,
+            },
+            NativeNodeEvent::Tick {
+                expired_paths: 6,
+                closed_links: 7,
+            },
+        ]
+        .into_iter()
+        .map(project_application_event)
+        .collect();
+
+        let expected_kinds = [
+            (ApplicationEventKind::AnnounceReceived, "announce_received"),
+            (ApplicationEventKind::DataReceived, "data_received"),
+            (ApplicationEventKind::ProofReceived, "proof_received"),
+            (ApplicationEventKind::ReceiptFailed, "receipt_failed"),
+            (ApplicationEventKind::LinkEstablished, "link_established"),
+            (ApplicationEventKind::LinkRttUpdated, "link_rtt_updated"),
+            (ApplicationEventKind::LinkData, "link_data"),
+            (ApplicationEventKind::ChannelMessages, "channel_messages"),
+            (ApplicationEventKind::RequestReceived, "request_received"),
+            (ApplicationEventKind::ResponseReceived, "response_received"),
+            (ApplicationEventKind::LinkClosed, "link_closed"),
+            (ApplicationEventKind::LinkIdentified, "link_identified"),
+            (ApplicationEventKind::ResourceOffered, "resource_offered"),
+            (ApplicationEventKind::ResourceProgress, "resource_progress"),
+            (ApplicationEventKind::ResourceComplete, "resource_complete"),
+            (ApplicationEventKind::ResourceFailed, "resource_failed"),
+            (ApplicationEventKind::ResourceRejected, "resource_rejected"),
+            (ApplicationEventKind::RequestFailed, "request_failed"),
+            (ApplicationEventKind::RequestProgress, "request_progress"),
+            (ApplicationEventKind::Tick, "tick"),
+        ];
+        assert_eq!(projected.len(), expected_kinds.len());
+        for (event, (expected_kind, expected_label)) in projected.iter().zip(expected_kinds) {
+            assert_eq!(event.kind(), expected_kind);
+            assert_eq!(event.kind().as_str(), expected_label);
+            assert_eq!(format!("{}", event.kind()), expected_label);
+        }
+
+        assert!(matches!(
+            &projected[0],
+            ApplicationEvent::AnnounceReceived {
+                destination: observed_destination,
+                identity: observed_identity,
+                hops: 3,
+                app_data: Some(data),
+            } if *observed_destination == *destination.as_bytes()
+                && *observed_identity == *identity.as_bytes()
+                && data == &[0xa1, 0xa2]
+        ));
+        assert!(matches!(
+            &projected[1],
+            ApplicationEvent::DataReceived {
+                destination: observed,
+                payload,
+            } if *observed == *destination.as_bytes() && payload == &[0xb1, 0xb2]
+        ));
+        assert!(matches!(
+            &projected[2],
+            ApplicationEvent::ProofReceived { packet_hash } if packet_hash == &[0xc1; 32]
+        ));
+        assert!(matches!(
+            &projected[3],
+            ApplicationEvent::ReceiptFailed { packet_hash } if packet_hash == &[0xc2; 32]
+        ));
+        assert!(matches!(
+            &projected[4],
+            ApplicationEvent::LinkEstablished { link: observed } if *observed == *link.as_bytes()
+        ));
+        assert!(matches!(
+            &projected[5],
+            ApplicationEvent::LinkRttUpdated {
+                link: observed,
+                rtt_seconds: 1.25,
+            } if *observed == *link.as_bytes()
+        ));
+        assert!(matches!(
+            &projected[6],
+            ApplicationEvent::LinkData {
+                link: observed,
+                data,
+                context: 7,
+            } if *observed == *link.as_bytes() && data == &[0xd1, 0xd2]
+        ));
+        assert!(matches!(
+            &projected[7],
+            ApplicationEvent::ChannelMessages {
+                link: observed,
+                messages,
+            } if *observed == *link.as_bytes()
+                && messages.len() == 1
+                && messages[0].0 == 9
+                && messages[0].1 == [0xe1, 0xe2]
+        ));
+        assert!(matches!(
+            &projected[8],
+            ApplicationEvent::RequestReceived {
+                link: observed_link,
+                request: observed_request,
+                path: observed_path,
+                data,
+            } if *observed_link == *link.as_bytes()
+                && *observed_request == *request.as_bytes()
+                && *observed_path == *path.as_bytes()
+                && data == &[0xf1, 0xf2]
+        ));
+        assert!(matches!(
+            &projected[9],
+            ApplicationEvent::ResponseReceived {
+                link: observed_link,
+                request: observed_request,
+                data,
+            } if *observed_link == *link.as_bytes()
+                && *observed_request == *request.as_bytes()
+                && data == &[0xf3, 0xf4]
+        ));
+        assert!(matches!(
+            &projected[10],
+            ApplicationEvent::LinkClosed { link: observed } if *observed == *link.as_bytes()
+        ));
+        assert!(matches!(
+            &projected[11],
+            ApplicationEvent::LinkIdentified {
+                link: observed_link,
+                identity: observed_identity,
+                public_key,
+            } if *observed_link == *link.as_bytes()
+                && *observed_identity == *identity.as_bytes()
+                && public_key == &[0x77; 64]
+        ));
+        assert!(matches!(
+            &projected[12],
+            ApplicationEvent::ResourceOffered {
+                link: observed,
+                resource_hash: observed_hash,
+                total_size: 123,
+            } if *observed == *link.as_bytes() && observed_hash == &resource_hash
+        ));
+        assert!(matches!(
+            &projected[13],
+            ApplicationEvent::ResourceProgress {
+                link: observed,
+                resource_hash: observed_hash,
+                current: 2,
+                total: 4,
+            } if *observed == *link.as_bytes() && observed_hash == &resource_hash
+        ));
+        assert!(matches!(
+            &projected[14],
+            ApplicationEvent::ResourceComplete {
+                link: observed,
+                resource_hash: observed_hash,
+                data,
+            } if *observed == *link.as_bytes()
+                && observed_hash == &resource_hash
+                && data == &[0x81, 0x82]
+        ));
+        assert!(matches!(
+            &projected[15],
+            ApplicationEvent::ResourceFailed {
+                link: observed,
+                resource_hash: observed_hash,
+            } if *observed == *link.as_bytes() && observed_hash == &resource_hash
+        ));
+        assert!(matches!(
+            &projected[16],
+            ApplicationEvent::ResourceRejected {
+                link: observed,
+                resource_hash: observed_hash,
+            } if *observed == *link.as_bytes() && observed_hash == &resource_hash
+        ));
+        assert!(matches!(
+            &projected[17],
+            ApplicationEvent::RequestFailed {
+                link: observed_link,
+                request: observed_request,
+                reason: ApplicationRequestFailReason::ResourceFailed,
+            } if *observed_link == *link.as_bytes()
+                && *observed_request == *request.as_bytes()
+        ));
+        assert!(matches!(
+            &projected[18],
+            ApplicationEvent::RequestProgress {
+                link: observed_link,
+                request: observed_request,
+                current: 5,
+                total: 8,
+            } if *observed_link == *link.as_bytes()
+                && *observed_request == *request.as_bytes()
+        ));
+        assert!(matches!(
+            &projected[19],
+            ApplicationEvent::Tick {
+                expired_paths: 6,
+                closed_links: 7,
+            }
+        ));
+    }
+
+    #[test]
+    fn application_event_debug_redacts_owned_bodies_and_public_key() {
+        let resource = ApplicationEvent::ResourceComplete {
+            link: [0x11; rete_core::TRUNCATED_HASH_LEN],
+            resource_hash: [0x22; rete_core::TRUNCATED_HASH_LEN],
+            data: vec![222, 173, 190, 239],
+        };
+        let resource_debug = format!("{resource:?}");
+        assert!(resource_debug.contains("data_len: 4"));
+        assert!(!resource_debug.contains("222, 173, 190, 239"));
+
+        let identified = ApplicationEvent::LinkIdentified {
+            link: [0x33; rete_core::TRUNCATED_HASH_LEN],
+            identity: [0x44; rete_core::TRUNCATED_HASH_LEN],
+            public_key: [0x55; 64],
+        };
+        let identified_debug = format!("{identified:?}");
+        assert!(identified_debug.contains("[redacted; 64 bytes]"));
+        assert!(!identified_debug.contains("85, 85, 85"));
     }
 
     fn identity(tag: u8) -> Identity {
@@ -2592,7 +3551,7 @@ mod tests {
         );
         assert!(matches!(
             established.actions.events.as_slice(),
-            [NodeEvent::LinkEstablished { link_id: event_id }] if *event_id == link_id
+            [ApplicationEvent::LinkEstablished { link }] if *link == *link_id.as_bytes()
         ));
         let malformed = initiator
             .core
@@ -2605,7 +3564,7 @@ mod tests {
         assert_eq!(closed.disposition, IngressDisposition::NativeInvalid);
         assert!(matches!(
             closed.actions.events.as_slice(),
-            [NodeEvent::LinkClosed { link_id: event_id }] if *event_id == link_id
+            [ApplicationEvent::LinkClosed { link }] if *link == *link_id.as_bytes()
         ));
         assert_eq!(closed.actions.packets.len(), 1);
         assert_eq!(
@@ -2648,7 +3607,7 @@ mod tests {
         );
         assert!(matches!(
             peer_closed.actions.events.as_slice(),
-            [NodeEvent::LinkClosed { link_id: event_id }] if *event_id == link_id
+            [ApplicationEvent::LinkClosed { link }] if *link == *link_id.as_bytes()
         ));
         assert_eq!(initiator.link_state(&link_id), None);
 
@@ -2749,7 +3708,7 @@ mod tests {
         assert_eq!(parsed_request.payload, &[0xFF]);
         assert!(matches!(
             tick.events.as_slice(),
-            [NodeEvent::Tick {
+            [ApplicationEvent::Tick {
                 closed_links: 0,
                 ..
             }]
@@ -2844,7 +3803,7 @@ mod tests {
         }));
         assert!(matches!(
             responder_tick.events.as_slice(),
-            [NodeEvent::Tick {
+            [ApplicationEvent::Tick {
                 closed_links: 0,
                 ..
             }]
@@ -2933,8 +3892,8 @@ mod tests {
         let received = responder.ingest(&data.bytes, 110, InterfaceId(7), &mut rng);
         assert!(matches!(
             received.actions.events.first(),
-            Some(NodeEvent::LinkData { link_id: id, data, .. })
-                if *id == link_id && data == b"bounded link payload"
+            Some(ApplicationEvent::LinkData { link, data, .. })
+                if *link == *link_id.as_bytes() && data == b"bounded link payload"
         ));
         assert_eq!(
             responder.metrics().transport.packets_dropped_dedup,
@@ -3238,8 +4197,9 @@ mod tests {
         let admitted = endpoint.ingest(&raw[..len], 4, InterfaceId(1), &mut rng);
         assert!(matches!(
             admitted.actions.events.as_slice(),
-            [NodeEvent::DataReceived { dest_hash, payload }]
-                if *dest_hash == plain_destination && payload == b"local plain payload"
+            [ApplicationEvent::DataReceived { destination, payload }]
+                if *destination == *plain_destination.as_bytes()
+                    && payload == b"local plain payload"
         ));
 
         let mut raw = [0u8; rete_core::MTU];
@@ -3288,8 +4248,9 @@ mod tests {
         assert_eq!(admitted.disposition, IngressDisposition::Processed);
         assert!(matches!(
             admitted.actions.events.as_slice(),
-            [NodeEvent::DataReceived { dest_hash, payload }]
-                if *dest_hash == plain_destination && payload == b"must terminate locally"
+            [ApplicationEvent::DataReceived { destination, payload }]
+                if *destination == *plain_destination.as_bytes()
+                    && payload == b"must terminate locally"
         ));
         assert_eq!(transport.metrics().ingress.header2_filtered, 0);
         assert_eq!(transport.metrics().transport.packets_received, 1);
@@ -4216,7 +5177,7 @@ mod tests {
         assert!(!received.metadata.counts_saturated());
         assert!(received.actions.events.iter().any(|event| matches!(
             event,
-            NodeEvent::DataReceived { payload, .. } if payload == b"announced and proven"
+            ApplicationEvent::DataReceived { payload, .. } if payload == b"announced and proven"
         )));
         assert_eq!(received.actions.packets.len(), 1);
         let proof = &received.actions.packets[0];
@@ -4376,7 +5337,7 @@ mod tests {
                 .actions
                 .events
                 .iter()
-                .all(|event| !matches!(event, NodeEvent::ReceiptFailed { .. }))
+                .all(|event| !matches!(event, ApplicationEvent::ReceiptFailed { .. }))
         );
         assert_eq!(sink.attempted, [expected, expected]);
         assert_eq!(sink.terminals, [ReceiptTerminal::TimedOut(expected)]);

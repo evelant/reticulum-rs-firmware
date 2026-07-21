@@ -113,13 +113,13 @@ Its explicit 16 MiB package is a 776,464-byte merged image, uses
 710,928/6,291,456 application bytes (11.30%), and has SHA-256
 `7b11c6f6a3c039d46ab0117fd362920aaa40145e7f27cbc6fa0a8a84a7ab3571`.
 This is build-only evidence for the preceding pin: the image has no flashed
-readback or powered proof. The current pin's default release links with
-text/data/BSS of 679,375/3,676/469,152 bytes (1,152,203 bytes total by GNU
-size). Its 12,220,340-byte ELF has SHA-256
-`d18ac44b2bf68d1e6bf79c562f0431bcba66c739388d31d50e29a2f7fa60a81f`.
-Its explicit 16 MiB package is a 785,360-byte merged image, uses
-719,824/6,291,456 application bytes (11.44%), and has SHA-256
-`826707513fec45a24940f20f5798c790b04d8b1f85158605f4bbae972b5267d6`.
+readback or powered proof. The current application-event ownership release
+links with text/data/BSS of 684,167/3,676/469,152 bytes (1,156,995 bytes total
+by GNU size). Its 12,345,320-byte ELF has SHA-256
+`ebb34e7176a8e61b6969ebf99d7dac97c6e674ef5e583bbf931a34e8b6e970a2`.
+Its explicit 16 MiB package is a 789,504-byte merged image, uses
+723,968/6,291,456 application bytes (11.51%), and has SHA-256
+`1796f161c480d0348e3d47fd8f3cda5fda5b51aa38ad6024aaad04c8ba1751ce`.
 That merged image matched an exact readback on `3e:88`, where authenticated
 `identity-summary` succeeded. The unavailable `3f:88` prevented a current
 two-board lifecycle/RF run.
@@ -548,22 +548,24 @@ cargo +stable run --locked -p xtask -- e290-runtime-measurement inspect-elf \
 It accepts only final little-endian 32-bit Xtensa `ET_EXEC` images with one
 nonempty, relocation-free `.stack_sizes` section. Both maximum frames must be
 at most 53,680 bytes, both linker guard offsets must remain 60 bytes, and the
-default/HIL usable stacks must remain at least 167,440/166,744 bytes. The
+default/HIL usable stacks must remain at least 165,032/164,336 bytes. The
 default ELF must exclude the proof trace; the HIL ELF must contain exactly one
 initialized 192-byte symbol whose linked bytes decode as a valid empty `RPTE`
 record. Record counts are diagnostic rather than policy: the current build
-pair contains 844 default and 860 HIL records, and both maxima are 53,680
+pair contains 856 default and 872 HIL records, and both maxima are 53,680
 bytes. The retained powered release ELFs described below instead
 contain 816/832 records with 52,752-byte maxima. CI runs Clippy and then
 relinks both current profiles with
 `-C link-arg=-nostartfiles -Z emit-stack-sizes` in isolated target directories
 immediately before this inspection.
 
-The current default/HIL usable stacks are 167,440/166,744 bytes, both guard
-offsets are 60 bytes, and the carried raw painted margin is 68,476 bytes after
-deducting 3,544 bytes of linked internal-RAM growth from the 72,020-byte powered
-boot-only baseline. Subtracting the current 53,680-byte maximum frame leaves a
-14,796-byte conservative margin. These are static build measurements and a
+The current default/HIL usable stacks are 165,032/164,336 bytes, both guard
+offsets are 60 bytes, and the carried raw painted margin is 66,068 bytes after
+deducting 5,952 bytes of linked internal-RAM growth from the 72,020-byte powered
+boot-only baseline. The application-event tranche accounts for the newest
+2,408 bytes: 2,056 bytes of fixed slot storage and 352 bytes of retained owner
+and task state. Subtracting the unchanged 53,680-byte maximum frame leaves a
+12,388-byte conservative margin. These are static build measurements and a
 deliberately conservative carry-forward calculation, not a new powered
 high-water result. This ceiling qualifies the E290's internal CPU0/main-
 executor task stack; it is not a compatibility ceiling for non-PSRAM ESP32
@@ -572,12 +574,12 @@ already requires PSRAM for its separate application/storage capacity, while
 Tracker V2 remains a separately sized reduced profile.
 
 The current build-only runtime-measurement HIL links with text/data/BSS of
-689,735/4,180/468,648 bytes (1,162,563 bytes total by GNU size). Its
-12,365,360-byte ELF has SHA-256
-`f4eacf22785b6d4f583d1ce2ca8ad3e992611a0f99e202befb7551dcd5e41e3e`.
-Its explicit 16 MiB package uses 730,016/6,291,456 application bytes (11.60%)
-and produces a 795,552-byte merged image with SHA-256
-`62b35fbd20d7a16d8129f4ba2b425cd1e6859e87438e25cc571b7465d41dddf7`.
+695,315/4,180/468,648 bytes (1,168,143 bytes total by GNU size). Its
+12,498,356-byte ELF has SHA-256
+`4ca4eef73ff1babd00750d4a635f7644d73d1a3ae1cde4fb1dbdb434937bcfca`.
+Its explicit 16 MiB package uses 734,944/6,291,456 application bytes (11.68%)
+and produces an 800,480-byte merged image with SHA-256
+`ec23bf0a7b20b7364e12cba6ebc90aa3e0ce761650413e1ad9d6186eeecf1662`.
 The HIL image remains unflashed and unpowered; the current one-board evidence
 above is for the default image only.
 
@@ -643,9 +645,10 @@ evidence for the immediately preceding trace revision, not powered evidence
 for the current hashes or the pending two-board RF proof-timeout reproduction.
 The 72,020-byte raw margin leaves 19,268 bytes after subtracting the unchanged
 52,752-byte maximum compiler frame in that artifact. Current static policy
-conservatively deducts 3,544 bytes of subsequent linked internal-RAM growth,
-then subtracts the current 53,680-byte maximum: 68,476 carried-forward raw
-bytes and 14,796 bytes remain. This is build-qualified carry-forward, not a
+conservatively deducts 5,952 bytes of subsequent linked internal-RAM growth,
+including the application-event owner's exact 2,408-byte linked reduction,
+then subtracts the current 53,680-byte maximum: 66,068 carried-forward raw
+bytes and 12,388 bytes remain. This is build-qualified carry-forward, not a
 fresh powered watermark.
 
 ### Decisive proof-correlation trial runbook
@@ -864,7 +867,7 @@ a deliberately conservative 19,460 bytes after subtracting the 52,752-byte
 maximum frame; the predecessor's one-board diagnostic baseline updates those
 values to 72,020/19,268 after the exact 192-byte linked-RAM cost. Neither pair
 is a universal stack guarantee. Current static policy further carries those
-values to 68,476/14,796 after 3,544 bytes of exact post-proof linked internal-
+values to 66,068/12,388 after 5,952 bytes of exact post-proof linked internal-
 RAM growth and the current 53,680-byte frame; that likewise is not a new
 powered observation. This is an internal CPU0/main-executor task-stack bound,
 not a no-PSRAM board-support ceiling.

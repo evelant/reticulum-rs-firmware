@@ -17,14 +17,14 @@ The preceding `14c7b4955a1ff6903e87cc40b42498f7869b6f4f` pin had host and
 portable-target LRRTT validation and a build-only E290 package. Its 776,464-byte
 merged image uses 710,928/6,291,456 application bytes (11.30%) and has SHA-256
 `7b11c6f6a3c039d46ab0117fd362920aaa40145e7f27cbc6fa0a8a84a7ab3571`.
-It has no flashed-image readback or powered proof. The current pin needs a
-two-board powered lifecycle/RF run, but its default E290 release is now known:
-text/data/BSS 679,375/3,676/469,152 bytes (1,152,203 bytes total by GNU size), a
-785,360-byte merged image using 719,824/6,291,456 application bytes (11.44%),
-ELF SHA-256
-`d18ac44b2bf68d1e6bf79c562f0431bcba66c739388d31d50e29a2f7fa60a81f`, and
+It has no flashed-image readback or powered proof. The current application-
+event release needs a two-board powered lifecycle/RF run, but its default E290
+release is now known: text/data/BSS 684,167/3,676/469,152 bytes (1,156,995 bytes
+total by GNU size), a 789,504-byte merged image using
+723,968/6,291,456 application bytes (11.51%), ELF SHA-256
+`ebb34e7176a8e61b6969ebf99d7dac97c6e674ef5e583bbf931a34e8b6e970a2`, and
 merged SHA-256
-`826707513fec45a24940f20f5798c790b04d8b1f85158605f4bbae972b5267d6`.
+`1796f161c480d0348e3d47fd8f3cda5fda5b51aa38ad6024aaad04c8ba1751ce`.
 The merged image matched an exact `3e:88` readback and served an authenticated
 `identity-summary`; `3f:88` did not enumerate. The source-`96e38aa` result above
 and later powered records

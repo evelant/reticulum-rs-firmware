@@ -15,9 +15,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{phase1_closure, phase1_hil, phase1_source};
 
-const SCHEMA: &str = "reticulum.phase1-rx-powered-evidence.v2";
-const OPERATOR_SCHEMA: &str = "reticulum.phase1-rx-powered-evidence.operator.v2";
-const SCENARIO_SCHEMA: &str = "reticulum.phase1-rx-powered-evidence.scenario.v2";
+const SCHEMA: &str = "reticulum.phase1-rx-powered-evidence.v3";
+const OPERATOR_SCHEMA: &str = "reticulum.phase1-rx-powered-evidence.operator.v3";
+const SCENARIO_SCHEMA: &str = "reticulum.phase1-rx-powered-evidence.scenario.v3";
 const MANIFEST_FILE: &str = "powered-evidence.json";
 const OPERATOR_FILE: &str = "records/operator.json";
 const SCENARIO_DIRECTORY: &str = "records/scenarios";
@@ -27,7 +27,7 @@ const SEALED_FILE: &str = "powered-evidence.sealed";
 const INVENTORY_FILE: &str = "artifacts.sha256";
 const INVENTORY_TEMP_FILE: &str = ".artifacts.sha256.tmp";
 const FINALIZE_LOCK_SUFFIX: &str = ".phase1-powered-evidence-finalize.lock";
-const INCOMPLETE_CONTENT: &str = "reticulum.phase1-rx-powered-evidence.v2\nstatus=incomplete\n";
+const INCOMPLETE_CONTENT: &str = "reticulum.phase1-rx-powered-evidence.v3\nstatus=incomplete\n";
 
 const NORMAL_MANIFEST_FILE: &str = "artifact-preparation.json";
 const CLOSURE_MANIFEST_FILE: &str = "closure-artifact-preparation.json";
@@ -38,8 +38,8 @@ const PEER_FIRMWARE_VERSION_BYTES_HEX: &str = "0156";
 const PEER_CORPUS_FILE: &str = "interop/vectors/rnode-hil-v1.json";
 const PEER_TOOL_FILE: &str = "interop/python/rnode_hil.py";
 const BOOT_LOCAL_GENERATOR_FILE: &str = boot_local_generator::SOURCE_PATH;
-const BOOT_LOCAL_GENERATOR_SHA256_V2: &str =
-    "ea0ba30bd562b19e95d4648c3c65c8c31a48db8c6df7bc3a5bc659d6f45122fe";
+const BOOT_LOCAL_GENERATOR_SHA256_V3: &str =
+    "1a74730faae37868f5fbe70ee4e483e9d177935521365ad1d243413ed05072ee";
 const PEER_MANIFEST_FILE: &str = "peer-manifest.json";
 const PEER_TRANSCRIPT_FILE: &str = "peer-transcript.jsonl";
 const BOOT_LOCAL_CORPUS_FILE: &str = "boot-local-data.json";
@@ -1978,7 +1978,7 @@ fn validate_peer_provenance(
 
 fn validate_boot_local_generator_source(bytes: &[u8]) -> Result<(), String> {
     if bytes == boot_local_generator::SOURCE_BYTES
-        && sha256_bytes(bytes) == BOOT_LOCAL_GENERATOR_SHA256_V2
+        && sha256_bytes(bytes) == BOOT_LOCAL_GENERATOR_SHA256_V3
     {
         Ok(())
     } else {

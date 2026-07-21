@@ -32,14 +32,22 @@ use reticulum_rns_rete::{
     ReceiptTerminalSink, TxTarget as RnsTxTarget,
 };
 pub use reticulum_rns_rete::{
-    InboundData, InboundDataProjection, IngressDisposition, IngressMetadata, IngressReport,
-    MonotonicInstant, NodeActions, OutboundDispatchInterval, OutboundProtocolToken, PacketType,
-    project_inbound_data,
+    ApplicationEvent, ApplicationEventKind, ApplicationRequestFailReason, InboundData,
+    InboundDataProjection, IngressDisposition, IngressMetadata, IngressReport, MonotonicInstant,
+    NodeActions, OutboundDispatchInterval, OutboundProtocolToken, PacketType, project_inbound_data,
 };
 use sha2::{Digest, Sha256};
 
+mod application_events;
 mod ordinary_actions;
 
+pub use application_events::{
+    ApplicationEventCapacitySnapshot, ApplicationEventDiscardReason, ApplicationEventGeneration,
+    ApplicationEventId, ApplicationEventLease, ApplicationEventOfferError,
+    ApplicationEventOfferFailure, ApplicationEventOfferReport, ApplicationEventOwner,
+    ApplicationEventOwnerCounters, ApplicationEventQuarantineReason, ApplicationEventSequence,
+    ApplicationEventSlot, ApplicationEventSlotId,
+};
 pub use ordinary_actions::{
     OrdinaryActionAdmissionError, OrdinaryActionAdmissionFailure, OrdinaryActionAdmissionRequest,
     OrdinaryActionBatch, OrdinaryActionCapacitySnapshot, OrdinaryActionOwner,

@@ -47,12 +47,13 @@ to timeout.
 This candidate remains on the project fork; no issue or pull request was opened
 for the newer lifecycle or routing work, and publication still requires direct
 user approval. The preceding pin has host/portable and build-only E290
-evidence. The current pin passes its root host/portable validation, 647-check
-schema-2 conformance run, and default/HIL E290 build gates. Its default package
-is a 785,360-byte merged image using 719,824/6,291,456 application bytes
-(11.44%); it matched an exact `3e:88` readback and served an authenticated
-`identity-summary`. The runtime-measurement HIL package is 795,552 bytes using
-730,016/6,291,456 (11.60%) and remains unflashed. `3f:88` did not enumerate, so
+evidence. The current application-event release passes its root host/portable
+validation, 647-check schema-2 conformance run, and default/HIL E290 build
+gates. Its default package is a 789,504-byte merged image using
+723,968/6,291,456 application bytes (11.51%); it matched an exact `3e:88`
+readback and served an authenticated `identity-summary`. The runtime-
+measurement HIL package is 800,480 bytes using 734,944/6,291,456 (11.68%) and
+remains unflashed. `3f:88` did not enumerate, so
 the current two-board lifecycle/RF run remains open; older artifact records
 remain bound to their recorded revisions.
 
@@ -327,14 +328,39 @@ consistently.
 Heapless transport maps do not bound `NodeCore` events, output packets,
 destinations, pending requests, resource lists, split queues or assembled
 Resource data. Ingress also accepts hosted packets up to 300 KiB and allocates
-for packets over the base MTU.
+for packets over the base MTU. The current Resource strategy is too late to be
+an embedded admission boundary: advertisement handling constructs an
+allocation-backed Resource before checking the 32-Resource table or consulting
+`AcceptNone`/`AcceptApp`. One advertised part count can reach 1,048,575 and
+immediately size part, hash and received-bit vectors. Request/response
+Resources bypass the application strategy and auto-accept.
 
 Introduce an embedded profile with caller-owned/fallible event and packet
 sinks, explicit destination/request/resource quotas, and transactional output
-backpressure. Resource receive must cap concurrent transfers, bytes, parts,
-decompressed output and transient copies; the long-term device path should be
-able to stream through flash-backed storage instead of assembling every
-representation in RAM.
+backpressure. Resource receive must preflight concurrent transfers, advertised
+bytes, parts, split count and aggregate split bytes, assembled/decompressed
+output, transient copies, deadline, and retry count before allocation or
+protocol mutation. The same limits apply to request/response Resources. The
+long-term device path must stream through bounded flash-backed blob storage and
+emit a stable object handle instead of assembling every representation in RAM.
+
+Completion currently can retain concatenated ciphertext, a same-sized decrypt
+buffer, plaintext/decompressed output, Resource state and final event data at
+the same time. Accept/reject collapse missing state and packet-build failures
+into an empty output and can remove or mark the Resource despite producing no
+wire response. Internal Resource output silently truncates above 256 packets,
+while an adaptive window may itself reach 75 packets and exceed the permanent
+E290 ordinary-owner pool. Replace burst `Vec` output with a fallible cursor or
+reservation bounded by the caller's available packet owners. Retry constants
+must be enforced so a stalled receiver cannot retain one transfer forever.
+
+The project-owned application-event seam moves existing allocation-backed
+payloads exactly once into a fixed outer owner, but it does not make Rete's
+internal creation allocation-atomic. Add a pre-mutation event reservation hook
+equivalent to the current receipt-terminal reservation/commit contract. An RNS
+Resource offer also needs an incarnation/generation-bound accept/reject token;
+the resulting action must return through the ordinary router rather than a
+raw mutable-`NodeCore` escape hatch.
 
 The current `HeaplessStorage<..., L>` also cannot instantiate `L = 0` or
 `L = 1`: its `heapless::IndexMap` capacity path requires greater than one. A

@@ -24,21 +24,21 @@ pub mod embedded;
 #[cfg(any(test, feature = "conformance"))]
 pub use embedded::ConformanceLinkSnapshot;
 pub use embedded::{
-    AdmissionCounters, AnnounceAdmissionError, DestinationRegistrationError, EmbeddedNode,
-    EmbeddedNodeConfig, EmbeddedNodeMetrics, EmbeddedSendError, InboundData, InboundDataProjection,
-    InboundProofPolicy, IngressCounters, IngressDisposition, IngressDropReason, IngressMetadata,
-    IngressReport, InterfaceId, MAX_CHANNEL_PAYLOAD, MAX_DATA_PAYLOAD, NodeActions, NodeRole,
-    PrepareDataError, PreparedData, RNS_MTU, ReceiptCandidate, ReceiptId, ReceiptKind,
-    ReceiptReservationUnavailable, ReceiptTerminal, ReceiptTerminalCounters,
-    ReceiptTerminalReservation, ReceiptTerminalSink, ReceiptTickReport, RouteSnapshot,
-    TransportCounters, TxPacket, TxTarget, project_inbound_data,
+    AdmissionCounters, AnnounceAdmissionError, ApplicationEvent, ApplicationEventKind,
+    ApplicationRequestFailReason, DestinationRegistrationError, EmbeddedNode, EmbeddedNodeConfig,
+    EmbeddedNodeMetrics, EmbeddedSendError, InboundData, InboundDataProjection, InboundProofPolicy,
+    IngressCounters, IngressDisposition, IngressDropReason, IngressMetadata, IngressReport,
+    InterfaceId, MAX_CHANNEL_PAYLOAD, MAX_DATA_PAYLOAD, NodeActions, NodeRole, PrepareDataError,
+    PreparedData, RNS_MTU, ReceiptCandidate, ReceiptId, ReceiptKind, ReceiptReservationUnavailable,
+    ReceiptTerminal, ReceiptTerminalCounters, ReceiptTerminalReservation, ReceiptTerminalSink,
+    ReceiptTickReport, RouteSnapshot, TransportCounters, TxPacket, TxTarget, project_inbound_data,
 };
 pub use rete_core::{
     DestHash, DestType, Identity, IdentityHash, LinkId, MonotonicDuration, MonotonicInstant,
     Packet, PacketType,
 };
 pub use rete_stack::node_core::{OutboundDispatchInterval, OutboundProtocolToken};
-pub use rete_stack::{DestinationType, Direction, NodeEvent};
+pub use rete_stack::{DestinationType, Direction};
 pub use rete_transport::{AnnounceError, AnnounceInfo, LinkState};
 
 /// Reviewed Rete integration-fork source revision.

@@ -562,8 +562,8 @@ after frame exposure with an ordinary announce queued behind the DATA owner;
 LoRa lease offline, and permits no later host-radio TX or RX. This qualifies the
 software composition, not ESP32-S3 execution or RF hardware.
 The current root gates include 56 focused host-client tests inside the passing
-252-test xtask suite, plus 58 portable Rete-integration and 17 raw-RNS inbox
-store tests. The 58 integration tests exercise this repository's adapter and are separate
+252-test xtask suite, plus 60 portable Rete-integration and 17 raw-RNS inbox
+store tests. The 60 integration tests exercise this repository's adapter and are separate
 from the pinned Rete fork's selected validation set. The previously validated
 project conformance baseline performed 235 checks: 112 released-vector, adapter and
 direct-Link checks, 40 released-Python LRRTT MessagePack checks, 8
@@ -586,20 +586,23 @@ portable-target LRRTT validation and a build-only default E290 package. Its
 776,464-byte merged image uses
 710,928/6,291,456 application bytes (11.30%) and has SHA-256
 `7b11c6f6a3c039d46ab0117fd362920aaa40145e7f27cbc6fa0a8a84a7ab3571`.
-It has no flashed-image readback or powered proof. The current `90570ca` pin's
-build-only default E290 release links with text/data/BSS of
-674,431/3,676/469,152 bytes (1,147,259 bytes total by GNU size), and its ELF has
-SHA-256 `d370039c3872d34a74b9bbc0b52567a24be607bc01ea660b6dfbd8d5dd12072d`.
-The explicit 16 MiB package is a 780,448-byte merged image, uses
-714,912/6,291,456 application bytes (11.36%), and has SHA-256
-`a912bb6c910c0145a9431f2a94b95a0a6560662678c457fc9c49e8641050b72c`.
+It has no flashed-image readback or powered proof. The current application-
+event ownership default E290 release links with text/data/BSS of
+684,167/3,676/469,152 bytes (1,156,995 bytes total by GNU size), and its
+12,345,320-byte ELF has SHA-256
+`ebb34e7176a8e61b6969ebf99d7dac97c6e674ef5e583bbf931a34e8b6e970a2`.
+The explicit 16 MiB package is a 789,504-byte merged image, uses
+723,968/6,291,456 application bytes (11.51%), and has SHA-256
+`1796f161c480d0348e3d47fd8f3cda5fda5b51aa38ad6024aaad04c8ba1751ce`.
 The current runtime-measurement HIL links with text/data/BSS of
-686,203/4,180/468,648 bytes (1,159,031 bytes total), packages as a 792,048-byte
-merged image using 726,512/6,291,456 application bytes (11.55%), and has
+695,315/4,180/468,648 bytes (1,168,143 bytes total), packages as an 800,480-byte
+merged image using 734,944/6,291,456 application bytes (11.68%), and has
 ELF/merged SHA-256 values
-`5aaa4c7029b35b55c5f2eb0f673c04ac11ae695c09a8cc1d1797990fe0a4ab30` and
-`938d944c9373638b475e48e804fc0211b92da1ef49d0e875233d052b19064881`.
-Both remain unflashed and unpowered because neither E290 currently enumerates.
+`4ca4eef73ff1babd00750d4a635f7644d73d1a3ae1cde4fb1dbdb434937bcfca` and
+`ec23bf0a7b20b7364e12cba6ebc90aa3e0ce761650413e1ad9d6186eeecf1662`.
+The default image matched an exact address-zero readback on `3e:88` and served
+an authenticated `identity-summary`; the HIL remains unflashed, and `3f:88`
+did not enumerate for this run.
 All powered records below remain bound to the source and Rete revisions they
 name.
 
@@ -810,8 +813,11 @@ codecs, debounced physical presence, sole USB byte owner, reset-epoch guard,
 bounded command/reply handoffs, static authenticated handoff, node-side
 current-authority dispatch, and the minimal credential-backed USB session state
 machine are composed. Next qualify physical inbox power cuts plus target
-timing/high-water, then design durable LXMF/configuration
-hosting and complete client delivery.
+timing/high-water while replacing the destructive native-event edge with ADR
+0012's fixed application-event owner and Python-derived LXMF compatibility
+corpus; then design durable LXMF/configuration hosting and complete client
+delivery. Native RNS Resource ingress stays disabled until its allocation and
+streaming-storage boundary is bounded.
 The node-side routing
 boundary remains interface-neutral so additional Reticulum links can be added
 later through adapters without rewriting the LoRa actor or protocol owner; no
@@ -833,6 +839,7 @@ second transport is required to qualify the first LoRa vertical slice.
 - [Device-API credential store and pairing decision](docs/adr/0009-device-api-credential-store-and-pairing.md)
 - [Wired developer pairing protocol](docs/adr/0010-device-api-live-pairing-protocol.md)
 - [Durable raw-RNS inbox qualification](docs/adr/0011-durable-rns-inbox-qualification.md)
+- [Application-event ownership and bounded RNS Resource admission](docs/adr/0012-application-event-and-resource-ownership.md)
 - [Transport-neutral interface registry and router](docs/interface-router.md)
 - [Phase-0 validation contract](docs/phase-0-acceptance.md)
 - [Phase-1 receive-only slice](docs/phase-1-rx-slice.md)

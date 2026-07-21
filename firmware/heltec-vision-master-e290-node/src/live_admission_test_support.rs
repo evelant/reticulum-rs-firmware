@@ -22,7 +22,8 @@ use reticulum_interface_router::{
     InterfaceDescriptor, InterfaceFabric, InterfaceLifecycleActorHandoff, InterfaceLifecycleState,
 };
 use reticulum_node_core::{
-    AnnounceEmissionTime, AuthorizedFrameObservation, DestinationHash, MonotonicMillis,
+    AnnounceEmissionTime, ApplicationEventDiscardReason, ApplicationEventOwner,
+    ApplicationEventSlot, AuthorizedFrameObservation, DestinationHash, MonotonicMillis,
     MonotonicSeconds, NodeConfig, NodeCore, NodeIdentity, NodeInstanceId, OrdinaryBufferPool,
     OrdinaryPacketBuffer, PacketInterfaceId, TxLeaseDeadline, TxPacketBuffer,
 };
@@ -50,8 +51,9 @@ use reticulum_tx_handoff::{
     AuthorizedFrameHandoff, AuthorizedFrameNodeHandoff, DataPermitHandoff, OrdinaryPermitHandoff,
 };
 use reticulum_tx_supervisor::{
-    DataRouterCoordinator, NodeInterfaceAnnounceFlushResult, NodeInterfaceSupervisor,
-    NodeInterfaceSupervisorTransition, OrdinaryRouterCoordinator, OrdinaryRouterStep,
+    DataRouterCoordinator, NodeInterfaceAnnounceFlushResult, NodeInterfaceApplicationEventDrain,
+    NodeInterfaceSupervisor, NodeInterfaceSupervisorTransition, OrdinaryRouterCoordinator,
+    OrdinaryRouterStep,
 };
 
 use std::{boxed::Box, vec, vec::Vec};
@@ -511,6 +513,7 @@ fn map_runtime_error(error: RuntimeError<FakeNorError>) -> SubmissionPortError {
 
 pub struct LiveNodeSystem {
     pub supervisor: ProductSupervisor,
+    application_events: ApplicationEventOwner<'static>,
     pub dispatcher: ProductDispatcher,
     pub frame_node: AuthorizedFrameNodeHandoff<NoopRawMutex>,
     pub node_rng: CounterRng,
@@ -644,9 +647,13 @@ impl LiveNodeSystem {
             frame_dispatcher,
             config::dispatcher_config(),
         );
+        let application_event_slots = Box::leak(Box::new(
+            [const { ApplicationEventSlot::new() }; config::APPLICATION_EVENT_SLOTS],
+        ));
 
         Self {
             supervisor,
+            application_events: ApplicationEventOwner::new(application_event_slots),
             dispatcher,
             frame_node,
             node_rng: CounterRng::default(),
@@ -770,7 +777,14 @@ impl LiveNodeSystem {
                 NodeInterfaceSupervisorTransition::Ordinary(
                     OrdinaryRouterStep::NonPacketActionsReady,
                 ) => {
-                    let _ = self.supervisor.take_non_packet_actions();
+                    assert!(matches!(
+                        self.supervisor
+                            .drain_application_events(&mut self.application_events),
+                        NodeInterfaceApplicationEventDrain::Drained(_)
+                    ));
+                    while let Some(lease) = self.application_events.lease_next() {
+                        lease.discard(ApplicationEventDiscardReason::ConsumerUnavailable);
+                    }
                 }
                 NodeInterfaceSupervisorTransition::Ordinary(OrdinaryRouterStep::Routed {
                     ..

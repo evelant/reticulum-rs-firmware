@@ -34,6 +34,16 @@ pub const LINKS: usize = 4;
 pub const DATA_BUFFERS: usize = 4;
 /// Statically owned ordinary-action packet buffers.
 pub const ORDINARY_BUFFERS: usize = 8;
+/// Transport-neutral application events retained outside Rete at once.
+///
+/// This is the first E290 outer-owner profile, not a protocol or no-PSRAM
+/// ceiling. Packet-sized payload allocations already created by Rete move into
+/// these slots without cloning; future RNS Resource bodies use durable blob
+/// handles instead of consuming an assembled event slot.
+pub const APPLICATION_EVENT_SLOTS: usize = 16;
+/// Internal static RAM occupied by the fixed application-event slot array.
+pub const APPLICATION_EVENT_STORAGE_BYTES: usize =
+    core::mem::size_of::<[reticulum_node_core::ApplicationEventSlot; APPLICATION_EVENT_SLOTS]>();
 /// Concrete interface actors in the first LoRa-only executable profile.
 pub const INTERFACE_SLOTS: usize = 1;
 /// Jobs, completions and ingress buffers available per concrete actor.

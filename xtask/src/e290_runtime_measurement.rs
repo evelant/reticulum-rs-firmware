@@ -219,27 +219,29 @@ const PROOF_SNAPSHOT_SEQ_END_WORD: usize = 47;
 // The powered 2026-07-20 qualification observed 72,212 bytes of raw painted
 // stack margin. RPTE v1 adds one exact 192-byte initialized internal-RAM
 // object, and the linked stack boundary moves down by the same 192 bytes. The
-// current source has accumulated another exact 3,544 bytes of linked internal-
-// RAM growth since that trace. The precise-LRRTT tranche accounts for 2,776
-// bytes beyond the preceding 560-byte baseline, and the interface-lifecycle
-// tranche adds another 208 bytes in both stack boundaries: retained protocol,
-// supervisor, and actor state expands the sole supervisor and its task futures.
+// source accumulated another exact 3,544 bytes of linked internal-RAM growth
+// through the interface-lifecycle tranche. The application-event ownership
+// tranche moves both stack boundaries down by a further exact 2,408 bytes: the
+// fixed 16-slot owner accounts for 2,056 bytes and retained owner/task state
+// accounts for the remaining 352 bytes.
 // Until a fresh powered trace supersedes it, carry the earlier watermark
 // forward conservatively after both deductions. This does not turn the
 // modified-word watermark into minimum-SP proof. The exact E290 pair reports
-// NodeCore::new at 53,680 bytes, leaving a derived 14,796-byte margin. This is
+// NodeCore::new at 53,680 bytes, leaving a derived 12,388-byte margin. This is
 // an E290 internal-stack bound; PSRAM does not back the executor stack.
 const PRIOR_QUALIFIED_RAW_STACK_MARGIN_BYTES: u64 = 72_212;
 const PROOF_TRACE_LINKED_STACK_REDUCTION_BYTES: u64 = PROOF_BYTE_SIZE as u64;
 const POST_PROOF_LINKED_STACK_REDUCTION_BYTES: u64 = 3_544;
+const APPLICATION_EVENT_LINKED_STACK_REDUCTION_BYTES: u64 = 2_408;
 const QUALIFIED_RAW_STACK_MARGIN_BYTES: u64 = PRIOR_QUALIFIED_RAW_STACK_MARGIN_BYTES
     - PROOF_TRACE_LINKED_STACK_REDUCTION_BYTES
-    - POST_PROOF_LINKED_STACK_REDUCTION_BYTES;
+    - POST_PROOF_LINKED_STACK_REDUCTION_BYTES
+    - APPLICATION_EVENT_LINKED_STACK_REDUCTION_BYTES;
 const MAXIMUM_STACK_FRAME_BYTES: u64 = 53_680;
 const MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES: u64 =
     QUALIFIED_RAW_STACK_MARGIN_BYTES - MAXIMUM_STACK_FRAME_BYTES;
-const MINIMUM_DEFAULT_USABLE_STACK_BYTES: u64 = 167_440;
-const MINIMUM_HIL_USABLE_STACK_BYTES: u64 = 166_744;
+const MINIMUM_DEFAULT_USABLE_STACK_BYTES: u64 = 165_032;
+const MINIMUM_HIL_USABLE_STACK_BYTES: u64 = 164_336;
 const EXPECTED_STACK_GUARD_OFFSET_BYTES: u64 = 60;
 const STACK_GUARD_WORD_BYTES: u64 = size_of::<u32>() as u64;
 
@@ -2994,10 +2996,11 @@ const fn is_minimum_word(word: usize) -> bool {
 const _: () = {
     assert!(PROOF_TRACE_LINKED_STACK_REDUCTION_BYTES == 192);
     assert!(POST_PROOF_LINKED_STACK_REDUCTION_BYTES == 3_544);
+    assert!(APPLICATION_EVENT_LINKED_STACK_REDUCTION_BYTES == 2_408);
     assert!(CHECKPOINT_BYTE_SIZE == 448);
-    assert!(QUALIFIED_RAW_STACK_MARGIN_BYTES == 68_476);
+    assert!(QUALIFIED_RAW_STACK_MARGIN_BYTES == 66_068);
     assert!(MAXIMUM_STACK_FRAME_BYTES == 53_680);
-    assert!(MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES == 14_796);
+    assert!(MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES == 12_388);
     assert!(
         MAXIMUM_STACK_FRAME_BYTES + MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES
             == QUALIFIED_RAW_STACK_MARGIN_BYTES
@@ -3614,8 +3617,8 @@ mod tests {
                 maximum_frame_bytes: 53_680,
             },
             default_stack: StackLayout {
-                reserved_bytes: 167_504,
-                usable_bytes: 167_440,
+                reserved_bytes: 165_096,
+                usable_bytes: 165_032,
                 guard_offset_bytes: 60,
             },
             default_proof_trace_symbol_count: 0,
@@ -3624,8 +3627,8 @@ mod tests {
                 maximum_frame_bytes: 53_680,
             },
             hil_stack: StackLayout {
-                reserved_bytes: 166_808,
-                usable_bytes: 166_744,
+                reserved_bytes: 164_400,
+                usable_bytes: 164_336,
                 guard_offset_bytes: 60,
             },
             hil_proof_trace_symbol_count: 1,
@@ -3634,12 +3637,12 @@ mod tests {
         reviewed.validate().unwrap();
         let output = reviewed.render();
         assert!(output.contains("default.maximum_frame_bytes=53680\n"));
-        assert!(output.contains("default.stack_usable_bytes=167440\n"));
+        assert!(output.contains("default.stack_usable_bytes=165032\n"));
         assert!(output.contains("default.proof_trace_symbol_count=0\n"));
-        assert!(output.contains("hil.stack_usable_bytes=166744\n"));
+        assert!(output.contains("hil.stack_usable_bytes=164336\n"));
         assert!(output.contains("hil.proof_trace_symbol_count=1\n"));
         assert!(output.contains("hil.proof_trace_symbol_size_bytes=192\n"));
-        assert!(output.ends_with("qualification.conservative_margin_bytes=14796"));
+        assert!(output.ends_with("qualification.conservative_margin_bytes=12388"));
 
         let mut regressed = reviewed;
         regressed.default_proof_trace_symbol_count = 1;
@@ -3672,7 +3675,7 @@ mod tests {
             regressed
                 .validate()
                 .unwrap_err()
-                .contains("usable stack 167439")
+                .contains("usable stack 165031")
         );
 
         let mut regressed = reviewed;
@@ -3681,7 +3684,7 @@ mod tests {
             regressed
                 .validate()
                 .unwrap_err()
-                .contains("usable stack 166743")
+                .contains("usable stack 164335")
         );
 
         let mut regressed = reviewed;

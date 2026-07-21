@@ -8,6 +8,7 @@ use core::{
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use reticulum_interface_router::{EligibleInterfaceSetError, OutboundRouter, RouteError};
 use reticulum_node_core::{
+    ApplicationEventOfferError, ApplicationEventOfferReport, ApplicationEventOwner,
     MonotonicMillis, NodeActions, OrdinaryActionAdmissionError, OrdinaryActionAdmissionFailure,
     OrdinaryActionAdmissionRequest, OrdinaryActionBatch, OrdinaryActionCapacitySnapshot,
     OrdinaryActionOwner, OrdinaryAuthorizationErrorKind, OrdinaryAuthorizationFailure,
@@ -776,6 +777,23 @@ impl<const PACKET_BUFFERS: usize> OrdinaryRouterCoordinator<PACKET_BUFFERS> {
     /// admitted envelope. The packet vector is empty.
     pub fn take_non_packet_actions(&mut self) -> Option<NodeActions> {
         self.non_packet_actions.take()
+    }
+
+    pub(crate) fn drain_application_events(
+        &mut self,
+        owner: &mut ApplicationEventOwner<'_>,
+    ) -> Result<Option<ApplicationEventOfferReport>, ApplicationEventOfferError> {
+        let Some(actions) = self.non_packet_actions.take() else {
+            return Ok(None);
+        };
+        match owner.try_offer_actions(actions) {
+            Ok(report) => Ok(Some(report)),
+            Err(failure) => {
+                let reason = failure.reason();
+                self.non_packet_actions = Some(failure.into_actions());
+                Err(reason)
+            }
+        }
     }
 
     /// Take one recoverably rejected unchanged action envelope.
