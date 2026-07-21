@@ -155,6 +155,31 @@ jobs:
           -p reticulum-nor-flash-region
           --no-deps
 
+      - name: Durable LXMF owner host tests
+        run: >-
+          cargo test --locked
+          -p reticulum-lxmf-model
+          -p reticulum-lxmf-store
+          -p reticulum-lxmf-durable-ingress
+
+      - name: Durable LXMF owner strict Clippy
+        run: >-
+          cargo clippy --locked
+          -p reticulum-lxmf-model
+          -p reticulum-lxmf-store
+          -p reticulum-lxmf-durable-ingress
+          --all-targets -- -D warnings
+
+      - name: Durable LXMF owner rustdoc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: >-
+          cargo doc --locked
+          -p reticulum-lxmf-model
+          -p reticulum-lxmf-store
+          -p reticulum-lxmf-durable-ingress
+          --no-deps
+
       - name: Device API experimental RNS DATA tests
         run: >-
           cargo test --locked
@@ -245,7 +270,10 @@ jobs:
           -p reticulum-device-identity-store
           -p reticulum-announce-clock
           -p reticulum-interface-router
+          -p reticulum-lxmf-durable-ingress
           -p reticulum-lxmf-ingress
+          -p reticulum-lxmf-model
+          -p reticulum-lxmf-store
           -p reticulum-lxmf-wire
           -p reticulum-node-core
           -p reticulum-nor-flash-region
@@ -411,7 +439,10 @@ jobs:
           -p reticulum-device-api-session
           -p reticulum-device-identity-store
           -p reticulum-announce-clock
+          -p reticulum-lxmf-durable-ingress
           -p reticulum-lxmf-ingress
+          -p reticulum-lxmf-model
+          -p reticulum-lxmf-store
           -p reticulum-lxmf-wire
           -p reticulum-node-core
           -p reticulum-nor-flash-region

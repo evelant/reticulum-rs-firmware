@@ -543,9 +543,9 @@ store/pairing decision in
 experimental host tests/clippy plus the corresponding ESP32-S3 Xtensa checks
 pass.
 
-The default E290 library now has 131 passing host tests, the opt-in inbox
-commit-fault HIL profile has 137, and the runtime-measurement HIL profile has
-147. These suites cover the resident live-pairing
+The default E290 library now has 134 passing host tests, the opt-in inbox
+commit-fault HIL profile has 140, and the runtime-measurement HIL profile has
+150. These suites cover the resident live-pairing
 lifecycle, its causal control/live frontier, shared USB decoder and
 sequence gate, secret-owning handoff, initialization/product policy,
 authenticated inbox-port isolation, and
@@ -562,8 +562,8 @@ after frame exposure with an ordinary announce queued behind the DATA owner;
 LoRa lease offline, and permits no later host-radio TX or RX. This qualifies the
 software composition, not ESP32-S3 execution or RF hardware.
 The current root gates include 56 focused host-client tests inside the passing
-256-test xtask suite, plus 60 portable Rete-integration and 17 raw-RNS inbox
-store tests. The 60 integration tests exercise this repository's adapter and are separate
+261-test xtask suite, plus 61 portable Rete-integration and 17 raw-RNS inbox
+store tests. The 61 integration tests exercise this repository's adapter and are separate
 from the pinned Rete fork's selected validation set. The previously validated
 project conformance baseline performed 235 checks: 112 released-vector, adapter and
 direct-Link checks, 40 released-Python LRRTT MessagePack checks, 8
@@ -830,12 +830,18 @@ destination-bound wire/signature/stamp validation boundary. The separate
 value, and classifies opportunistic DATA without copying or consuming it.
 Non-`NONE` Link DATA remains unrelated; context-`NONE` Link DATA and Resource
 completion are explicitly deferred until the application event can bind their
-Link to the local LXMF destination. Next
-design the separate durable model, engine, store, configuration hosting, and
-client-delivery services, then compose durable acceptance before acknowledging
-the retained event. The raw-RNS inbox remains qualification evidence rather
-than a product mailbox. Native RNS Resource ingress stays disabled until its
-allocation and streaming-storage boundary is bounded.
+Link to the local LXMF destination. ADR 0014 adds the separate dependency-free
+semantic model, variable-extent append-only NOR store, and durable-ingress
+lease adapter. Exact normalized LXMF bytes stream from the retained event into
+the store without a message-sized copy, and only a verified durable receipt can
+acknowledge that event. Replays, alternate valid stamps, and forced
+same-ID/different-material conflicts remain distinct. The portable tranche is
+not yet target composition: Rete currently creates an inbound RNS proof before
+application durability is known, so a delayed proof-owner boundary is still
+required before claiming remote durable-delivery semantics. The raw-RNS inbox
+remains qualification evidence rather than a product mailbox. Native RNS
+Resource ingress stays disabled until its allocation and streaming-storage
+boundary is bounded.
 The node-side routing
 boundary remains interface-neutral so additional Reticulum links can be added
 later through adapters without rewriting the LoRa actor or protocol owner; no
@@ -859,6 +865,7 @@ second transport is required to qualify the first LoRa vertical slice.
 - [Durable raw-RNS inbox qualification](docs/adr/0011-durable-rns-inbox-qualification.md)
 - [Application-event ownership and bounded RNS Resource admission](docs/adr/0012-application-event-and-resource-ownership.md)
 - [Bounded LXMF wire and service ownership boundary](docs/adr/0013-bounded-lxmf-wire-boundary.md)
+- [Durable LXMF message ownership](docs/adr/0014-durable-lxmf-message-ownership.md)
 - [Transport-neutral interface registry and router](docs/interface-router.md)
 - [Phase-0 validation contract](docs/phase-0-acceptance.md)
 - [Phase-1 receive-only slice](docs/phase-1-rx-slice.md)
@@ -897,6 +904,10 @@ cargo run -p xtask -- doctor
 
 ```sh
 cargo test --locked
+cargo run --locked -p xtask -- graph-policy
+cargo test --locked -p reticulum-lxmf-model
+cargo test --locked -p reticulum-lxmf-store
+cargo test --locked -p reticulum-lxmf-durable-ingress
 cargo test --locked -p reticulum-lxmf-ingress
 cargo test --locked -p reticulum-lxmf-wire
 cargo test --locked -p reticulum-device-api --features experimental-rns-data
@@ -933,7 +944,10 @@ cargo check --locked \
   -p reticulum-device-api-pairing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
+  -p reticulum-lxmf-durable-ingress \
   -p reticulum-lxmf-ingress \
+  -p reticulum-lxmf-model \
+  -p reticulum-lxmf-store \
   -p reticulum-lxmf-wire \
   -p reticulum-node-core \
   -p reticulum-radio-lora-phy \
@@ -961,7 +975,10 @@ cargo +esp check --locked \
   -p reticulum-device-api-pairing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
+  -p reticulum-lxmf-durable-ingress \
   -p reticulum-lxmf-ingress \
+  -p reticulum-lxmf-model \
+  -p reticulum-lxmf-store \
   -p reticulum-lxmf-wire \
   -p reticulum-rns-inbox-store \
   -p reticulum-node-core \

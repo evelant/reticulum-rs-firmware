@@ -2004,6 +2004,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "reticulum-lxmf-durable-ingress"
+version = "0.1.0"
+dependencies = [
+ "embedded-storage",
+ "hex",
+ "reticulum-lxmf-ingress",
+ "reticulum-lxmf-model",
+ "reticulum-lxmf-store",
+ "reticulum-node-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "reticulum-lxmf-ingress"
 version = "0.1.0"
 dependencies = [
@@ -2013,6 +2027,23 @@ dependencies = [
  "reticulum-rns-inbox-store",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "reticulum-lxmf-model"
+version = "0.1.0"
+
+[[package]]
+name = "reticulum-lxmf-store"
+version = "0.1.0"
+dependencies = [
+ "embedded-storage",
+ "hex",
+ "reticulum-lxmf-model",
+ "reticulum-lxmf-wire",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

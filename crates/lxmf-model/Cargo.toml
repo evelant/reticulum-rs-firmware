@@ -1,0 +1,13 @@
+[package]
+name = "reticulum-lxmf-model"
+description = "Allocation-free durable semantic model for inbound LXMF messages"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lib]
+path = "src/lib.rs"

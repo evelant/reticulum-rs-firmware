@@ -615,6 +615,86 @@ fn graph_policy() -> ExitCode {
         }
     };
 
+    let lxmf_model_closure = match capture_stdout_at(
+        "cargo",
+        [
+            "tree",
+            "--locked",
+            "-p",
+            "reticulum-lxmf-model",
+            "--edges",
+            "normal",
+            "--target",
+            "riscv32imac-unknown-none-elf",
+            "--prefix",
+            "none",
+            "--no-dedupe",
+            "--format",
+            "{p}\t{f}",
+        ],
+        &root,
+    ) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!("error: could not inspect LXMF model generic bare-metal closure: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let lxmf_store_closure = match capture_stdout_at(
+        "cargo",
+        [
+            "tree",
+            "--locked",
+            "-p",
+            "reticulum-lxmf-store",
+            "--edges",
+            "normal",
+            "--target",
+            "riscv32imac-unknown-none-elf",
+            "--prefix",
+            "none",
+            "--no-dedupe",
+            "--format",
+            "{p}\t{f}",
+        ],
+        &root,
+    ) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!("error: could not inspect LXMF store generic bare-metal closure: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let lxmf_durable_ingress_closure = match capture_stdout_at(
+        "cargo",
+        [
+            "tree",
+            "--locked",
+            "-p",
+            "reticulum-lxmf-durable-ingress",
+            "--edges",
+            "normal",
+            "--target",
+            "riscv32imac-unknown-none-elf",
+            "--prefix",
+            "none",
+            "--no-dedupe",
+            "--format",
+            "{p}\t{f}",
+        ],
+        &root,
+    ) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!(
+                "error: could not inspect durable LXMF ingress generic bare-metal closure: {error}"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+
     let mut failed = false;
     for (feature, product) in &product_graphs {
         if let Err(error) = validate_product_graph_boundary(feature, product) {
@@ -744,6 +824,18 @@ fn graph_policy() -> ExitCode {
             .map_err(|error| format!("LXMF ingress dependency boundary: {error}"))?;
         validate_lxmf_ingress_resolved_closure(&json, &lxmf_ingress_closure, &root)
             .map_err(|error| format!("LXMF ingress generic bare-metal closure: {error}"))?;
+        validate_lxmf_model_dependency_boundary(&json, &root)
+            .map_err(|error| format!("LXMF model dependency boundary: {error}"))?;
+        validate_lxmf_model_resolved_closure(&json, &lxmf_model_closure, &root)
+            .map_err(|error| format!("LXMF model generic bare-metal closure: {error}"))?;
+        validate_lxmf_store_dependency_boundary(&json, &root)
+            .map_err(|error| format!("LXMF store dependency boundary: {error}"))?;
+        validate_lxmf_store_resolved_closure(&json, &lxmf_store_closure, &root)
+            .map_err(|error| format!("LXMF store generic bare-metal closure: {error}"))?;
+        validate_lxmf_durable_ingress_dependency_boundary(&json, &root)
+            .map_err(|error| format!("durable LXMF ingress dependency boundary: {error}"))?;
+        validate_lxmf_durable_ingress_resolved_closure(&json, &lxmf_durable_ingress_closure, &root)
+            .map_err(|error| format!("durable LXMF ingress generic bare-metal closure: {error}"))?;
         validate_storage_model_dependency_boundary(&json, &root)
             .map_err(|error| format!("durable storage model dependency boundary: {error}"))?;
         validate_storage_journal_dependency_boundary(&json, &root)
@@ -798,6 +890,7 @@ fn graph_policy() -> ExitCode {
              normal edges, the single reviewed streaming-verification feature and three host-test edges, and its generic bare-metal normal closure exactly \
              matches the reviewed registry identities without std, alloc, Rete, platform, radio or storage packages; \
              the featureless transport-neutral LXMF ingress crate has exactly its reviewed feature-disabled node-core and LXMF-wire normal edges plus its dev-only durable inbox and host-test fixtures, while its generic bare-metal normal closure exactly matches the reviewed identities and excludes platform, board, radio, firmware, storage, device-API, supervisor and executor packages; \
+             the dependency-free LXMF model, append-only LXMF store and durable-ingress owner retain their exact reviewed manifests and generic bare-metal closures; the store normal closure reaches only the model, embedded-storage and SHA-256 while its development surface adds only the reviewed LXMF-wire/hex/serde corpus fixtures, durable ingress reaches only its four reviewed portable owner edges plus its exact host-test embedded-storage/hex/serde fixtures, and none of the new ownership closures can acquire the raw inbox, submission durability, board, radio, platform, firmware, device-API, supervisor or executor graphs; all three remain absent from product and HIL compositions until target integration is explicitly reviewed; \
              the portable identity, announce-clock and NOR-region crates use only their exact reviewed embedded-storage, rand_core, SHA-256 and zeroize subsets; the durable inbound RNS inbox store uses only exact feature-free embedded-storage and SHA-256 pins; the durable \
              storage model uses only reviewed minicbor and SHA-256 edges; \
              the physical storage journal uses only reviewed embedded-storage, storage-model and SHA-256 edges; \
@@ -1044,7 +1137,7 @@ fn cargo_tree_contains_package(tree: &str, package: &str) -> bool {
         .any(|line| line.split_whitespace().any(|field| field == package))
 }
 
-const PRODUCT_GRAPH_FORBIDDEN: [&str; 27] = [
+const PRODUCT_GRAPH_FORBIDDEN: [&str; 30] = [
     "leviculum-core",
     "rete-lxmf",
     "lxmf-rs",
@@ -1060,6 +1153,9 @@ const PRODUCT_GRAPH_FORBIDDEN: [&str; 27] = [
     "reticulum-device-api-handoff",
     "reticulum-device-api-pairing-policy",
     "reticulum-device-api-session",
+    "reticulum-lxmf-durable-ingress",
+    "reticulum-lxmf-model",
+    "reticulum-lxmf-store",
     "reticulum-node-core",
     "reticulum-radio-tx-dispatch",
     "reticulum-radio-lora-phy",
@@ -1085,7 +1181,7 @@ fn validate_product_graph_boundary(label: &str, tree: &str) -> Result<(), String
     Ok(())
 }
 
-const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 32] = [
+const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 35] = [
     "embassy-executor",
     "esp-radio",
     "lora-modulation",
@@ -1107,6 +1203,9 @@ const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 32] = [
     "reticulum-device-api-handoff",
     "reticulum-device-api-pairing-policy",
     "reticulum-device-api-session",
+    "reticulum-lxmf-durable-ingress",
+    "reticulum-lxmf-model",
+    "reticulum-lxmf-store",
     "reticulum-node-core",
     "reticulum-radio-interface",
     "reticulum-radio-tx-dispatch",
@@ -1128,7 +1227,7 @@ const TX_HIL_GRAPH_REQUIRED: [&str; 5] = [
     "reticulum-semantic-roundtrip-hil",
 ];
 
-const TX_HIL_GRAPH_FORBIDDEN: [&str; 27] = [
+const TX_HIL_GRAPH_FORBIDDEN: [&str; 30] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-core",
@@ -1145,6 +1244,9 @@ const TX_HIL_GRAPH_FORBIDDEN: [&str; 27] = [
     "reticulum-device-api-pairing-policy",
     "reticulum-device-api-session",
     "reticulum-board-heltec-vision-master-e290-radio",
+    "reticulum-lxmf-durable-ingress",
+    "reticulum-lxmf-model",
+    "reticulum-lxmf-store",
     "reticulum-node-core",
     "reticulum-radio-tx-dispatch",
     "reticulum-rns-inbox-store",
@@ -1188,7 +1290,7 @@ const SEMANTIC_TX_HIL_GRAPH_REQUIRED: [&str; 9] = [
     "rete-transport",
 ];
 
-const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 23] = [
+const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 26] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -1202,6 +1304,9 @@ const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 23] = [
     "reticulum-device-api-pairing-policy",
     "reticulum-device-api-session",
     "reticulum-board-heltec-vision-master-e290-radio",
+    "reticulum-lxmf-durable-ingress",
+    "reticulum-lxmf-model",
+    "reticulum-lxmf-store",
     "reticulum-node-core",
     "reticulum-radio-tx-dispatch",
     "reticulum-rns-inbox-store",
@@ -1328,7 +1433,7 @@ const E290_SEMANTIC_HIL_GRAPH_REQUIRED: [&str; 9] = [
     "rete-transport",
 ];
 
-const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 26] = [
+const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 29] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -1346,6 +1451,9 @@ const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 26] = [
     "reticulum-device-api-pairing-policy",
     "reticulum-device-api-session",
     "reticulum-interface-router",
+    "reticulum-lxmf-durable-ingress",
+    "reticulum-lxmf-model",
+    "reticulum-lxmf-store",
     "reticulum-node-core",
     "reticulum-radio-tx-dispatch",
     "reticulum-rns-inbox-store",
@@ -2004,7 +2112,7 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 38] = [
     "static_cell",
 ];
 
-const E290_NODE_GRAPH_FORBIDDEN: [&str; 11] = [
+const E290_NODE_GRAPH_FORBIDDEN: [&str; 14] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -2013,6 +2121,9 @@ const E290_NODE_GRAPH_FORBIDDEN: [&str; 11] = [
     "reticulum-heltec-vision-master-e290-qualification",
     "reticulum-heltec-vision-master-e290-semantic-hil",
     "reticulum-lab-rx-returned-fault-hil",
+    "reticulum-lxmf-durable-ingress",
+    "reticulum-lxmf-model",
+    "reticulum-lxmf-store",
     "reticulum-rns-leviculum",
     "reticulum-rns-rete-rx",
     "reticulum-semantic-roundtrip-hil",
@@ -4687,6 +4798,234 @@ fn validate_lxmf_ingress_dependency_boundary(
     Ok(())
 }
 
+fn validate_lxmf_model_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    const PACKAGE_NAME: &str = "reticulum-lxmf-model";
+
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let package = exact_local_package(
+        packages,
+        workspace,
+        PACKAGE_NAME,
+        "crates/lxmf-model/Cargo.toml",
+    )?;
+
+    let features = package["features"]
+        .as_object()
+        .ok_or_else(|| format!("{PACKAGE_NAME} package has no feature map"))?;
+    if !features.is_empty() {
+        return Err(format!(
+            "{PACKAGE_NAME} must expose no Cargo feature surface"
+        ));
+    }
+
+    let dependencies = package["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{PACKAGE_NAME} package has no dependency array"))?;
+    if !dependencies.is_empty() {
+        return Err(format!(
+            "{PACKAGE_NAME} must remain dependency-free, found {} dependencies",
+            dependencies.len()
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_lxmf_store_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    const PACKAGE_NAME: &str = "reticulum-lxmf-store";
+
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let package = exact_local_package(
+        packages,
+        workspace,
+        PACKAGE_NAME,
+        "crates/lxmf-store/Cargo.toml",
+    )?;
+
+    let features = package["features"]
+        .as_object()
+        .ok_or_else(|| format!("{PACKAGE_NAME} package has no feature map"))?;
+    if features.len() != 1
+        || features
+            .get("default")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|default| !default.is_empty())
+    {
+        return Err(format!(
+            "{PACKAGE_NAME} must expose only an empty default feature"
+        ));
+    }
+
+    let dependencies = package["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{PACKAGE_NAME} package has no dependency array"))?;
+    let normal_count = dependencies
+        .iter()
+        .filter(|dependency| dependency["kind"].is_null())
+        .count();
+    let development_count = dependencies
+        .iter()
+        .filter(|dependency| dependency["kind"].as_str() == Some("dev"))
+        .count();
+    if dependencies.len() != 7 || normal_count != 3 || development_count != 4 {
+        return Err(format!(
+            "{PACKAGE_NAME} must have exactly three reviewed normal and four reviewed development dependencies"
+        ));
+    }
+
+    validate_exact_local_dependency(
+        dependencies,
+        PACKAGE_NAME,
+        "reticulum-lxmf-model",
+        &workspace.join("crates/lxmf-model"),
+        false,
+    )?;
+    validate_exact_registry_dependency(
+        dependencies,
+        PACKAGE_NAME,
+        "embedded-storage",
+        "=0.3.1",
+        None,
+        false,
+        &[],
+    )?;
+    validate_exact_registry_dependency(
+        dependencies,
+        PACKAGE_NAME,
+        "sha2",
+        "=0.10.9",
+        None,
+        false,
+        &[],
+    )?;
+    validate_exact_local_dependency_with_kind(
+        dependencies,
+        PACKAGE_NAME,
+        "reticulum-lxmf-wire",
+        &workspace.join("crates/lxmf-wire"),
+        Some("dev"),
+        false,
+        &[],
+    )?;
+    for (name, requirement, features) in [
+        ("hex", "=0.4.3", &[][..]),
+        ("serde", "=1.0.228", &["derive"][..]),
+        ("serde_json", "=1.0.149", &[][..]),
+    ] {
+        validate_exact_registry_dependency(
+            dependencies,
+            PACKAGE_NAME,
+            name,
+            requirement,
+            Some("dev"),
+            true,
+            features,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn validate_lxmf_durable_ingress_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    const PACKAGE_NAME: &str = "reticulum-lxmf-durable-ingress";
+
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let package = exact_local_package(
+        packages,
+        workspace,
+        PACKAGE_NAME,
+        "crates/lxmf-durable-ingress/Cargo.toml",
+    )?;
+
+    let features = package["features"]
+        .as_object()
+        .ok_or_else(|| format!("{PACKAGE_NAME} package has no feature map"))?;
+    if !features.is_empty() {
+        return Err(format!(
+            "{PACKAGE_NAME} must expose no Cargo feature surface"
+        ));
+    }
+
+    let dependencies = package["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{PACKAGE_NAME} package has no dependency array"))?;
+    let normal_count = dependencies
+        .iter()
+        .filter(|dependency| dependency["kind"].is_null())
+        .count();
+    let development_count = dependencies
+        .iter()
+        .filter(|dependency| dependency["kind"].as_str() == Some("dev"))
+        .count();
+    if dependencies.len() != 8 || normal_count != 4 || development_count != 4 {
+        return Err(format!(
+            "{PACKAGE_NAME} must have exactly four reviewed normal and four reviewed development dependencies"
+        ));
+    }
+
+    for (name, relative_path) in [
+        ("reticulum-lxmf-ingress", "crates/lxmf-ingress"),
+        ("reticulum-lxmf-model", "crates/lxmf-model"),
+        ("reticulum-lxmf-store", "crates/lxmf-store"),
+        ("reticulum-node-core", "crates/node-core"),
+    ] {
+        validate_exact_local_dependency(
+            dependencies,
+            PACKAGE_NAME,
+            name,
+            &workspace.join(relative_path),
+            false,
+        )?;
+    }
+    validate_exact_registry_dependency(
+        dependencies,
+        PACKAGE_NAME,
+        "embedded-storage",
+        "=0.3.1",
+        Some("dev"),
+        false,
+        &[],
+    )?;
+    for (name, requirement, features) in [
+        ("hex", "=0.4.3", &[][..]),
+        ("serde", "=1.0.228", &["derive"][..]),
+        ("serde_json", "=1.0.149", &[][..]),
+    ] {
+        validate_exact_registry_dependency(
+            dependencies,
+            PACKAGE_NAME,
+            name,
+            requirement,
+            Some("dev"),
+            true,
+            features,
+        )?;
+    }
+
+    Ok(())
+}
+
 fn forbidden_radio_tx_dispatch_closure_category(
     package: &serde_json::Value,
     workspace: &Path,
@@ -4853,6 +5192,90 @@ fn forbidden_lxmf_ingress_closure_category(
         })
 }
 
+fn forbidden_lxmf_durable_component_closure_category(
+    package: &serde_json::Value,
+    workspace: &Path,
+) -> Option<&'static str> {
+    let name = package["name"].as_str()?;
+    if name == "reticulum-rns-inbox-store" {
+        return Some("raw inbox");
+    }
+    if name.starts_with("reticulum-storage-") || name.starts_with("reticulum-submission-") {
+        return Some("submission durability");
+    }
+    if name.starts_with("reticulum-board-") {
+        return Some("board");
+    }
+    if name == "lora-modulation"
+        || name == "lora-phy"
+        || name.starts_with("sx126")
+        || name.starts_with("sx127")
+        || name.starts_with("sx128")
+        || name.starts_with("radio-sx")
+        || name.starts_with("reticulum-radio-")
+    {
+        return Some("radio");
+    }
+    if name.starts_with("esp-")
+        || name.starts_with("esp32")
+        || name.starts_with("nrf")
+        || name.starts_with("rp2040")
+    {
+        return Some("platform");
+    }
+    if name.starts_with("reticulum-heltec-") {
+        return Some("firmware");
+    }
+    if name.starts_with("reticulum-device-api") {
+        return Some("device API");
+    }
+    if name == "reticulum-tx-supervisor" {
+        return Some("supervisor");
+    }
+    if name.starts_with("embassy-executor") {
+        return Some("executor");
+    }
+
+    package["manifest_path"]
+        .as_str()
+        .and_then(|path| Path::new(path).strip_prefix(workspace).ok())
+        .and_then(|relative| {
+            let mut components = relative.components();
+            match (components.next(), components.next()) {
+                (Some(Component::Normal(first)), _) if first == OsStr::new("firmware") => {
+                    Some("firmware")
+                }
+                (Some(Component::Normal(first)), Some(Component::Normal(second)))
+                    if first == OsStr::new("crates") =>
+                {
+                    let crate_directory = second.to_str()?;
+                    if crate_directory == "rns-inbox-store" {
+                        Some("raw inbox")
+                    } else if crate_directory.starts_with("storage-")
+                        || crate_directory.starts_with("submission-")
+                    {
+                        Some("submission durability")
+                    } else if crate_directory.starts_with("board-") {
+                        Some("board")
+                    } else if crate_directory.starts_with("radio-") {
+                        Some("radio")
+                    } else if crate_directory.starts_with("esp-") {
+                        Some("platform")
+                    } else if crate_directory.starts_with("device-api") {
+                        Some("device API")
+                    } else if crate_directory == "tx-supervisor" {
+                        Some("supervisor")
+                    } else if crate_directory.contains("executor") {
+                        Some("executor")
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        })
+}
+
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 const RETE_GIT_SOURCE: &str = "git+https://github.com/evelant/rete.git?rev=\
 90570cafc812b3025011cb690ec74a27f287cb3f#\
@@ -4932,6 +5355,40 @@ const LXMF_WIRE_REVIEWED_CLOSURE: [ReviewedClosurePackage; 15] = [
     closure_registry("signature", "2.2.0", &[]),
     closure_registry("subtle", "2.6.1", &[]),
     closure_registry("typenum", "1.20.1", &[]),
+];
+
+const LXMF_MODEL_REVIEWED_CLOSURE: [ReviewedClosurePackage; 1] = [closure_local(
+    "reticulum-lxmf-model",
+    "crates/lxmf-model/Cargo.toml",
+    &[],
+)];
+
+const LXMF_STORE_REVIEWED_CLOSURE: [ReviewedClosurePackage; 10] = [
+    closure_registry("block-buffer", "0.10.4", &[]),
+    closure_registry("cfg-if", "1.0.4", &[]),
+    closure_registry("crypto-common", "0.1.7", &[]),
+    closure_registry("digest", "0.10.7", &["block-buffer", "core-api", "default"]),
+    closure_registry("embedded-storage", "0.3.1", &[]),
+    closure_registry("generic-array", "0.14.7", &["more_lengths"]),
+    closure_local("reticulum-lxmf-model", "crates/lxmf-model/Cargo.toml", &[]),
+    closure_local(
+        "reticulum-lxmf-store",
+        "crates/lxmf-store/Cargo.toml",
+        &["default"],
+    ),
+    closure_registry("sha2", "0.10.9", &[]),
+    closure_registry("typenum", "1.20.1", &[]),
+];
+
+const LXMF_DURABLE_INGRESS_ADDITIONAL_REVIEWED_CLOSURE: [ReviewedClosurePackage; 4] = [
+    closure_registry("embedded-storage", "0.3.1", &[]),
+    closure_local(
+        "reticulum-lxmf-durable-ingress",
+        "crates/lxmf-durable-ingress/Cargo.toml",
+        &[],
+    ),
+    closure_local("reticulum-lxmf-model", "crates/lxmf-model/Cargo.toml", &[]),
+    closure_local("reticulum-lxmf-store", "crates/lxmf-store/Cargo.toml", &[]),
 ];
 
 const LXMF_INGRESS_REVIEWED_CLOSURE: [ReviewedClosurePackage; 40] = [
@@ -5309,6 +5766,53 @@ fn validate_lxmf_ingress_resolved_closure(
         &LXMF_INGRESS_REVIEWED_CLOSURE,
         "LXMF ingress",
         Some(forbidden_lxmf_ingress_closure_category),
+    )
+}
+
+fn validate_lxmf_model_resolved_closure(
+    metadata_json: &str,
+    cargo_tree: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    validate_reviewed_resolved_closure(
+        metadata_json,
+        cargo_tree,
+        workspace,
+        &LXMF_MODEL_REVIEWED_CLOSURE,
+        "LXMF model",
+        Some(forbidden_lxmf_durable_component_closure_category),
+    )
+}
+
+fn validate_lxmf_store_resolved_closure(
+    metadata_json: &str,
+    cargo_tree: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    validate_reviewed_resolved_closure(
+        metadata_json,
+        cargo_tree,
+        workspace,
+        &LXMF_STORE_REVIEWED_CLOSURE,
+        "LXMF store",
+        Some(forbidden_lxmf_durable_component_closure_category),
+    )
+}
+
+fn validate_lxmf_durable_ingress_resolved_closure(
+    metadata_json: &str,
+    cargo_tree: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    let mut reviewed = LXMF_INGRESS_REVIEWED_CLOSURE.to_vec();
+    reviewed.extend(LXMF_DURABLE_INGRESS_ADDITIONAL_REVIEWED_CLOSURE);
+    validate_reviewed_resolved_closure(
+        metadata_json,
+        cargo_tree,
+        workspace,
+        &reviewed,
+        "durable LXMF ingress",
+        Some(forbidden_lxmf_durable_component_closure_category),
     )
 }
 
@@ -9925,6 +10429,32 @@ fn sample(layout: Layout) {
     }
 
     #[test]
+    fn durable_lxmf_owners_remain_preintegration_in_every_product_and_hil_graph() {
+        for (label, forbidden) in [
+            ("Tracker product", &PRODUCT_GRAPH_FORBIDDEN[..]),
+            ("storage HIL", &STORAGE_HIL_GRAPH_FORBIDDEN[..]),
+            ("Tracker TX HIL", &TX_HIL_GRAPH_FORBIDDEN[..]),
+            (
+                "Tracker semantic TX HIL",
+                &SEMANTIC_TX_HIL_GRAPH_FORBIDDEN[..],
+            ),
+            ("E290 semantic HIL", &E290_SEMANTIC_HIL_GRAPH_FORBIDDEN[..]),
+            ("permanent E290 node", &E290_NODE_GRAPH_FORBIDDEN[..]),
+        ] {
+            for package in [
+                "reticulum-lxmf-model",
+                "reticulum-lxmf-store",
+                "reticulum-lxmf-durable-ingress",
+            ] {
+                assert!(
+                    forbidden.contains(&package),
+                    "{label} no longer forbids pre-integration {package}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn pairing_policy_is_required_only_by_permanent_e290_node() {
         for (label, forbidden) in [
             ("Tracker product", &PRODUCT_GRAPH_FORBIDDEN[..]),
@@ -10161,6 +10691,9 @@ fn sample(layout: Layout) {
         validate_radio_tx_dispatch_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_lxmf_wire_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_lxmf_ingress_dependency_boundary(&metadata.to_string(), &root).unwrap();
+        validate_lxmf_model_dependency_boundary(&metadata.to_string(), &root).unwrap();
+        validate_lxmf_store_dependency_boundary(&metadata.to_string(), &root).unwrap();
+        validate_lxmf_durable_ingress_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_storage_model_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_storage_journal_dependency_boundary(&metadata.to_string(), &root).unwrap();
         validate_storage_actor_dependency_boundary(&metadata.to_string(), &root).unwrap();
@@ -11585,6 +12118,409 @@ fn sample(layout: Layout) {
                 None,
             ));
         assert!(validate_lxmf_ingress_dependency_boundary(&extra.to_string(), &root).is_err());
+    }
+
+    #[test]
+    fn durable_lxmf_model_and_store_boundaries_lock_exact_manifests() {
+        let root = workspace_root();
+        let baseline = serde_json::json!({
+            "packages": [
+                lxmf_model_package_fixture(&root),
+                lxmf_store_package_fixture(&root),
+            ],
+        });
+        validate_lxmf_model_dependency_boundary(&baseline.to_string(), &root).unwrap();
+        validate_lxmf_store_dependency_boundary(&baseline.to_string(), &root).unwrap();
+
+        for package in ["reticulum-lxmf-model", "reticulum-lxmf-store"] {
+            let mut wrong_manifest = baseline.clone();
+            fixture_package_mut(&mut wrong_manifest, package)["manifest_path"] =
+                serde_json::json!(root.join("crates/lookalike-lxmf/Cargo.toml"));
+            assert!(
+                validate_lxmf_model_dependency_boundary(&wrong_manifest.to_string(), &root)
+                    .is_err()
+                    || validate_lxmf_store_dependency_boundary(&wrong_manifest.to_string(), &root)
+                        .is_err()
+            );
+
+            let mut nonlocal = baseline.clone();
+            fixture_package_mut(&mut nonlocal, package)["source"] =
+                serde_json::json!(CRATES_IO_SOURCE);
+            assert!(
+                validate_lxmf_model_dependency_boundary(&nonlocal.to_string(), &root).is_err()
+                    || validate_lxmf_store_dependency_boundary(&nonlocal.to_string(), &root)
+                        .is_err()
+            );
+
+            let mut duplicate = baseline.clone();
+            let copy = fixture_package_mut(&mut duplicate, package).clone();
+            duplicate["packages"].as_array_mut().unwrap().push(copy);
+            assert!(
+                validate_lxmf_model_dependency_boundary(&duplicate.to_string(), &root).is_err()
+                    || validate_lxmf_store_dependency_boundary(&duplicate.to_string(), &root)
+                        .is_err()
+            );
+
+            let mut feature = baseline.clone();
+            fixture_package_mut(&mut feature, package)["features"]["unreviewed"] =
+                serde_json::json!([]);
+            assert!(
+                validate_lxmf_model_dependency_boundary(&feature.to_string(), &root).is_err()
+                    || validate_lxmf_store_dependency_boundary(&feature.to_string(), &root)
+                        .is_err()
+            );
+        }
+
+        let mut model_edge = baseline.clone();
+        fixture_package_mut(&mut model_edge, "reticulum-lxmf-model")["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(handoff_dependency_fixture("sha2", "=0.10.9", None));
+        assert!(validate_lxmf_model_dependency_boundary(&model_edge.to_string(), &root).is_err());
+
+        for (name, local) in [
+            ("embedded-storage", false),
+            ("reticulum-lxmf-model", true),
+            ("sha2", false),
+        ] {
+            for (field, value) in [
+                ("req", serde_json::json!("=0.0.0")),
+                ("optional", serde_json::json!(true)),
+                ("rename", serde_json::json!("renamed")),
+                ("target", serde_json::json!("cfg(target_os = \"none\")")),
+                ("uses_default_features", serde_json::json!(true)),
+                ("features", serde_json::json!(["unreviewed"])),
+                ("kind", serde_json::json!("dev")),
+            ] {
+                let mut changed = baseline.clone();
+                fixture_dependency_mut(
+                    fixture_package_mut(&mut changed, "reticulum-lxmf-store"),
+                    name,
+                    None,
+                )[field] = value;
+                assert!(
+                    validate_lxmf_store_dependency_boundary(&changed.to_string(), &root).is_err(),
+                    "store dependency {name} accepted changed {field} (local={local})"
+                );
+            }
+        }
+
+        for (field, value) in [
+            ("req", serde_json::json!("=0.0.0")),
+            ("source", serde_json::json!(CRATES_IO_SOURCE)),
+            ("path", serde_json::json!(root.join("crates/lookalike"))),
+            ("kind", serde_json::Value::Null),
+            ("optional", serde_json::json!(true)),
+            ("rename", serde_json::json!("renamed")),
+            ("target", serde_json::json!("cfg(target_os = \"none\")")),
+            ("uses_default_features", serde_json::json!(true)),
+            ("features", serde_json::json!(["unreviewed"])),
+        ] {
+            let mut changed = baseline.clone();
+            fixture_dependency_mut(
+                fixture_package_mut(&mut changed, "reticulum-lxmf-store"),
+                "reticulum-lxmf-wire",
+                Some("dev"),
+            )[field] = value;
+            assert!(
+                validate_lxmf_store_dependency_boundary(&changed.to_string(), &root).is_err(),
+                "store dev dependency reticulum-lxmf-wire accepted changed {field}"
+            );
+        }
+
+        for (name, reviewed_defaults) in [("hex", true), ("serde", true), ("serde_json", true)] {
+            for (field, value) in [
+                ("req", serde_json::json!("=0.0.0")),
+                (
+                    "source",
+                    serde_json::json!("registry+https://example.invalid/index"),
+                ),
+                ("path", serde_json::json!(root.join("crates/lookalike"))),
+                ("kind", serde_json::Value::Null),
+                ("optional", serde_json::json!(true)),
+                ("rename", serde_json::json!("renamed")),
+                ("target", serde_json::json!("cfg(target_os = \"none\")")),
+                (
+                    "uses_default_features",
+                    serde_json::json!(!reviewed_defaults),
+                ),
+                ("features", serde_json::json!(["unreviewed"])),
+            ] {
+                let mut changed = baseline.clone();
+                fixture_dependency_mut(
+                    fixture_package_mut(&mut changed, "reticulum-lxmf-store"),
+                    name,
+                    Some("dev"),
+                )[field] = value;
+                assert!(
+                    validate_lxmf_store_dependency_boundary(&changed.to_string(), &root).is_err(),
+                    "store dev dependency {name} accepted changed {field}"
+                );
+            }
+        }
+
+        let mut extra = baseline;
+        fixture_package_mut(&mut extra, "reticulum-lxmf-store")["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(handoff_dependency_fixture("rand_core", "=0.6.4", None));
+        assert!(validate_lxmf_store_dependency_boundary(&extra.to_string(), &root).is_err());
+    }
+
+    #[test]
+    fn durable_lxmf_model_and_store_closures_are_exact_and_exclude_foreign_owners() {
+        let root = workspace_root();
+        let (model_metadata, model_tree) = lxmf_model_reviewed_closure_fixture(&root);
+        validate_lxmf_model_resolved_closure(&model_metadata.to_string(), &model_tree, &root)
+            .unwrap();
+        let (store_metadata, store_tree) = lxmf_store_reviewed_closure_fixture(&root);
+        validate_lxmf_store_resolved_closure(&store_metadata.to_string(), &store_tree, &root)
+            .unwrap();
+
+        for (name, version, category) in [
+            ("esp-hal", "1.1.1", "platform"),
+            ("lora-phy", "3.0.1", "radio"),
+            ("embassy-executor", "0.10.0", "executor"),
+        ] {
+            let mut metadata = store_metadata.clone();
+            let mut tree = store_tree.clone();
+            add_registry_closure_fixture_package(&mut metadata, &mut tree, &root, name, version);
+            let error = validate_lxmf_store_resolved_closure(&metadata.to_string(), &tree, &root)
+                .unwrap_err();
+            assert!(error.contains(name) && error.contains(category), "{error}");
+        }
+
+        for (name, manifest, category) in [
+            (
+                "reticulum-rns-inbox-store",
+                "crates/rns-inbox-store/Cargo.toml",
+                "raw inbox",
+            ),
+            (
+                "reticulum-submission-runtime",
+                "crates/submission-runtime/Cargo.toml",
+                "submission durability",
+            ),
+            (
+                "reticulum-board-heltec-vision-master-e290",
+                "crates/board-heltec-vision-master-e290/Cargo.toml",
+                "board",
+            ),
+            (
+                "reticulum-heltec-vision-master-e290-node",
+                "firmware/heltec-vision-master-e290-node/Cargo.toml",
+                "firmware",
+            ),
+            (
+                "reticulum-device-api",
+                "crates/device-api/Cargo.toml",
+                "device API",
+            ),
+            (
+                "reticulum-tx-supervisor",
+                "crates/tx-supervisor/Cargo.toml",
+                "supervisor",
+            ),
+        ] {
+            let mut metadata = store_metadata.clone();
+            let mut tree = store_tree.clone();
+            add_local_closure_fixture_package(
+                &mut metadata,
+                &mut tree,
+                &root,
+                name,
+                "0.1.0",
+                manifest,
+            );
+            let error = validate_lxmf_store_resolved_closure(&metadata.to_string(), &tree, &root)
+                .unwrap_err();
+            assert!(error.contains(name) && error.contains(category), "{error}");
+        }
+
+        let feature_drift = store_tree.replace("sha2 v0.10.9\t\n", "sha2 v0.10.9\tstd\n");
+        assert!(
+            validate_lxmf_store_resolved_closure(
+                &store_metadata.to_string(),
+                &feature_drift,
+                &root,
+            )
+            .is_err()
+        );
+        let missing = store_tree.replace("embedded-storage v0.3.1\t\n", "");
+        assert!(
+            validate_lxmf_store_resolved_closure(&store_metadata.to_string(), &missing, &root)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn durable_lxmf_ingress_boundary_locks_only_the_four_owner_edges() {
+        let root = workspace_root();
+        let baseline = serde_json::json!({
+            "packages": [lxmf_durable_ingress_package_fixture(&root)],
+        });
+        validate_lxmf_durable_ingress_dependency_boundary(&baseline.to_string(), &root).unwrap();
+
+        for (name, _) in [
+            ("reticulum-lxmf-ingress", "crates/lxmf-ingress"),
+            ("reticulum-lxmf-model", "crates/lxmf-model"),
+            ("reticulum-lxmf-store", "crates/lxmf-store"),
+            ("reticulum-node-core", "crates/node-core"),
+        ] {
+            for (field, value) in [
+                ("req", serde_json::json!("=0.0.0")),
+                ("source", serde_json::json!(CRATES_IO_SOURCE)),
+                ("path", serde_json::json!(root.join("crates/lookalike"))),
+                ("kind", serde_json::json!("dev")),
+                ("optional", serde_json::json!(true)),
+                ("rename", serde_json::json!("renamed")),
+                ("target", serde_json::json!("cfg(target_os = \"none\")")),
+                ("uses_default_features", serde_json::json!(true)),
+                ("features", serde_json::json!(["unreviewed"])),
+            ] {
+                let mut changed = baseline.clone();
+                fixture_dependency_mut(
+                    fixture_package_mut(&mut changed, "reticulum-lxmf-durable-ingress"),
+                    name,
+                    None,
+                )[field] = value;
+                assert!(
+                    validate_lxmf_durable_ingress_dependency_boundary(&changed.to_string(), &root,)
+                        .is_err(),
+                    "durable ingress dependency {name} accepted changed {field}"
+                );
+            }
+        }
+
+        for (name, reviewed_defaults) in [
+            ("embedded-storage", false),
+            ("hex", true),
+            ("serde", true),
+            ("serde_json", true),
+        ] {
+            for (field, value) in [
+                ("req", serde_json::json!("=0.0.0")),
+                (
+                    "source",
+                    serde_json::json!("registry+https://example.invalid/index"),
+                ),
+                ("path", serde_json::json!(root.join("crates/lookalike"))),
+                ("kind", serde_json::Value::Null),
+                ("optional", serde_json::json!(true)),
+                ("rename", serde_json::json!("renamed")),
+                ("target", serde_json::json!("cfg(target_os = \"none\")")),
+                (
+                    "uses_default_features",
+                    serde_json::json!(!reviewed_defaults),
+                ),
+                ("features", serde_json::json!(["unreviewed"])),
+            ] {
+                let mut changed = baseline.clone();
+                fixture_dependency_mut(
+                    fixture_package_mut(&mut changed, "reticulum-lxmf-durable-ingress"),
+                    name,
+                    Some("dev"),
+                )[field] = value;
+                assert!(
+                    validate_lxmf_durable_ingress_dependency_boundary(&changed.to_string(), &root,)
+                        .is_err(),
+                    "durable ingress dev dependency {name} accepted changed {field}"
+                );
+            }
+        }
+
+        for mutation in ["manifest", "source", "feature", "extra"] {
+            let mut changed = baseline.clone();
+            let package = fixture_package_mut(&mut changed, "reticulum-lxmf-durable-ingress");
+            match mutation {
+                "manifest" => {
+                    package["manifest_path"] =
+                        serde_json::json!(root.join("crates/lookalike/Cargo.toml"));
+                }
+                "source" => package["source"] = serde_json::json!(CRATES_IO_SOURCE),
+                "feature" => package["features"]["std"] = serde_json::json!([]),
+                "extra" => package["dependencies"].as_array_mut().unwrap().push(
+                    handoff_path_dependency_fixture(
+                        "reticulum-rns-inbox-store",
+                        "*",
+                        &root.join("crates/rns-inbox-store"),
+                        None,
+                    ),
+                ),
+                _ => unreachable!(),
+            }
+            assert!(
+                validate_lxmf_durable_ingress_dependency_boundary(&changed.to_string(), &root)
+                    .is_err(),
+                "durable ingress accepted {mutation} mutation"
+            );
+        }
+    }
+
+    #[test]
+    fn durable_lxmf_ingress_closure_is_exact_and_excludes_other_durable_owners() {
+        let root = workspace_root();
+        let (baseline_metadata, baseline_tree) =
+            lxmf_durable_ingress_reviewed_closure_fixture(&root);
+        validate_lxmf_durable_ingress_resolved_closure(
+            &baseline_metadata.to_string(),
+            &baseline_tree,
+            &root,
+        )
+        .unwrap();
+
+        for package in [
+            "reticulum-rns-inbox-store",
+            "reticulum-submission-runtime",
+            "reticulum-device-api",
+            "reticulum-tx-supervisor",
+        ] {
+            assert!(!cargo_tree_contains_package(&baseline_tree, package));
+        }
+
+        let mut metadata = baseline_metadata.clone();
+        let mut tree = baseline_tree.clone();
+        add_local_closure_fixture_package(
+            &mut metadata,
+            &mut tree,
+            &root,
+            "reticulum-rns-inbox-store",
+            "0.1.0",
+            "crates/rns-inbox-store/Cargo.toml",
+        );
+        let error =
+            validate_lxmf_durable_ingress_resolved_closure(&metadata.to_string(), &tree, &root)
+                .unwrap_err();
+        assert!(error.contains("raw inbox"), "{error}");
+
+        let feature_drift = baseline_tree.replace(
+            &format!(
+                "reticulum-lxmf-store v0.1.0 ({})\t\n",
+                root.join("crates/lxmf-store").display()
+            ),
+            &format!(
+                "reticulum-lxmf-store v0.1.0 ({})\tdefault\n",
+                root.join("crates/lxmf-store").display()
+            ),
+        );
+        assert!(
+            validate_lxmf_durable_ingress_resolved_closure(
+                &baseline_metadata.to_string(),
+                &feature_drift,
+                &root,
+            )
+            .is_err()
+        );
+
+        let missing = baseline_tree.replace("embedded-storage v0.3.1\t\n", "");
+        assert!(
+            validate_lxmf_durable_ingress_resolved_closure(
+                &baseline_metadata.to_string(),
+                &missing,
+                &root,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -13244,6 +14180,9 @@ fn sample(layout: Layout) {
                 radio_tx_dispatch_package_fixture(root),
                 lxmf_wire_package_fixture(root),
                 lxmf_ingress_package_fixture(root),
+                lxmf_durable_ingress_package_fixture(root),
+                lxmf_model_package_fixture(root),
+                lxmf_store_package_fixture(root),
                 radio_interface_package_fixture(root),
                 e290_board_facts_package_fixture(root),
                 lora_phy_radio_package_fixture(root),
@@ -13473,6 +14412,97 @@ fn sample(layout: Layout) {
         })
     }
 
+    fn lxmf_model_package_fixture(root: &Path) -> serde_json::Value {
+        serde_json::json!({
+            "name": "reticulum-lxmf-model",
+            "source": null,
+            "manifest_path": root.join("crates/lxmf-model/Cargo.toml"),
+            "features": {},
+            "dependencies": [],
+        })
+    }
+
+    fn lxmf_durable_ingress_package_fixture(root: &Path) -> serde_json::Value {
+        let mut hex = handoff_dependency_fixture("hex", "=0.4.3", Some("dev"));
+        hex["uses_default_features"] = serde_json::Value::Bool(true);
+        let mut serde = handoff_dependency_fixture("serde", "=1.0.228", Some("dev"));
+        serde["uses_default_features"] = serde_json::Value::Bool(true);
+        serde["features"] = serde_json::json!(["derive"]);
+        let mut serde_json = handoff_dependency_fixture("serde_json", "=1.0.149", Some("dev"));
+        serde_json["uses_default_features"] = serde_json::Value::Bool(true);
+        serde_json::json!({
+            "name": "reticulum-lxmf-durable-ingress",
+            "source": null,
+            "manifest_path": root.join("crates/lxmf-durable-ingress/Cargo.toml"),
+            "features": {},
+            "dependencies": [
+                handoff_path_dependency_fixture(
+                    "reticulum-lxmf-ingress",
+                    "*",
+                    &root.join("crates/lxmf-ingress"),
+                    None,
+                ),
+                handoff_path_dependency_fixture(
+                    "reticulum-lxmf-model",
+                    "*",
+                    &root.join("crates/lxmf-model"),
+                    None,
+                ),
+                handoff_path_dependency_fixture(
+                    "reticulum-lxmf-store",
+                    "*",
+                    &root.join("crates/lxmf-store"),
+                    None,
+                ),
+                handoff_path_dependency_fixture(
+                    "reticulum-node-core",
+                    "*",
+                    &root.join("crates/node-core"),
+                    None,
+                ),
+                handoff_dependency_fixture("embedded-storage", "=0.3.1", Some("dev")),
+                hex,
+                serde,
+                serde_json,
+            ],
+        })
+    }
+
+    fn lxmf_store_package_fixture(root: &Path) -> serde_json::Value {
+        let mut hex = handoff_dependency_fixture("hex", "=0.4.3", Some("dev"));
+        hex["uses_default_features"] = serde_json::Value::Bool(true);
+        let mut serde = handoff_dependency_fixture("serde", "=1.0.228", Some("dev"));
+        serde["uses_default_features"] = serde_json::Value::Bool(true);
+        serde["features"] = serde_json::json!(["derive"]);
+        let mut serde_json = handoff_dependency_fixture("serde_json", "=1.0.149", Some("dev"));
+        serde_json["uses_default_features"] = serde_json::Value::Bool(true);
+        serde_json::json!({
+            "name": "reticulum-lxmf-store",
+            "source": null,
+            "manifest_path": root.join("crates/lxmf-store/Cargo.toml"),
+            "features": { "default": [] },
+            "dependencies": [
+                handoff_dependency_fixture("embedded-storage", "=0.3.1", None),
+                handoff_path_dependency_fixture(
+                    "reticulum-lxmf-model",
+                    "*",
+                    &root.join("crates/lxmf-model"),
+                    None,
+                ),
+                handoff_dependency_fixture("sha2", "=0.10.9", None),
+                hex,
+                handoff_path_dependency_fixture(
+                    "reticulum-lxmf-wire",
+                    "*",
+                    &root.join("crates/lxmf-wire"),
+                    Some("dev"),
+                ),
+                serde,
+                serde_json,
+            ],
+        })
+    }
+
     fn radio_interface_package_fixture(root: &Path) -> serde_json::Value {
         let mut conformance = handoff_path_dependency_fixture(
             "reticulum-rns-conformance",
@@ -13624,6 +14654,20 @@ fn sample(layout: Layout) {
 
     fn lxmf_ingress_reviewed_closure_fixture(root: &Path) -> (serde_json::Value, String) {
         reviewed_closure_fixture(root, &LXMF_INGRESS_REVIEWED_CLOSURE)
+    }
+
+    fn lxmf_model_reviewed_closure_fixture(root: &Path) -> (serde_json::Value, String) {
+        reviewed_closure_fixture(root, &LXMF_MODEL_REVIEWED_CLOSURE)
+    }
+
+    fn lxmf_store_reviewed_closure_fixture(root: &Path) -> (serde_json::Value, String) {
+        reviewed_closure_fixture(root, &LXMF_STORE_REVIEWED_CLOSURE)
+    }
+
+    fn lxmf_durable_ingress_reviewed_closure_fixture(root: &Path) -> (serde_json::Value, String) {
+        let mut reviewed = LXMF_INGRESS_REVIEWED_CLOSURE.to_vec();
+        reviewed.extend(LXMF_DURABLE_INGRESS_ADDITIONAL_REVIEWED_CLOSURE);
+        reviewed_closure_fixture(root, &reviewed)
     }
 
     fn add_registry_closure_fixture_package(

@@ -1,0 +1,1244 @@
+//! Allocation-free durable vocabulary for inbound LXMF messages.
+//!
+//! This crate owns transport-neutral identifiers, immutable metadata, replay
+//! semantics and borrowed normalized-message candidates. It performs no I/O,
+//! hashing, parsing or allocation. In particular, a candidate represents exact
+//! wire bytes as one or two borrowed slices instead of embedding a board-sized
+//! payload buffer.
+
+#![no_std]
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
+use core::fmt;
+
+/// Length of an RNS destination hash used by LXMF.
+pub const DESTINATION_HASH_LENGTH: usize = 16;
+/// Length of a Python-compatible LXMF message ID.
+pub const MESSAGE_ID_LENGTH: usize = 32;
+/// Length of the domain-separated authenticated-material fingerprint.
+pub const AUTHENTICATED_MATERIAL_FINGERPRINT_LENGTH: usize = 32;
+/// Length of the SHA-256 digest covering exact normalized LXMF wire bytes.
+pub const EXACT_WIRE_DIGEST_LENGTH: usize = 32;
+
+/// Python-compatible LXMF authenticated-message identifier.
+///
+/// This is `SHA-256(destination || source || payload_without_stamp)`. It
+/// therefore identifies one authenticated logical message while deliberately
+/// excluding an optional ticket or proof-of-work stamp.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct MessageId([u8; MESSAGE_ID_LENGTH]);
+
+impl MessageId {
+    /// Construct an identifier from all digest bytes.
+    pub const fn new(bytes: [u8; MESSAGE_ID_LENGTH]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow all identifier bytes.
+    pub const fn as_bytes(&self) -> &[u8; MESSAGE_ID_LENGTH] {
+        &self.0
+    }
+}
+
+/// Domain-separated digest of authenticated LXMF material.
+///
+/// The wire/ingress authority calculates this over the complete authenticated
+/// material `destination || source || payload_without_stamp` under a
+/// project-owned domain separator. It is intentionally independent of the
+/// protocol [`MessageId`], allowing replay logic to fail closed if persisted
+/// or deliberately forced input presents one message ID for different signed
+/// material. An optional stamp is excluded from both values.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct AuthenticatedMaterialFingerprint([u8; AUTHENTICATED_MATERIAL_FINGERPRINT_LENGTH]);
+
+impl AuthenticatedMaterialFingerprint {
+    /// Construct a fingerprint from all domain-separated digest bytes.
+    pub const fn new(bytes: [u8; AUTHENTICATED_MATERIAL_FINGERPRINT_LENGTH]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow all fingerprint bytes.
+    pub const fn as_bytes(&self) -> &[u8; AUTHENTICATED_MATERIAL_FINGERPRINT_LENGTH] {
+        &self.0
+    }
+}
+
+/// Complete RNS destination hash receiving an LXMF message.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct DestinationHash([u8; DESTINATION_HASH_LENGTH]);
+
+impl DestinationHash {
+    /// Construct a destination hash from all bytes.
+    pub const fn new(bytes: [u8; DESTINATION_HASH_LENGTH]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow all destination-hash bytes.
+    pub const fn as_bytes(&self) -> &[u8; DESTINATION_HASH_LENGTH] {
+        &self.0
+    }
+}
+
+/// Authenticated source `lxmf.delivery` destination hash.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SourceHash([u8; DESTINATION_HASH_LENGTH]);
+
+impl SourceHash {
+    /// Construct a source hash from all bytes.
+    pub const fn new(bytes: [u8; DESTINATION_HASH_LENGTH]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow all source-hash bytes.
+    pub const fn as_bytes(&self) -> &[u8; DESTINATION_HASH_LENGTH] {
+        &self.0
+    }
+}
+
+/// SHA-256 of the exact normalized LXMF wire representation.
+///
+/// Unlike [`MessageId`], this digest covers the destination prefix, signature
+/// and optional stamp exactly as retained. Hash calculation belongs to the
+/// durable store so this semantic crate remains dependency-free.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ExactWireDigest([u8; EXACT_WIRE_DIGEST_LENGTH]);
+
+impl ExactWireDigest {
+    /// Construct a digest from all SHA-256 bytes.
+    pub const fn new(bytes: [u8; EXACT_WIRE_DIGEST_LENGTH]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow all digest bytes.
+    pub const fn as_bytes(&self) -> &[u8; EXACT_WIRE_DIGEST_LENGTH] {
+        &self.0
+    }
+}
+
+/// Stable logical identifier for one committed inbound message.
+///
+/// Handles are non-zero durable values allocated by the semantic owner. They
+/// are never flash offsets, partition addresses, RAM slot indices or pointers;
+/// compaction may therefore move a record without changing its handle.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct MessageHandle(u64);
+
+impl MessageHandle {
+    /// Construct a stable non-zero handle.
+    pub const fn new(value: u64) -> Result<Self, InvalidMessageHandle> {
+        if value == 0 {
+            Err(InvalidMessageHandle)
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    /// Complete persisted numeric representation.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Zero cannot identify a committed inbound message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidMessageHandle;
+
+impl fmt::Display for InvalidMessageHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an inbound message handle must be non-zero")
+    }
+}
+
+/// First carrier by which the retained message reached this node.
+///
+/// Carrier provenance is useful arrival evidence, but it is deliberately not
+/// part of authenticated logical-message identity. The same LXMF message can
+/// validly arrive through several Reticulum transports or carriers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CarrierProvenance {
+    /// Complete bytes parsed without more specific carrier evidence.
+    Complete,
+    /// Destination DATA omitted the local destination prefix.
+    Opportunistic,
+    /// Context-`NONE` Link DATA carried complete LXMF bytes.
+    LinkDataContextNone,
+    /// A completed RNS Resource carried complete LXMF bytes.
+    ResourceComplete,
+}
+
+impl CarrierProvenance {
+    /// Whether the retained carrier omitted the normalized destination prefix.
+    pub const fn omits_destination_prefix(self) -> bool {
+        matches!(self, Self::Opportunistic)
+    }
+}
+
+/// Receiver-required proof-of-work cost in Python LXMF's enabled range.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RequiredStampCost(u8);
+
+impl RequiredStampCost {
+    /// Construct a required cost in the inclusive range `1..=254`.
+    pub const fn new(value: u16) -> Result<Self, InvalidStampCost> {
+        if value == 0 || value >= 255 {
+            Err(InvalidStampCost { actual: value })
+        } else {
+            Ok(Self(value as u8))
+        }
+    }
+
+    /// Numeric target cost.
+    pub const fn get(self) -> u16 {
+        self.0 as u16
+    }
+}
+
+/// Value outside Python LXMF's enabled proof-of-work cost range.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidStampCost {
+    actual: u16,
+}
+
+impl InvalidStampCost {
+    /// Rejected numeric value.
+    pub const fn actual(self) -> u16 {
+        self.actual
+    }
+}
+
+impl fmt::Display for InvalidStampCost {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "LXMF stamp cost {} is outside 1..=254",
+            self.actual
+        )
+    }
+}
+
+/// Durable evidence for the receiver-owned stamp policy used at admission.
+///
+/// This is audit provenance rather than logical-message identity. In
+/// particular, two valid stamps for the same [`MessageId`] remain replays of
+/// one authenticated message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StampAdmissionProvenance {
+    /// Receiver policy explicitly did not require stamp validation.
+    NotRequired {
+        /// Whether a well-formed stamp was present but not consulted.
+        stamp_present: bool,
+    },
+    /// A 16-byte stamp matched a receiver-owned prior ticket.
+    TrustedPriorTicket,
+    /// A proof-of-work stamp met the inclusive receiver-owned target.
+    ProofOfWork {
+        /// Required cost at the time of admission.
+        target_cost: RequiredStampCost,
+        /// Observed Python-compatible leading-zero value.
+        observed_value: u16,
+    },
+}
+
+/// One persisted length field in inbound-message metadata.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MessageLengthKind {
+    /// Complete normalized LXMF bytes.
+    NormalizedWire,
+    /// Bytes physically supplied by the arrival carrier.
+    CarrierPayload,
+    /// Decoded title bytes.
+    Title,
+    /// Decoded content bytes.
+    Content,
+    /// Exact encoded MessagePack fields map.
+    FieldsEncoded,
+}
+
+/// A host-size length cannot be represented by the portable durable model.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MessageLengthOverflow {
+    kind: MessageLengthKind,
+    actual: usize,
+}
+
+impl MessageLengthOverflow {
+    /// Field which overflowed.
+    pub const fn kind(self) -> MessageLengthKind {
+        self.kind
+    }
+
+    /// Rejected host-size value.
+    pub const fn actual(self) -> usize {
+        self.actual
+    }
+}
+
+impl fmt::Display for MessageLengthOverflow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{:?} length {} exceeds the portable u32 representation",
+            self.kind, self.actual
+        )
+    }
+}
+
+/// Exact wire and decoded-component lengths retained for one message.
+///
+/// These values are descriptive evidence, not board ceilings. Admission and
+/// storage capacities remain explicit caller-owned profile policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InboundMessageLengths {
+    normalized_wire: u32,
+    carrier_payload: u32,
+    title: u32,
+    content: u32,
+    fields_encoded: u32,
+}
+
+impl InboundMessageLengths {
+    /// Convert exact host-size lengths into a portable durable representation.
+    pub fn new(
+        normalized_wire: usize,
+        carrier_payload: usize,
+        title: usize,
+        content: usize,
+        fields_encoded: usize,
+    ) -> Result<Self, MessageLengthOverflow> {
+        Ok(Self {
+            normalized_wire: portable_length(MessageLengthKind::NormalizedWire, normalized_wire)?,
+            carrier_payload: portable_length(MessageLengthKind::CarrierPayload, carrier_payload)?,
+            title: portable_length(MessageLengthKind::Title, title)?,
+            content: portable_length(MessageLengthKind::Content, content)?,
+            fields_encoded: portable_length(MessageLengthKind::FieldsEncoded, fields_encoded)?,
+        })
+    }
+
+    /// Complete normalized LXMF wire length.
+    pub const fn normalized_wire(self) -> u32 {
+        self.normalized_wire
+    }
+
+    /// Exact bytes physically supplied by the arrival carrier.
+    pub const fn carrier_payload(self) -> u32 {
+        self.carrier_payload
+    }
+
+    /// Decoded binary title length.
+    pub const fn title(self) -> u32 {
+        self.title
+    }
+
+    /// Decoded binary content length.
+    pub const fn content(self) -> u32 {
+        self.content
+    }
+
+    /// Exact encoded MessagePack fields-map length.
+    pub const fn fields_encoded(self) -> u32 {
+        self.fields_encoded
+    }
+}
+
+fn portable_length(kind: MessageLengthKind, actual: usize) -> Result<u32, MessageLengthOverflow> {
+    u32::try_from(actual).map_err(|_| MessageLengthOverflow { kind, actual })
+}
+
+/// Inconsistent normalized and carrier byte counts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CarrierLengthMismatch {
+    carrier: CarrierProvenance,
+    normalized_wire: u32,
+    carrier_payload: u32,
+}
+
+impl CarrierLengthMismatch {
+    /// Carrier whose normalization relationship was violated.
+    pub const fn carrier(self) -> CarrierProvenance {
+        self.carrier
+    }
+
+    /// Reported normalized wire length.
+    pub const fn normalized_wire(self) -> u32 {
+        self.normalized_wire
+    }
+
+    /// Reported physical carrier payload length.
+    pub const fn carrier_payload(self) -> u32 {
+        self.carrier_payload
+    }
+}
+
+impl fmt::Display for CarrierLengthMismatch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{:?} carrier length {} cannot normalize to {} bytes",
+            self.carrier, self.carrier_payload, self.normalized_wire
+        )
+    }
+}
+
+/// Immutable semantic and first-arrival metadata for one admitted message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InboundMessageMetadata {
+    message_id: MessageId,
+    authenticated_material: AuthenticatedMaterialFingerprint,
+    destination: DestinationHash,
+    source: SourceHash,
+    timestamp_bits: u64,
+    carrier: CarrierProvenance,
+    stamp_admission: StampAdmissionProvenance,
+    lengths: InboundMessageLengths,
+}
+
+impl InboundMessageMetadata {
+    /// Construct metadata after validating the carrier normalization lengths.
+    ///
+    /// The explicit arguments prevent a partially populated or defaulted
+    /// durable record at this trust boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        message_id: MessageId,
+        authenticated_material: AuthenticatedMaterialFingerprint,
+        destination: DestinationHash,
+        source: SourceHash,
+        timestamp_bits: u64,
+        carrier: CarrierProvenance,
+        stamp_admission: StampAdmissionProvenance,
+        lengths: InboundMessageLengths,
+    ) -> Result<Self, CarrierLengthMismatch> {
+        let expected = if carrier.omits_destination_prefix() {
+            lengths
+                .carrier_payload
+                .checked_add(DESTINATION_HASH_LENGTH as u32)
+        } else {
+            Some(lengths.carrier_payload)
+        };
+        if expected != Some(lengths.normalized_wire) {
+            return Err(CarrierLengthMismatch {
+                carrier,
+                normalized_wire: lengths.normalized_wire,
+                carrier_payload: lengths.carrier_payload,
+            });
+        }
+        Ok(Self {
+            message_id,
+            authenticated_material,
+            destination,
+            source,
+            timestamp_bits,
+            carrier,
+            stamp_admission,
+            lengths,
+        })
+    }
+
+    /// Python-compatible logical message ID.
+    pub const fn message_id(self) -> MessageId {
+        self.message_id
+    }
+
+    /// Independent digest of the complete authenticated LXMF material.
+    pub const fn authenticated_material(self) -> AuthenticatedMaterialFingerprint {
+        self.authenticated_material
+    }
+
+    /// Authenticated local delivery destination.
+    pub const fn destination(self) -> DestinationHash {
+        self.destination
+    }
+
+    /// Authenticated source delivery destination.
+    pub const fn source(self) -> SourceHash {
+        self.source
+    }
+
+    /// Exact IEEE-754 timestamp bits retained from MessagePack.
+    pub const fn timestamp_bits(self) -> u64 {
+        self.timestamp_bits
+    }
+
+    /// First carrier observed by this node.
+    pub const fn carrier(self) -> CarrierProvenance {
+        self.carrier
+    }
+
+    /// Receiver-owned stamp admission evidence.
+    pub const fn stamp_admission(self) -> StampAdmissionProvenance {
+        self.stamp_admission
+    }
+
+    /// Exact normalized, carrier and decoded-component lengths.
+    pub const fn lengths(self) -> InboundMessageLengths {
+        self.lengths
+    }
+
+    /// Authenticated logical-message fingerprint used for replay decisions.
+    pub const fn authenticated_fingerprint(self) -> AuthenticatedMessageFingerprint {
+        AuthenticatedMessageFingerprint {
+            message_id: self.message_id,
+            authenticated_material: self.authenticated_material,
+            destination: self.destination,
+            source: self.source,
+            timestamp_bits: self.timestamp_bits,
+            title_len: self.lengths.title,
+            content_len: self.lengths.content,
+            fields_encoded_len: self.lengths.fields_encoded,
+        }
+    }
+}
+
+/// Borrowed exact normalized LXMF bytes.
+///
+/// Opportunistic RNS DATA physically omits the destination hash. Its normalized
+/// representation is therefore the logical concatenation of the borrowed
+/// destination prefix and borrowed carrier payload. Complete carriers use one
+/// contiguous slice.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum NormalizedWire<'a> {
+    /// Carrier already contains complete normalized LXMF bytes.
+    Contiguous(&'a [u8]),
+    /// Opportunistic carrier requiring an implied destination prefix.
+    Opportunistic {
+        /// Destination authenticated by the Reticulum carrier.
+        implied_destination: &'a [u8; DESTINATION_HASH_LENGTH],
+        /// Exact physical DATA payload beginning with the LXMF source hash.
+        carrier_payload: &'a [u8],
+    },
+}
+
+impl<'a> NormalizedWire<'a> {
+    /// Exact normalized bytes as one or two ordered borrowed segments.
+    pub const fn segments(self) -> NormalizedWireSegments<'a> {
+        match self {
+            Self::Contiguous(bytes) => NormalizedWireSegments {
+                first: bytes,
+                second: &[],
+            },
+            Self::Opportunistic {
+                implied_destination,
+                carrier_payload,
+            } => NormalizedWireSegments {
+                first: implied_destination,
+                second: carrier_payload,
+            },
+        }
+    }
+
+    /// Exact physical carrier payload.
+    pub const fn carrier_payload(self) -> &'a [u8] {
+        match self {
+            Self::Contiguous(bytes) => bytes,
+            Self::Opportunistic {
+                carrier_payload, ..
+            } => carrier_payload,
+        }
+    }
+
+    /// Whether normalization supplies a separate destination prefix.
+    pub const fn is_opportunistic(self) -> bool {
+        matches!(self, Self::Opportunistic { .. })
+    }
+}
+
+impl fmt::Debug for NormalizedWire<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NormalizedWire")
+            .field("opportunistic", &self.is_opportunistic())
+            .field("segments", &self.segments().segment_count())
+            .field("normalized_len", &self.segments().total_len())
+            .field("bytes", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Ordered borrowed segments forming one complete normalized LXMF message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NormalizedWireSegments<'a> {
+    first: &'a [u8],
+    second: &'a [u8],
+}
+
+impl<'a> NormalizedWireSegments<'a> {
+    /// First segment, containing either the complete wire or destination prefix.
+    pub const fn first(self) -> &'a [u8] {
+        self.first
+    }
+
+    /// Optional second segment, containing opportunistic carrier bytes.
+    pub const fn second(self) -> &'a [u8] {
+        self.second
+    }
+
+    /// Number of segments selected by the representation.
+    ///
+    /// A contiguous representation reports one even when its borrowed slice
+    /// is empty. Candidate construction separately rejects an empty wire.
+    pub const fn segment_count(self) -> usize {
+        if self.second.is_empty() { 1 } else { 2 }
+    }
+
+    /// Checked complete normalized length of both segments.
+    pub const fn checked_total_len(self) -> Option<usize> {
+        self.first.len().checked_add(self.second.len())
+    }
+
+    /// Complete normalized length, saturating only for an impossible address-
+    /// space-wide borrowed input.
+    pub const fn total_len(self) -> usize {
+        self.first.len().saturating_add(self.second.len())
+    }
+}
+
+/// Inconsistency between validated metadata and its borrowed exact bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CandidateError {
+    /// The borrowed carrier shape disagrees with durable carrier provenance.
+    CarrierShapeMismatch {
+        /// Carrier retained by metadata.
+        carrier: CarrierProvenance,
+        /// Whether the borrowed bytes use opportunistic segmentation.
+        wire_is_opportunistic: bool,
+    },
+    /// Ordered segment lengths overflowed the target address space.
+    NormalizedLengthOverflow,
+    /// Borrowed normalized bytes disagree with metadata.
+    NormalizedLengthMismatch {
+        /// Metadata length.
+        expected: u32,
+        /// Borrowed length when representable portably.
+        actual: usize,
+    },
+    /// Complete contiguous wire is shorter than its destination prefix.
+    MissingDestinationPrefix {
+        /// Borrowed normalized length.
+        actual: usize,
+    },
+    /// Borrowed or implied destination disagrees with authenticated metadata.
+    DestinationMismatch,
+}
+
+impl fmt::Display for CandidateError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CarrierShapeMismatch {
+                carrier,
+                wire_is_opportunistic,
+            } => write!(
+                formatter,
+                "{:?} metadata disagrees with opportunistic wire shape {}",
+                carrier, wire_is_opportunistic
+            ),
+            Self::NormalizedLengthOverflow => {
+                formatter.write_str("normalized borrowed LXMF length overflowed usize")
+            }
+            Self::NormalizedLengthMismatch { expected, actual } => write!(
+                formatter,
+                "normalized LXMF length {actual} disagrees with metadata {expected}"
+            ),
+            Self::MissingDestinationPrefix { actual } => write!(
+                formatter,
+                "complete LXMF wire has {actual} bytes and no destination prefix"
+            ),
+            Self::DestinationMismatch => {
+                formatter.write_str("borrowed LXMF destination disagrees with metadata")
+            }
+        }
+    }
+}
+
+/// Fully admitted immutable metadata paired with borrowed exact normalized bytes.
+///
+/// Construction checks only cross-boundary consistency; cryptographic and
+/// MessagePack validation must already have completed in the wire/ingress
+/// layer. The value contains no owned message-sized buffer.
+#[must_use = "the candidate remains borrowed until a durable store commits it"]
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct InboundMessageCandidate<'a> {
+    metadata: InboundMessageMetadata,
+    wire: NormalizedWire<'a>,
+}
+
+impl<'a> InboundMessageCandidate<'a> {
+    /// Pair admitted metadata with its exact borrowed normalized bytes.
+    pub fn new(
+        metadata: InboundMessageMetadata,
+        wire: NormalizedWire<'a>,
+    ) -> Result<Self, CandidateError> {
+        if metadata.carrier().omits_destination_prefix() != wire.is_opportunistic() {
+            return Err(CandidateError::CarrierShapeMismatch {
+                carrier: metadata.carrier(),
+                wire_is_opportunistic: wire.is_opportunistic(),
+            });
+        }
+
+        let segments = wire.segments();
+        let normalized_len = segments
+            .checked_total_len()
+            .ok_or(CandidateError::NormalizedLengthOverflow)?;
+        if normalized_len != metadata.lengths().normalized_wire() as usize {
+            return Err(CandidateError::NormalizedLengthMismatch {
+                expected: metadata.lengths().normalized_wire(),
+                actual: normalized_len,
+            });
+        }
+        let destination = match wire {
+            NormalizedWire::Contiguous(bytes) => {
+                if bytes.len() < DESTINATION_HASH_LENGTH {
+                    return Err(CandidateError::MissingDestinationPrefix {
+                        actual: bytes.len(),
+                    });
+                }
+                &bytes[..DESTINATION_HASH_LENGTH]
+            }
+            NormalizedWire::Opportunistic {
+                implied_destination,
+                ..
+            } => implied_destination,
+        };
+        if destination != metadata.destination().as_bytes() {
+            return Err(CandidateError::DestinationMismatch);
+        }
+
+        Ok(Self { metadata, wire })
+    }
+
+    /// Immutable admitted metadata.
+    pub const fn metadata(self) -> InboundMessageMetadata {
+        self.metadata
+    }
+
+    /// Exact borrowed normalized wire representation.
+    pub const fn wire(self) -> NormalizedWire<'a> {
+        self.wire
+    }
+
+    /// Ordered borrowed segments for hashing or durable streaming writes.
+    pub const fn segments(self) -> NormalizedWireSegments<'a> {
+        self.wire.segments()
+    }
+}
+
+impl fmt::Debug for InboundMessageCandidate<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InboundMessageCandidate")
+            .field("metadata", &self.metadata)
+            .field("wire", &self.wire)
+            .finish()
+    }
+}
+
+/// Scalar evidence expected to agree for one authenticated [`MessageId`].
+///
+/// This deliberately excludes exact wire length, carrier and stamp admission:
+/// valid alternate stamps and transports are equivalent replays. The redundant
+/// authenticated scalars make persisted metadata corruption or a cryptographic
+/// ID collision fail closed instead of being silently accepted as a replay.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthenticatedMessageFingerprint {
+    message_id: MessageId,
+    authenticated_material: AuthenticatedMaterialFingerprint,
+    destination: DestinationHash,
+    source: SourceHash,
+    timestamp_bits: u64,
+    title_len: u32,
+    content_len: u32,
+    fields_encoded_len: u32,
+}
+
+impl AuthenticatedMessageFingerprint {
+    /// Python-compatible logical message ID.
+    pub const fn message_id(self) -> MessageId {
+        self.message_id
+    }
+
+    /// Independent digest of the complete authenticated LXMF material.
+    pub const fn authenticated_material(self) -> AuthenticatedMaterialFingerprint {
+        self.authenticated_material
+    }
+
+    /// Authenticated receiving destination.
+    pub const fn destination(self) -> DestinationHash {
+        self.destination
+    }
+
+    /// Authenticated source destination.
+    pub const fn source(self) -> SourceHash {
+        self.source
+    }
+
+    /// Exact IEEE-754 timestamp bits.
+    pub const fn timestamp_bits(self) -> u64 {
+        self.timestamp_bits
+    }
+
+    /// Decoded title length.
+    pub const fn title_len(self) -> u32 {
+        self.title_len
+    }
+
+    /// Decoded content length.
+    pub const fn content_len(self) -> u32 {
+        self.content_len
+    }
+
+    /// Exact encoded fields-map length.
+    pub const fn fields_encoded_len(self) -> u32 {
+        self.fields_encoded_len
+    }
+}
+
+/// Logical authenticated evidence plus a digest of exact retained bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReplayFingerprint {
+    authenticated: AuthenticatedMessageFingerprint,
+    exact_wire_digest: ExactWireDigest,
+}
+
+impl ReplayFingerprint {
+    /// Construct a replay fingerprint after hashing exact normalized wire bytes.
+    pub const fn new(
+        authenticated: AuthenticatedMessageFingerprint,
+        exact_wire_digest: ExactWireDigest,
+    ) -> Self {
+        Self {
+            authenticated,
+            exact_wire_digest,
+        }
+    }
+
+    /// Authenticated logical-message evidence.
+    pub const fn authenticated(self) -> AuthenticatedMessageFingerprint {
+        self.authenticated
+    }
+
+    /// SHA-256 of exact normalized bytes retained for this arrival.
+    pub const fn exact_wire_digest(self) -> ExactWireDigest {
+        self.exact_wire_digest
+    }
+
+    /// Compare a candidate fingerprint with an already committed fingerprint.
+    pub fn classify_against(self, committed: Self) -> ReplayRelation {
+        if self.authenticated.message_id != committed.authenticated.message_id {
+            ReplayRelation::DistinctMessage
+        } else if self.authenticated != committed.authenticated {
+            ReplayRelation::AuthenticatedMetadataConflict
+        } else if self.exact_wire_digest == committed.exact_wire_digest {
+            ReplayRelation::ExactReplay
+        } else {
+            ReplayRelation::EquivalentReplay
+        }
+    }
+}
+
+/// Relationship between a candidate and one committed message fingerprint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReplayRelation {
+    /// Different authenticated message IDs; normal admission may continue.
+    DistinctMessage,
+    /// Same authenticated evidence and byte-for-byte normalized digest.
+    ExactReplay,
+    /// Same authenticated message with alternate exact bytes, such as a valid
+    /// alternate stamp. Carrier and stamp provenance do not create a new message.
+    EquivalentReplay,
+    /// Same message ID but contradictory authenticated scalar evidence.
+    AuthenticatedMetadataConflict,
+}
+
+/// Stable acknowledgement evidence issued by a trusted durable store.
+///
+/// A receipt contains no physical address and remains valid across compaction.
+/// The public constructor supports storage implementations outside this crate;
+/// the type itself cannot prove that its caller completed a commit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DurableMessageReceipt {
+    handle: MessageHandle,
+    fingerprint: ReplayFingerprint,
+}
+
+impl DurableMessageReceipt {
+    /// Construct receipt evidence after a storage implementation completes or
+    /// recovers one durable commit.
+    pub const fn new(handle: MessageHandle, fingerprint: ReplayFingerprint) -> Self {
+        Self {
+            handle,
+            fingerprint,
+        }
+    }
+
+    /// Stable logical message handle.
+    pub const fn handle(self) -> MessageHandle {
+        self.handle
+    }
+
+    /// Logical and exact-byte replay evidence committed under the handle.
+    pub const fn fingerprint(self) -> ReplayFingerprint {
+        self.fingerprint
+    }
+
+    /// Python-compatible logical message ID.
+    pub const fn message_id(self) -> MessageId {
+        self.fingerprint.authenticated.message_id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lengths(
+        normalized: usize,
+        carrier: usize,
+        title: usize,
+        content: usize,
+        fields: usize,
+    ) -> InboundMessageLengths {
+        InboundMessageLengths::new(normalized, carrier, title, content, fields).unwrap()
+    }
+
+    fn metadata(
+        id: u8,
+        destination: u8,
+        source: u8,
+        timestamp_bits: u64,
+        carrier: CarrierProvenance,
+        lengths: InboundMessageLengths,
+        stamp_admission: StampAdmissionProvenance,
+    ) -> InboundMessageMetadata {
+        InboundMessageMetadata::new(
+            MessageId::new([id; MESSAGE_ID_LENGTH]),
+            AuthenticatedMaterialFingerprint::new([id; AUTHENTICATED_MATERIAL_FINGERPRINT_LENGTH]),
+            DestinationHash::new([destination; DESTINATION_HASH_LENGTH]),
+            SourceHash::new([source; DESTINATION_HASH_LENGTH]),
+            timestamp_bits,
+            carrier,
+            stamp_admission,
+            lengths,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn identifiers_retain_all_bytes_and_handle_zero_is_reserved() {
+        assert_eq!(MessageId::new([1; 32]).as_bytes(), &[1; 32]);
+        assert_eq!(
+            AuthenticatedMaterialFingerprint::new([5; 32]).as_bytes(),
+            &[5; 32]
+        );
+        assert_eq!(DestinationHash::new([2; 16]).as_bytes(), &[2; 16]);
+        assert_eq!(SourceHash::new([3; 16]).as_bytes(), &[3; 16]);
+        assert_eq!(ExactWireDigest::new([4; 32]).as_bytes(), &[4; 32]);
+        assert_eq!(MessageHandle::new(0), Err(InvalidMessageHandle));
+        assert_eq!(MessageHandle::new(9).unwrap().get(), 9);
+    }
+
+    #[test]
+    fn required_stamp_cost_matches_protocol_range() {
+        assert_eq!(RequiredStampCost::new(0).unwrap_err().actual(), 0);
+        assert_eq!(RequiredStampCost::new(1).unwrap().get(), 1);
+        assert_eq!(RequiredStampCost::new(254).unwrap().get(), 254);
+        assert_eq!(RequiredStampCost::new(255).unwrap_err().actual(), 255);
+        assert_eq!(
+            RequiredStampCost::new(u16::MAX).unwrap_err().actual(),
+            u16::MAX
+        );
+    }
+
+    #[test]
+    fn metadata_enforces_carrier_normalization_without_setting_a_product_ceiling() {
+        let opportunistic = lengths(407, 391, 4, 270, 1);
+        let admitted = metadata(
+            1,
+            2,
+            3,
+            4,
+            CarrierProvenance::Opportunistic,
+            opportunistic,
+            StampAdmissionProvenance::NotRequired {
+                stamp_present: false,
+            },
+        );
+        assert_eq!(admitted.lengths().normalized_wire(), 407);
+        assert_eq!(admitted.lengths().carrier_payload(), 391);
+        assert_eq!(admitted.lengths().title(), 4);
+        assert_eq!(admitted.lengths().content(), 270);
+        assert_eq!(admitted.lengths().fields_encoded(), 1);
+
+        let mismatch = InboundMessageMetadata::new(
+            admitted.message_id(),
+            admitted.authenticated_material(),
+            admitted.destination(),
+            admitted.source(),
+            admitted.timestamp_bits(),
+            CarrierProvenance::Opportunistic,
+            admitted.stamp_admission(),
+            lengths(406, 391, 4, 270, 1),
+        )
+        .unwrap_err();
+        assert_eq!(mismatch.carrier(), CarrierProvenance::Opportunistic);
+
+        assert!(
+            InboundMessageMetadata::new(
+                admitted.message_id(),
+                admitted.authenticated_material(),
+                admitted.destination(),
+                admitted.source(),
+                admitted.timestamp_bits(),
+                CarrierProvenance::LinkDataContextNone,
+                admitted.stamp_admission(),
+                lengths(431, 431, 4, 294, 1),
+            )
+            .is_ok()
+        );
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn portable_lengths_reject_values_larger_than_u32() {
+        let actual = u32::MAX as usize + 1;
+        let error = InboundMessageLengths::new(actual, 0, 0, 0, 0).unwrap_err();
+        assert_eq!(error.kind(), MessageLengthKind::NormalizedWire);
+        assert_eq!(error.actual(), actual);
+    }
+
+    #[test]
+    fn opportunistic_candidate_borrows_two_exact_segments_without_copying() {
+        let destination = [0x11; 16];
+        let carrier_payload = [0x22; 391];
+        let metadata = metadata(
+            1,
+            0x11,
+            3,
+            4,
+            CarrierProvenance::Opportunistic,
+            lengths(407, 391, 2, 270, 1),
+            StampAdmissionProvenance::TrustedPriorTicket,
+        );
+        let candidate = InboundMessageCandidate::new(
+            metadata,
+            NormalizedWire::Opportunistic {
+                implied_destination: &destination,
+                carrier_payload: &carrier_payload,
+            },
+        )
+        .unwrap();
+        let segments = candidate.segments();
+        assert_eq!(segments.segment_count(), 2);
+        assert_eq!(segments.total_len(), 407);
+        assert_eq!(segments.first().as_ptr(), destination.as_ptr());
+        assert_eq!(segments.second().as_ptr(), carrier_payload.as_ptr());
+        assert_eq!(candidate.wire().carrier_payload(), &carrier_payload);
+    }
+
+    #[test]
+    fn complete_candidate_borrows_one_segment_and_checks_destination() {
+        let mut complete = [0x44; 431];
+        complete[..16].fill(0x22);
+        let metadata = metadata(
+            1,
+            0x22,
+            3,
+            4,
+            CarrierProvenance::ResourceComplete,
+            lengths(431, 431, 2, 294, 1),
+            StampAdmissionProvenance::ProofOfWork {
+                target_cost: RequiredStampCost::new(8).unwrap(),
+                observed_value: 12,
+            },
+        );
+        let candidate =
+            InboundMessageCandidate::new(metadata, NormalizedWire::Contiguous(&complete)).unwrap();
+        assert_eq!(candidate.segments().segment_count(), 1);
+        assert_eq!(candidate.segments().first().as_ptr(), complete.as_ptr());
+        assert!(candidate.segments().second().is_empty());
+
+        complete[0] ^= 1;
+        assert_eq!(
+            InboundMessageCandidate::new(metadata, NormalizedWire::Contiguous(&complete)),
+            Err(CandidateError::DestinationMismatch)
+        );
+    }
+
+    #[test]
+    fn candidate_rejects_shape_and_normalized_length_mismatches() {
+        let destination = [2; 16];
+        let payload = [7; 391];
+        let opportunistic = metadata(
+            1,
+            2,
+            3,
+            4,
+            CarrierProvenance::Opportunistic,
+            lengths(407, 391, 0, 0, 1),
+            StampAdmissionProvenance::NotRequired {
+                stamp_present: false,
+            },
+        );
+        assert!(matches!(
+            InboundMessageCandidate::new(opportunistic, NormalizedWire::Contiguous(&payload)),
+            Err(CandidateError::CarrierShapeMismatch { .. })
+        ));
+
+        let short = &payload[..390];
+        assert_eq!(
+            InboundMessageCandidate::new(
+                opportunistic,
+                NormalizedWire::Opportunistic {
+                    implied_destination: &destination,
+                    carrier_payload: short,
+                },
+            ),
+            Err(CandidateError::NormalizedLengthMismatch {
+                expected: 407,
+                actual: 406,
+            })
+        );
+
+        let complete_metadata = metadata(
+            1,
+            2,
+            3,
+            4,
+            CarrierProvenance::Complete,
+            lengths(407, 407, 0, 0, 1),
+            StampAdmissionProvenance::NotRequired {
+                stamp_present: false,
+            },
+        );
+        let mut complete = [8; 407];
+        complete[..16].fill(2);
+        assert!(
+            InboundMessageCandidate::new(complete_metadata, NormalizedWire::Contiguous(&complete))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn replay_identity_ignores_carrier_stamp_and_exact_wire_variation() {
+        let opportunistic = metadata(
+            1,
+            2,
+            3,
+            0x4009_21fb_5444_2d18,
+            CarrierProvenance::Opportunistic,
+            lengths(407, 391, 4, 270, 1),
+            StampAdmissionProvenance::TrustedPriorTicket,
+        );
+        let resource = metadata(
+            1,
+            2,
+            3,
+            0x4009_21fb_5444_2d18,
+            CarrierProvenance::ResourceComplete,
+            lengths(431, 431, 4, 270, 1),
+            StampAdmissionProvenance::ProofOfWork {
+                target_cost: RequiredStampCost::new(8).unwrap(),
+                observed_value: 9,
+            },
+        );
+        assert_eq!(
+            opportunistic.authenticated_fingerprint(),
+            resource.authenticated_fingerprint()
+        );
+
+        let first = ReplayFingerprint::new(
+            opportunistic.authenticated_fingerprint(),
+            ExactWireDigest::new([1; 32]),
+        );
+        let exact = ReplayFingerprint::new(
+            resource.authenticated_fingerprint(),
+            ExactWireDigest::new([1; 32]),
+        );
+        let alternate = ReplayFingerprint::new(
+            resource.authenticated_fingerprint(),
+            ExactWireDigest::new([2; 32]),
+        );
+        assert_eq!(exact.classify_against(first), ReplayRelation::ExactReplay);
+        assert_eq!(
+            alternate.classify_against(first),
+            ReplayRelation::EquivalentReplay
+        );
+    }
+
+    #[test]
+    fn replay_comparison_distinguishes_new_ids_from_forced_same_id_collisions() {
+        let base = metadata(
+            1,
+            2,
+            3,
+            4,
+            CarrierProvenance::Complete,
+            lengths(431, 431, 4, 294, 1),
+            StampAdmissionProvenance::NotRequired {
+                stamp_present: false,
+            },
+        );
+        let different_id = metadata(
+            9,
+            2,
+            3,
+            4,
+            CarrierProvenance::Complete,
+            lengths(431, 431, 4, 294, 1),
+            base.stamp_admission(),
+        );
+        let conflicting_material = InboundMessageMetadata::new(
+            base.message_id(),
+            AuthenticatedMaterialFingerprint::new([0xee; 32]),
+            base.destination(),
+            base.source(),
+            base.timestamp_bits(),
+            base.carrier(),
+            base.stamp_admission(),
+            base.lengths(),
+        )
+        .unwrap();
+        let committed = ReplayFingerprint::new(
+            base.authenticated_fingerprint(),
+            ExactWireDigest::new([1; 32]),
+        );
+        assert_eq!(
+            ReplayFingerprint::new(
+                different_id.authenticated_fingerprint(),
+                ExactWireDigest::new([2; 32]),
+            )
+            .classify_against(committed),
+            ReplayRelation::DistinctMessage
+        );
+        assert_eq!(
+            ReplayFingerprint::new(
+                conflicting_material.authenticated_fingerprint(),
+                ExactWireDigest::new([2; 32]),
+            )
+            .classify_against(committed),
+            ReplayRelation::AuthenticatedMetadataConflict
+        );
+    }
+
+    #[test]
+    fn durable_receipt_exposes_only_stable_logical_evidence() {
+        let metadata = metadata(
+            1,
+            2,
+            3,
+            4,
+            CarrierProvenance::Complete,
+            lengths(431, 431, 4, 294, 1),
+            StampAdmissionProvenance::NotRequired {
+                stamp_present: false,
+            },
+        );
+        let fingerprint = ReplayFingerprint::new(
+            metadata.authenticated_fingerprint(),
+            ExactWireDigest::new([9; 32]),
+        );
+        let receipt = DurableMessageReceipt::new(MessageHandle::new(17).unwrap(), fingerprint);
+        assert_eq!(receipt.handle().get(), 17);
+        assert_eq!(receipt.message_id(), metadata.message_id());
+        assert_eq!(receipt.fingerprint(), fingerprint);
+    }
+}

@@ -12,8 +12,11 @@
 use core::fmt;
 
 use reticulum_lxmf_wire::{
-    CarrierIngress, CarrierKind, IDENTITY_PUBLIC_KEY_LENGTH, MESSAGE_ID_LENGTH, SignatureError,
-    StampAdmission, StampError, StampPolicy, StampPolicyError, WireError, WireLimits,
+    AUTHENTICATED_MATERIAL_FINGERPRINT_LENGTH, CarrierIngress, IDENTITY_PUBLIC_KEY_LENGTH,
+    MESSAGE_ID_LENGTH, SignatureError, StampError, StampPolicyError, WireError,
+};
+pub use reticulum_lxmf_wire::{
+    CarrierKind, RequiredStampCost, StampAdmission, StampPolicy, WireLimits,
 };
 use reticulum_node_core::{APPLICATION_LINK_CONTEXT_NONE, ApplicationEvent, ApplicationEventKind};
 
@@ -149,6 +152,7 @@ pub enum RejectedIngress {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ValidatedIngressEvidence {
     message_id: [u8; MESSAGE_ID_LENGTH],
+    authenticated_material_fingerprint: [u8; AUTHENTICATED_MATERIAL_FINGERPRINT_LENGTH],
     destination: [u8; 16],
     source: [u8; 16],
     timestamp_bits: u64,
@@ -165,6 +169,19 @@ impl ValidatedIngressEvidence {
     /// Python-compatible LXMF message ID.
     pub const fn message_id(&self) -> &[u8; MESSAGE_ID_LENGTH] {
         &self.message_id
+    }
+
+    /// Domain-separated digest of the exact destination, source, and
+    /// Python-compatible payload-without-stamp bytes authenticated by the
+    /// message signature.
+    ///
+    /// Durable stores use this independently of the protocol message ID when
+    /// distinguishing a replay (including a different valid stamp) from a
+    /// theoretical same-ID/different-preimage collision.
+    pub const fn authenticated_material_fingerprint(
+        &self,
+    ) -> &[u8; AUTHENTICATED_MATERIAL_FINGERPRINT_LENGTH] {
+        &self.authenticated_material_fingerprint
     }
 
     /// Local LXMF destination hash authenticated by the carrier and signature.
@@ -383,6 +400,7 @@ where
     let payload_view = view.payload();
     let evidence = ValidatedIngressEvidence {
         message_id: view.message_id(),
+        authenticated_material_fingerprint: view.authenticated_material_fingerprint(),
         destination: *view.destination_hash(),
         source: *view.source_hash(),
         timestamp_bits: payload_view.timestamp_bits(),

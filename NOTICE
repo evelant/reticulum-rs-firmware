@@ -21,11 +21,5 @@ peers; they are not linked into the firmware. Project-owned
 `reticulum-lxmf-wire` source is independently implemented from the documented
 wire behavior and remains under the project's MIT OR Apache-2.0 terms.
 
-Two Ed25519 mixed-order regression encodings are retained from C2SP/CCTV
-revision 5ea85644bd035c555900a2f707f7e4c31ea65ced: vector 50's public-key
-encoding and vector 7's signature-R encoding. That test data is BSD-3-Clause;
-its exact copyright notice, conditions, and disclaimer are retained in
-LICENSE-CCTV. It is test-only data and is not linked into firmware binaries.
-
 The separate Leviculum comparison package is AGPL-3.0-or-later. See
 docs/provenance.md and Cargo.lock for the exact source and dependency graph.

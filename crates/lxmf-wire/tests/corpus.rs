@@ -629,6 +629,13 @@ fn exact_four_raw_and_stamped_canonicalization_rules_are_distinct() {
 
     let basic_wire = decode(&basic.full_wire_hex);
     let basic_payload = decode(&basic.wire_payload_hex);
+    let basic_message =
+        MessageView::parse_complete(&basic_wire, limits()).expect("basic exact-four message");
+    assert_eq!(
+        basic_message.authenticated_material_fingerprint(),
+        array::<32>("2ee18fc0365699d39d3c2fea6d803e699cf54589f2a6e38166d48eeaecc79601"),
+        "the persisted replay discriminator must remain byte-for-byte stable"
+    );
     let mut stamped_array16 = basic_wire[..96].to_vec();
     stamped_array16.extend_from_slice(&[0xdc, 0x00, 0x05]);
     stamped_array16.extend_from_slice(&basic_payload[1..]);
@@ -637,6 +644,11 @@ fn exact_four_raw_and_stamped_canonicalization_rules_are_distinct() {
     let stamped = MessageView::parse_complete(&stamped_array16, limits())
         .expect("outer array width excluded from stamped canonical payload");
     assert_eq!(stamped.message_id(), array::<32>(&basic.message_id_hex));
+    assert_eq!(
+        stamped.authenticated_material_fingerprint(),
+        basic_message.authenticated_material_fingerprint(),
+        "a stamp changes exact wire bytes but not authenticated message material"
+    );
     let source = stamped
         .bind_source_identity(&public_key)
         .expect("source binding");

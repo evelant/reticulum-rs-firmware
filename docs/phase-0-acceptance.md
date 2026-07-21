@@ -73,10 +73,24 @@ The scaffold is complete only when all of these pass from a clean checkout:
 
 ```sh
 cargo test --locked
+cargo run --locked -p xtask -- graph-policy
 cargo run --locked -p reticulum-conformance-rete
 cargo test --locked -p reticulum-rns-leviculum
+cargo test --locked -p reticulum-lxmf-model
+cargo test --locked -p reticulum-lxmf-store
+cargo test --locked -p reticulum-lxmf-durable-ingress
 cargo test --locked -p reticulum-lxmf-ingress
 cargo test --locked -p reticulum-lxmf-wire
+cargo clippy --locked \
+  -p reticulum-lxmf-model \
+  -p reticulum-lxmf-store \
+  -p reticulum-lxmf-durable-ingress \
+  --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --locked \
+  -p reticulum-lxmf-model \
+  -p reticulum-lxmf-store \
+  -p reticulum-lxmf-durable-ingress \
+  --no-deps
 cargo check --locked \
   -p reticulum-device-api \
   -p reticulum-device-api-credential-store \
@@ -86,7 +100,10 @@ cargo check --locked \
   -p reticulum-device-api-pairing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
+  -p reticulum-lxmf-durable-ingress \
   -p reticulum-lxmf-ingress \
+  -p reticulum-lxmf-model \
+  -p reticulum-lxmf-store \
   -p reticulum-lxmf-wire \
   -p reticulum-node-core \
   -p reticulum-storage-model \
@@ -111,7 +128,10 @@ cargo +esp check --locked \
   -p reticulum-device-api-pairing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
+  -p reticulum-lxmf-durable-ingress \
   -p reticulum-lxmf-ingress \
+  -p reticulum-lxmf-model \
+  -p reticulum-lxmf-store \
   -p reticulum-lxmf-wire \
   -p reticulum-node-core \
   -p reticulum-board-heltec-vision-master-e290 \
@@ -685,10 +705,18 @@ The first checked Python LXMF 1.0.1 corpus, `reticulum-lxmf-wire` tranche, and
 the separate `reticulum-lxmf-ingress` application-event adapter now cover the
 supported foundation forms below. The ingress adapter admits only explicitly
 owned opportunistic destination DATA, resolves source identities by value, and
-returns a borrowed validated view without consuming the event. Non-`NONE` Link
-DATA is unrelated; context-`NONE` Link DATA and Resource completion remain
-explicitly deferred until their local-destination binding and bounded Resource
-ownership are available. Before
+returns a borrowed validated view without consuming the event. The portable
+`reticulum-lxmf-model`, `reticulum-lxmf-store`, and
+`reticulum-lxmf-durable-ingress` owner then preserve exact normalized wire in
+variable extents without a message-sized copy and acknowledge the retained
+application-event lease only after a new or already-durable store receipt.
+Replays, alternate valid stamps, and same-ID/different-material collisions stay
+distinct across reboot. This is local event-acknowledgement ordering only: the
+current Rete ingress creates its RNS delivery proof before this owner runs, so
+target composition must add delayed proof ownership before a remote receipt can
+mean durable LXMF delivery. Non-`NONE` Link DATA is unrelated; context-`NONE`
+Link DATA and Resource completion remain explicitly deferred until their local-
+destination binding and bounded Resource ownership are available. Before
 production-accepting the RNS foundation, retain and extend Python-derived LXMF
 fixtures covering:
 

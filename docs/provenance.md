@@ -16,7 +16,6 @@ authoritative in the lockfile.
 | lora-phy | Published crates.io 3.0.1 source vendored at `vendor/lora-phy-3.0.1` | archive SHA-256 `61471c3b2909789e3332083577f6cf6c41a4fcf37674ef15156bcbb20504ac65`; crate-recorded upstream commit `ca04c2284eb00e015528933ea5159cd1ff36142d`; exact tree and pristine/patched hashes in `VENDOR-HASHES.json` | MIT OR Apache-2.0 | SX126x radio owner with an atomic, default-preserving board override for high-power PA/OCP/encoded power, default-no-op post-initialization and early-TX RF-path hooks, and public standby state synchronization; exact edits, integrity guard and removal condition are recorded in `PATCHES.md` |
 | embedded-hal / embedded-hal-async / embedded-hal-bus / lora-modulation | crates.io | exact versions in workspace and lockfile | MIT OR Apache-2.0 | Portable pin/SPI/profile contracts and the target-exclusive async SPI device |
 | Embassy futures/sync/time, static_cell and zeroize | crates.io | exact versions in workspace and lockfile | MIT OR Apache-2.0 | Bounded target coordination, in-place protocol ownership and temporary key cleanup |
-| C2SP/CCTV Ed25519 vectors | <https://github.com/C2SP/CCTV/tree/5ea85644bd035c555900a2f707f7e4c31ea65ced/ed25519vectors> | `5ea85644bd035c555900a2f707f7e4c31ea65ced`; vector 50 public-key encoding and vector 7 signature-R encoding only | BSD-3-Clause; exact upstream text in `LICENSE-CCTV` | Test-only mixed-order point regression data; not linked into firmware |
 
 The designated durable tag for commit
 `90570cafc812b3025011cb690ec74a27f287cb3f` is
@@ -279,11 +278,9 @@ verification API and uses feature-disabled `curve25519-dalek` directly to
 enforce the prime-order subgroup checks required by the strict firmware
 profile. The exact locked normal closure is independently guarded and contains
 no allocator, standard library, Rete, board, executor, or transport dependency.
-The two exact C2SP/CCTV mixed-order point encodings used to pin that stricter
-behavior come from vector 50's public key and vector 7's signature R at revision
-`5ea85644bd035c555900a2f707f7e4c31ea65ced`. Their BSD-3-Clause notice is
-retained verbatim in `LICENSE-CCTV` (SHA-256
-`9fe727c21f00a770a683a4c8491bf24203ec839628bad09b026258c5afc17076`).
+The mixed-order regression corpus constructs its points locally from
+`curve25519-dalek`'s basepoint and torsion constants. No third-party encoded
+test-vector literals are retained.
 
 ## Future derived-code boundaries
 

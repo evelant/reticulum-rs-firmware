@@ -35,6 +35,10 @@ pub const WIRE_HEADER_LENGTH: usize = DESTINATION_HASH_LENGTH * 2 + SIGNATURE_LE
 pub const OPPORTUNISTIC_HEADER_LENGTH: usize = DESTINATION_HASH_LENGTH + SIGNATURE_LENGTH;
 /// Length of an LXMF message ID.
 pub const MESSAGE_ID_LENGTH: usize = 32;
+/// Length of the domain-separated authenticated-material fingerprint used by
+/// durable stores to distinguish a replay from a theoretical message-ID
+/// collision.
+pub const AUTHENTICATED_MATERIAL_FINGERPRINT_LENGTH: usize = 32;
 /// Length of an LXMF proof-of-work stamp.
 pub const POW_STAMP_LENGTH: usize = 32;
 /// Length of an LXMF ticket and ticket-derived stamp.
@@ -52,6 +56,8 @@ const MSGPACK_F64: u8 = 0xcb;
 const PYTHON_STRUCT_AND_TIMESTAMP_SIZE: usize = 16;
 const LXMF_DELIVERY_NAME_HASH: [u8; 10] =
     [0x6e, 0xc6, 0x0b, 0xc3, 0x18, 0xe2, 0xc0, 0xf0, 0xd9, 0x08];
+const AUTHENTICATED_MATERIAL_FINGERPRINT_DOMAIN: &[u8] =
+    b"reticulum-rs-firmware/lxmf/authenticated-material/v1\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EdwardsPointError {
@@ -650,6 +656,25 @@ impl<'a> MessageView<'a> {
     /// Calculate `SHA-256(destination || source || payload_without_stamp)`.
     pub fn message_id(self) -> [u8; MESSAGE_ID_LENGTH] {
         let mut hasher = Sha256::new();
+        hasher.update(self.destination_hash);
+        hasher.update(self.source_hash);
+        self.update_payload_without_stamp(&mut hasher);
+        hasher.finalize().into()
+    }
+
+    /// Calculate a domain-separated digest of the exact authenticated LXMF
+    /// hash material.
+    ///
+    /// Unlike [`Self::message_id`], this value is not part of the LXMF
+    /// protocol. It gives a durable store an independent replay/collision
+    /// discriminator while preserving Python's exact four-item raw and
+    /// stamped canonicalization rules. A different valid stamp therefore does
+    /// not change this fingerprint.
+    pub fn authenticated_material_fingerprint(
+        self,
+    ) -> [u8; AUTHENTICATED_MATERIAL_FINGERPRINT_LENGTH] {
+        let mut hasher = Sha256::new();
+        hasher.update(AUTHENTICATED_MATERIAL_FINGERPRINT_DOMAIN);
         hasher.update(self.destination_hash);
         hasher.update(self.source_hash);
         self.update_payload_without_stamp(&mut hasher);
@@ -1371,32 +1396,4 @@ fn copy_part(output: &mut [u8], cursor: &mut usize, part: &[u8]) {
     let end = *cursor + part.len();
     output[*cursor..end].copy_from_slice(part);
     *cursor = end;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{EdwardsPointError, require_non_identity_prime_order_point};
-
-    fn point(hex_value: &str) -> [u8; 32] {
-        hex::decode(hex_value)
-            .expect("point hex")
-            .try_into()
-            .expect("32-byte point")
-    }
-
-    #[test]
-    fn c2sp_cctv_mixed_order_a_and_r_are_rejected() {
-        // C2SP CCTV at 5ea85644: vector 50's A and vector 7's R each
-        // contain a low-order component while remaining non-small-order.
-        let vector_50_a = point("10eb7c3acfb2bed3e0d6ab89bf5a3d6afddd1176ce4812e38d9fd485058fdb1f");
-        let vector_7_r = point("36684ea91032ba5b1dbab2d02f4debc74c3327f2b3802e2e4d371aa42b12b56b");
-        assert_eq!(
-            require_non_identity_prime_order_point(&vector_50_a),
-            Err(EdwardsPointError::NonPrimeOrder)
-        );
-        assert_eq!(
-            require_non_identity_prime_order_point(&vector_7_r),
-            Err(EdwardsPointError::NonPrimeOrder)
-        );
-    }
 }

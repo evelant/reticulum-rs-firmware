@@ -1269,8 +1269,8 @@ identity formatting, inbox status/peek, owner-only non-overwriting payload and
 evidence output, sequential request IDs, version policy, polling terminal
 semantics, coalesced-record preservation, authenticated terminal binding, and
 submission-input non-disclosure. These 56 focused tests are part of the
-passing 256-test xtask gate, while the portable Rete integration and inbox-store
-suites have 58 and 17 tests. The 58 are project adapter tests. The previously
+passing 261-test xtask gate, while the portable Rete integration and inbox-store
+suites have 61 and 17 tests. The 61 are project adapter tests. The previously
 validated project conformance baseline performed
 235 checks: 112 released-vector, adapter and direct-Link checks,
 40 released-Python LRRTT MessagePack checks, 8 channel-retry lifecycle checks,

@@ -165,6 +165,11 @@ fn python_opportunistic_corpus_validates_without_copying_event_payload() {
             validated.evidence().message_id(),
             &array::<32>(&fixture.message_id_hex)
         );
+        assert_ne!(
+            validated.evidence().authenticated_material_fingerprint(),
+            validated.evidence().message_id(),
+            "the durable collision discriminator is domain-separated from the protocol ID"
+        );
         assert_eq!(validated.evidence().destination(), local.as_bytes());
         assert_eq!(
             validated.evidence().source(),
