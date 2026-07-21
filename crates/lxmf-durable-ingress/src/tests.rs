@@ -207,6 +207,7 @@ fn offer<'owner, 'slots>(
     owner
         .try_offer_actions(NodeActions {
             events: vec![event],
+            proof_sidecars: vec![],
             packets: vec![],
             unroutable_packets: 0,
         })

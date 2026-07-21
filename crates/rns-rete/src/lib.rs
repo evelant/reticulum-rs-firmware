@@ -25,14 +25,16 @@ pub mod embedded;
 pub use embedded::ConformanceLinkSnapshot;
 pub use embedded::{
     AdmissionCounters, AnnounceAdmissionError, ApplicationEvent, ApplicationEventKind,
-    ApplicationRequestFailReason, DestinationRegistrationError, EmbeddedNode, EmbeddedNodeConfig,
-    EmbeddedNodeMetrics, EmbeddedSendError, InboundData, InboundDataProjection, InboundProofPolicy,
-    IngressCounters, IngressDisposition, IngressDropReason, IngressMetadata, IngressReport,
-    InterfaceId, LINK_DATA_CONTEXT_NONE, MAX_CHANNEL_PAYLOAD, MAX_DATA_PAYLOAD, NodeActions,
-    NodeRole, PrepareDataError, PreparedData, RNS_MTU, ReceiptCandidate, ReceiptId, ReceiptKind,
+    ApplicationEventProofSidecar, ApplicationRequestFailReason, DestinationRegistrationError,
+    EmbeddedNode, EmbeddedNodeConfig, EmbeddedNodeMetrics, EmbeddedSendError, InboundData,
+    InboundDataProjection, InboundProofPolicy, InboundProofPolicyError, IngressCounters,
+    IngressDisposition, IngressDropReason, IngressMetadata, IngressReport, InterfaceId,
+    LINK_DATA_CONTEXT_NONE, MAX_CHANNEL_PAYLOAD, MAX_DATA_PAYLOAD, NodeActions, NodeRole,
+    PrepareDataError, PreparedData, RNS_MTU, ReceiptCandidate, ReceiptId, ReceiptKind,
     ReceiptReservationUnavailable, ReceiptTerminal, ReceiptTerminalCounters,
-    ReceiptTerminalReservation, ReceiptTerminalSink, ReceiptTickReport, RouteSnapshot,
-    TransportCounters, TxPacket, TxTarget, project_inbound_data,
+    ReceiptTerminalReservation, ReceiptTerminalSink, ReceiptTickReport, RetainedInboundProof,
+    RetainedProofInvariant, RouteSnapshot, TransportCounters, TxPacket, TxTarget,
+    project_inbound_data,
 };
 pub use rete_core::{
     DestHash, DestType, Identity, IdentityHash, LinkId, MonotonicDuration, MonotonicInstant,

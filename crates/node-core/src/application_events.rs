@@ -1,14 +1,17 @@
 //! Fixed-capacity ownership for transport-neutral application events.
 //!
-//! The owner moves complete application events out of one [`NodeActions`]
-//! envelope only after every event has a caller-provided slot. Consumers lease
-//! one event at a time in FIFO order. Resolving a lease transfers, discards, or
-//! quarantines its exact event; dropping an unresolved lease quarantines the
-//! event instead of silently releasing its slot.
+//! The owner moves complete application events and their optional proof
+//! sidecars out of one [`NodeActions`] envelope only after every event has a
+//! caller-provided slot and every sidecar binding is valid. Consumers lease one
+//! event at a time in FIFO order. Resolving a lease transfers, discards, or
+//! quarantines its exact event and sidecar; dropping an unresolved lease
+//! quarantines both instead of silently releasing their slot.
 
 use core::{fmt, mem};
 
-use reticulum_rns_rete::{ApplicationEvent, NodeActions};
+use reticulum_rns_rete::{
+    ApplicationEvent, ApplicationEventKind, NodeActions, RetainedInboundProof,
+};
 
 /// Stable index of one caller-provided application-event slot.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -103,7 +106,7 @@ enum ApplicationEventSlotState {
     Retired,
 }
 
-/// Caller-owned storage for one transport-neutral application event.
+/// Caller-owned storage for one transport-neutral event and optional sidecar.
 ///
 /// Construct slots in board or task-owned storage, then pass their mutable
 /// slice to [`ApplicationEventOwner::new`]. Slot contents survive dropping and
@@ -114,6 +117,7 @@ pub struct ApplicationEventSlot {
     sequence: u64,
     state: ApplicationEventSlotState,
     event: Option<ApplicationEvent>,
+    retained_proof: Option<RetainedInboundProof>,
 }
 
 impl ApplicationEventSlot {
@@ -124,6 +128,7 @@ impl ApplicationEventSlot {
             sequence: 0,
             state: ApplicationEventSlotState::Vacant,
             event: None,
+            retained_proof: None,
         }
     }
 }
@@ -142,6 +147,7 @@ impl fmt::Debug for ApplicationEventSlot {
             .field("sequence", &self.sequence)
             .field("state", &self.state)
             .field("event", &self.event.as_ref().map(|_| "<redacted>"))
+            .field("retained_proof", &self.retained_proof.is_some())
             .finish()
     }
 }
@@ -185,6 +191,8 @@ pub struct ApplicationEventOwnerCounters {
     pub accepted_batches: u64,
     /// Events moved into caller-owned slots.
     pub accepted_events: u64,
+    /// Retained proof sidecars moved into the same slots as their events.
+    pub accepted_proof_sidecars: u64,
     /// Events transferred to consumers by acknowledgement.
     pub acknowledged_events: u64,
     /// Events explicitly discarded by consumers.
@@ -211,6 +219,14 @@ pub struct ApplicationEventOwnerCounters {
     pub oversized_batch_rejections: u64,
     /// Offers rejected because they unexpectedly retained packet owners.
     pub packet_owner_rejections: u64,
+    /// Offers rejected because a proof sidecar named no event in its envelope.
+    pub proof_sidecar_index_rejections: u64,
+    /// Offers rejected because more than one proof sidecar named one event.
+    pub duplicate_proof_sidecar_rejections: u64,
+    /// Offers rejected because a proof sidecar named an incompatible event.
+    pub proof_sidecar_kind_rejections: u64,
+    /// Offers rejected because a proof sidecar's private DATA binding changed.
+    pub proof_sidecar_binding_rejections: u64,
     /// Offers rejected because a FIFO sequence could not be assigned safely.
     pub sequence_exhaustion_rejections: u64,
     /// Source-dependent packets already classified as unroutable upstream.
@@ -240,6 +256,31 @@ pub enum ApplicationEventOfferError {
     PacketOwnersPresent {
         /// Unexpected packet-owner count.
         count: usize,
+    },
+    /// A retained proof sidecar names no event in its action envelope.
+    ProofSidecarIndexOutOfRange {
+        /// Invalid zero-based event index.
+        event_index: usize,
+        /// Events present in the envelope.
+        event_count: usize,
+    },
+    /// More than one retained proof sidecar names the same event.
+    DuplicateProofSidecar {
+        /// Duplicated zero-based event index.
+        event_index: usize,
+    },
+    /// A retained DATA proof sidecar names an event of another kind.
+    ProofSidecarEventKindMismatch {
+        /// Zero-based index of the incompatible event.
+        event_index: usize,
+        /// Payload-free kind of the incompatible event.
+        event_kind: ApplicationEventKind,
+    },
+    /// A retained proof sidecar no longer names the exact DATA event it was
+    /// created beside.
+    ProofSidecarEventBindingMismatch {
+        /// Zero-based index whose private event binding did not match.
+        event_index: usize,
     },
     /// Existing FIFO state prevents assigning another non-wrapping sequence.
     SequenceExhausted,
@@ -278,6 +319,7 @@ impl fmt::Debug for ApplicationEventOfferFailure {
             .debug_struct("ApplicationEventOfferFailure")
             .field("reason", &self.reason)
             .field("event_count", &self.actions.events.len())
+            .field("proof_sidecar_count", &self.actions.proof_sidecars.len())
             .field("packet_count", &self.actions.packets.len())
             .field("unroutable_packets", &self.actions.unroutable_packets)
             .field("actions", &"<redacted>")
@@ -289,6 +331,7 @@ impl fmt::Debug for ApplicationEventOfferFailure {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ApplicationEventOfferReport {
     accepted_events: usize,
+    accepted_proof_sidecars: usize,
     unroutable_packets: usize,
 }
 
@@ -296,6 +339,11 @@ impl ApplicationEventOfferReport {
     /// Events moved into caller-owned slots.
     pub const fn accepted_events(self) -> usize {
         self.accepted_events
+    }
+
+    /// Retained proof sidecars moved with their exact events.
+    pub const fn accepted_proof_sidecars(self) -> usize {
+        self.accepted_proof_sidecars
     }
 
     /// Upstream source-dependent packet actions observed and consumed as a
@@ -330,6 +378,14 @@ impl<'slots> ApplicationEventOwner<'slots> {
                         | ApplicationEventSlotState::Leased
                         | ApplicationEventSlotState::Quarantined(_)
                 )
+            );
+            debug_assert!(slot.event.is_some() || slot.retained_proof.is_none());
+            debug_assert!(
+                slot.retained_proof.is_none()
+                    || slot
+                        .event
+                        .as_ref()
+                        .is_some_and(|event| event.kind() == ApplicationEventKind::DataReceived)
             );
             if slot.event.is_some() {
                 maximum_sequence = Some(
@@ -399,6 +455,62 @@ impl<'slots> ApplicationEventOwner<'slots> {
             });
         }
 
+        for (sidecar_position, sidecar) in actions.proof_sidecars.iter().enumerate() {
+            let event_index = sidecar.event_index();
+            let Some(event) = actions.events.get(event_index) else {
+                self.counters.proof_sidecar_index_rejections = self
+                    .counters
+                    .proof_sidecar_index_rejections
+                    .saturating_add(1);
+                return Err(ApplicationEventOfferFailure {
+                    reason: ApplicationEventOfferError::ProofSidecarIndexOutOfRange {
+                        event_index,
+                        event_count: actions.events.len(),
+                    },
+                    actions,
+                });
+            };
+            if actions.proof_sidecars[..sidecar_position]
+                .iter()
+                .any(|prior| prior.event_index() == event_index)
+            {
+                self.counters.duplicate_proof_sidecar_rejections = self
+                    .counters
+                    .duplicate_proof_sidecar_rejections
+                    .saturating_add(1);
+                return Err(ApplicationEventOfferFailure {
+                    reason: ApplicationEventOfferError::DuplicateProofSidecar { event_index },
+                    actions,
+                });
+            }
+            let event_kind = event.kind();
+            if event_kind != ApplicationEventKind::DataReceived {
+                self.counters.proof_sidecar_kind_rejections = self
+                    .counters
+                    .proof_sidecar_kind_rejections
+                    .saturating_add(1);
+                return Err(ApplicationEventOfferFailure {
+                    reason: ApplicationEventOfferError::ProofSidecarEventKindMismatch {
+                        event_index,
+                        event_kind,
+                    },
+                    actions,
+                });
+            }
+            if !sidecar.is_bound_to(event_index, event) {
+                self.counters.proof_sidecar_binding_rejections = self
+                    .counters
+                    .proof_sidecar_binding_rejections
+                    .saturating_add(1);
+                return Err(ApplicationEventOfferFailure {
+                    reason: ApplicationEventOfferError::ProofSidecarEventBindingMismatch {
+                        event_index,
+                    },
+                    actions,
+                });
+            }
+        }
+
         let required = actions.events.len();
         let capacities = self.capacities();
         let reusable_capacity = capacities.reusable_capacity();
@@ -455,10 +567,21 @@ impl<'slots> ApplicationEventOwner<'slots> {
         };
 
         let accepted_events = required;
+        let accepted_proof_sidecars = actions.proof_sidecars.len();
         let unroutable_packets = actions.unroutable_packets;
         let events = mem::take(&mut actions.events);
+        let mut proof_sidecars = mem::take(&mut actions.proof_sidecars);
         let mut next_sequence = sequence_range.map(|(first, _)| first).unwrap_or(0);
-        for event in events {
+        for (event_index, event) in events.into_iter().enumerate() {
+            let retained_proof = proof_sidecars
+                .iter()
+                .position(|sidecar| sidecar.event_index() == event_index)
+                .map(|sidecar_position| {
+                    let sidecar = proof_sidecars.swap_remove(sidecar_position);
+                    let (bound_event_index, proof) = sidecar.into_parts();
+                    debug_assert_eq!(bound_event_index, event_index);
+                    proof
+                });
             let slot = self
                 .slots
                 .iter_mut()
@@ -470,9 +593,11 @@ impl<'slots> ApplicationEventOwner<'slots> {
                 .expect("retired generations are excluded from vacant capacity");
             slot.sequence = next_sequence;
             slot.event = Some(event);
+            slot.retained_proof = retained_proof;
             slot.state = ApplicationEventSlotState::Ready;
             next_sequence = next_sequence.saturating_add(1);
         }
+        debug_assert!(proof_sidecars.is_empty());
         if let Some((_, last)) = sequence_range {
             self.next_sequence = last.checked_add(1);
         }
@@ -482,6 +607,10 @@ impl<'slots> ApplicationEventOwner<'slots> {
             .counters
             .accepted_events
             .saturating_add(u64::try_from(accepted_events).unwrap_or(u64::MAX));
+        self.counters.accepted_proof_sidecars = self
+            .counters
+            .accepted_proof_sidecars
+            .saturating_add(u64::try_from(accepted_proof_sidecars).unwrap_or(u64::MAX));
         self.counters.unroutable_packets_observed = self
             .counters
             .unroutable_packets_observed
@@ -489,6 +618,7 @@ impl<'slots> ApplicationEventOwner<'slots> {
 
         Ok(ApplicationEventOfferReport {
             accepted_events,
+            accepted_proof_sidecars,
             unroutable_packets,
         })
     }
@@ -538,7 +668,7 @@ impl<'slots> ApplicationEventOwner<'slots> {
         })
     }
 
-    fn resolve_slot(&mut self, id: ApplicationEventId) -> ApplicationEvent {
+    fn resolve_slot(&mut self, id: ApplicationEventId) -> AcknowledgedApplicationEvent {
         let slot = &mut self.slots[id.slot.0];
         assert_eq!(slot.generation, id.generation.0);
         assert_eq!(slot.state, ApplicationEventSlotState::Leased);
@@ -546,13 +676,17 @@ impl<'slots> ApplicationEventOwner<'slots> {
             .event
             .take()
             .expect("a valid application-event lease retains its exact event");
+        let retained_proof = slot.retained_proof.take();
         slot.sequence = 0;
         slot.state = if slot.generation == u64::MAX {
             ApplicationEventSlotState::Retired
         } else {
             ApplicationEventSlotState::Vacant
         };
-        event
+        AcknowledgedApplicationEvent {
+            event,
+            retained_proof,
+        }
     }
 
     fn quarantine_slot(
@@ -563,7 +697,13 @@ impl<'slots> ApplicationEventOwner<'slots> {
         let slot = &mut self.slots[id.slot.0];
         assert_eq!(slot.generation, id.generation.0);
         assert_eq!(slot.state, ApplicationEventSlotState::Leased);
-        debug_assert!(slot.event.is_some());
+        let event = slot
+            .event
+            .as_ref()
+            .expect("a valid application-event lease retains its exact event");
+        debug_assert!(
+            slot.retained_proof.is_none() || event.kind() == ApplicationEventKind::DataReceived
+        );
         slot.state = ApplicationEventSlotState::Quarantined(reason);
     }
 }
@@ -575,6 +715,45 @@ impl fmt::Debug for ApplicationEventOwner<'_> {
             .field("capacities", &self.capacities())
             .field("counters", &self.counters)
             .field("events", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Exact event and optional retained proof transferred by acknowledgement.
+///
+/// The semantic [`ApplicationEvent`] remains unchanged. A proof sidecar, when
+/// present, stays move-only and must be released or explicitly discarded by
+/// the acknowledging consumer.
+#[must_use = "an acknowledged application event and retained proof must be handled"]
+pub struct AcknowledgedApplicationEvent {
+    event: ApplicationEvent,
+    retained_proof: Option<RetainedInboundProof>,
+}
+
+impl AcknowledgedApplicationEvent {
+    /// Borrow the exact semantic event without copying its payload.
+    pub const fn event(&self) -> &ApplicationEvent {
+        &self.event
+    }
+
+    /// Borrow the retained direct proof associated with this event, if any.
+    pub const fn retained_proof(&self) -> Option<&RetainedInboundProof> {
+        self.retained_proof.as_ref()
+    }
+
+    /// Consume this owner into its exact event and optional proof sidecar.
+    pub fn into_parts(self) -> (ApplicationEvent, Option<RetainedInboundProof>) {
+        (self.event, self.retained_proof)
+    }
+}
+
+impl fmt::Debug for AcknowledgedApplicationEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AcknowledgedApplicationEvent")
+            .field("event_kind", &self.event.kind())
+            .field("retained_proof", &self.retained_proof.is_some())
+            .field("event", &"<redacted>")
             .finish()
     }
 }
@@ -616,19 +795,25 @@ impl ApplicationEventLease<'_, '_> {
             .expect("a valid application-event lease retains its exact event")
     }
 
-    /// Acknowledge delivery and transfer the exact event to the consumer.
-    pub fn acknowledge(mut self) -> ApplicationEvent {
-        let event = self.owner.resolve_slot(self.id);
+    /// Borrow the move-only retained proof bound to this event, if any.
+    pub fn retained_proof(&self) -> Option<&RetainedInboundProof> {
+        self.owner.slots[self.id.slot.0].retained_proof.as_ref()
+    }
+
+    /// Acknowledge delivery and transfer the exact event plus any retained
+    /// proof sidecar to the consumer.
+    pub fn acknowledge(mut self) -> AcknowledgedApplicationEvent {
+        let acknowledged = self.owner.resolve_slot(self.id);
         self.owner.counters.acknowledged_events =
             self.owner.counters.acknowledged_events.saturating_add(1);
         self.resolved = true;
-        event
+        acknowledged
     }
 
     /// Explicitly discard this event for one typed product reason and release
     /// its slot.
     pub fn discard(mut self, reason: ApplicationEventDiscardReason) {
-        let event = self.owner.resolve_slot(self.id);
+        let acknowledged = self.owner.resolve_slot(self.id);
         self.owner.counters.discarded_events =
             self.owner.counters.discarded_events.saturating_add(1);
         let classified = match reason {
@@ -653,7 +838,7 @@ impl ApplicationEventLease<'_, '_> {
         };
         *classified = classified.saturating_add(1);
         self.resolved = true;
-        drop(event);
+        drop(acknowledged);
     }
 
     /// Retain this event outside the normal ready queue.
@@ -672,6 +857,7 @@ impl fmt::Debug for ApplicationEventLease<'_, '_> {
             .field("id", &self.id)
             .field("sequence", &self.sequence)
             .field("prior_quarantine", &self.prior_quarantine)
+            .field("retained_proof", &self.retained_proof().is_some())
             .field("event", &"<redacted>")
             .finish()
     }
@@ -699,10 +885,47 @@ impl Drop for ApplicationEventLease<'_, '_> {
 mod tests {
     extern crate std;
 
-    use reticulum_rns_rete::ApplicationEvent;
+    use rand_core::{CryptoRng, RngCore};
+    use reticulum_rns_rete::{
+        ApplicationEvent, EmbeddedNode, EmbeddedNodeConfig, InboundProofPolicy, InterfaceId,
+        RNS_MTU, TxTarget, identity_from_private_key, parse_packet,
+    };
     use std::{format, vec, vec::Vec};
 
     use super::*;
+
+    #[derive(Default)]
+    struct CounterRng(u8);
+
+    impl RngCore for CounterRng {
+        fn next_u32(&mut self) -> u32 {
+            let mut bytes = [0; 4];
+            self.fill_bytes(&mut bytes);
+            u32::from_le_bytes(bytes)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut bytes = [0; 8];
+            self.fill_bytes(&mut bytes);
+            u64::from_le_bytes(bytes)
+        }
+
+        fn fill_bytes(&mut self, destination: &mut [u8]) {
+            for byte in destination {
+                self.0 = self.0.wrapping_add(1);
+                *byte = self.0;
+            }
+        }
+
+        fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), rand_core::Error> {
+            self.fill_bytes(destination);
+            Ok(())
+        }
+    }
+
+    impl CryptoRng for CounterRng {}
+
+    type TestRnsNode = EmbeddedNode<4, 4, 8, 2>;
 
     fn data_event(tag: u8) -> ApplicationEvent {
         ApplicationEvent::DataReceived {
@@ -714,8 +937,7 @@ mod tests {
     fn actions(tags: &[u8]) -> NodeActions {
         NodeActions {
             events: tags.iter().copied().map(data_event).collect::<Vec<_>>(),
-            packets: Vec::new(),
-            unroutable_packets: 0,
+            ..NodeActions::default()
         }
     }
 
@@ -724,6 +946,52 @@ mod tests {
             panic!("test event changed variant")
         };
         destination[0]
+    }
+
+    fn rns_node(tag: u8) -> TestRnsNode {
+        TestRnsNode::new(
+            identity_from_private_key(&[tag; 64]).expect("test identity is valid"),
+            "reticulum",
+            &["application-event-owner"],
+            EmbeddedNodeConfig::endpoint(),
+        )
+        .expect("test node is valid")
+    }
+
+    fn retained_data_actions(tag: u8, source: InterfaceId) -> NodeActions {
+        let mut rng = CounterRng::default();
+        let mut sender = rns_node(tag);
+        let mut receiver = rns_node(tag.wrapping_add(1));
+        receiver.set_inbound_proof_policy(InboundProofPolicy::Retain);
+        receiver
+            .queue_announce(None, 1, &mut rng)
+            .expect("receiver announce queues");
+        let announce = receiver.flush_announces(1, &mut rng);
+        assert_eq!(announce.len(), 1);
+        sender.ingest(announce[0].bytes(), 1, InterfaceId(1), &mut rng);
+
+        let mut encoded = [0u8; RNS_MTU];
+        let prepared = sender
+            .prepare_data_into(
+                &receiver.destination_hash(),
+                &[tag, tag.wrapping_add(1)],
+                2,
+                &mut rng,
+                &mut encoded,
+            )
+            .expect("encrypted DATA prepares");
+        let actions = receiver
+            .ingest(
+                &encoded[..usize::from(prepared.packet_len())],
+                2,
+                source,
+                &mut rng,
+            )
+            .actions;
+        assert_eq!(actions.events.len(), 1);
+        assert_eq!(actions.proof_sidecars.len(), 1);
+        assert!(actions.packets.is_empty());
+        actions
     }
 
     #[test]
@@ -799,7 +1067,8 @@ mod tests {
             Some(ApplicationEventQuarantineReason::UnresolvedLeaseDropped)
         );
         let first_event = quarantined.acknowledge();
-        assert_eq!(data_tag(&first_event), 10);
+        assert_eq!(data_tag(first_event.event()), 10);
+        assert!(first_event.retained_proof().is_none());
 
         owner
             .try_offer_actions(actions(&[12]))
@@ -816,6 +1085,178 @@ mod tests {
     }
 
     #[test]
+    fn proof_sidecar_survives_pressure_retry_unresolved_drop_and_owner_reconstruction() {
+        let source = InterfaceId(9);
+        let mut slots = [ApplicationEventSlot::new()];
+        let mut owner = ApplicationEventOwner::new(&mut slots);
+        owner
+            .try_offer_actions(actions(&[1]))
+            .expect("first event occupies the sole slot");
+
+        let offered = retained_data_actions(0x41, source);
+        let event_pointer = offered.events.as_ptr();
+        let sidecar_pointer = offered.proof_sidecars.as_ptr();
+        let failure = owner
+            .try_offer_actions(offered)
+            .expect_err("occupied owner reports retryable pressure");
+        assert_eq!(
+            failure.reason(),
+            ApplicationEventOfferError::Full {
+                required: 1,
+                available: 0,
+            }
+        );
+        let offered = failure.into_actions();
+        assert_eq!(offered.events.as_ptr(), event_pointer);
+        assert_eq!(offered.proof_sidecars.as_ptr(), sidecar_pointer);
+
+        owner
+            .lease_next()
+            .expect("occupying event remains ready")
+            .discard(ApplicationEventDiscardReason::Superseded);
+        let report = owner
+            .try_offer_actions(offered)
+            .expect("the exact rejected envelope is retryable");
+        assert_eq!(report.accepted_events(), 1);
+        assert_eq!(report.accepted_proof_sidecars(), 1);
+        assert_eq!(owner.counters().accepted_proof_sidecars, 1);
+
+        let lease = owner.lease_next().expect("retained DATA is ready");
+        assert_eq!(lease.event().kind(), ApplicationEventKind::DataReceived);
+        assert!(lease.retained_proof().is_some());
+        assert!(format!("{lease:?}").contains("retained_proof: true"));
+        lease.quarantine(ApplicationEventQuarantineReason::ConsumerDeferred);
+        assert_eq!(owner.capacities().quarantined, 1);
+
+        let lease = owner
+            .lease_next_quarantined()
+            .expect("explicitly quarantined event and proof remain recoverable");
+        assert_eq!(
+            lease.quarantine_reason(),
+            Some(ApplicationEventQuarantineReason::ConsumerDeferred)
+        );
+        assert!(lease.retained_proof().is_some());
+        drop(lease);
+        assert_eq!(owner.capacities().quarantined, 1);
+        assert_eq!(owner.counters().explicit_quarantines, 1);
+        assert_eq!(owner.counters().unresolved_lease_quarantines, 1);
+        drop(owner);
+
+        let mut owner = ApplicationEventOwner::new(&mut slots);
+        let lease = owner
+            .lease_next_quarantined()
+            .expect("reconstructed owner retains the unresolved event and proof");
+        assert_eq!(
+            lease.quarantine_reason(),
+            Some(ApplicationEventQuarantineReason::ConsumerDeferred)
+        );
+        assert!(lease.retained_proof().is_some());
+        let acknowledged = lease.acknowledge();
+        assert_eq!(
+            acknowledged.event().kind(),
+            ApplicationEventKind::DataReceived
+        );
+        let (_, proof) = acknowledged.into_parts();
+        let packet = proof
+            .expect("the exact proof sidecar survives")
+            .into_packet();
+        assert_eq!(packet.target(), TxTarget::Only(source));
+        assert_eq!(
+            parse_packet(packet.bytes())
+                .expect("retained bytes remain a valid packet")
+                .packet_type,
+            reticulum_rns_rete::PacketType::Proof
+        );
+    }
+
+    #[test]
+    fn malformed_proof_sidecar_bindings_fail_before_owner_or_envelope_mutation() {
+        let mut slots = [ApplicationEventSlot::new()];
+        let mut owner = ApplicationEventOwner::new(&mut slots);
+
+        let mut out_of_range = retained_data_actions(0x51, InterfaceId(2));
+        out_of_range.events.clear();
+        let sidecar_pointer = out_of_range.proof_sidecars.as_ptr();
+        let failure = owner
+            .try_offer_actions(out_of_range)
+            .expect_err("a sidecar cannot name a missing event");
+        assert_eq!(
+            failure.reason(),
+            ApplicationEventOfferError::ProofSidecarIndexOutOfRange {
+                event_index: 0,
+                event_count: 0,
+            }
+        );
+        let out_of_range = failure.into_actions();
+        assert_eq!(out_of_range.proof_sidecars.as_ptr(), sidecar_pointer);
+        assert!(out_of_range.events.is_empty());
+        assert_eq!(owner.capacities().occupied(), 0);
+
+        let mut wrong_kind = retained_data_actions(0x61, InterfaceId(3));
+        wrong_kind.events[0] = ApplicationEvent::Tick {
+            expired_paths: 0,
+            closed_links: 0,
+        };
+        let event_pointer = wrong_kind.events.as_ptr();
+        let sidecar_pointer = wrong_kind.proof_sidecars.as_ptr();
+        let failure = owner
+            .try_offer_actions(wrong_kind)
+            .expect_err("a retained DATA proof cannot bind another event kind");
+        assert_eq!(
+            failure.reason(),
+            ApplicationEventOfferError::ProofSidecarEventKindMismatch {
+                event_index: 0,
+                event_kind: ApplicationEventKind::Tick,
+            }
+        );
+        let wrong_kind = failure.into_actions();
+        assert_eq!(wrong_kind.events.as_ptr(), event_pointer);
+        assert_eq!(wrong_kind.proof_sidecars.as_ptr(), sidecar_pointer);
+        assert_eq!(owner.capacities().occupied(), 0);
+
+        let mut wrong_binding = retained_data_actions(0x69, InterfaceId(3));
+        wrong_binding.events[0] = ApplicationEvent::DataReceived {
+            destination: [0x69; 16],
+            payload: b"replacement DATA event".to_vec(),
+        };
+        let event_pointer = wrong_binding.events.as_ptr();
+        let sidecar_pointer = wrong_binding.proof_sidecars.as_ptr();
+        let failure = owner
+            .try_offer_actions(wrong_binding)
+            .expect_err("a sidecar cannot authorize a replacement DATA event");
+        assert_eq!(
+            failure.reason(),
+            ApplicationEventOfferError::ProofSidecarEventBindingMismatch { event_index: 0 }
+        );
+        let wrong_binding = failure.into_actions();
+        assert_eq!(wrong_binding.events.as_ptr(), event_pointer);
+        assert_eq!(wrong_binding.proof_sidecars.as_ptr(), sidecar_pointer);
+        assert_eq!(owner.capacities().occupied(), 0);
+
+        let mut duplicate = retained_data_actions(0x71, InterfaceId(4));
+        let another = retained_data_actions(0x81, InterfaceId(5));
+        duplicate.proof_sidecars.extend(another.proof_sidecars);
+        let event_pointer = duplicate.events.as_ptr();
+        let sidecar_pointer = duplicate.proof_sidecars.as_ptr();
+        let failure = owner
+            .try_offer_actions(duplicate)
+            .expect_err("one event cannot own two retained proofs");
+        assert_eq!(
+            failure.reason(),
+            ApplicationEventOfferError::DuplicateProofSidecar { event_index: 0 }
+        );
+        let duplicate = failure.into_actions();
+        assert_eq!(duplicate.events.as_ptr(), event_pointer);
+        assert_eq!(duplicate.proof_sidecars.as_ptr(), sidecar_pointer);
+        assert_eq!(duplicate.proof_sidecars.len(), 2);
+        assert_eq!(owner.capacities().occupied(), 0);
+        assert_eq!(owner.counters().proof_sidecar_index_rejections, 1);
+        assert_eq!(owner.counters().proof_sidecar_kind_rejections, 1);
+        assert_eq!(owner.counters().proof_sidecar_binding_rejections, 1);
+        assert_eq!(owner.counters().duplicate_proof_sidecar_rejections, 1);
+    }
+
+    #[test]
     fn debug_output_redacts_application_payloads() {
         let mut slots = [ApplicationEventSlot::new()];
         let mut owner = ApplicationEventOwner::new(&mut slots);
@@ -825,8 +1266,7 @@ mod tests {
                     destination: [0x31; 16],
                     payload: b"secret-application-payload".to_vec(),
                 }],
-                packets: Vec::new(),
-                unroutable_packets: 0,
+                ..NodeActions::default()
             })
             .expect("event fits");
         let owner_debug = format!("{owner:?}");
@@ -834,6 +1274,7 @@ mod tests {
         let lease = owner.lease_next().expect("event is ready");
         let lease_debug = format!("{lease:?}");
         assert!(!lease_debug.contains("secret-application-payload"));
+        assert!(lease_debug.contains("retained_proof: false"));
         lease.discard(ApplicationEventDiscardReason::PolicyRejected);
     }
 
@@ -843,9 +1284,8 @@ mod tests {
         let mut owner = ApplicationEventOwner::new(&mut slots);
         let report = owner
             .try_offer_actions(NodeActions {
-                events: Vec::new(),
-                packets: Vec::new(),
                 unroutable_packets: 3,
+                ..NodeActions::default()
             })
             .expect("scalar-only envelope needs no event slot");
         assert_eq!(report.accepted_events(), 0);

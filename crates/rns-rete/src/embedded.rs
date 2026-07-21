@@ -23,6 +23,7 @@ use rete_stack::{
     RequestFailReason as NativeRequestFailReason,
 };
 use rete_transport::{HeaplessStorage, LinkState, SendError};
+use sha2::{Digest as _, Sha256};
 
 use crate::capacity::{
     HeaplessCapacitySnapshot, LinkAdmissionError, heapless_capacity_snapshot,
@@ -208,6 +209,95 @@ pub struct TxPacket {
     target: TxTarget,
     /// Opaque marker returned after the selected interface accepts dispatch.
     protocol_token: Option<OutboundProtocolToken>,
+}
+
+/// Exact direct DATA proof withheld from ordinary ingress transmission.
+///
+/// The proof remains a single move-only owner until application policy allows
+/// it to re-enter the ordinary transmission path. Its packet bytes, covered
+/// hash and source interface are deliberately absent from `Debug` output.
+#[must_use = "a retained inbound proof must be released or explicitly discarded"]
+pub struct RetainedInboundProof {
+    packet: TxPacket,
+}
+
+impl RetainedInboundProof {
+    /// Consume this owner into the exact proof packet Rete constructed.
+    pub fn into_packet(self) -> TxPacket {
+        self.packet
+    }
+}
+
+impl core::fmt::Debug for RetainedInboundProof {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("RetainedInboundProof")
+            .field("packet_len", &self.packet.bytes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Move-only proof sidecar bound to one exact semantic event index.
+///
+/// Keeping this owner outside [`ApplicationEvent`] preserves the transport-
+/// neutral event contract. The index is visible for atomic owner validation;
+/// proof bytes, hashes and interface routing remain redacted.
+#[must_use = "an application-event proof sidecar must stay bound to its event"]
+pub struct ApplicationEventProofSidecar {
+    event_index: usize,
+    event_binding: [u8; 32],
+    proof: RetainedInboundProof,
+}
+
+impl ApplicationEventProofSidecar {
+    /// Zero-based index in the accompanying [`NodeActions::events`] vector.
+    pub const fn event_index(&self) -> usize {
+        self.event_index
+    }
+
+    /// Whether this sidecar still names the exact DATA event semantics it was
+    /// created beside.
+    ///
+    /// The private binding prevents a caller from replacing or reordering the
+    /// publicly owned event vector while retaining proof authority. Neither
+    /// payload bytes nor their digest are exposed.
+    pub fn is_bound_to(&self, event_index: usize, event: &ApplicationEvent) -> bool {
+        let ApplicationEvent::DataReceived {
+            destination,
+            payload,
+        } = event
+        else {
+            return false;
+        };
+        self.event_index == event_index
+            && self.event_binding == data_event_binding(destination, payload)
+    }
+
+    /// Consume into the exact event index and sole retained-proof owner.
+    pub fn into_parts(self) -> (usize, RetainedInboundProof) {
+        (self.event_index, self.proof)
+    }
+}
+
+fn data_event_binding(
+    destination: &[u8; rete_core::TRUNCATED_HASH_LEN],
+    payload: &[u8],
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"reticulum-rns-rete retained DATA event binding v1\0");
+    digest.update(destination);
+    digest.update(payload);
+    digest.finalize().into()
+}
+
+impl core::fmt::Debug for ApplicationEventProofSidecar {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("ApplicationEventProofSidecar")
+            .field("event_index", &self.event_index)
+            .field("proof_present", &true)
+            .finish()
+    }
 }
 
 impl TxPacket {
@@ -937,6 +1027,8 @@ fn project_application_event(event: NativeNodeEvent) -> ApplicationEvent {
 pub struct NodeActions {
     /// Exhaustive project-owned events with exact moved payload owners.
     pub events: Vec<ApplicationEvent>,
+    /// Move-only retained proofs bound by exact index to `events`.
+    pub proof_sidecars: Vec<ApplicationEventProofSidecar>,
     /// Packets with their interface target resolved while ingress context is
     /// still available.
     pub packets: Vec<TxPacket>,
@@ -1030,7 +1122,7 @@ pub enum NodeRole {
     Transport,
 }
 
-/// Automatic proof behavior for DATA received at the primary destination.
+/// Direct-proof behavior for DATA received at a local destination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InboundProofPolicy {
     /// Never generate delivery proofs automatically.
@@ -1038,6 +1130,9 @@ pub enum InboundProofPolicy {
     Never,
     /// Generate a delivery proof for every successfully decrypted DATA packet.
     Always,
+    /// Let Rete construct the normal proof, but retain its sole owner on the
+    /// application event until durable application policy releases it.
+    Retain,
 }
 
 impl InboundProofPolicy {
@@ -1045,6 +1140,30 @@ impl InboundProofPolicy {
         match self {
             Self::Never => rete_stack::ProofStrategy::ProveNone,
             Self::Always => rete_stack::ProofStrategy::ProveAll,
+            // `ProveApp` is an inert marker because this owning adapter never
+            // installs NodeHooks. Direct retained ingress temporarily arms the
+            // exact destination as `ProveAll` around one native call.
+            Self::Retain => rete_stack::ProofStrategy::ProveApp,
+        }
+    }
+}
+
+/// A destination cannot accept the requested inbound-proof policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboundProofPolicyError {
+    /// The destination is not registered on this node.
+    DestinationNotRegistered,
+    /// Retained proofs are supported only for inbound encrypted Single DATA.
+    RetainRequiresInboundSingle,
+}
+
+impl core::fmt::Display for InboundProofPolicyError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::DestinationNotRegistered => formatter.write_str("destination is not registered"),
+            Self::RetainRequiresInboundSingle => {
+                formatter.write_str("retained proofs require an inbound Single destination")
+            }
         }
     }
 }
@@ -1082,6 +1201,21 @@ impl Default for EmbeddedNodeConfig {
     }
 }
 
+/// Why a retained direct DATA proof could not be captured atomically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetainedProofInvariant {
+    /// Native ingress did not emit exactly one DATA event for the packet.
+    DataEventCount { actual: usize },
+    /// The sole native DATA event named a different destination.
+    DataEventDestination,
+    /// Native ingress did not emit exactly one source-interface direct proof.
+    ProofActionCount { actual: usize },
+    /// The sole source-interface candidate was not a parseable proof packet.
+    MalformedProof,
+    /// The sole proof did not have the exact normal direct-proof wire shape or hash.
+    MismatchedProof,
+}
+
 /// Why an ingress packet was rejected before or after native processing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IngressDropReason {
@@ -1108,6 +1242,8 @@ pub enum IngressDropReason {
     RelayLinkTableFull { limit: usize },
     /// Rete reported a local Link handshake but did not retain its state.
     LinkStateNotRetained,
+    /// Retained DATA proof construction violated the pinned native contract.
+    RetainedProofInvariant(RetainedProofInvariant),
     /// A valid LINKREQUEST could not receive a unique egress timing token.
     ProtocolTokenExhausted { link_id: LinkId },
     /// A fresh egress timing token could not be bound to the admitted Link.
@@ -1164,6 +1300,9 @@ impl core::fmt::Display for IngressDropReason {
                     f,
                     "Rete emitted Link handshake output without retained state"
                 )
+            }
+            Self::RetainedProofInvariant(invariant) => {
+                write!(f, "retained DATA proof invariant failed: {invariant:?}")
             }
             Self::ProtocolTokenExhausted { link_id } => {
                 write!(f, "protocol timing token exhausted for Link {link_id:02x?}")
@@ -1366,6 +1505,7 @@ pub struct IngressCounters {
     pub owned_link_full: u64,
     pub relay_link_full: u64,
     pub link_state_not_retained: u64,
+    pub retained_proof_invariant: u64,
     pub protocol_token_exhausted: u64,
     pub protocol_token_assignment_failed: u64,
     pub header1_remote_link_request_disabled: u64,
@@ -1624,6 +1764,13 @@ struct IngressPreflight {
     before_duplicate: u64,
     before_invalid: u64,
     metadata: IngressMetadata,
+    retained_proof: Option<RetainedProofExpectation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RetainedProofExpectation {
+    destination: DestHash,
+    packet_hash: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1804,9 +1951,33 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         self.role
     }
 
-    /// Set automatic proof behavior for DATA received at the primary destination.
+    /// Set direct-proof behavior for DATA received at the primary destination.
     pub fn set_inbound_proof_policy(&mut self, policy: InboundProofPolicy) {
-        self.core.set_proof_strategy(policy.into_rete());
+        let primary = self.destination_hash();
+        self.set_destination_inbound_proof_policy(&primary, policy)
+            .expect("the primary destination must remain an inbound Single destination");
+    }
+
+    /// Set direct-proof behavior for DATA received at one local destination.
+    ///
+    /// Retained policy is rejected unless the named destination is an inbound
+    /// encrypted Single destination. Other policies preserve Rete's native
+    /// registered-destination behavior.
+    pub fn set_destination_inbound_proof_policy(
+        &mut self,
+        destination: &DestHash,
+        policy: InboundProofPolicy,
+    ) -> Result<(), InboundProofPolicyError> {
+        let Some(native) = self.core.get_destination_mut(destination) else {
+            return Err(InboundProofPolicyError::DestinationNotRegistered);
+        };
+        if policy == InboundProofPolicy::Retain
+            && (native.direction != Direction::In || native.dest_type != DestinationType::Single)
+        {
+            return Err(InboundProofPolicyError::RetainRequiresInboundSingle);
+        }
+        native.set_proof_strategy(policy.into_rete());
+        Ok(())
     }
 
     /// Register another destination, subject to the product-owned quota.
@@ -1978,9 +2149,11 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             Ok(preflight) => preflight,
             Err(report) => return report,
         };
+        self.arm_retained_proof(&preflight);
         let native = self
             .core
             .handle_ingest_at(raw, now, link_now, interface.0, rng);
+        self.restore_retained_proof(&preflight);
         self.finish_ingest(
             native,
             preflight,
@@ -2039,14 +2212,17 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             Err(report) => return Ok(report),
         };
         let mut native_sink = NativeReceiptSink::new(sink);
-        let native = match self.core.handle_ingest_with_receipt_sink_at(
+        self.arm_retained_proof(&preflight);
+        let native = self.core.handle_ingest_with_receipt_sink_at(
             raw,
             now,
             link_now,
             interface.0,
             rng,
             &mut native_sink,
-        ) {
+        );
+        self.restore_retained_proof(&preflight);
+        let native = match native {
             Ok(native) => native,
             Err(rete_stack::ReceiptSinkFull) => {
                 self.receipt_terminals.reservation_backpressure = self
@@ -2059,6 +2235,10 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         Ok(self.finish_ingest(native, preflight, interface, native_sink.committed))
     }
 
+    #[allow(
+        clippy::result_large_err,
+        reason = "the synchronous owning failure must return the exact allocation-backed ingress report"
+    )]
     fn preflight_ingest(
         &mut self,
         raw: &[u8],
@@ -2115,7 +2295,44 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             before_duplicate: self.core.transport.stats().packets_dropped_dedup,
             before_invalid: self.core.transport.stats().packets_dropped_invalid,
             metadata,
+            retained_proof: (packet.header_type == HeaderType::Header1
+                && packet.packet_type == PacketType::Data
+                && packet.dest_type == DestType::Single)
+                .then(|| DestHash::from_slice(packet.destination_hash))
+                .filter(|destination| {
+                    self.core
+                        .get_destination(destination)
+                        .is_some_and(|native| {
+                            native.direction == Direction::In
+                                && native.dest_type == DestinationType::Single
+                                && native.proof_strategy == rete_stack::ProofStrategy::ProveApp
+                        })
+                })
+                .map(|destination| RetainedProofExpectation {
+                    destination,
+                    packet_hash: packet.compute_hash(),
+                }),
         })
+    }
+
+    fn arm_retained_proof(&mut self, preflight: &IngressPreflight) {
+        let Some(expected) = preflight.retained_proof else {
+            return;
+        };
+        self.core
+            .get_destination_mut(&expected.destination)
+            .expect("preflight retained destination must remain registered")
+            .set_proof_strategy(rete_stack::ProofStrategy::ProveAll);
+    }
+
+    fn restore_retained_proof(&mut self, preflight: &IngressPreflight) {
+        let Some(expected) = preflight.retained_proof else {
+            return;
+        };
+        self.core
+            .get_destination_mut(&expected.destination)
+            .expect("armed retained destination must remain registered")
+            .set_proof_strategy(rete_stack::ProofStrategy::ProveApp);
     }
 
     fn finish_ingest(
@@ -2196,12 +2413,30 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                 .saturating_add((before_packets - native.packets.len()) as u64);
         }
 
-        self.ingress.admitted = self.ingress.admitted.saturating_add(1);
         let after = self.core.transport.stats();
-        let disposition = if after.packets_dropped_dedup > preflight.before_duplicate {
+        let native_duplicate = after.packets_dropped_dedup > preflight.before_duplicate;
+        let native_invalid = after.packets_dropped_invalid > preflight.before_invalid;
+        let retained_proof = if native_duplicate || native_invalid {
+            suppress_retained_inbound_proof_actions(&mut native, preflight.retained_proof);
+            None
+        } else {
+            match intercept_retained_inbound_proof(&mut native, preflight.retained_proof, interface)
+            {
+                Ok(proof) => proof,
+                Err(invariant) => {
+                    return self.reject(
+                        IngressDropReason::RetainedProofInvariant(invariant),
+                        preflight.metadata,
+                    );
+                }
+            }
+        };
+
+        self.ingress.admitted = self.ingress.admitted.saturating_add(1);
+        let disposition = if native_duplicate {
             self.ingress.native_duplicate = self.ingress.native_duplicate.saturating_add(1);
             IngressDisposition::NativeDuplicate
-        } else if after.packets_dropped_invalid > preflight.before_invalid {
+        } else if native_invalid {
             self.ingress.native_invalid = self.ingress.native_invalid.saturating_add(1);
             IngressDisposition::NativeInvalid
         } else if native.events.is_empty()
@@ -2271,7 +2506,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         IngressReport {
             disposition,
             metadata,
-            actions: resolve_ingest_actions(native, interface),
+            actions: resolve_ingest_actions(native, interface, retained_proof),
         }
     }
 
@@ -2446,6 +2681,10 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                 self.ingress.relay_link_full = self.ingress.relay_link_full.saturating_add(1);
             }
             IngressDropReason::LinkStateNotRetained => {}
+            IngressDropReason::RetainedProofInvariant(_) => {
+                self.ingress.retained_proof_invariant =
+                    self.ingress.retained_proof_invariant.saturating_add(1);
+            }
             IngressDropReason::ProtocolTokenExhausted { .. } => {
                 self.ingress.protocol_token_exhausted =
                     self.ingress.protocol_token_exhausted.saturating_add(1);
@@ -2763,6 +3002,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         let (packet, event) = self.core.close_link(link_id, rng);
         NodeActions {
             events: event.into_iter().map(project_application_event).collect(),
+            proof_sidecars: Vec::new(),
             packets: packet.into_iter().map(resolve_origin_packet).collect(),
             unroutable_packets: 0,
         }
@@ -2890,13 +3130,145 @@ const fn endpoint_retains_ingress_packet(routing: PacketRouting) -> bool {
     }
 }
 
-fn resolve_ingest_actions(native: IngestOutcome, source: InterfaceId) -> NodeActions {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetainedProofCandidate {
+    Unrelated,
+    Malformed,
+    Mismatched,
+    Exact,
+}
+
+fn classify_retained_proof_candidate(
+    outbound: &OutboundPacket,
+    expected: RetainedProofExpectation,
+) -> RetainedProofCandidate {
+    if outbound.routing != PacketRouting::SourceInterface {
+        return RetainedProofCandidate::Unrelated;
+    }
+    let packet = match Packet::parse(&outbound.data) {
+        Ok(packet) => packet,
+        // A malformed source-relative action produced by local DATA handling
+        // cannot be proven unrelated, so retaining mode suppresses it.
+        Err(_) => return RetainedProofCandidate::Malformed,
+    };
+    if packet.packet_type != PacketType::Proof || packet.context != CONTEXT_NONE {
+        return RetainedProofCandidate::Unrelated;
+    }
+
+    let destination_matches =
+        packet.destination_hash == &expected.packet_hash[..rete_core::TRUNCATED_HASH_LEN];
+    let covered_hash_matches = packet
+        .payload
+        .get(..32)
+        .is_some_and(|covered| covered == expected.packet_hash);
+    if packet.header_type == HeaderType::Header1
+        && packet.dest_type == DestType::Single
+        && destination_matches
+        && packet.payload.len() == 96
+        && covered_hash_matches
+        && outbound.protocol_token().is_none()
+    {
+        RetainedProofCandidate::Exact
+    } else {
+        RetainedProofCandidate::Mismatched
+    }
+}
+
+fn suppress_retained_inbound_proof_actions(
+    native: &mut IngestOutcome,
+    expected: Option<RetainedProofExpectation>,
+) {
+    let Some(expected) = expected else {
+        return;
+    };
+    native.packets.retain(|packet| {
+        classify_retained_proof_candidate(packet, expected) == RetainedProofCandidate::Unrelated
+    });
+}
+
+fn intercept_retained_inbound_proof(
+    native: &mut IngestOutcome,
+    expected: Option<RetainedProofExpectation>,
+    source: InterfaceId,
+) -> Result<Option<ApplicationEventProofSidecar>, RetainedProofInvariant> {
+    let Some(expected) = expected else {
+        return Ok(None);
+    };
+    let mut data_event_count = 0_usize;
+    let mut matching_event = None;
+    for (index, event) in native.events.iter().enumerate() {
+        if let NativeNodeEvent::DataReceived { dest_hash, payload } = event {
+            data_event_count = data_event_count.saturating_add(1);
+            if *dest_hash == expected.destination {
+                matching_event = Some((
+                    index,
+                    data_event_binding(dest_hash.as_bytes(), payload.as_slice()),
+                ));
+            }
+        }
+    }
+    if data_event_count != 1 {
+        return Err(RetainedProofInvariant::DataEventCount {
+            actual: data_event_count,
+        });
+    }
+    let Some((event_index, event_binding)) = matching_event else {
+        return Err(RetainedProofInvariant::DataEventDestination);
+    };
+
+    let mut candidates = Vec::new();
+    let mut unrelated = Vec::with_capacity(native.packets.len());
+    for packet in core::mem::take(&mut native.packets) {
+        let classification = classify_retained_proof_candidate(&packet, expected);
+        match classification {
+            RetainedProofCandidate::Unrelated => unrelated.push(packet),
+            RetainedProofCandidate::Malformed
+            | RetainedProofCandidate::Mismatched
+            | RetainedProofCandidate::Exact => {
+                candidates.push((packet, classification));
+            }
+        }
+    }
+    native.packets = unrelated;
+
+    if candidates.len() != 1 {
+        return Err(RetainedProofInvariant::ProofActionCount {
+            actual: candidates.len(),
+        });
+    }
+    let (packet, classification) = candidates.pop().expect("one candidate was counted");
+    match classification {
+        RetainedProofCandidate::Malformed => {
+            return Err(RetainedProofInvariant::MalformedProof);
+        }
+        RetainedProofCandidate::Mismatched => {
+            return Err(RetainedProofInvariant::MismatchedProof);
+        }
+        RetainedProofCandidate::Exact => {}
+        RetainedProofCandidate::Unrelated => unreachable!("unrelated packets were not retained"),
+    }
+
+    Ok(Some(ApplicationEventProofSidecar {
+        event_index,
+        event_binding,
+        proof: RetainedInboundProof {
+            packet: resolve_packet(packet, source),
+        },
+    }))
+}
+
+fn resolve_ingest_actions(
+    native: IngestOutcome,
+    source: InterfaceId,
+    retained_proof: Option<ApplicationEventProofSidecar>,
+) -> NodeActions {
     NodeActions {
         events: native
             .events
             .into_iter()
             .map(project_application_event)
             .collect(),
+        proof_sidecars: retained_proof.into_iter().collect(),
         packets: native
             .packets
             .into_iter()
@@ -2952,6 +3324,7 @@ fn resolve_tick_actions(native: IngestOutcome) -> NodeActions {
             .into_iter()
             .map(project_application_event)
             .collect(),
+        proof_sidecars: Vec::new(),
         packets,
         unroutable_packets,
     }
@@ -4689,6 +5062,7 @@ mod tests {
                 before_duplicate: 0,
                 before_invalid: 0,
                 metadata: IngressMetadata::default(),
+                retained_proof: None,
             },
             InterfaceId(1),
             TerminalCommitCounts::default(),
@@ -5250,6 +5624,511 @@ mod tests {
         assert!(!delivered.metadata.counts_saturated());
         assert_eq!(sink.terminals, [ReceiptTerminal::Delivered(expected)]);
         assert_eq!(sender.metrics().capacity.receipts.used, 0);
+    }
+
+    #[test]
+    fn retained_inbound_proof_is_exact_immediate_proof_on_the_source_interface() {
+        let mut sender = node(94);
+        let mut immediate = node(95);
+        let mut retained = node(95);
+        immediate.set_inbound_proof_policy(InboundProofPolicy::Always);
+        retained.set_inbound_proof_policy(InboundProofPolicy::Retain);
+        sender
+            .register_peer(&identity(95), "reticulum", &["embedded"], 100)
+            .unwrap();
+
+        let mut rng = CounterRng::default();
+        let mut data = [0u8; RNS_MTU];
+        let prepared = sender
+            .prepare_data_into(
+                &immediate.destination_hash(),
+                b"retain until durable",
+                101,
+                &mut rng,
+                &mut data,
+            )
+            .unwrap();
+        let raw = &data[..usize::from(prepared.packet_len())];
+
+        let mut immediate_report =
+            immediate.ingest(raw, 101, InterfaceId(7), &mut CounterRng::default());
+        assert_eq!(immediate_report.metadata.emitted_packets(), 1);
+        assert_eq!(immediate_report.metadata.generated_proof_actions(), 1);
+        let immediate_proof = immediate_report.actions.packets.pop().unwrap();
+        assert_eq!(immediate_proof.target(), TxTarget::Only(InterfaceId(7)));
+
+        let mut retained_report =
+            retained.ingest(raw, 101, InterfaceId(23), &mut CounterRng::default());
+        assert_eq!(retained_report.disposition, IngressDisposition::Processed);
+        assert_eq!(retained_report.metadata.emitted_packets(), 0);
+        assert_eq!(retained_report.metadata.generated_proof_actions(), 0);
+        assert!(retained_report.actions.packets.is_empty());
+        assert_eq!(retained_report.actions.proof_sidecars.len(), 1);
+        let event = retained_report.actions.events.pop().unwrap();
+        let event_debug = format!("{event:?}");
+        assert!(!event_debug.contains("InterfaceId(23)"));
+
+        let InboundDataProjection::Data(data) = project_inbound_data(event) else {
+            panic!("retained destination DATA must remain projectable")
+        };
+        let (_, payload) = data.into_parts();
+        assert_eq!(payload, b"retain until durable");
+        let sidecar = retained_report.actions.proof_sidecars.pop().unwrap();
+        assert_eq!(sidecar.event_index(), 0);
+        let sidecar_debug = format!("{sidecar:?}");
+        assert_eq!(
+            sidecar_debug,
+            "ApplicationEventProofSidecar { event_index: 0, proof_present: true }"
+        );
+        assert!(!sidecar_debug.contains("InterfaceId"));
+        assert!(!sidecar_debug.contains('['));
+        let (event_index, owner) = sidecar.into_parts();
+        assert_eq!(event_index, 0);
+
+        let released = owner.into_packet();
+        assert_eq!(released.target(), TxTarget::Only(InterfaceId(23)));
+        assert_eq!(released.protocol_token(), None);
+        assert_eq!(released.bytes(), immediate_proof.bytes());
+        assert_eq!(
+            retained
+                .core
+                .get_destination(&retained.destination_hash())
+                .unwrap()
+                .proof_strategy,
+            rete_stack::ProofStrategy::ProveApp
+        );
+    }
+
+    #[test]
+    fn retained_policy_is_isolated_to_the_selected_additional_destination() {
+        let receiver_identity = identity(96);
+        let mut receiver = TestNode::new(
+            identity(96),
+            "reticulum",
+            &["primary"],
+            EmbeddedNodeConfig::endpoint(),
+        )
+        .unwrap();
+        let primary = receiver.destination_hash();
+        let additional = receiver
+            .register_destination(
+                "lxmf",
+                &["delivery"],
+                DestinationType::Single,
+                Direction::In,
+            )
+            .unwrap();
+        receiver.set_inbound_proof_policy(InboundProofPolicy::Always);
+        receiver
+            .set_destination_inbound_proof_policy(&additional, InboundProofPolicy::Retain)
+            .unwrap();
+        assert_eq!(
+            receiver.set_destination_inbound_proof_policy(
+                &DestHash::from([0xee; rete_core::TRUNCATED_HASH_LEN]),
+                InboundProofPolicy::Retain,
+            ),
+            Err(InboundProofPolicyError::DestinationNotRegistered)
+        );
+
+        let mut sender = node(97);
+        sender
+            .register_peer(&receiver_identity, "reticulum", &["primary"], 100)
+            .unwrap();
+        sender
+            .register_peer(&receiver_identity, "lxmf", &["delivery"], 100)
+            .unwrap();
+        let mut rng = CounterRng::default();
+        let mut raw = [0u8; RNS_MTU];
+
+        let prepared = sender
+            .prepare_data_into(&primary, b"primary immediate", 101, &mut rng, &mut raw)
+            .unwrap();
+        let primary_report = receiver.ingest(
+            &raw[..usize::from(prepared.packet_len())],
+            101,
+            InterfaceId(8),
+            &mut rng,
+        );
+        assert_eq!(primary_report.actions.packets.len(), 1);
+        assert!(primary_report.actions.proof_sidecars.is_empty());
+        assert!(matches!(
+            primary_report.actions.events.as_slice(),
+            [ApplicationEvent::DataReceived { destination, .. }]
+                if *destination == *primary.as_bytes()
+        ));
+
+        let prepared = sender
+            .prepare_data_into(&additional, b"additional retained", 102, &mut rng, &mut raw)
+            .unwrap();
+        let mut additional_report = receiver.ingest(
+            &raw[..usize::from(prepared.packet_len())],
+            102,
+            InterfaceId(9),
+            &mut rng,
+        );
+        assert!(additional_report.actions.packets.is_empty());
+        let [ApplicationEvent::DataReceived { destination, .. }] =
+            additional_report.actions.events.as_slice()
+        else {
+            panic!("the selected additional destination must retain its proof")
+        };
+        assert_eq!(*destination, *additional.as_bytes());
+        let sidecar = additional_report.actions.proof_sidecars.pop().unwrap();
+        assert_eq!(sidecar.event_index(), 0);
+        assert_eq!(
+            sidecar.into_parts().1.into_packet().target(),
+            TxTarget::Only(InterfaceId(9))
+        );
+    }
+
+    #[test]
+    fn retained_policy_accepts_only_registered_inbound_single_destinations() {
+        let mut receiver = node(99);
+        let plain = receiver
+            .register_destination(
+                "reticulum",
+                &["plain"],
+                DestinationType::Plain,
+                Direction::In,
+            )
+            .unwrap();
+        let outbound = receiver
+            .register_destination(
+                "reticulum",
+                &["outbound"],
+                DestinationType::Single,
+                Direction::Out,
+            )
+            .unwrap();
+
+        for destination in [plain, outbound] {
+            assert_eq!(
+                receiver.set_destination_inbound_proof_policy(
+                    &destination,
+                    InboundProofPolicy::Retain,
+                ),
+                Err(InboundProofPolicyError::RetainRequiresInboundSingle)
+            );
+        }
+        assert_eq!(
+            receiver.set_destination_inbound_proof_policy(
+                &DestHash::from([0xee; rete_core::TRUNCATED_HASH_LEN]),
+                InboundProofPolicy::Retain,
+            ),
+            Err(InboundProofPolicyError::DestinationNotRegistered)
+        );
+        assert_eq!(
+            receiver
+                .core
+                .get_destination(&plain)
+                .unwrap()
+                .proof_strategy,
+            rete_stack::ProofStrategy::ProveNone
+        );
+        assert_eq!(
+            receiver
+                .core
+                .get_destination(&outbound)
+                .unwrap()
+                .proof_strategy,
+            rete_stack::ProofStrategy::ProveNone
+        );
+    }
+
+    #[test]
+    fn retained_preflight_is_only_direct_header1_single_data_and_marker_is_bounded() {
+        let mut receiver = node(100);
+        receiver.set_inbound_proof_policy(InboundProofPolicy::Retain);
+        let destination = receiver.destination_hash();
+        assert_eq!(
+            receiver
+                .core
+                .get_destination(&destination)
+                .unwrap()
+                .proof_strategy,
+            rete_stack::ProofStrategy::ProveApp
+        );
+
+        let mut raw = [0_u8; RNS_MTU];
+        let direct_len = PacketBuilder::new(&mut raw)
+            .packet_type(PacketType::Data)
+            .dest_type(DestType::Single)
+            .destination_hash(destination.as_ref())
+            .context(CONTEXT_NONE)
+            .payload(b"direct shape")
+            .build()
+            .unwrap();
+        let direct = receiver
+            .preflight_ingest(&raw[..direct_len], InterfaceId(1))
+            .unwrap();
+        assert!(direct.retained_proof.is_some());
+
+        let mut raw = [0_u8; RNS_MTU];
+        let header2_len = PacketBuilder::new(&mut raw)
+            .packet_type(PacketType::Data)
+            .dest_type(DestType::Single)
+            .destination_hash(destination.as_ref())
+            .context(CONTEXT_NONE)
+            .payload(b"relayed shape")
+            .via(Some(receiver.identity_hash().as_bytes()))
+            .build()
+            .unwrap();
+        let header2 = receiver
+            .preflight_ingest(&raw[..header2_len], InterfaceId(1))
+            .unwrap();
+        assert!(header2.retained_proof.is_none());
+
+        let mut raw = [0_u8; RNS_MTU];
+        let plain_len = PacketBuilder::new(&mut raw)
+            .packet_type(PacketType::Data)
+            .dest_type(DestType::Plain)
+            .destination_hash(destination.as_ref())
+            .context(CONTEXT_NONE)
+            .payload(b"wrong destination type")
+            .build()
+            .unwrap();
+        let plain = receiver
+            .preflight_ingest(&raw[..plain_len], InterfaceId(1))
+            .unwrap();
+        assert!(plain.retained_proof.is_none());
+    }
+
+    #[test]
+    fn retained_proof_interception_fails_closed_on_missing_malformed_or_multiple_actions() {
+        type NativeStorage = rete_transport::HeaplessStorage<4, 2, 8, 2>;
+        let packet_hash = [0xa5; 32];
+        let expected = RetainedProofExpectation {
+            destination: DestHash::from([0x42; rete_core::TRUNCATED_HASH_LEN]),
+            packet_hash,
+        };
+        let wrong_hash = [0x5a; 32];
+        let event = || NativeNodeEvent::DataReceived {
+            dest_hash: expected.destination,
+            payload: b"accepted plaintext".to_vec(),
+        };
+        let exact = || {
+            OutboundPacket::new(
+                rete_transport::Transport::<NativeStorage>::build_proof_packet(
+                    &identity(98),
+                    &packet_hash,
+                )
+                .unwrap(),
+                PacketRouting::SourceInterface,
+            )
+        };
+
+        let mut suppressed_duplicate_or_invalid = IngestOutcome {
+            events: Vec::new(),
+            packets: vec![
+                exact(),
+                OutboundPacket::new(
+                    rete_transport::Transport::<NativeStorage>::build_proof_packet(
+                        &identity(98),
+                        &wrong_hash,
+                    )
+                    .unwrap(),
+                    PacketRouting::SourceInterface,
+                ),
+                OutboundPacket::new(vec![0xff], PacketRouting::SourceInterface),
+                OutboundPacket::new(
+                    rete_transport::Transport::<NativeStorage>::build_proof_packet(
+                        &identity(98),
+                        &packet_hash,
+                    )
+                    .unwrap(),
+                    PacketRouting::All,
+                ),
+            ],
+            rejection: None,
+        };
+        suppress_retained_inbound_proof_actions(
+            &mut suppressed_duplicate_or_invalid,
+            Some(expected),
+        );
+        assert_eq!(suppressed_duplicate_or_invalid.packets.len(), 1);
+        assert_eq!(
+            suppressed_duplicate_or_invalid.packets[0].routing,
+            PacketRouting::All
+        );
+
+        let mut no_data_event = IngestOutcome {
+            events: Vec::new(),
+            packets: vec![exact()],
+            rejection: None,
+        };
+        assert_eq!(
+            intercept_retained_inbound_proof(&mut no_data_event, Some(expected), InterfaceId(0),)
+                .unwrap_err(),
+            RetainedProofInvariant::DataEventCount { actual: 0 }
+        );
+
+        let mut multiple_data_events = IngestOutcome {
+            events: vec![event(), event()],
+            packets: vec![exact()],
+            rejection: None,
+        };
+        assert_eq!(
+            intercept_retained_inbound_proof(
+                &mut multiple_data_events,
+                Some(expected),
+                InterfaceId(0),
+            )
+            .unwrap_err(),
+            RetainedProofInvariant::DataEventCount { actual: 2 }
+        );
+
+        let mut wrong_data_event = IngestOutcome {
+            events: vec![NativeNodeEvent::DataReceived {
+                dest_hash: DestHash::from([0x24; rete_core::TRUNCATED_HASH_LEN]),
+                payload: b"wrong destination".to_vec(),
+            }],
+            packets: vec![exact()],
+            rejection: None,
+        };
+        assert_eq!(
+            intercept_retained_inbound_proof(
+                &mut wrong_data_event,
+                Some(expected),
+                InterfaceId(0),
+            )
+            .unwrap_err(),
+            RetainedProofInvariant::DataEventDestination
+        );
+
+        let mut missing = IngestOutcome {
+            events: vec![event()],
+            packets: Vec::new(),
+            rejection: None,
+        };
+        assert_eq!(
+            intercept_retained_inbound_proof(&mut missing, Some(expected), InterfaceId(1))
+                .unwrap_err(),
+            RetainedProofInvariant::ProofActionCount { actual: 0 }
+        );
+        assert!(missing.packets.is_empty());
+
+        let mut malformed = IngestOutcome {
+            events: vec![event()],
+            packets: vec![OutboundPacket::new(
+                vec![0xff],
+                PacketRouting::SourceInterface,
+            )],
+            rejection: None,
+        };
+        assert_eq!(
+            intercept_retained_inbound_proof(&mut malformed, Some(expected), InterfaceId(2))
+                .unwrap_err(),
+            RetainedProofInvariant::MalformedProof
+        );
+        assert!(malformed.packets.is_empty());
+
+        let mut multiple = IngestOutcome {
+            events: vec![event()],
+            packets: vec![exact(), exact()],
+            rejection: None,
+        };
+        assert_eq!(
+            intercept_retained_inbound_proof(&mut multiple, Some(expected), InterfaceId(3))
+                .unwrap_err(),
+            RetainedProofInvariant::ProofActionCount { actual: 2 }
+        );
+        assert!(multiple.packets.is_empty());
+
+        let mut wrong = IngestOutcome {
+            events: vec![event()],
+            packets: vec![OutboundPacket::new(
+                rete_transport::Transport::<NativeStorage>::build_proof_packet(
+                    &identity(98),
+                    &wrong_hash,
+                )
+                .unwrap(),
+                PacketRouting::SourceInterface,
+            )],
+            rejection: None,
+        };
+        assert_eq!(
+            intercept_retained_inbound_proof(&mut wrong, Some(expected), InterfaceId(4))
+                .unwrap_err(),
+            RetainedProofInvariant::MismatchedProof
+        );
+        assert!(wrong.packets.is_empty());
+
+        let mut mixed = IngestOutcome {
+            events: vec![event()],
+            packets: vec![
+                exact(),
+                OutboundPacket::new(
+                    rete_transport::Transport::<NativeStorage>::build_proof_packet(
+                        &identity(98),
+                        &wrong_hash,
+                    )
+                    .unwrap(),
+                    PacketRouting::SourceInterface,
+                ),
+            ],
+            rejection: None,
+        };
+        assert_eq!(
+            intercept_retained_inbound_proof(&mut mixed, Some(expected), InterfaceId(5))
+                .unwrap_err(),
+            RetainedProofInvariant::ProofActionCount { actual: 2 }
+        );
+        assert!(mixed.packets.is_empty());
+
+        let mut indexed = IngestOutcome {
+            events: vec![
+                NativeNodeEvent::Tick {
+                    expired_paths: 0,
+                    closed_links: 0,
+                },
+                event(),
+            ],
+            packets: vec![exact()],
+            rejection: None,
+        };
+        let sidecar =
+            intercept_retained_inbound_proof(&mut indexed, Some(expected), InterfaceId(6))
+                .unwrap()
+                .unwrap();
+        assert_eq!(sidecar.event_index(), 1);
+        assert!(indexed.packets.is_empty());
+    }
+
+    #[test]
+    fn retained_proof_invariant_rejection_publishes_no_event_packet_or_sidecar() {
+        let mut receiver = node(101);
+        let destination = receiver.destination_hash();
+        let report = receiver.finish_ingest(
+            IngestOutcome {
+                events: vec![NativeNodeEvent::DataReceived {
+                    dest_hash: destination,
+                    payload: b"must not publish".to_vec(),
+                }],
+                packets: Vec::new(),
+                rejection: None,
+            },
+            IngressPreflight {
+                before_duplicate: receiver.core.transport.stats().packets_dropped_dedup,
+                before_invalid: receiver.core.transport.stats().packets_dropped_invalid,
+                metadata: IngressMetadata::default(),
+                retained_proof: Some(RetainedProofExpectation {
+                    destination,
+                    packet_hash: [0x31; 32],
+                }),
+            },
+            InterfaceId(7),
+            TerminalCommitCounts::default(),
+        );
+        assert_eq!(
+            report.disposition,
+            IngressDisposition::Rejected(IngressDropReason::RetainedProofInvariant(
+                RetainedProofInvariant::ProofActionCount { actual: 0 }
+            ))
+        );
+        assert!(report.actions.events.is_empty());
+        assert!(report.actions.packets.is_empty());
+        assert!(report.actions.proof_sidecars.is_empty());
+        assert_eq!(receiver.metrics().ingress.retained_proof_invariant, 1);
     }
 
     #[test]

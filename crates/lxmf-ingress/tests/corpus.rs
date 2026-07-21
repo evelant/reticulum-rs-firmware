@@ -562,6 +562,7 @@ fn application_event_owner_retains_event_until_caller_disposes_lease() {
     owner
         .try_offer_actions(NodeActions {
             events: vec![opportunistic_event(fixture)],
+            proof_sidecars: vec![],
             packets: vec![],
             unroutable_packets: 0,
         })

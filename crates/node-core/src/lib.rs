@@ -44,11 +44,11 @@ mod application_events;
 mod ordinary_actions;
 
 pub use application_events::{
-    ApplicationEventCapacitySnapshot, ApplicationEventDiscardReason, ApplicationEventGeneration,
-    ApplicationEventId, ApplicationEventLease, ApplicationEventOfferError,
-    ApplicationEventOfferFailure, ApplicationEventOfferReport, ApplicationEventOwner,
-    ApplicationEventOwnerCounters, ApplicationEventQuarantineReason, ApplicationEventSequence,
-    ApplicationEventSlot, ApplicationEventSlotId,
+    AcknowledgedApplicationEvent, ApplicationEventCapacitySnapshot, ApplicationEventDiscardReason,
+    ApplicationEventGeneration, ApplicationEventId, ApplicationEventLease,
+    ApplicationEventOfferError, ApplicationEventOfferFailure, ApplicationEventOfferReport,
+    ApplicationEventOwner, ApplicationEventOwnerCounters, ApplicationEventQuarantineReason,
+    ApplicationEventSequence, ApplicationEventSlot, ApplicationEventSlotId,
 };
 pub use ordinary_actions::{
     OrdinaryActionAdmissionError, OrdinaryActionAdmissionFailure, OrdinaryActionAdmissionRequest,

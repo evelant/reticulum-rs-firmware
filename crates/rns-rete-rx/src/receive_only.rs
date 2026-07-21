@@ -533,6 +533,7 @@ fn suppress_actions(actions: NodeActions) -> SuppressedActions {
     // Rete owner must fail compilation until this safety boundary is reviewed.
     let NodeActions {
         events,
+        proof_sidecars,
         packets,
         unroutable_packets,
     } = actions;
@@ -544,6 +545,7 @@ fn suppress_actions(actions: NodeActions) -> SuppressedActions {
 
     // Destroy every allocation-backed action before returning scalar counts.
     drop(events);
+    drop(proof_sidecars);
     drop(packets);
     suppressed
 }
