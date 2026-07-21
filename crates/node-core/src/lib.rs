@@ -27,7 +27,8 @@ use reticulum_rns_rete::{
     DestinationRegistrationError as RnsDestinationRegistrationError,
     DestinationType as RnsDestinationType, Direction as RnsDirection, EmbeddedNode as RnsNode,
     EmbeddedNodeConfig as RnsNodeConfig, Identity as RnsIdentity,
-    InboundProofPolicy as RnsInboundProofPolicy, InterfaceId as RnsInterfaceId,
+    InboundProofPolicy as RnsInboundProofPolicy,
+    InboundProofPolicyError as RnsInboundProofPolicyError, InterfaceId as RnsInterfaceId,
     NodeRole as RnsNodeRole, PrepareDataError as RnsPrepareDataError,
     PreparedData as RnsPreparedData, RNS_MTU, ReceiptCandidate, ReceiptKind,
     ReceiptReservationUnavailable, ReceiptTerminal, ReceiptTerminalReservation,
@@ -487,8 +488,7 @@ pub enum NodeRole {
     Transport,
 }
 
-/// Automatic delivery-proof behavior for DATA received at the primary local
-/// destination.
+/// Automatic delivery-proof behavior for DATA received at a local destination.
 ///
 /// The default is fail-quiet: inbound DATA is delivered to the application but
 /// does not cause an automatic transmission. Firmware must opt in explicitly
@@ -500,6 +500,9 @@ pub enum InboundProofPolicy {
     Never,
     /// Generate a delivery proof for every successfully decrypted DATA packet.
     Always,
+    /// Retain the generated proof with its application event until durable
+    /// application policy explicitly releases it.
+    Retain,
 }
 
 impl InboundProofPolicy {
@@ -507,6 +510,7 @@ impl InboundProofPolicy {
         match self {
             Self::Never => RnsInboundProofPolicy::Never,
             Self::Always => RnsInboundProofPolicy::Always,
+            Self::Retain => RnsInboundProofPolicy::Retain,
         }
     }
 }
@@ -568,6 +572,26 @@ impl From<RnsDestinationRegistrationError> for LocalDestinationRegistrationError
         match error {
             RnsDestinationRegistrationError::LimitReached { limit } => Self::LimitReached { limit },
             RnsDestinationRegistrationError::Rete(_) => Self::InvalidRnsConfiguration,
+        }
+    }
+}
+
+/// Failure to configure delivery-proof behavior for one local destination.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalDestinationProofPolicyError {
+    /// The destination is not registered on this node.
+    DestinationNotRegistered,
+    /// Retained proofs require an inbound encrypted Single destination.
+    RetainRequiresInboundSingle,
+}
+
+impl From<RnsInboundProofPolicyError> for LocalDestinationProofPolicyError {
+    fn from(error: RnsInboundProofPolicyError) -> Self {
+        match error {
+            RnsInboundProofPolicyError::DestinationNotRegistered => Self::DestinationNotRegistered,
+            RnsInboundProofPolicyError::RetainRequiresInboundSingle => {
+                Self::RetainRequiresInboundSingle
+            }
         }
     }
 }
@@ -2447,6 +2471,25 @@ impl<
         self.rns.set_inbound_proof_policy(policy.into_rns());
     }
 
+    /// Configure automatic delivery proofs for DATA received at one local
+    /// destination.
+    ///
+    /// Retained proofs remain attached to their exact application event until
+    /// an [`ApplicationEventOwner`] moves them through a [`DelayedProofOwner`].
+    /// The named destination must already be registered on this node.
+    pub fn set_destination_inbound_proof_policy(
+        &mut self,
+        destination: &DestinationHash,
+        policy: InboundProofPolicy,
+    ) -> Result<(), LocalDestinationProofPolicyError> {
+        self.rns
+            .set_destination_inbound_proof_policy(
+                &RnsDestinationHash::from(*destination.as_bytes()),
+                policy.into_rns(),
+            )
+            .map_err(LocalDestinationProofPolicyError::from)
+    }
+
     /// Admit one signed local announce into the bounded protocol queue.
     ///
     /// `app_data` is copied into protocol-owned pending-announce storage. The
@@ -4049,15 +4092,41 @@ mod tests {
         interface: PacketInterfaceId,
         rng: &mut CounterRng,
     ) -> NodeActions {
+        let destination = receiver.destination_hash();
+        deliver_prepared_to(
+            sender,
+            receiver,
+            buffer,
+            destination,
+            plaintext,
+            now,
+            interface,
+            InterfaceSet::from_bits(u64::MAX),
+            rng,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn deliver_prepared_to<const PATHS: usize, const BUFFERS: usize>(
+        sender: &mut TestNode<PATHS, BUFFERS>,
+        receiver: &mut TestNode<PATHS, BUFFERS>,
+        buffer: &mut TxPacketBuffer,
+        destination: DestinationHash,
+        plaintext: &[u8],
+        now: u64,
+        interface: PacketInterfaceId,
+        enabled_interfaces: InterfaceSet,
+        rng: &mut CounterRng,
+    ) -> NodeActions {
         let job = prepare_with_interfaces(
             sender,
             buffer,
-            receiver.destination_hash(),
+            destination,
             plaintext,
             now,
             now * 1_000,
             now * 1_000 + 500,
-            InterfaceSet::from_bits(u64::MAX),
+            enabled_interfaces,
             rng,
         );
         let packet_len = usize::from(job.packet_len());
@@ -4324,6 +4393,124 @@ mod tests {
             &mut rng,
         );
         assert!(disabled_actions.packets.is_empty());
+    }
+
+    #[test]
+    fn per_destination_retained_proof_moves_through_portable_owners_before_release() {
+        let mut sender = node::<8, 1>(83, "sender");
+        let mut receiver = node::<8, 1>(84, "primary");
+        let primary = receiver.destination_hash();
+        let delivery = receiver
+            .register_inbound_single_destination("lxmf", &["delivery"])
+            .unwrap();
+        receiver.set_inbound_proof_policy(InboundProofPolicy::Always);
+        receiver
+            .set_destination_inbound_proof_policy(&delivery, InboundProofPolicy::Retain)
+            .unwrap();
+
+        assert_eq!(
+            receiver.set_destination_inbound_proof_policy(
+                &DestinationHash::new([0xee; 16]),
+                InboundProofPolicy::Retain,
+            ),
+            Err(LocalDestinationProofPolicyError::DestinationNotRegistered)
+        );
+        assert_eq!(
+            LocalDestinationProofPolicyError::from(
+                RnsInboundProofPolicyError::RetainRequiresInboundSingle,
+            ),
+            LocalDestinationProofPolicyError::RetainRequiresInboundSingle
+        );
+
+        sender
+            .register_peer(&identity(84), "reticulum", &["primary"], time(0))
+            .unwrap();
+        sender
+            .register_peer(&identity(84), "lxmf", &["delivery"], time(0))
+            .unwrap();
+        let mut buffer = registered_buffer(&mut sender);
+        let mut rng = CounterRng::default();
+
+        let primary_source = PacketInterfaceId::new(17);
+        let primary_actions = deliver_prepared_to(
+            &mut sender,
+            &mut receiver,
+            &mut buffer,
+            primary,
+            b"primary immediate",
+            1,
+            primary_source,
+            default_interfaces(),
+            &mut rng,
+        );
+        assert_eq!(primary_actions.packets.len(), 1);
+        assert_eq!(primary_actions.retained_proof_count(), 0);
+        assert_eq!(
+            primary_actions.packets[0].target(),
+            RnsTxTarget::Only(RnsInterfaceId(primary_source.get()))
+        );
+        assert_eq!(
+            reticulum_rns_rete::parse_packet(primary_actions.packets[0].bytes())
+                .unwrap()
+                .packet_type,
+            reticulum_rns_rete::PacketType::Proof
+        );
+
+        let retained_source = PacketInterfaceId::new(23);
+        let retained_actions = deliver_prepared_to(
+            &mut sender,
+            &mut receiver,
+            &mut buffer,
+            delivery,
+            b"durable before proof",
+            2,
+            retained_source,
+            default_interfaces(),
+            &mut rng,
+        );
+        assert!(retained_actions.packets.is_empty());
+        assert_eq!(retained_actions.retained_proof_count(), 1);
+        assert!(matches!(
+            retained_actions.events.as_slice(),
+            [ApplicationEvent::DataReceived {
+                destination,
+                payload,
+            }] if *destination == *delivery.as_bytes() && payload == b"durable before proof"
+        ));
+
+        let mut event_slots = [ApplicationEventSlot::new()];
+        let mut event_owner = ApplicationEventOwner::new(&mut event_slots);
+        let offered = event_owner.try_offer_actions(retained_actions).unwrap();
+        assert_eq!(offered.accepted_events(), 1);
+        assert_eq!(offered.accepted_retained_proofs(), 1);
+        let lease = event_owner.lease_next().unwrap();
+        assert!(lease.has_retained_proof());
+
+        let mut proof_slots = [DelayedProofSlot::new()];
+        let mut proof_owner = DelayedProofOwner::new(&mut proof_slots);
+        let committed = lease
+            .try_reserve_delayed(&mut proof_owner)
+            .unwrap()
+            .acknowledge_into_ready();
+        assert_eq!(committed.event().kind(), ApplicationEventKind::DataReceived);
+        assert_eq!(event_owner.capacities().vacant, 1);
+        assert_eq!(proof_owner.capacities().ready, 1);
+
+        let released = proof_owner.lease_next().unwrap().release_actions();
+        assert!(released.events.is_empty());
+        assert_eq!(released.retained_proof_count(), 0);
+        assert_eq!(released.packets.len(), 1);
+        assert_eq!(
+            released.packets[0].target(),
+            RnsTxTarget::Only(RnsInterfaceId(retained_source.get()))
+        );
+        assert_eq!(
+            reticulum_rns_rete::parse_packet(released.packets[0].bytes())
+                .unwrap()
+                .packet_type,
+            reticulum_rns_rete::PacketType::Proof
+        );
+        assert_eq!(proof_owner.capacities().vacant, 1);
     }
 
     #[test]
