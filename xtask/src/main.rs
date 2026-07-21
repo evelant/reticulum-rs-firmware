@@ -890,7 +890,7 @@ fn graph_policy() -> ExitCode {
              normal edges, the single reviewed streaming-verification feature and three host-test edges, and its generic bare-metal normal closure exactly \
              matches the reviewed registry identities without std, alloc, Rete, platform, radio or storage packages; \
              the featureless transport-neutral LXMF ingress crate has exactly its reviewed feature-disabled node-core and LXMF-wire normal edges plus its dev-only durable inbox and host-test fixtures, while its generic bare-metal normal closure exactly matches the reviewed identities and excludes platform, board, radio, firmware, storage, device-API, supervisor and executor packages; \
-             the dependency-free LXMF model, append-only LXMF store and durable-ingress owner retain their exact reviewed manifests and generic bare-metal closures; the store normal closure reaches only the model, embedded-storage and SHA-256 while its development surface adds only the reviewed LXMF-wire/hex/serde corpus fixtures, durable ingress reaches only its four reviewed portable owner edges plus its exact host-test embedded-storage/hex/serde fixtures, and none of the new ownership closures can acquire the raw inbox, submission durability, board, radio, platform, firmware, device-API, supervisor or executor graphs; all three remain absent from product and HIL compositions until target integration is explicitly reviewed; \
+             the dependency-free LXMF model, append-only LXMF store and durable-ingress owner retain their exact reviewed manifests and generic bare-metal closures; the store normal closure reaches only the model, embedded-storage and SHA-256 while its development surface adds only the reviewed LXMF-wire/hex/serde corpus fixtures, durable ingress reaches only its four reviewed portable owner edges plus exact host-test embedded-storage/hex/serde and Rete retained-proof fixture edges, and none of the new ownership closures can acquire the raw inbox, submission durability, board, radio, platform, firmware, device-API, supervisor or executor graphs; all three remain absent from product and HIL compositions until target integration is explicitly reviewed; \
              the portable identity, announce-clock and NOR-region crates use only their exact reviewed embedded-storage, rand_core, SHA-256 and zeroize subsets; the durable inbound RNS inbox store uses only exact feature-free embedded-storage and SHA-256 pins; the durable \
              storage model uses only reviewed minicbor and SHA-256 edges; \
              the physical storage journal uses only reviewed embedded-storage, storage-model and SHA-256 edges; \
@@ -4978,9 +4978,9 @@ fn validate_lxmf_durable_ingress_dependency_boundary(
         .iter()
         .filter(|dependency| dependency["kind"].as_str() == Some("dev"))
         .count();
-    if dependencies.len() != 8 || normal_count != 4 || development_count != 4 {
+    if dependencies.len() != 10 || normal_count != 4 || development_count != 6 {
         return Err(format!(
-            "{PACKAGE_NAME} must have exactly four reviewed normal and four reviewed development dependencies"
+            "{PACKAGE_NAME} must have exactly four reviewed normal and six reviewed development dependencies"
         ));
     }
 
@@ -5003,6 +5003,24 @@ fn validate_lxmf_durable_ingress_dependency_boundary(
         PACKAGE_NAME,
         "embedded-storage",
         "=0.3.1",
+        Some("dev"),
+        false,
+        &[],
+    )?;
+    validate_exact_registry_dependency(
+        dependencies,
+        PACKAGE_NAME,
+        "rand_core",
+        "=0.6.4",
+        Some("dev"),
+        false,
+        &[],
+    )?;
+    validate_exact_local_dependency_with_kind(
+        dependencies,
+        PACKAGE_NAME,
+        "reticulum-rns-rete",
+        &workspace.join("crates/rns-rete"),
         Some("dev"),
         false,
         &[],
@@ -12395,6 +12413,7 @@ fn sample(layout: Layout) {
         for (name, reviewed_defaults) in [
             ("embedded-storage", false),
             ("hex", true),
+            ("rand_core", false),
             ("serde", true),
             ("serde_json", true),
         ] {
@@ -12427,6 +12446,30 @@ fn sample(layout: Layout) {
                     "durable ingress dev dependency {name} accepted changed {field}"
                 );
             }
+        }
+
+        for (field, value) in [
+            ("req", serde_json::json!("=0.0.0")),
+            ("source", serde_json::json!(CRATES_IO_SOURCE)),
+            ("path", serde_json::json!(root.join("crates/lookalike"))),
+            ("kind", serde_json::Value::Null),
+            ("optional", serde_json::json!(true)),
+            ("rename", serde_json::json!("renamed")),
+            ("target", serde_json::json!("cfg(target_os = \"none\")")),
+            ("uses_default_features", serde_json::json!(true)),
+            ("features", serde_json::json!(["unreviewed"])),
+        ] {
+            let mut changed = baseline.clone();
+            fixture_dependency_mut(
+                fixture_package_mut(&mut changed, "reticulum-lxmf-durable-ingress"),
+                "reticulum-rns-rete",
+                Some("dev"),
+            )[field] = value;
+            assert!(
+                validate_lxmf_durable_ingress_dependency_boundary(&changed.to_string(), &root,)
+                    .is_err(),
+                "durable ingress retained-proof fixture dependency accepted changed {field}"
+            );
         }
 
         for mutation in ["manifest", "source", "feature", "extra"] {
@@ -14462,6 +14505,13 @@ fn sample(layout: Layout) {
                 ),
                 handoff_dependency_fixture("embedded-storage", "=0.3.1", Some("dev")),
                 hex,
+                handoff_dependency_fixture("rand_core", "=0.6.4", Some("dev")),
+                handoff_path_dependency_fixture(
+                    "reticulum-rns-rete",
+                    "*",
+                    &root.join("crates/rns-rete"),
+                    Some("dev"),
+                ),
                 serde,
                 serde_json,
             ],

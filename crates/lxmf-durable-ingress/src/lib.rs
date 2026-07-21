@@ -7,10 +7,10 @@
 //! Every outcome short of a completed or already-durable commit returns the
 //! exact unresolved lease to the caller.
 //!
-//! This ordering does not delay an RNS delivery proof. The current Rete ingress
-//! constructs that proof before it exposes the application event, so target
-//! composition needs a separate delayed-proof owner before a remote receipt can
-//! imply durable LXMF delivery.
+//! Proof-bearing events cross a second fixed-capacity owner before store I/O.
+//! Their exact retained RNS proof becomes ready only after the store reports a
+//! new or already-durable message. This crate does not transmit or drain ready
+//! proofs; target composition remains responsible for that separate step.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -32,7 +32,10 @@ use reticulum_lxmf_model::{
 use reticulum_lxmf_store::{
     BoundLxmfStoreAccess, LxmfCommitError, LxmfCommitOutcome, MountedLxmfStore,
 };
-use reticulum_node_core::{ApplicationEventId, ApplicationEventLease};
+use reticulum_node_core::{
+    ApplicationEvent, ApplicationEventId, ApplicationEventKind, ApplicationEventLease,
+    DelayedProofId, DelayedProofOwner, DelayedProofTransactionError,
+};
 
 #[cfg(test)]
 mod tests;
@@ -46,12 +49,26 @@ pub enum DurableIngressCommitKind {
     Replay,
 }
 
+/// Whether durable admission requires an RNS proof retained with the event.
+///
+/// This policy is intentionally explicit at every call site. Optional mode
+/// still delays any proof that is present; it merely permits proofless events
+/// to use the ordinary durable acknowledgement path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DurableIngressProofMode {
+    /// Reject a proofless event before any durable-store I/O.
+    Required,
+    /// Admit proofless events while delaying every retained proof that exists.
+    Optional,
+}
+
 /// Successful durable ownership transfer for one application event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DurableIngressSuccess {
     event_id: ApplicationEventId,
     receipt: DurableMessageReceipt,
     kind: DurableIngressCommitKind,
+    queued_proof_id: Option<DelayedProofId>,
 }
 
 impl DurableIngressSuccess {
@@ -69,6 +86,41 @@ impl DurableIngressSuccess {
     pub const fn kind(self) -> DurableIngressCommitKind {
         self.kind
     }
+
+    /// Ready delayed-proof identity, when the acknowledged event carried one.
+    ///
+    /// The proof remains owned by the supplied [`DelayedProofOwner`]. This
+    /// result is correlation evidence only and does not authorize transmission.
+    pub const fn queued_proof_id(self) -> Option<DelayedProofId> {
+        self.queued_proof_id
+    }
+}
+
+/// Contradiction while rebinding copied validated evidence to its exact event.
+///
+/// The first candidate construction runs while the cryptographically validated
+/// view is still borrowed. Proof reservation then consumes the event lease, so
+/// retained-proof operation must reacquire a borrow from that same structural
+/// owner. These failures are typed and fail closed instead of assuming that
+/// correlation through a scalar event ID is sufficient.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EventCarrierMismatch {
+    /// The event variant cannot carry the validated carrier kind.
+    EventKind {
+        /// Carrier established by cryptographic admission.
+        carrier: CarrierKind,
+        /// Variant observed when reacquiring the exact event.
+        event: ApplicationEventKind,
+    },
+    /// The event's destination differs from validated authenticated evidence.
+    Destination,
+    /// The event's physical payload length differs from validated evidence.
+    PayloadLength {
+        /// Validated physical carrier length.
+        expected: usize,
+        /// Length observed when reacquiring the exact event.
+        actual: usize,
+    },
 }
 
 /// Failure while translating validated ingress evidence into a durable candidate.
@@ -82,6 +134,8 @@ pub enum DurableCandidateError {
     InvalidStampCost(InvalidStampCost),
     /// Borrowed exact bytes contradicted their immutable metadata.
     Candidate(CandidateError),
+    /// Reacquired event bytes contradicted copied validated carrier evidence.
+    EventCarrierMismatch(EventCarrierMismatch),
 }
 
 /// Why the exact application event was not transferred to durable ownership.
@@ -95,6 +149,8 @@ pub enum DurableIngressRetentionReason<E> {
     Rejected(RejectedIngress),
     /// Validated evidence could not form a self-consistent durable candidate.
     Candidate(DurableCandidateError),
+    /// Required proof state or fixed delayed-proof capacity blocked the handoff.
+    DelayedProof(DelayedProofTransactionError),
     /// The mounted durable store blocked or failed without committing the event.
     Store(LxmfCommitError<E>),
 }
@@ -180,12 +236,16 @@ impl<E: fmt::Debug> fmt::Debug for DurableIngressOutcome<'_, '_, E> {
 /// payload copy. A successful new commit or replay result ends every event
 /// borrow before [`ApplicationEventLease::acknowledge`] releases the slot. Any
 /// admission, candidate-construction, capacity, binding, backend, recovery, or
-/// collision failure returns the original lease unchanged. This governs only
-/// local application-event acknowledgement; it does not delay the RNS proof
-/// already constructed by the current Rete ingress path.
+/// collision failure returns the original lease unchanged. A retained proof
+/// is reserved before store I/O and becomes ready only after a
+/// successful new or replay receipt. Store failure releases that empty proof
+/// reservation and returns the original proof-bearing lease. This operation
+/// never drains or transmits a ready proof.
 #[allow(clippy::too_many_arguments)]
-pub fn commit_application_event<'owner, 'slots, R, A, const MESSAGES: usize>(
+pub fn commit_application_event<'owner, 'slots, 'proof_slots, R, A, const MESSAGES: usize>(
     lease: ApplicationEventLease<'owner, 'slots>,
+    proof_mode: DurableIngressProofMode,
+    delayed_proofs: &mut DelayedProofOwner<'proof_slots>,
     local_destination: LocalDeliveryDestination,
     limits: WireLimits,
     source_identities: &R,
@@ -197,7 +257,6 @@ where
     R: SourceIdentityResolver + ?Sized,
     A: BoundLxmfStoreAccess,
 {
-    let event_id = lease.id();
     let validated = match validate_application_event(
         lease.event(),
         local_destination,
@@ -237,24 +296,56 @@ where
             ));
         }
     };
-    let wire = match metadata.carrier() {
-        CarrierProvenance::Opportunistic => NormalizedWire::Opportunistic {
-            implied_destination: evidence.destination(),
-            carrier_payload: validated.carrier_payload(),
-        },
-        CarrierProvenance::Complete
-        | CarrierProvenance::LinkDataContextNone
-        | CarrierProvenance::ResourceComplete => {
-            NormalizedWire::Contiguous(validated.carrier_payload())
-        }
-    };
-    let candidate = match InboundMessageCandidate::new(metadata, wire) {
-        Ok(candidate) => candidate,
-        Err(error) => {
+    {
+        let wire = match metadata.carrier() {
+            CarrierProvenance::Opportunistic => NormalizedWire::Opportunistic {
+                implied_destination: evidence.destination(),
+                carrier_payload: validated.carrier_payload(),
+            },
+            CarrierProvenance::Complete
+            | CarrierProvenance::LinkDataContextNone
+            | CarrierProvenance::ResourceComplete => {
+                NormalizedWire::Contiguous(validated.carrier_payload())
+            }
+        };
+        if let Err(error) = InboundMessageCandidate::new(metadata, wire) {
             drop(validated);
             return DurableIngressOutcome::Retained(RetainedApplicationEvent::new(
                 lease,
                 DurableIngressRetentionReason::Candidate(DurableCandidateError::Candidate(error)),
+            ));
+        }
+    }
+    drop(validated);
+
+    if !lease.has_retained_proof() {
+        if proof_mode == DurableIngressProofMode::Required {
+            return DurableIngressOutcome::Retained(RetainedApplicationEvent::new(
+                lease,
+                DurableIngressRetentionReason::DelayedProof(
+                    DelayedProofTransactionError::ProofNotPresent,
+                ),
+            ));
+        }
+        return commit_proofless(lease, evidence, metadata, store, access);
+    }
+
+    let transaction = match lease.try_reserve_delayed(delayed_proofs) {
+        Ok(transaction) => transaction,
+        Err(failure) => {
+            let reason = failure.reason();
+            return DurableIngressOutcome::Retained(RetainedApplicationEvent::new(
+                failure.into_lease(),
+                DurableIngressRetentionReason::DelayedProof(reason),
+            ));
+        }
+    };
+    let candidate = match rebind_candidate(transaction.event(), evidence, metadata) {
+        Ok(candidate) => candidate,
+        Err(error) => {
+            return DurableIngressOutcome::Retained(RetainedApplicationEvent::new(
+                transaction.into_lease(),
+                DurableIngressRetentionReason::Candidate(error),
             ));
         }
     };
@@ -263,9 +354,8 @@ where
         Ok(outcome) => outcome,
         Err(failure) => {
             let (_, error) = failure.into_parts();
-            drop(validated);
             return DurableIngressOutcome::Retained(RetainedApplicationEvent::new(
-                lease,
+                transaction.into_lease(),
                 DurableIngressRetentionReason::Store(error),
             ));
         }
@@ -275,13 +365,110 @@ where
         LxmfCommitOutcome::AlreadyDurable(receipt) => (DurableIngressCommitKind::Replay, receipt),
     };
 
-    drop(validated);
-    drop(lease.acknowledge());
+    let acknowledged = transaction.acknowledge_into_ready();
+    let acknowledged_event_id = acknowledged.event_id();
+    let queued_proof_id = acknowledged.proof_id();
+    drop(acknowledged.into_event());
     DurableIngressOutcome::Durable(DurableIngressSuccess {
-        event_id,
+        event_id: acknowledged_event_id,
         receipt,
         kind,
+        queued_proof_id: Some(queued_proof_id),
     })
+}
+
+fn commit_proofless<'owner, 'slots, A, const MESSAGES: usize>(
+    lease: ApplicationEventLease<'owner, 'slots>,
+    evidence: ValidatedIngressEvidence,
+    metadata: InboundMessageMetadata,
+    store: &mut MountedLxmfStore<MESSAGES>,
+    access: &mut A,
+) -> DurableIngressOutcome<'owner, 'slots, A::Error>
+where
+    A: BoundLxmfStoreAccess,
+{
+    let event_id = lease.id();
+    let candidate = match rebind_candidate(lease.event(), evidence, metadata) {
+        Ok(candidate) => candidate,
+        Err(error) => {
+            return DurableIngressOutcome::Retained(RetainedApplicationEvent::new(
+                lease,
+                DurableIngressRetentionReason::Candidate(error),
+            ));
+        }
+    };
+    let committed = match store.commit(access, candidate) {
+        Ok(outcome) => outcome,
+        Err(failure) => {
+            let (_, error) = failure.into_parts();
+            return DurableIngressOutcome::Retained(RetainedApplicationEvent::new(
+                lease,
+                DurableIngressRetentionReason::Store(error),
+            ));
+        }
+    };
+    let (kind, receipt) = commit_parts(committed);
+    match lease.acknowledge() {
+        Ok(_event) => DurableIngressOutcome::Durable(DurableIngressSuccess {
+            event_id,
+            receipt,
+            kind,
+            queued_proof_id: None,
+        }),
+        Err(_failure) => unreachable!(
+            "an exclusively owned proofless lease cannot acquire a retained proof after store I/O"
+        ),
+    }
+}
+
+fn commit_parts(outcome: LxmfCommitOutcome) -> (DurableIngressCommitKind, DurableMessageReceipt) {
+    match outcome {
+        LxmfCommitOutcome::Committed(receipt) => (DurableIngressCommitKind::New, receipt),
+        LxmfCommitOutcome::AlreadyDurable(receipt) => (DurableIngressCommitKind::Replay, receipt),
+    }
+}
+
+fn rebind_candidate<'event>(
+    event: &'event ApplicationEvent,
+    evidence: ValidatedIngressEvidence,
+    metadata: InboundMessageMetadata,
+) -> Result<InboundMessageCandidate<'event>, DurableCandidateError> {
+    let wire = match (evidence.carrier(), event) {
+        (
+            CarrierKind::Opportunistic,
+            ApplicationEvent::DataReceived {
+                destination,
+                payload,
+            },
+        ) => {
+            if destination != evidence.destination() {
+                return Err(DurableCandidateError::EventCarrierMismatch(
+                    EventCarrierMismatch::Destination,
+                ));
+            }
+            if payload.len() != evidence.carrier_payload_len() {
+                return Err(DurableCandidateError::EventCarrierMismatch(
+                    EventCarrierMismatch::PayloadLength {
+                        expected: evidence.carrier_payload_len(),
+                        actual: payload.len(),
+                    },
+                ));
+            }
+            NormalizedWire::Opportunistic {
+                implied_destination: destination,
+                carrier_payload: payload,
+            }
+        }
+        (carrier, event) => {
+            return Err(DurableCandidateError::EventCarrierMismatch(
+                EventCarrierMismatch::EventKind {
+                    carrier,
+                    event: event.kind(),
+                },
+            ));
+        }
+    };
+    InboundMessageCandidate::new(metadata, wire).map_err(DurableCandidateError::Candidate)
 }
 
 fn metadata_from_evidence(

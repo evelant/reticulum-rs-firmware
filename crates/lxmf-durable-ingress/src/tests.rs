@@ -6,6 +6,7 @@ use embedded_storage::nor_flash::{
     ErrorType, MultiwriteNorFlash, NorFlash, NorFlashError, NorFlashErrorKind, ReadNorFlash,
     check_erase, check_read, check_write,
 };
+use rand_core::{CryptoRng, RngCore};
 use reticulum_lxmf_ingress::{LocalDeliveryDestination, StampPolicy, WireLimits};
 use reticulum_lxmf_store::{
     BoundLxmfStore, LxmfProgramStage, LxmfStoreBinding, LxmfStoreDeviceId, PHYSICAL_FORMAT_VERSION,
@@ -13,7 +14,12 @@ use reticulum_lxmf_store::{
 };
 use reticulum_node_core::{
     ApplicationEvent, ApplicationEventOwner, ApplicationEventQuarantineReason,
-    ApplicationEventSlot, NodeActions,
+    ApplicationEventSlot, DelayedProofOwner, DelayedProofReservationError, DelayedProofSlot,
+    DelayedProofTransactionError, NodeActions,
+};
+use reticulum_rns_rete::{
+    EmbeddedNode, EmbeddedNodeConfig, InboundProofPolicy, IngressDisposition, InterfaceId,
+    MAX_DATA_PAYLOAD, RNS_MTU, TxTarget, identity_from_private_key,
 };
 use serde::Deserialize;
 use std::{string::String, vec, vec::Vec};
@@ -42,13 +48,21 @@ struct IngressFixture {
     payload_hex: String,
 }
 
-fn fixture() -> MessageFixture {
+fn named_fixture(name: &str) -> MessageFixture {
     serde_json::from_str::<Corpus>(CORPUS_JSON)
         .expect("checked-in Python LXMF corpus")
         .messages
         .into_iter()
-        .find(|fixture| fixture.name == "opportunistic_limit_295")
-        .expect("maximum opportunistic fixture")
+        .find(|fixture| fixture.name == name)
+        .expect("named Python LXMF fixture")
+}
+
+fn fixture() -> MessageFixture {
+    named_fixture("opportunistic_limit_295")
+}
+
+fn basic_fixture() -> MessageFixture {
+    named_fixture("basic_binary")
 }
 
 fn decode(value: &str) -> Vec<u8> {
@@ -210,6 +224,525 @@ fn offer<'owner, 'slots>(
     owner.lease_next().expect("offered event lease")
 }
 
+fn offer_actions<'owner, 'slots>(
+    owner: &'owner mut ApplicationEventOwner<'slots>,
+    actions: NodeActions,
+) -> ApplicationEventLease<'owner, 'slots> {
+    owner
+        .try_offer_actions(actions)
+        .expect("event owner accepts retained actions");
+    owner.lease_next().expect("offered retained event lease")
+}
+
+#[derive(Default)]
+struct CounterRng(u8);
+
+impl RngCore for CounterRng {
+    fn next_u32(&mut self) -> u32 {
+        let mut bytes = [0; 4];
+        self.fill_bytes(&mut bytes);
+        u32::from_le_bytes(bytes)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut bytes = [0; 8];
+        self.fill_bytes(&mut bytes);
+        u64::from_le_bytes(bytes)
+    }
+
+    fn fill_bytes(&mut self, destination: &mut [u8]) {
+        for byte in destination {
+            self.0 = self.0.wrapping_add(1);
+            *byte = self.0;
+        }
+    }
+
+    fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(destination);
+        Ok(())
+    }
+}
+
+impl CryptoRng for CounterRng {}
+
+type ProofNode = EmbeddedNode<4, 2, 8, 2>;
+
+fn fixture_identity(first: u8, second: u8) -> reticulum_rns_rete::Identity {
+    let mut private_key = [first; 64];
+    private_key[32..].fill(second);
+    identity_from_private_key(&private_key).expect("fixture identity key is valid")
+}
+
+fn proof_bearing_actions(fixture: &MessageFixture) -> NodeActions {
+    let destination_identity = fixture_identity(0x07, 0x08);
+    let mut sender = ProofNode::new(
+        fixture_identity(0x05, 0x06),
+        "lxmf",
+        &["delivery"],
+        EmbeddedNodeConfig::endpoint(),
+    )
+    .expect("fixture sender node is valid");
+    sender
+        .register_peer(&destination_identity, "lxmf", &["delivery"], 1)
+        .expect("fixture receiver is registered");
+    let mut receiver = ProofNode::new(
+        destination_identity,
+        "lxmf",
+        &["delivery"],
+        EmbeddedNodeConfig::endpoint(),
+    )
+    .expect("fixture receiver node is valid");
+    receiver.set_inbound_proof_policy(InboundProofPolicy::Retain);
+    assert_eq!(
+        receiver.destination_hash().as_bytes(),
+        &array::<16>(&fixture.destination_hash_hex)
+    );
+
+    let payload = decode(&fixture.ingress.payload_hex);
+    assert_eq!(payload.len(), 126);
+    assert!(payload.len() <= MAX_DATA_PAYLOAD);
+    let mut rng = CounterRng::default();
+    let mut raw = [0u8; RNS_MTU];
+    let prepared = sender
+        .prepare_data_into(
+            &receiver.destination_hash(),
+            &payload,
+            2,
+            &mut rng,
+            &mut raw,
+        )
+        .expect("fixture RNS DATA prepares");
+    let report = receiver.ingest(
+        &raw[..usize::from(prepared.packet_len())],
+        3,
+        InterfaceId(7),
+        &mut rng,
+    );
+    assert_eq!(report.disposition, IngressDisposition::Processed);
+    assert_eq!(report.actions.events.len(), 1);
+    assert_eq!(report.actions.retained_proof_count(), 1);
+    assert!(report.actions.packets.is_empty());
+    report.actions
+}
+
+#[allow(clippy::too_many_arguments)]
+fn commit_proofless_event<'owner, 'slots, R, A, const MESSAGES: usize>(
+    lease: ApplicationEventLease<'owner, 'slots>,
+    local_destination: LocalDeliveryDestination,
+    limits: WireLimits,
+    source_identities: &R,
+    stamp_policy: StampPolicy<'_>,
+    store: &mut MountedLxmfStore<MESSAGES>,
+    access: &mut A,
+) -> DurableIngressOutcome<'owner, 'slots, A::Error>
+where
+    R: SourceIdentityResolver + ?Sized,
+    A: BoundLxmfStoreAccess,
+{
+    let mut proof_slots = [];
+    let mut delayed_proofs = DelayedProofOwner::new(&mut proof_slots);
+    commit_application_event(
+        lease,
+        DurableIngressProofMode::Optional,
+        &mut delayed_proofs,
+        local_destination,
+        limits,
+        source_identities,
+        stamp_policy,
+        store,
+        access,
+    )
+}
+
+#[test]
+fn rebind_reports_typed_event_carrier_mismatch_without_revalidating_wire() {
+    let fixture = basic_fixture();
+    let admitted_event = event(&fixture);
+    let local = LocalDeliveryDestination::new(array(&fixture.destination_hash_hex));
+    let source = array::<16>(&fixture.source_hash_hex);
+    let public_key = array::<64>(&fixture.source_public_key_hex);
+    let resolver = |candidate: &[u8; 16]| (candidate == &source).then_some(public_key);
+    let IngressOutcome::Validated(validated) = validate_application_event(
+        &admitted_event,
+        local,
+        limits(),
+        &resolver,
+        StampPolicy::NotRequired,
+    ) else {
+        panic!("basic Python fixture must validate")
+    };
+    let evidence = validated.evidence();
+    let metadata = metadata_from_evidence(evidence).expect("validated metadata is portable");
+    drop(validated);
+
+    let wrong_destination = ApplicationEvent::DataReceived {
+        destination: [0xa5; 16],
+        payload: decode(&fixture.ingress.payload_hex),
+    };
+    assert_eq!(
+        rebind_candidate(&wrong_destination, evidence, metadata),
+        Err(DurableCandidateError::EventCarrierMismatch(
+            EventCarrierMismatch::Destination
+        ))
+    );
+
+    let wrong_length = ApplicationEvent::DataReceived {
+        destination: array(&fixture.destination_hash_hex),
+        payload: vec![0; evidence.carrier_payload_len() - 1],
+    };
+    assert_eq!(
+        rebind_candidate(&wrong_length, evidence, metadata),
+        Err(DurableCandidateError::EventCarrierMismatch(
+            EventCarrierMismatch::PayloadLength {
+                expected: evidence.carrier_payload_len(),
+                actual: evidence.carrier_payload_len() - 1,
+            }
+        ))
+    );
+}
+
+#[test]
+fn required_mode_returns_exact_proofless_lease_before_store_io() {
+    let fixture = basic_fixture();
+    let local = LocalDeliveryDestination::new(array(&fixture.destination_hash_hex));
+    let source = array::<16>(&fixture.source_hash_hex);
+    let public_key = array::<64>(&fixture.source_public_key_hex);
+    let resolver = |candidate: &[u8; 16]| (candidate == &source).then_some(public_key);
+    let mut access = BoundLxmfStore::new(FakeNor::erased(), binding());
+    let mut store = mount::<_, 1>(&mut access).expect("empty store mounts");
+    let io_before = (
+        access.backend().reads,
+        access.backend().writes,
+        access.backend().erases,
+    );
+    let mut slots = [ApplicationEventSlot::new()];
+    let mut owner = ApplicationEventOwner::new(&mut slots);
+    let lease = offer(&mut owner, event(&fixture));
+    let event_id = lease.id();
+    let event_pointer = match lease.event() {
+        ApplicationEvent::DataReceived { payload, .. } => payload.as_ptr(),
+        _ => unreachable!(),
+    };
+    let mut proof_slots = [DelayedProofSlot::new()];
+    let mut delayed_proofs = DelayedProofOwner::new(&mut proof_slots);
+
+    let DurableIngressOutcome::Retained(retained) = commit_application_event(
+        lease,
+        DurableIngressProofMode::Required,
+        &mut delayed_proofs,
+        local,
+        limits(),
+        &resolver,
+        StampPolicy::NotRequired,
+        &mut store,
+        &mut access,
+    ) else {
+        panic!("required mode must not admit a proofless event")
+    };
+    assert!(matches!(
+        retained.reason(),
+        DurableIngressRetentionReason::DelayedProof(DelayedProofTransactionError::ProofNotPresent)
+    ));
+    assert_eq!(delayed_proofs.counters().reservation_attempts, 0);
+    assert_eq!(delayed_proofs.capacities().vacant, 1);
+    assert_eq!(
+        (
+            access.backend().reads,
+            access.backend().writes,
+            access.backend().erases,
+        ),
+        io_before
+    );
+    let lease = retained.into_lease();
+    assert_eq!(lease.id(), event_id);
+    assert_eq!(
+        match lease.event() {
+            ApplicationEvent::DataReceived { payload, .. } => payload.as_ptr(),
+            _ => unreachable!(),
+        },
+        event_pointer
+    );
+    lease.quarantine(ApplicationEventQuarantineReason::ConsumerDeferred);
+    assert_eq!(store.message_count(), 0);
+    assert_eq!(owner.counters().acknowledged_events, 0);
+}
+
+#[test]
+fn retained_proof_is_preclassified_then_capacity_checked_before_store_io() {
+    let fixture = basic_fixture();
+    let local = LocalDeliveryDestination::new(array(&fixture.destination_hash_hex));
+    let source = array::<16>(&fixture.source_hash_hex);
+    let public_key = array::<64>(&fixture.source_public_key_hex);
+    let resolver = |candidate: &[u8; 16]| (candidate == &source).then_some(public_key);
+    let mut access = BoundLxmfStore::new(FakeNor::erased(), binding());
+    let mut store = mount::<_, 1>(&mut access).expect("empty store mounts");
+    let io_before = (
+        access.backend().reads,
+        access.backend().writes,
+        access.backend().erases,
+    );
+    let mut event_slots = [ApplicationEventSlot::new()];
+    let mut event_owner = ApplicationEventOwner::new(&mut event_slots);
+    let lease = offer_actions(&mut event_owner, proof_bearing_actions(&fixture));
+    let event_id = lease.id();
+    let event_pointer = match lease.event() {
+        ApplicationEvent::DataReceived { payload, .. } => payload.as_ptr(),
+        _ => unreachable!(),
+    };
+    assert!(lease.has_retained_proof());
+    let mut proof_slots: [DelayedProofSlot; 0] = [];
+    let mut delayed_proofs = DelayedProofOwner::new(&mut proof_slots);
+
+    let DurableIngressOutcome::Retained(unrelated) = commit_application_event(
+        lease,
+        DurableIngressProofMode::Required,
+        &mut delayed_proofs,
+        LocalDeliveryDestination::new([0x99; 16]),
+        limits(),
+        &resolver,
+        StampPolicy::NotRequired,
+        &mut store,
+        &mut access,
+    ) else {
+        panic!("classification must run before proof-capacity admission")
+    };
+    assert!(matches!(
+        unrelated.reason(),
+        DurableIngressRetentionReason::Unrelated(_)
+    ));
+    assert_eq!(delayed_proofs.counters().reservation_attempts, 0);
+    let lease = unrelated.into_lease();
+    assert_eq!(lease.id(), event_id);
+    assert!(lease.has_retained_proof());
+
+    let DurableIngressOutcome::Retained(full) = commit_application_event(
+        lease,
+        DurableIngressProofMode::Optional,
+        &mut delayed_proofs,
+        local,
+        limits(),
+        &resolver,
+        StampPolicy::NotRequired,
+        &mut store,
+        &mut access,
+    ) else {
+        panic!("optional mode must still reserve every proof that is present")
+    };
+    assert!(matches!(
+        full.reason(),
+        DurableIngressRetentionReason::DelayedProof(DelayedProofTransactionError::Reservation(
+            DelayedProofReservationError::Full { capacity: 0 }
+        ))
+    ));
+    assert_eq!(delayed_proofs.counters().reservation_attempts, 1);
+    assert_eq!(delayed_proofs.counters().full_rejections, 1);
+    assert_eq!(
+        (
+            access.backend().reads,
+            access.backend().writes,
+            access.backend().erases,
+        ),
+        io_before
+    );
+    let lease = full.into_lease();
+    assert_eq!(lease.id(), event_id);
+    assert!(lease.has_retained_proof());
+    assert_eq!(
+        match lease.event() {
+            ApplicationEvent::DataReceived { payload, .. } => payload.as_ptr(),
+            _ => unreachable!(),
+        },
+        event_pointer
+    );
+    lease.quarantine(ApplicationEventQuarantineReason::ConsumerDeferred);
+    assert_eq!(store.message_count(), 0);
+    assert_eq!(event_owner.counters().acknowledged_events, 0);
+}
+
+#[test]
+fn retained_basic_binary_new_and_replay_each_queue_one_ready_proof() {
+    let fixture = basic_fixture();
+    let local = LocalDeliveryDestination::new(array(&fixture.destination_hash_hex));
+    let source = array::<16>(&fixture.source_hash_hex);
+    let public_key = array::<64>(&fixture.source_public_key_hex);
+    let resolver = |candidate: &[u8; 16]| (candidate == &source).then_some(public_key);
+    let mut access = BoundLxmfStore::new(FakeNor::erased(), binding());
+    let mut store = mount::<_, 2>(&mut access).expect("empty store mounts");
+    let mut event_slots = [ApplicationEventSlot::new()];
+    let mut event_owner = ApplicationEventOwner::new(&mut event_slots);
+    let mut proof_slots = [DelayedProofSlot::new(), DelayedProofSlot::new()];
+    let mut delayed_proofs = DelayedProofOwner::new(&mut proof_slots);
+
+    let (first_event_id, first_proof_id) = {
+        let lease = offer_actions(&mut event_owner, proof_bearing_actions(&fixture));
+        let event_id = lease.id();
+        let DurableIngressOutcome::Durable(success) = commit_application_event(
+            lease,
+            DurableIngressProofMode::Required,
+            &mut delayed_proofs,
+            local,
+            limits(),
+            &resolver,
+            StampPolicy::NotRequired,
+            &mut store,
+            &mut access,
+        ) else {
+            panic!("first retained basic_binary event must become durable")
+        };
+        assert_eq!(success.event_id(), event_id);
+        assert_eq!(success.kind(), DurableIngressCommitKind::New);
+        let proof_id = success
+            .queued_proof_id()
+            .expect("new durable event reports its ready proof");
+        (event_id, proof_id)
+    };
+    assert_eq!(delayed_proofs.capacities().ready, 1);
+    assert_eq!(store.message_count(), 1);
+
+    let (second_event_id, second_proof_id) = {
+        let lease = offer_actions(&mut event_owner, proof_bearing_actions(&fixture));
+        let event_id = lease.id();
+        let DurableIngressOutcome::Durable(success) = commit_application_event(
+            lease,
+            DurableIngressProofMode::Required,
+            &mut delayed_proofs,
+            local,
+            limits(),
+            &resolver,
+            StampPolicy::NotRequired,
+            &mut store,
+            &mut access,
+        ) else {
+            panic!("replayed retained basic_binary event must reconcile durably")
+        };
+        assert_eq!(success.event_id(), event_id);
+        assert_eq!(success.kind(), DurableIngressCommitKind::Replay);
+        let proof_id = success
+            .queued_proof_id()
+            .expect("durable replay reports its distinct ready proof");
+        (event_id, proof_id)
+    };
+    assert_ne!(first_event_id, second_event_id);
+    assert_eq!(delayed_proofs.capacities().ready, 2);
+    assert_eq!(delayed_proofs.counters().reservations_committed, 2);
+    assert_eq!(store.message_count(), 1);
+    assert_eq!(event_owner.counters().acknowledged_events, 2);
+
+    for (expected_event_id, expected_proof_id) in [
+        (first_event_id, first_proof_id),
+        (second_event_id, second_proof_id),
+    ] {
+        let proof = delayed_proofs
+            .lease_next()
+            .expect("each durable event queued one proof");
+        assert_eq!(proof.event_id(), expected_event_id);
+        assert_eq!(proof.id(), expected_proof_id);
+        let actions = proof.release_actions();
+        assert_eq!(actions.packets.len(), 1);
+        assert_eq!(actions.packets[0].target(), TxTarget::Only(InterfaceId(7)));
+        assert!(actions.events.is_empty());
+    }
+    assert!(delayed_proofs.lease_next().is_none());
+}
+
+#[test]
+fn retained_lost_commit_reply_retry_queues_exactly_one_ready_proof() {
+    let fixture = basic_fixture();
+    let local = LocalDeliveryDestination::new(array(&fixture.destination_hash_hex));
+    let source = array::<16>(&fixture.source_hash_hex);
+    let public_key = array::<64>(&fixture.source_public_key_hex);
+    let resolver = |candidate: &[u8; 16]| (candidate == &source).then_some(public_key);
+    let mut access = BoundLxmfStore::new(FakeNor::erased(), binding());
+    let mut store = mount::<_, 1>(&mut access).expect("empty store mounts");
+    access.backend_mut().lose_commit_reply();
+    let mut event_slots = [ApplicationEventSlot::new()];
+    let mut event_owner = ApplicationEventOwner::new(&mut event_slots);
+    let lease = offer_actions(&mut event_owner, proof_bearing_actions(&fixture));
+    let event_id = lease.id();
+    let event_sequence = lease.sequence();
+    let event_pointer = match lease.event() {
+        ApplicationEvent::DataReceived { payload, .. } => payload.as_ptr(),
+        _ => unreachable!(),
+    };
+    let mut proof_slots = [DelayedProofSlot::new()];
+    let mut delayed_proofs = DelayedProofOwner::new(&mut proof_slots);
+
+    let DurableIngressOutcome::Retained(retained) = commit_application_event(
+        lease,
+        DurableIngressProofMode::Required,
+        &mut delayed_proofs,
+        local,
+        limits(),
+        &resolver,
+        StampPolicy::NotRequired,
+        &mut store,
+        &mut access,
+    ) else {
+        panic!("lost terminal write reply must return the proof-bearing lease")
+    };
+    assert!(matches!(
+        retained.reason(),
+        DurableIngressRetentionReason::Store(LxmfCommitError::Backend {
+            stage: LxmfProgramStage::Commit,
+            error: FakeError::Injected,
+        })
+    ));
+    assert_eq!(delayed_proofs.capacities().vacant, 1);
+    assert_eq!(delayed_proofs.capacities().ready, 0);
+    assert_eq!(delayed_proofs.counters().reservations_created, 1);
+    assert_eq!(delayed_proofs.counters().reservations_released, 1);
+    assert_eq!(
+        mount::<_, 1>(&mut access)
+            .expect("terminal write reached physical media")
+            .message_count(),
+        1
+    );
+    let lease = retained.into_lease();
+    assert_eq!(lease.id(), event_id);
+    assert_eq!(lease.sequence(), event_sequence);
+    assert!(lease.has_retained_proof());
+    assert_eq!(
+        match lease.event() {
+            ApplicationEvent::DataReceived { payload, .. } => payload.as_ptr(),
+            _ => unreachable!(),
+        },
+        event_pointer
+    );
+
+    let DurableIngressOutcome::Durable(success) = commit_application_event(
+        lease,
+        DurableIngressProofMode::Required,
+        &mut delayed_proofs,
+        local,
+        limits(),
+        &resolver,
+        StampPolicy::NotRequired,
+        &mut store,
+        &mut access,
+    ) else {
+        panic!("exact retry must reconcile and queue its retained proof")
+    };
+    assert_eq!(success.event_id(), event_id);
+    assert_eq!(success.kind(), DurableIngressCommitKind::Replay);
+    assert!(success.queued_proof_id().is_some());
+    assert_eq!(delayed_proofs.capacities().ready, 1);
+    assert_eq!(delayed_proofs.counters().reservations_created, 2);
+    assert_eq!(delayed_proofs.counters().reservations_released, 1);
+    assert_eq!(delayed_proofs.counters().reservations_committed, 1);
+    assert_eq!(event_owner.counters().acknowledged_events, 1);
+    assert_eq!(store.message_count(), 1);
+
+    let proof = delayed_proofs
+        .lease_next()
+        .expect("one reconciled proof is ready");
+    assert_eq!(proof.id(), success.queued_proof_id().unwrap());
+    assert_eq!(proof.event_id(), event_id);
+    let actions = proof.release_actions();
+    assert_eq!(actions.packets.len(), 1);
+    assert_eq!(actions.packets[0].target(), TxTarget::Only(InterfaceId(7)));
+    assert!(delayed_proofs.lease_next().is_none());
+}
+
 #[test]
 fn python_maximum_opportunistic_event_commits_before_acknowledgement_and_replays() {
     let fixture = fixture();
@@ -229,7 +762,7 @@ fn python_maximum_opportunistic_event_commits_before_acknowledgement_and_replays
     let mut slots = [ApplicationEventSlot::new()];
     let mut owner = ApplicationEventOwner::new(&mut slots);
 
-    let first = match commit_application_event(
+    let first = match commit_proofless_event(
         offer(&mut owner, first_event),
         local,
         limits(),
@@ -247,6 +780,7 @@ fn python_maximum_opportunistic_event_commits_before_acknowledgement_and_replays
         }
     };
     assert_eq!(first.kind(), DurableIngressCommitKind::New);
+    assert_eq!(first.queued_proof_id(), None);
     assert_eq!(store.message_count(), 1);
     assert_eq!(owner.counters().acknowledged_events, 1);
     assert_eq!(
@@ -254,7 +788,7 @@ fn python_maximum_opportunistic_event_commits_before_acknowledgement_and_replays
         Some(first.receipt())
     );
 
-    let replay = match commit_application_event(
+    let replay = match commit_proofless_event(
         offer(&mut owner, event(&fixture)),
         local,
         limits(),
@@ -272,6 +806,7 @@ fn python_maximum_opportunistic_event_commits_before_acknowledgement_and_replays
         }
     };
     assert_eq!(replay.kind(), DurableIngressCommitKind::Replay);
+    assert_eq!(replay.queued_proof_id(), None);
     assert_eq!(replay.receipt(), first.receipt());
     assert_eq!(store.message_count(), 1);
     assert_eq!(owner.counters().acknowledged_events, 2);
@@ -299,7 +834,7 @@ fn unrelated_deferred_and_rejected_outcomes_return_the_exact_lease() {
     let unrelated_id = unrelated_lease.id();
     let unrelated_sequence = unrelated_lease.sequence();
     let unrelated_quarantine = unrelated_lease.quarantine_reason();
-    let DurableIngressOutcome::Retained(unrelated) = commit_application_event(
+    let DurableIngressOutcome::Retained(unrelated) = commit_proofless_event(
         unrelated_lease,
         LocalDeliveryDestination::new([0x99; 16]),
         limits(),
@@ -335,7 +870,7 @@ fn unrelated_deferred_and_rejected_outcomes_return_the_exact_lease() {
         deferred_quarantine,
         Some(ApplicationEventQuarantineReason::ConsumerDeferred)
     );
-    let DurableIngressOutcome::Retained(deferred) = commit_application_event(
+    let DurableIngressOutcome::Retained(deferred) = commit_proofless_event(
         deferred_lease,
         local,
         limits(),
@@ -364,7 +899,7 @@ fn unrelated_deferred_and_rejected_outcomes_return_the_exact_lease() {
     assert_eq!(rejected_id, unrelated_id);
     assert_eq!(rejected_sequence, unrelated_sequence);
     assert_eq!(rejected_quarantine, deferred_quarantine);
-    let DurableIngressOutcome::Retained(rejected) = commit_application_event(
+    let DurableIngressOutcome::Retained(rejected) = commit_proofless_event(
         rejected_lease,
         local,
         WireLimits::new(100, 100, 10, 10, 100, 4),
@@ -412,7 +947,7 @@ fn store_capacity_and_backend_failures_return_the_exact_unacknowledged_lease() {
     let blocked_id = blocked_lease.id();
     let blocked_sequence = blocked_lease.sequence();
     let blocked_quarantine = blocked_lease.quarantine_reason();
-    let DurableIngressOutcome::Retained(blocked) = commit_application_event(
+    let DurableIngressOutcome::Retained(blocked) = commit_proofless_event(
         blocked_lease,
         local,
         limits(),
@@ -448,7 +983,7 @@ fn store_capacity_and_backend_failures_return_the_exact_unacknowledged_lease() {
     let failed_id = failed_lease.id();
     let failed_sequence = failed_lease.sequence();
     let failed_quarantine = failed_lease.quarantine_reason();
-    let DurableIngressOutcome::Retained(failed) = commit_application_event(
+    let DurableIngressOutcome::Retained(failed) = commit_proofless_event(
         failed_lease,
         local,
         limits(),
@@ -497,7 +1032,7 @@ fn commit_marker_lost_success_retains_exact_lease_until_same_lease_retry_is_dura
     let retained_sequence = retained_lease.sequence();
     let retained_quarantine = retained_lease.quarantine_reason();
 
-    let DurableIngressOutcome::Retained(retained) = commit_application_event(
+    let DurableIngressOutcome::Retained(retained) = commit_proofless_event(
         retained_lease,
         local,
         limits(),
@@ -531,7 +1066,7 @@ fn commit_marker_lost_success_retains_exact_lease_until_same_lease_retry_is_dura
     };
     assert_eq!(payload.as_ptr(), retained_pointer);
 
-    let DurableIngressOutcome::Durable(reconciled) = commit_application_event(
+    let DurableIngressOutcome::Durable(reconciled) = commit_proofless_event(
         retained,
         local,
         limits(),
@@ -578,7 +1113,7 @@ fn wrong_binding_returns_exact_lease_without_touching_the_supplied_backend() {
     let retained_sequence = retained_lease.sequence();
     let retained_quarantine = retained_lease.quarantine_reason();
 
-    let DurableIngressOutcome::Retained(retained) = commit_application_event(
+    let DurableIngressOutcome::Retained(retained) = commit_proofless_event(
         retained_lease,
         local,
         limits(),
@@ -674,7 +1209,7 @@ fn same_id_different_authenticated_material_collision_returns_exact_lease() {
     let retained_sequence = retained_lease.sequence();
     let retained_quarantine = retained_lease.quarantine_reason();
 
-    let DurableIngressOutcome::Retained(retained) = commit_application_event(
+    let DurableIngressOutcome::Retained(retained) = commit_proofless_event(
         retained_lease,
         local,
         limits(),

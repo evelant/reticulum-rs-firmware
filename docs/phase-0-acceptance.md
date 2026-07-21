@@ -711,14 +711,19 @@ returns a borrowed validated view without consuming the event. The portable
 variable extents without a message-sized copy and acknowledge the retained
 application-event lease only after a new or already-durable store receipt.
 Replays, alternate valid stamps, and same-ID/different-material collisions stay
-distinct across reboot. This is local event-acknowledgement ordering only: the
-current Rete ingress creates its RNS delivery proof before this owner runs, so
-target composition must add delayed proof ownership before a remote receipt can
-mean durable LXMF delivery. Non-`NONE` Link DATA is unrelated; context-`NONE`
-Link DATA and Resource completion remain explicitly deferred until their local-
-destination binding and bounded Resource ownership are available. Before
-production-accepting the RNS foundation, retain and extend Python-derived LXMF
-fixtures covering:
+distinct across reboot. Proof-bearing events now cross an explicit fixed-
+capacity delayed-proof transaction before store I/O; a new or already-durable
+receipt makes the exact proof ready, while capacity or store failure returns the
+exact combined lease and releases only the empty reservation. Required mode
+rejects proofless events before I/O; Optional mode admits them but still reserves
+every proof that is present. This owner never drains or transmits ready proofs.
+Target composition must still register the LXMF destination with retained-proof
+policy, provide the three bounded owners, and drain ready proofs through the
+ordinary router before a remote receipt can mean durable LXMF delivery. Non-
+`NONE` Link DATA is unrelated; context-`NONE` Link DATA and Resource completion
+remain explicitly deferred until their local-destination binding and bounded
+Resource ownership are available. Before production-accepting the RNS
+foundation, retain and extend Python-derived LXMF fixtures covering:
 
 - heterogeneous MessagePack keys and values, including unknown structured
   fields; the current allocation-free parser accepts nil/boolean/integer/

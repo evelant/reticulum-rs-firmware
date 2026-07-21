@@ -2009,10 +2009,12 @@ version = "0.1.0"
 dependencies = [
  "embedded-storage",
  "hex",
+ "rand_core 0.6.4",
  "reticulum-lxmf-ingress",
  "reticulum-lxmf-model",
  "reticulum-lxmf-store",
  "reticulum-node-core",
+ "reticulum-rns-rete",
  "serde",
  "serde_json",
 ]

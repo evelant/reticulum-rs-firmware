@@ -156,7 +156,8 @@ The durable-ingress operation consumes one `ApplicationEventLease` by value.
 It borrows and validates the event, constructs borrowed normalized-wire
 segments, commits them, ends every payload borrow, and acknowledges the lease
 only after receiving `Committed` or `AlreadyDurable` from the store. Its
-success result carries the application-event ID and stable message receipt.
+success result carries the application-event ID, stable message receipt, and an
+optional ready delayed-proof ID.
 
 Unrelated, deferred, rejected, capacity-limited, binding-failed,
 backend-ambiguous, collision, and store-fault outcomes return the exact
@@ -164,19 +165,42 @@ unresolved lease. The caller must deliberately route it to another consumer,
 retry it, discard it under a typed policy, or quarantine it. Dropping that
 returned lease retains ADR 0012's existing fail-closed quarantine behavior.
 
+Every call selects `Required` or `Optional` proof mode explicitly; the mode has
+no default. Required mode rejects a proofless event after validation and full
+candidate construction but before store I/O. Optional mode uses the ordinary
+durable acknowledgement path for a proofless event. A retained proof in either
+mode must form one structural delayed-proof transaction before store I/O. The
+transaction combines the exact event lease with an already selected fixed-
+capacity proof slot; scalar event IDs cannot authorize substitution.
+
+Candidate evidence and durable metadata are copied only after complete wire,
+signature, destination, and stamp validation. The candidate is fully
+constructed before proof reservation. Because reservation consumes the event
+lease, store work reacquires bytes through the combined transaction and a
+private typed carrier rebind; this checks event kind, destination, payload
+length, and candidate consistency without repeating signature or stamp work.
+Rebind contradictions return `EventCarrierMismatch` rather than panicking.
+
+On any store failure, `transaction.into_lease()` releases the still-empty proof
+reservation and returns the exact proof-bearing event. Both `Committed` and
+`AlreadyDurable` move the hidden proof infallibly into `Ready` while
+acknowledging the event. Durable ingress does not drain or send that proof.
+
 ### Do not equate an RNS proof with durable LXMF delivery
 
-The permanent E290 node currently configures Rete's
-`InboundProofPolicy::Always`. Rete constructs the RNS proof during packet
-ingest, before the application event can reach this durable owner. Therefore
-this portable tranche proves local application-event acknowledgement ordering,
-but it does **not** prove that a remote sender's delivery receipt means the LXMF
-record was durable.
+Rete now supports `InboundProofPolicy::Retain`, and ADR 0012's application-event
+owner privately binds the exact proof to its event. The durable-ingress
+transaction implemented here controls when that proof becomes `Ready`. Host
+tests using a real retained Rete DATA/proof pair and the released Python
+`basic_binary` LXMF fixture prove new and replay commits, capacity-before-I/O,
+and lost-terminal-write retry without duplicate ready proofs.
 
-Target composition remains deferred until the RNS boundary can retain a proof
-candidate and release it only after the durable receipt, or an equivalent
-delayed-proof contract is implemented and qualified. The existing raw-inbox
-powered evidence must not be relabelled as this stronger property.
+The permanent E290 node still configures its existing immediate-proof policy.
+It does not yet register the LXMF destination, mount this store, provide delayed
+event/proof capacity, or drain ready proofs through the ordinary router.
+Therefore the portable tranche still does **not** prove that a remote sender's
+delivery receipt from the powered product means the LXMF record was durable.
+The existing raw-inbox evidence must not be relabelled as this stronger claim.
 
 ## Consequences
 
@@ -214,7 +238,10 @@ The first portable implementation must prove:
 6. wrong-binding rejection before I/O, terminal readback before receipt, and
    recognized power-cut/lost-success behavior at every write stage;
 7. the exact application-event lease returned on every non-durable outcome and
-   acknowledgement only after a durable receipt; and
-8. manifest and resolved-closure policies excluding the raw inbox, submission
+   acknowledgement only after a durable receipt;
+8. real retained-proof preclassification and capacity before store I/O, one
+   ready proof for each new/replay event, and exactly one ready proof after a
+   lost-terminal-write retry; and
+9. manifest and resolved-closure policies excluding the raw inbox, submission
    store, platform, firmware, radio, device API, supervisor, and executor
    graphs from the new portable components.

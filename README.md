@@ -836,12 +836,16 @@ lease adapter. Exact normalized LXMF bytes stream from the retained event into
 the store without a message-sized copy, and only a verified durable receipt can
 acknowledge that event. Replays, alternate valid stamps, and forced
 same-ID/different-material conflicts remain distinct. The portable tranche is
-not yet target composition: Rete currently creates an inbound RNS proof before
-application durability is known, so a delayed proof-owner boundary is still
-required before claiming remote durable-delivery semantics. The raw-RNS inbox
-remains qualification evidence rather than a product mailbox. Native RNS
-Resource ingress stays disabled until its allocation and streaming-storage
-boundary is bounded.
+not yet target composition. Rete can now retain an exact inbound proof beside
+its application event, and the durable-ingress owner reserves fixed delayed-
+proof capacity before store I/O, returns the exact combined lease on failure,
+and makes that proof ready only after a new or already-durable receipt. It does
+not drain or transmit ready proofs. The permanent E290 graph still uses its
+existing immediate-proof policy and does not yet compose the LXMF store,
+delayed-proof owner, or ready-proof drain, so remote durable-delivery semantics
+are not yet claimed. The raw-RNS inbox remains qualification evidence rather
+than a product mailbox. Native RNS Resource ingress stays disabled until its
+allocation and streaming-storage boundary is bounded.
 The node-side routing
 boundary remains interface-neutral so additional Reticulum links can be added
 later through adapters without rewriting the LoRa actor or protocol owner; no
