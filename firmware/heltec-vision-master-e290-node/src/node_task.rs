@@ -66,7 +66,7 @@ use reticulum_tx_supervisor::{
 };
 
 use crate::{
-    LORA_ONLINE, ProductSupervisor, RADIO_READY, config,
+    ProductSupervisor, config,
     platform_storage::{
         ProductCredentialInitializationPort, ProductInboundAdmission, ProductInitializationDrive,
         ProductInitializationRequest, ProductLivePairingAdmission, ProductStorageCoordinator,
@@ -275,22 +275,11 @@ pub async fn run(
         mut authenticated_api,
         mut frame_handoff,
     ) = handoffs.into_parts();
-    RADIO_READY.wait().await;
-    let online = match supervisor.set_interface_online(offline_descriptor.lease(), true) {
-        Ok(descriptor) => descriptor,
-        Err(reason) => {
-            error!("e290-node stage=interface-online status=FAIL reason={reason:?}");
-            fail_stop().await
-        }
-    };
-    info!(
-        "e290-node stage=interface-online status=PASS interface={} config=0x{:08x} mtu={} queue_depth={}",
-        online.lease().interface().get(),
-        online.config().get(),
-        online.logical_mtu().get(),
-        config::INTERFACE_QUEUE_DEPTH,
-    );
-    LORA_ONLINE.signal(());
+    // The concrete actor now owns Ready/Offline reporting through its fixed
+    // interface-fabric lifecycle capability. This descriptor remains only the
+    // generation-bound product-policy authority for LoRa-specific durability
+    // fail-stop paths.
+    let lora_descriptor = offline_descriptor;
 
     // These slots are interchangeable. Either can hold a locally
     // backpressured envelope or an exact coordinator-rejected envelope.
@@ -373,7 +362,7 @@ pub async fn run(
             {
                 enter_active_owner_durability_fail_stop(
                     supervisor,
-                    online,
+                    lora_descriptor,
                     &mut fail_closed_draining,
                     "frame-arrived-after-durable-service-disabled",
                 );
@@ -411,7 +400,7 @@ pub async fn run(
                     {
                         enter_active_owner_durability_fail_stop(
                             supervisor,
-                            online,
+                            lora_descriptor,
                             &mut fail_closed_draining,
                             "authorized-frame-projection-fault",
                         );
@@ -431,7 +420,7 @@ pub async fn run(
                     {
                         enter_active_owner_durability_fail_stop(
                             supervisor,
-                            online,
+                            lora_descriptor,
                             &mut fail_closed_draining,
                             "authorized-frame-runtime-unavailable",
                         );
@@ -518,6 +507,30 @@ pub async fn run(
                     let pass = supervisor.step(MonotonicMillis::new(now_millis()));
                     let dispatch_completed_at = MonotonicInstant::from_micros(now_micros());
                     let transition = pass.transition();
+                    if let NodeInterfaceSupervisorTransition::Lifecycle(lifecycle) = transition {
+                        let acknowledgement = lifecycle.acknowledgement();
+                        let request = acknowledgement.request();
+                        match acknowledgement.result() {
+                            Ok(descriptor) => info!(
+                                "e290-node stage=interface-lifecycle status=PASS queue={} interface={} generation={} state={:?} online={} config=0x{:08x} mtu={} queue_depth={}",
+                                lifecycle.queue().get(),
+                                descriptor.lease().interface().get(),
+                                descriptor.lease().generation().get(),
+                                request.state(),
+                                descriptor.is_online(),
+                                descriptor.config().get(),
+                                descriptor.logical_mtu().get(),
+                                config::INTERFACE_QUEUE_DEPTH,
+                            ),
+                            Err(reason) => error!(
+                                "e290-node stage=interface-lifecycle status=REJECTED queue={} interface={} generation={} state={:?} reason={reason:?} action=retain-authoritative-registry-and-acknowledge-actor-fail-closed",
+                                lifecycle.queue().get(),
+                                request.lease().interface().get(),
+                                request.lease().generation().get(),
+                                request.state(),
+                            ),
+                        }
+                    }
                     if let NodeInterfaceSupervisorTransition::Ordinary(
                         OrdinaryRouterStep::Routed {
                             interface,
@@ -550,7 +563,6 @@ pub async fn run(
                         {
                             enter_protocol_dispatch_fail_stop(
                                 supervisor,
-                                online,
                                 &mut fail_closed_draining,
                                 interface,
                                 first_dispatch,
@@ -845,7 +857,7 @@ pub async fn run(
                                     if !previous.is_active_owner_fail_stopped() {
                                         enter_active_owner_durability_fail_stop(
                                             supervisor,
-                                            online,
+                                            lora_descriptor,
                                             &mut fail_closed_draining,
                                             "durable-runtime-fault-with-active-owner",
                                         );
@@ -873,7 +885,7 @@ pub async fn run(
                                     if !previous.is_active_owner_fail_stopped() {
                                         enter_active_owner_durability_fail_stop(
                                             supervisor,
-                                            online,
+                                            lora_descriptor,
                                             &mut fail_closed_draining,
                                             "durable-runtime-unavailable-with-active-owner",
                                         );
@@ -1553,7 +1565,7 @@ fn enter_active_owner_durability_fail_stop(
     fail_closed_draining: &mut bool,
     trigger: &'static str,
 ) {
-    match supervisor.set_interface_online(online.lease(), false) {
+    match supervisor.disable_interface(online.lease()) {
         Ok(offline) => error!(
             "e290-node stage=durability-policy status=ACTIVE-OWNER-FAIL-STOP trigger={trigger} interface={} generation={} online={} action=retain-frame-completion-ticket-and-deny-fresh-work",
             offline.lease().interface().get(),
@@ -1569,13 +1581,23 @@ fn enter_active_owner_durability_fail_stop(
 
 fn enter_protocol_dispatch_fail_stop(
     supervisor: &mut ProductSupervisor,
-    online: InterfaceDescriptor,
     fail_closed_draining: &mut bool,
     routed_interface: reticulum_node_core::PacketInterfaceId,
     first_dispatch: bool,
     interval_ordered: bool,
 ) {
-    match supervisor.set_interface_online(online.lease(), false) {
+    let Some(routed_descriptor) = supervisor.interface_registry().descriptor(routed_interface)
+    else {
+        error!(
+            "e290-node stage=protocol-dispatch-confirmation status=FAIL reason=routed-interface-unregistered routed_interface={} first_dispatch={} interval_ordered={} edge=router-egress-acceptance-not-rf-txdone action=fail-closed-drain",
+            routed_interface.get(),
+            first_dispatch,
+            interval_ordered,
+        );
+        *fail_closed_draining = true;
+        return;
+    };
+    match supervisor.disable_interface(routed_descriptor.lease()) {
         Ok(offline) => error!(
             "e290-node stage=protocol-dispatch-confirmation status=INTERFACE-FAIL-STOP routed_interface={} interface={} generation={} online={} first_dispatch={} interval_ordered={} edge=router-egress-acceptance-not-rf-txdone action=deny-fresh-interface-work-and-drain-retained-owners",
             routed_interface.get(),
@@ -1936,6 +1958,7 @@ fn terminal_transition_observation(transition: NodeInterfaceSupervisorTransition
         NodeInterfaceSupervisorTransition::Ordinary(_) => 1 << 2,
         NodeInterfaceSupervisorTransition::DataPermit { .. } => 1 << 3,
         NodeInterfaceSupervisorTransition::OrdinaryPermit { .. } => 1 << 4,
+        NodeInterfaceSupervisorTransition::Lifecycle(_) => 1 << 5,
         NodeInterfaceSupervisorTransition::CompletionAccepted { .. }
         | NodeInterfaceSupervisorTransition::Idle => 1 << 7,
     }
@@ -1988,10 +2011,4 @@ fn now_micros() -> u64 {
 
 fn now_seconds() -> u64 {
     Instant::now().as_secs()
-}
-
-async fn fail_stop() -> ! {
-    loop {
-        Timer::after(Duration::from_secs(30)).await;
-    }
 }

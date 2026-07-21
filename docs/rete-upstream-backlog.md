@@ -49,11 +49,12 @@ for the newer lifecycle or routing work, and publication still requires direct
 user approval. The preceding pin has host/portable and build-only E290
 evidence. The current pin passes its root host/portable validation, 647-check
 schema-2 conformance run, and default/HIL E290 build gates. Its default package
-is a 780,448-byte merged image using 714,912/6,291,456 application bytes
-(11.36%); the runtime-measurement HIL package is 792,048 bytes using
-726,512/6,291,456 (11.55%). Both are build-only, unflashed, and unpowered
-because neither E290 currently enumerates; older
-artifact records remain bound to their recorded revisions.
+is a 785,360-byte merged image using 719,824/6,291,456 application bytes
+(11.44%); it matched an exact `3e:88` readback and served an authenticated
+`identity-summary`. The runtime-measurement HIL package is 795,552 bytes using
+730,016/6,291,456 (11.60%) and remains unflashed. `3f:88` did not enumerate, so
+the current two-board lifecycle/RF run remains open; older artifact records
+remain bound to their recorded revisions.
 
 ## 1. Transactional Link admission — completed for owned and H2 relay paths
 

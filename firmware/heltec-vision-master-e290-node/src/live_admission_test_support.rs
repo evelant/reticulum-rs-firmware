@@ -18,7 +18,9 @@ use reticulum_board_heltec_vision_master_e290_radio::{
 };
 use reticulum_device_api::CapabilityAvailability;
 use reticulum_device_api_adapter::{SubmissionAcceptance, SubmissionPort, SubmissionPortError};
-use reticulum_interface_router::{InterfaceDescriptor, InterfaceFabric};
+use reticulum_interface_router::{
+    InterfaceDescriptor, InterfaceFabric, InterfaceLifecycleActorHandoff, InterfaceLifecycleState,
+};
 use reticulum_node_core::{
     AnnounceEmissionTime, AuthorizedFrameObservation, DestinationHash, MonotonicMillis,
     MonotonicSeconds, NodeConfig, NodeCore, NodeIdentity, NodeInstanceId, OrdinaryBufferPool,
@@ -513,6 +515,7 @@ pub struct LiveNodeSystem {
     pub frame_node: AuthorizedFrameNodeHandoff<NoopRawMutex>,
     pub node_rng: CounterRng,
     pub destination: DestinationHash,
+    lifecycle: InterfaceLifecycleActorHandoff<NoopRawMutex>,
     online_descriptor: InterfaceDescriptor,
     now_us: u64,
 }
@@ -616,14 +619,22 @@ impl LiveNodeSystem {
                 actor.queue_id(),
                 LORA_INTERFACE,
                 config::interface_properties(),
-                false,
             )
             .expect("LoRa interface registers");
-        let online_descriptor = supervisor
-            .set_interface_online(offline.lease(), true)
-            .expect("LoRa interface comes online");
         let (interface, data_permit, ordinary_permit) = actor.into_parts();
-        let (tx_interface, _ingress) = interface.into_parts();
+        let (tx_interface, _ingress, mut lifecycle) = interface.into_parts();
+        let ready = lifecycle
+            .try_request_state(offline.lease(), InterfaceLifecycleState::Ready)
+            .expect("LoRa Ready request fits");
+        assert!(matches!(
+            supervisor.step(MonotonicMillis::new(1_000)).transition(),
+            NodeInterfaceSupervisorTransition::Lifecycle(transition)
+                if transition.acknowledgement().request() == ready
+        ));
+        let online_descriptor = lifecycle
+            .try_finish_request()
+            .expect("LoRa Ready acknowledgement correlates")
+            .expect("LoRa Ready acknowledgement is retained");
         let dispatcher = SoleRadioTxDispatcher::new(
             ScriptedRadio::new(),
             CounterRng::default(),
@@ -640,6 +651,7 @@ impl LiveNodeSystem {
             frame_node,
             node_rng: CounterRng::default(),
             destination,
+            lifecycle,
             online_descriptor,
             now_us: 1_000_000,
         }
@@ -769,11 +781,35 @@ impl LiveNodeSystem {
         false
     }
 
-    pub fn fail_stop_lora(&mut self) {
+    pub fn actor_reports_lora_offline(&mut self) -> InterfaceDescriptor {
+        let offline = self
+            .lifecycle
+            .try_request_state(
+                self.online_descriptor.lease(),
+                InterfaceLifecycleState::Offline,
+            )
+            .expect("LoRa Offline request fits");
+        assert!(matches!(
+            self.supervisor
+                .step(MonotonicMillis::new(self.now_us / 1_000))
+                .transition(),
+            NodeInterfaceSupervisorTransition::Lifecycle(transition)
+                if transition.acknowledgement().request() == offline
+        ));
+        self.online_descriptor = self
+            .lifecycle
+            .try_finish_request()
+            .expect("LoRa Offline acknowledgement correlates")
+            .expect("LoRa Offline acknowledgement is retained");
+        self.online_descriptor
+    }
+
+    pub fn disable_lora_by_node_policy(&mut self) -> InterfaceDescriptor {
         self.online_descriptor = self
             .supervisor
-            .set_interface_online(self.online_descriptor.lease(), false)
-            .expect("active-owner storage failure takes LoRa offline");
+            .disable_interface(self.online_descriptor.lease())
+            .expect("node policy disables LoRa");
+        self.online_descriptor
     }
 
     pub fn force_delivery_timeout(&mut self) {

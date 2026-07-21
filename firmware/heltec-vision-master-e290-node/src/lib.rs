@@ -593,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn protocol_dispatch_invariant_failure_offlines_the_sole_interface_before_drain() {
+    fn protocol_dispatch_invariant_failure_offlines_the_routed_interface_before_drain() {
         let source = include_str!("node_task.rs");
         let routed = source
             .find("enter_protocol_dispatch_fail_stop(")
@@ -609,12 +609,78 @@ mod tests {
             .and_then(|tail| tail.split("fn step_ingress(").next())
             .expect("protocol dispatch fail-stop helper must remain explicit");
         let offline = helper
-            .find("supervisor.set_interface_online(online.lease(), false)")
-            .expect("protocol dispatch fail-stop must offline the sole transport");
+            .find("supervisor.disable_interface(routed_descriptor.lease())")
+            .expect("protocol dispatch fail-stop must offline the routed transport");
         let drain = helper
-            .find("*fail_closed_draining = true;")
+            .rfind("*fail_closed_draining = true;")
             .expect("protocol dispatch fail-stop must retain exact-owner drainage");
         assert!(offline < drain);
+    }
+
+    #[test]
+    fn active_owner_durability_failure_uses_node_owned_disable_policy() {
+        let source = include_str!("node_task.rs");
+        let helper = source
+            .split("fn enter_active_owner_durability_fail_stop(")
+            .nth(1)
+            .and_then(|tail| tail.split("fn enter_protocol_dispatch_fail_stop(").next())
+            .expect("active-owner durability fail-stop helper must remain explicit");
+        let offline = helper
+            .find("supervisor.disable_interface(online.lease())")
+            .expect("node policy must offline the affected registry lease");
+        let drain = helper
+            .rfind("*fail_closed_draining = true;")
+            .expect("node policy must retain exact-owner drainage");
+        assert!(offline < drain);
+        assert!(!helper.contains("InterfaceLifecycleState"));
+    }
+
+    #[test]
+    fn concrete_lora_actor_owns_generation_bound_ready_and_offline_handshakes() {
+        let main = include_str!("main.rs");
+        assert!(!main.contains("RADIO_READY"));
+        assert!(!main.contains("LORA_ONLINE"));
+        assert!(main.contains("let (tx_interface, ingress, lifecycle) = interface.into_parts();"));
+        assert!(
+            main.contains("radio_task::run(dispatcher, ingress, lifecycle, ingress_authority)")
+        );
+
+        let node = include_str!("node_task.rs");
+        assert!(node.contains("NodeInterfaceSupervisorTransition::Lifecycle(lifecycle)"));
+        assert!(!node.contains("set_interface_online"));
+
+        let radio = include_str!("radio_task.rs");
+        let ready = radio
+            .find("InterfaceLifecycleState::Ready")
+            .expect("actor startup must request Ready");
+        let actor_loop = radio
+            .find("let mut previous_radio_loop_us")
+            .expect("actor loop must retain its measurement frontier");
+        assert!(ready < actor_loop);
+
+        let helper = radio
+            .split("async fn fail_stop(")
+            .nth(1)
+            .expect("actor fail-stop helper must remain explicit");
+        let offline = helper
+            .find("InterfaceLifecycleState::Offline")
+            .expect("actor fail-stop must request Offline");
+        let resume = helper
+            .find("lifecycle.finish_pending_request().await")
+            .expect("actor fail-stop must resume a retained lifecycle exchange");
+        let retry = helper
+            .find("action=retry-offline-no-further-radio-operations")
+            .expect("actor fail-stop must retry a rejected Offline exchange");
+        let acknowledged = helper
+            .find("status=FAIL-STOPPED lifecycle=OFFLINE")
+            .expect("actor fail-stop must observe authoritative Offline state");
+        let retention = helper
+            .rfind("loop {")
+            .expect("actor fail-stop must retain every exact owner forever");
+        assert!(offline < resume);
+        assert!(resume < retry);
+        assert!(retry < acknowledged);
+        assert!(acknowledged < retention);
     }
 
     #[test]

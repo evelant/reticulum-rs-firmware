@@ -4,11 +4,14 @@ use core::mem;
 
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use rand_core::{CryptoRng, RngCore};
+#[cfg(test)]
+use reticulum_interface_router::InterfaceLifecycleState;
 use reticulum_interface_router::{
     CompletionRouteError, IngressBufferId, IngressBufferReturnError, IngressBufferReturnFailure,
     IngressRouteError, InterfaceActorHandoff, InterfaceDescriptor, InterfaceFabric, InterfaceLease,
-    InterfaceLeaseError, InterfaceProperties, InterfaceQueueId, InterfaceRegistrationError,
-    InterfaceRegistry, OutboundCompletion, OutboundRouter, SealedIngressPacket,
+    InterfaceLeaseError, InterfaceLifecycleTransition, InterfaceProperties, InterfaceQueueId,
+    InterfaceRegistrationError, InterfaceRegistry, OutboundCompletion, OutboundRouter,
+    SealedIngressPacket,
 };
 use reticulum_node_core::{
     AcknowledgeError, AnnounceAdmissionError, AnnounceEmissionTime, AttemptHandle,
@@ -158,7 +161,9 @@ mod tests {
     use std::vec::Vec;
 
     use super::*;
-    use crate::{DataPreparedHop, DataRouterConfig, OrdinaryRouterConfig};
+    use crate::{
+        DataPreparedHop, DataRouterCompletionProgress, DataRouterConfig, OrdinaryRouterConfig,
+    };
 
     const DATA_BUFFERS: usize = 1;
     const ORDINARY_BUFFERS: usize = 2;
@@ -362,7 +367,8 @@ mod tests {
     ) -> [InterfaceDescriptor; SLOTS] {
         core::array::from_fn(|index| {
             supervisor
-                .register_interface(
+                .router
+                .register(
                     actors[index].queue_id(),
                     PacketInterfaceId::new(
                         u8::try_from(index + 2).expect("test interface fits compact profile"),
@@ -663,7 +669,7 @@ mod tests {
             [true],
         );
         let (interface, _data_permit, _ordinary_permit) = actor.into_parts();
-        let (_tx, mut ingress) = interface.into_parts();
+        let (_tx, mut ingress, _lifecycle) = interface.into_parts();
         let authority = ingress
             .bind_ingress(descriptor)
             .expect("current descriptor binds to ingress actor");
@@ -740,7 +746,7 @@ mod tests {
             [true],
         );
         let (interface, _data_permit, _ordinary_permit) = actor.into_parts();
-        let (mut tx, mut ingress) = interface.into_parts();
+        let (mut tx, mut ingress, _lifecycle) = interface.into_parts();
         let authority = ingress
             .bind_ingress(descriptor)
             .expect("current descriptor binds to ingress actor");
@@ -843,7 +849,7 @@ mod tests {
     fn oversized_queued_ingress_actions_are_terminal_and_takeable_without_loss() {
         let (mut supervisor, [actor], _) = build::<1, 1>(19);
         let (interface, _data_permit, _ordinary_permit) = actor.into_parts();
-        let (_tx, mut ingress) = interface.into_parts();
+        let (_tx, mut ingress, _lifecycle) = interface.into_parts();
         let mut buffer = ingress
             .try_receive_buffer()
             .expect("actor owns its seeded ingress buffer");
@@ -980,7 +986,7 @@ mod tests {
     fn correlation_rejection_recycles_exact_buffer_before_returning() {
         let (mut supervisor, [actor], _) = build::<1, 1>(20);
         let (interface, _data_permit, _ordinary_permit) = actor.into_parts();
-        let (_tx, mut ingress) = interface.into_parts();
+        let (_tx, mut ingress, _lifecycle) = interface.into_parts();
         let mut buffer = ingress
             .try_receive_buffer()
             .expect("actor owns its seeded exact buffer");
@@ -1013,7 +1019,7 @@ mod tests {
         let (mut supervisor, _actors, _) = build::<1, 1>(22);
         let foreign_fabric = Box::leak(Box::new(InterfaceFabric::<NoopRawMutex, 1, 1>::new()));
         let (mut foreign_router, [foreign_actor]) = foreign_fabric.split();
-        let (_foreign_tx, mut foreign_ingress) = foreign_actor.into_parts();
+        let (_foreign_tx, mut foreign_ingress, _foreign_lifecycle) = foreign_actor.into_parts();
         let mut buffer = foreign_ingress
             .try_receive_buffer()
             .expect("foreign actor owns its seeded buffer");
@@ -1076,7 +1082,7 @@ mod tests {
         let (mut supervisor, [actor], _) = build::<1, 1>(23);
         let queue = actor.queue_id();
         let (interface, _data_permit, _ordinary_permit) = actor.into_parts();
-        let (_tx, mut ingress) = interface.into_parts();
+        let (_tx, mut ingress, _lifecycle) = interface.into_parts();
         let mut buffer = ingress
             .try_receive_buffer()
             .expect("actor owns its seeded exact buffer");
@@ -1117,7 +1123,7 @@ mod tests {
         let (mut supervisor, [actor], _) = build::<1, 1>(24);
         let queue = actor.queue_id();
         let (interface, _data_permit, _ordinary_permit) = actor.into_parts();
-        let (_tx, mut ingress) = interface.into_parts();
+        let (_tx, mut ingress, _lifecycle) = interface.into_parts();
         let mut buffer = ingress
             .try_receive_buffer()
             .expect("actor owns its seeded status-fixture buffer");
@@ -1164,7 +1170,7 @@ mod tests {
         let (mut supervisor, [actor], _) = build::<1, 1>(25);
         let queue = actor.queue_id();
         let (interface, _data_permit, _ordinary_permit) = actor.into_parts();
-        let (_tx, mut ingress) = interface.into_parts();
+        let (_tx, mut ingress, _lifecycle) = interface.into_parts();
         let mut buffer = ingress
             .try_receive_buffer()
             .expect("actor owns its seeded classification buffer");
@@ -1295,7 +1301,8 @@ mod tests {
     fn newly_disabled_coordinator_is_surfaced_then_skipped_for_permit_drain() {
         let (mut supervisor, [actor0, actor1], _) = build::<2, 1>(10);
         let descriptor0 = supervisor
-            .register_interface(
+            .router
+            .register(
                 actor0.queue_id(),
                 PacketInterfaceId::new(2),
                 properties(1),
@@ -1331,7 +1338,8 @@ mod tests {
         let (_ticket, job) = job.into_parts();
         let (_pending, request) = job.begin_permit(requirements(10));
         supervisor
-            .register_interface(
+            .router
+            .register(
                 actor1.queue_id(),
                 PacketInterfaceId::new(64),
                 properties(2),
@@ -1427,7 +1435,8 @@ mod tests {
         let (_data_pending, data_request) = data_job.begin_permit(requirements(1));
 
         supervisor
-            .set_interface_online(descriptors[0].lease(), true)
+            .router
+            .set_online(descriptors[0].lease(), true)
             .expect("actor zero can come online");
         supervisor
             .try_offer_actions(standalone_announce(31, &mut rng), admission())
@@ -1492,6 +1501,313 @@ mod tests {
         assert!(data1.replies().try_receive().is_some());
         assert!(ordinary0.replies().try_receive().is_some());
         assert_eq!(supervisor.policy().calls, 2);
+    }
+
+    #[test]
+    fn graceful_actor_offline_preserves_inflight_completion_and_healthy_transport_progress() {
+        let (mut supervisor, actor_ports, destination) = build::<2, 1>(35);
+        let descriptors = register(&mut supervisor, &actor_ports, [false, false]);
+        let [actor0, actor1] = actor_ports;
+        let (interface0, _data0, _ordinary0) = actor0.into_parts();
+        let (interface1, _data1, _ordinary1) = actor1.into_parts();
+        let (mut tx0, _ingress0, mut lifecycle0) = interface0.into_parts();
+        let (mut tx1, mut ingress1, mut lifecycle1) = interface1.into_parts();
+        let ingress1_authority = ingress1
+            .bind_ingress(descriptors[1])
+            .expect("actor one descriptor must bind to its ingress queue");
+
+        let ready0 = lifecycle0
+            .try_request_state(descriptors[0].lease(), InterfaceLifecycleState::Ready)
+            .expect("actor zero Ready request must fit");
+        let ready1 = lifecycle1
+            .try_request_state(descriptors[1].lease(), InterfaceLifecycleState::Ready)
+            .expect("actor one Ready request must fit");
+        let mut observed_ready = [false; 2];
+        for _ in 0..16 {
+            if let NodeInterfaceSupervisorTransition::Lifecycle(transition) =
+                supervisor.step(MonotonicMillis::new(9)).transition()
+            {
+                let acknowledgement = transition.acknowledgement();
+                let interface = acknowledgement
+                    .result()
+                    .expect("both current Ready requests must apply")
+                    .lease()
+                    .interface();
+                observed_ready[usize::from(interface.get() - 2)] = true;
+            }
+            if observed_ready == [true, true] {
+                break;
+            }
+        }
+        assert_eq!(observed_ready, [true, true]);
+        let ready0_descriptor = lifecycle0
+            .try_finish_request()
+            .expect("actor zero Ready acknowledgement must correlate")
+            .expect("actor zero Ready acknowledgement must be retained");
+        assert_eq!(ready0_descriptor.lease(), descriptors[0].lease());
+        assert!(ready0_descriptor.is_online());
+        let ready1_descriptor = lifecycle1
+            .try_finish_request()
+            .expect("actor one Ready acknowledgement must correlate")
+            .expect("actor one Ready acknowledgement must be retained");
+        assert_eq!(ready1_descriptor.lease(), descriptors[1].lease());
+        assert!(ready1_descriptor.is_online());
+        assert_eq!(ready0.lease(), descriptors[0].lease());
+        assert_eq!(ready1.lease(), descriptors[1].lease());
+
+        let mut rng = CounterRng::default();
+        let first = prepare_data(
+            &mut supervisor,
+            destination,
+            b"lifecycle in-flight fanout",
+            &mut rng,
+        );
+        assert_eq!(first.interface(), descriptors[0].lease().interface());
+        let mut first_routed = false;
+        for _ in 0..16 {
+            if supervisor.step(MonotonicMillis::new(10)).transition()
+                == NodeInterfaceSupervisorTransition::Data(DataRouterStep::Routed(first))
+            {
+                first_routed = true;
+                break;
+            }
+        }
+        assert!(first_routed);
+        let InterfaceTxJob::Data(first_job) =
+            tx0.try_receive_job().expect("actor zero owns first hop")
+        else {
+            panic!("first fanout hop changed family")
+        };
+        let (first_ticket, first_job) = first_job.into_parts();
+
+        let offline = lifecycle0
+            .try_request_state(descriptors[0].lease(), InterfaceLifecycleState::Offline)
+            .expect("actor zero Offline request must fit while its job is in flight");
+        let mut offline_applied = false;
+        for _ in 0..16 {
+            if let NodeInterfaceSupervisorTransition::Lifecycle(transition) =
+                supervisor.step(MonotonicMillis::new(11)).transition()
+                && transition.acknowledgement().request() == offline
+            {
+                assert!(
+                    !transition
+                        .acknowledgement()
+                        .result()
+                        .expect("current Offline request must apply")
+                        .is_online()
+                );
+                offline_applied = true;
+                break;
+            }
+        }
+        assert!(offline_applied);
+        assert!(
+            !lifecycle0
+                .try_finish_request()
+                .expect("actor zero Offline acknowledgement must correlate")
+                .expect("actor zero Offline acknowledgement must be retained")
+                .is_online()
+        );
+
+        let first_completion = first_ticket
+            .complete(
+                first_job
+                    .return_unpermitted()
+                    .complete(TxCompletionCode::new(0x780)),
+            )
+            .expect("offline transition must not invalidate the accepted ticket");
+        tx0.try_send_completion(first_completion)
+            .expect("offline actor may return its already-owned completion");
+
+        let mut second = None;
+        for _ in 0..32 {
+            match supervisor.step(MonotonicMillis::new(12)).transition() {
+                NodeInterfaceSupervisorTransition::Data(DataRouterStep::Completion(
+                    DataRouterCompletionProgress::Next(hop),
+                )) => second = Some(hop),
+                NodeInterfaceSupervisorTransition::Data(DataRouterStep::Routed(hop))
+                    if second == Some(hop) =>
+                {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let second = second.expect("legitimate offline completion must advance fanout");
+        assert_eq!(second.interface(), descriptors[1].lease().interface());
+        let InterfaceTxJob::Data(second_job) = tx1
+            .try_receive_job()
+            .expect("healthy actor owns second hop")
+        else {
+            panic!("second fanout hop changed family")
+        };
+        let (second_ticket, second_job) = second_job.into_parts();
+        let second_completion = second_ticket
+            .complete(
+                second_job
+                    .return_unpermitted()
+                    .complete(TxCompletionCode::new(0x781)),
+            )
+            .expect("healthy actor ticket must remain exact");
+        tx1.try_send_completion(second_completion)
+            .expect("healthy actor completion must fit");
+        let mut available = false;
+        for _ in 0..24 {
+            if matches!(
+                supervisor.step(MonotonicMillis::new(13)).transition(),
+                NodeInterfaceSupervisorTransition::Data(DataRouterStep::Completion(
+                    DataRouterCompletionProgress::Available(_)
+                ))
+            ) {
+                available = true;
+                break;
+            }
+        }
+        assert!(available);
+
+        let packet = native_announce_packet(96, &mut rng);
+        let mut buffer = ingress1
+            .try_receive_buffer()
+            .expect("healthy actor retains ingress capacity");
+        buffer.capacity_mut()[..packet.len()].copy_from_slice(&packet);
+        let sealed = buffer
+            .seal(packet.len())
+            .expect("healthy ingress packet seals");
+        ingress1
+            .try_send(ingress1_authority, sealed)
+            .expect("healthy actor ingress queue remains live");
+        assert!(matches!(
+            supervisor.step_ingress(MonotonicSeconds::new(14), admission(), &mut rng),
+            NodeInterfaceIngressStep::Processed(_)
+        ));
+
+        let fresh = prepare_data(
+            &mut supervisor,
+            destination,
+            b"fresh route excludes offline actor",
+            &mut rng,
+        );
+        assert_eq!(fresh.interface(), descriptors[1].lease().interface());
+        assert_eq!(tx0.pending_jobs(), 0);
+    }
+
+    #[test]
+    fn offline_lifecycle_preempts_a_ready_data_lane_before_actor_ownership_transfer() {
+        let (mut supervisor, actor_ports, destination) = build::<2, 1>(37);
+        let descriptors = register(&mut supervisor, &actor_ports, [true, true]);
+        let [actor0, actor1] = actor_ports;
+        let (interface0, _data0, _ordinary0) = actor0.into_parts();
+        let (interface1, _data1, _ordinary1) = actor1.into_parts();
+        let (tx0, _ingress0, mut lifecycle0) = interface0.into_parts();
+        let (mut tx1, _ingress1, _lifecycle1) = interface1.into_parts();
+        let mut rng = CounterRng::default();
+        let first = prepare_data(
+            &mut supervisor,
+            destination,
+            b"offline must preempt ready DATA",
+            &mut rng,
+        );
+        assert_eq!(first.interface(), descriptors[0].lease().interface());
+
+        // Position the fair orchestration cursor at DATA. Before lifecycle
+        // became a pre-routing gate, this allowed one fresh owner to enter a
+        // stopped actor before its queued Offline transition was observed.
+        supervisor.lane_cursor = 1;
+        let offline = lifecycle0
+            .try_request_state(descriptors[0].lease(), InterfaceLifecycleState::Offline)
+            .expect("actor zero Offline request must fit");
+        let first_pass = supervisor.step(MonotonicMillis::new(20));
+        assert!(matches!(
+            first_pass.transition(),
+            NodeInterfaceSupervisorTransition::Lifecycle(transition)
+                if transition.acknowledgement().request() == offline
+        ));
+        assert_eq!(tx0.pending_jobs(), 0);
+        assert!(
+            !lifecycle0
+                .try_finish_request()
+                .expect("Offline acknowledgement must correlate")
+                .expect("Offline acknowledgement must be retained")
+                .is_online()
+        );
+
+        assert!(matches!(
+            supervisor.step(MonotonicMillis::new(21)).transition(),
+            NodeInterfaceSupervisorTransition::Data(DataRouterStep::RouteRejected {
+                hop,
+                reason: reticulum_interface_router::RouteError::Offline(lease),
+            }) if hop == first && lease == descriptors[0].lease()
+        ));
+        assert_eq!(tx0.pending_jobs(), 0);
+
+        let mut second = None;
+        for _ in 0..16 {
+            match supervisor.step(MonotonicMillis::new(22)).transition() {
+                NodeInterfaceSupervisorTransition::Data(DataRouterStep::Completion(
+                    DataRouterCompletionProgress::Next(hop),
+                )) => second = Some(hop),
+                NodeInterfaceSupervisorTransition::Data(DataRouterStep::Routed(hop))
+                    if second == Some(hop) =>
+                {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let second = second.expect("local Offline rejection must continue through actor one");
+        assert_eq!(second.interface(), descriptors[1].lease().interface());
+        assert_eq!(tx0.pending_jobs(), 0);
+        assert!(matches!(
+            tx1.try_receive_job(),
+            Some(InterfaceTxJob::Data(_))
+        ));
+    }
+
+    #[test]
+    fn lifecycle_offline_is_acknowledged_after_aggregate_owner_mismatch() {
+        let (mut supervisor, [actor], _) = build::<1, 1>(36);
+        let [descriptor] = register(
+            &mut supervisor,
+            core::slice::from_ref(&actor).try_into().unwrap(),
+            [true],
+        );
+        let (interface, _data, _ordinary) = actor.into_parts();
+        let (_tx, _ingress, mut lifecycle) = interface.into_parts();
+        let request = lifecycle
+            .try_request_state(descriptor.lease(), InterfaceLifecycleState::Offline)
+            .expect("Offline request must fit before aggregate fault observation");
+
+        let (foreign_node, _) = sender(91);
+        supervisor.node = foreign_node;
+        assert_eq!(
+            supervisor.step(MonotonicMillis::new(20)).transition(),
+            NodeInterfaceSupervisorTransition::Fault(
+                NodeInterfaceSupervisorFault::DataOwnerMismatch
+            )
+        );
+        let second = supervisor.step(MonotonicMillis::new(21));
+        assert!(second.maintenance().is_err());
+        let NodeInterfaceSupervisorTransition::Lifecycle(transition) = second.transition() else {
+            panic!("faulted aggregate must still acknowledge actor lifecycle")
+        };
+        assert_eq!(transition.acknowledgement().request(), request);
+        assert!(
+            !transition
+                .acknowledgement()
+                .result()
+                .expect("current Offline request remains authoritative")
+                .is_online()
+        );
+        assert_eq!(
+            lifecycle
+                .try_finish_request()
+                .expect("faulted aggregate acknowledgement must correlate")
+                .expect("faulted aggregate retains the exact acknowledgement"),
+            transition
+                .acknowledgement()
+                .result()
+                .expect("current Offline transition already applied")
+        );
     }
 
     #[test]
@@ -1793,6 +2109,9 @@ pub enum NodeInterfaceSupervisorTransition {
         /// Current-generation or explicit recovery path.
         origin: NodeInterfaceCompletionOrigin,
     },
+    /// One concrete actor lifecycle report was applied or rejected and its
+    /// exact acknowledgement was returned.
+    Lifecycle(InterfaceLifecycleTransition),
     /// One DATA coordinator transition progressed or entered a new permanent
     /// fault.
     Data(DataRouterStep),
@@ -2334,24 +2653,27 @@ where
         self.node.destination_hash()
     }
 
-    /// Register one stable interface identity in a vacant actor slot.
+    /// Register one stable interface identity offline in a vacant actor slot.
+    ///
+    /// Only that slot's lifecycle capability can make the interface eligible
+    /// by completing a generation-bound Ready exchange.
     pub fn register_interface(
         &mut self,
         queue: InterfaceQueueId,
         interface: PacketInterfaceId,
         properties: InterfaceProperties,
-        online: bool,
     ) -> Result<InterfaceDescriptor, InterfaceRegistrationError> {
-        self.router.register(queue, interface, properties, online)
+        self.router.register(queue, interface, properties, false)
     }
 
-    /// Change whether one current interface accepts newly routed owners.
-    pub fn set_interface_online(
+    /// Administratively exclude one current interface from newly routed work.
+    ///
+    /// This disable-only surface cannot bypass actor-owned Ready reporting.
+    pub fn disable_interface(
         &mut self,
         lease: InterfaceLease,
-        online: bool,
     ) -> Result<InterfaceDescriptor, InterfaceLeaseError> {
-        self.router.set_online(lease, online)
+        self.router.set_online(lease, false)
     }
 
     /// Confirm the bounded synchronous egress-handoff interval for one
@@ -2769,17 +3091,38 @@ where
         self.ordinary.take_rejected_actions()
     }
 
-    /// Perform DATA owner maintenance once, then select at most one useful
-    /// transition by bounded round-robin scan across every orchestration lane.
+    /// Perform DATA owner maintenance once, apply at most one pending actor
+    /// lifecycle request as a pre-routing barrier, then select at most one
+    /// useful transition by bounded round-robin scan across orchestration
+    /// lanes.
     ///
     /// Idle, pressured, or disabled lanes never stop the scan. In particular,
     /// a coordinator-local fault does not prevent an already-issued actor
     /// request from reaching that coordinator's forced-denial authorization
     /// path through its permit server.
     pub fn step(&mut self, now: MonotonicMillis) -> NodeInterfaceSupervisorPass {
+        let owner_was_mismatched = self.owner_mismatch_fault;
         let maintenance = self.data.maintain_tx(&mut self.node, now);
         if maintenance.is_err() {
             self.owner_mismatch_fault = true;
+            if !owner_was_mismatched {
+                return NodeInterfaceSupervisorPass {
+                    maintenance,
+                    transition: NodeInterfaceSupervisorTransition::Fault(
+                        NodeInterfaceSupervisorFault::DataOwnerMismatch,
+                    ),
+                };
+            }
+        }
+
+        if let Some(lifecycle) = self.router.try_process_lifecycle() {
+            return NodeInterfaceSupervisorPass {
+                maintenance,
+                transition: NodeInterfaceSupervisorTransition::Lifecycle(lifecycle),
+            };
+        }
+
+        if maintenance.is_err() {
             return NodeInterfaceSupervisorPass {
                 maintenance,
                 transition: NodeInterfaceSupervisorTransition::Fault(

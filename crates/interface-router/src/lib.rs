@@ -227,6 +227,99 @@ pub struct InterfaceLease {
     generation: InterfaceGeneration,
 }
 
+/// Concrete actor lifecycle state requested from the authoritative registry.
+///
+/// `Ready` means the actor has completed transport-specific initialization and
+/// may accept new routed owners. `Offline` removes it from new route
+/// resolution without invalidating owners already accepted under the same
+/// generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InterfaceLifecycleState {
+    /// The concrete actor is ready to accept newly routed owners.
+    Ready,
+    /// The concrete actor must receive no newly routed owners.
+    Offline,
+}
+
+impl InterfaceLifecycleState {
+    const fn online(self) -> bool {
+        matches!(self, Self::Ready)
+    }
+}
+
+/// One generation-bound lifecycle request emitted by a concrete actor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InterfaceLifecycleRequest {
+    lease: InterfaceLease,
+    state: InterfaceLifecycleState,
+}
+
+impl InterfaceLifecycleRequest {
+    /// Exact registry generation the actor is reporting about.
+    pub const fn lease(self) -> InterfaceLease {
+        self.lease
+    }
+
+    /// Actor-observed lifecycle state to apply.
+    pub const fn state(self) -> InterfaceLifecycleState {
+        self.state
+    }
+}
+
+/// Why an actor lifecycle request did not change registry eligibility.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InterfaceLifecycleRouteError {
+    /// The request arrived through a different fixed actor queue than its
+    /// supplied lease names.
+    ForeignQueue {
+        /// Queue through which the router observed the request.
+        observed: InterfaceQueueId,
+        /// Queue named by the supplied lease.
+        supplied: InterfaceQueueId,
+    },
+    /// The supplied generation is not the current authoritative lease.
+    InvalidLease(InterfaceLeaseError),
+}
+
+/// Supervisor acknowledgement for one exact actor lifecycle request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InterfaceLifecycleAcknowledgement {
+    request: InterfaceLifecycleRequest,
+    result: Result<InterfaceDescriptor, InterfaceLifecycleRouteError>,
+}
+
+impl InterfaceLifecycleAcknowledgement {
+    /// Exact request being acknowledged.
+    pub const fn request(self) -> InterfaceLifecycleRequest {
+        self.request
+    }
+
+    /// Applied authoritative descriptor or typed fail-closed rejection.
+    pub const fn result(self) -> Result<InterfaceDescriptor, InterfaceLifecycleRouteError> {
+        self.result
+    }
+}
+
+/// One lifecycle request consumed, validated, applied or rejected, and
+/// acknowledged by the router.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InterfaceLifecycleTransition {
+    queue: InterfaceQueueId,
+    acknowledgement: InterfaceLifecycleAcknowledgement,
+}
+
+impl InterfaceLifecycleTransition {
+    /// Fixed actor queue through which the request was observed.
+    pub const fn queue(self) -> InterfaceQueueId {
+        self.queue
+    }
+
+    /// Exact acknowledgement already returned to the actor.
+    pub const fn acknowledgement(self) -> InterfaceLifecycleAcknowledgement {
+        self.acknowledgement
+    }
+}
+
 impl InterfaceLease {
     /// Stable Reticulum packet-interface identity.
     pub const fn interface(self) -> PacketInterfaceId {
@@ -1125,6 +1218,8 @@ where
     completions: Channel<M, InterfaceTxCompletion, QUEUE_DEPTH>,
     available_ingress: Channel<M, AvailableIngressBuffer, QUEUE_DEPTH>,
     completed_ingress: Channel<M, InterfaceIngress, QUEUE_DEPTH>,
+    lifecycle_requests: Channel<M, InterfaceLifecycleRequest, 1>,
+    lifecycle_acknowledgements: Channel<M, InterfaceLifecycleAcknowledgement, 1>,
 }
 
 impl<M, const QUEUE_DEPTH: usize> InterfaceChannels<M, QUEUE_DEPTH>
@@ -1137,6 +1232,8 @@ where
             completions: Channel::new(),
             available_ingress: Channel::new(),
             completed_ingress: Channel::new(),
+            lifecycle_requests: Channel::new(),
+            lifecycle_acknowledgements: Channel::new(),
         }
     }
 }
@@ -1149,6 +1246,8 @@ where
     completions: &'static Channel<M, InterfaceTxCompletion, QUEUE_DEPTH>,
     available_ingress: &'static Channel<M, AvailableIngressBuffer, QUEUE_DEPTH>,
     completed_ingress: &'static Channel<M, InterfaceIngress, QUEUE_DEPTH>,
+    lifecycle_requests: &'static Channel<M, InterfaceLifecycleRequest, 1>,
+    lifecycle_acknowledgements: &'static Channel<M, InterfaceLifecycleAcknowledgement, 1>,
     ingress_origin: &'static IngressFabricOrigin,
 }
 
@@ -1216,6 +1315,8 @@ where
             completions: &channels[index].completions,
             available_ingress: &channels[index].available_ingress,
             completed_ingress: &channels[index].completed_ingress,
+            lifecycle_requests: &channels[index].lifecycle_requests,
+            lifecycle_acknowledgements: &channels[index].lifecycle_acknowledgements,
             ingress_origin,
         });
         let actors = array::from_fn(|index| InterfaceActorHandoff {
@@ -1224,6 +1325,8 @@ where
             completions: &channels[index].completions,
             available_ingress: &channels[index].available_ingress,
             completed_ingress: &channels[index].completed_ingress,
+            lifecycle_requests: &channels[index].lifecycle_requests,
+            lifecycle_acknowledgements: &channels[index].lifecycle_acknowledgements,
             ingress_origin,
         });
         (
@@ -1232,6 +1335,7 @@ where
                 queues,
                 completion_cursor: 0,
                 ingress_cursor: 0,
+                lifecycle_cursor: 0,
             },
             actors,
         )
@@ -1248,6 +1352,203 @@ where
     }
 }
 
+/// Immediate actor-side rejection while enqueueing one lifecycle request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InterfaceLifecycleTryRequestError {
+    /// The supplied lease belongs to another fixed actor queue.
+    ForeignQueue {
+        /// Queue permanently owned by this actor capability.
+        actor: InterfaceQueueId,
+        /// Queue named by the supplied lease.
+        supplied: InterfaceQueueId,
+    },
+    /// Another exact lifecycle exchange is awaiting acknowledgement.
+    ExchangePending {
+        /// Exact earlier request still awaiting acknowledgement.
+        pending: InterfaceLifecycleRequest,
+        /// Exact request that was not enqueued.
+        unsent: InterfaceLifecycleRequest,
+    },
+    /// The request queue is occupied; the payload is the exact unsent request.
+    RequestQueueFull(InterfaceLifecycleRequest),
+}
+
+/// Actor-side lifecycle exchange status or fail-closed correlation error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InterfaceLifecycleActorError {
+    /// The supplied lease belongs to another fixed actor queue.
+    ForeignQueue {
+        /// Queue permanently owned by this actor capability.
+        actor: InterfaceQueueId,
+        /// Queue named by the supplied lease.
+        supplied: InterfaceQueueId,
+    },
+    /// Another exact lifecycle request still awaits acknowledgement.
+    ExchangePending(InterfaceLifecycleRequest),
+    /// The bounded request queue was unexpectedly occupied while no exchange
+    /// was locally pending.
+    RequestQueueFull(InterfaceLifecycleRequest),
+    /// No locally pending request exists to finish.
+    NoPendingRequest,
+    /// The supervisor rejected the exact request without changing registry
+    /// eligibility.
+    Rejected(InterfaceLifecycleRouteError),
+    /// The acknowledgement did not name the request this call emitted.
+    CrossedAcknowledgement {
+        /// Exact request emitted by this call.
+        expected: InterfaceLifecycleRequest,
+        /// Different request named by the received acknowledgement.
+        received: InterfaceLifecycleRequest,
+    },
+    /// An acknowledgement arrived while this actor had no pending exchange.
+    UnexpectedAcknowledgement(InterfaceLifecycleRequest),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InterfaceLifecycleActorPhase {
+    Idle,
+    Awaiting(InterfaceLifecycleRequest),
+}
+
+/// Split concrete-actor capability for generation-bound Ready/Offline
+/// reporting.
+#[must_use = "a permanent actor must retain its lifecycle capability"]
+pub struct InterfaceLifecycleActorHandoff<M>
+where
+    M: RawMutex + 'static,
+{
+    queue: InterfaceQueueId,
+    requests: &'static Channel<M, InterfaceLifecycleRequest, 1>,
+    acknowledgements: &'static Channel<M, InterfaceLifecycleAcknowledgement, 1>,
+    phase: InterfaceLifecycleActorPhase,
+}
+
+impl<M> InterfaceLifecycleActorHandoff<M>
+where
+    M: RawMutex + 'static,
+{
+    /// Fixed queue identity owned by this actor capability.
+    pub const fn queue_id(&self) -> InterfaceQueueId {
+        self.queue
+    }
+
+    /// Immediately enqueue one generation-bound lifecycle request.
+    pub fn try_request_state(
+        &mut self,
+        lease: InterfaceLease,
+        state: InterfaceLifecycleState,
+    ) -> Result<InterfaceLifecycleRequest, InterfaceLifecycleTryRequestError> {
+        if lease.queue != self.queue {
+            return Err(InterfaceLifecycleTryRequestError::ForeignQueue {
+                actor: self.queue,
+                supplied: lease.queue,
+            });
+        }
+        let request = InterfaceLifecycleRequest { lease, state };
+        if let InterfaceLifecycleActorPhase::Awaiting(pending) = self.phase {
+            return Err(InterfaceLifecycleTryRequestError::ExchangePending {
+                pending,
+                unsent: request,
+            });
+        }
+        match self.requests.try_send(request) {
+            Ok(()) => {
+                self.phase = InterfaceLifecycleActorPhase::Awaiting(request);
+                Ok(request)
+            }
+            Err(TrySendError::Full(request)) => {
+                Err(InterfaceLifecycleTryRequestError::RequestQueueFull(request))
+            }
+        }
+    }
+
+    /// Finish the locally pending exchange immediately.
+    ///
+    /// `Ok(None)` means an exchange is pending but its acknowledgement is not
+    /// yet available. Idle actors receive [`InterfaceLifecycleActorError::NoPendingRequest`]
+    /// instead of an ambiguous empty result.
+    pub fn try_finish_request(
+        &mut self,
+    ) -> Result<Option<InterfaceDescriptor>, InterfaceLifecycleActorError> {
+        if matches!(self.phase, InterfaceLifecycleActorPhase::Idle) {
+            return match self.acknowledgements.try_receive() {
+                Ok(acknowledgement) => {
+                    Err(InterfaceLifecycleActorError::UnexpectedAcknowledgement(
+                        acknowledgement.request,
+                    ))
+                }
+                Err(_) => Err(InterfaceLifecycleActorError::NoPendingRequest),
+            };
+        }
+        let Ok(acknowledgement) = self.acknowledgements.try_receive() else {
+            return Ok(None);
+        };
+        self.resolve_pending_acknowledgement(acknowledgement)
+            .map(Some)
+    }
+
+    /// Request one state and wait for the exact supervisor acknowledgement.
+    ///
+    /// A permanent actor must drive this single-flight exchange to completion;
+    /// cancelling after request delivery deliberately leaves the exact
+    /// pending exchange represented by this capability, with its request or
+    /// acknowledgement retained in the bounded channels rather than silently
+    /// accepting a later crossed transition.
+    pub async fn request_state(
+        &mut self,
+        lease: InterfaceLease,
+        state: InterfaceLifecycleState,
+    ) -> Result<InterfaceDescriptor, InterfaceLifecycleActorError> {
+        self.try_request_state(lease, state)
+            .map_err(|reason| match reason {
+                InterfaceLifecycleTryRequestError::ForeignQueue { actor, supplied } => {
+                    InterfaceLifecycleActorError::ForeignQueue { actor, supplied }
+                }
+                InterfaceLifecycleTryRequestError::ExchangePending { pending, .. } => {
+                    InterfaceLifecycleActorError::ExchangePending(pending)
+                }
+                InterfaceLifecycleTryRequestError::RequestQueueFull(request) => {
+                    InterfaceLifecycleActorError::RequestQueueFull(request)
+                }
+            })?;
+        self.finish_pending_request().await
+    }
+
+    /// Resume and finish one request retained in the actor phase after a
+    /// cancelled acknowledgement wait.
+    pub async fn finish_pending_request(
+        &mut self,
+    ) -> Result<InterfaceDescriptor, InterfaceLifecycleActorError> {
+        let InterfaceLifecycleActorPhase::Awaiting(expected) = self.phase else {
+            return Err(InterfaceLifecycleActorError::NoPendingRequest);
+        };
+        let acknowledgement = self.acknowledgements.receive().await;
+        debug_assert_eq!(self.phase, InterfaceLifecycleActorPhase::Awaiting(expected));
+        self.resolve_pending_acknowledgement(acknowledgement)
+    }
+
+    fn resolve_pending_acknowledgement(
+        &mut self,
+        acknowledgement: InterfaceLifecycleAcknowledgement,
+    ) -> Result<InterfaceDescriptor, InterfaceLifecycleActorError> {
+        let InterfaceLifecycleActorPhase::Awaiting(expected) = self.phase else {
+            return Err(InterfaceLifecycleActorError::UnexpectedAcknowledgement(
+                acknowledgement.request,
+            ));
+        };
+        if acknowledgement.request != expected {
+            return Err(InterfaceLifecycleActorError::CrossedAcknowledgement {
+                expected,
+                received: acknowledgement.request,
+            });
+        }
+        self.phase = InterfaceLifecycleActorPhase::Idle;
+        acknowledgement
+            .result
+            .map_err(InterfaceLifecycleActorError::Rejected)
+    }
+}
+
 /// Sole concrete-actor capability for one fixed interface queue.
 #[must_use = "dropping an actor handoff abandons its interface queue capability"]
 pub struct InterfaceActorHandoff<M, const QUEUE_DEPTH: usize>
@@ -1259,6 +1560,8 @@ where
     completions: &'static Channel<M, InterfaceTxCompletion, QUEUE_DEPTH>,
     available_ingress: &'static Channel<M, AvailableIngressBuffer, QUEUE_DEPTH>,
     completed_ingress: &'static Channel<M, InterfaceIngress, QUEUE_DEPTH>,
+    lifecycle_requests: &'static Channel<M, InterfaceLifecycleRequest, 1>,
+    lifecycle_acknowledgements: &'static Channel<M, InterfaceLifecycleAcknowledgement, 1>,
     ingress_origin: &'static IngressFabricOrigin,
 }
 
@@ -1271,16 +1574,17 @@ where
         self.queue
     }
 
-    /// Consume the combined compatibility handle into independent TX and RX
-    /// actor capabilities with the same fixed queue origin.
+    /// Consume the combined handle into independent TX, RX, and lifecycle
+    /// actor capabilities bound to the same fixed queue.
     ///
-    /// A permanent concrete interface task can own both values while passing
-    /// only the TX capability to a dedicated outbound dispatcher.
+    /// A permanent concrete interface task owns the RX and lifecycle values
+    /// while it may pass the TX capability to a dedicated dispatcher.
     pub fn into_parts(
         self,
     ) -> (
         InterfaceTxActorHandoff<M, QUEUE_DEPTH>,
         InterfaceIngressActorHandoff<M, QUEUE_DEPTH>,
+        InterfaceLifecycleActorHandoff<M>,
     ) {
         (
             InterfaceTxActorHandoff {
@@ -1293,6 +1597,12 @@ where
                 available: self.available_ingress,
                 completed: self.completed_ingress,
                 origin: self.ingress_origin,
+            },
+            InterfaceLifecycleActorHandoff {
+                queue: self.queue,
+                requests: self.lifecycle_requests,
+                acknowledgements: self.lifecycle_acknowledgements,
+                phase: InterfaceLifecycleActorPhase::Idle,
             },
         )
     }
@@ -1460,8 +1770,9 @@ where
 
 /// TX-only concrete-actor capability for one fixed interface queue.
 ///
-/// This is the outbound half returned by [`InterfaceActorHandoff::into_parts`]
-/// so a dedicated dispatcher need not own any RX-buffer capability.
+/// This is the outbound capability returned by
+/// [`InterfaceActorHandoff::into_parts`] so a dedicated dispatcher need not
+/// own any RX-buffer or lifecycle capability.
 #[must_use = "dropping a TX actor handoff abandons its outbound queue capability"]
 pub struct InterfaceTxActorHandoff<M, const QUEUE_DEPTH: usize>
 where
@@ -2086,6 +2397,7 @@ where
     queues: [RouterQueue<M, QUEUE_DEPTH>; SLOTS],
     completion_cursor: usize,
     ingress_cursor: usize,
+    lifecycle_cursor: usize,
 }
 
 impl<M, const SLOTS: usize, const QUEUE_DEPTH: usize> OutboundRouter<M, SLOTS, QUEUE_DEPTH>
@@ -2101,6 +2413,49 @@ where
     /// resolution.
     pub fn eligible_interfaces(&self) -> Result<InterfaceSet, EligibleInterfaceSetError> {
         self.registry.eligible_interfaces()
+    }
+
+    /// Consume, validate, apply or reject, and acknowledge at most one actor
+    /// lifecycle request in bounded round-robin order.
+    ///
+    /// The acknowledgement queue is checked before removing the request, so a
+    /// cancelled or wedged actor cannot cause a state transition whose exact
+    /// result the fabric cannot retain. The router is the sole acknowledgement
+    /// producer, making the subsequent send infallible while capacity remains
+    /// reserved by this synchronous method.
+    pub fn try_process_lifecycle(&mut self) -> Option<InterfaceLifecycleTransition> {
+        for offset in 0..SLOTS {
+            let index = (self.lifecycle_cursor + offset) % SLOTS;
+            let queue = &self.queues[index];
+            if queue.lifecycle_acknowledgements.is_full() {
+                continue;
+            }
+            let Ok(request) = queue.lifecycle_requests.try_receive() else {
+                continue;
+            };
+            self.lifecycle_cursor = (index + 1) % SLOTS;
+            let observed = InterfaceQueueId(index as u16);
+            let supplied = request.lease.queue;
+            let result = if supplied != observed {
+                Err(InterfaceLifecycleRouteError::ForeignQueue { observed, supplied })
+            } else {
+                self.registry
+                    .set_online(request.lease, request.state.online())
+                    .map_err(InterfaceLifecycleRouteError::InvalidLease)
+            };
+            let acknowledgement = InterfaceLifecycleAcknowledgement { request, result };
+            match queue.lifecycle_acknowledgements.try_send(acknowledgement) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    unreachable!("sole lifecycle acknowledgement producer reserved capacity")
+                }
+            }
+            return Some(InterfaceLifecycleTransition {
+                queue: observed,
+                acknowledgement,
+            });
+        }
+        None
     }
 
     /// Dequeue and validate one exact completed native packet in bounded
@@ -3451,8 +3806,8 @@ mod tests {
         let (mut router, actors) = fabric::<1>();
         let (first, second) = configure(&mut router, &actors);
         let [first_actor, second_actor] = actors;
-        let (first_tx, mut first_rx) = first_actor.into_parts();
-        let (second_tx, mut second_rx) = second_actor.into_parts();
+        let (first_tx, mut first_rx, _first_lifecycle) = first_actor.into_parts();
+        let (second_tx, mut second_rx, _second_lifecycle) = second_actor.into_parts();
         assert_eq!(first_tx.queue_id(), first.lease().queue());
         assert_eq!(first_rx.queue_id(), first.lease().queue());
         assert_eq!(second_tx.queue_id(), second.lease().queue());
@@ -3882,7 +4237,7 @@ mod tests {
                 true,
             )
             .expect("test interface must register");
-        let (_tx, mut ingress_actor) = actor.into_parts();
+        let (_tx, mut ingress_actor, _lifecycle) = actor.into_parts();
         let authority = ingress_actor
             .bind_ingress(descriptor)
             .expect("same-queue descriptor must bind");
@@ -4047,6 +4402,354 @@ mod tests {
         router
             .try_return_ingress_buffer(second_a)
             .expect("second A must return");
+    }
+
+    #[test]
+    fn lifecycle_requests_apply_ready_and_offline_under_the_same_generation() {
+        let (mut router, actors) = fabric::<1>();
+        let (first, second) = configure(&mut router, &actors);
+        let [first_actor, second_actor] = actors;
+        router
+            .set_online(first.lease(), false)
+            .expect("first current lease must transition offline");
+        router
+            .set_online(second.lease(), false)
+            .expect("second current lease must transition offline");
+        let (_, _, mut first_lifecycle) = first_actor.into_parts();
+        let (_, _, mut second_lifecycle) = second_actor.into_parts();
+
+        let first_request = first_lifecycle
+            .try_request_state(first.lease(), InterfaceLifecycleState::Ready)
+            .expect("first actor request queue must be empty");
+        let second_request = second_lifecycle
+            .try_request_state(second.lease(), InterfaceLifecycleState::Ready)
+            .expect("second actor request queue must be empty");
+
+        let first_transition = router
+            .try_process_lifecycle()
+            .expect("first fair lifecycle pass must progress");
+        assert_eq!(first_transition.queue(), first.lease().queue());
+        assert_eq!(first_transition.acknowledgement().request(), first_request);
+        assert!(
+            first_transition
+                .acknowledgement()
+                .result()
+                .expect("first ready request must apply")
+                .is_online()
+        );
+        assert_eq!(
+            first_lifecycle
+                .try_finish_request()
+                .expect("first acknowledgement must match")
+                .expect("first acknowledgement must be retained"),
+            first_transition
+                .acknowledgement()
+                .result()
+                .expect("first transition already applied")
+        );
+
+        let second_transition = router
+            .try_process_lifecycle()
+            .expect("cursor must advance to the second actor");
+        assert_eq!(second_transition.queue(), second.lease().queue());
+        assert_eq!(
+            second_transition.acknowledgement().request(),
+            second_request
+        );
+        assert_eq!(
+            second_lifecycle
+                .try_finish_request()
+                .expect("second acknowledgement must match")
+                .expect("second acknowledgement must be retained"),
+            second_transition
+                .acknowledgement()
+                .result()
+                .expect("second transition already applied")
+        );
+
+        let offline_request = first_lifecycle
+            .try_request_state(first.lease(), InterfaceLifecycleState::Offline)
+            .expect("acknowledged actor can request another transition");
+        let offline_transition = router
+            .try_process_lifecycle()
+            .expect("offline request must progress");
+        assert_eq!(
+            offline_transition.acknowledgement().request(),
+            offline_request
+        );
+        assert!(
+            !offline_transition
+                .acknowledgement()
+                .result()
+                .expect("current offline request must apply")
+                .is_online()
+        );
+        assert!(
+            !first_lifecycle
+                .try_finish_request()
+                .expect("offline acknowledgement must match")
+                .expect("offline acknowledgement must be retained")
+                .is_online()
+        );
+        assert!(
+            router
+                .registry()
+                .descriptor(second.lease().interface())
+                .expect("second interface remains registered")
+                .is_online()
+        );
+    }
+
+    #[test]
+    fn lifecycle_requests_reject_crossed_queues_and_stale_generations() {
+        let (mut router, actors) = fabric::<1>();
+        let (first, second) = configure(&mut router, &actors);
+        let [first_actor, second_actor] = actors;
+        let (_, _, mut first_lifecycle) = first_actor.into_parts();
+        let (_, _, _second_lifecycle) = second_actor.into_parts();
+
+        assert_eq!(
+            first_lifecycle.try_request_state(second.lease(), InterfaceLifecycleState::Offline,),
+            Err(InterfaceLifecycleTryRequestError::ForeignQueue {
+                actor: first.lease().queue(),
+                supplied: second.lease().queue(),
+            })
+        );
+
+        // Inject a malformed envelope behind the public actor guard to prove
+        // the router independently treats its observed channel as authority.
+        let crossed = InterfaceLifecycleRequest {
+            lease: second.lease(),
+            state: InterfaceLifecycleState::Offline,
+        };
+        first_lifecycle
+            .requests
+            .try_send(crossed)
+            .expect("test injection queue must be empty");
+        let unsent = InterfaceLifecycleRequest {
+            lease: first.lease(),
+            state: InterfaceLifecycleState::Ready,
+        };
+        assert_eq!(
+            first_lifecycle.try_request_state(first.lease(), InterfaceLifecycleState::Ready),
+            Err(InterfaceLifecycleTryRequestError::RequestQueueFull(unsent))
+        );
+        let crossed_transition = router
+            .try_process_lifecycle()
+            .expect("crossed request must be acknowledged as rejected");
+        assert_eq!(
+            crossed_transition.acknowledgement().result(),
+            Err(InterfaceLifecycleRouteError::ForeignQueue {
+                observed: first.lease().queue(),
+                supplied: second.lease().queue(),
+            })
+        );
+        assert!(
+            router
+                .registry()
+                .descriptor(second.lease().interface())
+                .expect("crossed request must not remove the second interface")
+                .is_online()
+        );
+        assert_eq!(
+            first_lifecycle.try_finish_request(),
+            Err(InterfaceLifecycleActorError::UnexpectedAcknowledgement(
+                crossed
+            ))
+        );
+
+        let replacement = router
+            .reconfigure(first.lease(), first.properties(), false)
+            .expect("current first lease must reconfigure");
+        first_lifecycle
+            .try_request_state(first.lease(), InterfaceLifecycleState::Ready)
+            .expect("stale request still names the actor's fixed queue");
+        let stale_transition = router
+            .try_process_lifecycle()
+            .expect("stale request must be acknowledged as rejected");
+        assert!(matches!(
+            stale_transition.acknowledgement().result(),
+            Err(InterfaceLifecycleRouteError::InvalidLease(
+                InterfaceLeaseError::Stale { supplied, current }
+            )) if supplied == first.lease() && current == replacement
+        ));
+        assert!(
+            !router
+                .registry()
+                .descriptor(first.lease().interface())
+                .expect("replacement remains registered")
+                .is_online()
+        );
+        assert!(matches!(
+            first_lifecycle.try_finish_request(),
+            Err(InterfaceLifecycleActorError::Rejected(
+                InterfaceLifecycleRouteError::InvalidLease(InterfaceLeaseError::Stale {
+                    supplied,
+                    current,
+                })
+            )) if supplied == first.lease() && current == replacement
+        ));
+    }
+
+    #[test]
+    fn lifecycle_acknowledgement_pressure_retains_the_next_request() {
+        let (mut router, actors) = fabric::<1>();
+        let (first, _) = configure(&mut router, &actors);
+        let [first_actor, _second_actor] = actors;
+        let (_, _, mut lifecycle) = first_actor.into_parts();
+
+        let first_request = lifecycle
+            .try_request_state(first.lease(), InterfaceLifecycleState::Offline)
+            .expect("first request must enqueue");
+        router
+            .try_process_lifecycle()
+            .expect("first request must be applied and acknowledged");
+        let second_request = InterfaceLifecycleRequest {
+            lease: first.lease(),
+            state: InterfaceLifecycleState::Ready,
+        };
+        assert_eq!(
+            lifecycle.try_request_state(first.lease(), InterfaceLifecycleState::Ready),
+            Err(InterfaceLifecycleTryRequestError::ExchangePending {
+                pending: first_request,
+                unsent: second_request,
+            })
+        );
+        lifecycle
+            .requests
+            .try_send(second_request)
+            .expect("private injection isolates router acknowledgement pressure");
+
+        assert_eq!(router.try_process_lifecycle(), None);
+        assert!(
+            !router
+                .registry()
+                .descriptor(first.lease().interface())
+                .expect("first interface remains registered")
+                .is_online()
+        );
+        assert!(
+            !lifecycle
+                .try_finish_request()
+                .expect("first acknowledgement must match")
+                .expect("first acknowledgement remains exact")
+                .is_online()
+        );
+        assert!(
+            router
+                .try_process_lifecycle()
+                .expect("retained second request progresses after ack capacity returns")
+                .acknowledgement()
+                .result()
+                .expect("second request is current")
+                .is_online()
+        );
+        assert_eq!(
+            lifecycle.try_finish_request(),
+            Err(InterfaceLifecycleActorError::UnexpectedAcknowledgement(
+                second_request
+            ))
+        );
+    }
+
+    #[test]
+    fn crossed_acknowledgement_preserves_the_pending_single_flight_exchange() {
+        let (mut router, actors) = fabric::<1>();
+        let (first, _) = configure(&mut router, &actors);
+        let [first_actor, _second_actor] = actors;
+        let (_, _, mut lifecycle) = first_actor.into_parts();
+        let pending = lifecycle
+            .try_request_state(first.lease(), InterfaceLifecycleState::Offline)
+            .expect("first request must enqueue");
+        let crossed = InterfaceLifecycleRequest {
+            lease: first.lease(),
+            state: InterfaceLifecycleState::Ready,
+        };
+        lifecycle
+            .acknowledgements
+            .try_send(InterfaceLifecycleAcknowledgement {
+                request: crossed,
+                result: Ok(first),
+            })
+            .expect("private crossed acknowledgement injection must fit");
+
+        assert_eq!(
+            lifecycle.try_finish_request(),
+            Err(InterfaceLifecycleActorError::CrossedAcknowledgement {
+                expected: pending,
+                received: crossed,
+            })
+        );
+        assert_eq!(
+            lifecycle.try_request_state(first.lease(), InterfaceLifecycleState::Ready),
+            Err(InterfaceLifecycleTryRequestError::ExchangePending {
+                pending,
+                unsent: crossed,
+            })
+        );
+
+        let transition = router
+            .try_process_lifecycle()
+            .expect("original pending request must still progress");
+        assert_eq!(transition.acknowledgement().request(), pending);
+        assert!(
+            !lifecycle
+                .try_finish_request()
+                .expect("original acknowledgement must correlate")
+                .expect("original acknowledgement must be retained")
+                .is_online()
+        );
+        lifecycle
+            .try_request_state(first.lease(), InterfaceLifecycleState::Ready)
+            .expect("exact completion must reopen the single-flight phase");
+    }
+
+    #[test]
+    fn cancelled_async_wait_can_resume_the_exact_single_flight_exchange() {
+        let (mut router, actors) = fabric::<1>();
+        let (first, _) = configure(&mut router, &actors);
+        let [first_actor, _second_actor] = actors;
+        let (_, _, mut lifecycle) = first_actor.into_parts();
+        assert_eq!(
+            lifecycle.try_finish_request(),
+            Err(InterfaceLifecycleActorError::NoPendingRequest)
+        );
+        let pending = InterfaceLifecycleRequest {
+            lease: first.lease(),
+            state: InterfaceLifecycleState::Offline,
+        };
+        let unsent = InterfaceLifecycleRequest {
+            lease: first.lease(),
+            state: InterfaceLifecycleState::Ready,
+        };
+
+        let mut future =
+            Box::pin(lifecycle.request_state(first.lease(), InterfaceLifecycleState::Offline));
+        let mut context = core::task::Context::from_waker(core::task::Waker::noop());
+        assert!(matches!(
+            core::future::Future::poll(future.as_mut(), &mut context),
+            core::task::Poll::Pending
+        ));
+        let transition = router
+            .try_process_lifecycle()
+            .expect("polled request must be visible to the router");
+        assert_eq!(transition.acknowledgement().request(), pending);
+        drop(future);
+
+        assert_eq!(
+            lifecycle.try_request_state(first.lease(), InterfaceLifecycleState::Ready),
+            Err(InterfaceLifecycleTryRequestError::ExchangePending { pending, unsent })
+        );
+        assert!(
+            !lifecycle
+                .try_finish_request()
+                .expect("cancelled wait must preserve exact correlation")
+                .expect("router acknowledgement must remain retained")
+                .is_online()
+        );
+        lifecycle
+            .try_request_state(first.lease(), InterfaceLifecycleState::Ready)
+            .expect("resumed completion must reopen the single-flight phase");
     }
 
     #[test]

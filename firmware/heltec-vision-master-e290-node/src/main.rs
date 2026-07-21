@@ -33,7 +33,7 @@ use core::future::pending;
 use core::{future::Future, mem};
 
 use embassy_executor::Spawner;
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Delay, Duration, Instant, Timer, with_timeout};
 use embedded_hal::digital::{Error as DigitalError, ErrorKind, ErrorType};
 use embedded_hal_async::digital::Wait;
@@ -167,9 +167,6 @@ const _: () = assert!(
         <= config::MAXIMUM_AUTHENTICATED_API_HANDOFF_BYTES
 );
 static EXECUTOR: StaticCell<esp_rtos::embassy::Executor> = StaticCell::new();
-
-pub(crate) static RADIO_READY: Signal<CriticalSectionRawMutex, ()> = Signal::new();
-pub(crate) static LORA_ONLINE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -710,7 +707,6 @@ async fn product_main(
         actor.queue_id(),
         LORA_INTERFACE,
         config::interface_properties(),
-        false,
     ) {
         Ok(descriptor) => descriptor,
         Err(reason) => {
@@ -719,7 +715,7 @@ async fn product_main(
         }
     };
     let (interface, data_permit, ordinary_permit) = actor.into_parts();
-    let (tx_interface, ingress) = interface.into_parts();
+    let (tx_interface, ingress, lifecycle) = interface.into_parts();
     let ingress_authority = match ingress.bind_ingress(offline_descriptor) {
         Ok(authority) => authority,
         Err(reason) => {
@@ -804,7 +800,7 @@ async fn product_main(
         InputConfig::default().with_pull(Pull::Up),
     );
 
-    let radio_task = match radio_task::run(dispatcher, ingress, ingress_authority) {
+    let radio_task = match radio_task::run(dispatcher, ingress, lifecycle, ingress_authority) {
         Ok(task) => task,
         Err(_) => {
             error!("e290-node stage=spawn status=FAIL task=lora");

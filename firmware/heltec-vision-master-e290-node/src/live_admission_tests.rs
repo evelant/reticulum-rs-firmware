@@ -299,6 +299,22 @@ fn authenticated_submission_crosses_lora_policy_and_scripted_radio_durability() 
 }
 
 #[test]
+fn radio_actor_offline_report_is_acknowledged_by_the_live_supervisor() {
+    let mut system = LiveNodeSystem::new();
+
+    let offline = system.actor_reports_lora_offline();
+
+    assert!(!offline.is_online());
+    assert_eq!(
+        system
+            .supervisor
+            .interface_registry()
+            .descriptor(LORA_INTERFACE),
+        Some(offline)
+    );
+}
+
+#[test]
 fn permanent_post_frame_storage_failure_fail_stops_lora_with_all_owners_retained() {
     let (mut service, _) = LiveSubmissionService::formatted(11);
     let mut system = LiveNodeSystem::new();
@@ -336,7 +352,15 @@ fn permanent_post_frame_storage_failure_fail_stops_lora_with_all_owners_retained
         service.service_state(),
         DurabilityServiceState::ActiveOwnerFailStopped
     );
-    system.fail_stop_lora();
+    let offline = system.disable_lora_by_node_policy();
+    assert!(!offline.is_online());
+    assert_eq!(
+        system
+            .supervisor
+            .interface_registry()
+            .descriptor(LORA_INTERFACE),
+        Some(offline)
+    );
 
     for now_us in [3_000_000, 4_000_000, 5_000_000] {
         assert_eq!(

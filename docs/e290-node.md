@@ -75,7 +75,37 @@ authenticated fail-closed LRPROOF handling, and makes covered H2 relay/reverse
 admission transactional with typed failures. It also adds precise
 microsecond/binary64 LRRTT timing, dispatch confirmation, Active/Stale updates,
 and authenticated-malformed teardown. Those changes do not retroactively
-qualify a historical image or hardware run. The preceding `14c7b49`
+qualify a historical image or hardware run.
+
+The current composition also replaces `RADIO_READY`/`LORA_ONLINE`
+product globals with the transport-neutral interface fabric's queue-bound,
+generation-checked lifecycle exchange. The LoRa actor reports `Ready` after
+radio construction and waits for the node-owned registry acknowledgement
+before service. Registration is offline-only and node-owned policy is
+disable-only, so no product caller can bypass that Ready boundary. Every
+terminal actor path resumes or retries its exact exchange until it observes
+authoritative `Offline` before its permanent owner-retention loop. Crossed or
+stale reports cannot change the
+registry; acknowledgement pressure leaves the observed request unapplied.
+Offline excludes fresh routing while preserving legitimate completion and
+ingress owners already accepted under the same lease. The supervisor services
+this as a pre-routing gate; fairness applies among actors inside the lifecycle
+router, not between lifecycle and ordinary routing lanes. Two-slot host
+coverage proves the graceful case: after the first actor goes Offline and
+legitimately returns its in-flight completion, serialized DATA fan-out and
+ingress continue through the healthy actor. It does not prove terminal
+failover. An E290 terminal path
+retains any exposed or otherwise ambiguous owner, so that attempt cannot
+automatically advance; only fresh attempts exclude the failed interface.
+Draining or revoking provably unstarted work still queued for that actor needs
+a future ownership protocol. Protocol-confirmation failure now offlines the
+interface returned by the routed transition rather than assuming LoRa. The
+default lifecycle image was flashed to `3e:88`, matched an exact address-zero
+readback, and returned an authenticated `identity-summary`. That proves one
+current-source boot and API exchange, not the two-board lifecycle/RF behavior;
+`3f:88` did not enumerate for this run.
+
+The preceding `14c7b49`
 build-only default E290 release links with text/data/BSS of
 670,407/3,676/469,152 bytes and a 12,084,612-byte ELF, SHA-256
 `d0b457165f8ec80a677f963e0608a5b9510970fde23458567b4f31e3b319822a`.
@@ -83,15 +113,16 @@ Its explicit 16 MiB package is a 776,464-byte merged image, uses
 710,928/6,291,456 application bytes (11.30%), and has SHA-256
 `7b11c6f6a3c039d46ab0117fd362920aaa40145e7f27cbc6fa0a8a84a7ab3571`.
 This is build-only evidence for the preceding pin: the image has no flashed
-readback or powered proof. The current pin's build-only default release links
-with text/data/BSS of 674,431/3,676/469,152 bytes (1,147,259 bytes total by GNU
-size), and its ELF has SHA-256
-`d370039c3872d34a74b9bbc0b52567a24be607bc01ea660b6dfbd8d5dd12072d`.
-Its explicit 16 MiB package is a 780,448-byte merged image, uses
-714,912/6,291,456 application bytes (11.36%), and has SHA-256
-`a912bb6c910c0145a9431f2a94b95a0a6560662678c457fc9c49e8641050b72c`.
-It is build-only, unflashed, and unpowered because neither E290 currently
-enumerates. A new powered run remains required.
+readback or powered proof. The current pin's default release links with
+text/data/BSS of 679,375/3,676/469,152 bytes (1,152,203 bytes total by GNU
+size). Its 12,220,340-byte ELF has SHA-256
+`d18ac44b2bf68d1e6bf79c562f0431bcba66c739388d31d50e29a2f7fa60a81f`.
+Its explicit 16 MiB package is a 785,360-byte merged image, uses
+719,824/6,291,456 application bytes (11.44%), and has SHA-256
+`826707513fec45a24940f20f5798c790b04d8b1f85158605f4bbae972b5267d6`.
+That merged image matched an exact readback on `3e:88`, where authenticated
+`identity-summary` succeeded. The unavailable `3f:88` prevented a current
+two-board lifecycle/RF run.
 Every powered result below remains bound to its recorded historical source and
 Rete revision.
 
@@ -363,8 +394,11 @@ Dropped CAD, TX and RX futures enter the dispatcher's explicit cancellation
 recovery. Ticketed completion is drained before terminal disablement, so a
 packet owner is not stranded. Other terminal actor paths stop scheduling any
 further radio operations; they do not claim that an independent hardware
-shutdown occurred. Restart/reinitialization and actor-to-registry offline
-signaling are later lifecycle work.
+shutdown occurred. They report Offline through the generation-bound lifecycle
+gate before permanent retention, which excludes fresh attempts but does not
+reinterpret an ambiguous retained owner as safe to reroute. Restart and
+reinitialization, plus terminal drain/revocation of provably unstarted queued
+work, remain later lifecycle work.
 
 The node task rotates across queued ingress, supervisor/permit progression,
 RNS maintenance, local announces, and one resident durable-runtime step. Each
@@ -514,22 +548,22 @@ cargo +stable run --locked -p xtask -- e290-runtime-measurement inspect-elf \
 It accepts only final little-endian 32-bit Xtensa `ET_EXEC` images with one
 nonempty, relocation-free `.stack_sizes` section. Both maximum frames must be
 at most 53,680 bytes, both linker guard offsets must remain 60 bytes, and the
-default/HIL usable stacks must remain at least 167,648/166,952 bytes. The
+default/HIL usable stacks must remain at least 167,440/166,744 bytes. The
 default ELF must exclude the proof trace; the HIL ELF must contain exactly one
 initialized 192-byte symbol whose linked bytes decode as a valid empty `RPTE`
-record. Record counts are diagnostic rather than policy: the current build-only
-pair contains 845 default and 862 HIL records, and both maxima are 53,680
+record. Record counts are diagnostic rather than policy: the current build
+pair contains 844 default and 860 HIL records, and both maxima are 53,680
 bytes. The retained powered release ELFs described below instead
 contain 816/832 records with 52,752-byte maxima. CI runs Clippy and then
 relinks both current profiles with
 `-C link-arg=-nostartfiles -Z emit-stack-sizes` in isolated target directories
 immediately before this inspection.
 
-The current default/HIL usable stacks are 167,648/166,952 bytes, both guard
-offsets are 60 bytes, and the carried raw painted margin is 68,684 bytes after
-deducting 3,336 bytes of linked internal-RAM growth from the 72,020-byte powered
+The current default/HIL usable stacks are 167,440/166,744 bytes, both guard
+offsets are 60 bytes, and the carried raw painted margin is 68,476 bytes after
+deducting 3,544 bytes of linked internal-RAM growth from the 72,020-byte powered
 boot-only baseline. Subtracting the current 53,680-byte maximum frame leaves a
-15,004-byte conservative margin. These are static build measurements and a
+14,796-byte conservative margin. These are static build measurements and a
 deliberately conservative carry-forward calculation, not a new powered
 high-water result. This ceiling qualifies the E290's internal CPU0/main-
 executor task stack; it is not a compatibility ceiling for non-PSRAM ESP32
@@ -538,14 +572,14 @@ already requires PSRAM for its separate application/storage capacity, while
 Tracker V2 remains a separately sized reduced profile.
 
 The current build-only runtime-measurement HIL links with text/data/BSS of
-686,203/4,180/468,648 bytes (1,159,031 bytes total by GNU size), and its ELF
-has SHA-256
-`5aaa4c7029b35b55c5f2eb0f673c04ac11ae695c09a8cc1d1797990fe0a4ab30`.
-Its explicit 16 MiB package uses 726,512/6,291,456 application bytes (11.55%)
-and produces a 792,048-byte merged image with SHA-256
-`938d944c9373638b475e48e804fc0211b92da1ef49d0e875233d052b19064881`.
-Like the current default package, it is unflashed and unpowered because neither
-E290 currently enumerates.
+689,735/4,180/468,648 bytes (1,162,563 bytes total by GNU size). Its
+12,365,360-byte ELF has SHA-256
+`f4eacf22785b6d4f583d1ce2ca8ad3e992611a0f99e202befb7551dcd5e41e3e`.
+Its explicit 16 MiB package uses 730,016/6,291,456 application bytes (11.60%)
+and produces a 795,552-byte merged image with SHA-256
+`62b35fbd20d7a16d8129f4ba2b425cd1e6859e87438e25cc571b7465d41dddf7`.
+The HIL image remains unflashed and unpowered; the current one-board evidence
+above is for the default image only.
 
 The exact release artifacts used for the 2026-07-20 powered run compare as
 follows. Paths embedded by the build can affect rebuild digests, so these
@@ -609,9 +643,9 @@ evidence for the immediately preceding trace revision, not powered evidence
 for the current hashes or the pending two-board RF proof-timeout reproduction.
 The 72,020-byte raw margin leaves 19,268 bytes after subtracting the unchanged
 52,752-byte maximum compiler frame in that artifact. Current static policy
-conservatively deducts 3,336 bytes of subsequent linked internal-RAM growth,
-then subtracts the current 53,680-byte maximum: 68,684 carried-forward raw
-bytes and 15,004 bytes remain. This is build-qualified carry-forward, not a
+conservatively deducts 3,544 bytes of subsequent linked internal-RAM growth,
+then subtracts the current 53,680-byte maximum: 68,476 carried-forward raw
+bytes and 14,796 bytes remain. This is build-qualified carry-forward, not a
 fresh powered watermark.
 
 ### Decisive proof-correlation trial runbook
@@ -830,7 +864,7 @@ a deliberately conservative 19,460 bytes after subtracting the 52,752-byte
 maximum frame; the predecessor's one-board diagnostic baseline updates those
 values to 72,020/19,268 after the exact 192-byte linked-RAM cost. Neither pair
 is a universal stack guarantee. Current static policy further carries those
-values to 68,684/15,004 after 3,336 bytes of exact post-proof linked internal-
+values to 68,476/14,796 after 3,544 bytes of exact post-proof linked internal-
 RAM growth and the current 53,680-byte frame; that likewise is not a new
 powered observation. This is an internal CPU0/main-executor task-stack bound,
 not a no-PSRAM board-support ceiling.
@@ -1160,8 +1194,8 @@ the ordinary and exceptional roots. The commit-fault dependency tail must be
 identical to default; the measurement tail may add only the reviewed
 `esp-alloc/alloc-hooks` feature. The default ELF must contain neither fault nor
 measurement wrappers, hooks, markers or evidence identifiers.
-The 131-test default host library suite, 137-test commit-fault profile, and
-147-test runtime-measurement profile have
+The 134-test default host library suite, 140-test commit-fault profile, and
+150-test runtime-measurement profile have
 passing policy/product/credential-boot/
 credential-runtime/USB-control/live-routing tests, including the source-order
 regressions, every canonical empty-initialization byte cut, adversarial media changes between

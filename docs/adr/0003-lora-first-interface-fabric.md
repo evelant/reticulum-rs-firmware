@@ -94,6 +94,43 @@ LoRa interface.
 
 ### Treat interface lifecycle and learned paths explicitly
 
+Each fixed fabric slot owns a depth-one Ready/Offline request and
+acknowledgement exchange. The concrete actor reports only about its current
+queue-bound registry lease; the node-owned router validates the observed slot
+and generation before changing eligibility. Crossed or stale reports are
+acknowledged as typed rejections, and acknowledgement pressure leaves the
+observed request unapplied. Offline excludes fresh routes without invalidating
+an already accepted completion or completed ingress owner. This replaces
+product-global radio-ready signals and is reusable by later LoRa, USB, Wi-Fi,
+BLE, Ethernet, or other packet actors.
+
+The production aggregate registers a slot offline and exposes only a
+disable-only administrative mutation. Enabling is exclusively the result of a
+successful queue-bound Ready exchange; a replacement generation therefore
+also starts offline if the prior actor can report only a stale lease.
+
+The supervisor treats a pending lifecycle report as a pre-routing gate, not as
+one ordinary fair-scan lane. Before it advances completion, coordinator, or
+permit work, it services one lifecycle report; the router's own cursor provides
+fairness among actor lifecycle queues. This ensures that an actor reporting
+Offline cannot receive a fresh routed owner because another supervisor lane
+happened to be next.
+
+Offline is an admission transition, not an owner-revocation or failover
+operation. Graceful shutdown may return an already accepted completion and
+allow node-core's serialized fan-out to continue elsewhere. A terminal E290
+fail-stop retains exposed or otherwise ambiguous owners, so the same attempt
+does not automatically move to another actor; only fresh attempts exclude the
+failed actor. Recovering provably unstarted work from a terminal actor queue
+requires a future drain/revocation protocol that preserves this ambiguity
+boundary.
+
+The current online bit combines actor liveness with product administrative
+enablement. The permanent E290 actor emits Ready only once, so that is adequate
+for the first composition. A restartable actor or operator-disable facility
+must introduce a separate administrative gate so a later Ready report cannot
+undo product policy.
+
 Rete currently retains only the one-byte interface ID on a learned path, not
 the project registry generation. A registry generation therefore prevents
 stale queued jobs and completions from being misattributed, but it cannot by
@@ -154,9 +191,11 @@ invent a cost-based route algorithm that Reticulum has not requested.
 - USB is the first planned local client/control bearer. An optional USB packet
   actor, and Wi-Fi or BLE packet actors, remain sequenced after the complete
   LoRa vertical slice.
-- Dynamic interface removal, reconfiguration, completion recovery, and learned
-  path invalidation must be tested as ownership/lifecycle behavior rather than
-  treated as ordinary configuration updates.
+- Dynamic interface removal, reconfiguration, graceful completion recovery,
+  terminal drain/revocation of provably unstarted queued work, and learned path
+  invalidation must be tested as ownership/lifecycle behavior rather than
+  treated as ordinary configuration updates. An ambiguous exposed owner remains
+  retained rather than being inferred safe to reroute.
 - Constrained boards can compile out actors and services, while the full E290
   profile can run several interfaces simultaneously.
 

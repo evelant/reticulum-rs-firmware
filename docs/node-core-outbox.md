@@ -17,15 +17,17 @@ The preceding `14c7b4955a1ff6903e87cc40b42498f7869b6f4f` pin had host and
 portable-target LRRTT validation and a build-only E290 package. Its 776,464-byte
 merged image uses 710,928/6,291,456 application bytes (11.30%) and has SHA-256
 `7b11c6f6a3c039d46ab0117fd362920aaa40145e7f27cbc6fa0a8a84a7ab3571`.
-It has no flashed-image readback or powered proof. The current pin needs a new
-powered run, but its build-only default E290 release is now known: text/data/BSS
-674,431/3,676/469,152 bytes (1,147,259 bytes total by GNU size), a 780,448-byte
-merged image using 714,912/6,291,456 application bytes (11.36%), ELF SHA-256
-`d370039c3872d34a74b9bbc0b52567a24be607bc01ea660b6dfbd8d5dd12072d`, and
+It has no flashed-image readback or powered proof. The current pin needs a
+two-board powered lifecycle/RF run, but its default E290 release is now known:
+text/data/BSS 679,375/3,676/469,152 bytes (1,152,203 bytes total by GNU size), a
+785,360-byte merged image using 719,824/6,291,456 application bytes (11.44%),
+ELF SHA-256
+`d18ac44b2bf68d1e6bf79c562f0431bcba66c739388d31d50e29a2f7fa60a81f`, and
 merged SHA-256
-`a912bb6c910c0145a9431f2a94b95a0a6560662678c457fc9c49e8641050b72c`.
-It is unflashed and unpowered because neither E290 currently enumerates. The
-source-`96e38aa` result above and later powered records
+`826707513fec45a24940f20f5798c790b04d8b1f85158605f4bbae972b5267d6`.
+The merged image matched an exact `3e:88` readback and served an authenticated
+`identity-summary`; `3f:88` did not enumerate. The source-`96e38aa` result above
+and later powered records
 remain bound to the revisions they name.
 
 At this pin, native ingress distinguishes exact path/reverse/Link forwarding

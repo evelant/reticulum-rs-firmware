@@ -4506,7 +4506,8 @@ mod tests {
         }
         let fabric = Box::leak(Box::new(InterfaceFabric::<NoopRawMutex, 1, 1>::new()));
         let (mut router, [actor_handoff]) = fabric.split();
-        let (tx_handoff, _unused_ingress_handoff) = actor_handoff.into_parts();
+        let (tx_handoff, _unused_ingress_handoff, _unused_lifecycle_handoff) =
+            actor_handoff.into_parts();
         router
             .register(
                 tx_handoff.queue_id(),

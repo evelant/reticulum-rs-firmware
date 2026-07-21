@@ -22,8 +22,8 @@ and does not define how future interfaces are added.
 owns:
 
 - one exact `NodeCore` and its node-instance ownership scope;
-- one `InterfaceFabric`, including the authoritative registry and bounded
-  job, completion, and ingress queues;
+- one `InterfaceFabric`, including the authoritative registry and bounded job,
+  completion, ingress, and actor-lifecycle request/acknowledgement queues;
 - one `DataRouterCoordinator` with its complete registered DATA buffer pool;
 - one `OrdinaryRouterCoordinator` with its independent ordinary buffer pool;
 - one DATA and one ordinary permit-only handoff for every interface actor slot;
@@ -34,7 +34,7 @@ Checked construction rejects zero actor slots, mismatched node ownership, or
 invalid interface/permit composition without silently discarding a non-copy
 owner. On success it returns the aggregate plus one `NodeInterfaceActorPorts`
 capability for each actor slot. Each actor capability can then be split into
-TX and ingress roles without creating a second registry authority.
+TX, ingress, and lifecycle roles without creating a second registry authority.
 
 The aggregate is intended to remain in static storage and be owned by one
 never-cancelled node task for the boot lifetime. Dropping and reconstructing it
@@ -122,8 +122,16 @@ copy-only binding for the exact retained completion.
 
 ## Fair bounded progression
 
-`step(now)` first performs DATA owner maintenance once, then scans the
-following orchestration lanes with a persistent round-robin cursor:
+`step(now)` first performs DATA owner maintenance once, then services one
+pending Ready/Offline exchange before any routing or progression lane. The
+router's lifecycle cursor rotates fairly among actor request queues, but this
+pre-routing lifecycle gate is not a lane in the supervisor's orchestration
+round robin. When no lifecycle report is pending, the supervisor scans these
+lanes with a persistent cursor:
+
+Supervisor registration is offline-only. There is no direct enable API:
+Ready must arrive through the actor lifecycle capability. Product policy can
+only disable a current lease, so it cannot accidentally bypass actor readiness.
 
 - shared interface completion intake;
 - DATA coordinator progression;
@@ -136,7 +144,19 @@ or disabled lanes do not end the scan, and the cursor advances after both
 progress and a completely idle pass. A full LoRa actor queue therefore cannot
 indefinitely hide another ready lane, and a coordinator-local fault does not
 prevent an already-issued permit request from reaching its forced-denial drain
-path.
+path. The first DATA-owner mismatch remains immediately visible; subsequent
+faulted passes still acknowledge lifecycle reports so an actor can remove
+itself from fresh routing while the aggregate drains terminal ownership.
+
+Offline alone does not revoke a job that the router already accepted. The
+two-actor host progression case is graceful: the first actor goes Offline,
+legitimately returns its in-flight completion, and only then can serialized
+fan-out continue through the healthy actor. A terminal actor failure is
+different. The E290 fail-stop retains an exposed or otherwise ambiguous owner,
+so that attempt does not advance automatically; only fresh attempts exclude
+the failed actor. Safely draining or revoking unstarted work still queued for a
+terminal actor requires a future ownership protocol that cannot conflate it
+with ambiguous exposed work.
 
 The aggregate exposes the earliest DATA, ordinary, or node-owner deadline plus
 copy-only capacity, permit-phase, ingress-residue, and coordinator-fault
@@ -157,14 +177,19 @@ The Heltec Vision Master E290 node target is the first concrete permanent
 composition. It deliberately contains two long-lived tasks:
 
 - a transport-neutral node task owning `NodeInterfaceSupervisor`, node timers,
-  action drain/retry, and interface online state; and
+  action drain/retry, and authoritative interface online state; and
 - one LoRa actor task owning timed RNode receive/reassembly, the ticket-aware
   `SoleRadioTxDispatcher`, CAD/backoff, exact airtime permit requirements, and
   the E290 HT-RA62/SX1262 radio.
 
 The two tasks exchange only the actor capability returned by the shared
-interface fabric, ticketed jobs/completions, sealed ingress buffers, and
-permit-only messages. LoRa is the first and primary complete transport slice.
+interface fabric, generation-bound Ready/Offline acknowledgements, ticketed
+jobs/completions, sealed ingress buffers, and permit-only messages. The radio
+actor waits for its accepted Ready acknowledgement before entering service and
+requests Offline before terminal retention. That closes fresh admission but
+does not reroute an ambiguous retained attempt; terminal drain/revocation of
+provably unstarted queued work remains future work. LoRa is the first and
+primary complete transport slice.
 The node/router seam is transport-neutral so a later USB, Wi-Fi, BLE, Ethernet,
 or other packet actor can receive its own registry slot and bounded pools, but
 those actors are intentionally deferred. They will implement their native link

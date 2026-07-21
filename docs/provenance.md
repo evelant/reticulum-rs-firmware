@@ -90,21 +90,23 @@ artifact hashes they actually used. In particular, records naming `9bceacd`,
 current pin. The preceding `14c7b49` pin's build-only default E290 release
 packages as a 776,464-byte merged image with SHA-256
 `7b11c6f6a3c039d46ab0117fd362920aaa40145e7f27cbc6fa0a8a84a7ab3571`.
-It has no flashed-image readback or powered proof. The current `90570ca` pin
-has a build-only default release with text/data/BSS of
-674,431/3,676/469,152 bytes (1,147,259 bytes total by GNU size). Its ELF has
-SHA-256 `d370039c3872d34a74b9bbc0b52567a24be607bc01ea660b6dfbd8d5dd12072d`;
-the 780,448-byte merged image uses 714,912/6,291,456 application bytes (11.36%)
+It has no flashed-image readback or powered proof. The current `90570ca` pin's
+default release has text/data/BSS of 679,375/3,676/469,152 bytes (1,152,203
+bytes total by GNU size). Its 12,220,340-byte ELF has SHA-256
+`d18ac44b2bf68d1e6bf79c562f0431bcba66c739388d31d50e29a2f7fa60a81f`;
+the 785,360-byte merged image uses 719,824/6,291,456 application bytes (11.44%)
 and has SHA-256
-`a912bb6c910c0145a9431f2a94b95a0a6560662678c457fc9c49e8641050b72c`.
-The current runtime-measurement HIL links with text/data/BSS of
-686,203/4,180/468,648 bytes (1,159,031 bytes total); its ELF has SHA-256
-`5aaa4c7029b35b55c5f2eb0f673c04ac11ae695c09a8cc1d1797990fe0a4ab30`,
-and its 792,048-byte merged image uses 726,512/6,291,456 application bytes
-(11.55%) with SHA-256
-`938d944c9373638b475e48e804fc0211b92da1ef49d0e875233d052b19064881`.
-Both current images are unflashed and unpowered because neither E290 currently
-enumerates; a new powered run remains required for any hardware claim.
+`826707513fec45a24940f20f5798c790b04d8b1f85158605f4bbae972b5267d6`.
+That image matched an exact `3e:88` readback and served an authenticated
+`identity-summary`; `3f:88` did not enumerate, so a current two-board
+lifecycle/RF run remains open. The current runtime-measurement HIL links with
+text/data/BSS of 689,735/4,180/468,648 bytes (1,162,563 bytes total); its
+12,365,360-byte ELF has SHA-256
+`f4eacf22785b6d4f583d1ce2ca8ad3e992611a0f99e202befb7551dcd5e41e3e`,
+and its 795,552-byte merged image uses 730,016/6,291,456 application bytes
+(11.60%) with SHA-256
+`62b35fbd20d7a16d8129f4ba2b425cd1e6859e87438e25cc571b7465d41dddf7`.
+The current HIL remains unflashed and unpowered.
 
 Phase-1 normal/pressure and closure artifact manifests bind the project commit
 and its raw Git root tree; their tool inventories record the same pair and the

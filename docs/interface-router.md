@@ -1,7 +1,8 @@
 # Transport-neutral Reticulum interface registry and router
 
 Status: implemented portable seam with bounded exact-owner TX queues, bounded
-stationary RX-buffer pools, and cancellation-safe actor/router waits. The
+stationary RX-buffer pools, generation-bound actor lifecycle handshakes, and
+cancellation-safe actor/router waits. The
 `NodeInterfaceSupervisor` owns the node, router, DATA and ordinary
 coordinators, and per-actor permit servers. The ticket-aware radio dispatcher
 owns only the TX half of one actor capability; the concrete LoRa task retains
@@ -128,6 +129,62 @@ a registry update, composition must quiesce/drain the queue before updating or
 return the owner unpermitted/recovery-faulted; it must never transmit old bytes
 under an unrelated new configuration.
 
+## Generation-bound actor lifecycle
+
+Every fabric slot also owns independent depth-one lifecycle request and
+acknowledgement channels. The actor capability's three-way split returns a
+non-cloneable `InterfaceLifecycleActorHandoff` beside the TX and RX
+capabilities. A concrete actor reports `Ready` only after transport-specific
+initialization succeeds and drives `Offline` to an acknowledged result before
+entering terminal retention. A retained or rejected exchange is resumed and
+retried without returning to transport operations. Each request carries the
+exact registry lease; it cannot invent a new interface identity or generation.
+
+`OutboundRouter::try_process_lifecycle()` polls actor slots fairly, treats the
+observed channel as authority, validates the request's queue and current
+generation, applies the online bit, and synchronously returns an exact typed
+acknowledgement. Crossed queues and stale generations are acknowledged as
+rejections without changing eligibility. If the actor's acknowledgement
+channel is already occupied, the observed request remains queued and unapplied.
+Ready and Offline are idempotent under one current lease.
+
+The production aggregate registers every slot offline and exposes no direct
+enable operation. Only the queue-bound lifecycle capability can make that
+generation eligible; node-owned policy has a separate disable-only operation.
+That also means a replacement generation begins offline if an old actor's
+terminal report is rejected as stale.
+
+`NodeInterfaceSupervisor::step()` treats lifecycle as a pre-routing gate. After
+DATA-owner maintenance, it services a pending lifecycle report before entering
+the round-robin completion, coordinator, and permit scan. Lifecycle is not one
+more lane in that scan: fairness applies inside the router's lifecycle cursor,
+which rotates among actor request queues. This ordering prevents an actor that
+has reported Offline from receiving another fresh owner merely because the
+supervisor's orchestration cursor was positioned at a routing lane.
+
+Offline changes only admission of fresh routed work. Already accepted jobs,
+completions, and completed ingress remain valid under the unchanged generation.
+The actor lifecycle handoff enforces one exchange in flight. Cancelling an
+acknowledgement wait preserves that pending exchange so the actor can resume
+it; an attempted second request is rejected with both the pending and unsent
+states still explicit.
+
+That preservation is deliberately not automatic failover. In the graceful
+case an actor may go Offline and still legitimately return an already accepted
+owner; node-core can then continue serialized fan-out through another online
+actor. A terminal E290 fail-stop instead retains any owner whose exposure or
+outcome is ambiguous, so that same attempt cannot automatically advance. The
+Offline transition excludes the failed actor only from fresh attempts. A
+future terminal-drain/revocation protocol must distinguish safely returnable,
+unstarted queued work from exposed or otherwise ambiguous ownership before the
+former can be recovered without weakening the latter's retention rule.
+
+Actor liveness and product administrative policy currently meet at the same
+online bit. The E290 actor emits Ready once at startup, so later durability
+policy offlining cannot be undone by that actor. A future restartable actor or
+operator-disable feature must represent administrative enablement separately
+rather than treating a repeated Ready report as policy authority.
+
 ## Ingress provenance
 
 Ingress uses the same capability boundary. Every fabric slot contains exactly
@@ -172,7 +229,9 @@ protocol-state problem.
 ## First concrete composition
 
 The first permanent composition puts the E290 LoRa/RNode radio owner behind one
-actor queue without moving LoRa requirements into this crate. The implemented
+actor queue without moving LoRa requirements into this crate. It replaces the
+former pair of product-global startup signals with the queue-bound Ready/
+Offline request and acknowledgement exchange. The implemented
 radio dispatcher accepts the queue's ticketed DATA/ordinary union and retains
 each exact ticket across permit negotiation, RNode framing, CAD, transmit, and
 completion return. It executes only under the job's stamped configuration
@@ -197,12 +256,12 @@ implicitly.
 
 ## Validation
 
-The focused interface-router suite contains 21 host tests. In addition to exact
+The focused interface-router suite contains 26 host tests. In addition to exact
 actor selection, fan-out, queue pressure, lifecycle, and cancellation coverage,
-it tests native ingress round-trip/reuse, length bounds, two-slot fairness,
+it tests lifecycle fairness, acknowledgement pressure, crossed/stale lifecycle
+rejection, native ingress round-trip/reuse, length bounds, two-slot fairness,
 online-to-offline acceptance, stale-generation recycling, crossed authority,
-queue and static-fabric rejection, and pressure/cancellation-safe ingress
-waits.
+queue and static-fabric rejection, and pressure/cancellation-safe ingress waits.
 
 ```sh
 cargo test --locked -p reticulum-interface-router

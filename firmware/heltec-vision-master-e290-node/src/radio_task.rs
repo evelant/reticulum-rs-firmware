@@ -13,7 +13,8 @@ use reticulum_heltec_vision_master_e290_node::runtime_measurement::{
 };
 use reticulum_interface_router::{
     ActorIngressSendError, AvailableIngressBuffer, InterfaceIngressActorHandoff,
-    InterfaceIngressAuthority, SealedIngressPacket,
+    InterfaceIngressAuthority, InterfaceLifecycleActorError, InterfaceLifecycleActorHandoff,
+    InterfaceLifecycleState, SealedIngressPacket,
 };
 use reticulum_radio_interface::{
     RNODE_HW_MTU, SX1262_FRAME_MTU, TimedReceiveOutcome, TimedRnodeRx,
@@ -25,7 +26,7 @@ use reticulum_radio_tx_dispatch::{
     RadioTxDispatcherChannel, RadioTxDispatcherPhase, RadioTxDispatcherStep, embassy_wait_until_us,
 };
 
-use crate::{LORA_ONLINE, ProductDispatcher, RADIO_READY, config};
+use crate::{ProductDispatcher, config};
 
 #[embassy_executor::task]
 pub async fn run(
@@ -34,6 +35,7 @@ pub async fn run(
         CriticalSectionRawMutex,
         { config::INTERFACE_QUEUE_DEPTH },
     >,
+    mut lifecycle: InterfaceLifecycleActorHandoff<CriticalSectionRawMutex>,
     authority: InterfaceIngressAuthority,
 ) {
     let fragment_timeout = NonZeroU64::new(
@@ -56,8 +58,30 @@ pub async fn run(
         config::TX_OPERATION_WATCHDOG_US,
         config::MAXIMUM_LOGICAL_PACKET_AIRTIME_US,
     );
-    RADIO_READY.signal(());
-    LORA_ONLINE.wait().await;
+    match lifecycle
+        .request_state(authority.lease(), InterfaceLifecycleState::Ready)
+        .await
+    {
+        Ok(descriptor) => info!(
+            "e290-node stage=lora-actor status=ONLINE interface={} generation={} queue={}",
+            descriptor.lease().interface().get(),
+            descriptor.lease().generation().get(),
+            descriptor.lease().queue().get(),
+        ),
+        Err(reason) => {
+            error!(
+                "e290-node stage=lora-actor status=FAIL reason=lifecycle-ready:{reason:?} action=report-offline-and-fail-stop"
+            );
+            fail_stop(
+                dispatcher,
+                &mut lifecycle,
+                authority,
+                available.take(),
+                sealed_pending.take(),
+            )
+            .await
+        }
+    }
     #[cfg(feature = "runtime-measurement-hil")]
     let mut previous_radio_loop_us = now_us();
 
@@ -92,7 +116,14 @@ pub async fn run(
                         error!(
                             "e290-node stage=lora-ingress status=FAIL reason={reason:?} action=quarantine-exact-ingress-owner-and-actor-fail-stop"
                         );
-                        fail_stop(dispatcher, available.take(), Some(packet)).await
+                        fail_stop(
+                            dispatcher,
+                            &mut lifecycle,
+                            authority,
+                            available.take(),
+                            Some(packet),
+                        )
+                        .await
                     }
                 },
             }
@@ -113,7 +144,14 @@ pub async fn run(
                         error!(
                             "e290-node stage=lora-rx status=FAIL reason=observation-length action=actor-fail-stop-no-further-radio-operations"
                         );
-                        fail_stop(dispatcher, available.take(), sealed_pending.take()).await
+                        fail_stop(
+                            dispatcher,
+                            &mut lifecycle,
+                            authority,
+                            available.take(),
+                            sealed_pending.take(),
+                        )
+                        .await
                     };
                     match receiver.feed(
                         frame,
@@ -167,8 +205,14 @@ pub async fn run(
                                             error!(
                                                 "e290-node stage=lora-ingress status=FAIL reason={reason:?} action=quarantine-exact-ingress-owner-and-actor-fail-stop"
                                             );
-                                            fail_stop(dispatcher, available.take(), Some(packet))
-                                                .await
+                                            fail_stop(
+                                                dispatcher,
+                                                &mut lifecycle,
+                                                authority,
+                                                available.take(),
+                                                Some(packet),
+                                            )
+                                            .await
                                         }
                                     },
                                 },
@@ -208,25 +252,53 @@ pub async fn run(
                 }
                 RadioReceiveStep::CancelledFutureNeedsRecovery => {
                     recover_cancelled_and_drain(dispatcher).await;
-                    fail_stop(dispatcher, available.take(), sealed_pending.take()).await
+                    fail_stop(
+                        dispatcher,
+                        &mut lifecycle,
+                        authority,
+                        available.take(),
+                        sealed_pending.take(),
+                    )
+                    .await
                 }
                 RadioReceiveStep::Fault { phase, class } => {
                     error!(
                         "e290-node stage=lora-rx status=FAIL phase={phase:?} class={class:?} action=actor-fail-stop-no-further-radio-operations"
                     );
-                    fail_stop(dispatcher, available.take(), sealed_pending.take()).await
+                    fail_stop(
+                        dispatcher,
+                        &mut lifecycle,
+                        authority,
+                        available.take(),
+                        sealed_pending.take(),
+                    )
+                    .await
                 }
                 RadioReceiveStep::InvalidObservation { len } => {
                     error!(
                         "e290-node stage=lora-rx status=FAIL reason=invalid-observation len={len} action=actor-fail-stop-no-further-radio-operations"
                     );
-                    fail_stop(dispatcher, available.take(), sealed_pending.take()).await
+                    fail_stop(
+                        dispatcher,
+                        &mut lifecycle,
+                        authority,
+                        available.take(),
+                        sealed_pending.take(),
+                    )
+                    .await
                 }
                 RadioReceiveStep::Disabled(fault) => {
                     error!(
                         "e290-node stage=lora-rx status=FAIL reason={fault:?} action=actor-fail-stop-no-further-radio-operations"
                     );
-                    fail_stop(dispatcher, available.take(), sealed_pending.take()).await
+                    fail_stop(
+                        dispatcher,
+                        &mut lifecycle,
+                        authority,
+                        available.take(),
+                        sealed_pending.take(),
+                    )
+                    .await
                 }
             }
         }
@@ -254,7 +326,14 @@ pub async fn run(
                 }
             }
             DispatchProgress::Disabled => {
-                fail_stop(dispatcher, available.take(), sealed_pending.take()).await
+                fail_stop(
+                    dispatcher,
+                    &mut lifecycle,
+                    authority,
+                    available.take(),
+                    sealed_pending.take(),
+                )
+                .await
             }
         }
     }
@@ -687,14 +766,44 @@ fn noop_context() -> core::task::Context<'static> {
 
 async fn fail_stop(
     dispatcher: &mut ProductDispatcher,
+    lifecycle: &mut InterfaceLifecycleActorHandoff<CriticalSectionRawMutex>,
+    authority: InterfaceIngressAuthority,
     retained_available: Option<AvailableIngressBuffer>,
     retained_sealed: Option<SealedIngressPacket>,
 ) -> ! {
     // The actor takes no further radio operations. The dispatcher may already
     // have shut down the radio as part of terminal cancellation recovery, but
     // this generic path does not claim or attempt a separate hardware shutdown.
+    let offline_descriptor = loop {
+        let result = match lifecycle
+            .request_state(authority.lease(), InterfaceLifecycleState::Offline)
+            .await
+        {
+            Err(InterfaceLifecycleActorError::ExchangePending(_)) => {
+                lifecycle.finish_pending_request().await
+            }
+            result => result,
+        };
+        match result {
+            Ok(descriptor) if !descriptor.is_online() => break descriptor,
+            Ok(descriptor) => warn!(
+                "e290-node stage=lora-actor status=FAIL-STOPPING lifecycle=READY interface={} generation={} action=retry-offline",
+                descriptor.lease().interface().get(),
+                descriptor.lease().generation().get(),
+            ),
+            Err(reason) => error!(
+                "e290-node stage=lora-actor status=FAIL-STOPPING lifecycle=RETRY reason={reason:?} available_owner_quarantined={} sealed_owner_quarantined={} action=retry-offline-no-further-radio-operations",
+                retained_available.is_some(),
+                retained_sealed.is_some(),
+            ),
+        }
+        Timer::after(Duration::from_secs(1)).await;
+    };
     warn!(
-        "e290-node stage=lora-actor status=FAIL-STOPPED available_owner_quarantined={} sealed_owner_quarantined={}",
+        "e290-node stage=lora-actor status=FAIL-STOPPED lifecycle=OFFLINE interface={} generation={} online={} available_owner_quarantined={} sealed_owner_quarantined={}",
+        offline_descriptor.lease().interface().get(),
+        offline_descriptor.lease().generation().get(),
+        offline_descriptor.is_online(),
         retained_available.is_some(),
         retained_sealed.is_some(),
     );

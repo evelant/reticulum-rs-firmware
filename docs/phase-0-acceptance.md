@@ -36,21 +36,22 @@ The preceding `14c7b4955a1ff6903e87cc40b42498f7869b6f4f` pin had host and
 portable-target LRRTT validation and a build-only E290 package. Its 776,464-byte
 merged image uses 710,928/6,291,456 application bytes (11.30%) and has SHA-256
 `7b11c6f6a3c039d46ab0117fd362920aaa40145e7f27cbc6fa0a8a84a7ab3571`.
-It has no flashed-image readback or powered proof. The current pin requires a
-new powered run before hardware qualification. Its build-only default E290
-release links with text/data/BSS of 674,431/3,676/469,152 bytes (1,147,259
-bytes total by GNU size), and its ELF has SHA-256
-`d370039c3872d34a74b9bbc0b52567a24be607bc01ea660b6dfbd8d5dd12072d`.
-The 780,448-byte merged image uses 714,912/6,291,456 application bytes (11.36%)
+It has no flashed-image readback or powered proof. The current pin still
+requires a two-board powered run before lifecycle/RF qualification. Its default
+E290 release links with text/data/BSS of 679,375/3,676/469,152 bytes (1,152,203
+bytes total by GNU size). Its 12,220,340-byte ELF has SHA-256
+`d18ac44b2bf68d1e6bf79c562f0431bcba66c739388d31d50e29a2f7fa60a81f`.
+The 785,360-byte merged image uses 719,824/6,291,456 application bytes (11.44%)
 and has SHA-256
-`a912bb6c910c0145a9431f2a94b95a0a6560662678c457fc9c49e8641050b72c`.
-The current runtime-measurement HIL packages as 792,048 bytes with application
-use 726,512/6,291,456 (11.55%); its ELF/merged SHA-256 values are
-`5aaa4c7029b35b55c5f2eb0f673c04ac11ae695c09a8cc1d1797990fe0a4ab30` and
-`938d944c9373638b475e48e804fc0211b92da1ef49d0e875233d052b19064881`.
-Both current images are build-only, unflashed, and unpowered because neither
-E290 currently enumerates. Every powered result below remains bound to the
-project and Rete revisions recorded with it.
+`826707513fec45a24940f20f5798c790b04d8b1f85158605f4bbae972b5267d6`.
+That default image matched an exact `3e:88` readback and served an authenticated
+`identity-summary`; `3f:88` did not enumerate. The current runtime-measurement
+HIL packages as 795,552 bytes with application use 730,016/6,291,456 (11.60%);
+its 12,365,360-byte ELF and merged image have SHA-256 values
+`f4eacf22785b6d4f583d1ce2ca8ad3e992611a0f99e202befb7551dcd5e41e3e` and
+`62b35fbd20d7a16d8129f4ba2b425cd1e6859e87438e25cc571b7465d41dddf7`.
+The current HIL is unflashed and unpowered. Every powered result below remains
+bound to the project and Rete revisions recorded with it.
 
 ## Scaffold gate
 
