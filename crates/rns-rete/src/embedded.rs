@@ -2611,12 +2611,21 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         let after = self.core.transport.stats();
         let native_duplicate = after.packets_dropped_dedup > preflight.before_duplicate;
         let native_invalid = after.packets_dropped_invalid > preflight.before_invalid;
+        let identity = self.core.identity();
         let retained_proof = if native_duplicate || native_invalid {
-            suppress_retained_inbound_proof_actions(&mut native, preflight.retained_proof);
+            suppress_retained_inbound_proof_actions(
+                &mut native,
+                preflight.retained_proof,
+                identity,
+            );
             None
         } else {
-            match intercept_retained_inbound_proof(&mut native, preflight.retained_proof, interface)
-            {
+            match intercept_retained_inbound_proof(
+                &mut native,
+                preflight.retained_proof,
+                interface,
+                identity,
+            ) {
                 Ok(proof) => proof,
                 Err(invariant) => {
                     return self.reject(
@@ -3335,6 +3344,7 @@ enum RetainedProofCandidate {
 fn classify_retained_proof_candidate(
     outbound: &OutboundPacket,
     expected: RetainedProofExpectation,
+    identity: &Identity,
 ) -> RetainedProofCandidate {
     if outbound.routing != PacketRouting::SourceInterface {
         return RetainedProofCandidate::Unrelated;
@@ -3345,7 +3355,7 @@ fn classify_retained_proof_candidate(
         // cannot be proven unrelated, so retaining mode suppresses it.
         Err(_) => return RetainedProofCandidate::Malformed,
     };
-    if packet.packet_type != PacketType::Proof || packet.context != CONTEXT_NONE {
+    if packet.packet_type != PacketType::Proof {
         return RetainedProofCandidate::Unrelated;
     }
 
@@ -3355,11 +3365,17 @@ fn classify_retained_proof_candidate(
         .payload
         .get(..32)
         .is_some_and(|covered| covered == expected.packet_hash);
-    if packet.header_type == HeaderType::Header1
-        && packet.dest_type == DestType::Single
+    let signature_matches = packet
+        .payload
+        .get(32..96)
+        .is_some_and(|signature| identity.verify(&expected.packet_hash, signature).is_ok());
+    if packet.flags == 0x03
+        && packet.hops == 0
+        && packet.context == CONTEXT_NONE
         && destination_matches
         && packet.payload.len() == 96
         && covered_hash_matches
+        && signature_matches
         && outbound.protocol_token().is_none()
     {
         RetainedProofCandidate::Exact
@@ -3371,12 +3387,14 @@ fn classify_retained_proof_candidate(
 fn suppress_retained_inbound_proof_actions(
     native: &mut IngestOutcome,
     expected: Option<RetainedProofExpectation>,
+    identity: &Identity,
 ) {
     let Some(expected) = expected else {
         return;
     };
     native.packets.retain(|packet| {
-        classify_retained_proof_candidate(packet, expected) == RetainedProofCandidate::Unrelated
+        classify_retained_proof_candidate(packet, expected, identity)
+            == RetainedProofCandidate::Unrelated
     });
 }
 
@@ -3384,10 +3402,14 @@ fn intercept_retained_inbound_proof(
     native: &mut IngestOutcome,
     expected: Option<RetainedProofExpectation>,
     source: InterfaceId,
+    identity: &Identity,
 ) -> Result<Option<RetainedApplicationProof>, RetainedProofInvariant> {
     let Some(expected) = expected else {
         return Ok(None);
     };
+    if native.events.is_empty() && native.packets.is_empty() {
+        return Ok(None);
+    }
     let mut data_event_count = 0_usize;
     let mut matching_event = None;
     for (index, event) in native.events.iter().enumerate() {
@@ -3410,7 +3432,7 @@ fn intercept_retained_inbound_proof(
     let mut candidates = Vec::new();
     let mut unrelated = Vec::with_capacity(native.packets.len());
     for packet in core::mem::take(&mut native.packets) {
-        let classification = classify_retained_proof_candidate(&packet, expected);
+        let classification = classify_retained_proof_candidate(&packet, expected, identity);
         match classification {
             RetainedProofCandidate::Unrelated => unrelated.push(packet),
             RetainedProofCandidate::Malformed
@@ -5900,6 +5922,67 @@ mod tests {
     }
 
     #[test]
+    fn retained_undecryptable_data_is_no_outcome_then_duplicate() {
+        let mut sender = node(102);
+        let mut receiver = node(103);
+        receiver.set_inbound_proof_policy(InboundProofPolicy::Retain);
+        sender
+            .register_peer(&identity(103), "reticulum", &["embedded"], 100)
+            .unwrap();
+
+        let mut rng = CounterRng::default();
+        let mut data = [0u8; RNS_MTU];
+        let prepared = sender
+            .prepare_data_into(
+                &receiver.destination_hash(),
+                b"corrupted retained ciphertext",
+                101,
+                &mut rng,
+                &mut data,
+            )
+            .unwrap();
+        let mut corrupted = data[..usize::from(prepared.packet_len())].to_vec();
+        // Destination DATA uses an authenticated encrypted token; its final
+        // bytes are the HMAC. Preserve the parseable packet shape while making
+        // authentication fail.
+        *corrupted.last_mut().unwrap() ^= 0xff;
+
+        let before = receiver.metrics();
+        let first = receiver.ingest(&corrupted, 101, InterfaceId(7), &mut rng);
+        assert_eq!(first.disposition, IngressDisposition::NoObservableOutcome);
+        assert!(first.actions.is_empty());
+        let after = receiver.metrics();
+        assert_eq!(
+            after.transport.packets_received,
+            before.transport.packets_received + 1
+        );
+        assert_eq!(after.ingress.seen, before.ingress.seen + 1);
+        assert_eq!(after.ingress.admitted, before.ingress.admitted + 1);
+        assert_eq!(
+            after.ingress.native_no_outcome,
+            before.ingress.native_no_outcome + 1
+        );
+        assert_eq!(
+            after.transport.packets_dropped_invalid,
+            before.transport.packets_dropped_invalid
+        );
+        assert_eq!(
+            after.transport.crypto_failures,
+            before.transport.crypto_failures
+        );
+        assert_eq!(after.ingress.rejected, before.ingress.rejected);
+        assert_eq!(after.ingress.native_invalid, before.ingress.native_invalid);
+        assert_eq!(
+            after.ingress.retained_proof_invariant,
+            before.ingress.retained_proof_invariant
+        );
+
+        let replay = receiver.ingest(&corrupted, 102, InterfaceId(7), &mut rng);
+        assert_eq!(replay.disposition, IngressDisposition::NativeDuplicate);
+        assert!(replay.actions.is_empty());
+    }
+
+    #[test]
     fn retained_policy_is_isolated_to_the_selected_additional_destination() {
         let receiver_identity = identity(96);
         let mut receiver = TestNode::new(
@@ -6106,6 +6189,7 @@ mod tests {
             destination: DestHash::from([0x42; rete_core::TRUNCATED_HASH_LEN]),
             packet_hash,
         };
+        let proof_identity = identity(98);
         let wrong_hash = [0x5a; 32];
         let event = || NativeNodeEvent::DataReceived {
             dest_hash: expected.destination,
@@ -6114,7 +6198,7 @@ mod tests {
         let exact = || {
             OutboundPacket::new(
                 rete_transport::Transport::<NativeStorage>::build_proof_packet(
-                    &identity(98),
+                    &proof_identity,
                     &packet_hash,
                 )
                 .unwrap(),
@@ -6128,7 +6212,7 @@ mod tests {
                 exact(),
                 OutboundPacket::new(
                     rete_transport::Transport::<NativeStorage>::build_proof_packet(
-                        &identity(98),
+                        &proof_identity,
                         &wrong_hash,
                     )
                     .unwrap(),
@@ -6137,7 +6221,7 @@ mod tests {
                 OutboundPacket::new(vec![0xff], PacketRouting::SourceInterface),
                 OutboundPacket::new(
                     rete_transport::Transport::<NativeStorage>::build_proof_packet(
-                        &identity(98),
+                        &proof_identity,
                         &packet_hash,
                     )
                     .unwrap(),
@@ -6149,6 +6233,7 @@ mod tests {
         suppress_retained_inbound_proof_actions(
             &mut suppressed_duplicate_or_invalid,
             Some(expected),
+            &proof_identity,
         );
         assert_eq!(suppressed_duplicate_or_invalid.packets.len(), 1);
         assert_eq!(
@@ -6162,9 +6247,30 @@ mod tests {
             rejection: None,
         };
         assert_eq!(
-            intercept_retained_inbound_proof(&mut no_data_event, Some(expected), InterfaceId(0),)
-                .unwrap_err(),
+            intercept_retained_inbound_proof(
+                &mut no_data_event,
+                Some(expected),
+                InterfaceId(0),
+                &proof_identity,
+            )
+            .unwrap_err(),
             RetainedProofInvariant::DataEventCount { actual: 0 }
+        );
+
+        let mut no_native_outcome = IngestOutcome {
+            events: Vec::new(),
+            packets: Vec::new(),
+            rejection: None,
+        };
+        assert!(
+            intercept_retained_inbound_proof(
+                &mut no_native_outcome,
+                Some(expected),
+                InterfaceId(0),
+                &proof_identity,
+            )
+            .unwrap()
+            .is_none()
         );
 
         let mut multiple_data_events = IngestOutcome {
@@ -6177,6 +6283,7 @@ mod tests {
                 &mut multiple_data_events,
                 Some(expected),
                 InterfaceId(0),
+                &proof_identity,
             )
             .unwrap_err(),
             RetainedProofInvariant::DataEventCount { actual: 2 }
@@ -6195,6 +6302,7 @@ mod tests {
                 &mut wrong_data_event,
                 Some(expected),
                 InterfaceId(0),
+                &proof_identity,
             )
             .unwrap_err(),
             RetainedProofInvariant::DataEventDestination
@@ -6206,8 +6314,13 @@ mod tests {
             rejection: None,
         };
         assert_eq!(
-            intercept_retained_inbound_proof(&mut missing, Some(expected), InterfaceId(1))
-                .unwrap_err(),
+            intercept_retained_inbound_proof(
+                &mut missing,
+                Some(expected),
+                InterfaceId(1),
+                &proof_identity,
+            )
+            .unwrap_err(),
             RetainedProofInvariant::ProofActionCount { actual: 0 }
         );
         assert!(missing.packets.is_empty());
@@ -6221,8 +6334,13 @@ mod tests {
             rejection: None,
         };
         assert_eq!(
-            intercept_retained_inbound_proof(&mut malformed, Some(expected), InterfaceId(2))
-                .unwrap_err(),
+            intercept_retained_inbound_proof(
+                &mut malformed,
+                Some(expected),
+                InterfaceId(2),
+                &proof_identity,
+            )
+            .unwrap_err(),
             RetainedProofInvariant::MalformedProof
         );
         assert!(malformed.packets.is_empty());
@@ -6233,8 +6351,13 @@ mod tests {
             rejection: None,
         };
         assert_eq!(
-            intercept_retained_inbound_proof(&mut multiple, Some(expected), InterfaceId(3))
-                .unwrap_err(),
+            intercept_retained_inbound_proof(
+                &mut multiple,
+                Some(expected),
+                InterfaceId(3),
+                &proof_identity,
+            )
+            .unwrap_err(),
             RetainedProofInvariant::ProofActionCount { actual: 2 }
         );
         assert!(multiple.packets.is_empty());
@@ -6243,7 +6366,7 @@ mod tests {
             events: vec![event()],
             packets: vec![OutboundPacket::new(
                 rete_transport::Transport::<NativeStorage>::build_proof_packet(
-                    &identity(98),
+                    &proof_identity,
                     &wrong_hash,
                 )
                 .unwrap(),
@@ -6252,8 +6375,13 @@ mod tests {
             rejection: None,
         };
         assert_eq!(
-            intercept_retained_inbound_proof(&mut wrong, Some(expected), InterfaceId(4))
-                .unwrap_err(),
+            intercept_retained_inbound_proof(
+                &mut wrong,
+                Some(expected),
+                InterfaceId(4),
+                &proof_identity,
+            )
+            .unwrap_err(),
             RetainedProofInvariant::MismatchedProof
         );
         assert!(wrong.packets.is_empty());
@@ -6264,7 +6392,7 @@ mod tests {
                 exact(),
                 OutboundPacket::new(
                     rete_transport::Transport::<NativeStorage>::build_proof_packet(
-                        &identity(98),
+                        &proof_identity,
                         &wrong_hash,
                     )
                     .unwrap(),
@@ -6274,8 +6402,13 @@ mod tests {
             rejection: None,
         };
         assert_eq!(
-            intercept_retained_inbound_proof(&mut mixed, Some(expected), InterfaceId(5))
-                .unwrap_err(),
+            intercept_retained_inbound_proof(
+                &mut mixed,
+                Some(expected),
+                InterfaceId(5),
+                &proof_identity,
+            )
+            .unwrap_err(),
             RetainedProofInvariant::ProofActionCount { actual: 2 }
         );
         assert!(mixed.packets.is_empty());
@@ -6291,12 +6424,110 @@ mod tests {
             packets: vec![exact()],
             rejection: None,
         };
-        let retained_proof =
-            intercept_retained_inbound_proof(&mut indexed, Some(expected), InterfaceId(6))
-                .unwrap()
-                .unwrap();
+        let retained_proof = intercept_retained_inbound_proof(
+            &mut indexed,
+            Some(expected),
+            InterfaceId(6),
+            &proof_identity,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(retained_proof.event_index(), 1);
         assert!(indexed.packets.is_empty());
+    }
+
+    #[test]
+    fn retained_proof_classifier_requires_exact_authenticated_wire_shape() {
+        type NativeStorage = rete_transport::HeaplessStorage<4, 2, 8, 2>;
+        let packet_hash = [0xa5; 32];
+        let expected = RetainedProofExpectation {
+            destination: DestHash::from([0x42; rete_core::TRUNCATED_HASH_LEN]),
+            packet_hash,
+        };
+        let proof_identity = identity(98);
+        let exact_bytes = rete_transport::Transport::<NativeStorage>::build_proof_packet(
+            &proof_identity,
+            &packet_hash,
+        )
+        .unwrap();
+        let classify = |bytes: Vec<u8>| {
+            classify_retained_proof_candidate(
+                &OutboundPacket::new(bytes, PacketRouting::SourceInterface),
+                expected,
+                &proof_identity,
+            )
+        };
+
+        assert_eq!(classify(exact_bytes.clone()), RetainedProofCandidate::Exact);
+
+        let mut wrong_hops = exact_bytes.clone();
+        wrong_hops[1] = 1;
+        assert_eq!(classify(wrong_hops), RetainedProofCandidate::Mismatched);
+
+        for bit in [0x20, 0x10, 0x80] {
+            let mut wrong_flags = exact_bytes.clone();
+            wrong_flags[0] |= bit;
+            assert_eq!(classify(wrong_flags), RetainedProofCandidate::Mismatched);
+        }
+
+        let mut wrong_context = exact_bytes.clone();
+        wrong_context[2 + rete_core::TRUNCATED_HASH_LEN] = 1;
+        assert_eq!(classify(wrong_context), RetainedProofCandidate::Mismatched);
+
+        let mut wrong_length = exact_bytes.clone();
+        wrong_length.pop();
+        assert_eq!(classify(wrong_length), RetainedProofCandidate::Mismatched);
+
+        let mut wrong_destination = exact_bytes.clone();
+        wrong_destination[2] ^= 0xff;
+        assert_eq!(
+            classify(wrong_destination),
+            RetainedProofCandidate::Mismatched
+        );
+
+        let payload_offset = 2 + rete_core::TRUNCATED_HASH_LEN + 1;
+        let mut wrong_covered_hash = exact_bytes.clone();
+        wrong_covered_hash[payload_offset] ^= 0xff;
+        assert_eq!(
+            classify(wrong_covered_hash),
+            RetainedProofCandidate::Mismatched
+        );
+
+        let mut wrong_signature = exact_bytes.clone();
+        *wrong_signature.last_mut().unwrap() ^= 0xff;
+        assert_eq!(
+            classify(wrong_signature),
+            RetainedProofCandidate::Mismatched
+        );
+
+        let wrong_signer = rete_transport::Transport::<NativeStorage>::build_proof_packet(
+            &identity(99),
+            &packet_hash,
+        )
+        .unwrap();
+        assert_eq!(classify(wrong_signer), RetainedProofCandidate::Mismatched);
+
+        let mut token_node = node(97);
+        let token_peer = identity(99);
+        let token_destination = node(99).destination_hash();
+        token_node
+            .register_peer(&token_peer, "reticulum", &["embedded"], 100)
+            .unwrap();
+        let (mut tokenized, _) = try_initiate_heapless_link_at(
+            &mut token_node.core,
+            token_destination,
+            100,
+            MonotonicInstant::from_secs(100),
+            &mut CounterRng::default(),
+        )
+        .unwrap();
+        assert!(tokenized.protocol_token().is_some());
+        tokenized.data = exact_bytes;
+        tokenized.routing = PacketRouting::SourceInterface;
+        assert_eq!(
+            classify_retained_proof_candidate(&tokenized, expected, &proof_identity),
+            RetainedProofCandidate::Mismatched
+        );
     }
 
     #[test]
