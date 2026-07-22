@@ -49,7 +49,8 @@ pub enum SoleRadioFaultClass {
     /// Receive-operation, CAD, or transmit timeout reported as a fault.
     ///
     /// An expected receive symbol timeout before preamble detection is instead
-    /// [`BoundedRxOutcome::NoPreambleTimeout`] and never uses this class.
+    /// [`BoundedRxOutcome::NoPreambleTimeout`] and never uses this class. A
+    /// continuous receive scheduler yield is likewise a normal outcome.
     Timeout,
     /// Requested radio capability is unsupported.
     Unsupported,
@@ -190,7 +191,21 @@ pub enum BoundedRxOutcome {
     /// A physical frame was received into the supplied buffer.
     Frame(BoundedRxObservation),
     /// The configured symbol timeout expired before a preamble was detected.
+    ///
+    /// This legacy outcome remains for finite hardware receive windows. The
+    /// permanent product path uses [`Self::SchedulerYield`] while leaving the
+    /// modem in continuous receive.
     NoPreambleTimeout,
+    /// The caller-provided scheduler future completed before a receive IRQ.
+    ///
+    /// The radio remains continuously armed. Callers may inspect queued TX
+    /// work and then resume waiting without reconfiguring or restarting RX.
+    SchedulerYield,
+    /// A corrupt, terminally timed-out, or stalled-progress frame was discarded.
+    ///
+    /// Continuous RX remains armed (or has been rearmed after stalled
+    /// progress), and the caller-owned buffer contains no admissible frame.
+    InvalidFrame,
 }
 
 impl CadObservation {
@@ -443,6 +458,42 @@ pub trait SoleRnodeRadio {
         &'a mut self,
         buffer: &'a mut [u8; SX1262_FRAME_MTU],
     ) -> impl Future<Output = Result<BoundedRxOutcome, Self::Fault>> + 'a;
+
+    /// Wait in persistent continuous RX until a frame or scheduler yield.
+    ///
+    /// Implementations must configure and start continuous receive at most
+    /// once per uninterrupted RX session, and must leave it armed after a
+    /// frame, invalid-frame terminal, or scheduler yield. The supplied future
+    /// may be raced only against the implementation's documented
+    /// cancellation-safe IRQ wait. Once an IRQ is observed, all SPI and IRQ
+    /// processing must complete without selecting or polling this future.
+    /// Observing preamble/header progress locks the operation until a terminal
+    /// receive IRQ, fault, or the separate progress-deadline future. That
+    /// future must begin measuring only when first polled. If it wins, the
+    /// implementation must rearm continuous RX before returning a recoverable
+    /// invalid-frame outcome; it must never reinterpret the deadline as TX
+    /// permission while the receive state is still latched.
+    ///
+    /// CAD or TX must explicitly quiesce continuous RX, disable its IRQ
+    /// routing, and clear pending receive flags before selecting a new mode.
+    fn receive_continuous_until<'a, SchedulerYield, ProgressDeadline>(
+        &'a mut self,
+        buffer: &'a mut [u8; SX1262_FRAME_MTU],
+        scheduler_yield: SchedulerYield,
+        progress_deadline: ProgressDeadline,
+    ) -> impl Future<Output = Result<BoundedRxOutcome, Self::Fault>> + 'a
+    where
+        SchedulerYield: Future<Output = ()> + 'a,
+        ProgressDeadline: Future<Output = ()> + 'a;
+
+    /// Mark the current continuous-RX epoch untrusted without touching hardware.
+    ///
+    /// A scheduler calls this when it stops draining RX in order to own a TX
+    /// job. Before the next receive result can be admitted, the implementation
+    /// must quiesce the old session, clear pending IRQ/FIFO state, and start a
+    /// new continuous receive epoch. CAD/TX may perform that quiescence as part
+    /// of their own explicit mode transition.
+    fn invalidate_receive_session(&mut self);
 
     /// Run one low-level LoRa channel activity detection operation.
     fn cad(&mut self) -> impl Future<Output = Result<CadObservation, Self::Fault>> + '_;

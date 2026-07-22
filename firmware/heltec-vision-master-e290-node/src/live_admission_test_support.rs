@@ -260,6 +260,25 @@ impl SoleRnodeRadio for ScriptedRadio {
         async { Ok(BoundedRxOutcome::NoPreambleTimeout) }
     }
 
+    fn receive_continuous_until<'a, SchedulerYield, ProgressDeadline>(
+        &'a mut self,
+        _buffer: &'a mut [u8; SX1262_FRAME_MTU],
+        scheduler_yield: SchedulerYield,
+        _progress_deadline: ProgressDeadline,
+    ) -> impl Future<Output = Result<BoundedRxOutcome, Self::Fault>> + 'a
+    where
+        SchedulerYield: Future<Output = ()> + 'a,
+        ProgressDeadline: Future<Output = ()> + 'a,
+    {
+        self.rx_calls += 1;
+        async move {
+            scheduler_yield.await;
+            Ok(BoundedRxOutcome::SchedulerYield)
+        }
+    }
+
+    fn invalidate_receive_session(&mut self) {}
+
     fn cad(&mut self) -> impl Future<Output = Result<CadObservation, Self::Fault>> + '_ {
         self.cad_calls += 1;
         let observed_at_us = 2_000_000 + (self.cad_calls as u64 - 1) * 500_000;

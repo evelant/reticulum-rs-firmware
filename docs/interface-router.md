@@ -235,8 +235,10 @@ Offline request and acknowledgement exchange. The implemented
 radio dispatcher accepts the queue's ticketed DATA/ordinary union and retains
 each exact ticket across permit negotiation, RNode framing, CAD, transmit, and
 completion return. It executes only under the job's stamped configuration
-identity, and the LoRa task explicitly schedules RX or dequeues TX so continuous
-egress cannot make mesh receive impossible. Its cancellation-safe
+identity. The LoRa task checks TX only at a safe software yield in persistent
+continuous RX; once receive progress begins it waits for a terminal IRQ, so
+continuous egress cannot cut through an in-flight frame or make mesh receive
+impossible. Its cancellation-safe
 completion-capacity wait retains the exact completion.
 
 The DATA and ordinary coordinators and their per-actor permit-only services are

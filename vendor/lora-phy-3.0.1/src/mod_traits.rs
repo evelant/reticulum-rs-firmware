@@ -129,6 +129,8 @@ pub trait RadioKind {
     async fn do_cad(&mut self, mdltn_params: &ModulationParams) -> Result<(), RadioError>;
     /// Set the LoRa chip to provide notification of specific events based on radio state
     async fn set_irq_params(&mut self, radio_mode: Option<RadioMode>) -> Result<(), RadioError>;
+    /// Clear every pending radio interrupt flag.
+    async fn clear_irq_status(&mut self) -> Result<(), RadioError>;
     /// Set the LoRa chip into the TxContinuousWave mode
     async fn set_tx_continuous_wave_mode(&mut self) -> Result<(), RadioError>;
 

@@ -13,7 +13,7 @@ authoritative in the lockfile.
 | Leviculum | <https://codeberg.org/Lew_Palm/leviculum> | `5fb1db0e5e5a490291ee5f6b81312cf0c9de622a` | AGPL-3.0-or-later | Separate protocol oracle and fallback package |
 | esp-hal family | <https://github.com/esp-rs/esp-hal> | crates.io versions in lockfile | MIT OR Apache-2.0 | ESP32-S3 platform |
 | esp-rtos | Published crates.io 0.3.0 source vendored at `vendor/esp-rtos-0.3.0` | archive SHA-256 `551f90766e1527edaa0c91e8d559e9e2a60397b545e93357ac61fb31845e5712`; crate-recorded upstream commit `347003de8a48320bb7724f53045be3afa9204411`; exact tree and pristine/patched hashes in `VENDOR-HASHES.json` | MIT OR Apache-2.0, with canonical license texts added as project provenance files | Local CPU0 and CPU1 main-stack slice unit corrections; exact edits, mechanical integrity guard and removal condition are recorded in `PATCHES.md` |
-| lora-phy | Published crates.io 3.0.1 source vendored at `vendor/lora-phy-3.0.1` | archive SHA-256 `61471c3b2909789e3332083577f6cf6c41a4fcf37674ef15156bcbb20504ac65`; crate-recorded upstream commit `ca04c2284eb00e015528933ea5159cd1ff36142d`; exact tree and pristine/patched hashes in `VENDOR-HASHES.json` | MIT OR Apache-2.0 | SX126x radio owner with an atomic, default-preserving board override for high-power PA/OCP/encoded power, default-no-op post-initialization and early-TX RF-path hooks, and public standby state synchronization; exact edits, integrity guard and removal condition are recorded in `PATCHES.md` |
+| lora-phy | Published crates.io 3.0.1 source vendored at `vendor/lora-phy-3.0.1` | archive SHA-256 `61471c3b2909789e3332083577f6cf6c41a4fcf37674ef15156bcbb20504ac65`; crate-recorded upstream commit `ca04c2284eb00e015528933ea5159cd1ff36142d`; exact tree and pristine/patched hashes in `VENDOR-HASHES.json` | MIT OR Apache-2.0 | SX126x radio owner with atomic board PA/FEM hooks, arm-once continuous-RX IRQ draining, terminal receive classification, synchronized standby, and explicit IRQ quiescence before mode changes; exact edits, integrity guard, and removal condition are recorded in `PATCHES.md` |
 | embedded-hal / embedded-hal-async / embedded-hal-bus / lora-modulation | crates.io | exact versions in workspace and lockfile | MIT OR Apache-2.0 | Portable pin/SPI/profile contracts and the target-exclusive async SPI device |
 | Embassy futures/sync/time, static_cell and zeroize | crates.io | exact versions in workspace and lockfile | MIT OR Apache-2.0 | Bounded target coordination, in-place protocol ownership and temporary key cleanup |
 
@@ -90,8 +90,8 @@ artifact hashes they actually used. In particular, records naming `9bceacd`,
 current pin. The preceding `14c7b49` pin's build-only default E290 release
 packages as a 776,464-byte merged image with SHA-256
 `7b11c6f6a3c039d46ab0117fd362920aaa40145e7f27cbc6fa0a8a84a7ab3571`.
-It has no flashed-image readback or powered proof. The current application-
-event release has text/data/BSS of 684,167/3,676/469,152 bytes (1,156,995 bytes
+It has no flashed-image readback or powered proof. The subsequent pre-PSRAM
+application-event release has text/data/BSS of 684,167/3,676/469,152 bytes (1,156,995 bytes
 total by GNU size). Its 12,345,320-byte ELF has SHA-256
 `ebb34e7176a8e61b6969ebf99d7dac97c6e674ef5e583bbf931a34e8b6e970a2`;
 the 789,504-byte merged image uses 723,968/6,291,456 application bytes (11.51%)
@@ -99,7 +99,7 @@ and has SHA-256
 `1796f161c480d0348e3d47fd8f3cda5fda5b51aa38ad6024aaad04c8ba1751ce`.
 That image matched an exact `3e:88` readback and served an authenticated
 `identity-summary`; `3f:88` did not enumerate, so a current two-board
-lifecycle/RF run remains open. The initial current runtime-measurement HIL
+lifecycle/RF run remained open. The initial pre-PSRAM runtime-measurement HIL
 links with text/data/BSS of 695,315/4,180/468,648 bytes (1,168,143 bytes total);
 its 12,498,356-byte ELF has SHA-256
 `4ca4eef73ff1babd00750d4a635f7644d73d1a3ae1cde4fb1dbdb434937bcfca`,
@@ -116,7 +116,49 @@ That package matched an exact `3e:88` readback and produced the authenticated
 runbook. The board was then restored to an exact-readback 789,504-byte default
 rebuild, SHA-256
 `a67afa72681558dc02fd0575a18711b2b3c05b365a66af45441b7cb8dd3a2577`,
-and served `identity-summary`. Board `3f:88` remained absent.
+and served `identity-summary`. These are historical pre-PSRAM artifacts and
+checkpoints. The later 870,656-byte LXTE/v2 HIL matched exact readbacks on both
+boards but retained the now-historical paired-announce discovery failure. The
+independently scheduled replacement HIL ELF is 13,642,544 bytes with SHA-256
+`e2fb2bee32026d28d7ec2cc727788a267ff19a5fd0a1b6b194f6a08ea643e9b8`;
+its 871,296-byte package uses 805,760 application bytes and has SHA-256
+`89d303d4880d062068bf8a9f4124bfbea322af091e5bf37c04e4e52715481cbd`.
+Identity-bound exact package readbacks passed on both boards. Both USB devices
+disappeared before the required post-flash pre-submit checkpoint, so no powered
+durable-LXMF outcome follows from that historical attempt.
+
+The final current default/HIL pair has 946/962 stack-size records, a
+53,680-byte maximum frame, and 175,056/174,256-byte usable stacks. The default
+ELF is 13,648,888 bytes with SHA-256
+`92e63b60a5f4b830ee55d958fcc446a6878036212904b8748519ae210ba3da58`;
+its 868,656-byte package uses 803,120 application bytes and has SHA-256
+`c8da2af30e2d0ee24ca4b215151d1370b7e1d242991ebbeb024079a730693a3f`.
+The HIL ELF is 13,821,496 bytes with SHA-256
+`7a3fad34699f910a2050468ada6461a0f33d16641ab5425a5c795a71238861ff`;
+its 881,456-byte package uses 815,920 application bytes and has SHA-256
+`12c6f31a7fb64485ad9220edca4ac38ba0a57867ad88ce60fa1a24ffc195d379`.
+Identity-bound exact HIL readbacks passed on both boards. Exactly one fresh
+A-to-B trial converted a 206-byte LXMF carrier to the exact 307-byte RNS packet
+with SHA-256
+`060037041c91eb5999f89bf84845c19e65bf7fa680827cce9c51e8ecc5dbe0a6`
+and reached `Delivered` on its first attempt. Receiver B committed message
+`abdeec2e498f09c96a6fd56ec3558ca86c2598aaeacac81969b645de3b549dc3`,
+advanced new/ready/released/ordinary-handoff by one with zero replay/order
+events, and confirmed one proof TX. Its `LXTE` release tag
+`0x3dc4588d3a205429` matches A's delivered tag; receiver `RPTE` generated-proof
+metadata remains zero by design because retained LXMF proofs are intercepted
+before ordinary ingress metadata. The exact 2 MiB B-store SHA-256 is
+`c75ab2a01b3266fda1e07e0271c70bb29c06e32636d70d8a70d977b9e8b0e21e`;
+its sole record matches the generator and full-wire digest
+`1c1839991401e01e15e3a3146cd3177a4fb7e5dbd52008fd119beaf091d377ba`.
+Baseline/terminal evidence reports zero allocation failures, unexpected runtime
+errors, RX/CAD/TX watchdog expiries, and correlation faults. This is narrow
+powered provenance for persistent continuous RX and one opportunistic durable-
+LXMF proof chain, not direction-balanced, replay/remount, fault, range, or soak
+qualification. The conservative stack carry-forward remains 57,700 bytes with
+a 4,020-byte post-frame margin. The complete post-offload placement, scheduler,
+historical failure, artifact, and powered-trial records remain in the
+[E290 runbook](e290-node.md#stage-5-psram-boot-checkpoint).
 
 Phase-1 normal/pressure and closure artifact manifests bind the project commit
 and its raw Git root tree; their tool inventories record the same pair and the
@@ -202,28 +244,42 @@ copies. The upstream-marked README remains byte-identical to the registry
 archive so the vendor reconstruction check stays meaningful.
 
 Published `lora-phy` 3.0.1 derives every SX1262 high-power PA command from the
-requested output power. The local patch adds an atomic, default-`None`
+requested output power and calls `do_rx()` from every `LoRa::rx()` invocation,
+including continuous mode. It exposes no public separation between the
+cancellation-safe DIO wait and the non-cancel-safe SPI work that drains the
+observed IRQ, so an arm-once continuous receiver otherwise has to issue another
+`SetRx` between packets.
+
+The local patch adds an atomic, default-`None`
 `Sx126xVariant::high_power_pa_override()` policy carrying PA duty cycle,
 `hpMax`, the raw signed `SetTxParams` power byte and optional OCP trim together,
 plus default-no-op post-initialization and early-transmit RF-path hooks. It also
-makes the public standby operation update the software radio mode after the
-hardware command succeeds, so later TX preparation does not issue a redundant
-standby command after an early external-FEM gate is armed. All PA fields are
+adds public arm-once `start_rx()` and drain-many `process_rx_irq()` operations,
+uses them in the LoRaWAN continuous path, recognizes preamble/sync/header
+progress and terminal invalid-frame/timeout precedence, synchronizes public
+standby state, and explicitly disables IRQ routing and clears pending flags
+before CAD/TX reconfiguration. SX127x ordinary IRQ handling clears only its
+captured snapshot so a later distinct flag is preserved. All PA fields are
 validated before PA/OCP commands are written; the existing TxClamp operation
 remains first, and a valid override then emits PA, optional OCP and TX-parameter
-commands in order. Existing variants and interfaces retain upstream behavior.
-The Tracker HIL alone uses the post-initialization hook to enable and settle its
-external FEM with CTX low, then asserts CTX after modem/power/standby
-normalization but before packet/FIFO preparation while preserving the final
-pre-`SetTx` gate. The checked vendor manifest records every published file, the
-exact crates.io archive and crate-recorded source commit, `PATCHES.md`, four
-patched source files and sixteen reviewed source replacements.
+commands in order. Existing variants retain the default PA and no-op board-hook
+behavior. The Tracker HIL uses the hooks to settle and arm its external FEM;
+the shared RNode core and permanent E290 actor use the continuous-RX and
+quiescence behavior. No artificial split-frame TX delay is added. The single
+fresh 307-byte powered E290 trial above narrowly confirms that persistent RX
+keeps the two physical RNode frames receivable across the scheduler boundary.
+
+The checked vendor manifest records every published file, the exact crates.io
+archive and crate-recorded source commit, `PATCHES.md`, seven patched source
+files, and thirty-three reviewed source replacements.
 `xtask graph-policy` requires Cargo to resolve the local path, verifies the
 complete inventory and digests, rejects symlinks, and reconstructs each
 pristine source file by reversing only those replacements. Remove the path
 patch after an upstream release provides equivalent atomic PA/OCP,
-post-initialization and early-TX RF-path hooks, preserves public standby state
-synchronization, and the project's regression guard has moved to that release.
+post-initialization and early-TX RF-path hooks, arm-once continuous receive,
+terminal receive classification, captured-mask IRQ clearing, and safe
+standby/IRQ quiescence, and after the project's regression guard has moved to
+that release.
 
 Rete's reviewed snapshot declares `MIT OR Apache-2.0` in Cargo metadata and
 its README but does not contain canonical license files. This is release

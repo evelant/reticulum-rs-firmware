@@ -1,8 +1,11 @@
 # ADR 0014: Durable LXMF message ownership
 
-- **Status:** accepted for the portable store/event-owner tranche and E290
-  read-only store mount; destination admission remains deferred
+- **Status:** accepted for the portable store/event-owner tranche and first
+  permanent-E290 opportunistic receive composition; one bounded A-to-B LoRa
+  durable-delivery chain is power-qualified, while broader qualification remains
+  deferred
 - **Date:** 2026-07-21
+- **Powered evidence updated:** 2026-07-21
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0004](0004-sole-flash-coordinator.md),
   [ADR 0011](0011-durable-rns-inbox-qualification.md),
@@ -194,14 +197,46 @@ tests using a real retained Rete DATA/proof pair and the released Python
 `basic_binary` LXMF fixture prove new and replay commits, capacity-before-I/O,
 and lost-terminal-write retry without duplicate ready proofs.
 
-The permanent E290 node still configures its existing primary destination's
-immediate-proof policy. It now validates and read-only mounts the separate LXMF
-partition into 512 caller-owned slots explicitly allocated in PSRAM, but it
-does not register the LXMF destination, admit an application event, provide
-delayed-proof capacity, or drain ready proofs through the ordinary router.
-Therefore this target tranche still does **not** prove that a remote sender's
-delivery receipt from the powered product means the LXMF record was durable.
-The existing raw-inbox evidence must not be relabelled as this stronger claim.
+The permanent E290 node keeps its existing primary destination's immediate-proof
+policy and disables local Links there. It validates and mounts the separate LXMF
+partition into 512 caller-owned index slots explicitly allocated in PSRAM. The
+sixteen delayed-proof slots and bounded retry/fault/proof-holder state are also
+caller-owned, validated boot-lifetime PSRAM allocations; sixteen application-
+event slots remain in internal static RAM. On mount success it registers the
+derived `lxmf.delivery` destination with local Links disabled, admits signed
+opportunistic DATA, selects per-destination `Retain`, and drains ready packet
+proofs only through the ordinary transport-neutral supervisor after a new
+commit or a fresh retransmission recognized as `AlreadyDurable`. Volatile proof
+state is never reconstructed from the durable record after reboot.
+Those event/proof counts are an E290 volatile-concurrency profile, not a protocol
+or store ceiling.
+
+Exactly one fresh A-to-B powered trial now proves that stronger property for one
+bounded opportunistic message. A 206-byte carrier became an exact 307-byte RNS
+packet with SHA-256
+`060037041c91eb5999f89bf84845c19e65bf7fa680827cce9c51e8ecc5dbe0a6`
+and reached `Delivered` on its first attempt. Receiver B advanced durable-new,
+proof-ready, proof-released, and ordinary-handoff by one, with zero already-
+durable and ordering-violation events. The retained proof tag
+`0x3dc4588d3a205429` matched sender A's delivered tag, and B recorded exactly one
+confirmed proof-TX delta. Receiver `RPTE` generated-proof count/tag stays zero
+by design: this retained LXMF proof is intercepted before ordinary RNS ingress
+metadata, so the valid correlation is `LXTE` release tag plus confirmed TX plus
+the sender's delivered tag.
+
+The exact 2 MiB receiver store readback has SHA-256
+`c75ab2a01b3266fda1e07e0271c70bb29c06e32636d70d8a70d977b9e8b0e21e`
+and contains exactly one record for message
+`abdeec2e498f09c96a6fd56ec3558ca86c2598aaeacac81969b645de3b549dc3`.
+Its full-wire digest
+`1c1839991401e01e15e3a3146cd3177a4fb7e5dbd52008fd119beaf091d377ba`
+matches the independent generator. Baseline and terminal checkpoints report
+zero allocation failures, unexpected runtime errors, RX/CAD/TX watchdog
+expiries, and correlation faults. This is narrow evidence for the exact
+new-commit/proof chain and persistent continuous RX across the split packet; it
+does not qualify reverse direction, replay/remount, ambiguous writes, pressure,
+range, or soak. The existing raw-inbox evidence remains a separate slice and
+must not be relabelled as LXMF evidence.
 
 ## Consequences
 
@@ -211,20 +246,28 @@ The existing raw-inbox evidence must not be relabelled as this stronger claim.
 - Full-product and reduced profiles choose explicit wire, record, index, and
   total-storage limits. A reduced board may disable the LXMF store without
   narrowing the full-feature protocol design.
-- The fixed, caller-backed RAM index is also profile-owned. The E290 allocates
-  its full 512-entry index through `ExternalMemory`, validates the exact
-  initialized slice inside the detected PSRAM mapping, and retains it for the
-  boot. Powered high-water measurement remains a separate qualification step;
-  the portable API does not turn a convenient small stack allocation into a
-  product capacity ceiling.
+- The fixed, caller-backed RAM owners are profile-owned. The E290 allocates its
+  full 512-entry index, delayed-proof slice, and retry/fault/proof-holder state
+  through `ExternalMemory`, validates each initialized allocation inside the
+  detected PSRAM mapping, and retains them for the boot. The single powered HIL
+  run reports no failed allocation, but sustained/pressure high-water remains a
+  separate qualification step; the portable APIs do not mandate PSRAM or turn a
+  convenient small stack allocation into a product capacity ceiling.
 - The first format trades space for simple power-loss isolation: one interrupted
   append retires extents until later compaction. That is bounded and observable,
   but not yet an endurance-ready mailbox.
 - Exact bytes remain available to future LXMF, NomadNet, Micron, and API layers;
   lossy UTF-8 or JSON projections cannot become the durable authority.
 - Resource reception, propagation, outgoing encode/send/retry, tickets and
-  ratchets, read/delete/tombstone state, client APIs, and target destination/
-  ingress/proof composition remain explicit later tranches.
+  ratchets, read/delete/tombstone state, client APIs, and broader powered target
+  qualification remain explicit later tranches. The first opportunistic target
+  destination/ingress/proof composition and one bounded powered commit/proof
+  chain are now present.
+- A pre-pending clean fault can disable only LXMF admission. Once a mutation is
+  pending, an ambiguous store fault retains its exact owner and blocks all other
+  flash mutations until reset/remount; routing and nonmutating consumers may
+  continue. This preserves sole-flash authority rather than pretending LXMF
+  isolation can resolve uncertain media state.
 
 ## Acceptance evidence
 
@@ -243,8 +286,17 @@ The first portable implementation must prove:
 7. the exact application-event lease returned on every non-durable outcome and
    acknowledgement only after a durable receipt;
 8. real retained-proof preclassification and capacity before store I/O, one
-   ready proof for each new/replay event, and exactly one ready proof after a
-   lost-terminal-write retry; and
+   ready proof for each newly committed event and each fresh retransmission
+   recognized as `AlreadyDurable`, exactly one ready proof after a
+   lost-terminal-write retry, and a fresh proof for a fresh post-reset
+   retransmission after remount replay;
 9. manifest and resolved-closure policies excluding the raw inbox, submission
    store, platform, firmware, radio, device API, supervisor, and executor
-   graphs from the new portable components.
+   graphs from the new portable components; and
+10. on the product target, exact package readback, durable record readback,
+    release-tag/confirmed-TX/sender-terminal correlation, and zero runtime fault
+    counters for at least one retained-proof opportunistic delivery.
+
+Criteria 1 through 10 now have bounded evidence for the first tranche. Criterion
+10 is satisfied only by the single A-to-B case described above; its explicit
+limits remain part of the acceptance record.

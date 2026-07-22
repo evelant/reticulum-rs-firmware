@@ -21,6 +21,17 @@ pub const RNS_APPLICATION_NAME: &str = "reticulum";
 pub const RNS_PRIMARY_ASPECT: &str = "embedded-node";
 /// Complete aspect list of the permanent node's primary destination.
 pub const RNS_PRIMARY_ASPECTS: [&str; 1] = [RNS_PRIMARY_ASPECT];
+/// Application component of the inbound LXMF delivery destination.
+pub const RNS_LXMF_APPLICATION_NAME: &str = "lxmf";
+/// Complete aspect list of the inbound LXMF delivery destination.
+pub const RNS_LXMF_DELIVERY_ASPECTS: [&str; 1] = ["delivery"];
+/// Canonical LXMF delivery-announce data for an unnamed, stamp-free service
+/// with no advertised optional functionality.
+///
+/// This is MessagePack `[nil, nil, []]`. The explicit empty functionality list
+/// avoids the legacy interpretation that a missing third field implies LXMF
+/// compression support.
+pub const LXMF_DELIVERY_ANNOUNCE_APP_DATA: [u8; 4] = [0x93, 0xc0, 0xc0, 0x90];
 
 /// Fixed native path-table capacity.
 pub const PATHS: usize = 16;
@@ -34,6 +45,7 @@ pub const LINKS: usize = 4;
 pub const DATA_BUFFERS: usize = 4;
 /// Statically owned ordinary-action packet buffers.
 pub const ORDINARY_BUFFERS: usize = 8;
+const _: () = assert!(ANNOUNCES <= ORDINARY_BUFFERS);
 /// Transport-neutral application events retained outside Rete at once.
 ///
 /// This is the first E290 outer-owner profile, not a protocol or no-PSRAM
@@ -44,6 +56,15 @@ pub const APPLICATION_EVENT_SLOTS: usize = 16;
 /// Internal static RAM occupied by the fixed application-event slot array.
 pub const APPLICATION_EVENT_STORAGE_BYTES: usize =
     core::mem::size_of::<[reticulum_node_core::ApplicationEventSlot; APPLICATION_EVENT_SLOTS]>();
+/// Delayed proofs retained after durable LXMF commit and before ordinary TX handoff.
+///
+/// One slot per application-event slot lets independent events defer without
+/// making a single retry or proof owner a global admission ceiling.
+pub const LXMF_DELAYED_PROOF_SLOTS: usize = APPLICATION_EVENT_SLOTS;
+/// Exact initialized byte span occupied by the external delayed-proof slice.
+pub const LXMF_DELAYED_PROOF_STORAGE_BYTES: usize =
+    core::mem::size_of::<[reticulum_node_core::DelayedProofSlot; LXMF_DELAYED_PROOF_SLOTS]>();
+const _: () = assert!(LXMF_DELAYED_PROOF_SLOTS == 16);
 /// Caller-owned LXMF index slots retained in external PSRAM for the full boot.
 pub const LXMF_INDEX_SLOTS: usize =
     crate::partition_contract::LXMF_STORE_LEN as usize / reticulum_lxmf_store::EXTENT_SIZE;
@@ -69,14 +90,14 @@ pub const INTERFACE_QUEUE_DEPTH: usize = 2;
 pub const DURABLE_SUBMISSIONS: usize = 4;
 /// Volatile lifecycle correlations retained by the resident runtime.
 pub const DURABLE_PROJECTED_SUBMISSIONS: usize = 2;
-/// Internal-static RAM occupied by the backend-independent durable runtime.
+/// Boot-lifetime PSRAM occupied by the backend-independent durable runtime.
 pub const DURABLE_RUNTIME_BYTES: usize = core::mem::size_of::<
     reticulum_submission_runtime::SubmissionRuntime<
         DURABLE_SUBMISSIONS,
         DURABLE_PROJECTED_SUBMISSIONS,
     >,
 >();
-/// Guard against silently growing the current internal-static profile.
+/// Guard against silently growing the current external resident profile.
 pub const MAXIMUM_DURABLE_RUNTIME_BYTES: usize = 16 * 1024;
 const _: () = assert!(DURABLE_RUNTIME_BYTES <= MAXIMUM_DURABLE_RUNTIME_BYTES);
 /// Accepted submissions permitted by the first bounded local-admission profile.
@@ -117,6 +138,25 @@ pub const MAXIMUM_PSRAM_BYTES: usize = 16 * 1024 * 1024;
 pub const SPI_FREQUENCY_HZ: u32 = 1_000_000;
 /// Per-edge upper bound for an asserted SX1262 BUSY signal.
 pub const BUSY_PIN_WATCHDOG_MS: u64 = 100;
+
+/// Maximum idle continuous-RX wait before the LoRa actor checks queued TX.
+///
+/// This preserves the former 248-symbol SF7/BW125 scheduler cadence without
+/// using SX1262 single-shot receive mode: `248 * 1.024 ms = 253.952 ms`.
+/// The modem remains continuously armed across this software-only yield.
+pub const RX_SCHEDULER_YIELD_US: u64 = 253_952;
+
+/// Driver/executor allowance after receive progress before a false-preamble rearm.
+pub const RX_PROGRESS_TIMEOUT_MARGIN_US: u64 = 100_000;
+/// Recoverable deadline from first-polled receive progress to a terminal frame IRQ.
+///
+/// The maximum-frame airtime already includes the complete configured preamble,
+/// so starting this bound at the progress IRQ is conservative for every
+/// admissible 255-byte physical frame. Expiry rearms continuous RX; it does not
+/// authorize TX or fail-stop the actor.
+pub const RX_PROGRESS_TIMEOUT_US: u64 = E290_NA915_DEV_PROFILE
+    .maximum_frame_time_on_air_us()
+    .saturating_add(RX_PROGRESS_TIMEOUT_MARGIN_US);
 
 /// Whole-operation CAD watchdog.
 ///
@@ -167,14 +207,58 @@ pub const MAXIMUM_AUTHENTICATED_API_HANDOFF_BYTES: usize = 2_048;
 pub const MAXIMUM_AUTHENTICATED_API_NODE_STATE_BYTES: usize = 1_024;
 /// Native RNS maintenance cadence.
 pub const PROTOCOL_TICK_INTERVAL_SECONDS: u64 = 1;
-/// Periodic local transport announce cadence for the first milestone.
+/// Number of short post-boot announce retries before the steady cadence.
+pub const ANNOUNCE_BOOTSTRAP_RETRIES: u8 = 2;
+/// Pinned Rete delay before the one native retransmission of an announce.
+pub const ANNOUNCE_NATIVE_RETRANSMIT_SECONDS: u64 =
+    reticulum_node_core::RNS_ANNOUNCE_RETRANSMIT_SECONDS;
+/// Minimum nominal separation between scheduled or native announce emissions.
+pub const ANNOUNCE_MINIMUM_EMISSION_SEPARATION_SECONDS: u64 = 3;
+/// Quiet time between distinct local destinations on the half-duplex radio.
+///
+/// A transport peer may immediately rebroadcast the first announce it accepts;
+/// the native retransmission delay plus this product guard keeps the following
+/// service announce out of the same nominal emission opportunity.
+pub const ANNOUNCE_DESTINATION_SPACING_SECONDS: u64 =
+    ANNOUNCE_NATIVE_RETRANSMIT_SECONDS + ANNOUNCE_MINIMUM_EMISSION_SEPARATION_SECONDS;
+/// Earliest delay before the first post-boot announce retry.
+pub const ANNOUNCE_BOOTSTRAP_BASE_SECONDS: u64 = 13;
+/// Primary-destination-derived phase buckets for the first bootstrap retry.
+///
+/// The prime bucket count makes the full little-endian seed participate in the
+/// modulus. The qualified E290 A/B identities occupy phases 5 and 22, leaving
+/// seventeen seconds between their corresponding retry pairs.
+pub const ANNOUNCE_BOOTSTRAP_PHASE_SLOTS: u64 = 23;
+/// Bounded delay before retrying the same destination after protocol rejection.
+pub const ANNOUNCE_ADMISSION_RETRY_SECONDS: u64 = 1;
+/// Delay from the first bootstrap retry to the second.
+pub const ANNOUNCE_BOOTSTRAP_RETRY_SPACING_SECONDS: u64 = 30;
+/// Periodic local transport announce cadence after bootstrap discovery.
 pub const ANNOUNCE_INTERVAL_SECONDS: u64 = 30 * 60;
+const _: () = assert!(ANNOUNCE_BOOTSTRAP_RETRIES > 0);
+const _: () = assert!(ANNOUNCE_DESTINATION_SPACING_SECONDS > ANNOUNCE_NATIVE_RETRANSMIT_SECONDS);
+const _: () = assert!(ANNOUNCE_BOOTSTRAP_PHASE_SLOTS > 0);
+const _: () = assert!(ANNOUNCE_ADMISSION_RETRY_SECONDS > 0);
+const _: () = assert!(ANNOUNCE_BOOTSTRAP_RETRY_SPACING_SECONDS > 0);
+const _: () = assert!(ANNOUNCE_INTERVAL_SECONDS > ANNOUNCE_BOOTSTRAP_RETRY_SPACING_SECONDS);
 /// Deadline assigned to one admitted ordinary-action envelope.
 pub const ORDINARY_OWNER_LEASE_MS: u64 = 30_000;
 /// Deadline assigned to one durable DATA packet-owner attempt.
 pub const SUBMISSION_OWNER_LEASE_MS: u64 = 30_000;
 /// Delay before retrying an ambiguous or temporarily busy journal operation.
 pub const STORAGE_RETRY_BACKOFF_MS: u64 = 1_000;
+/// Product-selected maximum normalized opportunistic LXMF wire length.
+pub const LXMF_MAX_WIRE_BYTES: usize = 4_096;
+/// Product-selected maximum bytes in one LXMF MessagePack scalar value.
+pub const LXMF_MAX_VALUE_BYTES: usize = 2_048;
+/// Product-selected maximum entries in one LXMF MessagePack container.
+pub const LXMF_MAX_CONTAINER_ITEMS: usize = 256;
+/// Product-selected maximum values visited by LXMF validation.
+pub const LXMF_MAX_TOTAL_VALUES: usize = 2_048;
+/// Product-selected maximum scanner work for one LXMF validation.
+pub const LXMF_MAX_SCAN_STEPS: usize = 65_536;
+/// Product-selected maximum LXMF MessagePack nesting depth.
+pub const LXMF_MAX_NESTING_DEPTH: usize = 16;
 /// Bounded cadence for the USB Serial/JTAG owner and raw GPIO sampler.
 pub const USB_PAIRING_POLL_INTERVAL_MS: u64 = 1;
 /// Repeated debounced button-observation cadence supplied to pairing policy.
@@ -307,6 +391,13 @@ pub const fn supervisor_transition_disposition(
 ) -> SupervisorTransitionDisposition {
     match transition {
         NodeInterfaceSupervisorTransition::Idle => SupervisorTransitionDisposition::Idle,
+        NodeInterfaceSupervisorTransition::Ordinary(
+            OrdinaryRouterStep::RouteBackpressured { .. }
+            | OrdinaryRouterStep::WaitingForInterfaces
+            | OrdinaryRouterStep::AdmissionBackpressured { .. }
+            | OrdinaryRouterStep::OutputBackpressured
+            | OrdinaryRouterStep::Idle,
+        ) => SupervisorTransitionDisposition::Idle,
         NodeInterfaceSupervisorTransition::Fault(_)
         | NodeInterfaceSupervisorTransition::Data(
             DataRouterStep::OwnerMismatch | DataRouterStep::Disabled(_),
@@ -421,6 +512,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn lxmf_delivery_announce_explicitly_advertises_no_optional_functionality() {
+        assert_eq!(LXMF_DELIVERY_ANNOUNCE_APP_DATA, [0x93, 0xc0, 0xc0, 0x90]);
+    }
+
+    #[test]
     fn first_live_admission_profile_owns_exactly_one_submission() {
         assert_eq!(DURABLE_ACCEPTED_SUBMISSION_LIMIT, 1);
         const { assert!(DURABLE_ACCEPTED_SUBMISSION_LIMIT <= DURABLE_SUBMISSIONS) };
@@ -434,6 +530,22 @@ mod tests {
         assert_eq!(access.maximum_backoff_us(), 360_000);
         assert_eq!(access.maximum_pre_first_rf_setup_us(), 50_000);
         assert_eq!(access.maximum_inter_frame_turnaround_us(), 25_000);
+    }
+
+    #[test]
+    fn receive_progress_deadline_is_recoverable_and_covers_a_maximum_frame() {
+        assert_eq!(RX_PROGRESS_TIMEOUT_MARGIN_US, 100_000);
+        assert_eq!(
+            RX_PROGRESS_TIMEOUT_US,
+            E290_NA915_DEV_PROFILE
+                .maximum_frame_time_on_air_us()
+                .saturating_add(RX_PROGRESS_TIMEOUT_MARGIN_US)
+        );
+        assert!(
+            RX_PROGRESS_TIMEOUT_US
+                < reticulum_board_heltec_vision_master_e290_radio::E290_MAXIMUM_RECEIVE_OPERATION_US
+                    .get()
+        );
     }
 
     #[test]
@@ -543,6 +655,27 @@ mod tests {
                 step: DataPermitServerStep::Advanced,
             }),
             SupervisorTransitionDisposition::Progress
+        );
+        assert_eq!(
+            supervisor_transition_disposition(NodeInterfaceSupervisorTransition::Ordinary(
+                OrdinaryRouterStep::WaitingForInterfaces,
+            )),
+            SupervisorTransitionDisposition::Idle
+        );
+        assert_eq!(
+            supervisor_transition_disposition(NodeInterfaceSupervisorTransition::Ordinary(
+                OrdinaryRouterStep::AdmissionBackpressured {
+                    needed: 2,
+                    available: 1,
+                },
+            )),
+            SupervisorTransitionDisposition::Idle
+        );
+        assert_eq!(
+            supervisor_transition_disposition(NodeInterfaceSupervisorTransition::Ordinary(
+                OrdinaryRouterStep::OutputBackpressured,
+            )),
+            SupervisorTransitionDisposition::Idle
         );
         assert_eq!(
             supervisor_transition_disposition(NodeInterfaceSupervisorTransition::Data(

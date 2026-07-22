@@ -1136,6 +1136,251 @@ impl Default for RuntimeProofTraceEvidence {
 pub static RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE: RuntimeProofTraceEvidence =
     RuntimeProofTraceEvidence::new();
 
+/// Four-byte LXMF trace marker, stored in memory as the ASCII bytes `LXTE`.
+pub const RUNTIME_LXMF_TRACE_EVIDENCE_MAGIC: u32 = u32::from_le_bytes(*b"LXTE");
+
+/// Version of the debugger-visible LXMF trace ABI.
+pub const RUNTIME_LXMF_TRACE_EVIDENCE_VERSION: u32 = 1;
+
+/// Exact number of 32-bit words in [`RuntimeLxmfTraceEvidence`] version 1.
+pub const RUNTIME_LXMF_TRACE_EVIDENCE_WORDS: u32 = 24;
+
+/// Exact byte size of [`RuntimeLxmfTraceEvidence`] version 1.
+pub const RUNTIME_LXMF_TRACE_EVIDENCE_SIZE: u32 = 96;
+
+/// LXMF trace collection is active in this HIL image.
+pub const RUNTIME_LXMF_TRACE_FLAG_ACTIVE: u32 = 1 << 0;
+/// At least one trace counter saturated.
+pub const RUNTIME_LXMF_TRACE_FLAG_SATURATED: u32 = 1 << 1;
+/// The last-message fields contain one durable LXMF receipt.
+pub const RUNTIME_LXMF_TRACE_FLAG_LAST_COMMIT_PRESENT: u32 = 1 << 2;
+/// The last durable receipt was for newly committed state.
+pub const RUNTIME_LXMF_TRACE_FLAG_LAST_COMMIT_NEW: u32 = 1 << 3;
+/// The last durable receipt was for an already-durable logical message.
+pub const RUNTIME_LXMF_TRACE_FLAG_LAST_COMMIT_ALREADY_DURABLE: u32 = 1 << 4;
+/// The last released proof exposed a compact RNS proof-correlation tag.
+pub const RUNTIME_LXMF_TRACE_FLAG_PROOF_TAG_PRESENT: u32 = 1 << 5;
+/// At least one proof lifecycle transition violated ready/release/handoff order.
+pub const RUNTIME_LXMF_TRACE_FLAG_ORDERING_VIOLATION: u32 = 1 << 6;
+/// A record call supplied structurally inconsistent scalar metadata.
+pub const RUNTIME_LXMF_TRACE_FLAG_INPUT_INCONSISTENT: u32 = 1 << 7;
+
+/// Return whether one LXMF trace dump contains a complete, stable snapshot.
+pub const fn runtime_lxmf_trace_snapshot_is_stable(begin: u32, end: u32) -> bool {
+    begin == end && begin & 1 == 0
+}
+
+/// Stable durable-commit classification encoded by the LXMF trace ABI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeLxmfCommitKind {
+    /// Exact LXMF state became durable during this handoff.
+    New,
+    /// The logical LXMF message was already durable.
+    AlreadyDurable,
+}
+
+/// Exact 96-byte debugger-visible durable-LXMF lifecycle trace ABI.
+///
+/// Words 0 through 4 are the leading sequence and fixed header. Words 5
+/// through 10 are saturating lifecycle counts, words 11 through 18 retain the
+/// last complete 32-byte LXMF message ID, words 19 and 20 retain its durable
+/// handle, words 21 and 22 retain the last released proof's compact RNS
+/// correlation tag, and word 23 is the trailing sequence marker.
+///
+/// Like [`RuntimeProofTraceEvidence`], this is a single-core non-yielding
+/// writer protocol, not a lock. Matching even sequence words let a debugger
+/// reject a torn read. The initialized `#[used]` static remains in internal
+/// RAM and is compiled only into `runtime-measurement-hil` images.
+#[repr(C)]
+pub struct RuntimeLxmfTraceEvidence {
+    snapshot_seq_begin: AtomicU32,
+    magic: u32,
+    version: u32,
+    size: u32,
+    flags: AtomicU32,
+    durable_new_count: AtomicU32,
+    durable_already_count: AtomicU32,
+    proof_ready_count: AtomicU32,
+    proof_released_count: AtomicU32,
+    proof_handoff_count: AtomicU32,
+    ordering_violation_count: AtomicU32,
+    last_message_id: [AtomicU32; 8],
+    last_durable_handle_low: AtomicU32,
+    last_durable_handle_high: AtomicU32,
+    last_proof_tag_low: AtomicU32,
+    last_proof_tag_high: AtomicU32,
+    snapshot_seq_end: AtomicU32,
+}
+
+impl RuntimeLxmfTraceEvidence {
+    /// Construct empty version-1 durable-LXMF evidence.
+    pub const fn new() -> Self {
+        Self {
+            snapshot_seq_begin: AtomicU32::new(0),
+            magic: RUNTIME_LXMF_TRACE_EVIDENCE_MAGIC,
+            version: RUNTIME_LXMF_TRACE_EVIDENCE_VERSION,
+            size: RUNTIME_LXMF_TRACE_EVIDENCE_SIZE,
+            flags: AtomicU32::new(RUNTIME_LXMF_TRACE_FLAG_ACTIVE),
+            durable_new_count: AtomicU32::new(0),
+            durable_already_count: AtomicU32::new(0),
+            proof_ready_count: AtomicU32::new(0),
+            proof_released_count: AtomicU32::new(0),
+            proof_handoff_count: AtomicU32::new(0),
+            ordering_violation_count: AtomicU32::new(0),
+            last_message_id: [const { AtomicU32::new(0) }; 8],
+            last_durable_handle_low: AtomicU32::new(0),
+            last_durable_handle_high: AtomicU32::new(0),
+            last_proof_tag_low: AtomicU32::new(0),
+            last_proof_tag_high: AtomicU32::new(0),
+            snapshot_seq_end: AtomicU32::new(0),
+        }
+    }
+
+    /// Record one durable LXMF outcome and whether its retained proof became ready.
+    pub fn record_durable(
+        &self,
+        kind: RuntimeLxmfCommitKind,
+        message_id: &[u8; 32],
+        durable_handle: u64,
+        proof_ready: bool,
+    ) {
+        self.begin_sample();
+        let kind_flag = match kind {
+            RuntimeLxmfCommitKind::New => {
+                self.increment(&self.durable_new_count);
+                RUNTIME_LXMF_TRACE_FLAG_LAST_COMMIT_NEW
+            }
+            RuntimeLxmfCommitKind::AlreadyDurable => {
+                self.increment(&self.durable_already_count);
+                RUNTIME_LXMF_TRACE_FLAG_LAST_COMMIT_ALREADY_DURABLE
+            }
+        };
+        if proof_ready {
+            self.increment(&self.proof_ready_count);
+        }
+        for (word, bytes) in self.last_message_id.iter().zip(message_id.chunks_exact(4)) {
+            word.store(
+                u32::from_le_bytes(bytes.try_into().expect("fixed four-byte message-ID word")),
+                Ordering::Relaxed,
+            );
+        }
+        self.last_durable_handle_low
+            .store(durable_handle as u32, Ordering::Relaxed);
+        self.last_durable_handle_high
+            .store((durable_handle >> 32) as u32, Ordering::Relaxed);
+        self.flags.fetch_and(
+            !(RUNTIME_LXMF_TRACE_FLAG_LAST_COMMIT_NEW
+                | RUNTIME_LXMF_TRACE_FLAG_LAST_COMMIT_ALREADY_DURABLE),
+            Ordering::Relaxed,
+        );
+        self.flags.fetch_or(
+            RUNTIME_LXMF_TRACE_FLAG_LAST_COMMIT_PRESENT | kind_flag,
+            Ordering::Relaxed,
+        );
+        if durable_handle == 0 {
+            self.mark_input_inconsistent();
+        }
+        self.finish_sample();
+    }
+
+    /// Record release of one proof from durable-delay ownership.
+    ///
+    /// `proof_tag` is the little-endian first eight bytes of the complete RNS
+    /// covered-packet hash carried by the proof and can be compared directly
+    /// with the sender's delivered-receipt tag.
+    pub fn record_proof_released(&self, proof_tag: Option<u64>) {
+        self.begin_sample();
+        let ready = self.proof_ready_count.load(Ordering::Relaxed);
+        let released = self.proof_released_count.load(Ordering::Relaxed);
+        if ready != u32::MAX && released >= ready {
+            self.mark_ordering_violation();
+        }
+        self.increment(&self.proof_released_count);
+        match proof_tag {
+            Some(tag) => {
+                self.last_proof_tag_low.store(tag as u32, Ordering::Relaxed);
+                self.last_proof_tag_high
+                    .store((tag >> 32) as u32, Ordering::Relaxed);
+                self.flags
+                    .fetch_or(RUNTIME_LXMF_TRACE_FLAG_PROOF_TAG_PRESENT, Ordering::Relaxed);
+            }
+            None => {
+                self.last_proof_tag_low.store(0, Ordering::Relaxed);
+                self.last_proof_tag_high.store(0, Ordering::Relaxed);
+                self.flags.fetch_and(
+                    !RUNTIME_LXMF_TRACE_FLAG_PROOF_TAG_PRESENT,
+                    Ordering::Relaxed,
+                );
+                self.mark_input_inconsistent();
+            }
+        }
+        self.finish_sample();
+    }
+
+    /// Record accepted transfer of one released proof to the ordinary supervisor.
+    pub fn record_proof_handed_off(&self) {
+        self.begin_sample();
+        let released = self.proof_released_count.load(Ordering::Relaxed);
+        let handed_off = self.proof_handoff_count.load(Ordering::Relaxed);
+        if released != u32::MAX && handed_off >= released {
+            self.mark_ordering_violation();
+        }
+        self.increment(&self.proof_handoff_count);
+        self.finish_sample();
+    }
+
+    fn increment(&self, counter: &AtomicU32) {
+        if !saturating_increment(counter) {
+            self.flags
+                .fetch_or(RUNTIME_LXMF_TRACE_FLAG_SATURATED, Ordering::Relaxed);
+        }
+    }
+
+    fn mark_ordering_violation(&self) {
+        self.increment(&self.ordering_violation_count);
+        self.flags.fetch_or(
+            RUNTIME_LXMF_TRACE_FLAG_ORDERING_VIOLATION,
+            Ordering::Relaxed,
+        );
+    }
+
+    fn mark_input_inconsistent(&self) {
+        self.flags.fetch_or(
+            RUNTIME_LXMF_TRACE_FLAG_INPUT_INCONSISTENT,
+            Ordering::Relaxed,
+        );
+    }
+
+    fn begin_sample(&self) {
+        let odd = self
+            .snapshot_seq_begin
+            .load(Ordering::Relaxed)
+            .wrapping_add(1);
+        self.snapshot_seq_begin.store(odd, Ordering::SeqCst);
+        self.snapshot_seq_end.store(odd, Ordering::SeqCst);
+    }
+
+    fn finish_sample(&self) {
+        let even = self
+            .snapshot_seq_end
+            .load(Ordering::Relaxed)
+            .wrapping_add(1);
+        self.snapshot_seq_end.store(even, Ordering::SeqCst);
+        self.snapshot_seq_begin.store(even, Ordering::SeqCst);
+    }
+}
+
+impl Default for RuntimeLxmfTraceEvidence {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Unique debugger-locatable durable-LXMF trace retained in HIL images.
+#[used]
+pub static RETICULUM_RUNTIME_LXMF_TRACE_EVIDENCE: RuntimeLxmfTraceEvidence =
+    RuntimeLxmfTraceEvidence::new();
+
 fn saturating_increment(counter: &AtomicU32) -> bool {
     let mut current = counter.load(Ordering::Relaxed);
     loop {
@@ -1269,6 +1514,44 @@ macro_rules! assert_proof_trace_word_offset {
         );
     };
 }
+
+macro_rules! assert_lxmf_trace_word_offset {
+    ($field:ident, $word:expr) => {
+        assert!(
+            core::mem::offset_of!(RuntimeLxmfTraceEvidence, $field)
+                == $word * core::mem::size_of::<u32>()
+        );
+    };
+}
+
+const _: () = {
+    assert!(core::mem::align_of::<RuntimeLxmfTraceEvidence>() == 4);
+    assert!(
+        core::mem::size_of::<RuntimeLxmfTraceEvidence>()
+            == RUNTIME_LXMF_TRACE_EVIDENCE_SIZE as usize
+    );
+    assert!(
+        core::mem::size_of::<RuntimeLxmfTraceEvidence>()
+            == RUNTIME_LXMF_TRACE_EVIDENCE_WORDS as usize * core::mem::size_of::<u32>()
+    );
+    assert_lxmf_trace_word_offset!(snapshot_seq_begin, 0);
+    assert_lxmf_trace_word_offset!(magic, 1);
+    assert_lxmf_trace_word_offset!(version, 2);
+    assert_lxmf_trace_word_offset!(size, 3);
+    assert_lxmf_trace_word_offset!(flags, 4);
+    assert_lxmf_trace_word_offset!(durable_new_count, 5);
+    assert_lxmf_trace_word_offset!(durable_already_count, 6);
+    assert_lxmf_trace_word_offset!(proof_ready_count, 7);
+    assert_lxmf_trace_word_offset!(proof_released_count, 8);
+    assert_lxmf_trace_word_offset!(proof_handoff_count, 9);
+    assert_lxmf_trace_word_offset!(ordering_violation_count, 10);
+    assert_lxmf_trace_word_offset!(last_message_id, 11);
+    assert_lxmf_trace_word_offset!(last_durable_handle_low, 19);
+    assert_lxmf_trace_word_offset!(last_durable_handle_high, 20);
+    assert_lxmf_trace_word_offset!(last_proof_tag_low, 21);
+    assert_lxmf_trace_word_offset!(last_proof_tag_high, 22);
+    assert_lxmf_trace_word_offset!(snapshot_seq_end, 23);
+};
 
 const _: () = {
     assert!(core::mem::align_of::<RuntimeProofTraceEvidence>() == 4);
@@ -1893,6 +2176,107 @@ mod tests {
         assert!(!runtime_proof_trace_snapshot_is_stable(odd, odd));
         evidence.finish_sample();
         assert!(runtime_proof_trace_snapshot_is_stable(
+            load(&evidence.snapshot_seq_begin),
+            load(&evidence.snapshot_seq_end)
+        ));
+    }
+
+    #[test]
+    fn lxmf_trace_abi_is_exactly_24_initialized_internal_words() {
+        assert_eq!(RUNTIME_LXMF_TRACE_EVIDENCE_MAGIC.to_le_bytes(), *b"LXTE");
+        assert_eq!(RUNTIME_LXMF_TRACE_EVIDENCE_VERSION, 1);
+        assert_eq!(RUNTIME_LXMF_TRACE_EVIDENCE_WORDS, 24);
+        assert_eq!(RUNTIME_LXMF_TRACE_EVIDENCE_SIZE, 96);
+        assert_eq!(core::mem::size_of::<RuntimeLxmfTraceEvidence>(), 96);
+        assert_eq!(core::mem::align_of::<RuntimeLxmfTraceEvidence>(), 4);
+        assert_eq!(
+            core::mem::offset_of!(RuntimeLxmfTraceEvidence, last_message_id),
+            11 * 4
+        );
+        assert_eq!(
+            core::mem::offset_of!(RuntimeLxmfTraceEvidence, snapshot_seq_end),
+            23 * 4
+        );
+        let evidence = RuntimeLxmfTraceEvidence::new();
+        assert_eq!(load(&evidence.flags), RUNTIME_LXMF_TRACE_FLAG_ACTIVE);
+        assert!(runtime_lxmf_trace_snapshot_is_stable(0, 0));
+    }
+
+    #[test]
+    fn lxmf_trace_records_durable_ready_release_handoff_and_exact_correlation() {
+        let evidence = RuntimeLxmfTraceEvidence::new();
+        let message_id = core::array::from_fn(|index| index as u8);
+        evidence.record_durable(
+            RuntimeLxmfCommitKind::New,
+            &message_id,
+            0x1122_3344_5566_7788,
+            true,
+        );
+        evidence.record_proof_released(Some(0x8877_6655_4433_2211));
+        evidence.record_proof_handed_off();
+
+        assert_eq!(load(&evidence.durable_new_count), 1);
+        assert_eq!(load(&evidence.durable_already_count), 0);
+        assert_eq!(load(&evidence.proof_ready_count), 1);
+        assert_eq!(load(&evidence.proof_released_count), 1);
+        assert_eq!(load(&evidence.proof_handoff_count), 1);
+        assert_eq!(load(&evidence.ordering_violation_count), 0);
+        for (index, word) in evidence.last_message_id.iter().enumerate() {
+            assert_eq!(
+                load(word),
+                u32::from_le_bytes(message_id[index * 4..index * 4 + 4].try_into().unwrap())
+            );
+        }
+        assert_eq!(load(&evidence.last_durable_handle_low), 0x5566_7788);
+        assert_eq!(load(&evidence.last_durable_handle_high), 0x1122_3344);
+        assert_eq!(load(&evidence.last_proof_tag_low), 0x4433_2211);
+        assert_eq!(load(&evidence.last_proof_tag_high), 0x8877_6655);
+        let flags = load(&evidence.flags);
+        assert_ne!(flags & RUNTIME_LXMF_TRACE_FLAG_LAST_COMMIT_PRESENT, 0);
+        assert_ne!(flags & RUNTIME_LXMF_TRACE_FLAG_LAST_COMMIT_NEW, 0);
+        assert_eq!(
+            flags & RUNTIME_LXMF_TRACE_FLAG_LAST_COMMIT_ALREADY_DURABLE,
+            0
+        );
+        assert_ne!(flags & RUNTIME_LXMF_TRACE_FLAG_PROOF_TAG_PRESENT, 0);
+        assert_eq!(flags & RUNTIME_LXMF_TRACE_FLAG_ORDERING_VIOLATION, 0);
+        assert_eq!(load(&evidence.snapshot_seq_begin), 6);
+        assert_eq!(load(&evidence.snapshot_seq_end), 6);
+        assert!(runtime_lxmf_trace_snapshot_is_stable(6, 6));
+
+        let replay_id = [0xa5; 32];
+        evidence.record_durable(RuntimeLxmfCommitKind::AlreadyDurable, &replay_id, 9, false);
+        assert_eq!(load(&evidence.durable_already_count), 1);
+        assert_eq!(load(&evidence.proof_ready_count), 1);
+        let flags = load(&evidence.flags);
+        assert_eq!(flags & RUNTIME_LXMF_TRACE_FLAG_LAST_COMMIT_NEW, 0);
+        assert_ne!(
+            flags & RUNTIME_LXMF_TRACE_FLAG_LAST_COMMIT_ALREADY_DURABLE,
+            0
+        );
+    }
+
+    #[test]
+    fn lxmf_trace_fail_closed_diagnostics_expose_bad_order_and_missing_tag() {
+        let evidence = RuntimeLxmfTraceEvidence::new();
+        evidence.record_proof_handed_off();
+        evidence.record_proof_released(None);
+        evidence.record_durable(RuntimeLxmfCommitKind::New, &[7; 32], 0, false);
+
+        assert_eq!(load(&evidence.ordering_violation_count), 2);
+        assert_eq!(load(&evidence.proof_handoff_count), 1);
+        assert_eq!(load(&evidence.proof_released_count), 1);
+        let flags = load(&evidence.flags);
+        assert_ne!(flags & RUNTIME_LXMF_TRACE_FLAG_ORDERING_VIOLATION, 0);
+        assert_ne!(flags & RUNTIME_LXMF_TRACE_FLAG_INPUT_INCONSISTENT, 0);
+        assert_eq!(flags & RUNTIME_LXMF_TRACE_FLAG_PROOF_TAG_PRESENT, 0);
+
+        evidence.begin_sample();
+        let odd = load(&evidence.snapshot_seq_begin);
+        assert_eq!(odd, load(&evidence.snapshot_seq_end));
+        assert!(!runtime_lxmf_trace_snapshot_is_stable(odd, odd));
+        evidence.finish_sample();
+        assert!(runtime_lxmf_trace_snapshot_is_stable(
             load(&evidence.snapshot_seq_begin),
             load(&evidence.snapshot_seq_end)
         ));

@@ -199,6 +199,7 @@ struct TestNode {
     destination: DestinationHash,
     prepare_calls: usize,
     acknowledge_calls: usize,
+    forced_unknown_preparations: usize,
 }
 
 impl TestNode {
@@ -238,7 +239,12 @@ impl TestNode {
             destination,
             prepare_calls: 0,
             acknowledge_calls: 0,
+            forced_unknown_preparations: 0,
         }
+    }
+
+    fn force_unknown_preparations(&mut self, count: usize) {
+        self.forced_unknown_preparations = count;
     }
 
     fn expose_frame_and_timeout(&mut self) -> AuthorizedFrameObservation {
@@ -331,6 +337,10 @@ impl SubmissionNodePort for TestNode {
     {
         self.prepare_calls += 1;
         assert_eq!(request.destination, self.destination);
+        if self.forced_unknown_preparations > 0 {
+            self.forced_unknown_preparations -= 1;
+            return SubmissionPreparationObservation::Rejected(SubmitError::UnknownDestination);
+        }
         let buffer = self
             .buffer
             .take()
@@ -441,12 +451,21 @@ fn try_drive(
     access: &mut BoundJournal<FakeNor>,
     node: &mut TestNode,
 ) -> Result<RuntimeStep, RuntimeError<FakeError>> {
+    try_drive_at(runtime, access, node, 100_000)
+}
+
+fn try_drive_at(
+    runtime: &mut SubmissionRuntime<4, 2>,
+    access: &mut BoundJournal<FakeNor>,
+    node: &mut TestNode,
+    now_ms: u64,
+) -> Result<RuntimeStep, RuntimeError<FakeError>> {
     runtime.drive_step(
         access,
         node,
-        MonotonicSeconds::new(100),
-        MonotonicMillis::new(100_000),
-        TxLeaseDeadline::new(MonotonicMillis::new(200_000)),
+        MonotonicSeconds::new(now_ms / 1_000),
+        MonotonicMillis::new(now_ms),
+        TxLeaseDeadline::new(MonotonicMillis::new(now_ms.saturating_add(100_000))),
         &mut CounterRng::default(),
     )
 }
@@ -546,6 +565,216 @@ fn durable_runtime_enforces_barrier_frame_terminal_and_ack_ordering() {
         runtime.index().get(id).unwrap().state(),
         LifecycleState::Final(FinalDisposition::Failed(SubmissionFailure::DeliveryTimeout))
     ));
+}
+
+#[test]
+fn unknown_destination_requests_a_path_twice_then_prepares_after_announce_learning() {
+    let mut node = TestNode::new();
+    node.force_unknown_preparations(3);
+    let mut access = formatted_access();
+    let mut runtime =
+        SubmissionRuntime::<4, 2>::mount(&mut access, SubmissionId::new(50), 8).unwrap();
+    assert_eq!(
+        runtime.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Complete)
+    );
+    let id = match runtime
+        .accept(&mut access, candidate(node.destination))
+        .unwrap()
+    {
+        AcceptanceProgress::Accepted(id) => id,
+        other => panic!("fresh candidate did not accept: {other:?}"),
+    };
+    assert!(matches!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 100_000).unwrap(),
+        RuntimeStep::PreparationBarrier { .. }
+    ));
+    assert_eq!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 100_000).unwrap(),
+        RuntimeStep::Persistence(PersistenceProgress::Committed)
+    );
+    let RuntimeStep::PathDiscoveryRequest {
+        offer: first_offer,
+        progress: ProjectionProgress::NoAction,
+    } = try_drive_at(&mut runtime, &mut access, &mut node, 100_000).unwrap()
+    else {
+        panic!("unknown destination must produce its first exact path offer")
+    };
+    assert_eq!(first_offer.id(), id);
+    assert_eq!(first_offer.destination(), node.destination);
+    assert_eq!(first_offer.ordinal(), 1);
+    assert_eq!(node.prepare_calls, 1);
+    assert_eq!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 200_000).unwrap(),
+        RuntimeStep::Idle,
+        "an undispatched offer must not start or exhaust discovery clocks"
+    );
+    runtime
+        .acknowledge_path_request_dispatched(first_offer, MonotonicMillis::new(100_000))
+        .unwrap();
+    assert_eq!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 106_999).unwrap(),
+        RuntimeStep::Idle
+    );
+    assert!(matches!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 107_000).unwrap(),
+        RuntimeStep::Preparation {
+            id: observed,
+            progress: ProjectionProgress::NoAction,
+        } if observed == id
+    ));
+    assert_eq!(node.prepare_calls, 2);
+    assert_eq!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 120_999).unwrap(),
+        RuntimeStep::Idle
+    );
+    let RuntimeStep::PathDiscoveryRequest {
+        offer: second_offer,
+        progress: ProjectionProgress::NoAction,
+    } = try_drive_at(&mut runtime, &mut access, &mut node, 121_000).unwrap()
+    else {
+        panic!("the shared discovery must produce its bounded retry offer")
+    };
+    assert_eq!(second_offer.id(), id);
+    assert_eq!(second_offer.destination(), node.destination);
+    assert_eq!(second_offer.ordinal(), 2);
+    assert_eq!(node.prepare_calls, 3);
+    runtime
+        .acknowledge_path_request_dispatched(second_offer, MonotonicMillis::new(121_000))
+        .unwrap();
+    assert_eq!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 127_999).unwrap(),
+        RuntimeStep::Idle
+    );
+    assert!(matches!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 128_000).unwrap(),
+        RuntimeStep::Preparation {
+            id: observed,
+            progress: ProjectionProgress::AttemptBound,
+        } if observed == id
+    ));
+    assert_eq!(node.prepare_calls, 4);
+    assert_eq!(
+        runtime.index().get(id).unwrap().state(),
+        LifecycleState::Preparing
+    );
+}
+
+#[test]
+fn path_discovery_exhaustion_commits_terminal_no_path() {
+    let mut node = TestNode::new();
+    node.force_unknown_preparations(4);
+    let mut access = formatted_access();
+    let mut runtime =
+        SubmissionRuntime::<4, 2>::mount(&mut access, SubmissionId::new(55), 9).unwrap();
+    assert_eq!(
+        runtime.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Complete)
+    );
+    let id = match runtime
+        .accept(&mut access, candidate(node.destination))
+        .unwrap()
+    {
+        AcceptanceProgress::Accepted(id) => id,
+        other => panic!("fresh candidate did not accept: {other:?}"),
+    };
+    let _ = try_drive_at(&mut runtime, &mut access, &mut node, 100_000).unwrap();
+    let _ = try_drive_at(&mut runtime, &mut access, &mut node, 100_000).unwrap();
+    let RuntimeStep::PathDiscoveryRequest {
+        offer: first_offer, ..
+    } = try_drive_at(&mut runtime, &mut access, &mut node, 100_000).unwrap()
+    else {
+        panic!("first path offer must be produced")
+    };
+    assert_eq!(first_offer.ordinal(), 1);
+    runtime
+        .acknowledge_path_request_dispatched(first_offer, MonotonicMillis::new(100_000))
+        .unwrap();
+    let _ = try_drive_at(&mut runtime, &mut access, &mut node, 107_000).unwrap();
+    let RuntimeStep::PathDiscoveryRequest {
+        offer: second_offer,
+        ..
+    } = try_drive_at(&mut runtime, &mut access, &mut node, 121_000).unwrap()
+    else {
+        panic!("second path offer must be produced")
+    };
+    assert_eq!(second_offer.ordinal(), 2);
+    runtime
+        .acknowledge_path_request_dispatched(second_offer, MonotonicMillis::new(121_000))
+        .unwrap();
+    assert!(matches!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 128_000).unwrap(),
+        RuntimeStep::Preparation {
+            id: observed,
+            progress: ProjectionProgress::Persist(_),
+        } if observed == id
+    ));
+    assert_eq!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 128_000).unwrap(),
+        RuntimeStep::Persistence(PersistenceProgress::Committed)
+    );
+    assert_eq!(
+        runtime.index().get(id).unwrap().state(),
+        LifecycleState::Final(FinalDisposition::Failed(SubmissionFailure::NoPath))
+    );
+}
+
+#[test]
+fn path_discovery_is_shared_per_destination_and_acknowledged_exactly() {
+    let node = TestNode::new();
+    let mut access = formatted_access();
+    let mut runtime =
+        SubmissionRuntime::<4, 2>::mount(&mut access, SubmissionId::new(58), 10).unwrap();
+    assert_eq!(
+        runtime.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Complete)
+    );
+    let first_id = SubmissionId::new(58);
+    let second_id = SubmissionId::new(59);
+    let unknown = SubmissionPreparationObservation::Rejected(SubmitError::UnknownDestination);
+
+    let (first_observation, first_offer) =
+        runtime.classify_path_discovery(first_id, node.destination, unknown, 100_000);
+    assert_eq!(
+        first_observation,
+        SubmissionPreparationObservation::RetrySameBoot
+    );
+    let first_offer = first_offer.expect("first destination miss must own one offer");
+    assert_eq!(first_offer.ordinal(), 1);
+
+    let (second_observation, duplicate_offer) =
+        runtime.classify_path_discovery(second_id, node.destination, unknown, 100_000);
+    assert_eq!(
+        second_observation,
+        SubmissionPreparationObservation::RetrySameBoot
+    );
+    assert_eq!(duplicate_offer, None);
+
+    let mismatched = PathDiscoveryOffer {
+        id: second_id,
+        destination: node.destination,
+        ordinal: 1,
+    };
+    assert_eq!(
+        runtime.acknowledge_path_request_dispatched(mismatched, MonotonicMillis::new(100_000)),
+        Err(PathDiscoveryAcknowledgeError::OfferMismatch)
+    );
+    runtime
+        .acknowledge_path_request_dispatched(first_offer, MonotonicMillis::new(100_000))
+        .unwrap();
+    assert!(!runtime.path_discovery_due(node.destination, 106_999));
+    assert!(runtime.path_discovery_due(node.destination, 107_000));
+
+    let (_, early_retry) =
+        runtime.classify_path_discovery(second_id, node.destination, unknown, 107_000);
+    assert_eq!(early_retry, None);
+    assert!(!runtime.path_discovery_due(node.destination, 120_999));
+    assert!(runtime.path_discovery_due(node.destination, 121_000));
+    let (_, shared_retry) =
+        runtime.classify_path_discovery(second_id, node.destination, unknown, 121_000);
+    let shared_retry = shared_retry.expect("one shared retry must become due");
+    assert_eq!(shared_retry.id(), second_id);
+    assert_eq!(shared_retry.ordinal(), 2);
 }
 
 #[test]

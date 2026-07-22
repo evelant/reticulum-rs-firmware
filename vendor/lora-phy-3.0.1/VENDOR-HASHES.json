@@ -15,10 +15,7 @@
     "rustfmt.toml": "b15fd1b8ede2432caec5a15e7db48968d95280b16bb965b165ae275afa6ef025",
     "src/interface.rs": "4e98b396d1dba74a5142775d4420ae2050a38edcd3749e92e365e63b3d4ce621",
     "src/iv.rs": "9be7892b6c8f3de3ba9d543907f3ecb961f943fa9e43696957065538fafa96b3",
-    "src/lorawan_radio.rs": "2068cef78703182f717e7930b903c52378818bf5b53cade7b9fe83cdf4789e3a",
-    "src/mod_params.rs": "a951eb981d20ffff8ed40331cac136683bec3b96b34bbd4f974db07034ba0405",
     "src/sx126x/radio_kind_params.rs": "9ad8207e025e577c40fec559c9eb27c0a61407e6f095c2859761d3d6eb2c807c",
-    "src/sx127x/mod.rs": "540a6ca9d7fce3eea3cf0d850ebefdb5784592ab580d7ea3e894fc1075a67c4f",
     "src/sx127x/radio_kind_params.rs": "015811b7f8fe8b1882a9e45ffa97b45888077b89797fb7969b17f90e38ae963a",
     "src/sx127x/sx1272.rs": "b16587769de500556a0cc013b04608c9a30fe913582a301e069a944602995de9",
     "src/sx127x/sx1276.rs": "fdee14dfd568422ed0f0bc6d9844a34c5414ce06acc6b074e42cde6e7df69ab2"
@@ -26,26 +23,123 @@
   "patched_upstream_files": {
     "src/lib.rs": {
       "upstream_sha256": "8df0ef81a3a6333a7f528f0bd44204c65d2614ddf5e92a86c1db61bf25f6eccf",
-      "vendored_sha256": "6b936e8546004f87e6003488fd793ad982cda85eec65073c453f412af41824ea"
+      "vendored_sha256": "5df9db1421cc965c77368c2f59a886266c7a6df6997fd3a6294e5e5d731b6217"
+    },
+    "src/lorawan_radio.rs": {
+      "upstream_sha256": "2068cef78703182f717e7930b903c52378818bf5b53cade7b9fe83cdf4789e3a",
+      "vendored_sha256": "af556577cb21d7f3158711e053cc12d4c9d661f412a3812386d2515d0bfbc11c"
+    },
+    "src/mod_params.rs": {
+      "upstream_sha256": "a951eb981d20ffff8ed40331cac136683bec3b96b34bbd4f974db07034ba0405",
+      "vendored_sha256": "9477644b0b4995e6275fd88157f3c6b0a464705be918b17963c04dc24239cf23"
     },
     "src/mod_traits.rs": {
       "upstream_sha256": "b95e71ba7a7591364a59ddf1961620f8864103a0991df28d71a07026541f6efd",
-      "vendored_sha256": "78aee410464aa0e85112ddc3fd790456ee38cf9f289757cf6aac783d94e3f618"
+      "vendored_sha256": "7f8a1ddc6d870dcdb5219e9c2a23a4293766cf913b9c86ea3489bc67bdfeb44b"
     },
     "src/sx126x/mod.rs": {
       "upstream_sha256": "a1f49190dbb1e5820993bb9e9c1f45481997f047be983017aa2b3c57629faf18",
-      "vendored_sha256": "a11be17de1603ebc796070a2d4a6f30dc23c63a305bc2111843d846d16550c3f"
+      "vendored_sha256": "52559683c50ceec53201e14ec9f2ddc078ae60a6a1855c22c602f2f345ca52d3"
     },
     "src/sx126x/variant.rs": {
       "upstream_sha256": "6ba1ab372039da00dbad8096b40fbf614cb8a2cd443783ede8a95eb9565a657a",
       "vendored_sha256": "daef22e7907e6502e9cb6622e3893fbc492389dcc3b856d88098712aa7262f63"
+    },
+    "src/sx127x/mod.rs": {
+      "upstream_sha256": "540a6ca9d7fce3eea3cf0d850ebefdb5784592ab580d7ea3e894fc1075a67c4f",
+      "vendored_sha256": "effb78ead716aef88bf69f974308c9c1a01b3d7fde7f74223ced04df99d3c0bf"
     }
   },
   "omitted_upstream_files": {},
   "project_files": {
-    "PATCHES.md": "6cf20617bf00597361b75cc97e14e0debe5022a048bff60a490397486c614258"
+    "PATCHES.md": "e15064fd55b5419ceb20cb5400b39d5669a5eb7ff591bd9aea446909aef55c8c"
   },
   "reviewed_source_edits": [
+    {
+      "path": "src/lib.rs",
+      "upstream": "\n        Ok(())\n    }\n}\n",
+      "vendored": "\n        Ok(())\n    }\n\n    async fn quiesce_to_standby(&mut self) -> Result<(), RadioError> {\n        self.radio_kind.set_standby().await?;\n        self.radio_mode = RadioMode::Standby;\n        self.radio_kind.set_irq_params(None).await?;\n        self.radio_kind.clear_irq_status().await?;\n        Ok(())\n    }\n}\n"
+    },
+    {
+      "path": "src/lib.rs",
+      "upstream": "    async fn prepare_modem(&mut self, mdltn_params: &ModulationParams) -> Result<(), RadioError> {\n        self.radio_kind.ensure_ready(self.radio_mode).await?;\n        if self.radio_mode != RadioMode::Standby {\n            self.radio_kind.set_standby().await?;\n            self.radio_mode = RadioMode::Standby;\n        }\n\n        if self.cold_start {\n",
+      "vendored": "    async fn prepare_modem(&mut self, mdltn_params: &ModulationParams) -> Result<(), RadioError> {\n        self.radio_kind.ensure_ready(self.radio_mode).await?;\n        if self.radio_mode != RadioMode::Standby {\n            self.quiesce_to_standby().await?;\n        }\n\n        if self.cold_start {\n"
+    },
+    {
+      "path": "src/lib.rs",
+      "upstream": "            }\n        } else {\n            Err(RadioError::InvalidRadioMode)\n        }\n    }\n\n",
+      "vendored": "            }\n        } else {\n            Err(RadioError::InvalidRadioMode)\n        }\n    }\n\n    /// Start the receive mode selected by [`Self::prepare_for_rx`].\n    ///\n    /// Continuous-receive users call this once, then use [`Self::wait_for_irq`]\n    /// and [`Self::process_rx_irq`] for every packet. Reissuing this command\n    /// between packets is unnecessary and creates a receive blind spot.\n    /// The returned future must run to completion once polled.\n    pub async fn start_rx(&mut self) -> Result<(), RadioError> {\n        if let RadioMode::Receive(listen_mode) = self.radio_mode {\n            self.radio_kind.do_rx(listen_mode).await\n        } else {\n            Err(RadioError::InvalidRadioMode)\n        }\n    }\n\n    /// Drain and classify one already-observed receive interrupt.\n    ///\n    /// The caller must await [`Self::wait_for_irq`] first and must not cancel\n    /// this method while its SPI transaction is in progress. In continuous\n    /// mode a successful call leaves the modem receiving, including while the\n    /// caller consumes the copied packet and waits for the next interrupt.\n    pub async fn process_rx_irq(\n        &mut self,\n        packet_params: &PacketParams,\n        receiving_buffer: &mut [u8],\n    ) -> Result<Option<ReceiveIrq>, RadioError> {\n        if !matches!(self.radio_mode, RadioMode::Receive(_)) {\n            return Err(RadioError::InvalidRadioMode);\n        }\n        match self.radio_kind.process_irq_event(self.radio_mode, None, true).await? {\n            Some(IrqState::PreambleReceived) => Ok(Some(ReceiveIrq::PreambleReceived)),\n            Some(IrqState::Done) => {\n                let len = self.radio_kind.get_rx_payload(packet_params, receiving_buffer).await?;\n                let status = self.radio_kind.get_rx_packet_status().await?;\n                Ok(Some(ReceiveIrq::PacketReceived { len, status }))\n            }\n            None => Ok(None),\n        }\n    }\n\n"
+    },
+    {
+      "path": "src/lib.rs",
+      "upstream": "        packet_params: &PacketParams,\n        receiving_buffer: &mut [u8],\n    ) -> Result<(u8, PacketStatus), RadioError> {\n        if let RadioMode::Receive(listen_mode) = self.radio_mode {\n            self.radio_kind.do_rx(listen_mode).await?;\n            loop {\n                self.wait_for_irq().await?;\n                match self.radio_kind.process_irq_event(self.radio_mode, None, true).await {\n                    Ok(Some(actual_state)) => match actual_state {\n                        IrqState::PreambleReceived => continue,\n                        IrqState::Done => {\n                            let received_len = self.radio_kind.get_rx_payload(packet_params, receiving_buffer).await?;\n                            let rx_pkt_status = self.radio_kind.get_rx_packet_status().await?;\n                            return Ok((received_len, rx_pkt_status));\n                        }\n                    },\n                    Ok(None) => continue,\n                    Err(err) => {\n                        // if in rx continuous mode, allow the caller to determine whether to keep receiving\n",
+      "vendored": "        packet_params: &PacketParams,\n        receiving_buffer: &mut [u8],\n    ) -> Result<(u8, PacketStatus), RadioError> {\n        if matches!(self.radio_mode, RadioMode::Receive(_)) {\n            self.start_rx().await?;\n            loop {\n                self.wait_for_irq().await?;\n                match self.process_rx_irq(packet_params, receiving_buffer).await {\n                    Ok(Some(ReceiveIrq::PreambleReceived)) => continue,\n                    Ok(Some(ReceiveIrq::PacketReceived { len, status })) => {\n                        return Ok((len, status));\n                    }\n                    Ok(None) => continue,\n                    Err(err) => {\n                        // if in rx continuous mode, allow the caller to determine whether to keep receiving\n"
+    },
+    {
+      "path": "src/lib.rs",
+      "upstream": "\n    /// Place the LoRa physical layer in standby mode\n    pub async fn enter_standby(&mut self) -> Result<(), RadioError> {\n        self.radio_kind.set_standby().await?;\n        self.radio_mode = RadioMode::Standby;\n        Ok(())\n    }\n\n    /// Place the LoRa physical layer in low power mode, specifying cold or warm start (if the Semtech chip supports it)\n",
+      "vendored": "\n    /// Place the LoRa physical layer in standby, disable IRQ routing, and clear pending IRQs.\n    pub async fn enter_standby(&mut self) -> Result<(), RadioError> {\n        self.quiesce_to_standby().await\n    }\n\n    /// Place the LoRa physical layer in low power mode, specifying cold or warm start (if the Semtech chip supports it)\n"
+    },
+    {
+      "path": "src/lorawan_radio.rs",
+      "upstream": "        if let Some(rx_params) = &self.rx_pkt_params {\n            match self.lora.rx(rx_params, receiving_buffer).await {\n                Ok((received_len, rx_pkt_status)) => {\n                    Ok((\n                        received_len as usize,\n                        RxQuality::new(rx_pkt_status.rssi, rx_pkt_status.snr as i8), // downcast snr\n                    ))\n                }\n                Err(err) => Err(err.into()),\n            }\n        } else {\n",
+      "vendored": "        if let Some(rx_params) = &self.rx_pkt_params {\n            loop {\n                self.lora.wait_for_irq().await?;\n                match self.lora.process_rx_irq(rx_params, receiving_buffer).await? {\n                    Some(ReceiveIrq::PacketReceived { len, status }) => {\n                        return Ok((\n                            len as usize,\n                            RxQuality::new(status.rssi, status.snr as i8),\n                        ));\n                    }\n                    Some(ReceiveIrq::PreambleReceived) | None => continue,\n                }\n            }\n        } else {\n"
+    },
+    {
+      "path": "src/lorawan_radio.rs",
+      "upstream": "        self.lora\n            .prepare_for_rx(RxMode::from(config.mode, config.rf.bb), &mdltn_params, &rx_pkt_params)\n            .await?;\n        self.rx_pkt_params = Some(rx_pkt_params);\n",
+      "vendored": "        let mode = RxMode::from(config.mode, config.rf.bb);\n        self.lora\n            .prepare_for_rx(mode, &mdltn_params, &rx_pkt_params)\n            .await?;\n        if mode == RxMode::Continuous {\n            self.lora.start_rx().await?;\n        }\n        self.rx_pkt_params = Some(rx_pkt_params);\n"
+    },
+    {
+      "path": "src/lorawan_radio.rs",
+      "upstream": "use super::mod_params::{PacketParams, RadioError};",
+      "vendored": "use super::mod_params::{PacketParams, RadioError, ReceiveIrq};"
+    },
+    {
+      "path": "src/mod_params.rs",
+      "upstream": "pub struct PacketStatus {\n    pub rssi: i16,\n    pub snr: i16,\n}\n\n/// The state of the radio\n",
+      "vendored": "pub struct PacketStatus {\n    pub rssi: i16,\n    pub snr: i16,\n}\n\n/// One decoded interrupt observed while a radio is configured for receive.\n///\n/// This separates the cancellation-safe interrupt wait from the async SPI\n/// work needed to drain and classify that interrupt. Continuous-receive users\n/// can therefore keep the modem armed across successive packets without\n/// issuing another receive command between them.\n#[derive(Clone, Copy)]\npub enum ReceiveIrq {\n    /// A preamble or valid header was observed; packet reception is in progress.\n    PreambleReceived,\n    /// A complete packet was copied into the caller's receive buffer.\n    PacketReceived {\n        /// Number of valid bytes copied into the receive buffer.\n        len: u8,\n        /// Packet RSSI and SNR reported by the radio.\n        status: PacketStatus,\n    },\n}\n\n/// The state of the radio\n"
+    },
+    {
+      "path": "src/mod_traits.rs",
+      "upstream": "    async fn do_cad(&mut self, mdltn_params: &ModulationParams) -> Result<(), RadioError>;\n    /// Set the LoRa chip to provide notification of specific events based on radio state\n    async fn set_irq_params(&mut self, radio_mode: Option<RadioMode>) -> Result<(), RadioError>;\n    /// Set the LoRa chip into the TxContinuousWave mode\n    async fn set_tx_continuous_wave_mode(&mut self) -> Result<(), RadioError>;\n\n",
+      "vendored": "    async fn do_cad(&mut self, mdltn_params: &ModulationParams) -> Result<(), RadioError>;\n    /// Set the LoRa chip to provide notification of specific events based on radio state\n    async fn set_irq_params(&mut self, radio_mode: Option<RadioMode>) -> Result<(), RadioError>;\n    /// Clear every pending radio interrupt flag.\n    async fn clear_irq_status(&mut self) -> Result<(), RadioError>;\n    /// Set the LoRa chip into the TxContinuousWave mode\n    async fn set_tx_continuous_wave_mode(&mut self) -> Result<(), RadioError>;\n\n"
+    },
+    {
+      "path": "src/sx126x/mod.rs",
+      "upstream": "            Err(RadioError::InvalidConfiguration)\n        );\n    }\n}\n",
+      "vendored": "            Err(RadioError::InvalidConfiguration)\n        );\n    }\n\n    #[test]\n    fn invalid_receive_irq_is_terminal_even_with_progress_or_done_flags() {\n        assert!(matches!(\n            classify_receive_irq(IrqMask::HeaderError.value() | IrqMask::PreambleDetected.value()),\n            Err(RadioError::ReceiveTimeout)\n        ));\n        assert!(matches!(\n            classify_receive_irq(IrqMask::CRCError.value() | IrqMask::RxDone.value()),\n            Err(RadioError::ReceiveTimeout)\n        ));\n    }\n\n    #[test]\n    fn receive_timeout_takes_precedence_over_preamble_progress() {\n        assert!(matches!(\n            classify_receive_irq(IrqMask::RxTxTimeout.value() | IrqMask::PreambleDetected.value()),\n            Err(RadioError::ReceiveTimeout)\n        ));\n    }\n\n    #[test]\n    fn completed_receive_takes_precedence_over_timeout() {\n        assert!(matches!(\n            classify_receive_irq(IrqMask::RxDone.value() | IrqMask::RxTxTimeout.value()),\n            Ok(Some(IrqState::Done))\n        ));\n    }\n\n    #[test]\n    fn receive_progress_and_empty_irq_remain_non_terminal() {\n        assert!(matches!(\n            classify_receive_irq(IrqMask::HeaderValid.value()),\n            Ok(Some(IrqState::PreambleReceived))\n        ));\n        assert!(matches!(\n            classify_receive_irq(IrqMask::SyncwordValid.value()),\n            Ok(Some(IrqState::PreambleReceived))\n        ));\n        assert!(matches!(classify_receive_irq(IrqMask::None.value()), Ok(None)));\n    }\n}\n"
+    },
+    {
+      "path": "src/sx126x/mod.rs",
+      "upstream": "                        ];\n                        self.intf.write(&register_and_evt_clear, false).await?;\n                    }\n                    return Ok(Some(IrqState::Done));\n                }\n                if IrqMask::PreambleDetected.is_set_in(irq_flags) || IrqMask::HeaderValid.is_set_in(irq_flags) {\n                    return Ok(Some(IrqState::PreambleReceived));\n                }\n                if (irq_flags & IrqMask::RxTxTimeout.value()) == IrqMask::RxTxTimeout.value() {\n                    return Err(RadioError::ReceiveTimeout);\n                }\n            }\n            RadioMode::ChannelActivityDetection => {\n                if (irq_flags & IrqMask::CADDone.value()) == IrqMask::CADDone.value() {\n",
+      "vendored": "                        ];\n                        self.intf.write(&register_and_evt_clear, false).await?;\n                    }\n                }\n                return Ok(receive_irq);\n            }\n            RadioMode::ChannelActivityDetection => {\n                if (irq_flags & IrqMask::CADDone.value()) == IrqMask::CADDone.value() {\n"
+    },
+    {
+      "path": "src/sx126x/mod.rs",
+      "upstream": "                if (irq_flags & IrqMask::CRCError.value()) == IrqMask::CRCError.value() {\n                    debug!(\"CRCError in radio mode {}\", radio_mode);\n                }\n                if (irq_flags & IrqMask::RxDone.value()) == IrqMask::RxDone.value() {\n                    debug!(\"RxDone in radio mode {}\", radio_mode);\n                    if rx_mode != RxMode::Continuous {\n                        // implicit header mode timeout behavior (see DS_SX1261-2_V1.2 datasheet chapter 15.3)\n",
+      "vendored": "                if (irq_flags & IrqMask::CRCError.value()) == IrqMask::CRCError.value() {\n                    debug!(\"CRCError in radio mode {}\", radio_mode);\n                }\n                let receive_irq = classify_receive_irq(irq_flags)?;\n                if receive_irq == Some(IrqState::Done) {\n                    debug!(\"RxDone in radio mode {}\", radio_mode);\n                    if rx_mode != RxMode::Continuous {\n                        // implicit header mode timeout behavior (see DS_SX1261-2_V1.2 datasheet chapter 15.3)\n"
+    },
+    {
+      "path": "src/sx126x/mod.rs",
+      "upstream": "        self.intf.write(&op_code_and_masks, false).await\n    }\n\n    async fn set_tx_continuous_wave_mode(&mut self) -> Result<(), RadioError> {\n        self.intf.iv.enable_rf_switch_tx().await?;\n\n",
+      "vendored": "        self.intf.write(&op_code_and_masks, false).await\n    }\n\n    async fn clear_irq_status(&mut self) -> Result<(), RadioError> {\n        self.intf\n            .write(&[OpCode::ClrIrqStatus.value(), 0xff, 0xff], false)\n            .await\n    }\n\n    async fn set_tx_continuous_wave_mode(&mut self) -> Result<(), RadioError> {\n        self.intf.iv.enable_rf_switch_tx().await?;\n\n"
+    },
+    {
+      "path": "src/sx126x/mod.rs",
+      "upstream": "        return Err(RadioError::InvalidConfiguration);\n    }\n    Ok(())\n}\n\n/// Configuration for SX126x-based boards\n",
+      "vendored": "        return Err(RadioError::InvalidConfiguration);\n    }\n    Ok(())\n}\n\nfn classify_receive_irq(irq_flags: u16) -> Result<Option<IrqState>, RadioError> {\n    // An invalid packet is never a completed receive, even when the chip\n    // reports RxDone in the same IRQ snapshot. In single-shot mode the SX126x\n    // can stop its receive timer after preamble detection, so treating these\n    // terminal error flags as mere diagnostics can leave `LoRa::rx()` waiting\n    // forever after the flags have been cleared.\n    if IrqMask::HeaderError.is_set_in(irq_flags) || IrqMask::CRCError.is_set_in(irq_flags) {\n        return Err(RadioError::ReceiveTimeout);\n    }\n    if IrqMask::RxDone.is_set_in(irq_flags) {\n        return Ok(Some(IrqState::Done));\n    }\n    // Preserve a valid completed receive if RxDone and timeout are latched\n    // together, but do not let an earlier preamble/header notification hide a\n    // terminal timeout.\n    if IrqMask::RxTxTimeout.is_set_in(irq_flags) {\n        return Err(RadioError::ReceiveTimeout);\n    }\n    if IrqMask::PreambleDetected.is_set_in(irq_flags)\n        || IrqMask::SyncwordValid.is_set_in(irq_flags)\n        || IrqMask::HeaderValid.is_set_in(irq_flags)\n    {\n        return Ok(Some(IrqState::PreambleReceived));\n    }\n    Ok(None)\n}\n\n/// Configuration for SX126x-based boards\n"
+    },
+    {
+      "path": "src/sx127x/mod.rs",
+      "upstream": "    ) -> Result<Option<IrqState>, RadioError> {\n        let irq_flags = self.read_register(Register::RegIrqFlags).await?;\n        if clear_interrupts {\n            self.write_register(Register::RegIrqFlags, 0xffu8).await?; // clear all interrupts\n        }\n\n        match radio_mode {\n",
+      "vendored": "    ) -> Result<Option<IrqState>, RadioError> {\n        let irq_flags = self.read_register(Register::RegIrqFlags).await?;\n        if clear_interrupts {\n            // Clear only the snapshot just consumed. A distinct IRQ can latch\n            // between the read and this write while continuous RX stays armed.\n            self.write_register(Register::RegIrqFlags, irq_flags).await?;\n        }\n\n        match radio_mode {\n"
+    },
+    {
+      "path": "src/sx127x/mod.rs",
+      "upstream": "        Ok(())\n    }\n\n    async fn await_irq(&mut self) -> Result<(), RadioError> {\n        self.intf.iv.await_irq().await\n    }\n",
+      "vendored": "        Ok(())\n    }\n\n    async fn clear_irq_status(&mut self) -> Result<(), RadioError> {\n        self.write_register(Register::RegIrqFlags, 0xffu8).await\n    }\n\n    async fn await_irq(&mut self) -> Result<(), RadioError> {\n        self.intf.iv.await_irq().await\n    }\n"
+    },
     {
       "path": "src/sx126x/mod.rs",
       "upstream": "/// Power amplifier selection\n#[repr(u8)]\npub enum DeviceSel {\n    /// Low power, power amplifier, used by sx1261\n    LowPowerPA = 1,\n    /// High power, power amplifier, used by sx1262\n    HighPowerPA = 0,\n}\n\n/// Configuration for SX126x-based boards\n",

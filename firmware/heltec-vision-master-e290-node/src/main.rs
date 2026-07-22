@@ -9,8 +9,8 @@
 //! live-pairing, and single-flight authenticated local-API bearer plus GPIO21
 //! physical-presence input without becoming a Reticulum packet interface. The
 //! node retains transport-neutral admission and authenticated dispatch lanes;
-//! BLE, Wi-Fi, LXMF, NomadNet, and UI actors remain independent later
-//! capabilities.
+//! Inbound durable LXMF delivery is composed without becoming an interface;
+//! BLE, Wi-Fi, NomadNet, and UI actors remain independent later capabilities.
 
 #![no_std]
 #![no_main]
@@ -32,7 +32,7 @@ mod usb_pairing_task;
 use core::future::pending;
 use core::{future::Future, mem};
 
-use allocator_api2::vec::Vec;
+use allocator_api2::{boxed::Box, vec::Vec};
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Delay, Duration, Instant, Timer, with_timeout};
@@ -84,6 +84,7 @@ use reticulum_heltec_vision_master_e290_node::{
         journal_boot_policy,
     },
     live_pairing_handoff::LivePairingHandoff,
+    lxmf_delivery::{LxmfDeliveryActivation, activate_lxmf_delivery},
     pairing_control_handoff::PairingControlHandoff,
     session_admission_handoff::SessionAdmissionHandoff,
     storage_device_id_from_eui48,
@@ -91,9 +92,9 @@ use reticulum_heltec_vision_master_e290_node::{
 use reticulum_interface_router::InterfaceFabric;
 use reticulum_lxmf_store::LxmfStoreIndexSlot;
 use reticulum_node_core::{
-    ApplicationEventOwner, ApplicationEventSlot, InboundProofPolicy, NodeConfig, NodeCore,
-    NodeIdentity, NodeInstanceId, OrdinaryBufferPool, OrdinaryPacketBuffer, PacketInterfaceId,
-    TxPacketBuffer,
+    ApplicationEventOwner, ApplicationEventSlot, DelayedProofOwner, DelayedProofSlot,
+    InboundProofPolicy, NodeConfig, NodeCore, NodeIdentity, NodeInstanceId, OrdinaryBufferPool,
+    OrdinaryPacketBuffer, PacketInterfaceId, TxPacketBuffer,
 };
 use reticulum_radio_lora_phy::IrqTimestampCapture;
 use reticulum_radio_tx_dispatch::{ExactLoRaAirtimePolicy, SoleRadioTxDispatcher};
@@ -106,7 +107,7 @@ use static_cell::StaticCell;
 
 use crate::platform_storage::{
     BootCredentialStore, ProductCredentialInitializationPort, ProductFlashOwner,
-    ProductStorageCoordinator,
+    ProductStorageCoordinator, ProductSubmissionRuntime,
 };
 
 #[cfg(debug_assertions)]
@@ -304,7 +305,7 @@ async fn product_main(
         Ok(device_api_id) => device_api_id,
         Err(reason) => {
             error!("e290-node stage=device-api-id status=FAIL reason={reason:?}");
-            inert_forever().await
+            inert_before_rtos()
         }
     };
     let usb_session_parameters = ServerParameters::new(
@@ -330,7 +331,7 @@ async fn product_main(
         Some(end) => end,
         None => {
             error!("e290-node stage=psram status=FAIL reason=mapped-range-overflow");
-            inert_forever().await
+            inert_before_rtos()
         }
     };
     if !(config::MINIMUM_PSRAM_BYTES..=config::MAXIMUM_PSRAM_BYTES).contains(&psram_bytes) {
@@ -339,12 +340,12 @@ async fn product_main(
             config::MINIMUM_PSRAM_BYTES,
             config::MAXIMUM_PSRAM_BYTES,
         );
-        inert_forever().await
+        inert_before_rtos()
     }
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: config::INTERNAL_HEAP_BYTES);
     esp_alloc::psram_allocator!(&psram);
     info!(
-        "e290-node stage=psram status=PASS bytes={psram_bytes} mode=auto minimum_qualified_bytes={} ownership_state=internal-static",
+        "e290-node stage=psram status=PASS bytes={psram_bytes} mode=auto minimum_qualified_bytes={} ownership_state=external-allocator-ready",
         config::MINIMUM_PSRAM_BYTES,
     );
 
@@ -352,6 +353,116 @@ async fn product_main(
     let software_interrupts =
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timers.timer0, software_interrupts.software_interrupt0);
+
+    let lxmf_volatile = match Box::try_new_in(node_task::LxmfVolatileState::new(), ExternalMemory) {
+        Ok(state) => state,
+        Err(_) => {
+            error!(
+                "e290-node stage=lxmf-volatile status=FAIL reason=external-allocation expected_bytes={}",
+                mem::size_of::<node_task::LxmfVolatileState>(),
+            );
+            inert_forever().await
+        }
+    };
+    let lxmf_volatile_bytes = mem::size_of_val(&*lxmf_volatile);
+    let lxmf_volatile_start = (&*lxmf_volatile as *const node_task::LxmfVolatileState) as usize;
+    let lxmf_volatile_end = match lxmf_volatile_start.checked_add(lxmf_volatile_bytes) {
+        Some(end) => end,
+        None => {
+            error!("e290-node stage=lxmf-volatile status=FAIL reason=allocation-range-overflow");
+            inert_forever().await
+        }
+    };
+    if lxmf_volatile_bytes != mem::size_of::<node_task::LxmfVolatileState>()
+        || !lxmf_volatile_start.is_multiple_of(mem::align_of::<node_task::LxmfVolatileState>())
+        || lxmf_volatile_start < psram_start_address
+        || lxmf_volatile_end > psram_end_address
+    {
+        error!(
+            "e290-node stage=lxmf-volatile status=FAIL reason=external-address allocation_start=0x{lxmf_volatile_start:08x} allocation_end=0x{lxmf_volatile_end:08x} psram_start=0x{psram_start_address:08x} psram_end=0x{psram_end_address:08x} expected_bytes={} actual_bytes={lxmf_volatile_bytes} alignment={}",
+            mem::size_of::<node_task::LxmfVolatileState>(),
+            mem::align_of::<node_task::LxmfVolatileState>(),
+        );
+        inert_forever().await
+    }
+    info!(
+        "e290-node stage=lxmf-volatile status=PASS ownership=boot-lifetime-external bytes={lxmf_volatile_bytes} start=0x{lxmf_volatile_start:08x} end=0x{lxmf_volatile_end:08x}"
+    );
+    let lxmf_volatile: &'static mut node_task::LxmfVolatileState = Box::leak(lxmf_volatile);
+
+    let mut delayed_proof_storage = Vec::new_in(ExternalMemory);
+    if delayed_proof_storage
+        .try_reserve_exact(config::LXMF_DELAYED_PROOF_SLOTS)
+        .is_err()
+    {
+        error!(
+            "e290-node stage=lxmf-delayed-proofs status=FAIL reason=external-allocation slots={} expected_bytes={}",
+            config::LXMF_DELAYED_PROOF_SLOTS,
+            config::LXMF_DELAYED_PROOF_STORAGE_BYTES,
+        );
+        inert_forever().await
+    }
+    if delayed_proof_storage.capacity() < config::LXMF_DELAYED_PROOF_SLOTS {
+        error!(
+            "e290-node stage=lxmf-delayed-proofs status=FAIL reason=allocation-capacity expected_slots={} actual_slots={}",
+            config::LXMF_DELAYED_PROOF_SLOTS,
+            delayed_proof_storage.capacity(),
+        );
+        inert_forever().await
+    }
+    for _ in 0..config::LXMF_DELAYED_PROOF_SLOTS {
+        if delayed_proof_storage
+            .push_within_capacity(DelayedProofSlot::new())
+            .is_err()
+        {
+            error!(
+                "e290-node stage=lxmf-delayed-proofs status=FAIL reason=initialization-capacity expected_slots={} initialized_slots={}",
+                config::LXMF_DELAYED_PROOF_SLOTS,
+                delayed_proof_storage.len(),
+            );
+            inert_forever().await
+        }
+    }
+    let delayed_proof_storage_bytes = mem::size_of_val(delayed_proof_storage.as_slice());
+    let delayed_proof_storage_start = delayed_proof_storage.as_ptr() as usize;
+    let delayed_proof_storage_end = match delayed_proof_storage_start
+        .checked_add(delayed_proof_storage_bytes)
+    {
+        Some(end) => end,
+        None => {
+            error!(
+                "e290-node stage=lxmf-delayed-proofs status=FAIL reason=allocation-range-overflow"
+            );
+            inert_forever().await
+        }
+    };
+    if delayed_proof_storage.len() != config::LXMF_DELAYED_PROOF_SLOTS
+        || delayed_proof_storage_bytes != config::LXMF_DELAYED_PROOF_STORAGE_BYTES
+    {
+        error!(
+            "e290-node stage=lxmf-delayed-proofs status=FAIL reason=initialized-size expected_slots={} actual_slots={} expected_bytes={} actual_bytes={delayed_proof_storage_bytes}",
+            config::LXMF_DELAYED_PROOF_SLOTS,
+            delayed_proof_storage.len(),
+            config::LXMF_DELAYED_PROOF_STORAGE_BYTES,
+        );
+        inert_forever().await
+    }
+    if !delayed_proof_storage_start.is_multiple_of(mem::align_of::<DelayedProofSlot>())
+        || delayed_proof_storage_start < psram_start_address
+        || delayed_proof_storage_end > psram_end_address
+    {
+        error!(
+            "e290-node stage=lxmf-delayed-proofs status=FAIL reason=external-address allocation_start=0x{delayed_proof_storage_start:08x} allocation_end=0x{delayed_proof_storage_end:08x} psram_start=0x{psram_start_address:08x} psram_end=0x{psram_end_address:08x} alignment={}",
+            mem::align_of::<DelayedProofSlot>(),
+        );
+        inert_forever().await
+    }
+    info!(
+        "e290-node stage=lxmf-delayed-proofs status=PASS ownership=boot-lifetime-external slots={} reserved_slots={} bytes={delayed_proof_storage_bytes} start=0x{delayed_proof_storage_start:08x} end=0x{delayed_proof_storage_end:08x}",
+        config::LXMF_DELAYED_PROOF_SLOTS,
+        delayed_proof_storage.capacity(),
+    );
+    let delayed_proof_storage: &'static mut [DelayedProofSlot] = delayed_proof_storage.leak();
 
     let mut lxmf_index = Vec::new_in(ExternalMemory);
     if lxmf_index
@@ -627,6 +738,47 @@ async fn product_main(
             None
         }
     };
+    let submission_runtime = match submission_runtime {
+        Some(runtime) => match Box::try_new_in(runtime, ExternalMemory) {
+            Ok(runtime) => {
+                let runtime_bytes = mem::size_of_val(&*runtime);
+                let runtime_start = (&*runtime as *const ProductSubmissionRuntime) as usize;
+                let runtime_end = match runtime_start.checked_add(runtime_bytes) {
+                    Some(end) => end,
+                    None => {
+                        error!(
+                            "e290-node stage=submission-runtime-placement status=FAIL reason=allocation-range-overflow"
+                        );
+                        inert_forever().await
+                    }
+                };
+                if runtime_bytes != mem::size_of::<ProductSubmissionRuntime>()
+                    || !runtime_start.is_multiple_of(mem::align_of::<ProductSubmissionRuntime>())
+                    || runtime_start < psram_start_address
+                    || runtime_end > psram_end_address
+                {
+                    error!(
+                        "e290-node stage=submission-runtime-placement status=FAIL reason=external-address allocation_start=0x{runtime_start:08x} allocation_end=0x{runtime_end:08x} psram_start=0x{psram_start_address:08x} psram_end=0x{psram_end_address:08x} expected_bytes={} actual_bytes={runtime_bytes} alignment={}",
+                        mem::size_of::<ProductSubmissionRuntime>(),
+                        mem::align_of::<ProductSubmissionRuntime>(),
+                    );
+                    inert_forever().await
+                }
+                info!(
+                    "e290-node stage=submission-runtime-placement status=PASS ownership=boot-lifetime-external bytes={runtime_bytes} start=0x{runtime_start:08x} end=0x{runtime_end:08x}"
+                );
+                Some(Box::leak(runtime))
+            }
+            Err(_) => {
+                error!(
+                    "e290-node stage=submission-runtime-placement status=DISABLED reason=external-allocation expected_bytes={} lora_routing=continue local_submission_admission=closed",
+                    mem::size_of::<ProductSubmissionRuntime>(),
+                );
+                None
+            }
+        },
+        None => None,
+    };
     #[cfg(feature = "runtime-measurement-hil")]
     let inbox_mount_started_us = monotonic_us();
     let inbox_mount_result = flash_owner.mount_inbox();
@@ -657,7 +809,7 @@ async fn product_main(
     let lxmf = match flash_owner.mount_lxmf(lxmf_index) {
         Ok(lxmf) => {
             info!(
-                "e290-node stage=lxmf-store-mount status=PASS profile=mounted-not-admitted index_slots={} messages={} consumed_extents={} partition=0x930000..0xb30000 plaintext=true writes=0 erases=0 lxmf_delivery_admission=closed lora_routing=continue",
+                "e290-node stage=lxmf-store-mount status=PASS profile=mounted index_slots={} messages={} consumed_extents={} partition=0x930000..0xb30000 plaintext=true writes=0 erases=0 destination_activation=pending-node-construction lora_routing=continue",
                 config::LXMF_INDEX_SLOTS,
                 lxmf.message_count(),
                 lxmf.consumed_extents(),
@@ -666,7 +818,7 @@ async fn product_main(
         }
         Err(reason) => {
             error!(
-                "e290-node stage=lxmf-store-mount status=DISABLED reason={reason:?} lora_routing=continue lxmf_delivery_admission=closed"
+                "e290-node stage=lxmf-store-mount status=DISABLED reason={reason:?} lora_routing=continue destination_activation=disabled"
             );
             None
         }
@@ -719,6 +871,39 @@ async fn product_main(
         }
     };
     node.set_inbound_proof_policy(InboundProofPolicy::Always);
+    let primary_destination = node.destination_hash();
+    if let Err(reason) = node.set_destination_accepts_links(&primary_destination, false) {
+        error!(
+            "e290-node stage=node-link-policy status=FAIL destination=primary reason={reason:?} action=pre-task-construction-fail-stop"
+        );
+        inert_forever().await
+    }
+    let lxmf_destination = match activate_lxmf_delivery(&mut node, lxmf_service_available) {
+        Ok(LxmfDeliveryActivation::Active(destination)) => {
+            info!(
+                "e290-node stage=lxmf-delivery status=ENABLED destination={:02x?} proof_policy=retain durability=required accepts_links=false data_profile=opportunistic discovery_announce=periodic interfaces=transport-neutral",
+                destination.as_bytes(),
+            );
+            Some(destination)
+        }
+        Ok(LxmfDeliveryActivation::Disabled) => {
+            warn!(
+                "e290-node stage=lxmf-delivery status=DISABLED reason=store-unavailable destination_registered=false proof_policy=none lora_routing=continue"
+            );
+            None
+        }
+        Err(reason) => {
+            error!(
+                "e290-node stage=lxmf-delivery status=FAIL reason={reason:?} action=pre-task-construction-fail-stop"
+            );
+            inert_forever().await
+        }
+    };
+    let lxmf_delivery_admission = if lxmf_destination.is_some() {
+        "enabled"
+    } else {
+        "disabled"
+    };
 
     let mut data_buffers = DATA_PACKET_STORAGE
         .init([const { TxPacketBuffer::new() }; config::DATA_BUFFERS])
@@ -893,6 +1078,7 @@ async fn product_main(
     let application_event_storage = APPLICATION_EVENT_STORAGE
         .init([const { ApplicationEventSlot::new() }; config::APPLICATION_EVENT_SLOTS]);
     let application_events = ApplicationEventOwner::new(application_event_storage);
+    let delayed_proofs = DelayedProofOwner::new(delayed_proof_storage);
     let (usb_pairing_handoff, node_pairing_handoff) =
         PAIRING_CONTROL.init(PairingControlHandoff::new()).split();
     let (usb_live_pairing_handoff, node_live_pairing_handoff) =
@@ -918,6 +1104,9 @@ async fn product_main(
         supervisor,
         storage_coordinator,
         application_events,
+        delayed_proofs,
+        lxmf_volatile,
+        lxmf_destination,
         node_task::NodeHandoffs::new(
             node_pairing_handoff,
             node_live_pairing_handoff,
@@ -963,8 +1152,9 @@ async fn product_main(
     RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE
         .record_composition_ready(monotonic_us().saturating_sub(runtime_measurement_started_us));
     info!(
-        "e290-node stage=composition status=PASS tasks=3 interfaces=1 primary_transport=lora future_transport_actors=deferred node_journal=mounted resident_storage_available={storage_service_available} durable_rns_inbox_available={inbox_service_available} rns_inbox_capacity=1 lxmf_store_available={lxmf_service_available} lxmf_index_slots={} lxmf_delivery_admission=closed credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} preauth_initialization_bearer=usb-serial-jtag preauth_live_pairing_bearer=usb-serial-jtag pairing_button_gpio=21 authenticated_local_api=node-dispatch bearer_session=usb-authenticated-single-flight credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} admission=session-selected runtime_patch={} flash_assumption_bytes=16777216",
+        "e290-node stage=composition status=PASS tasks=3 interfaces=1 primary_transport=lora future_transport_actors=deferred node_journal=mounted resident_storage_available={storage_service_available} durable_rns_inbox_available={inbox_service_available} rns_inbox_capacity=1 lxmf_store_available={lxmf_service_available} lxmf_index_slots={} lxmf_delivery_admission={lxmf_delivery_admission} lxmf_volatile_placement=external-psram lxmf_volatile_bytes={lxmf_volatile_bytes} lxmf_delayed_proof_placement=external-psram lxmf_delayed_proof_slots={} lxmf_delayed_proof_bytes={delayed_proof_storage_bytes} application_event_placement=internal-static credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} preauth_initialization_bearer=usb-serial-jtag preauth_live_pairing_bearer=usb-serial-jtag pairing_button_gpio=21 authenticated_local_api=node-dispatch bearer_session=usb-authenticated-single-flight credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} admission=session-selected runtime_patch={} flash_assumption_bytes=16777216",
         config::LXMF_INDEX_SLOTS,
+        config::LXMF_DELAYED_PROOF_SLOTS,
         credential_binding.absolute_offset(),
         credential_binding.length(),
         config::DURABLE_RUNTIME_BYTES,
@@ -1110,6 +1300,14 @@ fn _esp_alloc_dealloc(_heap: &::esp_alloc::EspHeap, _pointer: usize, _size: usiz
 
 fn monotonic_us() -> u64 {
     Instant::now().as_micros()
+}
+
+fn inert_before_rtos() -> ! {
+    // Embassy timers are unavailable until `esp_rtos::start`. These early
+    // fail-stop paths run with RF held in reset and USB still quarantined.
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 async fn inert_forever() -> ! {

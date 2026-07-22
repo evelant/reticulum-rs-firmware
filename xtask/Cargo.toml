@@ -23,6 +23,8 @@ reticulum-device-api-handoff = { path = "../crates/device-api-handoff", default-
 reticulum-device-api-pairing = { path = "../crates/device-api-pairing", default-features = false }
 reticulum-device-api-pairing-control = { path = "../crates/device-api-pairing-control", default-features = false }
 reticulum-device-api-session = { path = "../crates/device-api-session", default-features = false }
+reticulum-lxmf-model = { path = "../crates/lxmf-model", default-features = false }
+reticulum-lxmf-store = { path = "../crates/lxmf-store", default-features = false }
 reticulum-rns-rete = { path = "../crates/rns-rete", default-features = false }
 reticulum-rns-inbox-store = { path = "../crates/rns-inbox-store", default-features = false }
 object = { version = "=0.37.3", default-features = false, features = ["read", "std"] }

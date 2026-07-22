@@ -1929,7 +1929,11 @@ dependencies = [
  "reticulum-device-api-session",
  "reticulum-device-identity-store",
  "reticulum-interface-router",
+ "reticulum-lxmf-durable-ingress",
+ "reticulum-lxmf-ingress",
+ "reticulum-lxmf-model",
  "reticulum-lxmf-store",
+ "reticulum-lxmf-wire",
  "reticulum-node-core",
  "reticulum-nor-flash-region",
  "reticulum-radio-interface",
@@ -2105,6 +2109,7 @@ name = "reticulum-radio-lora-phy"
 version = "0.1.0"
 dependencies = [
  "critical-section",
+ "embassy-futures",
  "embedded-hal-async",
  "lora-phy",
  "reticulum-radio-interface",
@@ -3013,6 +3018,8 @@ dependencies = [
  "reticulum-device-api-pairing-control",
  "reticulum-device-api-session",
  "reticulum-heltec-vision-master-e290-node",
+ "reticulum-lxmf-model",
+ "reticulum-lxmf-store",
  "reticulum-phase1-rx-local-data",
  "reticulum-rns-inbox-store",
  "reticulum-rns-rete",

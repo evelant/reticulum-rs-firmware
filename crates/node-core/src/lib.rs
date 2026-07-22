@@ -19,20 +19,23 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+extern crate alloc;
+
 use core::num::NonZeroU64;
 
 use rand_core::{CryptoRng, RngCore};
 use reticulum_rns_rete::{
-    AnnounceAdmissionError as RnsAnnounceAdmissionError, DestHash as RnsDestinationHash,
+    AnnounceAdmissionError as RnsAnnounceAdmissionError,
+    AnnounceAppDataError as RnsAnnounceAppDataError, DestHash as RnsDestinationHash,
     DestinationRegistrationError as RnsDestinationRegistrationError,
     DestinationType as RnsDestinationType, Direction as RnsDirection, EmbeddedNode as RnsNode,
     EmbeddedNodeConfig as RnsNodeConfig, Identity as RnsIdentity,
     InboundProofPolicy as RnsInboundProofPolicy,
     InboundProofPolicyError as RnsInboundProofPolicyError, InterfaceId as RnsInterfaceId,
-    NodeRole as RnsNodeRole, PrepareDataError as RnsPrepareDataError,
-    PreparedData as RnsPreparedData, RNS_MTU, ReceiptCandidate, ReceiptKind,
-    ReceiptReservationUnavailable, ReceiptTerminal, ReceiptTerminalReservation,
-    ReceiptTerminalSink, TxTarget as RnsTxTarget,
+    NodeRole as RnsNodeRole, PathRequestBuildError as RnsPathRequestBuildError,
+    PrepareDataError as RnsPrepareDataError, PreparedData as RnsPreparedData, RNS_MTU,
+    ReceiptCandidate, ReceiptKind, ReceiptReservationUnavailable, ReceiptTerminal,
+    ReceiptTerminalReservation, ReceiptTerminalSink, TxTarget as RnsTxTarget,
 };
 pub use reticulum_rns_rete::{
     ApplicationEvent, ApplicationEventAcknowledgeFailure, ApplicationEventCapacitySnapshot,
@@ -79,9 +82,47 @@ pub const MAX_DATA_PAYLOAD: usize = reticulum_rns_rete::MAX_DATA_PAYLOAD;
 /// Largest application-data payload accepted for one local announce.
 pub const MAX_ANNOUNCE_APP_DATA: usize = reticulum_rns_rete::MAX_ANNOUNCE_APP_DATA;
 
+/// Native RNS delay before the one scheduled retransmission of an announce.
+pub const RNS_ANNOUNCE_RETRANSMIT_SECONDS: u64 = reticulum_rns_rete::ANNOUNCE_RETRANSMIT_SECONDS;
+
 /// Link DATA context that carries ordinary application bytes rather than an
 /// RNS control or service message.
 pub const APPLICATION_LINK_CONTEXT_NONE: u8 = reticulum_rns_rete::LINK_DATA_CONTEXT_NONE;
+
+/// Extract the compact correlation tag from one explicit RNS delivery proof.
+///
+/// The packet must have the exact structural wire shape emitted by Rete for a
+/// direct delivery proof: HEADER_1, SINGLE, `PROOF`, zero hops, context `NONE`,
+/// the truncated covered hash as its destination, and the explicit 96-byte
+/// `covered_hash[32] || signature[64]` payload. This deliberately excludes
+/// Reticulum's 64-byte implicit-proof form, whose signature bytes do not expose
+/// a covered hash. The returned value is the little-endian first eight bytes of
+/// the covered hash, matching ingress and receipt trace correlation without
+/// exposing the implementation parser to product firmware.
+pub fn delivery_proof_correlation_tag(raw: &[u8]) -> Option<u64> {
+    const RETE_DIRECT_PROOF_FLAGS: u8 = 0x03;
+    const COVERED_HASH_LEN: usize = 32;
+    const SIGNATURE_LEN: usize = 64;
+    const EXPLICIT_PROOF_PAYLOAD_LEN: usize = COVERED_HASH_LEN + SIGNATURE_LEN;
+
+    let packet = reticulum_rns_rete::parse_packet(raw).ok()?;
+    if packet.flags != RETE_DIRECT_PROOF_FLAGS
+        || packet.hops != 0
+        || packet.packet_type != PacketType::Proof
+        || packet.context != APPLICATION_LINK_CONTEXT_NONE
+        || packet.payload.len() != EXPLICIT_PROOF_PAYLOAD_LEN
+    {
+        return None;
+    }
+    let covered_hash = packet.payload.get(..COVERED_HASH_LEN)?;
+    if packet.destination_hash != &covered_hash[..16] {
+        return None;
+    }
+    let prefix: [u8; 8] = covered_hash[..8]
+        .try_into()
+        .expect("an admitted 32-byte covered hash has an eight-byte prefix");
+    Some(u64::from_le_bytes(prefix))
+}
 
 /// Whether Rete's current heapless backend can instantiate these table
 /// capacities.
@@ -577,6 +618,53 @@ impl From<RnsDestinationRegistrationError> for LocalDestinationRegistrationError
     }
 }
 
+/// Failure to configure default announce application data for one local
+/// destination.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalDestinationAnnounceAppDataError {
+    /// The destination is not registered on this node.
+    DestinationNotRegistered,
+    /// Application data cannot fit in one base-MTU announce.
+    AppDataTooLarge {
+        /// Supplied application-data length.
+        actual: usize,
+        /// Maximum supported application-data length.
+        maximum: usize,
+    },
+    /// Owned default application-data storage could not be reserved.
+    AllocationFailed,
+}
+
+impl From<RnsAnnounceAppDataError> for LocalDestinationAnnounceAppDataError {
+    fn from(error: RnsAnnounceAppDataError) -> Self {
+        match error {
+            RnsAnnounceAppDataError::DestinationNotRegistered => Self::DestinationNotRegistered,
+            RnsAnnounceAppDataError::AppDataTooLarge { actual, maximum } => {
+                Self::AppDataTooLarge { actual, maximum }
+            }
+            RnsAnnounceAppDataError::AllocationFailed => Self::AllocationFailed,
+        }
+    }
+}
+
+/// Failure to construct one tagged Reticulum path-request action.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PathRequestError {
+    /// The fixed request could not be encoded into one base-MTU packet.
+    PacketBuild,
+    /// Owned packet storage could not be reserved.
+    AllocationFailed,
+}
+
+impl From<RnsPathRequestBuildError> for PathRequestError {
+    fn from(error: RnsPathRequestBuildError) -> Self {
+        match error {
+            RnsPathRequestBuildError::PacketBuild => Self::PacketBuild,
+            RnsPathRequestBuildError::AllocationFailed => Self::AllocationFailed,
+        }
+    }
+}
+
 /// Failure to configure delivery-proof behavior for one local destination.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalDestinationProofPolicyError {
@@ -584,6 +672,13 @@ pub enum LocalDestinationProofPolicyError {
     DestinationNotRegistered,
     /// Retained proofs require an inbound encrypted Single destination.
     RetainRequiresInboundSingle,
+}
+
+/// Failure to configure inbound Link admission for one local destination.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalDestinationLinkPolicyError {
+    /// The destination is not registered on this node.
+    DestinationNotRegistered,
 }
 
 impl From<RnsInboundProofPolicyError> for LocalDestinationProofPolicyError {
@@ -2392,6 +2487,21 @@ impl<
             .map_err(LocalDestinationRegistrationError::from)
     }
 
+    /// Configure the default application data used for ordinary announces and
+    /// path responses from one registered local destination.
+    pub fn set_destination_announce_app_data(
+        &mut self,
+        destination: &DestinationHash,
+        app_data: Option<&[u8]>,
+    ) -> Result<(), LocalDestinationAnnounceAppDataError> {
+        self.rns
+            .set_destination_announce_app_data(
+                &RnsDestinationHash::from(*destination.as_bytes()),
+                app_data,
+            )
+            .map_err(LocalDestinationAnnounceAppDataError::from)
+    }
+
     /// Copy a public key learned for one announced destination.
     ///
     /// Returning the fixed-size value by copy keeps signature verification
@@ -2491,6 +2601,26 @@ impl<
             .map_err(LocalDestinationProofPolicyError::from)
     }
 
+    /// Enable or disable inbound Link admission for one local destination.
+    ///
+    /// Transit forwarding, DATA reception, and DATA proof policy are
+    /// unaffected. This controls only whether this node terminates a Link
+    /// addressed to the named local destination.
+    pub fn set_destination_accepts_links(
+        &mut self,
+        destination: &DestinationHash,
+        accepts: bool,
+    ) -> Result<(), LocalDestinationLinkPolicyError> {
+        if self
+            .rns
+            .set_accepts_links(&RnsDestinationHash::from(*destination.as_bytes()), accepts)
+        {
+            Ok(())
+        } else {
+            Err(LocalDestinationLinkPolicyError::DestinationNotRegistered)
+        }
+    }
+
     /// Admit one signed local announce into the bounded protocol queue.
     ///
     /// `app_data` is copied into protocol-owned pending-announce storage. The
@@ -2504,6 +2634,29 @@ impl<
     ) -> Result<(), AnnounceAdmissionError> {
         self.rns
             .queue_announce(app_data, emitted_at.get(), rng)
+            .map_err(AnnounceAdmissionError::from)
+    }
+
+    /// Admit one signed local announce for a registered destination into the
+    /// bounded protocol queue.
+    ///
+    /// This preserves the same queue and payload admission as
+    /// [`Self::queue_announce`] while allowing protocol services such as
+    /// `lxmf.delivery` to advertise their distinct derived destination.
+    pub fn queue_announce_for<R: RngCore + CryptoRng>(
+        &mut self,
+        destination: &DestinationHash,
+        app_data: Option<&[u8]>,
+        emitted_at: AnnounceEmissionTime,
+        rng: &mut R,
+    ) -> Result<(), AnnounceAdmissionError> {
+        self.rns
+            .queue_announce_for(
+                &RnsDestinationHash::from(*destination.as_bytes()),
+                app_data,
+                emitted_at.get(),
+                rng,
+            )
             .map_err(AnnounceAdmissionError::from)
     }
 
@@ -2524,6 +2677,30 @@ impl<
             self.rns.flush_announces(now.get(), rng),
             0,
         )
+    }
+
+    /// Build one tagged Reticulum path request as an ordinary broadcast
+    /// action. The caller retains the complete action envelope until the
+    /// interface router accepts or explicitly rejects it.
+    pub fn request_path<R: RngCore + CryptoRng>(
+        &self,
+        destination: &DestinationHash,
+        rng: &mut R,
+    ) -> Result<NodeActions, PathRequestError> {
+        let packet = self
+            .rns
+            .request_path(&RnsDestinationHash::from(*destination.as_bytes()), rng)
+            .map_err(PathRequestError::from)?;
+        let mut packets = alloc::vec::Vec::new();
+        packets
+            .try_reserve_exact(1)
+            .map_err(|_| PathRequestError::AllocationFailed)?;
+        packets.push(packet);
+        Ok(NodeActions::without_retained_proofs(
+            Default::default(),
+            packets,
+            0,
+        ))
     }
 
     /// Register one externally allocated packet buffer with this owner.
@@ -4254,6 +4431,48 @@ mod tests {
     }
 
     #[test]
+    fn delivery_proof_tag_requires_exact_rete_explicit_wire_shape() {
+        let mut bytes = [0_u8; 32];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = index as u8;
+        }
+        let proof = proof_for(77, AttemptToken(bytes));
+        assert_eq!(
+            delivery_proof_correlation_tag(&proof),
+            Some(u64::from_le_bytes([0, 1, 2, 3, 4, 5, 6, 7]))
+        );
+
+        assert_eq!(
+            delivery_proof_correlation_tag(&implicit_proof_for(77, AttemptToken(bytes))),
+            None
+        );
+
+        let mut one_byte_short = proof.clone();
+        one_byte_short.pop();
+        assert_eq!(delivery_proof_correlation_tag(&one_byte_short), None);
+
+        let mut one_byte_long = proof.clone();
+        one_byte_long.push(0);
+        assert_eq!(delivery_proof_correlation_tag(&one_byte_long), None);
+
+        let mut wrong_context = proof.clone();
+        wrong_context[18] = 1;
+        assert_eq!(delivery_proof_correlation_tag(&wrong_context), None);
+
+        let mut wrong_destination = proof.clone();
+        wrong_destination[2] ^= 0xff;
+        assert_eq!(delivery_proof_correlation_tag(&wrong_destination), None);
+
+        let mut forwarded = proof.clone();
+        forwarded[1] = 1;
+        assert_eq!(delivery_proof_correlation_tag(&forwarded), None);
+
+        let mut not_a_proof = proof.clone();
+        not_a_proof[0] = 0;
+        assert_eq!(delivery_proof_correlation_tag(&not_a_proof), None);
+    }
+
+    #[test]
     fn capacity_and_project_routing_types_have_explicit_bounds() {
         assert!(capacity_profile_is_supported(2, 1, 1, 2));
         assert!(capacity_profile_is_supported(16, 4, 32, 4));
@@ -4293,6 +4512,11 @@ mod tests {
         let mut owner = node::<2, 0>(80, "announce");
         let mut rng = CounterRng::default();
         let oversized = [0u8; MAX_ANNOUNCE_APP_DATA + 1];
+        let primary = owner.destination_hash();
+        let expected_public_key = identity(80).public_key();
+        let delivery = owner
+            .register_inbound_single_destination("lxmf", &["delivery"])
+            .unwrap();
 
         assert_eq!(
             owner.queue_announce(Some(&oversized), announce_time(1), &mut rng),
@@ -4305,7 +4529,12 @@ mod tests {
             .queue_announce(None, announce_time(1), &mut rng)
             .unwrap();
         owner
-            .queue_announce(Some(b"product announce"), announce_time(1), &mut rng)
+            .queue_announce_for(
+                &delivery,
+                Some(b"product announce"),
+                announce_time(2),
+                &mut rng,
+            )
             .unwrap();
         assert_eq!(
             owner.queue_announce(None, announce_time(1), &mut rng),
@@ -4318,10 +4547,30 @@ mod tests {
         assert_eq!(actions.packets.len(), 2);
         assert!(actions.packets.iter().all(|packet| {
             packet.target() == RnsTxTarget::All
-                && reticulum_rns_rete::parse_packet(packet.bytes()).is_ok_and(|packet| {
-                    packet.packet_type == reticulum_rns_rete::PacketType::Announce
-                })
+                && reticulum_rns_rete::parse_announce_packet(packet.bytes())
+                    .is_ok_and(|announce| announce.fields.pub_key == expected_public_key)
         }));
+        let primary_announce = actions
+            .packets
+            .iter()
+            .find_map(|packet| {
+                let announce = reticulum_rns_rete::parse_announce_packet(packet.bytes()).ok()?;
+                (announce.packet.destination_hash == primary.as_bytes()).then_some(announce)
+            })
+            .expect("primary destination announce must be present and valid");
+        assert_eq!(primary_announce.fields.app_data, None);
+        let delivery_announce = actions
+            .packets
+            .iter()
+            .find_map(|packet| {
+                let announce = reticulum_rns_rete::parse_announce_packet(packet.bytes()).ok()?;
+                (announce.packet.destination_hash == delivery.as_bytes()).then_some(announce)
+            })
+            .expect("LXMF delivery announce must be present and valid");
+        assert_eq!(
+            delivery_announce.fields.app_data,
+            Some(b"product announce".as_slice())
+        );
         assert_eq!(
             AnnounceAdmissionError::from(RnsAnnounceAdmissionError::NativeRejected),
             AnnounceAdmissionError::NativeRejected
@@ -4394,6 +4643,135 @@ mod tests {
             &mut rng,
         );
         assert!(disabled_actions.packets.is_empty());
+    }
+
+    #[test]
+    fn destination_link_policy_rejects_an_unregistered_destination() {
+        let mut receiver = node::<4, 0>(83, "link-policy");
+
+        assert_eq!(
+            receiver.set_destination_accepts_links(&DestinationHash::new([0xee; 16]), true),
+            Err(LocalDestinationLinkPolicyError::DestinationNotRegistered)
+        );
+    }
+
+    #[test]
+    fn destination_link_policy_only_controls_local_link_admission() {
+        let mut sender = node::<8, 1>(85, "sender");
+        let mut receiver = node::<8, 1>(86, "primary");
+        let delivery = receiver
+            .register_inbound_single_destination("lxmf", &["delivery"])
+            .unwrap();
+        receiver
+            .set_destination_inbound_proof_policy(&delivery, InboundProofPolicy::Always)
+            .unwrap();
+        sender
+            .register_peer(&identity(86), "lxmf", &["delivery"], time(0))
+            .unwrap();
+
+        let mut buffer = registered_buffer(&mut sender);
+        let mut rng = CounterRng::default();
+        let link_destination = RnsDestinationHash::from(*delivery.as_bytes());
+        let (link_request, _) = sender
+            .rns
+            .initiate_link(link_destination, 1, &mut rng)
+            .expect("test LINKREQUEST must construct");
+
+        receiver
+            .set_destination_accepts_links(&delivery, false)
+            .unwrap();
+        let rejected = receiver
+            .ingest(
+                link_request.bytes(),
+                time(1),
+                PacketInterfaceId::new(7),
+                &mut rng,
+            )
+            .unwrap();
+        assert_eq!(
+            rejected.disposition,
+            IngressDisposition::Rejected(
+                reticulum_rns_rete::IngressDropReason::DestinationDoesNotAcceptLinks,
+            )
+        );
+        assert!(rejected.actions.events.is_empty());
+        assert!(rejected.actions.packets.is_empty());
+
+        let links_disabled_data = deliver_prepared_to(
+            &mut sender,
+            &mut receiver,
+            &mut buffer,
+            delivery,
+            b"DATA while Links are disabled",
+            2,
+            PacketInterfaceId::new(11),
+            default_interfaces(),
+            &mut rng,
+        );
+        assert!(matches!(
+            links_disabled_data.events.as_slice(),
+            [ApplicationEvent::DataReceived {
+                destination,
+                payload,
+            }] if *destination == *delivery.as_bytes()
+                && payload == b"DATA while Links are disabled"
+        ));
+        assert_eq!(links_disabled_data.packets.len(), 1);
+        assert_eq!(
+            reticulum_rns_rete::parse_packet(links_disabled_data.packets[0].bytes())
+                .unwrap()
+                .packet_type,
+            PacketType::Proof
+        );
+
+        receiver
+            .set_destination_accepts_links(&delivery, true)
+            .unwrap();
+        let admitted = receiver
+            .ingest(
+                link_request.bytes(),
+                time(3),
+                PacketInterfaceId::new(7),
+                &mut rng,
+            )
+            .unwrap();
+        assert_eq!(admitted.disposition, IngressDisposition::Processed);
+        assert!(admitted.actions.events.is_empty());
+        assert_eq!(admitted.actions.packets.len(), 1);
+        assert!(admitted.actions.packets[0].protocol_token().is_some());
+        assert_eq!(
+            reticulum_rns_rete::parse_packet(admitted.actions.packets[0].bytes())
+                .unwrap()
+                .packet_type,
+            PacketType::Proof
+        );
+
+        let links_enabled_data = deliver_prepared_to(
+            &mut sender,
+            &mut receiver,
+            &mut buffer,
+            delivery,
+            b"DATA while Links are enabled",
+            4,
+            PacketInterfaceId::new(13),
+            default_interfaces(),
+            &mut rng,
+        );
+        assert!(matches!(
+            links_enabled_data.events.as_slice(),
+            [ApplicationEvent::DataReceived {
+                destination,
+                payload,
+            }] if *destination == *delivery.as_bytes()
+                && payload == b"DATA while Links are enabled"
+        ));
+        assert_eq!(links_enabled_data.packets.len(), 1);
+        assert_eq!(
+            reticulum_rns_rete::parse_packet(links_enabled_data.packets[0].bytes())
+                .unwrap()
+                .packet_type,
+            PacketType::Proof
+        );
     }
 
     #[test]

@@ -177,9 +177,18 @@ streaming-storage contract is bounded.
 
 `node-core` exposes only a construction-time registration helper for an
 additional inbound Single destination and a read-only, by-value identity
-lookup. The permanent supervisor forwards only the identity lookup. The E290
-firmware does not yet register or schedule the LXMF service, so these portable
-seams are not powered LXMF evidence.
+lookup. The permanent supervisor forwards that lookup and the E290 firmware now
+mount-gates registration and scheduling of opportunistic `lxmf.delivery` DATA.
+Local Link admission remains disabled pending a bounded Link/Resource owner.
+This later source composition does not turn the portable seams into powered
+LXMF evidence.
+
+The initial product retry policy has no age or attempt expiry for
+`SourceIdentityUnavailable`; it preserves the exact event in case a later
+announce supplies the key. The fixed owner bounds RAM, but sixteen unresolved
+sources can occupy every E290 application-event slot until reboot. A later
+source-discovery tranche must select explicit identity retention and retry
+expiry/attempt behavior before hostile or sustained deployment.
 
 ### Reuse LXMF-rs selectively and preserve attribution
 
@@ -277,6 +286,8 @@ The first wire and application-ingress tranches must prove:
    executor package.
 
 This evidence establishes the wire/validation foundation and its portable
-opportunistic application-event ingress seam. It does not claim target-firmware
-composition, durable send/receive, RNS Resource transfer, retries, propagation,
-NomadNet, RF interoperability, or a complete LXMF service.
+opportunistic application-event ingress seam. The later permanent-E290 source
+composition mount-gates that seam behind the dedicated durable store and
+retained-proof owner. It does not claim powered durable send/receive, RNS
+Resource transfer, outbound retries, propagation, NomadNet, RF interoperability,
+or a complete LXMF service.

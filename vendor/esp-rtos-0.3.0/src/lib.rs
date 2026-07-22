@@ -35,7 +35,7 @@ esp_rtos::start_second_core(
 //! // let esp_radio_controller = esp_radio::init().unwrap();
 //! # }
 //! ```
-//! 
+//!
 //! To write `async` code, enable the `embassy` feature, and mark the main function with `#[esp_rtos::main]`.
 //! This will create a thread-mode executor on the main thread. Note that, to create async tasks, you will need
 //! the `task` macro from the `embassy-executor` crate. Do NOT enable any of the `arch-*` features on `embassy-executor`.
@@ -322,8 +322,7 @@ pub fn start_with_idle_hook(
         let stack_bottom = (&raw const _stack_end_cpu0).cast::<MaybeUninit<u32>>();
         let stack_slice = core::ptr::slice_from_raw_parts_mut(
             stack_bottom.cast_mut(),
-            (stack_top as usize - stack_bottom as usize)
-                / core::mem::size_of::<MaybeUninit<u32>>(),
+            (stack_top as usize - stack_bottom as usize) / core::mem::size_of::<MaybeUninit<u32>>(),
         );
 
         task::allocate_main_task(

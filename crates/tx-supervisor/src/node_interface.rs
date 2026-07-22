@@ -19,7 +19,7 @@ use reticulum_node_core::{
     DestinationHash, IngressReport, MaintenanceReport, MonotonicInstant, MonotonicMillis,
     MonotonicSeconds, NodeActions, NodeCore, OrdinaryActionCapacitySnapshot,
     OrdinaryPreparedPacket, OutboundDispatchInterval, OutboundProtocolToken, PacketInterfaceId,
-    PreparedPacket, ReceiptCorrelationError, TerminalAttempt, TerminalAttempts,
+    PathRequestError, PreparedPacket, ReceiptCorrelationError, TerminalAttempt, TerminalAttempts,
     TxAuthorizationPolicy, TxLeaseDeadline, TxMaintenanceReport, TxOwnerScope,
     TxRecoveryObservation,
 };
@@ -777,8 +777,10 @@ mod tests {
         );
         let (mut interface, _data_permit, _ordinary_permit) = actor.into_parts();
         let mut rng = CounterRng::default();
+        let destination = supervisor.destination_hash();
         supervisor
-            .queue_announce(
+            .queue_announce_for(
+                &destination,
                 Some(b"local announce"),
                 AnnounceEmissionTime::new(20).unwrap(),
                 &mut rng,
@@ -3288,6 +3290,22 @@ where
         self.node.queue_announce(app_data, emitted_at, rng)
     }
 
+    /// Queue one signed local announce for a registered destination in the
+    /// owned protocol node.
+    pub fn queue_announce_for<R>(
+        &mut self,
+        destination: &DestinationHash,
+        app_data: Option<&[u8]>,
+        emitted_at: AnnounceEmissionTime,
+        rng: &mut R,
+    ) -> Result<(), AnnounceAdmissionError>
+    where
+        R: RngCore + CryptoRng,
+    {
+        self.node
+            .queue_announce_for(destination, app_data, emitted_at, rng)
+    }
+
     /// Flush every ready local announce and immediately offer the exact action
     /// envelope to the ordinary coordinator.
     pub fn flush_announces<R>(
@@ -3307,6 +3325,20 @@ where
             Ok(()) => NodeInterfaceAnnounceFlushResult::Accepted,
             Err(failure) => NodeInterfaceAnnounceFlushResult::ActionOfferRejected(failure),
         }
+    }
+
+    /// Build one tagged Reticulum path request as a transport-neutral ordinary
+    /// action envelope. Admission remains a separate exact-owner operation so
+    /// callers can retain the unchanged request under router backpressure.
+    pub fn request_path<R>(
+        &self,
+        destination: &DestinationHash,
+        rng: &mut R,
+    ) -> Result<NodeActions, PathRequestError>
+    where
+        R: RngCore + CryptoRng,
+    {
+        self.node.request_path(destination, rng)
     }
 
     /// Atomically drain one ready non-packet action envelope into a

@@ -36,8 +36,8 @@ The preceding `14c7b4955a1ff6903e87cc40b42498f7869b6f4f` pin had host and
 portable-target LRRTT validation and a build-only E290 package. Its 776,464-byte
 merged image uses 710,928/6,291,456 application bytes (11.30%) and has SHA-256
 `7b11c6f6a3c039d46ab0117fd362920aaa40145e7f27cbc6fa0a8a84a7ab3571`.
-It has no flashed-image readback or powered proof. The current application-
-event release still requires a two-board powered run before lifecycle/RF
+It has no flashed-image readback or powered proof. The subsequent pre-PSRAM
+application-event release still required a two-board powered run before lifecycle/RF
 qualification. Its default E290 release links with text/data/BSS of
 684,167/3,676/469,152 bytes (1,156,995 bytes total by GNU size). Its
 12,345,320-byte ELF has SHA-256
@@ -46,7 +46,7 @@ The 789,504-byte merged image uses 723,968/6,291,456 application bytes (11.51%)
 and has SHA-256
 `1796f161c480d0348e3d47fd8f3cda5fda5b51aa38ad6024aaad04c8ba1751ce`.
 That default image matched an exact `3e:88` readback and served an authenticated
-`identity-summary`; `3f:88` did not enumerate. The initial current
+`identity-summary`; `3f:88` did not enumerate. The initial pre-PSRAM
 runtime-measurement HIL build packages as 800,480 bytes with application use
 734,944/6,291,456 (11.68%); its 12,498,356-byte ELF and merged image have
 SHA-256 values
@@ -63,9 +63,58 @@ and no unexpected error, failed allocation, watchdog timeout, or correlation
 fault. The board was then
 restored to an exact-readback 789,504-byte default rebuild, SHA-256
 `a67afa72681558dc02fd0575a18711b2b3c05b365a66af45441b7cb8dd3a2577`,
-and served `identity-summary`. Board `3f:88` remained absent, so current
-two-board qualification is still open. Every powered result below remains
-bound to the project and Rete revisions recorded with it.
+and served `identity-summary`. Those are historical pre-PSRAM artifact and
+checkpoint records, not the current Stage 5 image. The later 868,800-byte
+post-offload placement checkpoint is itself historical pre-LXTE evidence. The
+immediately following 870,656-byte LXTE/checkpoint-v2 HIL matched exact
+identity-bound readbacks on both E290s, but its back-to-back primary/LXMF
+announce batches reproduced a half-duplex discovery failure: B processed three
+distinct A announces while submission to A's LXMF destination still returned
+`no-path`. The current scheduler emits at most one destination per event,
+separates primary and LXMF by eight seconds, applies two identity-phased retry
+cycles, and then uses the 30-minute steady cadence. Its 871,296-byte HIL package
+uses 805,760 application bytes and has SHA-256
+`89d303d4880d062068bf8a9f4124bfbea322af091e5bf37c04e4e52715481cbd`
+and matched exact identity-bound readbacks on both E290s. Both USB devices
+disappeared before that image's required post-flash pre-submit checkpoint, so
+that historical attempt has no durable-LXMF outcome.
+
+The final current default/HIL pair contains 946/962 stack-size records, a
+53,680-byte maximum frame, and 175,056/174,256-byte usable stacks. The
+13,648,888-byte default ELF has SHA-256
+`92e63b60a5f4b830ee55d958fcc446a6878036212904b8748519ae210ba3da58`;
+its 868,656-byte package uses 803,120 application bytes and has SHA-256
+`c8da2af30e2d0ee24ca4b215151d1370b7e1d242991ebbeb024079a730693a3f`.
+The 13,821,496-byte HIL ELF has SHA-256
+`7a3fad34699f910a2050468ada6461a0f33d16641ab5425a5c795a71238861ff`;
+its 881,456-byte package uses 815,920 application bytes and has SHA-256
+`12c6f31a7fb64485ad9220edca4ac38ba0a57867ad88ce60fa1a24ffc195d379`.
+Both E290s matched exact identity-bound HIL readbacks. Exactly one fresh A-to-B
+trial then submitted a 206-byte opportunistic LXMF carrier as an exact 307-byte
+RNS packet, SHA-256
+`060037041c91eb5999f89bf84845c19e65bf7fa680827cce9c51e8ecc5dbe0a6`,
+and reached `Delivered` on its first attempt. Receiver B advanced durable-new,
+proof-ready, proof-released, and ordinary-handoff by one, with zero already-
+durable and ordering-violation events. Its `LXTE` release tag
+`0x3dc4588d3a205429` matched A's delivered tag, and B recorded exactly one
+confirmed proof-TX delta. B's `RPTE` generated-proof field correctly remained
+zero because retained LXMF proof ownership is intercepted before ordinary RNS
+ingress metadata. The committed message ID is
+`abdeec2e498f09c96a6fd56ec3558ca86c2598aaeacac81969b645de3b549dc3`.
+The exact 2 MiB store readback, SHA-256
+`c75ab2a01b3266fda1e07e0271c70bb29c06e32636d70d8a70d977b9e8b0e21e`,
+contains one record matching the generator and full-wire digest
+`1c1839991401e01e15e3a3146cd3177a4fb7e5dbd52008fd119beaf091d377ba`.
+Baseline/terminal checkpoints contain zero allocation failures, unexpected
+runtime errors, RX/CAD/TX watchdog expiries, and correlation faults. This
+narrowly confirms persistent continuous RX across the split packet and the
+durability-before-proof chain; direction balance, replay/remount, pressure,
+fault, range, and soak remain open. The release gate conservatively carries
+57,700 stack bytes and a 4,020-byte post-frame margin. Artifact bindings and
+the trial are recorded in the
+[E290 runbook](e290-node.md#stage-5-psram-boot-checkpoint).
+Every powered result below remains bound to the project and Rete revisions
+recorded with it.
 
 ## Scaffold gate
 
@@ -709,17 +758,22 @@ returns a borrowed validated view without consuming the event. The portable
 `reticulum-lxmf-model`, `reticulum-lxmf-store`, and
 `reticulum-lxmf-durable-ingress` owner then preserve exact normalized wire in
 variable extents without a message-sized copy and acknowledge the retained
-application-event lease only after a new or already-durable store receipt.
+application-event lease only after a new commit or a fresh retransmission is
+recognized as `AlreadyDurable`.
 Replays, alternate valid stamps, and same-ID/different-material collisions stay
 distinct across reboot. Proof-bearing events now cross an explicit fixed-
-capacity delayed-proof transaction before store I/O; a new or already-durable
-receipt makes the exact proof ready, while capacity or store failure returns the
+capacity delayed-proof transaction before store I/O; a new commit or a fresh
+retransmission recognized as `AlreadyDurable` makes that event's exact proof
+ready, while capacity or store failure returns the
 exact combined lease and releases only the empty reservation. Required mode
 rejects proofless events before I/O; Optional mode admits them but still reserves
 every proof that is present. This owner never drains or transmits ready proofs.
-Target composition must still register the LXMF destination with retained-proof
-policy, provide the three bounded owners, and drain ready proofs through the
-ordinary router before a remote receipt can mean durable LXMF delivery. Non-
+The current E290 source composition now registers the mount-gated LXMF
+destination with retained-proof policy, provides the three bounded owners, and
+drains ready proofs through the ordinary router. The single powered A-to-B
+trial above confirms that one remote receipt followed an exact durable record
+and ordinary proof handoff; broader directions, replays, remounts, faults,
+pressure, and sustained qualification remain open. Non-
 `NONE` Link DATA is unrelated; context-`NONE` Link DATA and Resource completion
 remain explicitly deferred until their local-destination binding and bounded
 Resource ownership are available. Before production-accepting the RNS

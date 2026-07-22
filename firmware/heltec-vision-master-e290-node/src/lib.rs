@@ -21,6 +21,7 @@ pub mod durability_policy;
 pub mod inbox_admission_fault_hil;
 pub mod live_pairing_handoff;
 pub mod live_pairing_node;
+pub mod lxmf_delivery;
 pub mod pairing_control_handoff;
 pub mod pairing_control_mapping;
 pub mod partition_contract;
@@ -278,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn lxmf_index_is_external_mounted_and_not_yet_admitted() {
+    fn durable_runtime_lxmf_index_and_volatile_owners_are_external_when_composed() {
         assert_eq!(
             config::LXMF_INDEX_SLOTS,
             partition_contract::LXMF_STORE_LEN as usize / reticulum_lxmf_store::EXTENT_SIZE
@@ -286,15 +287,45 @@ mod tests {
         assert_eq!(config::LXMF_INDEX_SLOTS, 512);
 
         let main = include_str!("main.rs");
-        assert!(main.contains("Vec::new_in(ExternalMemory)"));
+        assert_eq!(main.matches("Vec::new_in(ExternalMemory)").count(), 2);
+        assert_eq!(main.matches("Box::try_new_in(").count(), 2);
+        assert!(main.contains("Box::try_new_in(runtime, ExternalMemory)"));
+        assert!(main.contains("Some(Box::leak(runtime))"));
+        assert!(
+            main.contains("Box::try_new_in(node_task::LxmfVolatileState::new(), ExternalMemory)")
+        );
+        assert!(
+            main.contains(
+                "let lxmf_volatile: &'static mut node_task::LxmfVolatileState = Box::leak"
+            )
+        );
+        assert!(main.contains("let mut delayed_proof_storage = Vec::new_in(ExternalMemory)"));
+        assert!(main.contains(".try_reserve_exact(config::LXMF_DELAYED_PROOF_SLOTS)"));
+        assert!(main.contains("delayed_proof_storage.len() != config::LXMF_DELAYED_PROOF_SLOTS"));
+        assert!(main.contains("let delayed_proof_storage: &'static mut [DelayedProofSlot]"));
+        assert!(!main.contains("static LXMF_DELAYED_PROOF_STORAGE:"));
         assert!(main.contains(".try_reserve_exact(config::LXMF_INDEX_SLOTS)"));
         assert!(main.contains("lxmf_index.len() != config::LXMF_INDEX_SLOTS"));
         assert!(main.contains("let lxmf_index: &'static mut [LxmfStoreIndexSlot]"));
         assert!(main.contains("flash_owner.mount_lxmf(lxmf_index)"));
-        assert!(main.contains("lxmf_delivery_admission=closed"));
-        assert!(!main.contains("RNS_LXMF_ASPECTS"));
+        assert!(main.contains("activate_lxmf_delivery(&mut node, lxmf_service_available)"));
+        assert!(main.contains("lxmf_delivery_admission={lxmf_delivery_admission}"));
+        assert!(main.contains("DelayedProofOwner::new(delayed_proof_storage)"));
+        assert!(main.contains("lxmf_volatile_placement=external-psram"));
+        assert!(main.contains("lxmf_delayed_proof_placement=external-psram"));
+
+        let node_task = include_str!("node_task.rs");
+        assert!(node_task.contains("pub(crate) struct LxmfVolatileState"));
+        assert!(node_task.contains("retries: LxmfRetrySet"));
+        assert!(node_task.contains("proof_holder: LxmfProofActionsHolder"));
+        assert!(node_task.contains("authority_faults: LxmfAuthorityFault"));
+        assert!(node_task.contains("lxmf_volatile: &'static mut LxmfVolatileState"));
+        assert!(!node_task.contains(
+            "let mut lxmf_retries = LxmfRetrySet::<{ config::APPLICATION_EVENT_SLOTS }>::new()"
+        ));
 
         let storage = include_str!("platform_storage.rs");
+        assert!(storage.contains("runtime: Option<&'static mut ProductSubmissionRuntime>"));
         assert!(storage.contains("lxmf: Option<MountedLxmfStore<'static>>"));
         let offer = storage
             .split("pub(crate) fn offer_authorized_frame(")

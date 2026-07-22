@@ -68,6 +68,33 @@ fn validate_high_power_pa_override(settings: HighPowerPaOverride) -> Result<(), 
     Ok(())
 }
 
+fn classify_receive_irq(irq_flags: u16) -> Result<Option<IrqState>, RadioError> {
+    // An invalid packet is never a completed receive, even when the chip
+    // reports RxDone in the same IRQ snapshot. In single-shot mode the SX126x
+    // can stop its receive timer after preamble detection, so treating these
+    // terminal error flags as mere diagnostics can leave `LoRa::rx()` waiting
+    // forever after the flags have been cleared.
+    if IrqMask::HeaderError.is_set_in(irq_flags) || IrqMask::CRCError.is_set_in(irq_flags) {
+        return Err(RadioError::ReceiveTimeout);
+    }
+    if IrqMask::RxDone.is_set_in(irq_flags) {
+        return Ok(Some(IrqState::Done));
+    }
+    // Preserve a valid completed receive if RxDone and timeout are latched
+    // together, but do not let an earlier preamble/header notification hide a
+    // terminal timeout.
+    if IrqMask::RxTxTimeout.is_set_in(irq_flags) {
+        return Err(RadioError::ReceiveTimeout);
+    }
+    if IrqMask::PreambleDetected.is_set_in(irq_flags)
+        || IrqMask::SyncwordValid.is_set_in(irq_flags)
+        || IrqMask::HeaderValid.is_set_in(irq_flags)
+    {
+        return Ok(Some(IrqState::PreambleReceived));
+    }
+    Ok(None)
+}
+
 /// Configuration for SX126x-based boards
 pub struct Config<C: Sx126xVariant + Sized> {
     /// LoRa chip variant on this board
@@ -869,6 +896,12 @@ where
         self.intf.write(&op_code_and_masks, false).await
     }
 
+    async fn clear_irq_status(&mut self) -> Result<(), RadioError> {
+        self.intf
+            .write(&[OpCode::ClrIrqStatus.value(), 0xff, 0xff], false)
+            .await
+    }
+
     async fn set_tx_continuous_wave_mode(&mut self) -> Result<(), RadioError> {
         self.intf.iv.enable_rf_switch_tx().await?;
 
@@ -940,7 +973,8 @@ where
                 if (irq_flags & IrqMask::CRCError.value()) == IrqMask::CRCError.value() {
                     debug!("CRCError in radio mode {}", radio_mode);
                 }
-                if (irq_flags & IrqMask::RxDone.value()) == IrqMask::RxDone.value() {
+                let receive_irq = classify_receive_irq(irq_flags)?;
+                if receive_irq == Some(IrqState::Done) {
                     debug!("RxDone in radio mode {}", radio_mode);
                     if rx_mode != RxMode::Continuous {
                         // implicit header mode timeout behavior (see DS_SX1261-2_V1.2 datasheet chapter 15.3)
@@ -973,14 +1007,8 @@ where
                         ];
                         self.intf.write(&register_and_evt_clear, false).await?;
                     }
-                    return Ok(Some(IrqState::Done));
                 }
-                if IrqMask::PreambleDetected.is_set_in(irq_flags) || IrqMask::HeaderValid.is_set_in(irq_flags) {
-                    return Ok(Some(IrqState::PreambleReceived));
-                }
-                if (irq_flags & IrqMask::RxTxTimeout.value()) == IrqMask::RxTxTimeout.value() {
-                    return Err(RadioError::ReceiveTimeout);
-                }
+                return Ok(receive_irq);
             }
             RadioMode::ChannelActivityDetection => {
                 if (irq_flags & IrqMask::CADDone.value()) == IrqMask::CADDone.value() {
@@ -1070,5 +1098,46 @@ mod tests {
             }),
             Err(RadioError::InvalidConfiguration)
         );
+    }
+
+    #[test]
+    fn invalid_receive_irq_is_terminal_even_with_progress_or_done_flags() {
+        assert!(matches!(
+            classify_receive_irq(IrqMask::HeaderError.value() | IrqMask::PreambleDetected.value()),
+            Err(RadioError::ReceiveTimeout)
+        ));
+        assert!(matches!(
+            classify_receive_irq(IrqMask::CRCError.value() | IrqMask::RxDone.value()),
+            Err(RadioError::ReceiveTimeout)
+        ));
+    }
+
+    #[test]
+    fn receive_timeout_takes_precedence_over_preamble_progress() {
+        assert!(matches!(
+            classify_receive_irq(IrqMask::RxTxTimeout.value() | IrqMask::PreambleDetected.value()),
+            Err(RadioError::ReceiveTimeout)
+        ));
+    }
+
+    #[test]
+    fn completed_receive_takes_precedence_over_timeout() {
+        assert!(matches!(
+            classify_receive_irq(IrqMask::RxDone.value() | IrqMask::RxTxTimeout.value()),
+            Ok(Some(IrqState::Done))
+        ));
+    }
+
+    #[test]
+    fn receive_progress_and_empty_irq_remain_non_terminal() {
+        assert!(matches!(
+            classify_receive_irq(IrqMask::HeaderValid.value()),
+            Ok(Some(IrqState::PreambleReceived))
+        ));
+        assert!(matches!(
+            classify_receive_irq(IrqMask::SyncwordValid.value()),
+            Ok(Some(IrqState::PreambleReceived))
+        ));
+        assert!(matches!(classify_receive_irq(IrqMask::None.value()), Ok(None)));
     }
 }

@@ -5,7 +5,7 @@ storage actor, transport-neutral submission runtime, native authorized-frame
 seam, and exact E290 request/durable-echo handoff implemented; portable
 authenticated device-API dispatch implemented; resident E290 operation-scoped
 flash/runtime coordinator implemented; isolated powered journal clean-path/
-software-reset HIL passed on board E9:44; the 125-test E290 host suite qualifies
+software-reset HIL passed on board E9:44; at this milestone, the 125-test E290 host suite qualified
 the one-entry complete LoRa-first software composition and ADR 0005 active-owner
 fail-stop. Portable API framing, the pre-authentication initialization-control
 codec, immutable credential authority, the USB-

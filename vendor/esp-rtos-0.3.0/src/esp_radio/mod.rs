@@ -10,10 +10,8 @@ use esp_hal::{
 use esp_radio_rtos_driver::{
     ThreadPtr,
     queue::CompatQueue,
-    register_queue_implementation,
-    register_semaphore_implementation,
-    register_timer_implementation,
-    register_wait_queue_implementation,
+    register_queue_implementation, register_semaphore_implementation,
+    register_timer_implementation, register_wait_queue_implementation,
     semaphore::{CompatSemaphore, SemaphoreHandle, SemaphoreKind, SemaphorePtr},
     timer::CompatTimer,
     wait_queue::{WaitQueueImplementation, WaitQueuePtr},

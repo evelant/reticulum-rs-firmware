@@ -11,10 +11,10 @@ use alloc::vec::Vec;
 
 use rand_core::{CryptoRng, RngCore};
 use rete_core::{
-    CONTEXT_NONE, CONTEXT_RESOURCE, CONTEXT_RESOURCE_ADV, CONTEXT_RESOURCE_HMU,
-    CONTEXT_RESOURCE_ICL, CONTEXT_RESOURCE_PRF, CONTEXT_RESOURCE_RCL, CONTEXT_RESOURCE_REQ,
-    DestHash, DestType, HeaderType, Identity, IdentityHash, LinkId, MonotonicInstant, Packet,
-    PacketType,
+    CONTEXT_NONE, CONTEXT_PATH_RESPONSE, CONTEXT_RESOURCE, CONTEXT_RESOURCE_ADV,
+    CONTEXT_RESOURCE_HMU, CONTEXT_RESOURCE_ICL, CONTEXT_RESOURCE_PRF, CONTEXT_RESOURCE_RCL,
+    CONTEXT_RESOURCE_REQ, DestHash, DestType, HeaderType, Identity, IdentityHash, LinkId,
+    MonotonicInstant, Packet, PacketBuilder, PacketType, TRUNCATED_HASH_LEN,
 };
 use rete_stack::node_core::{OutboundDispatchInterval, OutboundProtocolToken};
 use rete_stack::{
@@ -22,7 +22,7 @@ use rete_stack::{
     NodeEvent as NativeNodeEvent, OutboundPacket, PacketRouting, ReceiptToken,
     RequestFailReason as NativeRequestFailReason,
 };
-use rete_transport::{HeaplessStorage, LinkState, SendError};
+use rete_transport::{HeaplessStorage, LinkState, SendError, Transport};
 
 use crate::capacity::{
     HeaplessCapacitySnapshot, LinkAdmissionError, heapless_capacity_snapshot,
@@ -1713,6 +1713,10 @@ pub struct IngressCounters {
     pub reverse_table_full: u64,
     pub reverse_route_conflict: u64,
     pub endpoint_forward_suppressed: u64,
+    /// Registered local path requests answered on their ingress interface.
+    pub local_path_responses: u64,
+    /// Local path requests consumed after response construction failed.
+    pub local_path_response_failures: u64,
 }
 
 /// Monotonic counters for locally requested state and transmission admission.
@@ -1849,6 +1853,48 @@ impl core::fmt::Display for AnnounceAdmissionError {
     }
 }
 
+/// Failure to configure the default application data used by local path
+/// responses for one registered destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnounceAppDataError {
+    /// The named destination is not registered on this node.
+    DestinationNotRegistered,
+    /// Application data cannot fit in one base-MTU announce.
+    AppDataTooLarge { actual: usize, maximum: usize },
+    /// Owned default application-data storage could not be reserved.
+    AllocationFailed,
+}
+
+impl core::fmt::Display for AnnounceAppDataError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::DestinationNotRegistered => f.write_str("destination is not registered"),
+            Self::AppDataTooLarge { actual, maximum } => {
+                write!(f, "announce app data length {actual} exceeds {maximum}")
+            }
+            Self::AllocationFailed => f.write_str("announce app data allocation failed"),
+        }
+    }
+}
+
+/// Failure to construct one tagged Reticulum path request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathRequestBuildError {
+    /// The fixed protocol request did not fit the base-MTU packet buffer.
+    PacketBuild,
+    /// Owned packet storage could not be reserved.
+    AllocationFailed,
+}
+
+impl core::fmt::Display for PathRequestBuildError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::PacketBuild => f.write_str("Reticulum path request construction failed"),
+            Self::AllocationFailed => f.write_str("Reticulum path request allocation failed"),
+        }
+    }
+}
+
 /// Failure to register another local destination through the owning adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DestinationRegistrationError {
@@ -1960,6 +2006,8 @@ struct IngressPreflight {
     before_invalid: u64,
     metadata: IngressMetadata,
     retained_proof: Option<RetainedProofExpectation>,
+    local_path_request: Option<DestHash>,
+    path_response: Option<DestHash>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2196,6 +2244,40 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         Ok(hash)
     }
 
+    /// Configure default application data for ordinary announces and local
+    /// path responses from one registered destination.
+    pub fn set_destination_announce_app_data(
+        &mut self,
+        destination: &DestHash,
+        app_data: Option<&[u8]>,
+    ) -> Result<(), AnnounceAppDataError> {
+        if let Some(data) = app_data
+            && data.len() > crate::MAX_ANNOUNCE_APP_DATA
+        {
+            return Err(AnnounceAppDataError::AppDataTooLarge {
+                actual: data.len(),
+                maximum: crate::MAX_ANNOUNCE_APP_DATA,
+            });
+        }
+        let owned = match app_data {
+            Some(data) => {
+                let mut owned = Vec::new();
+                owned
+                    .try_reserve_exact(data.len())
+                    .map_err(|_| AnnounceAppDataError::AllocationFailed)?;
+                owned.extend_from_slice(data);
+                Some(owned)
+            }
+            None => None,
+        };
+        let native = self
+            .core
+            .get_destination_mut(destination)
+            .ok_or(AnnounceAppDataError::DestinationNotRegistered)?;
+        native.set_default_app_data(owned);
+        Ok(())
+    }
+
     /// Enable or disable inbound Link admission on one local destination.
     pub fn set_accepts_links(&mut self, destination: &DestHash, accepts: bool) -> bool {
         let Some(destination) = self.core.get_destination_mut(destination) else {
@@ -2226,6 +2308,46 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                 hops: path.hops,
                 received_on: path.received_on.map(InterfaceId),
             })
+    }
+
+    /// Construct one tagged Reticulum path request for broadcast across every
+    /// currently eligible interface.
+    ///
+    /// Transport nodes include their identity hash before the random request
+    /// tag, matching Python Reticulum's on-wire request shape. Endpoint nodes
+    /// include only the requested destination and tag.
+    pub fn request_path<R: RngCore + CryptoRng>(
+        &self,
+        destination: &DestHash,
+        rng: &mut R,
+    ) -> Result<TxPacket, PathRequestBuildError> {
+        let mut payload = [0_u8; TRUNCATED_HASH_LEN * 3];
+        payload[..TRUNCATED_HASH_LEN].copy_from_slice(destination.as_ref());
+        let tag_start = if self.role == NodeRole::Transport {
+            payload[TRUNCATED_HASH_LEN..TRUNCATED_HASH_LEN * 2]
+                .copy_from_slice(self.identity_hash().as_ref());
+            TRUNCATED_HASH_LEN * 2
+        } else {
+            TRUNCATED_HASH_LEN
+        };
+        rng.fill_bytes(&mut payload[tag_start..tag_start + TRUNCATED_HASH_LEN]);
+        let payload_length = tag_start + TRUNCATED_HASH_LEN;
+
+        let mut raw = [0_u8; rete_core::MTU];
+        let length = PacketBuilder::new(&mut raw)
+            .packet_type(PacketType::Data)
+            .dest_type(DestType::Plain)
+            .destination_hash(rete_transport::PATH_REQUEST_DEST.as_ref())
+            .context(CONTEXT_NONE)
+            .payload(&payload[..payload_length])
+            .build()
+            .map_err(|_| PathRequestBuildError::PacketBuild)?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(length)
+            .map_err(|_| PathRequestBuildError::AllocationFailed)?;
+        bytes.extend_from_slice(&raw[..length]);
+        Ok(TxPacket::broadcast(bytes))
     }
 
     /// Resolve the interface selected by the retained path for locally
@@ -2345,10 +2467,12 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             Err(report) => return report,
         };
         self.arm_retained_proof(&preflight);
-        let native = self
+        let mut native = self
             .core
             .handle_ingest_at(raw, now, link_now, interface.0, rng);
         self.restore_retained_proof(&preflight);
+        self.answer_local_path_request(&mut native, &preflight, now, rng);
+        self.suppress_path_response_rebroadcast(&mut native, &preflight);
         self.finish_ingest(
             native,
             preflight,
@@ -2417,7 +2541,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             &mut native_sink,
         );
         self.restore_retained_proof(&preflight);
-        let native = match native {
+        let mut native = match native {
             Ok(native) => native,
             Err(rete_stack::ReceiptSinkFull) => {
                 self.receipt_terminals.reservation_backpressure = self
@@ -2427,6 +2551,8 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                 return Err(ReceiptReservationUnavailable);
             }
         };
+        self.answer_local_path_request(&mut native, &preflight, now, rng);
+        self.suppress_path_response_rebroadcast(&mut native, &preflight);
         Ok(self.finish_ingest(native, preflight, interface, native_sink.committed))
     }
 
@@ -2507,7 +2633,34 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                     destination,
                     packet_hash: packet.compute_hash(),
                 }),
+            local_path_request: self.local_path_request(&packet),
+            path_response: (packet.header_type == HeaderType::Header1
+                && packet.packet_type == PacketType::Announce
+                && packet.dest_type == DestType::Single
+                && packet.context == CONTEXT_PATH_RESPONSE)
+                .then(|| DestHash::from_slice(packet.destination_hash)),
         })
+    }
+
+    fn local_path_request(&self, packet: &Packet<'_>) -> Option<DestHash> {
+        if self.role != NodeRole::Transport
+            || packet.header_type != HeaderType::Header1
+            || packet.packet_type != PacketType::Data
+            || packet.dest_type != DestType::Plain
+            || packet.context != CONTEXT_NONE
+            || packet.destination_hash != rete_transport::PATH_REQUEST_DEST.as_ref()
+            || packet.payload.len() < TRUNCATED_HASH_LEN
+        {
+            return None;
+        }
+        let requested = DestHash::from_slice(&packet.payload[..TRUNCATED_HASH_LEN]);
+        self.core
+            .get_destination(&requested)
+            .is_some_and(|destination| {
+                destination.direction == Direction::In
+                    && destination.dest_type == DestinationType::Single
+            })
+            .then_some(requested)
     }
 
     fn arm_retained_proof(&mut self, preflight: &IngressPreflight) {
@@ -2528,6 +2681,113 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             .get_destination_mut(&expected.destination)
             .expect("armed retained destination must remain registered")
             .set_proof_strategy(rete_stack::ProofStrategy::ProveApp);
+    }
+
+    fn answer_local_path_request<R: RngCore + CryptoRng>(
+        &mut self,
+        native: &mut IngestOutcome,
+        preflight: &IngressPreflight,
+        now: u64,
+        rng: &mut R,
+    ) {
+        let Some(destination) = preflight.local_path_request else {
+            return;
+        };
+        let before = native.packets.len();
+        native
+            .packets
+            .retain(|outbound| !is_forwarded_path_request_for(&outbound.data, &destination));
+        if native.packets.len() == before {
+            // Native Rete's destination throttle classified this request as a
+            // duplicate, so it must not produce another response.
+            return;
+        }
+
+        let Some(response) = self.build_local_path_response(&destination, now, rng) else {
+            self.ingress.local_path_response_failures =
+                self.ingress.local_path_response_failures.saturating_add(1);
+            return;
+        };
+        native.packets.push(OutboundPacket::new(
+            response,
+            PacketRouting::SourceInterface,
+        ));
+        self.ingress.local_path_responses = self.ingress.local_path_responses.saturating_add(1);
+    }
+
+    fn suppress_path_response_rebroadcast(
+        &mut self,
+        native: &mut IngestOutcome,
+        preflight: &IngressPreflight,
+    ) {
+        let Some(destination) = preflight.path_response else {
+            return;
+        };
+        native
+            .packets
+            .retain(|outbound| match Packet::parse(&outbound.data) {
+                Ok(packet) => {
+                    packet.packet_type != PacketType::Announce
+                        || packet.dest_type != DestType::Single
+                        || packet.destination_hash != destination.as_ref()
+                }
+                Err(_) => true,
+            });
+
+        let pending = self.core.transport.announce_count();
+        for _ in 0..pending {
+            let Some(announce) = self.core.transport.next_announce() else {
+                break;
+            };
+            let is_path_response = announce.dest_hash == destination
+                && !announce.local
+                && Packet::parse(&announce.raw).is_ok_and(|packet| {
+                    packet.packet_type == PacketType::Announce
+                        && packet.dest_type == DestType::Single
+                        && packet.context == CONTEXT_PATH_RESPONSE
+                });
+            if !is_path_response {
+                let requeued = self.core.transport.queue_announce(announce);
+                debug_assert!(requeued, "popped announce must fit its original queue");
+            }
+        }
+    }
+
+    fn build_local_path_response<R: RngCore + CryptoRng>(
+        &self,
+        destination: &DestHash,
+        now: u64,
+        rng: &mut R,
+    ) -> Option<Vec<u8>> {
+        let destination = self.core.get_destination(destination)?;
+        if destination.direction != Direction::In
+            || destination.dest_type != DestinationType::Single
+        {
+            return None;
+        }
+        let mut aspects = Vec::new();
+        aspects.try_reserve_exact(destination.aspects.len()).ok()?;
+        aspects.extend(destination.aspects.iter().map(|aspect| aspect.as_str()));
+
+        let mut raw = [0_u8; rete_core::MTU];
+        let length =
+            Transport::<HeaplessStorage<PATHS, ANNOUNCES, DEDUPLICATION, LINKS>>::create_announce(
+                self.core.identity(),
+                &destination.app_name,
+                &aspects,
+                destination.default_app_data.as_deref(),
+                None,
+                rng,
+                now,
+                &mut raw,
+            )
+            .ok()?;
+        raw[2 + TRUNCATED_HASH_LEN] = CONTEXT_PATH_RESPONSE;
+
+        let mut response = Vec::new();
+        response.try_reserve_exact(length).ok()?;
+        response.extend_from_slice(&raw[..length]);
+        Some(response)
     }
 
     fn finish_ingest(
@@ -3167,6 +3427,19 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         now: u64,
         rng: &mut R,
     ) -> Result<(), AnnounceAdmissionError> {
+        let destination = self.destination_hash();
+        self.queue_announce_for(&destination, app_data, now, rng)
+    }
+
+    /// Queue an announce for one registered local destination with explicit
+    /// queue and payload admission.
+    pub fn queue_announce_for<R: RngCore + CryptoRng>(
+        &mut self,
+        destination: &DestHash,
+        app_data: Option<&[u8]>,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), AnnounceAdmissionError> {
         if let Some(data) = app_data
             && data.len() > crate::MAX_ANNOUNCE_APP_DATA
         {
@@ -3180,7 +3453,10 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                 self.admission.announce_queue_full.saturating_add(1);
             return Err(AnnounceAdmissionError::QueueFull { limit: ANNOUNCES });
         }
-        if !self.core.queue_announce(app_data, rng, now) {
+        if !self
+            .core
+            .queue_announce_for(destination, app_data, rng, now)
+        {
             self.admission.announce_native_rejected =
                 self.admission.announce_native_rejected.saturating_add(1);
             return Err(AnnounceAdmissionError::NativeRejected);
@@ -3382,6 +3658,17 @@ fn classify_retained_proof_candidate(
     } else {
         RetainedProofCandidate::Mismatched
     }
+}
+
+fn is_forwarded_path_request_for(raw: &[u8], destination: &DestHash) -> bool {
+    Packet::parse(raw).is_ok_and(|packet| {
+        packet.header_type == HeaderType::Header1
+            && packet.packet_type == PacketType::Data
+            && packet.dest_type == DestType::Plain
+            && packet.context == CONTEXT_NONE
+            && packet.destination_hash == rete_transport::PATH_REQUEST_DEST.as_ref()
+            && packet.payload.starts_with(destination.as_ref())
+    })
 }
 
 fn suppress_retained_inbound_proof_actions(
@@ -5280,6 +5567,8 @@ mod tests {
                 before_invalid: 0,
                 metadata: IngressMetadata::default(),
                 retained_proof: None,
+                local_path_request: None,
+                path_response: None,
             },
             InterfaceId(1),
             TerminalCommitCounts::default(),
@@ -6551,6 +6840,8 @@ mod tests {
                     destination,
                     packet_hash: [0x31; 32],
                 }),
+                local_path_request: None,
+                path_response: None,
             },
             InterfaceId(7),
             TerminalCommitCounts::default(),
@@ -6942,8 +7233,18 @@ mod tests {
     fn announce_queue_is_owned_and_bounded() {
         let mut node = node(60);
         let mut rng = CounterRng::default();
+        let primary = node.destination_hash();
+        let expected_public_key = identity(60).public_key();
+        let delivery = node
+            .register_destination(
+                "lxmf",
+                &["delivery"],
+                DestinationType::Single,
+                Direction::In,
+            )
+            .unwrap();
         node.queue_announce(None, 1, &mut rng).unwrap();
-        node.queue_announce(Some(b"bounded app data"), 1, &mut rng)
+        node.queue_announce_for(&delivery, Some(b"bounded app data"), 2, &mut rng)
             .unwrap();
         assert_eq!(node.metrics().capacity.announces.used, 2);
         assert_eq!(
@@ -6953,7 +7254,230 @@ mod tests {
         assert_eq!(node.metrics().admission.announce_queue_full, 1);
 
         let packets = node.flush_announces(1, &mut rng);
-        assert!(!packets.is_empty());
+        assert_eq!(packets.len(), 2);
         assert!(packets.iter().all(|packet| packet.target == TxTarget::All));
+        let primary_announce = packets
+            .iter()
+            .find_map(|packet| {
+                let announce = crate::parse_announce_packet(packet.bytes()).ok()?;
+                (announce.packet.destination_hash == primary.as_bytes()).then_some(announce)
+            })
+            .expect("primary destination announce must be present and valid");
+        assert_eq!(primary_announce.fields.pub_key, expected_public_key);
+        assert_eq!(primary_announce.fields.app_data, None);
+        let delivery_announce = packets
+            .iter()
+            .find_map(|packet| {
+                let announce = crate::parse_announce_packet(packet.bytes()).ok()?;
+                (announce.packet.destination_hash == delivery.as_bytes()).then_some(announce)
+            })
+            .expect("LXMF delivery announce must be present and valid");
+        assert_eq!(delivery_announce.fields.pub_key, expected_public_key);
+        assert_eq!(
+            delivery_announce.fields.app_data,
+            Some(b"bounded app data".as_slice())
+        );
+    }
+
+    #[test]
+    fn received_secondary_announce_enables_targeted_data_preparation() {
+        let mut receiver = node(61);
+        let delivery = receiver
+            .register_destination(
+                "lxmf",
+                &["delivery"],
+                DestinationType::Single,
+                Direction::In,
+            )
+            .unwrap();
+        let mut sender = node(62);
+        let mut rng = CounterRng::default();
+
+        receiver
+            .queue_announce_for(&delivery, Some(b"lxmf app data"), 1, &mut rng)
+            .unwrap();
+        let announce = receiver
+            .flush_announces(1, &mut rng)
+            .into_iter()
+            .next()
+            .unwrap();
+        let learned = sender.ingest(announce.bytes(), 1, InterfaceId(7), &mut rng);
+        assert_eq!(learned.disposition, IngressDisposition::Processed);
+        assert_eq!(
+            sender.route(&delivery).unwrap().received_on,
+            Some(InterfaceId(7))
+        );
+
+        let mut output = [0; RNS_MTU];
+        let prepared = sender
+            .prepare_data_into(
+                &delivery,
+                b"after secondary announce",
+                2,
+                &mut rng,
+                &mut output,
+            )
+            .unwrap();
+        assert_eq!(prepared.target(), TxTarget::Only(InterfaceId(7)));
+    }
+
+    #[test]
+    fn tagged_transport_path_request_has_python_compatible_wire_shape() {
+        let requester_identity = identity(72);
+        let requester_hash = requester_identity.hash();
+        let requester = TestNode::new(
+            requester_identity,
+            "reticulum",
+            &["transport"],
+            EmbeddedNodeConfig::transport(),
+        )
+        .unwrap();
+        let requested = DestHash::from([0xa5; TRUNCATED_HASH_LEN]);
+        let mut rng = CounterRng::default();
+        let request = requester.request_path(&requested, &mut rng).unwrap();
+        assert_eq!(request.target(), TxTarget::All);
+        let packet = Packet::parse(request.bytes()).unwrap();
+        assert_eq!(packet.header_type, HeaderType::Header1);
+        assert_eq!(packet.packet_type, PacketType::Data);
+        assert_eq!(packet.dest_type, DestType::Plain);
+        assert_eq!(packet.context, CONTEXT_NONE);
+        assert_eq!(
+            packet.destination_hash,
+            rete_transport::PATH_REQUEST_DEST.as_ref()
+        );
+        assert_eq!(packet.payload.len(), TRUNCATED_HASH_LEN * 3);
+        assert_eq!(&packet.payload[..TRUNCATED_HASH_LEN], requested.as_ref());
+        assert_eq!(
+            &packet.payload[TRUNCATED_HASH_LEN..TRUNCATED_HASH_LEN * 2],
+            requester_hash.as_ref()
+        );
+        assert_ne!(
+            &packet.payload[TRUNCATED_HASH_LEN * 2..],
+            &[0_u8; TRUNCATED_HASH_LEN]
+        );
+    }
+
+    #[test]
+    fn tagged_endpoint_path_request_has_python_compatible_wire_shape() {
+        let requester = node(71);
+        let requested = DestHash::from([0xa4; TRUNCATED_HASH_LEN]);
+        let mut rng = CounterRng::default();
+        let request = requester.request_path(&requested, &mut rng).unwrap();
+        let packet = Packet::parse(request.bytes()).unwrap();
+        assert_eq!(packet.header_type, HeaderType::Header1);
+        assert_eq!(packet.packet_type, PacketType::Data);
+        assert_eq!(packet.dest_type, DestType::Plain);
+        assert_eq!(packet.context, CONTEXT_NONE);
+        assert_eq!(
+            packet.destination_hash,
+            rete_transport::PATH_REQUEST_DEST.as_ref()
+        );
+        assert_eq!(packet.payload.len(), TRUNCATED_HASH_LEN * 2);
+        assert_eq!(&packet.payload[..TRUNCATED_HASH_LEN], requested.as_ref());
+        assert_ne!(
+            &packet.payload[TRUNCATED_HASH_LEN..],
+            &[0_u8; TRUNCATED_HASH_LEN]
+        );
+    }
+
+    #[test]
+    fn local_secondary_path_request_returns_exact_path_response_once() {
+        let mut responder = TestNode::new(
+            identity(73),
+            "reticulum",
+            &["transport"],
+            EmbeddedNodeConfig::transport(),
+        )
+        .unwrap();
+        let secondary = responder
+            .register_destination(
+                "lxmf",
+                &["delivery"],
+                DestinationType::Single,
+                Direction::In,
+            )
+            .unwrap();
+        responder
+            .set_destination_announce_app_data(&secondary, Some(&[0x93, 0xc0, 0xc0, 0x90]))
+            .unwrap();
+
+        let mut requester = TestNode::new(
+            identity(74),
+            "reticulum",
+            &["transport"],
+            EmbeddedNodeConfig::transport(),
+        )
+        .unwrap();
+        let mut rng = CounterRng::default();
+        let request = requester.request_path(&secondary, &mut rng).unwrap();
+        let first = responder.ingest(request.bytes(), 100, InterfaceId(7), &mut rng);
+        assert_eq!(first.disposition, IngressDisposition::Processed);
+        assert_eq!(first.actions.packets.len(), 1);
+        assert_eq!(
+            first.actions.packets[0].target(),
+            TxTarget::Only(InterfaceId(7))
+        );
+        let response = crate::parse_announce_packet(first.actions.packets[0].bytes()).unwrap();
+        assert_eq!(response.packet.destination_hash, secondary.as_ref());
+        assert_eq!(response.packet.context, CONTEXT_PATH_RESPONSE);
+        assert_eq!(
+            response.fields.app_data,
+            Some([0x93, 0xc0, 0xc0, 0x90].as_slice())
+        );
+        assert_eq!(responder.metrics().ingress.local_path_responses, 1);
+        assert_eq!(responder.metrics().capacity.announces.used, 0);
+
+        let learned = requester.ingest(
+            first.actions.packets[0].bytes(),
+            100,
+            InterfaceId(7),
+            &mut rng,
+        );
+        assert_eq!(learned.disposition, IngressDisposition::Processed);
+        assert_eq!(
+            requester.route(&secondary).unwrap().received_on,
+            Some(InterfaceId(7))
+        );
+        assert!(learned.actions.packets.is_empty());
+        assert!(requester.tick(100, &mut rng).packets.is_empty());
+        assert_eq!(requester.metrics().capacity.announces.used, 0);
+
+        let duplicate = responder.ingest(request.bytes(), 101, InterfaceId(7), &mut rng);
+        assert_eq!(duplicate.disposition, IngressDisposition::NativeDuplicate);
+        assert!(duplicate.actions.packets.is_empty());
+        assert_eq!(responder.metrics().ingress.local_path_responses, 1);
+
+        let fresh_request = requester.request_path(&secondary, &mut rng).unwrap();
+        let fresh = responder.ingest(fresh_request.bytes(), 121, InterfaceId(7), &mut rng);
+        assert_eq!(fresh.disposition, IngressDisposition::Processed);
+        assert_eq!(fresh.actions.packets.len(), 1);
+        assert_eq!(responder.metrics().ingress.local_path_responses, 2);
+    }
+
+    #[test]
+    fn unknown_path_request_remains_forwarded_without_local_response() {
+        let mut transport = TestNode::new(
+            identity(75),
+            "reticulum",
+            &["transport"],
+            EmbeddedNodeConfig::transport(),
+        )
+        .unwrap();
+        let requester = TestNode::new(
+            identity(76),
+            "reticulum",
+            &["requester"],
+            EmbeddedNodeConfig::transport(),
+        )
+        .unwrap();
+        let missing = DestHash::from([0xf5; TRUNCATED_HASH_LEN]);
+        let mut rng = CounterRng::default();
+        let request = requester.request_path(&missing, &mut rng).unwrap();
+        let report = transport.ingest(request.bytes(), 200, InterfaceId(9), &mut rng);
+        assert_eq!(report.disposition, IngressDisposition::Processed);
+        assert_eq!(report.actions.packets.len(), 1);
+        assert_eq!(report.actions.packets[0].target(), TxTarget::All);
+        assert_eq!(report.actions.packets[0].bytes(), request.bytes());
+        assert_eq!(transport.metrics().ingress.local_path_responses, 0);
     }
 }

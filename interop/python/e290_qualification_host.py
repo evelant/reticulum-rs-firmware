@@ -24,6 +24,7 @@ from pathlib import Path
 import re
 import secrets
 import stat
+import struct
 import subprocess
 import sys
 import unicodedata
@@ -36,6 +37,28 @@ E290_FLASH_BYTES = 16 * 1024 * 1024
 FLASH_SECTOR_BYTES = 4096
 SUPPORTED_FLASH_BYTES = frozenset((8 * 1024 * 1024, 16 * 1024 * 1024))
 CONFIRMED_HF_MODULE = "HT-RA62-HF"
+E290_PARTITION_TABLE_OFFSET = 0x8000
+E290_PARTITION_TABLE_BYTES = FLASH_SECTOR_BYTES
+E290_FACTORY_OFFSET = 0x10000
+E290_FACTORY_BYTES = 0x600000
+E290_FACTORY_END = E290_FACTORY_OFFSET + E290_FACTORY_BYTES
+ESP_IMAGE_HEADER_BYTES = 24
+ESP32S3_IMAGE_CHIP_ID = 9
+ESP_PARTITION_ENTRY_BYTES = 32
+ESP_PARTITION_MAGIC = 0x50AA
+ESP_PARTITION_MD5_PREFIX = bytes((0xEB, 0xEB)) + bytes((0xFF,)) * 14
+E290_PARTITIONS = (
+    ("nvs", 0x01, 0x02, 0x9000, 0x6000, 0),
+    ("phy_init", 0x01, 0x01, 0xF000, 0x1000, 0),
+    ("factory", 0x00, 0x00, E290_FACTORY_OFFSET, E290_FACTORY_BYTES, 0),
+    ("node_identity", 0x01, 0x06, 0x610000, 0x2000, 0),
+    ("announce_clock", 0x01, 0x06, 0x612000, 0x2000, 0),
+    ("api_credentials", 0x01, 0x06, 0x614000, 0x2000, 0),
+    ("device_config", 0x01, 0x02, 0x616000, 0x1A000, 0),
+    ("node_journal", 0x01, 0x06, 0x630000, 0x100000, 0),
+    ("message_store", 0x01, 0x06, 0x730000, 0x200000, 0),
+    ("lxmf_store", 0x01, 0x06, 0x930000, 0x200000, 0),
+)
 FLASH_DETECTION_FAILURES = (
     re.compile(r"could not detect flash size", re.IGNORECASE),
     re.compile(r"defaulting to 4\s*mb", re.IGNORECASE),
@@ -98,6 +121,12 @@ class ActionTargetInfo:
     chip: str
     flash_bytes: int
     mac: str
+
+
+@dataclass(frozen=True)
+class MergedImageInfo:
+    bytes: int
+    partition_table_sha256: str
 
 
 @dataclass(frozen=True)
@@ -1536,11 +1565,146 @@ def flash_size_token(flash_bytes: int) -> str:
     raise QualificationError(f"unsupported flash capacity {flash_bytes}")
 
 
-def _validate_merged_image(image: Path, *, expected_flash_bytes: int) -> int:
+def _canonical_e290_partition_entries() -> bytes:
+    entries = bytearray()
+    for label, partition_type, subtype, offset, size, flags in E290_PARTITIONS:
+        encoded_label = label.encode("ascii")
+        if len(encoded_label) > 16:
+            raise AssertionError(f"E290 partition label is too long: {label!r}")
+        entries.extend(
+            struct.pack(
+                "<HBBII16sI",
+                ESP_PARTITION_MAGIC,
+                partition_type,
+                subtype,
+                offset,
+                size,
+                encoded_label.ljust(16, b"\x00"),
+                flags,
+            )
+        )
+    return bytes(entries)
+
+
+E290_PARTITION_ENTRIES = _canonical_e290_partition_entries()
+
+
+def _canonical_e290_partition_table_region() -> bytes:
+    md5_record = ESP_PARTITION_MD5_PREFIX + hashlib.md5(
+        E290_PARTITION_ENTRIES
+    ).digest()
+    table = E290_PARTITION_ENTRIES + md5_record
+    return table.ljust(E290_PARTITION_TABLE_BYTES, b"\xFF")
+
+
+E290_PARTITION_TABLE_REGION = _canonical_e290_partition_table_region()
+
+
+def _read_exact_at(source, offset: int, length: int) -> bytes:
+    source.seek(offset)
+    value = source.read(length)
+    if len(value) != length:
+        raise QualificationError(
+            "merged flash image is truncated: "
+            f"offset=0x{offset:x} expected={length} actual={len(value)}"
+        )
+    return value
+
+
+def _read_exact_from_descriptor(descriptor: int, offset: int, length: int) -> bytes:
+    chunks = bytearray()
+    while len(chunks) < length:
+        chunk = os.pread(
+            descriptor, length - len(chunks), offset + len(chunks)
+        )
+        if not chunk:
+            raise QualificationError(
+                "retained merged flash image is truncated: "
+                f"offset=0x{offset:x} expected={length} actual={len(chunks)}"
+            )
+        chunks.extend(chunk)
+    return bytes(chunks)
+
+
+def _validate_esp_image_header(
+    header: bytes, *, label: str, expected_flash_bytes: int
+) -> None:
+    if len(header) != ESP_IMAGE_HEADER_BYTES:
+        raise QualificationError(f"{label} ESP image header is truncated")
+    if header[0] != 0xE9:
+        raise QualificationError(
+            f"{label} has invalid ESP image magic 0x{header[0]:02x}"
+        )
+    if not 1 <= header[1] <= 16:
+        raise QualificationError(
+            f"{label} has invalid ESP image segment count {header[1]}"
+        )
+    if header[2] != 0x02:
+        raise QualificationError(
+            f"{label} must encode DIO flash mode, found 0x{header[2]:02x}"
+        )
+    encoded_size = {0x3: 8 * 1024 * 1024, 0x4: 16 * 1024 * 1024}.get(
+        header[3] >> 4
+    )
+    if encoded_size != expected_flash_bytes:
+        raise QualificationError(
+            f"{label} capacity does not match the qualified target: "
+            f"encoded={encoded_size!r} expected={expected_flash_bytes}"
+        )
+    if header[3] & 0x0F != 0x0F:
+        raise QualificationError(
+            f"{label} must encode the qualified 80 MHz flash frequency, "
+            f"found 0x{header[3] & 0x0F:02x}"
+        )
+    encoded_chip = int.from_bytes(header[12:14], "little")
+    if encoded_chip != ESP32S3_IMAGE_CHIP_ID:
+        raise QualificationError(
+            f"{label} targets ESP image chip ID {encoded_chip}, "
+            f"expected ESP32-S3 ID {ESP32S3_IMAGE_CHIP_ID}"
+        )
+
+
+def _validate_e290_partition_table(table: bytes) -> str:
+    if len(table) != E290_PARTITION_TABLE_BYTES:
+        raise QualificationError("merged flash image partition table is truncated")
+    entries_end = len(E290_PARTITION_ENTRIES)
+    if table[:entries_end] != E290_PARTITION_ENTRIES:
+        raise QualificationError(
+            "merged flash image partition entries do not match the canonical "
+            "E290 product layout"
+        )
+    md5_record = table[
+        entries_end : entries_end + ESP_PARTITION_ENTRY_BYTES
+    ]
+    if md5_record[:16] != ESP_PARTITION_MD5_PREFIX:
+        raise QualificationError(
+            "merged flash image partition table has no canonical MD5 record"
+        )
+    expected_md5 = hashlib.md5(table[:entries_end]).digest()
+    if md5_record[16:] != expected_md5:
+        raise QualificationError(
+            "merged flash image partition table MD5 does not match its entries"
+        )
+    if table[entries_end + ESP_PARTITION_ENTRY_BYTES :] != bytes((0xFF,)) * (
+        E290_PARTITION_TABLE_BYTES - entries_end - ESP_PARTITION_ENTRY_BYTES
+    ):
+        raise QualificationError(
+            "merged flash image partition table has non-erased trailing bytes"
+        )
+    return hashlib.sha256(table).hexdigest()
+
+
+def _validate_merged_image(image: Path, *, expected_flash_bytes: int) -> MergedImageInfo:
     try:
         image_bytes = image.stat().st_size
         with image.open("rb") as source:
-            header = source.read(4)
+            header = _read_exact_at(source, 0, ESP_IMAGE_HEADER_BYTES)
+            partition_table = _read_exact_at(
+                source, E290_PARTITION_TABLE_OFFSET, E290_PARTITION_TABLE_BYTES
+            )
+            app_header = _read_exact_at(
+                source, E290_FACTORY_OFFSET, ESP_IMAGE_HEADER_BYTES
+            )
     except OSError as error:
         raise QualificationError(
             f"could not inspect merged flash image {image}: {error}"
@@ -1548,51 +1712,64 @@ def _validate_merged_image(image: Path, *, expected_flash_bytes: int) -> int:
     return _validate_merged_image_properties(
         image_bytes=image_bytes,
         header=header,
+        partition_table=partition_table,
+        app_header=app_header,
         expected_flash_bytes=expected_flash_bytes,
     )
 
 
 def _validate_merged_image_properties(
-    *, image_bytes: int, header: bytes, expected_flash_bytes: int
-) -> int:
-    if image_bytes < 4:
+    *,
+    image_bytes: int,
+    header: bytes,
+    partition_table: bytes,
+    app_header: bytes,
+    expected_flash_bytes: int,
+) -> MergedImageInfo:
+    if expected_flash_bytes != E290_FLASH_BYTES:
         raise QualificationError(
-            "merged flash image is shorter than its ESP image header"
+            "E290 product merged image requires a qualified 16 MiB target"
         )
-    if image_bytes > expected_flash_bytes:
+    if image_bytes < E290_FACTORY_OFFSET + ESP_IMAGE_HEADER_BYTES:
+        raise QualificationError(
+            "merged flash image does not contain the factory application header"
+        )
+    if image_bytes > E290_FACTORY_END:
         raise QualificationError(
             f"merged flash image has {image_bytes} bytes, exceeding "
-            f"{expected_flash_bytes}-byte flash"
+            f"the protected product write boundary 0x{E290_FACTORY_END:x}"
         )
-    if header[0] != 0xE9:
-        raise QualificationError(
-            f"merged flash image has invalid ESP image magic 0x{header[0]:02x}"
-        )
-    if header[2] != 0x02:
-        raise QualificationError(
-            f"merged flash image must encode DIO flash mode, found 0x{header[2]:02x}"
-        )
-    encoded_size = {0x3: 8 * 1024 * 1024, 0x4: 16 * 1024 * 1024}.get(
-        header[3] >> 4
+    _validate_esp_image_header(
+        header, label="merged-image bootloader", expected_flash_bytes=expected_flash_bytes
     )
-    if encoded_size != expected_flash_bytes:
-        raise QualificationError(
-            "merged flash image header capacity does not match the qualified target: "
-            f"encoded={encoded_size!r} expected={expected_flash_bytes}"
-        )
-    return image_bytes
+    partition_table_sha256 = _validate_e290_partition_table(partition_table)
+    _validate_esp_image_header(
+        app_header,
+        label="merged-image factory application",
+        expected_flash_bytes=expected_flash_bytes,
+    )
+    return MergedImageInfo(
+        bytes=image_bytes, partition_table_sha256=partition_table_sha256
+    )
 
 
 def _validate_retained_merged_image(
     image: RetainedFlashInput, *, expected_flash_bytes: int
-) -> int:
+) -> MergedImageInfo:
     _require_retained_flash_input(image)
-    os.lseek(image.descriptor, 0, os.SEEK_SET)
-    header = os.read(image.descriptor, 4)
-    os.lseek(image.descriptor, 0, os.SEEK_SET)
     return _validate_merged_image_properties(
         image_bytes=image.bytes,
-        header=header,
+        header=_read_exact_from_descriptor(
+            image.descriptor, 0, ESP_IMAGE_HEADER_BYTES
+        ),
+        partition_table=_read_exact_from_descriptor(
+            image.descriptor,
+            E290_PARTITION_TABLE_OFFSET,
+            E290_PARTITION_TABLE_BYTES,
+        ),
+        app_header=_read_exact_from_descriptor(
+            image.descriptor, E290_FACTORY_OFFSET, ESP_IMAGE_HEADER_BYTES
+        ),
         expected_flash_bytes=expected_flash_bytes,
     )
 
@@ -1621,7 +1798,7 @@ def flash_merged_image(
         raise QualificationError("expected image SHA-256 must be 64 hexadecimal digits")
     if not image.is_file():
         raise QualificationError(f"merged flash image is not a regular file: {image}")
-    image_bytes = _validate_merged_image(
+    image_info = _validate_merged_image(
         image, expected_flash_bytes=expected_flash_bytes
     )
 
@@ -1645,7 +1822,7 @@ def flash_merged_image(
     retained_image = _copy_retained_flash_input(image, preserved_image)
     image_digest = retained_image.sha256
     try:
-        image_bytes = _validate_retained_merged_image(
+        image_info = _validate_retained_merged_image(
             retained_image, expected_flash_bytes=expected_flash_bytes
         )
     except BaseException:
@@ -1817,7 +1994,7 @@ def flash_merged_image(
                 "--non-interactive",
                 "--skip-update-check",
                 "0x0",
-                str(image_bytes),
+                str(image_info.bytes),
                 reserved_readback.action_path,
             ]
             read_result = command_runner(
@@ -1857,17 +2034,20 @@ def flash_merged_image(
             )
             try:
                 readback_bytes, readback_digest = _finalize_read_output(
-                    reserved_readback, expected_bytes=image_bytes
+                    reserved_readback, expected_bytes=image_info.bytes
                 )
             except QualificationError as error:
                 raise PostWriteEvidenceError(
                     f"merged-image readback mismatch: {error}"
                 ) from error
             try:
-                if readback_bytes != image_bytes or readback_digest != image_digest:
+                if (
+                    readback_bytes != image_info.bytes
+                    or readback_digest != image_digest
+                ):
                     raise PostWriteEvidenceError(
                         "merged-image readback mismatch: "
-                        f"bytes={readback_bytes}/{image_bytes} "
+                        f"bytes={readback_bytes}/{image_info.bytes} "
                         f"sha256={readback_digest}/{image_digest}"
                     )
                 if _sha256_file(preserved_image) != image_digest:
@@ -1889,9 +2069,13 @@ def flash_merged_image(
                             "address": 0,
                             "source_image": str(image),
                             "preserved_image": str(preserved_image),
-                            "image_bytes": image_bytes,
+                            "image_bytes": image_info.bytes,
                             "expected_image_sha256": normalized_expected_digest,
                             "image_sha256": image_digest,
+                            "partition_table_offset": E290_PARTITION_TABLE_OFFSET,
+                            "partition_table_bytes": E290_PARTITION_TABLE_BYTES,
+                            "partition_table_sha256": image_info.partition_table_sha256,
+                            "protected_write_boundary": E290_FACTORY_END,
                             "readback": str(readback),
                             "readback_bytes": readback_bytes,
                             "readback_sha256": readback_digest,
@@ -1937,7 +2121,7 @@ def verify_merged_image(
         raise QualificationError("expected image SHA-256 must be 64 hexadecimal digits")
     if not image.is_file():
         raise QualificationError(f"merged flash image is not a regular file: {image}")
-    image_bytes = _validate_merged_image(
+    image_info = _validate_merged_image(
         image, expected_flash_bytes=expected_flash_bytes
     )
 
@@ -1962,7 +2146,7 @@ def verify_merged_image(
             f"expected={normalized_expected_digest} actual={image_digest}"
         )
     try:
-        image_bytes = _validate_retained_merged_image(
+        image_info = _validate_retained_merged_image(
             retained_image, expected_flash_bytes=expected_flash_bytes
         )
     except BaseException:
@@ -2007,7 +2191,7 @@ def verify_merged_image(
                 "--non-interactive",
                 "--skip-update-check",
                 "0x0",
-                str(image_bytes),
+                str(image_info.bytes),
                 reserved_readback.action_path,
             ]
             result = command_runner(
@@ -2046,17 +2230,20 @@ def verify_merged_image(
             )
             try:
                 readback_bytes, readback_digest = _finalize_read_output(
-                    reserved_readback, expected_bytes=image_bytes
+                    reserved_readback, expected_bytes=image_info.bytes
                 )
             except QualificationError as error:
                 raise QualificationError(
                     f"merged-image readback mismatch: {error}"
                 ) from error
             try:
-                if readback_bytes != image_bytes or readback_digest != image_digest:
+                if (
+                    readback_bytes != image_info.bytes
+                    or readback_digest != image_digest
+                ):
                     raise QualificationError(
                         "merged-image readback mismatch: "
-                        f"bytes={readback_bytes}/{image_bytes} "
+                        f"bytes={readback_bytes}/{image_info.bytes} "
                         f"sha256={readback_digest}/{image_digest}"
                     )
                 _verify_retained_flash_input(retained_image)
@@ -2072,9 +2259,13 @@ def verify_merged_image(
                             "address": 0,
                             "source_image": str(image),
                             "preserved_image": str(preserved_image),
-                            "image_bytes": image_bytes,
+                            "image_bytes": image_info.bytes,
                             "expected_image_sha256": normalized_expected_digest,
                             "image_sha256": image_digest,
+                            "partition_table_offset": E290_PARTITION_TABLE_OFFSET,
+                            "partition_table_bytes": E290_PARTITION_TABLE_BYTES,
+                            "partition_table_sha256": image_info.partition_table_sha256,
+                            "protected_write_boundary": E290_FACTORY_END,
                             "readback": str(readback),
                             "readback_bytes": readback_bytes,
                             "readback_sha256": readback_digest,

@@ -1,5 +1,7 @@
 //! Permanent transport-neutral node owner task.
 
+#![allow(clippy::too_many_arguments)]
+
 use core::mem;
 
 use embassy_futures::yield_now;
@@ -22,12 +24,13 @@ use reticulum_device_api_pairing_policy::{
 use reticulum_device_api_session::AuthenticatedGrant;
 #[cfg(feature = "runtime-measurement-hil")]
 use reticulum_heltec_vision_master_e290_node::runtime_measurement::{
-    OperationKind as RuntimeOperationKind, RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE,
-    RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE, RuntimeProofTraceIngressDisposition,
-    RuntimeProofTraceIngressMetadata, RuntimeProofTracePacketType,
+    OperationKind as RuntimeOperationKind, RETICULUM_RUNTIME_LXMF_TRACE_EVIDENCE,
+    RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE, RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE,
+    RuntimeLxmfCommitKind, RuntimeProofTraceIngressDisposition, RuntimeProofTraceIngressMetadata,
+    RuntimeProofTracePacketType,
 };
 use reticulum_heltec_vision_master_e290_node::{
-    announce_time::BootAnnounceClock,
+    announce_time::{BootAnnounceClock, BootAnnounceSchedule, ScheduledAnnounce},
     authenticated_api_node::AuthenticatedApiDispatchFailureKind,
     causal_pairing_frontier::{PairingCommandLane, select_pairing_command_lane},
     credential_pairing::{CredentialPairingStatus, PairingMutation},
@@ -35,6 +38,12 @@ use reticulum_heltec_vision_master_e290_node::{
     durability_policy::{AuthorizedFrameDurability, DurabilityServiceState},
     live_pairing_handoff::{LivePairingCommand, LivePairingReply, NodeLivePairingHandoff},
     live_pairing_node::{LivePairingOperation, LivePairingOperationStep},
+    lxmf_delivery::{
+        LXMF_RETRY_QUARANTINE, LxmfAuthorityFault, LxmfProofActionsHolder, LxmfProofSinkFailure,
+        LxmfRetentionAction, LxmfRetryClass, LxmfRetryEntry, LxmfRetrySet, LxmfTerminalReject,
+        retention_action, retry_after_pre_io_deferral, should_relieve_lxmf_retry, stamp_policy,
+        wire_limits,
+    },
     pairing_control_handoff::{
         ButtonObservationReply, ExclusiveAcquisitionReply, LifecycleAcknowledgement,
         NodePairingHandoff, PairingControlCommand, PairingControlReply, PairingControlReplyKind,
@@ -48,17 +57,24 @@ use reticulum_heltec_vision_master_e290_node::{
     },
 };
 use reticulum_interface_router::{InterfaceDescriptor, SealedIngressPacket};
+#[cfg(feature = "runtime-measurement-hil")]
+use reticulum_lxmf_durable_ingress::DurableIngressCommitKind;
+use reticulum_lxmf_durable_ingress::{DurableIngressOutcome, DurableIngressSuccess};
+use reticulum_lxmf_ingress::LocalDeliveryDestination;
 use reticulum_node_core::{
-    ApplicationEvent, ApplicationEventDiscardReason, ApplicationEventOfferError,
-    ApplicationEventOwner, ApplicationEventQuarantineReason, AuthorizedFrameObservation,
-    MonotonicInstant, MonotonicMillis, MonotonicSeconds, NodeActions, OutboundDispatchInterval,
+    ApplicationEvent, ApplicationEventDiscardReason, ApplicationEventLease,
+    ApplicationEventOfferError, ApplicationEventOwner, ApplicationEventQuarantineReason,
+    AuthorizedFrameObservation, DelayedProofOwner, DestinationHash, MonotonicInstant,
+    MonotonicMillis, MonotonicSeconds, NodeActions, OutboundDispatchInterval,
     ReceiptCorrelationError, TxLeaseDeadline,
 };
 #[cfg(feature = "runtime-measurement-hil")]
 use reticulum_node_core::{IngressDisposition, IngressMetadata, PacketType};
 use reticulum_rns_inbox_store::{InboxCandidate, InboxDestination};
 use reticulum_storage_actor::{DriveError, ProjectorOperationError};
-use reticulum_submission_runtime::{FrameOfferProgress, RuntimeError, RuntimeStep};
+use reticulum_submission_runtime::{
+    FrameOfferProgress, PathDiscoveryOffer, RuntimeError, RuntimeStep,
+};
 use reticulum_tx_handoff::AuthorizedFrameNodeHandoff;
 use reticulum_tx_supervisor::{
     NodeInterfaceAnnounceFlushResult, NodeInterfaceApplicationEventDrain,
@@ -71,24 +87,90 @@ use crate::{
     ProductSupervisor, config,
     platform_storage::{
         ProductCredentialInitializationPort, ProductInboundAdmission, ProductInitializationDrive,
-        ProductInitializationRequest, ProductLivePairingAdmission, ProductStorageCoordinator,
-        ProductSubmissionDrive,
+        ProductInitializationRequest, ProductLivePairingAdmission, ProductLxmfAdmission,
+        ProductStorageCoordinator, ProductSubmissionDrive,
     },
 };
 
-type RetainedActions = (
-    NodeActions,
-    reticulum_tx_supervisor::OrdinaryRouterAdmission,
-);
+struct RetainedActions {
+    actions: NodeActions,
+    admission: reticulum_tx_supervisor::OrdinaryRouterAdmission,
+    path_offer: Option<PathDiscoveryOffer>,
+}
+
+impl RetainedActions {
+    fn ordinary(
+        actions: NodeActions,
+        admission: reticulum_tx_supervisor::OrdinaryRouterAdmission,
+    ) -> Self {
+        Self {
+            actions,
+            admission,
+            path_offer: None,
+        }
+    }
+
+    fn with_path_offer(mut self, offer: PathDiscoveryOffer) -> Self {
+        debug_assert!(self.path_offer.is_none());
+        self.path_offer = Some(offer);
+        self
+    }
+
+    fn path_offer(&self) -> Option<PathDiscoveryOffer> {
+        self.path_offer
+    }
+
+    fn into_parts(
+        self,
+    ) -> (
+        NodeActions,
+        reticulum_tx_supervisor::OrdinaryRouterAdmission,
+        Option<PathDiscoveryOffer>,
+    ) {
+        (self.actions, self.admission, self.path_offer)
+    }
+}
 type QuarantinedIngressBuffer = (NodeInterfaceIngressRecycleFault, SealedIngressPacket);
+
+/// Boot-lifetime LXMF scheduler owners placed together in external PSRAM.
+///
+/// Application-event slots remain in their existing internal static storage;
+/// every token here is only structural authority over one of those slots.
+#[must_use = "the LXMF volatile owner graph must remain alive for the node task"]
+pub(crate) struct LxmfVolatileState {
+    retries: LxmfRetrySet<'static, { config::APPLICATION_EVENT_SLOTS }>,
+    proof_holder: LxmfProofActionsHolder,
+    authority_faults: LxmfAuthorityFault<'static, { config::APPLICATION_EVENT_SLOTS }>,
+    pending_owner_fault_observed: bool,
+    service_fault_observed: bool,
+}
+
+impl LxmfVolatileState {
+    /// Construct the empty boot-time owner graph before any event is admitted.
+    pub(crate) const fn new() -> Self {
+        Self {
+            retries: LxmfRetrySet::new(),
+            proof_holder: LxmfProofActionsHolder::new(),
+            authority_faults: LxmfAuthorityFault::new(),
+            pending_owner_fault_observed: false,
+            service_fault_observed: false,
+        }
+    }
+}
 
 enum ActionOfferHandling {
     Retry(RetainedActions),
     RetainAndDrain(RetainedActions),
 }
 
+#[derive(Clone, Copy)]
+enum LxmfProofOfferHandling {
+    Retry,
+    RetainAndDrain,
+}
+
 enum ActionRetryStep {
-    Accepted,
+    Accepted(Option<PathDiscoveryOffer>),
     Busy,
     Terminal,
 }
@@ -258,19 +340,22 @@ impl PairingNodeState {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[embassy_executor::task]
 pub async fn run(
     supervisor: &'static mut ProductSupervisor,
     storage: &'static mut ProductStorageCoordinator,
     mut application_events: ApplicationEventOwner<'static>,
+    mut delayed_proofs: DelayedProofOwner<'static>,
+    lxmf_volatile: &'static mut LxmfVolatileState,
+    lxmf_destination: Option<DestinationHash>,
     handoffs: NodeHandoffs,
     offline_descriptor: InterfaceDescriptor,
     announce_epoch: BootEpoch,
     mut rng: Trng,
 ) {
-    let identity_summary = IdentitySummary::new(ApiDestinationHash(
-        *supervisor.destination_hash().as_bytes(),
-    ));
+    let primary_destination = *supervisor.destination_hash().as_bytes();
+    let identity_summary = IdentitySummary::new(ApiDestinationHash(primary_destination));
     let (
         mut pairing_handoff,
         mut live_pairing_handoff,
@@ -288,6 +373,7 @@ pub async fn run(
     // backpressured envelope or an exact coordinator-rejected envelope.
     let mut retry_actions_a: Option<RetainedActions> = None;
     let mut retry_actions_b: Option<RetainedActions> = None;
+    let mut pending_path_dispatch: Option<PathDiscoveryOffer> = None;
     let mut quarantined_actions: Option<RetainedActions> = None;
     let mut quarantined_ingress_buffer: Option<QuarantinedIngressBuffer> = None;
     let mut prefer_retry_b = true;
@@ -297,7 +383,11 @@ pub async fn run(
     let mut observed_terminal_transitions = 0_u8;
     let mut announce_clock = BootAnnounceClock::new(announce_epoch);
     let mut next_tick_seconds = now_seconds();
-    let mut next_announce_seconds = now_seconds();
+    let mut announce_schedule = BootAnnounceSchedule::new(
+        now_seconds(),
+        primary_destination,
+        lxmf_destination.is_some(),
+    );
     let mut lane = 0_u8;
     let mut observed_recycle_fault: Option<NodeInterfaceIngressRecycleFault> = None;
     let mut durability_service =
@@ -308,6 +398,13 @@ pub async fn run(
     let mut authenticated_api_state = AuthenticatedApiNodeState::new();
     let mut pending_inbound: Option<InboxCandidate> = None;
     let mut application_event_drain_fault: Option<ApplicationEventOfferError> = None;
+    let LxmfVolatileState {
+        retries: lxmf_retries,
+        proof_holder: lxmf_proof_holder,
+        authority_faults: lxmf_authority_fault,
+        pending_owner_fault_observed: lxmf_pending_owner_fault_observed,
+        service_fault_observed: lxmf_service_fault_observed,
+    } = lxmf_volatile;
     #[cfg(feature = "runtime-measurement-hil")]
     let mut previous_node_loop_us = now_micros();
 
@@ -443,12 +540,19 @@ pub async fn run(
             {
                 let reason = rejected.reason();
                 let (actions, elapsed_admission) = rejected.into_parts();
-                let retained = match config::rejected_action_disposition(reason) {
+                let path_offer = pending_path_dispatch.take();
+                let (retained, terminal) = match config::rejected_action_disposition(reason) {
                     config::RejectedActionDisposition::RefreshDeadline => {
                         warn!(
                             "e290-node stage=ordinary-admission status=RETRY-WITH-FRESH-DEADLINE reason={reason:?}"
                         );
-                        (actions, config::ordinary_admission(now_millis()))
+                        (
+                            RetainedActions::ordinary(
+                                actions,
+                                config::ordinary_admission(now_millis()),
+                            ),
+                            false,
+                        )
                     }
                     config::RejectedActionDisposition::FailStop => {
                         error!(
@@ -458,9 +562,25 @@ pub async fn run(
                             actions.unroutable_packets,
                         );
                         fail_closed_draining = true;
-                        (actions, elapsed_admission)
+                        (RetainedActions::ordinary(actions, elapsed_admission), true)
                     }
                 };
+                let retained = match path_offer {
+                    Some(offer) => retained.with_path_offer(offer),
+                    None => retained,
+                };
+                if terminal && path_offer.is_some() {
+                    disable_submission_for_path_fault(
+                        storage,
+                        &mut durability_service,
+                        &retained_frame,
+                        &pending_frame_acknowledgement,
+                        supervisor,
+                        lora_descriptor,
+                        &mut fail_closed_draining,
+                        "path-request-return-terminal",
+                    );
+                }
                 if retry_actions_a.is_none() {
                     retry_actions_a = Some(retained);
                 } else {
@@ -489,7 +609,11 @@ pub async fn run(
                     // occupied, or its later rejected output could have no
                     // local owner slot. Terminal drain only returns an exact
                     // RX buffer or moves an existing terminal residue.
-                    if (!fail_closed_draining && retry_capacity_available) || settling_ingress {
+                    if (!fail_closed_draining
+                        && retry_capacity_available
+                        && pending_path_dispatch.is_none())
+                        || settling_ingress
+                    {
                         let local_quarantine_available = quarantined_actions.is_none();
                         progressed |= step_ingress(
                             supervisor,
@@ -533,6 +657,64 @@ pub async fn run(
                                 request.lease().generation().get(),
                                 request.state(),
                             ),
+                        }
+                    }
+                    if let NodeInterfaceSupervisorTransition::Ordinary(OrdinaryRouterStep::Routed {
+                        interface,
+                        protocol_token,
+                        first_dispatch,
+                        ..
+                    }) = transition
+                        && let Some(offer) = pending_path_dispatch
+                    {
+                        if !first_dispatch || protocol_token.is_some() {
+                            error!(
+                                "e290-node stage=path-discovery status=FAIL reason=dispatch-correlation first_dispatch={first_dispatch} protocol_token_present={} interface={} action=disable-submissions",
+                                protocol_token.is_some(),
+                                interface.get(),
+                            );
+                            disable_submission_for_path_fault(
+                                storage,
+                                &mut durability_service,
+                                &retained_frame,
+                                &pending_frame_acknowledgement,
+                                supervisor,
+                                lora_descriptor,
+                                &mut fail_closed_draining,
+                                "path-request-dispatch-correlation",
+                            );
+                        } else {
+                            pending_path_dispatch = None;
+                            let dispatched_at =
+                                MonotonicMillis::new(dispatch_completed_at.as_micros() / 1_000);
+                            match storage.acknowledge_path_request_dispatched(offer, dispatched_at)
+                            {
+                                Ok(()) => info!(
+                                    "e290-node stage=path-discovery status=DISPATCHED submission={} ordinal={} interface={} dispatch_ms={} response_clock=started",
+                                    offer.id().get(),
+                                    offer.ordinal(),
+                                    interface.get(),
+                                    dispatched_at.get(),
+                                ),
+                                Err(reason) => {
+                                    error!(
+                                        "e290-node stage=path-discovery status=FAIL reason=dispatch-ack:{reason:?} submission={} ordinal={} action=disable-submissions",
+                                        offer.id().get(),
+                                        offer.ordinal(),
+                                    );
+                                    disable_submission_for_path_fault(
+                                        storage,
+                                        &mut durability_service,
+                                        &retained_frame,
+                                        &pending_frame_acknowledgement,
+                                        supervisor,
+                                        lora_descriptor,
+                                        &mut fail_closed_draining,
+                                        "path-request-dispatch-ack",
+                                    );
+                                }
+                            }
+                            progressed = true;
                         }
                     }
                     if let NodeInterfaceSupervisorTransition::Ordinary(
@@ -580,6 +762,18 @@ pub async fn run(
                         config::SupervisorTransitionDisposition::Progress => progressed = true,
                         config::SupervisorTransitionDisposition::TerminalFailClosedDrain => {
                             fail_closed_draining = true;
+                            if pending_path_dispatch.is_some() {
+                                disable_submission_for_path_fault(
+                                    storage,
+                                    &mut durability_service,
+                                    &retained_frame,
+                                    &pending_frame_acknowledgement,
+                                    supervisor,
+                                    lora_descriptor,
+                                    &mut fail_closed_draining,
+                                    "path-request-router-terminal",
+                                );
+                            }
                             let observation = terminal_transition_observation(transition);
                             if observed_terminal_transitions & observation == 0 {
                                 observed_terminal_transitions |= observation;
@@ -600,14 +794,36 @@ pub async fn run(
                         ) {
                             config::ActionRetrySlot::First => {
                                 prefer_retry_b = true;
+                                let retry_was_path = retry_actions_a
+                                    .as_ref()
+                                    .and_then(RetainedActions::path_offer)
+                                    .is_some();
                                 match retry_retained_actions(
                                     supervisor,
                                     &mut retry_actions_a,
                                     "action-retry-a",
                                 ) {
-                                    ActionRetryStep::Accepted => progressed = true,
+                                    ActionRetryStep::Accepted(path_offer) => {
+                                        if let Some(offer) = path_offer {
+                                            debug_assert!(pending_path_dispatch.is_none());
+                                            pending_path_dispatch = Some(offer);
+                                        }
+                                        progressed = true;
+                                    }
                                     ActionRetryStep::Busy => {}
                                     ActionRetryStep::Terminal => {
+                                        if retry_was_path {
+                                            disable_submission_for_path_fault(
+                                                storage,
+                                                &mut durability_service,
+                                                &retained_frame,
+                                                &pending_frame_acknowledgement,
+                                                supervisor,
+                                                lora_descriptor,
+                                                &mut fail_closed_draining,
+                                                "path-request-retry-terminal",
+                                            );
+                                        }
                                         fail_closed_draining = true;
                                         progressed = true;
                                     }
@@ -615,14 +831,36 @@ pub async fn run(
                             }
                             config::ActionRetrySlot::Second => {
                                 prefer_retry_b = false;
+                                let retry_was_path = retry_actions_b
+                                    .as_ref()
+                                    .and_then(RetainedActions::path_offer)
+                                    .is_some();
                                 match retry_retained_actions(
                                     supervisor,
                                     &mut retry_actions_b,
                                     "action-retry-b",
                                 ) {
-                                    ActionRetryStep::Accepted => progressed = true,
+                                    ActionRetryStep::Accepted(path_offer) => {
+                                        if let Some(offer) = path_offer {
+                                            debug_assert!(pending_path_dispatch.is_none());
+                                            pending_path_dispatch = Some(offer);
+                                        }
+                                        progressed = true;
+                                    }
                                     ActionRetryStep::Busy => {}
                                     ActionRetryStep::Terminal => {
+                                        if retry_was_path {
+                                            disable_submission_for_path_fault(
+                                                storage,
+                                                &mut durability_service,
+                                                &retained_frame,
+                                                &pending_frame_acknowledgement,
+                                                supervisor,
+                                                lora_descriptor,
+                                                &mut fail_closed_draining,
+                                                "path-request-retry-terminal",
+                                            );
+                                        }
                                         fail_closed_draining = true;
                                         progressed = true;
                                     }
@@ -630,7 +868,9 @@ pub async fn run(
                             }
                             config::ActionRetrySlot::None => {
                                 let now = now_seconds();
-                                if !supervisor.ingress_actions_pending() && now >= next_tick_seconds
+                                if pending_path_dispatch.is_none()
+                                    && !supervisor.ingress_actions_pending()
+                                    && now >= next_tick_seconds
                                 {
                                     next_tick_seconds =
                                         now.saturating_add(config::PROTOCOL_TICK_INTERVAL_SECONDS);
@@ -717,57 +957,102 @@ pub async fn run(
                     if retry_actions_a.is_none()
                         && retry_actions_b.is_none()
                         && quarantined_actions.is_none()
+                        && pending_path_dispatch.is_none()
                         && !supervisor.ingress_actions_pending()
                         && !fail_closed_draining
                         && !announce_clock.is_exhausted()
-                        && now >= next_announce_seconds
+                        && let Some(scheduled) = announce_schedule.due(now)
                     {
-                        next_announce_seconds =
-                            now.saturating_add(config::ANNOUNCE_INTERVAL_SECONDS);
-                        if let Some(emitted_at) = announce_clock.next_emission() {
+                        let mut admission_deferred = false;
+                        let mut primary_emission = None;
+                        if scheduled == ScheduledAnnounce::Primary {
+                            let emitted_at = announce_clock
+                                .next_emission()
+                                .expect("a non-exhausted announce clock has an emission");
                             match supervisor.queue_announce(None, emitted_at, &mut rng) {
                                 Ok(()) => {
                                     announce_clock.mark_queued();
-                                    match supervisor.flush_announces(
-                                        MonotonicSeconds::new(now),
-                                        config::ordinary_admission(now_millis()),
-                                        &mut rng,
-                                    ) {
-                                        NodeInterfaceAnnounceFlushResult::Accepted => {
-                                            info!(
-                                                "e290-node stage=announce status=QUEUED emission_time={} boot_epoch={}",
-                                                emitted_at.get(),
-                                                announce_clock.epoch().get(),
-                                            );
-                                            progressed = true;
-                                        }
-                                        NodeInterfaceAnnounceFlushResult::ActionOfferRejected(
-                                            failure,
-                                        ) => {
-                                            match handle_action_offer_failure(failure, "announce") {
-                                                ActionOfferHandling::Retry(retained) => {
-                                                    retry_actions_a = Some(retained)
-                                                }
-                                                ActionOfferHandling::RetainAndDrain(retained) => {
-                                                    retry_actions_a = Some(retained);
-                                                    fail_closed_draining = true;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    if announce_clock.is_exhausted() {
-                                        error!(
-                                            "e290-node stage=announce status=LOCAL-EMISSION-EXHAUSTED boot_epoch={} action=suppress-future-local-announces",
-                                            announce_clock.epoch().get(),
-                                        );
-                                    }
+                                    primary_emission = Some(emitted_at.get());
                                 }
                                 Err(reason) => {
+                                    admission_deferred = true;
                                     warn!(
-                                        "e290-node stage=announce status=DEFERRED reason={reason:?}"
-                                    )
+                                        "e290-node stage=announce destination=primary status=DEFERRED reason={reason:?} retry_after_seconds={}",
+                                        config::ANNOUNCE_ADMISSION_RETRY_SECONDS,
+                                    );
                                 }
                             }
+                        }
+
+                        let mut lxmf_emission = None;
+                        if scheduled == ScheduledAnnounce::LxmfDelivery
+                            && !*lxmf_service_fault_observed
+                            && storage.lxmf_service_available()
+                            && let Some(destination) = lxmf_destination
+                        {
+                            let emitted_at = announce_clock
+                                .next_emission()
+                                .expect("a non-exhausted announce clock has an emission");
+                            match supervisor.queue_announce_for(
+                                &destination,
+                                Some(&config::LXMF_DELIVERY_ANNOUNCE_APP_DATA),
+                                emitted_at,
+                                &mut rng,
+                            ) {
+                                Ok(()) => {
+                                    announce_clock.mark_queued();
+                                    lxmf_emission = Some(emitted_at.get());
+                                }
+                                Err(reason) => {
+                                    admission_deferred = true;
+                                    warn!(
+                                        "e290-node stage=announce destination=lxmf.delivery status=DEFERRED reason={reason:?} retry_after_seconds={}",
+                                        config::ANNOUNCE_ADMISSION_RETRY_SECONDS,
+                                    );
+                                }
+                            }
+                        }
+
+                        if admission_deferred {
+                            announce_schedule.defer_attempt(now);
+                        } else {
+                            // A queued announce completed this event. An LXMF
+                            // event whose service was cleanly disabled is also
+                            // consumed without spending an announce ordinal.
+                            announce_schedule.mark_attempted(now);
+                        }
+
+                        if primary_emission.is_some() || lxmf_emission.is_some() {
+                            match supervisor.flush_announces(
+                                MonotonicSeconds::new(now),
+                                config::ordinary_admission(now_millis()),
+                                &mut rng,
+                            ) {
+                                NodeInterfaceAnnounceFlushResult::Accepted => {
+                                    info!(
+                                        "e290-node stage=announce status=QUEUED primary_emission={primary_emission:?} lxmf_delivery_emission={lxmf_emission:?} boot_epoch={}",
+                                        announce_clock.epoch().get(),
+                                    );
+                                    progressed = true;
+                                }
+                                NodeInterfaceAnnounceFlushResult::ActionOfferRejected(failure) => {
+                                    match handle_action_offer_failure(failure, "announce") {
+                                        ActionOfferHandling::Retry(retained) => {
+                                            retry_actions_a = Some(retained)
+                                        }
+                                        ActionOfferHandling::RetainAndDrain(retained) => {
+                                            retry_actions_a = Some(retained);
+                                            fail_closed_draining = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if announce_clock.is_exhausted() {
+                            error!(
+                                "e290-node stage=announce status=LOCAL-EMISSION-EXHAUSTED boot_epoch={} action=suppress-future-local-announces",
+                                announce_clock.epoch().get(),
+                            );
                         }
                     }
                 }
@@ -781,7 +1066,16 @@ pub async fn run(
                 }
                 _ => {
                     let owner_now = now_millis();
-                    if !storage_step_attempted && durability_service.storage_step_due(owner_now) {
+                    if !storage_step_attempted
+                        && durability_service.storage_step_due(owner_now)
+                        && retry_actions_a.is_none()
+                        && retry_actions_b.is_none()
+                        && quarantined_actions.is_none()
+                        && pending_path_dispatch.is_none()
+                        && !supervisor.ingress_actions_pending()
+                        && ordinary_router_is_idle(supervisor)
+                        && !fail_closed_draining
+                    {
                         storage_step_attempted = true;
                         let deadline = TxLeaseDeadline::new(MonotonicMillis::new(
                             owner_now.saturating_add(config::SUBMISSION_OWNER_LEASE_MS),
@@ -803,6 +1097,81 @@ pub async fn run(
                         match submission_step {
                             ProductSubmissionDrive::Runtime(Ok(RuntimeStep::Idle)) => {
                                 durability_service = durability_service.runtime_progress();
+                            }
+                            ProductSubmissionDrive::Runtime(Ok(
+                                RuntimeStep::PathDiscoveryRequest { offer, progress },
+                            )) => {
+                                durability_service = durability_service.runtime_progress();
+                                match supervisor.request_path(&offer.destination(), &mut rng) {
+                                    Ok(actions) => {
+                                        let admission = config::ordinary_admission(owner_now);
+                                        match supervisor.try_offer_actions(actions, admission) {
+                                            Ok(()) => {
+                                                debug_assert!(pending_path_dispatch.is_none());
+                                                pending_path_dispatch = Some(offer);
+                                                info!(
+                                                    "e290-node stage=path-discovery status=ADMITTED submission={} ordinal={} progress={progress:?} response_clock=awaiting-first-dispatch",
+                                                    offer.id().get(),
+                                                    offer.ordinal(),
+                                                );
+                                                progressed = true;
+                                            }
+                                            Err(failure) => {
+                                                let handling = handle_action_offer_failure(
+                                                    failure,
+                                                    "path-discovery",
+                                                );
+                                                let (retained, terminal) = match handling {
+                                                    ActionOfferHandling::Retry(retained) => {
+                                                        (retained, false)
+                                                    }
+                                                    ActionOfferHandling::RetainAndDrain(
+                                                        retained,
+                                                    ) => (retained, true),
+                                                };
+                                                let retained = retained.with_path_offer(offer);
+                                                if terminal {
+                                                    disable_submission_for_path_fault(
+                                                        storage,
+                                                        &mut durability_service,
+                                                        &retained_frame,
+                                                        &pending_frame_acknowledgement,
+                                                        supervisor,
+                                                        lora_descriptor,
+                                                        &mut fail_closed_draining,
+                                                        "path-request-offer-terminal",
+                                                    );
+                                                    fail_closed_draining = true;
+                                                }
+                                                if retry_actions_a.is_none() {
+                                                    retry_actions_a = Some(retained);
+                                                } else {
+                                                    debug_assert!(retry_actions_b.is_none());
+                                                    retry_actions_b = Some(retained);
+                                                }
+                                                progressed = true;
+                                            }
+                                        }
+                                    }
+                                    Err(reason) => {
+                                        error!(
+                                            "e290-node stage=path-discovery status=DISABLED submission={} ordinal={} reason={reason:?} local_submission_admission=closed",
+                                            offer.id().get(),
+                                            offer.ordinal(),
+                                        );
+                                        disable_submission_for_path_fault(
+                                            storage,
+                                            &mut durability_service,
+                                            &retained_frame,
+                                            &pending_frame_acknowledgement,
+                                            supervisor,
+                                            lora_descriptor,
+                                            &mut fail_closed_draining,
+                                            "path-request-build-fault",
+                                        );
+                                        progressed = true;
+                                    }
+                                }
                             }
                             ProductSubmissionDrive::Runtime(Ok(step)) => {
                                 durability_service = durability_service.runtime_progress();
@@ -920,6 +1289,7 @@ pub async fn run(
                 lane + 1
             };
 
+            let mut application_event_capacity_backpressured = false;
             if application_event_drain_fault.is_none() {
                 match supervisor.drain_application_events(&mut application_events) {
                     NodeInterfaceApplicationEventDrain::Idle => {}
@@ -933,7 +1303,10 @@ pub async fn run(
                         progressed = true;
                     }
                     NodeInterfaceApplicationEventDrain::Retained(reason)
-                        if reason.is_retryable() => {}
+                        if reason.is_retryable() =>
+                    {
+                        application_event_capacity_backpressured = true;
+                    }
                     NodeInterfaceApplicationEventDrain::Retained(reason) => {
                         error!(
                             "e290-node stage=application-event-handoff status=QUARANTINED reason={reason:?} exact_actions=retained-in-supervisor packet_completion_lifecycle=continue"
@@ -943,14 +1316,58 @@ pub async fn run(
                     }
                 }
             }
-            progressed |=
-                drive_one_application_event(&mut application_events, storage, &mut pending_inbound);
+            let ordinary_lane_available = retry_actions_a.is_none()
+                && retry_actions_b.is_none()
+                && quarantined_actions.is_none()
+                && pending_path_dispatch.is_none()
+                && !supervisor.ingress_actions_pending()
+                && !fail_closed_draining;
+            if ordinary_lane_available {
+                progressed |= drive_one_lxmf_proof(
+                    supervisor,
+                    &mut delayed_proofs,
+                    lxmf_proof_holder,
+                    &mut fail_closed_draining,
+                );
+            }
+            let lxmf_proof_backpressured = should_relieve_lxmf_retry(
+                application_event_capacity_backpressured,
+                fail_closed_draining,
+                lxmf_proof_holder.is_occupied(),
+                delayed_proofs.capacities().ready,
+            );
+            progressed |= drive_one_application_event(
+                &mut application_events,
+                &mut delayed_proofs,
+                lxmf_retries,
+                storage,
+                supervisor,
+                lxmf_destination,
+                &mut pending_inbound,
+                lxmf_authority_fault,
+                *lxmf_pending_owner_fault_observed,
+                lxmf_service_fault_observed,
+                lxmf_proof_backpressured,
+                now_millis(),
+            );
+            if let Some(pending) = storage.lxmf_pending_message_id()
+                && !lxmf_retries.contains_pending_owner(pending)
+                && !lxmf_authority_fault.contains_message(pending)
+                && !*lxmf_pending_owner_fault_observed
+            {
+                error!(
+                    "e290-node stage=lxmf-pending-owner status=FAIL reason=missing-structural-token message_id={:02x?} action=stop-lxmf-event-processing",
+                    pending.as_bytes(),
+                );
+                *lxmf_pending_owner_fault_observed = true;
+            }
             if fail_closed_draining {
                 // Keep terminal local evidence live while portable machines
                 // finish forced denials and exact completion return.
                 let _ = (
                     retry_actions_a.as_ref(),
                     retry_actions_b.as_ref(),
+                    pending_path_dispatch.as_ref(),
                     quarantined_actions.as_ref(),
                     quarantined_ingress_buffer.as_ref(),
                     terminal_correlation_fault.as_ref(),
@@ -967,14 +1384,265 @@ pub async fn run(
     }
 }
 
+fn drive_one_lxmf_proof(
+    supervisor: &mut ProductSupervisor,
+    delayed_proofs: &mut DelayedProofOwner<'static>,
+    holder: &mut LxmfProofActionsHolder,
+    fail_closed_draining: &mut bool,
+) -> bool {
+    let staged = if !holder.is_occupied() {
+        let Some(proof) = delayed_proofs.lease_next() else {
+            return false;
+        };
+        let event_id = proof.event_id();
+        let proof_id = proof.id();
+        let actions = proof.release_actions();
+        #[cfg(feature = "runtime-measurement-hil")]
+        RETICULUM_RUNTIME_LXMF_TRACE_EVIDENCE
+            .record_proof_released(runtime_lxmf_proof_tag(&actions));
+        holder
+            .try_stage(actions, config::ordinary_admission(now_millis()))
+            .unwrap_or_else(|_| unreachable!("released delayed proof is one packet only"));
+        info!(
+            "e290-node stage=lxmf-proof status=STAGED event_slot={} event_generation={} proof_slot={} proof_generation={} holder=packet-only ordinary_supervisor=pending",
+            event_id.slot().get(),
+            event_id.generation().get(),
+            proof_id.slot().get(),
+            proof_id.generation().get(),
+        );
+        true
+    } else {
+        false
+    };
+
+    let offer = holder
+        .begin_offer()
+        .expect("a staged or previously retained LXMF proof exists");
+    match offer.try_submit(|actions, admission| {
+        supervisor
+            .try_offer_actions(actions, admission)
+            .map_err(
+                |failure| match handle_action_offer_failure(failure, "lxmf-proof") {
+                    ActionOfferHandling::Retry(retained) => {
+                        let (actions, admission, path_offer) = retained.into_parts();
+                        debug_assert!(path_offer.is_none());
+                        LxmfProofSinkFailure::returned(
+                            LxmfProofOfferHandling::Retry,
+                            actions,
+                            admission,
+                        )
+                    }
+                    ActionOfferHandling::RetainAndDrain(retained) => {
+                        let (actions, admission, path_offer) = retained.into_parts();
+                        debug_assert!(path_offer.is_none());
+                        LxmfProofSinkFailure::returned(
+                            LxmfProofOfferHandling::RetainAndDrain,
+                            actions,
+                            admission,
+                        )
+                    }
+                },
+            )
+    }) {
+        Ok(()) => {
+            #[cfg(feature = "runtime-measurement-hil")]
+            RETICULUM_RUNTIME_LXMF_TRACE_EVIDENCE.record_proof_handed_off();
+            info!(
+                "e290-node stage=lxmf-proof status=HANDED-OFF owner=ordinary-supervisor direct_radio_send=false"
+            );
+            true
+        }
+        Err(LxmfProofOfferHandling::Retry) => staged,
+        Err(LxmfProofOfferHandling::RetainAndDrain) => {
+            *fail_closed_draining = true;
+            true
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn drive_one_application_event(
     owner: &mut ApplicationEventOwner<'static>,
+    delayed_proofs: &mut DelayedProofOwner<'static>,
+    retries: &mut LxmfRetrySet<'static, { config::APPLICATION_EVENT_SLOTS }>,
+    storage: &mut ProductStorageCoordinator,
+    supervisor: &ProductSupervisor,
+    lxmf_destination: Option<DestinationHash>,
+    pending_inbound: &mut Option<InboxCandidate>,
+    authority_fault: &mut LxmfAuthorityFault<'static, { config::APPLICATION_EVENT_SLOTS }>,
+    pending_owner_fault_observed: bool,
+    service_fault_observed: &mut bool,
+    proof_backpressured: bool,
+    now_ms: u64,
+) -> bool {
+    let pending_message = storage.lxmf_pending_message_id();
+    let held_store_fault = pending_message.is_some_and(|message_id| {
+        retries.has_fault_hold(message_id) || authority_fault.has_fault_hold(message_id)
+    });
+
+    if held_store_fault && let Some(entry) = retries.take_nonheld() {
+        let class = entry.class();
+        let message_id = entry.message_id();
+        match owner.try_reacquire_quarantined(entry.into_token()) {
+            Ok(lease) => {
+                let event_id = lease.id();
+                lease.discard(ApplicationEventDiscardReason::ConsumerUnavailable);
+                warn!(
+                    "e290-node stage=lxmf-retry status=DISCARDED slot={} generation={} prior_class={class:?} reason=pending-store-fault-held proof=not-sent",
+                    event_id.slot().get(),
+                    event_id.generation().get(),
+                );
+            }
+            Err(failure) => {
+                let reason = failure.reason();
+                retain_lxmf_authority_fault(
+                    authority_fault,
+                    LxmfRetryEntry::new(failure.into_token(), u64::MAX, class, message_id),
+                );
+                error!(
+                    "e290-node stage=lxmf-retry status=FAIL reason={reason:?} action=retain-unchanged-token-and-stop-lxmf"
+                );
+            }
+        }
+        return true;
+    }
+
+    let lxmf_fail_stopped =
+        authority_fault.is_some() || pending_owner_fault_observed || *service_fault_observed;
+    if (proof_backpressured || lxmf_fail_stopped)
+        && let Some(entry) = retries.take_pressure_relief()
+    {
+        let class = entry.class();
+        let message_id = entry.message_id();
+        match owner.try_reacquire_quarantined(entry.into_token()) {
+            Ok(lease) => {
+                let event_id = lease.id();
+                let discard_reason = if proof_backpressured {
+                    ApplicationEventDiscardReason::DownstreamCapacity
+                } else {
+                    ApplicationEventDiscardReason::ConsumerUnavailable
+                };
+                lease.discard(discard_reason);
+                warn!(
+                    "e290-node stage=lxmf-retry status=DISCARDED slot={} generation={} prior_class={class:?} reason={} proof=not-sent pending-store-owner=preserved",
+                    event_id.slot().get(),
+                    event_id.generation().get(),
+                    if proof_backpressured {
+                        "ordinary-proof-pressure-relief"
+                    } else {
+                        "lxmf-service-fail-stop-cleanup"
+                    },
+                );
+            }
+            Err(failure) => {
+                let reason = failure.reason();
+                retain_lxmf_authority_fault(
+                    authority_fault,
+                    LxmfRetryEntry::new(failure.into_token(), u64::MAX, class, message_id),
+                );
+                error!(
+                    "e290-node stage=lxmf-retry status=FAIL reason={reason:?} action=retain-unchanged-token-and-stop-lxmf"
+                );
+            }
+        }
+        return true;
+    }
+
+    let retry = if authority_fault.is_none() && !pending_owner_fault_observed {
+        retries.take_due(now_ms, pending_message)
+    } else {
+        None
+    };
+    let (lease, retry_class, retry_message_id) = if let Some(entry) = retry {
+        let class = entry.class();
+        let message_id = entry.message_id();
+        match owner.try_reacquire_quarantined(entry.into_token()) {
+            Ok(lease) => (lease, Some(class), message_id),
+            Err(failure) => {
+                let reason = failure.reason();
+                retain_lxmf_authority_fault(
+                    authority_fault,
+                    LxmfRetryEntry::new(failure.into_token(), u64::MAX, class, message_id),
+                );
+                error!(
+                    "e290-node stage=lxmf-retry status=FAIL reason={reason:?} action=retain-unchanged-token-and-stop-lxmf"
+                );
+                return true;
+            }
+        }
+    } else {
+        let Some(lease) = owner.lease_next() else {
+            return false;
+        };
+        (lease, None, None)
+    };
+
+    let is_lxmf = match lease.event() {
+        ApplicationEvent::DataReceived { destination, .. } => {
+            lxmf_destination.is_some_and(|lxmf| destination == lxmf.as_bytes())
+        }
+        _ => false,
+    };
+
+    if is_lxmf {
+        if held_store_fault
+            || authority_fault.is_some()
+            || pending_owner_fault_observed
+            || *service_fault_observed
+        {
+            let event_id = lease.id();
+            lease.discard(ApplicationEventDiscardReason::ConsumerUnavailable);
+            warn!(
+                "e290-node stage=lxmf-ingress status=DISCARDED slot={} generation={} reason=service-fail-stopped proof=not-sent routing=continue",
+                event_id.slot().get(),
+                event_id.generation().get(),
+            );
+            return true;
+        }
+        if pending_message.is_some() && retry_class != Some(LxmfRetryClass::StoreReconcile) {
+            if proof_backpressured {
+                let event_id = lease.id();
+                lease.discard(ApplicationEventDiscardReason::DownstreamCapacity);
+                warn!(
+                    "e290-node stage=lxmf-ingress status=DISCARDED slot={} generation={} reason=ordinary-proof-pressure-relief pending-store-owner=preserved proof=not-sent",
+                    event_id.slot().get(),
+                    event_id.generation().get(),
+                );
+                return true;
+            }
+            quarantine_lxmf_retry(
+                lease,
+                retries,
+                authority_fault,
+                now_ms,
+                LxmfRetryClass::StoreBusy,
+                None,
+            );
+            return true;
+        }
+        return drive_lxmf_event(
+            lease,
+            delayed_proofs,
+            retries,
+            storage,
+            supervisor,
+            lxmf_destination.expect("LXMF event matched an active destination"),
+            authority_fault,
+            service_fault_observed,
+            retry_class,
+            retry_message_id,
+            now_ms,
+        );
+    }
+
+    drive_non_lxmf_application_event(lease, storage, pending_inbound)
+}
+
+fn drive_non_lxmf_application_event(
+    lease: ApplicationEventLease<'_, 'static>,
     storage: &mut ProductStorageCoordinator,
     pending_inbound: &mut Option<InboxCandidate>,
 ) -> bool {
-    let Some(lease) = owner.lease_next() else {
-        return false;
-    };
     let event_id = lease.id();
     let sequence = lease.sequence();
     let kind = lease.event().kind();
@@ -1051,6 +1719,286 @@ fn drive_one_application_event(
         }
     }
     true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drive_lxmf_event(
+    lease: ApplicationEventLease<'_, 'static>,
+    delayed_proofs: &mut DelayedProofOwner<'static>,
+    retries: &mut LxmfRetrySet<'static, { config::APPLICATION_EVENT_SLOTS }>,
+    storage: &mut ProductStorageCoordinator,
+    supervisor: &ProductSupervisor,
+    lxmf_destination: DestinationHash,
+    authority_fault: &mut LxmfAuthorityFault<'static, { config::APPLICATION_EVENT_SLOTS }>,
+    service_fault_observed: &mut bool,
+    attempted_retry_class: Option<LxmfRetryClass>,
+    attempted_message_id: Option<reticulum_lxmf_model::MessageId>,
+    now_ms: u64,
+) -> bool {
+    let event_id = lease.id();
+    let sequence = lease.sequence();
+    let resolver = |source: &[u8; 16]| supervisor.recall_identity(&DestinationHash::new(*source));
+    let outcome = storage.commit_lxmf_event(
+        lease,
+        delayed_proofs,
+        LocalDeliveryDestination::new(*lxmf_destination.as_bytes()),
+        wire_limits(),
+        &resolver,
+        stamp_policy(),
+    );
+    match outcome {
+        ProductLxmfAdmission::DeferredForCredentialMutation(lease) => {
+            let (class, message_id) = retry_after_pre_io_deferral(
+                attempted_retry_class,
+                attempted_message_id,
+                LxmfRetryClass::CrossStoreBusy,
+            );
+            quarantine_lxmf_retry(lease, retries, authority_fault, now_ms, class, message_id);
+        }
+        ProductLxmfAdmission::DeferredForJournalMutation(lease) => {
+            let (class, message_id) = retry_after_pre_io_deferral(
+                attempted_retry_class,
+                attempted_message_id,
+                LxmfRetryClass::CrossStoreBusy,
+            );
+            quarantine_lxmf_retry(lease, retries, authority_fault, now_ms, class, message_id);
+        }
+        ProductLxmfAdmission::RuntimeUnavailable(lease) => {
+            lease.discard(ApplicationEventDiscardReason::ConsumerUnavailable);
+            warn!(
+                "e290-node stage=lxmf-ingress status=DISCARDED slot={} generation={} sequence={} reason=store-unavailable proof=not-sent routing=continue",
+                event_id.slot().get(),
+                event_id.generation().get(),
+                sequence.get(),
+            );
+        }
+        ProductLxmfAdmission::Ingress(DurableIngressOutcome::Durable(success)) => {
+            #[cfg(feature = "runtime-measurement-hil")]
+            record_runtime_lxmf_durable(success);
+            log_durable_lxmf(success);
+        }
+        ProductLxmfAdmission::Ingress(DurableIngressOutcome::Retained(retained)) => {
+            let pending = storage.lxmf_pending_message_id();
+            let action = retention_action(retained.reason(), pending);
+            let (lease, reason) = retained.into_parts();
+            match action {
+                LxmfRetentionAction::Retry(class) => {
+                    let (class, message_id) = if matches!(
+                        class,
+                        LxmfRetryClass::AdmissionDeferred | LxmfRetryClass::DelayedProofBusy
+                    ) {
+                        retry_after_pre_io_deferral(
+                            attempted_retry_class,
+                            attempted_message_id,
+                            class,
+                        )
+                    } else if class == LxmfRetryClass::StoreReconcile {
+                        (class, pending)
+                    } else {
+                        (class, None)
+                    };
+                    quarantine_lxmf_retry(
+                        lease,
+                        retries,
+                        authority_fault,
+                        now_ms,
+                        class,
+                        message_id,
+                    );
+                    warn!(
+                        "e290-node stage=lxmf-ingress status=RETRY reason={reason:?} class={class:?} retry_not_before_ms={} proof=retained",
+                        now_ms.saturating_add(config::STORAGE_RETRY_BACKOFF_MS),
+                    );
+                }
+                LxmfRetentionAction::HoldPendingFault => {
+                    let Some(message_id) = pending else {
+                        lease.quarantine(ApplicationEventQuarantineReason::ConsumerFault);
+                        error!(
+                            "e290-node stage=lxmf-ingress status=FAIL reason=pending-fault-without-message-id detail={reason:?} action=quarantine-event"
+                        );
+                        return true;
+                    };
+                    quarantine_lxmf_retry(
+                        lease,
+                        retries,
+                        authority_fault,
+                        u64::MAX,
+                        LxmfRetryClass::StoreFaultHold,
+                        Some(message_id),
+                    );
+                    error!(
+                        "e290-node stage=lxmf-ingress status=FAIL-STOP reason={reason:?} message_id={:02x?} action=hold-exact-token-no-retry-until-reset other-flash-mutation=blocked routing=continue proof=not-sent",
+                        message_id.as_bytes(),
+                    );
+                }
+                LxmfRetentionAction::Terminal(terminal) => {
+                    handle_terminal_lxmf_reject(
+                        lease,
+                        storage,
+                        terminal,
+                        &reason,
+                        service_fault_observed,
+                    );
+                }
+            }
+        }
+    }
+    true
+}
+
+fn log_durable_lxmf(success: DurableIngressSuccess) {
+    let receipt = success.receipt();
+    info!(
+        "e290-node stage=lxmf-ingress status=DURABLE kind={:?} slot={} generation={} message_id={:02x?} handle={} proof_ready={} proof_handoff=ordinary-supervisor",
+        success.kind(),
+        success.event_id().slot().get(),
+        success.event_id().generation().get(),
+        receipt.message_id().as_bytes(),
+        receipt.handle().get(),
+        success.queued_proof_id().is_some(),
+    );
+}
+
+#[cfg(feature = "runtime-measurement-hil")]
+fn record_runtime_lxmf_durable(success: DurableIngressSuccess) {
+    let receipt = success.receipt();
+    let kind = match success.kind() {
+        DurableIngressCommitKind::New => RuntimeLxmfCommitKind::New,
+        DurableIngressCommitKind::Replay => RuntimeLxmfCommitKind::AlreadyDurable,
+    };
+    RETICULUM_RUNTIME_LXMF_TRACE_EVIDENCE.record_durable(
+        kind,
+        receipt.message_id().as_bytes(),
+        receipt.handle().get(),
+        success.queued_proof_id().is_some(),
+    );
+}
+
+#[cfg(feature = "runtime-measurement-hil")]
+fn runtime_lxmf_proof_tag(actions: &NodeActions) -> Option<u64> {
+    let packet = actions.packets.first()?;
+    reticulum_node_core::delivery_proof_correlation_tag(packet.bytes())
+}
+
+fn quarantine_lxmf_retry(
+    lease: ApplicationEventLease<'_, 'static>,
+    retries: &mut LxmfRetrySet<'static, { config::APPLICATION_EVENT_SLOTS }>,
+    authority_fault: &mut LxmfAuthorityFault<'static, { config::APPLICATION_EVENT_SLOTS }>,
+    now_ms: u64,
+    class: LxmfRetryClass,
+    message_id: Option<reticulum_lxmf_model::MessageId>,
+) {
+    let event_id = lease.id();
+    let token = lease.quarantine_for_retry(LXMF_RETRY_QUARANTINE);
+    let retry_not_before_ms = if class == LxmfRetryClass::StoreFaultHold {
+        u64::MAX
+    } else {
+        now_ms.saturating_add(config::STORAGE_RETRY_BACKOFF_MS)
+    };
+    retain_lxmf_retry_entry(
+        retries,
+        authority_fault,
+        LxmfRetryEntry::new(token, retry_not_before_ms, class, message_id),
+    );
+    info!(
+        "e290-node stage=lxmf-retry status=RETAINED slot={} generation={} class={class:?} retry_not_before_ms={retry_not_before_ms}",
+        event_id.slot().get(),
+        event_id.generation().get(),
+    );
+}
+
+fn retain_lxmf_retry_entry(
+    retries: &mut LxmfRetrySet<'static, { config::APPLICATION_EVENT_SLOTS }>,
+    authority_fault: &mut LxmfAuthorityFault<'static, { config::APPLICATION_EVENT_SLOTS }>,
+    entry: LxmfRetryEntry<'static>,
+) {
+    if let Err(failure) = retries.try_insert(entry) {
+        let retained = failure.into_entry();
+        error!(
+            "e290-node stage=lxmf-retry status=FAIL slot={} class={:?} reason=retry-set-slot-occupied action=retain-extra-authority-and-stop-lxmf",
+            retained.slot(),
+            retained.class(),
+        );
+        retain_lxmf_authority_fault(authority_fault, retained);
+    }
+}
+
+fn retain_lxmf_authority_fault(
+    authority_fault: &mut LxmfAuthorityFault<'static, { config::APPLICATION_EVENT_SLOTS }>,
+    entry: LxmfRetryEntry<'static>,
+) {
+    if let Err(failure) = authority_fault.try_capture(entry) {
+        let retained_overflow_owner = failure.into_entry();
+        error!(
+            "e290-node stage=lxmf-authority status=FAIL reason=bounded-fault-owner-exhausted action=quarantined-capability-unrecoverable-continue-non-lxmf"
+        );
+        // At most 16 physical application-event tokens can exist, so a 16-slot
+        // fault owner cannot overflow in a valid owner graph. If that invariant
+        // is violated, the event itself remains quarantined in its caller-owned
+        // slot even though this recovery capability becomes unreachable. Do
+        // not globally spin the shared non-LXMF consumer.
+        let _ = retained_overflow_owner;
+    }
+}
+
+fn handle_terminal_lxmf_reject<E: core::fmt::Debug>(
+    lease: ApplicationEventLease<'_, 'static>,
+    storage: &mut ProductStorageCoordinator,
+    terminal: LxmfTerminalReject,
+    detail: &E,
+    service_fault_observed: &mut bool,
+) {
+    let event_id = lease.id();
+    match terminal {
+        LxmfTerminalReject::InvalidMessage => {
+            lease.discard(ApplicationEventDiscardReason::InvalidPayload);
+            warn!(
+                "e290-node stage=lxmf-ingress status=REJECTED slot={} generation={} reason={detail:?} proof=not-sent",
+                event_id.slot().get(),
+                event_id.generation().get(),
+            );
+        }
+        LxmfTerminalReject::StoreFull
+        | LxmfTerminalReject::IndexFull
+        | LxmfTerminalReject::HandleExhausted => {
+            lease.discard(ApplicationEventDiscardReason::DownstreamCapacity);
+            warn!(
+                "e290-node stage=lxmf-ingress status=CAPACITY-REJECTED slot={} generation={} policy={terminal:?} reason={detail:?} service=remain-enabled-for-replay proof=not-sent",
+                event_id.slot().get(),
+                event_id.generation().get(),
+            );
+        }
+        LxmfTerminalReject::StoreFault => {
+            let disabled = storage.disable_lxmf_service_if_clean();
+            *service_fault_observed = true;
+            lease.quarantine(ApplicationEventQuarantineReason::ConsumerFault);
+            error!(
+                "e290-node stage=lxmf-ingress status=QUARANTINED slot={} generation={} policy={terminal:?} reason={detail:?} service_disabled={disabled} proof=not-sent",
+                event_id.slot().get(),
+                event_id.generation().get(),
+            );
+        }
+        LxmfTerminalReject::HashCollision => {
+            lease.discard(ApplicationEventDiscardReason::InvalidPayload);
+            warn!(
+                "e290-node stage=lxmf-ingress status=COLLISION-REJECTED slot={} generation={} policy={terminal:?} reason={detail:?} service=remain-enabled-for-other-messages proof=not-sent",
+                event_id.slot().get(),
+                event_id.generation().get(),
+            );
+        }
+        LxmfTerminalReject::Unrelated
+        | LxmfTerminalReject::CandidateContradiction
+        | LxmfTerminalReject::ProofInvariant => {
+            let disabled = storage.disable_lxmf_service_if_clean();
+            *service_fault_observed = true;
+            lease.quarantine(ApplicationEventQuarantineReason::ConsumerFault);
+            error!(
+                "e290-node stage=lxmf-ingress status=QUARANTINED slot={} generation={} policy={terminal:?} reason={detail:?} service_disabled={disabled} proof=not-sent",
+                event_id.slot().get(),
+                event_id.generation().get(),
+            );
+        }
+    }
 }
 
 fn drive_inbound_candidate(
@@ -1659,6 +2607,29 @@ fn authorized_frame_durability(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn disable_submission_for_path_fault(
+    storage: &mut ProductStorageCoordinator,
+    durability_service: &mut DurabilityServiceState,
+    retained_frame: &Option<AuthorizedFrameObservation>,
+    pending_frame_acknowledgement: &Option<AuthorizedFrameObservation>,
+    supervisor: &mut ProductSupervisor,
+    online: InterfaceDescriptor,
+    fail_closed_draining: &mut bool,
+    trigger: &'static str,
+) {
+    storage.disable_submission_service();
+    let previous = *durability_service;
+    *durability_service = (*durability_service).permanent_failure(authorized_frame_durability(
+        retained_frame,
+        pending_frame_acknowledgement,
+    ));
+    if !previous.is_active_owner_fail_stopped() && durability_service.is_active_owner_fail_stopped()
+    {
+        enter_active_owner_durability_fail_stop(supervisor, online, fail_closed_draining, trigger);
+    }
+}
+
 fn enter_active_owner_durability_fail_stop(
     supervisor: &mut ProductSupervisor,
     online: InterfaceDescriptor,
@@ -1976,7 +2947,7 @@ fn quarantine_terminal_ingress_actions(
                 actions.unroutable_packets,
             );
             debug_assert!(quarantined_actions.is_none());
-            *quarantined_actions = Some((actions, admission));
+            *quarantined_actions = Some(RetainedActions::ordinary(actions, admission));
             true
         }
         None => {
@@ -1998,7 +2969,7 @@ fn handle_action_offer_failure(
     let (actions, admission) = failure.into_parts();
     match config::ordinary_offer_disposition(reason) {
         config::OrdinaryOfferDisposition::RetryBusy => {
-            ActionOfferHandling::Retry((actions, admission))
+            ActionOfferHandling::Retry(RetainedActions::ordinary(actions, admission))
         }
         config::OrdinaryOfferDisposition::QuarantineAndDrain => {
             error!(
@@ -2007,7 +2978,7 @@ fn handle_action_offer_failure(
                 actions.events.len(),
                 actions.unroutable_packets,
             );
-            ActionOfferHandling::RetainAndDrain((actions, admission))
+            ActionOfferHandling::RetainAndDrain(RetainedActions::ordinary(actions, admission))
         }
     }
 }
@@ -2017,25 +2988,45 @@ fn retry_retained_actions(
     retained: &mut Option<RetainedActions>,
     stage: &'static str,
 ) -> ActionRetryStep {
-    let Some((actions, admission)) = retained.take() else {
+    if retained
+        .as_ref()
+        .and_then(RetainedActions::path_offer)
+        .is_some()
+        && !ordinary_router_is_idle(supervisor)
+    {
+        return ActionRetryStep::Busy;
+    }
+    let Some(owner) = retained.take() else {
         error!(
             "e290-node stage={stage} status=FAIL reason=selected-retry-owner-missing action=fail-closed-drain"
         );
         return ActionRetryStep::Terminal;
     };
+    let (actions, admission, path_offer) = owner.into_parts();
     match supervisor.try_offer_actions(actions, admission) {
-        Ok(()) => ActionRetryStep::Accepted,
+        Ok(()) => ActionRetryStep::Accepted(path_offer),
         Err(failure) => match handle_action_offer_failure(failure, stage) {
             ActionOfferHandling::Retry(owner) => {
-                *retained = Some(owner);
+                *retained = Some(match path_offer {
+                    Some(offer) => owner.with_path_offer(offer),
+                    None => owner,
+                });
                 ActionRetryStep::Busy
             }
             ActionOfferHandling::RetainAndDrain(owner) => {
-                *retained = Some(owner);
+                *retained = Some(match path_offer {
+                    Some(offer) => owner.with_path_offer(offer),
+                    None => owner,
+                });
                 ActionRetryStep::Terminal
             }
         },
     }
+}
+
+fn ordinary_router_is_idle(supervisor: &ProductSupervisor) -> bool {
+    let capacities = supervisor.ordinary_capacities();
+    capacities.active == 0 && supervisor.ordinary_parked_count() == capacities.registered
 }
 
 fn observe_terminal_correlation_fault(

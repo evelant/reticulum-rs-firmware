@@ -53,13 +53,18 @@ pub const E290_NA915_DEV_RAW_SET_TX_PARAMS_DBM: i8 = 22;
 pub const E290_RX_SYMBOL_TIMEOUT: u16 = 248;
 
 /// Minimum non-airtime allowance inside the whole-operation RX watchdog.
-pub const E290_RX_WATCHDOG_MINIMUM_MARGIN_US: u64 = 250_000;
+///
+/// Powered two-node checkpoints observed otherwise healthy receive operations
+/// reach the former 1.5-second bound when flash and protocol work delayed the
+/// cooperative executor. The outer watchdog is destructive by contract, so a
+/// scheduling overrun must not be mistaken for a wedged SX1262 operation.
+pub const E290_RX_WATCHDOG_MINIMUM_MARGIN_US: u64 = 2_000_000;
 
 /// Conservative configuration-bound deadline for one complete receive operation.
 ///
 /// This covers the 248-symbol search, a maximum frame after preamble
 /// detection, SPI/IRQ/standby cleanup and substantial executor margin.
-pub const E290_MAXIMUM_RECEIVE_OPERATION_US: NonZeroU64 = match NonZeroU64::new(1_500_000) {
+pub const E290_MAXIMUM_RECEIVE_OPERATION_US: NonZeroU64 = match NonZeroU64::new(3_000_000) {
     Some(bound) => bound,
     None => panic!("E290 receive watchdog must be non-zero"),
 };
@@ -514,6 +519,28 @@ where
         SoleRnodeRadio::receive_bounded(&mut self.core, buffer)
     }
 
+    fn receive_continuous_until<'a, SchedulerYield, ProgressDeadline>(
+        &'a mut self,
+        buffer: &'a mut [u8; SX1262_FRAME_MTU],
+        scheduler_yield: SchedulerYield,
+        progress_deadline: ProgressDeadline,
+    ) -> impl core::future::Future<Output = Result<BoundedRxOutcome, Self::Fault>> + 'a
+    where
+        SchedulerYield: core::future::Future<Output = ()> + 'a,
+        ProgressDeadline: core::future::Future<Output = ()> + 'a,
+    {
+        SoleRnodeRadio::receive_continuous_until(
+            &mut self.core,
+            buffer,
+            scheduler_yield,
+            progress_deadline,
+        )
+    }
+
+    fn invalidate_receive_session(&mut self) {
+        SoleRnodeRadio::invalidate_receive_session(&mut self.core);
+    }
+
     fn cad(
         &mut self,
     ) -> impl core::future::Future<Output = Result<CadObservation, Self::Fault>> + '_ {
@@ -645,7 +672,32 @@ mod tests {
         }
     }
 
-    struct MockWait;
+    struct MockWait {
+        ready: Rc<Cell<bool>>,
+        ready_budget: Rc<Cell<Option<u8>>>,
+    }
+
+    struct MockWaitControls {
+        ready: Rc<Cell<bool>>,
+        ready_budget: Rc<Cell<Option<u8>>>,
+    }
+
+    impl MockWait {
+        fn new(ready: bool) -> (Self, MockWaitControls) {
+            let ready = Rc::new(Cell::new(ready));
+            let ready_budget = Rc::new(Cell::new(None));
+            (
+                Self {
+                    ready: ready.clone(),
+                    ready_budget: ready_budget.clone(),
+                },
+                MockWaitControls {
+                    ready,
+                    ready_budget,
+                },
+            )
+        }
+    }
 
     impl ErrorType for MockWait {
         type Error = core::convert::Infallible;
@@ -653,7 +705,17 @@ mod tests {
 
     impl Wait for MockWait {
         async fn wait_for_high(&mut self) -> Result<(), Self::Error> {
-            Ok(())
+            if let Some(remaining) = self.ready_budget.get() {
+                if remaining == 0 {
+                    return core::future::pending().await;
+                }
+                self.ready_budget.set(Some(remaining - 1));
+                Ok(())
+            } else if self.ready.get() {
+                Ok(())
+            } else {
+                core::future::pending().await
+            }
         }
 
         async fn wait_for_low(&mut self) -> Result<(), Self::Error> {
@@ -696,9 +758,10 @@ mod tests {
         cad_pending: bool,
         rx_success: Rc<Cell<bool>>,
         rx_timeout: Rc<Cell<bool>>,
-        rx_preamble_pending: bool,
-        rx_done_pending: bool,
-        rx_timeout_pending: bool,
+        rx_preamble_pending: Rc<Cell<bool>>,
+        rx_done_pending: Rc<Cell<bool>>,
+        rx_timeout_pending: Rc<Cell<bool>>,
+        rx_payload: Rc<RefCell<Vec<u8>>>,
         fail_opcode: Rc<Cell<Option<u8>>>,
         fail_set_tx_number: Rc<Cell<u8>>,
         set_tx_count: u8,
@@ -709,6 +772,8 @@ mod tests {
         cad_activity: Rc<Cell<bool>>,
         rx_success: Rc<Cell<bool>>,
         rx_timeout: Rc<Cell<bool>>,
+        rx_preamble_pending: Rc<Cell<bool>>,
+        rx_payload: Rc<RefCell<Vec<u8>>>,
         fail_opcode: Rc<Cell<Option<u8>>>,
         fail_set_tx_number: Rc<Cell<u8>>,
     }
@@ -719,6 +784,10 @@ mod tests {
             let cad_activity = Rc::new(Cell::new(false));
             let rx_success = Rc::new(Cell::new(false));
             let rx_timeout = Rc::new(Cell::new(false));
+            let rx_preamble_pending = Rc::new(Cell::new(false));
+            let rx_done_pending = Rc::new(Cell::new(false));
+            let rx_timeout_pending = Rc::new(Cell::new(false));
+            let rx_payload = Rc::new(RefCell::new(Vec::from([0xa1, 0xb2, 0xc3])));
             let fail_opcode = Rc::new(Cell::new(None));
             let fail_set_tx_number = Rc::new(Cell::new(0));
             (
@@ -728,9 +797,10 @@ mod tests {
                     cad_pending: false,
                     rx_success: rx_success.clone(),
                     rx_timeout: rx_timeout.clone(),
-                    rx_preamble_pending: false,
-                    rx_done_pending: false,
-                    rx_timeout_pending: false,
+                    rx_preamble_pending: rx_preamble_pending.clone(),
+                    rx_done_pending,
+                    rx_timeout_pending,
+                    rx_payload: rx_payload.clone(),
                     fail_opcode: fail_opcode.clone(),
                     fail_set_tx_number: fail_set_tx_number.clone(),
                     set_tx_count: 0,
@@ -740,6 +810,8 @@ mod tests {
                     cad_activity,
                     rx_success,
                     rx_timeout,
+                    rx_preamble_pending,
+                    rx_payload,
                     fail_opcode,
                     fail_set_tx_number,
                 },
@@ -782,9 +854,9 @@ mod tests {
             }
             if opcode == Some(0x82) {
                 if self.rx_success.get() {
-                    self.rx_preamble_pending = true;
+                    self.rx_preamble_pending.set(true);
                 } else if self.rx_timeout.get() {
-                    self.rx_timeout_pending = true;
+                    self.rx_timeout_pending.set(true);
                 }
             }
 
@@ -796,15 +868,15 @@ mod tests {
                 } else {
                     0x0080_u16
                 }
-            } else if is_irq && self.rx_preamble_pending {
-                self.rx_preamble_pending = false;
-                self.rx_done_pending = true;
+            } else if is_irq && self.rx_preamble_pending.get() {
+                self.rx_preamble_pending.set(false);
+                self.rx_done_pending.set(true);
                 0x0004_u16
-            } else if is_irq && self.rx_done_pending {
-                self.rx_done_pending = false;
+            } else if is_irq && self.rx_done_pending.get() {
+                self.rx_done_pending.set(false);
                 0x0002_u16
-            } else if is_irq && self.rx_timeout_pending {
-                self.rx_timeout_pending = false;
+            } else if is_irq && self.rx_timeout_pending.get() {
+                self.rx_timeout_pending.set(false);
                 0x0200_u16
             } else {
                 0x0001_u16
@@ -818,11 +890,12 @@ mod tests {
                         bytes[0] = (irq >> 8) as u8;
                         bytes[1] = irq as u8;
                     } else if opcode == Some(0x13) && read_index == 1 && bytes.len() >= 2 {
-                        bytes[0] = 3;
+                        bytes[0] = self.rx_payload.borrow().len() as u8;
                         bytes[1] = 0;
                     } else if opcode == Some(0x1e) {
-                        for (output, input) in bytes.iter_mut().zip([0xa1, 0xb2, 0xc3]) {
-                            *output = input;
+                        for (output, input) in bytes.iter_mut().zip(self.rx_payload.borrow().iter())
+                        {
+                            *output = *input;
                         }
                     } else if opcode == Some(0x14) && read_index == 1 && bytes.len() >= 3 {
                         bytes[0] = 100;
@@ -843,17 +916,21 @@ mod tests {
         controls: MockSpiControls,
         reset: PinProbe,
         reset_events: Rc<RefCell<Vec<bool>>>,
+        dio_ready: Rc<Cell<bool>>,
+        dio_ready_budget: Rc<Cell<Option<u8>>>,
     }
 
     fn build_radio() -> TestRig {
         let (spi, controls) = MockSpi::new();
         let (reset, reset_probe, reset_events, _) = MockOutput::new(PinState::High);
+        let (dio1, dio_controls) = MockWait::new(true);
+        let (busy, _) = MockWait::new(true);
         let timestamps = Box::leak(Box::new(IrqTimestampCapture::new_monotonic_us(stepped_us)));
         let radio = block_on(E290Radio::new(
             spi,
             reset,
-            MockWait,
-            MockWait,
+            dio1,
+            busy,
             NoopDelay,
             timestamps,
             E290_NA915_DEV_CONFIGURATION,
@@ -864,6 +941,8 @@ mod tests {
             controls,
             reset: reset_probe,
             reset_events,
+            dio_ready: dio_controls.ready,
+            dio_ready_budget: dio_controls.ready_budget,
         }
     }
 
@@ -911,6 +990,10 @@ mod tests {
             .saturating_add(profile.maximum_frame_time_on_air_us())
             .saturating_add(E290_RX_WATCHDOG_MINIMUM_MARGIN_US);
         assert!(configuration.maximum_receive_operation_us().get() >= required_us);
+        assert_eq!(
+            configuration.maximum_receive_operation_us().get(),
+            3_000_000
+        );
     }
 
     #[test]
@@ -920,6 +1003,7 @@ mod tests {
             controls,
             reset,
             reset_events,
+            ..
         } = build_radio();
         assert!(radio.is_active());
         assert!(reset.is_high());
@@ -1098,6 +1182,408 @@ mod tests {
     }
 
     #[test]
+    fn continuous_rx_reads_two_frames_after_one_set_rx_and_quiesces_before_cad() {
+        let TestRig {
+            mut radio,
+            controls,
+            reset,
+            dio_ready,
+            ..
+        } = build_radio();
+        controls.commands.borrow_mut().clear();
+        controls.rx_success.set(true);
+        CLOCK_US.with(|clock| clock.set(500));
+        let mut buffer = [0_u8; SX1262_FRAME_MTU];
+
+        let first = block_on(SoleRnodeRadio::receive_continuous_until(
+            &mut radio,
+            &mut buffer,
+            core::future::ready(()),
+            core::future::pending(),
+        ))
+        .unwrap();
+        let BoundedRxOutcome::Frame(first) = first else {
+            panic!("first frame must complete")
+        };
+        assert_eq!(first.received_at_us(), 502);
+
+        controls.rx_preamble_pending.set(true);
+        let second = block_on(SoleRnodeRadio::receive_continuous_until(
+            &mut radio,
+            &mut buffer,
+            core::future::ready(()),
+            core::future::pending(),
+        ))
+        .unwrap();
+        let BoundedRxOutcome::Frame(second) = second else {
+            panic!("second frame must complete")
+        };
+        assert_eq!(second.received_at_us(), 504);
+
+        {
+            let commands = controls.commands.borrow();
+            assert_eq!(
+                commands
+                    .iter()
+                    .filter(|command| command.as_slice() == [0x82, 0xff, 0xff, 0xff])
+                    .count(),
+                1
+            );
+            assert_eq!(
+                commands
+                    .iter()
+                    .filter(|command| command.first() == Some(&0x1e))
+                    .count(),
+                2
+            );
+            assert!(
+                !commands
+                    .iter()
+                    .any(|command| command.first() == Some(&0x80))
+            );
+        }
+
+        let _ = block_on(SoleRnodeRadio::cad(&mut radio)).unwrap();
+        let commands = controls.commands.borrow();
+        let standby = command_index(&commands, &[0x80, 0x00]);
+        let disable_irq = command_index(&commands, &[0x08, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let clear_irq = command_index(&commands, &[0x02, 0xff, 0xff]);
+        let cad = command_index(&commands, &[0xc5]);
+        assert!(standby < disable_irq && disable_irq < clear_irq && clear_irq < cad);
+        drop(commands);
+
+        controls.commands.borrow_mut().clear();
+        dio_ready.set(false);
+        assert_eq!(
+            block_on(SoleRnodeRadio::receive_continuous_until(
+                &mut radio,
+                &mut buffer,
+                core::future::ready(()),
+                core::future::pending(),
+            ))
+            .unwrap(),
+            BoundedRxOutcome::SchedulerYield
+        );
+        let mut first_output = [0_u8; SX1262_FRAME_MTU];
+        let mut second_output = [0_u8; SX1262_FRAME_MTU];
+        let frames = reticulum_radio_interface::frame_rns_packet(
+            b"continuous-to-tx",
+            3,
+            &mut first_output,
+            &mut second_output,
+        )
+        .unwrap();
+        dio_ready.set(true);
+        let _ = block_on(SoleRnodeRadio::transmit(&mut radio, frames)).unwrap();
+        let commands = controls.commands.borrow();
+        let standby = command_index(&commands, &[0x80, 0x00]);
+        let disable_irq = command_index(&commands, &[0x08, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let clear_irq = command_index(&commands, &[0x02, 0xff, 0xff]);
+        let tx = command_index(&commands, &[0x83, 0, 0, 0]);
+        assert!(standby < disable_irq && disable_irq < clear_irq && clear_irq < tx);
+        assert!(radio.is_active());
+        assert!(reset.is_high());
+    }
+
+    #[test]
+    fn split_rnode_packet_reassembles_while_continuous_rx_stays_armed() {
+        let TestRig {
+            mut radio,
+            controls,
+            reset,
+            dio_ready,
+            ..
+        } = build_radio();
+        controls.commands.borrow_mut().clear();
+        controls.rx_success.set(true);
+        let packet = [0x5a_u8; 307];
+        let mut first_output = [0_u8; SX1262_FRAME_MTU];
+        let mut second_output = [0_u8; SX1262_FRAME_MTU];
+        let frames = reticulum_radio_interface::frame_rns_packet(
+            &packet,
+            9,
+            &mut first_output,
+            &mut second_output,
+        )
+        .unwrap();
+        assert_eq!(frames.first().len(), 255);
+        assert_eq!(frames.second().map(<[u8]>::len), Some(54));
+
+        let mut receiver =
+            reticulum_radio_interface::TimedRnodeRx::new(NonZeroU64::new(6_000_000).unwrap());
+        let mut physical = [0_u8; SX1262_FRAME_MTU];
+        let mut native = [0_u8; reticulum_radio_interface::RNODE_HW_MTU];
+
+        controls
+            .rx_payload
+            .borrow_mut()
+            .clone_from(&frames.first().to_vec());
+        let BoundedRxOutcome::Frame(first) = block_on(SoleRnodeRadio::receive_continuous_until(
+            &mut radio,
+            &mut physical,
+            core::future::pending(),
+            core::future::pending(),
+        ))
+        .unwrap() else {
+            panic!("first split frame must be received")
+        };
+        assert!(matches!(
+            receiver
+                .feed(
+                    first.payload(&physical).unwrap(),
+                    first.received_at_us(),
+                    first.signal(),
+                    &mut native,
+                )
+                .unwrap(),
+            reticulum_radio_interface::TimedReceiveOutcome::AwaitingContinuation {
+                data_len: 254,
+                ..
+            }
+        ));
+
+        dio_ready.set(false);
+        assert_eq!(
+            block_on(SoleRnodeRadio::receive_continuous_until(
+                &mut radio,
+                &mut physical,
+                core::future::ready(()),
+                core::future::pending(),
+            ))
+            .unwrap(),
+            BoundedRxOutcome::SchedulerYield
+        );
+        assert!(receiver.pending().is_some());
+        dio_ready.set(true);
+
+        controls
+            .rx_payload
+            .borrow_mut()
+            .clone_from(&frames.second().unwrap().to_vec());
+        controls.rx_preamble_pending.set(true);
+        let BoundedRxOutcome::Frame(second) = block_on(SoleRnodeRadio::receive_continuous_until(
+            &mut radio,
+            &mut physical,
+            core::future::pending(),
+            core::future::pending(),
+        ))
+        .unwrap() else {
+            panic!("split continuation must be received")
+        };
+        assert!(matches!(
+            receiver
+                .feed(
+                    second.payload(&physical).unwrap(),
+                    second.received_at_us(),
+                    second.signal(),
+                    &mut native,
+                )
+                .unwrap(),
+            reticulum_radio_interface::TimedReceiveOutcome::Packet {
+                packet_len: 307,
+                discarded_pending: false,
+                ..
+            }
+        ));
+        assert_eq!(&native[..packet.len()], &packet);
+        let diagnostics = receiver.diagnostics();
+        assert_eq!(diagnostics.frames_seen, 2);
+        assert_eq!(diagnostics.pending_started, 1);
+        assert_eq!(diagnostics.packets_accepted, 1);
+
+        let commands = controls.commands.borrow();
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| command.as_slice() == [0x82, 0xff, 0xff, 0xff])
+                .count(),
+            1
+        );
+        assert!(
+            !commands
+                .iter()
+                .any(|command| command.first() == Some(&0x80))
+        );
+        assert!(radio.is_active());
+        assert!(reset.is_high());
+    }
+
+    #[test]
+    fn scheduler_yield_cancels_only_dio_wait_and_does_not_rearm_continuous_rx() {
+        let TestRig {
+            mut radio,
+            controls,
+            reset,
+            dio_ready,
+            ..
+        } = build_radio();
+        controls.commands.borrow_mut().clear();
+        dio_ready.set(false);
+        let mut buffer = [0_u8; SX1262_FRAME_MTU];
+
+        for _ in 0..2 {
+            assert_eq!(
+                block_on(SoleRnodeRadio::receive_continuous_until(
+                    &mut radio,
+                    &mut buffer,
+                    core::future::ready(()),
+                    core::future::pending(),
+                ))
+                .unwrap(),
+                BoundedRxOutcome::SchedulerYield
+            );
+            assert!(radio.is_active());
+            assert!(reset.is_high());
+        }
+
+        {
+            let commands = controls.commands.borrow();
+            assert_eq!(
+                commands
+                    .iter()
+                    .filter(|command| command.as_slice() == [0x82, 0xff, 0xff, 0xff])
+                    .count(),
+                1
+            );
+            assert!(
+                !commands
+                    .iter()
+                    .any(|command| command.first() == Some(&0x80))
+            );
+        }
+
+        SoleRnodeRadio::invalidate_receive_session(&mut radio);
+        assert_eq!(
+            block_on(SoleRnodeRadio::receive_continuous_until(
+                &mut radio,
+                &mut buffer,
+                core::future::ready(()),
+                core::future::pending(),
+            ))
+            .unwrap(),
+            BoundedRxOutcome::SchedulerYield
+        );
+        let commands = controls.commands.borrow();
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| command.as_slice() == [0x82, 0xff, 0xff, 0xff])
+                .count(),
+            2
+        );
+        let standby = command_index(&commands, &[0x80, 0x00]);
+        let disable_irq = command_index(&commands, &[0x08, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let clear_irq = command_index(&commands, &[0x02, 0xff, 0xff]);
+        assert!(standby < disable_irq && disable_irq < clear_irq);
+    }
+
+    #[test]
+    fn stalled_preamble_deadline_rearms_continuous_rx_and_later_frame_succeeds() {
+        let TestRig {
+            mut radio,
+            controls,
+            reset,
+            dio_ready_budget,
+            ..
+        } = build_radio();
+        controls.commands.borrow_mut().clear();
+        controls.rx_success.set(true);
+        dio_ready_budget.set(Some(1));
+        let mut buffer = [0_u8; SX1262_FRAME_MTU];
+
+        assert_eq!(
+            block_on(SoleRnodeRadio::receive_continuous_until(
+                &mut radio,
+                &mut buffer,
+                core::future::pending(),
+                core::future::ready(()),
+            ))
+            .unwrap(),
+            BoundedRxOutcome::InvalidFrame
+        );
+        assert!(radio.is_active());
+        assert!(reset.is_high());
+
+        dio_ready_budget.set(None);
+        assert!(matches!(
+            block_on(SoleRnodeRadio::receive_continuous_until(
+                &mut radio,
+                &mut buffer,
+                core::future::pending(),
+                core::future::pending(),
+            ))
+            .unwrap(),
+            BoundedRxOutcome::Frame(_)
+        ));
+
+        let commands = controls.commands.borrow();
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| command.as_slice() == [0x82, 0xff, 0xff, 0xff])
+                .count(),
+            2
+        );
+        assert!(
+            !commands
+                .iter()
+                .any(|command| command.first() == Some(&0x80))
+        );
+    }
+
+    #[test]
+    fn invalid_continuous_frame_is_discarded_without_standby_or_rearm() {
+        let TestRig {
+            mut radio,
+            controls,
+            reset,
+            ..
+        } = build_radio();
+        controls.commands.borrow_mut().clear();
+        controls.rx_timeout.set(true);
+        let mut buffer = [0_u8; SX1262_FRAME_MTU];
+
+        assert_eq!(
+            block_on(SoleRnodeRadio::receive_continuous_until(
+                &mut radio,
+                &mut buffer,
+                core::future::pending(),
+                core::future::pending(),
+            ))
+            .unwrap(),
+            BoundedRxOutcome::InvalidFrame
+        );
+        controls.rx_timeout.set(false);
+        controls.rx_preamble_pending.set(true);
+        assert!(matches!(
+            block_on(SoleRnodeRadio::receive_continuous_until(
+                &mut radio,
+                &mut buffer,
+                core::future::pending(),
+                core::future::pending(),
+            ))
+            .unwrap(),
+            BoundedRxOutcome::Frame(_)
+        ));
+
+        let commands = controls.commands.borrow();
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| command.as_slice() == [0x82, 0xff, 0xff, 0xff])
+                .count(),
+            1
+        );
+        assert!(
+            !commands
+                .iter()
+                .any(|command| command.first() == Some(&0x80))
+        );
+        assert!(radio.is_active());
+        assert!(reset.is_high());
+    }
+
+    #[test]
     fn cancellation_and_spi_fault_assert_reset_and_quarantine_owner() {
         let TestRig {
             mut radio, reset, ..
@@ -1127,12 +1613,14 @@ mod tests {
         let (spi, _) = MockSpi::new();
         let (reset, reset_probe, _, fail_high) = MockOutput::new(PinState::High);
         fail_high.set(true);
+        let (dio1, _) = MockWait::new(true);
+        let (busy, _) = MockWait::new(true);
         let timestamps = Box::leak(Box::new(IrqTimestampCapture::new_monotonic_us(stepped_us)));
         let result = block_on(E290Radio::new(
             spi,
             reset,
-            MockWait,
-            MockWait,
+            dio1,
+            busy,
             NoopDelay,
             timestamps,
             E290_NA915_DEV_CONFIGURATION,

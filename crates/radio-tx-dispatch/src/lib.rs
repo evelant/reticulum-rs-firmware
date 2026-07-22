@@ -573,8 +573,10 @@ pub enum RadioOperationStep {
 pub enum RadioReceiveStep {
     /// A validated physical-frame observation accompanies bytes in the caller buffer.
     Frame(BoundedRxObservation),
-    /// The configured symbol timeout expired before preamble detection.
-    NoPreambleTimeout,
+    /// The scheduler's bounded RX service interval elapsed with no locked frame.
+    SchedulerYield,
+    /// A corrupt or timed-out physical frame was discarded while RX stayed armed.
+    InvalidFrame,
     /// An already-active TX owner excludes starting RX on the sole radio.
     TxPriority(RadioTxDispatcherPhase),
     /// A previously started receive future was dropped and requires recovery.
@@ -1087,6 +1089,10 @@ where
         self.radio.maximum_receive_operation_us()
     }
 
+    fn invalidate_receive_session(&mut self) {
+        self.radio.invalidate_receive_session();
+    }
+
     /// Current high-level phase without exposing either typestate family.
     pub fn phase(&self) -> RadioTxDispatcherPhase {
         match self.receive_state {
@@ -1296,6 +1302,7 @@ where
         }
 
         if let Some(job) = self.tx_handoff.try_receive_job() {
+            self.invalidate_receive_session();
             return self.start_interface_job(job, now_us);
         }
         RadioTxDispatcherStep::NeedJob
@@ -2261,20 +2268,30 @@ where
     ///
     /// Calling this method is an explicit scheduler decision to service RX.
     /// Jobs already waiting in the actor queue remain queued and unchanged;
-    /// the scheduler can run a bounded receive and then call [`Self::step`] or
+    /// the scheduler can wait in persistent continuous RX until the supplied
+    /// yield future completes, then call [`Self::step`] or
     /// [`Self::wait_for_job`] to select TX. On success RX is marked in flight
     /// before the adapter future is constructed. Consequently, dropping the
     /// returned future without polling it still leaves a persistent recovery
     /// obligation and invokes the adapter's unpolled-cancellation containment.
     ///
-    /// The returned future must run to a frame or normal no-preamble timeout.
-    /// If a supervisor applies a whole-operation watchdog after preamble
-    /// detection, dropping the future is terminal cancellation and must be
-    /// followed by [`Self::recover_cancelled_radio_operation`].
-    pub fn start_receive<'a>(
+    /// The returned future must run to a frame, invalid-frame terminal, or
+    /// normal scheduler yield. The separate progress-deadline future is polled
+    /// only after receive progress and recovers a latched false preamble by
+    /// rearming RX; it is not a scheduler/ TX-selection wake. If a supervisor
+    /// applies a whole-operation watchdog after preamble detection, dropping
+    /// the future is terminal cancellation and must be followed by
+    /// [`Self::recover_cancelled_radio_operation`].
+    pub fn start_continuous_receive_until<'a, SchedulerYield, ProgressDeadline>(
         &'a mut self,
         buffer: &'a mut [u8; SX1262_FRAME_MTU],
-    ) -> Result<impl core::future::Future<Output = RadioReceiveStep> + 'a, RadioReceiveStep> {
+        scheduler_yield: SchedulerYield,
+        progress_deadline: ProgressDeadline,
+    ) -> Result<impl core::future::Future<Output = RadioReceiveStep> + 'a, RadioReceiveStep>
+    where
+        SchedulerYield: core::future::Future<Output = ()> + 'a,
+        ProgressDeadline: core::future::Future<Output = ()> + 'a,
+    {
         match self.receive_state {
             ReceiveState::InFlight => {
                 return Err(RadioReceiveStep::CancelledFutureNeedsRecovery);
@@ -2305,7 +2322,10 @@ where
         let mut guard = ReceiveCancellationGuard::new(&mut self.radio);
 
         Ok(async move {
-            let result = guard.radio.receive_bounded(buffer).await;
+            let result = guard
+                .radio
+                .receive_continuous_until(buffer, scheduler_yield, progress_deadline)
+                .await;
             let step = match result {
                 Ok(BoundedRxOutcome::Frame(observation)) => {
                     if observation.len() > SX1262_FRAME_MTU {
@@ -2323,14 +2343,24 @@ where
                         RadioReceiveStep::Frame(observation)
                     }
                 }
-                Ok(BoundedRxOutcome::NoPreambleTimeout) => {
+                Ok(BoundedRxOutcome::NoPreambleTimeout | BoundedRxOutcome::SchedulerYield) => {
                     if !guard.radio.is_active() {
                         *receive_state = ReceiveState::Disabled(DispatcherFault::RadioUnavailable);
                         RadioReceiveStep::Disabled(DispatcherFault::RadioUnavailable)
                     } else {
                         guard.preserve_active();
                         *receive_state = ReceiveState::Idle;
-                        RadioReceiveStep::NoPreambleTimeout
+                        RadioReceiveStep::SchedulerYield
+                    }
+                }
+                Ok(BoundedRxOutcome::InvalidFrame) => {
+                    if !guard.radio.is_active() {
+                        *receive_state = ReceiveState::Disabled(DispatcherFault::RadioUnavailable);
+                        RadioReceiveStep::Disabled(DispatcherFault::RadioUnavailable)
+                    } else {
+                        guard.preserve_active();
+                        *receive_state = ReceiveState::Idle;
+                        RadioReceiveStep::InvalidFrame
                     }
                 }
                 Err(fault) => {
@@ -3265,6 +3295,7 @@ where
             return self.disable_stray_ticket();
         }
         let interface_job = self.tx_handoff.receive_job().await;
+        self.invalidate_receive_session();
         self.accept_interface_job(interface_job, None)
     }
 
@@ -4058,6 +4089,7 @@ mod tests {
         rx: VecDeque<RxScript>,
         captured: Vec<CapturedPacket>,
         maximum_receive_operation_us: core::num::NonZeroU64,
+        receive_session_invalidations: usize,
     }
 
     impl MockRadio {
@@ -4071,6 +4103,7 @@ mod tests {
                 rx: VecDeque::new(),
                 captured: Vec::new(),
                 maximum_receive_operation_us: core::num::NonZeroU64::new(1_500_000).unwrap(),
+                receive_session_invalidations: 0,
             }
         }
 
@@ -4242,6 +4275,28 @@ mod tests {
                 buffer,
                 complete: false,
             }
+        }
+
+        fn receive_continuous_until<'a, SchedulerYield, ProgressDeadline>(
+            &'a mut self,
+            buffer: &'a mut [u8; SX1262_FRAME_MTU],
+            _scheduler_yield: SchedulerYield,
+            _progress_deadline: ProgressDeadline,
+        ) -> impl Future<Output = Result<BoundedRxOutcome, Self::Fault>> + 'a
+        where
+            SchedulerYield: Future<Output = ()> + 'a,
+            ProgressDeadline: Future<Output = ()> + 'a,
+        {
+            self.active = false;
+            MockRxFuture {
+                radio: self,
+                buffer,
+                complete: false,
+            }
+        }
+
+        fn invalidate_receive_session(&mut self) {
+            self.receive_session_invalidations += 1;
         }
 
         fn cad(&mut self) -> impl Future<Output = Result<CadObservation, Self::Fault>> + '_ {
@@ -4879,7 +4934,11 @@ mod tests {
             .push_back(RxScript::NoPreambleTimeout);
         let mut rx_buffer = [0; SX1262_FRAME_MTU];
         assert!(matches!(
-            dispatcher.inner.start_receive(&mut rx_buffer),
+            dispatcher.inner.start_continuous_receive_until(
+                &mut rx_buffer,
+                core::future::pending(),
+                core::future::pending(),
+            ),
             Err(RadioReceiveStep::TxPriority(
                 RadioTxDispatcherPhase::AuthorizedFrameAcknowledgementWait
             ))
@@ -5250,6 +5309,7 @@ mod tests {
         route_ordinary(&mut router, job);
 
         assert_eq!(dispatcher.step(1_000_000), RadioTxDispatcherStep::Advanced);
+        assert_eq!(dispatcher.radio().receive_session_invalidations, 1);
         assert_eq!(
             dispatcher.last_report().map(DispatchReport::outcome),
             Some(DispatchOutcome::InterfaceConfigurationMismatch {
@@ -5707,6 +5767,7 @@ mod tests {
         );
         route_data(&mut router, job);
         assert_eq!(dispatcher.step(1_000_000), RadioTxDispatcherStep::Advanced);
+        assert_eq!(dispatcher.radio().receive_session_invalidations, 1);
         assert!(matches!(
             dispatcher.step(1_000_050),
             RadioTxDispatcherStep::NeedCad(DispatchFamily::Data)
@@ -7196,15 +7257,23 @@ mod tests {
         assert_eq!(dispatcher.maximum_receive_operation_us().get(), 1_500_000);
 
         let timeout = dispatcher
-            .start_receive(&mut buffer)
+            .start_continuous_receive_until(
+                &mut buffer,
+                core::future::pending(),
+                core::future::pending(),
+            )
             .unwrap_or_else(|step| panic!("RX did not start: {step:?}"));
-        assert_eq!(block_on(timeout), RadioReceiveStep::NoPreambleTimeout);
+        assert_eq!(block_on(timeout), RadioReceiveStep::SchedulerYield);
         assert_eq!(buffer, [0xa5; SX1262_FRAME_MTU]);
         assert_eq!(dispatcher.phase(), RadioTxDispatcherPhase::Idle);
         assert!(dispatcher.radio().is_active());
 
         let receive = dispatcher
-            .start_receive(&mut buffer)
+            .start_continuous_receive_until(
+                &mut buffer,
+                core::future::pending(),
+                core::future::pending(),
+            )
             .unwrap_or_else(|step| panic!("second RX did not start: {step:?}"));
         let observation = match block_on(receive) {
             RadioReceiveStep::Frame(observation) => observation,
@@ -7221,7 +7290,11 @@ mod tests {
         );
 
         let maximum = dispatcher
-            .start_receive(&mut buffer)
+            .start_continuous_receive_until(
+                &mut buffer,
+                core::future::pending(),
+                core::future::pending(),
+            )
             .unwrap_or_else(|step| panic!("maximum-length RX did not start: {step:?}"));
         let maximum = match block_on(maximum) {
             RadioReceiveStep::Frame(observation) => observation,
@@ -7233,7 +7306,11 @@ mod tests {
 
         let before_zero = buffer;
         let zero = dispatcher
-            .start_receive(&mut buffer)
+            .start_continuous_receive_until(
+                &mut buffer,
+                core::future::pending(),
+                core::future::pending(),
+            )
             .unwrap_or_else(|step| panic!("zero-length RX did not start: {step:?}"));
         let zero = match block_on(zero) {
             RadioReceiveStep::Frame(observation) => observation,
@@ -7282,9 +7359,13 @@ mod tests {
         let mut rx_buffer = [0; SX1262_FRAME_MTU];
 
         let receive = dispatcher
-            .start_receive(&mut rx_buffer)
+            .start_continuous_receive_until(
+                &mut rx_buffer,
+                core::future::pending(),
+                core::future::pending(),
+            )
             .unwrap_or_else(|step| panic!("scheduler-selected RX did not start: {step:?}"));
-        assert_eq!(block_on(receive), RadioReceiveStep::NoPreambleTimeout);
+        assert_eq!(block_on(receive), RadioReceiveStep::SchedulerYield);
         assert_eq!(dispatcher.phase(), RadioTxDispatcherPhase::Idle);
         assert_eq!(dispatcher.step(1_000_000), RadioTxDispatcherStep::Advanced);
         assert_eq!(
@@ -7293,7 +7374,11 @@ mod tests {
         );
         assert!(dispatcher.radio().is_active());
         assert!(matches!(
-            dispatcher.start_receive(&mut rx_buffer),
+            dispatcher.start_continuous_receive_until(
+                &mut rx_buffer,
+                core::future::pending(),
+                core::future::pending(),
+            ),
             Err(RadioReceiveStep::TxPriority(
                 RadioTxDispatcherPhase::BackingOff(DispatchFamily::Data)
             ))
@@ -7322,9 +7407,13 @@ mod tests {
         let mut rx_buffer = [0; SX1262_FRAME_MTU];
 
         let receive = dispatcher
-            .start_receive(&mut rx_buffer)
+            .start_continuous_receive_until(
+                &mut rx_buffer,
+                core::future::pending(),
+                core::future::pending(),
+            )
             .unwrap_or_else(|step| panic!("scheduler-selected RX did not start: {step:?}"));
-        assert_eq!(block_on(receive), RadioReceiveStep::NoPreambleTimeout);
+        assert_eq!(block_on(receive), RadioReceiveStep::SchedulerYield);
         assert_eq!(dispatcher.phase(), RadioTxDispatcherPhase::Idle);
         assert_eq!(dispatcher.step(1_000_000), RadioTxDispatcherStep::Advanced);
         assert_eq!(
@@ -7339,7 +7428,11 @@ mod tests {
         let mut dispatcher = dispatcher_with_rx(vec![RxScript::Pending]);
         let mut buffer = [0; SX1262_FRAME_MTU];
         let receive = dispatcher
-            .start_receive(&mut buffer)
+            .start_continuous_receive_until(
+                &mut buffer,
+                core::future::pending(),
+                core::future::pending(),
+            )
             .unwrap_or_else(|step| panic!("RX did not start: {step:?}"));
         drop(receive);
 
@@ -7415,7 +7508,11 @@ mod tests {
         {
             let mut receive = pin!(
                 dispatcher
-                    .start_receive(&mut rx_buffer)
+                    .start_continuous_receive_until(
+                        &mut rx_buffer,
+                        core::future::pending(),
+                        core::future::pending(),
+                    )
                     .unwrap_or_else(|step| panic!("RX did not start: {step:?}"))
             );
             let mut context = Context::from_waker(Waker::noop());
@@ -7456,7 +7553,11 @@ mod tests {
         let mut dispatcher = dispatcher_with_rx(vec![RxScript::Fault]);
         let mut buffer = [0; SX1262_FRAME_MTU];
         let receive = dispatcher
-            .start_receive(&mut buffer)
+            .start_continuous_receive_until(
+                &mut buffer,
+                core::future::pending(),
+                core::future::pending(),
+            )
             .unwrap_or_else(|step| panic!("RX did not start: {step:?}"));
         let expected = RadioReceiveStep::Fault {
             phase: SoleRadioFaultPhase::Receive,
@@ -7483,7 +7584,11 @@ mod tests {
         }]);
         let mut buffer = [0; SX1262_FRAME_MTU];
         let receive = dispatcher
-            .start_receive(&mut buffer)
+            .start_continuous_receive_until(
+                &mut buffer,
+                core::future::pending(),
+                core::future::pending(),
+            )
             .unwrap_or_else(|step| panic!("RX did not start: {step:?}"));
         let expected = RadioReceiveStep::InvalidObservation { len: invalid_len };
         assert_eq!(block_on(receive), expected);

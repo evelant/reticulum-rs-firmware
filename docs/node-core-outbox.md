@@ -17,8 +17,8 @@ The preceding `14c7b4955a1ff6903e87cc40b42498f7869b6f4f` pin had host and
 portable-target LRRTT validation and a build-only E290 package. Its 776,464-byte
 merged image uses 710,928/6,291,456 application bytes (11.30%) and has SHA-256
 `7b11c6f6a3c039d46ab0117fd362920aaa40145e7f27cbc6fa0a8a84a7ab3571`.
-It has no flashed-image readback or powered proof. The current application-
-event release needs a two-board powered lifecycle/RF run, but its default E290
+It has no flashed-image readback or powered proof. The subsequent pre-PSRAM
+application-event release needed a two-board powered lifecycle/RF run; its default E290
 release is now known: text/data/BSS 684,167/3,676/469,152 bytes (1,156,995 bytes
 total by GNU size), a 789,504-byte merged image using
 723,968/6,291,456 application bytes (11.51%), ELF SHA-256
@@ -26,9 +26,11 @@ total by GNU size), a 789,504-byte merged image using
 merged SHA-256
 `1796f161c480d0348e3d47fd8f3cda5fda5b51aa38ad6024aaad04c8ba1751ce`.
 The merged image matched an exact `3e:88` readback and served an authenticated
-`identity-summary`; `3f:88` did not enumerate. The source-`96e38aa` result above
-and later powered records
-remain bound to the revisions they name.
+`identity-summary`; `3f:88` did not enumerate. These are historical pre-PSRAM
+artifacts. The current post-offload placement evidence and still-open two-board
+LXMF qualification are recorded in the [E290 runbook](e290-node.md#stage-5-psram-boot-checkpoint).
+The source-`96e38aa` result above and later powered records remain bound to the
+revisions they name.
 
 At this pin, native ingress distinguishes exact path/reverse/Link forwarding
 from genuine propagation. `PacketRouting::ExactInterface(id)` maps to the
@@ -627,7 +629,7 @@ cargo +esp check --locked -p reticulum-tx-supervisor \
   --target xtensa-esp32s3-none-elf
 ```
 
-The 69-test node-core host suite covers bounded announce admission/flush,
+The 77-test node-core host suite covers bounded announce admission/flush,
 explicit inbound-proof policy, stable one-time registration, pointer-stable no-
 copy preparation, deadline-before-mutation rejection, empty and deterministic
 multi-interface routes, per-hop generations, exact queue rollback, cumulative
@@ -675,7 +677,7 @@ classification, serialized fan-out, exact requirements/reservation matching,
 one-shot authorized bytes, cumulative transmission history, delayed grants,
 typed cancellation, quarantine, the minimum active deadline, oversize
 validation, owning park failures, exact static-pointer recycling, and unchanged
-DATA capacity. The focused node-core and RF-inert dispatch suites contain 70
+DATA capacity. The focused node-core and RF-inert dispatch suites contain 77
 and 33 tests respectively. The production aggregate, ticket-aware dispatcher
 and E290 radio owner are now linked in the permanent LoRa-first firmware graph;
 the RF-inert machines remain focused regression fixtures.

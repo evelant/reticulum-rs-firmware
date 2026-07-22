@@ -52,8 +52,9 @@ use reticulum_heltec_vision_master_e290_node::credential_runtime::{
 };
 use reticulum_heltec_vision_master_e290_node::cross_store_gate::{
     CredentialPhysicalMutationGate, InboundMailboxMutationGate, JournalMutationGate,
-    JournalProjectionGate, credential_physical_mutation_gate, inbound_mailbox_mutation_gate,
-    journal_mutation_gate as cross_store_journal_mutation_gate, journal_projection_gate,
+    JournalProjectionGate, LxmfMutationGate, credential_physical_mutation_gate,
+    inbound_mailbox_mutation_gate, journal_mutation_gate as cross_store_journal_mutation_gate,
+    journal_projection_gate, lxmf_mutation_gate as cross_store_lxmf_mutation_gate,
 };
 use reticulum_heltec_vision_master_e290_node::partition_contract::{
     ANNOUNCE_CLOCK_LABEL_BYTES, ANNOUNCE_CLOCK_LEN, ANNOUNCE_CLOCK_OFFSET,
@@ -69,12 +70,20 @@ use reticulum_heltec_vision_master_e290_node::runtime_measurement::RETICULUM_RUN
 use reticulum_heltec_vision_master_e290_node::{
     api_credentials_binding, lxmf_store_binding, node_journal_binding, rns_inbox_binding,
 };
+use reticulum_lxmf_durable_ingress::{
+    DurableIngressOutcome, DurableIngressProofMode, commit_application_event,
+};
+use reticulum_lxmf_ingress::{
+    LocalDeliveryDestination, SourceIdentityResolver, StampPolicy, WireLimits,
+};
+use reticulum_lxmf_model::MessageId;
 use reticulum_lxmf_store::{
     BoundLxmfStore, LxmfStoreBinding, LxmfStoreIndexSlot, LxmfStoreMountError, MountedLxmfStore,
     mount as mount_lxmf_store,
 };
 use reticulum_node_core::{
-    AuthorizedFrameObservation, MonotonicMillis, MonotonicSeconds, TxLeaseDeadline,
+    ApplicationEventLease, AuthorizedFrameObservation, DelayedProofOwner, MonotonicMillis,
+    MonotonicSeconds, TxLeaseDeadline,
 };
 use reticulum_nor_flash_region::{PartitionNorFlash, RegionError};
 use reticulum_rns_inbox_store::{
@@ -93,8 +102,8 @@ use reticulum_storage_model::{
     AcceptOutcome, AcceptanceCandidate, LifecycleState, PrincipalId, SubmissionId,
 };
 use reticulum_submission_runtime::{
-    FrameOfferProgress, RecoveryStep, RuntimeControlError, RuntimeError, RuntimeStep,
-    SubmissionNodePort, SubmissionRuntime,
+    FrameOfferProgress, PathDiscoveryAcknowledgeError, PathDiscoveryOffer, RecoveryStep,
+    RuntimeControlError, RuntimeError, RuntimeStep, SubmissionNodePort, SubmissionRuntime,
 };
 
 use crate::config;
@@ -312,7 +321,7 @@ pub(crate) struct ProductStorageCoordinator {
     flash: &'static mut FlashStorage<'static>,
     journal_binding: JournalBinding,
     credential_runtime: CredentialRuntime,
-    runtime: Option<ProductSubmissionRuntime>,
+    runtime: Option<&'static mut ProductSubmissionRuntime>,
     submission_service_enabled: bool,
     inbox: Option<MountedInboxStore>,
     inbox_service_enabled: bool,
@@ -329,7 +338,7 @@ pub(crate) struct ProductStorageCoordinator {
 struct ProductSubmissionPort<'a> {
     flash: &'a mut FlashStorage<'static>,
     journal_binding: JournalBinding,
-    runtime: &'a mut Option<ProductSubmissionRuntime>,
+    runtime: &'a mut Option<&'static mut ProductSubmissionRuntime>,
     submission_service_enabled: bool,
     credential_physical_mutation_outstanding: bool,
     lxmf_mutation_pending: bool,
@@ -404,6 +413,29 @@ pub(crate) enum ProductSubmissionDrive {
     RuntimeUnavailable,
 }
 
+/// Product failure to correlate a dispatched path request with resident
+/// discovery state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProductPathDiscoveryAcknowledgeError {
+    /// Durable submission service no longer has a resident runtime.
+    RuntimeUnavailable,
+    /// The runtime retained a different destination or request ordinal.
+    Runtime(PathDiscoveryAcknowledgeError),
+}
+
+/// Product result of one exact LXMF application-event ownership attempt.
+#[must_use = "a non-durable LXMF result still owns its exact application event"]
+pub(crate) enum ProductLxmfAdmission<'owner, 'slots> {
+    /// Credential mutation owns the shared flash device; retry the exact lease.
+    DeferredForCredentialMutation(ApplicationEventLease<'owner, 'slots>),
+    /// Submission-journal mutation owns the shared flash device; retry the exact lease.
+    DeferredForJournalMutation(ApplicationEventLease<'owner, 'slots>),
+    /// LXMF service is not mounted or has been cleanly closed for this boot.
+    RuntimeUnavailable(ApplicationEventLease<'owner, 'slots>),
+    /// Portable validation, commit, replay, or retained ownership result.
+    Ingress(DurableIngressOutcome<'owner, 'slots, ProductRegionError>),
+}
+
 /// Sole-owner surface invoked by the node-side local pairing-control lane.
 pub(crate) trait ProductCredentialInitializationPort {
     /// Current non-secret resident initialization ownership.
@@ -454,11 +486,12 @@ pub(crate) trait ProductCredentialInitializationPort {
 
 const MAXIMUM_PRODUCT_STORAGE_COORDINATOR_CREDENTIAL_OVERHEAD_BYTES: usize =
     MAXIMUM_CREDENTIAL_RUNTIME_BYTES + 256;
-const MAXIMUM_PRODUCT_STORAGE_COORDINATOR_BYTES: usize = config::MAXIMUM_DURABLE_RUNTIME_BYTES
-    + MAXIMUM_PRODUCT_STORAGE_COORDINATOR_CREDENTIAL_OVERHEAD_BYTES
-    + mem::size_of::<MountedInboxStore>()
-    + mem::size_of::<MountedLxmfStore<'static>>()
-    + 128;
+const MAXIMUM_PRODUCT_STORAGE_COORDINATOR_BYTES: usize =
+    MAXIMUM_PRODUCT_STORAGE_COORDINATOR_CREDENTIAL_OVERHEAD_BYTES
+        + mem::size_of::<MountedInboxStore>()
+        + mem::size_of::<MountedLxmfStore<'static>>()
+        + mem::size_of::<Option<&'static mut ProductSubmissionRuntime>>()
+        + 128;
 const _: () = assert!(
     mem::size_of::<ProductStorageCoordinator>() <= MAXIMUM_PRODUCT_STORAGE_COORDINATOR_BYTES
 );
@@ -689,7 +722,7 @@ impl ProductFlashOwner {
     /// continue without exposing an alias after a journal mount failure.
     pub(crate) fn into_storage_coordinator(
         self,
-        runtime: Option<ProductSubmissionRuntime>,
+        runtime: Option<&'static mut ProductSubmissionRuntime>,
         inbox: Option<MountedInboxStore>,
         lxmf: Option<MountedLxmfStore<'static>>,
         credentials: BootCredentialStore,
@@ -779,8 +812,8 @@ impl ProductStorageCoordinator {
 
     /// Whether the append-only LXMF store mounted into its external index.
     ///
-    /// This reports only mounted storage composition. No LXMF destination or
-    /// application-event admission is enabled by this stage.
+    /// This reports mounted store readiness. `main` uses it later to gate
+    /// construction of the local `lxmf.delivery` destination and admission.
     pub(crate) const fn lxmf_service_available(&self) -> bool {
         self.lxmf_service_enabled && self.lxmf.is_some()
     }
@@ -847,6 +880,38 @@ impl ProductStorageCoordinator {
         self.lxmf
             .as_ref()
             .is_some_and(MountedLxmfStore::has_pending_mutation)
+    }
+
+    fn lxmf_mutation_gate(&self) -> LxmfMutationGate {
+        let (journal_actor_pending, journal_projector_pending) = self.journal_mutation_pending();
+        cross_store_lxmf_mutation_gate(
+            self.lxmf_service_available(),
+            self.credential_runtime
+                .credential_physical_mutation_outstanding(),
+            journal_actor_pending,
+            journal_projector_pending,
+            self.lxmf_mutation_pending(),
+        )
+    }
+
+    /// Message whose exact retry owns ambiguous LXMF physical mutation.
+    pub(crate) fn lxmf_pending_message_id(&self) -> Option<MessageId> {
+        self.lxmf
+            .as_ref()
+            .and_then(MountedLxmfStore::pending_message_id)
+    }
+
+    /// Close future LXMF admission only when no ambiguous mutation needs retry.
+    ///
+    /// Returning `false` preserves the service and its exact reconciliation
+    /// owner; disabling while pending would deadlock every other flash store.
+    pub(crate) fn disable_lxmf_service_if_clean(&mut self) -> bool {
+        if self.lxmf_mutation_pending() {
+            false
+        } else {
+            self.lxmf_service_enabled = false;
+            true
+        }
     }
 
     fn submission_port(&mut self) -> ProductSubmissionPort<'_> {
@@ -929,6 +994,62 @@ impl ProductStorageCoordinator {
                 ProductInboundAdmission::DroppedFaulted(error)
             }
         }
+    }
+
+    /// Validate and durably own one exact `lxmf.delivery` application event.
+    ///
+    /// Cross-store deferrals occur before constructing a partition view and
+    /// return the unchanged lease. The coordinator alone creates the bound
+    /// writable view over its physical flash owner. Its own pending mutation
+    /// never blocks this call; the mounted store decides whether the candidate
+    /// is the exact reconciliation retry.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn commit_lxmf_event<'owner, 'slots, 'proof_slots, R>(
+        &mut self,
+        lease: ApplicationEventLease<'owner, 'slots>,
+        delayed_proofs: &mut DelayedProofOwner<'proof_slots>,
+        local_destination: LocalDeliveryDestination,
+        limits: WireLimits,
+        source_identities: &R,
+        stamp_policy: StampPolicy<'_>,
+    ) -> ProductLxmfAdmission<'owner, 'slots>
+    where
+        R: SourceIdentityResolver + ?Sized,
+    {
+        match self.lxmf_mutation_gate() {
+            LxmfMutationGate::Ready => {}
+            LxmfMutationGate::DeferredForCredentialMutation => {
+                return ProductLxmfAdmission::DeferredForCredentialMutation(lease);
+            }
+            LxmfMutationGate::DeferredForJournalMutation => {
+                return ProductLxmfAdmission::DeferredForJournalMutation(lease);
+            }
+            LxmfMutationGate::RuntimeUnavailable => {
+                return ProductLxmfAdmission::RuntimeUnavailable(lease);
+            }
+        }
+
+        let binding = self
+            .lxmf
+            .as_ref()
+            .expect("ready LXMF gate requires a mounted store")
+            .binding();
+        let region = PartitionNorFlash::new(&mut *self.flash, LXMF_STORE_OFFSET, LXMF_STORE_LEN);
+        let mut access = BoundLxmfStore::new(region, binding);
+        let outcome = commit_application_event(
+            lease,
+            DurableIngressProofMode::Required,
+            delayed_proofs,
+            local_destination,
+            limits,
+            source_identities,
+            stamp_policy,
+            self.lxmf
+                .as_mut()
+                .expect("ready LXMF gate requires a mounted store"),
+            &mut access,
+        );
+        ProductLxmfAdmission::Ingress(outcome)
     }
 
     /// Count one input discarded before it could be represented as a store candidate.
@@ -1170,6 +1291,24 @@ impl ProductStorageCoordinator {
             deadline,
             rng,
         ))
+    }
+
+    /// Confirm the first real router dispatch of one exact path request.
+    ///
+    /// This is intentionally independent of physical flash mutation and must
+    /// remain callable while another store owns the shared NOR device.
+    pub(crate) fn acknowledge_path_request_dispatched(
+        &mut self,
+        offer: PathDiscoveryOffer,
+        dispatched_at: MonotonicMillis,
+    ) -> Result<(), ProductPathDiscoveryAcknowledgeError> {
+        let runtime = self
+            .runtime
+            .as_mut()
+            .ok_or(ProductPathDiscoveryAcknowledgeError::RuntimeUnavailable)?;
+        runtime
+            .acknowledge_path_request_dispatched(offer, dispatched_at)
+            .map_err(ProductPathDiscoveryAcknowledgeError::Runtime)
     }
 }
 

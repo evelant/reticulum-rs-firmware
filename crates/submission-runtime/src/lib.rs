@@ -19,7 +19,7 @@ use embassy_sync::blocking_mutex::raw::RawMutex;
 use rand_core::{CryptoRng, RngCore};
 use reticulum_node_core::{
     AcknowledgeError, AuthorizedFrameObservation, DestinationHash, MonotonicMillis,
-    MonotonicSeconds, TerminalAttempt, TxAuthorizationPolicy, TxLeaseDeadline,
+    MonotonicSeconds, SubmitError, TerminalAttempt, TxAuthorizationPolicy, TxLeaseDeadline,
     TxRecoveryObservation,
 };
 use reticulum_storage_actor::{
@@ -295,6 +295,59 @@ pub enum FrameOfferProgress {
     Retain,
 }
 
+/// Wait after an emitted path request before probing destination preparation
+/// again. This matches Python LXMF's opportunistic path-request wait.
+pub const PATH_DISCOVERY_RESPONSE_WAIT_MS: u64 = 7_000;
+
+/// Minimum separation between fresh path requests for one destination.
+///
+/// Pinned Rete and Python Reticulum throttle automated requests for twenty
+/// seconds, so the sender waits one additional second before its retry.
+pub const PATH_DISCOVERY_RETRY_INTERVAL_MS: u64 = 21_000;
+
+/// Maximum number of tagged path requests emitted for one submission in a
+/// single boot before `NoPath` becomes terminal.
+pub const PATH_DISCOVERY_MAX_REQUESTS: u8 = 2;
+
+/// Exact transport-neutral path-request offer awaiting first router dispatch.
+///
+/// The runtime does not start response or retry clocks when this value is
+/// created. The product owner must return the unchanged offer through
+/// [`SubmissionRuntime::acknowledge_path_request_dispatched`] only after one
+/// eligible interface has accepted the corresponding packet.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PathDiscoveryOffer {
+    id: SubmissionId,
+    destination: DestinationHash,
+    ordinal: u8,
+}
+
+impl PathDiscoveryOffer {
+    /// Durable submission whose preparation first requested this shared path.
+    pub const fn id(self) -> SubmissionId {
+        self.id
+    }
+
+    /// Destination shared by every submission waiting on this discovery.
+    pub const fn destination(self) -> DestinationHash {
+        self.destination
+    }
+
+    /// One-based request ordinal for this destination in the current boot.
+    pub const fn ordinal(self) -> u8 {
+        self.ordinal
+    }
+}
+
+/// A router-dispatch acknowledgement did not match the exact pending offer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PathDiscoveryAcknowledgeError {
+    /// No discovery is currently retained for the offered destination.
+    DestinationNotPending,
+    /// The destination is pending, but a different offer owns its next edge.
+    OfferMismatch,
+}
+
 /// One bounded useful transition selected by the runtime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeStep {
@@ -337,6 +390,14 @@ pub enum RuntimeStep {
         /// Projector disposition for the node's synchronous result.
         progress: ProjectionProgress,
     },
+    /// An unknown destination remains durably `Preparing` while the product
+    /// emits one tagged, transport-neutral Reticulum path request.
+    PathDiscoveryRequest {
+        /// Exact offer retained until the first interface accepts dispatch.
+        offer: PathDiscoveryOffer,
+        /// Projector disposition retaining the unbound `Preparing` barrier.
+        progress: ProjectionProgress,
+    },
     /// One queued submission began its durable no-replay barrier.
     PreparationBarrier {
         /// Durable submission entering `Preparing`.
@@ -346,6 +407,25 @@ pub enum RuntimeStep {
     },
     /// No useful submission transition was currently available.
     Idle,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PathDiscovery {
+    destination: DestinationHash,
+    phase: PathDiscoveryPhase,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PathDiscoveryPhase {
+    AwaitingDispatch {
+        offer: PathDiscoveryOffer,
+        first_request_ms: Option<u64>,
+    },
+    Waiting {
+        first_request_ms: u64,
+        next_probe_ms: u64,
+        requests_sent: u8,
+    },
 }
 
 /// Sole portable owner of durable submission state and scheduling phase.
@@ -364,6 +444,7 @@ pub struct SubmissionRuntime<const SUBMISSIONS: usize, const PROJECTED: usize> {
     recovery_cursor: u64,
     recovery_exhausted: bool,
     phase: RuntimePhase,
+    path_discoveries: [Option<PathDiscovery>; SUBMISSIONS],
 }
 
 impl<const SUBMISSIONS: usize, const PROJECTED: usize> SubmissionRuntime<SUBMISSIONS, PROJECTED> {
@@ -386,6 +467,7 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize> SubmissionRuntime<SUBMISS
             recovery_cursor: 0,
             recovery_exhausted: false,
             phase: RuntimePhase::Recovering,
+            path_discoveries: [None; SUBMISSIONS],
         })
     }
 
@@ -591,12 +673,15 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize> SubmissionRuntime<SUBMISS
 
         let ready = self.storage.index().iter().find_map(|submission| {
             let id = submission.accepted().id();
-            self.storage.ready_intent(id).map(|intent| (id, intent))
+            let intent = self.storage.ready_intent(id)?;
+            let destination = DestinationHash::new(*intent.destination().as_bytes());
+            self.path_discovery_due(destination, owner_now.get())
+                .then_some((id, intent, destination))
         });
-        if let Some((id, intent)) = ready {
+        if let Some((id, intent, destination)) = ready {
             let observation = node.prepare_submission(
                 SubmissionPrepareRequest {
-                    destination: DestinationHash::new(*intent.destination().as_bytes()),
+                    destination,
                     plaintext: intent.payload(),
                     rns_now,
                     owner_now,
@@ -604,7 +689,12 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize> SubmissionRuntime<SUBMISS
                 },
                 rng,
             );
+            let (observation, path_offer) =
+                self.classify_path_discovery(id, destination, observation, owner_now.get());
             let progress = self.storage.observe_preparation(id, observation)?;
+            if let Some(offer) = path_offer {
+                return Ok(RuntimeStep::PathDiscoveryRequest { offer, progress });
+            }
             return Ok(RuntimeStep::Preparation { id, progress });
         }
 
@@ -620,6 +710,152 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize> SubmissionRuntime<SUBMISS
         }
 
         Ok(RuntimeStep::Idle)
+    }
+
+    fn path_discovery_due(&self, destination: DestinationHash, now_ms: u64) -> bool {
+        self.path_discoveries
+            .iter()
+            .flatten()
+            .find(|discovery| discovery.destination == destination)
+            .is_none_or(|discovery| match discovery.phase {
+                PathDiscoveryPhase::AwaitingDispatch { .. } => false,
+                PathDiscoveryPhase::Waiting { next_probe_ms, .. } => now_ms >= next_probe_ms,
+            })
+    }
+
+    fn classify_path_discovery(
+        &mut self,
+        id: SubmissionId,
+        destination: DestinationHash,
+        observation: SubmissionPreparationObservation,
+        now_ms: u64,
+    ) -> (SubmissionPreparationObservation, Option<PathDiscoveryOffer>) {
+        if observation
+            != SubmissionPreparationObservation::Rejected(SubmitError::UnknownDestination)
+        {
+            if !matches!(
+                observation,
+                SubmissionPreparationObservation::RetrySameBoot
+                    | SubmissionPreparationObservation::Rejected(
+                        SubmitError::AttemptLedgerFull { .. }
+                            | SubmitError::ReceiptTableFull { .. }
+                            | SubmitError::ReceiptHashAlreadyTracked
+                    )
+            ) {
+                self.clear_path_discovery(destination);
+            }
+            return (observation, None);
+        }
+
+        let existing = self
+            .path_discoveries
+            .iter()
+            .position(|entry| entry.is_some_and(|entry| entry.destination == destination));
+        let Some(index) = existing else {
+            let Some(index) = self.path_discoveries.iter().position(Option::is_none) else {
+                return (SubmissionPreparationObservation::InternalFailure, None);
+            };
+            let offer = PathDiscoveryOffer {
+                id,
+                destination,
+                ordinal: 1,
+            };
+            self.path_discoveries[index] = Some(PathDiscovery {
+                destination,
+                phase: PathDiscoveryPhase::AwaitingDispatch {
+                    offer,
+                    first_request_ms: None,
+                },
+            });
+            return (SubmissionPreparationObservation::RetrySameBoot, Some(offer));
+        };
+
+        let discovery = self.path_discoveries[index]
+            .as_mut()
+            .expect("the located discovery slot must remain occupied");
+        match discovery.phase {
+            PathDiscoveryPhase::AwaitingDispatch { .. } => {
+                (SubmissionPreparationObservation::RetrySameBoot, None)
+            }
+            PathDiscoveryPhase::Waiting {
+                first_request_ms,
+                requests_sent,
+                ..
+            } if requests_sent < PATH_DISCOVERY_MAX_REQUESTS => {
+                let retry_not_before =
+                    first_request_ms.saturating_add(PATH_DISCOVERY_RETRY_INTERVAL_MS);
+                if now_ms < retry_not_before {
+                    discovery.phase = PathDiscoveryPhase::Waiting {
+                        first_request_ms,
+                        next_probe_ms: retry_not_before,
+                        requests_sent,
+                    };
+                    return (SubmissionPreparationObservation::RetrySameBoot, None);
+                }
+                let ordinal = requests_sent.saturating_add(1);
+                let offer = PathDiscoveryOffer {
+                    id,
+                    destination,
+                    ordinal,
+                };
+                discovery.phase = PathDiscoveryPhase::AwaitingDispatch {
+                    offer,
+                    first_request_ms: Some(first_request_ms),
+                };
+                (SubmissionPreparationObservation::RetrySameBoot, Some(offer))
+            }
+            PathDiscoveryPhase::Waiting { .. } => {
+                self.path_discoveries[index] = None;
+                (observation, None)
+            }
+        }
+    }
+
+    fn clear_path_discovery(&mut self, destination: DestinationHash) {
+        if let Some(index) = self
+            .path_discoveries
+            .iter()
+            .position(|entry| entry.is_some_and(|entry| entry.destination == destination))
+        {
+            self.path_discoveries[index] = None;
+        }
+    }
+
+    /// Start response and retry clocks after the request's first real router
+    /// dispatch onto an eligible interface.
+    ///
+    /// This operation is backend-free. The exact offer remains pending on any
+    /// mismatch so a caller can fail closed without losing correlation.
+    pub fn acknowledge_path_request_dispatched(
+        &mut self,
+        offer: PathDiscoveryOffer,
+        dispatched_at: MonotonicMillis,
+    ) -> Result<(), PathDiscoveryAcknowledgeError> {
+        let Some(discovery) = self
+            .path_discoveries
+            .iter_mut()
+            .flatten()
+            .find(|discovery| discovery.destination == offer.destination)
+        else {
+            return Err(PathDiscoveryAcknowledgeError::DestinationNotPending);
+        };
+        let PathDiscoveryPhase::AwaitingDispatch {
+            offer: expected,
+            first_request_ms,
+        } = discovery.phase
+        else {
+            return Err(PathDiscoveryAcknowledgeError::OfferMismatch);
+        };
+        if expected != offer {
+            return Err(PathDiscoveryAcknowledgeError::OfferMismatch);
+        }
+        let dispatched_at = dispatched_at.get();
+        discovery.phase = PathDiscoveryPhase::Waiting {
+            first_request_ms: first_request_ms.unwrap_or(dispatched_at),
+            next_probe_ms: dispatched_at.saturating_add(PATH_DISCOVERY_RESPONSE_WAIT_MS),
+            requests_sent: offer.ordinal,
+        };
+        Ok(())
     }
 
     fn ensure_ready<E>(&self) -> Result<(), RuntimeError<E>> {

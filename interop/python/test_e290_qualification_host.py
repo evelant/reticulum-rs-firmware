@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import errno
 import hashlib
 import json
@@ -52,6 +53,62 @@ Security Information:
 Secure Boot: {secure_boot}
 Flash Encryption: {flash_encryption}
 '''
+
+
+def merged_image_bytes(payload: bytes = b"test-application") -> bytes:
+    image = bytearray(
+        b"\xFF"
+        * (host.E290_FACTORY_OFFSET + host.ESP_IMAGE_HEADER_BYTES + len(payload))
+    )
+    header = bytearray(host.ESP_IMAGE_HEADER_BYTES)
+    header[:4] = bytes((0xE9, 0x01, 0x02, 0x4F))
+    header[12:14] = host.ESP32S3_IMAGE_CHIP_ID.to_bytes(2, "little")
+    image[: host.ESP_IMAGE_HEADER_BYTES] = header
+    image[
+        host.E290_PARTITION_TABLE_OFFSET : host.E290_PARTITION_TABLE_OFFSET
+        + host.E290_PARTITION_TABLE_BYTES
+    ] = host.E290_PARTITION_TABLE_REGION
+    image[
+        host.E290_FACTORY_OFFSET : host.E290_FACTORY_OFFSET
+        + host.ESP_IMAGE_HEADER_BYTES
+    ] = header
+    image[host.E290_FACTORY_OFFSET + host.ESP_IMAGE_HEADER_BYTES :] = payload
+    return bytes(image)
+
+
+def checked_in_e290_partitions() -> tuple[tuple[str, int, int, int, int, int], ...]:
+    table = (
+        Path(__file__).resolve().parents[2]
+        / "partitions"
+        / "heltec-vision-master-e290-node.csv"
+    )
+    partition_types = {"app": 0x00, "data": 0x01}
+    partition_subtypes = {
+        ("app", "factory"): 0x00,
+        ("data", "phy"): 0x01,
+        ("data", "nvs"): 0x02,
+        ("data", "undefined"): 0x06,
+    }
+    rows = []
+    with table.open(newline="") as source:
+        data_lines = (
+            line for line in source if line.strip() and not line.lstrip().startswith("#")
+        )
+        for raw_row in csv.reader(data_lines):
+            label, type_name, subtype_name, offset, size, flags = (
+                field.strip() for field in raw_row
+            )
+            rows.append(
+                (
+                    label,
+                    partition_types[type_name],
+                    partition_subtypes[(type_name, subtype_name)],
+                    int(offset, 0),
+                    int(size, 0),
+                    int(flags, 0) if flags else 0,
+                )
+            )
+    return tuple(rows)
 
 
 class IoregParserTests(unittest.TestCase):
@@ -1221,6 +1278,196 @@ class BoundActionTests(unittest.TestCase):
                 host._evidence_path(prefix, ".erase-region.verified.json").exists()
             )
 
+    def test_canonical_merged_image_layout_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "merged.bin"
+            payload = merged_image_bytes()
+            image.write_bytes(payload)
+
+            info = host._validate_merged_image(
+                image, expected_flash_bytes=host.E290_FLASH_BYTES
+            )
+
+            self.assertEqual(info.bytes, len(payload))
+            self.assertEqual(
+                info.partition_table_sha256,
+                # Anchored to espflash 4.5.0 output from the checked-in CSV.
+                "740600b71569fa4c2297d2603cd8dbcaa50b039e527e4837733d5c86317da074",
+            )
+
+    def test_host_guard_matches_checked_in_e290_partition_csv(self) -> None:
+        self.assertEqual(checked_in_e290_partitions(), host.E290_PARTITIONS)
+
+    def test_merged_image_guard_rejects_header_only_image(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "merged.bin"
+            image.write_bytes(bytes((0xE9, 0x01, 0x02, 0x4F)))
+
+            with self.assertRaisesRegex(host.QualificationError, "truncated"):
+                host._validate_merged_image(
+                    image, expected_flash_bytes=host.E290_FLASH_BYTES
+                )
+
+    def test_merged_image_guard_rejects_protected_partition_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "merged.bin"
+            image.write_bytes(merged_image_bytes())
+            with image.open("r+b") as destination:
+                destination.truncate(host.E290_FACTORY_END + 1)
+
+            with self.assertRaisesRegex(
+                host.QualificationError, "protected product write boundary"
+            ):
+                host._validate_merged_image(
+                    image, expected_flash_bytes=host.E290_FLASH_BYTES
+                )
+
+    def test_merged_image_guard_rejects_noncanonical_partition_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "merged.bin"
+            payload = bytearray(merged_image_bytes())
+            factory_offset_field = (
+                host.E290_PARTITION_TABLE_OFFSET
+                + 2 * host.ESP_PARTITION_ENTRY_BYTES
+                + 4
+            )
+            payload[factory_offset_field] ^= 0x01
+            image.write_bytes(payload)
+
+            with self.assertRaisesRegex(host.QualificationError, "canonical E290"):
+                host._validate_merged_image(
+                    image, expected_flash_bytes=host.E290_FLASH_BYTES
+                )
+
+    def test_merged_image_guard_rejects_invalid_partition_md5(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "merged.bin"
+            payload = bytearray(merged_image_bytes())
+            digest_offset = (
+                host.E290_PARTITION_TABLE_OFFSET
+                + len(host.E290_PARTITION_ENTRIES)
+                + 16
+            )
+            payload[digest_offset] ^= 0x01
+            image.write_bytes(payload)
+
+            with self.assertRaisesRegex(host.QualificationError, "MD5"):
+                host._validate_merged_image(
+                    image, expected_flash_bytes=host.E290_FLASH_BYTES
+                )
+
+    def test_merged_image_guard_rejects_non_erased_partition_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "merged.bin"
+            payload = bytearray(merged_image_bytes())
+            payload[
+                host.E290_PARTITION_TABLE_OFFSET
+                + host.E290_PARTITION_TABLE_BYTES
+                - 1
+            ] = 0
+            image.write_bytes(payload)
+
+            with self.assertRaisesRegex(host.QualificationError, "non-erased trailing"):
+                host._validate_merged_image(
+                    image, expected_flash_bytes=host.E290_FLASH_BYTES
+                )
+
+    def test_merged_image_guard_rejects_invalid_factory_app_header(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "merged.bin"
+            payload = bytearray(merged_image_bytes())
+            payload[host.E290_FACTORY_OFFSET] = 0
+            image.write_bytes(payload)
+
+            with self.assertRaisesRegex(
+                host.QualificationError, "factory application.*magic"
+            ):
+                host._validate_merged_image(
+                    image, expected_flash_bytes=host.E290_FLASH_BYTES
+                )
+
+    def test_merged_image_guard_rejects_wrong_esp_chip(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "merged.bin"
+            payload = bytearray(merged_image_bytes())
+            payload[12:14] = (0).to_bytes(2, "little")
+            image.write_bytes(payload)
+
+            with self.assertRaisesRegex(host.QualificationError, "ESP32-S3"):
+                host._validate_merged_image(
+                    image, expected_flash_bytes=host.E290_FLASH_BYTES
+                )
+
+    def test_merged_flash_rejects_bad_layout_before_hardware_access(self) -> None:
+        hardware_calls = 0
+
+        def forbidden(*_args, **_kwargs):
+            nonlocal hardware_calls
+            hardware_calls += 1
+            raise AssertionError("hardware access must not run")
+
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "merged.bin"
+            image.write_bytes(bytes((0xE9, 0x01, 0x02, 0x4F)))
+            digest = hashlib.sha256(image.read_bytes()).hexdigest()
+
+            with self.assertRaisesRegex(host.QualificationError, "truncated"):
+                host.flash_merged_image(
+                    expected_usb_serial=MAC_A,
+                    expected_mac=MAC_A,
+                    expected_flash_bytes=host.E290_FLASH_BYTES,
+                    evidence_prefix=Path(directory) / "board-a-flash",
+                    image=image,
+                    expected_image_sha256=digest,
+                    confirmed_radio_module=host.CONFIRMED_HF_MODULE,
+                    ioreg_reader=forbidden,
+                    command_runner=forbidden,
+                )
+            self.assertEqual(hardware_calls, 0)
+
+    def test_merged_flash_revalidates_the_retained_input_before_hardware(self) -> None:
+        hardware_calls = 0
+
+        def forbidden(*_args, **_kwargs):
+            nonlocal hardware_calls
+            hardware_calls += 1
+            raise AssertionError("hardware access must not run")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = root / "merged.bin"
+            image.write_bytes(merged_image_bytes())
+            corrupt_source = root / "corrupt.bin"
+            corrupt_payload = bytearray(merged_image_bytes())
+            corrupt_payload[host.E290_PARTITION_TABLE_OFFSET] = 0
+            corrupt_source.write_bytes(corrupt_payload)
+            corrupt_digest = hashlib.sha256(corrupt_payload).hexdigest()
+            real_copy = host._copy_retained_flash_input
+
+            def substitute_retained_input(
+                _source: Path, destination: Path
+            ) -> host.RetainedFlashInput:
+                return real_copy(corrupt_source, destination)
+
+            with mock.patch.object(
+                host,
+                "_copy_retained_flash_input",
+                side_effect=substitute_retained_input,
+            ):
+                with self.assertRaisesRegex(host.QualificationError, "canonical E290"):
+                    host.flash_merged_image(
+                        expected_usb_serial=MAC_A,
+                        expected_mac=MAC_A,
+                        expected_flash_bytes=host.E290_FLASH_BYTES,
+                        evidence_prefix=root / "board-a-flash",
+                        image=image,
+                        expected_image_sha256=corrupt_digest,
+                        confirmed_radio_module=host.CONFIRMED_HF_MODULE,
+                        ioreg_reader=forbidden,
+                        command_runner=forbidden,
+                    )
+            self.assertEqual(hardware_calls, 0)
+
     def test_merged_verification_is_identity_gated_and_hash_bound(self) -> None:
         ioreg = ioreg_device(MAC_A, "/dev/cu.usbmodem101")
         commands: list[list[str]] = []
@@ -1228,7 +1475,7 @@ class BoundActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             image = root / "merged.bin"
-            image.write_bytes(bytes((0xE9, 0x03, 0x02, 0x4F)) + b"merged-image")
+            image.write_bytes(merged_image_bytes(b"merged-image"))
             digest = hashlib.sha256(image.read_bytes()).hexdigest()
 
             def runner(
@@ -1271,6 +1518,10 @@ class BoundActionTests(unittest.TestCase):
             )
             self.assertEqual(evidence["read_target"]["mac"], MAC_A)
             self.assertEqual(
+                evidence["partition_table_sha256"],
+                hashlib.sha256(host.E290_PARTITION_TABLE_REGION).hexdigest(),
+            )
+            self.assertEqual(
                 stat.S_IMODE(
                     host._evidence_path(
                         prefix, ".verify-readback.bin"
@@ -1285,7 +1536,7 @@ class BoundActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             image = root / "merged.bin"
-            image.write_bytes(bytes((0xE9, 0x03, 0x02, 0x4F)) + b"merged-image")
+            image.write_bytes(merged_image_bytes(b"merged-image"))
 
             def runner(
                 command: list[str], **_kwargs
@@ -1334,7 +1585,7 @@ class BoundActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             image = root / "merged.bin"
-            image.write_bytes(bytes((0xE9, 0x03, 0x02, 0x4F)) + b"merged-image")
+            image.write_bytes(merged_image_bytes(b"merged-image"))
             victim = root / "victim.bin"
             victim.write_bytes(b"must remain untouched")
             victim.chmod(0o640)
@@ -1381,7 +1632,7 @@ class BoundActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             image = root / "merged.bin"
-            image.write_bytes(bytes((0xE9, 0x03, 0x02, 0x4F)) + b"merged-image")
+            image.write_bytes(merged_image_bytes(b"merged-image"))
 
             def runner(
                 command: list[str], **_kwargs
@@ -1424,7 +1675,7 @@ class BoundActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             image = root / "merged.bin"
-            image.write_bytes(bytes((0xE9, 0x03, 0x02, 0x4F)) + b"merged-image")
+            image.write_bytes(merged_image_bytes(b"merged-image"))
 
             def runner(
                 command: list[str], **_kwargs
@@ -1493,7 +1744,7 @@ class BoundActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             image = root / "merged.bin"
-            image.write_bytes(bytes((0xE9, 0x03, 0x02, 0x4F)) + b"merged-image")
+            image.write_bytes(merged_image_bytes(b"merged-image"))
             digest = hashlib.sha256(image.read_bytes()).hexdigest()
             prefix = root / "board-a-flash"
             _device, board, verified_digest = host.flash_merged_image(
@@ -1520,6 +1771,10 @@ class BoundActionTests(unittest.TestCase):
             self.assertEqual(record["write_action_target"]["mac"], MAC_A)
             self.assertEqual(record["post_write_target"]["mac"], MAC_A)
             self.assertEqual(record["read_target"]["mac"], MAC_A)
+            self.assertEqual(
+                record["partition_table_sha256"],
+                hashlib.sha256(host.E290_PARTITION_TABLE_REGION).hexdigest(),
+            )
             self.assertTrue(
                 host._evidence_path(prefix, ".ioreg-after-write-bin.txt").is_file()
             )
@@ -1554,7 +1809,7 @@ class BoundActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             image = root / "merged.bin"
-            image.write_bytes(bytes((0xE9, 0x03, 0x02, 0x4F)) + b"image")
+            image.write_bytes(merged_image_bytes(b"image"))
             prefix = root / "board-a-flash"
             with self.assertRaisesRegex(
                 host.PostWriteEvidenceError, "USB mapping is unverified"
@@ -1599,7 +1854,7 @@ class BoundActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             image = root / "merged.bin"
-            image.write_bytes(bytes((0xE9, 0x03, 0x02, 0x4F)) + b"image")
+            image.write_bytes(merged_image_bytes(b"image"))
             prefix = root / "board-a-flash"
             with self.assertRaisesRegex(
                 host.PostWriteEvidenceError, "unverified target"
@@ -1641,7 +1896,7 @@ class BoundActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             image = root / "merged.bin"
-            image.write_bytes(bytes((0xE9, 0x03, 0x02, 0x4F)) + b"image")
+            image.write_bytes(merged_image_bytes(b"image"))
             prefix = root / "board-a-flash"
             with self.assertRaisesRegex(
                 host.PostWriteEvidenceError, "write action target is unverified"
@@ -1668,7 +1923,7 @@ class BoundActionTests(unittest.TestCase):
     def test_merged_flash_requires_exact_hf_module_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             image = Path(directory) / "merged.bin"
-            image.write_bytes(bytes((0xE9, 0x03, 0x02, 0x4F)))
+            image.write_bytes(merged_image_bytes())
             with self.assertRaisesRegex(host.QualificationError, "confirmed module"):
                 host.flash_merged_image(
                     expected_usb_serial=MAC_A,
@@ -1692,7 +1947,7 @@ class BoundActionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             image = Path(directory) / "merged.bin"
-            image.write_bytes(bytes((0xE9, 0x03, 0x02, 0x4F)))
+            image.write_bytes(merged_image_bytes())
             with self.assertRaisesRegex(host.QualificationError, "SHA-256 mismatch"):
                 host.flash_merged_image(
                     expected_usb_serial=MAC_A,
@@ -1712,7 +1967,7 @@ class BoundActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             image = root / "merged.bin"
-            image.write_bytes(bytes((0xE9, 0x03, 0x02, 0x4F)) + b"image")
+            image.write_bytes(merged_image_bytes(b"image"))
 
             def runner(
                 command: list[str], **_kwargs

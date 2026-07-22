@@ -188,7 +188,7 @@ acceptance and cap, the pre-node preparation barrier, exact LoRa frame
 persistence/echo/completion, timeout, principal isolation, and remount. The
 other injects a wrong bound-journal access after frame exposure and proves
 `ActiveOwnerFailStopped` retains every owner with an ordinary action queued and
-permits no later host-radio operation. The 125-test E290 suite now covers those
+permits no later host-radio operation. At this milestone, the 125-test E290 suite covered those
 two paths plus the policy/product, credential boot/runtime, live-pairing, USB/
 reset, and causal-frontier surfaces. It closes software composition
 qualification without claiming powered flash or RF behavior.

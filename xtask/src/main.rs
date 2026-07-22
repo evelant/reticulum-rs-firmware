@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use syn::{Fields, ImplItem, Item, Type, Visibility};
 
 mod e290_authenticated_usb;
+mod e290_lxmf_store_inspect;
 mod e290_pairing_control;
 mod e290_pairing_live;
 mod e290_rns_inbox_fixture;
@@ -36,6 +37,7 @@ fn main() -> ExitCode {
         Some("e290-pairing-control") => e290_pairing_control::run(args.collect()),
         Some("e290-pairing-live") => e290_pairing_live::run(args.collect()),
         Some("e290-authenticated-usb") => e290_authenticated_usb::run(args.collect()),
+        Some("e290-lxmf-store-inspect") => e290_lxmf_store_inspect::run(args.collect()),
         Some("e290-rns-inbox-fixture") => e290_rns_inbox_fixture::run(args.collect()),
         Some("e290-runtime-measurement") => e290_runtime_measurement::run(args.collect()),
         Some("check-rns-vectors") if args.next().is_none() => check_rns_vectors(),
@@ -53,7 +55,7 @@ fn main() -> ExitCode {
         _ => {
             eprintln!(
                 "usage: cargo run -p xtask -- \
-                 <doctor|build-tracker|e290-pairing-control|e290-pairing-live|e290-authenticated-usb|e290-rns-inbox-fixture|e290-runtime-measurement|check-rns-vectors|check-rnode-hil-vectors|graph-policy|rx-api-policy|print-rx-api-surface|phase1-rx-hil-artifacts|phase1-rx-closure-artifacts|phase1-rx-powered-evidence>"
+                 <doctor|build-tracker|e290-pairing-control|e290-pairing-live|e290-authenticated-usb|e290-lxmf-store-inspect|e290-rns-inbox-fixture|e290-runtime-measurement|check-rns-vectors|check-rnode-hil-vectors|graph-policy|rx-api-policy|print-rx-api-surface|phase1-rx-hil-artifacts|phase1-rx-closure-artifacts|phase1-rx-powered-evidence>"
             );
             ExitCode::from(2)
         }
@@ -875,7 +877,7 @@ fn graph_policy() -> ExitCode {
              authenticated session layer has only its exact reviewed cryptographic, device-API, credentials, framing and handoff normal edges plus its exact test-only hex, semantic-adapter and storage-model fixtures; \
              the Rete integration and node-core normal closures contain no RNode, radio-interface, LoRa or board package; \
              the shared lora-phy owner and E290 radio wrapper have only their exact reviewed HAL, framing, board and test edges; \
-             the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the permanent E290 node reaches the LoRa-first node/router/dispatcher graph, exact portable identity, credential-store authority, announce-clock, NOR-region, durable-submission and durable inbound-RNS-inbox layers, the feature-free LXMF model/store mount and explicit external allocator, both target-safe experimental device-API semantic ports, the featureless framed USB pre-authentication control codec, the resident live-pairing lifecycle and a minimal boot-lifetime USB authenticated-session bearer with transport-neutral admission and node-side dispatch while excluding LXMF durable ingress, onboard clients and foreign Tracker/HIL packages; \
+             the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the permanent E290 node reaches the LoRa-first node/router/dispatcher graph, exact portable identity, credential-store authority, announce-clock, NOR-region, durable-submission and durable inbound-RNS-inbox layers, the feature-free durable LXMF ingress/model/store stack and explicit external allocator, both target-safe experimental device-API semantic ports, the featureless framed USB pre-authentication control codec, the resident live-pairing lifecycle and a minimal boot-lifetime USB authenticated-session bearer with transport-neutral admission and node-side dispatch while excluding onboard clients and foreign Tracker/HIL packages; \
              the interface router has only its reviewed node-core and Embassy Sync normal edges plus test-only rand_core and RNS fixture edges; \
              the TX handoff, RF-inert dispatcher and supervisor use only their reviewed node-core, \
              interface-router ingress, handoff, dispatcher, Embassy Sync/Futures/Time, rand_core \
@@ -890,7 +892,7 @@ fn graph_policy() -> ExitCode {
              normal edges, the single reviewed streaming-verification feature and three host-test edges, and its generic bare-metal normal closure exactly \
              matches the reviewed registry identities without std, alloc, Rete, platform, radio or storage packages; \
              the featureless transport-neutral LXMF ingress crate has exactly its reviewed feature-disabled node-core and LXMF-wire normal edges plus its dev-only durable inbox and host-test fixtures, while its generic bare-metal normal closure exactly matches the reviewed identities and excludes platform, board, radio, firmware, storage, device-API, supervisor and executor packages; \
-             the dependency-free LXMF model, append-only LXMF store and durable-ingress owner retain their exact reviewed manifests and generic bare-metal closures; the store normal closure reaches only the model, embedded-storage and SHA-256 while its development surface adds only the reviewed LXMF-wire/hex/serde corpus fixtures, durable ingress reaches only its four reviewed portable owner edges plus exact host-test embedded-storage/hex/serde and Rete retained-proof fixture edges, and none of the new ownership closures can acquire the raw inbox, submission durability, board, radio, platform, firmware, device-API, supervisor or executor graphs; the model/store are now composed feature-free only for the permanent E290 read-only mount while durable ingress remains absent from every product and HIL composition; \
+             the dependency-free LXMF model, append-only LXMF store and durable-ingress owner retain their exact reviewed manifests and generic bare-metal closures; the store normal closure reaches only the model, embedded-storage and SHA-256 while its development surface adds only the reviewed LXMF-wire/hex/serde corpus fixtures, durable ingress reaches only its four reviewed portable owner edges plus exact host-test embedded-storage/hex/serde and Rete retained-proof fixture edges, and none of the new ownership closures can acquire the raw inbox, submission durability, board, radio, platform, firmware, device-API, supervisor or executor graphs; the full durable LXMF ingress stack is composed feature-free only by the permanent E290 node and its two graph-identical diagnostic feature builds while remaining absent from every separate product and HIL package; \
              the portable identity, announce-clock and NOR-region crates use only their exact reviewed embedded-storage, rand_core, SHA-256 and zeroize subsets; the durable inbound RNS inbox store uses only exact feature-free embedded-storage and SHA-256 pins; the durable \
              storage model uses only reviewed minicbor and SHA-256 edges; \
              the physical storage journal uses only reviewed embedded-storage, storage-model and SHA-256 edges; \
@@ -1137,7 +1139,7 @@ fn cargo_tree_contains_package(tree: &str, package: &str) -> bool {
         .any(|line| line.split_whitespace().any(|field| field == package))
 }
 
-const PRODUCT_GRAPH_FORBIDDEN: [&str; 30] = [
+const PRODUCT_GRAPH_FORBIDDEN: [&str; 32] = [
     "leviculum-core",
     "rete-lxmf",
     "lxmf-rs",
@@ -1154,8 +1156,10 @@ const PRODUCT_GRAPH_FORBIDDEN: [&str; 30] = [
     "reticulum-device-api-pairing-policy",
     "reticulum-device-api-session",
     "reticulum-lxmf-durable-ingress",
+    "reticulum-lxmf-ingress",
     "reticulum-lxmf-model",
     "reticulum-lxmf-store",
+    "reticulum-lxmf-wire",
     "reticulum-node-core",
     "reticulum-radio-tx-dispatch",
     "reticulum-radio-lora-phy",
@@ -1181,7 +1185,7 @@ fn validate_product_graph_boundary(label: &str, tree: &str) -> Result<(), String
     Ok(())
 }
 
-const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 35] = [
+const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 37] = [
     "embassy-executor",
     "esp-radio",
     "lora-modulation",
@@ -1204,8 +1208,10 @@ const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 35] = [
     "reticulum-device-api-pairing-policy",
     "reticulum-device-api-session",
     "reticulum-lxmf-durable-ingress",
+    "reticulum-lxmf-ingress",
     "reticulum-lxmf-model",
     "reticulum-lxmf-store",
+    "reticulum-lxmf-wire",
     "reticulum-node-core",
     "reticulum-radio-interface",
     "reticulum-radio-tx-dispatch",
@@ -1227,7 +1233,7 @@ const TX_HIL_GRAPH_REQUIRED: [&str; 5] = [
     "reticulum-semantic-roundtrip-hil",
 ];
 
-const TX_HIL_GRAPH_FORBIDDEN: [&str; 30] = [
+const TX_HIL_GRAPH_FORBIDDEN: [&str; 32] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-core",
@@ -1245,8 +1251,10 @@ const TX_HIL_GRAPH_FORBIDDEN: [&str; 30] = [
     "reticulum-device-api-session",
     "reticulum-board-heltec-vision-master-e290-radio",
     "reticulum-lxmf-durable-ingress",
+    "reticulum-lxmf-ingress",
     "reticulum-lxmf-model",
     "reticulum-lxmf-store",
+    "reticulum-lxmf-wire",
     "reticulum-node-core",
     "reticulum-radio-tx-dispatch",
     "reticulum-rns-inbox-store",
@@ -1290,7 +1298,7 @@ const SEMANTIC_TX_HIL_GRAPH_REQUIRED: [&str; 9] = [
     "rete-transport",
 ];
 
-const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 26] = [
+const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 28] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -1305,8 +1313,10 @@ const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 26] = [
     "reticulum-device-api-session",
     "reticulum-board-heltec-vision-master-e290-radio",
     "reticulum-lxmf-durable-ingress",
+    "reticulum-lxmf-ingress",
     "reticulum-lxmf-model",
     "reticulum-lxmf-store",
+    "reticulum-lxmf-wire",
     "reticulum-node-core",
     "reticulum-radio-tx-dispatch",
     "reticulum-rns-inbox-store",
@@ -1433,7 +1443,7 @@ const E290_SEMANTIC_HIL_GRAPH_REQUIRED: [&str; 9] = [
     "rete-transport",
 ];
 
-const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 29] = [
+const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 31] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -1452,8 +1462,10 @@ const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 29] = [
     "reticulum-device-api-session",
     "reticulum-interface-router",
     "reticulum-lxmf-durable-ingress",
+    "reticulum-lxmf-ingress",
     "reticulum-lxmf-model",
     "reticulum-lxmf-store",
+    "reticulum-lxmf-wire",
     "reticulum-node-core",
     "reticulum-radio-tx-dispatch",
     "reticulum-rns-inbox-store",
@@ -2071,7 +2083,7 @@ fn immediately_preceded_by_feature_cfg(source: &str, position: usize, feature: &
         .is_some_and(|line| line.trim() == format!("#[cfg(feature = \"{feature}\")]"))
 }
 
-const E290_NODE_GRAPH_REQUIRED: [&str; 41] = [
+const E290_NODE_GRAPH_REQUIRED: [&str; 44] = [
     "allocator-api2",
     "embedded-storage",
     "esp-alloc",
@@ -2091,8 +2103,11 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 41] = [
     "reticulum-device-api-session",
     "reticulum-device-identity-store",
     "reticulum-interface-router",
+    "reticulum-lxmf-durable-ingress",
+    "reticulum-lxmf-ingress",
     "reticulum-lxmf-model",
     "reticulum-lxmf-store",
+    "reticulum-lxmf-wire",
     "reticulum-node-core",
     "reticulum-nor-flash-region",
     "reticulum-radio-interface",
@@ -2115,7 +2130,7 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 41] = [
     "static_cell",
 ];
 
-const E290_NODE_GRAPH_FORBIDDEN: [&str; 12] = [
+const E290_NODE_GRAPH_FORBIDDEN: [&str; 11] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -2124,7 +2139,6 @@ const E290_NODE_GRAPH_FORBIDDEN: [&str; 12] = [
     "reticulum-heltec-vision-master-e290-qualification",
     "reticulum-heltec-vision-master-e290-semantic-hil",
     "reticulum-lab-rx-returned-fault-hil",
-    "reticulum-lxmf-durable-ingress",
     "reticulum-rns-leviculum",
     "reticulum-rns-rete-rx",
     "reticulum-semantic-roundtrip-hil",
@@ -2252,7 +2266,11 @@ fn validate_e290_node_graph_for_root_features(
     }
     for package in [
         "reticulum-rns-inbox-store ",
+        "reticulum-lxmf-durable-ingress ",
+        "reticulum-lxmf-ingress ",
+        "reticulum-lxmf-model ",
         "reticulum-lxmf-store ",
+        "reticulum-lxmf-wire ",
         "reticulum-device-api-credential-store ",
         "reticulum-device-api-credentials ",
         "reticulum-device-api-framing ",
@@ -2268,7 +2286,7 @@ fn validate_e290_node_graph_for_root_features(
             .ok_or_else(|| format!("{profile} graph has no {package}line"))?;
         if !line.ends_with("features=[]") {
             return Err(format!(
-                "{profile} must keep the durable inbox, credential, authentication, and pre-authentication control packages feature-free; observed {line}"
+                "{profile} must keep the durable inbox, LXMF, credential, authentication, and pre-authentication control packages feature-free; observed {line}"
             ));
         }
     }
@@ -2326,13 +2344,23 @@ fn validate_e290_node_feature_boundary(
     let dependencies = package["dependencies"]
         .as_array()
         .ok_or_else(|| format!("{package_name} package has no dependency array"))?;
-    validate_exact_local_dependency(
-        dependencies,
-        package_name,
-        "reticulum-lxmf-store",
-        &workspace.join("crates/lxmf-store"),
-        false,
-    )?;
+    for (dependency, relative_path) in [
+        (
+            "reticulum-lxmf-durable-ingress",
+            "crates/lxmf-durable-ingress",
+        ),
+        ("reticulum-lxmf-ingress", "crates/lxmf-ingress"),
+        ("reticulum-lxmf-model", "crates/lxmf-model"),
+        ("reticulum-lxmf-store", "crates/lxmf-store"),
+    ] {
+        validate_exact_local_dependency(
+            dependencies,
+            package_name,
+            dependency,
+            &workspace.join(relative_path),
+            false,
+        )?;
+    }
     validate_exact_local_dependency(
         dependencies,
         package_name,
@@ -4337,9 +4365,9 @@ fn validate_lora_phy_radio_dependency_boundary(
     let dependencies = package["dependencies"]
         .as_array()
         .ok_or_else(|| format!("{package_name} package has no dependency array"))?;
-    if dependencies.len() != 4 {
+    if dependencies.len() != 5 {
         return Err(format!(
-            "{package_name} must have exactly four reviewed normal dependencies, found {}",
+            "{package_name} must have exactly five reviewed normal dependencies, found {}",
             dependencies.len()
         ));
     }
@@ -4348,6 +4376,15 @@ fn validate_lora_phy_radio_dependency_boundary(
         package_name,
         "critical-section",
         "=1.2.0",
+        None,
+        false,
+        &[],
+    )?;
+    validate_exact_registry_dependency(
+        dependencies,
+        package_name,
+        "embassy-futures",
+        "=0.1.2",
         None,
         false,
         &[],
@@ -8098,14 +8135,92 @@ const ESP_RTOS_VENDOR_MANIFEST: &str = "VENDOR-HASHES.json";
 const ESP_RTOS_ARCHIVE_SHA256: &str =
     "551f90766e1527edaa0c91e8d559e9e2a60397b545e93357ac61fb31845e5712";
 const ESP_RTOS_UPSTREAM_COMMIT: &str = "347003de8a48320bb7724f53045be3afa9204411";
-const ESP_RTOS_PRISTINE_LIB_SHA256: &str =
-    "0de5aec7bf732bba96fe6c1218fc634a5e72c9daed26c5bdbde726d7ebd0d0f9";
-const ESP_RTOS_CPU0_UPSTREAM_STACK_LENGTH: &str =
-    "            stack_top as usize - stack_bottom as usize,";
-const ESP_RTOS_CPU0_PATCHED_STACK_LENGTH: &str = "            (stack_top as usize - stack_bottom as usize)\n                / core::mem::size_of::<MaybeUninit<u32>>(),";
-const ESP_RTOS_CPU1_UPSTREAM_STACK_LENGTH: &str = "            STACK_SIZE,";
-const ESP_RTOS_CPU1_PATCHED_STACK_LENGTH: &str =
-    "            STACK_SIZE / core::mem::size_of::<MaybeUninit<u32>>(),";
+const ESP_RTOS_PROJECT_FILES: [(&str, &str); 3] = [
+    (
+        "LICENSE-APACHE",
+        "2bf4fe1a37e545c3b4f7bfaa2326c99f153af32ef8d112fbaa4bff7fb2a575bd",
+    ),
+    (
+        "LICENSE-MIT",
+        "7b2165c6740592038d887d51d56d122b0b563337a7756b424f19eecc7a936ef1",
+    ),
+    (
+        "PATCHES.md",
+        "188a1cce2ba29d7c5c8dd136fd8db63afb51d5315c66cf99c53e44ff3341557b",
+    ),
+];
+const ESP_RTOS_UNMODIFIED_UPSTREAM_FILES: [&str; 16] = [
+    ".cargo_vcs_info.json",
+    "CHANGELOG.md",
+    "Cargo.toml",
+    "Cargo.toml.orig",
+    "README.md",
+    "build.rs",
+    "esp_config.yml",
+    "src/embassy/mod.rs",
+    "src/fmt.rs",
+    "src/run_queue.rs",
+    "src/syscall.rs",
+    "src/task/mod.rs",
+    "src/task/riscv.rs",
+    "src/task/xtensa.rs",
+    "src/timer/embassy.rs",
+    "src/wait_queue.rs",
+];
+const ESP_RTOS_PATCHED_UPSTREAM_FILES: [(&str, &str, &str); 4] = [
+    (
+        "src/esp_radio/mod.rs",
+        "a6116f123c75b9584c829eea2d53151085b6bcb9a94536e9dfdeaaf29fbe9f5d",
+        "fae392998ae5d7c622a6d3469049f9f97bdf3e3f82f331dfa8738b5b393dc495",
+    ),
+    (
+        "src/lib.rs",
+        "0de5aec7bf732bba96fe6c1218fc634a5e72c9daed26c5bdbde726d7ebd0d0f9",
+        "1c04cceca3731e7604e8af9c94e0eefbbcfbbe84f546c1c518c0533671eec33f",
+    ),
+    (
+        "src/scheduler.rs",
+        "809eb9122d9e1a40718e48670148facd9a474c2869b926edd071f2c394a1bcbc",
+        "ae77f2ae9c07f30f53596ae10ada1a8047ce5d4630ab162774f8c5c68f345c5e",
+    ),
+    (
+        "src/timer/mod.rs",
+        "c75310a53ecf3cc0ef820d57a551866f6aa29b48098ffbe289fbcf0e742a485a",
+        "10faff7ffe8e8cc10c7bb6035c7a4e7bccf64c892f3d50e4e8b67bdcfcc8cd6b",
+    ),
+];
+const ESP_RTOS_REVIEWED_EDITS: [(&str, &str, &str); 6] = [
+    (
+        "src/esp_radio/mod.rs",
+        "    register_queue_implementation,\n    register_semaphore_implementation,\n    register_timer_implementation,\n    register_wait_queue_implementation,",
+        "    register_queue_implementation, register_semaphore_implementation,\n    register_timer_implementation, register_wait_queue_implementation,",
+    ),
+    (
+        "src/lib.rs",
+        "//! ```\n//! \n//! To write",
+        "//! ```\n//!\n//! To write",
+    ),
+    (
+        "src/lib.rs",
+        "            stack_top as usize - stack_bottom as usize,",
+        "            (stack_top as usize - stack_bottom as usize) / core::mem::size_of::<MaybeUninit<u32>>(),",
+    ),
+    (
+        "src/lib.rs",
+        "            STACK_SIZE,",
+        "            STACK_SIZE / core::mem::size_of::<MaybeUninit<u32>>(),",
+    ),
+    (
+        "src/scheduler.rs",
+        "    task::{\n        self,\n        ContextExt,\n        CpuContext,\n        IdleFn,\n        Task,\n        TaskAllocListElement,\n        TaskDeleteListElement,\n        TaskExt,\n        TaskList,\n        TaskListItem,\n        TaskPtr,\n        TaskState,\n        ThreadLocalData,\n        read_thread_pointer,\n    },",
+        "    task::{\n        self, ContextExt, CpuContext, IdleFn, Task, TaskAllocListElement, TaskDeleteListElement,\n        TaskExt, TaskList, TaskListItem, TaskPtr, TaskState, ThreadLocalData, read_thread_pointer,\n    },",
+    ),
+    (
+        "src/timer/mod.rs",
+        "use crate::{\n    SCHEDULER,\n    TICK_RATE,\n    TimeBase,\n    task::{",
+        "use crate::{\n    SCHEDULER, TICK_RATE, TimeBase,\n    task::{",
+    ),
+];
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -8182,39 +8297,56 @@ fn validate_esp_rtos_vendor_tree_with_manifest(
                 .to_owned(),
         );
     }
-    let expected_edits = [
-        (
-            ESP_RTOS_CPU0_UPSTREAM_STACK_LENGTH,
-            ESP_RTOS_CPU0_PATCHED_STACK_LENGTH,
-        ),
-        (
-            ESP_RTOS_CPU1_UPSTREAM_STACK_LENGTH,
-            ESP_RTOS_CPU1_PATCHED_STACK_LENGTH,
-        ),
-    ];
-    if manifest.reviewed_source_edits.len() != expected_edits.len()
+    if manifest.project_files.len() != ESP_RTOS_PROJECT_FILES.len()
+        || ESP_RTOS_PROJECT_FILES.into_iter().any(|(path, digest)| {
+            manifest.project_files.get(path).map(String::as_str) != Some(digest)
+        })
+    {
+        return Err(
+            "checked esp-rtos vendor manifest has the wrong project provenance files".to_owned(),
+        );
+    }
+
+    let unmodified_paths = manifest
+        .unmodified_upstream_files
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let expected_unmodified_paths = ESP_RTOS_UNMODIFIED_UPSTREAM_FILES
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if unmodified_paths != expected_unmodified_paths {
+        return Err("checked esp-rtos manifest has the wrong pristine file inventory".to_owned());
+    }
+
+    if manifest.patched_upstream_files.len() != ESP_RTOS_PATCHED_UPSTREAM_FILES.len() {
+        return Err(
+            "checked esp-rtos manifest must identify exactly four patched source files".to_owned(),
+        );
+    }
+    for (relative, upstream_sha256, vendored_sha256) in ESP_RTOS_PATCHED_UPSTREAM_FILES {
+        let record = manifest
+            .patched_upstream_files
+            .get(relative)
+            .ok_or_else(|| format!("checked esp-rtos manifest is missing patched {relative}"))?;
+        if record.upstream_sha256 != upstream_sha256 || record.vendored_sha256 != vendored_sha256 {
+            return Err(format!(
+                "checked esp-rtos manifest does not bind {relative} to its reviewed pristine and patched digests"
+            ));
+        }
+    }
+
+    if manifest.reviewed_source_edits.len() != ESP_RTOS_REVIEWED_EDITS.len()
         || manifest
             .reviewed_source_edits
             .iter()
-            .zip(expected_edits)
-            .any(|(edit, (upstream, vendored))| {
-                edit.path != "src/lib.rs" || edit.upstream != upstream || edit.vendored != vendored
+            .zip(ESP_RTOS_REVIEWED_EDITS)
+            .any(|(edit, (path, upstream, vendored))| {
+                edit.path != path || edit.upstream != upstream || edit.vendored != vendored
             })
     {
         return Err(
-            "checked vendor manifest must describe the exact reviewed CPU0 and CPU1 src/lib.rs edits"
-                .to_owned(),
-        );
-    }
-    let patched_lib = manifest
-        .patched_upstream_files
-        .get("src/lib.rs")
-        .ok_or_else(|| "checked vendor manifest does not identify patched src/lib.rs".to_owned())?;
-    if manifest.patched_upstream_files.len() != 1
-        || patched_lib.upstream_sha256 != ESP_RTOS_PRISTINE_LIB_SHA256
-    {
-        return Err(
-            "checked vendor manifest does not bind the sole patched file to pristine src/lib.rs"
+            "checked esp-rtos manifest must describe the exact ordered six reviewed edits across the four changed source files"
                 .to_owned(),
         );
     }
@@ -8297,25 +8429,37 @@ fn validate_esp_rtos_vendor_tree_with_manifest(
         }
     }
 
-    let mut reconstructed = fs::read_to_string(vendor.join("src/lib.rs"))
-        .map_err(|error| format!("could not read patched src/lib.rs: {error}"))?;
+    let mut reconstructed = BTreeMap::new();
+    for (relative, _, _) in ESP_RTOS_PATCHED_UPSTREAM_FILES {
+        let source = fs::read_to_string(vendor.join(relative))
+            .map_err(|error| format!("could not read patched {relative}: {error}"))?;
+        reconstructed.insert(relative, source);
+    }
     for edit in &manifest.reviewed_source_edits {
-        let vendored_occurrences = reconstructed.matches(&edit.vendored).count();
-        let upstream_occurrences = reconstructed.matches(&edit.upstream).count();
-        if vendored_occurrences != 1 || upstream_occurrences != 0 {
+        let source = reconstructed
+            .get_mut(edit.path.as_str())
+            .ok_or_else(|| format!("reviewed edit names unpatched file {:?}", edit.path))?;
+        let vendored_occurrences = source.matches(&edit.vendored).count();
+        if vendored_occurrences != 1 {
             return Err(format!(
-                "reviewed edit in {:?} has vendored occurrences {vendored_occurrences} and upstream occurrences {upstream_occurrences}, expected 1 and 0",
+                "reviewed esp-rtos edit in {:?} has {vendored_occurrences} vendored occurrences, expected 1",
                 edit.path
             ));
         }
-        reconstructed = reconstructed.replacen(&edit.vendored, &edit.upstream, 1);
+        *source = source.replacen(&edit.vendored, &edit.upstream, 1);
     }
-    let reconstructed_digest = sha256_bytes(reconstructed.as_bytes());
-    if reconstructed_digest != patched_lib.upstream_sha256 {
-        return Err(format!(
-            "reversing the two reviewed edits produced src/lib.rs digest {reconstructed_digest}, expected pristine {}",
-            patched_lib.upstream_sha256
-        ));
+    for (relative, upstream_sha256, _) in ESP_RTOS_PATCHED_UPSTREAM_FILES {
+        let reconstructed_digest = sha256_bytes(
+            reconstructed
+                .get(relative)
+                .expect("all reviewed patched files were loaded")
+                .as_bytes(),
+        );
+        if reconstructed_digest != upstream_sha256 {
+            return Err(format!(
+                "reversing the reviewed edits produced {relative} digest {reconstructed_digest}, expected pristine {upstream_sha256}"
+            ));
+        }
     }
 
     Ok(())
@@ -8326,8 +8470,8 @@ const LORA_PHY_ARCHIVE_SHA256: &str =
     "61471c3b2909789e3332083577f6cf6c41a4fcf37674ef15156bcbb20504ac65";
 const LORA_PHY_UPSTREAM_COMMIT: &str = "ca04c2284eb00e015528933ea5159cd1ff36142d";
 const LORA_PHY_PATCHES_SHA256: &str =
-    "6cf20617bf00597361b75cc97e14e0debe5022a048bff60a490397486c614258";
-const LORA_PHY_UNMODIFIED_UPSTREAM_FILES: [&str; 17] = [
+    "e15064fd55b5419ceb20cb5400b39d5669a5eb7ff591bd9aea446909aef55c8c";
+const LORA_PHY_UNMODIFIED_UPSTREAM_FILES: [&str; 14] = [
     ".cargo_vcs_info.json",
     "CHANGELOG.md",
     "Cargo.toml",
@@ -8338,37 +8482,66 @@ const LORA_PHY_UNMODIFIED_UPSTREAM_FILES: [&str; 17] = [
     "rustfmt.toml",
     "src/interface.rs",
     "src/iv.rs",
-    "src/lorawan_radio.rs",
-    "src/mod_params.rs",
     "src/sx126x/radio_kind_params.rs",
-    "src/sx127x/mod.rs",
     "src/sx127x/radio_kind_params.rs",
     "src/sx127x/sx1272.rs",
     "src/sx127x/sx1276.rs",
 ];
-const LORA_PHY_PATCHED_UPSTREAM_FILES: [(&str, &str, &str); 4] = [
+const LORA_PHY_PATCHED_UPSTREAM_FILES: [(&str, &str, &str); 7] = [
     (
         "src/lib.rs",
         "8df0ef81a3a6333a7f528f0bd44204c65d2614ddf5e92a86c1db61bf25f6eccf",
-        "6b936e8546004f87e6003488fd793ad982cda85eec65073c453f412af41824ea",
+        "5df9db1421cc965c77368c2f59a886266c7a6df6997fd3a6294e5e5d731b6217",
+    ),
+    (
+        "src/lorawan_radio.rs",
+        "2068cef78703182f717e7930b903c52378818bf5b53cade7b9fe83cdf4789e3a",
+        "af556577cb21d7f3158711e053cc12d4c9d661f412a3812386d2515d0bfbc11c",
+    ),
+    (
+        "src/mod_params.rs",
+        "a951eb981d20ffff8ed40331cac136683bec3b96b34bbd4f974db07034ba0405",
+        "9477644b0b4995e6275fd88157f3c6b0a464705be918b17963c04dc24239cf23",
     ),
     (
         "src/mod_traits.rs",
         "b95e71ba7a7591364a59ddf1961620f8864103a0991df28d71a07026541f6efd",
-        "78aee410464aa0e85112ddc3fd790456ee38cf9f289757cf6aac783d94e3f618",
+        "7f8a1ddc6d870dcdb5219e9c2a23a4293766cf913b9c86ea3489bc67bdfeb44b",
     ),
     (
         "src/sx126x/mod.rs",
         "a1f49190dbb1e5820993bb9e9c1f45481997f047be983017aa2b3c57629faf18",
-        "a11be17de1603ebc796070a2d4a6f30dc23c63a305bc2111843d846d16550c3f",
+        "52559683c50ceec53201e14ec9f2ddc078ae60a6a1855c22c602f2f345ca52d3",
     ),
     (
         "src/sx126x/variant.rs",
         "6ba1ab372039da00dbad8096b40fbf614cb8a2cd443783ede8a95eb9565a657a",
         "daef22e7907e6502e9cb6622e3893fbc492389dcc3b856d88098712aa7262f63",
     ),
+    (
+        "src/sx127x/mod.rs",
+        "540a6ca9d7fce3eea3cf0d850ebefdb5784592ab580d7ea3e894fc1075a67c4f",
+        "effb78ead716aef88bf69f974308c9c1a01b3d7fde7f74223ced04df99d3c0bf",
+    ),
 ];
-const LORA_PHY_REVIEWED_EDIT_PATHS: [&str; 16] = [
+const LORA_PHY_REVIEWED_EDIT_PATHS: [&str; 33] = [
+    "src/lib.rs",
+    "src/lib.rs",
+    "src/lib.rs",
+    "src/lib.rs",
+    "src/lib.rs",
+    "src/lorawan_radio.rs",
+    "src/lorawan_radio.rs",
+    "src/lorawan_radio.rs",
+    "src/mod_params.rs",
+    "src/mod_traits.rs",
+    "src/sx126x/mod.rs",
+    "src/sx126x/mod.rs",
+    "src/sx126x/mod.rs",
+    "src/sx126x/mod.rs",
+    "src/sx126x/mod.rs",
+    "src/sx127x/mod.rs",
+    "src/sx127x/mod.rs",
     "src/sx126x/mod.rs",
     "src/sx126x/mod.rs",
     "src/sx126x/mod.rs",
@@ -8446,7 +8619,7 @@ fn validate_lora_phy_vendor_tree_with_manifest(
 
     if manifest.patched_upstream_files.len() != LORA_PHY_PATCHED_UPSTREAM_FILES.len() {
         return Err(
-            "checked lora-phy manifest must identify exactly four patched files".to_owned(),
+            "checked lora-phy manifest must identify exactly seven patched files".to_owned(),
         );
     }
     for (relative, upstream_sha256, vendored_sha256) in LORA_PHY_PATCHED_UPSTREAM_FILES {
@@ -8474,7 +8647,7 @@ fn validate_lora_phy_vendor_tree_with_manifest(
             })
     {
         return Err(
-            "checked lora-phy manifest must describe the exact ordered sixteen reviewed edits across the SX126x core, variant, interface traits and public façade"
+            "checked lora-phy manifest must describe the exact ordered thirty-three reviewed edits across the radio cores, LoRaWAN adapter, parameters, variant, interface traits and public façade"
                 .to_owned(),
         );
     }
@@ -8981,7 +9154,7 @@ mod tests {
     }
 
     #[test]
-    fn esp_rtos_vendor_tree_matches_checked_registry_inventory_and_two_edits() {
+    fn esp_rtos_vendor_tree_matches_checked_registry_inventory_and_six_edits() {
         let vendor = workspace_root().join("vendor/esp-rtos-0.3.0");
         validate_esp_rtos_vendor_tree(&vendor).unwrap();
 
@@ -9488,6 +9661,24 @@ mod tests {
                 },
                 "dependencies": [
                     handoff_path_dependency_fixture(
+                        "reticulum-lxmf-durable-ingress",
+                        "*",
+                        &root.join("crates/lxmf-durable-ingress"),
+                        None,
+                    ),
+                    handoff_path_dependency_fixture(
+                        "reticulum-lxmf-ingress",
+                        "*",
+                        &root.join("crates/lxmf-ingress"),
+                        None,
+                    ),
+                    handoff_path_dependency_fixture(
+                        "reticulum-lxmf-model",
+                        "*",
+                        &root.join("crates/lxmf-model"),
+                        None,
+                    ),
+                    handoff_path_dependency_fixture(
                         "reticulum-lxmf-store",
                         "*",
                         &root.join("crates/lxmf-store"),
@@ -9583,8 +9774,14 @@ mod tests {
                      ├── reticulum-device-api-session v0.1.0 features=[]\n\
                      ├── reticulum-device-identity-store v0.1.0 features=[]\n\
                      ├── reticulum-interface-router v0.1.0 features=[]\n\
-                     ├── reticulum-lxmf-store v0.1.0 features=[]\n\
-                     │   └── reticulum-lxmf-model v0.1.0 features=[]\n\
+                     ├── reticulum-lxmf-durable-ingress v0.1.0 features=[]\n\
+                     │   ├── reticulum-lxmf-ingress v0.1.0 features=[]\n\
+                     │   │   └── reticulum-lxmf-wire v0.1.0 features=[]\n\
+                     │   ├── reticulum-lxmf-model v0.1.0 features=[]\n\
+                     │   └── reticulum-lxmf-store v0.1.0 features=[]\n\
+                     ├── reticulum-lxmf-ingress v0.1.0 features=[] (*)\n\
+                     ├── reticulum-lxmf-model v0.1.0 features=[]\n\
+                     ├── reticulum-lxmf-store v0.1.0 features=[] (*)\n\
                      ├── reticulum-node-core v0.1.0 features=[]\n\
                      │   └── reticulum-rns-rete v0.1.0 features=[]\n\
                      │       ├── rete-core v0.1.0 features=[alloc,default]\n\
@@ -9703,7 +9900,11 @@ mod tests {
         }
         for package in [
             "reticulum-rns-inbox-store",
+            "reticulum-lxmf-durable-ingress",
+            "reticulum-lxmf-ingress",
+            "reticulum-lxmf-model",
             "reticulum-lxmf-store",
+            "reticulum-lxmf-wire",
             "reticulum-device-api-credential-store",
             "reticulum-device-api-credentials",
             "reticulum-device-api-framing",
@@ -10119,12 +10320,27 @@ fn sample(layout: Layout) {
     }
 
     #[test]
-    fn permanent_e290_node_requires_exact_direct_storage_and_authentication_dependencies() {
+    fn permanent_e290_node_requires_exact_direct_lxmf_and_authentication_dependencies() {
         let root = workspace_root();
         let baseline = e290_node_metadata_fixture(&root);
         validate_e290_node_feature_boundary(&baseline.to_string(), &root).unwrap();
 
         for (dependency_name, wrong_path, rename) in [
+            (
+                "reticulum-lxmf-durable-ingress",
+                "crates/not-the-lxmf-durable-ingress",
+                "lxmf-durable-ingress",
+            ),
+            (
+                "reticulum-lxmf-ingress",
+                "crates/not-the-lxmf-ingress",
+                "lxmf-ingress",
+            ),
+            (
+                "reticulum-lxmf-model",
+                "crates/not-the-lxmf-model",
+                "lxmf-model",
+            ),
             (
                 "reticulum-lxmf-store",
                 "crates/not-the-lxmf-store",
@@ -10528,7 +10744,7 @@ fn sample(layout: Layout) {
     }
 
     #[test]
-    fn lxmf_store_is_composed_only_in_e290_while_ingress_remains_preintegration() {
+    fn durable_lxmf_ingress_is_composed_only_in_the_e290_product_family() {
         for (label, forbidden) in [
             ("Tracker product", &PRODUCT_GRAPH_FORBIDDEN[..]),
             ("storage HIL", &STORAGE_HIL_GRAPH_FORBIDDEN[..]),
@@ -10540,21 +10756,28 @@ fn sample(layout: Layout) {
             ("E290 semantic HIL", &E290_SEMANTIC_HIL_GRAPH_FORBIDDEN[..]),
         ] {
             for package in [
+                "reticulum-lxmf-durable-ingress",
+                "reticulum-lxmf-ingress",
                 "reticulum-lxmf-model",
                 "reticulum-lxmf-store",
-                "reticulum-lxmf-durable-ingress",
+                "reticulum-lxmf-wire",
             ] {
                 assert!(
                     forbidden.contains(&package),
-                    "{label} no longer forbids pre-integration {package}"
+                    "{label} no longer forbids E290-owned {package}"
                 );
             }
         }
-        for package in ["reticulum-lxmf-model", "reticulum-lxmf-store"] {
+        for package in [
+            "reticulum-lxmf-durable-ingress",
+            "reticulum-lxmf-ingress",
+            "reticulum-lxmf-model",
+            "reticulum-lxmf-store",
+            "reticulum-lxmf-wire",
+        ] {
             assert!(E290_NODE_GRAPH_REQUIRED.contains(&package));
             assert!(!E290_NODE_GRAPH_FORBIDDEN.contains(&package));
         }
-        assert!(E290_NODE_GRAPH_FORBIDDEN.contains(&"reticulum-lxmf-durable-ingress"));
     }
 
     #[test]
@@ -14693,6 +14916,7 @@ fn sample(layout: Layout) {
             "features": {},
             "dependencies": [
                 handoff_dependency_fixture("critical-section", "=1.2.0", None),
+                handoff_dependency_fixture("embassy-futures", "=0.1.2", None),
                 embedded_hal_async,
                 handoff_dependency_fixture("lora-phy", "=3.0.1", None),
                 radio_interface,

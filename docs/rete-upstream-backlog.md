@@ -47,7 +47,7 @@ to timeout.
 This candidate remains on the project fork; no issue or pull request was opened
 for the newer lifecycle or routing work, and publication still requires direct
 user approval. The preceding pin has host/portable and build-only E290
-evidence. The current application-event release passes its root host/portable
+evidence. The subsequent pre-PSRAM application-event release passed its root host/portable
 validation, 647-check schema-2 conformance run, and default/HIL E290 build
 gates. Its default package is a 789,504-byte merged image using
 723,968/6,291,456 application bytes (11.51%); it matched an exact `3e:88`
@@ -59,9 +59,11 @@ maximum-frame deduction), recorded two confirmed transmissions, and observed
 no unexpected error, failed allocation, watchdog timeout, or correlation
 fault. The board was restored
 to an exact-readback 789,504-byte default rebuild and served
-`identity-summary`. Board `3f:88` did not enumerate, so the current two-board
-lifecycle/RF run remains open; older artifact records remain bound to their
-recorded revisions.
+`identity-summary`. Board `3f:88` did not enumerate. These are historical
+pre-PSRAM artifact and checkpoint records. The current post-offload placement
+evidence and still-open two-board LXMF qualification are recorded in the
+[E290 runbook](e290-node.md#stage-5-psram-boot-checkpoint); older artifact
+records remain bound to their recorded revisions.
 
 ## 1. Transactional Link admission — completed for owned and H2 relay paths
 
@@ -180,6 +182,37 @@ yet model that local-client role at this seam, does not apply the path-response
 exclusion, and has additional role-sensitive cached-announce and known-path
 response surfaces. Audit and cover those independently instead of silently
 folding them into the endpoint fix.
+
+### Local secondary-destination discovery gaps
+
+The permanent E290 source now uses Rete's destination-specific announce
+primitive for both its primary destination and registered `lxmf.delivery`
+destination. Two pinned-revision behaviors remain incomplete for responsive,
+collision-resistant discovery:
+
+- A path request matching a registered local destination enters the forwarding
+  path instead of queuing an announce for that destination. Periodic service
+  announces work, but a peer that misses one cannot promptly recover by
+  requesting the path.
+- Announce retransmission derives `jitter_ms` with `% 500`, then converts it to
+  a whole-second value only when `jitter_ms >= 500`. That condition is
+  unreachable, so the effective delay is always zero. Simultaneously booted
+  devices can therefore retransmit in lockstep.
+
+The old E290 product scheduler exposed the practical interaction between this
+transport behavior and half-duplex LoRa. It queued primary and
+`lxmf.delivery` back-to-back; B processed exactly three distinct A announces
+across the powered bootstrap cycles but still returned `no-path` for A's LXMF
+destination. Rete transport mode immediately relays the first accepted announce,
+so B transmitted that relay while A sent the secondary and could not receive it.
+
+Current product source mitigates that composition without changing the Rete
+pin. It schedules at most one destination per event, separates primary and LXMF
+by eight seconds, runs two retry pairs with an identity-derived first phase, and
+then enters the 30-minute cadence. That does not close responsive path-request
+handling or the generic retransmission-jitter defect. Retain local regressions
+for both Rete behaviors before changing the pin. No issue or pull request has
+been opened for either item.
 
 ## 4. Link state events and outbound activity
 

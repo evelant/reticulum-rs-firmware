@@ -2,20 +2,22 @@
 //!
 //! Board crates retain pin topology, RF-front-end sequencing, admitted
 //! configurations and power policy. This crate owns the shared initialized
-//! radio state machine: bounded receive, channel activity detection, and one
-//! atomic one-or-two-frame RNode transmission through [`SoleRnodeRadio`].
+//! radio state machine: persistent continuous receive with bounded software
+//! scheduler yields, channel activity detection, and one atomic one-or-two-
+//! frame RNode transmission through [`SoleRnodeRadio`].
 
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use core::{cell::RefCell, num::NonZeroU64};
+use core::{cell::RefCell, future::Future, num::NonZeroU64};
 
 use critical_section::Mutex;
+use embassy_futures::select::{Either, select};
 use embedded_hal_async::{delay::DelayNs, spi::SpiDevice};
 use lora_phy::{
     LoRa, RxMode,
-    mod_params::{ModulationParams, PacketParams, RadioError},
+    mod_params::{ModulationParams, PacketParams, RadioError, ReceiveIrq},
     mod_traits::InterfaceVariant,
     sx126x::{Config, Sx126x, Sx126xVariant},
 };
@@ -213,9 +215,9 @@ pub enum Sx126xRadioOperation {
     ChannelActivityDetection,
     /// Post-CAD standby and RF-switch cleanup.
     ChannelActivityCleanup,
-    /// Bounded receive preparation.
+    /// Receive preparation, including persistent continuous receive.
     PrepareReceive,
-    /// Bounded receive execution.
+    /// Receive IRQ wait and processing.
     Receive,
     /// Post-receive standby cleanup.
     ReceiveCleanup,
@@ -302,6 +304,7 @@ where
     settings: Sx126xRnodeSettings,
     tx_hooks: &'static TxHooks,
     timestamps: &'static IrqTimestampCapture,
+    continuous_rx_active: bool,
 }
 
 impl<Spi, Interface, Chip, RadioDelay, TxHooks>
@@ -389,6 +392,7 @@ where
             settings,
             tx_hooks,
             timestamps,
+            continuous_rx_active: false,
         })
     }
 
@@ -402,6 +406,7 @@ where
         if frame.is_empty() || frame.len() > SX1262_FRAME_MTU {
             return Err(Sx126xRadioError::invalid_frame());
         }
+        self.continuous_rx_active = false;
         let mut active = self.active.take().ok_or_else(|| {
             Sx126xRadioError::radio(Sx126xRadioOperation::Transmit, RadioError::InvalidRadioMode)
         })?;
@@ -442,6 +447,7 @@ where
 
     /// Run one low-level LoRa channel activity detection operation.
     pub async fn channel_activity_detected(&mut self) -> Result<bool, Sx126xRadioError> {
+        self.continuous_rx_active = false;
         let mut active = self.active.take().ok_or_else(|| {
             Sx126xRadioError::radio(
                 Sx126xRadioOperation::ChannelActivityDetection,
@@ -474,6 +480,7 @@ where
         buffer: &'a mut [u8; SX1262_FRAME_MTU],
     ) -> impl core::future::Future<Output = Result<Option<Sx126xReceivedFrame>, Sx126xRadioError>> + 'a
     {
+        self.continuous_rx_active = false;
         let active = self.active.take();
         self.tx_hooks.disarm();
         let timestamps = self.timestamps;
@@ -532,6 +539,7 @@ where
 
     /// Drop initialized hardware into the private interface's inert state.
     pub fn shutdown(&mut self) {
+        self.continuous_rx_active = false;
         self.tx_hooks.disarm();
         self.active.take();
     }
@@ -649,9 +657,147 @@ where
         }
     }
 
+    fn receive_continuous_until<'a, SchedulerYield, ProgressDeadline>(
+        &'a mut self,
+        buffer: &'a mut [u8; SX1262_FRAME_MTU],
+        scheduler_yield: SchedulerYield,
+        progress_deadline: ProgressDeadline,
+    ) -> impl Future<Output = Result<BoundedRxOutcome, Self::Fault>> + 'a
+    where
+        SchedulerYield: Future<Output = ()> + 'a,
+        ProgressDeadline: Future<Output = ()> + 'a,
+    {
+        let active = self.active.take();
+        self.tx_hooks.disarm();
+        let timestamps = self.timestamps;
+
+        async move {
+            let mut active =
+                active.ok_or_else(|| inactive_fault(SoleRadioFaultPhase::ReceivePreparation))?;
+            if !timestamps.supports_sole_radio_us() {
+                return Err(SoleRadioFaultSummary::new(
+                    SoleRadioFaultPhase::ReceivePreparation,
+                    SoleRadioFaultClass::Configuration,
+                ));
+            }
+
+            if !self.continuous_rx_active {
+                if let Err(radio) = active
+                    .lora
+                    .prepare_for_rx(RxMode::Continuous, &active.modulation, &active.rx_packet)
+                    .await
+                {
+                    return Err(sole_radio_fault(
+                        SoleRadioFaultPhase::ReceivePreparation,
+                        &radio,
+                    ));
+                }
+                if let Err(radio) = active.lora.start_rx().await {
+                    return Err(sole_radio_fault(
+                        SoleRadioFaultPhase::ReceivePreparation,
+                        &radio,
+                    ));
+                }
+                self.continuous_rx_active = true;
+            }
+
+            timestamps.begin_operation();
+            match select(active.lora.wait_for_irq(), scheduler_yield).await {
+                Either::Second(()) => {
+                    let _ = timestamps.take_completed_operation();
+                    self.active = Some(active);
+                    return Ok(BoundedRxOutcome::SchedulerYield);
+                }
+                Either::First(Err(radio)) => {
+                    return Err(sole_radio_fault(SoleRadioFaultPhase::Receive, &radio));
+                }
+                Either::First(Ok(())) => {}
+            }
+
+            let mut progress_locked = false;
+            let mut progress_deadline = core::pin::pin!(progress_deadline);
+            loop {
+                match active.lora.process_rx_irq(&active.rx_packet, buffer).await {
+                    Ok(Some(ReceiveIrq::PacketReceived { len, status })) => {
+                        let received_at_us = timestamps
+                            .take_completed_operation()
+                            .ok_or_else(timestamp_fault)?;
+                        self.active = Some(active);
+                        return Ok(BoundedRxOutcome::Frame(BoundedRxObservation::new(
+                            usize::from(len),
+                            FrameSignal::new(status.rssi, status.snr),
+                            received_at_us,
+                        )));
+                    }
+                    Ok(Some(ReceiveIrq::PreambleReceived)) => {
+                        progress_locked = true;
+                        let _ = timestamps.take_completed_operation();
+                        timestamps.begin_operation();
+                        match select(active.lora.wait_for_irq(), progress_deadline.as_mut()).await {
+                            Either::First(Ok(())) => {}
+                            Either::First(Err(radio)) => {
+                                return Err(sole_radio_fault(SoleRadioFaultPhase::Receive, &radio));
+                            }
+                            Either::Second(()) => {
+                                let _ = timestamps.take_completed_operation();
+                                if let Err(radio) = active.lora.start_rx().await {
+                                    return Err(sole_radio_fault(
+                                        SoleRadioFaultPhase::ReceivePreparation,
+                                        &radio,
+                                    ));
+                                }
+                                self.active = Some(active);
+                                return Ok(BoundedRxOutcome::InvalidFrame);
+                            }
+                        }
+                    }
+                    Ok(None) if !progress_locked => {
+                        let _ = timestamps.take_completed_operation();
+                        self.active = Some(active);
+                        return Ok(BoundedRxOutcome::SchedulerYield);
+                    }
+                    Ok(None) => {
+                        let _ = timestamps.take_completed_operation();
+                        timestamps.begin_operation();
+                        match select(active.lora.wait_for_irq(), progress_deadline.as_mut()).await {
+                            Either::First(Ok(())) => {}
+                            Either::First(Err(radio)) => {
+                                return Err(sole_radio_fault(SoleRadioFaultPhase::Receive, &radio));
+                            }
+                            Either::Second(()) => {
+                                let _ = timestamps.take_completed_operation();
+                                if let Err(radio) = active.lora.start_rx().await {
+                                    return Err(sole_radio_fault(
+                                        SoleRadioFaultPhase::ReceivePreparation,
+                                        &radio,
+                                    ));
+                                }
+                                self.active = Some(active);
+                                return Ok(BoundedRxOutcome::InvalidFrame);
+                            }
+                        }
+                    }
+                    Err(RadioError::ReceiveTimeout) => {
+                        let _ = timestamps.take_completed_operation();
+                        self.active = Some(active);
+                        return Ok(BoundedRxOutcome::InvalidFrame);
+                    }
+                    Err(radio) => {
+                        return Err(sole_radio_fault(SoleRadioFaultPhase::Receive, &radio));
+                    }
+                }
+            }
+        }
+    }
+
+    fn invalidate_receive_session(&mut self) {
+        self.continuous_rx_active = false;
+    }
+
     fn cad(
         &mut self,
     ) -> impl core::future::Future<Output = Result<CadObservation, Self::Fault>> + '_ {
+        self.continuous_rx_active = false;
         let active = self.active.take();
         let tx_hooks = self.tx_hooks;
         let timestamps = self.timestamps;
@@ -695,6 +841,7 @@ where
         frames: RnodeTxFrames<'a>,
     ) -> impl core::future::Future<Output = Result<PacketTxObservation, PacketTxFault<Self::Fault>>> + 'a
     {
+        self.continuous_rx_active = false;
         let active = self.active.take();
         let settings = self.settings;
         let tx_hooks = self.tx_hooks;

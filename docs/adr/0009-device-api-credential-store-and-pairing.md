@@ -576,8 +576,8 @@ but cannot claim security from the developer USB trust shortcut.
   mapping, single USB ownership, GPIO21 pull-up composition, initialization-
   before-journal scheduling, shared control/live decoding, causal ordering,
   durable reply correlation, reset-generation blocking, physical detachment,
-  USB-RAM scrubbing, and earliest-Rust-entry boot quarantine. The 125-test
-  firmware library, 42 focused host-client tests, full 189-test xtask suite,
+  USB-RAM scrubbing, and earliest-Rust-entry boot quarantine. At this milestone,
+  the 125-test firmware library, 42 focused host-client tests, full 189-test xtask suite,
   strict host/target Clippy, rustdoc, release linking, graph policy, and image-
   size ceilings pass. Final measurements are recorded with the qualified image.
 - Complete as historical bounded powered bootstrap control: the 544,371/3,548/469,280/

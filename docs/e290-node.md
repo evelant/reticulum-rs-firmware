@@ -61,15 +61,22 @@ authenticated capabilities and identity reads, sequential request/response
 flights in one session, durable submission, LoRa DATA delivery, peer decrypt/
 proof, terminal projection, API 1.2 durable raw-RNS status/peek before and after
 a hard reset, one drop-newest observation, four bounded cold-mount quarantine
-cases, and one same-boot missing-commit quarantine. Each fault case includes
-only one direct DATA/proof exchange; it does not claim sustained forwarding,
+cases, and one same-boot missing-commit quarantine. The current continuous-RX
+HIL additionally qualifies one exact 307-byte A-to-B opportunistic LXMF DATA
+packet, a new durable receiver-store commit before retained-proof release,
+first-attempt `Delivered`, and exact store readback. The earlier fault fixtures
+each include only one direct DATA/proof exchange; they do not claim sustained
+forwarding,
 multi-hop routing, LXMF, or general application-level message consumption,
 session resumption, or either deferred wireless bearer binding.
 
 The current source composition pins Rete commit
 `90570cafc812b3025011cb690ec74a27f287cb3f`, with designated durable tag
-`firmware-pin-90570ca`. That pin is newer than every powered measurement and
-powered artifact recorded below. It removes implicit
+`firmware-pin-90570ca`. The older 2026-07-20 two-board measurements below
+predate that pin, while the later pre-PSRAM one-board checkpoint uses it. The
+Stage 5 PSRAM boot checkpoint is the first powered evidence for the post-offload
+Stage 5 source and placement, and is scoped only to placement, boot, and one
+authenticated API read. The pin removes implicit
 interface-zero/broadcast fallbacks, adds exact path/reverse/Link routing and
 authenticated fail-closed LRPROOF handling, and makes covered H2 relay/reverse
 admission transactional with typed failures. It also adds precise
@@ -102,7 +109,8 @@ a future ownership protocol. Protocol-confirmation failure now offlines the
 interface returned by the routed transition rather than assuming LoRa. The
 default lifecycle image was flashed to `3e:88`, matched an exact address-zero
 readback, and returned an authenticated `identity-summary`. That proves one
-current-source boot and API exchange, not the two-board lifecycle/RF behavior;
+boot and API exchange for that lifecycle source, not current Stage 5 or the
+two-board lifecycle/RF behavior;
 `3f:88` did not enumerate for this run.
 
 The preceding `14c7b49`
@@ -113,7 +121,7 @@ Its explicit 16 MiB package is a 776,464-byte merged image, uses
 710,928/6,291,456 application bytes (11.30%), and has SHA-256
 `7b11c6f6a3c039d46ab0117fd362920aaa40145e7f27cbc6fa0a8a84a7ab3571`.
 This is build-only evidence for the preceding pin: the image has no flashed
-readback or powered proof. The current application-event ownership release
+readback or powered proof. The pre-PSRAM application-event ownership release
 links with text/data/BSS of 684,167/3,676/469,152 bytes (1,156,995 bytes total
 by GNU size). Its 12,345,320-byte ELF has SHA-256
 `ebb34e7176a8e61b6969ebf99d7dac97c6e674ef5e583bbf931a34e8b6e970a2`.
@@ -125,7 +133,7 @@ That merged image matched an exact readback on `3e:88`, where authenticated
 runtime-measurement HIL then matched another exact `3e:88` readback and
 produced the bounded authenticated checkpoint recorded below. The board was
 subsequently restored to an exact-readback rebuilt default image and again
-served `identity-summary`. The unavailable `3f:88` prevented a current
+served `identity-summary`. The unavailable `3f:88` prevented that
 two-board lifecycle/RF run.
 Every powered result below remains bound to its recorded historical source and
 Rete revision.
@@ -206,7 +214,59 @@ read-only port. A mount or admission fault disables only that inbox service.
 The four cold-mount fixtures establish one direct peer DATA/decrypt/proof
 exchange after boot quarantine; the same-boot HIL's triggering exchange
 precedes the missing-commit quarantine. Neither establishes sustained or
-multi-hop routing. An optional journal mount/recovery failure occurs before any
+multi-hop routing.
+
+Current source separately mount-gates a derived `lxmf.delivery` destination
+backed by ADR 0014's 2 MiB append-only store and 512-slot PSRAM index. It admits
+only opportunistic destination DATA, resolves the sender through the
+transport-neutral node identity cache, and applies Rete's per-destination
+`Retain` proof policy: a proof becomes eligible for the ordinary supervisor
+only after a new commit or a fresh retransmission is recognized as
+`AlreadyDurable`. No delayed-proof state survives reboot. Signatures remain
+mandatory. The initial `StampPolicy::NotRequired` profile allows an absent stamp
+and preserves/parses a supplied stamp, but does not yet verify ticket trust or
+proof of work. Sixteen static internal-RAM application-event slots keep ingress
+admission bounded. Sixteen delayed-proof slots plus the bounded retry set,
+authority-fault set, non-cloneable packet-action holder, and fault flags are
+allocated explicitly in validated PSRAM for the boot lifetime with no internal-
+RAM fallback. These slot counts bound this E290 profile's volatile concurrency;
+they are not a protocol, store-capacity, or full-feature ceiling and may be
+raised after measured E290 qualification.
+The first profile deliberately has no age or attempt expiry for
+`AdmissionDeferred`: an unknown source identity retains its exact slot while an
+announce may make verification possible. This keeps memory bounded but means
+sixteen never-resolved sources can occupy all application-event slots until
+reboot. A path-request/identity-retention strategy plus an explicit expiry or
+attempt policy is required before hostile or sustained deployment.
+When the event pool is actually full and a ready proof cannot enter the ordinary
+path, pressure relief discards only the oldest non-pending LXMF retry; exact
+store-reconciliation and store-fault owners are never selected. Clean collision
+or capacity outcomes discard only that candidate without disabling replay. A
+clean invariant or pre-pending media fault retains the exact event and fail-stops
+only LXMF admission. A post-pending mutation fault also blocks all other flash
+mutations until reset/remount because its exact ambiguous store owner must remain
+exclusive; routing and nonmutating consumers continue. Local Link
+admission is disabled for both the primary and LXMF destinations until a bounded
+Link/Resource owner exists. A mounted service emits a separately signed
+`lxmf.delivery` discovery announce with canonical LXMF 1.0.1 `[nil, nil, []]`
+application data unless a clean fault has disabled that service. The scheduler
+attempts at most one local destination per event: primary first, LXMF eight
+seconds later, two short retry cycles, then a 30-minute steady cadence. The first
+retry is identity-phased by `13 + (u32_le(primary[0..4]) mod 23)` seconds after
+the initial pair; the known A and B identities therefore retry their primaries
+at 26 and 43 seconds from boot. Explicit events and Rete's five-second native
+retransmissions remain at least three seconds apart for that pair. A queue or
+native admission rejection retains the same scheduled destination and retries
+it one second later without consuming bootstrap budget. An ambiguous pending
+`StoreFaultHold` retains its exact owner but does not currently suppress
+discovery. Direct/Resource delivery,
+propagation, outbound LXMF, responsive path-request discovery, ticket/PoW
+requirements, reclamation, and client APIs remain deferred. This is host- and
+target-build-qualified source composition with one powered, exact
+opportunistic new-commit-before-proof result; it is not general LXMF
+interoperability qualification.
+
+An optional journal mount/recovery failure occurs before any
 durability-gated DATA owner can exist; it disables local durable submission
 service while the LoRa node still starts in route-only mode. The exact
 authorized-frame request/durable-echo handoff is source-composed and now passes
@@ -265,10 +325,11 @@ permanent fault
 with an unresolved frame enters interface-local `ActiveOwnerFailStopped`, takes
 the same LoRa lease offline without changing its generation, retains the exact
 frame/completion/ticket, and permits no fresh LoRa work for the rest of the boot.
-Device configuration, final LXMF/message storage and client delivery,
-LXMF/NomadNet, and production-ready host-facing USB/BLE/Wi-Fi services remain
-visible product blockers. The one-entry raw-RNS qualification record is not
-that final storage or client surface.
+Device configuration, the full LXMF engine and propagation service, durable
+read/delete/reclaim and migration policy, local LXMF/NomadNet clients, and
+production-ready host-facing USB/BLE/Wi-Fi services remain visible product
+blockers. The one-entry raw-RNS qualification record remains separate from the
+dedicated opportunistic LXMF receive store and is not a final client surface.
 
 ## Composition boundary
 
@@ -377,14 +438,25 @@ limits.
 
 ## Scheduler and RF policy
 
-The LoRa task gives an idle radio one bounded receive operation before checking
-the TX queue. A partial RNode packet retains receive priority until completion
-or the profile-derived fragment deadline. Completed bytes move into an exact
-fabric-owned ingress buffer. If the ingress queue is full, the sealed packet is
-retained unchanged; if no reusable buffer exists, the task skips RX and gives
-TX one turn. Once a ticketed TX owner is dequeued, the dispatcher drives it
-through backoff, CAD, resource permission, one logical one/two-frame transmit,
-and exact completion return before resuming receive service.
+The LoRa task keeps the modem in `RxMode::Continuous` across physical frames.
+The former 248-symbol hardware search window is now a 253,952-us software-only
+scheduler cadence: when that timer wins, the actor may inspect queued TX
+without issuing standby or another `SetRx`. Once preamble, sync-word, or valid-
+header progress is observed, the scheduler timer no longer competes. A separate
+maximum-frame-airtime-plus-margin deadline then waits for a terminal receive
+IRQ; if a false preamble leaves the SX1262 latched, expiry reissues continuous
+`SetRx` and returns a recoverable invalid-frame outcome before TX can be
+considered. A partial RNode packet separately retains receive priority until
+completion or the profile-derived fragment deadline.
+
+Completed bytes move into an exact fabric-owned ingress buffer. If the ingress
+queue is full, the sealed packet is retained unchanged; if no reusable buffer
+exists, the task skips RX and gives TX one turn. Accepting a ticketed TX owner
+invalidates the current receive epoch. Before CAD or TX, the radio enters
+standby, disables receive IRQ routing, and clears pending IRQ flags; the
+dispatcher then drives backoff, CAD, resource permission, one logical one/two-
+frame transmit, and exact completion return before starting a fresh continuous-
+RX epoch.
 
 The NA915 development profile currently uses a maximum of three CAD attempts
 and a randomized 24--360 ms backoff interval, preserving the reference RNode
@@ -437,8 +509,9 @@ dequeue fresh ingress, tick, or announce.
 
 The image autodetects ESP32-S3 PSRAM and refuses to continue unless the mapped
 capacity is between the qualified 8 MiB floor and the board datasheet's 16 MiB
-claim. Fixed channels, task storage, permit stores and ownership state remain
-in internal static RAM. The allocator receives 64 KiB of reclaimed internal
+claim. Fixed channels, task storage, permit stores, and IRQ/synchronization-
+visible state remain in internal static RAM. The LXMF backing allocations named
+below are deliberately external. The allocator receives 64 KiB of reclaimed internal
 RAM followed by the detected PSRAM. Because `esp-alloc` searches registered
 regions in order, ordinary global allocations currently consume internal heap
 first and spill into PSRAM only when no internal hole fits. That is a measured
@@ -448,13 +521,14 @@ DMA/IRQ-visible state and flash-critical state must remain internal. Largest
 contiguous free space is not exposed by the pinned allocator and must not be
 inferred from total free bytes.
 
-The first explicit placement is now the LXMF store index. Its 512 opaque slots
+The explicitly external allocations are now the LXMF store index, delayed-proof
+slot backing, and retry/fault/proof-holder state. The index's 512 opaque slots
 are derived from the exact 2 MiB partition length divided by the store's 4 KiB
-extent size, allocated with `ExternalMemory` after PSRAM registration, checked
-for exact initialized length/bytes/alignment and containment in the detected
-PSRAM mapping, then leaked as a boot-lifetime slice. Allocation or validation
-failure leaves the product inert. This does not place application-event or
-delayed-proof slots in PSRAM.
+extent size. Each allocation is made with `ExternalMemory` after PSRAM
+registration, checked for its expected initialized length/bytes/alignment and
+containment in the detected PSRAM mapping, then leaked for the boot lifetime.
+Allocation or validation failure leaves the product inert; there is no internal-
+RAM fallback. The application-event slots remain in internal static RAM.
 
 The target requires a 16 MiB flash image/header and uses
 [`partitions/heltec-vision-master-e290-node.csv`](../partitions/heltec-vision-master-e290-node.csv):
@@ -470,7 +544,7 @@ The target requires a 16 MiB flash image/header and uses
 | Device config | `0x616000` | 104 KiB | Reserved, not wired |
 | Node journal | `0x630000` | 1 MiB | Resident operation-scoped submission runtime; one-entry qualification cap; authenticated submission and post-re-enumeration terminal status powered-qualified |
 | Message store | `0x730000` | 2 MiB | Wired ADR 0011 format-1 raw-RNS inbox; one 576-byte commit-last item; 383-byte maximum; not LXMF |
-| LXMF store | `0x930000` | 2 MiB | Wired ADR 0014 append-only store; 512-slot PSRAM index; mounted but not admitted |
+| LXMF store | `0x930000` | 2 MiB | Wired ADR 0014 append-only store; 512-slot PSRAM index; mount-gated opportunistic `lxmf.delivery` admission; one exact new-commit-before-proof A-to-B delivery is powered-qualified; `AlreadyDurable` replay remains unqualified |
 | Unallocated | `0xb30000` | 4.8125 MiB | OTA/layout decision |
 
 The workspace runner in `.cargo/config.toml` hardcodes an 8 MiB flash size and
@@ -524,8 +598,20 @@ cargo +stable run --locked -p xtask -- \
   --input /path/to/proof-trace.bin [--json]
 ```
 
-For a checkpoint captured as the required contiguous `RTME || RPTE` range,
-decode and correlate both records together:
+Stage 5 adds a third initialized, exact 96-byte `LXTE` version-1 trace. It
+records durable-new and already-durable observations, the complete 32-byte
+LXMF message ID, opaque durable handle, proof-ready/released/ordinary-handoff
+frontiers, a compact proof-correlation tag, and any commit-before-proof ordering
+violation. It contains no message body or exact carrier. Decode it directly:
+
+```sh
+cargo +stable run --locked -p xtask -- \
+  e290-runtime-measurement decode-lxmf-trace \
+  --input /path/to/lxmf-trace.bin [--json]
+```
+
+For a checkpoint captured as the required exact 544-byte contiguous
+`LXTE || RTME || RPTE` range, decode and correlate all three records together:
 
 ```sh
 cargo +stable run --locked -p xtask -- \
@@ -533,14 +619,16 @@ cargo +stable run --locked -p xtask -- \
   --input /path/to/checkpoint.bin [--json]
 ```
 
-The combined decoder reports the RTME TX-operation total beside the sum of
+The combined decoder emits schema `reticulum.e290-runtime-checkpoint.v2`, with
+the decoded records named `lxte`, `rtme`, and `rpte`. It reports the RTME
+TX-operation total beside the sum of
 the two RPTE TX-outcome counters. A mismatch is retained as a diagnostic, not
 a malformed-record error: the debugger can halt the actor after RPTE records
 the radio result but before the surrounding RTME operation guard completes.
-Stable baseline and terminal acceptance checkpoints still require the two
-totals to agree.
+Stable baseline and terminal acceptance checkpoints still require the RTME
+and RPTE totals to agree.
 
-Both records use matching-even sequence markers. Their record methods depend
+All three records use matching-even sequence markers. Their record methods depend
 on the current single-core cooperative executor and never yield; the sequence
 protocol detects torn debugger reads but is not a multi-writer lock. A future
 multicore Wi-Fi/BLE actor must add synchronization or use a separate per-writer
@@ -561,32 +649,119 @@ cargo +stable run --locked -p xtask -- e290-runtime-measurement inspect-elf \
 It accepts only final little-endian 32-bit Xtensa `ET_EXEC` images with one
 nonempty, relocation-free `.stack_sizes` section. Both maximum frames must be
 at most 53,680 bytes, both linker guard offsets must remain 60 bytes, and the
-default/HIL usable stacks must remain at least 165,032/164,336 bytes. The
-default ELF must exclude the proof trace; the HIL ELF must contain exactly one
-initialized 192-byte symbol whose linked bytes decode as a valid empty `RPTE`
-record. Record counts are diagnostic rather than policy: the current build
-pair contains 856 default and 872 HIL records, and both maxima are 53,680
-bytes. The retained powered release ELFs described below instead
+post-offload default/HIL usable stacks must remain at least 162,376/161,576
+bytes. The default ELF must exclude both traces; the HIL ELF must contain
+exactly one initialized 192-byte symbol and one initialized 96-byte symbol
+whose linked bytes decode as valid empty `RPTE` and `LXTE` records. Record
+counts are diagnostic rather than policy: the
+current source pair contains 946 default and 962 HIL records, and both maxima
+are 53,680 bytes. The retained powered release ELFs described below instead
 contain 816/832 records with 52,752-byte maxima. CI runs Clippy and then
 relinks both current profiles with
 `-C link-arg=-nostartfiles -Z emit-stack-sizes` in isolated target directories
 immediately before this inspection.
 
-The current default/HIL usable stacks are 165,032/164,336 bytes, both guard
-offsets are 60 bytes, and the carried raw painted margin is 66,068 bytes after
-deducting 5,952 bytes of linked internal-RAM growth from the 72,020-byte powered
-boot-only baseline. The application-event tranche accounts for the newest
-2,408 bytes: 2,056 bytes of fixed slot storage and 352 bytes of retained owner
-and task state. Subtracting the unchanged 53,680-byte maximum frame leaves a
-12,388-byte conservative margin. These are static build measurements and a
-deliberately conservative carry-forward calculation, not a new powered
-high-water result. This ceiling qualifies the E290's internal CPU0/main-
+The post-offload default/HIL usable stacks are 175,056/174,256 bytes and both
+guard offsets are 60 bytes. The preceding pre-PSRAM pair was
+165,032/164,336. Before the post-offload image was powered, its linked-only
+interim policy carried the older raw margin forward as 63,436 bytes after
+8,584 bytes of post-proof linked internal-RAM growth, leaving 9,756 bytes under
+the 53,680-byte ceiling. The historical pre-LXTE Stage 5 placement checkpoint
+superseded that interim policy with 57,716 powered raw bytes. The independent
+announce scheduler adds sixteen linked bytes, so current policy carries forward
+57,700 bytes. Subtracting the current 53,680-byte maximum-frame ceiling leaves
+a fail-closed 4,020-byte policy margin. The pre-scheduler historical values
+remain 4,036 and 4,052 bytes respectively. The final
+default-profile linked-layout delta is 2,632 bytes; the HIL
+delta is 2,640 bytes. Both remain useful provenance and neither is the size of
+the externally placed LXMF state. This floor qualifies the
+E290's internal CPU0/main-
 executor task stack; it is not a compatibility ceiling for non-PSRAM ESP32
 boards, and PSRAM cannot back this internal task stack. The full E290 profile
 already requires PSRAM for its separate application/storage capacity, while
 Tracker V2 remains a separately sized reduced profile.
 
-The target-scoped current runtime-measurement HIL rebuild links with
+### Stage 5 PSRAM boot checkpoint
+
+#### Current continuous-RX LXTE/v2 artifact and readback binding
+
+The current final Stage 5 pair is bound to the independently scheduled primary
+and LXMF discovery source, the persistent continuous-RX epoch, and the 544-byte
+checkpoint-v2 layout. The default ELF is 13,648,888 bytes with SHA-256
+`92e63b60a5f4b830ee55d958fcc446a6878036212904b8748519ae210ba3da58`;
+its explicit address-zero package is 868,656 bytes with SHA-256
+`c8da2af30e2d0ee24ca4b215151d1370b7e1d242991ebbeb024079a730693a3f`
+and uses 803,120 application bytes. The HIL ELF is 13,821,496 bytes with SHA-256
+`7a3fad34699f910a2050468ada6461a0f33d16641ab5425a5c795a71238861ff`.
+The explicit address-zero package is 881,456 bytes with SHA-256
+`12c6f31a7fb64485ad9220edca4ac38ba0a57867ad88ce60fa1a24ffc195d379`
+and uses 815,920 application bytes. Identity-bound address-zero readbacks from
+both `AC:A7:04:E1:3E:88` and `AC:A7:04:E1:3F:88` matched that package exactly.
+The paired current ELFs also pass the static 946/962-record, 53,680-byte
+maximum-frame, 175,056/174,256-byte usable-stack, 60-byte guard, RPTE, and LXTE
+gates. The powered result below then adds clean baselines, one exact A-to-B
+delivery, correlated post-terminal checkpoints, and an exact receiver-store
+readback; it is no longer only a build/layout/readback claim.
+
+#### Historical paired-announce discovery failure
+
+The immediately preceding LXTE/v2 pair sent primary and `lxmf.delivery`
+announces back-to-back in one batch. Its default ELF/package were 13,478,724 and
+859,424 bytes with SHA-256
+`eea897c967f8e2ebd8aeadd1c8c45def4b85536622af216d5d9be3d95adb9ede`
+and `3d2a4c7e1140130fc3abe51675e8b047bd7bd1606fb2a6514e62a06f22e2b51d`.
+Its HIL ELF/package were 13,637,240 and 870,656 bytes with SHA-256
+`46b8c880cb1f6da1c38c7f1f03f4b3d2ff6ea91153ba48b9f93f4261b0322bc4`
+and `3c07fceb619f1cdf89e08c1039bac99b32847974fb22468690e92517bf220b04`;
+identity-bound exact readbacks passed on both E290s.
+
+That historical powered attempt established a discovery failure, not durable
+LXMF delivery. Across the deterministic bootstrap cycles B processed exactly
+three distinct announces from A, yet submission to A's announced
+`lxmf.delivery` hash returned `no-path`. Rete transport mode immediately queues
+the first accepted announce for rebroadcast. On half-duplex LoRa, the receiver
+therefore begins relaying the primary while the sender transmits the second
+service announce, and misses that service announce. Repeating the same paired
+ordering repeated the collision. The current scheduler fixes the product
+composition by attempting at most one destination per event and separating the
+two destinations; it does not change Rete's transport relay behavior. The
+current A-to-B confirmation below includes powered discovery through that
+replacement schedule.
+
+#### Historical pre-LXTE placement checkpoint
+
+Earlier on 2026-07-21, E290 `AC:A7:04:E1:3E:88` received the first
+post-offload runtime-measurement image. This historical artifact predates LXTE
+and checkpoint v2. Its 13,607,972-byte ELF has SHA-256
+`da392e91b3a6ace58fca9d0064700f249ca9876df6ed5d109a9a683c2dc873ca`.
+Its explicit address-zero 16 MiB package is 868,800 bytes with SHA-256
+`2e5d898bd55da61b132555d628eae9cc7ec42fc84e9c9e33dc04fdd8875813d0`;
+an exact 868,800-byte readback matched that digest.
+
+At uptime 20,577 ms, one stable combined `RTME || RPTE` capture had an intact
+guard, complete composition, consistent two-operation TX partition, zero
+failed allocations, zero unexpected errors, and zero RX/CAD/TX watchdog
+timeouts. The allocator held exactly 163,536 bytes in external PSRAM, matching
+that composition's LXMF index plus delayed-proof and retry/fault/proof-holder
+allocations. Minimum free external and internal heap were 8,225,072 and 63,428
+bytes. The HIL retained 57,716 painted stack bytes. The painter was initialized
+before the one-shot `NodeCore::new` constructor that owns the actual 53,664-byte
+maximum frame, so the raw watermark already includes that boot invocation.
+Subtracting the same frame again leaves a deliberately pessimistic 4,052-byte
+co-location allowance; it is not evidence that only 4,052 bytes remained at
+runtime. Interrupt/nesting and later traffic call chains are still unquantified,
+so this is a successful placement and boot checkpoint, not final stack-safety
+qualification. A subsequent
+authenticated `identity-summary` returned primary destination
+`c99e8ff1ec8629e4e1290e14462ae8af`. The later 93,663-ms capture retained the
+same memory and stack observations and recorded one 669-us API dispatch, but it
+also recorded one 1,501,156-us RX watchdog timeout after the debugger-attached
+API read. It is therefore not folded into the clean pre-API watchdog baseline,
+and no cause is assigned by this evidence. No LXMF packet was offered, and the
+then-absent second E290 prevented powered remote durable-delivery qualification
+in that run.
+
+The target-scoped pre-PSRAM runtime-measurement HIL rebuild links with
 text/data/BSS of 695,315/4,180/468,648 bytes (1,168,143 bytes total by GNU
 size). Its 12,498,348-byte ELF has SHA-256
 `c84363dff0801a1679dd786b5070c4662962d299f0269efc0cd72ff9c09b8e2a`.
@@ -671,36 +846,293 @@ RNS ingress, proof, receipt terminal, correlation fault, and inbox-commit
 counts. Its only observations were two initial action-pressure observations at
 1,205 ms while the boot announce entered the ordinary transmit path; the two
 then-reserved TX-outcome words remained zero. This is powered boot-only
-evidence for the immediately preceding trace revision, not powered evidence
-for the current hashes or the pending two-board RF proof-timeout reproduction.
+evidence for the immediately preceding trace revision, not evidence for the
+current hashes or the now-completed two-board continuous-RX confirmation.
 The 72,020-byte raw margin leaves 19,268 bytes after subtracting the unchanged
-52,752-byte maximum compiler frame in that artifact. Current static policy
-conservatively deducts 5,952 bytes of subsequent linked internal-RAM growth,
-including the application-event owner's exact 2,408-byte linked reduction,
-then subtracts the current 53,680-byte maximum: 66,068 carried-forward raw
-bytes and 12,388 bytes remain. This is build-qualified carry-forward, not a
-fresh powered watermark.
+52,752-byte maximum compiler frame in that artifact. The pre-PSRAM policy
+conservatively deducted 5,952 bytes of subsequent linked internal-RAM growth,
+including the application-event tranche's exact 2,408-byte reduction. The
+post-offload linked-only interim policy used the 2,632-byte default-profile
+layout delta; the separately gated HIL delta was 2,640 bytes. That policy left
+63,436 carried-forward raw bytes, leaving 9,756 bytes
+under the 53,680-byte frame ceiling or 9,772 bytes under the actual 53,664-byte
+maximum. The historical pre-LXTE Stage 5 placement checkpoint supersedes those
+interim values with 57,716 raw bytes, a 4,036-byte policy margin at the ceiling, and 4,052
+bytes under the actual maximum. The painter already includes the one-shot
+maximum-frame constructor invocation, so the second frame subtraction is
+deliberately pessimistic rather than a measured runtime remainder.
 
-### Decisive proof-correlation trial runbook
+### Stage 5 durable-LXMF two-board trial
 
-Run four clean trials in `B→A`, `A→B`, `A→B`, `B→A` order. The fixed board
-bindings are:
+**Powered outcome: pass after the split-frame receive fix.** The current narrow
+trial is one newly committed opportunistic LXMF message from A to B. It proves
+the complete chain below and nothing broader:
+
+1. pinned Python LXMF 1.0.1 derives the two boards' real `lxmf.delivery`
+   destinations and generates one signed opportunistic carrier;
+2. A's authenticated API submits that carrier as RNS DATA addressed to B's
+   derived `lxmf.delivery` hash, and the permanent LoRa/Rete path carries it;
+3. B validates the LXMF carrier and writes exactly one committed record to its
+   dedicated 2 MiB store;
+4. B makes the retained RNS proof ready only after the store returns the new
+   durable receipt, then hands that proof to the ordinary transport-neutral
+   supervisor; and
+5. A receives the correlated proof and its submission reaches `Delivered`.
+
+This trial does not qualify Link or Resource delivery, propagation, outbound
+LXMF state, app-level LXMF receipts, sustained routing, power-cut recovery, or
+replay after reboot. In particular, replaying the authenticated API request
+with the same idempotency key is only a submission-journal replay and emits no
+second RF packet. A later powered store-replay trial must freshly retransmit the
+same LXMF carrier after receiver remount; only that event may exercise
+`AlreadyDurable` and release its own freshly retained proof. No volatile proof
+is expected to survive reset. The confirmation used one and only one fresh
+A-to-B submission. It reached `Delivered` on that first attempt; no API or RF
+retry occurred.
+
+#### Split-frame receive-blind diagnosis
+
+The diagnostic B-to-A run used an exact 880,176-byte HIL package with SHA-256
+`73280d77171e204fff9cedd87ef76c3faaed9b1dab5ce86b0dbe4f2232bd9641`;
+identity-bound address-zero readbacks matched on both boards. Its 206-byte LXMF
+carrier became a 288-byte encrypted payload and an exact 307-byte RNS DATA
+packet. RNode framing produced 255-byte and 54-byte physical frames with
+535,040 us total nominal airtime. B's 630,732-us maximum TX and durable journal
+show that the complete logical packet entered `AwaitingDelivery`. A completed
+the preceding discovery exchange but admitted no LXMF event, and its exact
+2 MiB LXMF store remained all `0xff`; B terminated in `delivery-timeout`.
+This localizes the loss before A's logical DATA admission.
+
+The pre-fix checkpoint did not count individual physical frames, so it cannot
+prove whether A received the first half. Source inspection nevertheless found
+a matching receive-blind interval: the permanent actor used one finite
+`RxMode::Single(248)` operation per physical frame, entered standby after the
+frame, returned through scheduling and RNode reassembly, and then completely
+reconfigured RX. An interoperable RNode sender may transmit the continuation
+immediately. Earlier successful split deliveries make this a timing race, not
+a deterministic framing or reassembly defect.
+
+The source fix keeps one `RxMode::Continuous` epoch armed across packets and
+reassembly work. Only the cancellation-safe DIO wait races the 253,952-us
+software scheduler timer; after preamble, sync-word, or valid-header progress,
+IRQ processing runs to a terminal frame/error or a recoverable progress
+deadline without TX selection. The latter rearms continuous RX, matching
+RNode's false-preamble unlatch behavior. Taking a TX job invalidates the
+receive epoch, and CAD/TX explicitly performs standby,
+IRQ-routing disable, and pending-IRQ clear before changing modes. No artificial
+inter-frame TX delay was added, because external RNode senders are not required
+to honor one.
+
+Host command-trace coverage now feeds this exact 307-byte logical shape as
+255- and 54-byte frames, reassembles it after one continuous `SetRx`, and proves
+there is no standby between frames. Separate tests cover repeated scheduler
+yields without rearm, stalled-preamble rearm followed by a valid frame,
+invalid-frame recovery while RX remains armed, receive-epoch invalidation, and
+exact quiesce ordering before CAD/TX. The host suites, strict host and ESP32-S3
+Clippy, default/HIL target
+links, and the ELF stack/resource inspector pass. These deterministic results
+justified exactly one powered confirmation. The evidence recorded below is that
+single confirmation, not a succession of empirical timing trials.
+
+Use fresh owner-only full-flash backups from both identity-qualified boards.
+Create the public trial material with the isolated dependencies pinned by
+`interop/python/requirements-lxmf-1.0.1.txt`:
+
+```sh
+LXMF_PYTHON=/path/to/isolated-lxmf-1.0.1-venv/bin/python
+"$LXMF_PYTHON" interop/python/generate_e290_lxmf_trial.py \
+  --source-flash "$A_FLASH" \
+  --destination-flash "$B_FLASH" \
+  --source-primary-hash c99e8ff1ec8629e4e1290e14462ae8af \
+  --destination-primary-hash 83a09ed807a0a7c631386deaa0448fb9 \
+  --timestamp "$LXMF_TIMESTAMP" \
+  --title "$LXMF_TITLE" \
+  --content "$LXMF_CONTENT" \
+  --output "$TRIAL/lxmf-trial.json"
+```
+
+The generator refuses to overwrite its output, validates both mirrored private
+identity records and the expected primary destinations, derives the inbound and
+outbound `lxmf.delivery` hashes independently, and verifies the Python message
+ID and signature. Its JSON contains only public material, including
+`destination_lxmf_hash`, `message_id`, `full_wire_sha256`, `carrier_sha256`,
+`carrier_bytes`, and `carrier_hex`; it does not export private identity bytes.
+
+Start with an empty, verified receiver `lxmf_store` and a sender journal able to
+accept one fresh submission. Provision the isolated interpreter from the pinned
+requirements file and retain its package inventory. Blank B's exact store range
+with the identity-owning helper before flashing the final HIL image:
+
+```sh
+PATH="$ESPFLASH_BIN_DIR:$PATH" \
+python3.13 interop/python/e290_qualification_host.py erase-region \
+  --usb-serial AC:A7:04:E1:3F:88 \
+  --expected-mac ac:a7:04:e1:3f:88 \
+  --expected-flash-bytes 16777216 \
+  --evidence-prefix "$TRIAL/b-lxmf-store-erase" \
+  --offset 0x930000 --length 0x200000
+```
+
+Require the exact 2 MiB readback to contain only `0xff` and have SHA-256
+`4bda3a28f4ffe603c0ec1258c0034d65a1a0d35ab7bd523a834608adabf03cc5`.
+Flash the exact current HIL package to both boards with identity-bound readback.
+Reset both into fresh product boots and wait through both bootstrap retry pairs
+before submission. Relative to each board's boot, the expected local schedule is
+primary at 0 seconds and LXMF at 8 seconds; A then emits at 26/34 and 64/72
+seconds, while B emits at 43/51 and 81/89 seconds. Capture the required clean
+pre-submit checkpoint only after that discovery window. A `no-path` terminal is
+a failed discovery/setup attempt, not LXMF delivery evidence; restart from fresh
+trial state instead of repeatedly submitting into the one-entry journal profile.
+
+Before submission and immediately after the terminal result, capture each board
+with the final HIL ELF and the current tool:
+
+```sh
+cargo +stable run --locked -p xtask -- \
+  e290-runtime-measurement capture-checkpoint \
+  --hil-elf "$HIL_ELF" \
+  --usb-serial "$USB_SERIAL" \
+  --output "$OUT"
+```
+
+The output must carry schema
+`reticulum.e290-runtime-checkpoint-capture.v2`; `checkpoint.bin` must be the
+exact 544-byte contiguous `LXTE || RTME || RPTE` range, and its decoded record
+must carry schema `reticulum.e290-runtime-checkpoint.v2`. The directory also
+contains exact 96-byte `lxmf-trace.bin`, 256-byte `runtime.bin`, and 192-byte
+`proof-trace.bin` splits plus human/JSON decodes and a hash-bound manifest.
+Accept only independently matching-even records and a complete marker. A
+debugger failure or incomplete marker invalidates the trial until both boards
+are recovered and the clean sequence is restarted.
+
+Submit exactly the generator's `carrier_hex` to its
+`destination_lxmf_hash`, using a fresh 16-byte idempotency key and A's Active
+credential:
+
+```sh
+cargo +stable run --locked -p xtask -- e290-authenticated-usb \
+  --port "$A_PORT" \
+  --state-file "$A_ACTIVE_CREDENTIAL" \
+  --timeout-ms 120000 \
+  --destination-hash "$DESTINATION_LXMF_HASH" \
+  --payload-hex "$CARRIER_HEX" \
+  --idempotency-key "$IDEMPOTENCY_KEY_HEX" \
+  submit-and-wait \
+  --evidence-output "$TRIAL/sender-terminal.json"
+```
+
+After terminal captures, reset B into the loader, read exactly
+`0x930000..0xb30000` to a fresh private 2 MiB file with
+`e290_qualification_host.py read-region`, and inspect it read-only:
+
+```sh
+PATH="$ESPFLASH_BIN_DIR:$PATH" \
+python3.13 interop/python/e290_qualification_host.py read-region \
+  --usb-serial AC:A7:04:E1:3F:88 \
+  --expected-mac ac:a7:04:e1:3f:88 \
+  --expected-flash-bytes 16777216 \
+  --evidence-prefix "$TRIAL/b-lxmf-store" \
+  --offset 0x930000 --length 0x200000 \
+  --output "$TRIAL/b-lxmf-store.bin"
+
+cargo +stable run --locked -p xtask -- e290-lxmf-store-inspect \
+  --image "$TRIAL/b-lxmf-store.bin" \
+  --source-mac aca704e13f88 \
+  > "$TRIAL/b-lxmf-store.json"
+```
+
+The inspector accepts only an exact 2 MiB image mounted under B's physical
+binding and emits metadata, not message contents. A narrow pass requires all of
+the following terminal-minus-baseline facts:
+
+- A's authenticated evidence ends in `Delivered`, with one delivered receipt,
+  no timeout, and no extra terminal;
+- B's LXTE delta is durable-new `+1`, already-durable `+0`, proof-ready `+1`,
+  proof-released `+1`, ordinary-handoff `+1`, and ordering-violation `+0`;
+- B's LXTE `last_commit_kind` is `new`, its complete `last_message_id` equals
+  the generator's value, its durable handle is nonzero, and neither saturation
+  nor input inconsistency is present;
+- B's LXTE released-proof tag equals A's RPTE delivered-receipt tag; B has
+  exactly one post-baseline confirmed TX and no not-confirmed-success TX. The
+  retained LXMF proof is intercepted before ordinary ingress metadata is
+  formed, so B's RPTE generated-proof count and tag remain zero by design and
+  are not part of this correlation;
+- RTME/RPTE TX partitions are consistent at the accepted checkpoints, and no
+  new allocation, unexpected-error, or radio-watchdog fault invalidates the
+  clean trial; and
+- the store inspector reports exactly one committed record whose message ID,
+  destination/source hashes, normalized-wire length, and exact-wire digest
+  match the generator's `message_id`, derived hashes, full wire, and
+  `full_wire_sha256`.
+
+Do not infer ordering merely from a final store dump or from A's `Delivered`
+terminal. The LXTE new/ready/released/handoff frontiers and cross-board proof-tag
+correlation are the intended evidence that durability preceded release through
+the ordinary supervisor.
+
+The completed evidence is retained under
+`/private/tmp/e290-continuous-rx-confirm-20260721.2AGH6m`. A's exact 1 MiB
+journal preflight was erased, with SHA-256
+`f5fb04aa5b882706b9309e885f19477261336ef76a150c3b4d3489dfac3953ec`.
+One boot of the 868,672-byte schema-2 reprovision package, SHA-256
+`4998fb2ce23f6f1a351dce8bfda6567f533d61168c791239713df51df2106b8e`,
+created its manifest; the identity-bound journal readback then had SHA-256
+`a6d0b254e7fee84f2f00c45f4075fdafc8f5630dc162cfaf22a72d4de0add054`.
+B's exact 2 MiB receiver store was written and read back as all `0xff`, with
+SHA-256
+`4bda3a28f4ffe603c0ec1258c0034d65a1a0d35ab7bd523a834608adabf03cc5`,
+before the current HIL was flashed to both boards.
+
+Both post-discovery baselines were complete, independently matching-even
+checkpoint-v2 captures with consistent RTME/RPTE TX partitions. A began at 24
+confirmed TX outcomes and B at 20; both LXTE records were empty, both RPTE
+records had zero generated, delivered, timeout, and correlation-fault counts,
+and both RTME records had zero unexpected, allocation-failure, and RX/CAD/TX
+watchdog counts. One and only one fresh A-to-B submission then used a 206-byte
+carrier. The generator produced message ID
+`abdeec2e498f09c96a6fd56ec3558ca86c2598aaeacac81969b645de3b549dc3`
+and full-wire SHA-256
+`1c1839991401e01e15e3a3146cd3177a4fb7e5dbd52008fd119beaf091d377ba`.
+The authenticated API encoded an exact 307-byte RNS packet with SHA-256
+`060037041c91eb5999f89bf84845c19e65bf7fa680827cce9c51e8ecc5dbe0a6`
+and terminated `Delivered` on the first attempt. No retry occurred.
+
+| Stage 5 powered evidence | Outcome |
+| --- | --- |
+| Exact current HIL package/readback on A and B | Pass: 881,456 bytes, 815,920 application bytes, SHA-256 `12c6f31a7fb64485ad9220edca4ac38ba0a57867ad88ce60fa1a24ffc195d379` |
+| Post-flash pre-submit checkpoints | Pass: complete clean baselines on both boards; TX partitions consistent; all 44 baseline TX outcomes confirmed |
+| Fresh Python carrier and empty receiver-store baseline | Pass: one 206-byte carrier; B's exact 2 MiB store was verified all `0xff` |
+| A submission terminal and RPTE receipt correlation | Pass: one 307-byte packet reached `Delivered`; A delivered tag `0x3dc4588d3a205429`; no timeout or retry |
+| B LXTE durable-before-proof frontiers and TX correlation | Pass: new/ready/released/handoff `+1`, already-durable/ordering-violation `+0`; message ID exact; durable handle 1; LXTE tag `0x3dc4588d3a205429`; exactly one additional B TX, confirmed |
+| RPTE generated-proof expectation | Pass by design: B generated count/tag stayed zero because retained LXMF proofs are intercepted before ordinary ingress metadata; B LXTE release tag plus B's one confirmed TX plus A's delivered tag form the valid correlation |
+| Fault counters at terminal checkpoints | Pass: zero new unexpected, allocation-failure, RX/CAD/TX-watchdog, correlation, not-confirmed-success, saturation, input-inconsistency, or LXTE-ordering faults |
+| B exact 2 MiB store readback and metadata inspection | Pass: SHA-256 `c75ab2a01b3266fda1e07e0271c70bb29c06e32636d70d8a70d977b9e8b0e21e`; exactly one committed record with the generated message ID, destination/source hashes, 222-byte normalized wire, 206-byte carrier, and exact full-wire digest |
+| Overall narrow durable-LXMF claim | **Pass: one exact A-to-B new commit preceded retained-proof release and first-attempt delivery** |
+
+### Historical decisive proof-correlation trial runbook
+
+The historical plan called for four clean trials in `B→A`, `A→B`, `A→B`,
+`B→A` order. It remains a separate raw-RNS proof-correlation procedure, not
+the current Stage 5 durable-LXMF trial. Its fixed board bindings were:
 
 This runbook is pinned to the exact pre-stage-4 `bac2dcc` proof-correlation
 artifact. Its `0x930000` upper boundary, 3 MiB erase/readback length, and known
 all-`0xff` hash are deliberately artifact-specific historical evidence. Do not
 silently substitute the current `0xb30000` product boundary or recompute those
-published values when reproducing that artifact.
+published values when reproducing that artifact. This artifact predates LXTE:
+its checkpoint ABI is the historical 448-byte `RTME || RPTE` layout. Reproduce
+it only with the exact `bac2dcc` source and capture tool. The current v2 tool
+requires LXTE and intentionally rejects that historical ELF.
 
 | Board | USB serial / MAC | Active credential | Primary destination |
 | --- | --- | --- | --- |
 | A | `AC:A7:04:E1:3E:88` / `ac:a7:04:e1:3e:88` | `/private/tmp/e290-rns-inbox-proof/3e-active.key` | `c99e8ff1ec8629e4e1290e14462ae8af` |
 | B | `AC:A7:04:E1:3F:88` / `ac:a7:04:e1:3f:88` | `/private/tmp/e290-rns-inbox-proof/3f-active.key` | `83a09ed807a0a7c631386deaa0448fb9` |
 
-Before using an artifact, rerun the strict default/HIL builds and ELF inspector
-above, package the explicit 16 MiB merged image, and bind its size and SHA-256
-to the trial manifest. Capture from the exact final HIL ELF; do not copy
-addresses from an older build:
+Before using the historical artifact, rerun its strict default/HIL builds and
+ELF inspector from the exact checkout, package the explicit 16 MiB merged
+image, and bind its size and SHA-256 to the trial manifest. Capture from that
+exact final HIL ELF; do not copy addresses from another build:
 
 ```sh
 source ~/export-esp.sh
@@ -714,10 +1146,10 @@ cargo +stable run --locked -p xtask -- \
 
 `USB_SERIAL` is the exact uppercase colon-separated serial from the board table,
 `EXPECTED_MAC` is the same board's lowercase eFuse MAC, and `OUT` must name an
-absent directory. The command validates one initialized
-256-byte RTME symbol immediately followed by one initialized 192-byte RPTE
-symbol in the final little-endian Xtensa ELF, then invokes exactly one
-serial-qualified `probe-rs read` for the contiguous 448-byte range. It never
+absent directory. The historical command validates initialized 256-byte RTME
+and 192-byte RPTE symbols in that order in the final little-endian Xtensa ELF,
+then invokes exactly one serial-qualified `probe-rs read` for the contiguous
+448-byte range. It never
 resets, flashes, authenticates, or opens the serial port. The owner-only output
 contains the raw range, exact splits, human and JSON decodes, and a manifest
 binding the canonical ELF size/hash, symbol addresses, USB serial, debugger
@@ -902,10 +1334,15 @@ nesting headroom. The earlier two-board run's 72,212-byte painted margin became
 a deliberately conservative 19,460 bytes after subtracting the 52,752-byte
 maximum frame; the predecessor's one-board diagnostic baseline updates those
 values to 72,020/19,268 after the exact 192-byte linked-RAM cost. Neither pair
-is a universal stack guarantee. Current static policy further carries those
-values to 66,068/12,388 after 5,952 bytes of exact post-proof linked internal-
-RAM growth and the current 53,680-byte frame; that likewise is not a new
-powered observation. This is an internal CPU0/main-executor task-stack bound,
+is a universal stack guarantee. The pre-PSRAM policy carried those values to
+66,068/12,388 after 5,952 bytes of exact post-proof linked internal-RAM growth.
+The post-offload linked-only interim policy carried them to 63,436/9,756 under
+the 53,680-byte frame ceiling. The historical pre-LXTE Stage 5 placement
+checkpoint supersedes that policy with 57,716 powered raw bytes and 4,036 bytes
+under the ceiling (4,052
+under the actual 53,664-byte frame). The second deduction remains deliberately
+pessimistic because the painter already covers the constructor invocation.
+This is an internal CPU0/main-executor task-stack bound,
 not a no-PSRAM board-support ceiling.
 Current source also re-reads the innermost stack pointer immediately before
 each volatile word access and reports an address at or above it as changed,
@@ -1022,6 +1459,36 @@ announces instead of wrapping. Rotation erases one sector only while the other
 preserves the previous high-water value; retry after an ambiguous operation
 rescans and advances past any record that may have committed.
 
+The announce lane attempts at most one local destination per scheduling event.
+It starts with the primary destination, then attempts `lxmf.delivery` eight
+seconds later when the dedicated LXMF store is mounted and no clean service
+fault has disabled it. Two complete retry pairs follow: the first primary is
+delayed by `13 + (u32_le(primary[0..4]) mod 23)` seconds after the initial pair,
+and the second by another 30 seconds after that pair. Steady pairs then recur
+every 30 minutes. For the qualified A/B identities, this produces primary phases
+at 26 and 43 seconds from boot; including Rete's native retransmissions at five
+seconds, every post-initial nominal emission opportunity remains at least three
+seconds apart. A queue or native admission rejection retains the same destination
+behind a one-second retry deadline without consuming bootstrap budget. A pending
+ambiguous `StoreFaultHold` does not currently
+suppress the service announce. Each successfully queued destination consumes
+its own durable-clock ordinal, and its independent ordinary-action flush moves
+only that event toward every eligible packet interface. The exact four-byte LXMF
+application data is MessagePack `[nil, nil, []]`: unnamed, no stamp requirement,
+and no optional functionality advertised. An unmounted or clean-fault-disabled
+LXMF service is not advertised; the primary node destination continues
+independently.
+
+Two discovery limitations remain in pinned Rete `90570ca`. A path request for a
+registered local secondary destination is rebroadcast instead of causing that
+destination to announce, so a peer that misses periodic discovery may wait for
+the next cadence. Announce retransmission computes a value modulo 500 ms and
+then rounds it to a whole second using a threshold that cannot be reached, so
+its effective jitter is zero. The product scheduler now applies a stable
+identity-derived bootstrap phase instead of relying on that jitter. General
+responsive discovery still needs both Rete fixes or
+equivalent bounded behavior.
+
 On normal erased first provisioning, clock reservation performs four program
 calls (prefix then commit in each sector), followed by six identity program
 calls (claim, body, then commit in each mirror), with no erase. A normal reboot
@@ -1073,10 +1540,13 @@ through its caller-owned 512-slot PSRAM index and retains the mounted owner for
 the boot. Its pending-mutation fact participates in every credential, journal,
 and raw-inbox physical-mutation gate. The inverse LXMF gate admits its own
 pending state to the store so only the store can structurally validate an exact
-retry; credential or journal ownership still defers it. No `lxmf.delivery`
-destination, durable-ingress call, delayed-proof pool, ready-proof drain, or
-node-task LXMF ingestion is enabled yet. Mount success therefore cannot be
-reported as end-to-end LXMF durability.
+retry; credential or journal ownership still defers it. Mount success now also
+enables the derived `lxmf.delivery` destination, signed opportunistic DATA
+admission, durable-ingress call, per-destination `Retain` policy, sixteen-slot
+delayed-proof owner, and ordinary-supervisor ready-proof drain. Local Links are
+disabled until a bounded Link/Resource owner exists. The current A-to-B
+confirmation powers this exact opportunistic new-commit-before-proof path; it
+does not qualify replay, Link/Resource, propagation, or a client mailbox.
 
 Journal mount, unsupported history, or recovery failure is isolated because it
 occurs during boot before a durability-gated DATA owner can exist: the
@@ -1152,14 +1622,15 @@ bootloader interval before the application boot quarantine remain open. Live
 Begin, ProofStart, Activate, and AbortCurrent are routed through this task and
 durably driven by the resident credential owner.
 
-All three physical-store bindings name the device with the domain-separated
+All four physical-store bindings name the device with the domain-separated
 16-byte value `"e290-flash" || eFuse base MAC`. The credential view additionally fixes
 absolute offset `0x614000`, length `0x2000`, and credential physical layout
 version 1. The journal view fixes offset `0x630000`, length `0x100000`, and
 journal physical layout version 1. The inbox view fixes offset `0x730000`, length
-`0x200000`, and inbox physical format version 1. Each store validates its exact
-values and view capacity/alignment before I/O; every later borrowed operation
-must match its retained binding exactly.
+`0x200000`, and inbox physical format version 1. The LXMF view fixes offset
+`0x930000`, length `0x200000`, and LXMF physical format version 1. Each store
+validates its exact values and view capacity/alignment before I/O; every later
+borrowed operation must match its retained binding exactly.
 
 ## Software composition and build gates
 
@@ -1245,8 +1716,8 @@ the ordinary and exceptional roots. The commit-fault dependency tail must be
 identical to default; the measurement tail may add only the reviewed
 `esp-alloc/alloc-hooks` feature. The default ELF must contain neither fault nor
 measurement wrappers, hooks, markers or evidence identifiers.
-The 134-test default host library suite, 140-test commit-fault profile, and
-150-test runtime-measurement profile have
+The 156-test default host library suite, 162-test commit-fault profile, and
+175-test runtime-measurement profile have
 passing policy/product/credential-boot/
 credential-runtime/USB-control/live-routing tests, including the source-order
 regressions, every canonical empty-initialization byte cut, adversarial media changes between
@@ -1296,7 +1767,7 @@ identity formatting, inbox status/peek, owner-only non-overwriting payload and
 evidence output, sequential request IDs, version policy, polling terminal
 semantics, coalesced-record preservation, authenticated terminal binding, and
 submission-input non-disclosure. These 56 focused tests are part of the
-passing 261-test xtask gate, while the portable Rete integration and inbox-store
+passing 272-test xtask gate, while the portable Rete integration and inbox-store
 suites have 61 and 17 tests. The 61 are project adapter tests. The previously
 validated project conformance baseline performed
 235 checks: 112 released-vector, adapter and direct-Link checks,
@@ -1313,6 +1784,9 @@ integration), 143 LXMF library and 84 daemon library tests. The four library
 targets totaled 537 tests; the 97 transport and one stack integration tests
 brought that named set to 635. It is not a count of every
 nested workspace test target.
+The current focused Rete regression lane separately passes 95 tests plus one
+compile-fail documentation test; it does not relabel the broader historical
+selected set.
 Thirty-one of the xtask tests freeze the measurement decoder's
 CLI, exact individual/combined ABI rendering, torn/header/sentinel/invariant
 rejection, input-file behavior, one-read checkpoint capture, strict final-ELF
@@ -1966,8 +2440,11 @@ LoRa/node/API workload. They do not include static reservations, DMA-visible or
 interrupt-owned memory, or future client and wireless stacks. In particular,
 zero observed PSRAM allocation does not imply that the full appliance should
 avoid PSRAM: the current allocator searches the 64 KiB internal region first,
-and this workload never exhausted it. Resource, LXMF, NomadNet, SPA and future
-wireless buffers still require an explicit internal/external placement policy.
+and this workload never exhausted it. Current source now places the LXMF index,
+delayed proofs, and retry/fault/proof-holder state explicitly in PSRAM. The
+current one-message confirmation adds bounded powered high-water evidence for
+that placement; sustained pressure remains open. Resource, NomadNet, SPA, and
+future wireless buffers still require an explicit internal/external policy.
 The stack observations have the modified-word/minimum-SP limitation documented
 above and must retain static frame plus interrupt/nesting headroom.
 
@@ -2373,16 +2850,23 @@ first smoke.
   durable activity, low-memory/allocation-failure pressure, and default-image
   observation. Rerun the reverse delivery-proof scenario at the current
   `90570ca` pin and diagnose any remaining timeout before claiming bidirectional
-  delivery completion. Then design final LXMF/message storage and
-  device configuration with explicit wear, migration, reclamation,
-  authorization, and cross-store ordering behavior.
+  delivery completion. Then qualify the dedicated LXMF store and design its
+  read/delete/reclaim and migration policy plus device configuration with
+  explicit wear, authorization, and cross-store ordering behavior.
 - Define and qualify the production key backup/recovery and at-rest protection
   policy. The current developer image deliberately requires flash encryption
   disabled and stores its mirrored private identity in plaintext.
-- Deliver non-DATA node events to a durable/client owner. Inbound DATA now enters
-  the raw-RNS qualification store; other events remain drained so transport
-  progress cannot deadlock.
-- Add LXMF propagation/storage and local LXMF/NomadNet client services.
+- Bind non-DATA LXMF events to bounded durable/client owners. Opportunistic
+  destination DATA now reaches the dedicated LXMF store, while local Link
+  admission remains disabled so unowned Link/Resource events cannot saturate
+  the generic event queue.
+- Add outbound and direct/Resource LXMF delivery, responsive local path-request
+  discovery, propagation, store read/delete/reclaim and migration, and local
+  LXMF/NomadNet client services.
+- Bound `AdmissionDeferred` lifetime/attempts together with source-identity
+  discovery and retention; the first profile can otherwise let sixteen
+  never-resolved source identities occupy every application-event slot until
+  reboot.
 - Preserve the composed independently vector-tested ADR 0006 authentication
   model, ADR 0009 pairing, and first USB bearer. Add Wi-Fi as a Reticulum transport only when that
   separate link behavior is specified; packet transports remain deferred

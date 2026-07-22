@@ -13,22 +13,31 @@
     "build.rs": "eeda910728dfce31368b93e642420367949eed39be61d8286527720b24b419a5",
     "esp_config.yml": "7565b6db24d4da0fbf2b73186a7f8ef0853ba6b37f620b137634275fbb5ad26d",
     "src/embassy/mod.rs": "21a12c8e68ee8f6778368b2e00d019ed95cd1efe4e8d208fd7f6c7ddf7d0ed74",
-    "src/esp_radio/mod.rs": "a6116f123c75b9584c829eea2d53151085b6bcb9a94536e9dfdeaaf29fbe9f5d",
     "src/fmt.rs": "2c59d910729652cf170e3e0334429fd4a247a9cd82497d25fea88d975055deed",
     "src/run_queue.rs": "9445178a05121a963c3a737872876b51e705e9cdee7658c7de43345ba5e2cfee",
-    "src/scheduler.rs": "809eb9122d9e1a40718e48670148facd9a474c2869b926edd071f2c394a1bcbc",
     "src/syscall.rs": "507a5cc031d8574655628e18af3921f83b96ea643805fb07f4116c3c9be1dab0",
     "src/task/mod.rs": "2460ac37416b4a041e6fab46ecf8b8dfcf8634a9fcdb0f1a307d8aa359082a2a",
     "src/task/riscv.rs": "76b5f0fe0e68f64fecf6840d437d3a8c01ecbbf30b94e13a160ea1dbc74b49af",
     "src/task/xtensa.rs": "b740d813c63bf550363f1b2286457fda547f22ec9fa68b68c0455ccc65318b2c",
     "src/timer/embassy.rs": "24b0dc21a8324f3266d77458da758a6491c753f227485aa6e594b8936403be93",
-    "src/timer/mod.rs": "c75310a53ecf3cc0ef820d57a551866f6aa29b48098ffbe289fbcf0e742a485a",
     "src/wait_queue.rs": "4387a4b2ee04a651cc25c9b2584b47fc91dcff99510fd378e3621e89e1abc3e0"
   },
   "patched_upstream_files": {
+    "src/esp_radio/mod.rs": {
+      "upstream_sha256": "a6116f123c75b9584c829eea2d53151085b6bcb9a94536e9dfdeaaf29fbe9f5d",
+      "vendored_sha256": "fae392998ae5d7c622a6d3469049f9f97bdf3e3f82f331dfa8738b5b393dc495"
+    },
     "src/lib.rs": {
       "upstream_sha256": "0de5aec7bf732bba96fe6c1218fc634a5e72c9daed26c5bdbde726d7ebd0d0f9",
-      "vendored_sha256": "1607f85891e160c67f4ca2b9be57375816e0faa553ba11a9a3f9f4e8430bf7cc"
+      "vendored_sha256": "1c04cceca3731e7604e8af9c94e0eefbbcfbbe84f546c1c518c0533671eec33f"
+    },
+    "src/scheduler.rs": {
+      "upstream_sha256": "809eb9122d9e1a40718e48670148facd9a474c2869b926edd071f2c394a1bcbc",
+      "vendored_sha256": "ae77f2ae9c07f30f53596ae10ada1a8047ce5d4630ab162774f8c5c68f345c5e"
+    },
+    "src/timer/mod.rs": {
+      "upstream_sha256": "c75310a53ecf3cc0ef820d57a551866f6aa29b48098ffbe289fbcf0e742a485a",
+      "vendored_sha256": "10faff7ffe8e8cc10c7bb6035c7a4e7bccf64c892f3d50e4e8b67bdcfcc8cd6b"
     }
   },
   "omitted_upstream_files": {
@@ -37,18 +46,38 @@
   "project_files": {
     "LICENSE-APACHE": "2bf4fe1a37e545c3b4f7bfaa2326c99f153af32ef8d112fbaa4bff7fb2a575bd",
     "LICENSE-MIT": "7b2165c6740592038d887d51d56d122b0b563337a7756b424f19eecc7a936ef1",
-    "PATCHES.md": "6cab380d6e8ccc4b0d9dcaf711df5c6af80b00bed43b1b77c1665bc76b36c718"
+    "PATCHES.md": "188a1cce2ba29d7c5c8dd136fd8db63afb51d5315c66cf99c53e44ff3341557b"
   },
   "reviewed_source_edits": [
     {
+      "path": "src/esp_radio/mod.rs",
+      "upstream": "    register_queue_implementation,\n    register_semaphore_implementation,\n    register_timer_implementation,\n    register_wait_queue_implementation,",
+      "vendored": "    register_queue_implementation, register_semaphore_implementation,\n    register_timer_implementation, register_wait_queue_implementation,"
+    },
+    {
+      "path": "src/lib.rs",
+      "upstream": "//! ```\n//! \n//! To write",
+      "vendored": "//! ```\n//!\n//! To write"
+    },
+    {
       "path": "src/lib.rs",
       "upstream": "            stack_top as usize - stack_bottom as usize,",
-      "vendored": "            (stack_top as usize - stack_bottom as usize)\n                / core::mem::size_of::<MaybeUninit<u32>>(),"
+      "vendored": "            (stack_top as usize - stack_bottom as usize) / core::mem::size_of::<MaybeUninit<u32>>(),"
     },
     {
       "path": "src/lib.rs",
       "upstream": "            STACK_SIZE,",
       "vendored": "            STACK_SIZE / core::mem::size_of::<MaybeUninit<u32>>(),"
+    },
+    {
+      "path": "src/scheduler.rs",
+      "upstream": "    task::{\n        self,\n        ContextExt,\n        CpuContext,\n        IdleFn,\n        Task,\n        TaskAllocListElement,\n        TaskDeleteListElement,\n        TaskExt,\n        TaskList,\n        TaskListItem,\n        TaskPtr,\n        TaskState,\n        ThreadLocalData,\n        read_thread_pointer,\n    },",
+      "vendored": "    task::{\n        self, ContextExt, CpuContext, IdleFn, Task, TaskAllocListElement, TaskDeleteListElement,\n        TaskExt, TaskList, TaskListItem, TaskPtr, TaskState, ThreadLocalData, read_thread_pointer,\n    },"
+    },
+    {
+      "path": "src/timer/mod.rs",
+      "upstream": "use crate::{\n    SCHEDULER,\n    TICK_RATE,\n    TimeBase,\n    task::{",
+      "vendored": "use crate::{\n    SCHEDULER, TICK_RATE, TimeBase,\n    task::{"
     }
   ]
 }

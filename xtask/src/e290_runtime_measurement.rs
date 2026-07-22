@@ -27,17 +27,23 @@ const PROOF_WORD_COUNT: usize = 48;
 const PROOF_BYTE_SIZE: usize = PROOF_WORD_COUNT * size_of::<u32>();
 const PROOF_MAGIC: u32 = u32::from_le_bytes(*b"RPTE");
 const PROOF_VERSION: u32 = 1;
+const LXMF_WORD_COUNT: usize = 24;
+const LXMF_BYTE_SIZE: usize = LXMF_WORD_COUNT * size_of::<u32>();
+const LXMF_MAGIC: u32 = u32::from_le_bytes(*b"LXTE");
+const LXMF_VERSION: u32 = 1;
 const MEASUREMENT_EVIDENCE_SYMBOL_FRAGMENT: &str = "RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE";
 const PROOF_TRACE_EVIDENCE_SYMBOL_FRAGMENT: &str = "RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE";
+const LXMF_TRACE_EVIDENCE_SYMBOL_FRAGMENT: &str = "RETICULUM_RUNTIME_LXMF_TRACE_EVIDENCE";
 
-const CHECKPOINT_BYTE_SIZE: usize = BYTE_SIZE + PROOF_BYTE_SIZE;
-const CHECKPOINT_SCHEMA: &str = "reticulum.e290-runtime-checkpoint.v1";
-const CAPTURE_SCHEMA: &str = "reticulum.e290-runtime-checkpoint-capture.v1";
+const CHECKPOINT_BYTE_SIZE: usize = BYTE_SIZE + PROOF_BYTE_SIZE + LXMF_BYTE_SIZE;
+const CHECKPOINT_SCHEMA: &str = "reticulum.e290-runtime-checkpoint.v2";
+const CAPTURE_SCHEMA: &str = "reticulum.e290-runtime-checkpoint-capture.v2";
 const CAPTURE_INCOMPLETE_FILE: &str = "checkpoint.incomplete";
 const CAPTURE_COMPLETE_FILE: &str = "checkpoint.complete";
 const CAPTURE_RAW_FILE: &str = "checkpoint.bin";
 const CAPTURE_RUNTIME_FILE: &str = "runtime.bin";
 const CAPTURE_PROOF_FILE: &str = "proof-trace.bin";
+const CAPTURE_LXMF_FILE: &str = "lxmf-trace.bin";
 const CAPTURE_HUMAN_FILE: &str = "checkpoint.txt";
 const CAPTURE_JSON_FILE: &str = "checkpoint.json";
 const CAPTURE_MANIFEST_FILE: &str = "manifest.json";
@@ -52,7 +58,7 @@ const PROBE_CONFIG_NAMES: [&str; 4] = [
     ".probe-rs.yml",
 ];
 const CAPTURE_INCOMPLETE_CONTENT: &str =
-    "reticulum.e290-runtime-checkpoint-capture.v1\nstatus=incomplete\n";
+    "reticulum.e290-runtime-checkpoint-capture.v2\nstatus=incomplete\n";
 const EMPTY_PROBE_CONFIG: &[u8] = b"";
 const DEFAULT_PROBE_RS: &str = "probe-rs";
 const E290_PROBE_VID_PID: &str = "303a:1001";
@@ -216,32 +222,124 @@ const PROOF_RADIO_TX_CONFIRMED_SUCCESS_COUNT_WORD: usize = 45;
 const PROOF_RADIO_TX_NOT_CONFIRMED_SUCCESS_COUNT_WORD: usize = 46;
 const PROOF_SNAPSHOT_SEQ_END_WORD: usize = 47;
 
+const LXMF_FLAG_ACTIVE: u32 = 1 << 0;
+const LXMF_FLAG_SATURATED: u32 = 1 << 1;
+const LXMF_FLAG_LAST_COMMIT_PRESENT: u32 = 1 << 2;
+const LXMF_FLAG_LAST_COMMIT_NEW: u32 = 1 << 3;
+const LXMF_FLAG_LAST_COMMIT_ALREADY_DURABLE: u32 = 1 << 4;
+const LXMF_FLAG_PROOF_TAG_PRESENT: u32 = 1 << 5;
+const LXMF_FLAG_ORDERING_VIOLATION: u32 = 1 << 6;
+const LXMF_FLAG_INPUT_INCONSISTENT: u32 = 1 << 7;
+const LXMF_KNOWN_FLAG_MASK: u32 = LXMF_FLAG_ACTIVE
+    | LXMF_FLAG_SATURATED
+    | LXMF_FLAG_LAST_COMMIT_PRESENT
+    | LXMF_FLAG_LAST_COMMIT_NEW
+    | LXMF_FLAG_LAST_COMMIT_ALREADY_DURABLE
+    | LXMF_FLAG_PROOF_TAG_PRESENT
+    | LXMF_FLAG_ORDERING_VIOLATION
+    | LXMF_FLAG_INPUT_INCONSISTENT;
+
+const LXMF_FLAG_NAMES: [(&str, u32); 8] = [
+    ("flags.active", LXMF_FLAG_ACTIVE),
+    ("flags.saturated", LXMF_FLAG_SATURATED),
+    ("flags.last_commit_present", LXMF_FLAG_LAST_COMMIT_PRESENT),
+    ("flags.last_commit_new", LXMF_FLAG_LAST_COMMIT_NEW),
+    (
+        "flags.last_commit_already_durable",
+        LXMF_FLAG_LAST_COMMIT_ALREADY_DURABLE,
+    ),
+    ("flags.proof_tag_present", LXMF_FLAG_PROOF_TAG_PRESENT),
+    ("flags.ordering_violation", LXMF_FLAG_ORDERING_VIOLATION),
+    ("flags.input_inconsistent", LXMF_FLAG_INPUT_INCONSISTENT),
+];
+
+const LXMF_WORD_NAMES: [&str; LXMF_WORD_COUNT] = [
+    "snapshot_seq_begin",
+    "magic",
+    "version",
+    "size_bytes",
+    "flags.raw",
+    "durable.new.count",
+    "durable.already_durable.count",
+    "proof.ready.count",
+    "proof.released.count",
+    "proof.ordinary_handoff.count",
+    "ordering.violation.count",
+    "last_message_id.word0",
+    "last_message_id.word1",
+    "last_message_id.word2",
+    "last_message_id.word3",
+    "last_message_id.word4",
+    "last_message_id.word5",
+    "last_message_id.word6",
+    "last_message_id.word7",
+    "last_durable_handle.low",
+    "last_durable_handle.high",
+    "last_proof_tag.low",
+    "last_proof_tag.high",
+    "snapshot_seq_end",
+];
+
+const LXMF_SNAPSHOT_SEQ_BEGIN_WORD: usize = 0;
+const LXMF_MAGIC_WORD: usize = 1;
+const LXMF_VERSION_WORD: usize = 2;
+const LXMF_SIZE_WORD: usize = 3;
+const LXMF_FLAGS_WORD: usize = 4;
+const LXMF_DURABLE_NEW_COUNT_WORD: usize = 5;
+const LXMF_DURABLE_ALREADY_COUNT_WORD: usize = 6;
+const LXMF_PROOF_READY_COUNT_WORD: usize = 7;
+const LXMF_PROOF_RELEASED_COUNT_WORD: usize = 8;
+const LXMF_PROOF_HANDOFF_COUNT_WORD: usize = 9;
+const LXMF_ORDERING_VIOLATION_COUNT_WORD: usize = 10;
+const LXMF_LAST_MESSAGE_ID_FIRST_WORD: usize = 11;
+const LXMF_LAST_MESSAGE_ID_LAST_WORD: usize = 18;
+const LXMF_LAST_HANDLE_LOW_WORD: usize = 19;
+const LXMF_LAST_HANDLE_HIGH_WORD: usize = 20;
+const LXMF_LAST_PROOF_TAG_LOW_WORD: usize = 21;
+const LXMF_LAST_PROOF_TAG_HIGH_WORD: usize = 22;
+const LXMF_SNAPSHOT_SEQ_END_WORD: usize = 23;
+
 // The powered 2026-07-20 qualification observed 72,212 bytes of raw painted
 // stack margin. RPTE v1 adds one exact 192-byte initialized internal-RAM
 // object, and the linked stack boundary moves down by the same 192 bytes. The
 // source accumulated another exact 3,544 bytes of linked internal-RAM growth
 // through the interface-lifecycle tranche. The application-event ownership
-// tranche moves both stack boundaries down by a further exact 2,408 bytes: the
-// fixed 16-slot owner accounts for 2,056 bytes and retained owner/task state
-// accounts for the remaining 352 bytes.
-// Until a fresh powered trace supersedes it, carry the earlier watermark
-// forward conservatively after both deductions. This does not turn the
-// modified-word watermark into minimum-SP proof. The exact E290 pair reports
-// NodeCore::new at 53,680 bytes, leaving a derived 12,388-byte margin. This is
-// an E290 internal-stack bound; PSRAM does not back the executor stack.
+// tranche moved both stack boundaries down by a further exact 2,408 bytes. The
+// later retained-proof and mounted durable-LXMF composition moves the final
+// post-offload default profile down another exact 2,632 bytes; the independently
+// gated HIL profile moves down 2,640 bytes. The historical policy calculation
+// carries the default-profile deduction. Most volatile LXMF state is now
+// explicitly in PSRAM; these deltas are measured linked layout, not the size of
+// that external state.
+// That linked-only carry-forward was 63,436 bytes. The 2026-07-21 Stage 5 HIL
+// supersedes it with a lower observed 57,716-byte raw painted margin, so policy
+// must fail closed to the powered value. This still does not turn a modified-
+// word watermark into minimum-SP proof. The exact E290 pair reports a
+// 53,664-byte largest frame under the unchanged 53,680-byte ceiling, leaving a
+// deliberately pessimistic 4,036-byte policy margin. This is an E290 internal-
+// stack bound; PSRAM does not back the executor stack.
 const PRIOR_QUALIFIED_RAW_STACK_MARGIN_BYTES: u64 = 72_212;
 const PROOF_TRACE_LINKED_STACK_REDUCTION_BYTES: u64 = PROOF_BYTE_SIZE as u64;
 const POST_PROOF_LINKED_STACK_REDUCTION_BYTES: u64 = 3_544;
 const APPLICATION_EVENT_LINKED_STACK_REDUCTION_BYTES: u64 = 2_408;
-const QUALIFIED_RAW_STACK_MARGIN_BYTES: u64 = PRIOR_QUALIFIED_RAW_STACK_MARGIN_BYTES
+const DURABLE_LXMF_DEFAULT_POLICY_REDUCTION_BYTES: u64 = 2_632;
+const PRE_STAGE5_CARRIED_RAW_STACK_MARGIN_BYTES: u64 = PRIOR_QUALIFIED_RAW_STACK_MARGIN_BYTES
     - PROOF_TRACE_LINKED_STACK_REDUCTION_BYTES
     - POST_PROOF_LINKED_STACK_REDUCTION_BYTES
-    - APPLICATION_EVENT_LINKED_STACK_REDUCTION_BYTES;
+    - APPLICATION_EVENT_LINKED_STACK_REDUCTION_BYTES
+    - DURABLE_LXMF_DEFAULT_POLICY_REDUCTION_BYTES;
+const PRE_BOOTSTRAP_QUALIFIED_RAW_STACK_MARGIN_BYTES: u64 = 57_716;
+const BOOTSTRAP_ANNOUNCE_SCHEDULE_LINKED_STACK_REDUCTION_BYTES: u64 = 16;
+const QUALIFIED_RAW_STACK_MARGIN_BYTES: u64 = PRE_BOOTSTRAP_QUALIFIED_RAW_STACK_MARGIN_BYTES
+    - BOOTSTRAP_ANNOUNCE_SCHEDULE_LINKED_STACK_REDUCTION_BYTES;
 const MAXIMUM_STACK_FRAME_BYTES: u64 = 53_680;
 const MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES: u64 =
     QUALIFIED_RAW_STACK_MARGIN_BYTES - MAXIMUM_STACK_FRAME_BYTES;
-const MINIMUM_DEFAULT_USABLE_STACK_BYTES: u64 = 165_032;
-const MINIMUM_HIL_USABLE_STACK_BYTES: u64 = 164_336;
+// The bounded bootstrap announce scheduler adds sixteen linked bytes to both
+// profiles. LXTE remains one exact 96-byte initialized internal-RAM object only
+// in HIL, preserving the profile-to-profile difference.
+const MINIMUM_DEFAULT_USABLE_STACK_BYTES: u64 = 162_376;
+const MINIMUM_HIL_USABLE_STACK_BYTES: u64 = 161_576;
 const EXPECTED_STACK_GUARD_OFFSET_BYTES: u64 = 60;
 const STACK_GUARD_WORD_BYTES: u64 = size_of::<u32>() as u64;
 
@@ -399,6 +497,7 @@ struct Options {
 enum CommandOptions {
     Decode(Options),
     DecodeProofTrace(Options),
+    DecodeLxmfTrace(Options),
     DecodeCheckpoint(Options),
     InspectElf(ElfInspectionOptions),
     CaptureCheckpoint(CaptureCheckpointOptions),
@@ -428,6 +527,7 @@ struct EvidenceSymbol {
 struct CheckpointLayout {
     runtime: EvidenceSymbol,
     proof_trace: EvidenceSymbol,
+    lxmf_trace: EvidenceSymbol,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -456,10 +556,13 @@ struct ElfInspection {
     default_stack_sizes: StackSizeInventory,
     default_stack: StackLayout,
     default_proof_trace_symbol_count: u64,
+    default_lxmf_trace_symbol_count: u64,
     hil_stack_sizes: StackSizeInventory,
     hil_stack: StackLayout,
     hil_proof_trace_symbol_count: u64,
     hil_proof_trace_symbol_size_bytes: u64,
+    hil_lxmf_trace_symbol_count: u64,
+    hil_lxmf_trace_symbol_size_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -470,6 +573,11 @@ struct DecodedEvidence {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DecodedProofTraceEvidence {
     words: [u32; PROOF_WORD_COUNT],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DecodedLxmfTraceEvidence {
+    words: [u32; LXMF_WORD_COUNT],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -483,6 +591,7 @@ struct TxPartitionDiagnostic {
 struct DecodedCheckpoint {
     runtime: DecodedEvidence,
     proof_trace: DecodedProofTraceEvidence,
+    lxmf_trace: DecodedLxmfTraceEvidence,
     tx_partition: TxPartitionDiagnostic,
 }
 
@@ -524,6 +633,7 @@ struct CaptureSymbolBinding {
 struct CaptureLayoutBinding {
     runtime: CaptureSymbolBinding,
     proof_trace: CaptureSymbolBinding,
+    lxmf_trace: CaptureSymbolBinding,
     contiguous_bytes: u64,
 }
 
@@ -586,6 +696,7 @@ pub(crate) fn run(args: Vec<String>) -> ExitCode {
     let result = match options {
         CommandOptions::Decode(options) => execute(&options),
         CommandOptions::DecodeProofTrace(options) => execute_proof_trace(&options),
+        CommandOptions::DecodeLxmfTrace(options) => execute_lxmf_trace(&options),
         CommandOptions::DecodeCheckpoint(options) => execute_checkpoint(&options),
         CommandOptions::InspectElf(options) => {
             inspect_elf_pair(&options).map(|value| value.render())
@@ -610,8 +721,10 @@ fn usage() {
          --input <256-byte-bin> [--json]\n  cargo run -p xtask -- \
          e290-runtime-measurement decode-proof-trace \
          --input <192-byte-bin> [--json]\n  cargo run -p xtask -- \
+         e290-runtime-measurement decode-lxmf-trace \
+         --input <96-byte-bin> [--json]\n  cargo run -p xtask -- \
          e290-runtime-measurement decode-checkpoint \
-         --input <448-byte-bin> [--json]\n  cargo run -p xtask -- \
+         --input <544-byte-bin> [--json]\n  cargo run -p xtask -- \
          e290-runtime-measurement inspect-elf --default-elf <path> \
          --hil-elf <path>\n  cargo run -p xtask -- \
          e290-runtime-measurement capture-checkpoint --hil-elf <final-HIL-ELF> \
@@ -625,6 +738,9 @@ fn parse_command_options(args: &[String]) -> Result<CommandOptions, String> {
         Some("decode") => parse_options(args).map(CommandOptions::Decode),
         Some("decode-proof-trace") => {
             parse_proof_trace_options(args).map(CommandOptions::DecodeProofTrace)
+        }
+        Some("decode-lxmf-trace") => {
+            parse_lxmf_trace_options(args).map(CommandOptions::DecodeLxmfTrace)
         }
         Some("decode-checkpoint") => {
             parse_checkpoint_options(args).map(CommandOptions::DecodeCheckpoint)
@@ -654,6 +770,16 @@ fn parse_proof_trace_options(args: &[String]) -> Result<Options, String> {
         Some("decode-proof-trace") => {}
         Some(_) => return Err("subcommand must be decode-proof-trace".to_owned()),
         None => return Err("decode-proof-trace subcommand is required".to_owned()),
+    }
+
+    parse_decode_input_options(&args[1..])
+}
+
+fn parse_lxmf_trace_options(args: &[String]) -> Result<Options, String> {
+    match args.first().map(String::as_str) {
+        Some("decode-lxmf-trace") => {}
+        Some(_) => return Err("subcommand must be decode-lxmf-trace".to_owned()),
+        None => return Err("decode-lxmf-trace subcommand is required".to_owned()),
     }
 
     parse_decode_input_options(&args[1..])
@@ -809,6 +935,21 @@ fn execute_proof_trace(options: &Options) -> Result<String, String> {
     })
 }
 
+fn execute_lxmf_trace(options: &Options) -> Result<String, String> {
+    let bytes = fs::read(&options.input).map_err(|error| {
+        format!(
+            "could not read --input {}: {error}",
+            options.input.display()
+        )
+    })?;
+    let evidence = DecodedLxmfTraceEvidence::parse(&bytes)?;
+    Ok(if options.json {
+        evidence.render_json()
+    } else {
+        evidence.render_human()
+    })
+}
+
 fn execute_checkpoint(options: &Options) -> Result<String, String> {
     let bytes = fs::read(&options.input).map_err(|error| {
         format!(
@@ -951,7 +1092,7 @@ fn capture_checkpoint_with(
     ensure_absent(&raw_path, "raw checkpoint output")?;
 
     let probe_selector = format!("{E290_PROBE_VID_PID}:{}", options.usb_serial);
-    let runtime_address = format!("0x{:x}", prepared.layout.runtime.address);
+    let capture_address = format!("0x{:x}", prepared.layout.lxmf_trace.address);
     let arguments = [
         OsString::from("read"),
         OsString::from("--chip"),
@@ -966,7 +1107,7 @@ fn capture_checkpoint_with(
         OsString::from("--output"),
         raw_path.as_os_str().to_owned(),
         OsString::from("b8"),
-        OsString::from(&runtime_address),
+        OsString::from(&capture_address),
         OsString::from(CHECKPOINT_BYTE_SIZE.to_string()),
     ]
     .to_vec();
@@ -1004,13 +1145,15 @@ fn capture_checkpoint_with(
         ));
     }
     let checkpoint = DecodedCheckpoint::parse(&raw)?;
-    let runtime = &raw[..BYTE_SIZE];
-    let proof_trace = &raw[BYTE_SIZE..];
+    let lxmf_trace = &raw[..LXMF_BYTE_SIZE];
+    let runtime = &raw[LXMF_BYTE_SIZE..LXMF_BYTE_SIZE + BYTE_SIZE];
+    let proof_trace = &raw[LXMF_BYTE_SIZE + BYTE_SIZE..];
     let human = format!("{}\n", checkpoint.render_human());
     let json = format!("{}\n", checkpoint.render_json());
 
     write_new_synced(&output.join(CAPTURE_RUNTIME_FILE), runtime)?;
     write_new_synced(&output.join(CAPTURE_PROOF_FILE), proof_trace)?;
+    write_new_synced(&output.join(CAPTURE_LXMF_FILE), lxmf_trace)?;
     write_new_synced(&output.join(CAPTURE_HUMAN_FILE), human.as_bytes())?;
     write_new_synced(&output.join(CAPTURE_JSON_FILE), json.as_bytes())?;
 
@@ -1018,6 +1161,7 @@ fn capture_checkpoint_with(
         CAPTURE_RAW_FILE,
         CAPTURE_RUNTIME_FILE,
         CAPTURE_PROOF_FILE,
+        CAPTURE_LXMF_FILE,
         CAPTURE_HUMAN_FILE,
         CAPTURE_JSON_FILE,
         PROBE_CONFIG_FILE,
@@ -1047,6 +1191,7 @@ fn capture_checkpoint_with(
         layout: CaptureLayoutBinding {
             runtime: capture_symbol_binding(prepared.layout.runtime),
             proof_trace: capture_symbol_binding(prepared.layout.proof_trace),
+            lxmf_trace: capture_symbol_binding(prepared.layout.lxmf_trace),
             contiguous_bytes: CHECKPOINT_BYTE_SIZE as u64,
         },
         probe: CaptureProbeBinding {
@@ -1538,16 +1683,23 @@ fn inspect_elf_pair(options: &ElfInspectionOptions) -> Result<ElfInspection, Str
     let (hil_stack_sizes, hil_stack) = inspect_elf(&options.hil_elf, "runtime-measurement HIL")?;
     let (default_proof_trace_symbol_count, _) =
         inspect_proof_trace_symbol(&options.default_elf, "default E290", false)?;
+    let (default_lxmf_trace_symbol_count, _) =
+        inspect_lxmf_trace_symbol(&options.default_elf, "default E290", false)?;
     let (hil_proof_trace_symbol_count, hil_proof_trace_symbol_size_bytes) =
         inspect_proof_trace_symbol(&options.hil_elf, "runtime-measurement HIL", true)?;
+    let (hil_lxmf_trace_symbol_count, hil_lxmf_trace_symbol_size_bytes) =
+        inspect_lxmf_trace_symbol(&options.hil_elf, "runtime-measurement HIL", true)?;
     let inspection = ElfInspection {
         default_stack_sizes,
         default_stack,
         default_proof_trace_symbol_count,
+        default_lxmf_trace_symbol_count,
         hil_stack_sizes,
         hil_stack,
         hil_proof_trace_symbol_count,
         hil_proof_trace_symbol_size_bytes,
+        hil_lxmf_trace_symbol_count,
+        hil_lxmf_trace_symbol_size_bytes,
     };
     inspection.validate()?;
     Ok(inspection)
@@ -1590,9 +1742,21 @@ fn inspect_checkpoint_capture_elf(path: &Path) -> Result<PreparedCheckpointCaptu
             evidence.validate_empty_initializer()
         },
     )?;
+    let lxmf_trace = inspect_checkpoint_symbol(
+        &object,
+        &canonical,
+        LXMF_TRACE_EVIDENCE_SYMBOL_FRAGMENT,
+        "durable-LXMF trace",
+        LXMF_BYTE_SIZE,
+        |initializer| {
+            let evidence = DecodedLxmfTraceEvidence::parse(initializer)?;
+            evidence.validate_empty_initializer()
+        },
+    )?;
     let layout = CheckpointLayout {
         runtime,
         proof_trace,
+        lxmf_trace,
     };
     layout.validate()?;
     Ok(PreparedCheckpointCapture {
@@ -1709,10 +1873,27 @@ impl CheckpointLayout {
                 self.proof_trace.size_bytes
             ));
         }
+        if self.lxmf_trace.size_bytes != LXMF_BYTE_SIZE as u64 {
+            return Err(format!(
+                "LXTE symbol must be exactly {LXMF_BYTE_SIZE} bytes, got {}",
+                self.lxmf_trace.size_bytes
+            ));
+        }
+        let expected_runtime_address =
+            self.lxmf_trace
+                .address
+                .checked_add(LXMF_BYTE_SIZE as u64)
+                .ok_or_else(|| "LXTE symbol address overflows before RTME".to_owned())?;
+        if self.runtime.address != expected_runtime_address {
+            return Err(format!(
+                "RTME symbol must start exactly {LXMF_BYTE_SIZE} bytes after LXTE: LXTE=0x{:x}, expected RTME=0x{expected_runtime_address:x}, got RTME=0x{:x}",
+                self.lxmf_trace.address, self.runtime.address
+            ));
+        }
         let expected_proof_address = self
             .runtime
             .address
-            .checked_add(BYTE_SIZE as u64)
+            .checked_add(self.runtime.size_bytes)
             .ok_or_else(|| "RTME symbol address overflows before RPTE".to_owned())?;
         if self.proof_trace.address != expected_proof_address {
             return Err(format!(
@@ -1724,7 +1905,7 @@ impl CheckpointLayout {
             .proof_trace
             .address
             .checked_add(self.proof_trace.size_bytes)
-            .ok_or_else(|| "contiguous RTME/RPTE capture range overflows".to_owned())?;
+            .ok_or_else(|| "contiguous LXTE/RTME/RPTE capture range overflows".to_owned())?;
         Ok(())
     }
 }
@@ -1839,6 +2020,110 @@ fn inspect_proof_trace_symbol(
     evidence.validate_empty_initializer().map_err(|error| {
         format!(
             "{label} ELF {} proof-trace symbol is not an empty initialized record: {error}",
+            path.display()
+        )
+    })?;
+    Ok((count, symbol.size()))
+}
+
+fn inspect_lxmf_trace_symbol(
+    path: &Path,
+    label: &str,
+    required: bool,
+) -> Result<(u64, u64), String> {
+    let bytes = fs::read(path)
+        .map_err(|error| format!("could not read {label} ELF {}: {error}", path.display()))?;
+    let object = parse_xtensa_elf(&bytes, path, label)?;
+    let mut symbols = object.symbols().filter(|symbol| {
+        symbol
+            .name()
+            .is_ok_and(|name| name.contains(LXMF_TRACE_EVIDENCE_SYMBOL_FRAGMENT))
+            && symbol.section() != SymbolSection::Undefined
+    });
+    let first = symbols.next();
+    let count = u64::from(first.is_some()) + symbols.count() as u64;
+    if !required {
+        if count != 0 {
+            return Err(format!(
+                "{label} ELF {} must exclude {LXMF_TRACE_EVIDENCE_SYMBOL_FRAGMENT}, found {count} defined symbols",
+                path.display()
+            ));
+        }
+        return Ok((0, 0));
+    }
+    if count != 1 {
+        return Err(format!(
+            "{label} ELF {} must contain exactly one defined {LXMF_TRACE_EVIDENCE_SYMBOL_FRAGMENT}, found {count}",
+            path.display()
+        ));
+    }
+
+    let symbol = first.expect("one required durable-LXMF trace symbol was counted");
+    if symbol.size() != LXMF_BYTE_SIZE as u64 {
+        return Err(format!(
+            "{label} ELF {} durable-LXMF trace symbol must be exactly {LXMF_BYTE_SIZE} bytes, got {}",
+            path.display(),
+            symbol.size()
+        ));
+    }
+    let section_index = match symbol.section() {
+        SymbolSection::Section(index) => index,
+        section => {
+            return Err(format!(
+                "{label} ELF {} durable-LXMF trace symbol must belong to one initialized data section, got {section:?}",
+                path.display()
+            ));
+        }
+    };
+    let section = object.section_by_index(section_index).map_err(|error| {
+        format!(
+            "could not resolve {label} durable-LXMF trace section in {}: {error}",
+            path.display()
+        )
+    })?;
+    if section.kind() == SectionKind::UninitializedData {
+        return Err(format!(
+            "{label} ELF {} durable-LXMF trace symbol must be initialized, not BSS",
+            path.display()
+        ));
+    }
+    let offset = symbol
+        .address()
+        .checked_sub(section.address())
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| {
+            format!(
+                "{label} ELF {} durable-LXMF trace symbol address is outside its section",
+                path.display()
+            )
+        })?;
+    let end = offset.checked_add(LXMF_BYTE_SIZE).ok_or_else(|| {
+        format!(
+            "{label} ELF {} durable-LXMF trace symbol range overflows",
+            path.display()
+        )
+    })?;
+    let section_data = section.data().map_err(|error| {
+        format!(
+            "could not read initialized {label} durable-LXMF trace section in {}: {error}",
+            path.display()
+        )
+    })?;
+    let initialized = section_data.get(offset..end).ok_or_else(|| {
+        format!(
+            "{label} ELF {} durable-LXMF trace symbol bytes are outside initialized section data",
+            path.display()
+        )
+    })?;
+    let evidence = DecodedLxmfTraceEvidence::parse(initialized).map_err(|error| {
+        format!(
+            "{label} ELF {} durable-LXMF trace symbol has invalid initialized ABI bytes: {error}",
+            path.display()
+        )
+    })?;
+    evidence.validate_empty_initializer().map_err(|error| {
+        format!(
+            "{label} ELF {} durable-LXMF trace symbol is not an empty initialized record: {error}",
             path.display()
         )
     })?;
@@ -2035,12 +2320,26 @@ impl ElfInspection {
                 self.default_proof_trace_symbol_count
             ));
         }
+        if self.default_lxmf_trace_symbol_count != 0 {
+            return Err(format!(
+                "default E290 must exclude durable-LXMF trace evidence, found {} symbols",
+                self.default_lxmf_trace_symbol_count
+            ));
+        }
         if self.hil_proof_trace_symbol_count != 1
             || self.hil_proof_trace_symbol_size_bytes != PROOF_BYTE_SIZE as u64
         {
             return Err(format!(
                 "runtime-measurement HIL must contain one initialized {PROOF_BYTE_SIZE}-byte proof-trace symbol, got count={} size={}",
                 self.hil_proof_trace_symbol_count, self.hil_proof_trace_symbol_size_bytes
+            ));
+        }
+        if self.hil_lxmf_trace_symbol_count != 1
+            || self.hil_lxmf_trace_symbol_size_bytes != LXMF_BYTE_SIZE as u64
+        {
+            return Err(format!(
+                "runtime-measurement HIL must contain one initialized {LXMF_BYTE_SIZE}-byte durable-LXMF trace symbol, got count={} size={}",
+                self.hil_lxmf_trace_symbol_count, self.hil_lxmf_trace_symbol_size_bytes
             ));
         }
         for (label, inventory) in [
@@ -2092,13 +2391,14 @@ impl ElfInspection {
             .max(self.hil_stack_sizes.maximum_frame_bytes);
         let conservative_margin = QUALIFIED_RAW_STACK_MARGIN_BYTES.saturating_sub(worst_frame);
         format!(
-            "default.stack_size_records={}\ndefault.maximum_frame_bytes={}\ndefault.stack_reserved_bytes={}\ndefault.stack_usable_bytes={}\ndefault.stack_guard_offset_bytes={}\ndefault.proof_trace_symbol_count={}\nhil.stack_size_records={}\nhil.maximum_frame_bytes={}\nhil.stack_reserved_bytes={}\nhil.stack_usable_bytes={}\nhil.stack_guard_offset_bytes={}\nhil.proof_trace_symbol_count={}\nhil.proof_trace_symbol_size_bytes={}\npolicy.maximum_frame_bytes={}\npolicy.minimum_default_usable_stack_bytes={}\npolicy.minimum_hil_usable_stack_bytes={}\npolicy.expected_stack_guard_offset_bytes={}\nqualification.raw_painted_margin_bytes={}\nqualification.conservative_margin_bytes={}",
+            "default.stack_size_records={}\ndefault.maximum_frame_bytes={}\ndefault.stack_reserved_bytes={}\ndefault.stack_usable_bytes={}\ndefault.stack_guard_offset_bytes={}\ndefault.proof_trace_symbol_count={}\ndefault.lxmf_trace_symbol_count={}\nhil.stack_size_records={}\nhil.maximum_frame_bytes={}\nhil.stack_reserved_bytes={}\nhil.stack_usable_bytes={}\nhil.stack_guard_offset_bytes={}\nhil.proof_trace_symbol_count={}\nhil.proof_trace_symbol_size_bytes={}\nhil.lxmf_trace_symbol_count={}\nhil.lxmf_trace_symbol_size_bytes={}\npolicy.maximum_frame_bytes={}\npolicy.minimum_default_usable_stack_bytes={}\npolicy.minimum_hil_usable_stack_bytes={}\npolicy.expected_stack_guard_offset_bytes={}\nqualification.raw_painted_margin_bytes={}\nqualification.conservative_margin_bytes={}",
             self.default_stack_sizes.record_count,
             self.default_stack_sizes.maximum_frame_bytes,
             self.default_stack.reserved_bytes,
             self.default_stack.usable_bytes,
             self.default_stack.guard_offset_bytes,
             self.default_proof_trace_symbol_count,
+            self.default_lxmf_trace_symbol_count,
             self.hil_stack_sizes.record_count,
             self.hil_stack_sizes.maximum_frame_bytes,
             self.hil_stack.reserved_bytes,
@@ -2106,6 +2406,8 @@ impl ElfInspection {
             self.hil_stack.guard_offset_bytes,
             self.hil_proof_trace_symbol_count,
             self.hil_proof_trace_symbol_size_bytes,
+            self.hil_lxmf_trace_symbol_count,
+            self.hil_lxmf_trace_symbol_size_bytes,
             MAXIMUM_STACK_FRAME_BYTES,
             MINIMUM_DEFAULT_USABLE_STACK_BYTES,
             MINIMUM_HIL_USABLE_STACK_BYTES,
@@ -2914,6 +3216,309 @@ impl DecodedProofTraceEvidence {
     }
 }
 
+impl DecodedLxmfTraceEvidence {
+    fn parse(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() != LXMF_BYTE_SIZE {
+            return Err(format!(
+                "durable-LXMF trace input must be exactly {LXMF_BYTE_SIZE} bytes, got {}",
+                bytes.len()
+            ));
+        }
+        let mut words = [0_u32; LXMF_WORD_COUNT];
+        for (word, bytes) in words.iter_mut().zip(bytes.chunks_exact(size_of::<u32>())) {
+            *word = u32::from_le_bytes(
+                bytes
+                    .try_into()
+                    .expect("an exact four-byte chunk must convert to one ABI word"),
+            );
+        }
+        let evidence = Self { words };
+        evidence.validate()?;
+        Ok(evidence)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        let begin = self.words[LXMF_SNAPSHOT_SEQ_BEGIN_WORD];
+        let end = self.words[LXMF_SNAPSHOT_SEQ_END_WORD];
+        if begin != end {
+            return Err(format!(
+                "durable-LXMF trace snapshot sequence markers must match, got begin={begin} end={end}"
+            ));
+        }
+        if begin & 1 != 0 {
+            return Err(format!(
+                "durable-LXMF trace snapshot sequence markers must be even, got {begin}"
+            ));
+        }
+        if self.words[LXMF_MAGIC_WORD] != LXMF_MAGIC {
+            return Err(format!(
+                "durable-LXMF trace magic must be LXTE, got 0x{:08x}",
+                self.words[LXMF_MAGIC_WORD]
+            ));
+        }
+        if self.words[LXMF_VERSION_WORD] != LXMF_VERSION {
+            return Err(format!(
+                "durable-LXMF trace version must be {LXMF_VERSION}, got {}",
+                self.words[LXMF_VERSION_WORD]
+            ));
+        }
+        if self.words[LXMF_SIZE_WORD] != LXMF_BYTE_SIZE as u32 {
+            return Err(format!(
+                "durable-LXMF trace size_bytes must be {LXMF_BYTE_SIZE}, got {}",
+                self.words[LXMF_SIZE_WORD]
+            ));
+        }
+
+        let flags = self.words[LXMF_FLAGS_WORD];
+        let unknown_flags = flags & !LXMF_KNOWN_FLAG_MASK;
+        if unknown_flags != 0 {
+            return Err(format!(
+                "durable-LXMF trace flags.raw contains unknown bits 0x{unknown_flags:08x}"
+            ));
+        }
+        if flags & LXMF_FLAG_ACTIVE == 0 {
+            return Err("durable-LXMF trace flags.active must be true".to_owned());
+        }
+
+        let has_commit = self.words[LXMF_DURABLE_NEW_COUNT_WORD] != 0
+            || self.words[LXMF_DURABLE_ALREADY_COUNT_WORD] != 0;
+        let commit_present = flags & LXMF_FLAG_LAST_COMMIT_PRESENT != 0;
+        if has_commit != commit_present {
+            return Err(
+                "durable-LXMF trace last-commit presence must match durable counts".to_owned(),
+            );
+        }
+        let last_new = flags & LXMF_FLAG_LAST_COMMIT_NEW != 0;
+        let last_already = flags & LXMF_FLAG_LAST_COMMIT_ALREADY_DURABLE != 0;
+        if commit_present && last_new == last_already {
+            return Err(
+                "durable-LXMF trace last commit must be exactly one of new or already_durable"
+                    .to_owned(),
+            );
+        }
+        if !commit_present && (last_new || last_already) {
+            return Err(
+                "durable-LXMF trace last-commit kind requires last_commit_present".to_owned(),
+            );
+        }
+        let handle = self.wide(LXMF_LAST_HANDLE_LOW_WORD, LXMF_LAST_HANDLE_HIGH_WORD);
+        if commit_present && handle == 0 && flags & LXMF_FLAG_INPUT_INCONSISTENT == 0 {
+            return Err("durable-LXMF trace committed durable handle must be nonzero".to_owned());
+        }
+        if !commit_present
+            && (handle != 0
+                || self.words[LXMF_LAST_MESSAGE_ID_FIRST_WORD..=LXMF_LAST_MESSAGE_ID_LAST_WORD]
+                    .iter()
+                    .any(|word| *word != 0))
+        {
+            return Err(
+                "durable-LXMF trace last-message fields require last_commit_present".to_owned(),
+            );
+        }
+
+        let saturated = flags & LXMF_FLAG_SATURATED != 0;
+        let ready = self.words[LXMF_PROOF_READY_COUNT_WORD];
+        let released = self.words[LXMF_PROOF_RELEASED_COUNT_WORD];
+        let handed_off = self.words[LXMF_PROOF_HANDOFF_COUNT_WORD];
+        if !saturated {
+            let durable = self.words[LXMF_DURABLE_NEW_COUNT_WORD]
+                .saturating_add(self.words[LXMF_DURABLE_ALREADY_COUNT_WORD]);
+            if ready > durable {
+                return Err("durable-LXMF trace proof.ready.count exceeds durable count".to_owned());
+            }
+            if (released > ready || handed_off > released)
+                && flags & LXMF_FLAG_ORDERING_VIOLATION == 0
+            {
+                return Err(
+                    "durable-LXMF trace out-of-order proof counts require ordering_violation"
+                        .to_owned(),
+                );
+            }
+        }
+        let violation_count = self.words[LXMF_ORDERING_VIOLATION_COUNT_WORD];
+        if (violation_count != 0) != (flags & LXMF_FLAG_ORDERING_VIOLATION != 0) {
+            return Err(
+                "durable-LXMF trace ordering violation flag must match its count".to_owned(),
+            );
+        }
+
+        let tag_present = flags & LXMF_FLAG_PROOF_TAG_PRESENT != 0;
+        let tag = self.wide(LXMF_LAST_PROOF_TAG_LOW_WORD, LXMF_LAST_PROOF_TAG_HIGH_WORD);
+        if !tag_present && tag != 0 {
+            return Err("durable-LXMF trace proof tag words require proof_tag_present".to_owned());
+        }
+        if tag_present && released == 0 {
+            return Err(
+                "durable-LXMF trace proof_tag_present requires a released proof".to_owned(),
+            );
+        }
+        if released != 0 && !tag_present && flags & LXMF_FLAG_INPUT_INCONSISTENT == 0 {
+            return Err(
+                "durable-LXMF trace missing released-proof tag requires input_inconsistent"
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
+
+    fn validate_empty_initializer(&self) -> Result<(), String> {
+        for (word, name) in LXMF_WORD_NAMES.iter().copied().enumerate() {
+            let expected = match word {
+                LXMF_MAGIC_WORD => LXMF_MAGIC,
+                LXMF_VERSION_WORD => LXMF_VERSION,
+                LXMF_SIZE_WORD => LXMF_BYTE_SIZE as u32,
+                LXMF_FLAGS_WORD => LXMF_FLAG_ACTIVE,
+                _ => 0,
+            };
+            if self.words[word] != expected {
+                return Err(format!(
+                    "{name} must initialize to {expected}, got {}",
+                    self.words[word]
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn render_human(&self) -> String {
+        let mut output = String::new();
+        for (word, name) in LXMF_WORD_NAMES.iter().copied().enumerate() {
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(name);
+            output.push('=');
+            if word == LXMF_MAGIC_WORD {
+                output.push_str("LXTE");
+            } else {
+                let _ = write!(output, "{}", self.words[word]);
+            }
+            if word == LXMF_FLAGS_WORD {
+                for (flag_name, flag) in LXMF_FLAG_NAMES {
+                    let _ = write!(
+                        output,
+                        "\n{flag_name}={}",
+                        self.words[LXMF_FLAGS_WORD] & flag != 0
+                    );
+                }
+            }
+        }
+        let _ = write!(
+            output,
+            "\nlast_commit_kind={}\nlast_message_id={}\nlast_durable_handle={}\nlast_proof_tag={}",
+            self.last_commit_kind(),
+            self.last_message_id(),
+            self.optional_wide(
+                LXMF_FLAG_LAST_COMMIT_PRESENT,
+                LXMF_LAST_HANDLE_LOW_WORD,
+                LXMF_LAST_HANDLE_HIGH_WORD,
+            ),
+            self.optional_wide(
+                LXMF_FLAG_PROOF_TAG_PRESENT,
+                LXMF_LAST_PROOF_TAG_LOW_WORD,
+                LXMF_LAST_PROOF_TAG_HIGH_WORD,
+            ),
+        );
+        output
+    }
+
+    fn render_json(&self) -> String {
+        let mut output = String::from("{");
+        let mut first = true;
+        for (word, name) in LXMF_WORD_NAMES.iter().copied().enumerate() {
+            if !first {
+                output.push(',');
+            }
+            first = false;
+            let _ = write!(output, "\"{name}\":");
+            if word == LXMF_MAGIC_WORD {
+                output.push_str("\"LXTE\"");
+            } else {
+                let _ = write!(output, "{}", self.words[word]);
+            }
+            if word == LXMF_FLAGS_WORD {
+                for (flag_name, flag) in LXMF_FLAG_NAMES {
+                    let _ = write!(
+                        output,
+                        ",\"{flag_name}\":{}",
+                        self.words[LXMF_FLAGS_WORD] & flag != 0
+                    );
+                }
+            }
+        }
+        let _ = write!(
+            output,
+            ",\"last_commit_kind\":\"{}\",\"last_message_id\":{},\"last_durable_handle\":{},\"last_proof_tag\":{}",
+            self.last_commit_kind(),
+            self.json_last_message_id(),
+            self.json_optional_wide(
+                LXMF_FLAG_LAST_COMMIT_PRESENT,
+                LXMF_LAST_HANDLE_LOW_WORD,
+                LXMF_LAST_HANDLE_HIGH_WORD,
+            ),
+            self.json_optional_wide(
+                LXMF_FLAG_PROOF_TAG_PRESENT,
+                LXMF_LAST_PROOF_TAG_LOW_WORD,
+                LXMF_LAST_PROOF_TAG_HIGH_WORD,
+            ),
+        );
+        output.push('}');
+        output
+    }
+
+    fn last_commit_kind(&self) -> &'static str {
+        let flags = self.words[LXMF_FLAGS_WORD];
+        if flags & LXMF_FLAG_LAST_COMMIT_NEW != 0 {
+            "new"
+        } else if flags & LXMF_FLAG_LAST_COMMIT_ALREADY_DURABLE != 0 {
+            "already_durable"
+        } else {
+            "unobserved"
+        }
+    }
+
+    fn last_message_id(&self) -> String {
+        if self.words[LXMF_FLAGS_WORD] & LXMF_FLAG_LAST_COMMIT_PRESENT == 0 {
+            return "unobserved".to_owned();
+        }
+        let mut output = String::with_capacity(64);
+        for word in &self.words[LXMF_LAST_MESSAGE_ID_FIRST_WORD..=LXMF_LAST_MESSAGE_ID_LAST_WORD] {
+            for byte in word.to_le_bytes() {
+                let _ = write!(output, "{byte:02x}");
+            }
+        }
+        output
+    }
+
+    fn json_last_message_id(&self) -> String {
+        if self.words[LXMF_FLAGS_WORD] & LXMF_FLAG_LAST_COMMIT_PRESENT == 0 {
+            "null".to_owned()
+        } else {
+            format!("\"{}\"", self.last_message_id())
+        }
+    }
+
+    fn wide(&self, low: usize, high: usize) -> u64 {
+        u64::from(self.words[low]) | (u64::from(self.words[high]) << 32)
+    }
+
+    fn optional_wide(&self, flag: u32, low: usize, high: usize) -> String {
+        if self.words[LXMF_FLAGS_WORD] & flag == 0 {
+            "unobserved".to_owned()
+        } else {
+            format!("0x{:016x}", self.wide(low, high))
+        }
+    }
+
+    fn json_optional_wide(&self, flag: u32, low: usize, high: usize) -> String {
+        if self.words[LXMF_FLAGS_WORD] & flag == 0 {
+            "null".to_owned()
+        } else {
+            format!("\"0x{:016x}\"", self.wide(low, high))
+        }
+    }
+}
+
 impl DecodedCheckpoint {
     fn parse(bytes: &[u8]) -> Result<Self, String> {
         if bytes.len() != CHECKPOINT_BYTE_SIZE {
@@ -2922,9 +3527,11 @@ impl DecodedCheckpoint {
                 bytes.len()
             ));
         }
-        let runtime = DecodedEvidence::parse(&bytes[..BYTE_SIZE])
+        let lxmf_trace = DecodedLxmfTraceEvidence::parse(&bytes[..LXMF_BYTE_SIZE])
+            .map_err(|error| format!("invalid checkpoint LXTE record: {error}"))?;
+        let runtime = DecodedEvidence::parse(&bytes[LXMF_BYTE_SIZE..LXMF_BYTE_SIZE + BYTE_SIZE])
             .map_err(|error| format!("invalid checkpoint RTME record: {error}"))?;
-        let proof_trace = DecodedProofTraceEvidence::parse(&bytes[BYTE_SIZE..])
+        let proof_trace = DecodedProofTraceEvidence::parse(&bytes[LXMF_BYTE_SIZE + BYTE_SIZE..])
             .map_err(|error| format!("invalid checkpoint RPTE record: {error}"))?;
         let expected_count = runtime.words[TX_COUNT_WORD];
         let observed_count = proof_trace.words[PROOF_RADIO_TX_CONFIRMED_SUCCESS_COUNT_WORD]
@@ -2944,6 +3551,7 @@ impl DecodedCheckpoint {
         Ok(Self {
             runtime,
             proof_trace,
+            lxmf_trace,
             tx_partition,
         })
     }
@@ -2964,6 +3572,9 @@ impl DecodedCheckpoint {
         for line in self.proof_trace.render_human().lines() {
             let _ = write!(output, "\nrpte.{line}");
         }
+        for line in self.lxmf_trace.render_human().lines() {
+            let _ = write!(output, "\nlxte.{line}");
+        }
         output
     }
 
@@ -2974,11 +3585,12 @@ impl DecodedCheckpoint {
             None => "null",
         };
         format!(
-            "{{\"schema\":\"{CHECKPOINT_SCHEMA}\",\"size_bytes\":{CHECKPOINT_BYTE_SIZE},\"tx_partition_consistent\":{consistent},\"tx_partition_expected_count\":{},\"tx_partition_observed_count\":{},\"rtme\":{},\"rpte\":{}}}",
+            "{{\"schema\":\"{CHECKPOINT_SCHEMA}\",\"size_bytes\":{CHECKPOINT_BYTE_SIZE},\"tx_partition_consistent\":{consistent},\"tx_partition_expected_count\":{},\"tx_partition_observed_count\":{},\"rtme\":{},\"rpte\":{},\"lxte\":{}}}",
             self.tx_partition.expected_count,
             self.tx_partition.observed_count,
             self.runtime.render_json(),
             self.proof_trace.render_json(),
+            self.lxmf_trace.render_json(),
         )
     }
 }
@@ -2997,10 +3609,13 @@ const _: () = {
     assert!(PROOF_TRACE_LINKED_STACK_REDUCTION_BYTES == 192);
     assert!(POST_PROOF_LINKED_STACK_REDUCTION_BYTES == 3_544);
     assert!(APPLICATION_EVENT_LINKED_STACK_REDUCTION_BYTES == 2_408);
-    assert!(CHECKPOINT_BYTE_SIZE == 448);
-    assert!(QUALIFIED_RAW_STACK_MARGIN_BYTES == 66_068);
+    assert!(DURABLE_LXMF_DEFAULT_POLICY_REDUCTION_BYTES == 2_632);
+    assert!(LXMF_BYTE_SIZE == 96);
+    assert!(CHECKPOINT_BYTE_SIZE == 544);
+    assert!(PRE_STAGE5_CARRIED_RAW_STACK_MARGIN_BYTES == 63_436);
+    assert!(QUALIFIED_RAW_STACK_MARGIN_BYTES == 57_700);
     assert!(MAXIMUM_STACK_FRAME_BYTES == 53_680);
-    assert!(MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES == 12_388);
+    assert!(MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES == 4_020);
     assert!(
         MAXIMUM_STACK_FRAME_BYTES + MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES
             == QUALIFIED_RAW_STACK_MARGIN_BYTES
@@ -3022,6 +3637,29 @@ const _: () = {
     assert!(ALLOCATION_COUNT_WORD == UNEXPECTED_ERROR_COUNT_WORD + 1);
     assert!(FAILED_ALLOCATION_COUNT_WORD + 1 == SNAPSHOT_SEQ_END_WORD);
     assert!(SNAPSHOT_SEQ_END_WORD + 1 == WORD_COUNT);
+};
+
+const _: () = {
+    assert!(LXMF_WORD_NAMES.len() == LXMF_WORD_COUNT);
+    assert!(LXMF_SNAPSHOT_SEQ_BEGIN_WORD == 0);
+    assert!(LXMF_MAGIC_WORD == LXMF_SNAPSHOT_SEQ_BEGIN_WORD + 1);
+    assert!(LXMF_VERSION_WORD == LXMF_MAGIC_WORD + 1);
+    assert!(LXMF_SIZE_WORD == LXMF_VERSION_WORD + 1);
+    assert!(LXMF_FLAGS_WORD == LXMF_SIZE_WORD + 1);
+    assert!(LXMF_DURABLE_NEW_COUNT_WORD == LXMF_FLAGS_WORD + 1);
+    assert!(LXMF_DURABLE_ALREADY_COUNT_WORD == LXMF_DURABLE_NEW_COUNT_WORD + 1);
+    assert!(LXMF_PROOF_READY_COUNT_WORD == LXMF_DURABLE_ALREADY_COUNT_WORD + 1);
+    assert!(LXMF_PROOF_RELEASED_COUNT_WORD == LXMF_PROOF_READY_COUNT_WORD + 1);
+    assert!(LXMF_PROOF_HANDOFF_COUNT_WORD == LXMF_PROOF_RELEASED_COUNT_WORD + 1);
+    assert!(LXMF_ORDERING_VIOLATION_COUNT_WORD == LXMF_PROOF_HANDOFF_COUNT_WORD + 1);
+    assert!(LXMF_LAST_MESSAGE_ID_FIRST_WORD == LXMF_ORDERING_VIOLATION_COUNT_WORD + 1);
+    assert!(LXMF_LAST_MESSAGE_ID_LAST_WORD == LXMF_LAST_MESSAGE_ID_FIRST_WORD + 7);
+    assert!(LXMF_LAST_HANDLE_LOW_WORD == LXMF_LAST_MESSAGE_ID_LAST_WORD + 1);
+    assert!(LXMF_LAST_HANDLE_HIGH_WORD == LXMF_LAST_HANDLE_LOW_WORD + 1);
+    assert!(LXMF_LAST_PROOF_TAG_LOW_WORD == LXMF_LAST_HANDLE_HIGH_WORD + 1);
+    assert!(LXMF_LAST_PROOF_TAG_HIGH_WORD == LXMF_LAST_PROOF_TAG_LOW_WORD + 1);
+    assert!(LXMF_SNAPSHOT_SEQ_END_WORD == LXMF_LAST_PROOF_TAG_HIGH_WORD + 1);
+    assert!(LXMF_SNAPSHOT_SEQ_END_WORD + 1 == LXMF_WORD_COUNT);
 };
 
 const _: () = {
@@ -3082,8 +3720,8 @@ const _: () = {
 mod tests {
     use super::*;
     use reticulum_heltec_vision_master_e290_node::runtime_measurement::{
-        BootPhase, HeapSnapshot, OperationKind, RuntimeMeasurementEvidence,
-        RuntimeProofTraceEvidence, RuntimeProofTraceIngressDisposition,
+        BootPhase, HeapSnapshot, OperationKind, RuntimeLxmfCommitKind, RuntimeLxmfTraceEvidence,
+        RuntimeMeasurementEvidence, RuntimeProofTraceEvidence, RuntimeProofTraceIngressDisposition,
         RuntimeProofTraceIngressMetadata, RuntimeProofTracePacketType, StackSnapshot,
     };
     use std::{
@@ -3617,32 +4255,38 @@ mod tests {
                 maximum_frame_bytes: 53_680,
             },
             default_stack: StackLayout {
-                reserved_bytes: 165_096,
-                usable_bytes: 165_032,
+                reserved_bytes: 162_440,
+                usable_bytes: 162_376,
                 guard_offset_bytes: 60,
             },
             default_proof_trace_symbol_count: 0,
+            default_lxmf_trace_symbol_count: 0,
             hil_stack_sizes: StackSizeInventory {
                 record_count: 1_025,
                 maximum_frame_bytes: 53_680,
             },
             hil_stack: StackLayout {
-                reserved_bytes: 164_400,
-                usable_bytes: 164_336,
+                reserved_bytes: 161_640,
+                usable_bytes: 161_576,
                 guard_offset_bytes: 60,
             },
             hil_proof_trace_symbol_count: 1,
             hil_proof_trace_symbol_size_bytes: 192,
+            hil_lxmf_trace_symbol_count: 1,
+            hil_lxmf_trace_symbol_size_bytes: 96,
         };
         reviewed.validate().unwrap();
         let output = reviewed.render();
         assert!(output.contains("default.maximum_frame_bytes=53680\n"));
-        assert!(output.contains("default.stack_usable_bytes=165032\n"));
+        assert!(output.contains("default.stack_usable_bytes=162376\n"));
         assert!(output.contains("default.proof_trace_symbol_count=0\n"));
-        assert!(output.contains("hil.stack_usable_bytes=164336\n"));
+        assert!(output.contains("default.lxmf_trace_symbol_count=0\n"));
+        assert!(output.contains("hil.stack_usable_bytes=161576\n"));
         assert!(output.contains("hil.proof_trace_symbol_count=1\n"));
         assert!(output.contains("hil.proof_trace_symbol_size_bytes=192\n"));
-        assert!(output.ends_with("qualification.conservative_margin_bytes=12388"));
+        assert!(output.contains("hil.lxmf_trace_symbol_count=1\n"));
+        assert!(output.contains("hil.lxmf_trace_symbol_size_bytes=96\n"));
+        assert!(output.ends_with("qualification.conservative_margin_bytes=4020"));
 
         let mut regressed = reviewed;
         regressed.default_proof_trace_symbol_count = 1;
@@ -3662,6 +4306,23 @@ mod tests {
         assert!(regressed.validate().unwrap_err().contains("size=191"));
 
         let mut regressed = reviewed;
+        regressed.default_lxmf_trace_symbol_count = 1;
+        assert!(regressed.validate().unwrap_err().contains("must exclude"));
+
+        let mut regressed = reviewed;
+        regressed.hil_lxmf_trace_symbol_count = 0;
+        assert!(
+            regressed
+                .validate()
+                .unwrap_err()
+                .contains("one initialized")
+        );
+
+        let mut regressed = reviewed;
+        regressed.hil_lxmf_trace_symbol_size_bytes = 95;
+        assert!(regressed.validate().unwrap_err().contains("size=95"));
+
+        let mut regressed = reviewed;
         regressed.default_stack_sizes.maximum_frame_bytes += 1;
         assert!(regressed.validate().unwrap_err().contains("frame 53681"));
 
@@ -3675,7 +4336,7 @@ mod tests {
             regressed
                 .validate()
                 .unwrap_err()
-                .contains("usable stack 165031")
+                .contains("usable stack 162375")
         );
 
         let mut regressed = reviewed;
@@ -3684,7 +4345,7 @@ mod tests {
             regressed
                 .validate()
                 .unwrap_err()
-                .contains("usable stack 164335")
+                .contains("usable stack 161575")
         );
 
         let mut regressed = reviewed;
@@ -4131,6 +4792,60 @@ mod tests {
         evidence
     }
 
+    fn lxmf_minimal_words() -> [u32; LXMF_WORD_COUNT] {
+        let mut words = [0_u32; LXMF_WORD_COUNT];
+        words[LXMF_MAGIC_WORD] = LXMF_MAGIC;
+        words[LXMF_VERSION_WORD] = LXMF_VERSION;
+        words[LXMF_SIZE_WORD] = LXMF_BYTE_SIZE as u32;
+        words[LXMF_FLAGS_WORD] = LXMF_FLAG_ACTIVE;
+        words
+    }
+
+    fn encode_lxmf(words: [u32; LXMF_WORD_COUNT]) -> [u8; LXMF_BYTE_SIZE] {
+        let mut bytes = [0_u8; LXMF_BYTE_SIZE];
+        for (word, destination) in words
+            .into_iter()
+            .zip(bytes.chunks_exact_mut(size_of::<u32>()))
+        {
+            destination.copy_from_slice(&word.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn lxmf_producer_bytes(evidence: &RuntimeLxmfTraceEvidence) -> [u8; LXMF_BYTE_SIZE] {
+        assert_eq!(
+            size_of::<RuntimeLxmfTraceEvidence>(),
+            LXMF_BYTE_SIZE,
+            "durable-LXMF producer ABI size changed"
+        );
+        let mut bytes = [0_u8; LXMF_BYTE_SIZE];
+        // SAFETY: the firmware module compile-time asserts an exact repr(C)
+        // sequence of initialized four-byte fields with no padding. This test
+        // owns `evidence`, so no writer can mutate the stable snapshot here.
+        let source = unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::from_ref(evidence).cast::<u8>(),
+                size_of::<RuntimeLxmfTraceEvidence>(),
+            )
+        };
+        bytes.copy_from_slice(source);
+        bytes
+    }
+
+    fn populated_lxmf_evidence() -> RuntimeLxmfTraceEvidence {
+        let evidence = RuntimeLxmfTraceEvidence::new();
+        let message_id = core::array::from_fn(|index| index as u8);
+        evidence.record_durable(
+            RuntimeLxmfCommitKind::New,
+            &message_id,
+            0x1122_3344_5566_7788,
+            true,
+        );
+        evidence.record_proof_released(Some(0x8877_6655_4433_2211));
+        evidence.record_proof_handed_off();
+        evidence
+    }
+
     #[test]
     fn proof_decoder_requires_exact_stable_versioned_192_byte_abi() {
         for length in [0, PROOF_BYTE_SIZE - 1, PROOF_BYTE_SIZE + 1] {
@@ -4348,6 +5063,92 @@ mod tests {
         assert!(serde_json::from_str::<serde_json::Value>(&json).is_ok());
     }
 
+    #[test]
+    fn lxmf_decoder_matches_firmware_abi_and_renders_decisive_lifecycle_evidence() {
+        for length in [0, LXMF_BYTE_SIZE - 1, LXMF_BYTE_SIZE + 1] {
+            let error = DecodedLxmfTraceEvidence::parse(&vec![0; length])
+                .expect_err("wrong durable-LXMF trace size was accepted");
+            assert_eq!(
+                error,
+                format!(
+                    "durable-LXMF trace input must be exactly {LXMF_BYTE_SIZE} bytes, got {length}"
+                )
+            );
+        }
+
+        let empty = DecodedLxmfTraceEvidence::parse(&encode_lxmf(lxmf_minimal_words())).unwrap();
+        empty.validate_empty_initializer().unwrap();
+
+        let evidence = populated_lxmf_evidence();
+        let decoded = DecodedLxmfTraceEvidence::parse(&lxmf_producer_bytes(&evidence))
+            .expect("firmware durable-LXMF trace must satisfy its host decoder");
+        assert_eq!(decoded.words[LXMF_DURABLE_NEW_COUNT_WORD], 1);
+        assert_eq!(decoded.words[LXMF_PROOF_READY_COUNT_WORD], 1);
+        assert_eq!(decoded.words[LXMF_PROOF_RELEASED_COUNT_WORD], 1);
+        assert_eq!(decoded.words[LXMF_PROOF_HANDOFF_COUNT_WORD], 1);
+        assert_eq!(decoded.words[LXMF_ORDERING_VIOLATION_COUNT_WORD], 0);
+
+        let human = decoded.render_human();
+        assert!(human.starts_with("snapshot_seq_begin=6\nmagic=LXTE\nversion=1\n"));
+        assert!(human.contains("flags.last_commit_new=true\n"));
+        assert!(human.contains("flags.proof_tag_present=true\n"));
+        assert!(human.contains("last_commit_kind=new\n"));
+        assert!(human.contains(
+            "last_message_id=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n"
+        ));
+        assert!(human.contains("last_durable_handle=0x1122334455667788\n"));
+        assert!(human.ends_with("last_proof_tag=0x8877665544332211"));
+
+        let json: serde_json::Value = serde_json::from_str(&decoded.render_json()).unwrap();
+        assert_eq!(json["magic"], "LXTE");
+        assert_eq!(json["durable.new.count"], 1);
+        assert_eq!(json["proof.ready.count"], 1);
+        assert_eq!(json["proof.released.count"], 1);
+        assert_eq!(json["proof.ordinary_handoff.count"], 1);
+        assert_eq!(json["ordering.violation.count"], 0);
+        assert_eq!(json["last_durable_handle"], "0x1122334455667788");
+        assert_eq!(json["last_proof_tag"], "0x8877665544332211");
+    }
+
+    #[test]
+    fn lxmf_trace_cli_parses_and_executes_human_and_json_forms() {
+        let expected = Options {
+            input: PathBuf::from("lxmf.bin"),
+            json: true,
+        };
+        assert_eq!(
+            parse_lxmf_trace_options(&strings(&[
+                "decode-lxmf-trace",
+                "--json",
+                "--input",
+                "lxmf.bin",
+            ])),
+            Ok(expected)
+        );
+        assert!(matches!(
+            parse_command_options(&strings(&["decode-lxmf-trace", "--input", "lxmf.bin"])),
+            Ok(CommandOptions::DecodeLxmfTrace(_))
+        ));
+        assert_eq!(
+            parse_lxmf_trace_options(&strings(&["decode-lxmf-trace"])).unwrap_err(),
+            "--input is required"
+        );
+
+        let input = TempInput::new(&lxmf_producer_bytes(&populated_lxmf_evidence()));
+        let human = execute_lxmf_trace(&Options {
+            input: input.path().to_owned(),
+            json: false,
+        })
+        .unwrap();
+        assert!(human.contains("proof.ordinary_handoff.count=1\n"));
+        let json = execute_lxmf_trace(&Options {
+            input: input.path().to_owned(),
+            json: true,
+        })
+        .unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(&json).is_ok());
+    }
+
     fn checkpoint_fixture(
         runtime_tx_count: u32,
         confirmed_tx_count: u32,
@@ -4367,6 +5168,7 @@ mod tests {
             proof[PROOF_FLAGS_WORD] |= PROOF_FLAG_SATURATED;
         }
         let mut bytes = Vec::with_capacity(CHECKPOINT_BYTE_SIZE);
+        bytes.extend_from_slice(&encode_lxmf(lxmf_minimal_words()));
         bytes.extend_from_slice(&encode(runtime));
         bytes.extend_from_slice(&encode_proof(proof));
         bytes
@@ -4428,7 +5230,8 @@ mod tests {
         }
 
         let mut invalid_runtime = checkpoint_fixture(4, 3, 1, false, false);
-        invalid_runtime[MAGIC_WORD * 4..(MAGIC_WORD + 1) * 4]
+        let runtime_magic = LXMF_BYTE_SIZE + MAGIC_WORD * 4;
+        invalid_runtime[runtime_magic..runtime_magic + 4]
             .copy_from_slice(&u32::from_le_bytes(*b"NOPE").to_le_bytes());
         assert!(
             DecodedCheckpoint::parse(&invalid_runtime)
@@ -4436,13 +5239,22 @@ mod tests {
                 .starts_with("invalid checkpoint RTME record:")
         );
         let mut invalid_proof = checkpoint_fixture(4, 3, 1, false, false);
-        let proof_magic = BYTE_SIZE + PROOF_MAGIC_WORD * 4;
+        let proof_magic = LXMF_BYTE_SIZE + BYTE_SIZE + PROOF_MAGIC_WORD * 4;
         invalid_proof[proof_magic..proof_magic + 4]
             .copy_from_slice(&u32::from_le_bytes(*b"NOPE").to_le_bytes());
         assert!(
             DecodedCheckpoint::parse(&invalid_proof)
                 .unwrap_err()
                 .starts_with("invalid checkpoint RPTE record:")
+        );
+        let mut invalid_lxmf = checkpoint_fixture(4, 3, 1, false, false);
+        let lxmf_magic = LXMF_MAGIC_WORD * 4;
+        invalid_lxmf[lxmf_magic..lxmf_magic + 4]
+            .copy_from_slice(&u32::from_le_bytes(*b"NOPE").to_le_bytes());
+        assert!(
+            DecodedCheckpoint::parse(&invalid_lxmf)
+                .unwrap_err()
+                .starts_with("invalid checkpoint LXTE record:")
         );
     }
 
@@ -4490,10 +5302,11 @@ mod tests {
         })
         .unwrap();
         assert!(human.starts_with(
-            "schema=reticulum.e290-runtime-checkpoint.v1\nsize_bytes=448\ntx_partition_consistent=false\ntx_partition_expected_count=4\ntx_partition_observed_count=3\n"
+            "schema=reticulum.e290-runtime-checkpoint.v2\nsize_bytes=544\ntx_partition_consistent=false\ntx_partition_expected_count=4\ntx_partition_observed_count=3\n"
         ));
         assert!(human.contains("rtme.operation.tx.count=4\n"));
         assert!(human.contains("rpte.radio_tx.confirmed_success.count=2\n"));
+        assert!(human.contains("lxte.magic=LXTE\n"));
 
         let json = execute_checkpoint(&Options {
             input: input.path().to_owned(),
@@ -4502,12 +5315,13 @@ mod tests {
         .unwrap();
         let json: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(json["schema"], CHECKPOINT_SCHEMA);
-        assert_eq!(json["size_bytes"], 448);
+        assert_eq!(json["size_bytes"], 544);
         assert_eq!(json["tx_partition_consistent"], false);
         assert_eq!(json["tx_partition_expected_count"], 4);
         assert_eq!(json["tx_partition_observed_count"], 3);
         assert_eq!(json["rtme"]["magic"], "RTME");
         assert_eq!(json["rpte"]["magic"], "RPTE");
+        assert_eq!(json["lxte"]["magic"], "LXTE");
 
         let saturated = DecodedCheckpoint::parse(&checkpoint_fixture(4, 3, 1, true, false))
             .unwrap()
@@ -4700,12 +5514,16 @@ pwd > observed-cwd
             elf_sha256: sha256_bytes(b"elf"),
             layout: CheckpointLayout {
                 runtime: EvidenceSymbol {
-                    address: 0x3fca_1000,
+                    address: 0x3fca_1060,
                     size_bytes: BYTE_SIZE as u64,
                 },
                 proof_trace: EvidenceSymbol {
-                    address: 0x3fca_1100,
+                    address: 0x3fca_1160,
                     size_bytes: PROOF_BYTE_SIZE as u64,
+                },
+                lxmf_trace: EvidenceSymbol {
+                    address: 0x3fca_1000,
+                    size_bytes: LXMF_BYTE_SIZE as u64,
                 },
             },
         };
@@ -4757,12 +5575,16 @@ pwd > observed-cwd
             elf_sha256: sha256_bytes(b"elf"),
             layout: CheckpointLayout {
                 runtime: EvidenceSymbol {
-                    address: 0x3fca_1000,
+                    address: 0x3fca_1060,
                     size_bytes: BYTE_SIZE as u64,
                 },
                 proof_trace: EvidenceSymbol {
-                    address: 0x3fca_1100,
+                    address: 0x3fca_1160,
                     size_bytes: PROOF_BYTE_SIZE as u64,
+                },
+                lxmf_trace: EvidenceSymbol {
+                    address: 0x3fca_1000,
+                    size_bytes: LXMF_BYTE_SIZE as u64,
                 },
             },
         };
@@ -4813,12 +5635,16 @@ pwd > observed-cwd
     fn checkpoint_layout_requires_exact_adjacent_symbols_and_final_elf_parser_fails_closed() {
         let valid = CheckpointLayout {
             runtime: EvidenceSymbol {
-                address: 0x3fca_1000,
+                address: 0x3fca_1060,
                 size_bytes: BYTE_SIZE as u64,
             },
             proof_trace: EvidenceSymbol {
-                address: 0x3fca_1100,
+                address: 0x3fca_1160,
                 size_bytes: PROOF_BYTE_SIZE as u64,
+            },
+            lxmf_trace: EvidenceSymbol {
+                address: 0x3fca_1000,
+                size_bytes: LXMF_BYTE_SIZE as u64,
             },
         };
         valid.validate().unwrap();
@@ -4837,14 +5663,24 @@ pwd > observed-cwd
                 .unwrap_err()
                 .contains("start exactly 256")
         );
+        let mut invalid = valid;
+        invalid.lxmf_trace.size_bytes -= 1;
+        assert!(invalid.validate().unwrap_err().contains("LXTE symbol"));
+        let mut invalid = valid;
+        invalid.lxmf_trace.address += 4;
+        assert!(invalid.validate().unwrap_err().contains("start exactly 96"));
         let overflow = CheckpointLayout {
             runtime: EvidenceSymbol {
-                address: u64::MAX - 100,
+                address: 0,
                 size_bytes: BYTE_SIZE as u64,
             },
             proof_trace: EvidenceSymbol {
                 address: 0,
                 size_bytes: PROOF_BYTE_SIZE as u64,
+            },
+            lxmf_trace: EvidenceSymbol {
+                address: u64::MAX - 50,
+                size_bytes: LXMF_BYTE_SIZE as u64,
             },
         };
         assert!(overflow.validate().unwrap_err().contains("overflows"));
@@ -4870,12 +5706,16 @@ pwd > observed-cwd
             elf_sha256: sha256_bytes(elf_bytes),
             layout: CheckpointLayout {
                 runtime: EvidenceSymbol {
-                    address: 0x3fca_1000,
+                    address: 0x3fca_1060,
                     size_bytes: BYTE_SIZE as u64,
                 },
                 proof_trace: EvidenceSymbol {
-                    address: 0x3fca_1100,
+                    address: 0x3fca_1160,
                     size_bytes: PROOF_BYTE_SIZE as u64,
+                },
+                lxmf_trace: EvidenceSymbol {
+                    address: 0x3fca_1000,
+                    size_bytes: LXMF_BYTE_SIZE as u64,
                 },
             },
         };
@@ -4916,7 +5756,7 @@ pwd > observed-cwd
                 output.join(CAPTURE_RAW_FILE).into_os_string(),
                 OsString::from("b8"),
                 OsString::from("0x3fca1000"),
-                OsString::from("448"),
+                OsString::from("544"),
             ];
             assert_eq!(invocation.arguments, expected);
             fs::write(output.join(CAPTURE_RAW_FILE), &checkpoint).unwrap();
@@ -4937,11 +5777,15 @@ pwd > observed-cwd
         assert_eq!(fs::read(output.join(CAPTURE_RAW_FILE)).unwrap(), checkpoint);
         assert_eq!(
             fs::read(output.join(CAPTURE_RUNTIME_FILE)).unwrap(),
-            checkpoint[..BYTE_SIZE]
+            checkpoint[LXMF_BYTE_SIZE..LXMF_BYTE_SIZE + BYTE_SIZE]
         );
         assert_eq!(
             fs::read(output.join(CAPTURE_PROOF_FILE)).unwrap(),
-            checkpoint[BYTE_SIZE..]
+            checkpoint[LXMF_BYTE_SIZE + BYTE_SIZE..]
+        );
+        assert_eq!(
+            fs::read(output.join(CAPTURE_LXMF_FILE)).unwrap(),
+            checkpoint[..LXMF_BYTE_SIZE]
         );
 
         let decoded: serde_json::Value =
@@ -4952,9 +5796,10 @@ pwd > observed-cwd
         assert_eq!(manifest["schema"], CAPTURE_SCHEMA);
         assert_eq!(manifest["usb_serial"], "AC:A7:04:E1:3E:88");
         assert_eq!(manifest["hil_elf"]["sha256"], sha256_bytes(elf_bytes));
-        assert_eq!(manifest["layout"]["runtime"]["address"], "0x3fca1000");
-        assert_eq!(manifest["layout"]["proof_trace"]["address"], "0x3fca1100");
-        assert_eq!(manifest["layout"]["contiguous_bytes"], 448);
+        assert_eq!(manifest["layout"]["runtime"]["address"], "0x3fca1060");
+        assert_eq!(manifest["layout"]["proof_trace"]["address"], "0x3fca1160");
+        assert_eq!(manifest["layout"]["lxmf_trace"]["address"], "0x3fca1000");
+        assert_eq!(manifest["layout"]["contiguous_bytes"], 544);
         assert_eq!(
             manifest["probe"]["executable"]["path"],
             fake_probe.to_str().unwrap()
@@ -4987,7 +5832,7 @@ pwd > observed-cwd
             manifest["probe"]["launch"]["empty_config"]["sha256"],
             sha256_bytes(EMPTY_PROBE_CONFIG)
         );
-        assert_eq!(manifest["files"].as_array().unwrap().len(), 6);
+        assert_eq!(manifest["files"].as_array().unwrap().len(), 7);
         for binding in manifest["files"].as_array().unwrap() {
             let relative = binding["path"].as_str().unwrap();
             let bytes = fs::read(output.join(relative)).unwrap();
@@ -5016,12 +5861,16 @@ pwd > observed-cwd
             elf_sha256: sha256_bytes(b"elf"),
             layout: CheckpointLayout {
                 runtime: EvidenceSymbol {
-                    address: 0x3fca_1000,
+                    address: 0x3fca_1060,
                     size_bytes: BYTE_SIZE as u64,
                 },
                 proof_trace: EvidenceSymbol {
-                    address: 0x3fca_1100,
+                    address: 0x3fca_1160,
                     size_bytes: PROOF_BYTE_SIZE as u64,
+                },
+                lxmf_trace: EvidenceSymbol {
+                    address: 0x3fca_1000,
+                    size_bytes: LXMF_BYTE_SIZE as u64,
                 },
             },
         };
@@ -5048,7 +5897,7 @@ pwd > observed-cwd
             })
         })
         .expect_err("short debugger output was accepted");
-        assert!(error.contains("exactly 448 bytes, got 447"), "{error}");
+        assert!(error.contains("exactly 544 bytes, got 543"), "{error}");
         assert!(output.join(CAPTURE_INCOMPLETE_FILE).is_file());
         assert!(!output.join(CAPTURE_COMPLETE_FILE).exists());
         assert_eq!(

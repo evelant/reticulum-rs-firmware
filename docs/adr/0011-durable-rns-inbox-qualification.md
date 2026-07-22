@@ -4,7 +4,7 @@
   fault-isolation, and bounded target-measurement evidence exist, while physical
   power cuts and full target-bounds qualification remain open
 - **Date:** 2026-07-18
-- **Powered evidence updated:** 2026-07-20
+- **Powered evidence updated:** 2026-07-21
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0003](0003-lora-first-interface-fabric.md),
   [ADR 0004](0004-sole-flash-coordinator.md),
@@ -382,15 +382,18 @@ measurement HIL observed:
 The project-local release gate preserves the current static inputs to the stack
 calculation. CI runs Clippy and then relinks isolated default and measurement
 ELFs with compiler `.stack_sizes` evidence; the inspector accepts only final
-little-endian Xtensa executables with no remaining section relocations. For the
-current application-event pair it caps both maximum frames at 53,680 bytes,
-requires the default/current-HIL usable stacks to remain at least
-165,032/164,336 bytes, and fixes both linker guard offsets at 60 bytes. After
-the 192-byte proof-trace object and 5,952 bytes of exact subsequent linked
-internal-RAM growth, it conservatively carries the powered raw margin forward
-as 66,068 bytes and leaves 12,388 bytes after the current maximum frame. This
-detects a static regression but does not replace the
-powered watermark or establish interrupt/nesting headroom. It qualifies the
+little-endian Xtensa executables with no remaining section relocations. The
+current default/HIL pair contains 946/962 records, has a 53,680-byte maximum
+frame, leaves 175,056/174,256 usable stack bytes, and fixes both linker guard
+offsets at 60 bytes. The later, now-historical pre-LXTE Stage 5 placement
+checkpoint measured 57,716 powered raw bytes. Current conservative policy
+deducts the independent announce scheduler's sixteen linked bytes, preserving
+57,700 carried bytes and 4,020 bytes after the current maximum frame. The
+preceding pre-PSRAM pair was 165,032/164,336 with a 12,388-byte carried margin.
+The painter already covers the one-shot maximum-frame constructor, so the
+carry-forward deduction is deliberately pessimistic rather than a measured
+runtime remainder. It still does not establish interrupt/nesting headroom. It
+qualifies the
 E290 CPU0/main-executor stack, which remains in internal SRAM; it is not a
 compatibility ceiling for non-PSRAM boards. The full E290 profile separately
 requires PSRAM, while Tracker V2 remains a reduced profile.
@@ -445,21 +448,53 @@ action-pressure observations. Its words 45 and 46 were still reserved, so this
 run does not power-qualify the final TX-outcome counters. The companion runtime
 record retained a 72,020-byte painted stack margin and zero radio watchdog
 expiries. The trace record costs exactly 192 bytes of linked HIL stack space;
-the default image is free of it. The decisive qualification remains four clean
-direction-balanced trials (`3f→3e`, `3e→3f`, `3e→3f`, `3f→3e`) with a unique
+the default image is free of it. The separate decisive raw-RNS qualification
+plan remains four clean direction-balanced trials (`3f→3e`, `3e→3f`, `3e→3f`, `3f→3e`) with a unique
 maximum payload and idempotency key per trial. Both boards must be reset and
 independently reprovisioned before every trial; the sender boots first, the
 receiver boots last to supply a fresh ANNOUNCE, and no pre-submit authenticated
 request is allowed. Matching-even RTME/RPTE snapshots are retained at
 baseline, about five seconds after submission, and terminal result using
-addresses resolved from the exact HIL ELF. Receiver generated tags must
-correlate with sender Delivered or timeout tags, and durable payload readback
-remains the inbox success oracle.
+addresses resolved from the exact HIL ELF. For those immediate raw-RNS proofs,
+receiver generated tags must correlate with sender Delivered or timeout tags,
+and durable payload readback remains the inbox success oracle.
 The complete artifact naming and counter/tag acceptance matrix are frozen in
 the [E290 runbook](../e290-node.md#decisive-proof-correlation-trial-runbook).
 Board `3f:88` must first be physically re-enumerated and recovered from its
 interrupted pre-write reset at this checkpoint; no result is claimed from the
 one-board baseline.
+
+The later Stage 5 retained-LXMF path has a different observation boundary and
+must not inherit that receiver-`RPTE` requirement. It intercepts the retained
+proof before ordinary RNS ingress metadata, so receiver `RPTE` generated-proof
+count/tag correctly remains zero. Its correlation joins the `LXTE` release tag,
+the confirmed-TX counter delta, and the sender's delivered tag instead.
+
+The final current default ELF is 13,648,888 bytes with SHA-256
+`92e63b60a5f4b830ee55d958fcc446a6878036212904b8748519ae210ba3da58`;
+its 868,656-byte package uses 803,120 application bytes and has SHA-256
+`c8da2af30e2d0ee24ca4b215151d1370b7e1d242991ebbeb024079a730693a3f`.
+The current runtime-measurement HIL ELF is 13,821,496 bytes with SHA-256
+`7a3fad34699f910a2050468ada6461a0f33d16641ab5425a5c795a71238861ff`;
+its 881,456-byte package uses 815,920 application bytes and has SHA-256
+`12c6f31a7fb64485ad9220edca4ac38ba0a57867ad88ce60fa1a24ffc195d379`.
+Both boards matched exact HIL readbacks. Exactly one fresh A-to-B Stage 5 trial
+sent a 206-byte LXMF carrier as an exact 307-byte RNS packet with SHA-256
+`060037041c91eb5999f89bf84845c19e65bf7fa680827cce9c51e8ecc5dbe0a6`
+and reached `Delivered` on the first attempt. B advanced LXTE durable-new,
+proof-ready, proof-released, and ordinary-handoff by one, with zero already-
+durable/order events; release tag `0x3dc4588d3a205429` matched A's delivered
+tag, and B confirmed one proof TX. The exact 2 MiB B-store readback has SHA-256
+`c75ab2a01b3266fda1e07e0271c70bb29c06e32636d70d8a70d977b9e8b0e21e`
+and contains one record for message
+`abdeec2e498f09c96a6fd56ec3558ca86c2598aaeacac81969b645de3b549dc3`
+whose full-wire digest
+`1c1839991401e01e15e3a3146cd3177a4fb7e5dbd52008fd119beaf091d377ba`
+matches the generator. Both checkpoint pairs report zero failed allocations,
+unexpected runtime errors, RX/CAD/TX watchdog expiries, and correlation faults.
+This narrowly power-confirms persistent continuous RX for that split packet and
+the durable-LXMF proof chain; it does not close this ADR's direction-balanced
+raw-RNS plan or broader sustained/fault qualification.
 
 These values are workload-specific instrumented observations. The HIL enables
 allocator callbacks, updates atomic evidence, scans roughly 170 KiB of stack

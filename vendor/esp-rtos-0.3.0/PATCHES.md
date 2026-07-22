@@ -1,8 +1,11 @@
 # Local esp-rtos 0.3.0 patch
 
 This directory is the published `esp-rtos` 0.3.0 crate with two local,
-equivalent stack-unit corrections in one source file. The original crate is
-dual-licensed MIT OR Apache-2.0.
+equivalent stack-unit corrections in `src/lib.rs`. The original crate is
+dual-licensed MIT OR Apache-2.0. Workspace formatting also normalized imports
+in three source files and removed one trailing space from a `src/lib.rs` doc
+comment; those four formatting-only changes are recorded so the checked vendor
+tree can still be reconstructed byte-for-byte to the published crate.
 
 - crates.io version: `0.3.0`
 - crates.io archive SHA-256: `551f90766e1527edaa0c91e8d559e9e2a60397b545e93357ac61fb31845e5712`
@@ -12,11 +15,11 @@ dual-licensed MIT OR Apache-2.0.
 
 `VENDOR-HASHES.json` records the complete published-crate inventory, the one
 intentionally omitted package-local `Cargo.lock`, the project provenance files,
-the pristine and patched `src/lib.rs` hashes, and the exact two reviewed text
-replacements. `xtask graph-policy` verifies that inventory, rejects symlinks or
-extra files, checks every retained file digest, reverses only those two edits,
-and requires the reconstructed `src/lib.rs` to match the pristine registry
-crate hash.
+the pristine and patched hashes of all four changed source files, and the exact
+six reviewed text replacements. `xtask graph-policy` verifies that inventory,
+rejects symlinks or extra files, checks every retained file digest, reverses only
+those six edits, and requires every reconstructed source file to match its
+pristine registry-crate hash.
 
 ## `cpu0-main-stack-slice-uses-word-count`
 

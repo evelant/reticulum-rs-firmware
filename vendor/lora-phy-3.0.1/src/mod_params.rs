@@ -37,6 +37,25 @@ pub struct PacketStatus {
     pub snr: i16,
 }
 
+/// One decoded interrupt observed while a radio is configured for receive.
+///
+/// This separates the cancellation-safe interrupt wait from the async SPI
+/// work needed to drain and classify that interrupt. Continuous-receive users
+/// can therefore keep the modem armed across successive packets without
+/// issuing another receive command between them.
+#[derive(Clone, Copy)]
+pub enum ReceiveIrq {
+    /// A preamble or valid header was observed; packet reception is in progress.
+    PreambleReceived,
+    /// A complete packet was copied into the caller's receive buffer.
+    PacketReceived {
+        /// Number of valid bytes copied into the receive buffer.
+        len: u8,
+        /// Packet RSSI and SNR reported by the radio.
+        status: PacketStatus,
+    },
+}
+
 /// The state of the radio
 #[derive(Clone, Copy, defmt::Format, PartialEq)]
 pub enum RadioMode {

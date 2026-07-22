@@ -15,8 +15,9 @@ Three crates intentionally describe different trust and capability surfaces:
   can turn that crate into a transmitter.
 - `reticulum-board-heltec-tracker-v2-radio` is the product-capable sibling. It
   owns the proven Tracker configuration, SX1262 PA override, external-FEM and
-  reset policy under product names. Board-neutral bounded receive, CAD and
-  atomic one/two-frame transmit mechanics live in
+  reset policy under product names. Board-neutral legacy bounded receive,
+  persistent continuous receive, CAD, and atomic one/two-frame transmit
+  mechanics live in
   `reticulum-radio-lora-phy` and are shared with independent board wrappers.
 - `reticulum-board-heltec-tracker-v2-tx-hil` is now a one-dependency
   compatibility facade. It retains historical HIL aliases, log labels and the
@@ -43,7 +44,7 @@ calibrated value is invariant under every Cargo feature.
 | Packet mode | explicit header, CRC, normal IQ |
 | Sync word | private network (`0x1424`) |
 | Regulator / receive gain | LDO / unboosted |
-| RX preamble-search timeout | 248 symbols |
+| Legacy bounded-RX preamble-search timeout | 248 symbols |
 | Whole RX operation watchdog | 1,500,000 us; expiry is fail-closed cancellation |
 | Antenna-path target | characterized 14 dBm |
 | SX1262 output | 0 dBm behind the external FEM |
@@ -82,6 +83,13 @@ while the portable sole-radio trait owns a complete split-frame TX operation:
   and the monotonic tick sampled when the final DIO1 wait resumed;
 - `SoleRnodeRadio::receive_bounded()` exposes the same caller-buffer operation
   with portable signal/final-IRQ metadata and a normal no-preamble result;
+- `SoleRnodeRadio::receive_continuous_until()` starts one continuous-RX epoch,
+  races only the cancellation-safe DIO wait against a caller scheduler future,
+  and leaves RX armed after a frame, discarded invalid frame, or scheduler
+  yield;
+- `SoleRnodeRadio::invalidate_receive_session()` marks an abandoned RX epoch
+  untrusted so the next receive or CAD/TX transition performs standby,
+  IRQ-routing disable, pending-IRQ clear, and a fresh arm;
 - `channel_activity_detected()` performs exactly one low-level CAD and returns
   `true` for busy, then explicitly restores standby because pinned
   `lora-phy` otherwise retains its CAD software mode;
@@ -165,7 +173,7 @@ bundle.
 
 ## Evidence and remaining limitations
 
-Nine default-profile tests plus one diagnostic-profile test retain the
+Fourteen default-profile tests plus one diagnostic-profile test retain the
 qualified command traces and cover the exact opaque configurations, PA
 override, one-shot arm, FEM settling, fail-closed drop, RX-to-TX transition,
 clear/busy CAD cleanup and a receive whose final IRQ timestamp overwrites its

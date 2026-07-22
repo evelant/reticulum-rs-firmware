@@ -7,7 +7,7 @@ use embedded_storage::nor_flash::{
     check_erase, check_read, check_write,
 };
 use rand_core::{CryptoRng, RngCore};
-use reticulum_lxmf_ingress::{LocalDeliveryDestination, StampPolicy, WireLimits};
+use reticulum_lxmf_ingress::{DeferredIngress, LocalDeliveryDestination, StampPolicy, WireLimits};
 use reticulum_lxmf_store::{
     BoundLxmfStore, LxmfProgramStage, LxmfStoreBinding, LxmfStoreDeviceId, LxmfStoreIndexSlot,
     PHYSICAL_FORMAT_VERSION, RECORD_FOOTER_SIZE, mount,
@@ -278,6 +278,13 @@ fn fixture_identity(first: u8, second: u8) -> reticulum_rns_rete::Identity {
 }
 
 fn proof_bearing_actions(fixture: &MessageFixture) -> NodeActions {
+    proof_bearing_actions_on(fixture, InterfaceId(7))
+}
+
+fn proof_bearing_actions_on(
+    fixture: &MessageFixture,
+    source_interface: InterfaceId,
+) -> NodeActions {
     let destination_identity = fixture_identity(0x07, 0x08);
     let mut sender = ProofNode::new(
         fixture_identity(0x05, 0x06),
@@ -319,7 +326,7 @@ fn proof_bearing_actions(fixture: &MessageFixture) -> NodeActions {
     let report = receiver.ingest(
         &raw[..usize::from(prepared.packet_len())],
         3,
-        InterfaceId(7),
+        source_interface,
         &mut rng,
     );
     assert_eq!(report.disposition, IngressDisposition::Processed);
@@ -653,6 +660,158 @@ fn retained_basic_binary_new_and_replay_each_queue_one_ready_proof() {
 }
 
 #[test]
+fn reset_remount_and_fresh_retransmission_queue_only_the_fresh_interface_proof() {
+    let fixture = basic_fixture();
+    let local = LocalDeliveryDestination::new(array(&fixture.destination_hash_hex));
+    let source = array::<16>(&fixture.source_hash_hex);
+    let public_key = array::<64>(&fixture.source_public_key_hex);
+    let resolver = |candidate: &[u8; 16]| (candidate == &source).then_some(public_key);
+    let mut access = BoundLxmfStore::new(FakeNor::erased(), binding());
+
+    let writes_after_new = {
+        let mut index = store_index::<1>();
+        let mut store = mount(&mut access, &mut index).expect("empty store mounts");
+        let mut event_slots = [ApplicationEventSlot::new()];
+        let mut event_owner = ApplicationEventOwner::new(&mut event_slots);
+        let mut proof_slots = [DelayedProofSlot::new()];
+        let mut delayed_proofs = DelayedProofOwner::new(&mut proof_slots);
+        let lease = offer_actions(
+            &mut event_owner,
+            proof_bearing_actions_on(&fixture, InterfaceId(7)),
+        );
+        let DurableIngressOutcome::Durable(success) = commit_application_event(
+            lease,
+            DurableIngressProofMode::Required,
+            &mut delayed_proofs,
+            local,
+            limits(),
+            &resolver,
+            StampPolicy::NotRequired,
+            &mut store,
+            &mut access,
+        ) else {
+            panic!("first proof-bearing event must commit")
+        };
+        assert_eq!(success.kind(), DurableIngressCommitKind::New);
+        assert_eq!(delayed_proofs.capacities().ready, 1);
+        assert_eq!(store.message_count(), 1);
+        // The scope ends without releasing this ready proof, modeling loss of
+        // all volatile application/proof ownership during reset.
+        access.backend().writes
+    };
+
+    let mut remount_index = store_index::<1>();
+    let mut remounted = mount(&mut access, &mut remount_index).expect("durable bytes remount");
+    assert_eq!(remounted.message_count(), 1);
+    assert_eq!(access.backend().writes, writes_after_new);
+
+    let mut fresh_event_slots = [ApplicationEventSlot::new()];
+    let mut fresh_event_owner = ApplicationEventOwner::new(&mut fresh_event_slots);
+    let mut fresh_proof_slots = [DelayedProofSlot::new()];
+    let mut fresh_delayed_proofs = DelayedProofOwner::new(&mut fresh_proof_slots);
+    let fresh_lease = offer_actions(
+        &mut fresh_event_owner,
+        proof_bearing_actions_on(&fixture, InterfaceId(9)),
+    );
+    let DurableIngressOutcome::Durable(replayed) = commit_application_event(
+        fresh_lease,
+        DurableIngressProofMode::Required,
+        &mut fresh_delayed_proofs,
+        local,
+        limits(),
+        &resolver,
+        StampPolicy::NotRequired,
+        &mut remounted,
+        &mut access,
+    ) else {
+        panic!("fresh retransmission after reset must replay durably")
+    };
+    assert_eq!(replayed.kind(), DurableIngressCommitKind::Replay);
+    assert_eq!(remounted.message_count(), 1);
+    assert_eq!(access.backend().writes, writes_after_new);
+    assert_eq!(fresh_delayed_proofs.capacities().ready, 1);
+
+    let proof = fresh_delayed_proofs
+        .lease_next()
+        .expect("fresh retransmission creates one fresh proof");
+    let actions = proof.release_actions();
+    assert_eq!(actions.packets.len(), 1);
+    assert_eq!(actions.packets[0].target(), TxTarget::Only(InterfaceId(9)));
+    assert!(fresh_delayed_proofs.lease_next().is_none());
+}
+
+#[test]
+fn missing_source_identity_exact_retry_succeeds_after_identity_is_learned() {
+    let fixture = basic_fixture();
+    let local = LocalDeliveryDestination::new(array(&fixture.destination_hash_hex));
+    let source = array::<16>(&fixture.source_hash_hex);
+    let public_key = array::<64>(&fixture.source_public_key_hex);
+    let missing = |_candidate: &[u8; 16]| None;
+    let learned = |candidate: &[u8; 16]| (candidate == &source).then_some(public_key);
+    let mut access = BoundLxmfStore::new(FakeNor::erased(), binding());
+    let mut index = store_index::<1>();
+    let mut store = mount(&mut access, &mut index).expect("empty store mounts");
+    let mut event_slots = [ApplicationEventSlot::new()];
+    let mut event_owner = ApplicationEventOwner::new(&mut event_slots);
+    let mut proof_slots = [DelayedProofSlot::new()];
+    let mut delayed_proofs = DelayedProofOwner::new(&mut proof_slots);
+    let lease = offer_actions(
+        &mut event_owner,
+        proof_bearing_actions_on(&fixture, InterfaceId(11)),
+    );
+
+    let DurableIngressOutcome::Retained(retained) = commit_application_event(
+        lease,
+        DurableIngressProofMode::Required,
+        &mut delayed_proofs,
+        local,
+        limits(),
+        &missing,
+        StampPolicy::NotRequired,
+        &mut store,
+        &mut access,
+    ) else {
+        panic!("unknown source identity must defer the exact event")
+    };
+    assert!(matches!(
+        retained.reason(),
+        DurableIngressRetentionReason::Deferred(
+            DeferredIngress::SourceIdentityUnavailable { source: missing_source }
+        ) if *missing_source == source
+    ));
+    assert_eq!(store.message_count(), 0);
+    assert_eq!(delayed_proofs.capacities().ready, 0);
+
+    let token = retained
+        .into_lease()
+        .quarantine_for_retry(ApplicationEventQuarantineReason::ConsumerDeferred);
+    let exact = event_owner
+        .try_reacquire_quarantined(token)
+        .expect("learned identity retries the exact opaque owner");
+    let DurableIngressOutcome::Durable(success) = commit_application_event(
+        exact,
+        DurableIngressProofMode::Required,
+        &mut delayed_proofs,
+        local,
+        limits(),
+        &learned,
+        StampPolicy::NotRequired,
+        &mut store,
+        &mut access,
+    ) else {
+        panic!("learned source identity must admit the retained message")
+    };
+    assert_eq!(success.kind(), DurableIngressCommitKind::New);
+    assert_eq!(store.message_count(), 1);
+    assert_eq!(delayed_proofs.capacities().ready, 1);
+    let actions = delayed_proofs
+        .lease_next()
+        .expect("durability releases the retained proof")
+        .release_actions();
+    assert_eq!(actions.packets[0].target(), TxTarget::Only(InterfaceId(11)));
+}
+
+#[test]
 fn retained_lost_commit_reply_retry_queues_exactly_one_ready_proof() {
     let fixture = basic_fixture();
     let local = LocalDeliveryDestination::new(array(&fixture.destination_hash_hex));
@@ -695,6 +854,9 @@ fn retained_lost_commit_reply_retry_queues_exactly_one_ready_proof() {
             error: FakeError::Injected,
         })
     ));
+    let pending_message = store
+        .pending_message_id()
+        .expect("lost commit reply retains exact pending mutation identity");
     assert_eq!(delayed_proofs.capacities().vacant, 1);
     assert_eq!(delayed_proofs.capacities().ready, 0);
     assert_eq!(delayed_proofs.counters().reservations_created, 1);
@@ -717,6 +879,33 @@ fn retained_lost_commit_reply_retry_queues_exactly_one_ready_proof() {
         },
         event_pointer
     );
+
+    let missing = |_candidate: &[u8; 16]| None;
+    let DurableIngressOutcome::Retained(deferred) = commit_application_event(
+        lease,
+        DurableIngressProofMode::Required,
+        &mut delayed_proofs,
+        local,
+        limits(),
+        &missing,
+        StampPolicy::NotRequired,
+        &mut store,
+        &mut access,
+    ) else {
+        panic!("identity loss before exact retry must retain the pending owner")
+    };
+    assert!(matches!(
+        deferred.reason(),
+        DurableIngressRetentionReason::Deferred(
+            DeferredIngress::SourceIdentityUnavailable { source: missing_source }
+        ) if *missing_source == source
+    ));
+    assert_eq!(store.pending_message_id(), Some(pending_message));
+    assert_eq!(delayed_proofs.capacities().ready, 0);
+    let lease = deferred.into_lease();
+    assert_eq!(lease.id(), event_id);
+    assert_eq!(lease.sequence(), event_sequence);
+    assert!(lease.has_retained_proof());
 
     let DurableIngressOutcome::Durable(success) = commit_application_event(
         lease,

@@ -42,17 +42,17 @@ pub use delayed_proofs::{
 #[cfg(any(test, feature = "conformance"))]
 pub use embedded::ConformanceLinkSnapshot;
 pub use embedded::{
-    AdmissionCounters, AnnounceAdmissionError, ApplicationEvent, ApplicationEventKind,
-    ApplicationEvents, ApplicationRequestFailReason, DestinationRegistrationError,
-    DiscardedNodeActionCounts, EmbeddedNode, EmbeddedNodeConfig, EmbeddedNodeMetrics,
-    EmbeddedSendError, InboundData, InboundDataProjection, InboundProofPolicy,
+    AdmissionCounters, AnnounceAdmissionError, AnnounceAppDataError, ApplicationEvent,
+    ApplicationEventKind, ApplicationEvents, ApplicationRequestFailReason,
+    DestinationRegistrationError, DiscardedNodeActionCounts, EmbeddedNode, EmbeddedNodeConfig,
+    EmbeddedNodeMetrics, EmbeddedSendError, InboundData, InboundDataProjection, InboundProofPolicy,
     InboundProofPolicyError, IngressCounters, IngressDisposition, IngressDropReason,
     IngressMetadata, IngressReport, InterfaceId, LINK_DATA_CONTEXT_NONE, MAX_CHANNEL_PAYLOAD,
-    MAX_DATA_PAYLOAD, NodeActions, NodeRole, PrepareDataError, PreparedData, RNS_MTU,
-    ReceiptCandidate, ReceiptId, ReceiptKind, ReceiptReservationUnavailable, ReceiptTerminal,
-    ReceiptTerminalCounters, ReceiptTerminalReservation, ReceiptTerminalSink, ReceiptTickReport,
-    RetainedProofInvariant, RouteSnapshot, TransportCounters, TxPacket, TxTarget,
-    project_inbound_data,
+    MAX_DATA_PAYLOAD, NodeActions, NodeRole, PathRequestBuildError, PrepareDataError, PreparedData,
+    RNS_MTU, ReceiptCandidate, ReceiptId, ReceiptKind, ReceiptReservationUnavailable,
+    ReceiptTerminal, ReceiptTerminalCounters, ReceiptTerminalReservation, ReceiptTerminalSink,
+    ReceiptTickReport, RetainedProofInvariant, RouteSnapshot, TransportCounters, TxPacket,
+    TxTarget, project_inbound_data,
 };
 pub use rete_core::{
     DestHash, DestType, Identity, IdentityHash, LinkId, MonotonicDuration, MonotonicInstant,
@@ -98,6 +98,12 @@ pub type InitialEmbeddedNode = EmbeddedNode<
 /// Reticulum MTU.
 pub const MAX_ANNOUNCE_APP_DATA: usize =
     rete_core::MTU - rete_core::HEADER_1_OVERHEAD - rete_transport::announce::MIN_ANNOUNCE_PAYLOAD;
+
+/// Native Rete delay before the one scheduled retransmission of an announce.
+///
+/// Product schedulers use this exported protocol fact instead of duplicating
+/// Rete's private `PATHFINDER_G` value.
+pub const ANNOUNCE_RETRANSMIT_SECONDS: u64 = rete_transport::transport::PATHFINDER_G;
 
 /// Metadata emitted with every Rete conformance result.
 pub const fn metadata() -> CandidateMetadata {

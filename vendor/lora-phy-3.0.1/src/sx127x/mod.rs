@@ -471,6 +471,10 @@ where
         Ok(())
     }
 
+    async fn clear_irq_status(&mut self) -> Result<(), RadioError> {
+        self.write_register(Register::RegIrqFlags, 0xffu8).await
+    }
+
     async fn await_irq(&mut self) -> Result<(), RadioError> {
         self.intf.iv.await_irq().await
     }
@@ -488,7 +492,9 @@ where
     ) -> Result<Option<IrqState>, RadioError> {
         let irq_flags = self.read_register(Register::RegIrqFlags).await?;
         if clear_interrupts {
-            self.write_register(Register::RegIrqFlags, 0xffu8).await?; // clear all interrupts
+            // Clear only the snapshot just consumed. A distinct IRQ can latch
+            // between the read and this write while continuous RX stays armed.
+            self.write_register(Register::RegIrqFlags, irq_flags).await?;
         }
 
         match radio_mode {

@@ -142,7 +142,10 @@ log = "=0.4.27"
 # every high-power PA command from requested output power, while the Tracker V2
 # HIL needs one atomic RNode-compatible PA/OCP override at its fixed 0 dBm
 # modem setting plus an opt-in early external-FEM TX preparation hook and
-# post-initialization RF-path hook, plus synchronized public-standby state.
+# post-initialization RF-path hook, plus synchronized public-standby state and
+# terminal SX126x invalid-frame/timeout receive IRQ handling. The patch also
+# adds arm-once continuous-RX IRQ draining and an explicit standby/IRQ quiesce
+# before CAD or TX so back-to-back physical frames do not cross a rearm gap.
 # Existing variants and interfaces retain upstream behavior; see the checked
 # vendor inventory in vendor/lora-phy-3.0.1/PATCHES.md.
 lora-phy = { version = "=3.0.1", default-features = false }

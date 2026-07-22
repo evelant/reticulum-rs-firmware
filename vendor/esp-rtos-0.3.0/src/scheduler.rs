@@ -21,20 +21,8 @@ use crate::timer::embassy::TimerQueue;
 use crate::{
     run_queue::{Priority, RunQueue},
     task::{
-        self,
-        ContextExt,
-        CpuContext,
-        IdleFn,
-        Task,
-        TaskAllocListElement,
-        TaskDeleteListElement,
-        TaskExt,
-        TaskList,
-        TaskListItem,
-        TaskPtr,
-        TaskState,
-        ThreadLocalData,
-        read_thread_pointer,
+        self, ContextExt, CpuContext, IdleFn, Task, TaskAllocListElement, TaskDeleteListElement,
+        TaskExt, TaskList, TaskListItem, TaskPtr, TaskState, ThreadLocalData, read_thread_pointer,
     },
     timer::TimeDriver,
 };

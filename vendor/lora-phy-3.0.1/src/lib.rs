@@ -144,11 +144,9 @@ where
         Ok(())
     }
 
-    /// Place the LoRa physical layer in standby mode
+    /// Place the LoRa physical layer in standby, disable IRQ routing, and clear pending IRQs.
     pub async fn enter_standby(&mut self) -> Result<(), RadioError> {
-        self.radio_kind.set_standby().await?;
-        self.radio_mode = RadioMode::Standby;
-        Ok(())
+        self.quiesce_to_standby().await
     }
 
     /// Place the LoRa physical layer in low power mode, specifying cold or warm start (if the Semtech chip supports it)
@@ -250,19 +248,15 @@ where
         packet_params: &PacketParams,
         receiving_buffer: &mut [u8],
     ) -> Result<(u8, PacketStatus), RadioError> {
-        if let RadioMode::Receive(listen_mode) = self.radio_mode {
-            self.radio_kind.do_rx(listen_mode).await?;
+        if matches!(self.radio_mode, RadioMode::Receive(_)) {
+            self.start_rx().await?;
             loop {
                 self.wait_for_irq().await?;
-                match self.radio_kind.process_irq_event(self.radio_mode, None, true).await {
-                    Ok(Some(actual_state)) => match actual_state {
-                        IrqState::PreambleReceived => continue,
-                        IrqState::Done => {
-                            let received_len = self.radio_kind.get_rx_payload(packet_params, receiving_buffer).await?;
-                            let rx_pkt_status = self.radio_kind.get_rx_packet_status().await?;
-                            return Ok((received_len, rx_pkt_status));
-                        }
-                    },
+                match self.process_rx_irq(packet_params, receiving_buffer).await {
+                    Ok(Some(ReceiveIrq::PreambleReceived)) => continue,
+                    Ok(Some(ReceiveIrq::PacketReceived { len, status })) => {
+                        return Ok((len, status));
+                    }
                     Ok(None) => continue,
                     Err(err) => {
                         // if in rx continuous mode, allow the caller to determine whether to keep receiving
@@ -277,6 +271,45 @@ where
             }
         } else {
             Err(RadioError::InvalidRadioMode)
+        }
+    }
+
+    /// Start the receive mode selected by [`Self::prepare_for_rx`].
+    ///
+    /// Continuous-receive users call this once, then use [`Self::wait_for_irq`]
+    /// and [`Self::process_rx_irq`] for every packet. Reissuing this command
+    /// between packets is unnecessary and creates a receive blind spot.
+    /// The returned future must run to completion once polled.
+    pub async fn start_rx(&mut self) -> Result<(), RadioError> {
+        if let RadioMode::Receive(listen_mode) = self.radio_mode {
+            self.radio_kind.do_rx(listen_mode).await
+        } else {
+            Err(RadioError::InvalidRadioMode)
+        }
+    }
+
+    /// Drain and classify one already-observed receive interrupt.
+    ///
+    /// The caller must await [`Self::wait_for_irq`] first and must not cancel
+    /// this method while its SPI transaction is in progress. In continuous
+    /// mode a successful call leaves the modem receiving, including while the
+    /// caller consumes the copied packet and waits for the next interrupt.
+    pub async fn process_rx_irq(
+        &mut self,
+        packet_params: &PacketParams,
+        receiving_buffer: &mut [u8],
+    ) -> Result<Option<ReceiveIrq>, RadioError> {
+        if !matches!(self.radio_mode, RadioMode::Receive(_)) {
+            return Err(RadioError::InvalidRadioMode);
+        }
+        match self.radio_kind.process_irq_event(self.radio_mode, None, true).await? {
+            Some(IrqState::PreambleReceived) => Ok(Some(ReceiveIrq::PreambleReceived)),
+            Some(IrqState::Done) => {
+                let len = self.radio_kind.get_rx_payload(packet_params, receiving_buffer).await?;
+                let status = self.radio_kind.get_rx_packet_status().await?;
+                Ok(Some(ReceiveIrq::PacketReceived { len, status }))
+            }
+            None => Ok(None),
         }
     }
 
@@ -351,8 +384,7 @@ where
     async fn prepare_modem(&mut self, mdltn_params: &ModulationParams) -> Result<(), RadioError> {
         self.radio_kind.ensure_ready(self.radio_mode).await?;
         if self.radio_mode != RadioMode::Standby {
-            self.radio_kind.set_standby().await?;
-            self.radio_mode = RadioMode::Standby;
+            self.quiesce_to_standby().await?;
         }
 
         if self.cold_start {
@@ -364,6 +396,14 @@ where
             self.calibrate_image = false;
         }
 
+        Ok(())
+    }
+
+    async fn quiesce_to_standby(&mut self) -> Result<(), RadioError> {
+        self.radio_kind.set_standby().await?;
+        self.radio_mode = RadioMode::Standby;
+        self.radio_kind.set_irq_params(None).await?;
+        self.radio_kind.clear_irq_status().await?;
         Ok(())
     }
 }

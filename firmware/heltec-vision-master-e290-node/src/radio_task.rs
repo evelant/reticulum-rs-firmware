@@ -238,7 +238,17 @@ pub async fn run(
                         }
                     }
                 }
-                RadioReceiveStep::NoPreambleTimeout => {
+                RadioReceiveStep::SchedulerYield => {
+                    if receiver.pending().is_some() {
+                        let _ = receiver.expire(now_us());
+                        if receiver.pending().is_some() {
+                            continue;
+                        }
+                    }
+                    rx_serviced_since_tx_check = true;
+                }
+                RadioReceiveStep::InvalidFrame => {
+                    warn!("e290-node stage=lora-rx status=DROP reason=invalid-physical-frame");
                     if receiver.pending().is_some() {
                         let _ = receiver.expire(now_us());
                         if receiver.pending().is_some() {
@@ -310,7 +320,8 @@ pub async fn run(
         }
 
         let phase_before = dispatcher.phase();
-        match drive_dispatcher_once(dispatcher).await {
+        let dispatch_progress = drive_dispatcher_once(dispatcher).await;
+        match dispatch_progress {
             DispatchProgress::NeedJob => {
                 rx_serviced_since_tx_check = false;
                 yield_now().await;
@@ -345,7 +356,15 @@ async fn receive_once(
     physical: &mut [u8; SX1262_FRAME_MTU],
 ) -> RadioReceiveStep {
     let watchdog = dispatcher.maximum_receive_operation_us().get();
-    let receive = match dispatcher.start_receive(physical) {
+    let scheduler_yield = Timer::after(Duration::from_micros(config::RX_SCHEDULER_YIELD_US));
+    let progress_deadline = async {
+        Timer::after(Duration::from_micros(config::RX_PROGRESS_TIMEOUT_US)).await;
+    };
+    let receive = match dispatcher.start_continuous_receive_until(
+        physical,
+        scheduler_yield,
+        progress_deadline,
+    ) {
         Ok(receive) => receive,
         Err(step) => return step,
     };
@@ -372,7 +391,15 @@ async fn receive_once(
 ) -> RadioReceiveStep {
     let receive_started_us = now_us();
     let watchdog = dispatcher.maximum_receive_operation_us().get();
-    let receive = match dispatcher.start_receive(physical) {
+    let scheduler_yield = Timer::after(Duration::from_micros(config::RX_SCHEDULER_YIELD_US));
+    let progress_deadline = async {
+        Timer::after(Duration::from_micros(config::RX_PROGRESS_TIMEOUT_US)).await;
+    };
+    let receive = match dispatcher.start_continuous_receive_until(
+        physical,
+        scheduler_yield,
+        progress_deadline,
+    ) {
         Ok(receive) => receive,
         Err(step) => {
             RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_operation(

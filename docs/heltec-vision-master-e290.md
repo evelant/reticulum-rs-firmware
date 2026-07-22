@@ -109,26 +109,32 @@ RF-path/reset policy:
   by asserting only the SX1262 reset rather than manipulating FEM pins;
 - retain the final-DIO1-observation timestamp capture used by timed RNode
   reassembly; and
-- expose CAD, physical-frame TX, bounded RX, shutdown, and active-state APIs
-  through the board-neutral `SoleRnodeRadio` contract used by the permanent
-  E290 LoRa actor.
+- expose CAD, physical-frame TX, legacy bounded RX, persistent continuous RX,
+  receive-epoch invalidation, shutdown, and active-state APIs through the
+  board-neutral `SoleRnodeRadio` contract used by the permanent E290 LoRa
+  actor.
 
 The opaque first profile is 915 MHz, SF7/BW125/CR4/5, 24-symbol preamble,
-explicit header, CRC, normal IQ, private sync word `0x1424`, 248 receive-search
-symbols and requested 14 dBm output. Semtech SX1261/2 Data Sheet Rev. 2.2
+explicit header, CRC, normal IQ, private sync word `0x1424`, a legacy 248-symbol
+receive-search value, and requested 14 dBm output. The permanent actor converts
+that symbol count to a 253,952-us software scheduling cadence while the SX1262
+remains in continuous receive. Semtech SX1261/2 Data Sheet Rev. 2.2
 Table 13-21 realizes that optimal SX1262 row with PA values `02/02/00/01` and
 raw `SetTxParams(+22)`; this is not a calibrated antenna-path claim. The shared sole-radio path must be constructed with
 `IrqTimestampCapture::new_monotonic_us` in the same clock domain as channel
 access; the legacy tick constructor is only for the historical direct receive
 surface and is rejected fail-closed by `SoleRnodeRadio` operations.
 
-Seven host tests require DC-DC mode (`0x96, 0x01`), DIO2 RF-switch control
+Twelve host tests require DC-DC mode (`0x96, 0x01`), DIO2 RF-switch control
 (`0x9d, 0x01`), the pinned 10 ms 1.8 V DIO3 TCXO command
 (`0x97, 0x02, 0x00, 0x02, 0x80`), the private sync word and the Rev. 2.2
 optimal 14 dBm PA/raw-command pair before exercising RX, CAD and one/two-frame
-TX. They reject the
-Tracker OCP-register write and cover reset/SPI/cancellation containment,
-receive timeout/success and partial second-frame progress. Maximum-power work
+TX. They reject the Tracker OCP-register write and cover reset/SPI/cancellation
+containment, legacy receive timeout/success, partial second-frame progress,
+two frames and 307-byte RNode reassembly across an intervening scheduler yield
+after one continuous `SetRx`, repeated scheduler yields without rearm, stalled-
+preamble rearm followed by a valid frame, invalid-frame recovery, explicit
+epoch invalidation, and standby/IRQ quiescence before CAD/TX. Maximum-power work
 must separately verify OCP behavior; initial semantic HIL does not need to
 start at the module's 21 +/- 1 dBm rated maximum.
 

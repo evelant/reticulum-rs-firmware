@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 
-use super::mod_params::{PacketParams, RadioError};
+use super::mod_params::{PacketParams, RadioError, ReceiveIrq};
 use super::mod_traits::RadioKind;
 use super::{DelayNs, LoRa, RxMode};
 
@@ -123,9 +123,13 @@ where
         let rx_pkt_params = self
             .lora
             .create_rx_packet_params(8, false, 255, true, true, &mdltn_params)?;
+        let mode = RxMode::from(config.mode, config.rf.bb);
         self.lora
-            .prepare_for_rx(RxMode::from(config.mode, config.rf.bb), &mdltn_params, &rx_pkt_params)
+            .prepare_for_rx(mode, &mdltn_params, &rx_pkt_params)
             .await?;
+        if mode == RxMode::Continuous {
+            self.lora.start_rx().await?;
+        }
         self.rx_pkt_params = Some(rx_pkt_params);
         Ok(())
     }
@@ -143,14 +147,17 @@ where
     }
     async fn rx_continuous(&mut self, receiving_buffer: &mut [u8]) -> Result<(usize, RxQuality), Self::PhyError> {
         if let Some(rx_params) = &self.rx_pkt_params {
-            match self.lora.rx(rx_params, receiving_buffer).await {
-                Ok((received_len, rx_pkt_status)) => {
-                    Ok((
-                        received_len as usize,
-                        RxQuality::new(rx_pkt_status.rssi, rx_pkt_status.snr as i8), // downcast snr
-                    ))
+            loop {
+                self.lora.wait_for_irq().await?;
+                match self.lora.process_rx_irq(rx_params, receiving_buffer).await? {
+                    Some(ReceiveIrq::PacketReceived { len, status }) => {
+                        return Ok((
+                            len as usize,
+                            RxQuality::new(status.rssi, status.snr as i8),
+                        ));
+                    }
+                    Some(ReceiveIrq::PreambleReceived) | None => continue,
                 }
-                Err(err) => Err(err.into()),
             }
         } else {
             Err(Error::NoRxParams)

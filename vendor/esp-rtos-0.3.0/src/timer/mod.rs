@@ -7,9 +7,7 @@ use esp_hal::{
 #[cfg(feature = "rtos-trace")]
 use crate::TraceEvents;
 use crate::{
-    SCHEDULER,
-    TICK_RATE,
-    TimeBase,
+    SCHEDULER, TICK_RATE, TimeBase,
     task::{self, TaskExt, TaskPtr, TaskQueue, TaskState, TaskTimerQueueElement},
 };
 

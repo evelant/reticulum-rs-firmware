@@ -686,6 +686,28 @@ where
         SoleRnodeRadio::receive_bounded(&mut self.core, buffer)
     }
 
+    fn receive_continuous_until<'a, SchedulerYield, ProgressDeadline>(
+        &'a mut self,
+        buffer: &'a mut [u8; SX1262_FRAME_MTU],
+        scheduler_yield: SchedulerYield,
+        progress_deadline: ProgressDeadline,
+    ) -> impl core::future::Future<Output = Result<BoundedRxOutcome, Self::Fault>> + 'a
+    where
+        SchedulerYield: core::future::Future<Output = ()> + 'a,
+        ProgressDeadline: core::future::Future<Output = ()> + 'a,
+    {
+        SoleRnodeRadio::receive_continuous_until(
+            &mut self.core,
+            buffer,
+            scheduler_yield,
+            progress_deadline,
+        )
+    }
+
+    fn invalidate_receive_session(&mut self) {
+        SoleRnodeRadio::invalidate_receive_session(&mut self.core);
+    }
+
     fn cad(
         &mut self,
     ) -> impl core::future::Future<Output = Result<CadObservation, Self::Fault>> + '_ {
@@ -1764,10 +1786,14 @@ mod tests {
         block_on(tracker_lora.enter_standby()).unwrap();
         assert!(!tracker_ctx.is_high());
         let tracker_commands = tracker_command_log.borrow();
-        assert_eq!(tracker_commands.len(), before_standby + 1);
+        assert_eq!(tracker_commands.len(), before_standby + 3);
         assert_eq!(
-            tracker_commands.last().map(Vec::as_slice),
-            Some(&[0x80, 0x00][..])
+            &tracker_commands[before_standby..],
+            &[
+                Vec::from([0x80, 0x00]),
+                Vec::from([0x08, 0, 0, 0, 0, 0, 0, 0, 0]),
+                Vec::from([0x02, 0xff, 0xff]),
+            ]
         );
     }
 
@@ -1889,10 +1915,13 @@ mod tests {
         assert!(radio.is_active());
         assert!(!ctx.is_high());
         assert!(commands.borrow().iter().any(|command| command == &[0xc5]));
-        assert_eq!(
-            commands.borrow().last().map(Vec::as_slice),
-            Some(&[0x80, 0x00][..])
-        );
+        let commands_after_cad = commands.borrow();
+        assert!(commands_after_cad.ends_with(&[
+            Vec::from([0x80, 0x00]),
+            Vec::from([0x08, 0, 0, 0, 0, 0, 0, 0, 0]),
+            Vec::from([0x02, 0xff, 0xff]),
+        ]));
+        drop(commands_after_cad);
 
         cad_activity.set(true);
         let cad = block_on(SoleRnodeRadio::cad(&mut radio)).unwrap();
