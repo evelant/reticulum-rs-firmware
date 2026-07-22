@@ -19,9 +19,9 @@ use reticulum_node_core::{
     DestinationHash, IngressReport, MaintenanceReport, MonotonicInstant, MonotonicMillis,
     MonotonicSeconds, NodeActions, NodeCore, OrdinaryActionCapacitySnapshot,
     OrdinaryPreparedPacket, OutboundDispatchInterval, OutboundProtocolToken, PacketInterfaceId,
-    PathRequestError, PreparedPacket, ReceiptCorrelationError, TerminalAttempt, TerminalAttempts,
-    TxAuthorizationPolicy, TxLeaseDeadline, TxMaintenanceReport, TxOwnerScope,
-    TxRecoveryObservation,
+    PathRequestError, PrepareBasicLxmfError, PreparedBasicLxmf, PreparedPacket,
+    ReceiptCorrelationError, TerminalAttempt, TerminalAttempts, TxAuthorizationPolicy,
+    TxLeaseDeadline, TxMaintenanceReport, TxOwnerScope, TxRecoveryObservation,
 };
 use reticulum_tx_handoff::{
     DataPairedPermitHandoff, DispatcherPermitHandoff, OrdinaryDispatcherPermitHandoff,
@@ -152,9 +152,10 @@ mod tests {
     };
     use reticulum_node_core::{
         ApplicationEvent, ApplicationEventDiscardReason, ApplicationEventSlot, DestinationHash,
-        NodeConfig, NodeIdentity, NodeInstanceId, OrdinaryBufferPool, OrdinaryPacketBuffer,
-        PermitResolution, TxAuthorizationCandidate, TxCompletionCode, TxPacketBuffer,
-        TxPermitRequirements, TxPermitReservation, TxPermitResourceId, TxPolicyDecision,
+        MAX_OPPORTUNISTIC_LXMF_CARRIER, NodeConfig, NodeIdentity, NodeInstanceId,
+        OrdinaryBufferPool, OrdinaryPacketBuffer, PermitResolution, TxAuthorizationCandidate,
+        TxCompletionCode, TxPacketBuffer, TxPermitRequirements, TxPermitReservation,
+        TxPermitResourceId, TxPolicyDecision,
     };
     use reticulum_rns_rete::{IngressDisposition, PacketType};
     use reticulum_tx_handoff::{DataPermitHandoff, OrdinaryPermitHandoff};
@@ -331,7 +332,18 @@ mod tests {
         [NodeInterfaceActorPorts<NoopRawMutex, DEPTH>; SLOTS],
         DestinationHash,
     ) {
-        let (mut node, destination) = sender(tag);
+        let (node, destination) = sender(tag);
+        build_from_node(node, destination)
+    }
+
+    fn build_from_node<const SLOTS: usize, const DEPTH: usize>(
+        mut node: TestNode,
+        destination: DestinationHash,
+    ) -> (
+        TestSupervisor<SLOTS, DEPTH>,
+        [NodeInterfaceActorPorts<NoopRawMutex, DEPTH>; SLOTS],
+        DestinationHash,
+    ) {
         let data = data_coordinator(&mut node);
         let ordinary = ordinary_coordinator(&mut node);
         let fabric = Box::leak(Box::new(InterfaceFabric::new()));
@@ -364,6 +376,43 @@ mod tests {
             supervisor.recall_identity(&DestinationHash::new([0xee; 16])),
             None
         );
+    }
+
+    #[test]
+    fn permanent_aggregate_composes_basic_lxmf_with_only_the_registered_local_source() {
+        let (supervisor, _actors, destination) = build::<1, 1>(62);
+        let mut unavailable = [0x4c_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+        assert_eq!(
+            supervisor.prepare_basic_lxmf_into(
+                &destination,
+                1_700_000_000_000,
+                b"title",
+                b"content",
+                &mut unavailable,
+            ),
+            Err(PrepareBasicLxmfError::DeliveryDestinationUnavailable)
+        );
+        assert!(unavailable.iter().all(|byte| *byte == 0x4c));
+
+        let (mut owner, destination) = sender(64);
+        let source = owner
+            .register_inbound_single_destination("lxmf", &["delivery"])
+            .expect("the node-owned LXMF delivery destination registers");
+        let (supervisor, _actors, _) = build_from_node::<1, 1>(owner, destination);
+        let mut carrier = [0_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+        let prepared = supervisor
+            .prepare_basic_lxmf_into(
+                &destination,
+                1_700_000_000_000,
+                b"title",
+                b"content",
+                &mut carrier,
+            )
+            .expect("the supervisor forwards the source-free composer call");
+
+        assert_eq!(&carrier[..16], source.as_bytes());
+        assert_ne!(prepared.message_id(), [0; 32]);
+        assert!(usize::from(prepared.carrier_len()) <= carrier.len());
     }
 
     fn properties(config: u32) -> InterfaceProperties {
@@ -2873,6 +2922,25 @@ where
     /// Primary local Reticulum destination owned by this aggregate.
     pub fn destination_hash(&self) -> DestinationHash {
         self.node.destination_hash()
+    }
+
+    /// Compose one basic LXMF carrier with the node-owned identity and exact
+    /// registered `lxmf.delivery` source.
+    ///
+    /// This read-only protocol operation does not acquire an interface,
+    /// prepare an RNS packet, or consume a delivery receipt. The caller must
+    /// durably accept the returned carrier before handing it and the opaque
+    /// result to the dedicated opportunistic-LXMF submission path.
+    pub fn prepare_basic_lxmf_into(
+        &self,
+        destination: &DestinationHash,
+        timestamp_unix_ms: u64,
+        title: &[u8],
+        content: &[u8],
+        output: &mut [u8],
+    ) -> Result<PreparedBasicLxmf, PrepareBasicLxmfError> {
+        self.node
+            .prepare_basic_lxmf_into(destination, timestamp_unix_ms, title, content, output)
     }
 
     /// Copy a public key learned for one announced Reticulum destination.

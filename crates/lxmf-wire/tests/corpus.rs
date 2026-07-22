@@ -13,10 +13,12 @@ const CORPUS_JSON: &str = include_str!("../../../interop/vectors/lxmf-1.0.1-v1.j
 const GENERATOR: &[u8] = include_bytes!("../../../interop/python/generate_lxmf_1_0_1_vectors.py");
 const REQUIREMENTS: &[u8] = include_bytes!("../../../interop/python/requirements-lxmf-1.0.1.txt");
 
-const POSITIVE_NAMES: [&str; 8] = [
+const POSITIVE_NAMES: [&str; 10] = [
     "basic_binary",
     "direct_limit_319",
     "direct_over_320",
+    "empty_binary",
+    "one_byte_content",
     "opportunistic_limit_295",
     "opportunistic_over_296",
     "pow_stamp_32",
@@ -60,7 +62,7 @@ struct MessageFixture {
     desired_method: String,
     actual_method: String,
     representation: String,
-    selection_content_size: usize,
+    selection_content_size: i64,
     destination_hash_hex: String,
     source_hash_hex: String,
     source_public_key_hex: String,
@@ -152,6 +154,13 @@ fn fixture<'a>(corpus: &'a Corpus, name: &str) -> &'a MessageFixture {
         .iter()
         .find(|message| message.name == name)
         .expect("fixture name")
+}
+
+fn saturated_selection_content_size(fixture: &MessageFixture) -> usize {
+    match fixture.selection_content_size {
+        -1 => 0,
+        value => usize::try_from(value).expect("nonnegative Python content size fits usize"),
+    }
 }
 
 fn parse_bound<'a>(
@@ -265,7 +274,7 @@ fn all_python_positive_messages_parse_authenticate_and_select_the_same_lane() {
         assert_eq!(message.message_id(), array::<32>(&fixture.message_id_hex));
         assert_eq!(
             message.selection_content_size(),
-            fixture.selection_content_size
+            saturated_selection_content_size(fixture)
         );
 
         let ingress_payload = decode(&fixture.ingress.payload_hex);
@@ -377,7 +386,7 @@ fn all_python_positive_messages_parse_authenticate_and_select_the_same_lane() {
         } else {
             DesiredDelivery::Direct
         };
-        let decision = select_delivery(desired, fixture.selection_content_size);
+        let decision = select_delivery(desired, saturated_selection_content_size(fixture));
         assert_eq!(
             decision.method,
             if fixture.actual_method == "opportunistic" {

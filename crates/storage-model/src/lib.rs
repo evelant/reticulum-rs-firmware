@@ -6,7 +6,7 @@
 //! executor, radio, board, or platform dependency.
 
 #![no_std]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![deny(missing_docs)]
 
 mod codec;
@@ -17,6 +17,7 @@ pub use codec::{DecodeError, EncodeError, decode_journal_entry, encode_journal_e
 pub use index::{
     AcceptOutcome, AcceptanceCandidate, ApplyError, ApplyOutcome, BootRecoveryDecision,
     IndexedSubmission, PlanOutcome, PlannedMutation, SubmissionIndex, SubmissionReplay,
+    SubmissionReplayInPlace,
 };
 pub use model::{
     Accepted, AuditEntry, AuditEvent, AuthorizationSnapshot, AuthorizationSnapshotError,

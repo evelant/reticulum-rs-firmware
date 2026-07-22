@@ -1,0 +1,18 @@
+[package]
+name = "reticulum-lxmf-chat-core"
+description = "Persistent client-side chat domain model for LXMF"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["sqlite"]
+sqlite = ["dep:rusqlite"]
+
+[dependencies]
+rusqlite = { workspace = true, optional = true }
+
+[lib]
+path = "src/lib.rs"

@@ -7,7 +7,7 @@
 //! while the relevant context is still available, admitting only the subset we
 //! can make deterministic and observable on embedded targets.
 
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, vec::Vec};
 
 use rand_core::{CryptoRng, RngCore};
 use rete_core::{
@@ -16,6 +16,7 @@ use rete_core::{
     CONTEXT_RESOURCE_REQ, DestHash, DestType, HeaderType, Identity, IdentityHash, LinkId,
     MonotonicInstant, Packet, PacketBuilder, PacketType, TRUNCATED_HASH_LEN,
 };
+use rete_lxmf_core::{LXMessage, LxmfMessageError};
 use rete_stack::node_core::{OutboundDispatchInterval, OutboundProtocolToken};
 use rete_stack::{
     DestinationType, Direction, IngestOutcome, IngestRejection, LinkTableKind, NodeCore,
@@ -23,6 +24,7 @@ use rete_stack::{
     RequestFailReason as NativeRequestFailReason,
 };
 use rete_transport::{HeaplessStorage, LinkState, SendError, Transport};
+use sha2::{Digest, Sha256};
 
 use crate::capacity::{
     HeaplessCapacitySnapshot, LinkAdmissionError, heapless_capacity_snapshot,
@@ -42,6 +44,50 @@ pub const LINK_DATA_CONTEXT_NONE: u8 = CONTEXT_NONE;
 
 /// Largest plaintext accepted by destination-DATA encryption at the base MTU.
 pub const MAX_DATA_PAYLOAD: usize = rete_core::ENCRYPTED_MDU;
+
+/// Largest Python LXMF `content_size` selected for opportunistic delivery.
+///
+/// Python LXMF 1.0.1 computes this value as the canonical MessagePack payload
+/// length minus eight timestamp bytes and eight bytes of structural overhead.
+/// It is not the complete MessagePack payload or RNS plaintext length. The
+/// Python calculation is signed: the canonical empty-title, empty-content
+/// payload is 15 bytes and therefore has a `content_size` of -1.
+pub const MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE: usize = 295;
+
+/// Largest source-hash, signature, and MessagePack carrier accepted by the
+/// dedicated opportunistic LXMF destination-DATA path.
+///
+/// A maximum-size canonical basic message contains 16 source-hash bytes, 64
+/// signature bytes, 16 bytes excluded by Python's `content_size` calculation,
+/// and 295 selected bytes. Its encrypted representation fits a Header-1 RNS
+/// DATA packet but not a Header-2 packet routed through a repeater.
+pub const MAX_OPPORTUNISTIC_LXMF_CARRIER: usize = 391;
+
+/// Largest whole-millisecond Unix timestamp supported by basic composition.
+///
+/// Python LXMF serialises timestamps as binary64 seconds. Restricting this API
+/// to positive integer milliseconds below 2^43 seconds keeps the integer cast
+/// exact and the binary64 spacing below one millisecond, so distinct accepted
+/// millisecond inputs remain distinct on the wire. Python accepts a broader
+/// floating-point domain; this is the portable subset used by firmware and
+/// JavaScript clients.
+pub const MAX_LXMF_TIMESTAMP_UNIX_MS: u64 = (1_u64 << 43) * 1_000 - 1;
+
+const LXMF_DESTINATION_HASH_LENGTH: usize = TRUNCATED_HASH_LEN;
+const LXMF_SIGNATURE_LENGTH: usize = 64;
+const LXMF_SELECTION_OVERHEAD: usize = 16;
+const LXMF_WIRE_PREFIX_LENGTH: usize = LXMF_DESTINATION_HASH_LENGTH * 2 + LXMF_SIGNATURE_LENGTH;
+const LXMF_APPLICATION_NAME: &str = "lxmf";
+const LXMF_DELIVERY_ASPECT: &str = "delivery";
+const LXMF_DELIVERY_EXPANDED_NAME: &str = "lxmf.delivery";
+const _: () = assert!(
+    LXMF_DESTINATION_HASH_LENGTH
+        + LXMF_SIGNATURE_LENGTH
+        + LXMF_SELECTION_OVERHEAD
+        + MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE
+        == MAX_OPPORTUNISTIC_LXMF_CARRIER
+);
+const _: () = assert!(MAX_OPPORTUNISTIC_LXMF_CARRIER > MAX_DATA_PAYLOAD);
 
 /// Interface identifier carried across the synchronous ingest boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -196,6 +242,36 @@ impl PreparedData {
     /// Receipt committed transactionally with the packet.
     pub const fn receipt(self) -> ReceiptId {
         self.receipt
+    }
+}
+
+/// Scalar result of composing one basic opportunistic LXMF carrier.
+///
+/// The complete carrier bytes remain in the caller's output buffer. The
+/// destination prefix is intentionally omitted because RNS destination DATA
+/// already carries that hash in its packet header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreparedBasicLxmf {
+    carrier_len: u16,
+    carrier_sha256: [u8; 32],
+    message_id: [u8; 32],
+    destination: DestHash,
+}
+
+impl PreparedBasicLxmf {
+    /// Number of source-hash, signature, and MessagePack bytes written.
+    pub const fn carrier_len(self) -> u16 {
+        self.carrier_len
+    }
+
+    /// Canonical LXMF message identifier for the composed four-item payload.
+    pub const fn message_id(self) -> [u8; 32] {
+        self.message_id
+    }
+
+    /// RNS destination whose implied hash completes the signed LXMF wire.
+    pub const fn destination(self) -> DestHash {
+        self.destination
     }
 }
 
@@ -1919,6 +1995,108 @@ impl From<rete_core::Error> for DestinationRegistrationError {
     }
 }
 
+/// Failure to compose one basic, unstamped, empty-fields opportunistic LXMF
+/// carrier with the node-owned identity.
+///
+/// This deliberately flattens the pinned packer's error vocabulary so the
+/// firmware-facing transaction neither exposes Rete types nor private keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrepareBasicLxmfError {
+    /// Unix time zero is not a useful LXMF message timestamp.
+    InvalidTimestamp,
+    /// Whole-millisecond input exceeds the injective binary64 subset.
+    TimestampTooLarge { actual: u64, maximum: u64 },
+    /// This node has not registered its inbound Single `lxmf.delivery`
+    /// destination, so it has no designated LXMF signing source.
+    DeliveryDestinationUnavailable,
+    /// Rete could not sign the canonical four-item LXMF payload.
+    Signing,
+    /// The canonical MessagePack payload requires direct rather than
+    /// opportunistic delivery under Python LXMF 1.0.1 selection rules.
+    PayloadTooLarge { actual: usize, maximum: usize },
+    /// Caller-owned carrier storage cannot hold the prepared basic message.
+    OutputTooSmall { required: usize, available: usize },
+    /// The pinned basic LXMF packer violated its reviewed wire invariants.
+    Invariant,
+}
+
+impl core::fmt::Display for PrepareBasicLxmfError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidTimestamp => f.write_str("LXMF timestamp must be nonzero Unix time"),
+            Self::TimestampTooLarge { actual, maximum } => write!(
+                f,
+                "LXMF timestamp {actual}ms exceeds supported maximum {maximum}ms"
+            ),
+            Self::DeliveryDestinationUnavailable => {
+                f.write_str("inbound Single lxmf.delivery destination is not registered")
+            }
+            Self::Signing => f.write_str("LXMF basic-message signing failed"),
+            Self::PayloadTooLarge { actual, maximum } => {
+                write!(
+                    f,
+                    "LXMF content size {actual} exceeds opportunistic limit {maximum}"
+                )
+            }
+            Self::OutputTooSmall {
+                required,
+                available,
+            } => write!(
+                f,
+                "LXMF carrier requires {required} bytes but output holds {available}"
+            ),
+            Self::Invariant => f.write_str("LXMF basic-message packer invariant failed"),
+        }
+    }
+}
+
+/// Failure to wrap a prepared basic LXMF carrier in destination DATA.
+///
+/// This separate vocabulary keeps the ordinary 383-byte DATA API unchanged
+/// while making the LXMF-only Header-1 exception explicit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrepareOpportunisticLxmfDataError {
+    /// The supplied carrier length differs from the composed carrier length.
+    CarrierLengthMismatch { actual: usize, expected: usize },
+    /// The supplied carrier bytes differ from the exact composed carrier.
+    CarrierDigestMismatch,
+    /// The carrier does not begin with this node's registered `lxmf.delivery`
+    /// source hash.
+    CarrierSourceMismatch,
+    /// A Header-2 route cannot carry plaintext above the ordinary DATA MDU.
+    Header2PayloadTooLarge { actual: usize, maximum: usize },
+    /// Ordinary destination-DATA preparation failed.
+    Data(PrepareDataError),
+}
+
+impl core::fmt::Display for PrepareOpportunisticLxmfDataError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::CarrierLengthMismatch { actual, expected } => write!(
+                f,
+                "LXMF carrier length {actual} does not match prepared length {expected}"
+            ),
+            Self::CarrierDigestMismatch => {
+                f.write_str("LXMF carrier bytes do not match the prepared carrier")
+            }
+            Self::CarrierSourceMismatch => {
+                f.write_str("LXMF carrier source is not this node's lxmf.delivery destination")
+            }
+            Self::Header2PayloadTooLarge { actual, maximum } => write!(
+                f,
+                "LXMF carrier length {actual} exceeds Header-2 DATA limit {maximum}"
+            ),
+            Self::Data(error) => write!(f, "LXMF destination DATA preparation failed: {error}"),
+        }
+    }
+}
+
+impl From<PrepareDataError> for PrepareOpportunisticLxmfDataError {
+    fn from(value: PrepareDataError) -> Self {
+        Self::Data(value)
+    }
+}
+
 /// Failure to prepare destination DATA into caller-owned packet storage.
 ///
 /// This deliberately flattens native error payloads so the firmware-facing
@@ -2362,6 +2540,31 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             .map_or(TxTarget::All, |interface| {
                 TxTarget::Only(InterfaceId(interface))
             })
+    }
+
+    /// Resolve the one local destination authorised to sign LXMF messages.
+    ///
+    /// Looking up the identity-derived hash is not sufficient on its own: the
+    /// destination must also be registered with the exact inbound Single
+    /// shape. This prevents the composer from becoming an arbitrary
+    /// source-hash signing oracle.
+    fn registered_lxmf_delivery_source(&self) -> Option<DestHash> {
+        let identity_hash = self.core.identity().hash();
+        let source = rete_core::destination_hash(LXMF_DELIVERY_EXPANDED_NAME, Some(&identity_hash));
+        let registered = self.core.get_destination(&source)?;
+        if registered.dest_type != DestinationType::Single
+            || registered.direction != Direction::In
+            || registered.app_name != LXMF_APPLICATION_NAME
+            || registered.aspects.len() != 1
+            || registered
+                .aspects
+                .first()
+                .map(alloc::string::String::as_str)
+                != Some(LXMF_DELIVERY_ASPECT)
+        {
+            return None;
+        }
+        Some(source)
     }
 
     /// Current state of one locally owned Link.
@@ -3190,6 +3393,161 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         }
     }
 
+    /// Compose and sign one basic opportunistic LXMF carrier into caller-owned
+    /// storage without exposing the node identity or accepting a caller-chosen
+    /// signing source.
+    ///
+    /// This deliberately supports only the compatibility-proven first slice:
+    /// a four-item payload containing a Unix timestamp, binary title, binary
+    /// content, and an empty fields map, with no stamp. The complete LXMF
+    /// destination is used for signing but omitted from `output`, matching the
+    /// carrier bytes placed inside encrypted destination DATA by Python LXMF.
+    /// The source is always this node's exact registered inbound Single
+    /// `lxmf.delivery` destination.
+    ///
+    /// `timestamp_unix_ms` deliberately accepts only positive whole
+    /// milliseconds through [`MAX_LXMF_TIMESTAMP_UNIX_MS`]. LXMF itself uses
+    /// binary64 seconds; this narrower subset preserves distinct millisecond
+    /// inputs and covers the JavaScript `Date` range.
+    pub fn prepare_basic_lxmf_into(
+        &self,
+        destination: &DestHash,
+        timestamp_unix_ms: u64,
+        title: &[u8],
+        content: &[u8],
+        output: &mut [u8],
+    ) -> Result<PreparedBasicLxmf, PrepareBasicLxmfError> {
+        if timestamp_unix_ms == 0 {
+            return Err(PrepareBasicLxmfError::InvalidTimestamp);
+        }
+        if timestamp_unix_ms > MAX_LXMF_TIMESTAMP_UNIX_MS {
+            return Err(PrepareBasicLxmfError::TimestampTooLarge {
+                actual: timestamp_unix_ms,
+                maximum: MAX_LXMF_TIMESTAMP_UNIX_MS,
+            });
+        }
+        let source = self
+            .registered_lxmf_delivery_source()
+            .ok_or(PrepareBasicLxmfError::DeliveryDestinationUnavailable)?;
+        let timestamp = timestamp_unix_ms as f64 / 1_000.0;
+        let message = LXMessage::new(
+            *destination,
+            source,
+            self.core.identity(),
+            title,
+            content,
+            BTreeMap::new(),
+            timestamp,
+        )
+        .map_err(|error| match error {
+            LxmfMessageError::SigningFailed => PrepareBasicLxmfError::Signing,
+            LxmfMessageError::TooShort
+            | LxmfMessageError::InvalidSignature
+            | LxmfMessageError::Msgpack(_)
+            | LxmfMessageError::InvalidArrayLen => PrepareBasicLxmfError::Invariant,
+        })?;
+        let message_id = message.message_id();
+        let packed = message.pack();
+        let payload_len = packed
+            .len()
+            .checked_sub(LXMF_WIRE_PREFIX_LENGTH)
+            .ok_or(PrepareBasicLxmfError::Invariant)?;
+        // Python performs signed subtraction here. Its canonical empty-title,
+        // empty-content payload is 15 bytes, producing content_size = -1 and
+        // remaining opportunistic. Compare the untranslated payload length so
+        // Rust exactly preserves that upper-bound decision without unsigned
+        // underflow or inventing a different reported size.
+        if payload_len > LXMF_SELECTION_OVERHEAD + MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE {
+            let content_size = payload_len - LXMF_SELECTION_OVERHEAD;
+            return Err(PrepareBasicLxmfError::PayloadTooLarge {
+                actual: content_size,
+                maximum: MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE,
+            });
+        }
+        if packed.get(..LXMF_DESTINATION_HASH_LENGTH) != Some(destination.as_ref()) {
+            return Err(PrepareBasicLxmfError::Invariant);
+        }
+        let carrier = packed
+            .get(LXMF_DESTINATION_HASH_LENGTH..)
+            .ok_or(PrepareBasicLxmfError::Invariant)?;
+        if carrier.len() > MAX_OPPORTUNISTIC_LXMF_CARRIER {
+            return Err(PrepareBasicLxmfError::Invariant);
+        }
+        let output_len = output.len();
+        let carrier_output =
+            output
+                .get_mut(..carrier.len())
+                .ok_or(PrepareBasicLxmfError::OutputTooSmall {
+                    required: carrier.len(),
+                    available: output_len,
+                })?;
+        carrier_output.copy_from_slice(carrier);
+        Ok(PreparedBasicLxmf {
+            carrier_len: carrier.len() as u16,
+            carrier_sha256: Sha256::digest(carrier).into(),
+            message_id,
+            destination: *destination,
+        })
+    }
+
+    /// Wrap one composer-produced opportunistic LXMF carrier in encrypted RNS
+    /// destination DATA.
+    ///
+    /// This is the sole exception to [`MAX_DATA_PAYLOAD`]. Canonical LXMF at
+    /// Python's exact 295-byte selection boundary produces a 391-byte carrier;
+    /// identity encryption expands it to 480 bytes and a Header-1 packet to
+    /// 499 bytes. A retained repeater route requires Header-2 and therefore
+    /// remains limited to [`MAX_DATA_PAYLOAD`].
+    ///
+    /// The opaque [`PreparedBasicLxmf`] scalar binds the implied destination
+    /// and exact carrier bytes. The carrier digest and source prefix are
+    /// rechecked against the composer result and this node's registered
+    /// `lxmf.delivery` destination before entropy or receipt state is consumed.
+    pub fn prepare_opportunistic_lxmf_data_into<R: RngCore + CryptoRng>(
+        &mut self,
+        prepared: PreparedBasicLxmf,
+        carrier: &[u8],
+        now: u64,
+        rng: &mut R,
+        output: &mut [u8; RNS_MTU],
+    ) -> Result<PreparedData, PrepareOpportunisticLxmfDataError> {
+        let expected = usize::from(prepared.carrier_len());
+        if carrier.len() != expected {
+            return Err(PrepareOpportunisticLxmfDataError::CarrierLengthMismatch {
+                actual: carrier.len(),
+                expected,
+            });
+        }
+        let carrier_sha256: [u8; 32] = Sha256::digest(carrier).into();
+        if carrier_sha256 != prepared.carrier_sha256 {
+            return Err(PrepareOpportunisticLxmfDataError::CarrierDigestMismatch);
+        }
+        let source = self
+            .registered_lxmf_delivery_source()
+            .ok_or(PrepareOpportunisticLxmfDataError::CarrierSourceMismatch)?;
+        if carrier.get(..LXMF_DESTINATION_HASH_LENGTH) != Some(source.as_ref()) {
+            return Err(PrepareOpportunisticLxmfDataError::CarrierSourceMismatch);
+        }
+        self.check_data_payload_limit(carrier.len(), MAX_OPPORTUNISTIC_LXMF_CARRIER)?;
+
+        let destination = prepared.destination();
+        if carrier.len() > MAX_DATA_PAYLOAD
+            && self
+                .core
+                .transport
+                .get_path(&destination)
+                .and_then(|path| path.via)
+                .is_some()
+        {
+            return Err(PrepareOpportunisticLxmfDataError::Header2PayloadTooLarge {
+                actual: carrier.len(),
+                maximum: MAX_DATA_PAYLOAD,
+            });
+        }
+        self.prepare_data_into_preflighted(&destination, carrier, now, rng, output)
+            .map_err(Into::into)
+    }
+
     /// Prepare encrypted destination DATA directly into caller-reserved
     /// storage and transactionally retain its delivery receipt.
     ///
@@ -3205,14 +3563,31 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         rng: &mut R,
         output: &mut [u8; RNS_MTU],
     ) -> Result<PreparedData, PrepareDataError> {
-        if plaintext.len() > MAX_DATA_PAYLOAD {
+        self.check_data_payload_limit(plaintext.len(), MAX_DATA_PAYLOAD)?;
+        self.prepare_data_into_preflighted(destination, plaintext, now, rng, output)
+    }
+
+    fn check_data_payload_limit(
+        &mut self,
+        actual: usize,
+        maximum: usize,
+    ) -> Result<(), PrepareDataError> {
+        if actual > maximum {
             self.admission.data_payload_too_large =
                 self.admission.data_payload_too_large.saturating_add(1);
-            return Err(PrepareDataError::PayloadTooLarge {
-                actual: plaintext.len(),
-                maximum: MAX_DATA_PAYLOAD,
-            });
+            return Err(PrepareDataError::PayloadTooLarge { actual, maximum });
         }
+        Ok(())
+    }
+
+    fn prepare_data_into_preflighted<R: RngCore + CryptoRng>(
+        &mut self,
+        destination: &DestHash,
+        plaintext: &[u8],
+        now: u64,
+        rng: &mut R,
+        output: &mut [u8; RNS_MTU],
+    ) -> Result<PreparedData, PrepareDataError> {
         if self.core.transport.receipt_count() >= PATHS {
             self.admission.receipt_table_full = self.admission.receipt_table_full.saturating_add(1);
             return Err(PrepareDataError::ReceiptTableFull { limit: PATHS });
@@ -3836,12 +4211,13 @@ fn resolve_tick_actions(native: IngestOutcome) -> NodeActions {
 
 #[cfg(test)]
 mod tests {
-    use alloc::{format, vec};
+    use alloc::{format, string::String, vec};
 
     use super::*;
     use rete_core::{
         CONTEXT_KEEPALIVE, CONTEXT_LINKCLOSE, CONTEXT_LRPROOF, CONTEXT_LRRTT, PacketBuilder,
     };
+    use serde::Deserialize;
 
     #[derive(Default)]
     struct CounterRng(u8);
@@ -4355,6 +4731,576 @@ mod tests {
             EmbeddedNodeConfig::endpoint(),
         )
         .unwrap()
+    }
+
+    fn fixture_hash(encoded: &str) -> DestHash {
+        let bytes = hex::decode(encoded).expect("fixture hash is hexadecimal");
+        DestHash::from_slice(&bytes)
+    }
+
+    #[derive(Deserialize)]
+    struct LxmfCorpus {
+        fixture_identity: LxmfCorpusIdentity,
+        messages: Vec<LxmfCorpusMessage>,
+    }
+
+    #[derive(Deserialize)]
+    struct LxmfCorpusIdentity {
+        destination_public_key_hex: String,
+    }
+
+    #[derive(Deserialize)]
+    struct LxmfCorpusMessage {
+        decoded: LxmfCorpusDecoded,
+        destination_hash_hex: String,
+        full_wire_hex: String,
+        message_id_hex: String,
+        name: String,
+        selection_content_size: i64,
+        source_hash_hex: String,
+    }
+
+    #[derive(Deserialize)]
+    struct LxmfCorpusDecoded {
+        content_hex: String,
+        timestamp_f64_bits_hex: String,
+        title_hex: String,
+    }
+
+    fn python_lxmf_corpus() -> LxmfCorpus {
+        serde_json::from_str(include_str!("../../../interop/vectors/lxmf-1.0.1-v1.json"))
+            .expect("checked-in Python LXMF corpus parses")
+    }
+
+    fn corpus_message<'a>(corpus: &'a LxmfCorpus, name: &str) -> &'a LxmfCorpusMessage {
+        corpus
+            .messages
+            .iter()
+            .find(|message| message.name == name)
+            .expect("named Python LXMF vector exists")
+    }
+
+    fn corpus_timestamp_ms(message: &LxmfCorpusMessage) -> u64 {
+        let bits = u64::from_str_radix(&message.decoded.timestamp_f64_bits_hex, 16)
+            .expect("fixture timestamp bits are hexadecimal");
+        let seconds = f64::from_bits(bits);
+        let milliseconds = (seconds * 1_000.0) as u64;
+        assert_eq!(milliseconds as f64 / 1_000.0, seconds);
+        milliseconds
+    }
+
+    fn python_lxmf_fixture_node_without_delivery() -> TestNode {
+        let mut private_key = [0_u8; 64];
+        private_key[..32].fill(0x05);
+        private_key[32..].fill(0x06);
+        TestNode::new(
+            Identity::from_private_key(&private_key).expect("fixture identity imports"),
+            "reticulum",
+            &["embedded"],
+            EmbeddedNodeConfig::endpoint(),
+        )
+        .expect("fixture node constructs")
+    }
+
+    fn python_lxmf_fixture_node() -> TestNode {
+        let mut node = python_lxmf_fixture_node_without_delivery();
+        let source = node
+            .register_destination(
+                LXMF_APPLICATION_NAME,
+                &[LXMF_DELIVERY_ASPECT],
+                DestinationType::Single,
+                Direction::In,
+            )
+            .expect("fixture LXMF delivery destination registers");
+        assert_eq!(source, fixture_hash("20f7e44b55b06cff39719106f2bd1fd2"));
+        node
+    }
+
+    fn python_lxmf_fixture_sender(fixture: &LxmfCorpusMessage) -> (TestNode, DestHash) {
+        let mut sender = python_lxmf_fixture_node();
+        let mut destination_private_key = [0_u8; 64];
+        destination_private_key[..32].fill(0x07);
+        destination_private_key[32..].fill(0x08);
+        let recipient = Identity::from_private_key(&destination_private_key).unwrap();
+        let destination = fixture_hash(&fixture.destination_hash_hex);
+        sender
+            .register_peer(
+                &recipient,
+                LXMF_APPLICATION_NAME,
+                &[LXMF_DELIVERY_ASPECT],
+                1,
+            )
+            .unwrap();
+        (sender, destination)
+    }
+
+    #[test]
+    fn basic_lxmf_composition_matches_python_1_0_1_exactly() {
+        let node = python_lxmf_fixture_node();
+        let destination = fixture_hash("021e68345db8a80c29d0c2f193baa5f4");
+        let expected = hex::decode(
+            "021e68345db8a80c29d0c2f193baa5f4\
+             20f7e44b55b06cff39719106f2bd1fd2\
+             cfeaf89e57248baad43791a115345482f6b54b6e90aa0d02b5d8eddad1dc6a6\
+             a323ec74921c618ae95e69153e9645db6f223d5d387db37ae23f58ef1f0560700\
+             94cb41d954fc40000000c4094772656574696e6773\
+             c41648656c6c6f2066726f6d20507974686f6e204c584d4680",
+        )
+        .expect("Python LXMF fixture is hexadecimal");
+        let mut carrier = [0_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+
+        let prepared = node
+            .prepare_basic_lxmf_into(
+                &destination,
+                1_700_000_000_000,
+                b"Greetings",
+                b"Hello from Python LXMF",
+                &mut carrier,
+            )
+            .expect("Python-compatible basic message prepares");
+
+        assert_eq!(
+            &carrier[..usize::from(prepared.carrier_len())],
+            &expected[LXMF_DESTINATION_HASH_LENGTH..]
+        );
+        let expected_message_id: [u8; 32] =
+            hex::decode("c00af1f9ba72e66d4b9a41fbe76a55d6bbb1c8dfb9271f0cf660ed101e174c96")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        assert_eq!(prepared.message_id(), expected_message_id);
+        assert_eq!(prepared.destination(), destination);
+    }
+
+    #[test]
+    fn basic_lxmf_rejections_leave_caller_output_unchanged() {
+        let node = python_lxmf_fixture_node();
+        let destination = fixture_hash("021e68345db8a80c29d0c2f193baa5f4");
+
+        let mut invalid_time = [0x31_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+        assert_eq!(
+            node.prepare_basic_lxmf_into(&destination, 0, b"title", b"content", &mut invalid_time,),
+            Err(PrepareBasicLxmfError::InvalidTimestamp)
+        );
+        assert!(invalid_time.iter().all(|byte| *byte == 0x31));
+
+        let mut too_large = [0x52_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+        let content = vec![0x42; MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE + 1];
+        assert_eq!(
+            node.prepare_basic_lxmf_into(
+                &destination,
+                1_700_000_000_000,
+                b"",
+                &content,
+                &mut too_large,
+            ),
+            Err(PrepareBasicLxmfError::PayloadTooLarge {
+                actual: MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE + 1,
+                maximum: MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE,
+            })
+        );
+        assert!(too_large.iter().all(|byte| *byte == 0x52));
+
+        let mut too_small = [0x73_u8; 8];
+        assert!(matches!(
+            node.prepare_basic_lxmf_into(
+                &destination,
+                1_700_000_000_000,
+                b"title",
+                b"content",
+                &mut too_small,
+            ),
+            Err(PrepareBasicLxmfError::OutputTooSmall { available: 8, .. })
+        ));
+        assert!(too_small.iter().all(|byte| *byte == 0x73));
+    }
+
+    #[test]
+    fn python_corpus_preserves_negative_and_zero_content_size_messages() {
+        let corpus = python_lxmf_corpus();
+        let node = python_lxmf_fixture_node();
+
+        for (name, expected_content_size, expected_payload_len) in
+            [("empty_binary", -1, 15), ("one_byte_content", 0, 16)]
+        {
+            let fixture = corpus_message(&corpus, name);
+            assert_eq!(fixture.selection_content_size, expected_content_size);
+            let destination = fixture_hash(&fixture.destination_hash_hex);
+            let expected_wire = hex::decode(&fixture.full_wire_hex).unwrap();
+            assert_eq!(
+                expected_wire.len() - LXMF_WIRE_PREFIX_LENGTH,
+                expected_payload_len
+            );
+
+            let mut carrier = [0xa4_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+            let prepared = node
+                .prepare_basic_lxmf_into(
+                    &destination,
+                    corpus_timestamp_ms(fixture),
+                    &hex::decode(&fixture.decoded.title_hex).unwrap(),
+                    &hex::decode(&fixture.decoded.content_hex).unwrap(),
+                    &mut carrier,
+                )
+                .expect("Python-compatible small payload prepares");
+            let carrier_len = usize::from(prepared.carrier_len());
+            assert_eq!(
+                &carrier[..carrier_len],
+                &expected_wire[LXMF_DESTINATION_HASH_LENGTH..]
+            );
+            assert!(carrier[carrier_len..].iter().all(|byte| *byte == 0xa4));
+            let expected_message_id: [u8; 32] = hex::decode(&fixture.message_id_hex)
+                .unwrap()
+                .try_into()
+                .unwrap();
+            assert_eq!(prepared.message_id(), expected_message_id);
+        }
+    }
+
+    #[test]
+    fn python_corpus_proves_the_exact_295_content_size_boundary() {
+        let corpus = python_lxmf_corpus();
+        let at_limit = corpus_message(&corpus, "opportunistic_limit_295");
+        let over_limit = corpus_message(&corpus, "opportunistic_over_296");
+        assert_eq!(
+            at_limit.selection_content_size,
+            MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE as i64
+        );
+        assert_eq!(
+            over_limit.selection_content_size,
+            MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE as i64 + 1
+        );
+
+        let node = python_lxmf_fixture_node();
+        let destination = fixture_hash(&at_limit.destination_hash_hex);
+        let title = hex::decode(&at_limit.decoded.title_hex).unwrap();
+        let content = hex::decode(&at_limit.decoded.content_hex).unwrap();
+        let mut carrier = [0_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+        let prepared = node
+            .prepare_basic_lxmf_into(
+                &destination,
+                corpus_timestamp_ms(at_limit),
+                &title,
+                &content,
+                &mut carrier,
+            )
+            .expect("Python's exact opportunistic boundary prepares");
+
+        let expected_wire = hex::decode(&at_limit.full_wire_hex).unwrap();
+        assert_eq!(usize::from(prepared.carrier_len()), carrier.len());
+        assert_eq!(
+            expected_wire.len(),
+            carrier.len() + destination.as_ref().len()
+        );
+        assert_eq!(&carrier[..], &expected_wire[LXMF_DESTINATION_HASH_LENGTH..]);
+        assert_eq!(
+            &carrier[..LXMF_DESTINATION_HASH_LENGTH],
+            fixture_hash(&at_limit.source_hash_hex).as_ref()
+        );
+        let expected_message_id: [u8; 32] = hex::decode(&at_limit.message_id_hex)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(prepared.message_id(), expected_message_id);
+
+        let over_title = hex::decode(&over_limit.decoded.title_hex).unwrap();
+        let over_content = hex::decode(&over_limit.decoded.content_hex).unwrap();
+        let mut untouched = [0xa7_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+        assert_eq!(
+            node.prepare_basic_lxmf_into(
+                &fixture_hash(&over_limit.destination_hash_hex),
+                corpus_timestamp_ms(over_limit),
+                &over_title,
+                &over_content,
+                &mut untouched,
+            ),
+            Err(PrepareBasicLxmfError::PayloadTooLarge {
+                actual: MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE + 1,
+                maximum: MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE,
+            })
+        );
+        assert!(untouched.iter().all(|byte| *byte == 0xa7));
+    }
+
+    #[test]
+    fn basic_lxmf_requires_the_registered_local_delivery_source() {
+        let node = python_lxmf_fixture_node_without_delivery();
+        let destination = fixture_hash("021e68345db8a80c29d0c2f193baa5f4");
+        let mut output = [0x4d_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+
+        assert_eq!(
+            node.prepare_basic_lxmf_into(
+                &destination,
+                1_700_000_000_000,
+                b"title",
+                b"content",
+                &mut output,
+            ),
+            Err(PrepareBasicLxmfError::DeliveryDestinationUnavailable)
+        );
+        assert!(output.iter().all(|byte| *byte == 0x4d));
+    }
+
+    #[test]
+    fn basic_lxmf_timestamp_subset_is_bounded_and_millisecond_distinct() {
+        let node = python_lxmf_fixture_node();
+        let destination = fixture_hash("021e68345db8a80c29d0c2f193baa5f4");
+        let mut lower_output = [0_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+        let mut upper_output = [0_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+
+        let lower = node
+            .prepare_basic_lxmf_into(
+                &destination,
+                MAX_LXMF_TIMESTAMP_UNIX_MS - 1,
+                b"",
+                b"timestamp",
+                &mut lower_output,
+            )
+            .expect("penultimate supported millisecond prepares");
+        let upper = node
+            .prepare_basic_lxmf_into(
+                &destination,
+                MAX_LXMF_TIMESTAMP_UNIX_MS,
+                b"",
+                b"timestamp",
+                &mut upper_output,
+            )
+            .expect("maximum supported millisecond prepares");
+        assert_ne!(lower.message_id(), upper.message_id());
+
+        let mut untouched = [0xc1_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+        assert_eq!(
+            node.prepare_basic_lxmf_into(
+                &destination,
+                MAX_LXMF_TIMESTAMP_UNIX_MS + 1,
+                b"",
+                b"timestamp",
+                &mut untouched,
+            ),
+            Err(PrepareBasicLxmfError::TimestampTooLarge {
+                actual: MAX_LXMF_TIMESTAMP_UNIX_MS + 1,
+                maximum: MAX_LXMF_TIMESTAMP_UNIX_MS,
+            })
+        );
+        assert!(untouched.iter().all(|byte| *byte == 0xc1));
+    }
+
+    #[test]
+    fn maximum_opportunistic_carrier_uses_the_narrow_header1_data_path() {
+        let corpus = python_lxmf_corpus();
+        let fixture = corpus_message(&corpus, "opportunistic_limit_295");
+        let mut sender = python_lxmf_fixture_node();
+        let mut destination_private_key = [0_u8; 64];
+        destination_private_key[..32].fill(0x07);
+        destination_private_key[32..].fill(0x08);
+        let recipient = Identity::from_private_key(&destination_private_key).unwrap();
+        assert_eq!(
+            hex::encode(recipient.public_key()),
+            corpus.fixture_identity.destination_public_key_hex
+        );
+        let destination = fixture_hash(&fixture.destination_hash_hex);
+        sender
+            .register_peer(
+                &recipient,
+                LXMF_APPLICATION_NAME,
+                &[LXMF_DELIVERY_ASPECT],
+                1,
+            )
+            .unwrap();
+
+        let mut carrier = [0_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+        let prepared_lxmf = sender
+            .prepare_basic_lxmf_into(
+                &destination,
+                corpus_timestamp_ms(fixture),
+                &hex::decode(&fixture.decoded.title_hex).unwrap(),
+                &hex::decode(&fixture.decoded.content_hex).unwrap(),
+                &mut carrier,
+            )
+            .unwrap();
+        assert_eq!(
+            usize::from(prepared_lxmf.carrier_len()),
+            MAX_OPPORTUNISTIC_LXMF_CARRIER
+        );
+
+        let mut generic_rng = CounterRng::default();
+        let mut generic_output = [0x65_u8; RNS_MTU];
+        assert_eq!(
+            sender.prepare_data_into(
+                &destination,
+                &carrier,
+                2,
+                &mut generic_rng,
+                &mut generic_output,
+            ),
+            Err(PrepareDataError::PayloadTooLarge {
+                actual: MAX_OPPORTUNISTIC_LXMF_CARRIER,
+                maximum: MAX_DATA_PAYLOAD,
+            })
+        );
+        assert_eq!(generic_rng.0, 0);
+        assert!(generic_output.iter().all(|byte| *byte == 0x65));
+
+        let mut rng = CounterRng::default();
+        let mut packet_bytes = [0_u8; RNS_MTU];
+        let prepared_data = sender
+            .prepare_opportunistic_lxmf_data_into(
+                prepared_lxmf,
+                &carrier,
+                2,
+                &mut rng,
+                &mut packet_bytes,
+            )
+            .expect("391-byte opportunistic carrier fits direct DATA");
+        assert_eq!(usize::from(prepared_data.packet_len()), RNS_MTU - 1);
+        let packet =
+            Packet::parse(&packet_bytes[..usize::from(prepared_data.packet_len())]).unwrap();
+        assert_eq!(packet.header_type, HeaderType::Header1);
+        assert_eq!(packet.packet_type, PacketType::Data);
+        assert_eq!(packet.destination_hash, destination.as_ref());
+        // Rete's token decryptor writes the padded AES body before returning
+        // the shorter unpadded length.
+        let mut decrypted = [0_u8; RNS_MTU];
+        let decrypted_len = recipient.decrypt(packet.payload, &mut decrypted).unwrap();
+        assert_eq!(decrypted_len, carrier.len());
+        assert_eq!(&decrypted[..decrypted_len], &carrier);
+    }
+
+    #[test]
+    fn opportunistic_lxmf_rejects_same_length_carrier_substitution_before_mutation() {
+        let corpus = python_lxmf_corpus();
+        let fixture = corpus_message(&corpus, "opportunistic_limit_295");
+        let (mut sender, destination) = python_lxmf_fixture_sender(fixture);
+        let title = hex::decode(&fixture.decoded.title_hex).unwrap();
+        let content = hex::decode(&fixture.decoded.content_hex).unwrap();
+        let mut original = [0_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+        let prepared = sender
+            .prepare_basic_lxmf_into(
+                &destination,
+                corpus_timestamp_ms(fixture),
+                &title,
+                &content,
+                &mut original,
+            )
+            .unwrap();
+        let mut substituted = [0_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+        let substituted_prepared = sender
+            .prepare_basic_lxmf_into(
+                &destination,
+                corpus_timestamp_ms(fixture) + 1_000,
+                &title,
+                &content,
+                &mut substituted,
+            )
+            .unwrap();
+        assert_eq!(prepared.carrier_len(), substituted_prepared.carrier_len());
+        assert_eq!(
+            &original[..LXMF_DESTINATION_HASH_LENGTH],
+            &substituted[..LXMF_DESTINATION_HASH_LENGTH]
+        );
+        assert_ne!(original, substituted);
+
+        let mut rng = CounterRng::default();
+        let mut output = [0x6d_u8; RNS_MTU];
+        assert_eq!(
+            sender.prepare_opportunistic_lxmf_data_into(
+                prepared,
+                &substituted,
+                2,
+                &mut rng,
+                &mut output,
+            ),
+            Err(PrepareOpportunisticLxmfDataError::CarrierDigestMismatch)
+        );
+        assert_eq!(rng.0, 0);
+        assert!(output.iter().all(|byte| *byte == 0x6d));
+        assert_eq!(sender.core.transport.receipt_count(), 0);
+    }
+
+    #[test]
+    fn opportunistic_lxmf_rejects_post_prefix_mutation_before_state_mutation() {
+        let corpus = python_lxmf_corpus();
+        let fixture = corpus_message(&corpus, "opportunistic_limit_295");
+        let (mut sender, destination) = python_lxmf_fixture_sender(fixture);
+        let mut carrier = [0_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+        let prepared = sender
+            .prepare_basic_lxmf_into(
+                &destination,
+                corpus_timestamp_ms(fixture),
+                &hex::decode(&fixture.decoded.title_hex).unwrap(),
+                &hex::decode(&fixture.decoded.content_hex).unwrap(),
+                &mut carrier,
+            )
+            .unwrap();
+        carrier[LXMF_DESTINATION_HASH_LENGTH] ^= 0x01;
+
+        let mut rng = CounterRng::default();
+        let mut output = [0xb6_u8; RNS_MTU];
+        assert_eq!(
+            sender.prepare_opportunistic_lxmf_data_into(
+                prepared,
+                &carrier,
+                3,
+                &mut rng,
+                &mut output,
+            ),
+            Err(PrepareOpportunisticLxmfDataError::CarrierDigestMismatch)
+        );
+        assert_eq!(rng.0, 0);
+        assert!(output.iter().all(|byte| *byte == 0xb6));
+        assert_eq!(sender.core.transport.receipt_count(), 0);
+    }
+
+    #[test]
+    fn maximum_opportunistic_carrier_fails_closed_on_a_header2_route() {
+        let corpus = python_lxmf_corpus();
+        let fixture = corpus_message(&corpus, "opportunistic_limit_295");
+        let mut sender = python_lxmf_fixture_node();
+        let mut destination_private_key = [0_u8; 64];
+        destination_private_key[..32].fill(0x07);
+        destination_private_key[32..].fill(0x08);
+        let recipient = Identity::from_private_key(&destination_private_key).unwrap();
+        let destination = fixture_hash(&fixture.destination_hash_hex);
+        sender
+            .register_peer(
+                &recipient,
+                LXMF_APPLICATION_NAME,
+                &[LXMF_DELIVERY_ASPECT],
+                1,
+            )
+            .unwrap();
+        sender.core.transport.insert_path(
+            destination,
+            rete_transport::Path::via_repeater(identity(0xfa).hash(), 2, 2),
+        );
+
+        let mut carrier = [0_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+        let prepared_lxmf = sender
+            .prepare_basic_lxmf_into(
+                &destination,
+                corpus_timestamp_ms(fixture),
+                &hex::decode(&fixture.decoded.title_hex).unwrap(),
+                &hex::decode(&fixture.decoded.content_hex).unwrap(),
+                &mut carrier,
+            )
+            .unwrap();
+        let mut rng = CounterRng::default();
+        let mut output = [0x9b_u8; RNS_MTU];
+        assert_eq!(
+            sender.prepare_opportunistic_lxmf_data_into(
+                prepared_lxmf,
+                &carrier,
+                3,
+                &mut rng,
+                &mut output,
+            ),
+            Err(PrepareOpportunisticLxmfDataError::Header2PayloadTooLarge {
+                actual: MAX_OPPORTUNISTIC_LXMF_CARRIER,
+                maximum: MAX_DATA_PAYLOAD,
+            })
+        );
+        assert_eq!(rng.0, 0);
+        assert!(output.iter().all(|byte| *byte == 0x9b));
+        assert_eq!(sender.core.transport.receipt_count(), 0);
     }
 
     #[test]

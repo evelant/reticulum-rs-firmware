@@ -355,7 +355,13 @@ pub async fn run(
     mut rng: Trng,
 ) {
     let primary_destination = *supervisor.destination_hash().as_bytes();
-    let identity_summary = IdentitySummary::new(ApiDestinationHash(primary_destination));
+    let identity_summary = match lxmf_destination {
+        Some(lxmf_destination) => IdentitySummary::with_lxmf_delivery_destination(
+            ApiDestinationHash(primary_destination),
+            ApiDestinationHash(*lxmf_destination.as_bytes()),
+        ),
+        None => IdentitySummary::new(ApiDestinationHash(primary_destination)),
+    };
     let (
         mut pairing_handoff,
         mut live_pairing_handoff,
@@ -1059,6 +1065,7 @@ pub async fn run(
                 4 => {
                     progressed |= step_authenticated_api(
                         storage,
+                        supervisor,
                         identity_summary,
                         &mut authenticated_api,
                         &mut authenticated_api_state,
@@ -1066,16 +1073,19 @@ pub async fn run(
                 }
                 _ => {
                     let owner_now = now_millis();
-                    if !storage_step_attempted
-                        && durability_service.storage_step_due(owner_now)
-                        && retry_actions_a.is_none()
+                    let ordinary_owners_quiescent = retry_actions_a.is_none()
                         && retry_actions_b.is_none()
                         && quarantined_actions.is_none()
                         && pending_path_dispatch.is_none()
                         && !supervisor.ingress_actions_pending()
-                        && ordinary_router_is_idle(supervisor)
-                        && !fail_closed_draining
-                    {
+                        && ordinary_router_is_idle(supervisor);
+                    if config::submission_storage_step_admitted(
+                        storage_step_attempted,
+                        durability_service.storage_step_due(owner_now),
+                        retained_frame.is_some(),
+                        ordinary_owners_quiescent,
+                        fail_closed_draining,
+                    ) {
                         storage_step_attempted = true;
                         let deadline = TxLeaseDeadline::new(MonotonicMillis::new(
                             owner_now.saturating_add(config::SUBMISSION_OWNER_LEASE_MS),
@@ -2050,6 +2060,7 @@ fn drive_inbound_candidate(
 
 fn step_authenticated_api(
     storage: &mut ProductStorageCoordinator,
+    supervisor: &ProductSupervisor,
     identity: IdentitySummary,
     handoff: &mut NodeHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
     state: &mut AuthenticatedApiNodeState,
@@ -2080,7 +2091,7 @@ fn step_authenticated_api(
         };
         #[cfg(feature = "runtime-measurement-hil")]
         let api_dispatch_started_us = now_micros();
-        let dispatch = storage.dispatch_authenticated_request(request, identity);
+        let dispatch = storage.dispatch_authenticated_request(supervisor, request, identity);
         #[cfg(feature = "runtime-measurement-hil")]
         RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_operation(
             RuntimeOperationKind::ApiDispatch,

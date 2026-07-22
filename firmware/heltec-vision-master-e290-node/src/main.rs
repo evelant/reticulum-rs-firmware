@@ -702,16 +702,37 @@ async fn product_main(
     );
     drop(boot_identity);
 
+    let submission_runtime_storage = match Box::<ProductSubmissionRuntime, _>::try_new_uninit_in(
+        ExternalMemory,
+    ) {
+        Ok(storage) => Some(storage),
+        Err(_) => {
+            error!(
+                "e290-node stage=submission-runtime-placement status=DISABLED reason=external-allocation expected_bytes={} lora_routing=continue local_submission_admission=closed",
+                mem::size_of::<ProductSubmissionRuntime>(),
+            );
+            None
+        }
+    };
     #[cfg(feature = "runtime-measurement-hil")]
     let journal_mount_started_us = monotonic_us();
-    let journal_mount_result = flash_owner.mount_node_runtime(u64::from(announce_epoch.get()));
+    #[allow(
+        clippy::manual_map,
+        reason = "Option::map merges the external-runtime mount into this async frame and regresses the reviewed compiler-emitted stack ceiling"
+    )]
+    let journal_mount_result = match submission_runtime_storage {
+        Some(storage) => {
+            Some(flash_owner.mount_node_runtime(u64::from(announce_epoch.get()), storage))
+        }
+        None => None,
+    };
     #[cfg(feature = "runtime-measurement-hil")]
     RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_boot_phase(
         RuntimeBootPhase::JournalMount,
         monotonic_us().saturating_sub(journal_mount_started_us),
     );
     let submission_runtime = match journal_mount_result {
-        Ok((runtime, journal_report)) => {
+        Some(Ok((runtime, journal_report))) => {
             info!(
                 "e290-node stage=node-journal-recovery status=PASS boot_sequence={} profile=bounded-live-admission accepted_limit={} bank={:?} generation={} records={} accepted={} replayed={} queued={} already_final={} finalized={} writes={} erases={} service_gate=open flash_owner=resident",
                 announce_epoch.get(),
@@ -729,7 +750,7 @@ async fn product_main(
             );
             Some(runtime)
         }
-        Err(reason) => {
+        Some(Err(reason)) => {
             error!(
                 "e290-node stage=node-journal-recovery status=DISABLED boot_sequence={} phase={} reason={reason:?} lora_routing=continue local_submission_admission=closed",
                 announce_epoch.get(),
@@ -737,46 +758,38 @@ async fn product_main(
             );
             None
         }
+        None => None,
     };
     let submission_runtime = match submission_runtime {
-        Some(runtime) => match Box::try_new_in(runtime, ExternalMemory) {
-            Ok(runtime) => {
-                let runtime_bytes = mem::size_of_val(&*runtime);
-                let runtime_start = (&*runtime as *const ProductSubmissionRuntime) as usize;
-                let runtime_end = match runtime_start.checked_add(runtime_bytes) {
-                    Some(end) => end,
-                    None => {
-                        error!(
-                            "e290-node stage=submission-runtime-placement status=FAIL reason=allocation-range-overflow"
-                        );
-                        inert_forever().await
-                    }
-                };
-                if runtime_bytes != mem::size_of::<ProductSubmissionRuntime>()
-                    || !runtime_start.is_multiple_of(mem::align_of::<ProductSubmissionRuntime>())
-                    || runtime_start < psram_start_address
-                    || runtime_end > psram_end_address
-                {
+        Some(runtime) => {
+            let runtime_bytes = mem::size_of_val(&*runtime);
+            let runtime_start = (&*runtime as *const ProductSubmissionRuntime) as usize;
+            let runtime_end = match runtime_start.checked_add(runtime_bytes) {
+                Some(end) => end,
+                None => {
                     error!(
-                        "e290-node stage=submission-runtime-placement status=FAIL reason=external-address allocation_start=0x{runtime_start:08x} allocation_end=0x{runtime_end:08x} psram_start=0x{psram_start_address:08x} psram_end=0x{psram_end_address:08x} expected_bytes={} actual_bytes={runtime_bytes} alignment={}",
-                        mem::size_of::<ProductSubmissionRuntime>(),
-                        mem::align_of::<ProductSubmissionRuntime>(),
+                        "e290-node stage=submission-runtime-placement status=FAIL reason=allocation-range-overflow"
                     );
                     inert_forever().await
                 }
-                info!(
-                    "e290-node stage=submission-runtime-placement status=PASS ownership=boot-lifetime-external bytes={runtime_bytes} start=0x{runtime_start:08x} end=0x{runtime_end:08x}"
-                );
-                Some(Box::leak(runtime))
-            }
-            Err(_) => {
+            };
+            if runtime_bytes != mem::size_of::<ProductSubmissionRuntime>()
+                || !runtime_start.is_multiple_of(mem::align_of::<ProductSubmissionRuntime>())
+                || runtime_start < psram_start_address
+                || runtime_end > psram_end_address
+            {
                 error!(
-                    "e290-node stage=submission-runtime-placement status=DISABLED reason=external-allocation expected_bytes={} lora_routing=continue local_submission_admission=closed",
+                    "e290-node stage=submission-runtime-placement status=FAIL reason=external-address allocation_start=0x{runtime_start:08x} allocation_end=0x{runtime_end:08x} psram_start=0x{psram_start_address:08x} psram_end=0x{psram_end_address:08x} expected_bytes={} actual_bytes={runtime_bytes} alignment={}",
                     mem::size_of::<ProductSubmissionRuntime>(),
+                    mem::align_of::<ProductSubmissionRuntime>(),
                 );
-                None
+                inert_forever().await
             }
-        },
+            info!(
+                "e290-node stage=submission-runtime-placement status=PASS ownership=boot-lifetime-external bytes={runtime_bytes} start=0x{runtime_start:08x} end=0x{runtime_end:08x}"
+            );
+            Some(Box::leak(runtime))
+        }
         None => None,
     };
     #[cfg(feature = "runtime-measurement-hil")]

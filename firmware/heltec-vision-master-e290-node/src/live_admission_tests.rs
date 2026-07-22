@@ -116,18 +116,58 @@ fn authenticated_submission_crosses_lora_policy_and_scripted_radio_durability() 
     let owner = PrincipalId::new(OWNER.0);
     assert_eq!(service.state_for(owner, id), Some(LifecycleState::Queued));
 
-    let after_accept_writes = service.write_attempts();
-    let second_novel = dispatch(
+    for ordinal in 2_u8..=config::DURABLE_ACCEPTED_SUBMISSION_LIMIT as u8 {
+        let payload = [ordinal; 8];
+        let accepted = dispatch(
+            &mut service,
+            IDENTITY_SUMMARY,
+            &full_context(OWNER),
+            submit_request(
+                u64::from(ordinal) + 2,
+                destination,
+                &payload,
+                0x30 + ordinal,
+            ),
+        );
+        assert_eq!(
+            accepted_id(accepted.response),
+            ApiSubmissionId(u64::from(ordinal))
+        );
+    }
+    let after_fill_writes = service.write_attempts();
+    let over_capacity_ordinal = u8::try_from(config::DURABLE_ACCEPTED_SUBMISSION_LIMIT + 1)
+        .expect("configured acceptance limit plus one fits the test key space");
+    let over_capacity_key = 0x30_u8
+        .checked_add(over_capacity_ordinal)
+        .expect("one-past-capacity idempotency key fits u8");
+    let over_capacity = dispatch(
         &mut service,
         IDENTITY_SUMMARY,
         &full_context(OWNER),
-        submit_request(4, destination, b"second novel submission", 0x32),
+        submit_request(
+            u64::from(over_capacity_ordinal) + 2,
+            destination,
+            b"one-past-capacity novel submission",
+            over_capacity_key,
+        ),
     );
-    assert_error(second_novel.response, ApiErrorCode::CapacityExhausted);
+    assert_error(over_capacity.response, ApiErrorCode::CapacityExhausted);
     assert_eq!(
         service.write_attempts(),
-        after_accept_writes,
-        "the one-acceptance product cap rejects before touching NOR"
+        after_fill_writes,
+        "the configured acceptance cap rejects novel work before touching NOR"
+    );
+    let replay_at_capacity = dispatch(
+        &mut service,
+        IDENTITY_SUMMARY,
+        &full_context(OWNER),
+        submit_request(21, destination, b"live LoRa submission", 0x31),
+    );
+    assert_eq!(accepted_id(replay_at_capacity.response), ApiSubmissionId(1));
+    assert_eq!(
+        service.write_attempts(),
+        after_fill_writes,
+        "idempotent replay remains available and mutation-free at capacity"
     );
 
     let available_before = system.supervisor.data_parked_counts().available();
@@ -280,9 +320,11 @@ fn authenticated_submission_crosses_lora_policy_and_scripted_radio_durability() 
     let (mut remounted, remount_recovery) =
         LiveSubmissionService::mount(flash, 8).expect("durable final state remounts");
     assert!(matches!(
-        remount_recovery.as_slice(),
-        [RecoveryStep::Submission { id: recovered, .. }, RecoveryStep::Complete]
-            if *recovered == id
+        remount_recovery.last(),
+        Some(RecoveryStep::Complete)
+    ));
+    assert!(remount_recovery.iter().any(
+        |step| matches!(step, RecoveryStep::Submission { id: recovered, .. } if *recovered == id)
     ));
     let after_remount = dispatch(
         &mut remounted,
@@ -312,6 +354,65 @@ fn radio_actor_offline_report_is_acknowledged_by_the_live_supervisor() {
             .descriptor(LORA_INTERFACE),
         Some(offline)
     );
+}
+
+#[test]
+fn retained_frame_persists_while_ordinary_work_waits_on_the_same_radio() {
+    let (mut service, _) = LiveSubmissionService::formatted(10);
+    let mut system = LiveNodeSystem::new();
+    let destination = *system.destination.as_bytes();
+    let accepted = dispatch(
+        &mut service,
+        IDENTITY_SUMMARY,
+        &full_context(OWNER),
+        submit_request(
+            19,
+            destination,
+            b"durability before ordinary quiescence",
+            0x50,
+        ),
+    );
+    let api_id = accepted_id(accepted.response);
+    let id = SubmissionId::new(api_id.0);
+    let owner = PrincipalId::new(OWNER.0);
+
+    for expected in ["barrier", "barrier persistence", "preparation"] {
+        service
+            .drive_step(&mut system.supervisor, 1_000, 1_000, &mut system.node_rng)
+            .unwrap_or_else(|error| panic!("{expected} failed: {error:?}"));
+    }
+    let report = system.transmit_data_to_durability_gate();
+    let frame = system.take_authorized_frame_request();
+    assert_eq!(report.authorized_frame(), Some(frame));
+    assert!(system.queue_ordinary_announce_behind_frame());
+    assert!(!system.ordinary_router_is_idle());
+
+    assert_eq!(
+        service.offer_authorized_frame(frame),
+        Ok(FrameOfferProgress::Retain)
+    );
+    assert!(config::submission_storage_step_admitted(
+        false, true, true, false, false,
+    ));
+    assert!(matches!(
+        service
+            .drive_step(&mut system.supervisor, 2_000, 2_000, &mut system.node_rng)
+            .expect("the active DATA observation persists ahead of ordinary work"),
+        RuntimeStep::Persistence(_)
+    ));
+    assert_eq!(
+        service.offer_authorized_frame(frame),
+        Ok(FrameOfferProgress::Durable)
+    );
+    assert!(matches!(
+        service.state_for(owner, id),
+        Some(LifecycleState::AwaitingDelivery(_))
+    ));
+    system.acknowledge_authorized_frame(frame);
+    assert!(system.drain_completion().iter().any(|transition| matches!(
+        transition,
+        NodeInterfaceSupervisorTransition::CompletionAccepted { .. }
+    )));
 }
 
 #[test]

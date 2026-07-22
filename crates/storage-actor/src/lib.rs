@@ -1,25 +1,28 @@
 //! Sole-owner adapter joining the durable model, physical NOR journal, and
 //! volatile submission projector.
 //!
-//! Construction is possible only through [`StorageActor::mount`], so no live
-//! request can be served before complete physical scan and semantic replay.
+//! Construction is possible only through [`StorageActor::mount`] or
+//! [`StorageActor::mount_into`], so no live request can be served before
+//! complete physical scan and semantic replay.
 //! The actor retains one exact mutation across ambiguous backend failures and
 //! rejects unrelated work until retry establishes a durable conclusion.
 
 #![no_std]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![deny(missing_docs)]
+
+use core::mem::MaybeUninit;
 
 use embedded_storage::nor_flash::{ErrorType, MultiwriteNorFlash, NorFlash, ReadNorFlash};
 use reticulum_node_core::{TerminalAttempt, TxRecoveryObservation};
 use reticulum_storage_journal::{
     AppendOutcome, JournalError, JournalState, PARTITION_SIZE, PHYSICAL_FORMAT_VERSION,
-    SlotCorruption, append, compact, mount,
+    SlotCorruption, append_with_replay_scratch, compact_with_replay_scratch, mount, mount_into,
 };
 use reticulum_storage_model::{
     AcceptOutcome, AcceptanceCandidate, ApplyError, BootRecoveryDecision,
     ExperimentalRnsDataIntent, JournalEntry, PlanOutcome, PlannedMutation, SubmissionId,
-    SubmissionIndex,
+    SubmissionIndex, SubmissionReplay,
 };
 use reticulum_submission_projector::{
     AcknowledgementAction, AcknowledgementReply, PersistHandle, PersistRequest,
@@ -444,6 +447,7 @@ pub struct StorageActor<const SUBMISSIONS: usize, const PROJECTED: usize> {
     binding: JournalBinding,
     state: JournalState,
     index: SubmissionIndex<SUBMISSIONS>,
+    replay_scratch: SubmissionIndex<SUBMISSIONS>,
     projector: SubmissionProjector<PROJECTED>,
     first_submission_id: SubmissionId,
     pending: Option<PendingMutation>,
@@ -453,6 +457,11 @@ pub struct StorageActor<const SUBMISSIONS: usize, const PROJECTED: usize> {
 impl<const SUBMISSIONS: usize, const PROJECTED: usize> StorageActor<SUBMISSIONS, PROJECTED> {
     /// Scan the complete physical journal and finish semantic replay before
     /// exposing a live actor.
+    ///
+    /// This remains an out-of-line placement boundary so a caller embedding
+    /// the actor in a larger runtime does not merge both large return slots
+    /// into one compiler-emitted stack frame.
+    #[inline(never)]
     pub fn mount<A: BoundJournalAccess>(
         access: &mut A,
         first_submission_id: SubmissionId,
@@ -463,15 +472,97 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize> StorageActor<SUBMISSIONS,
             mount::<SUBMISSIONS, A>(access, first_submission_id).map_err(map_mount_error)?;
         let state = mounted.state();
         let index = mounted.into_index();
+        let replay_scratch = SubmissionReplay::<SUBMISSIONS>::new(first_submission_id)
+            .complete()
+            .expect("a fresh replay builder cannot be faulted");
         Ok(Self {
             binding,
             state,
             index,
+            replay_scratch,
             projector: SubmissionProjector::new(),
             first_submission_id,
             pending: None,
             fault: None,
         })
+    }
+
+    /// Mount directly into caller-provided uninitialized storage.
+    ///
+    /// This placement form avoids returning the complete actor by value. It is
+    /// intended for products that keep a comparatively large durable index in
+    /// external memory. `destination` contains a fully initialized actor only
+    /// when `Ok` is returned. On error it must still be treated as
+    /// uninitialized, although an internal no-drop placement field may already
+    /// have been written; the same storage may be supplied to an exact retry.
+    ///
+    /// The caller must supply genuinely uninitialized storage or the same
+    /// storage after this method returned an error. Calling this method with a
+    /// destination that contains an exposed live actor remains invalid. The
+    /// compile-time no-drop invariants make failed-attempt overwrite safe and
+    /// fail closed if any future placement field owns resources.
+    #[allow(
+        unsafe_code,
+        reason = "audited raw-field projection initializes both capacity-sized indexes at their final caller-owned addresses"
+    )]
+    #[inline(never)]
+    pub fn mount_into<'a, A: BoundJournalAccess>(
+        destination: &'a mut MaybeUninit<Self>,
+        access: &mut A,
+        first_submission_id: SubmissionId,
+    ) -> Result<&'a mut Self, MountError<A::Error>> {
+        const {
+            assert!(
+                !core::mem::needs_drop::<SubmissionIndex<SUBMISSIONS>>(),
+                "actor placement retries require a no-drop live and scratch index"
+            );
+            assert!(
+                !core::mem::needs_drop::<SubmissionProjector<PROJECTED>>(),
+                "actor placement retries require a no-drop projector"
+            );
+            assert!(
+                !core::mem::needs_drop::<StorageActor<SUBMISSIONS, PROJECTED>>(),
+                "actor placement retries require a no-drop actor"
+            );
+        }
+        validate_binding::<A>(access).map_err(MountError::Binding)?;
+        let binding = access.journal_binding();
+        let actor = destination.as_mut_ptr();
+        // SAFETY: `actor` is aligned, uniquely borrowed, and points to an
+        // uninitialized `StorageActor`. `MaybeUninit<T>` has `T`'s layout, so
+        // projecting each index field as `MaybeUninit<SubmissionIndex<_>>`
+        // creates no reference to an uninitialized index. Journal replay
+        // initializes the live index directly; a fresh replay initializes the
+        // independent retry scratch directly. No capacity-sized value is
+        // returned or moved through this frame.
+        let (state, scratch_destination, projector_destination) = unsafe {
+            let index_destination = &mut *core::ptr::addr_of_mut!((*actor).index)
+                .cast::<MaybeUninit<SubmissionIndex<SUBMISSIONS>>>();
+            let state = mount_into(index_destination, access, first_submission_id)
+                .map_err(map_mount_error)?;
+            let scratch_destination = &mut *core::ptr::addr_of_mut!((*actor).replay_scratch)
+                .cast::<MaybeUninit<SubmissionIndex<SUBMISSIONS>>>();
+            let projector_destination = &mut *core::ptr::addr_of_mut!((*actor).projector)
+                .cast::<MaybeUninit<SubmissionProjector<PROJECTED>>>(
+            );
+            (state, scratch_destination, projector_destination)
+        };
+        SubmissionReplay::<SUBMISSIONS>::begin_in(scratch_destination, first_submission_id)
+            .complete()
+            .expect("a fresh in-place replay builder cannot be faulted");
+        SubmissionProjector::initialize_in(projector_destination);
+
+        // SAFETY: both indexes and the projector are fully initialized above.
+        // Every remaining write is infallible and targets one distinct field
+        // exactly once, after which the complete actor may be exposed.
+        unsafe {
+            core::ptr::addr_of_mut!((*actor).binding).write(binding);
+            core::ptr::addr_of_mut!((*actor).state).write(state);
+            core::ptr::addr_of_mut!((*actor).first_submission_id).write(first_submission_id);
+            core::ptr::addr_of_mut!((*actor).pending).write(None);
+            core::ptr::addr_of_mut!((*actor).fault).write(None);
+            Ok(&mut *actor)
+        }
     }
 
     /// Exact physical journal binding established by mount.
@@ -927,7 +1018,12 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize> StorageActor<SUBMISSIONS,
     ) -> Result<PhysicalProgress, DriveError<A::Error>> {
         self.ensure_binding(access)?;
         let first = self.first_submission_id;
-        match append::<SUBMISSIONS, A>(access, first, entry) {
+        match append_with_replay_scratch::<SUBMISSIONS, A>(
+            access,
+            first,
+            entry,
+            &mut self.replay_scratch,
+        ) {
             Ok(outcome) => return Ok(self.observe_append(outcome)),
             Err(JournalError::Backend(error)) => return Err(DriveError::Backend(error)),
             Err(JournalError::AcceptanceCapacityExhausted) => {
@@ -938,14 +1034,23 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize> StorageActor<SUBMISSIONS,
         }
 
         self.ensure_binding(access)?;
-        self.state = match compact::<SUBMISSIONS, A>(access, first) {
+        self.state = match compact_with_replay_scratch::<SUBMISSIONS, A>(
+            access,
+            first,
+            &mut self.replay_scratch,
+        ) {
             Ok(state) => state,
             Err(JournalError::Backend(error)) => return Err(DriveError::Backend(error)),
             Err(error) => return Err(self.latch(map_journal_fault(error))),
         };
 
         self.ensure_binding(access)?;
-        match append::<SUBMISSIONS, A>(access, first, entry) {
+        match append_with_replay_scratch::<SUBMISSIONS, A>(
+            access,
+            first,
+            entry,
+            &mut self.replay_scratch,
+        ) {
             Ok(outcome) => Ok(self.observe_append(outcome)),
             Err(JournalError::Backend(error)) => Err(DriveError::Backend(error)),
             Err(JournalError::AcceptanceCapacityExhausted) => {

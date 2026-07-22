@@ -2,10 +2,13 @@
 //!
 //! This module composes the portable session typestates with the E290's
 //! credential-selection and logical-request handoffs. It deliberately supports
-//! one handshake attempt per accepted connection and one authenticated request
-//! in flight. A refusal, malformed handshake, framing fault, established-session
-//! authentication/order fault, or malformed logical request terminates ordinary
-//! session handling until an explicit reset.
+//! one handshake attempt per accepted connection at a time; one authenticated request
+//! may be in flight. A canonical client hello may replace an idle established
+//! session without replacing the USB connection epoch. Replacement never
+//! displaces request handoff, an awaiting node reply, reply transmission, or
+//! pairing exclusivity. A refusal, malformed handshake, framing fault,
+//! established-session authentication/order fault, or malformed logical request
+//! terminates ordinary session handling until an explicit reset.
 //!
 //! The sole [`SessionEpochAllocator`] is retained across reset, while every
 //! connection-scoped owner (selected credential, key schedule, session keys,
@@ -33,8 +36,8 @@ use reticulum_device_api_handoff::{
 };
 use reticulum_device_api_session::{
     ActiveCredential, AuthenticatedGrant, AwaitingReply, ClientHello, PendingClientProof,
-    ReplyFlight, ReplyRouteFaultKind, ServerHelloFlight, ServerParameters, ServerProofFlight,
-    ServerSession, SessionEpochAllocator, SessionFault,
+    RECORD_KIND_CLIENT_HELLO, ReplyFlight, ReplyRouteFaultKind, ServerHelloFlight,
+    ServerParameters, ServerProofFlight, ServerSession, SessionEpochAllocator, SessionFault,
 };
 
 use crate::session_admission_handoff::{
@@ -155,8 +158,12 @@ pub enum UsbSessionTxError {
 pub enum UsbSessionRxDisposition {
     /// No complete framing record was present.
     Pending,
-    /// A canonical client hello was retained for node-side selection.
+    /// A canonical initial or idle-session replacement client hello was retained
+    /// for node-side selection.
     ClientHelloAccepted,
+    /// A replacement client hello was dropped while an in-flight owner or
+    /// pairing exclusivity remained unchanged.
+    ClientHelloDroppedBusy,
     /// The client proof established one authenticated session.
     SessionEstablished,
     /// One authenticated, canonical logical request awaits node handoff.
@@ -417,20 +424,7 @@ impl UsbAuthenticatedSession {
         let phase = self.phase();
         let state = mem::replace(&mut self.state, State::Transitioning);
         match state {
-            State::AwaitingClientHello => {
-                let hello = match ClientHello::from_record(record) {
-                    Ok(hello) => hello,
-                    Err(_) => {
-                        return Err(self.terminate(UsbAuthenticatedSessionFault::Handshake));
-                    }
-                };
-                let Some(connection) = self.connection else {
-                    return Err(self.terminate(UsbAuthenticatedSessionFault::Handshake));
-                };
-                let command = SessionAdmissionCommand::new(at, connection, hello.credential_id());
-                self.state = State::AdmissionCommandPending { hello, command };
-                Ok(UsbSessionRxDisposition::ClientHelloAccepted)
-            }
+            State::AwaitingClientHello => self.accept_client_hello(record, at),
             State::PendingClientProof(pending) => match pending.authenticate(record) {
                 Ok(session) => {
                     self.active_epoch = Some(session.epoch());
@@ -439,21 +433,53 @@ impl UsbAuthenticatedSession {
                 }
                 Err(_) => Err(self.terminate(UsbAuthenticatedSessionFault::Handshake)),
             },
-            State::Established(session) => match session.authenticate_request(record) {
-                Ok(authenticated) => {
-                    let (request, waiting) = authenticated.into_parts();
-                    if decode_request(request.message().encoded()).is_err() {
-                        drop(request);
-                        drop(waiting);
-                        return Err(
-                            self.terminate(UsbAuthenticatedSessionFault::MalformedLogicalRequest)
-                        );
+            State::Established(session) => {
+                if observed_kind == RECORD_KIND_CLIENT_HELLO {
+                    drop(session);
+                    self.active_epoch = None;
+                    self.accept_client_hello(record, at)
+                } else {
+                    match session.authenticate_request(record) {
+                        Ok(authenticated) => {
+                            let (request, waiting) = authenticated.into_parts();
+                            if decode_request(request.message().encoded()).is_err() {
+                                drop(request);
+                                drop(waiting);
+                                return Err(self.terminate(
+                                    UsbAuthenticatedSessionFault::MalformedLogicalRequest,
+                                ));
+                            }
+                            self.state = State::RequestHandoffPending { request, waiting };
+                            Ok(UsbSessionRxDisposition::RequestAuthenticated)
+                        }
+                        Err(fault) => {
+                            Err(self.terminate(UsbAuthenticatedSessionFault::Established(fault)))
+                        }
                     }
-                    self.state = State::RequestHandoffPending { request, waiting };
-                    Ok(UsbSessionRxDisposition::RequestAuthenticated)
                 }
-                Err(fault) => Err(self.terminate(UsbAuthenticatedSessionFault::Established(fault))),
-            },
+            }
+            State::RequestHandoffPending { request, waiting }
+                if observed_kind == RECORD_KIND_CLIENT_HELLO =>
+            {
+                drop(record);
+                self.state = State::RequestHandoffPending { request, waiting };
+                Ok(UsbSessionRxDisposition::ClientHelloDroppedBusy)
+            }
+            State::AwaitingReply(waiting) if observed_kind == RECORD_KIND_CLIENT_HELLO => {
+                drop(record);
+                self.state = State::AwaitingReply(waiting);
+                Ok(UsbSessionRxDisposition::ClientHelloDroppedBusy)
+            }
+            State::ReplyFlight(owner) if observed_kind == RECORD_KIND_CLIENT_HELLO => {
+                drop(record);
+                self.state = State::ReplyFlight(owner);
+                Ok(UsbSessionRxDisposition::ClientHelloDroppedBusy)
+            }
+            State::PairingExclusive if observed_kind == RECORD_KIND_CLIENT_HELLO => {
+                drop(record);
+                self.state = State::PairingExclusive;
+                Ok(UsbSessionRxDisposition::ClientHelloDroppedBusy)
+            }
             other => {
                 drop(other);
                 Err(
@@ -752,6 +778,24 @@ impl UsbAuthenticatedSession {
         PairingExclusiveCloseDisposition::Closed
     }
 
+    fn accept_client_hello(
+        &mut self,
+        record: Record,
+        at: PairingMillis,
+    ) -> Result<UsbSessionRxDisposition, UsbAuthenticatedSessionFault> {
+        let hello = match ClientHello::from_record(record) {
+            Ok(hello) => hello,
+            Err(_) => return Err(self.terminate(UsbAuthenticatedSessionFault::Handshake)),
+        };
+        let Some(connection) = self.connection else {
+            return Err(self.terminate(UsbAuthenticatedSessionFault::Handshake));
+        };
+        let command = SessionAdmissionCommand::new(at, connection, hello.credential_id());
+        self.active_epoch = None;
+        self.state = State::AdmissionCommandPending { hello, command };
+        Ok(UsbSessionRxDisposition::ClientHelloAccepted)
+    }
+
     fn terminate(&mut self, fault: UsbAuthenticatedSessionFault) -> UsbAuthenticatedSessionFault {
         self.active_epoch = None;
         self.state = State::TerminatedUntilReset(fault);
@@ -785,8 +829,8 @@ mod tests {
     };
     use reticulum_device_api_pairing_policy::{ConnectionId, MonotonicMillis as PairingMillis};
     use reticulum_device_api_session::{
-        AuthenticatedGrant, BearerBinding, ClientCredential, ClientHelloFlight, ClientParameters,
-        ClientSession, DeviceId, ServerParameters,
+        AuthenticatedGrant, BearerBinding, ClientCredential, ClientHello, ClientHelloFlight,
+        ClientParameters, ClientSession, DeviceId, ServerParameters,
     };
 
     use crate::session_admission_handoff::{
@@ -926,6 +970,26 @@ mod tests {
         server_nonce: u8,
     ) -> ClientSession {
         assert!(machine.begin_connection(connection));
+        complete_handshake(machine, connection, client_nonce, server_nonce)
+    }
+
+    fn replace_established(
+        machine: &mut UsbAuthenticatedSession,
+        connection: ConnectionId,
+        client_nonce: u8,
+        server_nonce: u8,
+    ) -> ClientSession {
+        assert_eq!(machine.connection(), Some(connection));
+        assert_eq!(machine.phase(), UsbAuthenticatedSessionPhase::Established);
+        complete_handshake(machine, connection, client_nonce, server_nonce)
+    }
+
+    fn complete_handshake(
+        machine: &mut UsbAuthenticatedSession,
+        connection: ConnectionId,
+        client_nonce: u8,
+        server_nonce: u8,
+    ) -> ClientSession {
         let mut client_hello = ClientHelloFlight::begin(
             ClientParameters::new(DEVICE_ID, BearerBinding::UsbSerialJtag),
             ClientCredential::new(CREDENTIAL_ID, GENERATION, PSK),
@@ -998,6 +1062,10 @@ mod tests {
             UsbSessionRxDisposition::SessionEstablished
         );
         client_session
+    }
+
+    fn replacement_hello(nonce: u8) -> Record {
+        ClientHello::new(BearerBinding::UsbSerialJtag, CREDENTIAL_ID, [nonce; 32]).into_record()
     }
 
     fn canonical_request(request_id: u64) -> OwnedMessage {
@@ -1217,6 +1285,195 @@ mod tests {
         assert_eq!(second_request.key().epoch(), SessionEpoch::new(2));
         assert_eq!(second_request.key().correlation().get(), 0);
         assert_eq!(second_request.grant().admission_sequence(), 0);
+    }
+
+    #[test]
+    fn idle_established_session_is_replaced_on_the_same_connection_with_a_fresh_epoch() {
+        let mut machine = new_machine();
+        let first_client = establish(&mut machine, connection(1), 0x76, 0x86);
+        assert_eq!(first_client.next_client_sequence(), 0);
+        assert_eq!(machine.connection(), Some(connection(1)));
+
+        let second_client = replace_established(&mut machine, connection(1), 0x77, 0x87);
+        assert_eq!(machine.connection(), Some(connection(1)));
+        assert_eq!(machine.phase(), UsbAuthenticatedSessionPhase::Established);
+        assert_eq!(machine.fault(), None);
+        assert_eq!(second_client.next_client_sequence(), 0);
+        assert_eq!(second_client.next_server_sequence(), 0);
+
+        let mut request_flight = second_client
+            .frame_request(canonical_request(49))
+            .unwrap_or_else(|_| panic!("replacement request frames"));
+        let request_bytes = complete_client_flight(
+            |flight: &reticulum_device_api_session::ClientRequestFlight| flight.remaining(),
+            |flight, acknowledged| flight.advance(acknowledged).unwrap(),
+            &mut request_flight,
+        );
+        drop(
+            request_flight
+                .try_finish()
+                .unwrap_or_else(|_| panic!("replacement request fully sent")),
+        );
+        assert_eq!(
+            machine
+                .accept_record(decode_one(&request_bytes), PairingMillis::new(22))
+                .unwrap(),
+            UsbSessionRxDisposition::RequestAuthenticated
+        );
+
+        let api: &'static mut DeviceApiHandoff<NoopRawMutex, AuthenticatedGrant> =
+            std::boxed::Box::leak(std::boxed::Box::new(DeviceApiHandoff::new()));
+        let (mut bearer, mut node) = api.split();
+        assert_eq!(
+            machine.try_send_request(bearer.requests()),
+            RequestHandoffDisposition::Transferred
+        );
+        let request = node
+            .requests()
+            .try_receive()
+            .expect("replacement request queued");
+        assert_eq!(request.key().epoch(), SessionEpoch::new(2));
+        assert_eq!(request.key().correlation().get(), 0);
+        assert_eq!(request.grant().admission_sequence(), 0);
+    }
+
+    #[test]
+    fn malformed_idle_replacement_hello_remains_fail_closed() {
+        let mut machine = new_machine();
+        let _client = establish(&mut machine, connection(1), 0x77, 0x87);
+        let (kind, mut session_id, sequence, payload_length, payload, tag) =
+            replacement_hello(0x90).into_parts();
+        session_id[0] = 1;
+        let malformed = Record::new(kind, session_id, sequence, payload_length, payload, tag);
+
+        assert_eq!(
+            machine
+                .accept_record(malformed, PairingMillis::new(12))
+                .expect_err("a replacement hello must retain canonical handshake framing"),
+            UsbAuthenticatedSessionFault::Handshake
+        );
+        assert_eq!(
+            machine.phase(),
+            UsbAuthenticatedSessionPhase::TerminatedUntilReset
+        );
+        assert_eq!(
+            machine.fault(),
+            Some(UsbAuthenticatedSessionFault::Handshake)
+        );
+    }
+
+    #[test]
+    fn replacement_hello_never_displaces_request_or_reply_owners() {
+        let mut machine = new_machine();
+        let client = establish(&mut machine, connection(1), 0x78, 0x88);
+        let mut request_flight = client
+            .frame_request(canonical_request(50))
+            .unwrap_or_else(|_| panic!("request frames"));
+        let request_bytes = complete_client_flight(
+            |flight: &reticulum_device_api_session::ClientRequestFlight| flight.remaining(),
+            |flight, acknowledged| flight.advance(acknowledged).unwrap(),
+            &mut request_flight,
+        );
+        let awaiting_response = request_flight
+            .try_finish()
+            .unwrap_or_else(|_| panic!("request fully sent"));
+        machine
+            .accept_record(decode_one(&request_bytes), PairingMillis::new(12))
+            .unwrap();
+        assert_eq!(
+            machine
+                .accept_record(replacement_hello(0x91), PairingMillis::new(13))
+                .unwrap(),
+            UsbSessionRxDisposition::ClientHelloDroppedBusy
+        );
+        assert_eq!(
+            machine.phase(),
+            UsbAuthenticatedSessionPhase::RequestHandoffPending
+        );
+
+        let api: &'static mut DeviceApiHandoff<NoopRawMutex, AuthenticatedGrant> =
+            std::boxed::Box::leak(std::boxed::Box::new(DeviceApiHandoff::new()));
+        let (mut bearer, mut node) = api.split();
+        assert_eq!(
+            machine.try_send_request(bearer.requests()),
+            RequestHandoffDisposition::Transferred
+        );
+        let request = node.requests().try_receive().expect("exact request queued");
+        assert_eq!(request.message().encoded(), canonical_request(50).encoded());
+        assert_eq!(
+            machine
+                .accept_record(replacement_hello(0x92), PairingMillis::new(14))
+                .unwrap(),
+            UsbSessionRxDisposition::ClientHelloDroppedBusy
+        );
+        assert_eq!(machine.phase(), UsbAuthenticatedSessionPhase::AwaitingReply);
+
+        let reply = LocalApiReply::new(request.key(), message(b"retained reply"));
+        drop(request);
+        assert_eq!(
+            machine
+                .accept_node_reply(reply)
+                .unwrap_or_else(|_| panic!("matching reply starts a flight")),
+            NodeReplyDisposition::ReplyFlightStarted
+        );
+        let full_reply = machine
+            .next_tx_chunk(usize::MAX)
+            .expect("reply flight retained")
+            .to_vec();
+        assert_eq!(
+            machine
+                .accept_record(replacement_hello(0x93), PairingMillis::new(15))
+                .unwrap(),
+            UsbSessionRxDisposition::ClientHelloDroppedBusy
+        );
+        assert_eq!(machine.phase(), UsbAuthenticatedSessionPhase::ReplyFlight);
+        assert_eq!(machine.next_tx_chunk(usize::MAX).unwrap(), full_reply);
+
+        let first_length = 3;
+        let mut reply_bytes = full_reply[..first_length].to_vec();
+        assert_eq!(
+            machine.advance_tx(first_length).unwrap(),
+            UsbSessionTxAdvance::Partial
+        );
+        let retained_tail = machine.next_tx_chunk(usize::MAX).unwrap().to_vec();
+        assert_eq!(
+            machine
+                .accept_record(replacement_hello(0x94), PairingMillis::new(16))
+                .unwrap(),
+            UsbSessionRxDisposition::ClientHelloDroppedBusy
+        );
+        assert_eq!(machine.next_tx_chunk(usize::MAX).unwrap(), retained_tail);
+        reply_bytes.extend_from_slice(&drain_machine_record(
+            &mut machine,
+            UsbSessionTxKind::Reply,
+            5,
+        ));
+        let authenticated = awaiting_response
+            .authenticate(decode_one(&reply_bytes))
+            .expect("original client authenticates retained reply");
+        let (_, response) = authenticated.into_parts();
+        assert_eq!(response.encoded(), b"retained reply");
+    }
+
+    #[test]
+    fn replacement_hello_preserves_pairing_exclusivity() {
+        let mut machine = new_machine();
+        let _client = establish(&mut machine, connection(1), 0x79, 0x89);
+        assert_eq!(
+            machine.close_for_pairing_exclusivity(connection(1)),
+            PairingExclusiveCloseDisposition::Closed
+        );
+        assert_eq!(
+            machine
+                .accept_record(replacement_hello(0x95), PairingMillis::new(12))
+                .unwrap(),
+            UsbSessionRxDisposition::ClientHelloDroppedBusy
+        );
+        assert_eq!(
+            machine.phase(),
+            UsbAuthenticatedSessionPhase::PairingExclusive
+        );
+        assert_eq!(machine.fault(), None);
     }
 
     #[test]

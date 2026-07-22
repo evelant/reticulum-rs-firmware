@@ -446,6 +446,64 @@ fn formatted_access() -> BoundJournal<FakeNor> {
     BoundJournal::new(FakeNor::formatted(), binding())
 }
 
+#[test]
+fn mount_into_initializes_the_supplied_storage_only_after_successful_replay() {
+    let mut destination = MaybeUninit::<SubmissionRuntime<4, 2>>::uninit();
+    let destination_address = destination.as_mut_ptr();
+    let mut access = formatted_access();
+
+    let runtime = SubmissionRuntime::<4, 2>::mount_into(
+        &mut destination,
+        &mut access,
+        SubmissionId::new(38),
+        6,
+    )
+    .unwrap();
+
+    assert_eq!(core::ptr::from_mut(runtime), destination_address);
+    assert_eq!(runtime.phase(), RuntimePhase::Recovering);
+    assert_eq!(runtime.index().next_id(), Some(SubmissionId::new(38)));
+    assert_eq!(
+        runtime.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Complete)
+    );
+    assert_eq!(runtime.phase(), RuntimePhase::Ready);
+}
+
+#[test]
+fn mount_into_failure_leaves_the_destination_available_for_a_later_mount() {
+    assert!(!core::mem::needs_drop::<SubmissionRuntime<4, 2>>());
+    let mut destination = MaybeUninit::<SubmissionRuntime<4, 2>>::uninit();
+    let mut unformatted = BoundJournal::new(
+        FakeNor {
+            bytes: vec![0xff; PARTITION_SIZE],
+            lost_write_reply_after: None,
+            reject_writes: false,
+        },
+        binding(),
+    );
+
+    assert!(
+        SubmissionRuntime::<4, 2>::mount_into(
+            &mut destination,
+            &mut unformatted,
+            SubmissionId::new(39),
+            7,
+        )
+        .is_err()
+    );
+
+    let mut formatted = formatted_access();
+    let runtime = SubmissionRuntime::<4, 2>::mount_into(
+        &mut destination,
+        &mut formatted,
+        SubmissionId::new(39),
+        7,
+    )
+    .unwrap();
+    assert_eq!(runtime.index().next_id(), Some(SubmissionId::new(39)));
+}
+
 fn try_drive(
     runtime: &mut SubmissionRuntime<4, 2>,
     access: &mut BoundJournal<FakeNor>,

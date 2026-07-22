@@ -10,14 +10,17 @@ use embedded_storage::nor_flash::{
     ErrorType, MultiwriteNorFlash, NorFlash, NorFlashError, NorFlashErrorKind, ReadNorFlash,
     check_erase, check_read, check_write,
 };
+#[cfg(any(feature = "experimental-rns-data", feature = "experimental-lxmf"))]
+use reticulum_device_api::DestinationHash as ApiDestinationHash;
+#[cfg(any(
+    feature = "experimental-rns-data",
+    all(feature = "experimental-rns-inbox", feature = "experimental-lxmf")
+))]
+use reticulum_device_api::IdempotencyKey as ApiIdempotencyKey;
 use reticulum_device_api::{
     ApiErrorCode, ApiErrorResponse, ApiVersion, CapabilitySnapshot, DeviceRequest, DeviceResponse,
     DispatchContext, DispatchProvenance, OP_SUBMISSION_STATUS, Permissions,
     PrincipalId as ApiPrincipalId, RequestEnvelope, RequestId, SubmissionId as ApiSubmissionId,
-};
-#[cfg(feature = "experimental-rns-data")]
-use reticulum_device_api::{
-    DestinationHash as ApiDestinationHash, IdempotencyKey as ApiIdempotencyKey,
 };
 use reticulum_storage_actor::{
     AcceptanceProgress, BoundJournal, DriveError, JournalBinding, StorageActor, StorageDeviceId,
@@ -410,6 +413,271 @@ impl InboundMailboxPort for FakeInbox {
     }
 }
 
+#[cfg(feature = "experimental-lxmf")]
+#[derive(Default)]
+struct FakeLxmfOnlyPort {
+    submission_availability: usize,
+    lxmf_availability: usize,
+    lxmf_next: usize,
+    compose_availability: usize,
+}
+
+#[cfg(feature = "experimental-lxmf")]
+impl SubmissionPort for FakeLxmfOnlyPort {
+    fn availability(&mut self) -> CapabilityAvailability {
+        self.submission_availability += 1;
+        CapabilityAvailability::Available
+    }
+
+    fn submission_state(
+        &mut self,
+        _principal: PrincipalId,
+        _id: SubmissionId,
+    ) -> Result<Option<LifecycleState>, SubmissionPortError> {
+        Ok(None)
+    }
+
+    fn accept(
+        &mut self,
+        _candidate: AcceptanceCandidate,
+    ) -> Result<SubmissionAcceptance, SubmissionPortError> {
+        Err(SubmissionPortError::Unavailable)
+    }
+}
+
+#[cfg(feature = "experimental-lxmf")]
+impl LxmfInboxPort for FakeLxmfOnlyPort {
+    fn availability(&mut self) -> CapabilityAvailability {
+        self.lxmf_availability += 1;
+        CapabilityAvailability::Available
+    }
+
+    fn next(
+        &mut self,
+        _after: Option<api::LxmfMessageHandle>,
+    ) -> Result<Option<api::LxmfMessageSummary>, LxmfInboxPortError> {
+        self.lxmf_next += 1;
+        Ok(Some(
+            api::LxmfMessageSummary::new(
+                api::LxmfMessageHandle::new(7).unwrap(),
+                [0x17; 32],
+                ApiDestinationHash([0x27; 16]),
+                ApiDestinationHash([0x37; 16]),
+                1.25_f64.to_bits(),
+                114,
+                1,
+                2,
+                1,
+                [0x47; 32],
+            )
+            .unwrap(),
+        ))
+    }
+
+    fn read(
+        &mut self,
+        _handle: api::LxmfMessageHandle,
+        _offset: u32,
+        _max_bytes: api::LxmfReadLength,
+    ) -> Result<Option<api::LxmfReadChunk>, LxmfInboxPortError> {
+        Ok(None)
+    }
+}
+
+#[cfg(feature = "experimental-lxmf")]
+impl LxmfComposePort for FakeLxmfOnlyPort {
+    fn availability(&mut self) -> CapabilityAvailability {
+        self.compose_availability += 1;
+        CapabilityAvailability::Available
+    }
+
+    fn compose_and_accept(
+        &mut self,
+        _request: LxmfComposeRequest<'_>,
+    ) -> Result<LxmfComposeAcceptance, LxmfComposePortError> {
+        Ok(LxmfComposeAcceptance::new(
+            SubmissionAcceptance::Accepted(SubmissionId::new(41)),
+            [0x67; 32],
+        ))
+    }
+}
+
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CombinedPortCalls {
+    submission_availability: usize,
+    submission_status: usize,
+    submission_accept: usize,
+    inbox_availability: usize,
+    inbox_status: usize,
+    inbox_peek: usize,
+    lxmf_availability: usize,
+    lxmf_next: usize,
+    lxmf_read: usize,
+    compose_availability: usize,
+    compose_and_accept: usize,
+}
+
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ObservedLxmfComposeRequest {
+    principal: PrincipalId,
+    destination: DestinationHash,
+    timestamp_unix_ms: u64,
+    title: Vec<u8>,
+    content: Vec<u8>,
+    idempotency_key: IdempotencyKey,
+    authorization: AuthorizationSnapshot,
+}
+
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+struct FakeCombinedPort {
+    calls: CombinedPortCalls,
+    lxmf_availability: CapabilityAvailability,
+    lxmf_next: Result<Option<api::LxmfMessageSummary>, LxmfInboxPortError>,
+    lxmf_read: Result<Option<api::LxmfReadChunk>, LxmfInboxPortError>,
+    compose_availability: CapabilityAvailability,
+    compose_result: Result<LxmfComposeAcceptance, LxmfComposePortError>,
+    observed_compose: Option<ObservedLxmfComposeRequest>,
+}
+
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+impl FakeCombinedPort {
+    fn with_lxmf(
+        summary: Option<api::LxmfMessageSummary>,
+        chunk: Option<api::LxmfReadChunk>,
+    ) -> Self {
+        Self {
+            calls: CombinedPortCalls::default(),
+            lxmf_availability: CapabilityAvailability::Available,
+            lxmf_next: Ok(summary),
+            lxmf_read: Ok(chunk),
+            compose_availability: CapabilityAvailability::Available,
+            compose_result: Ok(LxmfComposeAcceptance::new(
+                SubmissionAcceptance::Accepted(SubmissionId::new(41)),
+                [0x67; 32],
+            )),
+            observed_compose: None,
+        }
+    }
+}
+
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+impl SubmissionPort for FakeCombinedPort {
+    fn availability(&mut self) -> CapabilityAvailability {
+        self.calls.submission_availability += 1;
+        CapabilityAvailability::Available
+    }
+
+    fn submission_state(
+        &mut self,
+        _principal: PrincipalId,
+        _id: SubmissionId,
+    ) -> Result<Option<LifecycleState>, SubmissionPortError> {
+        self.calls.submission_status += 1;
+        Ok(None)
+    }
+
+    fn accept(
+        &mut self,
+        _candidate: AcceptanceCandidate,
+    ) -> Result<SubmissionAcceptance, SubmissionPortError> {
+        self.calls.submission_accept += 1;
+        Err(SubmissionPortError::Unavailable)
+    }
+}
+
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+impl InboundMailboxPort for FakeCombinedPort {
+    fn availability(&mut self) -> CapabilityAvailability {
+        self.calls.inbox_availability += 1;
+        CapabilityAvailability::Available
+    }
+
+    fn status(&mut self) -> Result<api::RnsInboxStatus, InboundMailboxPortError> {
+        self.calls.inbox_status += 1;
+        Err(InboundMailboxPortError::Unavailable)
+    }
+
+    fn peek(&mut self) -> Result<Option<InboundMailboxItem>, InboundMailboxPortError> {
+        self.calls.inbox_peek += 1;
+        Err(InboundMailboxPortError::Unavailable)
+    }
+}
+
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+impl LxmfInboxPort for FakeCombinedPort {
+    fn availability(&mut self) -> CapabilityAvailability {
+        self.calls.lxmf_availability += 1;
+        self.lxmf_availability
+    }
+
+    fn next(
+        &mut self,
+        _after: Option<api::LxmfMessageHandle>,
+    ) -> Result<Option<api::LxmfMessageSummary>, LxmfInboxPortError> {
+        self.calls.lxmf_next += 1;
+        self.lxmf_next
+    }
+
+    fn read(
+        &mut self,
+        _handle: api::LxmfMessageHandle,
+        _offset: u32,
+        _max_bytes: api::LxmfReadLength,
+    ) -> Result<Option<api::LxmfReadChunk>, LxmfInboxPortError> {
+        self.calls.lxmf_read += 1;
+        self.lxmf_read
+    }
+}
+
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+impl LxmfComposePort for FakeCombinedPort {
+    fn availability(&mut self) -> CapabilityAvailability {
+        self.calls.compose_availability += 1;
+        self.compose_availability
+    }
+
+    fn compose_and_accept(
+        &mut self,
+        request: LxmfComposeRequest<'_>,
+    ) -> Result<LxmfComposeAcceptance, LxmfComposePortError> {
+        self.calls.compose_and_accept += 1;
+        self.observed_compose = Some(ObservedLxmfComposeRequest {
+            principal: request.principal(),
+            destination: request.destination(),
+            timestamp_unix_ms: request.timestamp_unix_ms(),
+            title: request.title().to_vec(),
+            content: request.content().to_vec(),
+            idempotency_key: request.idempotency_key(),
+            authorization: request.authorization(),
+        });
+        self.compose_result
+    }
+}
+
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+fn lxmf_summary() -> api::LxmfMessageSummary {
+    api::LxmfMessageSummary::new(
+        api::LxmfMessageHandle::new(7).unwrap(),
+        [0x17; 32],
+        api::DestinationHash([0x27; 16]),
+        api::DestinationHash([0x37; 16]),
+        1.25_f64.to_bits(),
+        114,
+        1,
+        2,
+        1,
+        [0x47; 32],
+    )
+    .unwrap()
+}
+
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+fn lxmf_chunk() -> api::LxmfReadChunk {
+    api::LxmfReadChunk::new(api::LxmfMessageHandle::new(7).unwrap(), 0, 5, b"hello").unwrap()
+}
+
 fn dispatch<const SUBMISSIONS: usize>(
     actor: &mut TestActor<SUBMISSIONS>,
     context: DispatchContext,
@@ -590,6 +858,47 @@ fn identity_summary_is_public_read_only_and_never_calls_submission_port() {
     }
 }
 
+#[cfg(feature = "experimental-lxmf")]
+#[test]
+fn lxmf_dispatcher_does_not_require_the_raw_inbox_feature_or_port() {
+    let mut port = FakeLxmfOnlyPort::default();
+    let capabilities = super::dispatch_with_lxmf(
+        &mut port,
+        identity_summary(),
+        &DispatchContext::UNAUTHENTICATED,
+        envelope(111, DeviceRequest::SystemCapabilities),
+    );
+    assert_eq!(
+        capabilities.response,
+        DeviceResponse::SystemCapabilities(
+            CapabilitySnapshot::for_dispatch_with_inbox_lxmf_and_basic_send(
+                cfg!(feature = "experimental-rns-data"),
+                CapabilityAvailability::Unavailable,
+                CapabilityAvailability::Available,
+                CapabilityAvailability::Available,
+            )
+        )
+    );
+
+    let next = super::dispatch_with_lxmf(
+        &mut port,
+        identity_summary(),
+        &authenticated(1, Permissions::NONE),
+        envelope(112, DeviceRequest::LxmfNext { after: None }),
+    );
+    let DeviceResponse::LxmfNext(summary) = next.response else {
+        panic!("expected standalone LXMF summary")
+    };
+    assert_eq!(summary.handle(), api::LxmfMessageHandle::new(7).unwrap());
+    assert_eq!(port.lxmf_availability, 2);
+    assert_eq!(port.lxmf_next, 1);
+    assert_eq!(port.compose_availability, 1);
+    assert_eq!(
+        port.submission_availability,
+        usize::from(cfg!(feature = "experimental-rns-data"))
+    );
+}
+
 #[cfg(feature = "experimental-rns-inbox")]
 #[test]
 fn composite_identity_read_acquires_neither_port() {
@@ -619,6 +928,354 @@ fn composite_identity_read_acquires_neither_port() {
                 peek: 0,
             }
         );
+    }
+}
+
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[test]
+fn combined_identity_and_authentication_preflight_acquire_no_ports() {
+    let expected = api::IdentitySummary::with_lxmf_delivery_destination(
+        api::DestinationHash([0xa5; 16]),
+        api::DestinationHash([0xb6; 16]),
+    );
+    let mut port = FakeCombinedPort::with_lxmf(Some(lxmf_summary()), Some(lxmf_chunk()));
+    let identity = super::dispatch_with_inbox_and_lxmf(
+        &mut port,
+        expected,
+        &authenticated(1, Permissions::NONE),
+        envelope(220, DeviceRequest::IdentitySummary),
+    );
+    assert_eq!(identity.response, DeviceResponse::IdentitySummary(expected));
+    assert_eq!(port.calls, CombinedPortCalls::default());
+
+    let unauthenticated = super::dispatch_with_inbox_and_lxmf(
+        &mut port,
+        expected,
+        &DispatchContext::UNAUTHENTICATED,
+        envelope(221, DeviceRequest::LxmfNext { after: None }),
+    );
+    assert_eq!(
+        unauthenticated.response,
+        DeviceResponse::Error(ApiErrorResponse {
+            code: ApiErrorCode::AuthenticationRequired,
+            operation: Some(api::OP_EXPERIMENTAL_LXMF_NEXT),
+        })
+    );
+    assert_eq!(port.calls, CombinedPortCalls::default());
+}
+
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[test]
+fn combined_capabilities_query_each_availability_once() {
+    let mut port = FakeCombinedPort::with_lxmf(None, None);
+    let response = super::dispatch_with_inbox_and_lxmf(
+        &mut port,
+        identity_summary(),
+        &DispatchContext::UNAUTHENTICATED,
+        envelope(222, DeviceRequest::SystemCapabilities),
+    );
+    assert_eq!(
+        response.response,
+        DeviceResponse::SystemCapabilities(
+            CapabilitySnapshot::for_dispatch_with_inbox_lxmf_and_basic_send(
+                cfg!(feature = "experimental-rns-data"),
+                CapabilityAvailability::Available,
+                CapabilityAvailability::Available,
+                CapabilityAvailability::Available,
+            ),
+        )
+    );
+    assert_eq!(
+        port.calls,
+        CombinedPortCalls {
+            submission_availability: usize::from(cfg!(feature = "experimental-rns-data")),
+            inbox_availability: 1,
+            lxmf_availability: 1,
+            compose_availability: 1,
+            ..CombinedPortCalls::default()
+        }
+    );
+}
+
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[test]
+fn combined_lxmf_next_and_read_enter_only_the_selected_port_method() {
+    let summary = lxmf_summary();
+    let chunk = lxmf_chunk();
+    let mut next_port = FakeCombinedPort::with_lxmf(Some(summary), Some(chunk));
+    let next = super::dispatch_with_inbox_and_lxmf(
+        &mut next_port,
+        identity_summary(),
+        &authenticated(1, Permissions::NONE),
+        envelope(223, DeviceRequest::LxmfNext { after: None }),
+    );
+    assert_eq!(next.response, DeviceResponse::LxmfNext(summary));
+    assert_eq!(
+        next_port.calls,
+        CombinedPortCalls {
+            lxmf_availability: 1,
+            lxmf_next: 1,
+            ..CombinedPortCalls::default()
+        }
+    );
+
+    let mut read_port = FakeCombinedPort::with_lxmf(Some(summary), Some(chunk));
+    let read = super::dispatch_with_inbox_and_lxmf(
+        &mut read_port,
+        identity_summary(),
+        &authenticated(1, Permissions::NONE),
+        envelope(
+            224,
+            DeviceRequest::LxmfRead {
+                handle: api::LxmfMessageHandle::new(7).unwrap(),
+                offset: 0,
+                max_bytes: api::LxmfReadLength::new(5).unwrap(),
+            },
+        ),
+    );
+    assert_eq!(read.response, DeviceResponse::LxmfRead(chunk));
+    assert_eq!(
+        read_port.calls,
+        CombinedPortCalls {
+            lxmf_availability: 1,
+            lxmf_read: 1,
+            ..CombinedPortCalls::default()
+        }
+    );
+}
+
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[test]
+fn combined_lxmf_empty_unavailable_and_port_failures_map_closed() {
+    let handle = api::LxmfMessageHandle::new(7).unwrap();
+    let request = DeviceRequest::LxmfNext {
+        after: Some(handle),
+    };
+    let mut empty = FakeCombinedPort::with_lxmf(None, None);
+    let response = super::dispatch_with_inbox_and_lxmf(
+        &mut empty,
+        identity_summary(),
+        &authenticated(1, Permissions::NONE),
+        envelope(225, request),
+    );
+    assert_eq!(error_code(response.response), ApiErrorCode::NotFound);
+
+    let mut disabled = FakeCombinedPort::with_lxmf(None, None);
+    disabled.lxmf_availability = CapabilityAvailability::Disabled;
+    let response = super::dispatch_with_inbox_and_lxmf(
+        &mut disabled,
+        identity_summary(),
+        &authenticated(1, Permissions::NONE),
+        envelope(226, request),
+    );
+    assert_eq!(
+        error_code(response.response),
+        ApiErrorCode::CapabilityUnavailable
+    );
+    assert_eq!(disabled.calls.lxmf_next, 0);
+
+    for (port_error, api_error) in [
+        (
+            LxmfInboxPortError::Unavailable,
+            ApiErrorCode::CapabilityUnavailable,
+        ),
+        (
+            LxmfInboxPortError::InvalidRequest,
+            ApiErrorCode::InvalidRequest,
+        ),
+        (LxmfInboxPortError::Busy, ApiErrorCode::Internal),
+        (LxmfInboxPortError::Backend, ApiErrorCode::Internal),
+        (LxmfInboxPortError::Binding, ApiErrorCode::Internal),
+        (LxmfInboxPortError::Faulted, ApiErrorCode::Internal),
+    ] {
+        let mut port = FakeCombinedPort::with_lxmf(None, None);
+        port.lxmf_next = Err(port_error);
+        let response = super::dispatch_with_inbox_and_lxmf(
+            &mut port,
+            identity_summary(),
+            &authenticated(1, Permissions::NONE),
+            envelope(227, request),
+        );
+        assert_eq!(error_code(response.response), api_error);
+    }
+}
+
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+fn basic_lxmf_send_request() -> DeviceRequest<'static> {
+    DeviceRequest::LxmfBasicSend {
+        destination: ApiDestinationHash([0x28; 16]),
+        timestamp_unix_ms: 1_753_141_234_567,
+        title: b"title",
+        content: b"content",
+        idempotency_key: ApiIdempotencyKey([0x38; 16]),
+    }
+}
+
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[test]
+fn combined_basic_lxmf_send_derives_provenance_and_enters_only_compose_port() {
+    let permissions =
+        Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA | Permissions::READ_SUBMISSION_STATUS;
+    for acceptance in [
+        SubmissionAcceptance::Accepted(SubmissionId::new(41)),
+        SubmissionAcceptance::Replay(SubmissionId::new(41)),
+    ] {
+        let mut port = FakeCombinedPort::with_lxmf(None, None);
+        port.compose_result = Ok(LxmfComposeAcceptance::new(acceptance, [0x67; 32]));
+        let response = super::dispatch_with_inbox_and_lxmf(
+            &mut port,
+            identity_summary(),
+            &authenticated(5, permissions),
+            envelope(228, basic_lxmf_send_request()),
+        );
+        assert_eq!(
+            response.response,
+            DeviceResponse::LxmfBasicSendAccepted(api::LxmfBasicSendAccepted::new(
+                ApiSubmissionId(41),
+                [0x67; 32],
+            ))
+        );
+        assert_eq!(
+            port.calls,
+            CombinedPortCalls {
+                compose_availability: 1,
+                compose_and_accept: 1,
+                ..CombinedPortCalls::default()
+            }
+        );
+        assert_eq!(
+            port.observed_compose,
+            Some(ObservedLxmfComposeRequest {
+                principal: PrincipalId::new([5; 16]),
+                destination: DestinationHash::new([0x28; 16]),
+                timestamp_unix_ms: 1_753_141_234_567,
+                title: b"title".to_vec(),
+                content: b"content".to_vec(),
+                idempotency_key: IdempotencyKey::new([0x38; 16]),
+                authorization: durable_authorization_with_permissions(5, permissions.bits()),
+            })
+        );
+    }
+}
+
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[test]
+fn combined_basic_lxmf_send_rejects_auth_and_version_before_every_port_call() {
+    let cases = [
+        (
+            DispatchContext::UNAUTHENTICATED,
+            ApiVersion::CURRENT,
+            ApiErrorCode::AuthenticationRequired,
+        ),
+        (
+            authenticated(6, Permissions::NONE),
+            ApiVersion::CURRENT,
+            ApiErrorCode::PermissionDenied,
+        ),
+        (
+            authenticated(6, Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA),
+            ApiVersion {
+                major: ApiVersion::CURRENT.major + 1,
+                minor: 0,
+            },
+            ApiErrorCode::UnsupportedVersion,
+        ),
+    ];
+    for (context, version, expected) in cases {
+        let mut port = FakeCombinedPort::with_lxmf(None, None);
+        let response = super::dispatch_with_inbox_and_lxmf(
+            &mut port,
+            identity_summary(),
+            &context,
+            RequestEnvelope {
+                version,
+                request_id: RequestId(229),
+                request: basic_lxmf_send_request(),
+            },
+        );
+        assert_eq!(error_code(response.response), expected);
+        assert_eq!(port.calls, CombinedPortCalls::default());
+        assert_eq!(port.observed_compose, None);
+    }
+}
+
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[test]
+fn combined_basic_lxmf_send_maps_unavailability_and_closed_port_errors() {
+    let context = authenticated(7, Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA);
+    let mut disabled = FakeCombinedPort::with_lxmf(None, None);
+    disabled.compose_availability = CapabilityAvailability::Disabled;
+    let response = super::dispatch_with_inbox_and_lxmf(
+        &mut disabled,
+        identity_summary(),
+        &context,
+        envelope(230, basic_lxmf_send_request()),
+    );
+    assert_eq!(
+        error_code(response.response),
+        ApiErrorCode::CapabilityUnavailable
+    );
+    assert_eq!(disabled.calls.compose_availability, 1);
+    assert_eq!(disabled.calls.compose_and_accept, 0);
+    assert_eq!(disabled.calls.submission_accept, 0);
+
+    for (port_error, api_error) in [
+        (
+            LxmfComposePortError::Unavailable,
+            ApiErrorCode::CapabilityUnavailable,
+        ),
+        (
+            LxmfComposePortError::InvalidRequest,
+            ApiErrorCode::InvalidRequest,
+        ),
+        (LxmfComposePortError::Busy, ApiErrorCode::Internal),
+        (LxmfComposePortError::Backend, ApiErrorCode::Internal),
+        (LxmfComposePortError::Binding, ApiErrorCode::Internal),
+        (LxmfComposePortError::Faulted, ApiErrorCode::Internal),
+        (LxmfComposePortError::Invariant, ApiErrorCode::Internal),
+    ] {
+        let mut port = FakeCombinedPort::with_lxmf(None, None);
+        port.compose_result = Err(port_error);
+        let response = super::dispatch_with_inbox_and_lxmf(
+            &mut port,
+            identity_summary(),
+            &context,
+            envelope(231, basic_lxmf_send_request()),
+        );
+        assert_eq!(error_code(response.response), api_error);
+        assert_eq!(port.calls.compose_and_accept, 1);
+        assert_eq!(port.calls.submission_accept, 0);
+    }
+}
+
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[test]
+fn combined_basic_lxmf_send_maps_durable_acceptance_outcomes() {
+    for (acceptance, expected) in [
+        (
+            SubmissionAcceptance::IdempotencyConflict,
+            ApiErrorCode::IdempotencyConflict,
+        ),
+        (
+            SubmissionAcceptance::CapacityExhausted,
+            ApiErrorCode::CapacityExhausted,
+        ),
+        (
+            SubmissionAcceptance::IdentifierExhausted,
+            ApiErrorCode::Internal,
+        ),
+    ] {
+        let mut port = FakeCombinedPort::with_lxmf(None, None);
+        port.compose_result = Ok(LxmfComposeAcceptance::new(acceptance, [0x68; 32]));
+        let response = super::dispatch_with_inbox_and_lxmf(
+            &mut port,
+            identity_summary(),
+            &authenticated(8, Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA),
+            envelope(232, basic_lxmf_send_request()),
+        );
+        assert_eq!(error_code(response.response), expected);
+        assert_eq!(port.calls.compose_and_accept, 1);
+        assert_eq!(port.calls.submission_accept, 0);
     }
 }
 

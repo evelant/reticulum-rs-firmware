@@ -1,5 +1,6 @@
 extern crate std;
 
+use core::mem::MaybeUninit;
 use rand_core::{CryptoRng, RngCore};
 use reticulum_node_core::{
     AttemptOutcome, DestinationHash as NodeDestinationHash, InterfaceSet, MonotonicMillis,
@@ -20,7 +21,7 @@ use reticulum_storage_model::{
     AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA,
     AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS, AuthorizationSnapshot, DestinationHash,
     ExperimentalRnsDataIntent, FinalDisposition, IdempotencyKey, InternalFailure, InterruptedState,
-    LifecycleState, PrincipalId, SubmissionFailure, SubmissionReplay,
+    LifecycleState, PrincipalId, SubmissionFailure, SubmissionIndex, SubmissionReplay,
 };
 use reticulum_submission_projector::{
     AcknowledgementKind, AcknowledgementReply, PersistenceReply, PreparedFrameObservation,
@@ -364,6 +365,47 @@ fn mount_is_the_only_service_entry_and_completes_replay() {
     assert_eq!(actor.index().next_id(), Some(SubmissionId::new(7)));
     assert_eq!(actor.pending_kind(), None);
     assert_eq!(actor.fault(), None);
+}
+
+#[test]
+fn mount_into_initializes_the_exact_caller_destination_after_complete_replay() {
+    let mut destination = MaybeUninit::<StorageActor<2, 1>>::uninit();
+    let destination_address = destination.as_mut_ptr();
+    let mut journal = bound(FakeNor::formatted());
+
+    let actor =
+        StorageActor::<2, 1>::mount_into(&mut destination, &mut journal, SubmissionId::new(11))
+            .unwrap();
+
+    assert_eq!(core::ptr::from_mut(actor), destination_address);
+    assert_eq!(actor.binding(), test_binding());
+    assert_eq!(actor.state().committed_records(), 0);
+    assert_eq!(actor.index().next_id(), Some(SubmissionId::new(11)));
+    assert_eq!(actor.pending_kind(), None);
+    assert_eq!(actor.fault(), None);
+}
+
+#[test]
+fn mount_into_error_leaves_the_destination_available_for_a_later_mount() {
+    assert!(!core::mem::needs_drop::<SubmissionIndex<2>>());
+    assert!(!core::mem::needs_drop::<SubmissionProjector<1>>());
+    assert!(!core::mem::needs_drop::<StorageActor<2, 1>>());
+    let mut destination = MaybeUninit::<StorageActor<2, 1>>::uninit();
+    let destination_address = destination.as_mut_ptr();
+    let mut unformatted = bound(FakeNor::erased());
+
+    assert!(matches!(
+        StorageActor::<2, 1>::mount_into(&mut destination, &mut unformatted, SubmissionId::new(12),),
+        Err(MountError::Fault(StorageFault::UnformattedErased))
+    ));
+
+    let mut formatted = bound(FakeNor::formatted());
+    let actor =
+        StorageActor::<2, 1>::mount_into(&mut destination, &mut formatted, SubmissionId::new(12))
+            .unwrap();
+
+    assert_eq!(core::ptr::from_mut(actor), destination_address);
+    assert_eq!(actor.index().next_id(), Some(SubmissionId::new(12)));
 }
 
 #[test]

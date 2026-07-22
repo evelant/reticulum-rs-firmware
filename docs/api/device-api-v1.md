@@ -1,13 +1,15 @@
 # Device API v1 logical protocol
 
-Status: API 1.2 logical codec and portable authenticated dispatch implemented
-over separate narrow durable-submission and read-only inbound-mailbox ports.
+Status: API 1.4 logical codec and portable authenticated dispatch implemented
+over one operation-scoped owner exposing narrow durable-submission, raw-inbox,
+committed-LXMF-read, and source-free basic-LXMF-compose ports.
 This document freezes the operation and field numbers exercised by
 `reticulum-device-api`; `reticulum-device-api-adapter` implements capabilities,
 the public primary-destination summary, and principal-scoped submission status
-in its default build, target-safe durable experimental outbound RNS DATA
-submission behind one explicit feature, and the experimental raw-RNS inbox
-status/peek operations behind another. Separate portable
+in its default build. It adds target-safe durable experimental outbound RNS DATA
+submission behind `experimental-rns-data`, experimental raw-RNS inbox
+status/peek behind `experimental-rns-inbox`, and committed-LXMF next/read plus
+source-free basic send behind `experimental-lxmf`. Separate portable
 framing, immutable credential-authority, USB-
 qualification session and boot-lifetime authenticated-job handoff crates now
 exist. The session core emits only a credential ID/generation grant; the
@@ -53,13 +55,14 @@ permanent graph now also instantiates the feature-free session and handoff
 crates, a static depth-one authenticated request/reply handoff, and a separate
 node-side dispatch lane. That lane revalidates every opaque grant against the
 currently publishable authority and synchronously invokes the logical adapter
-through disjoint submission and read-only inbox port views, both isolated from
-credential ownership. The USB
-task now composes the deliberately minimal first bearer: one authenticated
-handshake per connection, one request in flight, and terminal fault handling
-until USB reset or re-enumeration. It intentionally defers resumption, protocol
-retries, close records, encryption, rate limiting/attempt policy, repeated
-handshake attempts, and concurrency. Admission and node dispatch are
+through one operation-scoped semantic port owner isolated from credential
+ownership. The USB
+task now composes the deliberately minimal first bearer: one active session,
+one request in flight, idle ClientHello replacement into a fresh session epoch
+on the same connection, and terminal fault handling until USB reset or
+re-enumeration. Replacement never displaces request/reply owners. It
+intentionally defers resumption, protocol retries, close records, encryption,
+rate limiting/attempt policy, and concurrency. Admission and node dispatch are
 transport-neutral so later BLE and Wi-Fi bearers can reach the same lane after
 their currently disabled session bindings/suites are implemented and qualified.
 Powered E290 qualification now covers authenticated capabilities and identity
@@ -73,7 +76,15 @@ data. API 1.2 additionally has bounded powered evidence for one maximum-size
 commit, authenticated status/peek before and after hard reset, exact raw
 readback, and drop-newest preservation. Bounded powered software-fault
 isolation now covers mount rejection and one same-boot commit failure as
-described below; controlled physical cuts remain open.
+described below. API 1.3 adds committed LXMF enumeration/readback and the
+optional public `lxmf.delivery` destination; API 1.4 adds source-free basic
+LXMF composition and durable submission. The
+[2026-07-22 API 1.4 POC](../e290-api14-lxmf-poc.md) powered-qualified same-boot
+bidirectional send, Reticulum delivery proof, peer commit, enumeration, and
+digest-verified readback on the E290 pair. Its final audited image also retained
+both terminal sender records and both exact receiver wires across a physical
+CPU reset. Controlled electrical power cuts and broader carrier/client behavior
+remain open.
 
 ## Boundary
 
@@ -96,12 +107,14 @@ separately derive the trusted `DispatchContext` and validated
 provenance, or session assertion is accepted from CBOR input.
 
 `reticulum-device-api-adapter` is the separate allocation-free `no_std`
-dispatcher over a narrow `SubmissionPort` and, when enabled, a separate
-`InboundMailboxPort`. The submission port exposes only runtime availability,
-principal-scoped status, and durable acceptance. The inbox port exposes only
-availability, bounded status, and an owned copy of the oldest item; neither port
-exposes mutation or physical storage. Their product implementations retain every
-storage actor, operation-scoped view, and physical backend.
+dispatcher over narrow semantic ports. `SubmissionPort` exposes only runtime
+availability, principal-scoped status, and durable acceptance;
+`InboundMailboxPort` exposes bounded raw-inbox reads; `LxmfInboxPort` exposes
+commit-order metadata and bounded exact-wire chunks; and `LxmfComposePort`
+atomically composes with the device-owned source and durably accepts the exact
+carrier. None exposes raw physical storage, a radio, or private identity
+material. The E290 combines these traits on one operation-scoped value so its
+sole flash owner is never mutably aliased.
 The adapter repeats major-version validation,
 applies the codec's authorization policy to trusted context, always emits the
 current response version, echoes the request ID, and performs no direct flash,
@@ -117,9 +130,11 @@ no volatile fallback. Public capabilities remain available in either condition.
 
 ## Version and evolution rules
 
-The initial version was `1.0`; version `1.1` added `identity.summary`; the
-current version is `1.2`, which adds optional raw-RNS inbox capability fields
-and feature-gated experimental status/peek operations. A decoder accepts major
+The initial version was `1.0`; version `1.1` added `identity.summary`; version
+`1.2` added optional raw-RNS inbox capability fields and feature-gated
+status/peek; version `1.3` added optional `lxmf.delivery` identity metadata and
+bounded committed-LXMF reads; and the current version is `1.4`, adding
+source-free basic LXMF submission. A decoder accepts major
 version 1 with any minor version, skips unknown numeric map fields, and rejects
 another major version.
 Encoding an envelope with another major version fails with the typed
@@ -158,13 +173,19 @@ operation body or one unknown field value to eight levels.
 | body/unknown-value container or tag nesting | 8 levels | strict allocation-free skip/validation |
 | experimental outbound RNS DATA payload | 383 bytes | encode and decode |
 | experimental inbound RNS inbox payload | 383 bytes | encode and decode |
+| experimental LXMF read chunk | 416 bytes | request length and response construction |
+| basic LXMF title | 295 bytes | encode and decode; body and composer limits still apply |
+| basic LXMF content | 295 bytes | encode and decode; body and composer limits still apply |
 | destination hash | 16 bytes | decode |
 | idempotency key | 16 bytes | decode |
 | encoded-packet SHA-256 | 32 bytes | decode |
 
-The shared 383-byte ceiling matches the current Rete encrypted `SINGLE` DATA
-boundary. It is not a promise that either raw-RNS operation or the qualification
-record will become the product LXMF API or message-store format.
+The shared 383-byte ceiling matches the generic Rete encrypted destination-DATA
+boundary used by raw submission and the raw-RNS qualification inbox. It is not
+a promise that either operation or record will become the product LXMF API or
+message-store format. The dedicated Header-1 opportunistic LXMF path can carry
+up to 391 carrier bytes; basic send's current generic durable intent does not
+yet expose that full range.
 
 ## Common envelope
 
@@ -190,14 +211,22 @@ authorization credential.
 | `0xf001` | `experimental.submit_rns_data` | feature-gated experimental | authenticated + `EXPERIMENTAL_SUBMIT_RNS_DATA` |
 | `0xf002` | `experimental.rns_inbox.status` | feature-gated experimental | authenticated principal; no permission bit |
 | `0xf003` | `experimental.rns_inbox.peek` | feature-gated experimental | authenticated principal; no permission bit |
+| `0xf004` | `experimental.lxmf.next` | feature-gated experimental | authenticated principal; no permission bit |
+| `0xf005` | `experimental.lxmf.read` | feature-gated experimental | authenticated principal; no permission bit |
+| `0xf006` | `experimental.lxmf.basic_send` | feature-gated experimental | authenticated + `EXPERIMENTAL_SUBMIT_RNS_DATA` |
 
 Numbers `0xf000..=0xffff` are experimental and can disappear or change without
 API compatibility. `0xf001` is compiled only with the target-safe
 `experimental-rns-data` Cargo feature; `0xf002` and `0xf003` are compiled only
-with `experimental-rns-inbox`. A build without the corresponding feature
-returns `UnsupportedOperation`. The adapter mirrors both feature boundaries.
-Its capability response restricts the codec snapshot to the adapter's own
-compiled operations and each port's runtime availability, so Cargo feature
+with `experimental-rns-inbox`; and `0xf004` through `0xf006` are compiled only
+with `experimental-lxmf`. A build without the corresponding feature returns
+`UnsupportedOperation`. The adapter mirrors all three feature boundaries.
+`dispatch_with_lxmf` independently exposes LXMF reads and basic send without
+requiring or compiling the raw-RNS qualification mailbox;
+`dispatch_with_inbox_and_lxmf` accepts one owner
+implementing both stores and is compiled only when both corresponding features
+are enabled. Capability responses restrict the codec snapshot to the adapter's
+own compiled operations and each port's runtime availability, so Cargo feature
 unification on another dependency edge cannot make an adapter build advertise
 a missing dispatch arm.
 
@@ -219,6 +248,11 @@ Successful response body:
 | 6 | u16 | yes | maximum experimental payload bytes (383) |
 | 7 | u8 | no | `experimental_rns_inbox`: 0 unavailable, 1 disabled, 2 available |
 | 8 | u16 | no | maximum experimental inbox payload bytes; 383 when implemented, otherwise 0 |
+| 9 | u8 | no | `experimental_lxmf`: committed enumeration/read availability |
+| 10 | u16 | no | maximum exact normalized-wire bytes per LXMF read response; 416 when implemented, otherwise 0 |
+| 11 | u8 | no | `experimental_lxmf_basic_send`: source-free composition/submission availability |
+| 12 | u16 | no | structural per-field basic-LXMF title limit; 295 when implemented, otherwise 0 |
+| 13 | u16 | no | structural per-field basic-LXMF content limit; 295 when implemented, otherwise 0 |
 
 `CapabilitySnapshot::current()` is device-owned and cannot advertise packet
 output or direct-radio TX. Key 2 says nothing about node-owned RNS traffic: an
@@ -226,11 +260,16 @@ accepted request advertised by key 3 may be routed over LoRa or any other
 eligible Reticulum interface without granting a client direct radio control. A
 higher dispatcher uses `CapabilitySnapshot::for_dispatch` to restrict that
 codec-build snapshot; it can disable a capability but cannot enable one omitted
-from the codec build. API 1.2 encoders emit keys 7 and 8. Decoders treat both as
-optional so API 1.0/1.1 capability maps without them decode as inbox unavailable
-with a zero limit. The E290 profile reports key 7 as available only after an
-exact durable inbox mount; a mount fault reports unavailable rather than a
-volatile `durable=false` substitute.
+from the codec build. API 1.2 introduced keys 7 and 8, API 1.3 introduced keys 9
+and 10, and API 1.4 introduced keys 11 through 13. All are optional on decode;
+an older response therefore maps absent capabilities to unavailable with zero
+limits. The E290 reports raw-inbox and committed-LXMF reads only after their
+exact durable stores mount, and reports basic send only when durable submission
+and the local `lxmf.delivery` source are available. Faults disable the affected
+capability rather than inventing a volatile substitute.
+Keys 12 and 13 are independent codec field bounds, not a guarantee that every
+295-byte title/content combination fits the 448-byte request body, Python's
+opportunistic selection rule, or the current product carrier.
 
 ### `identity.summary` (`0x0003`)
 
@@ -242,6 +281,7 @@ Successful response body:
 | Key | Type | Required | Meaning |
 | ---: | --- | --- | --- |
 | 0 | bytes(16) | yes | complete destination hash for the node's primary permanent application destination |
+| 1 | bytes(16) | no | complete local inbound Single `lxmf.delivery` destination hash |
 
 The response is intentionally public, copy-only identity metadata; it contains
 no private key, credential, principal, permission, route, or storage handle. It
@@ -249,7 +289,8 @@ requires no logical operation permission. A physical E290 device-API bearer is
 still authenticated before it carries any logical operation, including this
 one. The adapter receives this scalar from the node owner separately from
 `SubmissionPort`, so the read performs no storage or radio I/O and cannot gain a
-mutable device capability.
+mutable device capability. API 1.3 and later E290 images include key 1 only when
+the durable LXMF service activated and registered that local destination.
 
 ### `submission.status` (`0x0002`)
 
@@ -468,6 +509,125 @@ read the retained item. This intentionally simple developer policy must be
 revisited before a production mailbox, multi-principal messaging, mutation, or
 wireless bearer is enabled.
 
+### `experimental.lxmf.next` (`0xf004`)
+
+This read-only operation enumerates committed normalized LXMF messages in
+physical commit order without returning their title, content, or fields.
+
+Request body:
+
+| Key | Type | Required | Meaning |
+| ---: | --- | --- | --- |
+| 0 | nonzero u64 | no | exclusive stable handle cursor; omit to request the first commit |
+
+Successful response body:
+
+| Key | Type | Required | Meaning |
+| ---: | --- | --- | --- |
+| 0 | nonzero u64 | yes | stable committed-message handle |
+| 1 | bytes(32) | yes | Python-compatible authenticated LXMF message ID |
+| 2 | bytes(16) | yes | local `lxmf.delivery` destination |
+| 3 | bytes(16) | yes | authenticated source `lxmf.delivery` destination |
+| 4 | u64 | yes | exact IEEE-754 bits of the decoded LXMF timestamp |
+| 5 | u32 | yes | complete normalized-wire length |
+| 6 | u32 | yes | decoded title byte length |
+| 7 | u32 | yes | decoded content byte length |
+| 8 | u32 | yes | encoded MessagePack fields-map length |
+| 9 | bytes(32) | yes | SHA-256 of the complete normalized wire bytes |
+
+No commit after the cursor, an empty store, or an unknown/stale cursor returns
+`NotFound`. The handle is logical store identity, not a flash address. It is
+designed to remain stable across reboot and a future compactor.
+
+### `experimental.lxmf.read` (`0xf005`)
+
+Request body:
+
+| Key | Type | Required | Meaning |
+| ---: | --- | --- | --- |
+| 0 | nonzero u64 | yes | committed-message handle from `experimental.lxmf.next` |
+| 1 | u32 | yes | zero-based normalized-wire offset |
+| 2 | u16 | yes | requested maximum bytes, 1 through 416 |
+
+Successful response body:
+
+| Key | Type | Required | Meaning |
+| ---: | --- | --- | --- |
+| 0 | nonzero u64 | yes | echoed handle |
+| 1 | u32 | yes | first returned normalized-wire offset |
+| 2 | u32 | yes | complete normalized-wire length |
+| 3 | bytes(1..416) | yes | exact nonempty committed bytes |
+
+Clients advance by `offset + bytes.len()` until that value equals key 2. They
+must require a stable handle/total length and verify the complete SHA-256 from
+the corresponding summary before using the message. The E290 host client also
+parses the complete normalized wire and cross-checks destination, source,
+timestamp, message ID, and component lengths. An unknown handle returns
+`NotFound`; an out-of-range offset reaches product dispatch and returns
+`InvalidRequest`. A requested length of zero or greater than 416 is structurally
+invalid and is rejected by CBOR decoding before dispatch. Reads do not consume,
+acknowledge, or delete a message.
+
+### `experimental.lxmf.basic_send` (`0xf006`)
+
+This mutation is the first semantic client send path. It selects no radio or
+interface: the accepted RNS DATA intent is routed by the same transport-neutral
+node and can later use LoRa, Wi-Fi, BLE, or another eligible Reticulum link.
+
+Request body:
+
+| Key | Type | Required | Meaning |
+| ---: | --- | --- | --- |
+| 0 | bytes(16) | yes | remote inbound Single `lxmf.delivery` destination |
+| 1 | u64 | yes | Unix timestamp in whole milliseconds, `1..=8_796_093_022_207_999` |
+| 2 | bytes(0..295) | yes | binary title |
+| 3 | bytes(0..295) | yes | binary content |
+| 4 | bytes(16) | yes | principal-scoped idempotency key |
+
+There is deliberately no source field. The device uses its registered inbound
+Single `lxmf.delivery` destination and resident private identity to construct
+and sign the Python-compatible basic message. The first subset has an empty
+fields map, no stamp, and opportunistic delivery. The codec accepts the
+timestamp as an unsigned integer; the E290 product composer rejects zero and
+values above `8_796_093_022_207_999`, the exact positive whole-millisecond
+binary64 subset. It also rejects title/content combinations above Python LXMF's
+opportunistic content-size boundary. Empty title and empty content together are
+valid and match the canonical Python vector. The 448-byte encoded-body limit
+also applies to the combination even though keys 2 and 3 each have a 295-byte
+structural field limit.
+
+Successful response body:
+
+| Key | Type | Required | Meaning |
+| ---: | --- | --- | --- |
+| 0 | u64 | yes | durable submission ID, queryable through `submission.status` |
+| 1 | bytes(32) | yes | Python-compatible authenticated LXMF message ID |
+
+The product composer creates the exact signed carrier before invoking durable
+acceptance. Composition failure, unavailable local source, or a carrier that
+does not fit the current durable intent performs no acceptance write. A
+successful reply means that exact carrier and destination are durably queued;
+it does not mean the peer has received it. `lxmf-send-and-wait` follows key 0
+through `submission.status` until delivery or a terminal failure.
+
+Idempotency uses the authenticated principal plus key 4. An exact retry must
+retain destination, timestamp, title, content, and key; it returns the original
+submission and message IDs without adding a record. Reusing the key with
+different semantic content returns `IdempotencyConflict`. The current generic
+durable intent stores at most 383 carrier bytes, so the E290 POC rejects a
+prepared carrier from 384 through Python's 391-byte opportunistic maximum.
+That is a recorded implementation gap, not the intended product feature
+ceiling.
+
+The current E290 PSRAM profile retains 128 accepted submissions without
+terminal reclamation. Its 129th novel request returns `CapacityExhausted`
+without a write, while an exact retry of any retained idempotency key still
+returns the original IDs at capacity. The physical journal separately reserves
+at most 162 complete submission lifetimes. This is a bounded current profile
+rather than an API-v1 or long-term product ceiling. Earlier one-entry and
+16-entry proof artifacts remain revision-bound; they neither set the current
+limit nor constitute powered qualification of a 128-entry fill.
+
 ### Powered inbox fault-isolation evidence
 
 Four powered E290 boots exercised deterministic mount faults: an interrupted
@@ -536,7 +696,12 @@ framing rules.
 - experimental outbound RNS DATA submission requires an authenticated principal
   and `EXPERIMENTAL_SUBMIT_RNS_DATA`;
 - experimental RNS inbox status and peek require an authenticated principal but
-  no persisted permission bit in API 1.2.
+  no persisted permission bit;
+- experimental LXMF next/read require an authenticated principal but no
+  persisted permission bit;
+- experimental basic LXMF send requires an authenticated principal and reuses
+  `EXPERIMENTAL_SUBMIT_RNS_DATA` until a future stable messaging policy is
+  designed.
 
 The logical codec can represent an unauthenticated context for internal callers
 and policy tests. ADR 0006's physical device-API bearers are stricter: every
@@ -546,8 +711,10 @@ pending or revoked credential is never converted to
 
 Authentication, ownership filtering, rate limiting, idempotency scope, physical
 presence, and high-assurance session encryption are not solved by this codec.
-The inbox's shared authenticated-principal read policy is qualification policy,
-not a general authorization decision for later LXMF messages.
+The inbox and LXMF store's shared authenticated-principal read policy is global:
+any authenticated principal can read the retained LXMF messages, with no
+per-principal mailbox ACL. This is POC policy, not a general authorization
+decision for later multi-user messaging.
 The portable adapter scopes status and experimental-operation idempotency by the
 principal from `DispatchContext`, never by bytes supplied in a request. The
 portable session core deliberately emits only a credential ID/generation grant.
@@ -559,8 +726,9 @@ moved out, but trusted linked code can reconstruct equivalent scalar facts with
 the public constructor. Immediate dispatch, no unauthenticated fallback and no
 port call after rejection remain composition rules, not an unforgeable Rust
 capability. The permanent E290 node now follows them: the resident credential
-runtime revalidates current authority, then credential-disjoint submission and
-read-only inbox port views are borrowed only for synchronous adapter dispatch.
+runtime revalidates current authority, then borrows one credential-disjoint,
+operation-scoped owner implementing submission, raw-inbox, LXMF-read, and
+LXMF-compose ports only for synchronous adapter dispatch.
 Revalidation failure returns the generic authentication-required response with
 zero port I/O; it never constructs an unauthenticated context. Principal and
 permissions come from the exact active record. Live authority
@@ -588,24 +756,25 @@ returns the original ID and retains the original evidence. See
 
 ## Golden vectors
 
-The canonical API 1.2 `system.capabilities` request for request ID 42 is:
+The canonical API 1.4 `system.capabilities` request for request ID 42 uses minor
+byte `04` and is:
 
 ```text
-a4 00 a2 00 01 01 02 01 18 2a 02 01 03 a0
+a4 00 a2 00 01 01 04 01 18 2a 02 01 03 a0
 ```
 
-The canonical API 1.2 `identity.summary` request for request ID 42 is:
+The canonical API 1.4 `identity.summary` request for request ID 42 is:
 
 ```text
-a4 00 a2 00 01 01 02 01 18 2a 02 03 03 a0
+a4 00 a2 00 01 01 04 01 18 2a 02 03 03 a0
 ```
 
-The wire tests freeze these requests, the identity response, all feature
-compositions of the nine-field API 1.2 capability response, API 1.0/1.1 maps
-with absent inbox keys, typed permission/capacity/idempotency error responses,
-the experimental submission request and accepted response, and exact
-`0xf002`/`0xf003` inbox status/peek vectors, including rejection of a zero inbox
-item ID.
+The wire tests freeze these requests, both identity-response forms, all feature
+compositions of the fourteen-field API 1.4 capability response, older maps with
+absent optional capability fields, typed permission/capacity/idempotency error
+responses, raw submission request/acceptance, exact `0xf002`/`0xf003` inbox
+vectors, exact `0xf004`/`0xf005` LXMF list/read vectors, and source-free
+`0xf006` request/acceptance vectors.
 They also cover every submission failure, state invariants, closed numeric
 enums, unknown fields, unknown operations, missing and duplicate known fields,
 every truncated golden prefix, trailing bytes,
@@ -631,6 +800,10 @@ cargo clippy --locked -p reticulum-device-api --all-targets \
 cargo test --locked -p reticulum-device-api --features experimental-rns-inbox
 cargo clippy --locked -p reticulum-device-api --all-targets \
   --features experimental-rns-inbox -- -D warnings
+
+cargo test --locked -p reticulum-device-api --features experimental-lxmf
+cargo clippy --locked -p reticulum-device-api --all-targets \
+  --features experimental-lxmf -- -D warnings
 
 cargo test --locked -p reticulum-device-api --all-features
 cargo clippy --locked -p reticulum-device-api --all-targets \
@@ -661,6 +834,10 @@ cargo test --locked -p reticulum-device-api-adapter --features experimental-rns-
 cargo clippy --locked -p reticulum-device-api-adapter --all-targets \
   --features experimental-rns-inbox -- -D warnings
 
+cargo test --locked -p reticulum-device-api-adapter --features experimental-lxmf
+cargo clippy --locked -p reticulum-device-api-adapter --all-targets \
+  --features experimental-lxmf -- -D warnings
+
 cargo test --locked -p reticulum-device-api-adapter --all-features
 cargo clippy --locked -p reticulum-device-api-adapter --all-targets \
   --all-features -- -D warnings
@@ -674,6 +851,11 @@ cargo test --locked -p reticulum-device-api-adapter \
   --features reticulum-device-api/experimental-rns-inbox
 cargo clippy --locked -p reticulum-device-api-adapter --all-targets \
   --features reticulum-device-api/experimental-rns-inbox -- -D warnings
+
+cargo test --locked -p reticulum-device-api-adapter \
+  --features reticulum-device-api/experimental-lxmf
+cargo clippy --locked -p reticulum-device-api-adapter --all-targets \
+  --features reticulum-device-api/experimental-lxmf -- -D warnings
 
 cargo +esp check --locked --release -p reticulum-device-api-adapter \
   --all-features --target xtensa-esp32s3-none-elf
@@ -726,8 +908,9 @@ python3 interop/python/generate_device_api_pairing_vectors.py --check
 python3 interop/python/test_device_api_pairing_vectors.py
 ```
 
-These checks pass. The dependency-only experimental profile proves feature
-unification cannot advertise an adapter-local operation that is absent. The
+Together these required gates prove that feature unification cannot make a
+dependency-only experimental profile advertise an adapter-local operation that
+is absent. The
 adapter's focused tests cover exact authorization and zero-port-call rejection,
 request context, version/capability behavior, principal isolation, every durable
 lifecycle mapping, maximum-size owned-payload acceptance/replay/conflict,
@@ -736,7 +919,10 @@ faulted and pending status gating, wrong-binding rejection without I/O, and
 lost-write reconciliation. Its inbox profile separately covers authentication
 before either port, no-permission-bit reads, disjoint port dispatch, available/
 disabled/faulted capability mapping, empty `NotFound`, and an owned maximum-size
-peek response. The session crate now exposes both server and public
+peek response. The standalone LXMF profile proves that `dispatch_with_lxmf`
+needs no raw-inbox feature or port; the combined profile proves that
+`dispatch_with_inbox_and_lxmf` invokes only the selected method on its single
+flash-capable owner. The session crate now exposes both server and public
 allocation-free `no_std` client typestates. Its tests and the live-pairing tests
 plus their independent Python vectors cover canonical hello/proof derivation,
 direction-separated record tags, downgrade/reflection/replay/generation/reset
@@ -746,18 +932,17 @@ shapes, and secret-owner drop behavior. Target checks exercise the portable
 layers directly on `no_std` bare-metal builds.
 
 The separate permanent-E290 composition gate now covers the static depth-one
-authenticated handoff, current-authority node dispatch through the disjoint
-submission and inbox-port views, retained reply pressure, and terminal malformed-owner
-quarantine in addition to the third USB/GPIO task,
+authenticated handoff, current-authority node dispatch through the combined
+submission/raw-inbox/LXMF-read/LXMF-compose owner, retained reply pressure, and
+terminal malformed-owner quarantine in addition to the third USB/GPIO task,
 active-low stable-time debounce, an 8 ms missed-SOF suspension that retains its
 epoch and sequence until bus reset, connection-epoch and sequence exhaustion,
 duplicate/gap rejection, depth-one pressure, exact durable reply correlation,
 causal control/live ordering, and node-owned status/initialize plus live-
 pairing dispatch. The API 1.2 inbox assertions in that composition gate are
 source/host evidence; the separate E290 runbook records the bounded powered
-commit/readback/reset/drop-newest run. Current exact suite totals are recorded
-there as well; the earlier authenticated-node-
-foundation release image predates the minimal bearer.
+commit/readback/reset/drop-newest run. The earlier authenticated-node-foundation
+release image predates the minimal bearer.
 Button/control arbitration is bounded. A stable High transition is latched
 before a later Low; a raw-sample gap of at least 20 ms cancels a possible hold
 and suppresses Low until a fresh debounced High. Once every response byte enters

@@ -14,12 +14,16 @@ conformance = []
 [dependencies]
 reticulum-rns-conformance = { path = "../rns-conformance" }
 rete-core.workspace = true
+rete-lxmf-core.workspace = true
 rete-stack = { workspace = true, features = ["alloc"] }
 rete-transport.workspace = true
 rand_core.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lib]
 path = "src/lib.rs"

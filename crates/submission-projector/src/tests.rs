@@ -23,6 +23,11 @@ type TestNode = NodeCore<4, 2, 8, 2, 1>;
 
 const TEST_PERMIT_RESOURCE: TxPermitResourceId = TxPermitResourceId::new([0x50; 16]);
 
+#[test]
+fn in_place_projector_is_explicitly_no_drop() {
+    assert!(!core::mem::needs_drop::<SubmissionProjector<128>>());
+}
+
 fn test_permit_requirements() -> TxPermitRequirements {
     TxPermitRequirements::try_new(TEST_PERMIT_RESOURCE, 1)
         .expect("test permit units must be nonzero")

@@ -931,8 +931,14 @@ fn receive_usb_request(
             | DecodeEvent::MalformedRecord(_)
             | DecodeEvent::Overflow => false,
         },
-        UsbAuthenticatedSessionPhase::PendingClientProof
-        | UsbAuthenticatedSessionPhase::Established => {
+        UsbAuthenticatedSessionPhase::PendingClientProof => {
+            let result =
+                authenticated_session.accept_decode_event(event, pairing_time(context.now_millis));
+            !matches!(result, Ok(UsbSessionRxDisposition::Pending))
+        }
+        UsbAuthenticatedSessionPhase::Established => {
+            // An idle session remains readable so a freshly opened host can
+            // replace it with a canonical ClientHello on this enumeration.
             let result =
                 authenticated_session.accept_decode_event(event, pairing_time(context.now_millis));
             !matches!(result, Ok(UsbSessionRxDisposition::Pending))
@@ -1305,6 +1311,8 @@ fn synchronize_tx_epoch(
 }
 
 const fn authenticated_rx_enabled(phase: UsbAuthenticatedSessionPhase) -> bool {
+    // In-flight request/reply phases are deliberately absent. A replacement
+    // hello cannot be consumed until the exact authenticated owner completes.
     matches!(
         phase,
         UsbAuthenticatedSessionPhase::AwaitingClientHello

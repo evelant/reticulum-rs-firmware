@@ -3,12 +3,12 @@
 use std::{
     fmt::Write as _,
     fs::File,
-    io::{self, Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     num::NonZeroU32,
     path::{Path, PathBuf},
     process::ExitCode,
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(unix)]
@@ -16,7 +16,9 @@ use std::fs::OpenOptions;
 
 use rand_core::{CryptoRng, RngCore};
 use reticulum_device_api::{
-    ApiVersion, DestinationHash, DeviceRequest, DeviceResponse, IdempotencyKey, MAX_MESSAGE_BYTES,
+    ApiVersion, DestinationHash, DeviceRequest, DeviceResponse, IdempotencyKey, LxmfMessageHandle,
+    LxmfMessageSummary, LxmfReadChunk, LxmfReadLength, MAX_LXMF_BASIC_CONTENT_BYTES,
+    MAX_LXMF_BASIC_TITLE_BYTES, MAX_LXMF_READ_CHUNK_BYTES, MAX_MESSAGE_BYTES,
     MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES, RequestEnvelope, RequestId, SubmissionFailure, SubmissionId,
     SubmissionState, decode_response, encode_request,
 };
@@ -26,6 +28,7 @@ use reticulum_device_api_session::{
     BearerBinding, ClientCredential, ClientHelloFlight, ClientParameters, ClientProofFlight,
     ClientRequestFlight, ClientSession, DeviceId,
 };
+use reticulum_lxmf_wire::{MessageView, WireLimits};
 use serde::{Deserialize, Serialize};
 use serialport::ClearBuffer;
 use sha2::{Digest, Sha256};
@@ -40,6 +43,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const OPEN_SETTLE_MS: u64 = 250;
 const IO_SLICE_MS: u64 = 100;
 const READ_BUFFER_CAPACITY: usize = 1_024;
+// Exact downloads are streamed without this ceiling; only the optional
+// in-memory structural projection is capped.
+const MAX_LXMF_HOST_PARSE_BYTES: usize = 16 * 1024 * 1024;
+const LXMF_HOST_MAX_NESTING_DEPTH: usize = 16;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 enum EvidenceSchema {
@@ -109,6 +116,25 @@ enum Command {
     RnsInboxPeek {
         output: PathBuf,
     },
+    LxmfList,
+    LxmfRead {
+        handle: LxmfMessageHandle,
+        output: PathBuf,
+    },
+    LxmfSend {
+        destination: DestinationHash,
+        timestamp_unix_ms: u64,
+        title: Vec<u8>,
+        content: Vec<u8>,
+        idempotency_key: IdempotencyKey,
+    },
+    LxmfSendAndWait {
+        destination: DestinationHash,
+        timestamp_unix_ms: u64,
+        title: Vec<u8>,
+        content: Vec<u8>,
+        idempotency_key: IdempotencyKey,
+    },
     SubmissionStatus {
         id: SubmissionId,
     },
@@ -130,6 +156,10 @@ enum CommandKind {
     IdentitySummary,
     RnsInboxStatus,
     RnsInboxPeek,
+    LxmfList,
+    LxmfRead,
+    LxmfSend,
+    LxmfSendAndWait,
     SubmissionStatus,
     SubmitRnsData,
     SubmitAndWait,
@@ -167,6 +197,49 @@ enum WaitDecision {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ParsedLxmfMetadata {
+    title_sha256: [u8; 32],
+    content_sha256: [u8; 32],
+    title_utf8: bool,
+    content_utf8: bool,
+}
+
+#[derive(Clone, Copy)]
+struct LxmfSendFields<'a> {
+    destination: DestinationHash,
+    timestamp_unix_ms: u64,
+    title: &'a [u8],
+    content: &'a [u8],
+    idempotency_key: IdempotencyKey,
+}
+
+fn lxmf_send_fields(command: &Command) -> Option<LxmfSendFields<'_>> {
+    match command {
+        Command::LxmfSend {
+            destination,
+            timestamp_unix_ms,
+            title,
+            content,
+            idempotency_key,
+        }
+        | Command::LxmfSendAndWait {
+            destination,
+            timestamp_unix_ms,
+            title,
+            content,
+            idempotency_key,
+        } => Some(LxmfSendFields {
+            destination: *destination,
+            timestamp_unix_ms: *timestamp_unix_ms,
+            title,
+            content,
+            idempotency_key: *idempotency_key,
+        }),
+        _ => None,
+    }
+}
+
 struct Options {
     port: String,
     state_file: PathBuf,
@@ -188,7 +261,7 @@ impl ReservedOutput {
         use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 
         let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
+        options.read(true).write(true).create_new(true);
         options.mode(0o600);
         let file = options.open(path).map_err(|error| {
             format!(
@@ -224,7 +297,7 @@ impl ReservedOutput {
         ))
     }
 
-    fn commit(mut self, bytes: &[u8]) -> Result<(), String> {
+    fn write_uncommitted(&mut self, bytes: &[u8]) -> Result<(), String> {
         let file = self
             .file
             .as_mut()
@@ -235,7 +308,139 @@ impl ReservedOutput {
                 self.label,
                 self.path.display()
             )
+        })
+    }
+
+    fn read_back_uncommitted(&mut self, expected_len: usize) -> Result<Vec<u8>, String> {
+        let file = self
+            .file
+            .as_mut()
+            .expect("uncommitted reservation must retain its file");
+        file.flush().map_err(|error| {
+            format!(
+                "could not flush {} output {} before validation: {error}",
+                self.label,
+                self.path.display()
+            )
         })?;
+        file.seek(SeekFrom::Start(0)).map_err(|error| {
+            format!(
+                "could not rewind {} output {} for validation: {error}",
+                self.label,
+                self.path.display()
+            )
+        })?;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(expected_len).map_err(|_| {
+            format!(
+                "could not reserve {expected_len} bytes to validate {} output {}",
+                self.label,
+                self.path.display()
+            )
+        })?;
+        bytes.resize(expected_len, 0);
+        file.read_exact(&mut bytes).map_err(|error| {
+            format!(
+                "could not read back complete {} output {} for validation: {error}",
+                self.label,
+                self.path.display()
+            )
+        })?;
+        let mut trailing = [0_u8; 1];
+        match file.read(&mut trailing) {
+            Ok(0) => Ok(bytes),
+            Ok(_) => Err(format!(
+                "{} output {} grew beyond its authenticated length during validation",
+                self.label,
+                self.path.display()
+            )),
+            Err(error) => Err(format!(
+                "could not validate the end of {} output {}: {error}",
+                self.label,
+                self.path.display()
+            )),
+        }
+    }
+
+    fn verify_sha256_uncommitted(
+        &mut self,
+        expected_len: usize,
+        expected_sha256: &[u8; 32],
+    ) -> Result<(), String> {
+        let file = self
+            .file
+            .as_mut()
+            .expect("uncommitted reservation must retain its file");
+        file.flush().map_err(|error| {
+            format!(
+                "could not flush {} output {} before digest verification: {error}",
+                self.label,
+                self.path.display()
+            )
+        })?;
+        file.seek(SeekFrom::Start(0)).map_err(|error| {
+            format!(
+                "could not rewind {} output {} for digest verification: {error}",
+                self.label,
+                self.path.display()
+            )
+        })?;
+        let mut hasher = Sha256::new();
+        let mut remaining = expected_len;
+        let mut buffer = [0_u8; 8 * 1024];
+        while remaining != 0 {
+            let requested = remaining.min(buffer.len());
+            let read = file.read(&mut buffer[..requested]).map_err(|error| {
+                format!(
+                    "could not read back {} output {} for digest verification: {error}",
+                    self.label,
+                    self.path.display()
+                )
+            })?;
+            if read == 0 {
+                return Err(format!(
+                    "{} output {} ended before its authenticated length of {expected_len} bytes",
+                    self.label,
+                    self.path.display()
+                ));
+            }
+            hasher.update(&buffer[..read]);
+            remaining -= read;
+        }
+        let mut trailing = [0_u8; 1];
+        match file.read(&mut trailing) {
+            Ok(0) => {}
+            Ok(_) => {
+                return Err(format!(
+                    "{} output {} grew beyond its authenticated length during digest verification",
+                    self.label,
+                    self.path.display()
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "could not validate the end of {} output {}: {error}",
+                    self.label,
+                    self.path.display()
+                ));
+            }
+        }
+        let actual: [u8; 32] = hasher.finalize().into();
+        if actual != *expected_sha256 {
+            return Err(format!(
+                "{} output {} did not retain the authenticated LXMF SHA-256",
+                self.label,
+                self.path.display()
+            ));
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<(), String> {
+        let file = self
+            .file
+            .as_mut()
+            .expect("uncommitted reservation must retain its file");
         file.sync_all().map_err(|error| {
             format!(
                 "could not sync {} output {}: {error}",
@@ -252,6 +457,11 @@ impl ReservedOutput {
         })?;
         self.committed = true;
         Ok(())
+    }
+
+    fn commit(mut self, bytes: &[u8]) -> Result<(), String> {
+        self.write_uncommitted(bytes)?;
+        self.finish()
     }
 }
 
@@ -285,6 +495,9 @@ enum CommandOutputs {
     SubmitAndWait {
         evidence: Option<ReservedOutput>,
     },
+    LxmfRead {
+        wire: ReservedOutput,
+    },
 }
 
 impl CommandOutputs {
@@ -302,6 +515,12 @@ impl CommandOutputs {
                     .map(|path| ReservedOutput::create(path, "evidence"))
                     .transpose()?;
                 Ok(Self::SubmitAndWait { evidence })
+            }
+            Command::LxmfRead { output, .. } => {
+                debug_assert!(evidence_output.is_none());
+                Ok(Self::LxmfRead {
+                    wire: ReservedOutput::create(output, "LXMF")?,
+                })
             }
             _ => {
                 debug_assert!(evidence_output.is_none());
@@ -321,6 +540,13 @@ impl CommandOutputs {
         match self {
             Self::RnsInboxPeek { payload, evidence } => Ok((payload, evidence)),
             _ => Err("internal output reservation mismatch for rns-inbox-peek".to_owned()),
+        }
+    }
+
+    fn into_lxmf_read(self) -> Result<ReservedOutput, String> {
+        match self {
+            Self::LxmfRead { wire } => Ok(wire),
+            _ => Err("internal output reservation mismatch for lxmf-read".to_owned()),
         }
     }
 }
@@ -540,6 +766,15 @@ fn transact(options: &Options, accepted_output: &mut dyn Write) -> Result<String
         .map_err(|_| "complete client proof did not advance client typestate".to_owned())?;
     let session_id = *session.session_id().as_bytes();
     let mut request_ids = RequestIds::new();
+    if let Some(fields) = lxmf_send_fields(&options.command) {
+        write_lxmf_send_intent(
+            accepted_output,
+            command_name(&options.command),
+            device_id.as_bytes(),
+            &session_id,
+            fields,
+        )?;
+    }
     let request_id = request_ids.take()?;
     let (session, response) = exchange(
         &mut *port,
@@ -551,6 +786,72 @@ fn transact(options: &Options, accepted_output: &mut dyn Write) -> Result<String
         deadline,
     )?;
 
+    if matches!(&options.command, Command::LxmfList) {
+        return continue_lxmf_list(
+            &mut *port,
+            &mut reader,
+            session,
+            &mut request_ids,
+            response,
+            deadline,
+            device_id.as_bytes(),
+            &session_id,
+            accepted_output,
+        );
+    }
+    if let Command::LxmfRead { handle, output } = &options.command {
+        return continue_lxmf_read(
+            &mut *port,
+            &mut reader,
+            session,
+            &mut request_ids,
+            response,
+            deadline,
+            device_id.as_bytes(),
+            &session_id,
+            *handle,
+            output,
+            outputs.into_lxmf_read()?,
+        );
+    }
+    if let Some(fields) = lxmf_send_fields(&options.command) {
+        let accepted = classify_lxmf_send_response(command_name(&options.command), response)?;
+        if matches!(&options.command, Command::LxmfSendAndWait { .. }) {
+            write_lxmf_send_accepted(
+                accepted_output,
+                command_name(&options.command),
+                device_id.as_bytes(),
+                &session_id,
+                accepted,
+                fields,
+            )?;
+            let terminal = wait_for_delivery(
+                &mut *port,
+                &mut reader,
+                session,
+                &mut request_ids,
+                deadline,
+                device_id.as_bytes(),
+                &session_id,
+                accepted.id,
+                None,
+                "lxmf-send-and-wait",
+            )?;
+            return Ok(format!(
+                "{terminal} message_id={} {}",
+                hex(accepted.message_id()),
+                format_lxmf_send_context(fields),
+            ));
+        }
+        drop(session);
+        return Ok(format_lxmf_send_accepted(
+            command_name(&options.command),
+            device_id.as_bytes(),
+            &session_id,
+            accepted,
+            fields,
+        ));
+    }
     if matches!(&options.command, Command::SubmitAndWait { .. }) {
         return continue_submit_and_wait(
             response,
@@ -569,6 +870,7 @@ fn transact(options: &Options, accepted_output: &mut dyn Write) -> Result<String
                     &session_id,
                     submission_id,
                     evidence_output,
+                    "submit-and-wait",
                 )
             },
         );
@@ -581,6 +883,95 @@ fn transact(options: &Options, accepted_output: &mut dyn Write) -> Result<String
         response,
         outputs,
     )
+}
+
+fn classify_lxmf_send_response(
+    operation: &str,
+    response: DeviceResponse,
+) -> Result<reticulum_device_api::LxmfBasicSendAccepted, String> {
+    match response {
+        DeviceResponse::LxmfBasicSendAccepted(accepted) => Ok(accepted),
+        DeviceResponse::Error(error) => Err(format_api_error(operation, error)),
+        other => Err(format!(
+            "device returned response kind {} instead of {operation}",
+            other.kind()
+        )),
+    }
+}
+
+fn format_lxmf_send_context(fields: LxmfSendFields<'_>) -> String {
+    format!(
+        "destination={} timestamp_unix_ms={} idempotency_key={} title_len={} content_len={}",
+        hex(&fields.destination.0),
+        fields.timestamp_unix_ms,
+        hex(&fields.idempotency_key.0),
+        fields.title.len(),
+        fields.content.len(),
+    )
+}
+
+fn write_lxmf_send_intent(
+    output: &mut dyn Write,
+    command: &str,
+    device_id: &[u8; 16],
+    session_id: &[u8; 16],
+    fields: LxmfSendFields<'_>,
+) -> Result<(), String> {
+    let record = format!(
+        "command={command} outcome=intent device_id={} session_id={} {}\n",
+        hex(device_id),
+        hex(session_id),
+        format_lxmf_send_context(fields),
+    );
+    output.write_all(record.as_bytes()).map_err(|error| {
+        format!("could not write the stable {command} retry material before submission: {error}")
+    })?;
+    output.flush().map_err(|error| {
+        format!("could not flush the stable {command} retry material before submission: {error}")
+    })
+}
+
+fn format_lxmf_send_accepted(
+    command: &str,
+    device_id: &[u8; 16],
+    session_id: &[u8; 16],
+    accepted: reticulum_device_api::LxmfBasicSendAccepted,
+    fields: LxmfSendFields<'_>,
+) -> String {
+    format!(
+        "command={command} outcome=accepted device_id={} session_id={} submission_id={} message_id={} {}",
+        hex(device_id),
+        hex(session_id),
+        accepted.id.0,
+        hex(accepted.message_id()),
+        format_lxmf_send_context(fields),
+    )
+}
+
+fn write_lxmf_send_accepted(
+    output: &mut dyn Write,
+    command: &str,
+    device_id: &[u8; 16],
+    session_id: &[u8; 16],
+    accepted: reticulum_device_api::LxmfBasicSendAccepted,
+    fields: LxmfSendFields<'_>,
+) -> Result<(), String> {
+    let record = format!(
+        "{}\n",
+        format_lxmf_send_accepted(command, device_id, session_id, accepted, fields)
+    );
+    output.write_all(record.as_bytes()).map_err(|error| {
+        format!(
+            "device accepted LXMF submission {} but the host could not write its accepted marker: {error}",
+            accepted.id.0
+        )
+    })?;
+    output.flush().map_err(|error| {
+        format!(
+            "device accepted LXMF submission {} but the host could not flush its accepted marker: {error}",
+            accepted.id.0
+        )
+    })
 }
 
 fn continue_submit_and_wait<F>(
@@ -693,6 +1084,403 @@ fn validate_response_version(version: ApiVersion) -> Result<(), String> {
     }
 }
 
+fn classify_lxmf_next_response(
+    operation: &str,
+    response: DeviceResponse,
+    after: Option<LxmfMessageHandle>,
+) -> Result<Option<LxmfMessageSummary>, String> {
+    match response {
+        DeviceResponse::LxmfNext(summary) => {
+            if let Some(after) = after
+                && summary.handle().get() <= after.get()
+            {
+                return Err(format!(
+                    "device returned non-advancing LXMF handle {} after {}",
+                    summary.handle().get(),
+                    after.get(),
+                ));
+            }
+            Ok(Some(summary))
+        }
+        DeviceResponse::Error(error)
+            if error.code == reticulum_device_api::ApiErrorCode::NotFound =>
+        {
+            Ok(None)
+        }
+        DeviceResponse::Error(error) => Err(format_api_error(operation, error)),
+        other => Err(format!(
+            "device returned response kind {} instead of {operation}",
+            other.kind()
+        )),
+    }
+}
+
+fn format_lxmf_summary_line(
+    device_id: &[u8; 16],
+    session_id: &[u8; 16],
+    ordinal: u64,
+    summary: LxmfMessageSummary,
+) -> String {
+    format!(
+        "command=lxmf-list outcome=item device_id={} session_id={} ordinal={} handle={} message_id={} destination={} source={} timestamp_bits={:016x} normalized_wire_len={} title_len={} content_len={} fields_encoded_len={} wire_sha256={}",
+        hex(device_id),
+        hex(session_id),
+        ordinal,
+        summary.handle().get(),
+        hex(summary.message_id()),
+        hex(&summary.destination().0),
+        hex(&summary.source().0),
+        summary.timestamp_bits(),
+        summary.normalized_wire_len(),
+        summary.title_len(),
+        summary.content_len(),
+        summary.fields_encoded_len(),
+        hex(summary.exact_wire_sha256()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn continue_lxmf_list<P: Read + Write + ?Sized>(
+    port: &mut P,
+    reader: &mut BufferedRecordReader,
+    mut session: ClientSession,
+    request_ids: &mut RequestIds,
+    mut response: DeviceResponse,
+    deadline: Instant,
+    device_id: &[u8; 16],
+    session_id: &[u8; 16],
+    output: &mut dyn Write,
+) -> Result<String, String> {
+    let mut after = None;
+    let mut count = 0_u64;
+    loop {
+        let Some(summary) = classify_lxmf_next_response("lxmf-list", response, after)? else {
+            return Ok(format!(
+                "command=lxmf-list outcome=ok device_id={} session_id={} count={count}",
+                hex(device_id),
+                hex(session_id),
+            ));
+        };
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| "LXMF listing count overflowed u64".to_owned())?;
+        let record = format_lxmf_summary_line(device_id, session_id, count, summary);
+        output
+            .write_all(record.as_bytes())
+            .and_then(|()| output.write_all(b"\n"))
+            .map_err(|error| {
+                format!(
+                    "authenticated LXMF summary for handle {} was received but could not be written: {error}",
+                    summary.handle().get()
+                )
+            })?;
+        output.flush().map_err(|error| {
+            format!(
+                "authenticated LXMF summary for handle {} was written but could not be flushed: {error}",
+                summary.handle().get()
+            )
+        })?;
+        after = Some(summary.handle());
+        let request_id = request_ids.take()?;
+        let (restored, next_response) = exchange(
+            port,
+            reader,
+            session,
+            request_id,
+            DeviceRequest::LxmfNext { after },
+            "lxmf-list",
+            deadline,
+        )?;
+        session = restored;
+        response = next_response;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn find_lxmf_summary<P: Read + Write + ?Sized>(
+    port: &mut P,
+    reader: &mut BufferedRecordReader,
+    mut session: ClientSession,
+    request_ids: &mut RequestIds,
+    mut response: DeviceResponse,
+    deadline: Instant,
+    target: LxmfMessageHandle,
+) -> Result<(ClientSession, LxmfMessageSummary), String> {
+    let mut after = None;
+    loop {
+        let Some(summary) = classify_lxmf_next_response("lxmf-read", response, after)? else {
+            return Err(format!(
+                "LXMF handle {} was not found; no output file was created",
+                target.get()
+            ));
+        };
+        if summary.handle() == target {
+            return Ok((session, summary));
+        }
+        if summary.handle().get() > target.get() {
+            return Err(format!(
+                "LXMF handle {} was not found; no output file was created",
+                target.get()
+            ));
+        }
+        after = Some(summary.handle());
+        let request_id = request_ids.take()?;
+        let (restored, next_response) = exchange(
+            port,
+            reader,
+            session,
+            request_id,
+            DeviceRequest::LxmfNext { after },
+            "lxmf-read summary lookup",
+            deadline,
+        )?;
+        session = restored;
+        response = next_response;
+    }
+}
+
+fn validate_lxmf_read_chunk(
+    summary: LxmfMessageSummary,
+    expected_offset: u32,
+    requested: LxmfReadLength,
+    chunk: &LxmfReadChunk,
+) -> Result<u32, String> {
+    if chunk.handle() != summary.handle() {
+        return Err(format!(
+            "device returned LXMF handle {} while reading {}",
+            chunk.handle().get(),
+            summary.handle().get()
+        ));
+    }
+    if chunk.offset() != expected_offset {
+        return Err(format!(
+            "device returned LXMF offset {} while {} was required",
+            chunk.offset(),
+            expected_offset
+        ));
+    }
+    if chunk.total_len() != summary.normalized_wire_len() {
+        return Err(format!(
+            "device changed LXMF handle {} length from {} to {} during read",
+            summary.handle().get(),
+            summary.normalized_wire_len(),
+            chunk.total_len()
+        ));
+    }
+    if chunk.bytes().is_empty() {
+        return Err(format!(
+            "device made no progress reading LXMF handle {} at offset {expected_offset}",
+            summary.handle().get()
+        ));
+    }
+    if chunk.bytes().len() > usize::from(requested.get()) {
+        return Err(format!(
+            "device returned {} LXMF bytes after at most {} were requested",
+            chunk.bytes().len(),
+            requested.get()
+        ));
+    }
+    let length = u32::try_from(chunk.bytes().len())
+        .map_err(|_| "LXMF chunk length did not fit u32".to_owned())?;
+    let next = expected_offset
+        .checked_add(length)
+        .ok_or_else(|| "LXMF chunk offset overflowed u32".to_owned())?;
+    if next > summary.normalized_wire_len() {
+        return Err(format!(
+            "device returned LXMF bytes beyond the declared length of {}",
+            summary.normalized_wire_len()
+        ));
+    }
+    if chunk.is_final() != (next == summary.normalized_wire_len()) {
+        return Err(format!(
+            "device returned contradictory final-chunk state for LXMF handle {}",
+            summary.handle().get()
+        ));
+    }
+    Ok(next)
+}
+
+fn parse_and_validate_lxmf(
+    summary: LxmfMessageSummary,
+    wire: &[u8],
+) -> Result<ParsedLxmfMetadata, String> {
+    let scan_steps = wire.len().saturating_mul(16).max(65_536);
+    let limits = WireLimits::new(
+        wire.len(),
+        wire.len(),
+        wire.len(),
+        wire.len(),
+        scan_steps,
+        LXMF_HOST_MAX_NESTING_DEPTH,
+    );
+    let message = MessageView::parse_complete(wire, limits).map_err(|error| {
+        format!(
+            "downloaded LXMF handle {} failed bounded structural parsing: {error}",
+            summary.handle().get()
+        )
+    })?;
+    if message.normalized_wire_len() != summary.normalized_wire_len() as usize {
+        return Err("parsed LXMF wire length disagrees with its authenticated summary".to_owned());
+    }
+    if message.message_id() != *summary.message_id() {
+        return Err("parsed LXMF message ID disagrees with its authenticated summary".to_owned());
+    }
+    if message.destination_hash() != &summary.destination().0 {
+        return Err("parsed LXMF destination disagrees with its authenticated summary".to_owned());
+    }
+    if message.source_hash() != &summary.source().0 {
+        return Err("parsed LXMF source disagrees with its authenticated summary".to_owned());
+    }
+    let payload = message.payload();
+    if payload.timestamp_bits() != summary.timestamp_bits() {
+        return Err("parsed LXMF timestamp disagrees with its authenticated summary".to_owned());
+    }
+    let title = payload.title().as_bytes();
+    let content = payload.content().as_bytes();
+    if title.len() != summary.title_len() as usize {
+        return Err("parsed LXMF title length disagrees with its authenticated summary".to_owned());
+    }
+    if content.len() != summary.content_len() as usize {
+        return Err(
+            "parsed LXMF content length disagrees with its authenticated summary".to_owned(),
+        );
+    }
+    if payload.fields().raw().len() != summary.fields_encoded_len() as usize {
+        return Err(
+            "parsed LXMF fields length disagrees with its authenticated summary".to_owned(),
+        );
+    }
+    Ok(ParsedLxmfMetadata {
+        title_sha256: Sha256::digest(title).into(),
+        content_sha256: Sha256::digest(content).into(),
+        title_utf8: std::str::from_utf8(title).is_ok(),
+        content_utf8: std::str::from_utf8(content).is_ok(),
+    })
+}
+
+fn format_lxmf_read_result(
+    device_id: &[u8; 16],
+    session_id: &[u8; 16],
+    summary: LxmfMessageSummary,
+    output_path: &Path,
+    parsed: Option<ParsedLxmfMetadata>,
+) -> String {
+    let prefix = format!(
+        "command=lxmf-read outcome=ok device_id={} session_id={} handle={} message_id={} destination={} source={} timestamp_bits={:016x} normalized_wire_len={} title_len={} content_len={} fields_encoded_len={} wire_sha256={} output={}",
+        hex(device_id),
+        hex(session_id),
+        summary.handle().get(),
+        hex(summary.message_id()),
+        hex(&summary.destination().0),
+        hex(&summary.source().0),
+        summary.timestamp_bits(),
+        summary.normalized_wire_len(),
+        summary.title_len(),
+        summary.content_len(),
+        summary.fields_encoded_len(),
+        hex(summary.exact_wire_sha256()),
+        output_path.display(),
+    );
+    match parsed {
+        Some(parsed) => format!(
+            "{prefix} parsed=true title_sha256={} title_utf8={} content_sha256={} content_utf8={}",
+            hex(&parsed.title_sha256),
+            parsed.title_utf8,
+            hex(&parsed.content_sha256),
+            parsed.content_utf8,
+        ),
+        None => format!(
+            "{prefix} parsed=false parse_reason=host-size-limit parse_limit_bytes={MAX_LXMF_HOST_PARSE_BYTES}"
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn continue_lxmf_read<P: Read + Write + ?Sized>(
+    port: &mut P,
+    reader: &mut BufferedRecordReader,
+    session: ClientSession,
+    request_ids: &mut RequestIds,
+    response: DeviceResponse,
+    deadline: Instant,
+    device_id: &[u8; 16],
+    session_id: &[u8; 16],
+    target: LxmfMessageHandle,
+    output_path: &Path,
+    mut output: ReservedOutput,
+) -> Result<String, String> {
+    let (mut session, summary) = find_lxmf_summary(
+        port,
+        reader,
+        session,
+        request_ids,
+        response,
+        deadline,
+        target,
+    )?;
+    let total_len = summary.normalized_wire_len();
+    let mut offset = 0_u32;
+    let mut received_hasher = Sha256::new();
+    while offset < total_len {
+        let remaining = total_len - offset;
+        let requested = LxmfReadLength::new(remaining.min(MAX_LXMF_READ_CHUNK_BYTES as u32) as u16)
+            .expect("positive remaining LXMF length is bounded to one API chunk");
+        let request_id = request_ids.take()?;
+        let (restored, response) = exchange(
+            port,
+            reader,
+            session,
+            request_id,
+            DeviceRequest::LxmfRead {
+                handle: target,
+                offset,
+                max_bytes: requested,
+            },
+            "lxmf-read",
+            deadline,
+        )?;
+        session = restored;
+        let chunk = match response {
+            DeviceResponse::LxmfRead(chunk) => chunk,
+            DeviceResponse::Error(error) => return Err(format_api_error("lxmf-read", error)),
+            other => {
+                return Err(format!(
+                    "device returned response kind {} instead of lxmf-read",
+                    other.kind()
+                ));
+            }
+        };
+        let next = validate_lxmf_read_chunk(summary, offset, requested, &chunk)?;
+        output.write_uncommitted(chunk.bytes())?;
+        received_hasher.update(chunk.bytes());
+        offset = next;
+    }
+    let received_sha256: [u8; 32] = received_hasher.finalize().into();
+    if received_sha256 != *summary.exact_wire_sha256() {
+        return Err(format!(
+            "downloaded LXMF handle {} SHA-256 did not match its authenticated summary; no output file was committed",
+            target.get()
+        ));
+    }
+    let total_len_usize = usize::try_from(total_len)
+        .map_err(|_| "LXMF normalized wire length does not fit this host".to_owned())?;
+    output.verify_sha256_uncommitted(total_len_usize, summary.exact_wire_sha256())?;
+    let parsed = if total_len_usize <= MAX_LXMF_HOST_PARSE_BYTES {
+        let wire = output.read_back_uncommitted(total_len_usize)?;
+        Some(parse_and_validate_lxmf(summary, &wire)?)
+    } else {
+        None
+    };
+    output.finish()?;
+    Ok(format_lxmf_read_result(
+        device_id,
+        session_id,
+        summary,
+        output_path,
+        parsed,
+    ))
+}
+
 fn format_one_shot_response(
     command: &Command,
     device_id: &[u8; 16],
@@ -703,7 +1491,7 @@ fn format_one_shot_response(
     match (command, response) {
         (Command::SystemCapabilities, DeviceResponse::SystemCapabilities(capabilities)) => {
             Ok(format!(
-                "command=system-capabilities outcome=ok device_id={} session_id={} api={}.{} packet_output={} direct_radio_tx={} experimental_submit_rns_data={} experimental_rns_inbox={} max_message_bytes={} max_body_bytes={} max_submit_rns_data_payload_bytes={} max_rns_inbox_payload_bytes={}",
+                "command=system-capabilities outcome=ok device_id={} session_id={} api={}.{} packet_output={} direct_radio_tx={} experimental_submit_rns_data={} experimental_rns_inbox={} experimental_lxmf={} experimental_lxmf_basic_send={} max_message_bytes={} max_body_bytes={} max_submit_rns_data_payload_bytes={} max_rns_inbox_payload_bytes={} max_lxmf_read_chunk_bytes={} max_lxmf_basic_title_bytes={} max_lxmf_basic_content_bytes={}",
                 hex(device_id),
                 hex(session_id),
                 capabilities.api_version().major,
@@ -712,17 +1500,25 @@ fn format_one_shot_response(
                 capabilities.direct_radio_tx().wire_code(),
                 capabilities.experimental_submit_rns_data(),
                 capabilities.experimental_rns_inbox().wire_code(),
+                capabilities.experimental_lxmf().wire_code(),
+                capabilities.experimental_lxmf_basic_send().wire_code(),
                 capabilities.max_message_bytes(),
                 capabilities.max_body_bytes(),
                 capabilities.max_submit_rns_data_payload_bytes(),
                 capabilities.max_rns_inbox_payload_bytes(),
+                capabilities.max_lxmf_read_chunk_bytes(),
+                capabilities.max_lxmf_basic_title_bytes(),
+                capabilities.max_lxmf_basic_content_bytes(),
             ))
         }
         (Command::IdentitySummary, DeviceResponse::IdentitySummary(summary)) => Ok(format!(
-            "command=identity-summary outcome=ok device_id={} session_id={} primary_destination={}",
+            "command=identity-summary outcome=ok device_id={} session_id={} primary_destination={} lxmf_delivery_destination={}",
             hex(device_id),
             hex(session_id),
             hex(&summary.primary_destination().0),
+            summary
+                .lxmf_delivery_destination()
+                .map_or_else(|| "none".to_owned(), |destination| hex(&destination.0)),
         )),
         (Command::RnsInboxStatus, DeviceResponse::RnsInboxStatus(status)) => Ok(format!(
             "command=rns-inbox-status outcome=ok device_id={} session_id={} depth={} capacity={} dropped={} max={} durable={}",
@@ -809,6 +1605,27 @@ fn command_request(command: &Command) -> DeviceRequest<'_> {
         Command::IdentitySummary => DeviceRequest::IdentitySummary,
         Command::RnsInboxStatus => DeviceRequest::RnsInboxStatus,
         Command::RnsInboxPeek { .. } => DeviceRequest::RnsInboxPeek,
+        Command::LxmfList | Command::LxmfRead { .. } => DeviceRequest::LxmfNext { after: None },
+        Command::LxmfSend {
+            destination,
+            timestamp_unix_ms,
+            title,
+            content,
+            idempotency_key,
+        }
+        | Command::LxmfSendAndWait {
+            destination,
+            timestamp_unix_ms,
+            title,
+            content,
+            idempotency_key,
+        } => DeviceRequest::LxmfBasicSend {
+            destination: *destination,
+            timestamp_unix_ms: *timestamp_unix_ms,
+            title,
+            content,
+            idempotency_key: *idempotency_key,
+        },
         Command::SubmissionStatus { id } => DeviceRequest::SubmissionStatus { id: *id },
         Command::SubmitRnsData {
             destination,
@@ -852,6 +1669,7 @@ fn wait_for_delivery<P: Read + Write + ?Sized>(
     session_id: &[u8; 16],
     submission_id: SubmissionId,
     mut evidence_output: Option<ReservedOutput>,
+    terminal_command: &str,
 ) -> Result<String, String> {
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -889,6 +1707,7 @@ fn wait_for_delivery<P: Read + Write + ?Sized>(
                     device_id,
                     session_id,
                     evidence_output.take(),
+                    terminal_command,
                 );
             }
         }
@@ -900,6 +1719,7 @@ fn finish_wait_decision(
     device_id: &[u8; 16],
     session_id: &[u8; 16],
     evidence_output: Option<ReservedOutput>,
+    terminal_command: &str,
 ) -> Result<String, String> {
     match decision {
         WaitDecision::PollAgain | WaitDecision::RetryInternal => {
@@ -930,7 +1750,7 @@ fn finish_wait_decision(
                 )?;
             }
             Ok(format_submission_status(
-                "submit-and-wait",
+                terminal_command,
                 device_id,
                 session_id,
                 reticulum_device_api::SubmissionStatus {
@@ -1072,8 +1892,12 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut command = None;
     let mut destination = None;
     let mut payload = None;
+    let mut lxmf_title = None;
+    let mut lxmf_content = None;
+    let mut lxmf_timestamp_unix_ms = None;
     let mut idempotency_key = None;
     let mut submission_id = None;
+    let mut lxmf_handle = None;
     let mut output = None;
     let mut evidence_output = None;
     let mut index = 0;
@@ -1114,6 +1938,26 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     "--payload-hex",
                 )?)?);
             }
+            "--title-hex" if lxmf_title.is_none() => {
+                index += 1;
+                lxmf_title = Some(parse_bounded_hex(
+                    required_value(args.get(index), "--title-hex")?,
+                    "--title-hex",
+                    MAX_LXMF_BASIC_TITLE_BYTES,
+                )?);
+            }
+            "--content-hex" if lxmf_content.is_none() => {
+                index += 1;
+                lxmf_content = Some(parse_bounded_hex(
+                    required_value(args.get(index), "--content-hex")?,
+                    "--content-hex",
+                    MAX_LXMF_BASIC_CONTENT_BYTES,
+                )?);
+            }
+            "--timestamp-ms" if lxmf_timestamp_unix_ms.is_none() => {
+                index += 1;
+                lxmf_timestamp_unix_ms = Some(parse_u64(args.get(index), "--timestamp-ms")?);
+            }
             "--idempotency-key" if idempotency_key.is_none() => {
                 index += 1;
                 idempotency_key = Some(IdempotencyKey(parse_fixed_hex(
@@ -1124,6 +1968,13 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--submission-id" if submission_id.is_none() => {
                 index += 1;
                 submission_id = Some(SubmissionId(parse_u64(args.get(index), "--submission-id")?));
+            }
+            "--handle" if lxmf_handle.is_none() => {
+                index += 1;
+                let value = parse_u64(args.get(index), "--handle")?;
+                lxmf_handle = Some(LxmfMessageHandle::new(value).map_err(|_| {
+                    "--handle must be a nonzero unsigned 64-bit integer".to_owned()
+                })?);
             }
             "--output" if output.is_none() => {
                 index += 1;
@@ -1148,20 +1999,37 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "rns-inbox-peek" if command.is_none() => {
                 command = Some(CommandKind::RnsInboxPeek);
             }
+            "lxmf-list" if command.is_none() => {
+                command = Some(CommandKind::LxmfList);
+            }
+            "lxmf-read" if command.is_none() => {
+                command = Some(CommandKind::LxmfRead);
+            }
+            "lxmf-send" if command.is_none() => {
+                command = Some(CommandKind::LxmfSend);
+            }
+            "lxmf-send-and-wait" if command.is_none() => {
+                command = Some(CommandKind::LxmfSendAndWait);
+            }
             "submission-status" if command.is_none() => {
                 command = Some(CommandKind::SubmissionStatus);
             }
             "submit-rns-data" if command.is_none() => command = Some(CommandKind::SubmitRnsData),
             "submit-and-wait" if command.is_none() => command = Some(CommandKind::SubmitAndWait),
             option @ ("--port" | "--state-file" | "--timeout-ms" | "--destination-hash"
-            | "--payload-hex" | "--idempotency-key" | "--submission-id" | "--output"
-            | "--evidence-output") => {
+            | "--payload-hex" | "--title-hex" | "--content-hex" | "--timestamp-ms"
+            | "--idempotency-key" | "--submission-id" | "--output"
+            | "--evidence-output" | "--handle") => {
                 return Err(format!("duplicate option {option}"));
             }
             command_name @ ("system-capabilities"
             | "identity-summary"
             | "rns-inbox-status"
             | "rns-inbox-peek"
+            | "lxmf-list"
+            | "lxmf-read"
+            | "lxmf-send"
+            | "lxmf-send-and-wait"
             | "submission-status"
             | "submit-rns-data"
             | "submit-and-wait") => {
@@ -1182,11 +2050,16 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let command = match command.unwrap_or(CommandKind::SystemCapabilities) {
         kind @ (CommandKind::SystemCapabilities
         | CommandKind::IdentitySummary
-        | CommandKind::RnsInboxStatus) => {
+        | CommandKind::RnsInboxStatus
+        | CommandKind::LxmfList) => {
             if destination.is_some()
                 || payload.is_some()
+                || lxmf_title.is_some()
+                || lxmf_content.is_some()
+                || lxmf_timestamp_unix_ms.is_some()
                 || idempotency_key.is_some()
                 || submission_id.is_some()
+                || lxmf_handle.is_some()
                 || output.is_some()
                 || evidence_output.is_some()
             {
@@ -1199,14 +2072,19 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 CommandKind::SystemCapabilities => Command::SystemCapabilities,
                 CommandKind::IdentitySummary => Command::IdentitySummary,
                 CommandKind::RnsInboxStatus => Command::RnsInboxStatus,
+                CommandKind::LxmfList => Command::LxmfList,
                 _ => unreachable!("combined match admits only argument-free commands"),
             }
         }
         CommandKind::RnsInboxPeek => {
             if destination.is_some()
                 || payload.is_some()
+                || lxmf_title.is_some()
+                || lxmf_content.is_some()
+                || lxmf_timestamp_unix_ms.is_some()
                 || idempotency_key.is_some()
                 || submission_id.is_some()
+                || lxmf_handle.is_some()
             {
                 return Err(
                     "rns-inbox-peek accepts only the operation-specific --output and optional --evidence-output arguments"
@@ -1218,10 +2096,19 @@ fn parse(args: &[String]) -> Result<Options, String> {
             }
         }
         CommandKind::SubmissionStatus => {
-            if destination.is_some() || payload.is_some() || idempotency_key.is_some() {
+            if destination.is_some()
+                || payload.is_some()
+                || lxmf_title.is_some()
+                || lxmf_content.is_some()
+                || lxmf_timestamp_unix_ms.is_some()
+                || idempotency_key.is_some()
+            {
                 return Err(
                     "submission-status does not accept submit-rns-data arguments".to_owned(),
                 );
+            }
+            if lxmf_handle.is_some() {
+                return Err("submission-status does not accept --handle".to_owned());
             }
             if output.is_some() {
                 return Err("submission-status does not accept --output".to_owned());
@@ -1234,10 +2121,86 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .ok_or_else(|| "submission-status requires --submission-id".to_owned())?,
             }
         }
+        CommandKind::LxmfRead => {
+            if destination.is_some()
+                || payload.is_some()
+                || lxmf_title.is_some()
+                || lxmf_content.is_some()
+                || lxmf_timestamp_unix_ms.is_some()
+                || idempotency_key.is_some()
+                || submission_id.is_some()
+                || evidence_output.is_some()
+            {
+                return Err(
+                    "lxmf-read accepts only the operation-specific --handle and --output arguments"
+                        .to_owned(),
+                );
+            }
+            Command::LxmfRead {
+                handle: lxmf_handle.ok_or_else(|| "lxmf-read requires --handle".to_owned())?,
+                output: output.ok_or_else(|| "lxmf-read requires --output".to_owned())?,
+            }
+        }
+        kind @ (CommandKind::LxmfSend | CommandKind::LxmfSendAndWait) => {
+            if payload.is_some()
+                || submission_id.is_some()
+                || lxmf_handle.is_some()
+                || output.is_some()
+                || evidence_output.is_some()
+            {
+                return Err(format!(
+                    "{} accepts only --destination-hash, --title-hex, --content-hex, optional --timestamp-ms, and optional --idempotency-key",
+                    command_kind_name(kind)
+                ));
+            }
+            let operation = command_kind_name(kind);
+            let destination =
+                destination.ok_or_else(|| format!("{operation} requires --destination-hash"))?;
+            let title = lxmf_title.ok_or_else(|| format!("{operation} requires --title-hex"))?;
+            let content =
+                lxmf_content.ok_or_else(|| format!("{operation} requires --content-hex"))?;
+            let timestamp_unix_ms = match lxmf_timestamp_unix_ms {
+                Some(timestamp) => timestamp,
+                None => current_unix_timestamp_ms()?,
+            };
+            let idempotency_key = match idempotency_key {
+                Some(key) => key,
+                None => generate_idempotency_key()?,
+            };
+            match kind {
+                CommandKind::LxmfSend => Command::LxmfSend {
+                    destination,
+                    timestamp_unix_ms,
+                    title,
+                    content,
+                    idempotency_key,
+                },
+                CommandKind::LxmfSendAndWait => Command::LxmfSendAndWait {
+                    destination,
+                    timestamp_unix_ms,
+                    title,
+                    content,
+                    idempotency_key,
+                },
+                _ => unreachable!("combined match admits only LXMF send commands"),
+            }
+        }
         kind @ (CommandKind::SubmitRnsData | CommandKind::SubmitAndWait) => {
+            if lxmf_title.is_some() || lxmf_content.is_some() || lxmf_timestamp_unix_ms.is_some() {
+                return Err(format!(
+                    "{} does not accept LXMF title, content, or timestamp arguments",
+                    command_kind_name(kind)
+                ));
+            }
             if submission_id.is_some() {
                 return Err(format!(
                     "{} does not accept --submission-id",
+                    command_kind_name(kind)
+                ));
+            }
+            if lxmf_handle.is_some() {
+                return Err(format!(
+                    "{} does not accept --handle",
                     command_kind_name(kind)
                 ));
             }
@@ -1271,7 +2234,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
             }
         }
     };
-    let default_timeout_ms = if matches!(&command, Command::SubmitAndWait { .. }) {
+    validate_lxmf_send_encoding(&command)?;
+    let default_timeout_ms = if matches!(
+        &command,
+        Command::SubmitAndWait { .. } | Command::LxmfSendAndWait { .. }
+    ) {
         DEFAULT_SUBMIT_AND_WAIT_TIMEOUT_MS
     } else {
         DEFAULT_TIMEOUT_MS
@@ -1285,6 +2252,25 @@ fn parse(args: &[String]) -> Result<Options, String> {
     })
 }
 
+fn validate_lxmf_send_encoding(command: &Command) -> Result<(), String> {
+    if lxmf_send_fields(command).is_none() {
+        return Ok(());
+    }
+    let envelope = RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(u64::MAX),
+        request: command_request(command),
+    };
+    let mut encoded = [0_u8; MAX_MESSAGE_BYTES];
+    encode_request(&envelope, &mut encoded).map_err(|error| {
+        format!(
+            "{} title/content combination cannot fit one bounded device-API request: {error:?}",
+            command_name(command)
+        )
+    })?;
+    Ok(())
+}
+
 fn required_value<'a>(value: Option<&'a String>, flag: &str) -> Result<&'a str, String> {
     value
         .map(String::as_str)
@@ -1295,6 +2281,23 @@ fn parse_u64(value: Option<&String>, flag: &str) -> Result<u64, String> {
     required_value(value, flag)?
         .parse()
         .map_err(|_| format!("{flag} requires an unsigned 64-bit integer"))
+}
+
+fn current_unix_timestamp_ms() -> Result<u64, String> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "host clock is before the Unix epoch; supply --timestamp-ms".to_owned())?;
+    u64::try_from(elapsed.as_millis()).map_err(|_| {
+        "host Unix timestamp does not fit u64 milliseconds; supply --timestamp-ms".to_owned()
+    })
+}
+
+fn generate_idempotency_key() -> Result<IdempotencyKey, String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|_| {
+        "operating-system randomness failed while generating --idempotency-key".to_owned()
+    })?;
+    Ok(IdempotencyKey(bytes))
 }
 
 fn parse_fixed_hex<const N: usize>(value: &str, flag: &str) -> Result<[u8; N], String> {
@@ -1310,17 +2313,23 @@ fn parse_fixed_hex<const N: usize>(value: &str, flag: &str) -> Result<[u8; N], S
 }
 
 fn parse_payload_hex(value: &str) -> Result<Vec<u8>, String> {
+    parse_bounded_hex(value, "--payload-hex", MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES)
+}
+
+fn parse_bounded_hex(value: &str, flag: &str, maximum: usize) -> Result<Vec<u8>, String> {
     if !value.len().is_multiple_of(2) {
-        return Err("--payload-hex requires an even number of hexadecimal digits".to_owned());
+        return Err(format!(
+            "{flag} requires an even number of hexadecimal digits"
+        ));
     }
     let length = value.len() / 2;
-    if length > MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES {
+    if length > maximum {
         return Err(format!(
-            "--payload-hex decodes to {length} bytes; maximum is {MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES}"
+            "{flag} decodes to {length} bytes; maximum is {maximum}"
         ));
     }
     let mut bytes = vec![0_u8; length];
-    decode_hex_into(value, &mut bytes, "--payload-hex")?;
+    decode_hex_into(value, &mut bytes, flag)?;
     Ok(bytes)
 }
 
@@ -1352,6 +2361,10 @@ const fn command_name(command: &Command) -> &'static str {
         Command::IdentitySummary => "identity-summary",
         Command::RnsInboxStatus => "rns-inbox-status",
         Command::RnsInboxPeek { .. } => "rns-inbox-peek",
+        Command::LxmfList => "lxmf-list",
+        Command::LxmfRead { .. } => "lxmf-read",
+        Command::LxmfSend { .. } => "lxmf-send",
+        Command::LxmfSendAndWait { .. } => "lxmf-send-and-wait",
         Command::SubmissionStatus { .. } => "submission-status",
         Command::SubmitRnsData { .. } => "submit-rns-data",
         Command::SubmitAndWait { .. } => "submit-and-wait",
@@ -1364,6 +2377,10 @@ const fn command_kind_name(command: CommandKind) -> &'static str {
         CommandKind::IdentitySummary => "identity-summary",
         CommandKind::RnsInboxStatus => "rns-inbox-status",
         CommandKind::RnsInboxPeek => "rns-inbox-peek",
+        CommandKind::LxmfList => "lxmf-list",
+        CommandKind::LxmfRead => "lxmf-read",
+        CommandKind::LxmfSend => "lxmf-send",
+        CommandKind::LxmfSendAndWait => "lxmf-send-and-wait",
         CommandKind::SubmissionStatus => "submission-status",
         CommandKind::SubmitRnsData => "submit-rns-data",
         CommandKind::SubmitAndWait => "submit-and-wait",
@@ -1413,7 +2430,7 @@ const fn failure_name(failure: SubmissionFailure) -> &'static str {
 
 fn usage() {
     eprintln!(
-        "usage:\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] [system-capabilities]\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] identity-summary\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] rns-inbox-status\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] rns-inbox-peek --output <path> [--evidence-output <absent-json>]\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] --submission-id <u64> submission-status\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] --destination-hash <32-hex> --payload-hex <0-to-766-hex> --idempotency-key <32-hex> submit-rns-data\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64, default 45000>] --destination-hash <32-hex> --payload-hex <0-to-766-hex> --idempotency-key <32-hex> submit-and-wait [--evidence-output <absent-json>]"
+        "usage:\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] [system-capabilities]\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] identity-summary\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] rns-inbox-status\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] rns-inbox-peek --output <path> [--evidence-output <absent-json>]\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] lxmf-list\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] lxmf-read --handle <nonzero-u64> --output <absent-path>\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] lxmf-send --destination-hash <32-hex> --title-hex <0-to-590-hex> --content-hex <0-to-590-hex> [--timestamp-ms <u64>] [--idempotency-key <32-hex>]\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64, default 45000>] lxmf-send-and-wait --destination-hash <32-hex> --title-hex <0-to-590-hex> --content-hex <0-to-590-hex> [--timestamp-ms <u64>] [--idempotency-key <32-hex>]\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] --submission-id <u64> submission-status\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64>] --destination-hash <32-hex> --payload-hex <0-to-766-hex> --idempotency-key <32-hex> submit-rns-data\n  cargo run -p xtask -- e290-authenticated-usb --port <serial-path> --state-file <active-secret-path> [--timeout-ms <u64, default 45000>] --destination-hash <32-hex> --payload-hex <0-to-766-hex> --idempotency-key <32-hex> submit-and-wait [--evidence-output <absent-json>]"
     );
 }
 
@@ -1520,6 +2537,46 @@ mod tests {
                 0xfe, 0xff,
             ]),
         }
+    }
+
+    fn sample_lxmf_wire(title: &[u8], content: &[u8]) -> Vec<u8> {
+        assert!(title.len() <= u8::MAX as usize);
+        assert!(content.len() <= u8::MAX as usize);
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&[0x10; 16]);
+        wire.extend_from_slice(&[0x20; 16]);
+        wire.extend_from_slice(&[0x30; 64]);
+        wire.push(0x94);
+        wire.push(0xcb);
+        wire.extend_from_slice(&1.25_f64.to_bits().to_be_bytes());
+        wire.extend_from_slice(&[0xc4, title.len() as u8]);
+        wire.extend_from_slice(title);
+        wire.extend_from_slice(&[0xc4, content.len() as u8]);
+        wire.extend_from_slice(content);
+        wire.push(0x80);
+        wire
+    }
+
+    fn sample_lxmf_summary(handle: u64, wire: &[u8]) -> LxmfMessageSummary {
+        let message = MessageView::parse_complete(
+            wire,
+            WireLimits::new(wire.len(), wire.len(), wire.len(), wire.len(), 65_536, 16),
+        )
+        .unwrap();
+        let payload = message.payload();
+        LxmfMessageSummary::new(
+            LxmfMessageHandle::new(handle).unwrap(),
+            message.message_id(),
+            DestinationHash(*message.destination_hash()),
+            DestinationHash(*message.source_hash()),
+            payload.timestamp_bits(),
+            u32::try_from(wire.len()).unwrap(),
+            u32::try_from(payload.title().as_bytes().len()).unwrap(),
+            u32::try_from(payload.content().as_bytes().len()).unwrap(),
+            u32::try_from(payload.fields().raw().len()).unwrap(),
+            Sha256::digest(wire).into(),
+        )
+        .unwrap()
     }
 
     struct TracedOutput {
@@ -1780,6 +2837,361 @@ mod tests {
     }
 
     #[test]
+    fn parser_accepts_only_bounded_lxmf_list_and_read_arguments() {
+        let list = parse(&strings(&[
+            "--port",
+            "/dev/test",
+            "lxmf-list",
+            "--state-file",
+            "/tmp/e290.key",
+        ]))
+        .unwrap();
+        assert_eq!(list.command, Command::LxmfList);
+        assert_eq!(
+            command_request(&list.command),
+            DeviceRequest::LxmfNext { after: None }
+        );
+
+        let read = parse(&strings(&[
+            "--output",
+            "/tmp/message.lxmf",
+            "--handle",
+            "18446744073709551615",
+            "--state-file",
+            "/tmp/e290.key",
+            "lxmf-read",
+            "--port",
+            "/dev/test",
+        ]))
+        .unwrap();
+        let handle = LxmfMessageHandle::new(u64::MAX).unwrap();
+        assert_eq!(
+            read.command,
+            Command::LxmfRead {
+                handle,
+                output: PathBuf::from("/tmp/message.lxmf"),
+            }
+        );
+        assert_eq!(
+            command_request(&read.command),
+            DeviceRequest::LxmfNext { after: None }
+        );
+
+        for (arguments, expected) in [
+            (
+                strings(&[
+                    "--port",
+                    "/dev/test",
+                    "--state-file",
+                    "/tmp/e290.key",
+                    "lxmf-read",
+                    "--output",
+                    "/tmp/message.lxmf",
+                ]),
+                "lxmf-read requires --handle",
+            ),
+            (
+                strings(&[
+                    "--port",
+                    "/dev/test",
+                    "--state-file",
+                    "/tmp/e290.key",
+                    "lxmf-read",
+                    "--handle",
+                    "1",
+                ]),
+                "lxmf-read requires --output",
+            ),
+            (
+                strings(&[
+                    "--port",
+                    "/dev/test",
+                    "--state-file",
+                    "/tmp/e290.key",
+                    "lxmf-list",
+                    "--output",
+                    "/tmp/message.lxmf",
+                ]),
+                "lxmf-list does not accept operation-specific arguments",
+            ),
+        ] {
+            assert_eq!(parse(&arguments).err().unwrap(), expected);
+        }
+
+        assert_eq!(
+            parse(&strings(&[
+                "--port",
+                "/dev/test",
+                "--state-file",
+                "/tmp/e290.key",
+                "lxmf-read",
+                "--handle",
+                "0",
+                "--output",
+                "/tmp/message.lxmf",
+            ]))
+            .err()
+            .unwrap(),
+            "--handle must be a nonzero unsigned 64-bit integer"
+        );
+        assert_eq!(
+            parse(&strings(&[
+                "--port",
+                "/dev/test",
+                "--state-file",
+                "/tmp/e290.key",
+                "lxmf-read",
+                "--handle",
+                "1",
+                "--handle",
+                "2",
+                "--output",
+                "/tmp/message.lxmf",
+            ]))
+            .err()
+            .unwrap(),
+            "duplicate option --handle"
+        );
+        assert_eq!(
+            parse(&strings(&[
+                "--port",
+                "/dev/test",
+                "--state-file",
+                "/tmp/e290.key",
+                "lxmf-read",
+                "--handle",
+                "1",
+                "--output",
+                "/tmp/message.lxmf",
+                "--evidence-output",
+                "/tmp/private.json",
+            ]))
+            .err()
+            .unwrap(),
+            "lxmf-read accepts only the operation-specific --handle and --output arguments"
+        );
+    }
+
+    #[test]
+    fn parser_builds_replayable_lxmf_send_requests_with_explicit_material() {
+        const DESTINATION: &str = "00112233445566778899aabbccddeeff";
+        const TITLE_HEX: &str = "70726976617465207469746c65";
+        const CONTENT_HEX: &str = "7072697661746520636f6e74656e74";
+        const KEY: &str = "101112131415161718191a1b1c1d1e1f";
+
+        for (name, waits) in [("lxmf-send", false), ("lxmf-send-and-wait", true)] {
+            let options = parse(&strings(&[
+                "--port",
+                "/dev/test",
+                "--state-file",
+                "/tmp/e290.key",
+                name,
+                "--destination-hash",
+                DESTINATION,
+                "--title-hex",
+                TITLE_HEX,
+                "--content-hex",
+                CONTENT_HEX,
+                "--timestamp-ms",
+                "1720123456789",
+                "--idempotency-key",
+                KEY,
+            ]))
+            .unwrap();
+            let fields = lxmf_send_fields(&options.command).unwrap();
+            assert_eq!(
+                fields.destination,
+                DestinationHash(parse_fixed_hex(DESTINATION, "d").unwrap())
+            );
+            assert_eq!(fields.timestamp_unix_ms, 1_720_123_456_789);
+            assert_eq!(fields.title, b"private title");
+            assert_eq!(fields.content, b"private content");
+            assert_eq!(
+                fields.idempotency_key,
+                IdempotencyKey(parse_fixed_hex(KEY, "k").unwrap())
+            );
+            assert_eq!(
+                options.timeout,
+                if waits {
+                    Duration::from_millis(DEFAULT_SUBMIT_AND_WAIT_TIMEOUT_MS)
+                } else {
+                    Duration::from_millis(DEFAULT_TIMEOUT_MS)
+                }
+            );
+
+            let first = command_request(&options.command);
+            let second = command_request(&options.command);
+            assert_eq!(first, second, "retry material must remain stable");
+            assert!(matches!(first, DeviceRequest::LxmfBasicSend { .. }));
+            let mut encoded = [0_u8; MAX_MESSAGE_BYTES];
+            encode_request(
+                &RequestEnvelope {
+                    version: ApiVersion::CURRENT,
+                    request_id: RequestId(u64::MAX),
+                    request: first,
+                },
+                &mut encoded,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn lxmf_send_generates_missing_retry_material_once_and_prints_it_before_submission() {
+        let before = current_unix_timestamp_ms().unwrap();
+        let options = parse(&strings(&[
+            "--port",
+            "/dev/test",
+            "--state-file",
+            "/tmp/e290.key",
+            "lxmf-send",
+            "--destination-hash",
+            "00112233445566778899aabbccddeeff",
+            "--title-hex",
+            "70726976617465207469746c65",
+            "--content-hex",
+            "7072697661746520636f6e74656e74",
+        ]))
+        .unwrap();
+        let after = current_unix_timestamp_ms().unwrap();
+        let fields = lxmf_send_fields(&options.command).unwrap();
+        assert!((before..=after).contains(&fields.timestamp_unix_ms));
+        assert_eq!(
+            command_request(&options.command),
+            command_request(&options.command)
+        );
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let mut output = TracedOutput {
+            bytes: Vec::new(),
+            events: Rc::clone(&events),
+        };
+        write_lxmf_send_intent(&mut output, "lxmf-send", &[0x11; 16], &[0x22; 16], fields).unwrap();
+        assert_eq!(*events.borrow(), ["accepted-write", "accepted-flush"]);
+        let intent = String::from_utf8(output.bytes).unwrap();
+        assert!(intent.contains("command=lxmf-send outcome=intent"));
+        assert!(intent.contains(&format!("timestamp_unix_ms={}", fields.timestamp_unix_ms)));
+        assert!(intent.contains(&format!(
+            "idempotency_key={}",
+            hex(&fields.idempotency_key.0)
+        )));
+        assert!(intent.contains("title_len=13 content_len=15"));
+        assert!(!intent.contains("private title"));
+        assert!(!intent.contains("private content"));
+        assert!(!intent.contains("70726976617465207469746c65"));
+        assert!(!intent.contains("7072697661746520636f6e74656e74"));
+    }
+
+    #[test]
+    fn lxmf_send_parser_enforces_individual_and_combined_bounds_without_echoing_content() {
+        assert_eq!(
+            parse(&strings(&[
+                "--port",
+                "/dev/test",
+                "--state-file",
+                "/tmp/e290.key",
+                "lxmf-send",
+                "--destination-hash",
+                "00112233445566778899aabbccddeeff",
+                "--content-hex",
+                "00",
+            ]))
+            .err()
+            .unwrap(),
+            "lxmf-send requires --title-hex"
+        );
+        let oversized_title = "74".repeat(MAX_LXMF_BASIC_TITLE_BYTES + 1);
+        let args = vec![
+            "--port".to_owned(),
+            "/dev/test".to_owned(),
+            "--state-file".to_owned(),
+            "/tmp/e290.key".to_owned(),
+            "lxmf-send".to_owned(),
+            "--destination-hash".to_owned(),
+            "00112233445566778899aabbccddeeff".to_owned(),
+            "--title-hex".to_owned(),
+            oversized_title.clone(),
+            "--content-hex".to_owned(),
+            String::new(),
+        ];
+        let error = parse(&args).err().unwrap();
+        assert!(error.contains("maximum is 295"));
+        assert!(!error.contains(&oversized_title));
+
+        let title = "74".repeat(220);
+        let content = "63".repeat(220);
+        let combined = vec![
+            "--port".to_owned(),
+            "/dev/test".to_owned(),
+            "--state-file".to_owned(),
+            "/tmp/e290.key".to_owned(),
+            "lxmf-send".to_owned(),
+            "--destination-hash".to_owned(),
+            "00112233445566778899aabbccddeeff".to_owned(),
+            "--title-hex".to_owned(),
+            title.clone(),
+            "--content-hex".to_owned(),
+            content.clone(),
+        ];
+        let error = parse(&combined).err().unwrap();
+        assert!(error.contains("cannot fit one bounded device-API request"));
+        assert!(!error.contains(&title));
+        assert!(!error.contains(&content));
+    }
+
+    #[test]
+    fn lxmf_send_acceptance_reports_ids_and_retry_metadata_but_not_message_bodies() {
+        let command = Command::LxmfSend {
+            destination: DestinationHash([0x10; 16]),
+            timestamp_unix_ms: 1_720_123_456_789,
+            title: b"private title".to_vec(),
+            content: b"private content".to_vec(),
+            idempotency_key: IdempotencyKey([0x20; 16]),
+        };
+        let fields = lxmf_send_fields(&command).unwrap();
+        let accepted =
+            reticulum_device_api::LxmfBasicSendAccepted::new(SubmissionId(42), [0x33; 32]);
+        assert_eq!(
+            classify_lxmf_send_response(
+                "lxmf-send",
+                DeviceResponse::LxmfBasicSendAccepted(accepted),
+            )
+            .unwrap(),
+            accepted
+        );
+        let output =
+            format_lxmf_send_accepted("lxmf-send", &[0x11; 16], &[0x22; 16], accepted, fields);
+        assert!(output.contains("submission_id=42"));
+        assert!(output.contains(&format!("message_id={}", "33".repeat(32))));
+        assert!(output.contains("timestamp_unix_ms=1720123456789"));
+        assert!(output.contains(&format!("idempotency_key={}", "20".repeat(16))));
+        assert!(output.contains("title_len=13 content_len=15"));
+        assert!(!output.contains("private title"));
+        assert!(!output.contains("private content"));
+        assert!(!output.contains("70726976617465207469746c65"));
+        assert!(!output.contains("7072697661746520636f6e74656e74"));
+
+        let terminal = finish_wait_decision(
+            WaitDecision::Delivered {
+                submission_id: accepted.id,
+                details: reticulum_device_api::PreparedPacketDetails {
+                    packet_len: 123,
+                    encoded_packet_sha256: reticulum_device_api::EncodedPacketSha256::new(
+                        [0x44; 32],
+                    ),
+                },
+            },
+            &[0x11; 16],
+            &[0x22; 16],
+            None,
+            "lxmf-send-and-wait",
+        )
+        .unwrap();
+        assert!(terminal.starts_with("command=lxmf-send-and-wait outcome=ok"));
+        assert!(terminal.contains("submission_id=42 state=delivered"));
+    }
+
+    #[test]
     fn parser_redacts_an_unrecognized_joined_output_path() {
         const PRIVATE_PATH: &str = "/tmp/private-inbox-location";
         let reason = parse(&[
@@ -1887,11 +3299,30 @@ mod tests {
         assert_eq!(
             output,
             format!(
-                "command=identity-summary outcome=ok device_id={} session_id={} primary_destination=000102030405060708090a0b0c0d0e0f",
+                "command=identity-summary outcome=ok device_id={} session_id={} primary_destination=000102030405060708090a0b0c0d0e0f lxmf_delivery_destination=none",
                 "ab".repeat(16),
                 "cd".repeat(16),
             )
         );
+
+        let with_lxmf = format_one_shot_response(
+            &Command::IdentitySummary,
+            &[0xab; 16],
+            &[0xcd; 16],
+            DeviceResponse::IdentitySummary(
+                reticulum_device_api::IdentitySummary::with_lxmf_delivery_destination(
+                    DestinationHash([0x10; 16]),
+                    DestinationHash([0x20; 16]),
+                ),
+            ),
+            CommandOutputs::None,
+        )
+        .unwrap();
+        assert!(with_lxmf.contains(&format!(
+            "primary_destination={} lxmf_delivery_destination={}",
+            "10".repeat(16),
+            "20".repeat(16)
+        )));
     }
 
     #[test]
@@ -1972,6 +3403,8 @@ mod tests {
             "system-capabilities",
             "submission-status",
             "submit-rns-data",
+            "lxmf-send",
+            "lxmf-send-and-wait",
         ] {
             let mut arguments = strings(&[
                 "--port",
@@ -1993,6 +3426,16 @@ mod tests {
                         "00",
                         "--idempotency-key",
                         "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+                    ]));
+                }
+                "lxmf-send" | "lxmf-send-and-wait" => {
+                    arguments.extend(strings(&[
+                        "--destination-hash",
+                        "000102030405060708090a0b0c0d0e0f",
+                        "--title-hex",
+                        "00",
+                        "--content-hex",
+                        "01",
                     ]));
                 }
                 _ => {}
@@ -2177,7 +3620,7 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_output_includes_inbox_availability_and_limit() {
+    fn capabilities_output_includes_inbox_and_lxmf_availability_and_limits() {
         let output = format_one_shot_response(
             &Command::SystemCapabilities,
             &[0x11; 16],
@@ -2186,9 +3629,204 @@ mod tests {
             CommandOutputs::None,
         )
         .unwrap();
-        assert!(output.contains("api=1.2"));
+        assert!(output.contains(&format!(
+            "api={}.{}",
+            ApiVersion::CURRENT.major,
+            ApiVersion::CURRENT.minor
+        )));
         assert!(output.contains("experimental_rns_inbox=2"));
         assert!(output.contains("max_rns_inbox_payload_bytes=383"));
+        assert!(output.contains("experimental_lxmf=2"));
+        assert!(output.contains("max_lxmf_read_chunk_bytes=416"));
+        assert!(output.contains("experimental_lxmf_basic_send=2"));
+        assert!(output.contains("max_lxmf_basic_title_bytes=295"));
+        assert!(output.contains("max_lxmf_basic_content_bytes=295"));
+    }
+
+    #[test]
+    fn lxmf_summary_iteration_is_monotonic_and_not_found_is_clean_completion() {
+        let wire = sample_lxmf_wire(b"private title", b"private content");
+        let first = sample_lxmf_summary(1, &wire);
+        let second = sample_lxmf_summary(2, &wire);
+        assert_eq!(
+            classify_lxmf_next_response("lxmf-list", DeviceResponse::LxmfNext(first), None,)
+                .unwrap(),
+            Some(first)
+        );
+        assert_eq!(
+            classify_lxmf_next_response(
+                "lxmf-list",
+                DeviceResponse::LxmfNext(second),
+                Some(first.handle()),
+            )
+            .unwrap(),
+            Some(second)
+        );
+        assert!(
+            classify_lxmf_next_response(
+                "lxmf-list",
+                DeviceResponse::LxmfNext(first),
+                Some(first.handle()),
+            )
+            .unwrap_err()
+            .contains("non-advancing")
+        );
+        assert_eq!(
+            classify_lxmf_next_response(
+                "lxmf-list",
+                DeviceResponse::Error(reticulum_device_api::ApiErrorResponse {
+                    code: reticulum_device_api::ApiErrorCode::NotFound,
+                    operation: Some(reticulum_device_api::OP_EXPERIMENTAL_LXMF_NEXT),
+                }),
+                Some(second.handle()),
+            )
+            .unwrap(),
+            None
+        );
+
+        let line = format_lxmf_summary_line(&[0x11; 16], &[0x22; 16], 1, first);
+        assert!(line.contains("command=lxmf-list outcome=item"));
+        assert!(line.contains("ordinal=1 handle=1"));
+        assert!(line.contains(&format!("message_id={}", hex(first.message_id()))));
+        assert!(!line.contains("private title"));
+        assert!(!line.contains("private content"));
+        assert!(!line.contains(&hex(b"private content")));
+    }
+
+    #[test]
+    fn lxmf_chunk_validation_requires_exact_handle_offset_length_and_progress() {
+        let wire = sample_lxmf_wire(b"title", b"content");
+        let summary = sample_lxmf_summary(7, &wire);
+        let requested = LxmfReadLength::new(64).unwrap();
+        let first = LxmfReadChunk::new(
+            summary.handle(),
+            0,
+            summary.normalized_wire_len(),
+            &wire[..64],
+        )
+        .unwrap();
+        assert_eq!(
+            validate_lxmf_read_chunk(summary, 0, requested, &first).unwrap(),
+            64
+        );
+
+        let wrong_handle = LxmfReadChunk::new(
+            LxmfMessageHandle::new(8).unwrap(),
+            0,
+            summary.normalized_wire_len(),
+            &wire[..1],
+        )
+        .unwrap();
+        assert!(validate_lxmf_read_chunk(summary, 0, requested, &wrong_handle).is_err());
+
+        let wrong_offset = LxmfReadChunk::new(
+            summary.handle(),
+            1,
+            summary.normalized_wire_len(),
+            &wire[1..2],
+        )
+        .unwrap();
+        assert!(validate_lxmf_read_chunk(summary, 0, requested, &wrong_offset).is_err());
+
+        let changed_length = LxmfReadChunk::new(
+            summary.handle(),
+            0,
+            summary.normalized_wire_len() + 1,
+            &wire[..1],
+        )
+        .unwrap();
+        assert!(validate_lxmf_read_chunk(summary, 0, requested, &changed_length).is_err());
+        assert!(
+            validate_lxmf_read_chunk(summary, 0, LxmfReadLength::new(1).unwrap(), &first,).is_err()
+        );
+    }
+
+    #[test]
+    fn lxmf_wire_parser_cross_checks_summary_and_redacts_title_and_content() {
+        let title = b"private title";
+        let content = b"private content";
+        let wire = sample_lxmf_wire(title, content);
+        let summary = sample_lxmf_summary(7, &wire);
+        let parsed = parse_and_validate_lxmf(summary, &wire).unwrap();
+        let expected_title_sha256: [u8; 32] = Sha256::digest(title).into();
+        let expected_content_sha256: [u8; 32] = Sha256::digest(content).into();
+        assert_eq!(parsed.title_sha256, expected_title_sha256);
+        assert_eq!(parsed.content_sha256, expected_content_sha256);
+        assert!(parsed.title_utf8);
+        assert!(parsed.content_utf8);
+
+        let line = format_lxmf_read_result(
+            &[0x11; 16],
+            &[0x22; 16],
+            summary,
+            Path::new("/tmp/message.lxmf"),
+            Some(parsed),
+        );
+        assert!(line.contains("parsed=true"));
+        assert!(line.contains(&format!("title_sha256={}", hex(&parsed.title_sha256))));
+        assert!(line.contains(&format!("content_sha256={}", hex(&parsed.content_sha256))));
+        assert!(!line.contains("private title"));
+        assert!(!line.contains("private content"));
+        assert!(!line.contains(&hex(content)));
+
+        let mut tampered = wire.clone();
+        let last_content_byte = tampered
+            .windows(content.len())
+            .position(|window| window == content)
+            .unwrap()
+            + content.len()
+            - 1;
+        tampered[last_content_byte] ^= 1;
+        assert!(parse_and_validate_lxmf(summary, &tampered).is_err());
+    }
+
+    #[test]
+    fn lxmf_output_is_reserved_streamed_verified_and_never_overwritten() {
+        let wire = sample_lxmf_wire(b"private title", b"private content");
+        let summary = sample_lxmf_summary(7, &wire);
+        let output_file = TempOutput::new("lxmf-output");
+        let command = Command::LxmfRead {
+            handle: summary.handle(),
+            output: output_file.path.clone(),
+        };
+        let mut output = CommandOutputs::reserve(&command, None)
+            .unwrap()
+            .into_lxmf_read()
+            .unwrap();
+        output.write_uncommitted(&wire[..64]).unwrap();
+        output.write_uncommitted(&wire[64..]).unwrap();
+        output
+            .verify_sha256_uncommitted(wire.len(), summary.exact_wire_sha256())
+            .unwrap();
+        let read_back = output.read_back_uncommitted(wire.len()).unwrap();
+        assert_eq!(read_back, wire);
+        assert!(parse_and_validate_lxmf(summary, &read_back).is_ok());
+        output.finish().unwrap();
+        assert_eq!(fs::read(&output_file.path).unwrap(), wire);
+
+        let error = CommandOutputs::reserve(&command, None)
+            .err()
+            .expect("an existing exact LXMF output must not be overwritten");
+        assert!(error.contains("without overwriting"));
+        assert_eq!(fs::read(&output_file.path).unwrap(), wire);
+
+        let rejected_file = TempOutput::new("lxmf-digest-rejected");
+        let rejected_command = Command::LxmfRead {
+            handle: summary.handle(),
+            output: rejected_file.path.clone(),
+        };
+        let mut rejected = CommandOutputs::reserve(&rejected_command, None)
+            .unwrap()
+            .into_lxmf_read()
+            .unwrap();
+        rejected.write_uncommitted(&wire).unwrap();
+        assert!(
+            rejected
+                .verify_sha256_uncommitted(wire.len(), &[0; 32])
+                .is_err()
+        );
+        drop(rejected);
+        assert!(!rejected_file.path.exists());
     }
 
     #[test]
@@ -2676,6 +4314,7 @@ mod tests {
             &[0x11; 16],
             &[0x22; 16],
             evidence_output,
+            "submit-and-wait",
         )
         .unwrap();
         assert_eq!(
@@ -2759,6 +4398,7 @@ mod tests {
             &[0x11; 16],
             &[0x22; 16],
             evidence_output,
+            "submit-and-wait",
         )
         .expect_err("device failure remains a command failure after evidence is committed");
         assert_eq!(
@@ -2807,6 +4447,7 @@ mod tests {
             &[0x11; 16],
             &[0x22; 16],
             Some(evidence_output),
+            "submit-and-wait",
         )
         .expect_err("read-only reservation handle must fail evidence commit");
         assert!(error.contains("authenticated submission 42 reached state=delivered"));

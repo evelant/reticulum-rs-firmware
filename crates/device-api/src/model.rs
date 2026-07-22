@@ -2,13 +2,13 @@
 
 use core::{convert::Infallible, marker::PhantomData, ops::BitOr};
 
-#[cfg(feature = "experimental-rns-inbox")]
+#[cfg(any(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
 use core::num::NonZeroU64;
 
 /// Device API v1 major version.
 pub const API_VERSION_MAJOR: u16 = 1;
-/// Device API v1 revision adding the optional experimental RNS inbox capability.
-pub const API_VERSION_MINOR: u16 = 2;
+/// Device API v1 revision adding source-free basic LXMF submission.
+pub const API_VERSION_MINOR: u16 = 4;
 
 /// Maximum size of one decoded or encoded logical CBOR message.
 pub const MAX_MESSAGE_BYTES: usize = 512;
@@ -19,6 +19,19 @@ pub const MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES: usize = 383;
 /// Maximum payload returned by the experimental inbound RNS DATA mailbox.
 #[cfg(feature = "experimental-rns-inbox")]
 pub const MAX_RNS_INBOX_PAYLOAD_BYTES: usize = 383;
+/// Maximum exact normalized LXMF wire bytes returned by one read response.
+#[cfg(feature = "experimental-lxmf")]
+pub const MAX_LXMF_READ_CHUNK_BYTES: usize = 416;
+/// Structural per-field title limit accepted by the basic-LXMF codec.
+///
+/// The encoded body and product composer can impose a lower limit on a
+/// particular title/content combination.
+pub const MAX_LXMF_BASIC_TITLE_BYTES: usize = 295;
+/// Structural per-field content limit accepted by the basic-LXMF codec.
+///
+/// The encoded body and product composer can impose a lower limit on a
+/// particular title/content combination.
+pub const MAX_LXMF_BASIC_CONTENT_BYTES: usize = 295;
 
 /// `system.capabilities` operation number.
 pub const OP_SYSTEM_CAPABILITIES: u16 = 0x0001;
@@ -37,6 +50,15 @@ pub const OP_EXPERIMENTAL_RNS_INBOX_STATUS: u16 = 0xf002;
 /// Read the oldest item in the experimental inbound RNS DATA mailbox.
 #[cfg(feature = "experimental-rns-inbox")]
 pub const OP_EXPERIMENTAL_RNS_INBOX_PEEK: u16 = 0xf003;
+/// Read the next committed LXMF message summary after an optional stable handle.
+#[cfg(feature = "experimental-lxmf")]
+pub const OP_EXPERIMENTAL_LXMF_NEXT: u16 = 0xf004;
+/// Read one bounded chunk of a committed normalized LXMF wire message.
+#[cfg(feature = "experimental-lxmf")]
+pub const OP_EXPERIMENTAL_LXMF_READ: u16 = 0xf005;
+/// Compose and durably submit one basic LXMF message through the local identity.
+#[cfg(feature = "experimental-lxmf")]
+pub const OP_EXPERIMENTAL_LXMF_BASIC_SEND: u16 = 0xf006;
 
 /// Major/minor logical protocol version.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -71,11 +93,13 @@ pub struct IdempotencyKey(pub [u8; 16]);
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct DestinationHash(pub [u8; 16]);
 
-/// Public, copy-only summary of the node's primary Reticulum identity.
+/// Public, copy-only summary of the node's Reticulum destinations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IdentitySummary {
     /// Primary destination served by the node.
     primary_destination: DestinationHash,
+    /// Optional local `lxmf.delivery` destination served by the node.
+    lxmf_delivery_destination: Option<DestinationHash>,
 }
 
 impl IdentitySummary {
@@ -83,12 +107,29 @@ impl IdentitySummary {
     pub const fn new(primary_destination: DestinationHash) -> Self {
         Self {
             primary_destination,
+            lxmf_delivery_destination: None,
+        }
+    }
+
+    /// Construct a summary that also advertises the local `lxmf.delivery` destination.
+    pub const fn with_lxmf_delivery_destination(
+        primary_destination: DestinationHash,
+        lxmf_delivery_destination: DestinationHash,
+    ) -> Self {
+        Self {
+            primary_destination,
+            lxmf_delivery_destination: Some(lxmf_delivery_destination),
         }
     }
 
     /// Primary destination served by the node.
     pub const fn primary_destination(self) -> DestinationHash {
         self.primary_destination
+    }
+
+    /// Local `lxmf.delivery` destination when that service is active.
+    pub const fn lxmf_delivery_destination(self) -> Option<DestinationHash> {
+        self.lxmf_delivery_destination
     }
 }
 
@@ -309,14 +350,14 @@ pub enum RequiredPermission {
     /// Read submission status.
     ReadSubmissionStatus,
     /// Submit outbound RNS DATA through the unstable transport-neutral path.
-    #[cfg(feature = "experimental-rns-data")]
+    #[cfg(any(feature = "experimental-rns-data", feature = "experimental-lxmf"))]
     ExperimentalSubmitRnsData,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AuthorizationRequirement {
     Public,
-    #[cfg(feature = "experimental-rns-inbox")]
+    #[cfg(any(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
     Authenticated,
     Permission(RequiredPermission),
 }
@@ -325,7 +366,7 @@ impl RequiredPermission {
     const fn bits(self) -> Permissions {
         match self {
             Self::ReadSubmissionStatus => Permissions::READ_SUBMISSION_STATUS,
-            #[cfg(feature = "experimental-rns-data")]
+            #[cfg(any(feature = "experimental-rns-data", feature = "experimental-lxmf"))]
             Self::ExperimentalSubmitRnsData => Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA,
         }
     }
@@ -359,6 +400,48 @@ pub enum DeviceRequest<'a> {
     /// Read the oldest inbound RNS DATA item without consuming it.
     #[cfg(feature = "experimental-rns-inbox")]
     RnsInboxPeek,
+    /// Read the next committed LXMF summary after an optional stable handle.
+    #[cfg(feature = "experimental-lxmf")]
+    LxmfNext {
+        /// Exclusive physical-commit-order cursor; `None` selects the first message.
+        after: Option<LxmfMessageHandle>,
+    },
+    /// Read one bounded chunk of an exact committed normalized LXMF wire message.
+    #[cfg(feature = "experimental-lxmf")]
+    LxmfRead {
+        /// Stable committed-message handle.
+        handle: LxmfMessageHandle,
+        /// Zero-based byte offset in the normalized wire representation.
+        offset: u32,
+        /// Maximum bytes requested in this response.
+        max_bytes: LxmfReadLength,
+    },
+    /// Compose and durably submit a basic LXMF message using the device-owned source.
+    ///
+    /// Empty title and content values are valid. The codec bounds fields and
+    /// message size; product composition applies its additional carrier rules.
+    #[cfg(feature = "experimental-lxmf")]
+    LxmfBasicSend {
+        /// Complete remote `lxmf.delivery` destination hash.
+        destination: DestinationHash,
+        /// Caller-selected Unix timestamp in milliseconds.
+        ///
+        /// The bearer-neutral codec accepts `u64`; the current product composer
+        /// accepts exactly `1..=8_796_093_022_207_999`.
+        timestamp_unix_ms: u64,
+        /// Borrowed binary title; interpretation belongs to the LXMF application.
+        ///
+        /// The codec's 295-byte field bound is not a guarantee that every
+        /// title/content combination fits the encoded body or product carrier.
+        title: &'a [u8],
+        /// Borrowed binary content; interpretation belongs to the LXMF application.
+        ///
+        /// The codec's 295-byte field bound is not a guarantee that every
+        /// title/content combination fits the encoded body or product carrier.
+        content: &'a [u8],
+        /// Deduplication key scoped by the authenticated principal and composed message.
+        idempotency_key: IdempotencyKey,
+    },
     /// Durably submit outbound RNS DATA without selecting a physical transport.
     #[cfg(feature = "experimental-rns-data")]
     SubmitRnsData {
@@ -386,6 +469,12 @@ impl DeviceRequest<'_> {
             Self::RnsInboxStatus => OP_EXPERIMENTAL_RNS_INBOX_STATUS,
             #[cfg(feature = "experimental-rns-inbox")]
             Self::RnsInboxPeek => OP_EXPERIMENTAL_RNS_INBOX_PEEK,
+            #[cfg(feature = "experimental-lxmf")]
+            Self::LxmfNext { .. } => OP_EXPERIMENTAL_LXMF_NEXT,
+            #[cfg(feature = "experimental-lxmf")]
+            Self::LxmfRead { .. } => OP_EXPERIMENTAL_LXMF_READ,
+            #[cfg(feature = "experimental-lxmf")]
+            Self::LxmfBasicSend { .. } => OP_EXPERIMENTAL_LXMF_BASIC_SEND,
             #[cfg(feature = "experimental-rns-data")]
             Self::SubmitRnsData { .. } => OP_EXPERIMENTAL_SUBMIT_RNS_DATA,
             Self::__Borrowed(never, _) => match *never {},
@@ -400,6 +489,10 @@ impl DeviceRequest<'_> {
             }
             #[cfg(feature = "experimental-rns-inbox")]
             Self::RnsInboxStatus | Self::RnsInboxPeek => false,
+            #[cfg(feature = "experimental-lxmf")]
+            Self::LxmfNext { .. } | Self::LxmfRead { .. } => false,
+            #[cfg(feature = "experimental-lxmf")]
+            Self::LxmfBasicSend { .. } => true,
             #[cfg(feature = "experimental-rns-data")]
             Self::SubmitRnsData { .. } => true,
             Self::__Borrowed(never, _) => match *never {},
@@ -414,6 +507,14 @@ impl DeviceRequest<'_> {
             }
             #[cfg(feature = "experimental-rns-inbox")]
             Self::RnsInboxStatus | Self::RnsInboxPeek => AuthorizationRequirement::Authenticated,
+            #[cfg(feature = "experimental-lxmf")]
+            Self::LxmfNext { .. } | Self::LxmfRead { .. } => {
+                AuthorizationRequirement::Authenticated
+            }
+            #[cfg(feature = "experimental-lxmf")]
+            Self::LxmfBasicSend { .. } => {
+                AuthorizationRequirement::Permission(RequiredPermission::ExperimentalSubmitRnsData)
+            }
             #[cfg(feature = "experimental-rns-data")]
             Self::SubmitRnsData { .. } => {
                 AuthorizationRequirement::Permission(RequiredPermission::ExperimentalSubmitRnsData)
@@ -444,7 +545,7 @@ pub const fn authorize_request(
 ) -> Result<(), AuthorizationError> {
     match request.authorization_requirement() {
         AuthorizationRequirement::Public => Ok(()),
-        #[cfg(feature = "experimental-rns-inbox")]
+        #[cfg(any(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
         AuthorizationRequirement::Authenticated => {
             if context.principal.is_some() {
                 Ok(())
@@ -507,6 +608,22 @@ pub struct CapabilitySnapshot {
     pub(crate) experimental_rns_inbox: CapabilityAvailability,
     /// Maximum payload returned by one experimental inbox item.
     pub(crate) max_rns_inbox_payload_bytes: u16,
+    /// Runtime availability of committed LXMF discovery and bounded reads.
+    pub(crate) experimental_lxmf: CapabilityAvailability,
+    /// Maximum exact normalized wire bytes returned by one LXMF read.
+    pub(crate) max_lxmf_read_chunk_bytes: u16,
+    /// Runtime availability of source-free basic LXMF composition and submission.
+    pub(crate) experimental_lxmf_basic_send: CapabilityAvailability,
+    /// Structural per-field title limit advertised by the logical codec.
+    ///
+    /// Product composition and carrier limits can reduce the accepted
+    /// title/content combination.
+    pub(crate) max_lxmf_basic_title_bytes: u16,
+    /// Structural per-field content limit advertised by the logical codec.
+    ///
+    /// Product composition and carrier limits can reduce the accepted
+    /// title/content combination.
+    pub(crate) max_lxmf_basic_content_bytes: u16,
 }
 
 impl CapabilitySnapshot {
@@ -534,6 +651,31 @@ impl CapabilitySnapshot {
             } else {
                 0
             },
+            experimental_lxmf: if cfg!(feature = "experimental-lxmf") {
+                CapabilityAvailability::Available
+            } else {
+                CapabilityAvailability::Unavailable
+            },
+            max_lxmf_read_chunk_bytes: if cfg!(feature = "experimental-lxmf") {
+                416
+            } else {
+                0
+            },
+            experimental_lxmf_basic_send: if cfg!(feature = "experimental-lxmf") {
+                CapabilityAvailability::Available
+            } else {
+                CapabilityAvailability::Unavailable
+            },
+            max_lxmf_basic_title_bytes: if cfg!(feature = "experimental-lxmf") {
+                MAX_LXMF_BASIC_TITLE_BYTES as u16
+            } else {
+                0
+            },
+            max_lxmf_basic_content_bytes: if cfg!(feature = "experimental-lxmf") {
+                MAX_LXMF_BASIC_CONTENT_BYTES as u16
+            } else {
+                0
+            },
         }
     }
 
@@ -548,6 +690,11 @@ impl CapabilitySnapshot {
         snapshot.experimental_submit_rns_data &= experimental_submit_rns_data;
         snapshot.experimental_rns_inbox = CapabilityAvailability::Unavailable;
         snapshot.max_rns_inbox_payload_bytes = 0;
+        snapshot.experimental_lxmf = CapabilityAvailability::Unavailable;
+        snapshot.max_lxmf_read_chunk_bytes = 0;
+        snapshot.experimental_lxmf_basic_send = CapabilityAvailability::Unavailable;
+        snapshot.max_lxmf_basic_title_bytes = 0;
+        snapshot.max_lxmf_basic_content_bytes = 0;
         snapshot
     }
 
@@ -569,6 +716,63 @@ impl CapabilitySnapshot {
         } else {
             snapshot.experimental_rns_inbox = CapabilityAvailability::Unavailable;
             snapshot.max_rns_inbox_payload_bytes = 0;
+        }
+        snapshot.experimental_lxmf = CapabilityAvailability::Unavailable;
+        snapshot.max_lxmf_read_chunk_bytes = 0;
+        snapshot.experimental_lxmf_basic_send = CapabilityAvailability::Unavailable;
+        snapshot.max_lxmf_basic_title_bytes = 0;
+        snapshot.max_lxmf_basic_content_bytes = 0;
+        snapshot
+    }
+
+    /// Restrict submission, raw-inbox, and LXMF capabilities to a higher dispatcher.
+    pub const fn for_dispatch_with_inbox_and_lxmf(
+        experimental_submit_rns_data: bool,
+        experimental_rns_inbox: CapabilityAvailability,
+        experimental_lxmf: CapabilityAvailability,
+    ) -> Self {
+        let mut snapshot =
+            Self::for_dispatch_with_inbox(experimental_submit_rns_data, experimental_rns_inbox);
+        if cfg!(feature = "experimental-lxmf") {
+            snapshot.experimental_lxmf = experimental_lxmf;
+            snapshot.max_lxmf_read_chunk_bytes =
+                if matches!(experimental_lxmf, CapabilityAvailability::Unavailable) {
+                    0
+                } else {
+                    416
+                };
+        }
+        snapshot
+    }
+
+    /// Restrict submission, inbox, LXMF reads, and basic LXMF send to one dispatcher.
+    pub const fn for_dispatch_with_inbox_lxmf_and_basic_send(
+        experimental_submit_rns_data: bool,
+        experimental_rns_inbox: CapabilityAvailability,
+        experimental_lxmf: CapabilityAvailability,
+        experimental_lxmf_basic_send: CapabilityAvailability,
+    ) -> Self {
+        let mut snapshot = Self::for_dispatch_with_inbox_and_lxmf(
+            experimental_submit_rns_data,
+            experimental_rns_inbox,
+            experimental_lxmf,
+        );
+        if cfg!(feature = "experimental-lxmf") {
+            snapshot.experimental_lxmf_basic_send = experimental_lxmf_basic_send;
+            let available = !matches!(
+                experimental_lxmf_basic_send,
+                CapabilityAvailability::Unavailable
+            );
+            snapshot.max_lxmf_basic_title_bytes = if available {
+                MAX_LXMF_BASIC_TITLE_BYTES as u16
+            } else {
+                0
+            };
+            snapshot.max_lxmf_basic_content_bytes = if available {
+                MAX_LXMF_BASIC_CONTENT_BYTES as u16
+            } else {
+                0
+            };
         }
         snapshot
     }
@@ -619,6 +823,37 @@ impl CapabilitySnapshot {
     /// Maximum payload returned by one experimental inbox item.
     pub const fn max_rns_inbox_payload_bytes(self) -> u16 {
         self.max_rns_inbox_payload_bytes
+    }
+
+    /// Runtime availability of committed LXMF discovery and bounded reads.
+    pub const fn experimental_lxmf(self) -> CapabilityAvailability {
+        self.experimental_lxmf
+    }
+
+    /// Maximum exact normalized wire bytes returned by one LXMF read.
+    pub const fn max_lxmf_read_chunk_bytes(self) -> u16 {
+        self.max_lxmf_read_chunk_bytes
+    }
+
+    /// Runtime availability of source-free basic LXMF composition and submission.
+    pub const fn experimental_lxmf_basic_send(self) -> CapabilityAvailability {
+        self.experimental_lxmf_basic_send
+    }
+
+    /// Structural codec limit for one source-free basic-LXMF title.
+    ///
+    /// The encoded-body and product-carrier limits can reject a smaller
+    /// title/content combination.
+    pub const fn max_lxmf_basic_title_bytes(self) -> u16 {
+        self.max_lxmf_basic_title_bytes
+    }
+
+    /// Structural codec limit for one source-free basic-LXMF content value.
+    ///
+    /// The encoded-body and product-carrier limits can reject a smaller
+    /// title/content combination.
+    pub const fn max_lxmf_basic_content_bytes(self) -> u16 {
+        self.max_lxmf_basic_content_bytes
     }
 }
 
@@ -722,6 +957,319 @@ impl core::fmt::Debug for RnsInboxItem {
             .field("payload_len", &self.payload_len)
             .finish_non_exhaustive()
     }
+}
+
+/// Stable non-zero handle for one committed inbound LXMF message.
+#[cfg(feature = "experimental-lxmf")]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct LxmfMessageHandle(NonZeroU64);
+
+#[cfg(feature = "experimental-lxmf")]
+impl LxmfMessageHandle {
+    /// Construct a stable handle from its complete numeric representation.
+    pub const fn new(value: u64) -> Result<Self, InvalidLxmfMessageHandle> {
+        match NonZeroU64::new(value) {
+            Some(value) => Ok(Self(value)),
+            None => Err(InvalidLxmfMessageHandle),
+        }
+    }
+
+    /// Complete numeric representation.
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+/// Zero cannot identify a committed LXMF message.
+#[cfg(feature = "experimental-lxmf")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidLxmfMessageHandle;
+
+/// Valid non-zero upper bound for one bounded LXMF read response.
+#[cfg(feature = "experimental-lxmf")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LxmfReadLength(u16);
+
+#[cfg(feature = "experimental-lxmf")]
+impl LxmfReadLength {
+    /// Validate a requested response length against the frozen logical limit.
+    pub const fn new(value: u16) -> Result<Self, InvalidLxmfReadLength> {
+        if value == 0 || value as usize > MAX_LXMF_READ_CHUNK_BYTES {
+            Err(InvalidLxmfReadLength { actual: value })
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    /// Maximum bytes requested from the named offset.
+    pub const fn get(self) -> u16 {
+        self.0
+    }
+}
+
+/// A requested LXMF chunk length was zero or exceeded the logical limit.
+#[cfg(feature = "experimental-lxmf")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidLxmfReadLength {
+    actual: u16,
+}
+
+#[cfg(feature = "experimental-lxmf")]
+impl InvalidLxmfReadLength {
+    /// Rejected requested length.
+    pub const fn actual(self) -> u16 {
+        self.actual
+    }
+
+    /// Maximum accepted requested length.
+    pub const fn maximum(self) -> u16 {
+        MAX_LXMF_READ_CHUNK_BYTES as u16
+    }
+}
+
+/// Metadata-only physical-commit-order entry returned by `experimental.lxmf.next`.
+#[cfg(feature = "experimental-lxmf")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LxmfMessageSummary {
+    handle: LxmfMessageHandle,
+    message_id: [u8; 32],
+    destination: DestinationHash,
+    source: DestinationHash,
+    timestamp_bits: u64,
+    normalized_wire_len: u32,
+    title_len: u32,
+    content_len: u32,
+    fields_encoded_len: u32,
+    exact_wire_sha256: [u8; 32],
+}
+
+#[cfg(feature = "experimental-lxmf")]
+const LXMF_NORMALIZED_WIRE_PREFIX_BYTES: u64 = 16 + 16 + 64;
+#[cfg(feature = "experimental-lxmf")]
+const LXMF_PAYLOAD_ARRAY_HEADER_BYTES: u64 = 1;
+#[cfg(feature = "experimental-lxmf")]
+const LXMF_TIMESTAMP_BYTES: u64 = 1 + 8;
+
+#[cfg(feature = "experimental-lxmf")]
+const fn minimum_msgpack_binary_bytes(decoded_len: u32) -> u64 {
+    let header_len = if decoded_len <= u8::MAX as u32 {
+        2
+    } else if decoded_len <= u16::MAX as u32 {
+        3
+    } else {
+        5
+    };
+    decoded_len as u64 + header_len
+}
+
+#[cfg(feature = "experimental-lxmf")]
+impl LxmfMessageSummary {
+    /// Construct one complete committed-message summary.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        handle: LxmfMessageHandle,
+        message_id: [u8; 32],
+        destination: DestinationHash,
+        source: DestinationHash,
+        timestamp_bits: u64,
+        normalized_wire_len: u32,
+        title_len: u32,
+        content_len: u32,
+        fields_encoded_len: u32,
+        exact_wire_sha256: [u8; 32],
+    ) -> Result<Self, InvalidLxmfMessageSummary> {
+        // A normalized LXMF wire is the destination, source and signature
+        // prefix followed by a four- or five-item MessagePack array. The
+        // shortest valid payload has a one-byte array header, one float64
+        // timestamp, two binary values with their shortest possible length
+        // prefixes, and the exact encoded fields map. A fifth stamp can only
+        // increase this lower bound. Perform the sum in u64 so adversarial u32
+        // component lengths cannot wrap into an apparently small message.
+        let minimum_wire_len = LXMF_NORMALIZED_WIRE_PREFIX_BYTES
+            + LXMF_PAYLOAD_ARRAY_HEADER_BYTES
+            + LXMF_TIMESTAMP_BYTES
+            + minimum_msgpack_binary_bytes(title_len)
+            + minimum_msgpack_binary_bytes(content_len)
+            + fields_encoded_len as u64;
+        if fields_encoded_len == 0 || (normalized_wire_len as u64) < minimum_wire_len {
+            return Err(InvalidLxmfMessageSummary);
+        }
+        Ok(Self {
+            handle,
+            message_id,
+            destination,
+            source,
+            timestamp_bits,
+            normalized_wire_len,
+            title_len,
+            content_len,
+            fields_encoded_len,
+            exact_wire_sha256,
+        })
+    }
+
+    /// Stable committed-message handle.
+    pub const fn handle(self) -> LxmfMessageHandle {
+        self.handle
+    }
+
+    /// Python-compatible LXMF authenticated-message identifier.
+    pub const fn message_id(&self) -> &[u8; 32] {
+        &self.message_id
+    }
+
+    /// Local `lxmf.delivery` destination that received the message.
+    pub const fn destination(self) -> DestinationHash {
+        self.destination
+    }
+
+    /// Authenticated source `lxmf.delivery` destination.
+    pub const fn source(self) -> DestinationHash {
+        self.source
+    }
+
+    /// Exact IEEE-754 bits of the LXMF timestamp.
+    pub const fn timestamp_bits(self) -> u64 {
+        self.timestamp_bits
+    }
+
+    /// Complete normalized wire length.
+    pub const fn normalized_wire_len(self) -> u32 {
+        self.normalized_wire_len
+    }
+
+    /// Decoded title byte length.
+    pub const fn title_len(self) -> u32 {
+        self.title_len
+    }
+
+    /// Decoded content byte length.
+    pub const fn content_len(self) -> u32 {
+        self.content_len
+    }
+
+    /// Encoded MessagePack fields-map length.
+    pub const fn fields_encoded_len(self) -> u32 {
+        self.fields_encoded_len
+    }
+
+    /// SHA-256 of the complete normalized wire representation.
+    pub const fn exact_wire_sha256(&self) -> &[u8; 32] {
+        &self.exact_wire_sha256
+    }
+}
+
+/// A committed LXMF summary contained an impossible zero wire length.
+#[cfg(feature = "experimental-lxmf")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidLxmfMessageSummary;
+
+/// One owned exact normalized-wire chunk returned by `experimental.lxmf.read`.
+#[cfg(feature = "experimental-lxmf")]
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct LxmfReadChunk {
+    handle: LxmfMessageHandle,
+    offset: u32,
+    total_len: u32,
+    bytes_len: u16,
+    bytes: [u8; MAX_LXMF_READ_CHUNK_BYTES],
+}
+
+#[cfg(feature = "experimental-lxmf")]
+impl LxmfReadChunk {
+    /// Copy and validate one non-empty bounded chunk of a committed message.
+    pub fn new(
+        handle: LxmfMessageHandle,
+        offset: u32,
+        total_len: u32,
+        bytes: &[u8],
+    ) -> Result<Self, InvalidLxmfReadChunk> {
+        if bytes.is_empty() {
+            return Err(InvalidLxmfReadChunk::Empty);
+        }
+        if bytes.len() > MAX_LXMF_READ_CHUNK_BYTES {
+            return Err(InvalidLxmfReadChunk::TooLarge {
+                actual: bytes.len(),
+            });
+        }
+        let end = u64::from(offset) + bytes.len() as u64;
+        if total_len == 0 || offset >= total_len || end > u64::from(total_len) {
+            return Err(InvalidLxmfReadChunk::OutsideMessage {
+                offset,
+                length: bytes.len(),
+                total_len,
+            });
+        }
+        let mut owned = [0_u8; MAX_LXMF_READ_CHUNK_BYTES];
+        owned[..bytes.len()].copy_from_slice(bytes);
+        Ok(Self {
+            handle,
+            offset,
+            total_len,
+            bytes_len: bytes.len() as u16,
+            bytes: owned,
+        })
+    }
+
+    /// Stable committed-message handle.
+    pub const fn handle(&self) -> LxmfMessageHandle {
+        self.handle
+    }
+
+    /// Zero-based offset of the first returned byte.
+    pub const fn offset(&self) -> u32 {
+        self.offset
+    }
+
+    /// Complete normalized wire length.
+    pub const fn total_len(&self) -> u32 {
+        self.total_len
+    }
+
+    /// Exact bytes in this response.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes[..self.bytes_len as usize]
+    }
+
+    /// Whether this chunk reaches the exact end of the committed message.
+    pub const fn is_final(&self) -> bool {
+        self.offset as u64 + self.bytes_len as u64 == self.total_len as u64
+    }
+}
+
+#[cfg(feature = "experimental-lxmf")]
+impl core::fmt::Debug for LxmfReadChunk {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("LxmfReadChunk")
+            .field("handle", &self.handle)
+            .field("offset", &self.offset)
+            .field("total_len", &self.total_len)
+            .field("bytes_len", &self.bytes_len)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A returned LXMF chunk violated its fixed logical or message boundary.
+#[cfg(feature = "experimental-lxmf")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InvalidLxmfReadChunk {
+    /// A successful read must make forward progress.
+    Empty,
+    /// Returned bytes exceeded the fixed response owner.
+    TooLarge {
+        /// Supplied byte count.
+        actual: usize,
+    },
+    /// Offset and bytes did not fit inside the declared complete message.
+    OutsideMessage {
+        /// Supplied zero-based offset.
+        offset: u32,
+        /// Supplied chunk byte count.
+        length: usize,
+        /// Declared complete normalized wire length.
+        total_len: u32,
+    },
 }
 
 /// SHA-256 digest of every byte in one complete encoded Reticulum packet.
@@ -842,6 +1390,33 @@ pub struct SubmissionAccepted {
     pub id: SubmissionId,
 }
 
+/// Acceptance result for source-free basic LXMF submission.
+///
+/// The device selects the authenticated local LXMF source. The returned
+/// message identifier names the exact composed LXMF message, while the
+/// submission identifier is used with [`DeviceRequest::SubmissionStatus`]. A
+/// successful response means durable acceptance, not peer delivery.
+#[cfg(feature = "experimental-lxmf")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LxmfBasicSendAccepted {
+    /// Device-assigned durable submission identifier.
+    pub id: SubmissionId,
+    message_id: [u8; 32],
+}
+
+#[cfg(feature = "experimental-lxmf")]
+impl LxmfBasicSendAccepted {
+    /// Construct a successful basic-LXMF acceptance result.
+    pub const fn new(id: SubmissionId, message_id: [u8; 32]) -> Self {
+        Self { id, message_id }
+    }
+
+    /// Python-compatible LXMF authenticated-message identifier.
+    pub const fn message_id(&self) -> &[u8; 32] {
+        &self.message_id
+    }
+}
+
 /// Typed API error returned in a logical response.
 ///
 /// This is a closed API-v1 wire vocabulary. Adding a numeric error category
@@ -912,6 +1487,15 @@ pub enum DeviceResponse {
     /// Occupied result of `experimental.rns_inbox.peek`.
     #[cfg(feature = "experimental-rns-inbox")]
     RnsInboxPeek(RnsInboxItem),
+    /// Next committed LXMF metadata entry in physical commit order.
+    #[cfg(feature = "experimental-lxmf")]
+    LxmfNext(LxmfMessageSummary),
+    /// Bounded exact normalized-wire bytes for one committed LXMF message.
+    #[cfg(feature = "experimental-lxmf")]
+    LxmfRead(LxmfReadChunk),
+    /// Accepted source-free basic LXMF submission.
+    #[cfg(feature = "experimental-lxmf")]
+    LxmfBasicSendAccepted(LxmfBasicSendAccepted),
     /// Accepted experimental outbound RNS DATA submission.
     #[cfg(feature = "experimental-rns-data")]
     SubmitRnsDataAccepted(SubmissionAccepted),
@@ -930,6 +1514,12 @@ impl DeviceResponse {
             Self::RnsInboxStatus(_) => OP_EXPERIMENTAL_RNS_INBOX_STATUS,
             #[cfg(feature = "experimental-rns-inbox")]
             Self::RnsInboxPeek(_) => OP_EXPERIMENTAL_RNS_INBOX_PEEK,
+            #[cfg(feature = "experimental-lxmf")]
+            Self::LxmfNext(_) => OP_EXPERIMENTAL_LXMF_NEXT,
+            #[cfg(feature = "experimental-lxmf")]
+            Self::LxmfRead(_) => OP_EXPERIMENTAL_LXMF_READ,
+            #[cfg(feature = "experimental-lxmf")]
+            Self::LxmfBasicSendAccepted(_) => OP_EXPERIMENTAL_LXMF_BASIC_SEND,
             #[cfg(feature = "experimental-rns-data")]
             Self::SubmitRnsDataAccepted(_) => OP_EXPERIMENTAL_SUBMIT_RNS_DATA,
             Self::Error(_) => RESPONSE_ERROR,

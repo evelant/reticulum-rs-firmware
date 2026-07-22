@@ -3,7 +3,7 @@
 
 use object::{
     Architecture, BinaryFormat, Endianness, Object, ObjectKind, ObjectSection, ObjectSymbol,
-    SectionKind, SymbolSection,
+    SectionKind, SymbolKind, SymbolSection,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -335,6 +335,14 @@ const QUALIFIED_RAW_STACK_MARGIN_BYTES: u64 = PRE_BOOTSTRAP_QUALIFIED_RAW_STACK_
 const MAXIMUM_STACK_FRAME_BYTES: u64 = 53_680;
 const MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES: u64 =
     QUALIFIED_RAW_STACK_MARGIN_BYTES - MAXIMUM_STACK_FRAME_BYTES;
+// The emitted storage-path frames below start at the async task body and stop
+// at the local esp-storage wrapper. Keep explicit room for the small executor
+// poll wrapper, the ROM flash implementation, and interrupt entry that the
+// selected path or ELF's `.stack_sizes` section cannot describe.
+const STORAGE_PATH_STACK_RESERVE_BYTES: u64 = 4_096;
+const PRE_USB_MOUNT_STACK_COMPONENT_COUNT: usize = 9;
+const LIVE_APPEND_STACK_COMPONENT_COUNT: usize = 9;
+const LIVE_COMPACT_STACK_COMPONENT_COUNT: usize = 10;
 // The bounded bootstrap announce scheduler adds sixteen linked bytes to both
 // profiles. LXTE remains one exact 96-byte initialized internal-RAM object only
 // in HIL, preserving the profile-to-profile difference.
@@ -342,6 +350,206 @@ const MINIMUM_DEFAULT_USABLE_STACK_BYTES: u64 = 162_376;
 const MINIMUM_HIL_USABLE_STACK_BYTES: u64 = 161_576;
 const EXPECTED_STACK_GUARD_OFFSET_BYTES: u64 = 60;
 const STACK_GUARD_WORD_BYTES: u64 = size_of::<u32>() as u64;
+
+#[derive(Clone, Copy)]
+struct StackSymbolSelector {
+    output_name: &'static str,
+    required_fragments: &'static [&'static str],
+    rejected_fragments: &'static [&'static str],
+}
+
+const PRE_USB_MOUNT_STACK_SELECTORS: [StackSymbolSelector; PRE_USB_MOUNT_STACK_COMPONENT_COUNT] = [
+    // Rust v0 mangling retains these identifier fragments while crate hashes and
+    // generic encodings vary. Every selector is required to resolve to one
+    // distinct defined text address, so an inlining or topology change fails
+    // closed for review instead of silently dropping a frame from the sum.
+    StackSymbolSelector {
+        output_name: "product_main_poll",
+        required_fragments: &["___product_main_task_inner_function"],
+        rejected_fragments: &["UninitCell", "TaskStorage", "HEAP"],
+    },
+    StackSymbolSelector {
+        output_name: "mount_node_runtime",
+        required_fragments: &["ProductFlashOwner", "mount_node_runtime"],
+        rejected_fragments: &[],
+    },
+    StackSymbolSelector {
+        output_name: "submission_runtime_mount_into",
+        required_fragments: &[
+            "SubmissionRuntime",
+            "mount_into",
+            "BoundJournal",
+            "PartitionNorFlash",
+            "FlashStorage",
+        ],
+        rejected_fragments: &[],
+    },
+    StackSymbolSelector {
+        output_name: "storage_actor_mount_into",
+        required_fragments: &[
+            "StorageActor",
+            "mount_into",
+            "BoundJournal",
+            "PartitionNorFlash",
+            "FlashStorage",
+        ],
+        rejected_fragments: &[],
+    },
+    StackSymbolSelector {
+        output_name: "storage_journal_mount_into",
+        required_fragments: &[
+            "reticulum_storage_journal",
+            "10mount_into",
+            "BoundJournal",
+            "PartitionNorFlash",
+            "FlashStorage",
+        ],
+        rejected_fragments: &["scan_bank"],
+    },
+    StackSymbolSelector {
+        output_name: "storage_journal_select_manifest",
+        required_fragments: &[
+            "reticulum_storage_journal",
+            "select_manifest",
+            "BoundJournal",
+            "PartitionNorFlash",
+            "FlashStorage",
+        ],
+        rejected_fragments: &[],
+    },
+    StackSymbolSelector {
+        output_name: "storage_journal_read_manifest",
+        required_fragments: &[
+            "reticulum_storage_journal",
+            "read_manifest",
+            "BoundJournal",
+            "PartitionNorFlash",
+            "FlashStorage",
+        ],
+        rejected_fragments: &[],
+    },
+    StackSymbolSelector {
+        output_name: "partition_nor_flash_read",
+        required_fragments: &["PartitionNorFlash", "ReadNorFlash", "4read", "FlashStorage"],
+        rejected_fragments: &[],
+    },
+    StackSymbolSelector {
+        output_name: "esp_storage_spiflash_read",
+        required_fragments: &["esp_storage", "spiflash_read"],
+        rejected_fragments: &[],
+    },
+];
+
+const LIVE_APPEND_STACK_SELECTORS: [StackSymbolSelector; LIVE_APPEND_STACK_COMPONENT_COUNT] = [
+    StackSymbolSelector {
+        output_name: "node_task_poll",
+        required_fragments: &["node_task", "___run_task_inner_function"],
+        rejected_fragments: &["UninitCell", "TaskStorage", "HEAP"],
+    },
+    StackSymbolSelector {
+        output_name: "authenticated_api_submission_accept",
+        required_fragments: &["ProductAuthenticatedApiPort", "SubmissionPort", "6accept"],
+        rejected_fragments: &[],
+    },
+    StackSymbolSelector {
+        output_name: "storage_actor_drive_pending",
+        required_fragments: &[
+            "StorageActor",
+            "drive_pending",
+            "BoundJournal",
+            "PartitionNorFlash",
+            "FlashStorage",
+        ],
+        rejected_fragments: &[],
+    },
+    StackSymbolSelector {
+        output_name: "storage_actor_drive_append",
+        required_fragments: &[
+            "StorageActor",
+            "drive_append",
+            "BoundJournal",
+            "PartitionNorFlash",
+            "FlashStorage",
+        ],
+        rejected_fragments: &[],
+    },
+    StackSymbolSelector {
+        output_name: "storage_journal_append_with_replay_scratch",
+        required_fragments: &[
+            "reticulum_storage_journal",
+            "append_with_replay_scratch",
+            "BoundJournal",
+            "PartitionNorFlash",
+            "FlashStorage",
+        ],
+        rejected_fragments: &[],
+    },
+    StackSymbolSelector {
+        output_name: "storage_journal_select_manifest",
+        required_fragments: &[
+            "reticulum_storage_journal",
+            "select_manifest",
+            "BoundJournal",
+            "PartitionNorFlash",
+            "FlashStorage",
+        ],
+        rejected_fragments: &[],
+    },
+    StackSymbolSelector {
+        output_name: "storage_journal_read_manifest",
+        required_fragments: &[
+            "reticulum_storage_journal",
+            "read_manifest",
+            "BoundJournal",
+            "PartitionNorFlash",
+            "FlashStorage",
+        ],
+        rejected_fragments: &[],
+    },
+    StackSymbolSelector {
+        output_name: "partition_nor_flash_read",
+        required_fragments: &["PartitionNorFlash", "ReadNorFlash", "4read", "FlashStorage"],
+        rejected_fragments: &[],
+    },
+    StackSymbolSelector {
+        output_name: "esp_storage_spiflash_read",
+        required_fragments: &["esp_storage", "spiflash_read"],
+        rejected_fragments: &[],
+    },
+];
+
+const LIVE_COMPACT_STACK_SELECTORS: [StackSymbolSelector; LIVE_COMPACT_STACK_COMPONENT_COUNT] = [
+    LIVE_APPEND_STACK_SELECTORS[0],
+    LIVE_APPEND_STACK_SELECTORS[1],
+    LIVE_APPEND_STACK_SELECTORS[2],
+    LIVE_APPEND_STACK_SELECTORS[3],
+    StackSymbolSelector {
+        output_name: "storage_journal_compact_with_replay_scratch",
+        required_fragments: &[
+            "reticulum_storage_journal",
+            "compact_with_replay_scratch",
+            "BoundJournal",
+            "PartitionNorFlash",
+            "FlashStorage",
+        ],
+        rejected_fragments: &[],
+    },
+    StackSymbolSelector {
+        output_name: "storage_journal_mount_state_with_scratch",
+        required_fragments: &[
+            "reticulum_storage_journal",
+            "mount_state_with_scratch",
+            "BoundJournal",
+            "PartitionNorFlash",
+            "FlashStorage",
+        ],
+        rejected_fragments: &[],
+    },
+    LIVE_APPEND_STACK_SELECTORS[5],
+    LIVE_APPEND_STACK_SELECTORS[6],
+    LIVE_APPEND_STACK_SELECTORS[7],
+    LIVE_APPEND_STACK_SELECTORS[8],
+];
 
 const FLAG_ACTIVE: u32 = 1 << 0;
 const FLAG_STACK_INITIALIZED: u32 = 1 << 1;
@@ -545,6 +753,30 @@ struct StackSizeInventory {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StackSizeRecord {
+    function_address: u64,
+    frame_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ParsedStackSizes {
+    inventory: StackSizeInventory,
+    records: Vec<StackSizeRecord>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PreUsbMountStack {
+    frame_bytes: [u64; PRE_USB_MOUNT_STACK_COMPONENT_COUNT],
+    cumulative_frame_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LiveMutationStack<const COMPONENTS: usize> {
+    frame_bytes: [u64; COMPONENTS],
+    cumulative_frame_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct StackLayout {
     reserved_bytes: u64,
     usable_bytes: u64,
@@ -554,10 +786,16 @@ struct StackLayout {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ElfInspection {
     default_stack_sizes: StackSizeInventory,
+    default_pre_usb_mount_stack: PreUsbMountStack,
+    default_live_append_stack: LiveMutationStack<LIVE_APPEND_STACK_COMPONENT_COUNT>,
+    default_live_compact_stack: LiveMutationStack<LIVE_COMPACT_STACK_COMPONENT_COUNT>,
     default_stack: StackLayout,
     default_proof_trace_symbol_count: u64,
     default_lxmf_trace_symbol_count: u64,
     hil_stack_sizes: StackSizeInventory,
+    hil_pre_usb_mount_stack: PreUsbMountStack,
+    hil_live_append_stack: LiveMutationStack<LIVE_APPEND_STACK_COMPONENT_COUNT>,
+    hil_live_compact_stack: LiveMutationStack<LIVE_COMPACT_STACK_COMPONENT_COUNT>,
     hil_stack: StackLayout,
     hil_proof_trace_symbol_count: u64,
     hil_proof_trace_symbol_size_bytes: u64,
@@ -1679,8 +1917,20 @@ fn sync_directory(path: &Path) -> Result<(), String> {
 }
 
 fn inspect_elf_pair(options: &ElfInspectionOptions) -> Result<ElfInspection, String> {
-    let (default_stack_sizes, default_stack) = inspect_elf(&options.default_elf, "default E290")?;
-    let (hil_stack_sizes, hil_stack) = inspect_elf(&options.hil_elf, "runtime-measurement HIL")?;
+    let (
+        default_stack_sizes,
+        default_pre_usb_mount_stack,
+        default_live_append_stack,
+        default_live_compact_stack,
+        default_stack,
+    ) = inspect_elf(&options.default_elf, "default E290")?;
+    let (
+        hil_stack_sizes,
+        hil_pre_usb_mount_stack,
+        hil_live_append_stack,
+        hil_live_compact_stack,
+        hil_stack,
+    ) = inspect_elf(&options.hil_elf, "runtime-measurement HIL")?;
     let (default_proof_trace_symbol_count, _) =
         inspect_proof_trace_symbol(&options.default_elf, "default E290", false)?;
     let (default_lxmf_trace_symbol_count, _) =
@@ -1691,10 +1941,16 @@ fn inspect_elf_pair(options: &ElfInspectionOptions) -> Result<ElfInspection, Str
         inspect_lxmf_trace_symbol(&options.hil_elf, "runtime-measurement HIL", true)?;
     let inspection = ElfInspection {
         default_stack_sizes,
+        default_pre_usb_mount_stack,
+        default_live_append_stack,
+        default_live_compact_stack,
         default_stack,
         default_proof_trace_symbol_count,
         default_lxmf_trace_symbol_count,
         hil_stack_sizes,
+        hil_pre_usb_mount_stack,
+        hil_live_append_stack,
+        hil_live_compact_stack,
         hil_stack,
         hil_proof_trace_symbol_count,
         hil_proof_trace_symbol_size_bytes,
@@ -1910,16 +2166,52 @@ impl CheckpointLayout {
     }
 }
 
-fn inspect_elf(path: &Path, label: &str) -> Result<(StackSizeInventory, StackLayout), String> {
+fn inspect_elf(
+    path: &Path,
+    label: &str,
+) -> Result<
+    (
+        StackSizeInventory,
+        PreUsbMountStack,
+        LiveMutationStack<LIVE_APPEND_STACK_COMPONENT_COUNT>,
+        LiveMutationStack<LIVE_COMPACT_STACK_COMPONENT_COUNT>,
+        StackLayout,
+    ),
+    String,
+> {
     let bytes = fs::read(path)
         .map_err(|error| format!("could not read {label} ELF {}: {error}", path.display()))?;
     let object = parse_xtensa_elf(&bytes, path, label)?;
-    let stack_sizes = stack_size_inventory(&object, path, label)?;
+    let stack_sizes = stack_size_records(&object, path, label)?;
+    let pre_usb_mount_stack =
+        inspect_pre_usb_mount_stack(&object, &stack_sizes.records, path, label)?;
+    let live_append_stack = inspect_live_mutation_stack(
+        &object,
+        &stack_sizes.records,
+        path,
+        label,
+        "live append",
+        &LIVE_APPEND_STACK_SELECTORS,
+    )?;
+    let live_compact_stack = inspect_live_mutation_stack(
+        &object,
+        &stack_sizes.records,
+        path,
+        label,
+        "live compact",
+        &LIVE_COMPACT_STACK_SELECTORS,
+    )?;
     let stack_end = unique_symbol_address(&object, path, label, "_stack_end_cpu0")?;
     let stack_guard = unique_symbol_address(&object, path, label, "__stack_chk_guard")?;
     let stack_start = unique_symbol_address(&object, path, label, "_stack_start_cpu0")?;
     let stack = calculate_stack_layout(label, stack_end, stack_guard, stack_start)?;
-    Ok((stack_sizes, stack))
+    Ok((
+        stack_sizes.inventory,
+        pre_usb_mount_stack,
+        live_append_stack,
+        live_compact_stack,
+        stack,
+    ))
 }
 
 fn inspect_proof_trace_symbol(
@@ -2167,11 +2459,11 @@ fn parse_xtensa_elf<'data>(
     Ok(object)
 }
 
-fn stack_size_inventory(
+fn stack_size_records(
     object: &object::File<'_>,
     path: &Path,
     label: &str,
-) -> Result<StackSizeInventory, String> {
+) -> Result<ParsedStackSizes, String> {
     let mut sections = object
         .sections()
         .filter(|section| section.name().is_ok_and(|name| name == ".stack_sizes"));
@@ -2207,10 +2499,7 @@ fn stack_size_inventory(
     })
 }
 
-fn parse_stack_size_records(
-    data: &[u8],
-    address_bytes: usize,
-) -> Result<StackSizeInventory, String> {
+fn parse_stack_size_records(data: &[u8], address_bytes: usize) -> Result<ParsedStackSizes, String> {
     if data.is_empty() {
         return Err("section is empty".to_owned());
     }
@@ -2223,21 +2512,281 @@ fn parse_stack_size_records(
     let mut offset = 0;
     let mut record_count = 0_u64;
     let mut maximum_frame_bytes = 0_u64;
+    let mut records = Vec::new();
     while offset < data.len() {
         if data.len() - offset < address_bytes {
             return Err("truncated function address".to_owned());
         }
-        offset += address_bytes;
+        let address_end = offset + address_bytes;
+        let function_address = data[offset..address_end]
+            .iter()
+            .copied()
+            .enumerate()
+            .fold(0_u64, |address, (byte, value)| {
+                address | (u64::from(value) << (byte * u8::BITS as usize))
+            });
+        offset = address_end;
         let (frame_bytes, consumed) = decode_uleb128(&data[offset..])?;
         offset += consumed;
+        if let Some(existing) = records.iter().find(|record: &&StackSizeRecord| {
+            record.function_address == function_address && record.frame_bytes != frame_bytes
+        }) {
+            return Err(format!(
+                "conflicting frame sizes at function address 0x{function_address:x}: {} and {frame_bytes}",
+                existing.frame_bytes
+            ));
+        }
+        records.push(StackSizeRecord {
+            function_address,
+            frame_bytes,
+        });
         record_count += 1;
         maximum_frame_bytes = maximum_frame_bytes.max(frame_bytes);
     }
 
-    Ok(StackSizeInventory {
-        record_count,
-        maximum_frame_bytes,
+    Ok(ParsedStackSizes {
+        inventory: StackSizeInventory {
+            record_count,
+            maximum_frame_bytes,
+        },
+        records,
     })
+}
+
+impl StackSymbolSelector {
+    fn matches(self, name: &str) -> bool {
+        self.required_fragments
+            .iter()
+            .all(|fragment| name.contains(fragment))
+            && self
+                .rejected_fragments
+                .iter()
+                .all(|fragment| !name.contains(fragment))
+    }
+}
+
+impl PreUsbMountStack {
+    fn from_frame_bytes(
+        frame_bytes: [u64; PRE_USB_MOUNT_STACK_COMPONENT_COUNT],
+    ) -> Result<Self, String> {
+        let cumulative_frame_bytes =
+            frame_bytes
+                .iter()
+                .copied()
+                .try_fold(0_u64, |total, frame_bytes| {
+                    total.checked_add(frame_bytes).ok_or_else(|| {
+                        "pre-USB mount cumulative compiler-emitted frame size overflows".to_owned()
+                    })
+                })?;
+        Ok(Self {
+            frame_bytes,
+            cumulative_frame_bytes,
+        })
+    }
+
+    fn required_stack_bytes(self) -> Result<u64, String> {
+        self.cumulative_frame_bytes
+            .checked_add(STORAGE_PATH_STACK_RESERVE_BYTES)
+            .ok_or_else(|| "pre-USB mount stack requirement overflows after reserve".to_owned())
+    }
+
+    fn render_into(self, prefix: &str, usable_stack_bytes: u64, output: &mut String) {
+        for (selector, frame_bytes) in PRE_USB_MOUNT_STACK_SELECTORS.iter().zip(self.frame_bytes) {
+            writeln!(
+                output,
+                "{prefix}.pre_usb_mount.{}_frame_bytes={frame_bytes}",
+                selector.output_name
+            )
+            .expect("writing stack inspection to String cannot fail");
+        }
+        let required_stack_bytes = self
+            .required_stack_bytes()
+            .expect("validated pre-USB mount requirement cannot overflow");
+        let raw_headroom_bytes = usable_stack_bytes
+            .checked_sub(self.cumulative_frame_bytes)
+            .expect("validated pre-USB mount chain must fit usable stack");
+        let policy_headroom_bytes = usable_stack_bytes
+            .checked_sub(required_stack_bytes)
+            .expect("validated pre-USB mount chain and reserve must fit usable stack");
+        writeln!(
+            output,
+            "{prefix}.pre_usb_mount.cumulative_frame_bytes={}",
+            self.cumulative_frame_bytes
+        )
+        .expect("writing stack inspection to String cannot fail");
+        writeln!(
+            output,
+            "{prefix}.pre_usb_mount.raw_headroom_bytes={raw_headroom_bytes}"
+        )
+        .expect("writing stack inspection to String cannot fail");
+        writeln!(
+            output,
+            "{prefix}.pre_usb_mount.policy_headroom_bytes={policy_headroom_bytes}"
+        )
+        .expect("writing stack inspection to String cannot fail");
+    }
+}
+
+impl<const COMPONENTS: usize> LiveMutationStack<COMPONENTS> {
+    fn from_frame_bytes(path_name: &str, frame_bytes: [u64; COMPONENTS]) -> Result<Self, String> {
+        let cumulative_frame_bytes =
+            frame_bytes
+                .iter()
+                .copied()
+                .try_fold(0_u64, |total, frame_bytes| {
+                    total.checked_add(frame_bytes).ok_or_else(|| {
+                        format!("{path_name} cumulative compiler-emitted frame size overflows")
+                    })
+                })?;
+        Ok(Self {
+            frame_bytes,
+            cumulative_frame_bytes,
+        })
+    }
+
+    fn required_stack_bytes(self, path_name: &str) -> Result<u64, String> {
+        self.cumulative_frame_bytes
+            .checked_add(STORAGE_PATH_STACK_RESERVE_BYTES)
+            .ok_or_else(|| format!("{path_name} stack requirement overflows after reserve"))
+    }
+
+    fn render_into(
+        self,
+        profile_prefix: &str,
+        output_prefix: &str,
+        selectors: &[StackSymbolSelector; COMPONENTS],
+        usable_stack_bytes: u64,
+        output: &mut String,
+    ) {
+        for (selector, frame_bytes) in selectors.iter().zip(self.frame_bytes) {
+            writeln!(
+                output,
+                "{profile_prefix}.{output_prefix}.{}_frame_bytes={frame_bytes}",
+                selector.output_name
+            )
+            .expect("writing stack inspection to String cannot fail");
+        }
+        let required_stack_bytes = self
+            .required_stack_bytes(output_prefix)
+            .expect("validated live mutation stack requirement cannot overflow");
+        let raw_headroom_bytes = usable_stack_bytes
+            .checked_sub(self.cumulative_frame_bytes)
+            .expect("validated live mutation chain must fit usable stack");
+        let policy_headroom_bytes = usable_stack_bytes
+            .checked_sub(required_stack_bytes)
+            .expect("validated live mutation chain and reserve must fit usable stack");
+        writeln!(
+            output,
+            "{profile_prefix}.{output_prefix}.cumulative_frame_bytes={}",
+            self.cumulative_frame_bytes
+        )
+        .expect("writing stack inspection to String cannot fail");
+        writeln!(
+            output,
+            "{profile_prefix}.{output_prefix}.raw_headroom_bytes={raw_headroom_bytes}"
+        )
+        .expect("writing stack inspection to String cannot fail");
+        writeln!(
+            output,
+            "{profile_prefix}.{output_prefix}.policy_headroom_bytes={policy_headroom_bytes}"
+        )
+        .expect("writing stack inspection to String cannot fail");
+    }
+}
+
+fn inspect_pre_usb_mount_stack(
+    object: &object::File<'_>,
+    records: &[StackSizeRecord],
+    path: &Path,
+    label: &str,
+) -> Result<PreUsbMountStack, String> {
+    let context = format!("{label} ELF {}", path.display());
+    let mut frame_bytes = [0_u64; PRE_USB_MOUNT_STACK_COMPONENT_COUNT];
+    for (index, selector) in PRE_USB_MOUNT_STACK_SELECTORS.iter().copied().enumerate() {
+        let addresses = object.symbols().filter_map(|symbol| {
+            if symbol.kind() != SymbolKind::Text || symbol.section() == SymbolSection::Undefined {
+                return None;
+            }
+            let name = symbol.name().ok()?;
+            selector.matches(name).then_some(symbol.address())
+        });
+        let address =
+            unique_selected_stack_symbol_address(&context, "pre-USB mount", selector, addresses)?;
+        frame_bytes[index] =
+            stack_frame_bytes_at_address(&context, "pre-USB mount", selector, records, address)?;
+    }
+    PreUsbMountStack::from_frame_bytes(frame_bytes)
+}
+
+fn inspect_live_mutation_stack<const COMPONENTS: usize>(
+    object: &object::File<'_>,
+    records: &[StackSizeRecord],
+    path: &Path,
+    label: &str,
+    path_name: &str,
+    selectors: &[StackSymbolSelector; COMPONENTS],
+) -> Result<LiveMutationStack<COMPONENTS>, String> {
+    let context = format!("{label} ELF {}", path.display());
+    let mut frame_bytes = [0_u64; COMPONENTS];
+    for (index, selector) in selectors.iter().copied().enumerate() {
+        let addresses = object.symbols().filter_map(|symbol| {
+            if symbol.kind() != SymbolKind::Text || symbol.section() == SymbolSection::Undefined {
+                return None;
+            }
+            let name = symbol.name().ok()?;
+            selector.matches(name).then_some(symbol.address())
+        });
+        let address =
+            unique_selected_stack_symbol_address(&context, path_name, selector, addresses)?;
+        frame_bytes[index] =
+            stack_frame_bytes_at_address(&context, path_name, selector, records, address)?;
+    }
+    LiveMutationStack::from_frame_bytes(path_name, frame_bytes)
+}
+
+fn unique_selected_stack_symbol_address(
+    context: &str,
+    path_name: &str,
+    selector: StackSymbolSelector,
+    addresses: impl IntoIterator<Item = u64>,
+) -> Result<u64, String> {
+    let mut addresses: Vec<u64> = addresses.into_iter().collect();
+    addresses.sort_unstable();
+    addresses.dedup();
+    match addresses.as_slice() {
+        [address] => Ok(*address),
+        _ => Err(format!(
+            "{context} must contain exactly one defined text symbol for {path_name} stack component {}, found {} distinct addresses",
+            selector.output_name,
+            addresses.len()
+        )),
+    }
+}
+
+fn stack_frame_bytes_at_address(
+    context: &str,
+    path_name: &str,
+    selector: StackSymbolSelector,
+    records: &[StackSizeRecord],
+    address: u64,
+) -> Result<u64, String> {
+    let mut frames = records
+        .iter()
+        .filter(|record| record.function_address == address)
+        .map(|record| record.frame_bytes);
+    let frame_bytes = frames.next().ok_or_else(|| {
+        format!(
+            "{context} .stack_sizes has no record for {path_name} stack component {} at 0x{address:x}",
+            selector.output_name
+        )
+    })?;
+    if frames.any(|candidate| candidate != frame_bytes) {
+        return Err(format!(
+            "{context} .stack_sizes has conflicting records for {path_name} stack component {} at 0x{address:x}",
+            selector.output_name
+        ));
+    }
+    Ok(frame_bytes)
 }
 
 fn decode_uleb128(bytes: &[u8]) -> Result<(u64, usize), String> {
@@ -2356,16 +2905,18 @@ impl ElfInspection {
                 ));
             }
         }
-        for (label, stack, minimum_usable) in [
+        for (label, stack, minimum_usable, pre_usb_mount_stack) in [
             (
                 "default E290",
                 self.default_stack,
                 MINIMUM_DEFAULT_USABLE_STACK_BYTES,
+                self.default_pre_usb_mount_stack,
             ),
             (
                 "runtime-measurement HIL",
                 self.hil_stack,
                 MINIMUM_HIL_USABLE_STACK_BYTES,
+                self.hil_pre_usb_mount_stack,
             ),
         ] {
             if stack.guard_offset_bytes != EXPECTED_STACK_GUARD_OFFSET_BYTES {
@@ -2380,6 +2931,35 @@ impl ElfInspection {
                     stack.usable_bytes
                 ));
             }
+            let required_stack_bytes = pre_usb_mount_stack.required_stack_bytes()?;
+            if required_stack_bytes > stack.usable_bytes {
+                return Err(format!(
+                    "{label} pre-USB mount compiler-emitted frames total {} bytes plus the reviewed {STORAGE_PATH_STACK_RESERVE_BYTES}-byte ROM/interrupt reserve require {required_stack_bytes} bytes, exceeding the {}-byte usable stack by {} bytes",
+                    pre_usb_mount_stack.cumulative_frame_bytes,
+                    stack.usable_bytes,
+                    required_stack_bytes - stack.usable_bytes,
+                ));
+            }
+            let (live_append_stack, live_compact_stack) = if label == "default E290" {
+                (
+                    self.default_live_append_stack,
+                    self.default_live_compact_stack,
+                )
+            } else {
+                (self.hil_live_append_stack, self.hil_live_compact_stack)
+            };
+            validate_live_mutation_stack(
+                label,
+                "live append",
+                live_append_stack,
+                stack.usable_bytes,
+            )?;
+            validate_live_mutation_stack(
+                label,
+                "live compact",
+                live_compact_stack,
+                stack.usable_bytes,
+            )?;
         }
         Ok(())
     }
@@ -2390,13 +2970,36 @@ impl ElfInspection {
             .maximum_frame_bytes
             .max(self.hil_stack_sizes.maximum_frame_bytes);
         let conservative_margin = QUALIFIED_RAW_STACK_MARGIN_BYTES.saturating_sub(worst_frame);
-        format!(
-            "default.stack_size_records={}\ndefault.maximum_frame_bytes={}\ndefault.stack_reserved_bytes={}\ndefault.stack_usable_bytes={}\ndefault.stack_guard_offset_bytes={}\ndefault.proof_trace_symbol_count={}\ndefault.lxmf_trace_symbol_count={}\nhil.stack_size_records={}\nhil.maximum_frame_bytes={}\nhil.stack_reserved_bytes={}\nhil.stack_usable_bytes={}\nhil.stack_guard_offset_bytes={}\nhil.proof_trace_symbol_count={}\nhil.proof_trace_symbol_size_bytes={}\nhil.lxmf_trace_symbol_count={}\nhil.lxmf_trace_symbol_size_bytes={}\npolicy.maximum_frame_bytes={}\npolicy.minimum_default_usable_stack_bytes={}\npolicy.minimum_hil_usable_stack_bytes={}\npolicy.expected_stack_guard_offset_bytes={}\nqualification.raw_painted_margin_bytes={}\nqualification.conservative_margin_bytes={}",
+        let mut output = format!(
+            "default.stack_size_records={}\ndefault.maximum_frame_bytes={}\ndefault.stack_reserved_bytes={}\ndefault.stack_usable_bytes={}\ndefault.stack_guard_offset_bytes={}\n",
             self.default_stack_sizes.record_count,
             self.default_stack_sizes.maximum_frame_bytes,
             self.default_stack.reserved_bytes,
             self.default_stack.usable_bytes,
             self.default_stack.guard_offset_bytes,
+        );
+        self.default_pre_usb_mount_stack.render_into(
+            "default",
+            self.default_stack.usable_bytes,
+            &mut output,
+        );
+        self.default_live_append_stack.render_into(
+            "default",
+            "live_append",
+            &LIVE_APPEND_STACK_SELECTORS,
+            self.default_stack.usable_bytes,
+            &mut output,
+        );
+        self.default_live_compact_stack.render_into(
+            "default",
+            "live_compact",
+            &LIVE_COMPACT_STACK_SELECTORS,
+            self.default_stack.usable_bytes,
+            &mut output,
+        );
+        write!(
+            output,
+            "default.proof_trace_symbol_count={}\ndefault.lxmf_trace_symbol_count={}\nhil.stack_size_records={}\nhil.maximum_frame_bytes={}\nhil.stack_reserved_bytes={}\nhil.stack_usable_bytes={}\nhil.stack_guard_offset_bytes={}\n",
             self.default_proof_trace_symbol_count,
             self.default_lxmf_trace_symbol_count,
             self.hil_stack_sizes.record_count,
@@ -2404,6 +3007,27 @@ impl ElfInspection {
             self.hil_stack.reserved_bytes,
             self.hil_stack.usable_bytes,
             self.hil_stack.guard_offset_bytes,
+        )
+        .expect("writing stack inspection to String cannot fail");
+        self.hil_pre_usb_mount_stack
+            .render_into("hil", self.hil_stack.usable_bytes, &mut output);
+        self.hil_live_append_stack.render_into(
+            "hil",
+            "live_append",
+            &LIVE_APPEND_STACK_SELECTORS,
+            self.hil_stack.usable_bytes,
+            &mut output,
+        );
+        self.hil_live_compact_stack.render_into(
+            "hil",
+            "live_compact",
+            &LIVE_COMPACT_STACK_SELECTORS,
+            self.hil_stack.usable_bytes,
+            &mut output,
+        );
+        write!(
+            output,
+            "hil.proof_trace_symbol_count={}\nhil.proof_trace_symbol_size_bytes={}\nhil.lxmf_trace_symbol_count={}\nhil.lxmf_trace_symbol_size_bytes={}\npolicy.maximum_frame_bytes={}\npolicy.minimum_default_usable_stack_bytes={}\npolicy.minimum_hil_usable_stack_bytes={}\npolicy.expected_stack_guard_offset_bytes={}\npolicy.storage_path_stack_reserve_bytes={}\nqualification.raw_painted_margin_bytes={}\nqualification.conservative_margin_bytes={}",
             self.hil_proof_trace_symbol_count,
             self.hil_proof_trace_symbol_size_bytes,
             self.hil_lxmf_trace_symbol_count,
@@ -2412,10 +3036,30 @@ impl ElfInspection {
             MINIMUM_DEFAULT_USABLE_STACK_BYTES,
             MINIMUM_HIL_USABLE_STACK_BYTES,
             EXPECTED_STACK_GUARD_OFFSET_BYTES,
+            STORAGE_PATH_STACK_RESERVE_BYTES,
             QUALIFIED_RAW_STACK_MARGIN_BYTES,
             conservative_margin,
         )
+        .expect("writing stack inspection to String cannot fail");
+        output
     }
+}
+
+fn validate_live_mutation_stack<const COMPONENTS: usize>(
+    label: &str,
+    path_name: &str,
+    stack_path: LiveMutationStack<COMPONENTS>,
+    usable_stack_bytes: u64,
+) -> Result<(), String> {
+    let required_stack_bytes = stack_path.required_stack_bytes(path_name)?;
+    if required_stack_bytes > usable_stack_bytes {
+        return Err(format!(
+            "{label} {path_name} compiler-emitted frames total {} bytes plus the reviewed {STORAGE_PATH_STACK_RESERVE_BYTES}-byte ROM/interrupt reserve require {required_stack_bytes} bytes, exceeding the {usable_stack_bytes}-byte usable stack by {} bytes",
+            stack_path.cumulative_frame_bytes,
+            required_stack_bytes - usable_stack_bytes,
+        ));
+    }
+    Ok(())
 }
 
 impl DecodedEvidence {
@@ -3616,6 +4260,10 @@ const _: () = {
     assert!(QUALIFIED_RAW_STACK_MARGIN_BYTES == 57_700);
     assert!(MAXIMUM_STACK_FRAME_BYTES == 53_680);
     assert!(MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES == 4_020);
+    assert!(STORAGE_PATH_STACK_RESERVE_BYTES == 4_096);
+    assert!(PRE_USB_MOUNT_STACK_SELECTORS.len() == PRE_USB_MOUNT_STACK_COMPONENT_COUNT);
+    assert!(LIVE_APPEND_STACK_SELECTORS.len() == LIVE_APPEND_STACK_COMPONENT_COUNT);
+    assert!(LIVE_COMPACT_STACK_SELECTORS.len() == LIVE_COMPACT_STACK_COMPONENT_COUNT);
     assert!(
         MAXIMUM_STACK_FRAME_BYTES + MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES
             == QUALIFIED_RAW_STACK_MARGIN_BYTES
@@ -4187,10 +4835,45 @@ mod tests {
         append_stack_size_record(&mut data, 0x4037_2000, 42_960);
         assert_eq!(
             parse_stack_size_records(&data, 4),
-            Ok(StackSizeInventory {
-                record_count: 3,
-                maximum_frame_bytes: 53_680,
+            Ok(ParsedStackSizes {
+                inventory: StackSizeInventory {
+                    record_count: 3,
+                    maximum_frame_bytes: 53_680,
+                },
+                records: vec![
+                    StackSizeRecord {
+                        function_address: 0x4037_0000,
+                        frame_bytes: 0,
+                    },
+                    StackSizeRecord {
+                        function_address: 0x4037_1000,
+                        frame_bytes: 53_680,
+                    },
+                    StackSizeRecord {
+                        function_address: 0x4037_2000,
+                        frame_bytes: 42_960,
+                    },
+                ],
             })
+        );
+
+        let mut wide = 0x4201_2345_6789_abcd_u64.to_le_bytes().to_vec();
+        wide.push(32);
+        assert_eq!(
+            parse_stack_size_records(&wide, 8).unwrap().records,
+            vec![StackSizeRecord {
+                function_address: 0x4201_2345_6789_abcd,
+                frame_bytes: 32,
+            }]
+        );
+
+        let mut conflicting = Vec::new();
+        append_stack_size_record(&mut conflicting, 0x4200_1000, 32);
+        append_stack_size_record(&mut conflicting, 0x4200_1000, 64);
+        assert!(
+            parse_stack_size_records(&conflicting, 4)
+                .unwrap_err()
+                .contains("conflicting frame sizes at function address 0x42001000")
         );
 
         for (data, width, expected) in [
@@ -4213,6 +4896,109 @@ mod tests {
                 "{error:?} does not contain {expected:?}"
             );
         }
+    }
+
+    #[test]
+    fn storage_path_selectors_and_frame_resolution_fail_closed() {
+        for selector in PRE_USB_MOUNT_STACK_SELECTORS
+            .into_iter()
+            .chain(LIVE_APPEND_STACK_SELECTORS)
+            .chain(LIVE_COMPACT_STACK_SELECTORS)
+        {
+            let matching_name = selector.required_fragments.join("__");
+            assert!(
+                selector.matches(&matching_name),
+                "selector {} rejected its required fragments",
+                selector.output_name
+            );
+            for rejected in selector.rejected_fragments {
+                assert!(
+                    !selector.matches(&format!("{matching_name}__{rejected}")),
+                    "selector {} accepted rejected fragment {rejected}",
+                    selector.output_name
+                );
+            }
+        }
+
+        let selector = PRE_USB_MOUNT_STACK_SELECTORS[2];
+        assert_eq!(
+            unique_selected_stack_symbol_address(
+                "fixture",
+                "fixture path",
+                selector,
+                [0x4200_1000, 0x4200_1000]
+            ),
+            Ok(0x4200_1000)
+        );
+        assert!(
+            unique_selected_stack_symbol_address("fixture", "fixture path", selector, [])
+                .unwrap_err()
+                .contains("found 0 distinct addresses")
+        );
+        assert!(
+            unique_selected_stack_symbol_address(
+                "fixture",
+                "fixture path",
+                selector,
+                [0x4200_1000, 0x4200_2000]
+            )
+            .unwrap_err()
+            .contains("found 2 distinct addresses")
+        );
+
+        let records = [StackSizeRecord {
+            function_address: 0x4200_1000,
+            frame_bytes: 1_072,
+        }];
+        assert_eq!(
+            stack_frame_bytes_at_address(
+                "fixture",
+                "fixture path",
+                selector,
+                &records,
+                0x4200_1000
+            ),
+            Ok(1_072)
+        );
+        assert!(
+            stack_frame_bytes_at_address(
+                "fixture",
+                "fixture path",
+                selector,
+                &records,
+                0x4200_2000
+            )
+            .unwrap_err()
+            .contains("has no record")
+        );
+        assert!(
+            stack_frame_bytes_at_address(
+                "fixture",
+                "fixture path",
+                selector,
+                &[
+                    records[0],
+                    StackSizeRecord {
+                        function_address: 0x4200_1000,
+                        frame_bytes: 1_073,
+                    },
+                ],
+                0x4200_1000,
+            )
+            .unwrap_err()
+            .contains("conflicting records")
+        );
+
+        assert!(
+            PreUsbMountStack::from_frame_bytes([u64::MAX, 1, 0, 0, 0, 0, 0, 0, 0])
+                .unwrap_err()
+                .contains("cumulative compiler-emitted frame size overflows")
+        );
+        assert!(
+            LiveMutationStack::from_frame_bytes("live append", [u64::MAX, 1, 0, 0, 0, 0, 0, 0, 0],)
+                .unwrap_err()
+                .contains("live append cumulative compiler-emitted frame size overflows")
+        );
     }
 
     #[test]
@@ -4249,11 +5035,46 @@ mod tests {
 
     #[test]
     fn elf_policy_accepts_reviewed_bounds_and_rejects_frame_or_stack_regressions() {
+        let default_pre_usb_mount_stack = PreUsbMountStack::from_frame_bytes([
+            35_984, 2_640, 80, 320, 912, 4_592, 4_368, 4_144, 32,
+        ])
+        .unwrap();
+        let hil_pre_usb_mount_stack = PreUsbMountStack::from_frame_bytes([
+            36_160, 2_640, 80, 320, 912, 4_592, 4_368, 4_144, 32,
+        ])
+        .unwrap();
+        let default_live_append_stack = LiveMutationStack::from_frame_bytes(
+            "live append",
+            [33_632, 1_104, 2_224, 288, 2_064, 4_592, 4_368, 4_144, 32],
+        )
+        .unwrap();
+        let hil_live_append_stack = LiveMutationStack::from_frame_bytes(
+            "live append",
+            [33_808, 1_104, 2_224, 288, 2_064, 4_592, 4_368, 4_144, 32],
+        )
+        .unwrap();
+        let default_live_compact_stack = LiveMutationStack::from_frame_bytes(
+            "live compact",
+            [
+                33_632, 1_104, 2_224, 288, 1_120, 832, 4_592, 4_368, 4_144, 32,
+            ],
+        )
+        .unwrap();
+        let hil_live_compact_stack = LiveMutationStack::from_frame_bytes(
+            "live compact",
+            [
+                33_808, 1_104, 2_224, 288, 1_120, 832, 4_592, 4_368, 4_144, 32,
+            ],
+        )
+        .unwrap();
         let reviewed = ElfInspection {
             default_stack_sizes: StackSizeInventory {
                 record_count: 1_025,
                 maximum_frame_bytes: 53_680,
             },
+            default_pre_usb_mount_stack,
+            default_live_append_stack,
+            default_live_compact_stack,
             default_stack: StackLayout {
                 reserved_bytes: 162_440,
                 usable_bytes: 162_376,
@@ -4265,6 +5086,9 @@ mod tests {
                 record_count: 1_025,
                 maximum_frame_bytes: 53_680,
             },
+            hil_pre_usb_mount_stack,
+            hil_live_append_stack,
+            hil_live_compact_stack,
             hil_stack: StackLayout {
                 reserved_bytes: 161_640,
                 usable_bytes: 161_576,
@@ -4279,13 +5103,29 @@ mod tests {
         let output = reviewed.render();
         assert!(output.contains("default.maximum_frame_bytes=53680\n"));
         assert!(output.contains("default.stack_usable_bytes=162376\n"));
+        assert!(
+            output.contains("default.pre_usb_mount.submission_runtime_mount_into_frame_bytes=80\n")
+        );
+        assert!(output.contains("default.pre_usb_mount.cumulative_frame_bytes=53072\n"));
+        assert!(output.contains("default.pre_usb_mount.policy_headroom_bytes=105208\n"));
+        assert!(output.contains("default.live_append.cumulative_frame_bytes=52448\n"));
+        assert!(output.contains("default.live_append.policy_headroom_bytes=105832\n"));
+        assert!(output.contains("default.live_compact.cumulative_frame_bytes=52336\n"));
+        assert!(output.contains("default.live_compact.policy_headroom_bytes=105944\n"));
         assert!(output.contains("default.proof_trace_symbol_count=0\n"));
         assert!(output.contains("default.lxmf_trace_symbol_count=0\n"));
         assert!(output.contains("hil.stack_usable_bytes=161576\n"));
+        assert!(output.contains("hil.pre_usb_mount.cumulative_frame_bytes=53248\n"));
+        assert!(output.contains("hil.pre_usb_mount.policy_headroom_bytes=104232\n"));
+        assert!(output.contains("hil.live_append.cumulative_frame_bytes=52624\n"));
+        assert!(output.contains("hil.live_append.policy_headroom_bytes=104856\n"));
+        assert!(output.contains("hil.live_compact.cumulative_frame_bytes=52512\n"));
+        assert!(output.contains("hil.live_compact.policy_headroom_bytes=104968\n"));
         assert!(output.contains("hil.proof_trace_symbol_count=1\n"));
         assert!(output.contains("hil.proof_trace_symbol_size_bytes=192\n"));
         assert!(output.contains("hil.lxmf_trace_symbol_count=1\n"));
         assert!(output.contains("hil.lxmf_trace_symbol_size_bytes=96\n"));
+        assert!(output.contains("policy.storage_path_stack_reserve_bytes=4096\n"));
         assert!(output.ends_with("qualification.conservative_margin_bytes=4020"));
 
         let mut regressed = reviewed;
@@ -4329,6 +5169,40 @@ mod tests {
         let mut regressed = reviewed;
         regressed.hil_stack_sizes.maximum_frame_bytes += 1;
         assert!(regressed.validate().unwrap_err().contains("frame 53681"));
+
+        let mut regressed = reviewed;
+        regressed.default_pre_usb_mount_stack =
+            PreUsbMountStack::from_frame_bytes([53_680, 53_680, 53_680, 0, 0, 0, 0, 0, 0]).unwrap();
+        let error = regressed.validate().unwrap_err();
+        assert!(error.contains("default E290 pre-USB mount"));
+        assert!(error.contains("exceeding the 162376-byte usable stack by 2760 bytes"));
+
+        let mut regressed = reviewed;
+        regressed.hil_pre_usb_mount_stack =
+            PreUsbMountStack::from_frame_bytes([53_680, 53_680, 53_680, 0, 0, 0, 0, 0, 0]).unwrap();
+        let error = regressed.validate().unwrap_err();
+        assert!(error.contains("runtime-measurement HIL pre-USB mount"));
+        assert!(error.contains("exceeding the 161576-byte usable stack by 3560 bytes"));
+
+        let mut regressed = reviewed;
+        regressed.default_live_append_stack = LiveMutationStack::from_frame_bytes(
+            "live append",
+            [53_680, 53_680, 53_680, 0, 0, 0, 0, 0, 0],
+        )
+        .unwrap();
+        let error = regressed.validate().unwrap_err();
+        assert!(error.contains("default E290 live append"));
+        assert!(error.contains("exceeding the 162376-byte usable stack by 2760 bytes"));
+
+        let mut regressed = reviewed;
+        regressed.hil_live_compact_stack = LiveMutationStack::from_frame_bytes(
+            "live compact",
+            [53_680, 53_680, 53_680, 0, 0, 0, 0, 0, 0, 0],
+        )
+        .unwrap();
+        let error = regressed.validate().unwrap_err();
+        assert!(error.contains("runtime-measurement HIL live compact"));
+        assert!(error.contains("exceeding the 161576-byte usable stack by 3560 bytes"));
 
         let mut regressed = reviewed;
         regressed.default_stack.usable_bytes -= 1;

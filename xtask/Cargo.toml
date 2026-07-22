@@ -17,7 +17,7 @@ getrandom = "=0.3.4"
 md-5 = "=0.10.6"
 quote = "=1.0.46"
 rand_core.workspace = true
-reticulum-device-api = { path = "../crates/device-api", default-features = false, features = ["experimental-rns-data", "experimental-rns-inbox"] }
+reticulum-device-api = { path = "../crates/device-api", default-features = false, features = ["experimental-rns-data", "experimental-rns-inbox", "experimental-lxmf"] }
 reticulum-device-api-framing = { path = "../crates/device-api-framing", default-features = false }
 reticulum-device-api-handoff = { path = "../crates/device-api-handoff", default-features = false }
 reticulum-device-api-pairing = { path = "../crates/device-api-pairing", default-features = false }
@@ -25,6 +25,7 @@ reticulum-device-api-pairing-control = { path = "../crates/device-api-pairing-co
 reticulum-device-api-session = { path = "../crates/device-api-session", default-features = false }
 reticulum-lxmf-model = { path = "../crates/lxmf-model", default-features = false }
 reticulum-lxmf-store = { path = "../crates/lxmf-store", default-features = false }
+reticulum-lxmf-wire = { path = "../crates/lxmf-wire", default-features = false }
 reticulum-rns-rete = { path = "../crates/rns-rete", default-features = false }
 reticulum-rns-inbox-store = { path = "../crates/rns-inbox-store", default-features = false }
 object = { version = "=0.37.3", default-features = false, features = ["read", "std"] }

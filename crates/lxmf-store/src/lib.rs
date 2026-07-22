@@ -445,6 +445,69 @@ pub enum LxmfStoreMountError<E> {
     HandleExhausted,
 }
 
+/// Result of reading one caller-bounded portion of a committed LXMF wire image.
+///
+/// `bytes_read` may be smaller than the supplied output buffer only when the
+/// end of the normalized wire image was reached. An empty output buffer is a
+/// successful zero-byte read and does not imply completion unless `offset` was
+/// already at the end of the message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LxmfWireChunk {
+    offset: u32,
+    wire_length: u32,
+    bytes_read: usize,
+}
+
+impl LxmfWireChunk {
+    /// Logical wire offset at which this chunk starts.
+    pub const fn offset(self) -> u32 {
+        self.offset
+    }
+
+    /// Complete normalized wire length retained for the message.
+    pub const fn wire_length(self) -> u32 {
+        self.wire_length
+    }
+
+    /// Number of leading bytes initialized in the caller's output buffer.
+    pub const fn bytes_read(self) -> usize {
+        self.bytes_read
+    }
+
+    /// Logical wire offset immediately after the returned bytes.
+    pub const fn next_offset(self) -> u32 {
+        self.offset + self.bytes_read as u32
+    }
+
+    /// Whether the returned bytes reach the exact end of the wire image.
+    pub const fn is_complete(self) -> bool {
+        self.next_offset() == self.wire_length
+    }
+}
+
+/// Failure to read a caller-bounded portion of one committed LXMF wire image.
+#[derive(Debug, Eq, PartialEq)]
+pub enum LxmfWireReadError<E> {
+    /// Binding rejected before physical I/O.
+    Binding(LxmfStoreBindingError),
+    /// No committed message has the requested stable handle.
+    NotFound {
+        /// Unknown stable logical handle.
+        handle: MessageHandle,
+    },
+    /// The requested starting offset is beyond the exact wire end.
+    OffsetOutOfRange {
+        /// Requested logical wire offset.
+        offset: u32,
+        /// Complete normalized wire length retained for the message.
+        wire_length: u32,
+    },
+    /// Raw NOR backend failure.
+    Backend(E),
+    /// Mounted index state and current committed-media structure disagree.
+    Fault(LxmfStoreFault),
+}
+
 /// Definitive result returned only after durable verification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LxmfCommitOutcome {
@@ -648,6 +711,59 @@ impl MountedLxmfStore<'_> {
             .iter()
             .filter_map(|slot| slot.entry.as_ref())
             .map(|entry| entry.receipt)
+    }
+
+    /// Read one caller-bounded chunk of exact committed normalized wire bytes.
+    ///
+    /// Mount validates each complete record and builds a private physical
+    /// index. This operation revalidates the supplied access binding and every
+    /// indexed extent header it traverses, then copies through a fixed scratch
+    /// page so callers need not satisfy raw-NOR alignment. It never exposes a
+    /// physical offset or reads beyond the caller's output buffer. `offset`
+    /// equal to the wire length is a successful zero-byte completed read;
+    /// larger offsets fail without physical I/O.
+    pub fn read_wire_chunk<A>(
+        &self,
+        access: &mut A,
+        handle: MessageHandle,
+        offset: u32,
+        output: &mut [u8],
+    ) -> Result<LxmfWireChunk, LxmfWireReadError<A::Error>>
+    where
+        A: BoundLxmfStoreReadAccess,
+    {
+        let actual = validate_read_access(access)
+            .and_then(|binding| validate_same_binding(self.binding, binding))
+            .map_err(LxmfWireReadError::Binding)?;
+        debug_assert_eq!(actual, self.binding);
+
+        let entry = self
+            .entry_for_handle(handle)
+            .ok_or(LxmfWireReadError::NotFound { handle })?;
+        if offset > entry.wire_len {
+            return Err(LxmfWireReadError::OffsetOutOfRange {
+                offset,
+                wire_length: entry.wire_len,
+            });
+        }
+        let bytes_read = output.len().min((entry.wire_len - offset) as usize);
+        let outcome = LxmfWireChunk {
+            offset,
+            wire_length: entry.wire_len,
+            bytes_read,
+        };
+        if bytes_read == 0 {
+            return Ok(outcome);
+        }
+
+        read_indexed_wire(
+            access,
+            self.binding,
+            entry,
+            offset as usize,
+            &mut output[..bytes_read],
+        )?;
+        Ok(outcome)
     }
 
     /// Commit one admitted candidate without allocating or copying a complete message.
@@ -960,6 +1076,13 @@ impl MountedLxmfStore<'_> {
             .find(|entry| entry.receipt.message_id() == id)
     }
 
+    fn entry_for_handle(&self, handle: MessageHandle) -> Option<IndexEntry> {
+        self.entries[..self.entry_count]
+            .iter()
+            .filter_map(|slot| slot.entry)
+            .find(|entry| entry.receipt.handle() == handle)
+    }
+
     fn install_entry(&mut self, entry: IndexEntry) {
         if self.entry_for_message(entry.receipt.message_id()).is_none() {
             self.entries[self.entry_count].entry = Some(entry);
@@ -1221,6 +1344,100 @@ impl HeaderDecodeError {
 enum InspectError<E> {
     Backend(E),
     Fault(LxmfStoreFault),
+}
+
+fn read_indexed_wire<A>(
+    access: &mut A,
+    binding: LxmfStoreBinding,
+    entry: IndexEntry,
+    offset: usize,
+    output: &mut [u8],
+) -> Result<(), LxmfWireReadError<A::Error>>
+where
+    A: BoundLxmfStoreReadAccess,
+{
+    let first_extent = entry.first_extent as usize;
+    let extent_count = usize::from(entry.extent_count);
+    let span_end = first_extent.checked_add(extent_count);
+    if required_extents(entry.wire_len as usize) != Some(extent_count)
+        || span_end.is_none_or(|end| end > binding.length() / EXTENT_SIZE)
+    {
+        return Err(LxmfWireReadError::Fault(LxmfStoreFault::MediaChanged {
+            extent: first_extent,
+        }));
+    }
+
+    let mut copied = 0;
+    let mut validated_extent = None;
+    let mut scratch = [0_u8; IO_CHUNK_SIZE];
+    while copied < output.len() {
+        let logical_offset = offset + copied;
+        let extent_index = logical_offset / EXTENT_PAYLOAD_SIZE;
+        let within_payload = logical_offset % EXTENT_PAYLOAD_SIZE;
+        if extent_index >= extent_count {
+            return Err(LxmfWireReadError::Fault(LxmfStoreFault::MediaChanged {
+                extent: first_extent,
+            }));
+        }
+        let payload_capacity = if extent_index + 1 == extent_count {
+            FINAL_EXTENT_PAYLOAD_SIZE
+        } else {
+            EXTENT_PAYLOAD_SIZE
+        };
+        if within_payload >= payload_capacity {
+            return Err(LxmfWireReadError::Fault(LxmfStoreFault::MediaChanged {
+                extent: first_extent,
+            }));
+        }
+
+        if validated_extent != Some(extent_index) {
+            let physical_extent = first_extent + extent_index;
+            let mut header = [0_u8; EXTENT_HEADER_SIZE];
+            access
+                .read(extent_offset(physical_extent) as u32, &mut header)
+                .map_err(LxmfWireReadError::Backend)?;
+            let expected = encode_header(
+                binding,
+                entry.receipt.handle(),
+                extent_index as u16,
+                entry.extent_count,
+                entry.metadata,
+                entry.receipt.fingerprint().exact_wire_digest(),
+            );
+            if header != expected {
+                let fault = match decode_header(&header, binding) {
+                    Err(error) => error.into_fault(physical_extent, binding),
+                    Ok(_) => LxmfStoreFault::CommittedHeaderCorrupt {
+                        extent: physical_extent,
+                    },
+                };
+                return Err(LxmfWireReadError::Fault(fault));
+            }
+            validated_extent = Some(extent_index);
+        }
+
+        let page_within_payload = within_payload / IO_CHUNK_SIZE * IO_CHUNK_SIZE;
+        let within_page = within_payload - page_within_payload;
+        let page_offset =
+            extent_offset(first_extent + extent_index) + EXTENT_HEADER_SIZE + page_within_payload;
+        if page_offset
+            .checked_add(IO_CHUNK_SIZE)
+            .is_none_or(|end| end > binding.length())
+        {
+            return Err(LxmfWireReadError::Fault(LxmfStoreFault::MediaChanged {
+                extent: first_extent,
+            }));
+        }
+        access
+            .read(page_offset as u32, &mut scratch)
+            .map_err(LxmfWireReadError::Backend)?;
+        let take = (output.len() - copied)
+            .min(IO_CHUNK_SIZE - within_page)
+            .min(payload_capacity - within_payload);
+        output[copied..copied + take].copy_from_slice(&scratch[within_page..within_page + take]);
+        copied += take;
+    }
+    Ok(())
 }
 
 fn required_extents(wire_len: usize) -> Option<usize> {

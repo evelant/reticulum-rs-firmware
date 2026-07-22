@@ -264,7 +264,7 @@ mod tests {
             "flash_owner.provision_node_journal(journal_policy)",
             "flash_owner.reserve_announce_epoch(fresh_clock_policy)",
             "flash_owner.boot_identity(&mut bootstrap_rng)",
-            "flash_owner.mount_node_runtime(u64::from(announce_epoch.get()))",
+            "flash_owner.mount_node_runtime(",
             "flash_owner.mount_inbox()",
             "flash_owner.mount_lxmf(lxmf_index)",
         ] {
@@ -288,8 +288,10 @@ mod tests {
 
         let main = include_str!("main.rs");
         assert_eq!(main.matches("Vec::new_in(ExternalMemory)").count(), 2);
-        assert_eq!(main.matches("Box::try_new_in(").count(), 2);
-        assert!(main.contains("Box::try_new_in(runtime, ExternalMemory)"));
+        assert_eq!(main.matches("Box::try_new_in(").count(), 1);
+        assert!(main.contains("Box::<ProductSubmissionRuntime, _>::try_new_uninit_in("));
+        assert_eq!(main.matches("try_new_uninit_in(").count(), 1);
+        assert!(main.contains("Box::leak(runtime)"));
         assert!(main.contains("Some(Box::leak(runtime))"));
         assert!(
             main.contains("Box::try_new_in(node_task::LxmfVolatileState::new(), ExternalMemory)")
@@ -310,6 +312,15 @@ mod tests {
         assert!(main.contains("flash_owner.mount_lxmf(lxmf_index)"));
         assert!(main.contains("activate_lxmf_delivery(&mut node, lxmf_service_available)"));
         assert!(main.contains("lxmf_delivery_admission={lxmf_delivery_admission}"));
+
+        let platform_storage = include_str!("platform_storage.rs");
+        let direct_mount = platform_storage
+            .find("ProductSubmissionRuntime::mount_into(")
+            .expect("runtime must replay directly into its external allocation");
+        let typed_box = platform_storage
+            .find("unsafe { storage.assume_init() }")
+            .expect("successful direct replay must convert the initialized allocation");
+        assert!(direct_mount < typed_box);
         assert!(main.contains("DelayedProofOwner::new(delayed_proof_storage)"));
         assert!(main.contains("lxmf_volatile_placement=external-psram"));
         assert!(main.contains("lxmf_delayed_proof_placement=external-psram"));
@@ -591,17 +602,28 @@ mod tests {
         assert!(node.contains("enum AuthenticatedApiNodeState"));
         assert!(node.contains("*supervisor.destination_hash().as_bytes()"));
         assert!(node.contains("progressed |= step_authenticated_api("));
-        assert!(node.contains("storage.dispatch_authenticated_request(request, identity)"));
+        assert!(
+            node.contains("storage.dispatch_authenticated_request(supervisor, request, identity)")
+        );
         assert!(node.contains("AuthenticatedApiNodeState::PendingReply(pressure.into_inner())"));
         assert!(node.contains("AuthenticatedApiNodeState::Quarantined {"));
         assert!(node.contains("request: failure.into_request()"));
 
         let storage = include_str!("platform_storage.rs");
         assert!(storage.contains("struct ProductSubmissionPort<'a>"));
+        assert!(storage.contains("struct ProductAuthenticatedApiPort<'a>"));
         assert!(storage.contains(".select_ordinary_session(at, connection, credential_id)"));
         assert!(storage.contains("credential_runtime.dispatch_authenticated_request("));
-        assert!(storage.contains("&mut submission_port,"));
-        assert!(storage.contains("&mut inbox_port,"));
+        assert!(storage.contains(
+            "credential_runtime.dispatch_authenticated_request(request, identity, &mut port)"
+        ));
+        assert!(storage.contains("impl SubmissionPort for ProductAuthenticatedApiPort<'_>"));
+        assert!(storage.contains("impl InboundMailboxPort for ProductAuthenticatedApiPort<'_>"));
+        assert!(storage.contains("impl LxmfInboxPort for ProductAuthenticatedApiPort<'_>"));
+        assert!(storage.contains("impl LxmfComposePort for ProductAuthenticatedApiPort<'_>"));
+        assert!(storage.contains("request.destination()"));
+        assert!(storage.contains("request.authorization()"));
+        assert!(storage.contains(".prepare_basic_lxmf_into("));
 
         let usb = include_str!("usb_pairing_task.rs");
         assert!(usb.contains(

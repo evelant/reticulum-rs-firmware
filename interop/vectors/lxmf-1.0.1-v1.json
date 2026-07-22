@@ -37,7 +37,7 @@
     "source_public_key_hex": "50a61409b1ddd0325e9b16b700e719e9772c07000b1bd7786e907c653d20495d8a875fff1eb38451577acd5afee405456568dd7c89e090863a0557bc7af49f17"
   },
   "generator": "interop/python/generate_lxmf_1_0_1_vectors.py",
-  "generator_source_sha256": "3a6f07a6380fc18ca533e1b31a7b2a25d9059a668e7e91a689f600a1893c20b0",
+  "generator_source_sha256": "95494cf18ab1cb0097b8fe4b461ea9adbb1ac3f4cfc16017df0c628d52c160b8",
   "inbound_oracles": [
     {
       "canonical_repack_hex": "94cb41d954fc40000000c4094772656574696e6773c41648656c6c6f2066726f6d20507974686f6e204c584d4680",
@@ -66,6 +66,78 @@
     "these are documented expectations; this Python corpus does not import or execute Rete"
   ],
   "messages": [
+    {
+      "actual_method": "opportunistic",
+      "decoded": {
+        "content_hex": "",
+        "fields": {
+          "entries": [],
+          "type": "map"
+        },
+        "timestamp_f64_bits_hex": "41d954fc41000000",
+        "title_hex": ""
+      },
+      "description": "Empty title and content produce Python content_size -1 and remain opportunistic",
+      "desired_method": "opportunistic",
+      "destination_hash_hex": "021e68345db8a80c29d0c2f193baa5f4",
+      "fields_msgpack_hex": "80",
+      "full_wire_hex": "021e68345db8a80c29d0c2f193baa5f420f7e44b55b06cff39719106f2bd1fd2d8e9be7c7af2e654e12285a037bb6098591798d5fa93a23f1eaf70f73577adac66286c1e704294897555633f7faa53d5f5b74d1096294b8ff21e55f00304f30294cb41d954fc41000000c400c40080",
+      "ingress": {
+        "carrier_event": "destination_data",
+        "implied_destination_hash_hex": "021e68345db8a80c29d0c2f193baa5f4",
+        "normalization": "prepend_implied_destination_hash",
+        "payload_contains_destination_hash": false,
+        "payload_hex": "20f7e44b55b06cff39719106f2bd1fd2d8e9be7c7af2e654e12285a037bb6098591798d5fa93a23f1eaf70f73577adac66286c1e704294897555633f7faa53d5f5b74d1096294b8ff21e55f00304f30294cb41d954fc41000000c400c40080"
+      },
+      "message_id_hex": "cb78dfa0b0fcbdfe7faaa7d7264d9f628a6c43558b9d4a011840276b9cd0baf8",
+      "name": "empty_binary",
+      "origin": "created by Python LXMF 1.0.1 LXMessage.pack",
+      "payload4_hex": "94cb41d954fc41000000c400c40080",
+      "precursor_python_known_answer_input": false,
+      "representation": "packet",
+      "selection_content_size": -1,
+      "signature_hex": "d8e9be7c7af2e654e12285a037bb6098591798d5fa93a23f1eaf70f73577adac66286c1e704294897555633f7faa53d5f5b74d1096294b8ff21e55f00304f302",
+      "source_hash_hex": "20f7e44b55b06cff39719106f2bd1fd2",
+      "source_public_key_hex": "50a61409b1ddd0325e9b16b700e719e9772c07000b1bd7786e907c653d20495d8a875fff1eb38451577acd5afee405456568dd7c89e090863a0557bc7af49f17",
+      "stamp": null,
+      "wire_payload_hex": "94cb41d954fc41000000c400c40080"
+    },
+    {
+      "actual_method": "opportunistic",
+      "decoded": {
+        "content_hex": "78",
+        "fields": {
+          "entries": [],
+          "type": "map"
+        },
+        "timestamp_f64_bits_hex": "41d954fc41000000",
+        "title_hex": ""
+      },
+      "description": "One content byte produces the adjacent Python content_size zero case",
+      "desired_method": "opportunistic",
+      "destination_hash_hex": "021e68345db8a80c29d0c2f193baa5f4",
+      "fields_msgpack_hex": "80",
+      "full_wire_hex": "021e68345db8a80c29d0c2f193baa5f420f7e44b55b06cff39719106f2bd1fd24c55225ca1983cdec19cf48a173da86b2f6550d7159f48762c7017feeb6f41e4504210c5d20f858cb052a433e55ead2d7976459ca8d5f9467507d3221bb4ee0894cb41d954fc41000000c400c4017880",
+      "ingress": {
+        "carrier_event": "destination_data",
+        "implied_destination_hash_hex": "021e68345db8a80c29d0c2f193baa5f4",
+        "normalization": "prepend_implied_destination_hash",
+        "payload_contains_destination_hash": false,
+        "payload_hex": "20f7e44b55b06cff39719106f2bd1fd24c55225ca1983cdec19cf48a173da86b2f6550d7159f48762c7017feeb6f41e4504210c5d20f858cb052a433e55ead2d7976459ca8d5f9467507d3221bb4ee0894cb41d954fc41000000c400c4017880"
+      },
+      "message_id_hex": "4d1d5ff5f7134b80717d437453d46aa2d1e5b9730e9228dd621543d8c94fd6d6",
+      "name": "one_byte_content",
+      "origin": "created by Python LXMF 1.0.1 LXMessage.pack",
+      "payload4_hex": "94cb41d954fc41000000c400c4017880",
+      "precursor_python_known_answer_input": false,
+      "representation": "packet",
+      "selection_content_size": 0,
+      "signature_hex": "4c55225ca1983cdec19cf48a173da86b2f6550d7159f48762c7017feeb6f41e4504210c5d20f858cb052a433e55ead2d7976459ca8d5f9467507d3221bb4ee08",
+      "source_hash_hex": "20f7e44b55b06cff39719106f2bd1fd2",
+      "source_public_key_hex": "50a61409b1ddd0325e9b16b700e719e9772c07000b1bd7786e907c653d20495d8a875fff1eb38451577acd5afee405456568dd7c89e090863a0557bc7af49f17",
+      "stamp": null,
+      "wire_payload_hex": "94cb41d954fc41000000c400c4017880"
+    },
     {
       "actual_method": "opportunistic",
       "decoded": {
@@ -662,6 +734,7 @@
       "32-byte proof-of-work stamp",
       "16-byte ticket-derived stamp and FIELD_TICKET",
       "packet and Resource threshold boundaries",
+      "signed negative and zero content-size boundaries",
       "valid noncanonical exact-four inbound raw-byte hashing",
       "negative signature, content, source, truncation, and stamp mutations"
     ]

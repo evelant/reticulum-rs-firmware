@@ -1,5 +1,7 @@
 //! Fixed-capacity acceptance, replay, and lifecycle index.
 
+use core::mem::MaybeUninit;
+
 use crate::model::{
     Accepted, AuditEntry, AuditEvent, AuthorizationSnapshot, BootRecoveryMarker,
     ExperimentalRnsDataIntent, FinalDisposition, IdempotencyKey, InternalFailure, InterruptedState,
@@ -260,6 +262,17 @@ pub struct SubmissionReplay<const SUBMISSIONS: usize> {
     fault: Option<ApplyError>,
 }
 
+/// Replay-only builder borrowing an index initialized directly in caller storage.
+///
+/// This has the same fail-sticky semantic contract as [`SubmissionReplay`], but
+/// never owns or returns the potentially large fixed-capacity index by value.
+/// It exists for PSRAM-backed products whose CPU stack cannot hold a second
+/// transient index while mounting or validating durable journal state.
+pub struct SubmissionReplayInPlace<'a, const SUBMISSIONS: usize> {
+    index: &'a mut SubmissionIndex<SUBMISSIONS>,
+    fault: Option<ApplyError>,
+}
+
 impl<const SUBMISSIONS: usize> SubmissionReplay<SUBMISSIONS> {
     /// Begin replay with an explicit first submission identifier.
     pub const fn new(first_id: SubmissionId) -> Self {
@@ -269,22 +282,75 @@ impl<const SUBMISSIONS: usize> SubmissionReplay<SUBMISSIONS> {
         }
     }
 
+    /// Begin replay by initializing an index directly in uninitialized caller storage.
+    ///
+    /// No complete `SubmissionIndex` temporary is constructed. Every slot and
+    /// the next-identifier field are initialized at their final addresses
+    /// before the returned replay builder can expose them. The destination is
+    /// fully initialized immediately on return; callers must still invoke
+    /// [`SubmissionReplayInPlace::complete`] only after authenticated backend
+    /// EOF before treating it as live state.
+    ///
+    /// The caller must supply genuinely uninitialized storage or storage whose
+    /// only prior use was a failed journal placement attempt documented as
+    /// retryable. Reusing storage that contains an exposed live index remains
+    /// invalid. The compile-time no-drop invariant below makes failed-attempt
+    /// overwrite safe and fails closed if a future index field owns resources.
+    #[allow(
+        unsafe_code,
+        reason = "audited field-wise initialization avoids a capacity-sized stack temporary"
+    )]
+    pub fn begin_in<'a>(
+        destination: &'a mut MaybeUninit<SubmissionIndex<SUBMISSIONS>>,
+        first_id: SubmissionId,
+    ) -> SubmissionReplayInPlace<'a, SUBMISSIONS> {
+        const {
+            assert!(
+                !core::mem::needs_drop::<SubmissionIndex<SUBMISSIONS>>(),
+                "in-place replay retries require a no-drop SubmissionIndex"
+            );
+        }
+        let index = destination.as_mut_ptr();
+        // SAFETY: `index` is aligned and uniquely borrowed from an
+        // uninitialized `SubmissionIndex`. The array pointer has the address
+        // and alignment of its first element; each in-bounds slot is written
+        // exactly once (including the zero-capacity case, where the loop is
+        // empty), then `next_id` is initialized. Only after every field is
+        // initialized is `&mut SubmissionIndex` created and exposed through
+        // the replay-only wrapper.
+        let index = unsafe {
+            let slots = core::ptr::addr_of_mut!((*index).slots).cast::<Option<IndexedSubmission>>();
+            for slot in 0..SUBMISSIONS {
+                slots.add(slot).write(None);
+            }
+            core::ptr::addr_of_mut!((*index).next_id).write(Some(first_id));
+            &mut *index
+        };
+        SubmissionReplayInPlace { index, fault: None }
+    }
+
+    /// Restart replay in an already initialized caller-owned scratch index.
+    ///
+    /// Slots are cleared one at a time so the operation's stack use is
+    /// independent of `SUBMISSIONS`.
+    pub fn restart_in<'a>(
+        index: &'a mut SubmissionIndex<SUBMISSIONS>,
+        first_id: SubmissionId,
+    ) -> SubmissionReplayInPlace<'a, SUBMISSIONS> {
+        for slot in &mut index.slots {
+            *slot = None;
+        }
+        index.next_id = Some(first_id);
+        SubmissionReplayInPlace { index, fault: None }
+    }
+
     /// Apply one immutable record while reconstructing durable semantic state.
     ///
     /// The first rejected record permanently poisons this replay builder. Later
     /// calls return that same error without applying more records, and
     /// [`Self::complete`] refuses to expose the surviving prefix as live state.
     pub fn apply_entry(&mut self, entry: JournalEntry) -> Result<ApplyOutcome, ApplyError> {
-        if let Some(error) = self.fault {
-            return Err(error);
-        }
-        match self.index.apply_entry_internal(entry) {
-            Ok(outcome) => Ok(outcome),
-            Err(error) => {
-                self.fault = Some(error);
-                Err(error)
-            }
-        }
+        apply_replay_entry(&mut self.index, &mut self.fault, entry)
     }
 
     /// Seal a successful replay and expose the live planning and boot-recovery index.
@@ -296,6 +362,45 @@ impl<const SUBMISSIONS: usize> SubmissionReplay<SUBMISSIONS> {
         match self.fault {
             Some(error) => Err(error),
             None => Ok(self.index),
+        }
+    }
+}
+
+impl<'a, const SUBMISSIONS: usize> SubmissionReplayInPlace<'a, SUBMISSIONS> {
+    /// Apply one immutable record while reconstructing durable semantic state.
+    ///
+    /// The first rejected record permanently poisons this replay builder, just
+    /// as it does for [`SubmissionReplay::apply_entry`].
+    pub fn apply_entry(&mut self, entry: JournalEntry) -> Result<ApplyOutcome, ApplyError> {
+        apply_replay_entry(self.index, &mut self.fault, entry)
+    }
+
+    /// Seal successful replay and return the caller-owned live index in place.
+    ///
+    /// Returns the first semantic replay error if any decoded durable record
+    /// was rejected. The caller must establish authenticated backend EOF before
+    /// invoking this method.
+    pub fn complete(self) -> Result<&'a mut SubmissionIndex<SUBMISSIONS>, ApplyError> {
+        match self.fault {
+            Some(error) => Err(error),
+            None => Ok(self.index),
+        }
+    }
+}
+
+fn apply_replay_entry<const SUBMISSIONS: usize>(
+    index: &mut SubmissionIndex<SUBMISSIONS>,
+    fault: &mut Option<ApplyError>,
+    entry: JournalEntry,
+) -> Result<ApplyOutcome, ApplyError> {
+    if let Some(error) = *fault {
+        return Err(error);
+    }
+    match index.apply_entry_internal(entry) {
+        Ok(outcome) => Ok(outcome),
+        Err(error) => {
+            *fault = Some(error);
+            Err(error)
         }
     }
 }

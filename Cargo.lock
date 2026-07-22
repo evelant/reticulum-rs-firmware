@@ -1044,6 +1044,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fallible-iterator"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
+
+[[package]]
+name = "fallible-streaming-iterator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
+
+[[package]]
 name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1342,6 +1354,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
+name = "libsqlite3-sys"
+version = "0.38.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6c19a05435c21ac299d71b6a9c13db3e3f47c520517d58990a462a1397a61db"
+dependencies = [
+ "cc",
+ "pkg-config",
+ "vcpkg",
+]
+
+[[package]]
 name = "linked_list_allocator"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1517,6 +1540,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkg-config"
+version = "0.3.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
+
+[[package]]
 name = "portable-atomic"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1619,6 +1648,17 @@ dependencies = [
  "sha2",
  "x25519-dalek",
  "zeroize",
+]
+
+[[package]]
+name = "rete-lxmf-core"
+version = "0.1.0"
+source = "git+https://github.com/evelant/rete.git?rev=90570cafc812b3025011cb690ec74a27f287cb3f#90570cafc812b3025011cb690ec74a27f287cb3f"
+dependencies = [
+ "hkdf",
+ "rand_core 0.6.4",
+ "rete-core",
+ "sha2",
 ]
 
 [[package]]
@@ -1818,6 +1858,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "reticulum-device-client"
+version = "0.1.0"
+dependencies = [
+ "rand_core 0.6.4",
+ "reticulum-device-api",
+ "reticulum-device-api-framing",
+ "reticulum-device-api-handoff",
+ "reticulum-device-api-session",
+ "reticulum-lxmf-wire",
+ "sha2",
+ "zeroize",
+]
+
+[[package]]
 name = "reticulum-device-identity-store"
 version = "0.1.0"
 dependencies = [
@@ -2010,6 +2064,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "reticulum-lxmf-chat"
+version = "0.1.0"
+dependencies = [
+ "getrandom",
+ "hex",
+ "rand_core 0.6.4",
+ "reticulum-device-api",
+ "reticulum-device-client",
+ "reticulum-lxmf-chat-core",
+ "serialport",
+]
+
+[[package]]
+name = "reticulum-lxmf-chat-core"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+]
+
+[[package]]
 name = "reticulum-lxmf-durable-ingress"
 version = "0.1.0"
 dependencies = [
@@ -2157,9 +2231,13 @@ dependencies = [
  "hex",
  "rand_core 0.6.4",
  "rete-core",
+ "rete-lxmf-core",
  "rete-stack",
  "rete-transport",
  "reticulum-rns-conformance",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -2357,6 +2435,19 @@ dependencies = [
  "libc",
  "rustversion",
  "svgbobdoc",
+]
+
+[[package]]
+name = "rusqlite"
+version = "0.40.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11438310b19e3109b6446c33d1ed5e889428cf2e278407bc7896bc4aaea43323"
+dependencies = [
+ "bitflags 2.13.0",
+ "fallible-iterator",
+ "fallible-streaming-iterator",
+ "libsqlite3-sys",
+ "smallvec",
 ]
 
 [[package]]
@@ -2839,6 +2930,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77439c1b53d2303b20d9459b1ade71a83c716e3f9c34f3228c00e6f185d6c002"
 
 [[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
+
+[[package]]
 name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3020,6 +3117,7 @@ dependencies = [
  "reticulum-heltec-vision-master-e290-node",
  "reticulum-lxmf-model",
  "reticulum-lxmf-store",
+ "reticulum-lxmf-wire",
  "reticulum-phase1-rx-local-data",
  "reticulum-rns-inbox-store",
  "reticulum-rns-rete",

@@ -814,6 +814,11 @@ impl LiveNodeSystem {
         false
     }
 
+    pub fn ordinary_router_is_idle(&self) -> bool {
+        let capacities = self.supervisor.ordinary_capacities();
+        capacities.active == 0 && self.supervisor.ordinary_parked_count() == capacities.registered
+    }
+
     pub fn actor_reports_lora_offline(&mut self) -> InterfaceDescriptor {
         let offline = self
             .lifecycle

@@ -1,12 +1,14 @@
 //! Device-API dispatch with explicit public identity metadata and a narrow
-//! durable-submission port.
+//! durable-submission ports.
 //!
 //! This adapter performs no framing, session establishment, allocation, radio
 //! work, raw flash access, or journal construction. It authorizes a trusted
 //! device-owned dispatch context, scopes status reads by principal, and passes
 //! one complete owned acceptance candidate through [`SubmissionPort`] only
-//! after an authorized mutation. The port retains all actor, journal, and
-//! backend ownership.
+//! after an authorized mutation. Basic LXMF send instead passes source-free
+//! semantics plus device-derived authorization through `LxmfComposePort`,
+//! whose product implementation owns source selection, composition, and
+//! durable acceptance. Ports retain all actor, journal, and backend ownership.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -196,6 +198,187 @@ pub trait InboundMailboxPort {
     fn peek(&mut self) -> Result<Option<InboundMailboxItem>, InboundMailboxPortError>;
 }
 
+/// Bounded failure vocabulary exposed by the durable LXMF inbox port.
+#[cfg(feature = "experimental-lxmf")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LxmfInboxPortError {
+    /// The build or product profile does not provide the durable LXMF inbox.
+    Unavailable,
+    /// Another exact retained flash operation currently owns the coordinator.
+    Busy,
+    /// The requested handle or offset is not a valid readable wire range.
+    InvalidRequest,
+    /// Durable message bytes could not be read reliably.
+    Backend,
+    /// The supplied physical binding did not match the mounted store owner.
+    Binding,
+    /// The mounted owner detected contradictory persisted media.
+    Faulted,
+}
+
+/// Narrow transport-neutral semantic port for committed LXMF discovery and reads.
+#[cfg(feature = "experimental-lxmf")]
+pub trait LxmfInboxPort {
+    /// Current product/runtime availability of durable LXMF inbox service.
+    fn availability(&mut self) -> CapabilityAvailability;
+
+    /// Return the next physical-commit-order summary after an optional cursor.
+    fn next(
+        &mut self,
+        after: Option<api::LxmfMessageHandle>,
+    ) -> Result<Option<api::LxmfMessageSummary>, LxmfInboxPortError>;
+
+    /// Return one non-empty caller-bounded normalized-wire chunk.
+    fn read(
+        &mut self,
+        handle: api::LxmfMessageHandle,
+        offset: u32,
+        max_bytes: api::LxmfReadLength,
+    ) -> Result<Option<api::LxmfReadChunk>, LxmfInboxPortError>;
+}
+
+/// Source-free semantic input for basic LXMF composition and durable acceptance.
+///
+/// The authenticated principal and authorization snapshot are derived from the
+/// device-owned dispatch context. There is deliberately no source-destination
+/// field: the product composer selects the local LXMF identity.
+#[cfg(feature = "experimental-lxmf")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LxmfComposeRequest<'a> {
+    principal: storage::PrincipalId,
+    destination: storage::DestinationHash,
+    timestamp_unix_ms: u64,
+    title: &'a [u8],
+    content: &'a [u8],
+    idempotency_key: storage::IdempotencyKey,
+    authorization: storage::AuthorizationSnapshot,
+}
+
+#[cfg(feature = "experimental-lxmf")]
+impl<'a> LxmfComposeRequest<'a> {
+    /// Construct one authenticated source-free composition request.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        principal: storage::PrincipalId,
+        destination: storage::DestinationHash,
+        timestamp_unix_ms: u64,
+        title: &'a [u8],
+        content: &'a [u8],
+        idempotency_key: storage::IdempotencyKey,
+        authorization: storage::AuthorizationSnapshot,
+    ) -> Self {
+        Self {
+            principal,
+            destination,
+            timestamp_unix_ms,
+            title,
+            content,
+            idempotency_key,
+            authorization,
+        }
+    }
+
+    /// Authenticated principal owning a successful submission.
+    pub const fn principal(self) -> storage::PrincipalId {
+        self.principal
+    }
+
+    /// Complete remote `lxmf.delivery` destination hash.
+    pub const fn destination(self) -> storage::DestinationHash {
+        self.destination
+    }
+
+    /// Caller-selected Unix timestamp in milliseconds.
+    pub const fn timestamp_unix_ms(self) -> u64 {
+        self.timestamp_unix_ms
+    }
+
+    /// Exact borrowed binary title.
+    pub const fn title(self) -> &'a [u8] {
+        self.title
+    }
+
+    /// Exact borrowed binary content.
+    pub const fn content(self) -> &'a [u8] {
+        self.content
+    }
+
+    /// Principal-scoped idempotency key.
+    pub const fn idempotency_key(self) -> storage::IdempotencyKey {
+        self.idempotency_key
+    }
+
+    /// Exact device-derived authorization facts for durable acceptance.
+    pub const fn authorization(self) -> storage::AuthorizationSnapshot {
+        self.authorization
+    }
+}
+
+/// Basic LXMF composition result paired with durable-submission acceptance.
+#[cfg(feature = "experimental-lxmf")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LxmfComposeAcceptance {
+    acceptance: SubmissionAcceptance,
+    message_id: [u8; 32],
+}
+
+#[cfg(feature = "experimental-lxmf")]
+impl LxmfComposeAcceptance {
+    /// Pair durable acceptance progress with the exact composed LXMF message ID.
+    pub const fn new(acceptance: SubmissionAcceptance, message_id: [u8; 32]) -> Self {
+        Self {
+            acceptance,
+            message_id,
+        }
+    }
+
+    /// Durable acceptance or idempotency outcome.
+    pub const fn acceptance(self) -> SubmissionAcceptance {
+        self.acceptance
+    }
+
+    /// Python-compatible LXMF authenticated-message identifier.
+    pub const fn message_id(&self) -> &[u8; 32] {
+        &self.message_id
+    }
+}
+
+/// Closed failure vocabulary for basic LXMF composition and durable acceptance.
+#[cfg(feature = "experimental-lxmf")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LxmfComposePortError {
+    /// The product profile or current runtime has disabled basic LXMF send.
+    Unavailable,
+    /// The semantic request cannot be composed, including carrier-size overflow.
+    InvalidRequest,
+    /// Another exact retained durable mutation currently owns the service.
+    Busy,
+    /// A physical backend operation failed or returned ambiguously.
+    Backend,
+    /// The supplied physical storage binding did not match the mounted owner.
+    Binding,
+    /// The mounted owner latched a semantic or physical fault.
+    Faulted,
+    /// Composition or durable acceptance violated an internal invariant.
+    Invariant,
+}
+
+/// Narrow product-owned port for basic LXMF composition and durable submission.
+///
+/// Implementations select the local LXMF source and the final Python-compatible
+/// carrier, then durably accept that exact composed message as one operation.
+#[cfg(feature = "experimental-lxmf")]
+pub trait LxmfComposePort {
+    /// Current product/runtime availability of basic LXMF send.
+    fn availability(&mut self) -> CapabilityAvailability;
+
+    /// Compose using the device identity and durably accept the exact result.
+    fn compose_and_accept(
+        &mut self,
+        request: LxmfComposeRequest<'_>,
+    ) -> Result<LxmfComposeAcceptance, LxmfComposePortError>;
+}
+
 /// Authorize and dispatch one decoded logical request against a narrow
 /// durable-submission port.
 ///
@@ -265,6 +448,77 @@ where
                 request,
                 operation,
             ),
+            Err(error) => authorization_error(error, operation),
+        }
+    };
+    ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id,
+        response,
+    }
+}
+
+/// Authorize and dispatch one request against a single owner implementing the
+/// submission, durable LXMF inbox, and basic-LXMF compose ports.
+///
+/// This entry point deliberately does not require the raw-RNS inbox feature or
+/// port. Products can therefore compile the higher-level LXMF client surface
+/// without retaining the raw qualification mailbox.
+#[cfg(feature = "experimental-lxmf")]
+pub fn dispatch_with_lxmf<P>(
+    port: &mut P,
+    identity: api::IdentitySummary,
+    context: &DispatchContext,
+    envelope: RequestEnvelope<'_>,
+) -> ResponseEnvelope
+where
+    P: SubmissionPort + LxmfInboxPort + LxmfComposePort,
+{
+    let request_id = envelope.request_id;
+    let request = envelope.request;
+    let operation = request.operation();
+    let response = if envelope.version.major != ApiVersion::CURRENT.major {
+        api_error(ApiErrorCode::UnsupportedVersion, operation)
+    } else {
+        match authorize_request(context, &request) {
+            Ok(()) => dispatch_authorized_with_lxmf(port, identity, context, request, operation),
+            Err(error) => authorization_error(error, operation),
+        }
+    };
+    ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id,
+        response,
+    }
+}
+
+/// Authorize and dispatch one request against a single owner implementing the
+/// submission, raw-RNS inbox, durable LXMF inbox, and basic-LXMF compose ports.
+///
+/// A single combined owner is intentional: both durable submission and LXMF
+/// reads may need operation-scoped access to the same physical flash device.
+/// Dispatch invokes only the method selected by the decoded operation, so no
+/// physical capability is aliased and public identity reads invoke no port.
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+pub fn dispatch_with_inbox_and_lxmf<P>(
+    port: &mut P,
+    identity: api::IdentitySummary,
+    context: &DispatchContext,
+    envelope: RequestEnvelope<'_>,
+) -> ResponseEnvelope
+where
+    P: SubmissionPort + InboundMailboxPort + LxmfInboxPort + LxmfComposePort,
+{
+    let request_id = envelope.request_id;
+    let request = envelope.request;
+    let operation = request.operation();
+    let response = if envelope.version.major != ApiVersion::CURRENT.major {
+        api_error(ApiErrorCode::UnsupportedVersion, operation)
+    } else {
+        match authorize_request(context, &request) {
+            Ok(()) => {
+                dispatch_authorized_with_inbox_and_lxmf(port, identity, context, request, operation)
+            }
             Err(error) => authorization_error(error, operation),
         }
     };
@@ -406,12 +660,163 @@ where
     }
 }
 
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+fn dispatch_authorized_with_inbox_and_lxmf<P>(
+    port: &mut P,
+    identity: api::IdentitySummary,
+    context: &DispatchContext,
+    request: DeviceRequest<'_>,
+    operation: u16,
+) -> DeviceResponse
+where
+    P: SubmissionPort + InboundMailboxPort + LxmfInboxPort + LxmfComposePort,
+{
+    match request {
+        DeviceRequest::SystemCapabilities => {
+            let submit_available = cfg!(feature = "experimental-rns-data")
+                && SubmissionPort::availability(port) == CapabilityAvailability::Available;
+            let rns_inbox = InboundMailboxPort::availability(port);
+            let lxmf = LxmfInboxPort::availability(port);
+            let lxmf_basic_send = LxmfComposePort::availability(port);
+            DeviceResponse::SystemCapabilities(
+                api::CapabilitySnapshot::for_dispatch_with_inbox_lxmf_and_basic_send(
+                    submit_available,
+                    rns_inbox,
+                    lxmf,
+                    lxmf_basic_send,
+                ),
+            )
+        }
+        DeviceRequest::IdentitySummary => DeviceResponse::IdentitySummary(identity),
+        DeviceRequest::RnsInboxStatus => {
+            if InboundMailboxPort::availability(port) != CapabilityAvailability::Available {
+                return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+            }
+            match InboundMailboxPort::status(port) {
+                Ok(status) => DeviceResponse::RnsInboxStatus(status),
+                Err(error) => inbox_port_error(error, operation),
+            }
+        }
+        DeviceRequest::RnsInboxPeek => {
+            if InboundMailboxPort::availability(port) != CapabilityAvailability::Available {
+                return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+            }
+            match InboundMailboxPort::peek(port) {
+                Ok(Some(item)) => {
+                    match api::RnsInboxItem::new(item.id, item.destination(), item.payload()) {
+                        Ok(item) => DeviceResponse::RnsInboxPeek(item),
+                        Err(_) => api_error(ApiErrorCode::Internal, operation),
+                    }
+                }
+                Ok(None) => api_error(ApiErrorCode::NotFound, operation),
+                Err(error) => inbox_port_error(error, operation),
+            }
+        }
+        other => dispatch_authorized_with_lxmf(port, identity, context, other, operation),
+    }
+}
+
+#[cfg(feature = "experimental-lxmf")]
+fn dispatch_authorized_with_lxmf<P>(
+    port: &mut P,
+    identity: api::IdentitySummary,
+    context: &DispatchContext,
+    request: DeviceRequest<'_>,
+    operation: u16,
+) -> DeviceResponse
+where
+    P: SubmissionPort + LxmfInboxPort + LxmfComposePort,
+{
+    match request {
+        DeviceRequest::SystemCapabilities => {
+            let submit_available = cfg!(feature = "experimental-rns-data")
+                && SubmissionPort::availability(port) == CapabilityAvailability::Available;
+            let lxmf = LxmfInboxPort::availability(port);
+            let lxmf_basic_send = LxmfComposePort::availability(port);
+            DeviceResponse::SystemCapabilities(
+                api::CapabilitySnapshot::for_dispatch_with_inbox_lxmf_and_basic_send(
+                    submit_available,
+                    CapabilityAvailability::Unavailable,
+                    lxmf,
+                    lxmf_basic_send,
+                ),
+            )
+        }
+        DeviceRequest::IdentitySummary => DeviceResponse::IdentitySummary(identity),
+        DeviceRequest::LxmfNext { after } => {
+            if LxmfInboxPort::availability(port) != CapabilityAvailability::Available {
+                return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+            }
+            match LxmfInboxPort::next(port, after) {
+                Ok(Some(summary)) => DeviceResponse::LxmfNext(summary),
+                Ok(None) => api_error(ApiErrorCode::NotFound, operation),
+                Err(error) => lxmf_port_error(error, operation),
+            }
+        }
+        DeviceRequest::LxmfRead {
+            handle,
+            offset,
+            max_bytes,
+        } => {
+            if LxmfInboxPort::availability(port) != CapabilityAvailability::Available {
+                return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+            }
+            match LxmfInboxPort::read(port, handle, offset, max_bytes) {
+                Ok(Some(chunk)) => DeviceResponse::LxmfRead(chunk),
+                Ok(None) => api_error(ApiErrorCode::NotFound, operation),
+                Err(error) => lxmf_port_error(error, operation),
+            }
+        }
+        DeviceRequest::LxmfBasicSend {
+            destination,
+            timestamp_unix_ms,
+            title,
+            content,
+            idempotency_key,
+        } => {
+            let Some(principal) = context.principal() else {
+                return api_error(ApiErrorCode::AuthenticationRequired, operation);
+            };
+            if LxmfComposePort::availability(port) != CapabilityAvailability::Available {
+                return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+            }
+            let Some(authorization) = authorization_snapshot(context) else {
+                return api_error(ApiErrorCode::Internal, operation);
+            };
+            let request = LxmfComposeRequest::new(
+                storage::PrincipalId::new(principal.0),
+                storage::DestinationHash::new(destination.0),
+                timestamp_unix_ms,
+                title,
+                content,
+                storage::IdempotencyKey::new(idempotency_key.0),
+                authorization,
+            );
+            lxmf_compose_response(port.compose_and_accept(request), operation)
+        }
+        other => dispatch_authorized(port, identity, context, other, operation),
+    }
+}
+
 fn authorization_error(error: AuthorizationError, operation: u16) -> DeviceResponse {
     let code = match error {
         AuthorizationError::AuthenticationRequired => ApiErrorCode::AuthenticationRequired,
         AuthorizationError::PermissionDenied(_) => ApiErrorCode::PermissionDenied,
     };
     api_error(code, operation)
+}
+
+#[cfg(feature = "experimental-lxmf")]
+fn authorization_snapshot(context: &DispatchContext) -> Option<storage::AuthorizationSnapshot> {
+    let provenance = context.provenance()?;
+    storage::AuthorizationSnapshot::new(
+        provenance.credential_id(),
+        provenance.credential_generation(),
+        provenance.authority_revision(),
+        provenance.policy_version(),
+        context.permissions().bits(),
+    )
+    .ok()
 }
 
 fn api_error(code: ApiErrorCode, operation: u16) -> DeviceResponse {
@@ -463,6 +868,60 @@ fn inbox_port_error(error: InboundMailboxPortError, operation: u16) -> DeviceRes
         InboundMailboxPortError::Busy
         | InboundMailboxPortError::Backend
         | InboundMailboxPortError::Faulted => ApiErrorCode::Internal,
+    };
+    api_error(code, operation)
+}
+
+#[cfg(feature = "experimental-lxmf")]
+fn lxmf_port_error(error: LxmfInboxPortError, operation: u16) -> DeviceResponse {
+    let code = match error {
+        LxmfInboxPortError::Unavailable => ApiErrorCode::CapabilityUnavailable,
+        LxmfInboxPortError::InvalidRequest => ApiErrorCode::InvalidRequest,
+        LxmfInboxPortError::Busy
+        | LxmfInboxPortError::Backend
+        | LxmfInboxPortError::Binding
+        | LxmfInboxPortError::Faulted => ApiErrorCode::Internal,
+    };
+    api_error(code, operation)
+}
+
+#[cfg(feature = "experimental-lxmf")]
+fn lxmf_compose_response(
+    progress: Result<LxmfComposeAcceptance, LxmfComposePortError>,
+    operation: u16,
+) -> DeviceResponse {
+    match progress {
+        Ok(progress) => match progress.acceptance() {
+            SubmissionAcceptance::Accepted(id) | SubmissionAcceptance::Replay(id) => {
+                DeviceResponse::LxmfBasicSendAccepted(api::LxmfBasicSendAccepted::new(
+                    api_submission_id(id),
+                    *progress.message_id(),
+                ))
+            }
+            SubmissionAcceptance::IdempotencyConflict => {
+                api_error(ApiErrorCode::IdempotencyConflict, operation)
+            }
+            SubmissionAcceptance::CapacityExhausted => {
+                api_error(ApiErrorCode::CapacityExhausted, operation)
+            }
+            SubmissionAcceptance::IdentifierExhausted => {
+                api_error(ApiErrorCode::Internal, operation)
+            }
+        },
+        Err(error) => lxmf_compose_port_error(error, operation),
+    }
+}
+
+#[cfg(feature = "experimental-lxmf")]
+fn lxmf_compose_port_error(error: LxmfComposePortError, operation: u16) -> DeviceResponse {
+    let code = match error {
+        LxmfComposePortError::Unavailable => ApiErrorCode::CapabilityUnavailable,
+        LxmfComposePortError::InvalidRequest => ApiErrorCode::InvalidRequest,
+        LxmfComposePortError::Busy
+        | LxmfComposePortError::Backend
+        | LxmfComposePortError::Binding
+        | LxmfComposePortError::Faulted
+        | LxmfComposePortError::Invariant => ApiErrorCode::Internal,
     };
     api_error(code, operation)
 }

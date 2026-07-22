@@ -5,19 +5,27 @@ use core::{
     mem,
 };
 
+use allocator_api2::boxed::Box;
 #[cfg(feature = "runtime-measurement-hil")]
 use embassy_time::Instant;
 use embedded_storage::nor_flash::ReadNorFlash;
+use esp_alloc::ExternalMemory;
 use esp_bootloader_esp_idf::partitions::{PARTITION_TABLE_MAX_LEN, read_partition_table};
 use esp_storage::{FlashStorage, FlashStorageError};
 use rand_core::{CryptoRng, RngCore};
 use reticulum_announce_clock::{
     BootEpochReservation, FreshClockPolicy, ReserveError, reserve_next_boot_epoch,
 };
-use reticulum_device_api::{CapabilityAvailability, IdentitySummary};
+use reticulum_device_api::{
+    CapabilityAvailability, DestinationHash as ApiDestinationHash, IdentitySummary,
+    LxmfMessageHandle as ApiLxmfMessageHandle, LxmfMessageSummary as ApiLxmfMessageSummary,
+    LxmfReadChunk as ApiLxmfReadChunk, LxmfReadLength as ApiLxmfReadLength,
+    MAX_LXMF_READ_CHUNK_BYTES,
+};
 use reticulum_device_api_adapter::{
-    InboundMailboxItem, InboundMailboxPort, InboundMailboxPortError, SubmissionAcceptance,
-    SubmissionPort, SubmissionPortError,
+    InboundMailboxItem, InboundMailboxPort, InboundMailboxPortError, LxmfComposeAcceptance,
+    LxmfComposePort, LxmfComposePortError, LxmfComposeRequest, LxmfInboxPort, LxmfInboxPortError,
+    SubmissionAcceptance, SubmissionPort, SubmissionPortError,
 };
 use reticulum_device_api_credential_store::{
     BoundCredentialStore, CredentialStoreBinding, CredentialStoreRecovery, MountedCredentialStore,
@@ -76,14 +84,15 @@ use reticulum_lxmf_durable_ingress::{
 use reticulum_lxmf_ingress::{
     LocalDeliveryDestination, SourceIdentityResolver, StampPolicy, WireLimits,
 };
-use reticulum_lxmf_model::MessageId;
+use reticulum_lxmf_model::{MessageHandle, MessageId};
 use reticulum_lxmf_store::{
-    BoundLxmfStore, LxmfStoreBinding, LxmfStoreIndexSlot, LxmfStoreMountError, MountedLxmfStore,
-    mount as mount_lxmf_store,
+    BoundLxmfStore, LxmfStoreBinding, LxmfStoreIndexSlot, LxmfStoreMountError, LxmfWireReadError,
+    MountedLxmfStore, mount as mount_lxmf_store,
 };
 use reticulum_node_core::{
-    ApplicationEventLease, AuthorizedFrameObservation, DelayedProofOwner, MonotonicMillis,
-    MonotonicSeconds, TxLeaseDeadline,
+    ApplicationEventLease, AuthorizedFrameObservation, DelayedProofOwner,
+    DestinationHash as NodeDestinationHash, MAX_OPPORTUNISTIC_LXMF_CARRIER, MonotonicMillis,
+    MonotonicSeconds, PrepareBasicLxmfError, TxLeaseDeadline,
 };
 use reticulum_nor_flash_region::{PartitionNorFlash, RegionError};
 use reticulum_rns_inbox_store::{
@@ -99,14 +108,15 @@ use reticulum_storage_journal::{
     FirstProvisionError, FreshJournalPolicy, JournalState, provision_first,
 };
 use reticulum_storage_model::{
-    AcceptOutcome, AcceptanceCandidate, LifecycleState, PrincipalId, SubmissionId,
+    AcceptOutcome, AcceptanceCandidate, ExperimentalRnsDataIntent, LifecycleState, PrincipalId,
+    SubmissionId,
 };
 use reticulum_submission_runtime::{
     FrameOfferProgress, PathDiscoveryAcknowledgeError, PathDiscoveryOffer, RecoveryStep,
     RuntimeControlError, RuntimeError, RuntimeStep, SubmissionNodePort, SubmissionRuntime,
 };
 
-use crate::config;
+use crate::{ProductSupervisor, config};
 use reticulum_heltec_vision_master_e290_node::durability_boot::JournalBootPolicy;
 #[cfg(feature = "rns-inbox-commit-fault-hil")]
 use reticulum_heltec_vision_master_e290_node::inbox_admission_fault_hil::{
@@ -349,6 +359,28 @@ struct ProductInboundMailboxPort<'a> {
     inbox: &'a Option<MountedInboxStore>,
     service_enabled: bool,
     dropped_since_boot: u64,
+}
+
+/// One operation-scoped owner joining logical API capabilities that may each
+/// need the sole physical flash device.
+///
+/// Adapter dispatch calls exactly one semantic method per request. Keeping the
+/// capabilities on one value therefore preserves exclusive flash ownership
+/// without unsafe aliases or exposing raw storage above this module.
+struct ProductAuthenticatedApiPort<'a> {
+    flash: &'a mut FlashStorage<'static>,
+    journal_binding: JournalBinding,
+    runtime: &'a mut Option<&'static mut ProductSubmissionRuntime>,
+    submission_service_enabled: bool,
+    credential_physical_mutation_outstanding: bool,
+    inbox: &'a Option<MountedInboxStore>,
+    inbox_service_enabled: bool,
+    inbox_dropped_since_boot: u64,
+    lxmf: &'a Option<MountedLxmfStore<'static>>,
+    lxmf_service_enabled: bool,
+    lxmf_mutation_pending: bool,
+    lxmf_compose_service_enabled: bool,
+    supervisor: &'a ProductSupervisor,
 }
 
 /// Product result of offering one decrypted local DATA item to durable storage.
@@ -624,25 +656,38 @@ impl ProductFlashOwner {
     /// Strictly mount the journal, reject unsupported history before any
     /// recovery mutation, and finish the bootstrap recovery gate.
     ///
-    /// This first admission profile permits at most one accepted submission so
-    /// its complete live and remount path can be qualified without implying a
-    /// product retention capacity. The LoRa dispatcher retains and re-offers
-    /// complete authorized-frame observations, and the mounted runtime remains
-    /// resident rather than abandoning durable state after boot.
+    /// The first USB-usable profile permits a bounded PSRAM-backed history but
+    /// deliberately performs no retirement or journal reclamation. The LoRa
+    /// dispatcher retains and re-offers complete authorized-frame
+    /// observations, and the mounted runtime remains resident rather than
+    /// abandoning durable state after boot.
     pub(crate) fn mount_node_runtime(
         &mut self,
         boot_sequence: u64,
-    ) -> Result<(ProductSubmissionRuntime, BootJournalMountReport), BootJournalMountError> {
+        mut storage: Box<mem::MaybeUninit<ProductSubmissionRuntime>, ExternalMemory>,
+    ) -> Result<
+        (
+            Box<ProductSubmissionRuntime, ExternalMemory>,
+            BootJournalMountReport,
+        ),
+        BootJournalMountError,
+    > {
         let (runtime, report) = {
             let region =
                 PartitionNorFlash::new(&mut *self.flash, NODE_JOURNAL_OFFSET, NODE_JOURNAL_LEN);
             let mut journal = BoundJournal::new(region, self.journal_binding);
-            let mut runtime = ProductSubmissionRuntime::mount(
+            ProductSubmissionRuntime::mount_into(
+                storage.as_mut(),
                 &mut journal,
                 SubmissionId::new(config::FIRST_SUBMISSION_ID),
                 boot_sequence,
             )
             .map_err(BootJournalMountError::Mount)?;
+            // SAFETY: `SubmissionRuntime::mount_into` writes every field and
+            // returns `Ok` only after physical and semantic replay succeeds.
+            // Its error contract leaves `storage` uninitialized, and the `?`
+            // above returns before this conversion on every error path.
+            let mut runtime = unsafe { storage.assume_init() };
 
             let mounted_state = runtime.storage().state();
             if mounted_state.accepted_submissions() > config::DURABLE_ACCEPTED_SUBMISSION_LIMIT {
@@ -1067,6 +1112,7 @@ impl ProductStorageCoordinator {
     )]
     pub(crate) fn dispatch_authenticated_request(
         &mut self,
+        supervisor: &ProductSupervisor,
         request: LocalApiRequest<AuthenticatedGrant>,
         identity: IdentitySummary,
     ) -> Result<LocalApiReply, AuthenticatedApiDispatchFailure> {
@@ -1083,28 +1129,25 @@ impl ProductStorageCoordinator {
             inbox,
             inbox_service_enabled,
             inbox_dropped_since_boot,
-            lxmf: _,
-            lxmf_service_enabled: _,
+            lxmf,
+            lxmf_service_enabled,
         } = self;
-        let mut submission_port = ProductSubmissionPort {
+        let mut port = ProductAuthenticatedApiPort {
             flash,
             journal_binding: *journal_binding,
             runtime,
             submission_service_enabled: *submission_service_enabled,
             credential_physical_mutation_outstanding,
-            lxmf_mutation_pending,
-        };
-        let mut inbox_port = ProductInboundMailboxPort {
             inbox,
-            service_enabled: *inbox_service_enabled,
-            dropped_since_boot: *inbox_dropped_since_boot,
+            inbox_service_enabled: *inbox_service_enabled,
+            inbox_dropped_since_boot: *inbox_dropped_since_boot,
+            lxmf,
+            lxmf_service_enabled: *lxmf_service_enabled,
+            lxmf_mutation_pending,
+            lxmf_compose_service_enabled: identity.lxmf_delivery_destination().is_some(),
+            supervisor,
         };
-        credential_runtime.dispatch_authenticated_request(
-            request,
-            identity,
-            &mut submission_port,
-            &mut inbox_port,
-        )
+        credential_runtime.dispatch_authenticated_request(request, identity, &mut port)
     }
 
     /// Admit one ordinary authenticated session and return its exact selected
@@ -1472,9 +1515,9 @@ impl SubmissionPort for ProductSubmissionPort<'_> {
             .as_mut()
             .ok_or(SubmissionPortError::Unavailable)?;
 
-        // Preserve replay and conflict semantics even when the one-live-
-        // admission development profile is full. Only a genuinely new
-        // acceptance is stopped by the product cap.
+        // Preserve replay and conflict semantics even when the bounded POC
+        // admission profile is full. Only a genuinely new acceptance is
+        // stopped by the product cap.
         if matches!(
             runtime.storage().index().plan_accept(candidate),
             AcceptOutcome::Accepted(_)
@@ -1491,6 +1534,51 @@ impl SubmissionPort for ProductSubmissionPort<'_> {
             .accept(&mut journal, candidate)
             .map(map_submission_acceptance)
             .map_err(map_submission_port_runtime_error)
+    }
+}
+
+impl SubmissionPort for ProductAuthenticatedApiPort<'_> {
+    fn availability(&mut self) -> CapabilityAvailability {
+        ProductSubmissionPort {
+            flash: &mut *self.flash,
+            journal_binding: self.journal_binding,
+            runtime: &mut *self.runtime,
+            submission_service_enabled: self.submission_service_enabled,
+            credential_physical_mutation_outstanding: self.credential_physical_mutation_outstanding,
+            lxmf_mutation_pending: self.lxmf_mutation_pending,
+        }
+        .availability()
+    }
+
+    fn submission_state(
+        &mut self,
+        principal: PrincipalId,
+        id: SubmissionId,
+    ) -> Result<Option<LifecycleState>, SubmissionPortError> {
+        ProductSubmissionPort {
+            flash: &mut *self.flash,
+            journal_binding: self.journal_binding,
+            runtime: &mut *self.runtime,
+            submission_service_enabled: self.submission_service_enabled,
+            credential_physical_mutation_outstanding: self.credential_physical_mutation_outstanding,
+            lxmf_mutation_pending: self.lxmf_mutation_pending,
+        }
+        .submission_state(principal, id)
+    }
+
+    fn accept(
+        &mut self,
+        candidate: AcceptanceCandidate,
+    ) -> Result<SubmissionAcceptance, SubmissionPortError> {
+        ProductSubmissionPort {
+            flash: &mut *self.flash,
+            journal_binding: self.journal_binding,
+            runtime: &mut *self.runtime,
+            submission_service_enabled: self.submission_service_enabled,
+            credential_physical_mutation_outstanding: self.credential_physical_mutation_outstanding,
+            lxmf_mutation_pending: self.lxmf_mutation_pending,
+        }
+        .accept(candidate)
     }
 }
 
@@ -1566,6 +1654,178 @@ impl InboundMailboxPort for ProductInboundMailboxPort<'_> {
     }
 }
 
+impl InboundMailboxPort for ProductAuthenticatedApiPort<'_> {
+    fn availability(&mut self) -> CapabilityAvailability {
+        ProductInboundMailboxPort {
+            inbox: self.inbox,
+            service_enabled: self.inbox_service_enabled,
+            dropped_since_boot: self.inbox_dropped_since_boot,
+        }
+        .availability()
+    }
+
+    fn status(&mut self) -> Result<reticulum_device_api::RnsInboxStatus, InboundMailboxPortError> {
+        ProductInboundMailboxPort {
+            inbox: self.inbox,
+            service_enabled: self.inbox_service_enabled,
+            dropped_since_boot: self.inbox_dropped_since_boot,
+        }
+        .status()
+    }
+
+    fn peek(&mut self) -> Result<Option<InboundMailboxItem>, InboundMailboxPortError> {
+        ProductInboundMailboxPort {
+            inbox: self.inbox,
+            service_enabled: self.inbox_service_enabled,
+            dropped_since_boot: self.inbox_dropped_since_boot,
+        }
+        .peek()
+    }
+}
+
+impl LxmfInboxPort for ProductAuthenticatedApiPort<'_> {
+    fn availability(&mut self) -> CapabilityAvailability {
+        if !self.lxmf_service_enabled {
+            return CapabilityAvailability::Unavailable;
+        }
+        let Some(store) = self.lxmf.as_ref() else {
+            return CapabilityAvailability::Unavailable;
+        };
+        if store.has_pending_mutation() {
+            CapabilityAvailability::Disabled
+        } else {
+            CapabilityAvailability::Available
+        }
+    }
+
+    fn next(
+        &mut self,
+        after: Option<ApiLxmfMessageHandle>,
+    ) -> Result<Option<ApiLxmfMessageSummary>, LxmfInboxPortError> {
+        if LxmfInboxPort::availability(self) != CapabilityAvailability::Available {
+            return Err(LxmfInboxPortError::Unavailable);
+        }
+        let store = self.lxmf.as_ref().ok_or(LxmfInboxPortError::Unavailable)?;
+        let mut after_seen = after.is_none();
+        for receipt in store.receipts() {
+            if !after_seen {
+                after_seen = after.is_some_and(|cursor| cursor.get() == receipt.handle().get());
+                continue;
+            }
+            let metadata = store
+                .metadata(receipt.handle())
+                .ok_or(LxmfInboxPortError::Faulted)?;
+            let lengths = metadata.lengths();
+            let handle = ApiLxmfMessageHandle::new(receipt.handle().get())
+                .map_err(|_| LxmfInboxPortError::Faulted)?;
+            let summary = ApiLxmfMessageSummary::new(
+                handle,
+                *receipt.message_id().as_bytes(),
+                ApiDestinationHash(*metadata.destination().as_bytes()),
+                ApiDestinationHash(*metadata.source().as_bytes()),
+                metadata.timestamp_bits(),
+                lengths.normalized_wire(),
+                lengths.title(),
+                lengths.content(),
+                lengths.fields_encoded(),
+                *receipt.fingerprint().exact_wire_digest().as_bytes(),
+            )
+            .map_err(|_| LxmfInboxPortError::Faulted)?;
+            return Ok(Some(summary));
+        }
+        Ok(None)
+    }
+
+    fn read(
+        &mut self,
+        handle: ApiLxmfMessageHandle,
+        offset: u32,
+        max_bytes: ApiLxmfReadLength,
+    ) -> Result<Option<ApiLxmfReadChunk>, LxmfInboxPortError> {
+        if LxmfInboxPort::availability(self) != CapabilityAvailability::Available {
+            return Err(LxmfInboxPortError::Unavailable);
+        }
+        let store = self.lxmf.as_ref().ok_or(LxmfInboxPortError::Unavailable)?;
+        let model_handle =
+            MessageHandle::new(handle.get()).map_err(|_| LxmfInboxPortError::InvalidRequest)?;
+        let mut bytes = [0_u8; MAX_LXMF_READ_CHUNK_BYTES];
+        let requested = usize::from(max_bytes.get());
+        let region = PartitionNorFlash::new(&mut *self.flash, LXMF_STORE_OFFSET, LXMF_STORE_LEN);
+        let mut access = BoundLxmfStore::new(region, store.binding());
+        let chunk =
+            match store.read_wire_chunk(&mut access, model_handle, offset, &mut bytes[..requested])
+            {
+                Ok(chunk) => chunk,
+                Err(LxmfWireReadError::NotFound { .. }) => return Ok(None),
+                Err(LxmfWireReadError::OffsetOutOfRange { .. }) => {
+                    return Err(LxmfInboxPortError::InvalidRequest);
+                }
+                Err(LxmfWireReadError::Binding(_)) => return Err(LxmfInboxPortError::Binding),
+                Err(LxmfWireReadError::Backend(_)) => return Err(LxmfInboxPortError::Backend),
+                Err(LxmfWireReadError::Fault(_)) => return Err(LxmfInboxPortError::Faulted),
+            };
+        if chunk.bytes_read() == 0 {
+            return Err(LxmfInboxPortError::InvalidRequest);
+        }
+        ApiLxmfReadChunk::new(
+            handle,
+            chunk.offset(),
+            chunk.wire_length(),
+            &bytes[..chunk.bytes_read()],
+        )
+        .map(Some)
+        .map_err(|_| LxmfInboxPortError::Faulted)
+    }
+}
+
+impl LxmfComposePort for ProductAuthenticatedApiPort<'_> {
+    fn availability(&mut self) -> CapabilityAvailability {
+        if !self.lxmf_compose_service_enabled {
+            return CapabilityAvailability::Unavailable;
+        }
+        SubmissionPort::availability(self)
+    }
+
+    fn compose_and_accept(
+        &mut self,
+        request: LxmfComposeRequest<'_>,
+    ) -> Result<LxmfComposeAcceptance, LxmfComposePortError> {
+        if LxmfComposePort::availability(self) != CapabilityAvailability::Available {
+            return Err(LxmfComposePortError::Unavailable);
+        }
+
+        let destination = NodeDestinationHash::new(*request.destination().as_bytes());
+        let mut carrier = [0_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+        let prepared = self
+            .supervisor
+            .prepare_basic_lxmf_into(
+                &destination,
+                request.timestamp_unix_ms(),
+                request.title(),
+                request.content(),
+                &mut carrier,
+            )
+            .map_err(map_lxmf_compose_error)?;
+        let carrier_len = usize::from(prepared.carrier_len());
+        if carrier_len > reticulum_storage_model::MAX_EXPERIMENTAL_RNS_DATA_BYTES {
+            return Err(LxmfComposePortError::InvalidRequest);
+        }
+        let intent = ExperimentalRnsDataIntent::new(request.destination(), &carrier[..carrier_len])
+            .map_err(|_| LxmfComposePortError::InvalidRequest)?;
+        let candidate = AcceptanceCandidate::new(
+            request.principal(),
+            request.idempotency_key(),
+            intent,
+            request.authorization(),
+        );
+        let acceptance = SubmissionPort::accept(self, candidate).map_err(map_lxmf_accept_error)?;
+        Ok(LxmfComposeAcceptance::new(
+            acceptance,
+            prepared.message_id(),
+        ))
+    }
+}
+
 impl InboundMailboxPort for ProductStorageCoordinator {
     fn availability(&mut self) -> CapabilityAvailability {
         self.inbox_port().availability()
@@ -1589,6 +1849,28 @@ fn map_submission_acceptance(progress: AcceptanceProgress) -> SubmissionAcceptan
             SubmissionAcceptance::CapacityExhausted
         }
         AcceptanceProgress::IdentifierExhausted => SubmissionAcceptance::IdentifierExhausted,
+    }
+}
+
+const fn map_lxmf_compose_error(error: PrepareBasicLxmfError) -> LxmfComposePortError {
+    match error {
+        PrepareBasicLxmfError::InvalidTimestamp
+        | PrepareBasicLxmfError::TimestampTooLarge { .. }
+        | PrepareBasicLxmfError::PayloadTooLarge { .. } => LxmfComposePortError::InvalidRequest,
+        PrepareBasicLxmfError::DeliveryDestinationUnavailable => LxmfComposePortError::Unavailable,
+        PrepareBasicLxmfError::Signing
+        | PrepareBasicLxmfError::OutputTooSmall { .. }
+        | PrepareBasicLxmfError::Invariant => LxmfComposePortError::Invariant,
+    }
+}
+
+const fn map_lxmf_accept_error(error: SubmissionPortError) -> LxmfComposePortError {
+    match error {
+        SubmissionPortError::Unavailable => LxmfComposePortError::Unavailable,
+        SubmissionPortError::Busy => LxmfComposePortError::Busy,
+        SubmissionPortError::Backend => LxmfComposePortError::Backend,
+        SubmissionPortError::Binding => LxmfComposePortError::Binding,
+        SubmissionPortError::Faulted => LxmfComposePortError::Faulted,
     }
 }
 

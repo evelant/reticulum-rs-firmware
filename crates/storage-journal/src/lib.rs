@@ -10,11 +10,13 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+use core::mem::MaybeUninit;
+
 use embedded_storage::nor_flash::{MultiwriteNorFlash, NorFlash, ReadNorFlash};
 use reticulum_storage_model::{
     ApplyError, ApplyOutcome, JOURNAL_SCHEMA_VERSION, JournalEntry,
     MAX_DURABLE_RECORDS_PER_SUBMISSION, MAX_JOURNAL_RECORD_BYTES, SubmissionId, SubmissionIndex,
-    SubmissionReplay, decode_journal_entry, encode_journal_entry,
+    SubmissionReplay, SubmissionReplayInPlace, decode_journal_entry, encode_journal_entry,
 };
 use sha2::{Digest, Sha256};
 
@@ -410,9 +412,8 @@ enum NeedleMatch {
     Conflict,
 }
 
-struct ScanResult<const SUBMISSIONS: usize> {
+struct ScanResult {
     state: JournalState,
-    index: SubmissionIndex<SUBMISSIONS>,
     needle_match: NeedleMatch,
 }
 
@@ -490,11 +491,41 @@ where
 {
     validate_flash::<F>(flash)?;
     let manifest = select_manifest(flash)?;
-    let scan = scan_bank::<SUBMISSIONS, F>(flash, manifest, first_submission_id, None)?;
+    let mut replay = SubmissionReplay::<SUBMISSIONS>::new(first_submission_id);
+    let scan = scan_bank(flash, manifest, None, &mut replay)?;
+    let index = replay.complete().map_err(JournalError::SemanticReplay)?;
     Ok(MountedJournal {
         state: scan.state,
-        index: scan.index,
+        index,
     })
+}
+
+/// Scan and replay directly into caller-provided uninitialized index storage.
+///
+/// This has the same physical and semantic validation contract as [`mount`]
+/// but never returns the fixed-capacity index by value. `destination` contains
+/// a complete live index only when `Ok` is returned. It is intended for large
+/// external-memory owners whose CPU stack cannot hold a transient replay index.
+///
+/// The caller must supply genuinely uninitialized storage or the same storage
+/// after this function returned an error. Calling this with a destination that
+/// contains an exposed live index remains invalid. The in-place replay layer
+/// enforces a compile-time no-drop invariant for safe failed-mount retries.
+#[inline(never)]
+pub fn mount_into<const SUBMISSIONS: usize, F>(
+    destination: &mut MaybeUninit<SubmissionIndex<SUBMISSIONS>>,
+    flash: &mut F,
+    first_submission_id: SubmissionId,
+) -> Result<JournalState, JournalError<F::Error>>
+where
+    F: ReadNorFlash,
+{
+    validate_flash::<F>(flash)?;
+    let manifest = select_manifest(flash)?;
+    let mut replay = SubmissionReplay::<SUBMISSIONS>::begin_in(destination, first_submission_id);
+    let scan = scan_bank(flash, manifest, None, &mut replay)?;
+    replay.complete().map_err(JournalError::SemanticReplay)?;
+    Ok(scan.state)
 }
 
 /// Append one semantically valid record with exact idempotent retry behavior.
@@ -514,8 +545,44 @@ where
 {
     validate_writable_flash::<F>(flash)?;
     let manifest = select_manifest(flash)?;
-    let scan = scan_bank::<SUBMISSIONS, F>(flash, manifest, first_submission_id, Some(entry))?;
+    let mut replay = SubmissionReplay::<SUBMISSIONS>::new(first_submission_id);
+    let scan = scan_bank(flash, manifest, Some(entry), &mut replay)?;
+    replay.complete().map_err(JournalError::SemanticReplay)?;
+    append_after_scan(flash, entry, scan)
+}
 
+/// Append with semantic replay performed in caller-owned scratch storage.
+///
+/// `scratch` is cleared and reconstructed from the authenticated journal on
+/// every call, including exact retries after an ambiguous backend result. The
+/// live actor index is therefore never used as scratch and remains unchanged
+/// until the caller observes a durable outcome.
+#[inline(never)]
+pub fn append_with_replay_scratch<const SUBMISSIONS: usize, F>(
+    flash: &mut F,
+    first_submission_id: SubmissionId,
+    entry: JournalEntry,
+    scratch: &mut SubmissionIndex<SUBMISSIONS>,
+) -> Result<AppendOutcome, JournalError<F::Error>>
+where
+    F: MultiwriteNorFlash,
+{
+    validate_writable_flash::<F>(flash)?;
+    let manifest = select_manifest(flash)?;
+    let mut replay = SubmissionReplay::<SUBMISSIONS>::restart_in(scratch, first_submission_id);
+    let scan = scan_bank(flash, manifest, Some(entry), &mut replay)?;
+    replay.complete().map_err(JournalError::SemanticReplay)?;
+    append_after_scan(flash, entry, scan)
+}
+
+fn append_after_scan<F>(
+    flash: &mut F,
+    entry: JournalEntry,
+    scan: ScanResult,
+) -> Result<AppendOutcome, JournalError<F::Error>>
+where
+    F: MultiwriteNorFlash,
+{
     match scan.needle_match {
         NeedleMatch::Equivalent => return Ok(AppendOutcome::AlreadyEquivalent(scan.state)),
         NeedleMatch::Conflict => return Err(JournalError::LogicalConflict),
@@ -592,14 +659,48 @@ where
 {
     validate_writable_flash::<F>(flash)?;
     let record = select_manifest(flash)?;
-    let scan = scan_bank::<SUBMISSIONS, F>(flash, record, first_submission_id, None)?;
+    let mut replay = SubmissionReplay::<SUBMISSIONS>::new(first_submission_id);
+    let scan = scan_bank(flash, record, None, &mut replay)?;
+    let mut scratch = replay.complete().map_err(JournalError::SemanticReplay)?;
+    compact_after_scan(flash, first_submission_id, record, scan, &mut scratch)
+}
+
+/// Compact with semantic replay performed in caller-owned scratch storage.
+///
+/// The scratch index is reconstructed before mutation and after each manifest
+/// transition that requires full semantic verification. It is independent of
+/// the caller's live index, preserving exact retry and fail-closed behavior.
+#[inline(never)]
+pub fn compact_with_replay_scratch<const SUBMISSIONS: usize, F>(
+    flash: &mut F,
+    first_submission_id: SubmissionId,
+    scratch: &mut SubmissionIndex<SUBMISSIONS>,
+) -> Result<JournalState, JournalError<F::Error>>
+where
+    F: MultiwriteNorFlash,
+{
+    validate_writable_flash::<F>(flash)?;
+    let record = select_manifest(flash)?;
+    let scan = scan_with_scratch(flash, record, first_submission_id, None, scratch)?;
+    compact_after_scan(flash, first_submission_id, record, scan, scratch)
+}
+
+fn compact_after_scan<const SUBMISSIONS: usize, F>(
+    flash: &mut F,
+    first_submission_id: SubmissionId,
+    record: ManifestRecord,
+    scan: ScanResult,
+    scratch: &mut SubmissionIndex<SUBMISSIONS>,
+) -> Result<JournalState, JournalError<F::Error>>
+where
+    F: MultiwriteNorFlash,
+{
     let source = scan.state;
 
     if let Some(retired) = record.retire_manifest {
         retire_manifest(flash, retired)?;
         if matches!(record.handoff, HandoffState::None) {
-            let mounted = mount::<SUBMISSIONS, F>(flash, first_submission_id)?;
-            let state = mounted.state();
+            let state = mount_state_with_scratch(flash, first_submission_id, scratch)?;
             if state.bank != source.bank
                 || state.generation != source.generation
                 || state.committed_records != source.committed_records
@@ -660,8 +761,7 @@ where
     )?;
     retire_manifest(flash, source.bank)?;
 
-    let mounted = mount::<SUBMISSIONS, F>(flash, first_submission_id)?;
-    let state = mounted.state();
+    let state = mount_state_with_scratch(flash, first_submission_id, scratch)?;
     if state.bank != target
         || state.generation != target_generation
         || state.committed_records != source.committed_records
@@ -671,6 +771,19 @@ where
         return Err(JournalError::CompactionInvariant);
     }
     Ok(state)
+}
+
+fn mount_state_with_scratch<const SUBMISSIONS: usize, F>(
+    flash: &mut F,
+    first_submission_id: SubmissionId,
+    scratch: &mut SubmissionIndex<SUBMISSIONS>,
+) -> Result<JournalState, JournalError<F::Error>>
+where
+    F: ReadNorFlash,
+{
+    validate_flash::<F>(flash)?;
+    let manifest = select_manifest(flash)?;
+    Ok(scan_with_scratch(flash, manifest, first_submission_id, None, scratch)?.state)
 }
 
 fn retire_manifest<F>(flash: &mut F, bank: Bank) -> Result<(), JournalError<F::Error>>
@@ -1320,17 +1433,49 @@ fn decode_handoff(data: &[u8], expected_schema: u16) -> Option<Handoff> {
     })
 }
 
-fn scan_bank<const SUBMISSIONS: usize, F>(
+trait ReplaySink {
+    fn apply_entry(&mut self, entry: JournalEntry) -> Result<ApplyOutcome, ApplyError>;
+}
+
+impl<const SUBMISSIONS: usize> ReplaySink for SubmissionReplay<SUBMISSIONS> {
+    fn apply_entry(&mut self, entry: JournalEntry) -> Result<ApplyOutcome, ApplyError> {
+        SubmissionReplay::apply_entry(self, entry)
+    }
+}
+
+impl<const SUBMISSIONS: usize> ReplaySink for SubmissionReplayInPlace<'_, SUBMISSIONS> {
+    fn apply_entry(&mut self, entry: JournalEntry) -> Result<ApplyOutcome, ApplyError> {
+        SubmissionReplayInPlace::apply_entry(self, entry)
+    }
+}
+
+fn scan_with_scratch<const SUBMISSIONS: usize, F>(
     flash: &mut F,
     record: ManifestRecord,
     first_submission_id: SubmissionId,
     needle: Option<JournalEntry>,
-) -> Result<ScanResult<SUBMISSIONS>, JournalError<F::Error>>
+    scratch: &mut SubmissionIndex<SUBMISSIONS>,
+) -> Result<ScanResult, JournalError<F::Error>>
 where
     F: ReadNorFlash,
 {
+    let mut replay = SubmissionReplay::<SUBMISSIONS>::restart_in(scratch, first_submission_id);
+    let scan = scan_bank(flash, record, needle, &mut replay)?;
+    replay.complete().map_err(JournalError::SemanticReplay)?;
+    Ok(scan)
+}
+
+fn scan_bank<F, R>(
+    flash: &mut F,
+    record: ManifestRecord,
+    needle: Option<JournalEntry>,
+    replay: &mut R,
+) -> Result<ScanResult, JournalError<F::Error>>
+where
+    F: ReadNorFlash,
+    R: ReplaySink,
+{
     let manifest = record.manifest;
-    let mut replay = SubmissionReplay::<SUBMISSIONS>::new(first_submission_id);
     let mut committed_records = 0_usize;
     let mut consumed_slots = 0_usize;
     let mut accepted_submissions = 0_usize;
@@ -1445,8 +1590,6 @@ where
             Err(error) => return Err(JournalError::SemanticReplay(error)),
         }
     }
-    let index = replay.complete().map_err(JournalError::SemanticReplay)?;
-
     Ok(ScanResult {
         state: JournalState {
             bank: manifest.bank,
@@ -1458,7 +1601,6 @@ where
             compaction_pending: record.retire_manifest.is_some()
                 || !matches!(record.handoff, HandoffState::None),
         },
-        index,
         needle_match,
     })
 }

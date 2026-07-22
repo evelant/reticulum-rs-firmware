@@ -82,14 +82,16 @@ pub const INTERFACE_SLOTS: usize = 1;
 /// Jobs, completions and ingress buffers available per concrete actor.
 pub const INTERFACE_QUEUE_DEPTH: usize = 2;
 
-/// Submission records retained by the current resident development profile.
+/// Submission records retained by the first USB-usable PSRAM product profile.
 ///
-/// This deliberately small fixed profile validates the complete coordinator
-/// ownership path. It is not the eventual message-retention capacity or a
-/// reason to constrain PSRAM-equipped product profiles.
-pub const DURABLE_SUBMISSIONS: usize = 4;
+/// One hundred twenty-eight supports a useful multi-message client trial while
+/// remaining below the append-only journal's explicit 162-submission lifetime.
+/// This runtime is deliberately allocated in external PSRAM and is not a
+/// non-PSRAM profile. Reclamation is still required for an indefinitely running
+/// product.
+pub const DURABLE_SUBMISSIONS: usize = 128;
 /// Volatile lifecycle correlations retained by the resident runtime.
-pub const DURABLE_PROJECTED_SUBMISSIONS: usize = 2;
+pub const DURABLE_PROJECTED_SUBMISSIONS: usize = 128;
 /// Boot-lifetime PSRAM occupied by the backend-independent durable runtime.
 pub const DURABLE_RUNTIME_BYTES: usize = core::mem::size_of::<
     reticulum_submission_runtime::SubmissionRuntime<
@@ -97,16 +99,26 @@ pub const DURABLE_RUNTIME_BYTES: usize = core::mem::size_of::<
         DURABLE_PROJECTED_SUBMISSIONS,
     >,
 >();
-/// Guard against silently growing the current external resident profile.
-pub const MAXIMUM_DURABLE_RUNTIME_BYTES: usize = 16 * 1024;
-const _: () = assert!(DURABLE_RUNTIME_BYTES <= MAXIMUM_DURABLE_RUNTIME_BYTES);
-/// Accepted submissions permitted by the first bounded local-admission profile.
+// Keep both reviewed layouts explicit so an otherwise source-compatible field
+// or alignment change cannot silently consume target PSRAM or host-test RAM.
+// Xtensa's 32-bit field layout is 24 bytes smaller than the 64-bit host layout.
+#[cfg(target_arch = "xtensa")]
+const REVIEWED_DURABLE_RUNTIME_BYTES: usize = 375_544;
+#[cfg(not(target_arch = "xtensa"))]
+const REVIEWED_DURABLE_RUNTIME_BYTES: usize = 375_568;
+const _: () = assert!(DURABLE_RUNTIME_BYTES == REVIEWED_DURABLE_RUNTIME_BYTES);
+/// Guard against silently growing the PSRAM-backed runtime and its independent
+/// journal-replay scratch index.
 ///
-/// One durable submission is enough to qualify the complete admission,
-/// preparation, LoRa DATA, exact frame-echo, terminal, status, and remount
-/// path without presenting the current four-slot development index as a
-/// product retention policy. No external API bearer exists yet.
-pub const DURABLE_ACCEPTED_SUBMISSION_LIMIT: usize = 1;
+/// The scratch index keeps all retry and compaction validation off the CPU
+/// stack while preserving the live index until a durable outcome. The
+/// remaining margin covers small metadata additions without allowing a
+/// multi-fold regression to hide behind the board's large PSRAM.
+pub const MAXIMUM_DURABLE_RUNTIME_BYTES: usize = 512 * 1024;
+const _: () = assert!(DURABLE_RUNTIME_BYTES <= MAXIMUM_DURABLE_RUNTIME_BYTES);
+/// Accepted submissions permitted before the non-reclaiming POC journal
+/// reports explicit capacity exhaustion.
+pub const DURABLE_ACCEPTED_SUBMISSION_LIMIT: usize = DURABLE_SUBMISSIONS;
 /// First durable submission identifier in an empty product journal.
 pub const FIRST_SUBMISSION_ID: u64 = 1;
 
@@ -466,6 +478,28 @@ pub const fn ordinary_admission(now_ms: u64) -> OrdinaryRouterAdmission {
     )))
 }
 
+/// Decide whether the node task may advance one durable submission step.
+///
+/// Fresh submission scheduling waits for every ordinary owner to become
+/// quiescent. An already transmitted DATA frame is different: the sole radio
+/// dispatcher retains its completion until the frame observation is durable,
+/// so ordinary work queued behind that frame cannot become quiescent first.
+/// That exact active owner therefore bypasses scheduler quiescence, including
+/// a later unrelated fail-closed drain; storage retry timing remains
+/// authoritative. Once its observation becomes durable, the owner is
+/// acknowledged and the ordinary gates become authoritative again.
+pub const fn submission_storage_step_admitted(
+    storage_step_attempted: bool,
+    storage_step_due: bool,
+    retained_frame_pending: bool,
+    ordinary_owners_quiescent: bool,
+    fail_closed_draining: bool,
+) -> bool {
+    !storage_step_attempted
+        && storage_step_due
+        && (retained_frame_pending || (ordinary_owners_quiescent && !fail_closed_draining))
+}
+
 /// Validated RNode-compatible randomized backoff and CAD policy.
 ///
 /// The continuous random interval preserves the reference 24 ms minimum slot
@@ -517,8 +551,12 @@ mod tests {
     }
 
     #[test]
-    fn first_live_admission_profile_owns_exactly_one_submission() {
-        assert_eq!(DURABLE_ACCEPTED_SUBMISSION_LIMIT, 1);
+    fn usb_usable_profile_owns_128_bounded_submissions_in_psram() {
+        assert_eq!(DURABLE_SUBMISSIONS, 128);
+        assert_eq!(DURABLE_PROJECTED_SUBMISSIONS, 128);
+        assert_eq!(DURABLE_ACCEPTED_SUBMISSION_LIMIT, 128);
+        assert_eq!(DURABLE_RUNTIME_BYTES, 375_568);
+        assert_eq!(MAXIMUM_DURABLE_RUNTIME_BYTES, 512 * 1024);
         const { assert!(DURABLE_ACCEPTED_SUBMISSION_LIMIT <= DURABLE_SUBMISSIONS) };
     }
 
@@ -641,6 +679,29 @@ mod tests {
     fn retry_slot_selection_honors_the_fairness_cursor_when_both_are_live() {
         assert_eq!(action_retry_slot(true, true, true), ActionRetrySlot::Second);
         assert_eq!(action_retry_slot(true, true, false), ActionRetrySlot::First);
+    }
+
+    #[test]
+    fn retained_data_frame_bypasses_ordinary_quiescence_for_durability() {
+        assert!(submission_storage_step_admitted(
+            false, true, true, false, false,
+        ));
+        assert!(
+            !submission_storage_step_admitted(false, true, false, false, false),
+            "fresh scheduling still waits for ordinary owners"
+        );
+        assert!(
+            !submission_storage_step_admitted(false, false, true, false, false),
+            "a retained frame does not bypass storage retry timing"
+        );
+        assert!(
+            submission_storage_step_admitted(false, true, true, false, true),
+            "a later unrelated fault cannot strand an active DATA completion"
+        );
+        assert!(
+            !submission_storage_step_admitted(false, true, false, true, true),
+            "fail-closed drain still forbids fresh submission scheduling"
+        );
     }
 
     #[test]

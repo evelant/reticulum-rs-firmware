@@ -12,7 +12,8 @@ use reticulum_device_api::{
     decode_request, encode_response,
 };
 use reticulum_device_api_adapter::{
-    InboundMailboxPort, SubmissionPort, dispatch, dispatch_with_inbox,
+    InboundMailboxPort, LxmfComposePort, LxmfInboxPort, SubmissionPort, dispatch,
+    dispatch_with_inbox, dispatch_with_inbox_and_lxmf,
 };
 use reticulum_device_api_credentials::CredentialAuthority;
 use reticulum_device_api_handoff::{
@@ -154,6 +155,71 @@ where
     {
         Some(lease) => lease.with_dispatch_context(|context| {
             dispatch_with_inbox(submission_port, inbox_port, identity, context, envelope)
+        }),
+        None => ResponseEnvelope {
+            version: ApiVersion::CURRENT,
+            request_id: envelope.request_id,
+            response: DeviceResponse::Error(ApiErrorResponse {
+                code: ApiErrorCode::AuthenticationRequired,
+                operation: Some(operation),
+            }),
+        },
+    };
+
+    let mut encoded = [0_u8; MESSAGE_CAPACITY];
+    let length = match encode_response(&response, &mut encoded) {
+        Ok(length) => length,
+        Err(_) => {
+            return Err(AuthenticatedApiDispatchFailure {
+                kind: AuthenticatedApiDispatchFailureKind::ResponseEncoding,
+                request,
+            });
+        }
+    };
+    let key = request.key();
+    drop(request);
+    Ok(LocalApiReply::new(
+        key,
+        OwnedMessage::new(
+            MessageLength::new(length).expect("device API and handoff share one capacity"),
+            encoded,
+        ),
+    ))
+}
+
+/// Revalidate and dispatch one authenticated request through a single owner of
+/// durable submission, raw-RNS inbox, and LXMF inbox semantic capabilities.
+///
+/// The combined port permits operation-scoped use of one physical flash owner
+/// without creating simultaneous mutable aliases. Authentication failure and
+/// public identity reads still invoke no port method.
+#[allow(
+    clippy::result_large_err,
+    reason = "terminal failure must retain the exact allocation-free request owner"
+)]
+pub fn dispatch_authenticated_request_with_inbox_and_lxmf<const CREDENTIALS: usize, P>(
+    request: LocalApiRequest<AuthenticatedGrant>,
+    authority: Option<&CredentialAuthority<CREDENTIALS>>,
+    identity: IdentitySummary,
+    port: &mut P,
+) -> Result<LocalApiReply, AuthenticatedApiDispatchFailure>
+where
+    P: SubmissionPort + InboundMailboxPort + LxmfInboxPort + LxmfComposePort,
+{
+    let envelope = match decode_request(request.message().encoded()) {
+        Ok(envelope) => envelope,
+        Err(_) => {
+            return Err(AuthenticatedApiDispatchFailure {
+                kind: AuthenticatedApiDispatchFailureKind::MalformedRequest,
+                request,
+            });
+        }
+    };
+    let operation = envelope.request.operation();
+    let response = match authority.and_then(|authority| request.grant().revalidate(authority).ok())
+    {
+        Some(lease) => lease.with_dispatch_context(|context| {
+            dispatch_with_inbox_and_lxmf(port, identity, context, envelope)
         }),
         None => ResponseEnvelope {
             version: ApiVersion::CURRENT,

@@ -357,6 +357,187 @@ fn commit_mount_and_remount_preserve_receipt_and_metadata() {
 }
 
 #[test]
+fn wire_chunks_return_exact_persisted_bytes_across_extent_boundaries() {
+    let wire = complete_wire(0x22, 4084, 0xa5);
+    let mut access = bound(TestNor::erased(PARTITION_SIZE));
+    let mut commit_index = index::<2>();
+    let receipt = {
+        let mut mounted = mount(&mut access, &mut commit_index).unwrap();
+        match mounted
+            .commit(
+                &mut access,
+                complete_candidate(&wire, 1, 9, 0x22, 7, normal_stamp()),
+            )
+            .unwrap()
+        {
+            LxmfCommitOutcome::Committed(receipt) => receipt,
+            other => panic!("unexpected outcome {other:?}"),
+        }
+    };
+
+    let mut read_index = index::<2>();
+    let mounted = mount(&mut access, &mut read_index).unwrap();
+    let mut complete = vec![0_u8; wire.len()];
+    let whole = mounted
+        .read_wire_chunk(&mut access, receipt.handle(), 0, &mut complete)
+        .unwrap();
+    assert_eq!(whole.offset(), 0);
+    assert_eq!(whole.wire_length(), wire.len() as u32);
+    assert_eq!(whole.bytes_read(), wire.len());
+    assert_eq!(whole.next_offset(), wire.len() as u32);
+    assert!(whole.is_complete());
+    assert_eq!(complete, wire);
+
+    let start = EXTENT_PAYLOAD_SIZE - 84;
+    let mut crossing = [0xcc; 600];
+    let chunk = mounted
+        .read_wire_chunk(&mut access, receipt.handle(), start as u32, &mut crossing)
+        .unwrap();
+    assert_eq!(chunk.bytes_read(), wire.len() - start);
+    assert!(chunk.is_complete());
+    assert_eq!(&crossing[..chunk.bytes_read()], &wire[start..]);
+    assert!(
+        crossing[chunk.bytes_read()..]
+            .iter()
+            .all(|byte| *byte == 0xcc)
+    );
+}
+
+#[test]
+fn wire_chunk_offsets_and_empty_buffers_have_explicit_end_semantics() {
+    let wire = complete_wire(0x22, 600, 0x5a);
+    let mut access = bound(TestNor::erased(PARTITION_SIZE));
+    let mut mounted_index = index::<2>();
+    let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
+    let receipt = match mounted
+        .commit(
+            &mut access,
+            complete_candidate(&wire, 1, 9, 0x22, 7, normal_stamp()),
+        )
+        .unwrap()
+    {
+        LxmfCommitOutcome::Committed(receipt) => receipt,
+        other => panic!("unexpected outcome {other:?}"),
+    };
+
+    let reads = access.backend().reads;
+    let empty_before_end = mounted
+        .read_wire_chunk(&mut access, receipt.handle(), 7, &mut [])
+        .unwrap();
+    assert_eq!(empty_before_end.bytes_read(), 0);
+    assert!(!empty_before_end.is_complete());
+    assert_eq!(access.backend().reads, reads);
+
+    let at_end = mounted
+        .read_wire_chunk(
+            &mut access,
+            receipt.handle(),
+            wire.len() as u32,
+            &mut [0; 8],
+        )
+        .unwrap();
+    assert_eq!(at_end.bytes_read(), 0);
+    assert!(at_end.is_complete());
+    assert_eq!(access.backend().reads, reads);
+
+    assert_eq!(
+        mounted.read_wire_chunk(
+            &mut access,
+            receipt.handle(),
+            wire.len() as u32 + 1,
+            &mut [0; 8],
+        ),
+        Err(LxmfWireReadError::OffsetOutOfRange {
+            offset: wire.len() as u32 + 1,
+            wire_length: wire.len() as u32,
+        })
+    );
+    assert_eq!(access.backend().reads, reads);
+
+    let unknown = MessageHandle::new(receipt.handle().get() + 1).unwrap();
+    assert_eq!(
+        mounted.read_wire_chunk(&mut access, unknown, 0, &mut [0; 8]),
+        Err(LxmfWireReadError::NotFound { handle: unknown })
+    );
+    assert_eq!(access.backend().reads, reads);
+}
+
+#[test]
+fn wire_chunk_rejects_wrong_binding_and_reports_backend_failure() {
+    let wire = complete_wire(0x22, 600, 0x5a);
+    let mut access = bound(TestNor::erased(PARTITION_SIZE));
+    let mut mounted_index = index::<2>();
+    let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
+    let receipt = match mounted
+        .commit(
+            &mut access,
+            complete_candidate(&wire, 1, 9, 0x22, 7, normal_stamp()),
+        )
+        .unwrap()
+    {
+        LxmfCommitOutcome::Committed(receipt) => receipt,
+        other => panic!("unexpected outcome {other:?}"),
+    };
+
+    let wrong_device = LxmfStoreDeviceId::new([0x77; 16]);
+    let wrong_binding = LxmfStoreBinding::new(
+        wrong_device,
+        STORE_OFFSET,
+        PARTITION_SIZE,
+        PHYSICAL_FORMAT_VERSION,
+    );
+    let mut wrong_access = BoundLxmfStore::new(access.backend().clone(), wrong_binding);
+    let reads = wrong_access.backend().reads;
+    assert_eq!(
+        mounted.read_wire_chunk(&mut wrong_access, receipt.handle(), 0, &mut [0; 8]),
+        Err(LxmfWireReadError::Binding(
+            LxmfStoreBindingError::DeviceMismatch {
+                expected: DEVICE,
+                actual: wrong_device,
+            }
+        ))
+    );
+    assert_eq!(wrong_access.backend().reads, reads);
+
+    access.backend_mut().fail_read_after(0);
+    assert_eq!(
+        mounted.read_wire_chunk(&mut access, receipt.handle(), 0, &mut [0; 8]),
+        Err(LxmfWireReadError::Backend(FakeError::Injected))
+    );
+}
+
+#[test]
+fn wire_chunk_fails_closed_when_an_indexed_extent_header_changes() {
+    let wire = complete_wire(0x22, 4000, 0x5a);
+    let mut access = bound(TestNor::erased(PARTITION_SIZE));
+    let mut mounted_index = index::<2>();
+    let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
+    let receipt = match mounted
+        .commit(
+            &mut access,
+            complete_candidate(&wire, 1, 9, 0x22, 7, normal_stamp()),
+        )
+        .unwrap()
+    {
+        LxmfCommitOutcome::Committed(receipt) => receipt,
+        other => panic!("unexpected outcome {other:?}"),
+    };
+    access.backend_mut().bytes[EXTENT_SIZE + HEADER_MAGIC_OFFSET] ^= 0x01;
+
+    assert_eq!(
+        mounted.read_wire_chunk(
+            &mut access,
+            receipt.handle(),
+            EXTENT_PAYLOAD_SIZE as u32,
+            &mut [0; 8],
+        ),
+        Err(LxmfWireReadError::Fault(
+            LxmfStoreFault::CommittedHeaderCorrupt { extent: 1 }
+        ))
+    );
+}
+
+#[test]
 fn opportunistic_391_byte_carrier_exceeds_old_qualification_ceiling() {
     let destination = [0x44; 16];
     let carrier = [0x66; 391];

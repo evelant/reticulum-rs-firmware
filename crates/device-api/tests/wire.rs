@@ -1,62 +1,95 @@
+#[cfg(any(feature = "experimental-rns-data", feature = "experimental-lxmf"))]
+use reticulum_device_api::IdempotencyKey;
 use reticulum_device_api::{
     API_VERSION_MAJOR, API_VERSION_MINOR, ApiErrorCode, ApiErrorResponse, ApiVersion,
     AuthorizationError, CapabilityAvailability, CapabilitySnapshot, DecodeError, DestinationHash,
     DeviceRequest, DeviceResponse, DispatchContext, DispatchProvenance, DispatchProvenanceError,
     EncodeError, EncodedPacketSha256, IdentitySummary, MAX_BODY_BYTES, MAX_CBOR_NESTING_DEPTH,
-    MAX_MESSAGE_BYTES, MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES, OP_IDENTITY_SUMMARY,
-    OP_SUBMISSION_STATUS, Permissions, PreparedPacketDetails, PrincipalId, RequestEnvelope,
-    RequestId, RequiredField, RequiredPermission, ResponseEnvelope, SubmissionFailure,
-    SubmissionId, SubmissionState, SubmissionStatus, authorize_request, decode_request,
-    decode_response, encode_request, encode_response,
+    MAX_LXMF_BASIC_CONTENT_BYTES, MAX_LXMF_BASIC_TITLE_BYTES, MAX_MESSAGE_BYTES,
+    MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES, OP_IDENTITY_SUMMARY, OP_SUBMISSION_STATUS, Permissions,
+    PreparedPacketDetails, PrincipalId, RequestEnvelope, RequestId, RequiredField,
+    RequiredPermission, ResponseEnvelope, SubmissionFailure, SubmissionId, SubmissionState,
+    SubmissionStatus, authorize_request, decode_request, decode_response, encode_request,
+    encode_response,
 };
-#[cfg(feature = "experimental-rns-data")]
-use reticulum_device_api::{IdempotencyKey, OP_EXPERIMENTAL_SUBMIT_RNS_DATA, SubmissionAccepted};
+#[cfg(feature = "experimental-lxmf")]
+use reticulum_device_api::{
+    LxmfBasicSendAccepted, LxmfMessageHandle, LxmfMessageSummary, LxmfReadChunk, LxmfReadLength,
+    MAX_LXMF_READ_CHUNK_BYTES, OP_EXPERIMENTAL_LXMF_BASIC_SEND, OP_EXPERIMENTAL_LXMF_NEXT,
+    OP_EXPERIMENTAL_LXMF_READ,
+};
 #[cfg(feature = "experimental-rns-inbox")]
 use reticulum_device_api::{
     MAX_RNS_INBOX_PAYLOAD_BYTES, OP_EXPERIMENTAL_RNS_INBOX_PEEK, OP_EXPERIMENTAL_RNS_INBOX_STATUS,
     RnsInboxItem, RnsInboxStatus,
 };
+#[cfg(feature = "experimental-rns-data")]
+use reticulum_device_api::{OP_EXPERIMENTAL_SUBMIT_RNS_DATA, SubmissionAccepted};
 
 const GOLDEN_CAPABILITIES_REQUEST: &[u8] = &[
-    0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa0,
+    0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa0,
 ];
 
-#[cfg(all(
-    not(feature = "experimental-rns-data"),
-    not(feature = "experimental-rns-inbox")
-))]
-const GOLDEN_CAPABILITIES_RESPONSE: &[u8] = &[
-    0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa9, 0x00, 0xa2,
-    0x00, 0x01, 0x01, 0x02, 0x01, 0xf4, 0x02, 0x00, 0x03, 0xf4, 0x04, 0x19, 0x02, 0x00, 0x05, 0x19,
-    0x01, 0xc0, 0x06, 0x19, 0x01, 0x7f, 0x07, 0x00, 0x08, 0x00,
-];
-
-#[cfg(all(
-    feature = "experimental-rns-data",
-    not(feature = "experimental-rns-inbox")
-))]
-const GOLDEN_CAPABILITIES_RESPONSE: &[u8] = &[
-    0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa9, 0x00, 0xa2,
-    0x00, 0x01, 0x01, 0x02, 0x01, 0xf4, 0x02, 0x00, 0x03, 0xf5, 0x04, 0x19, 0x02, 0x00, 0x05, 0x19,
-    0x01, 0xc0, 0x06, 0x19, 0x01, 0x7f, 0x07, 0x00, 0x08, 0x00,
-];
-
-#[cfg(all(
-    not(feature = "experimental-rns-data"),
-    feature = "experimental-rns-inbox"
-))]
-const GOLDEN_CAPABILITIES_RESPONSE: &[u8] = &[
-    0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa9, 0x00, 0xa2,
-    0x00, 0x01, 0x01, 0x02, 0x01, 0xf4, 0x02, 0x00, 0x03, 0xf4, 0x04, 0x19, 0x02, 0x00, 0x05, 0x19,
-    0x01, 0xc0, 0x06, 0x19, 0x01, 0x7f, 0x07, 0x02, 0x08, 0x19, 0x01, 0x7f,
-];
-
-#[cfg(all(feature = "experimental-rns-data", feature = "experimental-rns-inbox"))]
-const GOLDEN_CAPABILITIES_RESPONSE: &[u8] = &[
-    0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa9, 0x00, 0xa2,
-    0x00, 0x01, 0x01, 0x02, 0x01, 0xf4, 0x02, 0x00, 0x03, 0xf5, 0x04, 0x19, 0x02, 0x00, 0x05, 0x19,
-    0x01, 0xc0, 0x06, 0x19, 0x01, 0x7f, 0x07, 0x02, 0x08, 0x19, 0x01, 0x7f,
-];
+fn golden_capabilities_response() -> Vec<u8> {
+    let mut encoded = vec![
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xae, 0x00,
+        0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0xf4, 0x02, 0x00, 0x03,
+    ];
+    encoded.push(if cfg!(feature = "experimental-rns-data") {
+        0xf5
+    } else {
+        0xf4
+    });
+    encoded.extend_from_slice(&[
+        0x04, 0x19, 0x02, 0x00, 0x05, 0x19, 0x01, 0xc0, 0x06, 0x19, 0x01, 0x7f, 0x07,
+    ]);
+    encoded.push(if cfg!(feature = "experimental-rns-inbox") {
+        0x02
+    } else {
+        0x00
+    });
+    encoded.push(0x08);
+    if cfg!(feature = "experimental-rns-inbox") {
+        encoded.extend_from_slice(&[0x19, 0x01, 0x7f]);
+    } else {
+        encoded.push(0x00);
+    }
+    encoded.extend_from_slice(&[
+        0x09,
+        if cfg!(feature = "experimental-lxmf") {
+            0x02
+        } else {
+            0x00
+        },
+        0x0a,
+    ]);
+    if cfg!(feature = "experimental-lxmf") {
+        encoded.extend_from_slice(&[0x19, 0x01, 0xa0]);
+    } else {
+        encoded.push(0x00);
+    }
+    encoded.extend_from_slice(&[
+        0x0b,
+        if cfg!(feature = "experimental-lxmf") {
+            0x02
+        } else {
+            0x00
+        },
+        0x0c,
+    ]);
+    if cfg!(feature = "experimental-lxmf") {
+        encoded.extend_from_slice(&[0x19, 0x01, 0x27]);
+    } else {
+        encoded.push(0x00);
+    }
+    encoded.push(0x0d);
+    if cfg!(feature = "experimental-lxmf") {
+        encoded.extend_from_slice(&[0x19, 0x01, 0x27]);
+    } else {
+        encoded.push(0x00);
+    }
+    encoded
+}
 
 fn capabilities_request() -> RequestEnvelope<'static> {
     RequestEnvelope {
@@ -68,6 +101,9 @@ fn capabilities_request() -> RequestEnvelope<'static> {
 
 const PRIMARY_DESTINATION: DestinationHash = DestinationHash([
     0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+]);
+const LXMF_DELIVERY_DESTINATION: DestinationHash = DestinationHash([
+    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
 ]);
 
 fn identity_request() -> RequestEnvelope<'static> {
@@ -103,15 +139,13 @@ fn exact_capabilities_response_golden_round_trip() {
     };
     let mut output = [0u8; MAX_MESSAGE_BYTES];
     let written = encode_response(&envelope, &mut output).unwrap();
-    assert_eq!(&output[..written], GOLDEN_CAPABILITIES_RESPONSE);
-    assert_eq!(
-        decode_response(GOLDEN_CAPABILITIES_RESPONSE).unwrap(),
-        envelope
-    );
+    let golden = golden_capabilities_response();
+    assert_eq!(&output[..written], golden);
+    assert_eq!(decode_response(&golden).unwrap(), envelope);
 }
 
 #[test]
-fn api_v1_0_and_v1_1_capabilities_default_absent_inbox_fields() {
+fn legacy_capabilities_default_absent_inbox_and_lxmf_fields() {
     const LEGACY: &[u8] = &[
         0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa7, 0x00,
         0xa2, 0x00, 0x01, 0x01, 0x00, 0x01, 0xf4, 0x02, 0x00, 0x03, 0xf4, 0x04, 0x19, 0x02, 0x00,
@@ -133,12 +167,23 @@ fn api_v1_0_and_v1_1_capabilities_default_absent_inbox_fields() {
             CapabilityAvailability::Unavailable
         );
         assert_eq!(capabilities.max_rns_inbox_payload_bytes(), 0);
+        assert_eq!(
+            capabilities.experimental_lxmf(),
+            CapabilityAvailability::Unavailable
+        );
+        assert_eq!(capabilities.max_lxmf_read_chunk_bytes(), 0);
+        assert_eq!(
+            capabilities.experimental_lxmf_basic_send(),
+            CapabilityAvailability::Unavailable
+        );
+        assert_eq!(capabilities.max_lxmf_basic_title_bytes(), 0);
+        assert_eq!(capabilities.max_lxmf_basic_content_bytes(), 0);
     }
 }
 
 #[test]
 fn inbox_capability_availability_is_a_closed_wire_vocabulary() {
-    let mut encoded = GOLDEN_CAPABILITIES_RESPONSE.to_vec();
+    let mut encoded = golden_capabilities_response();
     let key = encoded
         .windows(2)
         .rposition(|window| {
@@ -162,12 +207,37 @@ fn inbox_capability_availability_is_a_closed_wire_vocabulary() {
 }
 
 #[test]
+fn lxmf_capability_availability_is_a_closed_wire_vocabulary() {
+    let mut encoded = golden_capabilities_response();
+    let key = encoded
+        .windows(2)
+        .rposition(|window| {
+            window
+                == [
+                    0x09,
+                    CapabilitySnapshot::current()
+                        .experimental_lxmf()
+                        .wire_code(),
+                ]
+        })
+        .expect("capability key 9");
+    encoded.splice(key + 1..=key + 1, [0x18, 99]);
+    assert_eq!(
+        decode_response(&encoded),
+        Err(DecodeError::InvalidValue {
+            field: RequiredField::CapabilityExperimentalLxmf,
+            value: 99,
+        })
+    );
+}
+
+#[test]
 fn exact_identity_summary_goldens_round_trip() {
     const REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa0,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa0,
     ];
     const RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa1, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa1, 0x00,
         0x50, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
         0x1e, 0x1f,
     ];
@@ -186,14 +256,43 @@ fn exact_identity_summary_goldens_round_trip() {
 }
 
 #[test]
+fn exact_identity_summary_with_lxmf_destination_golden_round_trip() {
+    const RESPONSE: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa2, 0x00,
+        0x50, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+        0x1e, 0x1f, 0x01, 0x50, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a,
+        0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
+    ];
+    let summary = IdentitySummary::with_lxmf_delivery_destination(
+        PRIMARY_DESTINATION,
+        LXMF_DELIVERY_DESTINATION,
+    );
+    let response = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        response: DeviceResponse::IdentitySummary(summary),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let response_len = encode_response(&response, &mut output).unwrap();
+    assert_eq!(&output[..response_len], RESPONSE);
+    assert_eq!(decode_response(RESPONSE).unwrap(), response);
+    assert_eq!(summary.primary_destination(), PRIMARY_DESTINATION);
+    assert_eq!(
+        summary.lxmf_delivery_destination(),
+        Some(LXMF_DELIVERY_DESTINATION)
+    );
+}
+
+#[test]
 fn identity_summary_is_copy_only_public_and_read_only() {
     fn assert_copy<T: Copy>() {}
     assert_copy::<IdentitySummary>();
-    assert_eq!(API_VERSION_MINOR, 2);
+    assert_eq!(API_VERSION_MINOR, 4);
     assert_eq!(OP_IDENTITY_SUMMARY, 0x0003);
 
     let summary = IdentitySummary::new(PRIMARY_DESTINATION);
     assert_eq!(summary.primary_destination(), PRIMARY_DESTINATION);
+    assert_eq!(summary.lxmf_delivery_destination(), None);
     assert_eq!(identity_request().request.operation(), OP_IDENTITY_SUMMARY);
     assert!(!identity_request().request.is_mutating());
     assert_eq!(
@@ -219,11 +318,11 @@ fn identity_summary_is_copy_only_public_and_read_only() {
 #[test]
 fn identity_summary_unknown_fields_are_skipped_but_required_field_is_strict() {
     const UNKNOWN_REQUEST_FIELD: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa1, 0x18,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa1, 0x18,
         0x63, 0x82, 0x01, 0x02,
     ];
     const UNKNOWN_RESPONSE_FIELD: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa2, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa2, 0x00,
         0x50, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
         0x1e, 0x1f, 0x18, 0x63, 0x82, 0x01, 0x02,
     ];
@@ -272,17 +371,32 @@ fn identity_summary_unknown_fields_are_skipped_but_required_field_is_strict() {
             actual: 15,
         })
     );
+
+    let wrong_lxmf_length = [
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x03, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa2, 0x00,
+        0x50, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+        0x1e, 0x1f, 0x01, 0x4f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a,
+        0x2b, 0x2c, 0x2d, 0x2e,
+    ];
+    assert_eq!(
+        decode_response(&wrong_lxmf_length),
+        Err(DecodeError::InvalidByteStringLength {
+            field: RequiredField::IdentityLxmfDeliveryDestination,
+            expected: 16,
+            actual: 15,
+        })
+    );
 }
 
 #[cfg(feature = "experimental-rns-inbox")]
 #[test]
 fn exact_experimental_inbox_status_goldens_round_trip() {
     const REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x02, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x02, 0x03,
         0xa0,
     ];
     const RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x02, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x02, 0x03,
         0xa5, 0x00, 0x03, 0x01, 0x18, 0x20, 0x02, 0x1b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
         0x08, 0x03, 0x19, 0x01, 0x7f, 0x04, 0xf5,
     ];
@@ -317,11 +431,11 @@ fn exact_experimental_inbox_status_goldens_round_trip() {
 #[test]
 fn exact_experimental_inbox_peek_goldens_round_trip() {
     const REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x03, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x03, 0x03,
         0xa0,
     ];
     const RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x03, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x03, 0x03,
         0xa3, 0x00, 0x1b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01, 0x50, 0x10, 0x11,
         0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x02,
         0x43, 0x61, 0x62, 0x63,
@@ -486,10 +600,590 @@ fn inbox_reads_require_authentication_but_no_persisted_permission_bit() {
     }
 }
 
+#[cfg(feature = "experimental-lxmf")]
+fn lxmf_summary() -> LxmfMessageSummary {
+    LxmfMessageSummary::new(
+        LxmfMessageHandle::new(7).unwrap(),
+        [0x11; 32],
+        DestinationHash([0x22; 16]),
+        DestinationHash([0x33; 16]),
+        0x0102_0304_0506_0708,
+        0x0123,
+        5,
+        9,
+        1,
+        [0x44; 32],
+    )
+    .unwrap()
+}
+
+#[cfg(feature = "experimental-lxmf")]
+#[test]
+fn exact_experimental_lxmf_next_goldens_round_trip() {
+    const REQUEST: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x04, 0x03,
+        0xa1, 0x00, 0x07,
+    ];
+    const RESPONSE: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x04, 0x03,
+        0xaa, 0x00, 0x07, 0x01, 0x58, 0x20, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+        0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+        0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x02, 0x50, 0x22, 0x22, 0x22, 0x22, 0x22,
+        0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x03, 0x50, 0x33, 0x33,
+        0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x04,
+        0x1b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x05, 0x19, 0x01, 0x23, 0x06, 0x05,
+        0x07, 0x09, 0x08, 0x01, 0x09, 0x58, 0x20, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44,
+        0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44,
+        0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44,
+    ];
+    let request = RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        request: DeviceRequest::LxmfNext {
+            after: Some(LxmfMessageHandle::new(7).unwrap()),
+        },
+    };
+    let response = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        response: DeviceResponse::LxmfNext(lxmf_summary()),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let request_len = encode_request(&request, &mut output).unwrap();
+    assert_eq!(&output[..request_len], REQUEST);
+    assert_eq!(decode_request(REQUEST).unwrap(), request);
+    let response_len = encode_response(&response, &mut output).unwrap();
+    assert_eq!(&output[..response_len], RESPONSE);
+    assert_eq!(decode_response(RESPONSE).unwrap(), response);
+    assert_eq!(request.request.operation(), OP_EXPERIMENTAL_LXMF_NEXT);
+    assert_eq!(response.response.kind(), OP_EXPERIMENTAL_LXMF_NEXT);
+}
+
+#[cfg(feature = "experimental-lxmf")]
+#[test]
+fn exact_experimental_lxmf_read_goldens_round_trip() {
+    const REQUEST: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x05, 0x03,
+        0xa3, 0x00, 0x07, 0x01, 0x19, 0x01, 0x00, 0x02, 0x19, 0x01, 0xa0,
+    ];
+    const RESPONSE: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x05, 0x03,
+        0xa4, 0x00, 0x07, 0x01, 0x19, 0x01, 0x00, 0x02, 0x19, 0x02, 0x00, 0x03, 0x43, 0x61, 0x62,
+        0x63,
+    ];
+    let handle = LxmfMessageHandle::new(7).unwrap();
+    let request = RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        request: DeviceRequest::LxmfRead {
+            handle,
+            offset: 256,
+            max_bytes: LxmfReadLength::new(MAX_LXMF_READ_CHUNK_BYTES as u16).unwrap(),
+        },
+    };
+    let response = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        response: DeviceResponse::LxmfRead(LxmfReadChunk::new(handle, 256, 512, b"abc").unwrap()),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let request_len = encode_request(&request, &mut output).unwrap();
+    assert_eq!(&output[..request_len], REQUEST);
+    assert_eq!(decode_request(REQUEST).unwrap(), request);
+    let response_len = encode_response(&response, &mut output).unwrap();
+    assert_eq!(&output[..response_len], RESPONSE);
+    assert_eq!(decode_response(RESPONSE).unwrap(), response);
+    assert_eq!(request.request.operation(), OP_EXPERIMENTAL_LXMF_READ);
+    assert_eq!(response.response.kind(), OP_EXPERIMENTAL_LXMF_READ);
+}
+
+#[cfg(feature = "experimental-lxmf")]
+fn basic_lxmf_send_request(
+    title: &'static [u8],
+    content: &'static [u8],
+) -> RequestEnvelope<'static> {
+    RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(9),
+        request: DeviceRequest::LxmfBasicSend {
+            destination: DestinationHash([
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+                0x0e, 0x0f,
+            ]),
+            timestamp_unix_ms: u64::MAX,
+            title,
+            content,
+            idempotency_key: IdempotencyKey([
+                0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd,
+                0xfe, 0xff,
+            ]),
+        },
+    }
+}
+
+#[cfg(feature = "experimental-lxmf")]
+#[test]
+fn exact_basic_lxmf_send_goldens_are_source_free_and_borrowed() {
+    const REQUEST: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x06, 0x03, 0xa5,
+        0x00, 0x50, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
+        0x0d, 0x0e, 0x0f, 0x01, 0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02, 0x43,
+        0x74, 0x74, 0x6c, 0x03, 0x47, 0x63, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x04, 0x50, 0xf0,
+        0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff,
+    ];
+    const RESPONSE: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x06, 0x03, 0xa2,
+        0x00, 0x1b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01, 0x58, 0x20, 0x20, 0x21,
+        0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30,
+        0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
+    ];
+    let request = basic_lxmf_send_request(b"ttl", b"content");
+    let response = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(9),
+        response: DeviceResponse::LxmfBasicSendAccepted(LxmfBasicSendAccepted::new(
+            SubmissionId(0x0102_0304_0506_0708),
+            core::array::from_fn(|index| 0x20 + index as u8),
+        )),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let request_len = encode_request(&request, &mut output).unwrap();
+    assert_eq!(&output[..request_len], REQUEST);
+    let decoded = decode_request(REQUEST).unwrap();
+    let DeviceRequest::LxmfBasicSend {
+        timestamp_unix_ms,
+        title,
+        content,
+        ..
+    } = decoded.request
+    else {
+        panic!("wrong decoded operation")
+    };
+    assert_eq!(timestamp_unix_ms, u64::MAX);
+    assert_eq!(title, b"ttl");
+    assert_eq!(content, b"content");
+    assert!(REQUEST.as_ptr_range().contains(&title.as_ptr()));
+    assert!(REQUEST.as_ptr_range().contains(&content.as_ptr()));
+    assert_eq!(decoded, request);
+    assert!(request.request.is_mutating());
+    assert_eq!(request.request.operation(), OP_EXPERIMENTAL_LXMF_BASIC_SEND);
+
+    let response_len = encode_response(&response, &mut output).unwrap();
+    assert_eq!(&output[..response_len], RESPONSE);
+    assert_eq!(decode_response(RESPONSE).unwrap(), response);
+    assert_eq!(response.response.kind(), OP_EXPERIMENTAL_LXMF_BASIC_SEND);
+}
+
+#[cfg(feature = "experimental-lxmf")]
+fn append_cbor_bytes(encoded: &mut Vec<u8>, bytes: &[u8]) {
+    match bytes.len() {
+        0..=23 => encoded.push(0x40 + bytes.len() as u8),
+        24..=255 => encoded.extend([0x58, bytes.len() as u8]),
+        _ => encoded.extend([0x59, (bytes.len() >> 8) as u8, bytes.len() as u8]),
+    }
+    encoded.extend_from_slice(bytes);
+}
+
+#[cfg(feature = "experimental-lxmf")]
+fn raw_basic_lxmf_send(title: &[u8], content: &[u8]) -> Vec<u8> {
+    let mut encoded = vec![
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x06, 0x03, 0xa5,
+        0x00, 0x50,
+    ];
+    encoded.extend_from_slice(&[0; 16]);
+    encoded.extend([0x01, 0x00, 0x02]);
+    append_cbor_bytes(&mut encoded, title);
+    encoded.push(0x03);
+    append_cbor_bytes(&mut encoded, content);
+    encoded.extend([0x04, 0x50]);
+    encoded.extend_from_slice(&[0; 16]);
+    encoded
+}
+
+#[cfg(feature = "experimental-lxmf")]
+#[test]
+fn basic_lxmf_send_enforces_individual_and_total_cbor_limits() {
+    static TITLE_MAX: [u8; MAX_LXMF_BASIC_TITLE_BYTES] = [0x74; MAX_LXMF_BASIC_TITLE_BYTES];
+    static CONTENT_MAX: [u8; MAX_LXMF_BASIC_CONTENT_BYTES] = [0x63; MAX_LXMF_BASIC_CONTENT_BYTES];
+    static TITLE_TOO_LARGE: [u8; MAX_LXMF_BASIC_TITLE_BYTES + 1] =
+        [0x74; MAX_LXMF_BASIC_TITLE_BYTES + 1];
+    static CONTENT_TOO_LARGE: [u8; MAX_LXMF_BASIC_CONTENT_BYTES + 1] =
+        [0x63; MAX_LXMF_BASIC_CONTENT_BYTES + 1];
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+
+    for request in [
+        basic_lxmf_send_request(&TITLE_MAX, b""),
+        basic_lxmf_send_request(b"", &CONTENT_MAX),
+    ] {
+        let written = encode_request(&request, &mut output).unwrap();
+        assert_eq!(decode_request(&output[..written]).unwrap(), request);
+    }
+    assert_eq!(
+        encode_request(&basic_lxmf_send_request(&TITLE_TOO_LARGE, b""), &mut output),
+        Err(EncodeError::LxmfBasicTitleTooLarge {
+            actual: MAX_LXMF_BASIC_TITLE_BYTES + 1,
+            max: MAX_LXMF_BASIC_TITLE_BYTES,
+        })
+    );
+    assert_eq!(
+        encode_request(
+            &basic_lxmf_send_request(b"", &CONTENT_TOO_LARGE),
+            &mut output,
+        ),
+        Err(EncodeError::LxmfBasicContentTooLarge {
+            actual: MAX_LXMF_BASIC_CONTENT_BYTES + 1,
+            max: MAX_LXMF_BASIC_CONTENT_BYTES,
+        })
+    );
+    assert_eq!(
+        decode_request(&raw_basic_lxmf_send(&TITLE_TOO_LARGE, b"")),
+        Err(DecodeError::LxmfBasicTitleTooLarge {
+            actual: MAX_LXMF_BASIC_TITLE_BYTES + 1,
+            max: MAX_LXMF_BASIC_TITLE_BYTES,
+        })
+    );
+    assert_eq!(
+        decode_request(&raw_basic_lxmf_send(b"", &CONTENT_TOO_LARGE)),
+        Err(DecodeError::LxmfBasicContentTooLarge {
+            actual: MAX_LXMF_BASIC_CONTENT_BYTES + 1,
+            max: MAX_LXMF_BASIC_CONTENT_BYTES,
+        })
+    );
+
+    static TITLE_220: [u8; 220] = [0x74; 220];
+    static CONTENT_220: [u8; 220] = [0x63; 220];
+    assert_eq!(
+        encode_request(
+            &basic_lxmf_send_request(&TITLE_220, &CONTENT_220),
+            &mut output,
+        ),
+        Err(EncodeError::BodyTooLarge {
+            actual: 493,
+            max: MAX_BODY_BYTES,
+        })
+    );
+    assert_eq!(
+        decode_request(&raw_basic_lxmf_send(&TITLE_220, &CONTENT_220)),
+        Err(DecodeError::BodyTooLarge {
+            actual: 485,
+            max: MAX_BODY_BYTES,
+        })
+    );
+}
+
+#[cfg(feature = "experimental-lxmf")]
+#[test]
+fn basic_lxmf_send_reuses_submit_permission() {
+    let request = basic_lxmf_send_request(b"", b"").request;
+    let principal = PrincipalId([0x74; 16]);
+    assert_eq!(
+        authorize_request(&DispatchContext::UNAUTHENTICATED, &request),
+        Err(AuthorizationError::AuthenticationRequired)
+    );
+    assert_eq!(
+        authorize_request(
+            &DispatchContext::authenticated(principal, Permissions::NONE, dispatch_provenance()),
+            &request,
+        ),
+        Err(AuthorizationError::PermissionDenied(
+            RequiredPermission::ExperimentalSubmitRnsData
+        ))
+    );
+    assert_eq!(
+        authorize_request(
+            &DispatchContext::authenticated(
+                principal,
+                Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA,
+                dispatch_provenance(),
+            ),
+            &request,
+        ),
+        Ok(())
+    );
+}
+
+#[cfg(feature = "experimental-lxmf")]
+#[test]
+fn lxmf_reads_require_authentication_but_no_persisted_permission_bit() {
+    let authenticated = DispatchContext::authenticated(
+        PrincipalId([0x73; 16]),
+        Permissions::NONE,
+        dispatch_provenance(),
+    );
+    let requests = [
+        DeviceRequest::LxmfNext { after: None },
+        DeviceRequest::LxmfRead {
+            handle: LxmfMessageHandle::new(1).unwrap(),
+            offset: 0,
+            max_bytes: LxmfReadLength::new(1).unwrap(),
+        },
+    ];
+    for request in requests {
+        assert!(!request.is_mutating());
+        assert_eq!(
+            authorize_request(&DispatchContext::UNAUTHENTICATED, &request),
+            Err(AuthorizationError::AuthenticationRequired)
+        );
+        assert_eq!(authorize_request(&authenticated, &request), Ok(()));
+    }
+}
+
+#[cfg(feature = "experimental-lxmf")]
+#[test]
+fn lxmf_model_is_owned_bounded_and_redacts_message_bytes() {
+    assert!(LxmfMessageHandle::new(0).is_err());
+    assert_eq!(LxmfMessageHandle::new(u64::MAX).unwrap().get(), u64::MAX);
+
+    for invalid in [0, MAX_LXMF_READ_CHUNK_BYTES as u16 + 1] {
+        let error = LxmfReadLength::new(invalid).unwrap_err();
+        assert_eq!(error.actual(), invalid);
+        assert_eq!(error.maximum() as usize, MAX_LXMF_READ_CHUNK_BYTES);
+    }
+
+    assert!(
+        LxmfMessageSummary::new(
+            LxmfMessageHandle::new(1).unwrap(),
+            [0; 32],
+            DestinationHash([0; 16]),
+            DestinationHash([0; 16]),
+            0,
+            0,
+            0,
+            0,
+            0,
+            [0; 32],
+        )
+        .is_err()
+    );
+
+    let summary_arguments = |normalized_wire_len, title_len, content_len, fields_encoded_len| {
+        LxmfMessageSummary::new(
+            LxmfMessageHandle::new(1).unwrap(),
+            [0; 32],
+            DestinationHash([0; 16]),
+            DestinationHash([0; 16]),
+            0,
+            normalized_wire_len,
+            title_len,
+            content_len,
+            fields_encoded_len,
+            [0; 32],
+        )
+    };
+    // 96-byte destination/source/signature prefix, one-byte array header,
+    // nine-byte float64, two two-byte empty binary values, and one-byte map.
+    assert!(summary_arguments(111, 0, 0, 1).is_ok());
+    assert!(summary_arguments(110, 0, 0, 1).is_err());
+    assert!(summary_arguments(u32::MAX, 0, 0, 0).is_err());
+    assert!(summary_arguments(u32::MAX, u32::MAX, 0, 1).is_err());
+    assert!(summary_arguments(u32::MAX, 0, 0, u32::MAX).is_err());
+
+    let handle = LxmfMessageHandle::new(1).unwrap();
+    let mut source = [0x5a; MAX_LXMF_READ_CHUNK_BYTES];
+    let chunk = LxmfReadChunk::new(handle, 0, MAX_LXMF_READ_CHUNK_BYTES as u32, &source).unwrap();
+    source.fill(0);
+    assert_eq!(chunk.bytes(), &[0x5a; MAX_LXMF_READ_CHUNK_BYTES]);
+    assert!(chunk.is_final());
+    let debug = std::format!("{chunk:?}");
+    assert!(debug.contains("bytes_len: 416"));
+    assert!(!debug.contains("90, 90"));
+
+    assert!(matches!(
+        LxmfReadChunk::new(handle, 0, 1, &[]),
+        Err(reticulum_device_api::InvalidLxmfReadChunk::Empty)
+    ));
+    assert!(matches!(
+        LxmfReadChunk::new(handle, 1, 1, b"x"),
+        Err(reticulum_device_api::InvalidLxmfReadChunk::OutsideMessage { .. })
+    ));
+    assert!(matches!(
+        LxmfReadChunk::new(handle, 0, (MAX_LXMF_READ_CHUNK_BYTES + 1) as u32, &[0; MAX_LXMF_READ_CHUNK_BYTES + 1]),
+        Err(reticulum_device_api::InvalidLxmfReadChunk::TooLarge { actual })
+            if actual == MAX_LXMF_READ_CHUNK_BYTES + 1
+    ));
+}
+
+#[cfg(feature = "experimental-lxmf")]
+#[test]
+fn maximum_lxmf_read_chunk_fits_frozen_message_limit() {
+    let bytes = [0xa5; MAX_LXMF_READ_CHUNK_BYTES];
+    let offset = u32::MAX - MAX_LXMF_READ_CHUNK_BYTES as u32;
+    let envelope = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(u64::MAX),
+        response: DeviceResponse::LxmfRead(
+            LxmfReadChunk::new(
+                LxmfMessageHandle::new(u64::MAX).unwrap(),
+                offset,
+                u32::MAX,
+                &bytes,
+            )
+            .unwrap(),
+        ),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_response(&envelope, &mut output).unwrap();
+    assert!(written <= MAX_MESSAGE_BYTES);
+    assert_eq!(decode_response(&output[..written]).unwrap(), envelope);
+}
+
+#[cfg(feature = "experimental-lxmf")]
+#[test]
+fn lxmf_wire_fields_are_required_unique_and_strictly_bounded() {
+    let missing_read_max = [
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x03, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x05, 0x03, 0xa2,
+        0x00, 0x01, 0x01, 0x00,
+    ];
+    assert_eq!(
+        decode_request(&missing_read_max),
+        Err(DecodeError::MissingField(RequiredField::LxmfReadMaxBytes))
+    );
+
+    let duplicate_handle = [
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x03, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x05, 0x03, 0xa4,
+        0x00, 0x01, 0x00, 0x02, 0x01, 0x00, 0x02, 0x01,
+    ];
+    assert_eq!(
+        decode_request(&duplicate_handle),
+        Err(DecodeError::DuplicateField(RequiredField::LxmfHandle))
+    );
+
+    let zero_after = [
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x03, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x04, 0x03, 0xa1,
+        0x00, 0x00,
+    ];
+    assert_eq!(
+        decode_request(&zero_after),
+        Err(DecodeError::InvalidValue {
+            field: RequiredField::LxmfAfterHandle,
+            value: 0,
+        })
+    );
+
+    for (encoded_max, value) in [([0x00, 0x00, 0x00], 0_u64), ([0x19, 0x01, 0xa1], 417)] {
+        let mut request = vec![
+            0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x03, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x05, 0x03,
+            0xa3, 0x00, 0x01, 0x01, 0x00, 0x02,
+        ];
+        if value == 0 {
+            request.push(encoded_max[0]);
+        } else {
+            request.extend_from_slice(&encoded_max);
+        }
+        assert_eq!(
+            decode_request(&request),
+            Err(DecodeError::InvalidValue {
+                field: RequiredField::LxmfReadMaxBytes,
+                value,
+            })
+        );
+    }
+
+    let empty_chunk = [
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x03, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x05, 0x03, 0xa4,
+        0x00, 0x01, 0x01, 0x00, 0x02, 0x01, 0x03, 0x40,
+    ];
+    assert_eq!(
+        decode_response(&empty_chunk),
+        Err(DecodeError::InvalidLxmfReadChunk)
+    );
+
+    let outside_chunk = [
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x03, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x05, 0x03, 0xa4,
+        0x00, 0x01, 0x01, 0x01, 0x02, 0x01, 0x03, 0x41, 0x61,
+    ];
+    assert_eq!(
+        decode_response(&outside_chunk),
+        Err(DecodeError::InvalidLxmfReadChunk)
+    );
+
+    let mut oversized_chunk = vec![
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x03, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x05, 0x03, 0xa4,
+        0x00, 0x01, 0x01, 0x00, 0x02, 0x19, 0x01, 0xa1, 0x03, 0x59, 0x01, 0xa1,
+    ];
+    oversized_chunk.extend_from_slice(&[0; MAX_LXMF_READ_CHUNK_BYTES + 1]);
+    assert_eq!(
+        decode_response(&oversized_chunk),
+        Err(DecodeError::LxmfReadChunkTooLarge {
+            actual: MAX_LXMF_READ_CHUNK_BYTES + 1,
+            max: MAX_LXMF_READ_CHUNK_BYTES,
+        })
+    );
+
+    let summary_envelope = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(1),
+        response: DeviceResponse::LxmfNext(lxmf_summary()),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_response(&summary_envelope, &mut output).unwrap();
+
+    let mut wrong_message_id_width = output[..written].to_vec();
+    let message_id = wrong_message_id_width
+        .windows(3)
+        .position(|window| window == [0x01, 0x58, 0x20])
+        .unwrap();
+    wrong_message_id_width[message_id + 2] = 0x1f;
+    wrong_message_id_width.remove(message_id + 3);
+    assert_eq!(
+        decode_response(&wrong_message_id_width),
+        Err(DecodeError::InvalidByteStringLength {
+            field: RequiredField::LxmfMessageId,
+            expected: 32,
+            actual: 31,
+        })
+    );
+
+    let mut zero_wire_length = output[..written].to_vec();
+    let wire_length = zero_wire_length
+        .windows(4)
+        .position(|window| window == [0x05, 0x19, 0x01, 0x23])
+        .unwrap();
+    zero_wire_length.splice(wire_length + 1..wire_length + 4, [0x00]);
+    assert_eq!(
+        decode_response(&zero_wire_length),
+        Err(DecodeError::InvalidLxmfMessageSummary)
+    );
+
+    let mut contradictory_wire_length = output[..written].to_vec();
+    let wire_length = contradictory_wire_length
+        .windows(4)
+        .position(|window| window == [0x05, 0x19, 0x01, 0x23])
+        .unwrap();
+    contradictory_wire_length.splice(wire_length + 1..wire_length + 4, [0x19, 0x00, 0x6e]);
+    assert_eq!(
+        decode_response(&contradictory_wire_length),
+        Err(DecodeError::InvalidLxmfMessageSummary)
+    );
+
+    let mut overflowing_title_length = output[..written].to_vec();
+    let title_length = overflowing_title_length
+        .windows(6)
+        .position(|window| window == [0x06, 0x05, 0x07, 0x09, 0x08, 0x01])
+        .unwrap();
+    overflowing_title_length.splice(
+        title_length + 1..title_length + 2,
+        [0x1a, 0xff, 0xff, 0xff, 0xff],
+    );
+    assert_eq!(
+        decode_response(&overflowing_title_length),
+        Err(DecodeError::InvalidLxmfMessageSummary)
+    );
+
+    let unknown_next_field = [
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x03, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x04, 0x03, 0xa1,
+        0x18, 0x63, 0x82, 0x01, 0x02,
+    ];
+    assert_eq!(
+        decode_request(&unknown_next_field).unwrap().request,
+        DeviceRequest::LxmfNext { after: None }
+    );
+}
+
 #[test]
 fn exact_typed_error_response_golden_round_trip() {
     const GOLDEN: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
         0x04, 0x01, 0x02,
     ];
     let envelope = ResponseEnvelope {
@@ -510,11 +1204,11 @@ fn exact_typed_error_response_golden_round_trip() {
 fn immediate_submission_rejections_have_distinct_error_goldens() {
     const MUTATING_OPERATION: u16 = 0xf001;
     const CAPACITY_GOLDEN: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
         0x09, 0x01, 0x19, 0xf0, 0x01,
     ];
     const IDEMPOTENCY_GOLDEN: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
         0x0a, 0x01, 0x19, 0xf0, 0x01,
     ];
     for (code, golden) in [
@@ -626,7 +1320,7 @@ fn contradictory_submission_status_wire_shapes_are_rejected() {
 fn unknown_envelope_version_and_body_fields_are_skipped() {
     // Envelope key 99, version key 7, and empty-body key 55 are all unknown.
     let bytes = [
-        0xa5, 0x00, 0xa3, 0x00, 0x01, 0x01, 0x02, 0x07, 0x82, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02,
+        0xa5, 0x00, 0xa3, 0x00, 0x01, 0x01, 0x04, 0x07, 0x82, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02,
         0x01, 0x03, 0xa1, 0x18, 0x37, 0xa1, 0x00, 0xf5, 0x18, 0x63, 0x82, 0x01, 0x02,
     ];
     assert_eq!(decode_request(&bytes).unwrap(), capabilities_request());
@@ -777,9 +1471,10 @@ fn every_truncated_golden_request_is_rejected() {
             "prefix of length {end} unexpectedly decoded"
         );
     }
-    for end in 0..GOLDEN_CAPABILITIES_RESPONSE.len() {
+    let golden_capabilities_response = golden_capabilities_response();
+    for end in 0..golden_capabilities_response.len() {
         assert!(
-            decode_response(&GOLDEN_CAPABILITIES_RESPONSE[..end]).is_err(),
+            decode_response(&golden_capabilities_response[..end]).is_err(),
             "response prefix of length {end} unexpectedly decoded"
         );
     }
@@ -1126,6 +1821,46 @@ fn capability_snapshot_separates_direct_radio_from_outbound_rns_submission() {
             0
         }
     );
+    assert_eq!(
+        capabilities.experimental_lxmf(),
+        if cfg!(feature = "experimental-lxmf") {
+            CapabilityAvailability::Available
+        } else {
+            CapabilityAvailability::Unavailable
+        }
+    );
+    assert_eq!(
+        capabilities.max_lxmf_read_chunk_bytes(),
+        if cfg!(feature = "experimental-lxmf") {
+            416
+        } else {
+            0
+        }
+    );
+    assert_eq!(
+        capabilities.experimental_lxmf_basic_send(),
+        if cfg!(feature = "experimental-lxmf") {
+            CapabilityAvailability::Available
+        } else {
+            CapabilityAvailability::Unavailable
+        }
+    );
+    assert_eq!(
+        capabilities.max_lxmf_basic_title_bytes(),
+        if cfg!(feature = "experimental-lxmf") {
+            MAX_LXMF_BASIC_TITLE_BYTES as u16
+        } else {
+            0
+        }
+    );
+    assert_eq!(
+        capabilities.max_lxmf_basic_content_bytes(),
+        if cfg!(feature = "experimental-lxmf") {
+            MAX_LXMF_BASIC_CONTENT_BYTES as u16
+        } else {
+            0
+        }
+    );
 
     let legacy_dispatch = CapabilitySnapshot::for_dispatch(true);
     assert_eq!(
@@ -1137,6 +1872,17 @@ fn capability_snapshot_separates_direct_radio_from_outbound_rns_submission() {
         CapabilityAvailability::Unavailable
     );
     assert_eq!(legacy_dispatch.max_rns_inbox_payload_bytes(), 0);
+    assert_eq!(
+        legacy_dispatch.experimental_lxmf(),
+        CapabilityAvailability::Unavailable
+    );
+    assert_eq!(legacy_dispatch.max_lxmf_read_chunk_bytes(), 0);
+    assert_eq!(
+        legacy_dispatch.experimental_lxmf_basic_send(),
+        CapabilityAvailability::Unavailable
+    );
+    assert_eq!(legacy_dispatch.max_lxmf_basic_title_bytes(), 0);
+    assert_eq!(legacy_dispatch.max_lxmf_basic_content_bytes(), 0);
     assert!(!CapabilitySnapshot::for_dispatch(false).experimental_submit_rns_data());
 
     let inbox_dispatch =
@@ -1153,6 +1899,72 @@ fn capability_snapshot_separates_direct_radio_from_outbound_rns_submission() {
         inbox_dispatch.max_rns_inbox_payload_bytes(),
         if cfg!(feature = "experimental-rns-inbox") {
             383
+        } else {
+            0
+        }
+    );
+    assert_eq!(
+        inbox_dispatch.experimental_lxmf(),
+        CapabilityAvailability::Unavailable
+    );
+    assert_eq!(inbox_dispatch.max_lxmf_read_chunk_bytes(), 0);
+    assert_eq!(
+        inbox_dispatch.experimental_lxmf_basic_send(),
+        CapabilityAvailability::Unavailable
+    );
+
+    let lxmf_dispatch = CapabilitySnapshot::for_dispatch_with_inbox_and_lxmf(
+        true,
+        CapabilityAvailability::Disabled,
+        CapabilityAvailability::Disabled,
+    );
+    assert_eq!(
+        lxmf_dispatch.experimental_lxmf(),
+        if cfg!(feature = "experimental-lxmf") {
+            CapabilityAvailability::Disabled
+        } else {
+            CapabilityAvailability::Unavailable
+        }
+    );
+    assert_eq!(
+        lxmf_dispatch.max_lxmf_read_chunk_bytes(),
+        if cfg!(feature = "experimental-lxmf") {
+            416
+        } else {
+            0
+        }
+    );
+    assert_eq!(
+        lxmf_dispatch.experimental_lxmf_basic_send(),
+        CapabilityAvailability::Unavailable
+    );
+
+    let send_dispatch = CapabilitySnapshot::for_dispatch_with_inbox_lxmf_and_basic_send(
+        true,
+        CapabilityAvailability::Disabled,
+        CapabilityAvailability::Disabled,
+        CapabilityAvailability::Disabled,
+    );
+    assert_eq!(
+        send_dispatch.experimental_lxmf_basic_send(),
+        if cfg!(feature = "experimental-lxmf") {
+            CapabilityAvailability::Disabled
+        } else {
+            CapabilityAvailability::Unavailable
+        }
+    );
+    assert_eq!(
+        send_dispatch.max_lxmf_basic_title_bytes(),
+        if cfg!(feature = "experimental-lxmf") {
+            MAX_LXMF_BASIC_TITLE_BYTES as u16
+        } else {
+            0
+        }
+    );
+    assert_eq!(
+        send_dispatch.max_lxmf_basic_content_bytes(),
+        if cfg!(feature = "experimental-lxmf") {
+            MAX_LXMF_BASIC_CONTENT_BYTES as u16
         } else {
             0
         }
@@ -1182,7 +1994,7 @@ fn submit_request(payload: &'static [u8]) -> RequestEnvelope<'static> {
 #[test]
 fn exact_experimental_submit_golden_and_borrowed_payload() {
     const GOLDEN: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa3,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa3,
         0x00, 0x50, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
         0x0d, 0x0e, 0x0f, 0x01, 0x43, 0x61, 0x62, 0x63, 0x02, 0x50, 0xf0, 0xf1, 0xf2, 0xf3, 0xf4,
         0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff,
@@ -1208,7 +2020,7 @@ fn exact_experimental_submit_golden_and_borrowed_payload() {
 #[test]
 fn exact_experimental_submit_accepted_response_has_only_submission_id() {
     const GOLDEN: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa1,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x04, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa1,
         0x00, 0x1b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
     ];
     let envelope = ResponseEnvelope {
@@ -1370,6 +2182,36 @@ fn experimental_operation_is_unavailable_without_feature() {
         );
         assert_eq!(
             decode_response(&request),
+            Err(DecodeError::UnsupportedResponseKind(operation))
+        );
+    }
+
+    #[cfg(not(feature = "experimental-lxmf"))]
+    for operation in [0xf004_u16, 0xf005, 0xf006] {
+        let encoded_operation = operation.to_be_bytes();
+        let envelope = [
+            0xa4,
+            0x00,
+            0xa2,
+            0x00,
+            0x01,
+            0x01,
+            0x03,
+            0x01,
+            0x09,
+            0x02,
+            0x19,
+            encoded_operation[0],
+            encoded_operation[1],
+            0x03,
+            0xa0,
+        ];
+        assert_eq!(
+            decode_request(&envelope),
+            Err(DecodeError::UnsupportedOperation(operation))
+        );
+        assert_eq!(
+            decode_response(&envelope),
             Err(DecodeError::UnsupportedResponseKind(operation))
         );
     }

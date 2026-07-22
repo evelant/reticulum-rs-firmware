@@ -146,6 +146,8 @@ class LxmfVectorTests(unittest.TestCase):
 
     def test_python_method_and_representation_thresholds_are_exact(self) -> None:
         expected = {
+            "empty_binary": (-1, "opportunistic", "packet"),
+            "one_byte_content": (0, "opportunistic", "packet"),
             "opportunistic_limit_295": (295, "opportunistic", "packet"),
             "opportunistic_over_296": (296, "direct", "packet"),
             "direct_limit_319": (319, "direct", "packet"),

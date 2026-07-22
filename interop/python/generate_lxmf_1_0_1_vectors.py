@@ -549,6 +549,30 @@ def build_vectors() -> dict[str, object]:
 
     packed_messages = [
         (
+            "empty_binary",
+            "Empty title and content produce Python content_size -1 and remain opportunistic",
+            _pack_message(
+                timestamp=1_700_000_004.0,
+                title=b"",
+                content=b"",
+                fields=None,
+                desired_method=LXMessage.OPPORTUNISTIC,
+            ),
+            {"desired_method": LXMessage.OPPORTUNISTIC},
+        ),
+        (
+            "one_byte_content",
+            "One content byte produces the adjacent Python content_size zero case",
+            _pack_message(
+                timestamp=1_700_000_004.0,
+                title=b"",
+                content=b"x",
+                fields=None,
+                desired_method=LXMessage.OPPORTUNISTIC,
+            ),
+            {"desired_method": LXMessage.OPPORTUNISTIC},
+        ),
+        (
             "basic_binary",
             "Precursor Python known-answer input with binary title/content and no fields or stamp",
             _pack_message(
@@ -712,6 +736,7 @@ def build_vectors() -> dict[str, object]:
                 "32-byte proof-of-work stamp",
                 "16-byte ticket-derived stamp and FIELD_TICKET",
                 "packet and Resource threshold boundaries",
+                "signed negative and zero content-size boundaries",
                 "valid noncanonical exact-four inbound raw-byte hashing",
                 "negative signature, content, source, truncation, and stamp mutations",
             ],

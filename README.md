@@ -66,9 +66,32 @@ round trip, and API 1.2 raw-RNS inbox commit/readback/hard-reset/drop-newest
 behavior. A 2026-07-19 powered matrix additionally proves four exact cold-mount
 fail-closed cases, each followed by one direct Reticulum DATA/proof exchange.
 A separate feature-gated path proves that its triggering DATA/proof exchange
-completed before same-boot commit-mismatch quarantine was observed. Physical
-power cuts, target high-water/timing, LXMF, and full-product qualification
-remain open.
+completed before same-boot commit-mismatch quarantine was observed. Later work
+qualified one durable inbound LXMF exchange and bounded PSRAM/stack/timing
+measurements. API 1.4 adds USB-controlled LXMF list/read and source-free basic
+send. The [2026-07-22 powered POC](docs/e290-api14-lxmf-poc.md) completed both
+directions: each durable submission reached `Delivered`, the peer committed the
+same LXMF message ID, and authenticated chunked readback matched the exact
+normalized wire. The final audited image then matched exact writes/readbacks on
+both boards; after a physical CPU reset, both original submissions remained
+`Delivered` and both receivers served the same digest-verified 126-byte wires.
+The later
+[persistent chat-alpha powered proof](docs/e290-lxmf-chat-alpha-proof.md)
+qualifies the current 128-entry image and SQLite CLI workflow in both
+directions, including repeated same-enumeration authenticated sessions,
+terminal outbox reconciliation, exact peer import, and inbox deduplication.
+That POC's initial startup failure was a cumulative pre-USB mount-stack
+overflow, not a USB or board-enumeration fault; direct in-place placement of
+the upper runtime/actor chain fixed that diagnosed boundary. The initially
+flashed 128-entry successor then failed the final linked-path stack gate and
+was not qualified. Current source adds an actor-owned replay scratch index in
+PSRAM and gates the complete mount, append, and compaction paths, preventing
+their capacity-sized replay state from overflowing the CPU stack. Physical
+power cuts, a powered 128-message fill/pressure run, and
+full-product qualification remain open. The
+bounded client, storage, carrier, security, and multi-transport gaps are
+tracked explicitly in
+[the usable-firmware POC limits](docs/poc-known-defects.md).
 Bitrate and cost are recorded but do not replace Reticulum routing. Until Rete
 paths carry an interface generation, an ID/configuration stays immutable for
 one node-owner lifetime or its learned paths must be purged before reuse.
@@ -390,9 +413,14 @@ view, then every scheduled runtime operation borrows a fresh matching view from
 the coordinator's sole flash backend. If the optional journal service cannot
 mount or recover at boot, before a durability-gated DATA owner can exist, the
 coordinator retains exclusive flash authority while local durable submission
-stays disabled and route-only LoRa continues. The current product profile allows
-at most one accepted-history entry solely for composition qualification, not as
-a product-capacity commitment. The source-composed minimal authenticated USB
+stays disabled and route-only LoRa continues. The current PSRAM product profile
+retains 128 accepted-history entries and reports explicit capacity exhaustion
+for a 129th novel request. This remains a bounded non-reclaiming profile, not
+the intended long-term product capacity: the physical journal has a separate
+162-acceptance lifetime ceiling. Earlier one-entry and 16-entry proof artifacts
+remain valid only for their named source/image and must not be read as the
+current limit or as powered qualification of the 128-entry profile. The
+source-composed minimal authenticated USB
 lane now originates work through this path from an Active credential; the
 bounded powered E290 run completed durable acceptance, physical LoRa DATA/proof,
 terminal projection, and status after USB re-enumeration. Node-core emits an
@@ -433,18 +461,22 @@ not inherit a LoRa-local fail-stop. No speculative second packet adapter is part
 of this slice.
 
 `reticulum-device-api-adapter` now supplies portable authenticated dispatch over
-separate target-safe `SubmissionPort` and read-only `InboundMailboxPort`
-semantic boundaries. With the
+target-safe submission, raw-inbox, committed-LXMF-read, and device-owned
+LXMF-compose semantic boundaries. With the
 `experimental-rns-data` feature, the indexed-CBOR request and borrowed payload
 are converted into one owned acceptance candidate, and an ID is returned only
 after the submission port reports durable acceptance or exact replay. With
 `experimental-rns-inbox`, authenticated status and peek obtain only bounded
 state or an owned item copy; there is no persisted permission bit or mutation
-operation. The resident E290 `ProductStorageCoordinator` implements both through
-disjoint short-lived views with stable mappings for availability, replay,
-conflict, capacity, ambiguity and faults.
-The product accepted-history cap is one solely for composition qualification,
-not product capacity. Allocation-free COBS framing, bounded public `no_std`
+operation. With `experimental-lxmf`, authenticated clients can enumerate and
+chunk-read committed normalized messages or source-free compose a basic
+opportunistic send; `dispatch_with_lxmf` does not require the raw-inbox feature.
+The resident E290 `ProductStorageCoordinator` exposes all enabled operations
+through one short-lived owner and stable mappings for availability, replay,
+conflict, capacity, ambiguity, and faults. Its current PSRAM profile retains 128
+accepted submissions, rejects a 129th novel request without mutation, and
+preserves exact replay at capacity; this is not product capacity.
+Allocation-free COBS framing, bounded public `no_std`
 USB-qualification server/client session typestates, and a depth-one
 boot-lifetime authenticated-job handoff now define the portable edge, including
 mutual PSK proofs,
@@ -518,21 +550,22 @@ pairing records with initialization control in one exact sequence space. The
 permanent graph now additionally composes the feature-free session/handoff
 crates, a static depth-one authenticated API channel, and the first deliberately
 minimal USB session bearer. Its node endpoint revalidates current authority and
-dispatches synchronously through credential-disjoint submission and inbox-port
-views.
-The USB endpoint admits one authenticated handshake per connection and one
-request at a time; any session fault is terminal until USB reset or
+dispatches synchronously through one credential-disjoint, operation-scoped
+owner implementing narrow submission, raw-inbox, committed-LXMF-read, and
+LXMF-compose ports.
+The USB endpoint admits one active authenticated session and one request at a
+time. A canonical ClientHello can replace an idle established session on the
+same connection with a fresh session epoch; it never displaces an in-flight
+request or reply. Any session fault is terminal until USB reset or
 re-enumeration. This first profile deliberately omits resumption, protocol
-retries, close records, encryption, rate limiting/attempt policy, repeated
-handshake attempts, and concurrent requests. Credential selection, admission
+retries, close records, encryption, rate limiting/attempt policy, and concurrent
+requests. Credential selection, admission
 handoff, and node dispatch remain transport-neutral. The current qualification
 crypto suite is deliberately enabled only for USB Serial/JTAG; later BLE and
 Wi-Fi bearers can reuse the ownership boundary after adding and qualifying their
-own binding/suite, without redesigning node dispatch. The
-credential authority
-passes 23 unit tests, eight public
-successor tests, and 18 compile-fail doctests; the
-physical store passes 32 fake-NOR tests. The accepted
+own binding/suite, without redesigning node dispatch. Focused host, compile-fail,
+and fake-NOR gates cover the credential authority, successor rules, and physical
+store. The accepted
 authentication, authority, provenance, and USB ownership contracts are
 recorded in [ADR 0006](docs/adr/0006-authenticated-local-api-bearer.md) and
 [ADR 0007](docs/adr/0007-device-api-credential-authority.md), with the durable
@@ -543,15 +576,15 @@ store/pairing decision in
 experimental host tests/clippy plus the corresponding ESP32-S3 Xtensa checks
 pass.
 
-The default E290 library now has 156 passing host tests, the opt-in inbox
-commit-fault HIL profile has 162, and the runtime-measurement HIL profile has
-175. These suites cover the resident live-pairing
+The default, opt-in inbox-commit-fault, and runtime-measurement E290 validation
+profiles cover the resident live-pairing
 lifecycle, its causal control/live frontier, shared USB decoder and
 sequence gate, secret-owning handoff, initialization/product policy,
 authenticated inbox-port isolation, and
-two real cross-layer composition tests. The happy path rejects
-unauthenticated and unauthorized requests without a NOR write, durably accepts
-exactly one request and rejects a second novel request at the qualification cap,
+cross-layer composition. The durable-capacity path rejects unauthenticated and
+unauthorized requests without a NOR write, durably accepts 128 submissions,
+rejects a 129th novel request without mutation, and preserves exact replay
+of an accepted idempotency key at capacity. The routing happy path
 commits `Preparing` before touching the real `NodeInterfaceSupervisor`, then
 drives that supervisor, `ExactLoRaAirtimePolicy`, the real dispatcher, and a
 host radio through exact frame persistence, durable echo, and completion. It
@@ -561,16 +594,11 @@ after frame exposure with an ordinary announce queued behind the DATA owner;
 `ActiveOwnerFailStopped` retains every owner and acknowledgement gate, takes the
 LoRa lease offline, and permits no later host-radio TX or RX. This qualifies the
 software composition, not ESP32-S3 execution or RF hardware.
-The current root gates include 56 focused host-client tests inside the passing
-272-test xtask suite, plus 61 portable Rete-integration and 17 raw-RNS inbox
-store tests. The 61 integration tests exercise this repository's adapter and are separate
-from the pinned Rete fork's selected validation set. The previously validated
-project conformance baseline performed 235 checks: 112 released-vector, adapter and
-direct-Link checks, 40 released-Python LRRTT MessagePack checks, 8
-channel-retry lifecycle checks, 40 keepalive lifecycle checks, and a 35-check
-three-node A--B--C relayed Link, LRPROOF/LRRTT, encrypted channel DATA and proof
-flow through independent exact interface IDs. The current schema-2
-lifecycle/candidate runner passes 647 checks. This is deterministic
+The current root gates include focused host-client, portable Rete-integration,
+raw-RNS inbox-store, schema-2 lifecycle/candidate, released-vector, direct-Link,
+LRRTT, channel-retry, keepalive, and deterministic three-node A--B--C relayed
+Link/LRPROOF/channel/proof coverage. The project adapter tests remain separate
+from the pinned Rete fork's selected validation set. This is deterministic
 project-side conformance, not a powered or live-Python multi-hop claim. At the
 preceding
 `8b5d65283cd370dee4cbb17594ef9c88d2805416` pin, the selected upstream set
@@ -580,8 +608,8 @@ stack (136 library and one integration), 143 LXMF library, and 84 daemon
 library tests. The four library targets totaled 537 tests; adding the 97
 transport and one stack integration tests produced 635. This is a named
 selected set, not a count of every nested workspace test target.
-The focused current Rete regression lane separately passes 95 tests plus one
-compile-fail documentation test.
+The focused current Rete regression lane is also run separately from that
+historical selected set.
 
 The preceding `14c7b4955a1ff6903e87cc40b42498f7869b6f4f` pin had host and
 portable-target LRRTT validation and a build-only default E290 package. Its
@@ -617,7 +645,35 @@ and served an authenticated `identity-summary`. Board `3f:88` still did not
 enumerate, so that historical checkpoint is not two-board lifecycle/RF
 qualification.
 
-The current Stage 5 default/HIL pair links 946/962 compiler stack-size records,
+The first API 1.4 default image nested 175,296 bytes of compiler-emitted
+pre-USB mount frames in a 174,912-byte usable stack; the corresponding HIL
+chain exceeded its usable stack by 1,360 bytes. The former maximum-single-frame
+gate could not detect that cumulative overflow. Direct caller-destination
+placement of the upper runtime and actor reduced those historical default/HIL
+mount chains to 142,432/142,608 bytes.
+
+The initially flashed 128-entry successor failed the expanded final linked-path
+gate and was not qualified. Current source keeps an independent replay scratch
+index inside the PSRAM-resident `StorageActor`: boot initializes both indexes at
+their final addresses, while append validation and compaction replay into the
+scratch index without moving a capacity-sized value through the CPU stack or
+overwriting the live index before a durable result. The target runtime is
+375,544 bytes; its 64-bit host fixture is 375,568 bytes. The final inspector
+gates these compiler-emitted path sums:
+
+| Profile | Mount | Append | Compact |
+| --- | ---: | ---: | ---: |
+| Default | 53,072 B | 52,816 B | 52,704 B |
+| Runtime-measurement HIL | 53,248 B | 53,040 B | 52,928 B |
+
+Each path also carries a 4,096-byte ROM flash-read/interrupt reserve, so the
+enforced totals are 57,168/56,544/56,432 bytes for default and
+57,344/56,768/56,656 bytes for HIL. This statically closes the diagnosed
+boot/append/compact stack-overflow boundary. The current 128-entry image has
+passed a bounded powered bidirectional chat proof; a 128-message fill and
+pressure qualification remain open.
+
+The retained Stage 5 default/HIL pair links 946/962 compiler stack-size records,
 has a 53,680-byte maximum frame, and leaves 175,056/174,256 bytes of usable
 CPU0 stack. The default ELF is 13,648,888 bytes with SHA-256
 `92e63b60a5f4b830ee55d958fcc446a6878036212904b8748519ae210ba3da58`;
@@ -775,8 +831,9 @@ credential authority, qualification-session core, boot-lifetime job handoff,
 and E290 `ProductStorageCoordinator` port implementations are compiled. The
 permanent node now receives exact owners from a static depth-one handoff,
 revalidates each grant against the currently publishable authority, and invokes
-the submission and inbox ports synchronously through disjoint borrows; rejection has zero port I/O
-and no unauthenticated fallback. Schema-2 acceptance retains exact
+one operation-scoped owner implementing narrow submission, raw-inbox,
+committed-LXMF-read, and device-owned LXMF-compose ports; rejection has zero
+port I/O and no unauthenticated fallback. Schema-2 acceptance retains exact
 authorization provenance. The current source graph serves that boundary
 through its minimal single-flight USB bearer; capabilities, identity, durable
 submission, sequential status, peer proof, and fresh post-re-enumeration status
@@ -851,9 +908,11 @@ credential initialization, authenticated USB handshake/request/reply, durable
 submission, physical LoRa peer-proof path, and bounded API 1.2 raw-RNS inbox
 commit/readback/reset/drop-newest workflow, four exact cold-mount fault states,
 one same-boot simulated commit-suppression path, and one exact opportunistic
-LXMF durable-commit/proof exchange. Broader lifecycle work, physical-
-interruption qualification, additional LXMF carriers/directions, and client
-message access remain—not credential-store boot composition, the
+LXMF durable-commit/proof exchange. API 1.4 now implements authenticated
+committed-message list/read and source-free basic opportunistic send through
+the same transport-neutral durable submission runtime. Broader lifecycle work,
+physical-interruption qualification, additional LXMF carriers/directions, and
+a production client remain—not credential-store boot composition, the
 frozen pairing/session cryptography, another semantic authority, durability
 policy, partition, or capacity decision. The feature-free
 ADR 0009 admission policy, resident
@@ -910,9 +969,10 @@ only through the ordinary transport-neutral supervisor. Those sixteen
 event/proof slots are this E290
 profile's tunable volatile-concurrency bound, not a protocol or storage ceiling.
 Local Link admission remains disabled until a bounded Link/Resource owner exists.
-The pinned Rete revision does not yet answer a path request for a local secondary
-destination by announcing it, so a peer that misses this periodic discovery may
-wait until the next cadence. Its sub-second retransmission jitter also currently
+The project wrapper now answers a path request for a local secondary destination
+and suppresses rebroadcast of that locally consumed request. This is a temporary
+one-interface qualification path pending an owning Rete implementation with
+multi-interface forwarding state. Rete's sub-second retransmission jitter also currently
 rounds to zero; the product's identity-phased bootstrap retries mitigate that
 collision without changing the pinned Rete behavior.
 The current composition now has the single powered remote durable-delivery
@@ -933,6 +993,9 @@ second transport is required to qualify the first LoRa vertical slice.
 - [Architecture](docs/firmware-architecture.md)
 - [Vision Master E290 primary target](docs/heltec-vision-master-e290.md)
 - [Permanent LoRa-first E290 node](docs/e290-node.md)
+- [LXMF chat alpha CLI](crates/lxmf-chat-cli/README.md)
+- [E290 LXMF chat-alpha powered proof](docs/e290-lxmf-chat-alpha-proof.md)
+- [Usable-firmware POC limits and known defects](docs/poc-known-defects.md)
 - [Phase-0 scaffold decision](docs/adr/0001-phase-0-scaffold.md)
 - [Rete provisional-foundation decision](docs/adr/0002-rete-provisional-foundation.md)
 - [LoRa-first heterogeneous-interface decision](docs/adr/0003-lora-first-interface-fabric.md)
@@ -1107,14 +1170,19 @@ schema.
 The [permanent E290 node runbook](docs/e290-node.md) describes the first
 LoRa-first three-task node/LoRa/USB product composition, its fixed capacities, 16 MiB partition
 layout, durable identity/announce ordering, build gates, API 1.1 outbound proof,
-API 1.2 raw-RNS inbox evidence, and remaining storage/client blockers. The
+API 1.2 raw-RNS inbox evidence, the implemented API 1.4 LXMF client slice, and
+remaining storage/client blockers. The
 powered record now includes controlled permanent-image peer DATA/proof, bounded
 inbox commit/readback/hard-reset/drop-newest behavior, the four-state exact
 cold-mount matrix, the feature-gated same-boot commit-suppression HIL, and one
 fresh exact 307-byte opportunistic LXMF durable-commit/proof exchange over the
-persistent continuous-RX path. It does not substitute for physical power cuts,
-direction-balanced or sustained/multi-hop traffic, direct/Resource LXMF,
-client-store semantics, or full-product qualification.
+persistent continuous-RX path. The separate API 1.4 POC adds same-boot,
+direction-balanced source-free send, proof, peer commit, list, and exact read.
+Its final audited image additionally preserved both terminal sender records and
+both exact receiver wires across a physical CPU reset. Neither result
+substitutes for electrical power-cut persistence, sustained/multi-hop traffic,
+direct/Resource LXMF, production client-store semantics, or full-product
+qualification.
 
 The receive-only lab binary has no frequency or modulation defaults. A known
 host/RNode-compatible build example is:

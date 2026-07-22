@@ -40,6 +40,11 @@ fn authorization(tag: u8) -> AuthorizationSnapshot {
     .unwrap()
 }
 
+#[test]
+fn in_place_replay_index_is_explicitly_no_drop() {
+    assert!(!core::mem::needs_drop::<SubmissionIndex<128>>());
+}
+
 fn details(tag: u8) -> PreparedPacketDetails {
     PreparedPacketDetails::new(
         97,

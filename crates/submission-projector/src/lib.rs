@@ -17,10 +17,10 @@
 //! `reticulum-storage-model`; volatile attempts must not be reconstructed.
 
 #![no_std]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![deny(missing_docs)]
 
-use core::array;
+use core::{array, mem::MaybeUninit};
 
 use reticulum_node_core::{
     AttemptHandle, AttemptOutcome, AttemptToken, AttemptUnsentReason, AuthorizedFrameObservation,
@@ -474,6 +474,46 @@ impl<const SUBMISSIONS: usize> SubmissionProjector<SUBMISSIONS> {
             slots: array::from_fn(|_| None),
             next_operation_generation: Some(1),
             fault: None,
+        }
+    }
+
+    /// Initialize an empty projector directly in uninitialized caller storage.
+    ///
+    /// Every fixed-capacity slot is initialized at its final address, so stack
+    /// use does not grow with `SUBMISSIONS`. The destination is fully
+    /// initialized when the returned mutable reference is exposed.
+    ///
+    /// The caller must supply genuinely uninitialized storage. Reusing storage
+    /// containing a live projector would overwrite it without dropping its
+    /// fields.
+    #[allow(
+        unsafe_code,
+        reason = "audited field-wise initialization avoids a capacity-sized projector stack temporary"
+    )]
+    pub fn initialize_in(
+        destination: &mut MaybeUninit<Self>,
+    ) -> &mut SubmissionProjector<SUBMISSIONS> {
+        const {
+            assert!(
+                !core::mem::needs_drop::<SubmissionProjector<SUBMISSIONS>>(),
+                "field-wise projector placement requires a no-drop projector"
+            );
+        }
+        let projector = destination.as_mut_ptr();
+        // SAFETY: `projector` is aligned and uniquely borrowed from an
+        // uninitialized `SubmissionProjector`. The array pointer has the
+        // address and alignment of its first element; each in-bounds slot is
+        // written exactly once, followed by both scalar fields. Only then is a
+        // mutable reference to the complete projector created.
+        unsafe {
+            let slots =
+                core::ptr::addr_of_mut!((*projector).slots).cast::<Option<SubmissionSlot>>();
+            for slot in 0..SUBMISSIONS {
+                slots.add(slot).write(None);
+            }
+            core::ptr::addr_of_mut!((*projector).next_operation_generation).write(Some(1));
+            core::ptr::addr_of_mut!((*projector).fault).write(None);
+            &mut *projector
         }
     }
 

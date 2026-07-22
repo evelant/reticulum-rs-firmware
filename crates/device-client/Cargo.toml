@@ -1,0 +1,19 @@
+[package]
+name = "reticulum-device-client"
+description = "Reusable authenticated host client for the Reticulum device API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+readme = "README.md"
+
+[dependencies]
+rand_core.workspace = true
+reticulum-device-api = { path = "../device-api", default-features = false, features = ["experimental-lxmf"] }
+reticulum-device-api-framing = { path = "../device-api-framing", default-features = false }
+reticulum-device-api-handoff = { path = "../device-api-handoff", default-features = false }
+reticulum-device-api-session = { path = "../device-api-session", default-features = false }
+reticulum-lxmf-wire = { path = "../lxmf-wire", default-features = false }
+sha2.workspace = true
+zeroize.workspace = true

@@ -227,13 +227,15 @@ variant), `InitializationInterrupted`, `Blocked`, `Corrupt`, or `Backend`.
 Only `Ready` permits a future credential mutation; `Ready` and `AuthOnly` may
 retain a publishable authority. The image has both the distinct
 pre-authentication initialization/pairing records and a deliberately minimal
-authenticated USB session/API bearer. The latter admits one handshake per
-connection and one request at a time and fails terminally until reset; its
+authenticated USB session/API bearer. The latter admits one active session and
+one request at a time, permits canonical idle-session replacement into a fresh
+epoch without displacing request/reply owners, and fails terminally until reset
+after a session fault; its
 initialize/pair/reboot/authenticated-capabilities happy path is qualified on one
 powered board. A later image also qualifies one durable submission with
 sequential status, physical LoRa peer proof, and fresh post-re-enumeration
-status. Broader repeated-session, ambiguity, and fault behavior remain separate
-gates.
+status. Idle replacement is source/host-qualified; a powered multi-process
+smoke plus broader ambiguity and fault behavior remain separate gates.
 Every successfully mounted owner, including a blocked or cleanup-failed owner,
 is retained in `ProductStorageCoordinator`. Erased media is never provisioned
 automatically.

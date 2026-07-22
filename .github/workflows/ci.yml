@@ -46,6 +46,10 @@ jobs:
       - name: Host tests
         # Includes child-process regressions that poison ambient Git state and
         # direct raw-tree/archive and common-dir-attributes provenance checks.
+        # The E290 live fixture deliberately owns the complete 128-entry
+        # runtime, so host test threads need the reviewed fixture stack budget.
+        env:
+          RUST_MIN_STACK: "16777216"
         run: cargo test --locked
 
       - name: E290 semantic HIL policy tests
@@ -59,6 +63,8 @@ jobs:
           -p reticulum-semantic-roundtrip-hil --all-features
 
       - name: Permanent E290 node host tests
+        env:
+          RUST_MIN_STACK: "16777216"
         run: >-
           cargo test --locked
           -p reticulum-heltec-vision-master-e290-node --lib
@@ -69,6 +75,8 @@ jobs:
           -p reticulum-heltec-vision-master-e290-node --lib -- -D warnings
 
       - name: Permanent E290 inbox commit-fault HIL host tests
+        env:
+          RUST_MIN_STACK: "16777216"
         run: >-
           cargo test --locked
           -p reticulum-heltec-vision-master-e290-node --lib
@@ -81,6 +89,8 @@ jobs:
           --features rns-inbox-commit-fault-hil -- -D warnings
 
       - name: Permanent E290 runtime-measurement HIL host tests
+        env:
+          RUST_MIN_STACK: "16777216"
         run: >-
           cargo test --locked
           -p reticulum-heltec-vision-master-e290-node --lib

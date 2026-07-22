@@ -33,7 +33,8 @@ use reticulum_rns_rete::{
     InboundProofPolicy as RnsInboundProofPolicy,
     InboundProofPolicyError as RnsInboundProofPolicyError, InterfaceId as RnsInterfaceId,
     NodeRole as RnsNodeRole, PathRequestBuildError as RnsPathRequestBuildError,
-    PrepareDataError as RnsPrepareDataError, PreparedData as RnsPreparedData, RNS_MTU,
+    PrepareBasicLxmfError as RnsPrepareBasicLxmfError, PrepareDataError as RnsPrepareDataError,
+    PreparedBasicLxmf as RnsPreparedBasicLxmf, PreparedData as RnsPreparedData, RNS_MTU,
     ReceiptCandidate, ReceiptKind, ReceiptReservationUnavailable, ReceiptTerminal,
     ReceiptTerminalReservation, ReceiptTerminalSink, TxTarget as RnsTxTarget,
 };
@@ -78,6 +79,13 @@ pub const PACKET_CAPACITY: usize = RNS_MTU;
 
 /// Largest destination-DATA plaintext accepted by the current RNS adapter.
 pub const MAX_DATA_PAYLOAD: usize = reticulum_rns_rete::MAX_DATA_PAYLOAD;
+
+/// Largest opportunistic LXMF carrier emitted by the basic composer.
+pub const MAX_OPPORTUNISTIC_LXMF_CARRIER: usize =
+    reticulum_rns_rete::MAX_OPPORTUNISTIC_LXMF_CARRIER;
+
+/// Largest positive whole-millisecond timestamp accepted by basic LXMF composition.
+pub const MAX_LXMF_TIMESTAMP_UNIX_MS: u64 = reticulum_rns_rete::MAX_LXMF_TIMESTAMP_UNIX_MS;
 
 /// Largest application-data payload accepted for one local announce.
 pub const MAX_ANNOUNCE_APP_DATA: usize = reticulum_rns_rete::MAX_ANNOUNCE_APP_DATA;
@@ -143,6 +151,87 @@ pub const fn capacity_profile_is_supported(
         && deduplication > 0
         && links > 1
         && links.is_power_of_two()
+}
+
+/// Scalar result of composing one signed basic LXMF carrier.
+///
+/// The caller retains the bytes in its supplied output buffer. The scalar
+/// contains no private identity material and does not expose the underlying
+/// Rete message, signing source, or destination. It privately preserves the
+/// composer capability needed by the dedicated opportunistic DATA path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreparedBasicLxmf(RnsPreparedBasicLxmf);
+
+impl PreparedBasicLxmf {
+    /// Exact carrier prefix initialized in the caller's output buffer.
+    pub const fn carrier_len(self) -> u16 {
+        self.0.carrier_len()
+    }
+
+    /// Python-compatible authenticated LXMF message identifier.
+    pub const fn message_id(self) -> [u8; 32] {
+        self.0.message_id()
+    }
+}
+
+/// Failure to compose the supported basic opportunistic LXMF subset.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrepareBasicLxmfError {
+    /// Timestamp zero is outside the firmware's useful message subset.
+    InvalidTimestamp,
+    /// Whole-millisecond timestamp exceeds the exact binary64 subset.
+    TimestampTooLarge {
+        /// Rejected Unix timestamp in milliseconds.
+        actual: u64,
+        /// Largest supported Unix timestamp in milliseconds.
+        maximum: u64,
+    },
+    /// The node has no registered inbound Single `lxmf.delivery` source.
+    DeliveryDestinationUnavailable,
+    /// The node identity could not sign the canonical message.
+    Signing,
+    /// Canonical content exceeds Python's opportunistic selection boundary.
+    PayloadTooLarge {
+        /// Computed Python LXMF `content_size`.
+        actual: usize,
+        /// Largest opportunistically selected content size.
+        maximum: usize,
+    },
+    /// Caller-owned carrier storage is too small.
+    OutputTooSmall {
+        /// Required carrier bytes.
+        required: usize,
+        /// Supplied output capacity.
+        available: usize,
+    },
+    /// The pinned packer violated an internal reviewed invariant.
+    Invariant,
+}
+
+impl From<RnsPrepareBasicLxmfError> for PrepareBasicLxmfError {
+    fn from(error: RnsPrepareBasicLxmfError) -> Self {
+        match error {
+            RnsPrepareBasicLxmfError::InvalidTimestamp => Self::InvalidTimestamp,
+            RnsPrepareBasicLxmfError::TimestampTooLarge { actual, maximum } => {
+                Self::TimestampTooLarge { actual, maximum }
+            }
+            RnsPrepareBasicLxmfError::DeliveryDestinationUnavailable => {
+                Self::DeliveryDestinationUnavailable
+            }
+            RnsPrepareBasicLxmfError::Signing => Self::Signing,
+            RnsPrepareBasicLxmfError::PayloadTooLarge { actual, maximum } => {
+                Self::PayloadTooLarge { actual, maximum }
+            }
+            RnsPrepareBasicLxmfError::OutputTooSmall {
+                required,
+                available,
+            } => Self::OutputTooSmall {
+                required,
+                available,
+            },
+            RnsPrepareBasicLxmfError::Invariant => Self::Invariant,
+        }
+    }
 }
 
 /// Opaque Reticulum identity owned by the node core.
@@ -2487,6 +2576,33 @@ impl<
             .map_err(LocalDestinationRegistrationError::from)
     }
 
+    /// Compose and sign one basic opportunistic LXMF carrier with this node's
+    /// registered inbound Single `lxmf.delivery` source.
+    ///
+    /// The caller supplies only the remote delivery destination, timestamp,
+    /// title, content, and output storage. Source selection and private-key use
+    /// remain inside the sole protocol owner. This operation does not prepare
+    /// an RNS packet or consume receipt state.
+    pub fn prepare_basic_lxmf_into(
+        &self,
+        destination: &DestinationHash,
+        timestamp_unix_ms: u64,
+        title: &[u8],
+        content: &[u8],
+        output: &mut [u8],
+    ) -> Result<PreparedBasicLxmf, PrepareBasicLxmfError> {
+        self.rns
+            .prepare_basic_lxmf_into(
+                &RnsDestinationHash::from(*destination.as_bytes()),
+                timestamp_unix_ms,
+                title,
+                content,
+                output,
+            )
+            .map(PreparedBasicLxmf)
+            .map_err(PrepareBasicLxmfError::from)
+    }
+
     /// Configure the default application data used for ordinary announces and
     /// path responses from one registered local destination.
     pub fn set_destination_announce_app_data(
@@ -4111,6 +4227,40 @@ mod tests {
             owner.recall_identity(&DestinationHash::new([0xee; 16])),
             None
         );
+    }
+
+    #[test]
+    fn basic_lxmf_composition_binds_the_registered_source_inside_the_node_owner() {
+        let mut owner = node_with_instance::<8, 0>(52, "embedded", 0x93);
+        let remote = DestinationHash::new([0xa7; 16]);
+        let mut carrier = [0x55_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+        assert_eq!(
+            owner.prepare_basic_lxmf_into(
+                &remote,
+                1_700_000_000_000,
+                b"title",
+                b"content",
+                &mut carrier,
+            ),
+            Err(PrepareBasicLxmfError::DeliveryDestinationUnavailable)
+        );
+        assert!(carrier.iter().all(|byte| *byte == 0x55));
+
+        let source = owner
+            .register_inbound_single_destination("lxmf", &["delivery"])
+            .unwrap();
+        let prepared = owner
+            .prepare_basic_lxmf_into(
+                &remote,
+                1_700_000_000_000,
+                b"title",
+                b"content",
+                &mut carrier,
+            )
+            .unwrap();
+        assert!(usize::from(prepared.carrier_len()) <= MAX_OPPORTUNISTIC_LXMF_CARRIER);
+        assert_eq!(&carrier[..16], source.as_bytes());
+        assert_ne!(prepared.message_id(), [0; 32]);
     }
 
     const fn time(seconds: u64) -> MonotonicSeconds {

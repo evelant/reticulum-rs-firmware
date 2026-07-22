@@ -11,7 +11,9 @@ use core::mem;
 
 use rand_core::{CryptoRng, RngCore};
 use reticulum_device_api::IdentitySummary;
-use reticulum_device_api_adapter::{InboundMailboxPort, SubmissionPort};
+use reticulum_device_api_adapter::{
+    InboundMailboxPort, LxmfComposePort, LxmfInboxPort, SubmissionPort,
+};
 use reticulum_device_api_credential_store::{
     BoundCredentialStoreAccess, CommitPairingLifecycleSuccessorError, CredentialStoreBinding,
     CredentialStoreBindingError, CredentialStoreFault, CredentialStoreMountError,
@@ -41,7 +43,7 @@ use reticulum_device_api_session::AuthenticatedGrant;
 use zeroize::Zeroizing;
 
 use crate::authenticated_api_node::{
-    AuthenticatedApiDispatchFailure, dispatch_authenticated_request_with_inbox,
+    AuthenticatedApiDispatchFailure, dispatch_authenticated_request_with_inbox_and_lxmf,
 };
 use crate::credential_boot::{
     CredentialBootOutcome, CredentialBootState, MAXIMUM_CREDENTIAL_BOOT_OUTCOME_BYTES,
@@ -320,29 +322,21 @@ impl CredentialRuntime {
         clippy::result_large_err,
         reason = "terminal failure must retain the exact allocation-free request owner"
     )]
-    pub fn dispatch_authenticated_request<P, M>(
+    pub fn dispatch_authenticated_request<P>(
         &self,
         request: LocalApiRequest<AuthenticatedGrant>,
         identity: IdentitySummary,
-        submission_port: &mut P,
-        inbox_port: &mut M,
+        port: &mut P,
     ) -> Result<LocalApiReply, AuthenticatedApiDispatchFailure>
     where
-        P: SubmissionPort,
-        M: InboundMailboxPort,
+        P: SubmissionPort + InboundMailboxPort + LxmfInboxPort + LxmfComposePort,
     {
         let authority = self
             .mounted
             .as_ref()
             .and_then(MountedCredentialStore::publishable_authority)
             .filter(|_| self.boot_state.authority_publishable());
-        dispatch_authenticated_request_with_inbox(
-            request,
-            authority,
-            identity,
-            submission_port,
-            inbox_port,
-        )
+        dispatch_authenticated_request_with_inbox_and_lxmf(request, authority, identity, port)
     }
 
     /// Whether the retained authority is physically and locally eligible for a

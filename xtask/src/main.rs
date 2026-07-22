@@ -877,7 +877,7 @@ fn graph_policy() -> ExitCode {
              authenticated session layer has only its exact reviewed cryptographic, device-API, credentials, framing and handoff normal edges plus its exact test-only hex, semantic-adapter and storage-model fixtures; \
              the Rete integration and node-core normal closures contain no RNode, radio-interface, LoRa or board package; \
              the shared lora-phy owner and E290 radio wrapper have only their exact reviewed HAL, framing, board and test edges; \
-             the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the permanent E290 node reaches the LoRa-first node/router/dispatcher graph, exact portable identity, credential-store authority, announce-clock, NOR-region, durable-submission and durable inbound-RNS-inbox layers, the feature-free durable LXMF ingress/model/store stack and explicit external allocator, both target-safe experimental device-API semantic ports, the featureless framed USB pre-authentication control codec, the resident live-pairing lifecycle and a minimal boot-lifetime USB authenticated-session bearer with transport-neutral admission and node-side dispatch while excluding onboard clients and foreign Tracker/HIL packages; \
+             the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent semantic round-trip fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the permanent E290 node reaches the LoRa-first node/router/dispatcher graph, exact portable identity, credential-store authority, announce-clock, NOR-region, durable-submission and durable inbound-RNS-inbox layers, the feature-free durable LXMF ingress/model/store stack and explicit external allocator, all three target-safe experimental device-API feature sets, the featureless framed USB pre-authentication control codec, the resident live-pairing lifecycle and a minimal boot-lifetime USB authenticated-session bearer with transport-neutral admission and node-side dispatch while excluding onboard clients and foreign Tracker/HIL packages; \
              the interface router has only its reviewed node-core and Embassy Sync normal edges plus test-only rand_core and RNS fixture edges; \
              the TX handoff, RF-inert dispatcher and supervisor use only their reviewed node-core, \
              interface-router ingress, handoff, dispatcher, Embassy Sync/Futures/Time, rand_core \
@@ -886,7 +886,7 @@ fn graph_policy() -> ExitCode {
              feature-free local radio-interface edge; the staged real-radio dispatcher has only its reviewed \
              portable interface-router, node-core, handoff, radio-interface, Embassy Sync/Time and rand_core normal \
              edges plus test-only Embassy Futures and static storage, and its target-all normal \
-             closure exactly matches all 64 reviewed local \
+             closure exactly matches all 65 reviewed local \
              path or registry/Git source identities and dispatcher-specific enabled-feature sets; \
              the bounded LXMF wire crate has only its five reviewed default-feature-disabled cryptographic \
              normal edges, the single reviewed streaming-verification feature and three host-test edges, and its generic bare-metal normal closure exactly \
@@ -897,7 +897,7 @@ fn graph_policy() -> ExitCode {
              storage model uses only reviewed minicbor and SHA-256 edges; \
              the physical storage journal uses only reviewed embedded-storage, storage-model and SHA-256 edges; \
              the sole storage actor uses only reviewed embedded-storage, node-core, journal, semantic-model and submission-projector edges plus its reviewed test-only rand_core edge; the durable submission runtime uses only reviewed Embassy Sync, embedded-storage, rand_core, node-core, storage-actor, semantic-model, submission-projector and transport-neutral supervisor edges plus its journal-only test fixture; \
-             the device API adapter uses only reviewed device-API and semantic-model normal edges with test-only embedded-storage and storage-actor fixtures plus exact experimental-rns-data and experimental-rns-inbox feature forwards; \
+             the device API adapter uses only reviewed device-API and semantic-model normal edges with test-only embedded-storage and storage-actor fixtures plus exact experimental-lxmf, experimental-rns-data and experimental-rns-inbox feature forwards; \
              the physical-storage HIL has only its reviewed raw-flash, journal, semantic-model, logging and ESP runtime edges and no radio/protocol stack; \
              the submission projector uses only reviewed node-core and storage-model \
              and test-only rand_core and RNS adapter edges"
@@ -2083,7 +2083,7 @@ fn immediately_preceded_by_feature_cfg(source: &str, position: usize, feature: &
         .is_some_and(|line| line.trim() == format!("#[cfg(feature = \"{feature}\")]"))
 }
 
-const E290_NODE_GRAPH_REQUIRED: [&str; 44] = [
+const E290_NODE_GRAPH_REQUIRED: [&str; 45] = [
     "allocator-api2",
     "embedded-storage",
     "esp-alloc",
@@ -2116,6 +2116,7 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 44] = [
     "reticulum-rns-inbox-store",
     "reticulum-rns-rete",
     "rete-core",
+    "rete-lxmf-core",
     "rete-stack",
     "rete-transport",
     "reticulum-storage-actor",
@@ -2258,9 +2259,11 @@ fn validate_e290_node_graph_for_root_features(
             .lines()
             .find(|line| line.contains(package))
             .ok_or_else(|| format!("{profile} graph has no {package}line"))?;
-        if !line.ends_with("features=[experimental-rns-data,experimental-rns-inbox]") {
+        if !line
+            .ends_with("features=[experimental-lxmf,experimental-rns-data,experimental-rns-inbox]")
+        {
             return Err(format!(
-                "{profile} must enable only target-safe experimental RNS DATA and durable inbox operations on {package}, observed {line}"
+                "{profile} must enable only the target-safe experimental LXMF, RNS DATA, and durable inbox operations on {package}, observed {line}"
             ));
         }
     }
@@ -5473,7 +5476,7 @@ const LXMF_DURABLE_INGRESS_ADDITIONAL_REVIEWED_CLOSURE: [ReviewedClosurePackage;
     closure_local("reticulum-lxmf-store", "crates/lxmf-store/Cargo.toml", &[]),
 ];
 
-const LXMF_INGRESS_REVIEWED_CLOSURE: [ReviewedClosurePackage; 40] = [
+const LXMF_INGRESS_REVIEWED_CLOSURE: [ReviewedClosurePackage; 41] = [
     closure_registry("aes", "0.8.4", &[]),
     closure_registry("block-buffer", "0.10.4", &[]),
     closure_registry("byteorder", "1.5.0", &[]),
@@ -5501,6 +5504,7 @@ const LXMF_INGRESS_REVIEWED_CLOSURE: [ReviewedClosurePackage; 40] = [
     closure_registry("quote", "1.0.46", &["default", "proc-macro"]),
     closure_registry("rand_core", "0.6.4", &[]),
     closure_git("rete-core", "0.1.0", &["alloc", "default"]),
+    closure_git("rete-lxmf-core", "0.1.0", &[]),
     closure_git("rete-stack", "0.1.0", &["alloc"]),
     closure_git("rete-transport", "0.1.0", &[]),
     closure_local(
@@ -5542,7 +5546,7 @@ const LXMF_INGRESS_REVIEWED_CLOSURE: [ReviewedClosurePackage; 40] = [
     closure_registry("zeroize_derive", "1.5.0", &[]),
 ];
 
-const RADIO_TX_DISPATCH_REVIEWED_CLOSURE: [ReviewedClosurePackage; 64] = [
+const RADIO_TX_DISPATCH_REVIEWED_CLOSURE: [ReviewedClosurePackage; 65] = [
     closure_registry("aes", "0.8.4", &[]),
     closure_registry("block-buffer", "0.10.4", &[]),
     closure_registry("byteorder", "1.5.0", &[]),
@@ -5591,6 +5595,7 @@ const RADIO_TX_DISPATCH_REVIEWED_CLOSURE: [ReviewedClosurePackage; 64] = [
     closure_registry("quote", "1.0.46", &["default", "proc-macro"]),
     closure_registry("rand_core", "0.6.4", &[]),
     closure_git("rete-core", "0.1.0", &["alloc", "default"]),
+    closure_git("rete-lxmf-core", "0.1.0", &[]),
     closure_git("rete-stack", "0.1.0", &["alloc"]),
     closure_git("rete-transport", "0.1.0", &[]),
     closure_local(
@@ -6407,7 +6412,10 @@ fn validate_device_api_adapter_dependency_boundary(
     let experimental_rns_inbox = features
         .get("experimental-rns-inbox")
         .and_then(serde_json::Value::as_array);
-    if features.len() != 3
+    let experimental_lxmf = features
+        .get("experimental-lxmf")
+        .and_then(serde_json::Value::as_array);
+    if features.len() != 4
         || default.is_none_or(|default| !default.is_empty())
         || experimental_rns_data.is_none_or(|experimental_rns_data| {
             experimental_rns_data.len() != 1
@@ -6419,9 +6427,13 @@ fn validate_device_api_adapter_dependency_boundary(
                 || experimental_rns_inbox[0].as_str()
                     != Some("reticulum-device-api/experimental-rns-inbox")
         })
+        || experimental_lxmf.is_none_or(|experimental_lxmf| {
+            experimental_lxmf.len() != 1
+                || experimental_lxmf[0].as_str() != Some("reticulum-device-api/experimental-lxmf")
+        })
     {
         return Err(
-            "reticulum-device-api-adapter must expose only default=[] plus exact experimental-rns-data and experimental-rns-inbox forwards"
+            "reticulum-device-api-adapter must expose only default=[] plus exact experimental-lxmf, experimental-rns-data, and experimental-rns-inbox forwards"
                 .to_owned(),
         );
     }
@@ -9762,8 +9774,8 @@ mod tests {
                      ├── reticulum-board-heltec-vision-master-e290-radio v0.1.0 features=[]\n\
                      │   ├── reticulum-board-heltec-vision-master-e290 v0.1.0 features=[]\n\
                      │   └── reticulum-radio-lora-phy v0.1.0 features=[]\n\
-                     ├── reticulum-device-api v0.1.0 features=[experimental-rns-data,experimental-rns-inbox]\n\
-                     ├── reticulum-device-api-adapter v0.1.0 features=[experimental-rns-data,experimental-rns-inbox]\n\
+                     ├── reticulum-device-api v0.1.0 features=[experimental-lxmf,experimental-rns-data,experimental-rns-inbox]\n\
+                     ├── reticulum-device-api-adapter v0.1.0 features=[experimental-lxmf,experimental-rns-data,experimental-rns-inbox]\n\
                      ├── reticulum-device-api-credential-store v0.1.0 features=[]\n\
                      │   └── reticulum-device-api-credentials v0.1.0 features=[]\n\
                      ├── reticulum-device-api-framing v0.1.0 features=[]\n\
@@ -9785,6 +9797,7 @@ mod tests {
                      ├── reticulum-node-core v0.1.0 features=[]\n\
                      │   └── reticulum-rns-rete v0.1.0 features=[]\n\
                      │       ├── rete-core v0.1.0 features=[alloc,default]\n\
+                     │       ├── rete-lxmf-core v0.1.0 features=[]\n\
                      │       ├── rete-stack v0.1.0 features=[alloc]\n\
                      │       └── rete-transport v0.1.0 features=[]\n\
                      ├── reticulum-nor-flash-region v0.1.0 features=[]\n\
@@ -9889,8 +9902,9 @@ mod tests {
         }
 
         for package in ["reticulum-device-api", "reticulum-device-api-adapter"] {
-            let expected =
-                format!("{package} v0.1.0 features=[experimental-rns-data,experimental-rns-inbox]");
+            let expected = format!(
+                "{package} v0.1.0 features=[experimental-lxmf,experimental-rns-data,experimental-rns-inbox]"
+            );
             let drifted = format!("{package} v0.1.0 features=[]");
             let feature_drift = valid.replacen(&expected, &drifted, 1);
             assert!(
@@ -13785,6 +13799,11 @@ fn sample(layout: Layout) {
                 "experimental-rns-inbox",
                 serde_json::json!(["reticulum-device-api/unreviewed"]),
             ),
+            ("experimental-lxmf", serde_json::json!([])),
+            (
+                "experimental-lxmf",
+                serde_json::json!(["reticulum-device-api/unreviewed"]),
+            ),
         ] {
             let mut feature_drift = portable_layers_metadata_fixture(&root);
             feature_drift["packages"][PACKAGE_INDEX]["features"][feature] = value;
@@ -15234,6 +15253,7 @@ fn sample(layout: Layout) {
             "manifest_path": root.join("crates/device-api-adapter/Cargo.toml"),
             "features": {
                 "default": [],
+                "experimental-lxmf": ["reticulum-device-api/experimental-lxmf"],
                 "experimental-rns-data": ["reticulum-device-api/experimental-rns-data"],
                 "experimental-rns-inbox": ["reticulum-device-api/experimental-rns-inbox"],
             },

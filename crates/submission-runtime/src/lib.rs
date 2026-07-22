@@ -12,8 +12,10 @@
 //!    the exact upstream owner.
 
 #![no_std]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![deny(missing_docs)]
+
+use core::mem::MaybeUninit;
 
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use rand_core::{CryptoRng, RngCore};
@@ -469,6 +471,78 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize> SubmissionRuntime<SUBMISS
             phase: RuntimePhase::Recovering,
             path_discoveries: [None; SUBMISSIONS],
         })
+    }
+
+    /// Mount directly into caller-provided uninitialized storage.
+    ///
+    /// This placement form avoids constructing the complete runtime as a
+    /// caller-stack return value. It is intended for products that keep a
+    /// bounded but comparatively large durable index in external memory.
+    /// `destination` contains a fully initialized runtime only when `Ok` is
+    /// returned. On error it must still be treated as uninitialized, although
+    /// an internal no-drop placement field may already have been written; the
+    /// same storage may be supplied to an exact retry.
+    ///
+    /// The out-of-line mount projects the actor field inside `destination` and
+    /// asks [`StorageActor::mount_into`] to initialize that field directly.
+    /// Only after the complete physical and semantic replay succeeds are the
+    /// remaining infallible runtime fields initialized. This is part of the
+    /// placement API's bounded-stack contract, not throughput tuning.
+    ///
+    /// The caller must supply genuinely uninitialized storage or the same
+    /// storage after this method returned an error. Calling this method with a
+    /// destination that contains an exposed live runtime remains invalid. The
+    /// compile-time no-drop invariant makes failed-attempt overwrite safe and
+    /// fails closed if a future runtime field owns resources.
+    #[allow(
+        unsafe_code,
+        reason = "one audited raw-field projection initializes the large actor directly in caller-owned MaybeUninit storage"
+    )]
+    #[inline(never)]
+    pub fn mount_into<'a, A>(
+        destination: &'a mut MaybeUninit<Self>,
+        access: &mut A,
+        first_submission_id: SubmissionId,
+        boot_sequence: u64,
+    ) -> Result<&'a mut Self, MountError<A::Error>>
+    where
+        A: BoundJournalAccess,
+    {
+        const {
+            assert!(
+                !core::mem::needs_drop::<SubmissionRuntime<SUBMISSIONS, PROJECTED>>(),
+                "runtime placement retries require a no-drop runtime"
+            );
+        }
+        let runtime = destination.as_mut_ptr();
+        // SAFETY: `runtime` is aligned, uniquely borrowed, and points to a
+        // `MaybeUninit<Self>`. `MaybeUninit<T>` has the same layout as `T`, so
+        // projecting the `storage` field and viewing that field as
+        // `MaybeUninit<StorageActor<..>>` creates no reference to an
+        // uninitialized `StorageActor`. The called placement API initializes
+        // that exact field only on `Ok`; on `Err`, the outer value remains
+        // uninitialized and this function returns before exposing it.
+        let storage_destination = unsafe {
+            &mut *core::ptr::addr_of_mut!((*runtime).storage)
+                .cast::<MaybeUninit<StorageActor<SUBMISSIONS, PROJECTED>>>()
+        };
+        StorageActor::mount_into(storage_destination, access, first_submission_id)?;
+
+        // SAFETY: the storage field is fully initialized above. Every
+        // following write is infallible and initializes one distinct remaining
+        // field exactly once, after which all fields of `Self` are initialized.
+        unsafe {
+            core::ptr::addr_of_mut!((*runtime).boot_sequence).write(boot_sequence);
+            core::ptr::addr_of_mut!((*runtime).recovery_cursor).write(0);
+            core::ptr::addr_of_mut!((*runtime).recovery_exhausted).write(false);
+            core::ptr::addr_of_mut!((*runtime).phase).write(RuntimePhase::Recovering);
+            let path_discoveries = core::ptr::addr_of_mut!((*runtime).path_discoveries)
+                .cast::<Option<PathDiscovery>>();
+            for slot in 0..SUBMISSIONS {
+                path_discoveries.add(slot).write(None);
+            }
+            Ok(&mut *runtime)
+        }
     }
 
     /// Current boot/service phase.

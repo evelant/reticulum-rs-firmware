@@ -130,12 +130,14 @@ owner. Dropping either boot-lifetime endpoint is a fatal service teardown.
 The permanent E290 graph now instantiates that depth-one handoff statically.
 The node endpoint is scheduled as its own fair lane, and the USB task owns the
 first deliberately minimal bearer manager across reconnects. The manager admits
-one hello/proof handshake per connection and one authenticated request at a
-time. Any session fault is terminal until USB reset or re-enumeration. This
-initial source profile intentionally omits resumption, protocol retries, close
-records, encryption, rate limiting/attempt policy, repeated handshake attempts,
-and concurrent requests. Its admission/handoff and node-dispatch boundary is
-bearer-neutral. The present integrity-only qualification suite is explicitly
+one active session and one authenticated request at a time. A canonical
+ClientHello replaces an idle established session with a fresh epoch on the same
+connection; replacement never displaces request/reply owners. Any session fault
+is terminal until USB reset or re-enumeration. This initial source profile
+intentionally omits resumption, protocol retries, close records, encryption,
+rate limiting/attempt policy, and concurrent requests. Its admission/handoff
+and node-dispatch boundary is bearer-neutral. The present integrity-only
+qualification suite is explicitly
 USB Serial/JTAG-only; later BLE and Wi-Fi adapters can reuse the ownership
 boundary after adding and qualifying their binding/suite and supplying their
 own connection and transmission mechanics. Before two bearers run
@@ -391,13 +393,17 @@ physical attacker and must not be described as tamper-resistant.
   request/reply handoff, a fair node dispatch lane, current-authority
   revalidation, synchronous dispatch through a credential-disjoint submission
   view, retained reply pressure, and generic rejection with no fallback or
-  submission-port I/O. The minimal USB bearer admits one handshake per
-  connection and one request in flight, with fault-until-reset behavior. The
-  host may issue sequential requests in that established session; the powered
-  `submit-and-wait` path uses this for status polling.
+  submission-port I/O. The minimal USB bearer admits one active session and one
+  request in flight, with idle ClientHello replacement into a fresh epoch and
+  fault-until-reset behavior. Replacement never displaces request/reply owners.
+  The host may issue sequential requests in one established session; the
+  powered `submit-and-wait` path uses this for status polling. Idle replacement
+  is powered-qualified across consecutive authenticated client processes on
+  one unchanged USB enumeration. Busy-owner non-displacement and richer
+  established-stream fault/recovery behavior remain to qualify.
 - Deliberately deferred from the first bearer profile: resumption, protocol
-  retries, close records, encryption, rate limiting/attempt policy, repeated
-  handshake attempts, concurrency, and richer established-stream recovery.
+  retries, close records, encryption, rate limiting/attempt policy, concurrency,
+  and richer established-stream recovery.
 - Complete in the portable store: the dedicated two-sector format,
   operation-scoped binding, erased-only initialization/recovery,
   commit/retire/publication ordering, and 32-test power-cut/error matrix.
