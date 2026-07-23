@@ -11,7 +11,8 @@ export interface OnboardingPresentation {
 }
 
 const PRESENCE_INSTRUCTION =
-  "Release GPIO21 once, then hold it continuously for at least 2 seconds. " +
+  "On the selected E290, release the middle button labelled 21, between RST and BOOT, " +
+  "then hold it continuously for at least 2 seconds. " +
   "Keep holding until this screen advances; the 60-second window begins when the hold is recognized.";
 
 function workingInstruction(stage: OnboardingStage): string {
@@ -64,7 +65,8 @@ function baseOnboardingPresentation(
         ready: false,
         title: "Set up this node",
         instruction:
-          "Release GPIO21 before starting. After you select Start, follow the hold prompt; " +
+          "Release the selected E290's middle button labelled 21 before starting. " +
+          "After you select Start, follow the hold prompt; " +
           "the appliance keeps credential secrets out of this app.",
         canStart: true,
         canResume: false,

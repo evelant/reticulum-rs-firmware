@@ -47,10 +47,11 @@ filesystem checks are implemented.
 
 Open the printed URL and start setup when the client reports that pairing is
 needed. The device requires a release followed by a continuous two-second hold
-of GPIO21 for each physical-presence operation. Follow the current stage shown
-by the client rather than holding the button continuously. After successful
-activation, reset or unplug/replug the board: the service requires a real USB
-disappearance and reappearance before it permits a new authenticated epoch.
+of the E290's middle button labelled `21`, between `RST` and `BOOT`, for each
+physical-presence operation. Follow the current stage shown by the client
+rather than holding the button continuously. After successful activation,
+reset or unplug/replug the board: the service requires a real USB disappearance
+and reappearance before it permits a new authenticated epoch.
 
 Interrupted work is classified from the private credential artifact. A known,
 canonical Pending artifact may be resumed or explicitly aborted; an ambiguous
@@ -181,13 +182,18 @@ Board A, and imported verbatim from Board B. The same run exercised capability
 bootstrap, schema-2 identity binding, automatic inbox import, terminal status
 projection, and a same-enumeration reconnect.
 
-Still deferred are live qualification of managed first-run pairing and reset
-recovery, activation-ambiguous repair, cross-platform host filesystem policy,
-service/host restart qualification, concurrent-process locking,
-notifications, browser compatibility and accessibility testing, database
-encryption, installed native-client transports, device-served Wi-Fi or USB
-networking, BLE, NomadNet/Micron, direct/Resource/propagated LXMF,
-pressure/fill testing, and soak.
+The [managed Expo first-run proof](../../docs/e290-expo-appliance-first-run-proof.md)
+adds identity-bound credential-empty setup, physical-presence pairing, a
+required USB reset, service restart with the retained private profile, two
+simultaneous board services, and an Expo-enqueued 3F-to-3E LoRa message with
+exact peer import and terminal `Delivered`.
+
+Still deferred are activation-ambiguous repair, cross-platform host filesystem
+policy, host restart qualification, concurrent-process locking, notifications,
+broader browser compatibility and accessibility testing, database encryption,
+installed native-client transports, device-served Wi-Fi or USB networking,
+BLE, NomadNet/Micron, direct/Resource/propagated LXMF, pressure/fill testing,
+and soak.
 
 ## Focused checks
 

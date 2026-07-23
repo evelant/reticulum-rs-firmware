@@ -11,6 +11,15 @@ function view(lifecycle: OnboardingState): OnboardingView {
 }
 
 describe("onboarding recovery presentation", () => {
+  test("identifies the E290 user key without confusing it with reset or boot", () => {
+    const before = onboardingPresentation(view({ state: "needs_pairing" }));
+    const waiting = onboardingPresentation(
+      view({ state: "working", stage: "waiting_for_pairing_presence" }),
+    );
+    expect(before.instruction).toContain("middle button labelled 21");
+    expect(waiting.instruction).toContain("between RST and BOOT");
+  });
+
   test("never offers an unsafe action after activation ambiguity", () => {
     const presentation = onboardingPresentation(view({ state: "activation_ambiguous" }));
     expect(presentation.ready).toBeFalse();

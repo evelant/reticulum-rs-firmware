@@ -1008,6 +1008,7 @@ second transport is required to qualify the first LoRa vertical slice.
 - [Expo universal appliance client](clients/appliance/README.md)
 - [E290 LXMF chat-alpha powered proof](docs/e290-lxmf-chat-alpha-proof.md)
 - [E290 LXMF host-appliance alpha proof](docs/e290-lxmf-appliance-alpha-proof.md)
+- [E290 Expo managed first-run proof](docs/e290-expo-appliance-first-run-proof.md)
 - [Usable-firmware POC limits and known defects](docs/poc-known-defects.md)
 - [Phase-0 scaffold decision](docs/adr/0001-phase-0-scaffold.md)
 - [Rete provisional-foundation decision](docs/adr/0002-rete-provisional-foundation.md)

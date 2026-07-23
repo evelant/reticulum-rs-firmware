@@ -100,8 +100,15 @@ proof unless a failing test promotes one into a release blocker.
   logical API are bearer-neutral, but BLE and Wi-Fi provisioning, stronger
   wireless authentication policy, and full recovery UX are deferred. Managed
   host profiles now expose secret-free initialization, pairing, Pending
-  resume/abort, and reset progress through the Expo client, but the live
-  first-run path and activation-ambiguous repair remain to qualify.
+  resume/abort, and reset progress through the Expo client. The powered managed
+  first-run path, real reset, retained-profile service restart, and one
+  Expo-to-LoRa-to-peer message now pass on the E290 pair; activation-ambiguous
+  repair and the alternate Pending recovery paths remain to qualify.
+- With several identical attached boards, the app shows the selected USB serial
+  but the physical E290 has no corresponding identify cue. Until a display or
+  LED identify action exists, an operator may have to press the middle button
+  labelled `21` on every candidate board. Only the selected serial owns the
+  pairing session, but this is not acceptable final multi-device UX.
 - The current session authenticates records but does not encrypt the USB
   transcript. The diagnostic and chat-alpha CLIs accept title/content bytes in
   process arguments, where shell history or same-host process inspection can
