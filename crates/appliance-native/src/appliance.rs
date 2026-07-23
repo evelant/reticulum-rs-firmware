@@ -1,6 +1,7 @@
 //! Offline-capable native ownership of the durable chat runtime.
 
 use std::fmt;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -11,6 +12,8 @@ use reticulum_lxmf_chat_runtime::{
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::Mutex as AsyncMutex;
+
+use crate::wifi::WifiConnector;
 
 /// Bearer selected for the native appliance session.
 ///
@@ -153,14 +156,17 @@ pub struct NativeAppliance {
     handle: Mutex<Option<ApplianceHandle>>,
     close_gate: AsyncMutex<()>,
     transport: NativeTransport,
+    connector_configured: bool,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 impl NativeAppliance {
     /// Open one SQLite chat database and start its single-owner actor.
     ///
-    /// The selected connector is currently an explicit unavailable stub. This
-    /// does not prevent local contacts, conversations, or durable outbox writes.
+    /// The selected connector is an explicit unavailable stub. This does not
+    /// prevent local contacts, conversations, or durable outbox writes. Use
+    /// [`Self::open_wifi`] to configure the implemented raw-TCP Wi-Fi proof
+    /// connector.
     #[uniffi::constructor]
     pub fn open(
         database_path: String,
@@ -180,6 +186,55 @@ impl NativeAppliance {
             handle: Mutex::new(Some(handle)),
             close_gate: AsyncMutex::new(()),
             transport,
+            connector_configured: false,
+        }))
+    }
+
+    /// Open one SQLite chat database with the Wi-Fi raw-TCP proof connector.
+    ///
+    /// The endpoint must be a literal IP socket address. The current E290 proof
+    /// profile listens at `192.168.4.1:29716`. The credential path must be an
+    /// absolute path to the 96-byte activated credential previously seeded into
+    /// the app sandbox.
+    /// This suite authenticates and integrity-protects the device API but does
+    /// not add application-layer confidentiality.
+    #[uniffi::constructor]
+    pub fn open_wifi(
+        database_path: String,
+        endpoint: String,
+        credential_path: String,
+    ) -> Result<Arc<Self>, NativeApplianceError> {
+        if database_path.is_empty() {
+            return Err(NativeApplianceError::InvalidArgument {
+                reason: "database path must not be empty".to_owned(),
+            });
+        }
+        let endpoint = endpoint.parse::<SocketAddr>().map_err(|error| {
+            NativeApplianceError::InvalidArgument {
+                reason: format!("Wi-Fi endpoint must be a literal IP socket address: {error}"),
+            }
+        })?;
+        if endpoint.port() == 0 {
+            return Err(NativeApplianceError::InvalidArgument {
+                reason: "Wi-Fi endpoint port must not be zero".to_owned(),
+            });
+        }
+        let credential_path = PathBuf::from(credential_path);
+        if !credential_path.is_absolute() {
+            return Err(NativeApplianceError::InvalidArgument {
+                reason: "Wi-Fi credential path must be absolute".to_owned(),
+            });
+        }
+        let handle = start_appliance(
+            ApplianceConfig::new(PathBuf::from(database_path)),
+            WifiConnector::new(endpoint, credential_path),
+        )
+        .map_err(NativeApplianceError::from)?;
+        Ok(Arc::new(Self {
+            handle: Mutex::new(Some(handle)),
+            close_gate: AsyncMutex::new(()),
+            transport: NativeTransport::Wifi,
+            connector_configured: true,
         }))
     }
 
@@ -254,11 +309,16 @@ impl NativeAppliance {
 
     /// Request a fresh device connection.
     ///
-    /// Every native connector is still a deliberate stub, so this returns the
-    /// typed `TransportUnavailable` failure instead of silently falling back.
+    /// Configured Wi-Fi owners schedule a fresh connection attempt. Reserved
+    /// connector stubs return typed `TransportUnavailable` instead of silently
+    /// falling back to another bearer.
     pub async fn reconnect(&self) -> Result<(), NativeApplianceError> {
-        let _ = self.active_handle()?;
-        Err(self.transport.unavailable_error())
+        let handle = self.active_handle()?;
+        if !self.connector_configured {
+            return Err(self.transport.unavailable_error());
+        }
+        handle.reconnect().await?;
+        Ok(())
     }
 
     /// Idempotently stop the actor and close its SQLite ownership.
@@ -448,6 +508,50 @@ mod tests {
             error,
             NativeApplianceError::InvalidArgument { .. }
         ));
+        appliance.close().await.unwrap();
+    }
+
+    #[test]
+    fn wifi_constructor_rejects_ambiguous_or_incomplete_endpoints() {
+        let database = TestDatabase::new("bad-wifi");
+        assert!(matches!(
+            NativeAppliance::open_wifi(
+                database.path_string(),
+                "reticulum.local:4242".to_owned(),
+                "/tmp/credential.rdpkey".to_owned(),
+            ),
+            Err(NativeApplianceError::InvalidArgument { .. })
+        ));
+        assert!(matches!(
+            NativeAppliance::open_wifi(
+                database.path_string(),
+                "127.0.0.1:0".to_owned(),
+                "/tmp/credential.rdpkey".to_owned(),
+            ),
+            Err(NativeApplianceError::InvalidArgument { .. })
+        ));
+        assert!(matches!(
+            NativeAppliance::open_wifi(
+                database.path_string(),
+                "127.0.0.1:4242".to_owned(),
+                "relative/credential.rdpkey".to_owned(),
+            ),
+            Err(NativeApplianceError::InvalidArgument { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn configured_wifi_owner_accepts_explicit_reconnect_requests() {
+        let database = TestDatabase::new("wifi-reconnect");
+        let credential = std::env::temp_dir().join("reticulum-native-missing-credential.rdpkey");
+        let appliance = NativeAppliance::open_wifi(
+            database.path_string(),
+            "127.0.0.1:9".to_owned(),
+            credential.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+
+        appliance.reconnect().await.unwrap();
         appliance.close().await.unwrap();
     }
 }

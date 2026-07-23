@@ -9,6 +9,8 @@ pub const PROTOCOL_MAJOR: u16 = 1;
 pub const PROTOCOL_MINOR: u16 = 0;
 /// HKDF-SHA256 plus HMAC-SHA256 authentication-only qualification suite.
 pub const QUALIFICATION_SUITE: u16 = 1;
+/// Wi-Fi-bound HKDF-SHA256 plus HMAC-SHA256 authentication-only qualification suite.
+pub const WIFI_QUALIFICATION_SUITE: u16 = 2;
 
 /// Client hello record kind.
 pub const RECORD_KIND_CLIENT_HELLO: u8 = 0x01;
@@ -71,6 +73,43 @@ impl BearerBinding {
     }
 }
 
+/// Cryptographic handshake suite and its required local bearer binding.
+///
+/// Both current suites provide authentication and integrity only. Suite 1 is
+/// retained as the byte-for-byte USB qualification profile. Suite 2 uses the
+/// same primitives under a distinct transcript and is bound exclusively to
+/// the Wi-Fi local API profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u16)]
+pub enum SessionSuite {
+    /// Original USB Serial/JTAG-only qualification suite.
+    UsbQualification = QUALIFICATION_SUITE,
+    /// Wi-Fi-only authentication and integrity qualification suite.
+    WifiQualification = WIFI_QUALIFICATION_SUITE,
+}
+
+impl SessionSuite {
+    pub(crate) const fn from_wire(value: u16) -> Option<Self> {
+        match value {
+            QUALIFICATION_SUITE => Some(Self::UsbQualification),
+            WIFI_QUALIFICATION_SUITE => Some(Self::WifiQualification),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn wire(self) -> u16 {
+        self as u16
+    }
+
+    /// The only bearer on which this suite may be negotiated.
+    pub const fn required_bearer(self) -> BearerBinding {
+        match self {
+            Self::UsbQualification => BearerBinding::UsbSerialJtag,
+            Self::WifiQualification => BearerBinding::Wifi,
+        }
+    }
+}
+
 /// Stable public identifier for the device API endpoint.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct DeviceId([u8; 16]);
@@ -101,15 +140,30 @@ impl SessionId {
 /// Canonical client hello parsed from one pre-authentication record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientHello {
+    suite: SessionSuite,
     bearer: BearerBinding,
     credential_id: CredentialId,
     nonce: [u8; 32],
 }
 
 impl ClientHello {
-    /// Construct the only supported qualification-suite client hello.
+    /// Construct the original USB qualification-suite client hello.
+    ///
+    /// This compatibility constructor preserves the suite-1 wire profile. Use
+    /// [`Self::new_for_suite`] to select another supported suite explicitly.
     pub const fn new(bearer: BearerBinding, credential_id: CredentialId, nonce: [u8; 32]) -> Self {
+        Self::new_for_suite(SessionSuite::UsbQualification, bearer, credential_id, nonce)
+    }
+
+    /// Construct a client hello for one explicitly selected session suite.
+    pub const fn new_for_suite(
+        suite: SessionSuite,
+        bearer: BearerBinding,
+        credential_id: CredentialId,
+        nonce: [u8; 32],
+    ) -> Self {
         Self {
+            suite,
             bearer,
             credential_id,
             nonce,
@@ -125,13 +179,12 @@ impl ClientHello {
         )?;
         let major = u16::from_le_bytes([payload[0], payload[1]]);
         let minor = u16::from_le_bytes([payload[2], payload[3]]);
-        let suite = u16::from_le_bytes([payload[4], payload[5]]);
+        let suite_wire = u16::from_le_bytes([payload[4], payload[5]]);
         if major != PROTOCOL_MAJOR || minor != PROTOCOL_MINOR {
             return Err(HandshakeRecordError::UnsupportedVersion { major, minor });
         }
-        if suite != QUALIFICATION_SUITE {
-            return Err(HandshakeRecordError::UnsupportedSuite { suite });
-        }
+        let suite = SessionSuite::from_wire(suite_wire)
+            .ok_or(HandshakeRecordError::UnsupportedSuite { suite: suite_wire })?;
         let bearer =
             BearerBinding::from_wire(payload[6]).ok_or(HandshakeRecordError::UnknownBearer {
                 observed: payload[6],
@@ -144,6 +197,7 @@ impl ClientHello {
         let mut nonce = [0_u8; 32];
         nonce.copy_from_slice(&payload[24..56]);
         Ok(Self {
+            suite,
             bearer,
             credential_id: CredentialId::new(credential_id),
             nonce,
@@ -154,6 +208,11 @@ impl ClientHello {
     pub fn into_record(self) -> Record {
         let payload = self.encode();
         handshake_record(RECORD_KIND_CLIENT_HELLO, ZERO_SESSION_ID, &payload)
+    }
+
+    /// Cryptographic session suite requested by the client.
+    pub const fn suite(&self) -> SessionSuite {
+        self.suite
     }
 
     /// Bearer the client expects this handshake to authenticate.
@@ -175,7 +234,7 @@ impl ClientHello {
         let mut output = [0_u8; CLIENT_HELLO_LENGTH];
         output[0..2].copy_from_slice(&PROTOCOL_MAJOR.to_le_bytes());
         output[2..4].copy_from_slice(&PROTOCOL_MINOR.to_le_bytes());
-        output[4..6].copy_from_slice(&QUALIFICATION_SUITE.to_le_bytes());
+        output[4..6].copy_from_slice(&self.suite.wire().to_le_bytes());
         output[6] = self.bearer.wire();
         output[7] = 0;
         output[8..24].copy_from_slice(self.credential_id.as_bytes());
@@ -187,6 +246,7 @@ impl ClientHello {
 /// Canonical server hello bound into the qualification transcript.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ServerHello {
+    suite: SessionSuite,
     bearer: BearerBinding,
     device_id: DeviceId,
     nonce: [u8; 32],
@@ -196,12 +256,14 @@ pub struct ServerHello {
 
 impl ServerHello {
     pub(crate) const fn new(
+        suite: SessionSuite,
         bearer: BearerBinding,
         device_id: DeviceId,
         nonce: [u8; 32],
         credential_generation: CredentialGeneration,
     ) -> Self {
         Self {
+            suite,
             bearer,
             device_id,
             nonce,
@@ -219,13 +281,12 @@ impl ServerHello {
         )?;
         let major = u16::from_le_bytes([payload[0], payload[1]]);
         let minor = u16::from_le_bytes([payload[2], payload[3]]);
-        let suite = u16::from_le_bytes([payload[4], payload[5]]);
+        let suite_wire = u16::from_le_bytes([payload[4], payload[5]]);
         if major != PROTOCOL_MAJOR || minor != PROTOCOL_MINOR {
             return Err(HandshakeRecordError::UnsupportedVersion { major, minor });
         }
-        if suite != QUALIFICATION_SUITE {
-            return Err(HandshakeRecordError::UnsupportedSuite { suite });
-        }
+        let suite = SessionSuite::from_wire(suite_wire)
+            .ok_or(HandshakeRecordError::UnsupportedSuite { suite: suite_wire })?;
         let bearer =
             BearerBinding::from_wire(payload[6]).ok_or(HandshakeRecordError::UnknownBearer {
                 observed: payload[6],
@@ -267,12 +328,18 @@ impl ServerHello {
             return Err(HandshakeRecordError::UnsupportedFlags { observed: flags });
         }
         Ok(Self {
+            suite,
             bearer,
             device_id: DeviceId(device_id),
             nonce,
             credential_generation,
             flags,
         })
+    }
+
+    /// Cryptographic session suite selected by the server.
+    pub const fn suite(&self) -> SessionSuite {
+        self.suite
     }
 
     /// Actual bearer selected by the server.
@@ -309,7 +376,7 @@ impl ServerHello {
         let mut output = [0_u8; SERVER_HELLO_LENGTH];
         output[0..2].copy_from_slice(&PROTOCOL_MAJOR.to_le_bytes());
         output[2..4].copy_from_slice(&PROTOCOL_MINOR.to_le_bytes());
-        output[4..6].copy_from_slice(&QUALIFICATION_SUITE.to_le_bytes());
+        output[4..6].copy_from_slice(&self.suite.wire().to_le_bytes());
         output[6] = self.bearer.wire();
         output[7] = 0;
         output[8..24].copy_from_slice(self.device_id.as_bytes());

@@ -13,7 +13,7 @@ mod client;
 mod credential;
 
 pub use client::{
-    BasicLxmfSend, ClientConfig, ClientError, ClientTransport, DeviceClient, FramingFault,
-    LxmfMessage, Operation,
+    BasicLxmfSend, ClientConfig, ClientError, ClientSessionProfile, ClientTransport, DeviceClient,
+    FramingFault, LxmfMessage, Operation,
 };
 pub use credential::{ACTIVATED_CREDENTIAL_STATE_BYTES, ActivatedCredential, CredentialStateError};

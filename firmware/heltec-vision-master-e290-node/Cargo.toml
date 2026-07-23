@@ -14,6 +14,14 @@ default = []
 journal-schema2-dev-reprovision = []
 rns-inbox-commit-fault-hil = []
 runtime-measurement-hil = ["esp-alloc/alloc-hooks"]
+wifi-api-proof = [
+    "dep:edge-dhcp",
+    "dep:edge-nal",
+    "dep:edge-nal-embassy",
+    "dep:embassy-net",
+    "dep:esp-radio",
+    "esp-rtos/esp-radio",
+]
 
 [dependencies]
 reticulum-announce-clock = { path = "../../crates/announce-clock", default-features = false }
@@ -83,6 +91,24 @@ esp-rtos = { workspace = true, features = [
     "log-04",
 ] }
 embedded-storage.workspace = true
+edge-dhcp = { version = "=0.7.0", default-features = false, features = ["io"], optional = true }
+edge-nal = { version = "=0.6.0", default-features = false, optional = true }
+edge-nal-embassy = { version = "=0.8.1", default-features = false, features = [
+    "medium-ethernet",
+    "proto-ipv4",
+    "udp",
+], optional = true }
+embassy-net = { version = "=0.8.0", default-features = false, features = [
+    "medium-ethernet",
+    "proto-ipv4",
+    "tcp",
+    "udp",
+], optional = true }
+esp-radio = { version = "=0.18.0", default-features = false, features = [
+    "esp-alloc",
+    "esp32s3",
+    "wifi",
+], optional = true }
 esp-storage = { workspace = true, features = ["esp32s3", "critical-section"] }
 log.workspace = true
 static_cell.workspace = true

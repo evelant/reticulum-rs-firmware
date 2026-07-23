@@ -42,6 +42,10 @@ protected:
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
+  cpp_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open_wifi(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value
   cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_close(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
@@ -268,6 +272,10 @@ protected:
       size_t count);
   jsi::Value
   cpp_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value
+  cpp_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_wifi(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_ffi_reticulum_appliance_native_uniffi_contract_version(

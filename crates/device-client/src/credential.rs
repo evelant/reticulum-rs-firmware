@@ -1,7 +1,7 @@
 use std::{fmt, io::Read};
 
 use reticulum_device_api_session::{
-    BearerBinding, ClientCredential, ClientParameters, CredentialGeneration, CredentialId, DeviceId,
+    ClientCredential, CredentialGeneration, CredentialId, DeviceId,
 };
 use zeroize::Zeroizing;
 
@@ -112,11 +112,8 @@ impl ActivatedCredential {
         self.generation
     }
 
-    pub(crate) fn into_handshake(self) -> (ClientParameters, ClientCredential) {
-        (
-            ClientParameters::new(self.device_id, BearerBinding::UsbSerialJtag),
-            ClientCredential::from_zeroizing(self.credential_id, self.generation, self.psk),
-        )
+    pub(crate) fn into_handshake(self) -> ClientCredential {
+        ClientCredential::from_zeroizing(self.credential_id, self.generation, self.psk)
     }
 }
 

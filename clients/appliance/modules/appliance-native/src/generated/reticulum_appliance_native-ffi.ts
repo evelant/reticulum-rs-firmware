@@ -71,6 +71,7 @@ interface NativeModuleInterface {
     ubrn_uniffi_reticulum_appliance_native_fn_free_nativeappliance(ptr: bigint, uniffi_out_err: UniffiRustCallStatus): void;
     ubrn_uniffi_reticulum_appliance_native_fn_func_native_bridge_contract(uniffi_out_err: UniffiRustCallStatus): Uint8Array;
     ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open(databasePath: Uint8Array, transport: Uint8Array, uniffi_out_err: UniffiRustCallStatus): bigint;
+    ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open_wifi(databasePath: Uint8Array, endpoint: Uint8Array, credentialPath: Uint8Array, uniffi_out_err: UniffiRustCallStatus): bigint;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_close(uniffiSelf: bigint): bigint;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_contacts_json(uniffiSelf: bigint): bigint;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_reconnect(uniffiSelf: bigint): bigint;
@@ -83,6 +84,7 @@ interface NativeModuleInterface {
     ubrn_ffi_reticulum_appliance_native_uniffi_contract_version(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_func_native_bridge_contract(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open(): number;
+    ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_wifi(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_close(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_contacts_json(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_reconnect(): number;

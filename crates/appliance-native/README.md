@@ -12,9 +12,13 @@ builds compile this crate and have executed its immutable contract query.
 Platform packaging belongs to the Expo client, while this crate remains
 independent of React Native, iOS, Android, and application UI lifecycles.
 Contacts, timelines, and idempotent outbox writes work offline immediately.
-USB serial/JTAG, USB OTG, BLE, and Wi-Fi remain explicit unavailable connector
-stubs: their stable variants and errors reserve the boundary without claiming
-that a bearer works or silently selecting another one. Future adapters should
-compose the existing portable device-client crates here rather than
-reimplementing framing, authentication, or LXMF wire handling in TypeScript,
-Swift, or Kotlin.
+USB serial/JTAG, USB OTG, and BLE remain explicit unavailable connector stubs:
+their stable variants and errors reserve the boundary without claiming that a
+bearer works or silently selecting another one. `NativeAppliance::open_wifi`
+is the first real connector. It loads an app-private activated credential,
+opens a finite-timeout raw TCP stream, and delegates framing, the
+Wi-Fi-transcript-bound suite-2 handshake, logical device operations, and LXMF
+validation to the portable Rust client crates. The proof suite provides
+authentication and integrity, not confidentiality. Future adapters should
+preserve this composition rather than reimplementing protocol or LXMF handling
+in TypeScript, Swift, or Kotlin.

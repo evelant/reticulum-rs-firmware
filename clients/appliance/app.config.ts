@@ -9,6 +9,10 @@ const config: ExpoConfig = {
   userInterfaceStyle: "dark",
   ios: {
     bundleIdentifier: "org.reticulum.appliance",
+    infoPlist: {
+      NSLocalNetworkUsageDescription:
+        "Connect to your Reticulum appliance over its local Wi-Fi network.",
+    },
     supportsTablet: true,
   },
   android: {

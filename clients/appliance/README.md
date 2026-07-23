@@ -63,13 +63,24 @@ projects are needed.
 
 The app defaults to the appliance's same-origin HTTP API on web. Native builds default to a Rust
 single-owner actor with an app-private SQLite database. This already provides durable contacts,
-timelines, and idempotent outbox writes while offline. BLE is the default selected native bearer,
-but BLE, Wi-Fi, USB OTG, and USB serial/JTAG are still explicit unavailable connector stubs; they do
-not silently fall back or claim a device connection.
+timelines, and idempotent outbox writes while offline. BLE is the default selected native bearer and
+remains an explicit unavailable connector stub, as do USB OTG and USB serial/JTAG. They do not
+silently fall back or claim a device connection.
+
+Set `EXPO_PUBLIC_APPLIANCE_WIFI_ENDPOINT` to the E290 proof endpoint
+`192.168.4.1:29716` to opt a native development build into the first raw-TCP Wi-Fi proof connector.
+The connector reloads `reticulum-device-credential.rdpkey` from the app's private Documents
+directory for every handshake and uses the separately transcript-bound Wi-Fi session suite. For the
+current proof, pair over the qualified USB workflow first and manually seed that exact 96-byte
+activated credential into the sandbox. Automatic pairing, Keychain/Keystore migration, SoftAP
+joining, and credential transfer remain follow-up work. The session authenticates and
+integrity-protects API records but adds no application-layer confidentiality; the initial appliance
+SoftAP must therefore retain WPA2 and this path must not be described as the final wireless security
+profile.
 
 Set `EXPO_PUBLIC_APPLIANCE_URL` to retain the interim native HTTP adapter during development, then
 open a `reticulum-appliance://connect?cap=...` link to bootstrap a session. The current Rust alpha
 server binds loopback and enforces browser-origin headers, so remote native HTTP still needs a
 deliberate server transport/authentication policy before it can connect. Both adapters implement
-the same client boundary and consume Rust-generated semantic DTOs, so adding real BLE, Wi-Fi, or
+the same client boundary and consume Rust-generated semantic DTOs, so adding the remaining BLE or
 USB connectors does not require changing screens or duplicating interface types.

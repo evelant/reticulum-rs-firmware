@@ -123,23 +123,40 @@ proof unless a failing test promotes one into a release blocker.
   bundled loopback Expo web export. The shared Expo application now also
   compiles and runs as Android and iOS development builds, and its first
   callable UniFFI round trip reaches Rust. It remains a computer-side
-  companion: there is still no client served by the E290, Wi-Fi or BLE client
-  bearer, native device transport, display UI, NomadNet client, or Micron
-  client.
+  companion: there is still no client served by the E290, physically qualified
+  Wi-Fi or BLE client bearer, display UI, NomadNet client, or Micron client.
 - The native Rust bridge now owns an app-private SQLite chat runtime and exposes
   contacts, timelines, idempotent durable outbox writes, snapshots, sync, and
-  close through the shared Rust DTOs. Its USB Serial/JTAG, USB OTG, BLE, and
-  Wi-Fi connector variants are deliberate nonfunctional stubs, so native
-  screens can use offline state but still cannot reach a node. The host
-  service's loopback/origin policy remains deliberately unsuitable as a phone
-  transport. The mutable facade is covered on each side of the generated
-  boundary but has not yet run as a Hermes/TurboModule smoke test in a built
-  mobile app. Cancellation, Rust panic translation, full Fast Refresh and
+  close through the shared Rust DTOs. USB Serial/JTAG, USB OTG, and BLE remain
+  deliberate nonfunctional stubs. The opt-in Wi-Fi constructor now loads a
+  fixed app-private activated credential, opens a finite-timeout raw TCP
+  stream, and authenticates with the separately bound suite-2 profile. Its
+  localhost partial-I/O handshake passes, but endpoint selection and credential
+  seeding are still development-build/manual operations, and mobile
+  secure-storage migration is absent. The exact profile image has been safely
+  flashed to one credentialed E290 with an unchanged durable control-region
+  readback, but no client has yet joined its SoftAP or completed the powered
+  suite-2 path. The development Mac's only internet uplink is Wi-Fi, so that
+  final exchange is intentionally left as a manual phone/alternate-uplink test.
+  The host service's loopback/origin policy remains deliberately unsuitable as
+  a phone transport. The mutable facade has run through Hermes and the
+  generated TurboModule in an arm64 iOS simulator build: the native runtime
+  opened, created a contact, durably queued an outbox message in schema-v2
+  SQLite, and restored both after a forced app termination and relaunch. This
+  qualifies mutable offline state across the generated boundary, not the new
+  device transport. Cancellation, Rust panic translation, full Fast Refresh and
   background/foreground lifecycle, and BLE disconnect/resume remain
   unqualified. Native generation and application builds are not yet in CI. The
-  iOS XCFramework supports arm64 device and Apple-Silicon simulator only.
-  The Android proof used a large multi-ABI debug APK; release stripping,
-  splits, startup, and memory remain unmeasured.
+  iOS XCFramework supports arm64 device and Apple-Silicon simulator only. The
+  current simulator link also warns that one object was built with a newer iOS
+  simulator version than the application's 16.4 deployment target. The Android
+  proof used a large multi-ABI debug APK; release stripping, splits, startup,
+  and memory remain unmeasured. The current target SDK 36 build correctly does
+  not request Android's future local-network runtime permission. Before raising
+  the target to SDK 37, add and exercise
+  [`ACCESS_LOCAL_NETWORK`](https://developer.android.com/privacy-and-security/local-network-permission);
+  Android 17 otherwise blocks the connector's outgoing raw-LAN TCP traffic by
+  default.
 - The host service has no operating-system single-instance lock, notification
   service, account migration, database encryption, activation-ambiguous repair,
   or cross-platform disconnect/host-suspend matrix. Managed profiles currently

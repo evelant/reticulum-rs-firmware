@@ -33,6 +33,7 @@ use crate::{
     ClientRequestFaultKind, ClientSession, ClientSessionFault, CredentialGeneration, CredentialId,
     DeviceId, HandshakeError, PendingClientProof, ReplyFlight, ReplyRouteFaultKind, ServerHello,
     ServerHelloFlight, ServerParameters, ServerSession, SessionEpochAllocator, SessionFault,
+    SessionSuite,
     crypto::{
         KeySchedule, client_proof, client_record_tag, derive, server_proof, server_record_tag,
         verify_server_record_tag,
@@ -393,9 +394,26 @@ fn server_hello_record_for(
 }
 
 fn establish_client_server() -> (ClientSession, ServerSession, KeySchedule) {
-    let mut client_rng = FixedRng::new(CLIENT_NONCE);
+    let mut epochs = SessionEpochAllocator::new();
+    establish_client_server_for(
+        client_parameters(),
+        ServerParameters::new(DEVICE_ID, BearerBinding::UsbSerialJtag),
+        &mut epochs,
+        CLIENT_NONCE,
+        SERVER_NONCE,
+    )
+}
+
+fn establish_client_server_for(
+    client_parameters: ClientParameters,
+    server_parameters: ServerParameters,
+    epochs: &mut SessionEpochAllocator,
+    client_nonce: [u8; 32],
+    server_nonce: [u8; 32],
+) -> (ClientSession, ServerSession, KeySchedule) {
+    let mut client_rng = FixedRng::new(client_nonce);
     let mut client_hello_flight =
-        ClientHelloFlight::begin(client_parameters(), client_credential(), &mut client_rng)
+        ClientHelloFlight::begin(client_parameters, client_credential(), &mut client_rng)
             .unwrap_or_else(|error| panic!("client handshake begin failed: {error:?}"));
     let parsed_client_hello = ClientHello::from_record(decode_one(client_hello_flight.remaining()))
         .unwrap_or_else(|error| panic!("client emitted invalid hello: {error:?}"));
@@ -405,13 +423,12 @@ fn establish_client_server() -> (ClientSession, ServerSession, KeySchedule) {
         .try_finish()
         .unwrap_or_else(|_| panic!("complete client hello did not advance typestate"));
 
-    let mut epochs = SessionEpochAllocator::new();
-    let mut server_rng = FixedRng::new(SERVER_NONCE);
+    let mut server_rng = FixedRng::new(server_nonce);
     let mut server_hello_flight = ServerHelloFlight::begin(
         parsed_client_hello,
         ActiveCredential::new(CREDENTIAL_ID, GENERATION, PSK),
-        ServerParameters::new(DEVICE_ID, BearerBinding::UsbSerialJtag),
-        &mut epochs,
+        server_parameters,
+        epochs,
         &mut server_rng,
     )
     .unwrap_or_else(|error| panic!("server handshake begin failed: {error:?}"));
@@ -495,12 +512,271 @@ fn client_and_server_hello_round_trip_canonical_records() {
     let hello = client_hello();
     let parsed = ClientHello::from_record(hello.into_record()).unwrap();
     assert_eq!(parsed, hello);
+    assert_eq!(parsed.suite(), SessionSuite::UsbQualification);
 
     let (_, _, server_hello, _) = establish();
+    assert_eq!(server_hello.suite(), SessionSuite::UsbQualification);
     assert_eq!(server_hello.bearer(), BearerBinding::UsbSerialJtag);
     assert_eq!(server_hello.device_id(), DEVICE_ID);
     assert_eq!(server_hello.nonce(), &SERVER_NONCE);
     assert_eq!(server_hello.credential_generation(), GENERATION);
+}
+
+#[test]
+fn wifi_suite_authenticates_round_trip_and_reconnect_resets_sequences() {
+    let client_parameters = ClientParameters::new_for_suite(
+        DEVICE_ID,
+        BearerBinding::Wifi,
+        SessionSuite::WifiQualification,
+    );
+    let server_parameters = ServerParameters::new_for_suite(
+        DEVICE_ID,
+        BearerBinding::Wifi,
+        SessionSuite::WifiQualification,
+    );
+    assert_eq!(
+        SessionSuite::WifiQualification.required_bearer(),
+        BearerBinding::Wifi
+    );
+    assert_eq!(client_parameters.suite(), SessionSuite::WifiQualification);
+    assert_eq!(client_parameters.bearer(), BearerBinding::Wifi);
+    assert_eq!(server_parameters.suite(), SessionSuite::WifiQualification);
+    assert_eq!(server_parameters.bearer(), BearerBinding::Wifi);
+
+    let mut epochs = SessionEpochAllocator::new();
+    let (client, server, first_schedule) = establish_client_server_for(
+        client_parameters,
+        server_parameters,
+        &mut epochs,
+        CLIENT_NONCE,
+        SERVER_NONCE,
+    );
+    assert_eq!(client.next_client_sequence(), 0);
+    assert_eq!(client.next_server_sequence(), 0);
+    assert_eq!(server.next_client_sequence(), 0);
+    assert_eq!(server.next_server_sequence(), 0);
+    assert_eq!(server.epoch(), SessionEpoch::new(1));
+
+    let mut request_flight = client
+        .frame_request(owned_message(b"wifi-request"))
+        .unwrap_or_else(|fault| panic!("Wi-Fi request framing failed: {:?}", fault.kind()));
+    let request_record = decode_one(request_flight.remaining());
+    let request_length = request_flight.remaining().len();
+    request_flight.advance(request_length).unwrap();
+    let awaiting_response = request_flight
+        .try_finish()
+        .unwrap_or_else(|_| panic!("complete Wi-Fi request did not advance typestate"));
+    let authenticated = server
+        .authenticate_request(request_record)
+        .unwrap_or_else(|fault| panic!("Wi-Fi request authentication failed: {fault:?}"));
+    let (request, waiting) = authenticated.into_parts();
+    assert_eq!(request.message().encoded(), b"wifi-request");
+    assert_eq!(request.grant().bearer(), BearerBinding::Wifi);
+    assert_eq!(request.grant().admission_sequence(), 0);
+    assert_eq!(request.grant().epoch(), SessionEpoch::new(1));
+
+    let mut response_flight = frame_server_response(waiting, b"wifi-response");
+    let response = awaiting_response
+        .authenticate(decode_one(response_flight.remaining()))
+        .unwrap_or_else(|fault| panic!("Wi-Fi response authentication failed: {fault:?}"));
+    let (client, response) = response.into_parts();
+    assert_eq!(response.encoded(), b"wifi-response");
+    let response_length = response_flight.remaining().len();
+    response_flight.advance(response_length).unwrap();
+    let server = response_flight
+        .try_finish()
+        .unwrap_or_else(|_| panic!("complete Wi-Fi response did not restore server session"));
+    assert_eq!(client.next_client_sequence(), 1);
+    assert_eq!(client.next_server_sequence(), 1);
+    assert_eq!(server.next_client_sequence(), 1);
+    assert_eq!(server.next_server_sequence(), 1);
+    drop(client);
+    drop(server);
+
+    let mut reconnect_client_nonce = CLIENT_NONCE;
+    reconnect_client_nonce[0] ^= 0x80;
+    let mut reconnect_server_nonce = SERVER_NONCE;
+    reconnect_server_nonce[0] ^= 0x80;
+    let (client, server, reconnect_schedule) = establish_client_server_for(
+        client_parameters,
+        server_parameters,
+        &mut epochs,
+        reconnect_client_nonce,
+        reconnect_server_nonce,
+    );
+    assert_ne!(reconnect_schedule.session_id, first_schedule.session_id);
+    assert_eq!(client.next_client_sequence(), 0);
+    assert_eq!(client.next_server_sequence(), 0);
+    assert_eq!(server.next_client_sequence(), 0);
+    assert_eq!(server.next_server_sequence(), 0);
+    assert_eq!(server.epoch(), SessionEpoch::new(2));
+}
+
+#[test]
+fn wifi_suite_rejects_wrong_bearer_and_supported_suite() {
+    let mut client_rng = FixedRng::new(CLIENT_NONCE);
+    let error = expect_error(
+        ClientHelloFlight::begin(
+            ClientParameters::new(DEVICE_ID, BearerBinding::Wifi),
+            client_credential(),
+            &mut client_rng,
+        ),
+        "legacy USB qualification suite started on Wi-Fi",
+    );
+    assert!(matches!(
+        error,
+        ClientHandshakeError::QualificationSuiteForbidden {
+            bearer: BearerBinding::Wifi,
+        }
+    ));
+
+    let mut server_rng = FixedRng::new(SERVER_NONCE);
+    let mut epochs = SessionEpochAllocator::new();
+    let error = expect_error(
+        ServerHelloFlight::begin(
+            client_hello(),
+            ActiveCredential::new(CREDENTIAL_ID, GENERATION, PSK),
+            ServerParameters::new(DEVICE_ID, BearerBinding::Wifi),
+            &mut epochs,
+            &mut server_rng,
+        ),
+        "legacy USB qualification server started on Wi-Fi",
+    );
+    assert!(matches!(
+        error,
+        HandshakeError::QualificationSuiteForbidden {
+            bearer: BearerBinding::Wifi,
+        }
+    ));
+
+    let mut client_rng = FixedRng::new(CLIENT_NONCE);
+    let error = expect_error(
+        ClientHelloFlight::begin(
+            ClientParameters::new_for_suite(
+                DEVICE_ID,
+                BearerBinding::UsbSerialJtag,
+                SessionSuite::WifiQualification,
+            ),
+            client_credential(),
+            &mut client_rng,
+        ),
+        "Wi-Fi suite started on USB",
+    );
+    assert!(matches!(
+        error,
+        ClientHandshakeError::SuiteBearerMismatch {
+            suite: SessionSuite::WifiQualification,
+            bearer: BearerBinding::UsbSerialJtag,
+            required: BearerBinding::Wifi,
+        }
+    ));
+
+    let wifi_hello = ClientHello::new_for_suite(
+        SessionSuite::WifiQualification,
+        BearerBinding::Wifi,
+        CREDENTIAL_ID,
+        CLIENT_NONCE,
+    );
+    let mut server_rng = FixedRng::new(SERVER_NONCE);
+    let error = expect_error(
+        ServerHelloFlight::begin(
+            wifi_hello,
+            ActiveCredential::new(CREDENTIAL_ID, GENERATION, PSK),
+            ServerParameters::new_for_suite(
+                DEVICE_ID,
+                BearerBinding::UsbSerialJtag,
+                SessionSuite::WifiQualification,
+            ),
+            &mut epochs,
+            &mut server_rng,
+        ),
+        "Wi-Fi suite server started on USB",
+    );
+    assert!(matches!(
+        error,
+        HandshakeError::SuiteBearerMismatch {
+            suite: SessionSuite::WifiQualification,
+            bearer: BearerBinding::UsbSerialJtag,
+            required: BearerBinding::Wifi,
+        }
+    ));
+
+    let mut server_rng = FixedRng::new(SERVER_NONCE);
+    let error = expect_error(
+        ServerHelloFlight::begin(
+            wifi_hello,
+            ActiveCredential::new(CREDENTIAL_ID, GENERATION, PSK),
+            ServerParameters::new(DEVICE_ID, BearerBinding::UsbSerialJtag),
+            &mut epochs,
+            &mut server_rng,
+        ),
+        "Wi-Fi client hello was accepted by the USB suite",
+    );
+    assert!(matches!(
+        error,
+        HandshakeError::SuiteMismatch {
+            client: SessionSuite::WifiQualification,
+            server: SessionSuite::UsbQualification,
+        }
+    ));
+
+    let wifi_hello_on_ble = ClientHello::new_for_suite(
+        SessionSuite::WifiQualification,
+        BearerBinding::BleGatt,
+        CREDENTIAL_ID,
+        CLIENT_NONCE,
+    );
+    let mut server_rng = FixedRng::new(SERVER_NONCE);
+    let error = expect_error(
+        ServerHelloFlight::begin(
+            wifi_hello_on_ble,
+            ActiveCredential::new(CREDENTIAL_ID, GENERATION, PSK),
+            ServerParameters::new_for_suite(
+                DEVICE_ID,
+                BearerBinding::Wifi,
+                SessionSuite::WifiQualification,
+            ),
+            &mut epochs,
+            &mut server_rng,
+        ),
+        "Wi-Fi suite accepted a client hello from BLE",
+    );
+    assert!(matches!(
+        error,
+        HandshakeError::BearerMismatch {
+            client: BearerBinding::BleGatt,
+            server: BearerBinding::Wifi,
+        }
+    ));
+
+    let mut client_rng = FixedRng::new(CLIENT_NONCE);
+    let mut client_flight = ClientHelloFlight::begin(
+        ClientParameters::new_for_suite(
+            DEVICE_ID,
+            BearerBinding::Wifi,
+            SessionSuite::WifiQualification,
+        ),
+        client_credential(),
+        &mut client_rng,
+    )
+    .unwrap();
+    let client_length = client_flight.remaining().len();
+    client_flight.advance(client_length).unwrap();
+    let awaiting_server_hello = client_flight
+        .try_finish()
+        .unwrap_or_else(|_| panic!("complete Wi-Fi client hello did not advance typestate"));
+    let usb_server_hello = decode_one(begin().remaining());
+    let error = expect_error(
+        awaiting_server_hello.accept(usb_server_hello),
+        "Wi-Fi client accepted a USB-suite server hello",
+    );
+    assert!(matches!(
+        error,
+        ClientHandshakeError::SuiteMismatch {
+            expected: SessionSuite::WifiQualification,
+            observed: SessionSuite::UsbQualification,
+        }
+    ));
 }
 
 #[test]
@@ -702,14 +978,14 @@ fn preauth_downgrade_reserved_and_tag_mutations_fail_closed() {
 
     let record = client_hello().into_record();
     let (kind, session_id, sequence, length, mut payload, tag) = record.into_parts();
-    payload[4] = 2;
+    payload[4] = 3;
     let error = ClientHello::from_record(Record::new(
         kind, session_id, sequence, length, payload, tag,
     ))
     .unwrap_err();
     assert!(matches!(
         error,
-        crate::HandshakeRecordError::UnsupportedSuite { suite: 2 }
+        crate::HandshakeRecordError::UnsupportedSuite { suite: 3 }
     ));
 
     let record = client_hello().into_record();

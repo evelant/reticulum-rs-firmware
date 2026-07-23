@@ -5,12 +5,15 @@
 //! provisions or strictly mounts the submission journal and drives an explicit
 //! bounded-history recovery gate to completion. The backend-independent durable
 //! runtime then remains resident with the sole operation-scoped flash
-//! coordinator. A third task owns the USB Serial/JTAG initialization,
-//! live-pairing, and single-flight authenticated local-API bearer plus GPIO21
-//! physical-presence input without becoming a Reticulum packet interface. The
-//! node retains transport-neutral admission and authenticated dispatch lanes;
-//! Inbound durable LXMF delivery is composed without becoming an interface;
-//! BLE, Wi-Fi, NomadNet, and UI actors remain independent later capabilities.
+//! coordinator. The ordinary profile's third task owns USB Serial/JTAG
+//! initialization, live pairing, and the single-flight authenticated local API
+//! plus GPIO21 physical presence without becoming a Reticulum packet
+//! interface. The opt-in `wifi-api-proof` profile replaces that task with
+//! SoftAP, DHCP, and one authenticated raw-TCP RDA1 client; it never composes
+//! USB and Wi-Fi API bearers concurrently. The node retains transport-neutral
+//! admission and authenticated dispatch lanes. Inbound durable LXMF delivery
+//! is composed without becoming an interface; BLE, NomadNet, and UI actors
+//! remain independent later capabilities.
 
 #![no_std]
 #![no_main]
@@ -26,7 +29,17 @@ mod platform_storage;
 mod radio_task;
 #[cfg(feature = "runtime-measurement-hil")]
 mod runtime_measurement_stack_hil;
+#[cfg_attr(
+    feature = "wifi-api-proof",
+    allow(
+        dead_code,
+        unused_imports,
+        reason = "the Wi-Fi profile retains only the earliest USB quarantine boundary"
+    )
+)]
 mod usb_pairing_task;
+#[cfg(feature = "wifi-api-proof")]
+mod wifi_api_task;
 
 #[cfg(not(feature = "runtime-measurement-hil"))]
 use core::future::pending;
@@ -43,10 +56,12 @@ use esp_alloc::ExternalMemory;
 #[cfg(feature = "runtime-measurement-hil")]
 use esp_alloc::{EspHeap, MemoryCapability};
 use esp_backtrace as _;
+#[cfg(not(feature = "wifi-api-proof"))]
+use esp_hal::gpio::Pull;
 use esp_hal::{
     Async,
     clock::CpuClock,
-    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
+    gpio::{Input, InputConfig, Level, Output, OutputConfig},
     psram::{FlashFreq, Psram, PsramConfig, PsramMode, PsramSize, SpiRamFreq},
     rng::{Trng, TrngSource},
     spi::{
@@ -65,6 +80,8 @@ use reticulum_board_heltec_vision_master_e290_radio::{
 };
 use reticulum_device_api_handoff::DeviceApiHandoff;
 use reticulum_device_api_pairing::DeviceId;
+#[cfg(feature = "wifi-api-proof")]
+use reticulum_device_api_session::SessionSuite;
 use reticulum_device_api_session::{
     AuthenticatedGrant, BearerBinding as SessionBearerBinding, DeviceId as SessionDeviceId,
     ServerParameters,
@@ -75,6 +92,8 @@ use reticulum_heltec_vision_master_e290_node::runtime_measurement::{
     BootPhase as RuntimeBootPhase, HeapSnapshot as RuntimeHeapSnapshot,
     RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE, StackSnapshot as RuntimeStackSnapshot,
 };
+#[cfg(feature = "wifi-api-proof")]
+use reticulum_heltec_vision_master_e290_node::wifi_api_profile;
 use reticulum_heltec_vision_master_e290_node::{
     config,
     credential_boot::CredentialBootState,
@@ -308,9 +327,16 @@ async fn product_main(
             inert_before_rtos()
         }
     };
-    let usb_session_parameters = ServerParameters::new(
+    #[cfg(not(feature = "wifi-api-proof"))]
+    let local_api_session_parameters = ServerParameters::new(
         SessionDeviceId::new(device_api_id_from_eui48(base_mac_eui48)),
         SessionBearerBinding::UsbSerialJtag,
+    );
+    #[cfg(feature = "wifi-api-proof")]
+    let local_api_session_parameters = ServerParameters::new_for_suite(
+        SessionDeviceId::new(device_api_id_from_eui48(base_mac_eui48)),
+        SessionBearerBinding::Wifi,
+        SessionSuite::WifiQualification,
     );
     info!(
         "e290-node stage=boot base_mac={} identity=pending-durable radio_constructed=false rf_state=reset_low_nss_high",
@@ -858,7 +884,10 @@ async fn product_main(
 
     let node_rng = bootstrap_rng.clone();
     let radio_rng = bootstrap_rng.clone();
-    let usb_session_rng = bootstrap_rng.clone();
+    let local_api_session_rng = bootstrap_rng.clone();
+    #[cfg(feature = "wifi-api-proof")]
+    let wifi_network_seed =
+        (u64::from(bootstrap_rng.next_u32()) << 32) | u64::from(bootstrap_rng.next_u32());
     let mut instance_bytes = [0_u8; 16];
     bootstrap_rng.fill_bytes(&mut instance_bytes);
     let instance = NodeInstanceId::new(instance_bytes);
@@ -1101,6 +1130,7 @@ async fn product_main(
         .split();
     let (usb_authenticated_api, node_authenticated_api) =
         AUTHENTICATED_API.init(DeviceApiHandoff::new()).split();
+    #[cfg(not(feature = "wifi-api-proof"))]
     let pairing_button = Input::new(
         peripherals.GPIO21,
         InputConfig::default().with_pull(Pull::Up),
@@ -1137,6 +1167,7 @@ async fn product_main(
             inert_forever().await
         }
     };
+    #[cfg(not(feature = "wifi-api-proof"))]
     let usb_pairing_task = match usb_pairing_task::run(
         usb_boot_quarantine,
         peripherals.USB_DEVICE,
@@ -1147,8 +1178,8 @@ async fn product_main(
             usb_session_admission,
             usb_authenticated_api,
         ),
-        usb_session_parameters,
-        usb_session_rng,
+        local_api_session_parameters,
+        local_api_session_rng,
     ) {
         Ok(task) => task,
         Err(_) => {
@@ -1156,18 +1187,65 @@ async fn product_main(
             inert_forever().await
         }
     };
+    #[cfg(feature = "wifi-api-proof")]
+    let wifi_api_task = {
+        // The earliest entrypoint deliberately leaves USB quarantined for the
+        // complete Wi-Fi proof boot. Moving the opaque token here makes that
+        // one-bearer choice explicit even though the Wi-Fi task has no USB
+        // capability.
+        let _usb_boot_quarantine = usb_boot_quarantine;
+        match wifi_api_task::run(
+            spawner,
+            peripherals.WIFI,
+            base_mac_eui48,
+            wifi_network_seed,
+            wifi_api_task::WifiHandoffs::new(
+                usb_pairing_handoff,
+                usb_live_pairing_handoff,
+                usb_session_admission,
+                usb_authenticated_api,
+            ),
+            local_api_session_parameters,
+            local_api_session_rng,
+        ) {
+            Ok(task) => task,
+            Err(_) => {
+                error!("e290-node stage=spawn status=FAIL task=wifi-api");
+                inert_forever().await
+            }
+        }
+    };
     // This Embassy version reports pool exhaustion while constructing each
     // SpawnToken above; `Spawner::spawn` is infallible and returns unit.
     spawner.spawn(radio_task);
     spawner.spawn(node_task);
+    #[cfg(not(feature = "wifi-api-proof"))]
     spawner.spawn(usb_pairing_task);
+    #[cfg(feature = "wifi-api-proof")]
+    spawner.spawn(wifi_api_task);
     #[cfg(feature = "runtime-measurement-hil")]
     RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE
         .record_composition_ready(monotonic_us().saturating_sub(runtime_measurement_started_us));
+    #[cfg(not(feature = "wifi-api-proof"))]
     info!(
         "e290-node stage=composition status=PASS tasks=3 interfaces=1 primary_transport=lora future_transport_actors=deferred node_journal=mounted resident_storage_available={storage_service_available} durable_rns_inbox_available={inbox_service_available} rns_inbox_capacity=1 lxmf_store_available={lxmf_service_available} lxmf_index_slots={} lxmf_delivery_admission={lxmf_delivery_admission} lxmf_volatile_placement=external-psram lxmf_volatile_bytes={lxmf_volatile_bytes} lxmf_delayed_proof_placement=external-psram lxmf_delayed_proof_slots={} lxmf_delayed_proof_bytes={delayed_proof_storage_bytes} application_event_placement=internal-static credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} preauth_initialization_bearer=usb-serial-jtag preauth_live_pairing_bearer=usb-serial-jtag pairing_button_gpio=21 authenticated_local_api=node-dispatch bearer_session=usb-authenticated-single-flight credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} admission=session-selected runtime_patch={} flash_assumption_bytes=16777216",
         config::LXMF_INDEX_SLOTS,
         config::LXMF_DELAYED_PROOF_SLOTS,
+        credential_binding.absolute_offset(),
+        credential_binding.length(),
+        config::DURABLE_RUNTIME_BYTES,
+        env!("RETICULUM_ESP_RTOS_MAIN_STACK_PATCH"),
+    );
+    #[cfg(feature = "wifi-api-proof")]
+    info!(
+        "e290-node stage=composition status=PASS tasks=5 interfaces=1 primary_transport=lora local_api_profile=wifi-api-proof usb=boot-quarantined wifi_softap_ssid={:?} wifi_gateway={}.{}.{}.{} wifi_prefix={} wifi_tcp_port={} wifi_dhcp=enabled wifi_max_clients=1 wifi_pairing=disabled authenticated_local_api=node-dispatch bearer_session=wifi-authenticated-single-flight session_suite=wifi-qualification node_journal=mounted resident_storage_available={storage_service_available} durable_rns_inbox_available={inbox_service_available} lxmf_store_available={lxmf_service_available} lxmf_delivery_admission={lxmf_delivery_admission} credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} runtime_patch={}",
+        wifi_api_profile::softap_ssid(base_mac_eui48),
+        wifi_api_profile::GATEWAY_IPV4[0],
+        wifi_api_profile::GATEWAY_IPV4[1],
+        wifi_api_profile::GATEWAY_IPV4[2],
+        wifi_api_profile::GATEWAY_IPV4[3],
+        wifi_api_profile::GATEWAY_PREFIX_LEN,
+        wifi_api_profile::RDA1_TCP_PORT,
         credential_binding.absolute_offset(),
         credential_binding.length(),
         config::DURABLE_RUNTIME_BYTES,

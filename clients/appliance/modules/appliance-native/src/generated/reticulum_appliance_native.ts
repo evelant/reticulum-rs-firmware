@@ -655,8 +655,9 @@ export interface NativeApplianceLike {
 /**
  * Request a fresh device connection.
  *
- * Every native connector is still a deliberate stub, so this returns the
- * typed `TransportUnavailable` failure instead of silently falling back.
+ * Configured Wi-Fi owners schedule a fresh connection attempt. Reserved
+ * connector stubs return typed `TransportUnavailable` instead of silently
+ * falling back to another bearer.
  */
     reconnect(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<void>;
 /**
@@ -713,8 +714,10 @@ private constructor(pointer: UniffiHandle) {
 /**
  * Open one SQLite chat database and start its single-owner actor.
  *
- * The selected connector is currently an explicit unavailable stub. This
- * does not prevent local contacts, conversations, or durable outbox writes.
+ * The selected connector is an explicit unavailable stub. This does not
+ * prevent local contacts, conversations, or durable outbox writes. Use
+ * [`Self::open_wifi`] to configure the implemented raw-TCP Wi-Fi proof
+ * connector.
  */
     static open(databasePath: string, transport: NativeTransport): NativeApplianceLike /*throws*/ {
     return FfiConverterTypeNativeAppliance.lift(uniffiCaller.rustCallWithError(
@@ -723,6 +726,30 @@ private constructor(pointer: UniffiHandle) {
                 return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open(
         FfiConverterString.lower(databasePath, nativeModule().rustbuffer_alloc),
         FfiConverterTypeNativeTransport.lower(transport, nativeModule().rustbuffer_alloc),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    ));
+    }
+
+/**
+ * Open one SQLite chat database with the Wi-Fi raw-TCP proof connector.
+ *
+ * The endpoint must be a literal IP socket address. The current E290 proof
+ * profile listens at `192.168.4.1:29716`. The credential path must be an
+ * absolute path to the 96-byte activated credential previously seeded into
+ * the app sandbox.
+ * This suite authenticates and integrity-protects the device API but does
+ * not add application-layer confidentiality.
+ */
+    static openWifi(databasePath: string, endpoint: string, credentialPath: string): NativeApplianceLike /*throws*/ {
+    return FfiConverterTypeNativeAppliance.lift(uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError),
+            /*caller:*/ (callStatus) => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open_wifi(
+        FfiConverterString.lower(databasePath, nativeModule().rustbuffer_alloc),
+        FfiConverterString.lower(endpoint, nativeModule().rustbuffer_alloc),
+        FfiConverterString.lower(credentialPath, nativeModule().rustbuffer_alloc),
                 callStatus);
             },
             /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
@@ -799,8 +826,9 @@ private constructor(pointer: UniffiHandle) {
 /**
  * Request a fresh device connection.
  *
- * Every native connector is still a deliberate stub, so this returns the
- * typed `TransportUnavailable` failure instead of silently falling back.
+ * Configured Wi-Fi owners schedule a fresh connection attempt. Reserved
+ * connector stubs return typed `TransportUnavailable` instead of silently
+ * falling back to another bearer.
  */
     async reconnect(asyncOpts_?: { signal: AbortSignal }): Promise<void> /*throws*/ {
     const __stack = uniffiIsDebug ? new Error().stack : undefined;
@@ -1097,8 +1125,11 @@ function uniffiEnsureInitialized() {
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_func_native_bridge_contract() !== 30012) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_func_native_bridge_contract");
     }
-    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open() !== 60566) {
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open() !== 1620) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_wifi() !== 46339) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_wifi");
     }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_close() !== 5337) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_close");
@@ -1106,7 +1137,7 @@ function uniffiEnsureInitialized() {
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_contacts_json() !== 54150) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_contacts_json");
     }
-    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_reconnect() !== 6729) {
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_reconnect() !== 29970) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_reconnect");
     }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_send_message_json() !== 18594) {

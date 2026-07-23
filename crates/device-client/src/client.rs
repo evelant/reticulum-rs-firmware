@@ -14,8 +14,9 @@ use reticulum_device_api::{
 use reticulum_device_api_framing::{DecodeEvent, Record, StreamDecoder, TxAdvanceError};
 use reticulum_device_api_handoff::{MessageLength, OwnedMessage};
 use reticulum_device_api_session::{
-    ClientHandshakeError, ClientHelloFlight, ClientProofFlight, ClientRequestFaultKind,
-    ClientRequestFlight, ClientSession, ClientSessionFault, DeviceId, SessionId,
+    BearerBinding, ClientHandshakeError, ClientHelloFlight, ClientParameters, ClientProofFlight,
+    ClientRequestFaultKind, ClientRequestFlight, ClientSession, ClientSessionFault, DeviceId,
+    SessionId, SessionSuite,
 };
 use reticulum_lxmf_wire::{MessageView, WireError, WireLimits};
 use sha2::{Digest, Sha256};
@@ -91,6 +92,35 @@ impl Default for ClientConfig {
             DEFAULT_MAX_LXMF_MESSAGES,
             DEFAULT_MAX_LXMF_WIRE_BYTES,
         )
+    }
+}
+
+/// Transcript and bearer profile for one authenticated client connection.
+///
+/// Both current profiles provide authentication and integrity but no
+/// application-layer confidentiality. The Wi-Fi profile is an explicit proof
+/// profile for a WPA2 local network; it must not be presented as the final
+/// wireless security construction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientSessionProfile {
+    /// Original suite-1 USB Serial/JTAG qualification profile.
+    UsbSerialJtagQualification,
+    /// Suite-2 Wi-Fi-bound authentication and integrity qualification profile.
+    WifiQualification,
+}
+
+impl ClientSessionProfile {
+    const fn parameters(self, device_id: DeviceId) -> ClientParameters {
+        match self {
+            Self::UsbSerialJtagQualification => {
+                ClientParameters::new(device_id, BearerBinding::UsbSerialJtag)
+            }
+            Self::WifiQualification => ClientParameters::new_for_suite(
+                device_id,
+                BearerBinding::Wifi,
+                SessionSuite::WifiQualification,
+            ),
+        }
     }
 }
 
@@ -441,7 +471,7 @@ impl<T: ClientTransport> DeviceClient<T> {
     /// `transport` must use finite blocking I/O timeouts. The supplied random
     /// source provides the fresh client handshake nonce.
     pub fn connect<R>(
-        mut transport: T,
+        transport: T,
         credential: ActivatedCredential,
         rng: &mut R,
         config: ClientConfig,
@@ -449,8 +479,34 @@ impl<T: ClientTransport> DeviceClient<T> {
     where
         R: RngCore + CryptoRng,
     {
+        Self::connect_with_profile(
+            transport,
+            credential,
+            rng,
+            config,
+            ClientSessionProfile::UsbSerialJtagQualification,
+        )
+    }
+
+    /// Authenticate one already-open byte stream under an explicit local-bearer profile.
+    ///
+    /// `transport` must use finite blocking I/O timeouts. The supplied random
+    /// source provides the fresh client handshake nonce. Profile selection is
+    /// never inferred from the stream or endpoint, so a Wi-Fi connection cannot
+    /// silently fall back to the USB transcript.
+    pub fn connect_with_profile<R>(
+        mut transport: T,
+        credential: ActivatedCredential,
+        rng: &mut R,
+        config: ClientConfig,
+        profile: ClientSessionProfile,
+    ) -> Result<Self, ClientError>
+    where
+        R: RngCore + CryptoRng,
+    {
         let device_id = credential.device_id();
-        let (parameters, credential) = credential.into_handshake();
+        let parameters = profile.parameters(device_id);
+        let credential = credential.into_handshake();
         let deadline = deadline(config.handshake_timeout, "handshake")?;
         let hello = ClientHelloFlight::begin(parameters, credential, rng)
             .map_err(ClientError::Handshake)?;

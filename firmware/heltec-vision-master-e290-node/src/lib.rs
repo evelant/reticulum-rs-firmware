@@ -31,6 +31,7 @@ pub mod session_admission_handoff;
 pub mod usb_authenticated_session;
 pub mod usb_pairing_policy;
 pub mod usb_pairing_records;
+pub mod wifi_api_profile;
 
 #[cfg(test)]
 extern crate std;
@@ -583,6 +584,48 @@ mod tests {
                 "USB pairing owner reached forbidden product capability {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn wifi_api_proof_replaces_usb_and_stays_outside_the_interface_fabric() {
+        let manifest = include_str!("../Cargo.toml");
+        assert!(manifest.contains("wifi-api-proof = ["));
+        for dependency in [
+            "\"dep:edge-dhcp\"",
+            "\"dep:edge-nal-embassy\"",
+            "\"dep:embassy-net\"",
+            "\"dep:esp-radio\"",
+            "\"esp-rtos/esp-radio\"",
+        ] {
+            assert!(
+                manifest.contains(dependency),
+                "Wi-Fi proof must retain its opt-in dependency: {dependency}"
+            );
+        }
+
+        let main = include_str!("main.rs");
+        assert!(main.contains("#[cfg(feature = \"wifi-api-proof\")]\nmod wifi_api_task;"));
+        assert!(main.contains("SessionBearerBinding::Wifi"));
+        assert!(main.contains("SessionSuite::WifiQualification"));
+        assert!(main.contains("peripherals.WIFI"));
+        assert!(main.contains("let _usb_boot_quarantine = usb_boot_quarantine;"));
+        assert!(main.contains("spawner.spawn(usb_pairing_task);"));
+        assert!(main.contains("spawner.spawn(wifi_api_task);"));
+        assert!(main.contains("local_api_profile=wifi-api-proof usb=boot-quarantined"));
+
+        let wifi = include_str!("wifi_api_task.rs");
+        assert!(wifi.contains("AccessPointConfig::default()"));
+        assert!(wifi.contains(".with_auth_method(AuthenticationMethod::Wpa2Personal)"));
+        assert!(wifi.contains(".with_password(profile::SOFTAP_DEVELOPMENT_PASSPHRASE.into())"));
+        assert!(!wifi.contains("softap_open=true"));
+        assert!(wifi.contains("embassy_net::Config::ipv4_static"));
+        assert!(wifi.contains("pub async fn run_dhcp"));
+        assert!(wifi.contains("TcpSocket::new"));
+        assert!(wifi.contains("port: profile::RDA1_TCP_PORT"));
+        assert!(wifi.contains("UsbAuthenticatedSession::new(session_parameters)"));
+        assert!(wifi.contains("Only one TCP connection is accepted at a time."));
+        assert!(!wifi.contains("PacketInterfaceId"));
+        assert!(!wifi.contains("register_interface"));
     }
 
     #[test]

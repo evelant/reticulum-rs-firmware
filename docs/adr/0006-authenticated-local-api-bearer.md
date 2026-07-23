@@ -137,10 +137,13 @@ is terminal until USB reset or re-enumeration. This initial source profile
 intentionally omits resumption, protocol retries, close records, encryption,
 rate limiting/attempt policy, and concurrent requests. Its admission/handoff
 and node-dispatch boundary is bearer-neutral. The present integrity-only
-qualification suite is explicitly
-USB Serial/JTAG-only; later BLE and Wi-Fi adapters can reuse the ownership
-boundary after adding and qualifying their binding/suite and supplying their
-own connection and transmission mechanics. Before two bearers run
+suite 1 remains explicitly USB Serial/JTAG-only and byte-for-byte compatible
+with its committed vectors. A separate integrity-only suite 2 is now bound
+exclusively to the Wi-Fi local-API profile and reuses the same ownership
+boundary under a distinct transcript. Portable client/server and partial-stream
+tests cover that binding, but the E290 SoftAP/TCP endpoint is not yet powered
+qualified. BLE still requires its own binding/suite and connection mechanics.
+Before two bearers run
 simultaneously, the product must also choose either globally unique,
 bearer-qualified connection/session epochs or strictly disjoint per-bearer
 reply channels governed by one global pairing-exclusivity coordinator. A second
@@ -290,11 +293,12 @@ comparison is constant-time, session key material is zeroized where practical,
 and the future bearer manager must enforce handshake timeout and attempt-rate
 policy around this core.
 
-The first wired qualification suite may use HKDF-SHA256 plus
+The USB and Wi-Fi qualification suites use HKDF-SHA256 plus
 HMAC-SHA256 truncated to the fixed 128-bit record tag. That suite provides
 authentication and integrity, not confidentiality, and is labelled and gated
-as such. It is not enabled for Wi-Fi or BLE and is not sufficient for private
-LXMF/configuration traffic against a passive USB observer. A production client
+as such. Each suite is bound to exactly one bearer; neither is enabled for BLE.
+They are not sufficient for private LXMF/configuration traffic against a
+passive observer on their respective bearer. A production client
 profile selects a reviewed AEAD suite, binds the canonical header as associated
 data and disables any downgrade to the qualification-only suite. The fixed
 128-bit tag and session ID do not require a framing change for that transition.
@@ -363,9 +367,9 @@ physical attacker and must not be described as tamper-resistant.
 
 - USB provides the missing local admission edge for the complete LoRa-first
   E290 path without becoming a second Reticulum interface.
-- Framing, authenticated grant, admission, and node acceptance remain reusable
-  by later BLE or Wi-Fi local-API bearers. The current session suite must be
-  extended and separately qualified for each non-USB binding.
+- Framing, authenticated grant, admission, and node acceptance are reused by
+  the separately transcript-bound Wi-Fi suite. BLE still needs its own
+  extension and qualification.
 - A future USB/Wi-Fi/BLE Reticulum packet actor still uses the separate
   interface registry and native-packet ownership contract from ADR 0003.
 - Framing and handoff are allocation-free and fixed-capacity; session and
@@ -382,6 +386,10 @@ physical attacker and must not be described as tamper-resistant.
   reset-nonce, sequence gap/duplicate/overflow, wrong-session and bad-tag
   rejection, partial hello/proof/reply acknowledgement typestate, exact
   correlation matching and old-reply/new-session epoch-alias rejection.
+- Complete in the portable session/client core: Wi-Fi suite 2 is explicitly
+  bearer-bound, rejects suite/bearer mismatch on both peers, survives
+  arbitrarily partial stream reads/writes, and advances the shared epoch across
+  reconnect. This is host evidence, not powered E290 Wi-Fi qualification.
 - Complete in the portable authority: immutable fixed-capacity snapshot
   validation, stable permission vocabulary, constant-time active selection,
   zeroizing handoff to session, PSK-free revocation tombstones, grant-to-lease

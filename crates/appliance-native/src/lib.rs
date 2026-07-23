@@ -3,8 +3,9 @@
 //! The immutable bridge contract establishes that an installed application and
 //! its generated TypeScript declarations agree with the Rust device API. The
 //! [`NativeAppliance`] facade additionally owns durable offline chat state while
-//! platform USB, BLE, and Wi-Fi connector implementations remain explicit
-//! unavailable stubs.
+//! platform USB and BLE connector implementations remain explicit unavailable
+//! stubs. The opt-in Wi-Fi constructor adds the first authenticated raw-TCP
+//! proof connector.
 
 #![deny(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -15,13 +16,14 @@ use reticulum_device_api::{
 };
 
 mod appliance;
+mod wifi;
 
 pub use appliance::{NativeAppliance, NativeApplianceError, NativeTransport};
 
 /// Incompatible generation of the callable native bridge.
 pub const BRIDGE_API_MAJOR: u16 = 1;
 /// Backward-compatible revision of the callable native bridge.
-pub const BRIDGE_API_MINOR: u16 = 1;
+pub const BRIDGE_API_MINOR: u16 = 2;
 
 /// Exact protocol contract compiled into a native client binary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
@@ -76,7 +78,7 @@ mod tests {
             native_bridge_contract(),
             NativeBridgeContract {
                 bridge_api_major: 1,
-                bridge_api_minor: 1,
+                bridge_api_minor: 2,
                 device_api_major: 1,
                 device_api_minor: 4,
                 max_message_bytes: 512,

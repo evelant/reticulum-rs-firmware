@@ -848,7 +848,12 @@ port I/O and no unauthenticated fallback. Schema-2 acceptance retains exact
 authorization provenance. The current source graph serves that boundary
 through its minimal single-flight USB bearer; capabilities, identity, durable
 submission, sequential status, peer proof, and fresh post-re-enumeration status
-are powered-qualified. BLE and Wi-Fi implementations do not yet exist.
+are powered-qualified. An opt-in Wi-Fi SoftAP/raw-TCP bearer now reuses this
+boundary with a separately bound session suite and a host-tested native client.
+Its exact image has been safely flashed to one credentialed E290 with product
+data preserved, but association, DHCP, authenticated exchange, reconnect, and
+LoRa coexistence remain manually powered qualification. BLE remains future
+work.
 The
 resident credential runtime now also retains live pairing permits, proofs,
 secrets, typed store candidates, and reconciliation owners through definite

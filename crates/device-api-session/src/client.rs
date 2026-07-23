@@ -16,7 +16,7 @@ use crate::{
     protocol::{
         BearerBinding, ClientHello, DeviceId, HandshakeRecordError, RECORD_KIND_CLIENT_PROOF,
         RECORD_KIND_REQUEST, RECORD_KIND_RESPONSE, RECORD_KIND_SERVER_PROOF, ServerHello,
-        SessionId, proof_record, take_proof,
+        SessionId, SessionSuite, proof_record, take_proof,
     },
 };
 
@@ -25,14 +25,28 @@ use crate::{
 pub struct ClientParameters {
     expected_device_id: DeviceId,
     bearer: BearerBinding,
+    suite: SessionSuite,
 }
 
 impl ClientParameters {
-    /// Bind a handshake attempt to one expected device ID and local bearer.
+    /// Bind a suite-1 handshake to one expected device ID and local bearer.
+    ///
+    /// This compatibility constructor retains the original USB qualification
+    /// suite. Use [`Self::new_for_suite`] for another supported suite.
     pub const fn new(expected_device_id: DeviceId, bearer: BearerBinding) -> Self {
+        Self::new_for_suite(expected_device_id, bearer, SessionSuite::UsbQualification)
+    }
+
+    /// Bind a handshake attempt to one device, bearer, and explicit suite.
+    pub const fn new_for_suite(
+        expected_device_id: DeviceId,
+        bearer: BearerBinding,
+        suite: SessionSuite,
+    ) -> Self {
         Self {
             expected_device_id,
             bearer,
+            suite,
         }
     }
 
@@ -44,6 +58,11 @@ impl ClientParameters {
     /// Actual local bearer carrying this handshake.
     pub const fn bearer(self) -> BearerBinding {
         self.bearer
+    }
+
+    /// Cryptographic session suite this client requires.
+    pub const fn suite(self) -> SessionSuite {
+        self.suite
     }
 }
 
@@ -101,6 +120,22 @@ pub enum ClientHandshakeError {
     QualificationSuiteForbidden {
         /// Bearer on which the suite was rejected.
         bearer: BearerBinding,
+    },
+    /// A non-legacy suite was configured for a bearer it does not permit.
+    SuiteBearerMismatch {
+        /// Configured session suite.
+        suite: SessionSuite,
+        /// Bearer configured for the handshake attempt.
+        bearer: BearerBinding,
+        /// Sole bearer permitted by the configured suite.
+        required: BearerBinding,
+    },
+    /// Server selected a different supported suite than the client requires.
+    SuiteMismatch {
+        /// Suite required by the client instance.
+        expected: SessionSuite,
+        /// Suite declared by the server.
+        observed: SessionSuite,
     },
     /// Server selected a different bearer than the client instance owns.
     BearerMismatch {
@@ -164,16 +199,29 @@ impl ClientHelloFlight {
     where
         R: RngCore + CryptoRng,
     {
-        if parameters.bearer != BearerBinding::UsbSerialJtag {
-            return Err(ClientHandshakeError::QualificationSuiteForbidden {
+        let required_bearer = parameters.suite.required_bearer();
+        if parameters.bearer != required_bearer {
+            if parameters.suite == SessionSuite::UsbQualification {
+                return Err(ClientHandshakeError::QualificationSuiteForbidden {
+                    bearer: parameters.bearer,
+                });
+            }
+            return Err(ClientHandshakeError::SuiteBearerMismatch {
+                suite: parameters.suite,
                 bearer: parameters.bearer,
+                required: required_bearer,
             });
         }
 
         let mut client_nonce = [0_u8; 32];
         rng.try_fill_bytes(&mut client_nonce)
             .map_err(ClientHandshakeError::Entropy)?;
-        let client_hello = ClientHello::new(parameters.bearer, credential.id, client_nonce);
+        let client_hello = ClientHello::new_for_suite(
+            parameters.suite,
+            parameters.bearer,
+            credential.id,
+            client_nonce,
+        );
         let frame = FramedRecord::encode(&client_hello.into_record())?;
         Ok(Self {
             pending: AwaitingServerHello {
@@ -228,6 +276,12 @@ impl AwaitingServerHello {
     /// Any error consumes and terminates this handshake attempt.
     pub fn accept(self, record: Record) -> Result<AwaitingServerProof, ClientHandshakeError> {
         let server_hello = ServerHello::from_record(record)?;
+        if server_hello.suite() != self.parameters.suite {
+            return Err(ClientHandshakeError::SuiteMismatch {
+                expected: self.parameters.suite,
+                observed: server_hello.suite(),
+            });
+        }
         if server_hello.bearer() != self.parameters.bearer {
             return Err(ClientHandshakeError::BearerMismatch {
                 expected: self.parameters.bearer,

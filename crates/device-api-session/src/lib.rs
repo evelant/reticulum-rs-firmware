@@ -1,10 +1,11 @@
 //! Bounded authenticated sessions for local device-API byte-stream bearers.
 //!
-//! This crate implements the USB-qualification handshake selected by ADR 0006.
-//! It is allocation-free, `no_std`, transport-independent above a declared
-//! bearer binding, and intentionally contains no credential persistence,
-//! pairing UI, USB driver, logical CBOR dispatch, flash owner, Reticulum
-//! identity key, or radio capability.
+//! This crate implements the USB qualification handshake selected by ADR 0006
+//! plus a separately transcript-bound Wi-Fi qualification suite. It is
+//! allocation-free, `no_std`, transport-independent above a declared bearer
+//! binding, and intentionally contains no credential persistence, pairing UI,
+//! USB or Wi-Fi driver, logical CBOR dispatch, flash owner, Reticulum identity
+//! key, or radio capability.
 //!
 //! A successful server handshake derives one opaque [`AuthenticatedGrant`] for
 //! each accepted request. The grant contains only credential identity and
@@ -50,7 +51,7 @@ pub use protocol::{
     QUALIFICATION_SUITE, RECORD_KIND_CLIENT_HELLO, RECORD_KIND_CLIENT_PROOF, RECORD_KIND_CLOSE,
     RECORD_KIND_REQUEST, RECORD_KIND_RESPONSE, RECORD_KIND_SERVER_HELLO, RECORD_KIND_SERVER_PROOF,
     SERVER_FLAG_DEVICE_API, SERVER_FLAG_INTEGRITY_ONLY, SERVER_FLAG_QUALIFICATION_ONLY,
-    ServerHello, SessionId,
+    ServerHello, SessionId, SessionSuite, WIFI_QUALIFICATION_SUITE,
 };
 pub use reticulum_device_api_credentials::{CredentialGeneration, CredentialId};
 pub use server::{

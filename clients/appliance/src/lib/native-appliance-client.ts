@@ -19,6 +19,7 @@ import { assertNativeBridgeContract } from "./native-contract.ts";
 import { type NativeErrorPredicate, normalizeNativeError } from "./native-error.ts";
 
 const DATABASE_FILE_NAME = "reticulum-lxmf-chat.sqlite3";
+const WIFI_CREDENTIAL_FILE_NAME = "reticulum-device-credential.rdpkey";
 const NATIVE_ONBOARDING: OnboardingView = { available: false, snapshot: null };
 
 export interface NativeApplianceBridge {
@@ -45,7 +46,7 @@ function parseNativeJson<T>(label: string, value: string): T {
 
 function unsupportedOnboarding(): never {
   throw new Error(
-    "Pairing is not available through the native bridge yet; BLE, Wi-Fi, and USB remain explicit transport stubs.",
+    "Pairing is not available through the native bridge yet; seed an activated credential over the qualified USB workflow before using the Wi-Fi proof connector.",
   );
 }
 
@@ -55,6 +56,11 @@ async function loadNativeApplianceRuntime(): Promise<NativeApplianceRuntime> {
     import("expo-file-system"),
   ]);
   const databaseUri = new fileSystem.File(fileSystem.Paths.document, DATABASE_FILE_NAME).uri;
+  const wifiCredentialUri = new fileSystem.File(
+    fileSystem.Paths.document,
+    WIFI_CREDENTIAL_FILE_NAME,
+  ).uri;
+  const wifiEndpoint = process.env.EXPO_PUBLIC_APPLIANCE_WIFI_ENDPOINT?.trim() ?? "";
   return {
     bridge: {
       contract: bindings.nativeBridgeContract(),
@@ -63,6 +69,13 @@ async function loadNativeApplianceRuntime(): Promise<NativeApplianceRuntime> {
         if (bindings.NativeAppliance.instanceOf(appliance)) appliance.uniffiDestroy();
       },
       open(databasePath): NativeApplianceLike {
+        if (wifiEndpoint !== "") {
+          return bindings.NativeAppliance.openWifi(
+            databasePath,
+            wifiEndpoint,
+            nativePathFromFileUri(wifiCredentialUri),
+          );
+        }
         return bindings.NativeAppliance.open(
           databasePath,
           bindings.NativeTransport.BluetoothLowEnergy,
@@ -77,9 +90,10 @@ async function loadNativeApplianceRuntime(): Promise<NativeApplianceRuntime> {
  * Offline-first native adapter backed by the Rust single-owner actor and an
  * app-private SQLite database.
  *
- * BLE is selected as the intended mobile bearer, but it remains an explicit
- * unavailable connector until the platform GATT implementation lands. Local
- * contacts, timelines, and durable outbox writes work in the meantime.
+ * `EXPO_PUBLIC_APPLIANCE_WIFI_ENDPOINT` opts a native build into the raw-TCP
+ * Wi-Fi proof connector and its app-private activated credential. Without that
+ * build-time endpoint, BLE remains selected as an explicit future-work stub.
+ * Local contacts, timelines, and durable outbox writes work in both modes.
  */
 export class NativeApplianceClient implements ApplianceClient {
   readonly #loadRuntime: NativeApplianceRuntimeLoader;

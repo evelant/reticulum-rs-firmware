@@ -12,11 +12,12 @@ use reticulum_device_api_handoff::{LocalApiReply, MessageLength, OwnedMessage};
 use reticulum_device_api_session::{
     ActiveCredential, BearerBinding, ClientHello, CredentialGeneration, CredentialId,
     PendingClientProof, ServerHelloFlight, ServerParameters, ServerSession, SessionEpochAllocator,
+    SessionSuite,
 };
 use reticulum_lxmf_wire::{MessageView, WireLimits};
 use sha2::{Digest, Sha256};
 
-use super::{BasicLxmfSend, ClientConfig, ClientError, DeviceClient};
+use super::{BasicLxmfSend, ClientConfig, ClientError, ClientSessionProfile, DeviceClient};
 use crate::{ACTIVATED_CREDENTIAL_STATE_BYTES, ActivatedCredential, CredentialStateError};
 
 const DEVICE_BYTES: [u8; 16] = [0x11; 16];
@@ -74,6 +75,8 @@ struct MockPeer {
     wire: Vec<u8>,
     request_count: usize,
     last_send: Option<OwnedSend>,
+    parameters: ServerParameters,
+    max_io_chunk: usize,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -87,8 +90,23 @@ struct OwnedSend {
 
 impl MockPeer {
     fn new() -> Self {
+        Self::new_for_profile(ClientSessionProfile::UsbSerialJtagQualification, usize::MAX)
+    }
+
+    fn new_for_profile(profile: ClientSessionProfile, max_io_chunk: usize) -> Self {
         let wire = sample_lxmf_wire(b"hello", b"from peer");
         let summary = sample_lxmf_summary(1, &wire);
+        let device_id = reticulum_device_api_session::DeviceId::new(DEVICE_BYTES);
+        let parameters = match profile {
+            ClientSessionProfile::UsbSerialJtagQualification => {
+                ServerParameters::new(device_id, BearerBinding::UsbSerialJtag)
+            }
+            ClientSessionProfile::WifiQualification => ServerParameters::new_for_suite(
+                device_id,
+                BearerBinding::Wifi,
+                SessionSuite::WifiQualification,
+            ),
+        };
         Self {
             decoder: StreamDecoder::new(),
             output: VecDeque::new(),
@@ -99,6 +117,8 @@ impl MockPeer {
             wire,
             request_count: 0,
             last_send: None,
+            parameters,
+            max_io_chunk,
         }
     }
 
@@ -114,10 +134,7 @@ impl MockPeer {
                         CredentialGeneration::new(GENERATION),
                         PSK,
                     ),
-                    ServerParameters::new(
-                        reticulum_device_api_session::DeviceId::new(DEVICE_BYTES),
-                        BearerBinding::UsbSerialJtag,
-                    ),
+                    self.parameters,
                     &mut self.epochs,
                     &mut self.rng,
                 )
@@ -248,7 +265,7 @@ impl io::Read for MockPeer {
         if self.output.is_empty() {
             return Err(io::Error::from(io::ErrorKind::WouldBlock));
         }
-        let count = output.len().min(self.output.len());
+        let count = output.len().min(self.output.len()).min(self.max_io_chunk);
         for byte in &mut output[..count] {
             *byte = self.output.pop_front().expect("count is bounded by queue");
         }
@@ -258,7 +275,8 @@ impl io::Read for MockPeer {
 
 impl io::Write for MockPeer {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        for byte in bytes {
+        let count = bytes.len().min(self.max_io_chunk);
+        for byte in &bytes[..count] {
             match self.decoder.push(*byte) {
                 DecodeEvent::Pending => {}
                 DecodeEvent::Record(record) => self.process(record),
@@ -267,7 +285,7 @@ impl io::Write for MockPeer {
                 | DecodeEvent::Overflow => panic!("client emitted malformed framing"),
             }
         }
-        Ok(bytes.len())
+        Ok(count)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -419,6 +437,30 @@ fn real_handshake_and_multi_request_session_cover_typed_lxmf_surface() {
             idempotency_key,
         })
     );
+}
+
+#[test]
+fn wifi_profile_uses_suite_two_across_partial_stream_io() {
+    let credential = ActivatedCredential::decode(&active_state()).expect("credential decodes");
+    let config = ClientConfig::new(Duration::from_secs(1), Duration::from_secs(1), 8, 4_096);
+    let mut client = DeviceClient::connect_with_profile(
+        MockPeer::new_for_profile(ClientSessionProfile::WifiQualification, 3),
+        credential,
+        &mut FixedRng::new(0x99),
+        config,
+        ClientSessionProfile::WifiQualification,
+    )
+    .expect("Wi-Fi profile authenticates across partial stream I/O");
+
+    assert_eq!(client.device_id().as_bytes(), &DEVICE_BYTES);
+    assert_eq!(
+        client
+            .identity_summary()
+            .expect("authenticated request succeeds")
+            .lxmf_delivery_destination(),
+        Some(LXMF_LOCAL)
+    );
+    assert_eq!(client.into_transport().request_count, 1);
 }
 
 #[test]

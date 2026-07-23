@@ -22,7 +22,7 @@ use crate::{
     protocol::{
         BearerBinding, ClientHello, DeviceId, HandshakeRecordError, RECORD_KIND_CLIENT_PROOF,
         RECORD_KIND_REQUEST, RECORD_KIND_RESPONSE, RECORD_KIND_SERVER_PROOF, ServerHello,
-        SessionId, proof_record, take_proof,
+        SessionId, SessionSuite, proof_record, take_proof,
     },
 };
 
@@ -31,12 +31,29 @@ use crate::{
 pub struct ServerParameters {
     device_id: DeviceId,
     bearer: BearerBinding,
+    suite: SessionSuite,
 }
 
 impl ServerParameters {
-    /// Bind a handshake attempt to one stable device ID and physical bearer.
+    /// Bind a suite-1 handshake to one stable device ID and physical bearer.
+    ///
+    /// This compatibility constructor retains the original USB qualification
+    /// suite. Use [`Self::new_for_suite`] for another supported suite.
     pub const fn new(device_id: DeviceId, bearer: BearerBinding) -> Self {
-        Self { device_id, bearer }
+        Self::new_for_suite(device_id, bearer, SessionSuite::UsbQualification)
+    }
+
+    /// Bind a handshake attempt to one device, bearer, and explicit suite.
+    pub const fn new_for_suite(
+        device_id: DeviceId,
+        bearer: BearerBinding,
+        suite: SessionSuite,
+    ) -> Self {
+        Self {
+            device_id,
+            bearer,
+            suite,
+        }
     }
 
     /// Stable public device API identifier.
@@ -47,6 +64,11 @@ impl ServerParameters {
     /// Actual bearer this server instance owns.
     pub const fn bearer(self) -> BearerBinding {
         self.bearer
+    }
+
+    /// Cryptographic session suite this server requires.
+    pub const fn suite(self) -> SessionSuite {
+        self.suite
     }
 }
 
@@ -141,6 +163,22 @@ pub enum HandshakeError {
         /// Bearer on which the suite was rejected.
         bearer: BearerBinding,
     },
+    /// A non-legacy suite was configured for a bearer it does not permit.
+    SuiteBearerMismatch {
+        /// Configured session suite.
+        suite: SessionSuite,
+        /// Bearer configured for the handshake attempt.
+        bearer: BearerBinding,
+        /// Sole bearer permitted by the configured suite.
+        required: BearerBinding,
+    },
+    /// Client requested a different supported suite than the server owns.
+    SuiteMismatch {
+        /// Suite declared by the client.
+        client: SessionSuite,
+        /// Suite configured by the server.
+        server: SessionSuite,
+    },
     /// Credential selection or proof failed without revealing which fact differed.
     AuthenticationFailed,
     /// Qualified entropy failed while producing the fresh server nonce.
@@ -200,9 +238,23 @@ impl ServerHelloFlight {
     where
         R: RngCore + CryptoRng,
     {
-        if parameters.bearer != BearerBinding::UsbSerialJtag {
-            return Err(HandshakeError::QualificationSuiteForbidden {
+        let required_bearer = parameters.suite.required_bearer();
+        if parameters.bearer != required_bearer {
+            if parameters.suite == SessionSuite::UsbQualification {
+                return Err(HandshakeError::QualificationSuiteForbidden {
+                    bearer: parameters.bearer,
+                });
+            }
+            return Err(HandshakeError::SuiteBearerMismatch {
+                suite: parameters.suite,
                 bearer: parameters.bearer,
+                required: required_bearer,
+            });
+        }
+        if client_hello.suite() != parameters.suite {
+            return Err(HandshakeError::SuiteMismatch {
+                client: client_hello.suite(),
+                server: parameters.suite,
             });
         }
         if client_hello.bearer() != parameters.bearer {
@@ -219,6 +271,7 @@ impl ServerHelloFlight {
         rng.try_fill_bytes(&mut server_nonce)
             .map_err(HandshakeError::Entropy)?;
         let server_hello = ServerHello::new(
+            parameters.suite,
             parameters.bearer,
             parameters.device_id,
             server_nonce,
