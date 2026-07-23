@@ -280,7 +280,7 @@ Run the binary with `--help` or `-h` to print the exact argument grammar.
   Native app, NomadNet, or Micron renderer. The separate
   [`reticulum-lxmf-chat-service`](../lxmf-chat-service/README.md) now provides
   exact-serial discovery, background reconciliation/polling, reconnect backoff,
-  and a bundled loopback SPA over the same store and device API.
+  and a bundled loopback Expo web export over the same store and device API.
 - The CLI has package tests, restart-tested SQLite semantics, and a completed
   two-board powered workflow. Physical disconnect matrices and soak remain
   open.

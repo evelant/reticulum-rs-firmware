@@ -98,7 +98,10 @@ proof unless a failing test promotes one into a release blocker.
 
 - USB Serial/JTAG is the first usable authenticated bearer. The session and
   logical API are bearer-neutral, but BLE and Wi-Fi provisioning, stronger
-  wireless authentication policy, credential UX, and recovery UX are deferred.
+  wireless authentication policy, and full recovery UX are deferred. Managed
+  host profiles now expose secret-free initialization, pairing, Pending
+  resume/abort, and reset progress through the Expo client, but the live
+  first-run path and activation-ambiguous repair remain to qualify.
 - The current session authenticates records but does not encrypt the USB
   transcript. The diagnostic and chat-alpha CLIs accept title/content bytes in
   process arguments, where shell history or same-host process inspection can
@@ -110,13 +113,15 @@ proof unless a failing test promotes one into a release blocker.
   [host appliance service](../crates/lxmf-chat-service/README.md) adds exact USB-
   serial discovery, a sole serial/database actor, automatic reconnect/backoff,
   continuous one-step inbox/status work, immutable state invalidations, and a
-  bundled loopback SPA. It remains a computer-side companion: there is still no
-  SPA served by the E290, Wi-Fi or BLE client bearer, React Native application,
-  display UI, NomadNet client, or Micron client.
+  bundled loopback Expo web export. It remains a computer-side companion: there
+  is still no client served by the E290, Wi-Fi or BLE client bearer, installed
+  native Expo application, display UI, NomadNet client, or Micron client.
 - The host service has no operating-system single-instance lock, notification
-  service, account migration, database encryption, pairing/credential UX, or
-  cross-platform disconnect/host-suspend matrix. Do not run it concurrently
-  with another service or the foreground CLI against the same database/device.
+  service, account migration, database encryption, activation-ambiguous repair,
+  or cross-platform disconnect/host-suspend matrix. Managed profiles currently
+  fail closed outside Unix until equivalent private-file semantics exist. Do
+  not run it concurrently with another service or the foreground CLI against
+  the same database/device.
   Current firmware accepts a canonical replacement handshake when the old
   session is idle, but a busy owner is never displaced and a terminal session
   fault still requires USB reset/re-enumeration.

@@ -20,9 +20,8 @@ rand_core.workspace = true
 reticulum-device-api = { path = "../crates/device-api", default-features = false, features = ["experimental-rns-data", "experimental-rns-inbox", "experimental-lxmf"] }
 reticulum-device-api-framing = { path = "../crates/device-api-framing", default-features = false }
 reticulum-device-api-handoff = { path = "../crates/device-api-handoff", default-features = false }
-reticulum-device-api-pairing = { path = "../crates/device-api-pairing", default-features = false }
-reticulum-device-api-pairing-control = { path = "../crates/device-api-pairing-control", default-features = false }
 reticulum-device-api-session = { path = "../crates/device-api-session", default-features = false }
+reticulum-device-pairing-client = { path = "../crates/device-pairing-client" }
 reticulum-lxmf-model = { path = "../crates/lxmf-model", default-features = false }
 reticulum-lxmf-store = { path = "../crates/lxmf-store", default-features = false }
 reticulum-lxmf-wire = { path = "../crates/lxmf-wire", default-features = false }

@@ -2061,6 +2061,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "reticulum-device-pairing-client"
+version = "0.1.0"
+dependencies = [
+ "getrandom",
+ "reticulum-device-api-framing",
+ "reticulum-device-api-pairing",
+ "reticulum-device-api-pairing-control",
+ "rustix",
+ "serialport",
+ "zeroize",
+]
+
+[[package]]
 name = "reticulum-heltec-tracker-v2"
 version = "0.1.0"
 dependencies = [
@@ -2282,14 +2295,17 @@ dependencies = [
  "rand_core 0.6.4",
  "reticulum-device-api",
  "reticulum-device-client",
+ "reticulum-device-pairing-client",
  "reticulum-lxmf-chat-app",
  "reticulum-lxmf-chat-core",
+ "rustix",
  "serde",
  "serde_json",
  "serialport",
  "subtle",
  "tokio",
  "tower",
+ "ts-rs",
 ]
 
 [[package]]
@@ -3174,6 +3190,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "ts-rs"
+version = "12.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "756050066659291d47a554a9f558125db17428b073c5ffce1daf5dcb0f7231d8"
+dependencies = [
+ "thiserror",
+ "ts-rs-macros",
+]
+
+[[package]]
+name = "ts-rs-macros"
+version = "12.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38d90eea51bc7988ef9e674bf80a85ba6804739e535e9cab48e4bb34a8b652aa"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+ "termcolor",
+]
+
+[[package]]
 name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3422,9 +3460,8 @@ dependencies = [
  "reticulum-device-api",
  "reticulum-device-api-framing",
  "reticulum-device-api-handoff",
- "reticulum-device-api-pairing",
- "reticulum-device-api-pairing-control",
  "reticulum-device-api-session",
+ "reticulum-device-pairing-client",
  "reticulum-heltec-vision-master-e290-node",
  "reticulum-lxmf-model",
  "reticulum-lxmf-store",

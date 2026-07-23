@@ -24,11 +24,14 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tokio::sync::{Semaphore, oneshot};
 use tokio::task::JoinHandle;
+use ts_rs::TS;
 
+use crate::bindings::{JsonSafeInteger, deserialize_json_safe_u64, serialize_json_safe_u64};
+use crate::onboarding::{OnboardingError, OnboardingHandle, OnboardingSnapshot};
 use crate::runtime::{ApplianceHandle, ServiceError};
 
 const BODY_LIMIT: usize = 16 * 1024;
-const MAX_CONTACT_NAME_BYTES: usize = 256;
+pub(crate) const MAX_CONTACT_NAME_BYTES: usize = 256;
 const MAX_SSE_CLIENTS: usize = 8;
 const SESSION_COOKIE: &str = "reticulum_lxmf_session";
 const CLIENT_HEADER: &str = "x-reticulum-client";
@@ -96,6 +99,7 @@ impl WebServer {
 #[derive(Clone)]
 struct WebState {
     appliance: ApplianceHandle,
+    onboarding: Option<OnboardingHandle>,
     expected_host: String,
     expected_origin: String,
     capability: Arc<String>,
@@ -104,6 +108,15 @@ struct WebState {
 
 /// Bind the loopback server, generate a process capability, and spawn serving.
 pub async fn serve_web(appliance: ApplianceHandle, config: WebConfig) -> Result<WebServer, String> {
+    serve_web_with_onboarding(appliance, None, config).await
+}
+
+/// Bind the loopback server with an optional backend-owned first-run lifecycle.
+pub async fn serve_web_with_onboarding(
+    appliance: ApplianceHandle,
+    onboarding: Option<OnboardingHandle>,
+    config: WebConfig,
+) -> Result<WebServer, String> {
     let listener = tokio::net::TcpListener::bind(SocketAddr::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         config.port,
@@ -118,6 +131,7 @@ pub async fn serve_web(appliance: ApplianceHandle, config: WebConfig) -> Result<
     let capability = Arc::new(generate_capability()?);
     let state = WebState {
         appliance,
+        onboarding,
         expected_host,
         expected_origin: expected_origin.clone(),
         capability: capability.clone(),
@@ -146,6 +160,10 @@ fn router(state: WebState) -> Router {
         .route("/app.js", get(app_js))
         .route("/style.css", get(style_css))
         .route("/api/v1/session", post(create_session))
+        .route("/api/v1/onboarding", get(onboarding))
+        .route("/api/v1/onboarding/start", post(start_onboarding))
+        .route("/api/v1/onboarding/refresh", post(refresh_onboarding))
+        .route("/api/v1/onboarding/recover", post(recover_onboarding))
         .route("/api/v1/snapshot", get(snapshot))
         .route("/api/v1/contacts", get(contacts))
         .route("/api/v1/contacts/{destination}", put(upsert_contact))
@@ -159,6 +177,88 @@ fn router(state: WebState) -> Router {
         .with_state(state)
 }
 
+#[derive(Serialize, TS)]
+pub(crate) struct OnboardingView {
+    available: bool,
+    snapshot: Option<OnboardingSnapshot>,
+}
+
+async fn onboarding(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
+    require_api(&state, &headers, false)?;
+    let snapshot = state
+        .onboarding
+        .as_ref()
+        .map(|onboarding| (*onboarding.snapshot()).clone());
+    Ok(Json(OnboardingView {
+        available: snapshot.is_some(),
+        snapshot,
+    })
+    .into_response())
+}
+
+async fn start_onboarding(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
+    require_api(&state, &headers, true)?;
+    state
+        .onboarding
+        .as_ref()
+        .ok_or_else(|| HttpError::not_found("managed onboarding is not enabled"))?
+        .start()
+        .await
+        .map_err(HttpError::from_onboarding)?;
+    Ok(StatusCode::ACCEPTED.into_response())
+}
+
+async fn refresh_onboarding(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
+    require_api(&state, &headers, true)?;
+    state
+        .onboarding
+        .as_ref()
+        .ok_or_else(|| HttpError::not_found("managed onboarding is not enabled"))?
+        .refresh()
+        .await
+        .map_err(HttpError::from_onboarding)?;
+    Ok(StatusCode::ACCEPTED.into_response())
+}
+
+#[derive(Clone, Copy, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RecoveryAction {
+    ResumeKnownPending,
+    AbortOrphan,
+}
+
+#[derive(Deserialize, TS)]
+pub(crate) struct RecoveryRequest {
+    action: RecoveryAction,
+}
+
+async fn recover_onboarding(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(request): Json<RecoveryRequest>,
+) -> Result<Response, HttpError> {
+    require_api(&state, &headers, true)?;
+    let onboarding = state
+        .onboarding
+        .as_ref()
+        .ok_or_else(|| HttpError::not_found("managed onboarding is not enabled"))?;
+    match request.action {
+        RecoveryAction::ResumeKnownPending => onboarding.resume().await,
+        RecoveryAction::AbortOrphan => onboarding.abort().await,
+    }
+    .map_err(HttpError::from_onboarding)?;
+    Ok(StatusCode::ACCEPTED.into_response())
+}
+
 async fn security_headers(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
@@ -168,7 +268,7 @@ async fn security_headers(request: Request, next: Next) -> Response {
     headers.insert(
         CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'",
+            "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
         ),
     );
     response
@@ -198,8 +298,8 @@ fn static_asset(
     ([(CONTENT_TYPE, content_type)], bytes).into_response()
 }
 
-#[derive(Deserialize)]
-struct SessionRequest {
+#[derive(Deserialize, TS)]
+pub(crate) struct SessionRequest {
     capability: String,
 }
 
@@ -247,14 +347,22 @@ async fn contacts(
     Ok(Json(contacts).into_response())
 }
 
-#[derive(Deserialize)]
-struct ContactRequest {
+#[derive(Deserialize, TS)]
+pub(crate) struct ContactRequest {
     name: String,
 }
 
-#[derive(Serialize)]
-struct MutationResponse {
-    outcome: &'static str,
+#[derive(Clone, Copy, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MutationOutcome {
+    Inserted,
+    Updated,
+    Unchanged,
+}
+
+#[derive(Serialize, TS)]
+pub(crate) struct MutationResponse {
+    outcome: MutationOutcome,
 }
 
 async fn upsert_contact(
@@ -274,9 +382,9 @@ async fn upsert_contact(
         .await
         .map_err(HttpError::from_service)?;
     let outcome = match outcome {
-        ContactUpsertOutcome::Inserted => "inserted",
-        ContactUpsertOutcome::Updated => "updated",
-        ContactUpsertOutcome::Unchanged => "unchanged",
+        ContactUpsertOutcome::Inserted => MutationOutcome::Inserted,
+        ContactUpsertOutcome::Updated => MutationOutcome::Updated,
+        ContactUpsertOutcome::Unchanged => MutationOutcome::Unchanged,
     };
     Ok(Json(MutationResponse { outcome }).into_response())
 }
@@ -296,19 +404,30 @@ async fn conversation(
     Ok(Json(timeline).into_response())
 }
 
-#[derive(Deserialize)]
-struct SendRequest {
+#[derive(Deserialize, TS)]
+pub(crate) struct SendRequest {
     destination: String,
+    #[serde(deserialize_with = "deserialize_json_safe_u64")]
+    #[ts(as = "JsonSafeInteger")]
     timestamp_ms: u64,
     idempotency_key: String,
     title: String,
     content: String,
 }
 
-#[derive(Serialize)]
-struct SendResponse {
+#[derive(Clone, Copy, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SendOutcome {
+    Inserted,
+    Existing,
+}
+
+#[derive(Serialize, TS)]
+pub(crate) struct SendResponse {
+    #[serde(serialize_with = "serialize_json_safe_u64")]
+    #[ts(as = "JsonSafeInteger")]
     outbox_id: u64,
-    outcome: &'static str,
+    outcome: SendOutcome,
 }
 
 async fn send_message(
@@ -344,8 +463,8 @@ async fn send_message(
         .await
         .map_err(HttpError::from_service)?;
     let (outbox_id, outcome) = match outcome {
-        OutboxCommitOutcome::Inserted(id) => (id.get(), "inserted"),
-        OutboxCommitOutcome::Existing(id) => (id.get(), "existing"),
+        OutboxCommitOutcome::Inserted(id) => (id.get(), SendOutcome::Inserted),
+        OutboxCommitOutcome::Existing(id) => (id.get(), SendOutcome::Existing),
     };
     Ok((
         StatusCode::ACCEPTED,
@@ -493,8 +612,8 @@ fn generate_capability() -> Result<String, String> {
     Ok(hex::encode(bytes))
 }
 
-#[derive(Serialize)]
-struct ErrorBody {
+#[derive(Serialize, TS)]
+pub(crate) struct ErrorBody {
     error: String,
 }
 
@@ -515,6 +634,20 @@ impl HttpError {
     fn unauthorized(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
+            message: message.into(),
+        }
+    }
+
+    fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: message.into(),
+        }
+    }
+
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
             message: message.into(),
         }
     }
@@ -546,6 +679,15 @@ impl HttpError {
             ServiceError::Operation(_) => Self::internal(error.to_string()),
         }
     }
+
+    fn from_onboarding(error: OnboardingError) -> Self {
+        match error {
+            OnboardingError::Busy | OnboardingError::Stopped => {
+                Self::unavailable(error.to_string())
+            }
+            OnboardingError::Operation(_) => Self::conflict(error.to_string()),
+        }
+    }
 }
 
 impl IntoResponse for HttpError {
@@ -570,6 +712,7 @@ mod tests {
     fn test_state() -> WebState {
         WebState {
             appliance: ApplianceHandle::for_web_test(),
+            onboarding: None,
             expected_host: "127.0.0.1:43123".to_owned(),
             expected_origin: "http://127.0.0.1:43123".to_owned(),
             capability: Arc::new("ab".repeat(32)),
@@ -632,6 +775,71 @@ mod tests {
             accepted.headers().get(CONTENT_TYPE).unwrap(),
             "text/html; charset=utf-8"
         );
+        let policy = accepted
+            .headers()
+            .get(CONTENT_SECURITY_POLICY)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(policy.contains("style-src 'self' 'unsafe-inline'"));
+        assert!(policy.contains("img-src 'self' data:"));
+    }
+
+    #[tokio::test]
+    async fn onboarding_reports_explicitly_unavailable_outside_managed_mode() {
+        let app = router(test_state());
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/api/v1/onboarding")
+                    .header(HOST, "127.0.0.1:43123")
+                    .header(COOKIE, format!("{SESSION_COOKIE}={}", "ab".repeat(32)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), BODY_LIMIT).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["available"], false);
+        assert_eq!(json["snapshot"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn onboarding_refresh_is_guarded_and_disabled_outside_managed_mode() {
+        let app = router(test_state());
+        let unauthenticated = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/v1/onboarding/refresh")
+                    .header(HOST, "127.0.0.1:43123")
+                    .header(ORIGIN, "http://127.0.0.1:43123")
+                    .header(CLIENT_HEADER, CLIENT_HEADER_VALUE)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let unavailable = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/v1/onboarding/refresh")
+                    .header(HOST, "127.0.0.1:43123")
+                    .header(ORIGIN, "http://127.0.0.1:43123")
+                    .header(CLIENT_HEADER, CLIENT_HEADER_VALUE)
+                    .header(COOKIE, format!("{SESSION_COOKIE}={}", "ab".repeat(32)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unavailable.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

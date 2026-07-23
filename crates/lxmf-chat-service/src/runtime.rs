@@ -12,12 +12,14 @@ use reticulum_lxmf_chat_app::{
 use reticulum_lxmf_chat_core::{
     ChatStore, Contact, ContactUpsertOutcome, DestinationHash, DeviceBinding, InboundCommitOutcome,
     OutboxCommitOutcome, OutboxId, OutboxMaterial, OutboxStatus, SqliteChatStore, SqliteStoreError,
-    SubmissionFailure, SubmissionState, TimelineDirection, TimelineEntry,
+    SubmissionFailure, SubmissionState, TimelineDirection as CoreTimelineDirection, TimelineEntry,
 };
 use serde::Serialize;
 use tokio::sync::{oneshot, watch};
+use ts_rs::TS;
 
-use crate::serial::{SerialConnector, SerialConnectorConfig};
+use crate::bindings::{JsonSafeInteger, serialize_json_safe_u64, serialize_json_safe_usize};
+use crate::serial::{SerialConnectionLease, SerialConnector, SerialConnectorConfig};
 
 const COMMAND_CAPACITY: usize = 32;
 const COMMAND_WAIT: Duration = Duration::from_millis(50);
@@ -28,6 +30,7 @@ pub(crate) struct ConnectedSession {
     pub(crate) session: BoxedSession,
     pub(crate) port_name: String,
     pub(crate) usb_serial: String,
+    pub(crate) connection_lease: Option<SerialConnectionLease>,
 }
 
 pub(crate) trait Connector: Send + 'static {
@@ -74,7 +77,7 @@ impl ApplianceConfig {
 }
 
 /// Public connection lifecycle exposed to the UI.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ConnectionState {
     /// Actor has opened the database but has not attempted USB discovery.
@@ -99,7 +102,7 @@ pub enum ConnectionState {
 }
 
 /// JSON-safe authenticated device identity.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
 pub(crate) struct DeviceView {
     device_id: String,
     primary_destination: String,
@@ -117,13 +120,21 @@ impl From<DeviceBinding> for DeviceView {
 }
 
 /// Immutable authoritative service state read without touching serial or SQLite.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
 pub struct ApplianceSnapshot {
+    #[serde(serialize_with = "serialize_json_safe_u64")]
+    #[ts(as = "JsonSafeInteger")]
     revision: u64,
     connection: ConnectionState,
     device: Option<DeviceView>,
+    #[serde(serialize_with = "serialize_json_safe_usize")]
+    #[ts(as = "JsonSafeInteger")]
     pending_outbox: usize,
+    #[serde(serialize_with = "serialize_json_safe_usize")]
+    #[ts(as = "JsonSafeInteger")]
     contact_count: usize,
+    #[serde(serialize_with = "serialize_json_safe_u64")]
+    #[ts(as = "JsonSafeInteger")]
     imported_this_run: u64,
     last_error: Option<String>,
 }
@@ -162,7 +173,7 @@ impl ApplianceSnapshot {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
 pub(crate) struct ContactView {
     pub(crate) destination: String,
     pub(crate) name: String,
@@ -177,9 +188,16 @@ impl From<Contact> for ContactView {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BytesEncoding {
+    Utf8,
+    Hex,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
 pub(crate) struct BytesView {
-    pub(crate) encoding: &'static str,
+    pub(crate) encoding: BytesEncoding,
     pub(crate) value: String,
 }
 
@@ -187,25 +205,54 @@ impl BytesView {
     fn new(bytes: &[u8]) -> Self {
         match std::str::from_utf8(bytes) {
             Ok(text) => Self {
-                encoding: "utf8",
+                encoding: BytesEncoding::Utf8,
                 value: text.to_owned(),
             },
             Err(_) => Self {
-                encoding: "hex",
+                encoding: BytesEncoding::Hex,
                 value: hex::encode(bytes),
             },
         }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TimelineDirection {
+    Inbound,
+    Outbound,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TimelineStatus {
+    Committed,
+    Accepted,
+    Queued,
+    Preparing,
+    AwaitingDelivery,
+    Delivered,
+    FailedNoPath,
+    FailedDeliveryTimeout,
+    FailedDownstreamRejection,
+    FailedInternal,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
 pub(crate) struct TimelineView {
+    #[serde(serialize_with = "serialize_json_safe_u64")]
+    #[ts(as = "JsonSafeInteger")]
     pub(crate) sequence: u64,
-    pub(crate) direction: &'static str,
+    pub(crate) direction: TimelineDirection,
+    #[serde(serialize_with = "serialize_json_safe_u64")]
+    #[ts(as = "JsonSafeInteger")]
     pub(crate) timestamp_ms: u64,
     pub(crate) message_id: Option<String>,
+    #[serde(serialize_with = "crate::bindings::serialize_optional_json_safe_u64")]
+    #[ts(as = "Option<JsonSafeInteger>")]
     pub(crate) outbox_id: Option<u64>,
-    pub(crate) status: Option<String>,
+    pub(crate) status: Option<TimelineStatus>,
     pub(crate) title: BytesView,
     pub(crate) content: BytesView,
 }
@@ -215,8 +262,8 @@ impl From<TimelineEntry> for TimelineView {
         Self {
             sequence: entry.sequence().get(),
             direction: match entry.direction() {
-                TimelineDirection::Inbound => "inbound",
-                TimelineDirection::Outbound => "outbound",
+                CoreTimelineDirection::Inbound => TimelineDirection::Inbound,
+                CoreTimelineDirection::Outbound => TimelineDirection::Outbound,
             },
             timestamp_ms: entry.timestamp().get(),
             message_id: entry
@@ -230,24 +277,23 @@ impl From<TimelineEntry> for TimelineView {
     }
 }
 
-fn status_name(status: OutboxStatus) -> String {
+fn status_name(status: OutboxStatus) -> TimelineStatus {
     match status {
-        OutboxStatus::Committed => "committed".to_owned(),
-        OutboxStatus::Accepted => "accepted".to_owned(),
-        OutboxStatus::Device(SubmissionState::Queued) => "queued".to_owned(),
-        OutboxStatus::Device(SubmissionState::Preparing) => "preparing".to_owned(),
+        OutboxStatus::Committed => TimelineStatus::Committed,
+        OutboxStatus::Accepted => TimelineStatus::Accepted,
+        OutboxStatus::Device(SubmissionState::Queued) => TimelineStatus::Queued,
+        OutboxStatus::Device(SubmissionState::Preparing) => TimelineStatus::Preparing,
         OutboxStatus::Device(SubmissionState::AwaitingDelivery(_)) => {
-            "awaiting_delivery".to_owned()
+            TimelineStatus::AwaitingDelivery
         }
-        OutboxStatus::Device(SubmissionState::Delivered(_)) => "delivered".to_owned(),
+        OutboxStatus::Device(SubmissionState::Delivered(_)) => TimelineStatus::Delivered,
         OutboxStatus::Device(SubmissionState::Failed(failure)) => match failure {
-            SubmissionFailure::NoPath => "failed_no_path",
-            SubmissionFailure::DeliveryTimeout => "failed_delivery_timeout",
-            SubmissionFailure::DownstreamRejection => "failed_downstream_rejection",
-            SubmissionFailure::Internal => "failed_internal",
-        }
-        .to_owned(),
-        OutboxStatus::Device(SubmissionState::Cancelled) => "cancelled".to_owned(),
+            SubmissionFailure::NoPath => TimelineStatus::FailedNoPath,
+            SubmissionFailure::DeliveryTimeout => TimelineStatus::FailedDeliveryTimeout,
+            SubmissionFailure::DownstreamRejection => TimelineStatus::FailedDownstreamRejection,
+            SubmissionFailure::Internal => TimelineStatus::FailedInternal,
+        },
+        OutboxStatus::Device(SubmissionState::Cancelled) => TimelineStatus::Cancelled,
     }
 }
 
@@ -470,6 +516,7 @@ struct Actor<C> {
     revisions: watch::Sender<u64>,
     snapshot: ApplianceSnapshot,
     session: Option<BoxedSession>,
+    session_lease: Option<SerialConnectionLease>,
     reconnect_delay: Duration,
     next_connect: Instant,
     next_reconcile: Instant,
@@ -505,6 +552,7 @@ impl<C: Connector> Actor<C> {
             revisions,
             snapshot: ApplianceSnapshot::starting(),
             session: None,
+            session_lease: None,
             next_connect: now,
             next_reconcile: now,
             next_inbox: now,
@@ -526,7 +574,7 @@ impl<C: Connector> Actor<C> {
             }
             self.background_turn();
         }
-        self.session = None;
+        self.clear_session();
         self.snapshot.connection = ConnectionState::Stopped;
         self.publish();
     }
@@ -578,7 +626,7 @@ impl<C: Connector> Actor<C> {
                 let _ = reply.send(Ok(()));
             }
             Command::Reconnect(reply) => {
-                self.session = None;
+                self.clear_session();
                 self.engine.reset_session_scan();
                 self.background_error_work = None;
                 self.permanent_fault = false;
@@ -630,6 +678,7 @@ impl<C: Connector> Actor<C> {
             mut session,
             port_name,
             usb_serial,
+            connection_lease,
         } = connected;
         let binding = match session.binding() {
             Ok(binding) => binding,
@@ -653,6 +702,7 @@ impl<C: Connector> Actor<C> {
         }
         self.engine.reset_session_scan();
         self.session = Some(session);
+        self.session_lease = connection_lease;
         self.reconnect_delay = self.config.reconnect_initial;
         self.next_inbox = Instant::now();
         self.next_reconcile = Instant::now();
@@ -730,7 +780,7 @@ impl<C: Connector> Actor<C> {
                     .as_ref()
                     .is_some_and(|session| session.is_usable());
                 if !usable {
-                    self.session = None;
+                    self.clear_session();
                     self.engine.reset_session_scan();
                     self.retry_connection(error.to_string());
                     return;
@@ -767,7 +817,7 @@ impl<C: Connector> Actor<C> {
     }
 
     fn retry_connection(&mut self, error: String) {
-        self.session = None;
+        self.clear_session();
         self.engine.reset_session_scan();
         self.background_error_work = None;
         self.snapshot.connection = ConnectionState::Backoff;
@@ -781,12 +831,17 @@ impl<C: Connector> Actor<C> {
     }
 
     fn permanent_fault(&mut self, error: String) {
-        self.session = None;
+        self.clear_session();
         self.background_error_work = None;
         self.permanent_fault = true;
         self.snapshot.connection = ConnectionState::Faulted;
         self.snapshot.last_error = Some(error);
         self.publish();
+    }
+
+    fn clear_session(&mut self) {
+        self.session = None;
+        self.session_lease = None;
     }
 
     fn refresh_counts(&mut self) {
@@ -963,6 +1018,7 @@ mod tests {
                 }),
                 port_name: "/dev/fake".to_owned(),
                 usb_serial: "001122334455".to_owned(),
+                connection_lease: None,
             })
         }
     }
@@ -1023,7 +1079,7 @@ mod tests {
         assert_eq!(submitted.lock().unwrap().as_slice(), &[outbound(0x41)]);
         let timeline = handle.timeline(destination(0x31)).await.unwrap();
         assert_eq!(timeline.len(), 1);
-        assert_eq!(timeline[0].content.encoding, "utf8");
+        assert_eq!(timeline[0].content.encoding, BytesEncoding::Utf8);
         assert_eq!(timeline[0].content.value, "1");
 
         handle.shutdown_and_wait().await.unwrap();

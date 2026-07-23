@@ -1,0 +1,30 @@
+{
+  "schema": 2,
+  "source": "clients/appliance",
+  "generator": {
+    "bun": {
+      "revision": "bf2e2cecf",
+      "version": "1.3.13"
+    },
+    "expo": "57.0.8",
+    "expo_router": "57.0.8",
+    "mode": "single"
+  },
+  "assets": [
+    {
+      "bytes": 1178997,
+      "path": "app.js",
+      "sha256": "5499ac0950df8a88e43d7f6da08ebeba18aedab9ec2ff0e71f1f209df8543d0e"
+    },
+    {
+      "bytes": 465,
+      "path": "index.html",
+      "sha256": "53cf1957ef6f9ac7937a0f265ebf6008bbdfa093f916e76af6eb9cbe9875ccb7"
+    },
+    {
+      "bytes": 284,
+      "path": "style.css",
+      "sha256": "98bb79816f2689a9308c9d7d8c168b2adedfa9bc308e11c6dee0a388aab0e4f3"
+    }
+  ]
+}

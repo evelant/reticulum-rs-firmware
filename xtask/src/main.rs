@@ -865,7 +865,7 @@ fn graph_policy() -> ExitCode {
     } else {
         println!(
             "ok: all safe, RX, HIL and all-features all-target product graphs, the RF-inert physical-storage HIL graph, the separately hazardous default-sentinel, Tracker semantic-announce/semantic-round-trip and E290 semantic-round-trip TX HIL graphs, the permanent, inbox commit-fault and runtime-measurement E290 node graphs and the Leviculum \
-             comparison graph are isolated; every firmware and HIL graph excludes the host-only device client, chat application/service crates, SQLite/serial access and Axum/Hyper/Tokio/Tower OS runtime; the returned-radio-fault, inbound-commit-fault and runtime-measurement hooks are feature-exclusive; \
+             comparison graph are isolated; every firmware and HIL graph excludes the host-only device and pairing clients, chat application/service crates, SQLite/serial access and Axum/Hyper/Tokio/Tower OS runtime; the returned-radio-fault, inbound-commit-fault and runtime-measurement hooks are feature-exclusive; \
              legacy Tracker firmware direct dependencies use only the RX façade and every-feature resolution \
              excludes TX ownership and pre-integration durable crates; resolved Rete packages match reported \
              source/revision; esp-rtos and lora-phy resolve only to their reviewed local patches, \
@@ -1139,11 +1139,12 @@ fn cargo_tree_contains_package(tree: &str, package: &str) -> bool {
         .any(|line| line.split_whitespace().any(|field| field == package))
 }
 
-const HOST_APPLIANCE_GRAPH_FORBIDDEN: [&str; 12] = [
+const HOST_APPLIANCE_GRAPH_FORBIDDEN: [&str; 13] = [
     "axum",
     "hyper",
     "mio",
     "reticulum-device-client",
+    "reticulum-device-pairing-client",
     "reticulum-lxmf-chat",
     "reticulum-lxmf-chat-app",
     "reticulum-lxmf-chat-core",

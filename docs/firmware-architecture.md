@@ -152,7 +152,8 @@ Implementation is governed by [ADR 0001](adr/0001-phase-0-scaffold.md),
 [ADR 0011](adr/0011-durable-rns-inbox-qualification.md),
 [ADR 0012](adr/0012-application-event-and-resource-ownership.md),
 [ADR 0013](adr/0013-bounded-lxmf-wire-boundary.md),
-[ADR 0014](adr/0014-durable-lxmf-message-ownership.md), and the
+[ADR 0014](adr/0014-durable-lxmf-message-ownership.md),
+[ADR 0015](adr/0015-universal-expo-client-and-generated-bindings.md), and the
 [Phase-0 validation contract](phase-0-acceptance.md). Those documents narrow
 the first workspace and establish Rete as the provisional RNS foundation
 without reducing the product scope described here.
@@ -163,19 +164,19 @@ The full product is plausible, but no examined repository is a drop-in firmware 
 
 The first turnkey-client bridge now exists on the host: a single-owner service
 uses the authenticated USB API, SQLite schema-2 identity-bound state, automatic
-inbox/outbox work, and a bundled loopback SPA. Its
+inbox/outbox work, and a bundled loopback Expo web export. Its
 [one-message two-E290 proof](e290-lxmf-appliance-alpha-proof.md) closes the
 application boundary from HTTP enqueue through LoRa delivery and peer import.
 It deliberately does not move node identity or routing to the host, and it is
-not evidence for a device-served Wi-Fi/USB SPA, BLE, NomadNet, or an embedded
-propagation service.
+not evidence for a device-served Wi-Fi/USB client, BLE, NomadNet, or an
+embedded propagation service.
 
 The broader Rust survey changes the recommended path:
 
 1. Adopt [`rete`](https://github.com/s-retlaw/rete) as the provisional **RNS** foundation and retain Leviculum as an independent protocol oracle and fallback. At the reviewed upstream selection snapshot, `rete-core`, `rete-transport`, `rete-stack`, and `rete-lxmf-core` passed a generic bare-metal check, 391 focused host tests passed, and the then-current ESP32-S3/SX1262/Wi-Fi example compiled with the installed ESP toolchain. It is pre-release, its checked-in Python peer predates Reticulum 1.3.8, and its Resource and failure paths need bounded-memory and backpressure hardening before production acceptance. Leviculum remains available for targeted differential tests and as the alternative if Rete meets an explicit ADR 0002 abandonment criterion.
 2. Reuse existing LXMF work instead of starting from an empty crate. `LXMF-rs` contains directly useful constants, announce codecs, message packing/signing, delivery selection, propagation envelopes, paper messages, fixtures, and state semantics. Its full feature graph and runtime are not directly embeddable, so extract/refactor protocol pieces behind an RNS identity adapter rather than importing its Tokio/SQLite runtime. Do **not** use `rete-lxmf-core` as the compatibility authority in its present form: despite compiling `no_std`, it currently uses 2-byte stamps/tickets where current LXMF uses 32-byte stamps and 16-byte tickets, and its `u8 -> bytes` field model cannot preserve arbitrary MessagePack values. `rsLXMF` is the most complete AGPL propagation/router reference found, while `precursor-lxmfchat` is the closest embedded Rust precedent for a combined LXMF, NomadNet and Micron client.
 3. Make two infrastructure roles first-class: Reticulum transport forwarding and an LXMF propagation node. Both are configurable and quota-bound, but neither is defined out of the product merely because the initial board is constrained. An infrastructure profile remains in LoRa receive and processes/forwards traffic whenever the device is powered; only an explicitly selected leaf/standby state opts out and reports that loss of reachability.
-4. Treat onboard LXMF conversation UI, NomadNet browsing, a SPA, and a native mobile app as optional capability modules. They make the device turnkey, but the node is useful without them and constrained builds may omit them.
+4. Treat onboard LXMF conversation UI, NomadNet browsing, and the universal Expo client/export as optional capability modules. They make the device turnkey, but the node is useful without them and constrained builds may omit them.
 5. Use only the bare-metal `esp-hal`/`esp-rtos`/Embassy platform path. The working Tracker-specific `microReticulum_Firmware` checkout is sufficient evidence that the board, radio, FEM, and ESP32-S3 can support the hardware role; an additional C++/ESP-IDF comparison would not retire the important Rust risks.
 6. Make the node and Rete owner interface-neutral. One bounded registry resolves stable interface IDs and hands exact packet owners to independent actors. LoRa is the first and primary complete transport vertical slice, not a global transport abstraction; do not implement speculative USB, Wi-Fi or BLE packet actors before that slice is stable.
 7. Inside the LoRa actor, put `lora-phy` behind a radio trait, keep separate E290/HT-RA62 and Tracker/external-FEM board owners, and retain an explicit RNode-compatible split/reassembly layer. It must distinguish the standard 500-byte RNS MTU from RNode's 508-byte physical interface capacity.
@@ -1060,8 +1061,7 @@ This is an engineering compliance plan, not a legal opinion. Audit the exact dep
 ```mermaid
 flowchart TB
     subgraph Clients["Local clients"]
-        SPA["SPA / browser"]
-        RN["React Native app"]
+        EXPO["Expo universal app (web / iOS / Android)"]
         CLI["Desktop CLI / test harness"]
     end
 
@@ -1106,9 +1106,8 @@ flowchart TB
         PERIPH["E-Ink, battery, future GNSS"]
     end
 
-    SPA --> WS
-    RN --> GATT
-    RN --> WS
+    EXPO --> WS
+    EXPO --> GATT
     CLI --> CDC
     WS --> RPC
     GATT --> RPC
@@ -1152,7 +1151,7 @@ flowchart TB
 5. **One state owner per concern.** A node actor owns RNS/LXMF state; a flash actor owns mutations; each interface actor owns its driver, ingress and egress; a local-session actor owns authentication. Callbacks do not mutate these domains from arbitrary tasks.
 6. **Board knowledge stops at the BSP.** Protocol and node crates cannot mention ESP GPIOs, SX1262, Heltec, Wi-Fi, or Embassy.
 7. **The device API is not a Reticulum interface.** It exposes application operations and events. USB, BLE or Wi-Fi may host both services, but their API and RNS endpoints retain separate framing, authentication, flow control and ownership. An optional raw RNode bridge remains a separate capability and mode.
-8. **Infrastructure does not depend on a local UI.** Transport forwarding and LXMF propagation run headless. Messaging, NomadNet, SPA, BLE and GNSS are separately removable capabilities.
+8. **Infrastructure does not depend on a local UI.** Transport forwarding and LXMF propagation run headless. Messaging, NomadNet, the Expo client/export, BLE and GNSS are separately removable capabilities.
 9. **Profiles change capacity, not protocol truth.** A constrained profile may have fewer paths, links, stored messages or simultaneous clients, or omit a component entirely. An enabled component must remain wire-compatible; it cannot silently substitute a reduced private protocol.
 10. **The interface registry is authoritative.** Node-core resolves Reticulum targets from the registry's synchronous online snapshot. Concrete actors report Ready/Offline only through their queue-bound, generation-checked lifecycle capability; a second enabled-interface list, caller-invented ingress ID, product-global readiness signal, or global concrete-radio dispatcher is prohibited.
 11. **Link-specific mechanics stay in their actor.** RNode fragmentation, LoRa modulation, CAD, regional frequency, RF airtime and SX126x deadlines exist only in a LoRa branch. USB, Wi-Fi and BLE actors do not emulate a radio permit or RNode modem.
@@ -1193,7 +1192,7 @@ crates/
   local-clients/                  # optional embedded conversation/Nomad services
   lxmf-chat-core/                 # host conversation/outbox/inbox persistence domain
   lxmf-chat-app/                  # stepwise store-to-authenticated-session use cases
-  lxmf-chat-service/              # host USB actor plus bundled loopback SPA/API
+  lxmf-chat-service/              # host USB actor plus bundled Expo web export/API
   device-api/                     # request/response/event schema
   device-api-adapter/             # authenticated dispatch over storage actor
   device-api-framing/             # COBS/length framing and chunk transfer
@@ -1224,9 +1223,8 @@ crates/
   platform-esp32s3/               # esp-hal/rtos/USB/radio/flash adapters
   simulator/                      # std host runtime and fault injection
 clients/
-  typescript-sdk/                 # generated/handwritten device API client
-  web/                            # SPA, precompressed into firmware
-  mobile/                         # optional React Native shell
+  appliance/                      # universal Expo web/iOS/Android application
+    src/generated/                # Rust-generated application API declarations
 interop/
   python/                         # pinned RNS/LXMF/NomadNet peers
   vectors/                        # provenance-tagged golden data
@@ -1802,7 +1800,7 @@ The embedded client therefore needs:
 3. canonical path/form-variable handling;
 4. a streaming Micron parser producing a safe, normalized AST;
 5. link/action nodes represented as structured device-API objects;
-6. a renderer in the SPA/mobile app;
+6. a renderer in the universal Expo app;
 7. bounded file downloads written directly to the blob store.
 
 The device must not send arbitrary HTML or executable content from a remote NomadNet node to the browser. The parser should reject excessive nesting, element counts, line lengths, decoded image sizes, and malformed escape sequences. The local renderer maps the safe AST into fixed components and sanitizes every URI/action.
@@ -2027,7 +2025,15 @@ config.*       get, stage, validate, commit, rollback
 events.*       subscribe, resume
 ```
 
-Use a generated schema or a single Rust source of truth that emits TypeScript types. Unknown fields and operations must be forward-compatible. The device reports hard limits so the UI can disable impossible attachment/page sizes rather than discovering them through OOM.
+Use the serializable Rust DTO as the source of truth and emit checked
+TypeScript declarations from it. The current host JSON adapter uses `ts-rs`
+only in its host generator; the crate must not enter a firmware dependency
+graph. A future direct CBOR client should generate from the same small
+`no_std` DTO crate through a host-only feature or companion generator. Unknown
+fields and operations must be forward-compatible. The device reports hard
+limits so the UI can disable impossible attachment/page sizes rather than
+discovering them through OOM. See
+[ADR 0015](adr/0015-universal-expo-client-and-generated-bindings.md).
 
 Use indexed numeric CBOR fields and reserve ranges for future additions so old clients can skip unknown fields and new clients can tolerate omitted ones. `postcard` remains reasonable for explicitly version-locked internal records, not this mixed-version public device API.
 
@@ -2083,7 +2089,10 @@ There are two local-client trust profiles:
 - **Convenience browser:** the device remains the SoftAP and uses a unique random per-device WPA2 passphrase revealed through physical access. HTTP plus application authorization is protected only by that local Wi-Fi trust domain. It does not defend against an active attacker who already knows the AP credential and can spoof/relay the HTTP application.
 - **High assurance:** USB or a native app pins the device public key during physically confirmed pairing, then the device API uses an authenticated encrypted session. Identity export/restore, trust-root changes, security provisioning, and other secret-bearing administration require this profile. A browser loaded over unauthenticated HTTP cannot securely bootstrap it.
 
-If the browser must perform high-assurance operations, the Wi-Fi SPA milestone must first solve device HTTPS certificate/name enrollment or another independently reviewed pinned-origin design. Do not claim that a login token alone closes this gap.
+If the web client must perform high-assurance operations, the device-served
+Wi-Fi Expo milestone must first solve device HTTPS certificate/name enrollment
+or another independently reviewed pinned-origin design. Do not claim that a
+login token alone closes this gap.
 
 ## USB, Wi-Fi, BLE, and client strategy
 
@@ -2153,7 +2162,11 @@ AbortCurrent. After ambiguous Activate, authenticated-session reconciliation is
 not yet composed: retain the file and do not guess Active, blindly resume, or
 abort. Firmware refuses `u64::MAX` and exhausts that epoch.
 
-CDC-NCM USB Ethernet is attractive later: the current esp-hal example serves an HTTP page directly at a fixed address, which could provide the SPA over USB. Host behavior across macOS, Windows, Linux, Android, iOS, and browser captive-network handling needs a dedicated compatibility matrix. Do not make it a phase-1 requirement.
+CDC-NCM USB Ethernet is attractive later: the current esp-hal example serves an
+HTTP page directly at a fixed address, which could provide the Expo web export
+over USB. Host behavior across macOS, Windows, Linux, Android, iOS, and browser
+captive-network handling needs a dedicated compatibility matrix. Do not make
+it a phase-1 requirement.
 
 A USB Reticulum interface is a separate endpoint from both the framed device
 API and logs. It is a strong candidate for the second concrete RNS actor
@@ -2163,9 +2176,20 @@ opening the API CDC port does not add a route to the mesh.
 
 ### Wi-Fi
 
-Initial UI mode is a per-device WPA2 SoftAP with DHCP, DNS convenience, static compressed assets, and a binary WebSocket device API. Optional station mode and AP+STA bridging come later. The SPA should work fully offline and never depend on a CDN. Current bare-metal `esp-radio` does not support WPA3, so application authentication remains necessary even when the AP passphrase is strong.
+Initial UI mode is a per-device WPA2 SoftAP with DHCP, DNS convenience, static
+compressed assets, and a binary WebSocket device API. Optional station mode
+and AP+STA bridging come later. The Expo web export must work fully offline and
+never depend on a CDN. Current bare-metal `esp-radio` does not support WPA3, so
+application authentication remains necessary even when the AP passphrase is
+strong.
 
-An HTTP page at a private device address is not a browser “secure context”. Service workers, installability, and some device APIs will be unavailable, so the first UI should be specified as an offline SPA rather than promising PWA behavior. HTTPS on an appliance introduces certificate enrollment and name-discovery UX; evaluate it as a separate security/product spike. A native app can pin device credentials, but a general browser cannot silently trust a self-signed certificate.
+An HTTP page at a private device address is not a browser “secure context”.
+Service workers, installability, and some device APIs will be unavailable, so
+the first web target is an offline static export rather than a promised PWA.
+HTTPS on an appliance introduces certificate enrollment and name-discovery UX;
+evaluate it as a separate security/product spike. A native app can pin device
+credentials, but a general browser cannot silently trust a self-signed
+certificate.
 
 The Wi-Fi management network is not implicitly a Reticulum interface. A future
 TCP/UDP/AutoInterface bridge must be a separately configured interface actor
@@ -2174,7 +2198,22 @@ loop tests. This avoids silently exporting the local control AP into the
 Reticulum topology or treating an authenticated device API session as a
 network peer.
 
-Compile precompressed SPA assets into the application image so OTA updates code and UI atomically. Serve immutable hashes with long cache lifetimes and a tiny uncached bootstrap. Avoid a writable filesystem just for assets. In the convenience-browser profile, keep secret export/restore and security provisioning out of the SPA; accept only signed update images and require physical confirmation for disruptive administration.
+Compile the precompressed Expo web export into the application image so OTA
+updates code and UI atomically. Serve immutable hashes with long cache
+lifetimes and a tiny uncached bootstrap. Avoid a writable filesystem just for
+assets. In the convenience-browser profile, keep secret export/restore and
+security provisioning out of the web client; accept only signed update images
+and require physical confirmation for disruptive administration.
+
+Author the first-party client as one Expo React Native application in
+TypeScript/TSX and use an exactly pinned Bun toolchain for package management,
+tests, scripts, and command orchestration. Expo's Metro pipeline is the
+framework-required platform bundler invoked by Bun; it is not a separate
+project-owned scripting surface. Plain JavaScript is permitted only as a
+reproducibly generated bundle checked against its TypeScript source. Cargo and
+firmware builds consume checked static exports and do not invoke Bun or Metro
+implicitly. Rust serde DTOs generate the app's TypeScript wire declarations;
+the app must not maintain parallel handwritten API unions.
 
 ### BLE
 
@@ -2186,23 +2225,32 @@ must not turn a paired device-API client into an RNS peer implicitly, and it
 must invalidate or reconstruct paths when a reused interface identity changes
 incarnation.
 
-Web Bluetooth is not a universal mobile answer, especially on iOS. A React Native shell is the likely BLE client. It should reuse the TypeScript SDK, domain models, message renderer, and Micron components from the SPA, while native modules provide BLE and background lifecycle behavior.
+Web Bluetooth is not a universal mobile answer, especially on iOS. The Expo
+application is therefore the BLE client as well as the web client. Shared
+components and domain hooks consume a transport interface; a native Rust
+module provides BLE and background lifecycle behavior on iOS/Android while the
+web target uses HTTP/SSE or WebSocket. The first Rust bridge spike uses
+`uniffi-bindgen-react-native` behind Expo development builds; Nitro remains a
+measured-performance fallback.
 
 ### Recommended order
 
 For the turnkey local client/API:
 
 1. USB CDC-ACM CLI/test client.
-2. Host companion service and loopback SPA over that USB API.
-3. Device-served Wi-Fi SPA using the same application model and API semantics.
-4. BLE device-API bearer and a minimal React Native shell.
-5. Optional USB NCM device-served SPA and desktop packaging.
+2. Host companion service and the Expo static web export over that USB API.
+3. Expo iOS/Android development builds with the transport boundary in place.
+4. Device-served Wi-Fi export and native local-network transport using the same
+   generated contracts and application model.
+5. BLE device-API bearer through the Expo native Rust module.
+6. Optional USB NCM device-served export and desktop packaging.
 
 For Reticulum packet interfaces, fully qualify LoRa first, then use a USB
 stream actor to prove heterogeneous forwarding before selecting Wi-Fi
 TCP/UDP/discovery behavior; add BLE RNS only after its reconnect and background
 lifecycle are bounded. These are independent sequences: implementing the
-Wi-Fi SPA does not require enabling Wi-Fi as a Reticulum interface.
+device-served Wi-Fi client does not require enabling Wi-Fi as a Reticulum
+interface.
 
 The default runtime profile should enable the USB device API and LoRa RNS,
 bring Wi-Fi up on demand, and bring BLE up for pairing or an active configured
@@ -2224,7 +2272,7 @@ Do not collapse product scope into one monolithic Tracker binary. Define orthogo
 | `local-messaging` | contacts/conversations/composer/read state | Optional turnkey client over the same LXMF router |
 | `nomad-client` / `micron` | node discovery, page/file requests and safe AST | Optional; depends on RNS Link/Resource, not LXMF propagation |
 | `nomad-server` | bounded static pages/files | Optional and separate from browsing |
-| `usb-api`, `wifi-api`, `ble-api`, `spa` | local administration/client transports | Independently selectable; at least USB in development/recovery builds |
+| `usb-api`, `wifi-api`, `ble-api`, `expo-web` | local administration/client transports | Independently selectable; at least USB in development/recovery builds |
 | `display` | status/pairing/diagnostics | Optional; never required for headless networking |
 | `gnss-location` | future location/time provider | Stub trait and capability bit only until a late phase |
 
@@ -2233,9 +2281,9 @@ Initial example compositions:
 | Profile | Intended composition |
 | --- | --- |
 | `tracker-core-node` | LoRa RNS + USB device API, RNS endpoint/transport, durable identity/state, LXMF router; add a tightly capped propagation store only if measurement passes |
-| `tracker-headless-infrastructure` | RNS transport + LXMF propagation with maximum RAM/flash left for network tables/store; no SPA, Nomad, BLE or local conversation UI |
-| `tracker-turnkey` | RNS transport + LXMF router/local messaging + USB device API and on-demand Wi-Fi SPA; optional components selected from measured headroom |
-| `full-appliance-psram` | RNS transport, full LXMF propagation, local messaging, Nomad client/server, SPA, BLE/Wi-Fi/USB device APIs, optional additional packet actors, display and later GNSS |
+| `tracker-headless-infrastructure` | RNS transport + LXMF propagation with maximum RAM/flash left for network tables/store; no Expo web export, Nomad, BLE or local conversation UI |
+| `tracker-turnkey` | RNS transport + LXMF router/local messaging + USB device API and on-demand Wi-Fi Expo web export; optional components selected from measured headroom |
+| `full-appliance-psram` | RNS transport, full LXMF propagation, local messaging, Nomad client/server, Expo web/native clients, BLE/Wi-Fi/USB device APIs, optional additional packet actors, display and later GNSS |
 | `portable-leaf` | Endpoint/LXMF client with forwarding/propagation deliberately disabled for battery or regulatory policy; supported but not the product-defining profile |
 
 The full product acceptance matrix is the union enabled in `full-appliance-psram`, not whatever fits the first Tracker binary. Conversely, an enabled capability must be complete and interoperable; do not advertise a “mini LXMF” private wire format. Every published firmware reports its capabilities and hard quotas through the device API.
@@ -2861,13 +2909,13 @@ Deliverables:
 
 Exit: released Python LXMF nodes can deposit to, retrieve from and peer/synchronise with the device across loss and reboot, without unbounded RAM, flash or CPU use. This is the core full-node milestone.
 
-### Phase 5 — optional local messaging client and Wi-Fi SPA
+### Phase 5 — optional local messaging client and device Wi-Fi
 
 Current progress: the host-appliance alpha factors persistent contacts,
 conversations, commit-before-send outbox work, status projection, and inbox
 deduplication behind a stepwise application engine. A single host actor owns
-SQLite and the authenticated serial session while a bundled loopback SPA uses a
-capability-cookie JSON/SSE API. One message crossed that HTTP boundary, the
+SQLite and the authenticated serial session while the bundled Expo web export
+uses a capability-cookie JSON/SSE API. One message crossed that HTTP boundary, the
 E290 LoRa path, and peer import. This de-risks the local-messaging model and UI
 flow but does not satisfy this phase: the host computer remains required and no
 SoftAP, device HTTP server, wireless security profile, update flow, or
@@ -2877,7 +2925,7 @@ Deliverables:
 
 - LXMF paper payload encode/decode plus app-assisted QR/text import/export;
 - contacts, conversations, composer, delivery state and bounded attachments as a feature-gated service;
-- on-demand SoftAP, DHCP, static compressed SPA and binary WebSocket using the common device API;
+- on-demand SoftAP, DHCP, static compressed Expo web export and binary WebSocket using the common device API;
 - pairing/authentication, event resume, slow-client handling;
 - signed A/B OTA upload with physical confirmation and rollback; secret export/provisioning remains USB/native until a pinned browser origin exists.
 
@@ -2900,7 +2948,7 @@ Deliverables:
 
 - authenticated credit-based BLE service;
 - reconnect/resume and coexistence instrumentation;
-- React Native app reusing TypeScript SDK and render components;
+- native BLE/Rust transport integrated into the existing universal Expo app;
 - iOS/Android lifecycle and background constraints documented.
 
 Exit: BLE messaging/browsing sessions recover across disconnects without starving LoRa or exhausting memory; Wi-Fi remains the universal fallback.
@@ -2968,7 +3016,9 @@ Exit: enabling location adds a bounded optional capability without changing netw
 3. What measured quotas define the initial `e290-core-node`, `e290-headless-infrastructure`, `e290-turnkey`, and constrained Tracker compositions?
 4. Which allocations may use E290 PSRAM, and which synchronization, radio,
    DMA, interrupt-visible, and flash-critical state must remain internal?
-5. Is browser-over-Wi-Fi the first turnkey client, with BLE/React Native following, or must BLE ship in that first client milestone?
+5. Which native Rust bridge passes the Expo iOS/Android/WASM spike and what
+   measured boundary would justify replacing UniFFI with Nitro or handwritten
+   Turbo Modules?
 6. Must identity/message storage resist physical flash extraction in the first hardware release, or can secure manufacturing provisioning follow a developer edition?
 7. Is optional RNode bridge compatibility a product requirement or only a development/recovery aid?
 8. Which USB framing and host-peer mode becomes the first non-LoRa Reticulum

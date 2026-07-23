@@ -19,6 +19,7 @@ members = [
     "crates/device-api-handoff",
     "crates/device-api-session",
     "crates/device-client",
+    "crates/device-pairing-client",
     "crates/device-identity-store",
     "crates/interface-router",
     "crates/lab-rx-returned-fault-hil",
@@ -79,6 +80,7 @@ default-members = [
     "crates/device-api-handoff",
     "crates/device-api-session",
     "crates/device-client",
+    "crates/device-pairing-client",
     "crates/device-identity-store",
     "crates/interface-router",
     "crates/lab-rx-returned-fault-hil",
@@ -166,6 +168,7 @@ getrandom = "=0.3.4"
 futures-util = { version = "=0.3.33", default-features = false, features = ["async-await", "std"] }
 rand_core = { version = "=0.6.4", default-features = false }
 rusqlite = { version = "=0.40.1", default-features = false, features = ["bundled"] }
+rustix = { version = "=1.1.4", default-features = false, features = ["process"] }
 hex = "=0.4.3"
 hkdf = { version = "=0.12.4", default-features = false }
 hmac = { version = "=0.12.1", default-features = false }
@@ -177,6 +180,7 @@ static_cell = "=2.1.1"
 subtle = { version = "=2.6.1", default-features = false }
 tokio = { version = "=1.53.1", default-features = false, features = ["macros", "net", "rt", "signal", "sync", "time"] }
 tower = { version = "=0.5.3", default-features = false, features = ["util"] }
+ts-rs = { version = "=12.0.1", default-features = false, features = ["no-serde-warnings", "serde-compat"] }
 zeroize = { version = "=1.9.0", default-features = false }
 
 # Rete is not published as a coherent crates.io release. Keep every crate on

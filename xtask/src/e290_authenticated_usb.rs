@@ -28,13 +28,12 @@ use reticulum_device_api_session::{
     BearerBinding, ClientCredential, ClientHelloFlight, ClientParameters, ClientProofFlight,
     ClientRequestFlight, ClientSession, DeviceId,
 };
+use reticulum_device_pairing_client::load_activated_credential;
 use reticulum_lxmf_wire::{MessageView, WireLimits};
 use serde::{Deserialize, Serialize};
 use serialport::ClearBuffer;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
-
-use crate::e290_pairing_live::load_activated_credential;
 
 const BAUD_RATE: u32 = 115_200;
 const DEFAULT_TIMEOUT_MS: u64 = 5_000;
@@ -721,7 +720,8 @@ fn transact(options: &Options, accepted_output: &mut dyn Write) -> Result<String
     let deadline = Instant::now()
         .checked_add(options.timeout)
         .ok_or_else(|| "--timeout-ms is too large for the host monotonic clock".to_owned())?;
-    let activated = load_activated_credential(&options.state_file)?;
+    let activated =
+        load_activated_credential(&options.state_file).map_err(|error| error.to_string())?;
     let (device_id, credential_id, generation, psk) = activated.into_parts();
     let expected_device_id = DeviceId::new(*device_id.as_bytes());
     let credential = ClientCredential::from_zeroizing(credential_id, generation, psk);

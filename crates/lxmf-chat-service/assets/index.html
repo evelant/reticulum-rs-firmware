@@ -2,78 +2,14 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <meta name="theme-color" content="#101411">
     <title>Reticulum LXMF</title>
     <link rel="stylesheet" href="/style.css">
   </head>
   <body>
-    <header class="topbar">
-      <div>
-        <p class="eyebrow">RETICULUM APPLIANCE</p>
-        <h1>LXMF</h1>
-      </div>
-      <div class="status-cluster">
-        <span id="connection" class="pill">Starting</span>
-        <button id="sync" class="secondary" type="button">Sync</button>
-        <button id="reconnect" class="secondary" type="button">Reconnect</button>
-      </div>
-    </header>
-
-    <div id="error" class="error hidden" role="alert"></div>
-
-    <main class="shell">
-      <aside class="sidebar">
-        <div class="section-heading">
-          <h2>Contacts</h2>
-          <button id="show-contact-form" class="icon-button" type="button" aria-label="Add contact">+</button>
-        </div>
-        <form id="contact-form" class="contact-form hidden">
-          <label>
-            Name
-            <input id="contact-name" maxlength="256" autocomplete="off" required>
-          </label>
-          <label>
-            LXMF destination
-            <input id="contact-destination" minlength="32" maxlength="32" spellcheck="false" autocomplete="off" required>
-          </label>
-          <div class="row">
-            <button type="submit">Save</button>
-            <button id="cancel-contact" class="secondary" type="button">Cancel</button>
-          </div>
-        </form>
-        <nav id="contacts" aria-label="Conversations"></nav>
-        <dl class="device-meta">
-          <div><dt>Pending</dt><dd id="pending-count">0</dd></div>
-          <div><dt>Imported</dt><dd id="imported-count">0</dd></div>
-          <div><dt>Local LXMF</dt><dd id="local-destination">—</dd></div>
-        </dl>
-      </aside>
-
-      <section class="conversation">
-        <div id="empty-state" class="empty-state">
-          <p>Select or add a contact to begin.</p>
-          <small>The node continues receiving and routing while this page is closed.</small>
-        </div>
-        <div id="active-conversation" class="conversation-content hidden">
-          <div class="conversation-heading">
-            <div>
-              <h2 id="peer-name"></h2>
-              <code id="peer-destination"></code>
-            </div>
-          </div>
-          <ol id="timeline" class="timeline" aria-live="polite"></ol>
-          <form id="compose" class="compose">
-            <input id="message-title" maxlength="295" placeholder="Title (optional)" autocomplete="off">
-            <textarea id="message-content" maxlength="295" placeholder="Message" required></textarea>
-            <div class="compose-footer">
-              <span id="message-length">0 / 295</span>
-              <button type="submit">Queue message</button>
-            </div>
-          </form>
-        </div>
-      </section>
-    </main>
-
+    <noscript>You need to enable JavaScript to run this app.</noscript>
+    <div id="root"></div>
     <script src="/app.js" defer></script>
   </body>
 </html>

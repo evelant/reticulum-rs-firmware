@@ -4,13 +4,14 @@
 API into a small always-running host application. One actor thread exclusively
 owns the serial session and SQLite connection, reconciles the durable outbox,
 polls the device inbox, and publishes immutable state snapshots. A bundled
-HTML/CSS/JavaScript client is served from a loopback-only HTTP API.
+Expo web export is served from a loopback-only HTTP API.
 
-This is an appliance-development bridge, not the final standalone UI. The SPA
-is compiled into the **host executable** and the computer must remain running;
-the E290 does not yet serve HTTP over USB or Wi-Fi. The node firmware continues
-to own its Reticulum identity, radio, routing, durable submissions, and LXMF
-inbox.
+This is an appliance-development bridge, not the final standalone UI. The web
+export is compiled into the **host executable** and the computer must remain
+running; the E290 does not yet serve HTTP over USB or Wi-Fi. The same Expo
+source can target iOS and Android, but those native builds cannot yet reach the
+loopback-only host boundary. The node firmware continues to own its Reticulum
+identity, radio, routing, durable submissions, and LXMF inbox.
 
 ## Run
 
@@ -25,6 +26,38 @@ target/debug/reticulum-lxmf-chat-service \
   --credential /secure/e290-active.key \
   --database "$HOME/.local/share/reticulum-lxmf-chat/e290-a.sqlite3"
 ```
+
+The preferred managed mode owns the private per-device paths and enables
+first-run initialization, pairing, and recovery. First list attached
+native-USB ESP32-S3 candidates and select one stable descriptor serial:
+
+```sh
+target/debug/reticulum-lxmf-chat-service --discover
+
+target/debug/reticulum-lxmf-chat-service \
+  --usb-serial AC:A7:04:E1:3E:88 \
+  --profile-root "$HOME/.local/share/reticulum-lxmf-chat"
+```
+
+The profile root and each per-device directory must be owner-only. The service
+derives the credential and SQLite paths from the normalized USB serial, so
+neither secret paths nor ephemeral `/dev` names become client inputs. Managed
+profiles currently fail closed on non-Unix hosts until equivalent owner-only
+filesystem checks are implemented.
+
+Open the printed URL and start setup when the client reports that pairing is
+needed. The device requires a release followed by a continuous two-second hold
+of GPIO21 for each physical-presence operation. Follow the current stage shown
+by the client rather than holding the button continuously. After successful
+activation, reset or unplug/replug the board: the service requires a real USB
+disappearance and reappearance before it permits a new authenticated epoch.
+
+Interrupted work is classified from the private credential artifact. A known,
+canonical Pending artifact may be resumed or explicitly aborted; an ambiguous
+Begin may only be explicitly aborted with physical presence. An activation-
+ambiguous artifact deliberately has no automatic recovery because the device
+may already have committed Active state. Credential paths, PSKs, protocol
+transcripts, and detailed pairing errors never cross the browser API.
 
 The required USB serial is the stable 48-bit descriptor value, with or without
 colon or hyphen separators. The service discovers the current device path by
@@ -50,10 +83,43 @@ not sent in the initial HTTP request. The bundled client exchanges it for an
 `HttpOnly`, `SameSite=Strict` API cookie and removes it from the address bar.
 The capability is regenerated whenever the service starts.
 
+## Web source and generated assets
+
+The universal client is authored in `../../clients/appliance/` with Expo,
+React Native, and TypeScript. Bun 1.3.13 drives the checks and Expo export;
+Expo's required Metro pipeline produces a static single-page web build. The
+normalizer embeds Metro image resources into `app.js` and reduces the runtime
+surface to `index.html`, `app.js`, and `style.css`. Rust embeds those files in
+the executable, while `assets/manifest.json` records the exact toolchain and
+SHA-256 digest of every runtime asset. Files under `assets/` are generated; do
+not edit them directly.
+
+JSON DTOs in `../../clients/appliance/src/generated/api.ts` are generated from
+the Rust Serde types with `ts-rs`. Change the Rust wire type first and then run
+`bun run api:generate`; do not maintain a second handwritten TypeScript model.
+
+The Bun version/revision and every development dependency are exact pins. To
+change the client, install from the lockfile, regenerate, and run the complete
+web gate:
+
+```sh
+cd clients/appliance
+bun install --frozen-lockfile
+bun run build:web
+bun run verify
+```
+
+`verify` checks generated Rust/TypeScript bindings, Expo dependencies,
+formatting and lint, strict TypeScript types, Bun tests, repeat-build
+determinism, manifest hashes, and the complete tracked asset set. Cargo never
+invokes Bun: checked assets keep Rust builds and firmware-oriented tooling
+independent of the web toolchain.
+
 ## Runtime behavior
 
-- The browser can add local contacts, inspect conversations, queue basic LXMF
-  messages, request an immediate synchronization pass, and force reconnect.
+- The client can onboard a managed device, add local contacts, inspect
+  conversations, queue basic LXMF messages, request an immediate
+  synchronization pass, and force reconnect.
 - A send commits its timestamp, idempotency key, destination, title, and
   content to SQLite before any device request. The HTTP response means the
   local row is durable; the background actor performs device submission and
@@ -68,8 +134,9 @@ The capability is regenerated whenever the service starts.
   backoff. A database/device binding mismatch is a visible fail-closed fault,
   not a retry against another board.
 - The actor command queue, HTTP request body, and EventSource client count are
-  bounded. Browser events are invalidations; the SPA reloads authoritative
-  snapshots and timelines rather than treating events as mutable state.
+  bounded. Browser events are invalidations; the Expo client reloads
+  authoritative snapshots and timelines rather than treating events as
+  mutable state.
 
 SQLite schema 2 retains one authenticated binding consisting of the device ID,
 primary Reticulum destination, and local `lxmf.delivery` destination. A new or
@@ -85,6 +152,10 @@ The current JSON API is private to the bundled alpha client:
 | Method and path | Purpose |
 | --- | --- |
 | `POST /api/v1/session` | Exchange the process capability for the API cookie |
+| `GET /api/v1/onboarding` | Read the secret-free managed-profile lifecycle |
+| `POST /api/v1/onboarding/start` | Start initialization and new pairing |
+| `POST /api/v1/onboarding/refresh` | Reclassify local recovery state after an operator repair or transient fault |
+| `POST /api/v1/onboarding/recover` | Resume or physically confirm abort of recoverable Pending state |
 | `GET /api/v1/snapshot` | Connection, device, outbox, contact, and import state |
 | `GET /api/v1/contacts` | List local contacts |
 | `PUT /api/v1/contacts/{destination}` | Add or rename one contact |
@@ -110,12 +181,13 @@ Board A, and imported verbatim from Board B. The same run exercised capability
 bootstrap, schema-2 identity binding, automatic inbox import, terminal status
 projection, and a same-enumeration reconnect.
 
-Still deferred are physical unplug/replug recovery across supported operating
-systems, service/host restart qualification, concurrent-process locking,
+Still deferred are live qualification of managed first-run pairing and reset
+recovery, activation-ambiguous repair, cross-platform host filesystem policy,
+service/host restart qualification, concurrent-process locking,
 notifications, browser compatibility and accessibility testing, database
-encryption, pairing and credential-management UI, device-served Wi-Fi or USB
-networking, BLE/mobile clients, NomadNet/Micron, direct/Resource/propagated
-LXMF, pressure/fill testing, and soak.
+encryption, installed native-client transports, device-served Wi-Fi or USB
+networking, BLE, NomadNet/Micron, direct/Resource/propagated LXMF,
+pressure/fill testing, and soak.
 
 ## Focused checks
 
@@ -124,4 +196,8 @@ cargo +stable test --locked -p reticulum-lxmf-chat-app
 cargo +stable test --locked -p reticulum-lxmf-chat-service
 cargo +stable clippy --locked -p reticulum-lxmf-chat-app --all-targets -- -D warnings
 cargo +stable clippy --locked -p reticulum-lxmf-chat-service --all-targets -- -D warnings
+
+cd clients/appliance
+bun install --frozen-lockfile
+bun run verify
 ```

@@ -7,11 +7,12 @@ core, registry, and router remain interface-neutral so a later second radio,
 USB, Wi-Fi, or BLE link can join as an independent Reticulum interface without
 pretending to be LoRa. None of those later Reticulum packet actors is being
 implemented in parallel with the first LoRa path. USB's first product role is
-the authenticated local client/control API; a Wi-Fi SPA and BLE client can
-follow on that same separate API boundary. Those bearers become Reticulum
-packet interfaces only through optional actors added after the LoRa slice. The
-already-qualified Heltec Wireless Tracker V2.3 pair remains a constrained LoRa
-regression target.
+the authenticated local client/control API. One Expo application now owns the
+shared web, iOS, and Android client surface; future Wi-Fi, BLE, and native Rust
+adapters can join behind its bearer-neutral client boundary. Those bearers
+become Reticulum packet interfaces only through optional actors added after the
+LoRa slice. The already-qualified Heltec Wireless Tracker V2.3 pair remains a
+constrained LoRa regression target.
 
 The hardware-independent
 `reticulum-board-heltec-vision-master-e290` crate is the compiled source of
@@ -83,10 +84,12 @@ terminal outbox reconciliation, exact peer import, and inbox deduplication.
 The subsequent
 [host-appliance alpha proof](docs/e290-lxmf-appliance-alpha-proof.md) adds a
 single-owner background service, SQLite schema-2 authenticated database binding,
-exact-serial discovery/reconnect, and a bundled loopback SPA/API. One message
+exact-serial discovery/reconnect, and a bundled loopback client/API. One message
 queued through that HTTP boundary reached `Delivered` over the E290 LoRa link
 and was imported verbatim from the peer. This is a host-companion milestone;
-the SPA is not yet served by the E290 over USB or Wi-Fi.
+the former hand-built SPA has since been replaced by a universal Expo client
+and Rust-generated TypeScript API types, but its current bundled web export is
+still not served by the E290 over USB or Wi-Fi.
 That POC's initial startup failure was a cumulative pre-USB mount-stack
 overflow, not a USB or board-enumeration fault; direct in-place placement of
 the upper runtime/actor chain fixed that diagnosed boundary. The initially
@@ -1002,6 +1005,7 @@ second transport is required to qualify the first LoRa vertical slice.
 - [Permanent LoRa-first E290 node](docs/e290-node.md)
 - [LXMF chat alpha CLI](crates/lxmf-chat-cli/README.md)
 - [LXMF host appliance alpha](crates/lxmf-chat-service/README.md)
+- [Expo universal appliance client](clients/appliance/README.md)
 - [E290 LXMF chat-alpha powered proof](docs/e290-lxmf-chat-alpha-proof.md)
 - [E290 LXMF host-appliance alpha proof](docs/e290-lxmf-appliance-alpha-proof.md)
 - [Usable-firmware POC limits and known defects](docs/poc-known-defects.md)
@@ -1019,6 +1023,7 @@ second transport is required to qualify the first LoRa vertical slice.
 - [Application-event ownership and bounded RNS Resource admission](docs/adr/0012-application-event-and-resource-ownership.md)
 - [Bounded LXMF wire and service ownership boundary](docs/adr/0013-bounded-lxmf-wire-boundary.md)
 - [Durable LXMF message ownership](docs/adr/0014-durable-lxmf-message-ownership.md)
+- [Universal Expo client and generated TypeScript boundary](docs/adr/0015-universal-expo-client-and-generated-bindings.md)
 - [Transport-neutral interface registry and router](docs/interface-router.md)
 - [Phase-0 validation contract](docs/phase-0-acceptance.md)
 - [Phase-1 receive-only slice](docs/phase-1-rx-slice.md)

@@ -13,6 +13,9 @@
 .env.*
 !.env.example
 .venv/
+**/node_modules/
+**/coverage/
+/clients/appliance/.tmp/
 __pycache__/
 *.py[cod]
 
