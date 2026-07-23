@@ -1,0 +1,6 @@
+*.xcframework/
+/android/.cxx/
+/android/build/
+/android/generated/
+/android/src/main/jniLibs/
+/ios/generated/

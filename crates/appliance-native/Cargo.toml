@@ -1,0 +1,16 @@
+[package]
+name = "reticulum-appliance-native"
+description = "Native mobile binding surface for the Reticulum appliance client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reticulum-device-api = { path = "../device-api", default-features = false, features = ["experimental-lxmf"] }
+uniffi.workspace = true
+
+[lib]
+crate-type = ["lib", "staticlib"]
+path = "src/lib.rs"

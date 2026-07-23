@@ -4,6 +4,10 @@
 // Every JsonSafeInteger is encoded as a JSON number in the inclusive range
 // 0..=Number.MAX_SAFE_INTEGER. Rust validates this contract at the wire boundary.
 
+export const DEVICE_API_VERSION_MAJOR = 1 as const;
+export const DEVICE_API_VERSION_MINOR = 4 as const;
+export const MAX_MESSAGE_BYTES = 512 as const;
+export const MAX_LXMF_READ_CHUNK_BYTES = 416 as const;
 export const MAX_CONTACT_NAME_BYTES = 256 as const;
 export const MAX_LXMF_BASIC_TITLE_BYTES = 295 as const;
 export const MAX_LXMF_BASIC_CONTENT_BYTES = 295 as const;

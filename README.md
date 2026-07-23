@@ -8,11 +8,12 @@ USB, Wi-Fi, or BLE link can join as an independent Reticulum interface without
 pretending to be LoRa. None of those later Reticulum packet actors is being
 implemented in parallel with the first LoRa path. USB's first product role is
 the authenticated local client/control API. One Expo application now owns the
-shared web, iOS, and Android client surface; future Wi-Fi, BLE, and native Rust
-adapters can join behind its bearer-neutral client boundary. Those bearers
-become Reticulum packet interfaces only through optional actors added after the
-LoRa slice. The already-qualified Heltec Wireless Tracker V2.3 pair remains a
-constrained LoRa regression target.
+shared web, iOS, and Android client surface, and its compiled UniFFI bridge has
+completed an Android/iOS immutable-contract round trip. Future Wi-Fi, BLE, and
+native device transports can join behind its bearer-neutral client boundary.
+Those bearers become Reticulum packet interfaces only through optional actors
+added after the LoRa slice. The already-qualified Heltec Wireless Tracker V2.3
+pair remains a constrained LoRa regression target.
 
 The hardware-independent
 `reticulum-board-heltec-vision-master-e290` crate is the compiled source of
@@ -1009,6 +1010,7 @@ second transport is required to qualify the first LoRa vertical slice.
 - [E290 LXMF chat-alpha powered proof](docs/e290-lxmf-chat-alpha-proof.md)
 - [E290 LXMF host-appliance alpha proof](docs/e290-lxmf-appliance-alpha-proof.md)
 - [E290 Expo managed first-run proof](docs/e290-expo-appliance-first-run-proof.md)
+- [Expo native Rust bridge proof](docs/expo-native-rust-bridge-proof.md)
 - [Usable-firmware POC limits and known defects](docs/poc-known-defects.md)
 - [Phase-0 scaffold decision](docs/adr/0001-phase-0-scaffold.md)
 - [Rete provisional-foundation decision](docs/adr/0002-rete-provisional-foundation.md)

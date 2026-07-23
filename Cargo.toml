@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "comparisons/rns-leviculum",
     "crates/announce-clock",
+    "crates/appliance-native",
     "crates/board-heltec-tracker-v2",
     "crates/board-heltec-tracker-v2-radio",
     "crates/board-heltec-tracker-v2-tx-hil",
@@ -64,6 +65,7 @@ members = [
 exclude = ["vendor/esp-rtos-0.3.0", "vendor/lora-phy-3.0.1"]
 default-members = [
     "crates/announce-clock",
+    "crates/appliance-native",
     "crates/board-heltec-tracker-v2",
     "crates/board-heltec-tracker-v2-radio",
     "crates/board-heltec-tracker-v2-tx-hil",
@@ -181,6 +183,7 @@ subtle = { version = "=2.6.1", default-features = false }
 tokio = { version = "=1.53.1", default-features = false, features = ["macros", "net", "rt", "signal", "sync", "time"] }
 tower = { version = "=0.5.3", default-features = false, features = ["util"] }
 ts-rs = { version = "=12.0.1", default-features = false, features = ["no-serde-warnings", "serde-compat"] }
+uniffi = { version = "=0.31.0", default-features = false }
 zeroize = { version = "=1.9.0", default-features = false }
 
 # Rete is not published as a coherent crates.io release. Keep every crate on

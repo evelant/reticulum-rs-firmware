@@ -1,6 +1,6 @@
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { extname, join, relative, resolve, sep } from "node:path";
+import { basename, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { assertExpectedBun, EXPECTED_BUN_REVISION, EXPECTED_BUN_VERSION } from "./toolchain.ts";
@@ -76,28 +76,48 @@ interface InlinedBundle {
   readonly source: string;
 }
 
-async function inlineMetroAssets(bundle: string, exportDirectory: string): Promise<InlinedBundle> {
-  const assetUrls = [
-    ...new Set(bundle.match(/\/assets\/[A-Za-z0-9_./@-]+\.[A-Za-z0-9]+/g) ?? []),
-  ].sort();
+async function inlineMetroAssets(
+  bundle: string,
+  exportDirectory: string,
+  exportedFiles: readonly string[],
+): Promise<InlinedBundle> {
+  const assetUrls = [...new Set(bundle.match(/\/assets\/[A-Za-z0-9_./@+-]+\.png/g) ?? [])].sort();
+  const assetPaths: string[] = [];
   let result = bundle;
   for (const url of assetUrls) {
     const extension = extname(url).toLowerCase();
     if (extension !== ".png") {
       throw new Error(`unsupported Metro runtime asset in web bundle: ${url}`);
     }
-    const path = resolve(exportDirectory, `.${url}`);
+    const logicalPath = url.slice(1);
+    const exportedMatches = [
+      ...new Set(
+        exportedFiles.filter(
+          (path) =>
+            path === logicalPath ||
+            (path.startsWith("assets/") && path.endsWith(`/${basename(logicalPath)}`)),
+        ),
+      ),
+    ];
+    if (exportedMatches.length !== 1 || exportedMatches[0] === undefined) {
+      throw new Error(
+        `expected one exported file for Metro asset ${url}, observed ${exportedMatches.length}`,
+      );
+    }
+    const exportedPath = exportedMatches[0];
+    const path = resolve(exportDirectory, exportedPath);
     if (!path.startsWith(`${resolve(exportDirectory)}${sep}`)) {
       throw new Error(`Metro runtime asset escaped the export root: ${url}`);
     }
     const bytes = await readFile(path);
     const dataUrl = `data:image/png;base64,${bytes.toString("base64")}`;
     result = result.replaceAll(url, dataUrl);
+    assetPaths.push(exportedPath);
   }
   if (/\/assets\//.test(result)) {
     throw new Error("Expo bundle contains an unhandled external asset URL");
   }
-  return { assetPaths: assetUrls.map((url) => url.slice(1)), source: result };
+  return { assetPaths, source: result };
 }
 
 function dedent(value: string): string {
@@ -171,7 +191,7 @@ async function normalizeExport(
   }
 
   const rawBundle = await Bun.file(join(exportDirectory, bundlePaths[0])).text();
-  const bundle = await inlineMetroAssets(rawBundle, exportDirectory);
+  const bundle = await inlineMetroAssets(rawBundle, exportDirectory, files);
   const expectedFiles = new Set([
     "index.html",
     "metadata.json",

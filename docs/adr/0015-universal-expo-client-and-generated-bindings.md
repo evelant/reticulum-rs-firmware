@@ -90,14 +90,24 @@ HTTP, USB, BLE, or Expo globals directly. Initial implementations are:
 2. device HTTP/WebSocket for Wi-Fi when that bearer exists; and
 3. a native Rust-backed transport for BLE and background operation.
 
-The first native-Rust spike will evaluate `uniffi-bindgen-react-native`. It can
-generate a Turbo Module for React Native and a WASM binding from one UniFFI
-Rust surface, matching the desired native/web reuse. An Expo local module or
-config plugin owns packaging, lifecycle, and generated native-project changes.
-Direct handwritten Turbo Modules are a fallback. Nitro Modules are deferred
-until profiling shows that the control/message interface needs a lower-overhead
-JSI boundary; selecting them pre-emptively would add a second code generator
-and C++ ownership surface without a demonstrated throughput requirement.
+The first native-Rust spike selected UniFFI `0.31.0` through exactly pinned
+`uniffi-bindgen-react-native` `0.31.0-3`. A private Expo local TurboModule owns
+platform packaging and generated TypeScript, C++, Kotlin, Objective-C++, CMake,
+Gradle, podspec, and framework boundaries. Its first callable Rust operation
+returns immutable bridge/device-API versions and message bounds. The
+TypeScript caller compares every field with Rust-generated device-API
+constants and fails closed before exposing the bridge as ready.
+
+Android development compilation now passes for all four Expo ABIs. An arm64
+iOS simulator development build also passes and renders the contract returned
+by the compiled Rust library. This qualifies the generator, packaging,
+autoloading, and basic callable round trip; it does not yet qualify a native
+device transport, cancellation, panic translation, application lifecycle, or
+BLE behavior. Direct handwritten Turbo Modules remain a fallback. Nitro
+Modules remain deferred until profiling shows that the control/message
+interface needs a lower-overhead JSI boundary; selecting them pre-emptively
+would add a second code generator and C++ ownership surface without a
+demonstrated throughput requirement.
 
 The app is an optional client, not the Reticulum router. Routing, identity,
 durable inbox/outbox state, LXMF propagation, and transport forwarding continue
@@ -149,9 +159,13 @@ The application gate must, from a frozen Bun lockfile:
 7. compile the Rust host service from those checked assets without invoking
    Bun implicitly.
 
-Native gates are added with the first Rust module: generated-project
-reproducibility, Android and iOS development builds, binding round trips,
-cancellation/panic behavior, background lifecycle, and physical BLE hardware.
+The first native gate regenerates both platform bindings, checks only their
+tracked generated surfaces for drift, and tests and lints the source Rust
+crate. Android and iOS development builds and the immutable binding round trip
+have passed manually and are recorded in the
+[native bridge proof](../expo-native-rust-bridge-proof.md). Platform CI,
+cancellation/panic behavior, cleanup and Fast Refresh idempotence, background
+lifecycle, and physical BLE hardware remain gates for their owning phases.
 
 ## References
 

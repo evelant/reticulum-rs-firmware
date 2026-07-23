@@ -1,0 +1,37 @@
+{
+  "name": "@reticulum/appliance-native",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Rust-backed native client boundary for the Reticulum appliance",
+  "main": "src/index.web.ts",
+  "browser": "src/index.web.ts",
+  "react-native": "src/index.tsx",
+  "types": "src/index.tsx",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/evelant/reticulum-rs-firmware.git"
+  },
+  "homepage": "https://github.com/evelant/reticulum-rs-firmware",
+  "author": "Reticulum Rust Firmware contributors",
+  "license": "MIT OR Apache-2.0",
+  "dependencies": {
+    "@ubjs/core": "0.31.0-3",
+    "uniffi-bindgen-react-native": "0.31.0-3"
+  },
+  "peerDependencies": {
+    "react": "19.2.3",
+    "react-native": "0.86.0"
+  },
+  "codegenConfig": {
+    "name": "ReticulumApplianceNativeSpec",
+    "type": "modules",
+    "jsSrcsDir": "src",
+    "android": {
+      "javaPackageName": "org.reticulum.appliance.nativebridge"
+    },
+    "outputDir": {
+      "ios": "ios/generated",
+      "android": "android/build/generated/source/codegen"
+    }
+  }
+}

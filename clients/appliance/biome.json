@@ -8,7 +8,24 @@
     }
   },
   "files": {
-    "includes": ["**", "!!dist", "!!node_modules", "!!android", "!!ios", "!!src/generated"]
+    "includes": [
+      "**",
+      "!!.expo",
+      "!!dist",
+      "!!node_modules",
+      "!!android",
+      "!!expo-env.d.ts",
+      "!!ios",
+      "!!src/generated",
+      "!!modules/appliance-native/android/.cxx",
+      "!!modules/appliance-native/android/build",
+      "!!modules/appliance-native/android/src/main/jniLibs",
+      "!!modules/appliance-native/ios/generated",
+      "!!modules/appliance-native/ReticulumApplianceNativeFramework.xcframework",
+      "!!modules/appliance-native/src/generated",
+      "!!modules/appliance-native/src/NativeApplianceNative.ts",
+      "!!modules/appliance-native/src/index.tsx"
+    ]
   },
   "formatter": {
     "enabled": true,

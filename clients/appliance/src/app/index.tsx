@@ -31,6 +31,8 @@ import { ApplianceApi } from "../lib/api.ts";
 import { type DraftIdentity, ensureDraftIdentity } from "../lib/draft.ts";
 import { LatestRequest } from "../lib/latest-request.ts";
 import { byteLimitError, utf8ByteLength } from "../lib/limits.ts";
+import { readNativeCoreStatus } from "../lib/native-core";
+import type { NativeCoreStatus } from "../lib/native-core-types.ts";
 import { onboardingPresentation } from "../lib/onboarding.ts";
 import { randomHex } from "../lib/random.ts";
 
@@ -370,6 +372,7 @@ export default function ApplianceScreen() {
   const { width } = useWindowDimensions();
   const compact = width < 760;
   const [bootstrapped, setBootstrapped] = useState(false);
+  const [nativeCore, setNativeCore] = useState<NativeCoreStatus | null>(null);
   const [snapshot, setSnapshot] = useState<ApplianceSnapshot | null>(null);
   const [onboarding, setOnboarding] = useState<OnboardingView>(EMPTY_ONBOARDING);
   const [contacts, setContacts] = useState<ContactView[]>([]);
@@ -386,6 +389,16 @@ export default function ApplianceScreen() {
 
   const ready = onboardingPresentation(onboarding).ready;
   const selectedContact = contacts.find((contact) => contact.destination === selected);
+
+  useEffect(() => {
+    let active = true;
+    void readNativeCoreStatus().then((status) => {
+      if (active) setNativeCore(status);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const refresh = useCallback(async () => {
     const refreshRequest = refreshRequests.current.begin();
@@ -586,6 +599,16 @@ export default function ApplianceScreen() {
           <Text style={styles.title}>LXMF</Text>
         </View>
         <View style={styles.statusCluster}>
+          {nativeCore === null ? null : (
+            <View
+              style={[
+                styles.pill,
+                nativeCore.state === "ready" ? styles.pillReady : styles.pillFaulted,
+              ]}
+            >
+              <Text style={styles.pillText}>{nativeCore.label}</Text>
+            </View>
+          )}
           <View
             style={[
               styles.pill,

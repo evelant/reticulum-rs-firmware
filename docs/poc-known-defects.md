@@ -120,9 +120,21 @@ proof unless a failing test promotes one into a release blocker.
   [host appliance service](../crates/lxmf-chat-service/README.md) adds exact USB-
   serial discovery, a sole serial/database actor, automatic reconnect/backoff,
   continuous one-step inbox/status work, immutable state invalidations, and a
-  bundled loopback Expo web export. It remains a computer-side companion: there
-  is still no client served by the E290, Wi-Fi or BLE client bearer, installed
-  native Expo application, display UI, NomadNet client, or Micron client.
+  bundled loopback Expo web export. The shared Expo application now also
+  compiles and runs as Android and iOS development builds, and its first
+  callable UniFFI round trip reaches Rust. It remains a computer-side
+  companion: there is still no client served by the E290, Wi-Fi or BLE client
+  bearer, native device transport, display UI, NomadNet client, or Micron
+  client.
+- The native Rust bridge currently exports immutable contract metadata only.
+  Native screens still use the interim HTTP adapter, while the host service's
+  loopback/origin policy is deliberately not a phone transport. Cancellation,
+  Rust panic/error translation, module cleanup, reload idempotence,
+  background/foreground lifecycle, and BLE disconnect/resume remain
+  unqualified. Native generation and application builds are not yet in CI.
+  The iOS XCFramework supports arm64 device and Apple-Silicon simulator only.
+  The Android proof used a large multi-ABI debug APK; release stripping,
+  splits, startup, and memory remain unmeasured.
 - The host service has no operating-system single-instance lock, notification
   service, account migration, database encryption, activation-ambiguous repair,
   or cross-platform disconnect/host-suspend matrix. Managed profiles currently

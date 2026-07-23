@@ -2235,8 +2235,10 @@ application is therefore the BLE client as well as the web client. Shared
 components and domain hooks consume a transport interface; a native Rust
 module provides BLE and background lifecycle behavior on iOS/Android while the
 web target uses HTTP/SSE or WebSocket. The first Rust bridge spike uses
-`uniffi-bindgen-react-native` behind Expo development builds; Nitro remains a
-measured-performance fallback.
+the pinned UniFFI `0.31.0` and `uniffi-bindgen-react-native` `0.31.0-3` local
+TurboModule behind Expo development builds. Its Android/iOS immutable-contract
+round trip now passes; transport, cancellation, lifecycle, and physical BLE
+qualification remain. Nitro remains a measured-performance fallback.
 
 ### Recommended order
 
@@ -2244,7 +2246,8 @@ For the turnkey local client/API:
 
 1. USB CDC-ACM CLI/test client.
 2. Host companion service and the Expo static web export over that USB API.
-3. Expo iOS/Android development builds with the transport boundary in place.
+3. Expo iOS/Android development builds with the transport boundary in place
+   (native Rust contract foundation complete; device transport pending).
 4. Device-served Wi-Fi export and native local-network transport using the same
    generated contracts and application model.
 5. BLE device-API bearer through the Expo native Rust module.
@@ -3021,9 +3024,9 @@ Exit: enabling location adds a bounded optional capability without changing netw
 3. What measured quotas define the initial `e290-core-node`, `e290-headless-infrastructure`, `e290-turnkey`, and constrained Tracker compositions?
 4. Which allocations may use E290 PSRAM, and which synchronization, radio,
    DMA, interrupt-visible, and flash-critical state must remain internal?
-5. Which native Rust bridge passes the Expo iOS/Android/WASM spike and what
-   measured boundary would justify replacing UniFFI with Nitro or handwritten
-   Turbo Modules?
+5. What measured transport, lifecycle, or throughput boundary would justify
+   replacing the selected UniFFI TurboModule with Nitro or a handwritten Turbo
+   Module, and does the web target eventually benefit from a WASM binding?
 6. Must identity/message storage resist physical flash extraction in the first hardware release, or can secure manufacturing provisioning follow a developer edition?
 7. Is optional RNode bridge compatibility a product requirement or only a development/recovery aid?
 8. Which USB framing and host-peer mode becomes the first non-LoRa Reticulum

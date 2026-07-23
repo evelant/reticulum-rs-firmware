@@ -1,0 +1,29 @@
+rust:
+  directory: ../../../..
+  manifestPath: crates/appliance-native/Cargo.toml
+
+bindings:
+  cpp: cpp/generated
+  ts: src/generated
+
+android:
+  directory: android
+  apiLevel: 24
+  targets:
+    - arm64-v8a
+    - armeabi-v7a
+    - x86
+    - x86_64
+  cargoExtras:
+    - --locked
+  codegenOutputDir: android/build/generated/source/codegen
+  useSharedLibrary: false
+
+ios:
+  directory: ios
+  targets:
+    - aarch64-apple-ios
+    - aarch64-apple-ios-sim
+  cargoExtras:
+    - --locked
+  codegenOutputDir: ios/generated

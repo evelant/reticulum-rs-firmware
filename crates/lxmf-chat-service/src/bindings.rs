@@ -1,6 +1,9 @@
 //! App-facing TypeScript binding generation and JSON integer policy.
 
-use reticulum_device_api::{MAX_LXMF_BASIC_CONTENT_BYTES, MAX_LXMF_BASIC_TITLE_BYTES};
+use reticulum_device_api::{
+    API_VERSION_MAJOR, API_VERSION_MINOR, MAX_LXMF_BASIC_CONTENT_BYTES, MAX_LXMF_BASIC_TITLE_BYTES,
+    MAX_LXMF_READ_CHUNK_BYTES, MAX_MESSAGE_BYTES,
+};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serializer};
 use ts_rs::TS;
@@ -89,7 +92,11 @@ pub fn render_api_bindings() -> String {
     );
 
     output.push_str(&format!(
-        "export const MAX_CONTACT_NAME_BYTES = {MAX_CONTACT_NAME_BYTES} as const;\n\
+        "export const DEVICE_API_VERSION_MAJOR = {API_VERSION_MAJOR} as const;\n\
+         export const DEVICE_API_VERSION_MINOR = {API_VERSION_MINOR} as const;\n\
+         export const MAX_MESSAGE_BYTES = {MAX_MESSAGE_BYTES} as const;\n\
+         export const MAX_LXMF_READ_CHUNK_BYTES = {MAX_LXMF_READ_CHUNK_BYTES} as const;\n\
+         export const MAX_CONTACT_NAME_BYTES = {MAX_CONTACT_NAME_BYTES} as const;\n\
          export const MAX_LXMF_BASIC_TITLE_BYTES = {MAX_LXMF_BASIC_TITLE_BYTES} as const;\n\
          export const MAX_LXMF_BASIC_CONTENT_BYTES = {MAX_LXMF_BASIC_CONTENT_BYTES} as const;\n\n"
     ));
