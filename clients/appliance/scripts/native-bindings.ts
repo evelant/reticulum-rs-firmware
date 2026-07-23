@@ -12,6 +12,7 @@ const repositoryDirectory = resolve(clientDirectory, "../..");
 const moduleDirectory = join(clientDirectory, "modules/appliance-native");
 const moduleRepositoryPath = "clients/appliance/modules/appliance-native";
 const rustToolchainPath = join(repositoryDirectory, "rust-toolchain.toml");
+const iosDeploymentTarget = "16.4";
 
 const commonGeneratedPaths = [
   "cpp/generated",
@@ -189,10 +190,10 @@ async function buildEnvironment(
   const environment: Record<string, string> = { RUSTUP_TOOLCHAIN: toolchain };
   if (platform !== "ios") return environment;
 
-  // A Nix-wrapped host compiler can inject a macOS deployment target even
-  // while cc-rs is compiling bundled C dependencies for iPhoneOS. Select the
-  // Xcode toolchain explicitly for both supported iOS Rust targets so native
-  // dependencies never receive incompatible macOS and iOS target flags.
+  // A host compiler wrapper can inject macOS target flags, and cc-rs otherwise
+  // builds bundled C dependencies against the current SDK's minimum version.
+  // Select both the Xcode compiler and the app's minimum iOS version explicitly
+  // so the resulting Rust archive can link into the app.
   const clang = (
     await commandOutput(
       ["xcrun", "--sdk", "iphoneos", "--find", "clang"],
@@ -225,6 +226,7 @@ async function buildEnvironment(
     CXX_aarch64_apple_ios_sim: clangPlusPlus,
     CARGO_TARGET_AARCH64_APPLE_IOS_LINKER: clang,
     CARGO_TARGET_AARCH64_APPLE_IOS_SIM_LINKER: clang,
+    IPHONEOS_DEPLOYMENT_TARGET: iosDeploymentTarget,
   };
 }
 

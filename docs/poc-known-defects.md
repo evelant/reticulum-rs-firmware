@@ -107,8 +107,15 @@ proof unless a failing test promotes one into a release blocker.
   bytes, Rust validates and create-only publishes the canonical credential,
   and the E290 device ID supplies the exact BLE advertised-name selector.
   This implements and host-tests fresh-install sandbox seeding and removes
-  first-match selection from the app source, but the physical Expo path is not
-  yet qualified and the import clones transferable authentication authority.
+  first-match selection from the app source. The
+  [bounded physical iOS proof](e290-expo-ios-ble-lora-proof.md) additionally
+  covers one system-picker import into a signed Release, exact-E290 foreground
+  BLE selection and suite-3 authentication, and one sequential basic LXMF
+  message in each direction over LoRa. A follow-up cold foreground launch
+  automatically reconnected and physically passed the keyboard-aware composer.
+  Android hardware, background restoration, the full mobile lifecycle matrix,
+  pressure, soak, and overlapping BLE owners remain unqualified, and the import
+  clones transferable authentication authority.
   Import also publishes the first canonical artifact immediately: there is no
   Rust-owned secret-free identity preview/confirmation, so selecting the other
   board's valid file irreversibly binds that app data until the user clears it.
@@ -158,11 +165,13 @@ proof unless a failing test promotes one into a release blocker.
   `failed_delivery_timeout`; a later sequential send with new material
   delivered exactly. The likely RF collision was not instrumented closely
   enough to establish its cause, and simultaneous bidirectional scheduling
-  remains unqualified. The shared Expo application now also compiles and runs
-  as Android and iOS development builds, and its first callable UniFFI round
-  trip reaches Rust. It remains a computer-side companion: there is still no
+  remains unqualified. The shared Expo application compiles and runs as Android
+  and iOS development builds, its first callable UniFFI round trip reaches
+  Rust, and the bounded signed-iOS proof above composes its native Rust owner
+  with authenticated BLE and the two-E290 LoRa path. It remains an external
+  companion rather than an E290-served or onboard client: there is still no
   E290-served web UI, physically qualified Wi-Fi client bearer, display UI,
-  NomadNet client, or Micron client.
+  NomadNet client, Micron client, or physical Android qualification.
 - The host BLE connector currently reuses `BleTransport` through the
   E290-specific physical-qualifier package, which also owns its diagnostic CLI
   and browser bridge. This avoided duplicating the already-powered
@@ -192,8 +201,10 @@ proof unless a failing test promotes one into a release blocker.
   four runs used 20-byte fragments, write-with-response, and indications and
   returned the board-correct device and destination identifiers. This qualifies
   the bounded production firmware's disconnect/drain/drop/re-advertise sequence
-  plus the direct macOS qualifier path, not a powered Expo native-module
-  foreground/background/reconnect lifecycle matrix. A sole BLE central must
+  plus the direct macOS qualifier path. The later signed-iOS run qualifies one
+  Expo native-module foreground path and automatic cold-launch foreground
+  reconnect, not a foreground/background/restoration lifecycle matrix. A sole
+  BLE central must
   enable indications within 15 seconds, then reach its first authenticated
   `Established` session within one absolute, non-refreshing 30-second deadline;
   partial framing and stalled handshake flights do not extend ownership.
@@ -227,13 +238,14 @@ proof unless a failing test promotes one into a release blocker.
   device transport. Cancellation, Rust panic translation, full Fast Refresh,
   background/foreground lifecycle, and mobile BLE disconnect/resume remain
   unqualified. Native generation and application builds are not yet in CI. The
-  iOS XCFramework supports arm64 device and Apple-Silicon simulator only. The
-  current simulator link also warns that one object was built with a newer iOS
-  simulator version than the application's 16.4 deployment target. The Android
-  proof used a large multi-ABI debug APK; release stripping, splits, startup,
-  and memory remain unmeasured. The current target SDK 36 build correctly does
-  not request Android's future local-network runtime permission. Before raising
-  the target to SDK 37, add and exercise
+  iOS XCFramework supports arm64 device and Apple-Silicon simulator only.
+  Bundled C dependencies now receive the application's explicit 16.4 deployment
+  target; exhaustive archive inspection and a clean Release link removed the
+  earlier newer-SDK object warning. The Android proof used a large multi-ABI
+  debug APK; release stripping, splits, startup, and memory remain unmeasured.
+  The current target SDK 36 build correctly does not request Android's future
+  local-network runtime permission. Before raising the target to SDK 37, add and
+  exercise
   [`ACCESS_LOCAL_NETWORK`](https://developer.android.com/privacy-and-security/local-network-permission);
   Android 17 otherwise blocks the connector's outgoing raw-LAN TCP traffic by
   default.
@@ -262,7 +274,8 @@ proof unless a failing test promotes one into a release blocker.
   Exact flash/readback on both boards, three consecutive Board B sessions, and
   one independent Board A session now powered-qualify the corrected barrier
   with the unchanged two-activity/one-link budgets. Pressure, soak, and the
-  powered mobile Expo lifecycle matrix remain open.
+  powered mobile Expo lifecycle matrix beyond the bounded iOS foreground proof
+  remain open.
 - BLE controller initialization is still not fully isolated from the autonomous
   LoRa node. `BleConnector::new` returns a recoverable error only for
   configuration validation; pinned esp-radio controller and esp-rtos paths can

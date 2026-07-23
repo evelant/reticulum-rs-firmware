@@ -24,6 +24,7 @@ import { nativePathFromFileUri } from "./file-uri.ts";
 import { NativeBleTransport, type NativeBleTransportConfig } from "./native-ble-transport.ts";
 import { assertNativeBridgeContract } from "./native-contract.ts";
 import { type NativeErrorPredicate, normalizeNativeError } from "./native-error.ts";
+import { nativePlatformOs } from "./native-platform";
 
 const DATABASE_FILE_NAME = "reticulum-lxmf-chat.sqlite3";
 const DEVICE_CREDENTIAL_FILE_NAME = "reticulum-device-credential.rdpkey";
@@ -174,11 +175,10 @@ function nativeOnboardingView(
 }
 
 async function loadNativeApplianceRuntime(): Promise<NativeApplianceRuntime> {
-  const [bindings, crypto, fileSystem, reactNative] = await Promise.all([
+  const [bindings, crypto, fileSystem] = await Promise.all([
     import("@reticulum/appliance-native"),
     import("expo-crypto"),
     import("expo-file-system"),
-    import("react-native"),
   ]);
   const databaseUri = new fileSystem.File(fileSystem.Paths.document, DATABASE_FILE_NAME).uri;
   const deviceCredentialUri = new fileSystem.File(
@@ -262,7 +262,7 @@ async function loadNativeApplianceRuntime(): Promise<NativeApplianceRuntime> {
       try {
         await picked.result.copy(staging, { overwrite: false });
         const stagingPath = nativePathFromFileUri(staging.uri);
-        cleanupPickerOwnedCredential(reactNative.Platform.OS, picked.result);
+        cleanupPickerOwnedCredential(nativePlatformOs, picked.result);
         return { stagingPath, cleanup };
       } catch (error) {
         const cleanupErrors: unknown[] = [];
@@ -272,7 +272,7 @@ async function loadNativeApplianceRuntime(): Promise<NativeApplianceRuntime> {
           cleanupErrors.push(cleanupError);
         }
         try {
-          cleanupPickerOwnedCredential(reactNative.Platform.OS, picked.result);
+          cleanupPickerOwnedCredential(nativePlatformOs, picked.result);
         } catch (cleanupError) {
           cleanupErrors.push(cleanupError);
         }

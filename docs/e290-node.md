@@ -2830,12 +2830,22 @@ device ID `653239302d6170692d31aca704e13f88`, primary destination
 bounded disconnect/drain/drop/re-advertise sequence across consecutive sessions
 and independently on both hardware identities.
 
-This proof does not qualify a powered Expo iOS/Android
-foreground/background/reconnect lifecycle matrix, pressure, or soak. The
-process-global React Native `BleManager` still needs the P2 cross-instance
-ownership epoch before overlapping owners or restoration can be qualified, and
-BLE controller initialization can still panic/assert before the API bearer
-reaches its recoverable isolation boundary.
+The subsequent
+[physical Expo iOS BLE-to-LoRa proof](e290-expo-ios-ble-lora-proof.md)
+installed a signed, self-contained Release, imported one activated credential
+through the system picker, selected the credential-derived exact E290, and
+completed indication subscription plus suite-3 authentication. One sequential
+basic LXMF message reached `Delivered` and exact durable peer import in each
+direction over LoRa. A follow-up cold foreground launch automatically
+reconnected and physically passed the corrected keyboard-aware composer.
+
+This qualifies one bounded Expo iOS foreground path, not a powered iOS/Android
+foreground/background/restoration lifecycle matrix. Android hardware, repeated
+disconnect/resume, pressure, and soak remain open. The process-global React
+Native `BleManager` still needs the P2 cross-instance ownership epoch before
+overlapping owners or restoration can be qualified, and BLE controller
+initialization can still panic/assert before the API bearer reaches its
+recoverable isolation boundary.
 
 The private local evidence root is
 `/private/tmp/e290-ble-powered-20260723.YcRky1`. The final flash/readback records
@@ -3161,9 +3171,13 @@ first smoke.
   admission boundary must remain reusable by every bearer. BLE suite 3 now has
   a bounded one-connection implementation, three consecutive authenticated
   CoreBluetooth sessions on Board B, and one independent session on Board A;
-  the fail-closed disconnect barrier is therefore powered-qualified. Wi-Fi still
-  requires powered qualification, while the mobile Expo lifecycle matrix,
-  P2 cross-instance `BleManager` epoch, pressure, and soak remain open. The
+  the fail-closed disconnect barrier is therefore powered-qualified. Preserve
+  the later signed physical-iOS foreground proof of credential import,
+  exact-board authenticated BLE, one sequential LXMF exchange in each LoRa
+  direction, automatic cold-launch reconnect, and corrected keyboard UX. Wi-Fi
+  still requires powered qualification, while the full mobile Expo lifecycle
+  matrix, background restoration, Android hardware, P2 cross-instance
+  `BleManager` epoch, pressure, and soak remain open. The
   narrow pre-authentication bearer, current 128-entry non-reclaiming submission
   profile, 129th-request rejection, mutation-free replay at capacity, and ADR
   0005 host behavior are covered in source/host tests. Historical 16-entry

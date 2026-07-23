@@ -172,9 +172,16 @@ The later
 credential-empty onboarding, physical-presence pairing, required USB reset,
 retained-profile service restart, simultaneous two-board services, and an
 Expo-enqueued message that reached exact peer import and terminal delivery.
-It deliberately does not move node identity or routing to the host, and it is
-not evidence for a device-served Wi-Fi/USB client, BLE, NomadNet, or an
-embedded propagation service.
+The subsequent
+[physical Expo iOS proof](e290-expo-ios-ble-lora-proof.md) qualifies a signed,
+self-contained Release importing an activated credential, authenticating the
+exact E290 over BLE, and exchanging one sequential LXMF message in each
+direction over LoRa. A follow-up cold foreground launch automatically
+reconnected and physically passed the corrected keyboard-aware composer. These
+proofs do not move node identity or routing to the host and do not qualify
+background restoration, Android hardware, a full mobile lifecycle matrix,
+pressure/soak, a device-served Wi-Fi/USB client, NomadNet, or an embedded
+propagation service.
 
 The broader Rust survey changes the recommended path:
 
@@ -2265,8 +2272,12 @@ bounded disconnect/drain/drop/re-advertise sequence across reconnect and both
 hardware identities. Exact returned identifiers, evidence filenames, and
 flash/readback binding are in the
 [E290 runbook](e290-node.md#powered-ble-startup-and-corebluetooth-proof).
-The proof does not cover a powered mobile Expo lifecycle matrix, pressure, or
-soak; the P2 cross-instance `BleManager` ownership epoch and pre-bearer BLE
+The later [physical Expo iOS proof](e290-expo-ios-ble-lora-proof.md) qualifies
+one signed credential-import, exact-board authenticated foreground-BLE path,
+one sequential LXMF message in each LoRa direction, automatic cold-launch
+foreground reconnect, and the corrected keyboard UX. It does not cover a full
+mobile lifecycle matrix, background restoration, Android hardware, pressure,
+or soak; the P2 cross-instance `BleManager` ownership epoch and pre-bearer BLE
 controller-init panic isolation remain open.
 
 If BLE later carries Reticulum traffic, expose a distinct packet service/actor
@@ -2284,9 +2295,11 @@ the pinned UniFFI `0.31.0` and `uniffi-bindgen-react-native` `0.31.0-3` local
 TurboModule behind Expo development builds. Its Android/iOS immutable-contract
 round trip and host transport suites pass. The four direct macOS sessions across
 both boards close a bounded physical BLE transport/authentication and firmware
-disconnect-barrier proof, but the powered Expo device lifecycle matrix,
-cancellation, foreground/background behavior, reconnect UX, pressure, and soak
-remain. Nitro remains a measured-performance fallback.
+disconnect-barrier proof. The later signed-iOS run additionally closes one
+foreground credential-import/authenticated-BLE/LXMF path plus cold-launch
+automatic reconnect and keyboard UX. The full powered Expo lifecycle matrix,
+cancellation, background/restoration behavior, Android hardware, pressure, and
+soak remain. Nitro remains a measured-performance fallback.
 
 ### Recommended order
 
@@ -2296,10 +2309,12 @@ For the turnkey local client/API:
 2. Host companion service and Expo static web export over that USB API
    (complete for the bounded alpha).
 3. Expo iOS/Android builds, native Rust chat ownership, and generated
-   transport boundary (build- and simulator-qualified).
+   transport boundary (build- and simulator-qualified on both platforms;
+   bounded physical foreground Release-qualified on iOS).
 4. BLE device-API bearer and create-only credential import through the Expo
-   native Rust module (implemented, host-tested, and direct-CoreBluetooth
-   firmware-qualified; physical-phone Expo qualification next).
+   native Rust module (implemented, host-tested, direct-CoreBluetooth
+   firmware-qualified, and bounded physical-iOS foreground-qualified; full
+   lifecycle/background restoration and Android hardware remain).
 5. Device-served Wi-Fi export and native local-network transport using the
    same generated contracts and application model (raw connector implemented;
    joining and powered exchange pending).
@@ -3005,6 +3020,14 @@ Deliverables:
 Exit: representative released/current Nomad pages, forms, partials and files work under loss/reboot/hostile-content tests without changing RNS/LXMF infrastructure behavior.
 
 ### Phase 7 — BLE and mobile client
+
+Current progress: a signed, self-contained iOS Release imported an activated
+credential, selected and authenticated the exact E290, and carried one
+sequential basic LXMF message in each direction over LoRa. A follow-up cold
+foreground launch automatically reconnected and physically passed the corrected
+keyboard-aware composer. Background restoration, the complete lifecycle
+matrix, Android hardware, pressure, soak, coexistence, and the cross-instance
+`BleManager` epoch remain open.
 
 Deliverables:
 

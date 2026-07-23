@@ -27,8 +27,9 @@ host-side result into the completed bridge `1.1` runtime claim.
 Bridge API `1.3` subsequently added the foreground BLE central, generated GATT
 contract, and native Rust command/ack pump. Both E290s pass the unchanged
 suite-3 RDA1 session through direct macOS CoreBluetooth, and all generated
-iOS/Android native builds pass. That proves the firmware carrier and native
-source/build boundaries, not the complete Expo lifecycle on a physical phone.
+iOS/Android native builds pass. That established the firmware carrier and
+native source/build boundaries before the later bounded physical-iOS proof; it
+still does not establish a complete mobile lifecycle matrix.
 
 Bridge API `1.4` adds secret-free credential status, create-only activated-
 credential import, and credential-derived exact E290 advertisement selection.
@@ -36,9 +37,13 @@ Rust tests cover complete 96-byte readback, no-replace publication, file
 shape/permissions, target policy, and public summary derivation. Expo tests
 cover picker staging ownership, cleanup/reconciliation failures, missing/
 invalid gating, and exact-name propagation. The native platform builds and
-generated bindings pass, but the system picker, TurboModule, BLE permissions,
-scan, reconnect, and authenticated exchange have not yet been exercised
-together on a physical iOS or Android device.
+generated bindings pass. The later
+[E290 Expo iOS BLE-to-LoRa proof](e290-expo-ios-ble-lora-proof.md) exercised the
+system picker, TurboModule, BLE permission, exact-name scan, GATT subscription,
+suite-3 authentication, and one sequential LXMF exchange in each LoRa direction
+together on a physical iOS device. A separately hashed follow-up Release also
+passed automatic foreground reconnect and keyboard-safe composition. Android
+hardware and the full iOS lifecycle matrix remain unqualified.
 
 ## Android
 
@@ -88,22 +93,24 @@ pending count, and complete timeline entry were restored. The selected BLE
 connector remained `unavailable`, as intended by the explicit future-work
 stub; offline success did not masquerade as device connectivity.
 
-The successful link emitted one warning that an object built for the iOS 26.5
-simulator was linked into the application's iOS 16.4 deployment target. It did
-not prevent build, launch, mutation, or persistence, but the generated native
-dependency target policy remains a cleanup item.
+The original successful link emitted one warning that bundled SQLite had been
+built for the iOS 26.5 simulator and linked into the application's iOS 16.4
+deployment target. A subsequent native-build fix passes the explicit 16.4
+target to bundled C dependencies. Exhaustive device/simulator archive
+inspection and a clean Release link confirmed that no member now requires a
+newer target.
 
 ## Remaining qualification
 
 - move native generation and platform compilation into their platform CI
   jobs;
 - qualify the mutable facade in an Android runtime;
-- qualify bridge `1.4` credential import and the authenticated BLE bearer on
-  physical iOS and Android devices;
+- extend the bounded bridge `1.4` physical-iOS result across repeated
+  disconnect/resume, backgrounding, restoration, and permission-state changes,
+  and qualify the same path on Android hardware;
 - qualify error and panic translation, cancellation, cleanup, Fast Refresh,
   background/foreground lifecycle, and reconnect;
 - measure Android release size/startup/memory and decide its ABI distribution;
-- qualify physical iOS/Android BLE hardware and authenticated resume behavior;
-  and
+- qualify authenticated resume behavior on both mobile platforms; and
 - add an Intel simulator slice only if that development host remains a product
   requirement.

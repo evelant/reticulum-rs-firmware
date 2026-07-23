@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  AppState,
+  KeyboardAvoidingView,
   Platform,
   Pressable,
   ScrollView,
@@ -30,6 +32,8 @@ import {
 } from "../generated/api.ts";
 import { ApplianceApi } from "../lib/api";
 import { type DraftIdentity, ensureDraftIdentity } from "../lib/draft.ts";
+import { ForegroundReconnect } from "../lib/foreground-reconnect.ts";
+import { keyboardLayoutPolicy } from "../lib/keyboard-layout.ts";
 import { LatestRequest } from "../lib/latest-request.ts";
 import { byteLimitError, utf8ByteLength } from "../lib/limits.ts";
 import { readNativeCoreStatus } from "../lib/native-core";
@@ -38,6 +42,8 @@ import { onboardingPresentation } from "../lib/onboarding.ts";
 import { randomHex } from "../lib/random.ts";
 
 const EMPTY_ONBOARDING: OnboardingView = { available: false, method: null, snapshot: null };
+const FOREGROUND_RECONNECT_DELAY_MS = 2_000;
+const KEYBOARD_LAYOUT = keyboardLayoutPolicy(Platform.OS);
 
 function connectionLabel(connection: ConnectionState | undefined): string {
   return connection?.state.replaceAll("_", " ") ?? "starting";
@@ -229,7 +235,12 @@ function Sidebar({
           </View>
         </View>
       ) : null}
-      <ScrollView contentContainerStyle={styles.contacts}>
+      <ScrollView
+        contentContainerStyle={styles.contacts}
+        keyboardDismissMode={KEYBOARD_LAYOUT.dismissMode}
+        keyboardShouldPersistTaps="handled"
+        nestedScrollEnabled={compact}
+      >
         {contacts.map((contact) => (
           <Pressable
             accessibilityRole="button"
@@ -277,13 +288,21 @@ function MetaRow({ label, value }: { readonly label: string; readonly value: str
 
 interface ConversationProps {
   readonly busy: boolean;
+  readonly compact: boolean;
   readonly contact: ContactView | undefined;
   readonly onDraftChanged: () => void;
   readonly onSend: (title: string, content: string) => Promise<boolean>;
   readonly timeline: TimelineView[];
 }
 
-function Conversation({ busy, contact, onDraftChanged, onSend, timeline }: ConversationProps) {
+function Conversation({
+  busy,
+  compact,
+  contact,
+  onDraftChanged,
+  onSend,
+  timeline,
+}: ConversationProps) {
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [validationError, setValidationError] = useState<string | null>(null);
@@ -291,7 +310,7 @@ function Conversation({ busy, contact, onDraftChanged, onSend, timeline }: Conve
 
   if (contact === undefined) {
     return (
-      <View style={styles.emptyState}>
+      <View style={[styles.emptyState, compact && styles.conversationCompact]}>
         <Text style={styles.emptyTitle}>Select or add a contact to begin.</Text>
         <Text style={styles.secondaryText}>
           The node continues receiving and routing while this app is closed.
@@ -318,14 +337,20 @@ function Conversation({ busy, contact, onDraftChanged, onSend, timeline }: Conve
   };
 
   return (
-    <View style={styles.conversation}>
+    <View style={[styles.conversation, compact && styles.conversationCompact]}>
       <View style={styles.conversationHeading}>
         <Text style={styles.heading}>{contact.name || "Unnamed contact"}</Text>
         <Text selectable style={styles.monospace}>
           {contact.destination}
         </Text>
       </View>
-      <ScrollView contentContainerStyle={styles.timeline} style={styles.timelineScroller}>
+      <ScrollView
+        contentContainerStyle={styles.timeline}
+        keyboardDismissMode={KEYBOARD_LAYOUT.dismissMode}
+        keyboardShouldPersistTaps="handled"
+        nestedScrollEnabled={compact}
+        style={styles.timelineScroller}
+      >
         {timeline.map((entry) => (
           <View
             key={`${entry.sequence}:${entry.direction}`}
@@ -397,16 +422,27 @@ export default function ApplianceScreen() {
   const [snapshot, setSnapshot] = useState<ApplianceSnapshot | null>(null);
   const [onboarding, setOnboarding] = useState<OnboardingView>(EMPTY_ONBOARDING);
   const [contacts, setContacts] = useState<ContactView[]>([]);
+  const [foreground, setForeground] = useState(
+    AppState.currentState === null || AppState.currentState === "active",
+  );
+  const [reconnectRetry, setReconnectRetry] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
   const [timeline, setTimeline] = useState<TimelineView[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const draft = useRef<DraftIdentity | null>(null);
   const mutationInFlight = useRef(false);
-  const reconnectRequested = useRef(false);
   const refreshRequests = useRef(new LatestRequest());
   const selectedRef = useRef<string | null>(null);
   const timelineRequests = useRef(new LatestRequest());
+  const automaticReconnect = useMemo(
+    () =>
+      new ForegroundReconnect(
+        () => setReconnectRetry((generation) => generation + 1),
+        FOREGROUND_RECONNECT_DELAY_MS,
+      ),
+    [],
+  );
 
   const ready = onboardingPresentation(onboarding).ready;
   // Missing credentials can make the dormant connector report an expected
@@ -425,6 +461,15 @@ export default function ApplianceScreen() {
   }, []);
 
   useEffect(() => () => api.dispose(), [api]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (state) => {
+      setForeground(state === "active");
+    });
+    return () => subscription.remove();
+  }, []);
+
+  useEffect(() => () => automaticReconnect.suspend(), [automaticReconnect]);
 
   const refresh = useCallback(async () => {
     const refreshRequest = refreshRequests.current.begin();
@@ -517,19 +562,27 @@ export default function ApplianceScreen() {
   }, [api, bootstrapped, ready, refresh]);
 
   useEffect(() => {
-    if (
-      onboarding.available &&
-      ready &&
-      snapshot?.connection.state !== "ready" &&
-      !reconnectRequested.current
-    ) {
-      reconnectRequested.current = true;
-      void api
-        .reconnect()
-        .then(refresh)
-        .catch((nextError) => setError(errorText(nextError)));
+    if (!foreground || !onboarding.available || !ready || snapshot?.connection.state === "ready") {
+      automaticReconnect.suspend();
+      return;
     }
-  }, [api, onboarding.available, ready, refresh, snapshot?.connection.state]);
+    if (!automaticReconnect.begin(reconnectRetry)) return;
+
+    void api
+      .reconnect()
+      .then(refresh)
+      .catch((nextError) => setError(errorText(nextError)))
+      .finally(() => automaticReconnect.settle());
+  }, [
+    api,
+    automaticReconnect,
+    foreground,
+    onboarding.available,
+    ready,
+    reconnectRetry,
+    refresh,
+    snapshot?.connection.state,
+  ]);
 
   const run = async (operation: () => Promise<unknown>): Promise<boolean> => {
     if (mutationInFlight.current) return false;
@@ -617,6 +670,31 @@ export default function ApplianceScreen() {
       });
   };
 
+  const applianceShell = (
+    <View style={[styles.shell, compact && styles.shellCompact]}>
+      <Sidebar
+        busy={busy}
+        compact={compact}
+        contacts={contacts}
+        onSelect={chooseContact}
+        onUpsert={upsertContact}
+        selected={selected}
+        snapshot={snapshot}
+      />
+      <Conversation
+        busy={busy}
+        compact={compact}
+        contact={selectedContact}
+        key={selectedContact?.destination ?? "empty"}
+        onDraftChanged={() => {
+          draft.current = null;
+        }}
+        onSend={send}
+        timeline={timeline}
+      />
+    </View>
+  );
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.topbar}>
@@ -671,45 +749,43 @@ export default function ApplianceScreen() {
       )}
       {busy ? <ActivityIndicator color="#91e6a7" style={styles.activity} /> : null}
       <OnboardingPanel busy={busy} onboarding={onboarding} onMutation={onboardingMutation} />
-      {ready ? (
-        <View style={[styles.shell, compact && styles.shellCompact]}>
-          <Sidebar
-            busy={busy}
-            compact={compact}
-            contacts={contacts}
-            onSelect={chooseContact}
-            onUpsert={upsertContact}
-            selected={selected}
-            snapshot={snapshot}
-          />
-          <Conversation
-            busy={busy}
-            contact={selectedContact}
-            key={selectedContact?.destination ?? "empty"}
-            onDraftChanged={() => {
-              draft.current = null;
-            }}
-            onSend={send}
-            timeline={timeline}
-          />
-        </View>
-      ) : null}
-      {compact && ready ? (
-        <View style={styles.mobileActions}>
-          <ActionButton
-            disabled={busy}
-            label="Sync"
-            onPress={() => void run(() => api.sync())}
-            secondary
-          />
-          <ActionButton
-            disabled={busy}
-            label="Reconnect"
-            onPress={() => void run(() => api.reconnect())}
-            secondary
-          />
-        </View>
-      ) : null}
+      <KeyboardAvoidingView
+        behavior={KEYBOARD_LAYOUT.avoidingBehavior}
+        enabled={KEYBOARD_LAYOUT.avoidingEnabled}
+        style={styles.keyboardAvoiding}
+      >
+        {ready ? (
+          compact ? (
+            <ScrollView
+              contentContainerStyle={styles.compactContent}
+              keyboardDismissMode={KEYBOARD_LAYOUT.dismissMode}
+              keyboardShouldPersistTaps="handled"
+              nestedScrollEnabled
+              style={styles.compactScroller}
+            >
+              {applianceShell}
+            </ScrollView>
+          ) : (
+            applianceShell
+          )
+        ) : null}
+        {compact && ready ? (
+          <View style={styles.mobileActions}>
+            <ActionButton
+              disabled={busy}
+              label="Sync"
+              onPress={() => void run(() => api.sync())}
+              secondary
+            />
+            <ActionButton
+              disabled={busy}
+              label="Reconnect"
+              onPress={() => void run(() => api.reconnect())}
+              secondary
+            />
+          </View>
+        ) : null}
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
@@ -728,6 +804,7 @@ const colors = {
 
 const styles = StyleSheet.create({
   safeArea: { flex: 1, minHeight: "100%", backgroundColor: colors.background },
+  keyboardAvoiding: { flex: 1, minHeight: 0 },
   topbar: {
     minHeight: 84,
     paddingHorizontal: 28,
@@ -809,6 +886,8 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
   },
   actionRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 10 },
+  compactScroller: { flex: 1 },
+  compactContent: { flexGrow: 1 },
   shell: { flex: 1, flexDirection: "row", minHeight: 0 },
   shellCompact: { flexDirection: "column" },
   sidebar: {
@@ -897,6 +976,7 @@ const styles = StyleSheet.create({
   emptyState: { flex: 1, alignItems: "center", justifyContent: "center", padding: 32 },
   emptyTitle: { marginBottom: 8, color: colors.text, fontSize: 17, fontWeight: "600" },
   conversation: { flex: 1, minWidth: 0 },
+  conversationCompact: { minHeight: 420 },
   conversationHeading: {
     minHeight: 72,
     justifyContent: "center",

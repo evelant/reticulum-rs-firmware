@@ -61,6 +61,18 @@ outputs are disposable and ignored. After the development client is installed,
 changes. `bun run prebuild` remains available when only generated native
 projects are needed.
 
+An iOS Debug build deliberately skips embedding JavaScript and therefore needs a reachable Metro
+server. Use a Release configuration for a self-contained physical-device artifact:
+
+```sh
+bun run ios -- --configuration Release --device <device-udid> --no-bundler
+```
+
+`--no-bundler` prevents Expo from leaving a development server running; the Release Xcode build
+still invokes Metro once to embed `main.jsbundle` in the signed application. Before installation,
+verify that the generated `Release-iphoneos/ReticulumAppliance.app/main.jsbundle` exists and is
+nonempty.
+
 The app defaults to the appliance's same-origin HTTP API on web. Native builds default to a Rust
 single-owner actor with an app-private SQLite database. This already provides durable contacts,
 timelines, and idempotent outbox writes while offline. BLE is the default native bearer: React
@@ -69,10 +81,19 @@ owns the activated credential, authenticated session, protocol framing, and LXMF
 BLE attempt runs in the background only after the native bridge has validated an app-private
 credential, so an absent credential or radio never blocks the offline database. The credential's
 E290 device ID selects the exact Rust-generated advertised name rather than whichever matching
-board happens to advertise first. The Reconnect action retries discovery and the complete GATT
-link. BLE background restoration and phone-native live pairing are not implemented yet. USB OTG
-and USB serial/JTAG remain explicit unavailable connector stubs and do not silently fall back or
-claim a device connection.
+board happens to advertise first. While the app remains foregrounded, an unsuccessful attempt
+re-arms after two seconds without overlapping the prior GATT operation; retries suspend when the
+app backgrounds and resume when it becomes active again. The Reconnect action also retries
+discovery and the complete GATT link explicitly. BLE background restoration and phone-native live
+pairing are not implemented yet. USB OTG and USB serial/JTAG remain explicit unavailable connector
+stubs and do not silently fall back or claim a device connection.
+
+On compact native layouts, the conversation workspace is keyboard-aware and scrollable. iOS uses
+padding plus interactive keyboard dismissal, Android uses height avoidance plus drag dismissal,
+and taps on visible actions remain enabled while the keyboard is open. The
+[bounded physical iOS proof](../../docs/e290-expo-ios-ble-lora-proof.md) qualified title/body
+entry, composer scrolling, and Send-button reachability; it did not qualify rotation,
+accessibility text scaling, external keyboards, or Android keyboard variants.
 
 On a fresh native install, the first-run screen offers the alpha **credential import** path. Pair
 the intended board through the qualified USB managed-profile workflow, make a temporary copy of
