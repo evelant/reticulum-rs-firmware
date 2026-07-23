@@ -60,10 +60,7 @@ pub const fn storage_device_id_from_eui48(mac: [u8; 6]) -> StorageDeviceId {
 /// This namespace is intentionally distinct from the physical flash binding.
 /// Pairing and authenticated-session transcripts use these exact 16 bytes.
 pub const fn device_api_id_from_eui48(mac: [u8; 6]) -> [u8; 16] {
-    [
-        b'e', b'2', b'9', b'0', b'-', b'a', b'p', b'i', b'-', b'1', mac[0], mac[1], mac[2], mac[3],
-        mac[4], mac[5],
-    ]
+    reticulum_device_api_ble::device_api_id(mac)
 }
 
 /// Bind the physical journal layout to one coordinator-owned storage device.

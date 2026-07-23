@@ -1,12 +1,12 @@
 # Reticulum LXMF host appliance alpha
 
-`reticulum-lxmf-chat-service` turns one paired E290 and its authenticated USB
-API into a small always-running host application. The shared
+`reticulum-lxmf-chat-service` turns one paired E290 and its authenticated local
+device API into a small always-running host application. The shared
 `reticulum-lxmf-chat-runtime` actor exclusively owns the authenticated session
 and SQLite connection, reconciles the durable outbox, polls the device inbox,
 and publishes immutable transport-neutral snapshots. This crate supplies the
-USB Serial/JTAG connector, managed onboarding, and a loopback-only HTTP API
-serving the bundled Expo web export.
+USB Serial/JTAG connector, a macOS CoreBluetooth connector, USB managed
+onboarding, and a loopback-only HTTP API serving the bundled Expo web export.
 
 This is an appliance-development bridge, not the final standalone UI. The web
 export is compiled into the **host executable** and the computer must remain
@@ -69,6 +69,32 @@ for one CDC interface as aliases and prefers the callout path. `--port` is an
 explicit diagnostic override, but it must still report the configured USB
 serial and cannot bypass device selection. `--http-port 0`, the default, asks
 the operating system for an unused loopback port.
+
+An already-activated profile can instead use the E290 BLE GATT bearer on
+macOS:
+
+```sh
+target/debug/reticulum-lxmf-chat-service \
+  --ble \
+  --usb-serial AC:A7:04:E1:3E:88 \
+  --profile-root "$HOME/.local/share/reticulum-lxmf-chat"
+```
+
+In BLE mode, `--usb-serial` is the stable per-device profile key; the service
+does not open a USB interface. It reloads the profile credential, rejects a
+credential whose E290 device-ID EUI does not match that profile key, derives
+the one exact `reticulum-e290-*` advertised name, connects over CoreBluetooth,
+and then authenticates suite 3 before exposing any device operation.
+`--ble-peripheral-id` can additionally narrow selection to an opaque platform
+identifier for diagnostics, but it cannot replace the EUI check, name
+selection, or authentication.
+
+BLE mode intentionally does not start the USB pairing/onboarding owner. Pair
+and activate the board over the qualified USB managed workflow first, then
+boot the board normally and select `--ble`. `--port` is USB-only. The direct
+host BLE adapter is currently macOS-only; other host platforms report the
+bearer as unavailable instead of silently falling back. Wireless onboarding
+and additional host BLE backends remain future work.
 
 The Active credential is reloaded for every connection attempt. On Unix it
 must be a regular, non-symlink file with no group or other permissions (for
@@ -136,9 +162,11 @@ independent of the web toolchain.
   session-local because the device API has no durable inbox-generation token;
   after reconnect, a full summary scan skips already-known message IDs without
   downloading their complete wire again.
-- Missing or unusable serial sessions enter bounded exponential reconnect
-  backoff. A connector deliberately absent from a build instead settles in an
-  explicit unavailable state. A database/device binding mismatch is a visible
+- Missing peripherals and transient local-bearer transport failures enter
+  bounded exponential reconnect backoff. Credential/profile mismatches and
+  handshake authentication failures instead fault for operator action. A
+  connector deliberately absent from a platform settles in an explicit
+  unavailable state. A database/device binding mismatch is a visible
   fail-closed fault, not a retry against another board.
 - The actor command queue, HTTP request body, and EventSource client count are
   bounded. Browser events are invalidations; the Expo client reloads
@@ -194,12 +222,21 @@ required USB reset, service restart with the retained private profile, two
 simultaneous board services, and an Expo-enqueued 3F-to-3E LoRa message with
 exact peer import and terminal `Delivered`.
 
+The [BLE composition addendum](../../docs/e290-lxmf-chat-alpha-proof.md#ble-bearer-composition-proof)
+records two concurrent macOS host services authenticating separate E290s over
+CoreBluetooth and a sequential message in each direction reaching terminal
+`Delivered` plus exact peer import over LoRa. It also retains one
+simultaneous-send `failed_delivery_timeout` as a non-success case. This
+qualifies the bounded host BLE service path, not an installed native Expo app
+or simultaneous bidirectional scheduling.
+
 Still deferred are activation-ambiguous repair, cross-platform host filesystem
-policy, host restart qualification, concurrent-process locking, notifications,
-broader browser compatibility and accessibility testing, database encryption,
-installed native-client transports, device-served Wi-Fi or USB networking,
-BLE, NomadNet/Micron, direct/Resource/propagated LXMF, pressure/fill testing,
-and soak.
+policy and BLE backends, host restart qualification, concurrent-process
+locking, notifications, broader browser compatibility and accessibility
+testing, database encryption, physical installed-native-client qualification,
+device-served Wi-Fi or USB networking, wireless onboarding, simultaneous
+bidirectional BLE/LoRa scheduling, NomadNet/Micron,
+direct/Resource/propagated LXMF, pressure/fill testing, and soak.
 
 ## Focused checks
 

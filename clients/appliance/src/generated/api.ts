@@ -25,10 +25,10 @@ export type NoContent = undefined;
 /**
  * Physical or local-network bearer used for one authenticated session.
  *
- * Only [`Self::UsbSerial`] has a connector in the host service today. The
- * remaining variants deliberately reserve the runtime vocabulary for USB
- * OTG, BLE, Wi-Fi, and later adapters without implying that they are already
- * available.
+ * The host service implements [`Self::UsbSerial`] and
+ * [`Self::BluetoothLowEnergy`]. The remaining variants deliberately reserve
+ * the runtime vocabulary for USB OTG, Wi-Fi, and later adapters without
+ * implying that they are already available.
  */
 export type ConnectionTransport = "usb_serial" | "usb_otg" | "bluetooth_low_energy" | "wifi" | { "other": string };
 

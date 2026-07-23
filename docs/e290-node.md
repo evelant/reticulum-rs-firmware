@@ -1861,7 +1861,7 @@ Low, so release evidence retained for an older connection epoch cannot arm the
 new epoch; the replacement epoch must observe a complete fresh High debounce.
 
 The generic 128-entry fake runtime exceeds Rust's default host test-thread
-stack because that fixture owns the aggregate by value. The qualified 163-test
+stack because that fixture owns the aggregate by value. The qualified 176-test
 host run is:
 
 ```sh

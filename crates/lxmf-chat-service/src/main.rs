@@ -1,4 +1,4 @@
-//! Executable entrypoint for the USB-connected LXMF appliance client.
+//! Executable entrypoint for the local-bearer LXMF appliance client.
 
 #![forbid(unsafe_code)]
 
@@ -7,17 +7,24 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use reticulum_lxmf_chat_service::{
-    ApplianceConfig, OnboardingConfig, OnboardingHandle, ProfileRoot, SerialConnectionGate,
-    SerialConnector, SerialConnectorConfig, WebConfig, discover_usb_serials,
-    serve_web_with_onboarding, start_appliance, start_onboarding,
+    ApplianceConfig, BleConnector, BleConnectorConfig, OnboardingConfig, OnboardingHandle,
+    ProfileRoot, SerialConnectionGate, SerialConnector, SerialConnectorConfig, WebConfig,
+    discover_usb_serials, serve_web_with_onboarding, start_appliance, start_onboarding,
+    usb_serial_eui48,
 };
 
 #[derive(Debug)]
 struct Options {
     usb_serial: String,
     storage: StorageOptions,
-    explicit_port: Option<String>,
+    bearer: BearerOptions,
     http_port: u16,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum BearerOptions {
+    UsbSerial { explicit_port: Option<String> },
+    BluetoothLowEnergy { peripheral_id: Option<String> },
 }
 
 #[derive(Debug)]
@@ -66,6 +73,10 @@ async fn main() -> ExitCode {
 }
 
 async fn run(options: Options) -> Result<(), String> {
+    let usb_explicit_port = match &options.bearer {
+        BearerOptions::UsbSerial { explicit_port } => explicit_port.clone(),
+        BearerOptions::BluetoothLowEnergy { .. } => None,
+    };
     let (credential, database, connection_gate, onboarding) = match options.storage {
         StorageOptions::Explicit {
             credential,
@@ -74,27 +85,51 @@ async fn run(options: Options) -> Result<(), String> {
         StorageOptions::ProfileRoot(path) => {
             let profile = ProfileRoot::open(path)?.device(&options.usb_serial)?;
             profile.prepare_database()?;
-            let gate = SerialConnectionGate::new();
-            let onboarding = start_onboarding(
-                OnboardingConfig::new(profile.clone(), gate.clone())
-                    .with_explicit_port(options.explicit_port.clone()),
-            )
-            .map_err(|error| error.to_string())?;
+            let (gate, onboarding) = match &options.bearer {
+                BearerOptions::UsbSerial { .. } => {
+                    let gate = SerialConnectionGate::new();
+                    let onboarding = start_onboarding(
+                        OnboardingConfig::new(profile.clone(), gate.clone())
+                            .with_explicit_port(usb_explicit_port),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    (Some(gate), Some(onboarding))
+                }
+                BearerOptions::BluetoothLowEnergy { .. } => {
+                    // BLE currently consumes an already-activated profile.
+                    // Wireless onboarding remains future work; keeping it
+                    // separate prevents the USB owner from racing the BLE
+                    // connector for a device that is not on the USB bearer.
+                    (None, None)
+                }
+            };
             (
                 profile.credential_path(),
                 profile.database_path(),
-                Some(gate),
-                Some(onboarding),
+                gate,
+                onboarding,
             )
         }
     };
-    let mut serial = SerialConnectorConfig::new(&options.usb_serial, credential)?
-        .with_explicit_port(options.explicit_port);
-    if let Some(gate) = connection_gate {
-        serial = serial.with_connection_gate(gate);
+    let appliance = match options.bearer {
+        BearerOptions::UsbSerial { explicit_port } => {
+            let mut serial = SerialConnectorConfig::new(&options.usb_serial, credential)?
+                .with_explicit_port(explicit_port);
+            if let Some(gate) = connection_gate {
+                serial = serial.with_connection_gate(gate);
+            }
+            start_appliance(ApplianceConfig::new(database), SerialConnector::new(serial))
+        }
+        BearerOptions::BluetoothLowEnergy { peripheral_id } => {
+            let expected_eui48 = usb_serial_eui48(&options.usb_serial).ok_or_else(|| {
+                "USB serial must contain exactly twelve hexadecimal digits".to_owned()
+            })?;
+            let ble = BleConnectorConfig::new(expected_eui48, credential)
+                .with_peripheral_id(peripheral_id);
+            start_appliance(ApplianceConfig::new(database), BleConnector::new(ble))
+        }
     }
-    let appliance = start_appliance(ApplianceConfig::new(database), SerialConnector::new(serial))
-        .map_err(|error| error.to_string())?;
+    .map_err(|error| error.to_string())?;
     let web = serve_web_with_onboarding(
         appliance.clone(),
         onboarding.clone(),
@@ -136,11 +171,31 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut database = None;
     let mut profile_root = None;
     let mut explicit_port = None;
+    let mut ble = false;
+    let mut ble_peripheral_id = None;
     let mut http_port = None;
     let mut index = 0_usize;
     while index < args.len() {
         let flag = args[index].as_str();
         index += 1;
+        if flag == "--ble" {
+            if std::mem::replace(&mut ble, true) {
+                return Err("--ble may be specified only once".to_owned());
+            }
+            continue;
+        }
+        if !matches!(
+            flag,
+            "--usb-serial"
+                | "--credential"
+                | "--database"
+                | "--profile-root"
+                | "--port"
+                | "--ble-peripheral-id"
+                | "--http-port"
+        ) {
+            return Err(format!("unknown option {flag}\n{}", usage()));
+        }
         let value = args
             .get(index)
             .ok_or_else(|| format!("{flag} requires a value\n{}", usage()))?;
@@ -153,13 +208,16 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--database" => set_once(&mut database, PathBuf::from(value), flag)?,
             "--profile-root" => set_once(&mut profile_root, PathBuf::from(value), flag)?,
             "--port" => set_once(&mut explicit_port, value.clone(), flag)?,
+            "--ble-peripheral-id" => {
+                set_once(&mut ble_peripheral_id, value.clone(), flag)?;
+            }
             "--http-port" => {
                 let parsed = value
                     .parse::<u16>()
                     .map_err(|_| "--http-port must be between 0 and 65535".to_owned())?;
                 set_once(&mut http_port, parsed, flag)?;
             }
-            _ => return Err(format!("unknown option {flag}\n{}", usage())),
+            _ => unreachable!("recognized value-taking option"),
         }
         index += 1;
     }
@@ -180,10 +238,29 @@ fn parse(args: &[String]) -> Result<Options, String> {
             );
         }
     };
+    let bearer = if ble {
+        if explicit_port.is_some() {
+            return Err("--port cannot be combined with --ble".to_owned());
+        }
+        if ble_peripheral_id
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err("--ble-peripheral-id must not be empty".to_owned());
+        }
+        BearerOptions::BluetoothLowEnergy {
+            peripheral_id: ble_peripheral_id,
+        }
+    } else {
+        if ble_peripheral_id.is_some() {
+            return Err("--ble-peripheral-id requires --ble".to_owned());
+        }
+        BearerOptions::UsbSerial { explicit_port }
+    };
     Ok(Options {
         usb_serial: usb_serial.ok_or_else(|| "--usb-serial is required".to_owned())?,
         storage,
-        explicit_port,
+        bearer,
         http_port: http_port.unwrap_or(0),
     })
 }
@@ -206,7 +283,13 @@ fn usage() -> &'static str {
         "  reticulum-lxmf-chat-service \\\n",
         "       --usb-serial <12-hex-or-colon-serial> \\\n",
         "       --credential <active-state-path> --database <sqlite-path> \\\n",
-        "       [--port <serial-path>] [--http-port <0..65535>]"
+        "       [--port <serial-path>] [--http-port <0..65535>]\n",
+        "  reticulum-lxmf-chat-service \\\n",
+        "       --ble --usb-serial <12-hex-or-colon-profile-key> \\\n",
+        "       (--profile-root <private-data-directory> | \\\n",
+        "        --credential <active-state-path> --database <sqlite-path>) \\\n",
+        "       [--ble-peripheral-id <opaque-platform-id>] \\\n",
+        "       [--http-port <0..65535>]"
     )
 }
 
@@ -229,6 +312,12 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(options.http_port, 8080);
+        assert_eq!(
+            options.bearer,
+            BearerOptions::UsbSerial {
+                explicit_port: None
+            }
+        );
         assert!(matches!(
             options.storage,
             StorageOptions::Explicit { credential, database }
@@ -251,6 +340,88 @@ mod tests {
             options.storage,
             StorageOptions::ProfileRoot(path) if path == std::path::Path::new("/private/profile")
         ));
+        assert!(matches!(
+            options.bearer,
+            BearerOptions::UsbSerial {
+                explicit_port: None
+            }
+        ));
+    }
+
+    #[test]
+    fn parser_accepts_ble_with_exact_optional_platform_id() {
+        let options = parse(&[
+            "--ble".to_owned(),
+            "--usb-serial".to_owned(),
+            "AC:A7:04:E1:3E:88".to_owned(),
+            "--profile-root".to_owned(),
+            "/private/profile".to_owned(),
+            "--ble-peripheral-id".to_owned(),
+            "opaque-id".to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(
+            options.bearer,
+            BearerOptions::BluetoothLowEnergy {
+                peripheral_id: Some("opaque-id".to_owned())
+            }
+        );
+        assert!(matches!(
+            options.storage,
+            StorageOptions::ProfileRoot(path) if path == std::path::Path::new("/private/profile")
+        ));
+    }
+
+    #[test]
+    fn parser_keeps_ble_onboarding_explicitly_separate_from_usb_options() {
+        let base = [
+            "--ble".to_owned(),
+            "--usb-serial".to_owned(),
+            "AC:A7:04:E1:3E:88".to_owned(),
+            "--profile-root".to_owned(),
+            "/private/profile".to_owned(),
+        ];
+        assert!(
+            parse(
+                &base
+                    .iter()
+                    .cloned()
+                    .chain(["--port".to_owned(), "/dev/cu.test".to_owned()])
+                    .collect::<Vec<_>>()
+            )
+            .is_err()
+        );
+        assert!(
+            parse(&[
+                "--usb-serial".to_owned(),
+                "AC:A7:04:E1:3E:88".to_owned(),
+                "--profile-root".to_owned(),
+                "/private/profile".to_owned(),
+                "--ble-peripheral-id".to_owned(),
+                "opaque-id".to_owned(),
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(
+                &base
+                    .iter()
+                    .cloned()
+                    .chain(["--ble".to_owned()])
+                    .collect::<Vec<_>>()
+            )
+            .is_err()
+        );
+        assert!(
+            parse(
+                &base
+                    .iter()
+                    .cloned()
+                    .chain(["--ble-peripheral-id".to_owned(), "  ".to_owned()])
+                    .collect::<Vec<_>>()
+            )
+            .is_err()
+        );
     }
 
     #[test]

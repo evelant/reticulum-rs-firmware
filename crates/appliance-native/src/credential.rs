@@ -7,14 +7,13 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use rand_core::{CryptoRng, RngCore};
-use reticulum_device_api_ble::local_name;
+use reticulum_device_api_ble::local_name_for_device_api_id;
 use reticulum_device_client::{ACTIVATED_CREDENTIAL_STATE_BYTES, ActivatedCredential};
 use zeroize::Zeroizing;
 
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
-const E290_DEVICE_ID_PREFIX: &[u8; 10] = b"e290-api-1";
 const IMPORT_STAGING_ATTEMPTS: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -385,13 +384,7 @@ fn verify_exact_credential_readback(path: &Path, expected: &[u8]) -> Result<(), 
 }
 
 fn e290_ble_advertised_name(device_id: &[u8; 16]) -> Option<String> {
-    if &device_id[..E290_DEVICE_ID_PREFIX.len()] != E290_DEVICE_ID_PREFIX {
-        return None;
-    }
-    let eui48: [u8; 6] = device_id[E290_DEVICE_ID_PREFIX.len()..]
-        .try_into()
-        .expect("E290 device ID suffix is one EUI-48");
-    String::from_utf8(local_name(eui48).to_vec()).ok()
+    local_name_for_device_api_id(*device_id).and_then(|name| String::from_utf8(name.to_vec()).ok())
 }
 
 pub(crate) struct HostRng;
@@ -467,8 +460,7 @@ mod tests {
         bytes[..8].copy_from_slice(b"RDPKEY1\0");
         bytes[8..10].copy_from_slice(&1_u16.to_le_bytes());
         bytes[10] = 2;
-        bytes[16..26].copy_from_slice(E290_DEVICE_ID_PREFIX);
-        bytes[26..32].copy_from_slice(&device_suffix);
+        bytes[16..32].copy_from_slice(&reticulum_device_api_ble::device_api_id(device_suffix));
         bytes[32..48].fill(0x42);
         bytes[48..56].copy_from_slice(&7_u64.to_le_bytes());
         bytes[56..88].fill(0x24);

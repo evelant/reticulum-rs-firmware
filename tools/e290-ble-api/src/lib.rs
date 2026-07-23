@@ -7,13 +7,16 @@ use std::{
     collections::VecDeque,
     io::{self, Read, Write},
     sync::{
-        Arc, Condvar, Mutex,
+        Condvar, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
 #[cfg(target_os = "macos")]
-use std::{sync::mpsc, thread};
+use std::{
+    sync::{Arc, mpsc},
+    thread,
+};
 
 #[cfg(target_os = "macos")]
 use btleplug::{

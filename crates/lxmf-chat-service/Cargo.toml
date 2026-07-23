@@ -1,6 +1,6 @@
 [package]
 name = "reticulum-lxmf-chat-service"
-description = "USB appliance service and bundled web client for Reticulum LXMF chat"
+description = "Local-bearer appliance service and bundled web client for Reticulum LXMF chat"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,8 +18,10 @@ getrandom.workspace = true
 hex.workspace = true
 rand_core.workspace = true
 reticulum-device-api = { path = "../device-api", default-features = false, features = ["experimental-lxmf"] }
+reticulum-device-api-ble = { path = "../device-api-ble" }
 reticulum-device-client = { path = "../device-client" }
 reticulum-device-pairing-client = { path = "../device-pairing-client" }
+reticulum-e290-ble-api = { path = "../../tools/e290-ble-api" }
 reticulum-lxmf-chat-app = { path = "../lxmf-chat-app" }
 reticulum-lxmf-chat-core = { path = "../lxmf-chat-core" }
 reticulum-lxmf-chat-runtime = { path = "../lxmf-chat-runtime" }
@@ -31,6 +33,7 @@ tokio.workspace = true
 ts-rs.workspace = true
 
 [dev-dependencies]
+reticulum-device-api-session = { path = "../device-api-session" }
 reticulum-lxmf-chat-runtime = { path = "../lxmf-chat-runtime", features = ["test-support"] }
 tower.workspace = true
 

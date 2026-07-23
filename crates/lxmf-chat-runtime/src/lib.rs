@@ -279,10 +279,10 @@ type BoxedSession = Box<dyn LxmfSession<Error = DeviceSessionError> + Send>;
 
 /// Physical or local-network bearer used for one authenticated session.
 ///
-/// Only [`Self::UsbSerial`] has a connector in the host service today. The
-/// remaining variants deliberately reserve the runtime vocabulary for USB
-/// OTG, BLE, Wi-Fi, and later adapters without implying that they are already
-/// available.
+/// The host service implements [`Self::UsbSerial`] and
+/// [`Self::BluetoothLowEnergy`]. The remaining variants deliberately reserve
+/// the runtime vocabulary for USB OTG, Wi-Fi, and later adapters without
+/// implying that they are already available.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionTransport {

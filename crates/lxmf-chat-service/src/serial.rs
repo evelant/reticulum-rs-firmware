@@ -159,6 +159,15 @@ pub fn normalize_usb_serial(value: &str) -> Option<String> {
     (normalized.len() == 12).then_some(normalized)
 }
 
+/// Parse one normalized or separator-delimited USB descriptor serial as its
+/// underlying EUI-48.
+pub fn usb_serial_eui48(value: &str) -> Option<[u8; 6]> {
+    let normalized = normalize_usb_serial(value)?;
+    let mut eui48 = [0_u8; 6];
+    hex::decode_to_slice(normalized, &mut eui48).ok()?;
+    Some(eui48)
+}
+
 /// Enumerate attached ESP32-S3 native USB Serial/JTAG devices by their stable
 /// descriptor serial, collapsing operating-system aliases for one interface.
 ///
@@ -419,7 +428,7 @@ fn port_matches_usb_serial(port: &SerialPortInfo, usb_serial: &str) -> bool {
     }
 }
 
-fn read_credential(path: &Path) -> Result<ActivatedCredential, String> {
+pub(crate) fn read_credential(path: &Path) -> Result<ActivatedCredential, String> {
     let path_metadata = symlink_metadata(path)
         .map_err(|error| format!("could not inspect configured credential: {error}"))?;
     if path_metadata.file_type().is_symlink() || !path_metadata.is_file() {
@@ -476,7 +485,7 @@ fn verify_open_file_identity(_expected: &std::fs::Metadata, _file: &File) -> Res
     Ok(())
 }
 
-struct HostRng;
+pub(crate) struct HostRng;
 
 impl RngCore for HostRng {
     fn next_u32(&mut self) -> u32 {
@@ -537,6 +546,11 @@ mod tests {
         );
         assert_eq!(normalize_usb_serial("ACA704E13E88x"), None);
         assert_eq!(normalize_usb_serial("ACA704E13E8"), None);
+        assert_eq!(
+            usb_serial_eui48("AC:A7:04:E1:3E:88"),
+            Some([0xac, 0xa7, 0x04, 0xe1, 0x3e, 0x88])
+        );
+        assert_eq!(usb_serial_eui48("ACA704E13E8x"), None);
     }
 
     #[test]

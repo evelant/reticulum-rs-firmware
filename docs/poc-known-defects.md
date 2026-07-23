@@ -131,10 +131,6 @@ proof unless a failing test promotes one into a release blocker.
   retained-profile service restart, and Expo-to-LoRa-to-peer message pass on
   the E290 pair. Activation-ambiguous repair and the alternate Pending recovery
   paths remain to qualify.
-- The E290 device-API namespace prefix `e290-api-1` is still repeated between
-  firmware derivation and the native import parser. Move it into one portable
-  board/device-profile contract before adding another board namespace so exact
-  target derivation cannot drift.
 - With several identical attached boards, the app shows the selected USB serial
   but the physical E290 has no corresponding identify cue. Until a display or
   LED identify action exists, an operator may have to press the middle button
@@ -149,13 +145,35 @@ proof unless a failing test promotes one into a release blocker.
   inbox synchronization, reconciliation, and timelines over authenticated USB.
   The newer
   [host appliance service](../crates/lxmf-chat-service/README.md) adds exact USB-
-  serial discovery, a sole serial/database actor, automatic reconnect/backoff,
-  continuous one-step inbox/status work, immutable state invalidations, and a
-  bundled loopback Expo web export. The shared Expo application now also
-  compiles and runs as Android and iOS development builds, and its first
-  callable UniFFI round trip reaches Rust. It remains a computer-side
-  companion: there is still no E290-served web UI, physically qualified Wi-Fi
-  client bearer, display UI, NomadNet client, or Micron client.
+  serial discovery, USB managed onboarding, authenticated macOS CoreBluetooth
+  selection from the credential-derived E290 name, a sole session/database
+  actor, automatic reconnect/backoff, continuous one-step inbox/status work,
+  immutable state invalidations, and a bundled loopback Expo web export. The
+  BLE service connector consumes an already-activated profile and deliberately
+  leaves wireless onboarding and non-macOS host adapters for later. Its direct
+  GATT stream, suite-3 authentication, and combined long-running
+  BLE-service-to-LoRa-to-peer-import path are powered-qualified in both
+  sequential directions. Starting one message on each half-duplex LoRa board
+  at effectively the same time yielded one `Delivered` result and one durable
+  `failed_delivery_timeout`; a later sequential send with new material
+  delivered exactly. The likely RF collision was not instrumented closely
+  enough to establish its cause, and simultaneous bidirectional scheduling
+  remains unqualified. The shared Expo application now also compiles and runs
+  as Android and iOS development builds, and its first callable UniFFI round
+  trip reaches Rust. It remains a computer-side companion: there is still no
+  E290-served web UI, physically qualified Wi-Fi client bearer, display UI,
+  NomadNet client, or Micron client.
+- The host BLE connector currently reuses `BleTransport` through the
+  E290-specific physical-qualifier package, which also owns its diagnostic CLI
+  and browser bridge. This avoided duplicating the already-powered
+  CoreBluetooth stream, but a dedicated reusable host BLE adapter crate should
+  be extracted before adding other boards or native host backends.
+- The loopback HTTP-v1 ready-state compatibility projection still serializes
+  bearer-generic `endpoint` and `device_label` values under the historical
+  field names `port` and `usb_serial`. The Expo adapter maps them back into the
+  generic application model, and BLE now publishes the authenticated EUI-48 as
+  the latter value, but a later wire-version break should make the field names
+  transport-neutral.
 - The native Rust bridge owns an app-private SQLite chat runtime and exposes
   contacts, timelines, idempotent durable outbox writes, snapshots, sync, and
   close through generated shared Rust DTOs. USB Serial/JTAG and USB OTG remain
