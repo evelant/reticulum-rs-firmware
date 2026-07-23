@@ -613,6 +613,135 @@ fn wifi_suite_authenticates_round_trip_and_reconnect_resets_sequences() {
 }
 
 #[test]
+fn ble_gatt_suite_authenticates_request_response_round_trip() {
+    let client_parameters = ClientParameters::new_for_suite(
+        DEVICE_ID,
+        BearerBinding::BleGatt,
+        SessionSuite::BleGattQualification,
+    );
+    let server_parameters = ServerParameters::new_for_suite(
+        DEVICE_ID,
+        BearerBinding::BleGatt,
+        SessionSuite::BleGattQualification,
+    );
+    assert_eq!(crate::BLE_GATT_QUALIFICATION_SUITE, 3);
+    assert_eq!(
+        SessionSuite::BleGattQualification.required_bearer(),
+        BearerBinding::BleGatt
+    );
+
+    let mut epochs = SessionEpochAllocator::new();
+    let (client, server, _) = establish_client_server_for(
+        client_parameters,
+        server_parameters,
+        &mut epochs,
+        CLIENT_NONCE,
+        SERVER_NONCE,
+    );
+    let (awaiting_response, waiting) = send_client_request(client, server, b"ble-gatt-request");
+
+    let mut response_flight = frame_server_response(waiting, b"ble-gatt-response");
+    let response = awaiting_response
+        .authenticate(decode_one(response_flight.remaining()))
+        .unwrap_or_else(|fault| panic!("BLE GATT response authentication failed: {fault:?}"));
+    let (client, response) = response.into_parts();
+    assert_eq!(response.encoded(), b"ble-gatt-response");
+    let response_length = response_flight.remaining().len();
+    response_flight.advance(response_length).unwrap();
+    let server = response_flight
+        .try_finish()
+        .unwrap_or_else(|_| panic!("complete BLE GATT response did not restore server session"));
+    assert_eq!(client.next_client_sequence(), 1);
+    assert_eq!(client.next_server_sequence(), 1);
+    assert_eq!(server.next_client_sequence(), 1);
+    assert_eq!(server.next_server_sequence(), 1);
+}
+
+#[test]
+fn ble_gatt_suite_rejects_cross_bearer_use() {
+    let mut client_rng = FixedRng::new(CLIENT_NONCE);
+    let error = expect_error(
+        ClientHelloFlight::begin(
+            ClientParameters::new_for_suite(
+                DEVICE_ID,
+                BearerBinding::Wifi,
+                SessionSuite::BleGattQualification,
+            ),
+            client_credential(),
+            &mut client_rng,
+        ),
+        "BLE GATT suite started on Wi-Fi",
+    );
+    assert!(matches!(
+        error,
+        ClientHandshakeError::SuiteBearerMismatch {
+            suite: SessionSuite::BleGattQualification,
+            bearer: BearerBinding::Wifi,
+            required: BearerBinding::BleGatt,
+        }
+    ));
+
+    let mut epochs = SessionEpochAllocator::new();
+    let mut server_rng = FixedRng::new(SERVER_NONCE);
+    let ble_hello = ClientHello::new_for_suite(
+        SessionSuite::BleGattQualification,
+        BearerBinding::BleGatt,
+        CREDENTIAL_ID,
+        CLIENT_NONCE,
+    );
+    let error = expect_error(
+        ServerHelloFlight::begin(
+            ble_hello,
+            ActiveCredential::new(CREDENTIAL_ID, GENERATION, PSK),
+            ServerParameters::new_for_suite(
+                DEVICE_ID,
+                BearerBinding::Wifi,
+                SessionSuite::BleGattQualification,
+            ),
+            &mut epochs,
+            &mut server_rng,
+        ),
+        "BLE GATT suite server started on Wi-Fi",
+    );
+    assert!(matches!(
+        error,
+        HandshakeError::SuiteBearerMismatch {
+            suite: SessionSuite::BleGattQualification,
+            bearer: BearerBinding::Wifi,
+            required: BearerBinding::BleGatt,
+        }
+    ));
+
+    let forged_wifi_hello = ClientHello::new_for_suite(
+        SessionSuite::BleGattQualification,
+        BearerBinding::Wifi,
+        CREDENTIAL_ID,
+        CLIENT_NONCE,
+    );
+    let error = expect_error(
+        ServerHelloFlight::begin(
+            forged_wifi_hello,
+            ActiveCredential::new(CREDENTIAL_ID, GENERATION, PSK),
+            ServerParameters::new_for_suite(
+                DEVICE_ID,
+                BearerBinding::BleGatt,
+                SessionSuite::BleGattQualification,
+            ),
+            &mut epochs,
+            &mut server_rng,
+        ),
+        "BLE GATT suite accepted a client hello from Wi-Fi",
+    );
+    assert!(matches!(
+        error,
+        HandshakeError::BearerMismatch {
+            client: BearerBinding::Wifi,
+            server: BearerBinding::BleGatt,
+        }
+    ));
+}
+
+#[test]
 fn wifi_suite_rejects_wrong_bearer_and_supported_suite() {
     let mut client_rng = FixedRng::new(CLIENT_NONCE);
     let error = expect_error(
@@ -978,14 +1107,14 @@ fn preauth_downgrade_reserved_and_tag_mutations_fail_closed() {
 
     let record = client_hello().into_record();
     let (kind, session_id, sequence, length, mut payload, tag) = record.into_parts();
-    payload[4] = 3;
+    payload[4] = 4;
     let error = ClientHello::from_record(Record::new(
         kind, session_id, sequence, length, payload, tag,
     ))
     .unwrap_err();
     assert!(matches!(
         error,
-        crate::HandshakeRecordError::UnsupportedSuite { suite: 3 }
+        crate::HandshakeRecordError::UnsupportedSuite { suite: 4 }
     ));
 
     let record = client_hello().into_record();

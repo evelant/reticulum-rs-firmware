@@ -12,13 +12,34 @@ builds compile this crate and have executed its immutable contract query.
 Platform packaging belongs to the Expo client, while this crate remains
 independent of React Native, iOS, Android, and application UI lifecycles.
 Contacts, timelines, and idempotent outbox writes work offline immediately.
-USB serial/JTAG, USB OTG, and BLE remain explicit unavailable connector stubs:
-their stable variants and errors reserve the boundary without claiming that a
-bearer works or silently selecting another one. `NativeAppliance::open_wifi`
-is the first real connector. It loads an app-private activated credential,
-opens a finite-timeout raw TCP stream, and delegates framing, the
+USB serial/JTAG and USB OTG remain explicit unavailable connector stubs: their
+stable variants and errors reserve the boundary without claiming that a bearer
+works or silently selecting another one.
+
+`NativeAppliance::open_wifi` loads an app-private activated credential, opens a
+finite-timeout raw TCP stream, and delegates framing, the
 Wi-Fi-transcript-bound suite-2 handshake, logical device operations, and LXMF
-validation to the portable Rust client crates. The proof suite provides
-authentication and integrity, not confidentiality. Future adapters should
-preserve this composition rather than reimplementing protocol or LXMF handling
-in TypeScript, Swift, or Kotlin.
+validation to the portable Rust client crates.
+
+`NativeAppliance::open_ble` owns the same composition for the BLE-bound suite-3
+handshake while the platform owns scanning, connection, subscription, and GATT
+I/O. Its bounded generation-aware byte bridge exposes opaque writes one at a
+time and advances Rust I/O only after write-with-response succeeds. Indications
+feed the same RDA1 stream without a second fragmentation protocol. Link loss,
+overflow, an ambiguous write deadline, and session-lease release all wake
+blocked operations and require explicit GATT teardown before another generation
+can replace the link. The platform reports its write-with-response capability,
+but GATT 1.0 caps every emitted characteristic value to the firmware profile's
+fixed 20-byte initial-ATT bound.
+
+Initial platform setup registers the subscribed generation and calls the
+non-destructive `ensure_connected`. Explicit replacement first closes and
+reports the old generation, calls destructive `reconnect` while no replacement
+can be claimed, then registers the fresh generation and calls
+`ensure_connected`. Preserving that order prevents the actor from racing ahead
+and acquiring a new link that a late destructive reconnect would immediately
+release.
+
+These proof suites provide authentication and integrity, not confidentiality.
+Future adapters should preserve this composition rather than reimplementing
+protocol or LXMF handling in TypeScript, Swift, or Kotlin.

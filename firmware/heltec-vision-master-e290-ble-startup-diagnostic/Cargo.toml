@@ -1,0 +1,150 @@
+[package]
+name = "reticulum-heltec-vision-master-e290-ble-startup-diagnostic"
+description = "One-shot native USB Serial/JTAG BLE startup diagnostic for the Heltec Vision Master E290 node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "../heltec-vision-master-e290-node/build.rs"
+autobins = false
+
+[features]
+default = ["ble-api-proof"]
+ble-api-proof = [
+    "dep:embassy-sync-07",
+    "dep:esp-radio",
+    "dep:trouble-host",
+    "esp-radio/ble",
+    "esp-radio/unstable",
+    "esp-rtos/esp-radio",
+]
+journal-schema2-dev-reprovision = []
+rns-inbox-commit-fault-hil = []
+runtime-measurement-hil = ["esp-alloc/alloc-hooks"]
+wifi-api-proof = [
+    "dep:edge-dhcp",
+    "dep:edge-nal",
+    "dep:edge-nal-embassy",
+    "dep:embassy-net",
+    "dep:esp-radio",
+    "esp-radio/wifi",
+    "esp-rtos/esp-radio",
+]
+
+[dependencies]
+reticulum-announce-clock = { path = "../../crates/announce-clock", default-features = false }
+reticulum-board-heltec-vision-master-e290-radio = { path = "../../crates/board-heltec-vision-master-e290-radio" }
+reticulum-device-api = { path = "../../crates/device-api", default-features = false, features = ["experimental-rns-data", "experimental-rns-inbox", "experimental-lxmf"] }
+reticulum-device-api-adapter = { path = "../../crates/device-api-adapter", default-features = false, features = ["experimental-rns-data", "experimental-rns-inbox", "experimental-lxmf"] }
+reticulum-device-api-ble = { path = "../../crates/device-api-ble", default-features = false }
+reticulum-device-api-credential-store = { path = "../../crates/device-api-credential-store", default-features = false }
+reticulum-device-api-credentials = { path = "../../crates/device-api-credentials", default-features = false }
+reticulum-device-api-framing = { path = "../../crates/device-api-framing", default-features = false }
+reticulum-device-api-handoff = { path = "../../crates/device-api-handoff", default-features = false }
+reticulum-device-api-pairing = { path = "../../crates/device-api-pairing", default-features = false }
+reticulum-device-api-pairing-control = { path = "../../crates/device-api-pairing-control", default-features = false }
+reticulum-device-api-pairing-policy = { path = "../../crates/device-api-pairing-policy", default-features = false }
+reticulum-device-api-session = { path = "../../crates/device-api-session", default-features = false }
+reticulum-device-identity-store = { path = "../../crates/device-identity-store", default-features = false }
+reticulum-interface-router = { path = "../../crates/interface-router", default-features = false }
+reticulum-lxmf-durable-ingress = { path = "../../crates/lxmf-durable-ingress", default-features = false }
+reticulum-lxmf-ingress = { path = "../../crates/lxmf-ingress", default-features = false }
+reticulum-lxmf-model = { path = "../../crates/lxmf-model", default-features = false }
+reticulum-lxmf-store = { path = "../../crates/lxmf-store", default-features = false }
+reticulum-node-core = { path = "../../crates/node-core", default-features = false }
+reticulum-nor-flash-region = { path = "../../crates/nor-flash-region", default-features = false }
+reticulum-radio-interface = { path = "../../crates/radio-interface", default-features = false }
+reticulum-radio-tx-dispatch = { path = "../../crates/radio-tx-dispatch", default-features = false }
+reticulum-rns-inbox-store = { path = "../../crates/rns-inbox-store", default-features = false }
+reticulum-storage-actor = { path = "../../crates/storage-actor", default-features = false }
+reticulum-storage-journal = { path = "../../crates/storage-journal", default-features = false }
+reticulum-storage-model = { path = "../../crates/storage-model", default-features = false }
+reticulum-submission-runtime = { path = "../../crates/submission-runtime", default-features = false }
+reticulum-tx-supervisor = { path = "../../crates/tx-supervisor", default-features = false }
+embassy-sync.workspace = true
+rand_core.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(target_arch = "xtensa")'.dependencies]
+allocator-api2 = { workspace = true, features = ["alloc"] }
+reticulum-radio-lora-phy = { path = "../../crates/radio-lora-phy" }
+reticulum-tx-handoff = { path = "../../crates/tx-handoff", default-features = false }
+
+critical-section.workspace = true
+embassy-executor = { workspace = true, features = ["log"] }
+embassy-futures.workspace = true
+embassy-time = { workspace = true, features = ["log"] }
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
+embedded-hal-bus.workspace = true
+esp-alloc = { workspace = true, features = [
+    "esp32s3",
+    "global-allocator",
+    "internal-heap-stats",
+] }
+esp-backtrace = { workspace = true, features = ["esp32s3", "panic-handler", "println"] }
+esp-bootloader-esp-idf = { workspace = true, features = ["esp32s3", "log-04", "validation"] }
+esp-hal = { workspace = true, features = [
+    "esp32s3",
+    "exception-handler",
+    "float-save-restore",
+    "log-04",
+    "rt",
+    "unstable",
+] }
+esp-println = { workspace = true, features = ["esp32s3", "jtag-serial", "log-04"] }
+esp-rtos = { workspace = true, features = [
+    "embassy",
+    "esp-alloc",
+    "esp32s3",
+    "log-04",
+] }
+embedded-storage.workspace = true
+embassy-sync-07 = { package = "embassy-sync", version = "=0.7.2", default-features = false, optional = true }
+edge-dhcp = { version = "=0.7.0", default-features = false, features = ["io"], optional = true }
+edge-nal = { version = "=0.6.0", default-features = false, optional = true }
+edge-nal-embassy = { version = "=0.8.1", default-features = false, features = [
+    "medium-ethernet",
+    "proto-ipv4",
+    "udp",
+], optional = true }
+embassy-net = { version = "=0.8.0", default-features = false, features = [
+    "medium-ethernet",
+    "proto-ipv4",
+    "tcp",
+    "udp",
+], optional = true }
+esp-radio = { version = "=0.18.0", default-features = false, features = [
+    "esp-alloc",
+    "esp32s3",
+], optional = true }
+esp-storage = { workspace = true, features = ["esp32s3", "critical-section"] }
+log.workspace = true
+static_cell.workspace = true
+trouble-host = { version = "=0.6.0", default-features = false, features = [
+    "default-packet-pool-mtu-255",
+    "derive",
+    "gatt",
+    "peripheral",
+], optional = true }
+
+[dev-dependencies]
+embassy-futures.workspace = true
+embassy-sync.workspace = true
+embedded-storage.workspace = true
+reticulum-tx-handoff = { path = "../../crates/tx-handoff", default-features = false }
+reticulum-lxmf-wire = { path = "../../crates/lxmf-wire", default-features = false }
+sha2.workspace = true
+
+[lib]
+name = "reticulum_heltec_vision_master_e290_node"
+path = "../heltec-vision-master-e290-node/src/lib.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "reticulum-heltec-vision-master-e290-ble-startup-diagnostic"
+path = "../heltec-vision-master-e290-node/src/main.rs"
+test = false
+bench = false

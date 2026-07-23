@@ -14,12 +14,21 @@ default = []
 journal-schema2-dev-reprovision = []
 rns-inbox-commit-fault-hil = []
 runtime-measurement-hil = ["esp-alloc/alloc-hooks"]
+ble-api-proof = [
+    "dep:embassy-sync-07",
+    "dep:esp-radio",
+    "dep:trouble-host",
+    "esp-radio/ble",
+    "esp-radio/unstable",
+    "esp-rtos/esp-radio",
+]
 wifi-api-proof = [
     "dep:edge-dhcp",
     "dep:edge-nal",
     "dep:edge-nal-embassy",
     "dep:embassy-net",
     "dep:esp-radio",
+    "esp-radio/wifi",
     "esp-rtos/esp-radio",
 ]
 
@@ -28,6 +37,7 @@ reticulum-announce-clock = { path = "../../crates/announce-clock", default-featu
 reticulum-board-heltec-vision-master-e290-radio = { path = "../../crates/board-heltec-vision-master-e290-radio" }
 reticulum-device-api = { path = "../../crates/device-api", default-features = false, features = ["experimental-rns-data", "experimental-rns-inbox", "experimental-lxmf"] }
 reticulum-device-api-adapter = { path = "../../crates/device-api-adapter", default-features = false, features = ["experimental-rns-data", "experimental-rns-inbox", "experimental-lxmf"] }
+reticulum-device-api-ble = { path = "../../crates/device-api-ble", default-features = false }
 reticulum-device-api-credential-store = { path = "../../crates/device-api-credential-store", default-features = false }
 reticulum-device-api-credentials = { path = "../../crates/device-api-credentials", default-features = false }
 reticulum-device-api-framing = { path = "../../crates/device-api-framing", default-features = false }
@@ -91,6 +101,7 @@ esp-rtos = { workspace = true, features = [
     "log-04",
 ] }
 embedded-storage.workspace = true
+embassy-sync-07 = { package = "embassy-sync", version = "=0.7.2", default-features = false, optional = true }
 edge-dhcp = { version = "=0.7.0", default-features = false, features = ["io"], optional = true }
 edge-nal = { version = "=0.6.0", default-features = false, optional = true }
 edge-nal-embassy = { version = "=0.8.1", default-features = false, features = [
@@ -107,11 +118,16 @@ embassy-net = { version = "=0.8.0", default-features = false, features = [
 esp-radio = { version = "=0.18.0", default-features = false, features = [
     "esp-alloc",
     "esp32s3",
-    "wifi",
 ], optional = true }
 esp-storage = { workspace = true, features = ["esp32s3", "critical-section"] }
 log.workspace = true
 static_cell.workspace = true
+trouble-host = { version = "=0.6.0", default-features = false, features = [
+    "default-packet-pool-mtu-255",
+    "derive",
+    "gatt",
+    "peripheral",
+], optional = true }
 
 [dev-dependencies]
 embassy-futures.workspace = true

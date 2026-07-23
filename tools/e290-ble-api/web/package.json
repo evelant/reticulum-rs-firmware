@@ -1,0 +1,14 @@
+{
+  "name": "reticulum-e290-web-bluetooth-bridge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build src/main.ts --target=browser --outfile=dist/app.js",
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "typescript": "5.9.3"
+  }
+}

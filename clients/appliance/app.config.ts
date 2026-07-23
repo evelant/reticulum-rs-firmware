@@ -10,6 +10,8 @@ const config: ExpoConfig = {
   ios: {
     bundleIdentifier: "org.reticulum.appliance",
     infoPlist: {
+      NSBluetoothAlwaysUsageDescription:
+        "Connect to your Reticulum appliance over Bluetooth Low Energy.",
       NSLocalNetworkUsageDescription:
         "Connect to your Reticulum appliance over its local Wi-Fi network.",
     },
@@ -23,7 +25,17 @@ const config: ExpoConfig = {
     name: "Reticulum LXMF",
     output: "single",
   },
-  plugins: ["expo-router"],
+  plugins: [
+    "expo-router",
+    [
+      "react-native-ble-manager",
+      {
+        bluetoothAlwaysPermission: "Connect to your Reticulum appliance over Bluetooth Low Energy.",
+        isBleRequired: false,
+        neverForLocation: true,
+      },
+    ],
+  ],
   experiments: {
     typedRoutes: true,
   },

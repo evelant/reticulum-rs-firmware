@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Reticulum E290 Web Bluetooth qualifier</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      body {
+        margin: 0 auto;
+        max-width: 52rem;
+        padding: 2rem;
+        line-height: 1.5;
+      }
+      button {
+        font: inherit;
+        padding: 0.65rem 1rem;
+      }
+      pre {
+        overflow: auto;
+        padding: 1rem;
+        background: #151515;
+        border: 1px solid #383838;
+        white-space: pre-wrap;
+      }
+      .error {
+        color: #ff9a9a;
+      }
+      .pass {
+        color: #8ee29b;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>E290 Web Bluetooth qualifier</h1>
+    <p>
+      This page only moves opaque GATT bytes. The Rust process retains the
+      credential and owns authentication, the suite-3 session, and the
+      identity request.
+    </p>
+    <button id="connect" type="button" disabled>Choose E290 and connect</button>
+    <p id="status" role="status">Loading the local bridge profile…</p>
+    <h2>Rust-produced qualification evidence</h2>
+    <pre id="evidence">Waiting for authenticated suite-3 identity proof.</pre>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

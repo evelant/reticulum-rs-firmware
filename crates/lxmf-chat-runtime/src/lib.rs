@@ -847,6 +847,7 @@ enum Command {
         reply: oneshot::Sender<Result<OutboxCommitOutcome, String>>,
     },
     SyncNow(oneshot::Sender<Result<(), String>>),
+    EnsureConnected(oneshot::Sender<Result<(), String>>),
     Reconnect(oneshot::Sender<Result<(), String>>),
     Shutdown,
 }
@@ -929,6 +930,16 @@ impl ApplianceHandle {
     /// Schedule inbox and outbox work immediately.
     pub async fn sync_now(&self) -> Result<(), ServiceError> {
         self.request(Command::SyncNow).await
+    }
+
+    /// Schedule the connector immediately if there is no current session.
+    ///
+    /// Unlike [`Self::reconnect`], this never drops an already established
+    /// bearer. Platform-owned transports use it after registering a fresh
+    /// physical link, including when the actor raced ahead and already claimed
+    /// that link.
+    pub async fn ensure_connected(&self) -> Result<(), ServiceError> {
+        self.request(Command::EnsureConnected).await
     }
 
     /// Drop the current bearer and immediately retry the connector.
@@ -1170,6 +1181,12 @@ impl<C: Connector> Actor<C> {
             Command::SyncNow(reply) => {
                 self.next_inbox = Instant::now();
                 self.next_reconcile = Instant::now();
+                let _ = reply.send(Ok(()));
+            }
+            Command::EnsureConnected(reply) => {
+                if self.session.is_none() && !self.permanent_fault {
+                    self.next_connect = Instant::now();
+                }
                 let _ = reply.send(Ok(()));
             }
             Command::Reconnect(reply) => {
@@ -1899,6 +1916,72 @@ mod tests {
         assert_eq!(lease_drops.load(Ordering::Relaxed), 1);
         handle.shutdown_and_wait().await.unwrap();
         assert_eq!(lease_drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn ensure_connected_preserves_an_already_ready_transport_lease() {
+        let database = TestDatabase::new("ensure-ready-lease");
+        let lease_drops = Arc::new(AtomicUsize::new(0));
+        let connector = LeaseConnector {
+            connected: false,
+            lease_drops: lease_drops.clone(),
+        };
+        let store = SqliteChatStore::open(&database.0).unwrap();
+        let handle = start_with_connector(config(&database), store, connector).unwrap();
+        wait_for(&handle, |snapshot| {
+            matches!(snapshot.connection(), ConnectionState::Ready { .. })
+        })
+        .await;
+
+        handle.ensure_connected().await.unwrap();
+        assert!(
+            matches!(
+                handle.snapshot().connection(),
+                ConnectionState::Ready { .. }
+            ),
+            "non-destructive wake preserves the ready session"
+        );
+        assert_eq!(lease_drops.load(Ordering::Relaxed), 0);
+
+        handle.shutdown_and_wait().await.unwrap();
+        assert_eq!(lease_drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn ensure_connected_interrupts_retry_backoff_without_clearing_state() {
+        let database = TestDatabase::new("ensure-backoff");
+        let expected_binding = binding(0x72);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let submitted = Arc::new(Mutex::new(Vec::new()));
+        let connector = FakeConnector {
+            outcomes: VecDeque::from([
+                Err("physical link is not registered".to_owned()),
+                Ok((expected_binding, Vec::new())),
+            ]),
+            attempts: attempts.clone(),
+            submitted,
+        };
+        let mut delayed = config(&database);
+        delayed.reconnect_initial = Duration::from_secs(30);
+        delayed.reconnect_maximum = Duration::from_secs(30);
+        let store = SqliteChatStore::open(&database.0).unwrap();
+        let handle = start_with_connector(delayed, store, connector).unwrap();
+        wait_for(&handle, |snapshot| {
+            snapshot.connection() == &ConnectionState::Backoff
+        })
+        .await;
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+
+        handle.ensure_connected().await.unwrap();
+        wait_for(&handle, |snapshot| {
+            matches!(snapshot.connection(), ConnectionState::Ready { .. })
+        })
+        .await;
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        let expected_device = DeviceView::from(expected_binding);
+        assert_eq!(handle.snapshot().device(), Some(&expected_device));
+
+        handle.shutdown_and_wait().await.unwrap();
     }
 
     #[tokio::test]

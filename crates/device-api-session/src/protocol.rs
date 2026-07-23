@@ -11,6 +11,8 @@ pub const PROTOCOL_MINOR: u16 = 0;
 pub const QUALIFICATION_SUITE: u16 = 1;
 /// Wi-Fi-bound HKDF-SHA256 plus HMAC-SHA256 authentication-only qualification suite.
 pub const WIFI_QUALIFICATION_SUITE: u16 = 2;
+/// BLE GATT-bound HKDF-SHA256 plus HMAC-SHA256 authentication-only qualification suite.
+pub const BLE_GATT_QUALIFICATION_SUITE: u16 = 3;
 
 /// Client hello record kind.
 pub const RECORD_KIND_CLIENT_HELLO: u8 = 0x01;
@@ -75,10 +77,10 @@ impl BearerBinding {
 
 /// Cryptographic handshake suite and its required local bearer binding.
 ///
-/// Both current suites provide authentication and integrity only. Suite 1 is
-/// retained as the byte-for-byte USB qualification profile. Suite 2 uses the
-/// same primitives under a distinct transcript and is bound exclusively to
-/// the Wi-Fi local API profile.
+/// All current suites provide authentication and integrity only. Suite 1 is
+/// retained as the byte-for-byte USB qualification profile. Suites 2 and 3 use
+/// the same primitives under distinct transcripts and are bound exclusively to
+/// the Wi-Fi and BLE GATT local API profiles, respectively.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u16)]
 pub enum SessionSuite {
@@ -86,6 +88,8 @@ pub enum SessionSuite {
     UsbQualification = QUALIFICATION_SUITE,
     /// Wi-Fi-only authentication and integrity qualification suite.
     WifiQualification = WIFI_QUALIFICATION_SUITE,
+    /// BLE GATT-only authentication and integrity qualification suite.
+    BleGattQualification = BLE_GATT_QUALIFICATION_SUITE,
 }
 
 impl SessionSuite {
@@ -93,6 +97,7 @@ impl SessionSuite {
         match value {
             QUALIFICATION_SUITE => Some(Self::UsbQualification),
             WIFI_QUALIFICATION_SUITE => Some(Self::WifiQualification),
+            BLE_GATT_QUALIFICATION_SUITE => Some(Self::BleGattQualification),
             _ => None,
         }
     }
@@ -106,6 +111,7 @@ impl SessionSuite {
         match self {
             Self::UsbQualification => BearerBinding::UsbSerialJtag,
             Self::WifiQualification => BearerBinding::Wifi,
+            Self::BleGattQualification => BearerBinding::BleGatt,
         }
     }
 }

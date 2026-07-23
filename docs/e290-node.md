@@ -74,9 +74,9 @@ epoch on the same USB connection but never displaces request/reply owners. A
 session fault remains terminal until reset or re-enumeration. Resumption,
 protocol retries, close records, encryption, rate limiting/attempt policy, and
 concurrent requests are deferred. Credential selection, admission handoff, and
-node dispatch are bearer-neutral. The current qualification suite is USB
-Serial/JTAG-only; BLE or Wi-Fi can later reuse the ownership boundary after its
-binding/suite is added and qualified. Powered evidence now qualifies
+node dispatch are bearer-neutral. The opt-in BLE profile now reuses that
+ownership boundary under suite 3 while keeping the application connection limit
+at one; Wi-Fi remains to be powered-qualified. Powered evidence now qualifies
 authenticated capabilities and identity reads, sequential request/response
 flights in one session, durable submission, LoRa DATA delivery, peer decrypt/
 proof, terminal projection, API 1.2 durable raw-RNS status/peek before and after
@@ -88,7 +88,7 @@ first-attempt `Delivered`, and exact store readback. The earlier fault fixtures
 each include only one direct DATA/proof exchange; they do not claim sustained
 forwarding,
 multi-hop routing, LXMF, or general application-level message consumption,
-session resumption, or either deferred wireless bearer binding.
+session resumption, Wi-Fi bearer binding, or broader BLE lifecycle behavior.
 
 The current source composition pins Rete commit
 `90570cafc812b3025011cb690ec74a27f287cb3f`, with designated durable tag
@@ -544,8 +544,20 @@ The image autodetects ESP32-S3 PSRAM and refuses to continue unless the mapped
 capacity is between the qualified 8 MiB floor and the board datasheet's 16 MiB
 claim. Fixed channels, task storage, permit stores, and IRQ/synchronization-
 visible state remain in internal static RAM. The LXMF backing allocations named
-below are deliberately external. The allocator receives 64 KiB of reclaimed internal
-RAM followed by the detected PSRAM. Because `esp-alloc` searches registered
+below are deliberately external. The ordinary and Wi-Fi profiles retain their
+measured 64 KiB reclaimed heap. The opt-in BLE profile receives 72 KiB followed
+by the detected PSRAM. That is the largest whole-KiB allocation that fits the
+ESP32-S3 linker's separate 73,744-byte DRAM2 segment; it leaves 16 bytes rather
+than reducing the product executor stack in ordinary DRAM. The BLE-only
+additional 8 KiB is available to esp-radio's 8,192-byte strict-internal
+controller-task stack and other controller allocations. This remains below
+the pinned esp-radio 0.18 documentation's conservative 100 KiB total
+recommendation (64 KiB reclaimed plus 36 KiB ordinary). The 2026-07-23 powered
+BLE startup diagnostic nevertheless completed controller initialization,
+Trouble host/GATT construction, runner startup, and advertising under exactly
+72 KiB, with 41,040 internal-heap bytes free after advertising. No further heap
+increase is required for this startup path; sustained authenticated load and
+high-water qualification remain open. Because `esp-alloc` searches registered
 regions in order, ordinary global allocations currently consume internal heap
 first and spill into PSRAM only when no internal hole fits. That is a measured
 baseline, not the intended long-term placement policy: large protocol/client
@@ -1682,10 +1694,10 @@ session on the same connection with a fresh session epoch; replacement is
 dropped while a request or reply owner exists. A malformed replacement or
 other session fault still fails terminally until USB reset. It intentionally
 has no resumption, protocol retry, close record, encryption, rate/attempt
-policy, or concurrency yet. Its admission and request/reply
-handoffs remain bearer-neutral for later BLE/Wi-Fi adapters, while each
-non-USB binding still requires an explicitly enabled and qualified session
-suite. The separate USB
+policy, or concurrency yet. Its admission and request/reply handoffs remain
+bearer-neutral. The opt-in BLE adapter now uses those same boundaries with an
+explicitly enabled and bounded suite-3 session; the Wi-Fi binding remains to be
+powered-qualified. The separate USB
 bootstrap records remain pre-authentication and serve only initialization and
 credential pairing.
 
@@ -2612,8 +2624,10 @@ The heap values describe the registered global allocator under this specific
 LoRa/node/API workload. They do not include static reservations, DMA-visible or
 interrupt-owned memory, or future client and wireless stacks. In particular,
 zero observed PSRAM allocation does not imply that the full appliance should
-avoid PSRAM: the current allocator searches the 64 KiB internal region first,
-and this workload never exhausted it. That measured image placed its
+avoid PSRAM: that measured image searched a 64 KiB internal region first, and
+this workload never exhausted it. Current source raises the separate reclaimed
+region to 72 KiB for esp-radio BLE controller headroom; that change is not part
+of the historical measurements above. The measured image placed its
 then-current 16-entry submission runtime, LXMF index, delayed proofs, and
 retry/fault/proof-holder state explicitly in PSRAM. Current source expands the
 runtime to 128 entries; the historical one-message high-water result does not
@@ -2744,7 +2758,108 @@ flash readback, while suspend/resume remains a separate powered qualification
 case. A hard reset does not by itself qualify the ROM/bootloader interval before
 the earliest Rust entrypoint.
 
+### Powered BLE startup and CoreBluetooth proof
+
+On 2026-07-23, a diagnostic image isolated the apparent BLE startup failure to
+the controller activity budget, not the application connection limit or
+registered-heap size. The pinned esp-radio 0.18
+`Config::with_max_connections` name is misleading for this version: it writes
+Espressif's `ble_max_act`, the total concurrent controller activity count. The
+official ESP32-S3
+[`CONFIG_BT_CTRL_BLE_MAX_ACT` reference](https://docs.espressif.com/projects/esp-idf/en/v5.5.3/esp32s3/api-reference/kconfig-reference.html#config-bt-ctrl-ble-max-act)
+counts connections, scanning, synchronization, and advertising, and
+Espressif's
+[multi-connection guide](https://docs.espressif.com/projects/esp-idf/en/release-v5.1/esp32c3/api-guides/ble/ble-multiconnection-guide.html)
+defines the required value as maximum connections plus simultaneous
+advertising, scanning, and periodic-synchronization instances. This peripheral
+still admits exactly one application connection, but its connectable
+advertisement and eventual ACL connection require two controller activities.
+
+The digest-bound artifacts were:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| historical activity-2 startup-diagnostic image | `b94c8b10c5107cce2365e72fa30cd383a17a5122339e5ca4dd88700fd0d6e38b` |
+| historical activity-2 startup-diagnostic ELF | `83df24da890d4d539d370d72f84e40024d2164cd24aef039876832fc2c9ba58a` |
+| historical activity-2 production BLE image | `71d3bff3ce535c7246e7c65d8b05a51615932ad521aae340eb034d7291a7d00a` |
+| historical activity-2 production BLE ELF | `1d7d0ae0b5b3a55462119a5c9327031e40b1f9a02843a473da35d495f4207ca0` |
+| disconnect-barrier production BLE image | `74ce5f8a8ef5ddb1eec105a843c4fd633753585eaf81b592738f3f7b5c14b8ea` |
+| disconnect-barrier production BLE ELF | `39789a94cf060056f320765bbece079410e7352b953169e400e4bad48a712891` |
+
+With the activity count set to two, the powered diagnostic completed controller
+construction, Trouble host construction, GATT-server construction, controller
+runner startup, and connectable advertising. Its reclaimed internal heap
+remained exactly 72 KiB, and 41,040 internal-heap bytes were free after
+advertising. No heap increase was needed to fix startup.
+
+The historical activity-2 production image was identity-safely flashed and read
+back on Board B before two direct macOS CoreBluetooth suite-3 sessions. That
+older diagnostic artifact observed the first immediate post-disconnect
+re-advertise transiently return HCI `0x07` (`Memory Capacity Exceeded`) before
+controller teardown completed; its 100 ms advertise retry recovered. This
+`0x07` observation is historical to the older activity-2 artifact, not a
+current-source limitation.
+
+The final disconnect barrier records whether `serve_connection` consumed
+Trouble's exact `Disconnected` event. Every other exit requests disconnect and
+waits without a success timeout for the raw disconnect event; timer rechecks
+only emit prolonged-drain diagnostics. The old `GattConnection` is then
+explicitly dropped so Trouble's sole host-resource refcount reaches zero before
+the loop can create another advertiser. This fail-closed drain does not raise
+the two-activity controller budget or one-link application limit, and a stalled
+BLE teardown does not stop the separately spawned autonomous LoRa/node tasks.
+
+The exact disconnect-barrier production image was identity-safely flashed and
+read back on both boards:
+
+| Board | USB serial | eFuse MAC | Flash | Radio |
+| --- | --- | --- | --- | --- |
+| A | `AC:A7:04:E1:3E:88` | `ac:a7:04:e1:3e:88` | 16 MiB | `HT-RA62-HF` |
+| B | `AC:A7:04:E1:3F:88` | `ac:a7:04:e1:3f:88` | 16 MiB | `HT-RA62-HF` |
+
+Board B then completed three consecutive production CoreBluetooth suite-3
+authenticated sessions in 10,907 ms, 12,351 ms, and 11,595 ms. Board A
+independently completed the same path in 12,193 ms. All four runs used 20-byte
+fragments, write-with-response to RX, and indications from TX. Board B returned
+device ID `653239302d6170692d31aca704e13f88`, primary destination
+`83a09ed807a0a7c631386deaa0448fb9`, and LXMF delivery destination
+`935caba93f7cd97c7c6658350ac02b45`; Board A returned device ID
+`653239302d6170692d31aca704e13e88`, primary destination
+`c99e8ff1ec8629e4e1290e14462ae8af`, and LXMF delivery destination
+`03869ee76b74d1e2a4626f0c02ae3248`. This qualifies the production firmware's
+bounded disconnect/drain/drop/re-advertise sequence across consecutive sessions
+and independently on both hardware identities.
+
+This proof does not qualify a powered Expo iOS/Android
+foreground/background/reconnect lifecycle matrix, pressure, or soak. The
+process-global React Native `BleManager` still needs the P2 cross-instance
+ownership epoch before overlapping owners or restoration can be qualified, and
+BLE controller initialization can still panic/assert before the API bearer
+reaches its recoverable isolation boundary.
+
+The private local evidence root is
+`/private/tmp/e290-ble-powered-20260723.YcRky1`. The final flash/readback records
+are
+`board-a-ble-disconnect-barrier-production-flash.flash-image.verified.json` and
+`board-b-ble-disconnect-barrier-production-flash.flash-image.verified.json`.
+The final session records are
+`board-b-ble-disconnect-barrier-production-qualification-1.json`,
+`board-b-ble-disconnect-barrier-production-qualification-2.json`,
+`board-b-ble-disconnect-barrier-production-qualification-3.json`, and
+`board-a-ble-disconnect-barrier-production-qualification.json`. The historical
+activity-2 diagnostic monitor and first authentication records are
+`board-b-ble-activity2-diagnostic.monitor.txt` and
+`board-b-ble-activity2-native-qualification.json`. These paths bind this
+development proof but are not portable repository artifacts.
+
 ## Connected-board identity and future flash procedure
+
+ROM download mode uses the dedicated `BOOT_KEY` on ESP32-S3 GPIO0: hold the
+board button silk-screened `BOOT`, tap `RST`, wait one second, then release
+`BOOT`. GPIO21 is the separate application user/pairing key and cannot select
+the ROM loader. An application profile that quarantines native USB will
+therefore remain absent after an ordinary `RST` until this GPIO0 sequence is
+used.
 
 The read-only 2026-07-17 discovery snapshot was:
 
@@ -3043,8 +3158,12 @@ first smoke.
   quarantine.
   Resumption, retries, close records, encryption, rate/attempt policy, repeated
   attempts, and concurrency remain later hardening work; the transport-neutral
-  admission boundary must remain reusable by BLE and Wi-Fi, whose session
-  bindings/suites still require explicit implementation and qualification. The
+  admission boundary must remain reusable by every bearer. BLE suite 3 now has
+  a bounded one-connection implementation, three consecutive authenticated
+  CoreBluetooth sessions on Board B, and one independent session on Board A;
+  the fail-closed disconnect barrier is therefore powered-qualified. Wi-Fi still
+  requires powered qualification, while the mobile Expo lifecycle matrix,
+  P2 cross-instance `BleManager` epoch, pressure, and soak remain open. The
   narrow pre-authentication bearer, current 128-entry non-reclaiming submission
   profile, 129th-request rejection, mutation-free replay at capacity, and ADR
   0005 host behavior are covered in source/host tests. Historical 16-entry
@@ -3085,8 +3204,9 @@ first smoke.
 - Preserve the composed independently vector-tested ADR 0006 authentication
   model, ADR 0009 pairing, and first USB bearer. Replace the POC's
   integrity-only session with an appropriately confidential, rate-limited
-  wireless profile before exposing the API over BLE or Wi-Fi. Add Wi-Fi or BLE
-  as a Reticulum transport only when that separate link behavior and
+  wireless profile before treating the now-exposed BLE proof bearer or a future
+  Wi-Fi bearer as production-ready. Add Wi-Fi or BLE as a Reticulum transport
+  only when that separate link behavior and
   interface-scoped path forwarding are specified; packet transports remain
   deferred behind the primary LoRa slice.
 - Replace the single-LoRa airtime policy with a composite per-resource policy

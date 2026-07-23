@@ -132,14 +132,27 @@ pub const LORA_ADVERTISED_BITRATE: AdvertisedBitrate = match AdvertisedBitrate::
     Err(_) => panic!("the E290 advertised bitrate must be non-zero"),
 };
 
-/// Reclaimed internal SRAM assigned to the global allocator.
+/// Reclaimed internal SRAM assigned to a BLE-capable global allocator.
 ///
 /// Ownership machines and Embassy task state remain in internal static RAM.
 /// This region is registered before PSRAM, so ordinary global allocations use
 /// it first and spill into external RAM only when no internal hole fits. An
 /// explicit placement policy is still required before large protocol/client
-/// allocations are enabled. Sixty-four KiB leaves the E290 link layout enough
-/// internal space for the fixed 4-DATA/8-ordinary profile.
+/// allocations are enabled. Seventy-two KiB is the largest whole-KiB
+/// allocation that fits the ESP32-S3's separate 73,744-byte reclaimed DRAM2
+/// segment. The final 8 KiB is available to esp-radio's 8,192-byte
+/// strict-internal controller-task stack and controller allocations without
+/// shrinking the product executor stack in ordinary DRAM. The pinned
+/// esp-radio documentation recommends more total heap (64 KiB reclaimed plus
+/// 36 KiB ordinary), so this profile still requires powered heap
+/// qualification rather than treating 72 KiB as a general BLE guarantee.
+#[cfg(feature = "ble-api-proof")]
+pub const INTERNAL_HEAP_BYTES: usize = 72 * 1024;
+/// Reclaimed internal SRAM assigned to the ordinary and Wi-Fi allocators.
+///
+/// These profiles retain their measured 64 KiB reservation. BLE alone claims
+/// the otherwise-unused final 8 KiB of the separate reclaimed DRAM2 segment.
+#[cfg(not(feature = "ble-api-proof"))]
 pub const INTERNAL_HEAP_BYTES: usize = 64 * 1024;
 /// Qualified minimum external RAM required by this product profile.
 pub const MINIMUM_PSRAM_BYTES: usize = 8 * 1024 * 1024;
@@ -544,6 +557,20 @@ pub const fn dispatcher_config() -> RadioTxDispatcherConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(feature = "ble-api-proof")]
+    fn internal_heap_uses_the_bounded_esp32s3_reclaimed_dram2_capacity() {
+        assert_eq!(INTERNAL_HEAP_BYTES, 72 * 1024);
+        assert!(INTERNAL_HEAP_BYTES <= 73_744);
+        assert_eq!(73_744 - INTERNAL_HEAP_BYTES, 16);
+    }
+
+    #[test]
+    #[cfg(not(feature = "ble-api-proof"))]
+    fn non_ble_internal_heap_preserves_the_measured_baseline() {
+        assert_eq!(INTERNAL_HEAP_BYTES, 64 * 1024);
+    }
 
     #[test]
     fn lxmf_delivery_announce_explicitly_advertises_no_optional_functionality() {

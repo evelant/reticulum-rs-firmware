@@ -832,9 +832,12 @@ Powered API 1.1 work exercised identity/submission/status through physical LoRa
 proof, and powered API 1.2 work exercised inbox status/peek around exact durable
 commit, hard reset, and drop-newest. The adapter itself still performs no
 framing, credential lookup, session establishment, direct flash, node or radio
-work. BLE/Wi-Fi bearers remain unimplemented; they can reuse the bearer-neutral
-admission/handoff boundary only after their bindings/suites are explicitly
-implemented and qualified.
+work. The opt-in BLE bearer now reuses the bearer-neutral admission/handoff
+boundary under suite 3. Its fail-closed disconnect barrier is powered-qualified
+by three consecutive CoreBluetooth sessions on Board B plus one independent
+session on Board A, all from exact final-image flash/readback. Wi-Fi remains to
+be powered-qualified, while the mobile Expo lifecycle matrix, the P2
+cross-instance `BleManager` epoch, BLE pressure, and soak remain open.
 
 The journal's isolated powered clean path passed on E9:44 from source
 `7b47113`. Strict serial verification covered A1 format, five appends,
@@ -1429,7 +1432,8 @@ short-lived view. The E290's pre-authentication USB/GPIO records invoke
 status/initialize and Begin/ProofStart/Activate/AbortCurrent through one decoder,
 sequence gate, and the two pre-authentication handoff families. The same sole
 USB owner now also invokes the logical dispatcher through the separate minimal
-authenticated session; BLE/Wi-Fi bearers do not yet exist.
+authenticated session. The mutually exclusive opt-in BLE profile invokes that
+same boundary under suite 3; Wi-Fi remains without powered qualification.
 The node orders those control/live events by captured time and withholds mutation
 success until exact durable completion. Powered workflows returned
 `physical-presence-required` on both boards; one later qualifying hold admitted
@@ -1942,10 +1946,10 @@ Pin compatible versions after the first working lockfile rather than floating ac
 | scheduling/radio integration | `esp-rtos 0.3`, Embassy executor/sync/time | Needed by current ESP radio stack; portable task model |
 | portable I/O traits | `embedded-hal`, `embedded-hal-async`, `embedded-io-async` | Keeps drivers and stream adapters independent of ESP/Embassy executors |
 | bounded/static utilities | `heapless`, `static_cell`, `portable-atomic` | Fixed-capacity collections and explicit static ownership; use only where their memory is visible in the profile |
-| Wi-Fi/BLE controller | [`esp-radio 1.0.0-beta.0`](https://docs.espressif.com/projects/rust/esp-radio/1.0.0-beta.0/esp32s3/esp_radio/) | Current bare-metal route; beta, binary blobs, dynamic allocation, unstable coexistence |
+| Wi-Fi/BLE controller | `esp-radio 0.18.0` | Exact line used by the build-qualified SoftAP proof and powered BLE proof; binary blobs, dynamic internal-RAM allocation, and unstable coexistence remain constraints |
 | TCP/IP | `embassy-net` | Portable async network stack; AP/DHCP examples exist |
 | USB | `embassy-usb 0.6` | CDC-ACM now; CDC-NCM/WebUSB/DFU candidates later |
-| BLE host | `trouble-host 0.7` | Rust GATT host, not yet Bluetooth-qualified |
+| BLE host | `trouble-host 0.6.0` | Exact `bt-hci 0.8` match for `esp-radio 0.18.0`; controller/GATT startup, advertising, indications, and the fail-closed disconnect barrier are powered-qualified through three consecutive macOS CoreBluetooth sessions on Board B plus one independent Board A session, while the mobile Expo lifecycle matrix, coexistence/pressure, and soak remain open |
 | HTTP/WebSocket | `picoserve 0.18` | Small `no_std` server with Embassy support; exact-pin and stress-test |
 | flash | `esp-storage 0.9` | Raw, currently unencrypted flash access; storage/security supplied above it |
 | boot/OTA | `esp-bootloader-esp-idf 0.5` | A/B OTA path used by current examples |
@@ -2223,7 +2227,47 @@ the app must not maintain parallel handwritten API unions.
 
 ### BLE
 
-BLE uses a custom framed service with control, client-to-device, device-to-client notify/indicate, and optional bulk characteristics. Negotiate MTU, use chunk sequence numbers and credits, and make reconnect/resume first-class. Do not expose an unauthenticated serial pipe.
+The opt-in BLE device-API profile uses a custom GATT service carrying the
+unchanged ordered RDA1 stream: client-to-device fragments are
+write-with-response and device-to-client fragments are indications. The first
+bounded profile fixes each fragment at 20 bytes and admits one application
+connection. A later larger-MTU/bulk profile needs explicit sequencing and
+credits, and reconnect/resume remains first-class. Do not expose an
+unauthenticated serial pipe.
+
+In pinned esp-radio 0.18, `Config::with_max_connections` writes Espressif's
+total `ble_max_act` controller-activity count, not just the application link
+limit. The official ESP32-S3
+[`CONFIG_BT_CTRL_BLE_MAX_ACT` reference](https://docs.espressif.com/projects/esp-idf/en/v5.5.3/esp32s3/api-reference/kconfig-reference.html#config-bt-ctrl-ble-max-act)
+and
+[multi-connection guide](https://docs.espressif.com/projects/esp-idf/en/release-v5.1/esp32c3/api-guides/ble/ble-multiconnection-guide.html)
+count advertising separately from a connection. The application limit remains
+one, while one connectable advertiser plus the eventual link requires
+controller activity count two.
+
+The 2026-07-23 powered activity-2 diagnostic proved controller, Trouble/GATT,
+runner, and advertising startup with the unchanged 72 KiB reclaimed heap and
+41,040 internal-heap bytes free after advertising. Its one immediate
+post-disconnect HCI `0x07` re-advertise result is historical to that older
+activity-2 artifact; its 100 ms retry recovered.
+
+The final fail-closed barrier image/ELF hashes are
+`74ce5f8a8ef5ddb1eec105a843c4fd633753585eaf81b592738f3f7b5c14b8ea` and
+`39789a94cf060056f320765bbece079410e7352b953169e400e4bad48a712891`.
+Exact identity-safe flash/readback passed on both 16 MiB `HT-RA62-HF` boards:
+Board A is USB serial `AC:A7:04:E1:3E:88` / eFuse
+`ac:a7:04:e1:3e:88`, and Board B is `AC:A7:04:E1:3F:88` /
+`ac:a7:04:e1:3f:88`. Board B completed three consecutive direct macOS
+CoreBluetooth suite-3 sessions in 10,907 ms, 12,351 ms, and 11,595 ms; Board A
+independently completed the same 20-byte-fragment,
+write-with-response/indication path in 12,193 ms. This powered-qualifies the
+bounded disconnect/drain/drop/re-advertise sequence across reconnect and both
+hardware identities. Exact returned identifiers, evidence filenames, and
+flash/readback binding are in the
+[E290 runbook](e290-node.md#powered-ble-startup-and-corebluetooth-proof).
+The proof does not cover a powered mobile Expo lifecycle matrix, pressure, or
+soak; the P2 cross-instance `BleManager` ownership epoch and pre-bearer BLE
+controller-init panic isolation remain open.
 
 If BLE later carries Reticulum traffic, expose a distinct packet service/actor
 with its own credits, interface identity, MTU and reconnect generation. It
@@ -2238,8 +2282,11 @@ module provides BLE and background lifecycle behavior on iOS/Android while the
 web target uses HTTP/SSE or WebSocket. The first Rust bridge spike uses
 the pinned UniFFI `0.31.0` and `uniffi-bindgen-react-native` `0.31.0-3` local
 TurboModule behind Expo development builds. Its Android/iOS immutable-contract
-round trip now passes; transport, cancellation, lifecycle, and physical BLE
-qualification remain. Nitro remains a measured-performance fallback.
+round trip and host transport suites pass. The four direct macOS sessions across
+both boards close a bounded physical BLE transport/authentication and firmware
+disconnect-barrier proof, but the powered Expo device lifecycle matrix,
+cancellation, foreground/background behavior, reconnect UX, pressure, and soak
+remain. Nitro remains a measured-performance fallback.
 
 ### Recommended order
 
@@ -2604,11 +2651,13 @@ permanent E290 graph. A static authenticated job/reply handoff, node-side
 current-authority dispatch, and the minimal authenticated USB handshake/session
 manager are now composed as well. The USB bearer is deliberately single-flight
 and has completed one bounded end-to-end powered DATA/peer-proof/status path.
-BLE/Wi-Fi bearers remain
-unimplemented, but the portable immutable authority, framing, qualification
+The mutually exclusive BLE bearer now has an explicitly enabled suite-3 binding,
+exact two-board flash/readback, and bounded powered CoreBluetooth
+disconnect-barrier qualification; Wi-Fi remains without a powered bearer proof.
+The portable immutable authority, framing, qualification
 session-machine ownership, admission, and authenticated boot-lifetime handoff
-are kept transport-neutral for them. Each non-USB binding still needs an
-explicitly enabled and qualified crypto suite.
+remain transport-neutral. Each additional binding still needs an explicitly
+enabled and independently qualified crypto suite.
 Live typed Begin, Proof, Activate, and Abort mutation/reconciliation ownership
 is already resident and routed.
 OTA, watchdog, other-store and radio-timing
@@ -3135,11 +3184,12 @@ CAD policy, formal electrical/RF, range, or regional release gates.
    mount-gated E290 composition in which a new commit or fresh retransmission
    recognized as `AlreadyDurable` precedes event acknowledgement and that
    event's retained-proof release. Keep the admission and
-   node-dispatch boundary reusable by later BLE/Wi-Fi bearers, with a separately
-   implemented and qualified session suite for each binding. Select the real
-   capacity policy beyond this one-entry qualification profile. Preserve durable
-   acceptance before Rete preparation and durable terminal projection before
-   acknowledgement.
+   node-dispatch boundary reusable across BLE/Wi-Fi bearers. Preserve the
+   bounded BLE suite-3 binding and its powered fail-closed disconnect barrier,
+   and qualify Wi-Fi with its separately selected suite. Select the real
+   capacity policy beyond this one-entry qualification
+   profile. Preserve durable acceptance before Rete preparation and durable
+   terminal projection before acknowledgement.
 4. Preserve ADR 0011's completed bounded powered end-to-end results without
    rewriting the historical API 1.1 proof as persistence evidence: the maximum-
    size DATA packet independently reached `Delivered`, exact status/peek and raw
@@ -3209,7 +3259,7 @@ replay/remount, other LXMF carriers, pressure, faults, range, or soak.
 - [Heltec ESP32 driver](https://github.com/HelTecAutomation/Heltec_ESP32) for the MIT-licensed Tracker V2 power mapping
 - [Semtech SX1262](https://www.semtech.com/products/wireless-rf/lora-connect/sx1262)
 - [ESP Rust documentation](https://docs.espressif.com/projects/rust/) and [esp-hal](https://github.com/esp-rs/esp-hal)
-- [esp-radio 1.0.0-beta.0](https://docs.espressif.com/projects/rust/esp-radio/1.0.0-beta.0/esp32s3/esp_radio/)
+- Espressif [`CONFIG_BT_CTRL_BLE_MAX_ACT`](https://docs.espressif.com/projects/esp-idf/en/v5.5.3/esp32s3/api-reference/kconfig-reference.html#config-bt-ctrl-ble-max-act) and [BLE multi-connection guidance](https://docs.espressif.com/projects/esp-idf/en/release-v5.1/esp32c3/api-guides/ble/ble-multiconnection-guide.html)
 - [lora-rs / lora-phy](https://github.com/lora-rs/lora-rs)
 - [picoserve](https://github.com/sammhicks/picoserve), [sequential-storage](https://github.com/tweedegolf/sequential-storage), and [littlefs2](https://github.com/trussed-dev/littlefs2)
 - [ESP32-S3 random-number guidance](https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-reference/system/random.html)

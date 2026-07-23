@@ -106,6 +106,11 @@ impl MockPeer {
                 BearerBinding::Wifi,
                 SessionSuite::WifiQualification,
             ),
+            ClientSessionProfile::BleGattQualification => ServerParameters::new_for_suite(
+                device_id,
+                BearerBinding::BleGatt,
+                SessionSuite::BleGattQualification,
+            ),
         };
         Self {
             decoder: StreamDecoder::new(),
@@ -451,6 +456,30 @@ fn wifi_profile_uses_suite_two_across_partial_stream_io() {
         ClientSessionProfile::WifiQualification,
     )
     .expect("Wi-Fi profile authenticates across partial stream I/O");
+
+    assert_eq!(client.device_id().as_bytes(), &DEVICE_BYTES);
+    assert_eq!(
+        client
+            .identity_summary()
+            .expect("authenticated request succeeds")
+            .lxmf_delivery_destination(),
+        Some(LXMF_LOCAL)
+    );
+    assert_eq!(client.into_transport().request_count, 1);
+}
+
+#[test]
+fn ble_gatt_profile_uses_suite_three_across_partial_stream_io() {
+    let credential = ActivatedCredential::decode(&active_state()).expect("credential decodes");
+    let config = ClientConfig::new(Duration::from_secs(1), Duration::from_secs(1), 8, 4_096);
+    let mut client = DeviceClient::connect_with_profile(
+        MockPeer::new_for_profile(ClientSessionProfile::BleGattQualification, 3),
+        credential,
+        &mut FixedRng::new(0x99),
+        config,
+        ClientSessionProfile::BleGattQualification,
+    )
+    .expect("BLE GATT profile authenticates across partial stream I/O");
 
     assert_eq!(client.device_id().as_bytes(), &DEVICE_BYTES);
     assert_eq!(

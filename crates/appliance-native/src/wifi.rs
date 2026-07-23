@@ -1,20 +1,17 @@
 //! Native raw-TCP connector for the Wi-Fi local device API proof profile.
 
-use std::fs::{File, symlink_metadata};
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::num::NonZeroU32;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
-use rand_core::{CryptoRng, RngCore};
-use reticulum_device_client::{
-    ActivatedCredential, ClientConfig, ClientError, ClientSessionProfile, DeviceClient,
-};
+use reticulum_device_client::{ClientConfig, ClientError, ClientSessionProfile, DeviceClient};
 use reticulum_lxmf_chat_app::DeviceClientSession;
 use reticulum_lxmf_chat_runtime::{
     ConnectFailure, ConnectedSession, ConnectionMetadata, ConnectionTransport, Connector,
 };
+
+use crate::credential::{HostRng, read_credential};
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_IO_SLICE: Duration = Duration::from_millis(100);
@@ -118,18 +115,6 @@ impl Write for WifiStream {
     }
 }
 
-fn read_credential(path: &Path) -> Result<ActivatedCredential, String> {
-    let metadata = symlink_metadata(path)
-        .map_err(|error| format!("could not inspect app-private credential: {error}"))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err("app-private credential must be a regular non-symlink file".to_owned());
-    }
-    let mut file = File::open(path)
-        .map_err(|error| format!("could not open app-private credential: {error}"))?;
-    ActivatedCredential::read_from(&mut file)
-        .map_err(|error| format!("could not decode app-private credential: {error}"))
-}
-
 fn classify_client_failure(error: ClientError) -> ConnectFailure {
     if matches!(&error, ClientError::Handshake(_)) {
         ConnectFailure::permanent(format!("Wi-Fi authentication failed: {error}"))
@@ -137,37 +122,6 @@ fn classify_client_failure(error: ClientError) -> ConnectFailure {
         ConnectFailure::retryable(format!("Wi-Fi device session failed: {error}"))
     }
 }
-
-struct HostRng;
-
-impl RngCore for HostRng {
-    fn next_u32(&mut self) -> u32 {
-        let mut bytes = [0_u8; 4];
-        self.fill_bytes(&mut bytes);
-        u32::from_le_bytes(bytes)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut bytes = [0_u8; 8];
-        self.fill_bytes(&mut bytes);
-        u64::from_le_bytes(bytes)
-    }
-
-    fn fill_bytes(&mut self, destination: &mut [u8]) {
-        self.try_fill_bytes(destination)
-            .unwrap_or_else(|error| panic!("operating-system randomness failed: {error}"));
-    }
-
-    fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), rand_core::Error> {
-        getrandom::fill(destination).map_err(|_| {
-            NonZeroU32::new(rand_core::Error::CUSTOM_START)
-                .expect("rand_core custom error base is nonzero")
-                .into()
-        })
-    }
-}
-
-impl CryptoRng for HostRng {}
 
 #[cfg(test)]
 mod tests {
@@ -179,6 +133,7 @@ mod tests {
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use rand_core::{CryptoRng, RngCore};
     use reticulum_device_api_framing::{DecodeEvent, Record, StreamDecoder};
     use reticulum_device_api_session::{
         ActiveCredential, BearerBinding, ClientHello, CredentialGeneration, CredentialId, DeviceId,

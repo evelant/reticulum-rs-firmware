@@ -6,6 +6,7 @@
 
 pub mod announce_time;
 pub mod authenticated_api_node;
+pub mod ble_api_profile;
 pub mod causal_pairing_frontier;
 pub mod config;
 pub mod credential_boot;
@@ -595,6 +596,7 @@ mod tests {
             "\"dep:edge-nal-embassy\"",
             "\"dep:embassy-net\"",
             "\"dep:esp-radio\"",
+            "\"esp-radio/wifi\"",
             "\"esp-rtos/esp-radio\"",
         ] {
             assert!(
@@ -626,6 +628,118 @@ mod tests {
         assert!(wifi.contains("Only one TCP connection is accepted at a time."));
         assert!(!wifi.contains("PacketInterfaceId"));
         assert!(!wifi.contains("register_interface"));
+    }
+
+    #[test]
+    fn ble_api_proof_is_one_confirmed_stream_bearer_outside_the_interface_fabric() {
+        let manifest = include_str!("../Cargo.toml");
+        assert!(manifest.contains("ble-api-proof = ["));
+        for dependency in [
+            "\"dep:esp-radio\"",
+            "\"dep:trouble-host\"",
+            "\"esp-radio/ble\"",
+            "\"esp-radio/unstable\"",
+            "\"esp-rtos/esp-radio\"",
+            "trouble-host = { version = \"=0.6.0\"",
+            "esp-radio = { version = \"=0.18.0\"",
+        ] {
+            assert!(
+                manifest.contains(dependency),
+                "BLE proof must retain its pinned opt-in dependency: {dependency}"
+            );
+        }
+        let esp_radio_dependency = manifest
+            .split("esp-radio = { version = \"=0.18.0\"")
+            .nth(1)
+            .and_then(|tail| tail.split("esp-storage =").next())
+            .expect("the target graph must expose one bounded esp-radio dependency");
+        assert!(!esp_radio_dependency.contains("\"wifi\""));
+        assert!(!esp_radio_dependency.contains("\"ble\""));
+
+        let main = include_str!("main.rs");
+        assert!(main.contains("#[cfg(feature = \"ble-api-proof\")]\nmod ble_api_task;"));
+        assert!(
+            main.contains(
+                "ble-api-proof and wifi-api-proof are mutually exclusive local API bearers"
+            )
+        );
+        assert!(main.contains("SessionBearerBinding::BleGatt"));
+        assert!(main.contains("SessionSuite::BleGattQualification"));
+        assert!(main.contains("peripherals.BT"));
+        assert!(main.contains("spawner.spawn(ble_api_task);"));
+        assert!(main.contains("local_api_profile=ble-api-proof"));
+        assert!(main.contains("usb=boot-quarantined"));
+        assert!(main.contains("task=ble-api lora_routing=continue"));
+
+        let ble = include_str!("ble_api_task.rs");
+        assert!(ble.contains("static BLE_RESOURCES: StaticCell<"));
+        assert!(ble.contains("HostResources<DefaultPacketPool"));
+        assert!(ble.contains("#[gatt_service(uuid = gatt_profile::SERVICE_UUID_U128)]"));
+        assert!(ble.contains("#[characteristic(uuid = gatt_profile::RX_UUID_U128, write)]"));
+        assert!(ble.contains("#[characteristic(uuid = gatt_profile::TX_UUID_U128, indicate)]"));
+        assert!(!ble.contains("write_without_response"));
+        assert!(ble.contains("StreamDecoder::new()"));
+        assert!(ble.contains("UsbAuthenticatedSession::new(session_parameters)"));
+        assert!(ble.contains("AdStructure::ServiceUuids128(&SERVICE_UUIDS)"));
+        assert!(ble.contains(".with_max_connections(profile::CONTROLLER_ACTIVITY_MAX as u8)"));
+        assert!(ble.contains("it counts the advertiser and ACL link as distinct"));
+        let ble_profile = include_str!("ble_api_profile.rs");
+        assert!(ble_profile.contains("pub const CONNECTIONS_MAX: usize ="));
+        assert!(ble_profile.contains("pub const CONTROLLER_ACTIVITY_MAX: usize = 2;"));
+        assert!(ble_profile.contains("CONTROLLER_ACTIVITY_MAX == CONNECTIONS_MAX + 1"));
+        assert!(ble.contains(".with_scan(false)"));
+        assert!(ble.contains("CCCD_SUBSCRIBE_TIMEOUT_MS"));
+        assert!(ble.contains("PreAuthenticationDeadline::new()"));
+        assert!(ble.contains("PRE_AUTHENTICATION_TIMEOUT_MS"));
+        assert!(ble.contains("reason=pre-authentication-timeout"));
+        assert!(ble.contains("struct ServeConnectionOutcome"));
+        assert!(ble.contains("disconnected_event_observed = true;"));
+        assert!(ble.contains("async fn drain_connection<P: PacketPool>"));
+        assert!(ble.contains("raw.is_connected()"));
+        assert!(ble.contains("raw.disconnect();"));
+        assert!(ble.contains("raw.next()"));
+        assert!(ble.contains("DISCONNECT_DRAIN_RECHECK_INTERVAL_MS"));
+        assert!(ble.contains("completion=awaiting-disconnected-event"));
+
+        let drain = ble
+            .find("drain_connection(\n            &gatt_connection")
+            .expect("the old link must be drained before another advertiser");
+        let release = ble
+            .find("drop(gatt_connection);")
+            .expect("the final Trouble connection reference must be released explicitly");
+        let advertise = ble
+            .find("let gatt_connection = match advertise(")
+            .expect("the bearer must own one advertiser entrypoint");
+        assert!(advertise < drain);
+        assert!(drain < release);
+        assert_eq!(ble.matches("drop(gatt_connection);").count(), 1);
+
+        let cccd = ble
+            .find("write.handle() == tx_cccd")
+            .expect("the bearer must observe the indication CCCD");
+        let begin = ble
+            .find("session.begin_connection(connection_id)")
+            .expect("the bearer must explicitly begin one authenticated connection");
+        assert!(cccd < begin);
+        let arm = ble
+            .find("indication.arm(chunk.len())")
+            .expect("the bearer must retain a fragment before sending");
+        let indicate = ble
+            .find("tx.indicate(connection, &fragment)")
+            .expect("the bearer must send indications");
+        let confirmation = ble
+            .find("AttClient::Confirmation(AttCfm::ConfirmIndication)")
+            .expect("the bearer must classify ATT confirmations");
+        let advance = ble
+            .find("session.advance_tx(acknowledged)")
+            .expect("the bearer must advance only a confirmed fragment");
+        assert!(arm < indicate);
+        assert!(indicate < confirmation);
+        assert!(confirmation < advance);
+        assert_eq!(ble.matches("session.advance_tx(").count(), 1);
+        assert!(ble.contains("INDICATION_CONFIRM_TIMEOUT_MS"));
+        assert!(!ble.contains("PacketInterfaceId"));
+        assert!(!ble.contains("register_interface"));
     }
 
     #[test]

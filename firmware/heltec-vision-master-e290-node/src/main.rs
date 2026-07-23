@@ -8,12 +8,12 @@
 //! coordinator. The ordinary profile's third task owns USB Serial/JTAG
 //! initialization, live pairing, and the single-flight authenticated local API
 //! plus GPIO21 physical presence without becoming a Reticulum packet
-//! interface. The opt-in `wifi-api-proof` profile replaces that task with
-//! SoftAP, DHCP, and one authenticated raw-TCP RDA1 client; it never composes
-//! USB and Wi-Fi API bearers concurrently. The node retains transport-neutral
-//! admission and authenticated dispatch lanes. Inbound durable LXMF delivery
-//! is composed without becoming an interface; BLE, NomadNet, and UI actors
-//! remain independent later capabilities.
+//! interface. The mutually exclusive `wifi-api-proof` and `ble-api-proof`
+//! profiles replace that task with one authenticated wireless RDA1 bearer.
+//! Neither profile composes USB concurrently. The node retains
+//! transport-neutral admission and authenticated dispatch lanes. Inbound
+//! durable LXMF delivery is composed without becoming an interface; NomadNet
+//! and UI actors remain independent later capabilities.
 
 #![no_std]
 #![no_main]
@@ -24,17 +24,24 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+#[cfg(all(feature = "ble-api-proof", feature = "wifi-api-proof"))]
+compile_error!("ble-api-proof and wifi-api-proof are mutually exclusive local API bearers");
+#[cfg(all(reticulum_e290_ble_startup_diagnostic, not(feature = "ble-api-proof")))]
+compile_error!("the E290 BLE startup diagnostic requires ble-api-proof");
+
+#[cfg(feature = "ble-api-proof")]
+mod ble_api_task;
 mod node_task;
 mod platform_storage;
 mod radio_task;
 #[cfg(feature = "runtime-measurement-hil")]
 mod runtime_measurement_stack_hil;
 #[cfg_attr(
-    feature = "wifi-api-proof",
+    any(feature = "ble-api-proof", feature = "wifi-api-proof"),
     allow(
         dead_code,
         unused_imports,
-        reason = "the Wi-Fi profile retains only the earliest USB quarantine boundary"
+        reason = "wireless profiles retain only the earliest USB quarantine boundary"
     )
 )]
 mod usb_pairing_task;
@@ -56,7 +63,7 @@ use esp_alloc::ExternalMemory;
 #[cfg(feature = "runtime-measurement-hil")]
 use esp_alloc::{EspHeap, MemoryCapability};
 use esp_backtrace as _;
-#[cfg(not(feature = "wifi-api-proof"))]
+#[cfg(not(any(feature = "ble-api-proof", feature = "wifi-api-proof")))]
 use esp_hal::gpio::Pull;
 use esp_hal::{
     Async,
@@ -80,7 +87,7 @@ use reticulum_board_heltec_vision_master_e290_radio::{
 };
 use reticulum_device_api_handoff::DeviceApiHandoff;
 use reticulum_device_api_pairing::DeviceId;
-#[cfg(feature = "wifi-api-proof")]
+#[cfg(any(feature = "ble-api-proof", feature = "wifi-api-proof"))]
 use reticulum_device_api_session::SessionSuite;
 use reticulum_device_api_session::{
     AuthenticatedGrant, BearerBinding as SessionBearerBinding, DeviceId as SessionDeviceId,
@@ -195,6 +202,29 @@ const _: () = assert!(
 );
 static EXECUTOR: StaticCell<esp_rtos::embassy::Executor> = StaticCell::new();
 
+#[cfg(reticulum_e290_ble_startup_diagnostic)]
+pub(crate) struct DiagnosticUsbSerialJtagOwner {
+    _usb_device: Option<esp_hal::peripherals::USB_DEVICE<'static>>,
+}
+
+#[cfg(reticulum_e290_ble_startup_diagnostic)]
+impl DiagnosticUsbSerialJtagOwner {
+    const fn before_hal_initialization() -> Self {
+        Self { _usb_device: None }
+    }
+
+    fn retain_native_usb(mut self, usb_device: esp_hal::peripherals::USB_DEVICE<'static>) -> Self {
+        debug_assert!(self._usb_device.is_none());
+        self._usb_device = Some(usb_device);
+        self
+    }
+}
+
+#[cfg(reticulum_e290_ble_startup_diagnostic)]
+type ProductUsbBootBoundary = DiagnosticUsbSerialJtagOwner;
+#[cfg(not(reticulum_e290_ble_startup_diagnostic))]
+type ProductUsbBootBoundary = usb_pairing_task::BootUsbQuarantine;
+
 esp_bootloader_esp_idf::esp_app_desc!();
 
 #[derive(Debug)]
@@ -270,11 +300,14 @@ where
 
 #[esp_hal::main]
 fn main() -> ! {
-    let usb_boot_quarantine = usb_pairing_task::quarantine_usb_at_boot();
+    #[cfg(reticulum_e290_ble_startup_diagnostic)]
+    let usb_boot_boundary = DiagnosticUsbSerialJtagOwner::before_hal_initialization();
+    #[cfg(not(reticulum_e290_ble_startup_diagnostic))]
+    let usb_boot_boundary = usb_pairing_task::quarantine_usb_at_boot();
     let executor = EXECUTOR.init(esp_rtos::embassy::Executor::new());
     executor.run(|spawner| {
         spawner.spawn(
-            product_main(spawner, usb_boot_quarantine)
+            product_main(spawner, usb_boot_boundary)
                 .expect("the sole product composition task pool must be available"),
         );
     })
@@ -285,12 +318,14 @@ fn main() -> ! {
     reason = "one-shot composition moves every fixed owner into static task storage"
 )]
 #[embassy_executor::task]
-async fn product_main(
-    spawner: Spawner,
-    usb_boot_quarantine: usb_pairing_task::BootUsbQuarantine,
-) -> ! {
+async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundary) -> ! {
     let hal = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(hal);
+    #[cfg(reticulum_e290_ble_startup_diagnostic)]
+    let diagnostic_usb_serial_jtag_owner =
+        usb_boot_boundary.retain_native_usb(peripherals.USB_DEVICE);
+    #[cfg(not(reticulum_e290_ble_startup_diagnostic))]
+    let usb_boot_quarantine: usb_pairing_task::BootUsbQuarantine = usb_boot_boundary;
 
     // Establish the complete E290 RF interlock at the composition task's first
     // poll, before logging, entropy, PSRAM initialization or radio construction.
@@ -327,7 +362,7 @@ async fn product_main(
             inert_before_rtos()
         }
     };
-    #[cfg(not(feature = "wifi-api-proof"))]
+    #[cfg(not(any(feature = "ble-api-proof", feature = "wifi-api-proof")))]
     let local_api_session_parameters = ServerParameters::new(
         SessionDeviceId::new(device_api_id_from_eui48(base_mac_eui48)),
         SessionBearerBinding::UsbSerialJtag,
@@ -337,6 +372,12 @@ async fn product_main(
         SessionDeviceId::new(device_api_id_from_eui48(base_mac_eui48)),
         SessionBearerBinding::Wifi,
         SessionSuite::WifiQualification,
+    );
+    #[cfg(feature = "ble-api-proof")]
+    let local_api_session_parameters = ServerParameters::new_for_suite(
+        SessionDeviceId::new(device_api_id_from_eui48(base_mac_eui48)),
+        SessionBearerBinding::BleGatt,
+        SessionSuite::BleGattQualification,
     );
     info!(
         "e290-node stage=boot base_mac={} identity=pending-durable radio_constructed=false rf_state=reset_low_nss_high",
@@ -1130,7 +1171,7 @@ async fn product_main(
         .split();
     let (usb_authenticated_api, node_authenticated_api) =
         AUTHENTICATED_API.init(DeviceApiHandoff::new()).split();
-    #[cfg(not(feature = "wifi-api-proof"))]
+    #[cfg(not(any(feature = "ble-api-proof", feature = "wifi-api-proof")))]
     let pairing_button = Input::new(
         peripherals.GPIO21,
         InputConfig::default().with_pull(Pull::Up),
@@ -1167,7 +1208,7 @@ async fn product_main(
             inert_forever().await
         }
     };
-    #[cfg(not(feature = "wifi-api-proof"))]
+    #[cfg(not(any(feature = "ble-api-proof", feature = "wifi-api-proof")))]
     let usb_pairing_task = match usb_pairing_task::run(
         usb_boot_quarantine,
         peripherals.USB_DEVICE,
@@ -1215,22 +1256,66 @@ async fn product_main(
             }
         }
     };
+    #[cfg(feature = "ble-api-proof")]
+    let ble_api_task = {
+        // The earliest entrypoint deliberately leaves USB quarantined for the
+        // complete BLE proof boot. Moving the opaque token here makes the
+        // one-bearer choice explicit even though the BLE task has no USB
+        // capability or pairing surface.
+        #[cfg(not(reticulum_e290_ble_startup_diagnostic))]
+        let _usb_boot_quarantine = usb_boot_quarantine;
+        match ble_api_task::run(
+            peripherals.BT,
+            base_mac_eui48,
+            ble_api_task::BleHandoffs::new(
+                usb_pairing_handoff,
+                usb_live_pairing_handoff,
+                usb_session_admission,
+                usb_authenticated_api,
+            ),
+            local_api_session_parameters,
+            local_api_session_rng,
+            #[cfg(reticulum_e290_ble_startup_diagnostic)]
+            diagnostic_usb_serial_jtag_owner,
+        ) {
+            Ok(task) => Some(task),
+            Err(_) => {
+                error!("e290-node stage=spawn status=DISABLED task=ble-api lora_routing=continue");
+                None
+            }
+        }
+    };
+    #[cfg(feature = "ble-api-proof")]
+    let ble_api_task_available = ble_api_task.is_some();
     // This Embassy version reports pool exhaustion while constructing each
     // SpawnToken above; `Spawner::spawn` is infallible and returns unit.
     spawner.spawn(radio_task);
     spawner.spawn(node_task);
-    #[cfg(not(feature = "wifi-api-proof"))]
+    #[cfg(not(any(feature = "ble-api-proof", feature = "wifi-api-proof")))]
     spawner.spawn(usb_pairing_task);
     #[cfg(feature = "wifi-api-proof")]
     spawner.spawn(wifi_api_task);
+    #[cfg(feature = "ble-api-proof")]
+    if let Some(ble_api_task) = ble_api_task {
+        spawner.spawn(ble_api_task);
+    }
     #[cfg(feature = "runtime-measurement-hil")]
     RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE
         .record_composition_ready(monotonic_us().saturating_sub(runtime_measurement_started_us));
-    #[cfg(not(feature = "wifi-api-proof"))]
+    #[cfg(not(any(feature = "ble-api-proof", feature = "wifi-api-proof")))]
     info!(
         "e290-node stage=composition status=PASS tasks=3 interfaces=1 primary_transport=lora future_transport_actors=deferred node_journal=mounted resident_storage_available={storage_service_available} durable_rns_inbox_available={inbox_service_available} rns_inbox_capacity=1 lxmf_store_available={lxmf_service_available} lxmf_index_slots={} lxmf_delivery_admission={lxmf_delivery_admission} lxmf_volatile_placement=external-psram lxmf_volatile_bytes={lxmf_volatile_bytes} lxmf_delayed_proof_placement=external-psram lxmf_delayed_proof_slots={} lxmf_delayed_proof_bytes={delayed_proof_storage_bytes} application_event_placement=internal-static credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} preauth_initialization_bearer=usb-serial-jtag preauth_live_pairing_bearer=usb-serial-jtag pairing_button_gpio=21 authenticated_local_api=node-dispatch bearer_session=usb-authenticated-single-flight credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} admission=session-selected runtime_patch={} flash_assumption_bytes=16777216",
         config::LXMF_INDEX_SLOTS,
         config::LXMF_DELAYED_PROOF_SLOTS,
+        credential_binding.absolute_offset(),
+        credential_binding.length(),
+        config::DURABLE_RUNTIME_BYTES,
+        env!("RETICULUM_ESP_RTOS_MAIN_STACK_PATCH"),
+    );
+    #[cfg(feature = "ble-api-proof")]
+    info!(
+        "e290-node stage=composition status=PASS tasks={} interfaces=1 primary_transport=lora local_api_profile=ble-api-proof ble_api_task_available={ble_api_task_available} usb=boot-quarantined ble_max_centrals=1 ble_pairing=disabled ble_tx=indicate ble_rx=write-with-response authenticated_local_api=node-dispatch bearer_session=ble-authenticated-single-flight session_suite=ble-gatt-qualification node_journal=mounted resident_storage_available={storage_service_available} durable_rns_inbox_available={inbox_service_available} lxmf_store_available={lxmf_service_available} lxmf_delivery_admission={lxmf_delivery_admission} credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} runtime_patch={}",
+        if ble_api_task_available { 3 } else { 2 },
         credential_binding.absolute_offset(),
         credential_binding.length(),
         config::DURABLE_RUNTIME_BYTES,

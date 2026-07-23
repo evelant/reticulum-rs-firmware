@@ -104,14 +104,40 @@ uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open(
     RustBuffer database_path, RustBuffer transport,
     RustCallStatus *uniffi_out_err);
 /*handle*/ uint64_t
+uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open_ble(
+    RustBuffer database_path, RustBuffer credential_path,
+    RustCallStatus *uniffi_out_err);
+/*handle*/ uint64_t
 uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open_wifi(
     RustBuffer database_path, RustBuffer endpoint, RustBuffer credential_path,
+    RustCallStatus *uniffi_out_err);
+void uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_disconnected(
+    /*handle*/ uint64_t ptr, uint64_t generation, RustBuffer reason,
+    RustCallStatus *uniffi_out_err);
+void uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_ingest_indication(
+    /*handle*/ uint64_t ptr, uint64_t generation, RustBuffer bytes,
+    RustCallStatus *uniffi_out_err);
+uint64_t
+uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_link_connected(
+    /*handle*/ uint64_t ptr, RustBuffer peripheral_id, uint32_t max_write_bytes,
+    RustCallStatus *uniffi_out_err);
+/*handle*/ uint64_t
+uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_next_platform_command(
+    /*handle*/ uint64_t ptr, uint64_t generation);
+void uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_write_failed(
+    /*handle*/ uint64_t ptr, uint64_t generation, uint64_t token,
+    RustBuffer reason, RustCallStatus *uniffi_out_err);
+void uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_write_succeeded(
+    /*handle*/ uint64_t ptr, uint64_t generation, uint64_t token,
     RustCallStatus *uniffi_out_err);
 /*handle*/ uint64_t
 uniffi_reticulum_appliance_native_fn_method_nativeappliance_close(
     /*handle*/ uint64_t ptr);
 /*handle*/ uint64_t
 uniffi_reticulum_appliance_native_fn_method_nativeappliance_contacts_json(
+    /*handle*/ uint64_t ptr);
+/*handle*/ uint64_t
+uniffi_reticulum_appliance_native_fn_method_nativeappliance_ensure_connected(
     /*handle*/ uint64_t ptr);
 /*handle*/ uint64_t
 uniffi_reticulum_appliance_native_fn_method_nativeappliance_reconnect(
@@ -134,6 +160,8 @@ uniffi_reticulum_appliance_native_fn_method_nativeappliance_transport(
 /*handle*/ uint64_t
 uniffi_reticulum_appliance_native_fn_method_nativeappliance_upsert_contact_json(
     /*handle*/ uint64_t ptr, RustBuffer destination, RustBuffer request_json);
+RustBuffer uniffi_reticulum_appliance_native_fn_func_native_ble_gatt_profile(
+    RustCallStatus *uniffi_out_err);
 RustBuffer uniffi_reticulum_appliance_native_fn_func_native_bridge_contract(
     RustCallStatus *uniffi_out_err);
 RustBuffer
@@ -254,11 +282,27 @@ void ffi_reticulum_appliance_native_rust_future_free_void(
 void ffi_reticulum_appliance_native_rust_future_complete_void(
     /*handle*/ uint64_t handle, RustCallStatus *uniffi_out_err);
 uint16_t
+uniffi_reticulum_appliance_native_checksum_func_native_ble_gatt_profile();
+uint16_t
 uniffi_reticulum_appliance_native_checksum_func_native_bridge_contract();
+uint16_t
+uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_disconnected();
+uint16_t
+uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_ingest_indication();
+uint16_t
+uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_link_connected();
+uint16_t
+uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_next_platform_command();
+uint16_t
+uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_write_failed();
+uint16_t
+uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_write_succeeded();
 uint16_t
 uniffi_reticulum_appliance_native_checksum_method_nativeappliance_close();
 uint16_t
 uniffi_reticulum_appliance_native_checksum_method_nativeappliance_contacts_json();
+uint16_t
+uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ensure_connected();
 uint16_t
 uniffi_reticulum_appliance_native_checksum_method_nativeappliance_reconnect();
 uint16_t
@@ -275,6 +319,8 @@ uint16_t
 uniffi_reticulum_appliance_native_checksum_method_nativeappliance_upsert_contact_json();
 uint16_t
 uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open();
+uint16_t
+uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_ble();
 uint16_t
 uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_wifi();
 uint32_t ffi_reticulum_appliance_native_uniffi_contract_version();
@@ -1682,6 +1728,18 @@ NativeReticulumApplianceNative::NativeReticulumApplianceNative(
                 rt, thisVal, args, count);
       });
   props["ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_"
+        "open_ble"] = jsi::Function::createFromHostFunction(
+      rt,
+      jsi::PropNameID::forAscii(rt, "ubrn_uniffi_reticulum_appliance_native_fn_"
+                                    "constructor_nativeappliance_open_ble"),
+      2,
+      [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+             const jsi::Value *args, size_t count) -> jsi::Value {
+        return this
+            ->cpp_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open_ble(
+                rt, thisVal, args, count);
+      });
+  props["ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_"
         "open_wifi"] = jsi::Function::createFromHostFunction(
       rt,
       jsi::PropNameID::forAscii(rt, "ubrn_uniffi_reticulum_appliance_native_fn_"
@@ -1691,6 +1749,82 @@ NativeReticulumApplianceNative::NativeReticulumApplianceNative(
              const jsi::Value *args, size_t count) -> jsi::Value {
         return this
             ->cpp_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open_wifi(
+                rt, thisVal, args, count);
+      });
+  props["ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_"
+        "disconnected"] = jsi::Function::createFromHostFunction(
+      rt,
+      jsi::PropNameID::forAscii(rt, "ubrn_uniffi_reticulum_appliance_native_fn_"
+                                    "method_nativeappliance_ble_disconnected"),
+      3,
+      [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+             const jsi::Value *args, size_t count) -> jsi::Value {
+        return this
+            ->cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_disconnected(
+                rt, thisVal, args, count);
+      });
+  props["ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_"
+        "ingest_indication"] = jsi::Function::createFromHostFunction(
+      rt,
+      jsi::PropNameID::forAscii(rt,
+                                "ubrn_uniffi_reticulum_appliance_native_fn_"
+                                "method_nativeappliance_ble_ingest_indication"),
+      3,
+      [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+             const jsi::Value *args, size_t count) -> jsi::Value {
+        return this
+            ->cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_ingest_indication(
+                rt, thisVal, args, count);
+      });
+  props["ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_"
+        "link_connected"] = jsi::Function::createFromHostFunction(
+      rt,
+      jsi::PropNameID::forAscii(rt,
+                                "ubrn_uniffi_reticulum_appliance_native_fn_"
+                                "method_nativeappliance_ble_link_connected"),
+      3,
+      [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+             const jsi::Value *args, size_t count) -> jsi::Value {
+        return this
+            ->cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_link_connected(
+                rt, thisVal, args, count);
+      });
+  props["ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_"
+        "next_platform_command"] = jsi::Function::createFromHostFunction(
+      rt,
+      jsi::PropNameID::forAscii(
+          rt, "ubrn_uniffi_reticulum_appliance_native_fn_method_"
+              "nativeappliance_ble_next_platform_command"),
+      2,
+      [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+             const jsi::Value *args, size_t count) -> jsi::Value {
+        return this
+            ->cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_next_platform_command(
+                rt, thisVal, args, count);
+      });
+  props["ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_"
+        "write_failed"] = jsi::Function::createFromHostFunction(
+      rt,
+      jsi::PropNameID::forAscii(rt, "ubrn_uniffi_reticulum_appliance_native_fn_"
+                                    "method_nativeappliance_ble_write_failed"),
+      4,
+      [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+             const jsi::Value *args, size_t count) -> jsi::Value {
+        return this
+            ->cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_write_failed(
+                rt, thisVal, args, count);
+      });
+  props["ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_"
+        "write_succeeded"] = jsi::Function::createFromHostFunction(
+      rt,
+      jsi::PropNameID::forAscii(rt,
+                                "ubrn_uniffi_reticulum_appliance_native_fn_"
+                                "method_nativeappliance_ble_write_succeeded"),
+      3,
+      [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+             const jsi::Value *args, size_t count) -> jsi::Value {
+        return this
+            ->cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_write_succeeded(
                 rt, thisVal, args, count);
       });
   props["ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_"
@@ -1715,6 +1849,18 @@ NativeReticulumApplianceNative::NativeReticulumApplianceNative(
              const jsi::Value *args, size_t count) -> jsi::Value {
         return this
             ->cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_contacts_json(
+                rt, thisVal, args, count);
+      });
+  props["ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_"
+        "ensure_connected"] = jsi::Function::createFromHostFunction(
+      rt,
+      jsi::PropNameID::forAscii(rt, "ubrn_uniffi_reticulum_appliance_native_fn_"
+                                    "method_nativeappliance_ensure_connected"),
+      1,
+      [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+             const jsi::Value *args, size_t count) -> jsi::Value {
+        return this
+            ->cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ensure_connected(
                 rt, thisVal, args, count);
       });
   props["ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_"
@@ -1800,6 +1946,18 @@ NativeReticulumApplianceNative::NativeReticulumApplianceNative(
              const jsi::Value *args, size_t count) -> jsi::Value {
         return this
             ->cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_upsert_contact_json(
+                rt, thisVal, args, count);
+      });
+  props["ubrn_uniffi_reticulum_appliance_native_fn_func_native_ble_gatt_"
+        "profile"] = jsi::Function::createFromHostFunction(
+      rt,
+      jsi::PropNameID::forAscii(rt, "ubrn_uniffi_reticulum_appliance_native_fn_"
+                                    "func_native_ble_gatt_profile"),
+      0,
+      [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+             const jsi::Value *args, size_t count) -> jsi::Value {
+        return this
+            ->cpp_uniffi_reticulum_appliance_native_fn_func_native_ble_gatt_profile(
                 rt, thisVal, args, count);
       });
   props["ubrn_uniffi_reticulum_appliance_native_fn_func_native_bridge_"
@@ -2398,6 +2556,18 @@ NativeReticulumApplianceNative::NativeReticulumApplianceNative(
                 ->cpp_ffi_reticulum_appliance_native_rust_future_complete_void(
                     rt, thisVal, args, count);
           });
+  props["ubrn_uniffi_reticulum_appliance_native_checksum_func_native_ble_gatt_"
+        "profile"] = jsi::Function::createFromHostFunction(
+      rt,
+      jsi::PropNameID::forAscii(rt, "ubrn_uniffi_reticulum_appliance_native_"
+                                    "checksum_func_native_ble_gatt_profile"),
+      0,
+      [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+             const jsi::Value *args, size_t count) -> jsi::Value {
+        return this
+            ->cpp_uniffi_reticulum_appliance_native_checksum_func_native_ble_gatt_profile(
+                rt, thisVal, args, count);
+      });
   props["ubrn_uniffi_reticulum_appliance_native_checksum_func_native_bridge_"
         "contract"] = jsi::Function::createFromHostFunction(
       rt,
@@ -2410,6 +2580,88 @@ NativeReticulumApplianceNative::NativeReticulumApplianceNative(
             ->cpp_uniffi_reticulum_appliance_native_checksum_func_native_bridge_contract(
                 rt, thisVal, args, count);
       });
+  props["ubrn_uniffi_reticulum_appliance_native_checksum_method_"
+        "nativeappliance_ble_disconnected"] = jsi::Function::createFromHostFunction(
+      rt,
+      jsi::PropNameID::forAscii(
+          rt, "ubrn_uniffi_reticulum_appliance_native_checksum_method_"
+              "nativeappliance_ble_disconnected"),
+      0,
+      [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+             const jsi::Value *args, size_t count) -> jsi::Value {
+        return this
+            ->cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_disconnected(
+                rt, thisVal, args, count);
+      });
+  props["ubrn_uniffi_reticulum_appliance_native_checksum_method_"
+        "nativeappliance_ble_ingest_indication"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_uniffi_reticulum_appliance_native_checksum_method_"
+                  "nativeappliance_ble_ingest_indication"),
+          0,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_ingest_indication(
+                    rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_reticulum_appliance_native_checksum_method_"
+        "nativeappliance_ble_link_connected"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_uniffi_reticulum_appliance_native_checksum_method_"
+                  "nativeappliance_ble_link_connected"),
+          0,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_link_connected(
+                    rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_reticulum_appliance_native_checksum_method_"
+        "nativeappliance_ble_next_platform_command"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_uniffi_reticulum_appliance_native_checksum_method_"
+                  "nativeappliance_ble_next_platform_command"),
+          0,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_next_platform_command(
+                    rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_reticulum_appliance_native_checksum_method_"
+        "nativeappliance_ble_write_failed"] = jsi::Function::createFromHostFunction(
+      rt,
+      jsi::PropNameID::forAscii(
+          rt, "ubrn_uniffi_reticulum_appliance_native_checksum_method_"
+              "nativeappliance_ble_write_failed"),
+      0,
+      [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+             const jsi::Value *args, size_t count) -> jsi::Value {
+        return this
+            ->cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_write_failed(
+                rt, thisVal, args, count);
+      });
+  props["ubrn_uniffi_reticulum_appliance_native_checksum_method_"
+        "nativeappliance_ble_write_succeeded"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_uniffi_reticulum_appliance_native_checksum_method_"
+                  "nativeappliance_ble_write_succeeded"),
+          0,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_write_succeeded(
+                    rt, thisVal, args, count);
+          });
   props["ubrn_uniffi_reticulum_appliance_native_checksum_method_"
         "nativeappliance_close"] = jsi::Function::createFromHostFunction(
       rt,
@@ -2433,6 +2685,19 @@ NativeReticulumApplianceNative::NativeReticulumApplianceNative(
              const jsi::Value *args, size_t count) -> jsi::Value {
         return this
             ->cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_contacts_json(
+                rt, thisVal, args, count);
+      });
+  props["ubrn_uniffi_reticulum_appliance_native_checksum_method_"
+        "nativeappliance_ensure_connected"] = jsi::Function::createFromHostFunction(
+      rt,
+      jsi::PropNameID::forAscii(
+          rt, "ubrn_uniffi_reticulum_appliance_native_checksum_method_"
+              "nativeappliance_ensure_connected"),
+      0,
+      [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+             const jsi::Value *args, size_t count) -> jsi::Value {
+        return this
+            ->cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ensure_connected(
                 rt, thisVal, args, count);
       });
   props["ubrn_uniffi_reticulum_appliance_native_checksum_method_"
@@ -2538,6 +2803,19 @@ NativeReticulumApplianceNative::NativeReticulumApplianceNative(
              const jsi::Value *args, size_t count) -> jsi::Value {
         return this
             ->cpp_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open(
+                rt, thisVal, args, count);
+      });
+  props["ubrn_uniffi_reticulum_appliance_native_checksum_constructor_"
+        "nativeappliance_open_ble"] = jsi::Function::createFromHostFunction(
+      rt,
+      jsi::PropNameID::forAscii(
+          rt, "ubrn_uniffi_reticulum_appliance_native_checksum_constructor_"
+              "nativeappliance_open_ble"),
+      0,
+      [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+             const jsi::Value *args, size_t count) -> jsi::Value {
+        return this
+            ->cpp_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_ble(
                 rt, thisVal, args, count);
       });
   props["ubrn_uniffi_reticulum_appliance_native_checksum_constructor_"
@@ -2808,6 +3086,26 @@ jsi::Value NativeReticulumApplianceNative::
                                                          value);
 }
 jsi::Value NativeReticulumApplianceNative::
+    cpp_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open_ble(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  RustCallStatus status =
+      uniffi::reticulum_appliance_native::Bridging<RustCallStatus>::rustSuccess(
+          rt);
+  auto value =
+      uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open_ble(
+          uniffi::reticulum_appliance_native::Bridging<RustBuffer>::fromJs(
+              rt, callInvoker, args[0]),
+          uniffi::reticulum_appliance_native::Bridging<RustBuffer>::fromJs(
+              rt, callInvoker, args[1]),
+          &status);
+  uniffi::reticulum_appliance_native::Bridging<RustCallStatus>::copyIntoJs(
+      rt, callInvoker, status, args[count - 1]);
+
+  return uniffi_jsi::Bridging</*handle*/ uint64_t>::toJs(rt, callInvoker,
+                                                         value);
+}
+jsi::Value NativeReticulumApplianceNative::
     cpp_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open_wifi(
         jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
         size_t count) {
@@ -2830,6 +3128,115 @@ jsi::Value NativeReticulumApplianceNative::
                                                          value);
 }
 jsi::Value NativeReticulumApplianceNative::
+    cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_disconnected(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  RustCallStatus status =
+      uniffi::reticulum_appliance_native::Bridging<RustCallStatus>::rustSuccess(
+          rt);
+  uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_disconnected(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi_jsi::Bridging<uint64_t>::fromJs(rt, callInvoker, args[1]),
+      uniffi::reticulum_appliance_native::Bridging<RustBuffer>::fromJs(
+          rt, callInvoker, args[2]),
+      &status);
+  uniffi::reticulum_appliance_native::Bridging<RustCallStatus>::copyIntoJs(
+      rt, callInvoker, status, args[count - 1]);
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeReticulumApplianceNative::
+    cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_ingest_indication(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  RustCallStatus status =
+      uniffi::reticulum_appliance_native::Bridging<RustCallStatus>::rustSuccess(
+          rt);
+  uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_ingest_indication(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi_jsi::Bridging<uint64_t>::fromJs(rt, callInvoker, args[1]),
+      uniffi::reticulum_appliance_native::Bridging<RustBuffer>::fromJs(
+          rt, callInvoker, args[2]),
+      &status);
+  uniffi::reticulum_appliance_native::Bridging<RustCallStatus>::copyIntoJs(
+      rt, callInvoker, status, args[count - 1]);
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeReticulumApplianceNative::
+    cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_link_connected(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  RustCallStatus status =
+      uniffi::reticulum_appliance_native::Bridging<RustCallStatus>::rustSuccess(
+          rt);
+  auto value =
+      uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_link_connected(
+          uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                            args[0]),
+          uniffi::reticulum_appliance_native::Bridging<RustBuffer>::fromJs(
+              rt, callInvoker, args[1]),
+          uniffi_jsi::Bridging<uint32_t>::fromJs(rt, callInvoker, args[2]),
+          &status);
+  uniffi::reticulum_appliance_native::Bridging<RustCallStatus>::copyIntoJs(
+      rt, callInvoker, status, args[count - 1]);
+
+  return uniffi_jsi::Bridging<uint64_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeReticulumApplianceNative::
+    cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_next_platform_command(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  auto value =
+      uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_next_platform_command(
+          uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                            args[0]),
+          uniffi_jsi::Bridging<uint64_t>::fromJs(rt, callInvoker, args[1]));
+
+  return uniffi_jsi::Bridging</*handle*/ uint64_t>::toJs(rt, callInvoker,
+                                                         value);
+}
+jsi::Value NativeReticulumApplianceNative::
+    cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_write_failed(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  RustCallStatus status =
+      uniffi::reticulum_appliance_native::Bridging<RustCallStatus>::rustSuccess(
+          rt);
+  uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_write_failed(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi_jsi::Bridging<uint64_t>::fromJs(rt, callInvoker, args[1]),
+      uniffi_jsi::Bridging<uint64_t>::fromJs(rt, callInvoker, args[2]),
+      uniffi::reticulum_appliance_native::Bridging<RustBuffer>::fromJs(
+          rt, callInvoker, args[3]),
+      &status);
+  uniffi::reticulum_appliance_native::Bridging<RustCallStatus>::copyIntoJs(
+      rt, callInvoker, status, args[count - 1]);
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeReticulumApplianceNative::
+    cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_write_succeeded(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  RustCallStatus status =
+      uniffi::reticulum_appliance_native::Bridging<RustCallStatus>::rustSuccess(
+          rt);
+  uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_write_succeeded(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi_jsi::Bridging<uint64_t>::fromJs(rt, callInvoker, args[1]),
+      uniffi_jsi::Bridging<uint64_t>::fromJs(rt, callInvoker, args[2]),
+      &status);
+  uniffi::reticulum_appliance_native::Bridging<RustCallStatus>::copyIntoJs(
+      rt, callInvoker, status, args[count - 1]);
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeReticulumApplianceNative::
     cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_close(
         jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
         size_t count) {
@@ -2847,6 +3254,18 @@ jsi::Value NativeReticulumApplianceNative::
         size_t count) {
   auto value =
       uniffi_reticulum_appliance_native_fn_method_nativeappliance_contacts_json(
+          uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                            args[0]));
+
+  return uniffi_jsi::Bridging</*handle*/ uint64_t>::toJs(rt, callInvoker,
+                                                         value);
+}
+jsi::Value NativeReticulumApplianceNative::
+    cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ensure_connected(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  auto value =
+      uniffi_reticulum_appliance_native_fn_method_nativeappliance_ensure_connected(
           uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
                                                             args[0]));
 
@@ -2956,6 +3375,22 @@ jsi::Value NativeReticulumApplianceNative::
 
   return uniffi_jsi::Bridging</*handle*/ uint64_t>::toJs(rt, callInvoker,
                                                          value);
+}
+jsi::Value NativeReticulumApplianceNative::
+    cpp_uniffi_reticulum_appliance_native_fn_func_native_ble_gatt_profile(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  RustCallStatus status =
+      uniffi::reticulum_appliance_native::Bridging<RustCallStatus>::rustSuccess(
+          rt);
+  auto value =
+      uniffi_reticulum_appliance_native_fn_func_native_ble_gatt_profile(
+          &status);
+  uniffi::reticulum_appliance_native::Bridging<RustCallStatus>::copyIntoJs(
+      rt, callInvoker, status, args[count - 1]);
+
+  return uniffi::reticulum_appliance_native::Bridging<RustBuffer>::toJs(
+      rt, callInvoker, value);
 }
 jsi::Value NativeReticulumApplianceNative::
     cpp_uniffi_reticulum_appliance_native_fn_func_native_bridge_contract(
@@ -3586,11 +4021,74 @@ jsi::Value NativeReticulumApplianceNative::
   return jsi::Value::undefined();
 }
 jsi::Value NativeReticulumApplianceNative::
+    cpp_uniffi_reticulum_appliance_native_checksum_func_native_ble_gatt_profile(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  auto value =
+      uniffi_reticulum_appliance_native_checksum_func_native_ble_gatt_profile();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeReticulumApplianceNative::
     cpp_uniffi_reticulum_appliance_native_checksum_func_native_bridge_contract(
         jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
         size_t count) {
   auto value =
       uniffi_reticulum_appliance_native_checksum_func_native_bridge_contract();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeReticulumApplianceNative::
+    cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_disconnected(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  auto value =
+      uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_disconnected();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeReticulumApplianceNative::
+    cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_ingest_indication(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  auto value =
+      uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_ingest_indication();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeReticulumApplianceNative::
+    cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_link_connected(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  auto value =
+      uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_link_connected();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeReticulumApplianceNative::
+    cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_next_platform_command(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  auto value =
+      uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_next_platform_command();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeReticulumApplianceNative::
+    cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_write_failed(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  auto value =
+      uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_write_failed();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeReticulumApplianceNative::
+    cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_write_succeeded(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  auto value =
+      uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_write_succeeded();
 
   return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
 }
@@ -3609,6 +4107,15 @@ jsi::Value NativeReticulumApplianceNative::
         size_t count) {
   auto value =
       uniffi_reticulum_appliance_native_checksum_method_nativeappliance_contacts_json();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeReticulumApplianceNative::
+    cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ensure_connected(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  auto value =
+      uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ensure_connected();
 
   return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
 }
@@ -3681,6 +4188,15 @@ jsi::Value NativeReticulumApplianceNative::
         size_t count) {
   auto value =
       uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeReticulumApplianceNative::
+    cpp_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_ble(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  auto value =
+      uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_ble();
 
   return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
 }

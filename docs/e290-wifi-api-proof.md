@@ -20,7 +20,8 @@ The proof image deliberately chooses exactly one local API bearer:
 - the ordinary image runs the existing USB Serial/JTAG bearer;
 - the proof image leaves USB in its earliest boot quarantine and runs Wi-Fi
   instead; and
-- BLE and other local API carriers remain future work.
+- the separately enabled BLE proof profile follows the same one-bearer
+  replacement rule, while other local API carriers remain future work.
 
 This replacement rule avoids two independent session-epoch allocators sharing
 the current reply-routing namespace. It also keeps a Wi-Fi initialization

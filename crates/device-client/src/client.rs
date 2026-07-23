@@ -97,16 +97,18 @@ impl Default for ClientConfig {
 
 /// Transcript and bearer profile for one authenticated client connection.
 ///
-/// Both current profiles provide authentication and integrity but no
-/// application-layer confidentiality. The Wi-Fi profile is an explicit proof
-/// profile for a WPA2 local network; it must not be presented as the final
-/// wireless security construction.
+/// All current profiles provide authentication and integrity but no
+/// application-layer confidentiality. The Wi-Fi and BLE profiles are explicit
+/// proof profiles for local wireless links; neither is the final wireless
+/// security construction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientSessionProfile {
     /// Original suite-1 USB Serial/JTAG qualification profile.
     UsbSerialJtagQualification,
     /// Suite-2 Wi-Fi-bound authentication and integrity qualification profile.
     WifiQualification,
+    /// Suite-3 BLE GATT-bound authentication and integrity qualification profile.
+    BleGattQualification,
 }
 
 impl ClientSessionProfile {
@@ -119,6 +121,11 @@ impl ClientSessionProfile {
                 device_id,
                 BearerBinding::Wifi,
                 SessionSuite::WifiQualification,
+            ),
+            Self::BleGattQualification => ClientParameters::new_for_suite(
+                device_id,
+                BearerBinding::BleGatt,
+                SessionSuite::BleGattQualification,
             ),
         }
     }
@@ -492,8 +499,8 @@ impl<T: ClientTransport> DeviceClient<T> {
     ///
     /// `transport` must use finite blocking I/O timeouts. The supplied random
     /// source provides the fresh client handshake nonce. Profile selection is
-    /// never inferred from the stream or endpoint, so a Wi-Fi connection cannot
-    /// silently fall back to the USB transcript.
+    /// never inferred from the stream or endpoint, so a wireless connection
+    /// cannot silently fall back to a different bearer transcript.
     pub fn connect_with_profile<R>(
         mut transport: T,
         credential: ActivatedCredential,

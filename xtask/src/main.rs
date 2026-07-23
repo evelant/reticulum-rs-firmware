@@ -435,6 +435,29 @@ fn graph_policy() -> ExitCode {
         }
     };
 
+    let e290_journal_reprovision = match capture(
+        "cargo",
+        [
+            "tree",
+            "--locked",
+            "-p",
+            "reticulum-heltec-vision-master-e290-node",
+            "--no-default-features",
+            "--features",
+            "journal-schema2-dev-reprovision",
+            "--target",
+            "all",
+            "--format",
+            "{p} features=[{f}]",
+        ],
+    ) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!("error: could not inspect E290 journal-reprovision graph: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let e290_inbox_commit_fault_hil = match capture(
         "cargo",
         [
@@ -454,6 +477,75 @@ fn graph_policy() -> ExitCode {
         Ok(tree) => tree,
         Err(error) => {
             eprintln!("error: could not inspect E290 inbox commit-fault HIL graph: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let e290_wifi_api_proof = match capture(
+        "cargo",
+        [
+            "tree",
+            "--locked",
+            "-p",
+            "reticulum-heltec-vision-master-e290-node",
+            "--no-default-features",
+            "--features",
+            "wifi-api-proof",
+            "--target",
+            "all",
+            "--format",
+            "{p} features=[{f}]",
+        ],
+    ) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!("error: could not inspect E290 Wi-Fi API proof graph: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let e290_ble_api_proof = match capture(
+        "cargo",
+        [
+            "tree",
+            "--locked",
+            "-p",
+            "reticulum-heltec-vision-master-e290-node",
+            "--no-default-features",
+            "--features",
+            "ble-api-proof",
+            "--target",
+            "all",
+            "--format",
+            "{p} features=[{f}]",
+        ],
+    ) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!("error: could not inspect E290 BLE API proof graph: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let e290_ble_startup_diagnostic = match capture(
+        "cargo",
+        [
+            "tree",
+            "--locked",
+            "-p",
+            "reticulum-heltec-vision-master-e290-ble-startup-diagnostic",
+            "--no-default-features",
+            "--features",
+            "ble-api-proof",
+            "--target",
+            "all",
+            "--format",
+            "{p} features=[{f}]",
+        ],
+    ) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!("error: could not inspect E290 BLE startup-diagnostic graph: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -742,9 +834,33 @@ fn graph_policy() -> ExitCode {
         eprintln!("error: {error}");
         failed = true;
     }
+    if let Err(error) =
+        validate_e290_journal_reprovision_graph_boundary(&e290_node, &e290_journal_reprovision)
+    {
+        eprintln!("error: {error}");
+        failed = true;
+    }
     if let Err(error) = validate_e290_inbox_commit_fault_hil_graph_boundary(
         &e290_node,
         &e290_inbox_commit_fault_hil,
+    ) {
+        eprintln!("error: {error}");
+        failed = true;
+    }
+    if let Err(error) =
+        validate_e290_wifi_api_proof_graph_boundary(&e290_node, &e290_wifi_api_proof)
+    {
+        eprintln!("error: {error}");
+        failed = true;
+    }
+    if let Err(error) = validate_e290_ble_api_proof_graph_boundary(&e290_node, &e290_ble_api_proof)
+    {
+        eprintln!("error: {error}");
+        failed = true;
+    }
+    if let Err(error) = validate_e290_ble_startup_diagnostic_graph_boundary(
+        &e290_ble_api_proof,
+        &e290_ble_startup_diagnostic,
     ) {
         eprintln!("error: {error}");
         failed = true;
@@ -814,6 +930,8 @@ fn graph_policy() -> ExitCode {
             .map_err(|error| format!("E290 radio dependency boundary: {error}"))?;
         validate_e290_node_feature_boundary(&json, &root)
             .map_err(|error| format!("permanent E290 node composition boundary: {error}"))?;
+        validate_e290_ble_startup_diagnostic_metadata_boundary(&json, &root)
+            .map_err(|error| format!("E290 BLE startup-diagnostic metadata boundary: {error}"))?;
         validate_radio_tx_dispatch_dependency_boundary(&json, &root)
             .map_err(|error| format!("real radio TX dispatcher dependency boundary: {error}"))?;
         validate_radio_tx_dispatch_resolved_closure(&json, &radio_tx_dispatch_closure, &root)
@@ -864,7 +982,7 @@ fn graph_policy() -> ExitCode {
         ExitCode::FAILURE
     } else {
         println!(
-            "ok: all safe, RX, HIL and all-features all-target product graphs, the RF-inert physical-storage HIL graph, the separately hazardous default-sentinel, Tracker semantic-announce/semantic-round-trip and E290 semantic-round-trip TX HIL graphs, the permanent, inbox commit-fault and runtime-measurement E290 node graphs and the Leviculum \
+            "ok: all safe, RX, HIL and all-features all-target product graphs, the RF-inert physical-storage HIL graph, the separately hazardous default-sentinel, Tracker semantic-announce/semantic-round-trip and E290 semantic-round-trip TX HIL graphs, the permanent, journal-reprovision, inbox commit-fault, runtime-measurement, Wi-Fi API proof and BLE API proof E290 node graphs, the E290 BLE startup-diagnostic graph and the Leviculum \
              comparison graph are isolated; every firmware and HIL graph excludes the host-only device and pairing clients, chat application/service crates, SQLite/serial access and Axum/Hyper/Tokio/Tower OS runtime; the returned-radio-fault, inbound-commit-fault and runtime-measurement hooks are feature-exclusive; \
              legacy Tracker firmware direct dependencies use only the RX façade and every-feature resolution \
              excludes TX ownership and pre-integration durable crates; resolved Rete packages match reported \
@@ -876,7 +994,7 @@ fn graph_policy() -> ExitCode {
              credential authority has only its exact logical device-API, constant-time comparison and zeroization edges; credential-store integration escape identifiers remain restricted to their exact reviewed definition and call sites in the two trusted owner files, and every workspace member target remains beneath a scanned source root; the physical-presence pairing policy has only its exact feature-disabled credential-authority edge, is composed feature-free only into the permanent E290 node, and remains absent from every legacy product and HIL graph; the \
              authenticated session layer has only its exact reviewed cryptographic, device-API, credentials, framing and handoff normal edges plus its exact test-only hex, semantic-adapter and storage-model fixtures; \
              the Rete integration and node-core normal closures contain no RNode, radio-interface, LoRa or board package; \
-             the shared lora-phy owner and E290 radio wrapper have only their exact reviewed HAL, framing, board and test edges; \
+             the shared lora-phy owner and E290 radio wrapper have only their exact reviewed HAL, framing, board and test edges; the Wi-Fi and BLE API proof profiles retain the complete permanent node graph and add only their exact locked transport closures and shared feature transitions; the BLE startup diagnostic matches the production BLE profile except for its package root and exact ESP Serial/JTAG logging path, so it cannot acquire Wi-Fi or another transport closure; \
              the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent semantic round-trip fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the permanent E290 node reaches the LoRa-first node/router/dispatcher graph, exact portable identity, credential-store authority, announce-clock, NOR-region, durable-submission and durable inbound-RNS-inbox layers, the feature-free durable LXMF ingress/model/store stack and explicit external allocator, all three target-safe experimental device-API feature sets, the featureless framed USB pre-authentication control codec, the resident live-pairing lifecycle and a minimal boot-lifetime USB authenticated-session bearer with transport-neutral admission and node-side dispatch while excluding onboard clients and foreign Tracker/HIL packages; \
              the interface router has only its reviewed node-core and Embassy Sync normal edges plus test-only rand_core and RNS fixture edges; \
              the TX handoff, RF-inert dispatcher and supervisor use only their reviewed node-core, \
@@ -1166,7 +1284,7 @@ fn validate_host_appliance_graph_boundary(profile: &str, tree: &str) -> Result<(
     Ok(())
 }
 
-const PRODUCT_GRAPH_FORBIDDEN: [&str; 32] = [
+const PRODUCT_GRAPH_FORBIDDEN: [&str; 33] = [
     "leviculum-core",
     "rete-lxmf",
     "lxmf-rs",
@@ -1174,6 +1292,7 @@ const PRODUCT_GRAPH_FORBIDDEN: [&str; 32] = [
     "reticulum-board-heltec-tracker-v2-tx-hil",
     "reticulum-board-heltec-vision-master-e290-radio",
     "reticulum-device-api-adapter",
+    "reticulum-device-api-ble",
     "reticulum-device-api-credential-store",
     "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
@@ -1213,7 +1332,7 @@ fn validate_product_graph_boundary(label: &str, tree: &str) -> Result<(), String
     Ok(())
 }
 
-const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 37] = [
+const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 38] = [
     "embassy-executor",
     "esp-radio",
     "lora-modulation",
@@ -1227,6 +1346,7 @@ const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 37] = [
     "reticulum-board-heltec-tracker-v2",
     "reticulum-board-heltec-vision-master-e290-radio",
     "reticulum-device-api-adapter",
+    "reticulum-device-api-ble",
     "reticulum-device-api-credential-store",
     "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
@@ -1261,7 +1381,7 @@ const TX_HIL_GRAPH_REQUIRED: [&str; 5] = [
     "reticulum-semantic-roundtrip-hil",
 ];
 
-const TX_HIL_GRAPH_FORBIDDEN: [&str; 32] = [
+const TX_HIL_GRAPH_FORBIDDEN: [&str; 33] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-core",
@@ -1269,6 +1389,7 @@ const TX_HIL_GRAPH_FORBIDDEN: [&str; 32] = [
     "rete-stack",
     "rete-transport",
     "reticulum-device-api-adapter",
+    "reticulum-device-api-ble",
     "reticulum-device-api-credential-store",
     "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
@@ -1327,11 +1448,12 @@ const SEMANTIC_TX_HIL_GRAPH_REQUIRED: [&str; 9] = [
     "rete-transport",
 ];
 
-const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 28] = [
+const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 29] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
     "reticulum-device-api-adapter",
+    "reticulum-device-api-ble",
     "reticulum-device-api-credential-store",
     "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
@@ -1474,7 +1596,7 @@ const E290_SEMANTIC_HIL_GRAPH_REQUIRED: [&str; 9] = [
     "rete-transport",
 ];
 
-const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 31] = [
+const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 32] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -1483,6 +1605,7 @@ const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 31] = [
     "reticulum-board-heltec-tracker-v2",
     "reticulum-heltec-tracker-v2-tx-hil",
     "reticulum-device-api-adapter",
+    "reticulum-device-api-ble",
     "reticulum-device-api-credential-store",
     "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
@@ -2115,7 +2238,7 @@ fn immediately_preceded_by_feature_cfg(source: &str, position: usize, feature: &
         .is_some_and(|line| line.trim() == format!("#[cfg(feature = \"{feature}\")]"))
 }
 
-const E290_NODE_GRAPH_REQUIRED: [&str; 45] = [
+const E290_NODE_GRAPH_REQUIRED: [&str; 46] = [
     "allocator-api2",
     "embedded-storage",
     "esp-alloc",
@@ -2125,6 +2248,7 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 45] = [
     "reticulum-board-heltec-vision-master-e290-radio",
     "reticulum-device-api",
     "reticulum-device-api-adapter",
+    "reticulum-device-api-ble",
     "reticulum-device-api-credential-store",
     "reticulum-device-api-credentials",
     "reticulum-device-api-framing",
@@ -2181,22 +2305,43 @@ fn validate_e290_node_graph_boundary(tree: &str) -> Result<(), String> {
     validate_e290_node_graph_for_root_features(tree, "default", "permanent E290 node")
 }
 
+fn validate_e290_journal_reprovision_graph_boundary(
+    permanent: &str,
+    reprovision: &str,
+) -> Result<(), String> {
+    validate_e290_graph_identical_profile(
+        permanent,
+        reprovision,
+        "journal-schema2-dev-reprovision",
+        "E290 journal-reprovision profile",
+    )
+}
+
 fn validate_e290_inbox_commit_fault_hil_graph_boundary(
     permanent: &str,
     hil: &str,
 ) -> Result<(), String> {
-    validate_e290_node_graph_for_root_features(
+    validate_e290_graph_identical_profile(
+        permanent,
         hil,
         E290_INBOX_COMMIT_FAULT_HIL_FEATURE,
         "E290 inbox commit-fault HIL",
-    )?;
+    )
+}
+
+fn validate_e290_graph_identical_profile(
+    permanent: &str,
+    profile_tree: &str,
+    feature: &str,
+    profile: &str,
+) -> Result<(), String> {
+    validate_e290_node_graph_for_root_features(profile_tree, feature, profile)?;
     let permanent_dependencies = permanent.lines().skip(1).collect::<Vec<_>>();
-    let hil_dependencies = hil.lines().skip(1).collect::<Vec<_>>();
-    if permanent_dependencies != hil_dependencies {
-        return Err(
-            "E290 inbox commit-fault HIL must change only the product root feature, not the dependency graph"
-                .to_owned(),
-        );
+    let profile_dependencies = profile_tree.lines().skip(1).collect::<Vec<_>>();
+    if permanent_dependencies != profile_dependencies {
+        return Err(format!(
+            "{profile} must change only the product root feature, not the dependency graph"
+        ));
     }
     Ok(())
 }
@@ -2258,9 +2403,357 @@ fn validate_e290_runtime_measurement_hil_graph_boundary(
     Ok(())
 }
 
+const E290_WIFI_API_ADDED_PACKAGE_FEATURES: [(&str, &str); 20] = [
+    ("docsplay v0.1.3", ""),
+    ("docsplay-macros v0.1.2", ""),
+    (
+        "edge-dhcp v0.7.0",
+        "edge-nal,embassy-futures,embassy-time,io",
+    ),
+    ("edge-nal v0.6.0", ""),
+    ("edge-nal-embassy v0.8.1", "medium-ethernet,proto-ipv4,udp"),
+    ("edge-raw v0.7.0", ""),
+    ("embassy-net v0.8.0", "medium-ethernet,proto-ipv4,tcp,udp"),
+    ("embassy-net-driver v0.2.0", ""),
+    ("embedded-nal v0.9.0", ""),
+    ("embedded-nal-async v0.9.0", ""),
+    ("esp-phy v0.2.0", "esp32s3"),
+    ("esp-radio v0.18.0", "esp-alloc,esp32s3,wifi,xtensa-lx-rt"),
+    ("esp-wifi-sys-esp32s3 v0.2.0", "default"),
+    ("managed v0.8.0", "map"),
+    ("num-derive v0.4.2", ""),
+    ("num_enum v0.7.6", ""),
+    ("num_enum_derive v0.7.6", ""),
+    ("portable_atomic_enum v0.3.1", "portable-atomic"),
+    ("portable_atomic_enum_macros v0.2.1", ""),
+    (
+        "smoltcp v0.12.0",
+        "async,medium-ethernet,proto-ipv4,socket,socket-tcp,socket-udp",
+    ),
+];
+
+const E290_WIFI_API_SHARED_FEATURE_CHANGES: [(&str, &str, &str); 3] = [
+    (
+        "esp-radio-rtos-driver v0.3.0",
+        "esp-sync,ipc-implementations",
+        "esp-sync,esp32s3,ipc-implementations",
+    ),
+    (
+        "esp-rtos v0.3.0",
+        "alloc,embassy,esp-alloc,esp32s3,log-04",
+        "alloc,embassy,esp-alloc,esp-radio,esp32s3,log-04",
+    ),
+    (
+        "reticulum-heltec-vision-master-e290-node v0.1.0",
+        "default",
+        "wifi-api-proof",
+    ),
+];
+
+const E290_BLE_API_ADDED_PACKAGE_FEATURES: [(&str, &str); 24] = [
+    ("bt-hci v0.8.1", "uuid"),
+    ("btuuid v0.1.1", "uuid"),
+    ("convert_case v0.8.0", ""),
+    ("docsplay v0.1.3", ""),
+    ("docsplay-macros v0.1.2", ""),
+    ("esp-phy v0.2.0", "esp32s3"),
+    (
+        "esp-radio v0.18.0",
+        "__has_unstable_feature_enabled,ble,esp-alloc,esp32s3,unstable,xtensa-lx-rt",
+    ),
+    ("esp-wifi-sys-esp32s3 v0.2.0", "default"),
+    ("futures v0.3.33", ""),
+    ("futures-channel v0.3.33", "futures-sink,sink"),
+    ("futures-intrusive v0.5.0", ""),
+    ("futures-io v0.3.33", ""),
+    ("lock_api v0.4.14", "atomic_usize,default"),
+    ("num-derive v0.4.2", ""),
+    ("portable_atomic_enum v0.3.1", "portable-atomic"),
+    ("portable_atomic_enum_macros v0.2.1", ""),
+    ("scopeguard v1.2.0", ""),
+    (
+        "trouble-host v0.6.0",
+        "default-packet-pool,default-packet-pool-mtu-255,derive,gatt,peripheral,trouble-host-macros",
+    ),
+    ("trouble-host-macros v0.4.0", ""),
+    ("unicode-segmentation v1.13.3", ""),
+    ("uuid v1.24.0", ""),
+    ("uuid v1.24.0", "default,std"),
+    ("zerocopy v0.8.55", ""),
+    ("zerocopy-derive v0.8.55", ""),
+];
+
+const E290_BLE_API_SHARED_FEATURE_CHANGES: [(&str, &str, &str); 5] = [
+    (
+        "esp-hal v1.1.1",
+        "__usb_otg,critical-section,esp32s3,exception-handler,float-save-restore,log-04,requires-unstable,rt,unstable",
+        "__bluetooth,__usb_otg,critical-section,esp32s3,exception-handler,float-save-restore,log-04,requires-unstable,rt,unstable",
+    ),
+    (
+        "esp-radio-rtos-driver v0.3.0",
+        "esp-sync,ipc-implementations",
+        "esp-sync,esp32s3,ipc-implementations",
+    ),
+    (
+        "esp-rtos v0.3.0",
+        "alloc,embassy,esp-alloc,esp32s3,log-04",
+        "alloc,embassy,esp-alloc,esp-radio,esp32s3,log-04",
+    ),
+    ("futures-util v0.3.33", "", "futures-sink,sink"),
+    (
+        "reticulum-heltec-vision-master-e290-node v0.1.0",
+        "default",
+        "ble-api-proof",
+    ),
+];
+
+fn validate_e290_wifi_api_proof_graph_boundary(permanent: &str, wifi: &str) -> Result<(), String> {
+    validate_e290_node_graph_for_root_features(wifi, "wifi-api-proof", "E290 Wi-Fi API proof")?;
+    validate_e290_wireless_profile_delta(
+        permanent,
+        wifi,
+        "E290 Wi-Fi API proof",
+        &E290_WIFI_API_ADDED_PACKAGE_FEATURES,
+        &E290_WIFI_API_SHARED_FEATURE_CHANGES,
+    )
+}
+
+fn validate_e290_ble_api_proof_graph_boundary(permanent: &str, ble: &str) -> Result<(), String> {
+    validate_e290_node_graph_for_root_features(ble, "ble-api-proof", "E290 BLE API proof")?;
+    validate_e290_wireless_profile_delta(
+        permanent,
+        ble,
+        "E290 BLE API proof",
+        &E290_BLE_API_ADDED_PACKAGE_FEATURES,
+        &E290_BLE_API_SHARED_FEATURE_CHANGES,
+    )
+}
+
+const E290_NODE_PACKAGE: &str = "reticulum-heltec-vision-master-e290-node";
+const E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE: &str =
+    "reticulum-heltec-vision-master-e290-ble-startup-diagnostic";
+const E290_NODE_PACKAGE_IDENTITY: &str = "reticulum-heltec-vision-master-e290-node v0.1.0";
+const E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE_IDENTITY: &str =
+    "reticulum-heltec-vision-master-e290-ble-startup-diagnostic v0.1.0";
+const E290_ESP_PRINTLN_IDENTITY: &str = "esp-println v0.17.0";
+const E290_PRODUCTION_ESP_PRINTLN_FEATURES: &str = "esp32s3,log-04,no-op";
+const E290_DIAGNOSTIC_ESP_PRINTLN_FEATURES: &str = "esp32s3,jtag-serial,log-04";
+
+fn validate_e290_ble_startup_diagnostic_graph_boundary(
+    production_ble: &str,
+    diagnostic: &str,
+) -> Result<(), String> {
+    validate_e290_node_graph_for_root_features(
+        production_ble,
+        "ble-api-proof",
+        "production E290 BLE API proof",
+    )?;
+    validate_e290_firmware_graph_for_root_features(
+        diagnostic,
+        E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE,
+        "ble-api-proof",
+        E290_DIAGNOSTIC_ESP_PRINTLN_FEATURES,
+        "E290 BLE startup diagnostic",
+    )?;
+
+    let mut production_inventory = cargo_tree_feature_inventory(production_ble)?;
+    let mut diagnostic_inventory = cargo_tree_feature_inventory(diagnostic)?;
+    let expected_root_features = BTreeSet::from(["ble-api-proof".to_owned()]);
+    if production_inventory.remove(E290_NODE_PACKAGE_IDENTITY)
+        != Some(expected_root_features.clone())
+    {
+        return Err(
+            "production E290 BLE API proof inventory has a drifted package root or root feature"
+                .to_owned(),
+        );
+    }
+    if diagnostic_inventory.remove(E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE_IDENTITY)
+        != Some(expected_root_features)
+    {
+        return Err(
+            "E290 BLE startup diagnostic inventory has a drifted package root or root feature"
+                .to_owned(),
+        );
+    }
+
+    let production_println = BTreeSet::from([E290_PRODUCTION_ESP_PRINTLN_FEATURES.to_owned()]);
+    if production_inventory.remove(E290_ESP_PRINTLN_IDENTITY) != Some(production_println) {
+        return Err(
+            "production E290 BLE API proof must retain the exact no-op esp-println path".to_owned(),
+        );
+    }
+    let diagnostic_println = BTreeSet::from([E290_DIAGNOSTIC_ESP_PRINTLN_FEATURES.to_owned()]);
+    if diagnostic_inventory.remove(E290_ESP_PRINTLN_IDENTITY) != Some(diagnostic_println) {
+        return Err(
+            "E290 BLE startup diagnostic must retain the exact ESP Serial/JTAG esp-println path"
+                .to_owned(),
+        );
+    }
+
+    if production_inventory != diagnostic_inventory {
+        return Err(format!(
+            "E290 BLE startup diagnostic may differ from the production BLE graph only at the package root and esp-println path: production-only or changed {:#?}, diagnostic-only or changed {:#?}",
+            cargo_tree_inventory_difference(&production_inventory, &diagnostic_inventory),
+            cargo_tree_inventory_difference(&diagnostic_inventory, &production_inventory),
+        ));
+    }
+    Ok(())
+}
+
+type CargoTreeFeatureInventory = BTreeMap<String, BTreeSet<String>>;
+
+fn cargo_tree_feature_inventory(tree: &str) -> Result<CargoTreeFeatureInventory, String> {
+    let mut inventory = BTreeMap::<String, BTreeSet<String>>::new();
+    for line in tree.lines() {
+        let Some((identity_with_path, feature_suffix)) = line.split_once(" features=[") else {
+            continue;
+        };
+        let identity_with_path = identity_with_path
+            .trim_start_matches(|character: char| !character.is_ascii_alphanumeric());
+        let identity = identity_with_path
+            .split_once(" (")
+            .map_or(identity_with_path, |(identity, _)| identity);
+        if !identity.contains(" v") {
+            return Err(format!(
+                "cargo tree feature inventory could not parse package identity from {line:?}"
+            ));
+        }
+        let feature_suffix = feature_suffix
+            .strip_suffix(" (*)")
+            .unwrap_or(feature_suffix);
+        let features = feature_suffix.strip_suffix(']').ok_or_else(|| {
+            format!("cargo tree feature inventory could not parse feature list from {line:?}")
+        })?;
+        inventory
+            .entry(identity.to_owned())
+            .or_default()
+            .insert(features.to_owned());
+    }
+    if inventory.is_empty() {
+        return Err("cargo tree feature inventory is empty".to_owned());
+    }
+    Ok(inventory)
+}
+
+fn cargo_tree_inventory_difference(
+    left: &CargoTreeFeatureInventory,
+    right: &CargoTreeFeatureInventory,
+) -> CargoTreeFeatureInventory {
+    left.iter()
+        .filter(|(identity, features)| right.get(*identity) != Some(*features))
+        .map(|(identity, features)| (identity.clone(), features.clone()))
+        .collect()
+}
+
+fn reviewed_tree_feature_inventory(entries: &[(&str, &str)]) -> CargoTreeFeatureInventory {
+    let mut inventory = BTreeMap::<String, BTreeSet<String>>::new();
+    for &(identity, features) in entries {
+        inventory
+            .entry(identity.to_owned())
+            .or_default()
+            .insert(features.to_owned());
+    }
+    inventory
+}
+
+fn validate_e290_wireless_profile_delta(
+    permanent: &str,
+    profile_tree: &str,
+    profile: &str,
+    expected_added_entries: &[(&str, &str)],
+    expected_shared_changes: &[(&str, &str, &str)],
+) -> Result<(), String> {
+    let permanent = cargo_tree_feature_inventory(permanent)?;
+    let profile_inventory = cargo_tree_feature_inventory(profile_tree)?;
+    let removed = permanent
+        .keys()
+        .filter(|identity| !profile_inventory.contains_key(*identity))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !removed.is_empty() {
+        return Err(format!(
+            "{profile} removed permanent-node packages {removed:?}"
+        ));
+    }
+
+    let actual_added = profile_inventory
+        .iter()
+        .filter(|(identity, _)| !permanent.contains_key(*identity))
+        .map(|(identity, features)| (identity.clone(), features.clone()))
+        .collect::<CargoTreeFeatureInventory>();
+    let expected_added = reviewed_tree_feature_inventory(expected_added_entries);
+    if actual_added != expected_added {
+        return Err(format!(
+            "{profile} added package/feature inventory changed: expected {expected_added:?}, observed {actual_added:?}"
+        ));
+    }
+
+    let mut reviewed_changes = BTreeMap::<String, (BTreeSet<String>, BTreeSet<String>)>::new();
+    for &(identity, permanent_features, profile_features) in expected_shared_changes {
+        let prior = reviewed_changes.insert(
+            identity.to_owned(),
+            (
+                BTreeSet::from([permanent_features.to_owned()]),
+                BTreeSet::from([profile_features.to_owned()]),
+            ),
+        );
+        if prior.is_some() {
+            return Err(format!(
+                "{profile} policy repeats shared package transition {identity}"
+            ));
+        }
+    }
+
+    for (identity, permanent_features) in &permanent {
+        let profile_features = profile_inventory
+            .get(identity)
+            .expect("removed profile packages were rejected");
+        match reviewed_changes.get(identity) {
+            Some((expected_permanent, expected_profile))
+                if permanent_features == expected_permanent
+                    && profile_features == expected_profile => {}
+            Some((expected_permanent, expected_profile)) => {
+                return Err(format!(
+                    "{profile} changed reviewed shared package {identity}: expected {expected_permanent:?} -> {expected_profile:?}, observed {permanent_features:?} -> {profile_features:?}"
+                ));
+            }
+            None if permanent_features == profile_features => {}
+            None => {
+                return Err(format!(
+                    "{profile} changed unreviewed shared package {identity}: {permanent_features:?} -> {profile_features:?}"
+                ));
+            }
+        }
+    }
+    for identity in reviewed_changes.keys() {
+        if !permanent.contains_key(identity) {
+            return Err(format!(
+                "{profile} policy names absent shared package {identity}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_e290_node_graph_for_root_features(
     tree: &str,
     expected_root_features: &str,
+    profile: &str,
+) -> Result<(), String> {
+    validate_e290_firmware_graph_for_root_features(
+        tree,
+        E290_NODE_PACKAGE,
+        expected_root_features,
+        E290_PRODUCTION_ESP_PRINTLN_FEATURES,
+        profile,
+    )
+}
+
+fn validate_e290_firmware_graph_for_root_features(
+    tree: &str,
+    root_package: &str,
+    expected_root_features: &str,
+    expected_esp_println_features: &str,
     profile: &str,
 ) -> Result<(), String> {
     validate_host_appliance_graph_boundary(profile, tree)?;
@@ -2279,7 +2772,7 @@ fn validate_e290_node_graph_for_root_features(
 
     let root_line = tree
         .lines()
-        .find(|line| line.starts_with("reticulum-heltec-vision-master-e290-node "))
+        .find(|line| line.starts_with(&format!("{root_package} ")))
         .ok_or_else(|| format!("{profile} graph has no product root"))?;
     let expected_root_suffix = format!("features=[{expected_root_features}]");
     if !root_line.ends_with(&expected_root_suffix) {
@@ -2307,6 +2800,7 @@ fn validate_e290_node_graph_for_root_features(
         "reticulum-lxmf-model ",
         "reticulum-lxmf-store ",
         "reticulum-lxmf-wire ",
+        "reticulum-device-api-ble ",
         "reticulum-device-api-credential-store ",
         "reticulum-device-api-credentials ",
         "reticulum-device-api-framing ",
@@ -2339,10 +2833,27 @@ fn validate_e290_node_graph_for_root_features(
         .lines()
         .find(|line| line.contains("esp-println "))
         .ok_or_else(|| format!("{profile} graph has no esp-println line"))?;
-    if !println_line.ends_with("features=[esp32s3,log-04,no-op]") {
+    let expected_println_suffix = format!("features=[{expected_esp_println_features}]");
+    if !println_line.ends_with(&expected_println_suffix) {
         return Err(format!(
-            "{profile} must reserve USB Serial/JTAG by enabling only the no-op esp-println backend, observed {println_line}"
+            "{profile} must retain only its reviewed esp-println path {expected_esp_println_features}, observed {println_line}"
         ));
+    }
+    if !matches!(expected_root_features, "wifi-api-proof" | "ble-api-proof") {
+        for wireless_package in [
+            "edge-dhcp",
+            "edge-nal",
+            "edge-nal-embassy",
+            "embassy-net",
+            "esp-radio",
+            "trouble-host",
+        ] {
+            if cargo_tree_contains_package(tree, wireless_package) {
+                return Err(format!(
+                    "{profile} graph contains wireless-profile-only package {wireless_package}"
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -2367,14 +2878,31 @@ fn validate_e290_node_feature_boundary(
         .as_object()
         .ok_or_else(|| format!("{package_name} package has no feature map"))?;
     let expected_features = serde_json::json!({
+        "ble-api-proof": [
+            "dep:embassy-sync-07",
+            "dep:esp-radio",
+            "dep:trouble-host",
+            "esp-radio/ble",
+            "esp-radio/unstable",
+            "esp-rtos/esp-radio"
+        ],
         "default": [],
         "journal-schema2-dev-reprovision": [],
         "rns-inbox-commit-fault-hil": [],
-        "runtime-measurement-hil": ["esp-alloc/alloc-hooks"]
+        "runtime-measurement-hil": ["esp-alloc/alloc-hooks"],
+        "wifi-api-proof": [
+            "dep:edge-dhcp",
+            "dep:edge-nal",
+            "dep:edge-nal-embassy",
+            "dep:embassy-net",
+            "dep:esp-radio",
+            "esp-radio/wifi",
+            "esp-rtos/esp-radio"
+        ]
     });
     if serde_json::Value::Object(features.clone()) != expected_features {
         return Err(format!(
-            "{package_name} must expose only an empty default, two empty opt-in development features, and runtime-measurement-hil enabling only esp-alloc/alloc-hooks"
+            "{package_name} feature map must retain the exact opt-in development, Wi-Fi API proof and BLE API proof closures"
         ));
     }
     let dependencies = package["dependencies"]
@@ -2397,6 +2925,13 @@ fn validate_e290_node_feature_boundary(
             false,
         )?;
     }
+    validate_exact_local_dependency(
+        dependencies,
+        package_name,
+        "reticulum-device-api-ble",
+        &workspace.join("crates/device-api-ble"),
+        false,
+    )?;
     validate_exact_local_dependency(
         dependencies,
         package_name,
@@ -2523,7 +3058,175 @@ fn validate_e290_node_feature_boundary(
         false,
         &["esp32s3", "log-04", "no-op"],
     )?;
+
+    let expected_optional_dependencies = BTreeSet::from([
+        ("edge-dhcp", None),
+        ("edge-nal", None),
+        ("edge-nal-embassy", None),
+        ("embassy-net", None),
+        ("embassy-sync", Some("embassy-sync-07")),
+        ("esp-radio", None),
+        ("trouble-host", None),
+    ]);
+    let optional_dependencies = dependencies
+        .iter()
+        .filter(|dependency| dependency["optional"].as_bool() == Some(true))
+        .map(|dependency| {
+            let name = dependency["name"].as_str().ok_or_else(|| {
+                format!("{package_name} has an optional dependency without a name")
+            })?;
+            let rename = dependency["rename"].as_str();
+            Ok((name, rename))
+        })
+        .collect::<Result<BTreeSet<_>, String>>()?;
+    if optional_dependencies != expected_optional_dependencies {
+        return Err(format!(
+            "{package_name} optional dependency inventory changed: expected {expected_optional_dependencies:?}, observed {optional_dependencies:?}"
+        ));
+    }
+    for (dependency, requirement, rename, expected_features) in [
+        ("edge-dhcp", "=0.7.0", None, &["io"][..]),
+        ("edge-nal", "=0.6.0", None, &[][..]),
+        (
+            "edge-nal-embassy",
+            "=0.8.1",
+            None,
+            &["medium-ethernet", "proto-ipv4", "udp"][..],
+        ),
+        (
+            "embassy-net",
+            "=0.8.0",
+            None,
+            &["medium-ethernet", "proto-ipv4", "tcp", "udp"][..],
+        ),
+        ("embassy-sync", "=0.7.2", Some("embassy-sync-07"), &[][..]),
+        ("esp-radio", "=0.18.0", None, &["esp-alloc", "esp32s3"][..]),
+        (
+            "trouble-host",
+            "=0.6.0",
+            None,
+            &[
+                "default-packet-pool-mtu-255",
+                "derive",
+                "gatt",
+                "peripheral",
+            ][..],
+        ),
+    ] {
+        validate_exact_optional_target_registry_dependency(
+            dependencies,
+            package_name,
+            dependency,
+            requirement,
+            "cfg(target_arch = \"xtensa\")",
+            rename,
+            expected_features,
+        )?;
+    }
     Ok(())
+}
+
+fn validate_e290_ble_startup_diagnostic_metadata_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    validate_e290_node_feature_boundary(metadata_json, workspace)?;
+
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let production = exact_local_package(
+        packages,
+        workspace,
+        E290_NODE_PACKAGE,
+        "firmware/heltec-vision-master-e290-node/Cargo.toml",
+    )?;
+    let diagnostic = exact_local_package(
+        packages,
+        workspace,
+        E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE,
+        "firmware/heltec-vision-master-e290-ble-startup-diagnostic/Cargo.toml",
+    )?;
+
+    let diagnostic_features = diagnostic["features"].as_object().ok_or_else(|| {
+        format!("{E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE} package has no feature map")
+    })?;
+    let expected_diagnostic_features = serde_json::json!({
+        "ble-api-proof": [
+            "dep:embassy-sync-07",
+            "dep:esp-radio",
+            "dep:trouble-host",
+            "esp-radio/ble",
+            "esp-radio/unstable",
+            "esp-rtos/esp-radio"
+        ],
+        "default": ["ble-api-proof"],
+        "journal-schema2-dev-reprovision": [],
+        "rns-inbox-commit-fault-hil": [],
+        "runtime-measurement-hil": ["esp-alloc/alloc-hooks"],
+        "wifi-api-proof": [
+            "dep:edge-dhcp",
+            "dep:edge-nal",
+            "dep:edge-nal-embassy",
+            "dep:embassy-net",
+            "dep:esp-radio",
+            "esp-radio/wifi",
+            "esp-rtos/esp-radio"
+        ]
+    });
+    if serde_json::Value::Object(diagnostic_features.clone()) != expected_diagnostic_features {
+        return Err(format!(
+            "{E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE} must retain its exact BLE-default feature map"
+        ));
+    }
+
+    let production_dependencies = production["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{E290_NODE_PACKAGE} package has no dependency array"))?;
+    let diagnostic_dependencies = diagnostic["dependencies"].as_array().ok_or_else(|| {
+        format!("{E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE} package has no dependency array")
+    })?;
+    validate_exact_target_registry_dependency(
+        diagnostic_dependencies,
+        E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE,
+        "esp-println",
+        "=0.17.0",
+        "cfg(target_arch = \"xtensa\")",
+        false,
+        &["esp32s3", "jtag-serial", "log-04"],
+    )?;
+
+    let production_inventory = canonical_dependency_metadata(production_dependencies);
+    let mut normalized_diagnostic_dependencies = diagnostic_dependencies.to_vec();
+    let mut diagnostic_println = normalized_diagnostic_dependencies
+        .iter_mut()
+        .filter(|dependency| dependency["name"].as_str() == Some("esp-println"))
+        .collect::<Vec<_>>();
+    if diagnostic_println.len() != 1 {
+        return Err(format!(
+            "{E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE} must have exactly one esp-println dependency"
+        ));
+    }
+    diagnostic_println[0]["features"] = serde_json::json!(["esp32s3", "log-04", "no-op"]);
+    let normalized_diagnostic_inventory =
+        canonical_dependency_metadata(&normalized_diagnostic_dependencies);
+    if production_inventory != normalized_diagnostic_inventory {
+        return Err(format!(
+            "{E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE} direct dependency metadata may differ from {E290_NODE_PACKAGE} only at the reviewed esp-println feature path"
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_dependency_metadata(dependencies: &[serde_json::Value]) -> Vec<String> {
+    let mut inventory = dependencies
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<Vec<_>>();
+    inventory.sort();
+    inventory
 }
 
 fn validate_storage_hil_graph_boundary(tree: &str) -> Result<(), String> {
@@ -4209,6 +4912,53 @@ fn validate_exact_target_registry_dependency(
     Ok(())
 }
 
+fn validate_exact_optional_target_registry_dependency(
+    dependencies: &[serde_json::Value],
+    package_name: &str,
+    dependency_name: &str,
+    requirement: &str,
+    target: &str,
+    expected_rename: Option<&str>,
+    expected_features: &[&str],
+) -> Result<(), String> {
+    let matching = dependencies
+        .iter()
+        .filter(|dependency| {
+            dependency["name"].as_str() == Some(dependency_name)
+                && dependency["kind"].is_null()
+                && dependency["rename"].as_str() == expected_rename
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err(format!(
+            "{package_name} must have exactly one optional target-specific registry {dependency_name} dependency renamed {expected_rename:?}"
+        ));
+    }
+    let dependency = matching[0];
+    let features = dependency["features"].as_array().ok_or_else(|| {
+        format!("{package_name} {dependency_name} dependency has no feature list")
+    })?;
+    let actual_features = features
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
+    if dependency["req"].as_str() != Some(requirement)
+        || dependency["source"].as_str()
+            != Some("registry+https://github.com/rust-lang/crates.io-index")
+        || !dependency["path"].is_null()
+        || dependency["optional"].as_bool() != Some(true)
+        || dependency["rename"].as_str() != expected_rename
+        || dependency["target"].as_str() != Some(target)
+        || dependency["uses_default_features"].as_bool() != Some(false)
+        || actual_features != expected_features
+    {
+        return Err(format!(
+            "{package_name} has an unreviewed optional target-specific registry {dependency_name} dependency shape"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_exact_local_dependency(
     dependencies: &[serde_json::Value],
     package_name: &str,
@@ -5612,7 +6362,7 @@ const RADIO_TX_DISPATCH_REVIEWED_CLOSURE: [ReviewedClosurePackage; 65] = [
     closure_registry("embedded-io-async", "0.7.0", &[]),
     closure_registry("fiat-crypto", "0.2.9", &[]),
     closure_registry("futures-core", "0.3.33", &[]),
-    closure_registry("futures-sink", "0.3.32", &[]),
+    closure_registry("futures-sink", "0.3.33", &[]),
     closure_registry("generic-array", "0.14.7", &["more_lengths"]),
     closure_registry("hash32", "0.3.1", &[]),
     closure_registry("heapless", "0.8.0", &[]),
@@ -9695,6 +10445,80 @@ mod tests {
         assert!(validate_e290_semantic_hil_graph_boundary(&wrong_policy_feature).is_err());
     }
 
+    fn e290_ble_profile_graph_fixture() -> String {
+        let mut tree = format!("{E290_NODE_PACKAGE_IDENTITY} features=[ble-api-proof]");
+        for package in E290_NODE_GRAPH_REQUIRED {
+            let (version, features) = match package {
+                "allocator-api2" => ("0.3.1", "alloc"),
+                "embedded-storage" => ("0.3.1", ""),
+                "esp-alloc" => (
+                    "0.10.0",
+                    "compat,default,esp32s3,global-allocator,internal-heap-stats",
+                ),
+                "esp-println" => ("0.17.0", E290_PRODUCTION_ESP_PRINTLN_FEATURES),
+                "esp-storage" => ("0.9.0", "critical-section,esp32s3"),
+                "reticulum-device-api" | "reticulum-device-api-adapter" => (
+                    "0.1.0",
+                    "experimental-lxmf,experimental-rns-data,experimental-rns-inbox",
+                ),
+                "static_cell" => ("2.1.1", ""),
+                _ => ("0.1.0", ""),
+            };
+            tree.push_str(&format!("\n├── {package} v{version} features=[{features}]"));
+        }
+        for line in [
+            "esp-hal v1.1.1 features=[__bluetooth,__usb_otg,critical-section,esp32s3,exception-handler,float-save-restore,log-04,requires-unstable,rt,unstable]",
+            "esp-radio v0.18.0 features=[__has_unstable_feature_enabled,ble,esp-alloc,esp32s3,unstable,xtensa-lx-rt]",
+            "esp-radio-rtos-driver v0.3.0 features=[esp-sync,esp32s3,ipc-implementations]",
+            "esp-rtos v0.3.0 features=[alloc,embassy,esp-alloc,esp-radio,esp32s3,log-04]",
+            "futures-util v0.3.33 features=[futures-sink,sink]",
+            "trouble-host v0.6.0 features=[default-packet-pool,default-packet-pool-mtu-255,derive,gatt,peripheral,trouble-host-macros]",
+        ] {
+            tree.push_str(&format!("\n└── {line}"));
+        }
+        tree
+    }
+
+    #[test]
+    fn e290_ble_startup_diagnostic_matches_only_the_production_ble_graph() {
+        let production = e290_ble_profile_graph_fixture();
+        let diagnostic = production
+            .replacen(
+                E290_NODE_PACKAGE_IDENTITY,
+                E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE_IDENTITY,
+                1,
+            )
+            .replacen(
+                &format!(
+                    "{E290_ESP_PRINTLN_IDENTITY} features=[{E290_PRODUCTION_ESP_PRINTLN_FEATURES}]"
+                ),
+                &format!(
+                    "{E290_ESP_PRINTLN_IDENTITY} features=[{E290_DIAGNOSTIC_ESP_PRINTLN_FEATURES}]"
+                ),
+                1,
+            );
+        validate_e290_ble_startup_diagnostic_graph_boundary(&production, &diagnostic).unwrap();
+
+        for drifted in [
+            diagnostic.replace(
+                E290_DIAGNOSTIC_ESP_PRINTLN_FEATURES,
+                E290_PRODUCTION_ESP_PRINTLN_FEATURES,
+            ),
+            diagnostic.replace("features=[ble-api-proof]", "features=[default]"),
+            diagnostic.replace(
+                "__has_unstable_feature_enabled,ble,esp-alloc,esp32s3,unstable,xtensa-lx-rt",
+                "__has_unstable_feature_enabled,ble,esp-alloc,esp32s3,unstable,wifi,xtensa-lx-rt",
+            ),
+            format!("{diagnostic}\n└── edge-dhcp v0.7.0 features=[io]"),
+            format!("{diagnostic}\n└── unreviewed-transport v1.0.0 features=[]"),
+        ] {
+            assert!(
+                validate_e290_ble_startup_diagnostic_graph_boundary(&production, &drifted).is_err(),
+                "diagnostic graph accepted drift:\n{drifted}"
+            );
+        }
+    }
+
     fn e290_node_metadata_fixture(root: &Path) -> serde_json::Value {
         let mut allocator_api = handoff_dependency_fixture("allocator-api2", "=0.3.1", None);
         allocator_api["features"] = serde_json::json!(["alloc"]);
@@ -9712,18 +10536,51 @@ mod tests {
         embedded_storage_target["target"] = serde_json::json!("cfg(target_arch = \"xtensa\")");
         let embedded_storage_dev =
             handoff_dependency_fixture("embedded-storage", "=0.3.1", Some("dev"));
+        let optional_target =
+            |name: &str, requirement: &str, rename: Option<&str>, features: &[&str]| {
+                let mut dependency = handoff_dependency_fixture(name, requirement, None);
+                dependency["optional"] = serde_json::Value::Bool(true);
+                dependency["rename"] =
+                    rename.map_or(serde_json::Value::Null, |rename| serde_json::json!(rename));
+                dependency["target"] = serde_json::json!("cfg(target_arch = \"xtensa\")");
+                dependency["features"] = serde_json::json!(features);
+                dependency
+            };
         serde_json::json!({
             "packages": [{
                 "name": "reticulum-heltec-vision-master-e290-node",
                 "source": null,
                 "manifest_path": root.join("firmware/heltec-vision-master-e290-node/Cargo.toml"),
                 "features": {
+                    "ble-api-proof": [
+                        "dep:embassy-sync-07",
+                        "dep:esp-radio",
+                        "dep:trouble-host",
+                        "esp-radio/ble",
+                        "esp-radio/unstable",
+                        "esp-rtos/esp-radio"
+                    ],
                     "default": [],
                     "journal-schema2-dev-reprovision": [],
                     "rns-inbox-commit-fault-hil": [],
-                    "runtime-measurement-hil": ["esp-alloc/alloc-hooks"]
+                    "runtime-measurement-hil": ["esp-alloc/alloc-hooks"],
+                    "wifi-api-proof": [
+                        "dep:edge-dhcp",
+                        "dep:edge-nal",
+                        "dep:edge-nal-embassy",
+                        "dep:embassy-net",
+                        "dep:esp-radio",
+                        "esp-radio/wifi",
+                        "esp-rtos/esp-radio"
+                    ]
                 },
                 "dependencies": [
+                    handoff_path_dependency_fixture(
+                        "reticulum-device-api-ble",
+                        "*",
+                        &root.join("crates/device-api-ble"),
+                        None,
+                    ),
                     handoff_path_dependency_fixture(
                         "reticulum-lxmf-durable-ingress",
                         "*",
@@ -9809,9 +10666,172 @@ mod tests {
                     allocator_api,
                     esp_alloc,
                     esp_println,
+                    optional_target("edge-dhcp", "=0.7.0", None, &["io"]),
+                    optional_target("edge-nal", "=0.6.0", None, &[]),
+                    optional_target(
+                        "edge-nal-embassy",
+                        "=0.8.1",
+                        None,
+                        &["medium-ethernet", "proto-ipv4", "udp"],
+                    ),
+                    optional_target(
+                        "embassy-net",
+                        "=0.8.0",
+                        None,
+                        &["medium-ethernet", "proto-ipv4", "tcp", "udp"],
+                    ),
+                    optional_target(
+                        "embassy-sync",
+                        "=0.7.2",
+                        Some("embassy-sync-07"),
+                        &[],
+                    ),
+                    optional_target(
+                        "esp-radio",
+                        "=0.18.0",
+                        None,
+                        &["esp-alloc", "esp32s3"],
+                    ),
+                    optional_target(
+                        "trouble-host",
+                        "=0.6.0",
+                        None,
+                        &[
+                            "default-packet-pool-mtu-255",
+                            "derive",
+                            "gatt",
+                            "peripheral",
+                        ],
+                    ),
                 ]
             }]
         })
+    }
+
+    fn e290_ble_startup_diagnostic_metadata_fixture(root: &Path) -> serde_json::Value {
+        let mut metadata = e290_node_metadata_fixture(root);
+        let mut diagnostic = metadata["packages"][0].clone();
+        diagnostic["name"] = serde_json::json!(E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE);
+        diagnostic["manifest_path"] = serde_json::json!(
+            root.join("firmware/heltec-vision-master-e290-ble-startup-diagnostic/Cargo.toml")
+        );
+        diagnostic["features"]["default"] = serde_json::json!(["ble-api-proof"]);
+        let println = diagnostic["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|dependency| dependency["name"].as_str() == Some("esp-println"))
+            .unwrap();
+        println["features"] = serde_json::json!(["esp32s3", "jtag-serial", "log-04"]);
+        metadata["packages"]
+            .as_array_mut()
+            .unwrap()
+            .push(diagnostic);
+        metadata
+    }
+
+    #[test]
+    fn e290_ble_startup_diagnostic_metadata_retains_exact_ble_profile_delta() {
+        let root = workspace_root();
+        let baseline = e290_ble_startup_diagnostic_metadata_fixture(&root);
+        validate_e290_ble_startup_diagnostic_metadata_boundary(&baseline.to_string(), &root)
+            .unwrap();
+
+        let mut wrong_default = baseline.clone();
+        fixture_package_mut(&mut wrong_default, E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE)["features"]
+            ["default"] = serde_json::json!([]);
+        assert!(
+            validate_e290_ble_startup_diagnostic_metadata_boundary(
+                &wrong_default.to_string(),
+                &root,
+            )
+            .is_err()
+        );
+
+        let mut extra_feature = baseline.clone();
+        fixture_package_mut(&mut extra_feature, E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE)["features"]
+            ["future-transport"] = serde_json::json!([]);
+        assert!(
+            validate_e290_ble_startup_diagnostic_metadata_boundary(
+                &extra_feature.to_string(),
+                &root,
+            )
+            .is_err()
+        );
+
+        let mut wrong_logger = baseline.clone();
+        let logger = fixture_package_mut(
+            &mut wrong_logger,
+            E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE,
+        )["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|dependency| dependency["name"].as_str() == Some("esp-println"))
+            .unwrap();
+        logger["features"] = serde_json::json!(["esp32s3", "log-04", "no-op"]);
+        assert!(
+            validate_e290_ble_startup_diagnostic_metadata_boundary(
+                &wrong_logger.to_string(),
+                &root,
+            )
+            .is_err()
+        );
+
+        let mut pin_drift = baseline.clone();
+        let esp_radio = fixture_package_mut(
+            &mut pin_drift,
+            E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE,
+        )["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|dependency| dependency["name"].as_str() == Some("esp-radio"))
+            .unwrap();
+        esp_radio["req"] = serde_json::json!("^0.18");
+        assert!(
+            validate_e290_ble_startup_diagnostic_metadata_boundary(&pin_drift.to_string(), &root,)
+                .is_err()
+        );
+
+        let mut dependency_feature_drift = baseline.clone();
+        let esp_radio = fixture_package_mut(
+            &mut dependency_feature_drift,
+            E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE,
+        )["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|dependency| dependency["name"].as_str() == Some("esp-radio"))
+            .unwrap();
+        esp_radio["features"] = serde_json::json!(["esp-alloc", "esp32s3", "wifi"]);
+        assert!(
+            validate_e290_ble_startup_diagnostic_metadata_boundary(
+                &dependency_feature_drift.to_string(),
+                &root,
+            )
+            .is_err()
+        );
+
+        let mut extra_dependency = baseline;
+        fixture_package_mut(
+            &mut extra_dependency,
+            E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE,
+        )["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(handoff_dependency_fixture(
+                "unreviewed-transport",
+                "=1.0.0",
+                None,
+            ));
+        assert!(
+            validate_e290_ble_startup_diagnostic_metadata_boundary(
+                &extra_dependency.to_string(),
+                &root,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -9820,14 +10840,19 @@ mod tests {
                      ├── allocator-api2 v0.3.1 features=[alloc]\n\
                      ├── embedded-storage v0.3.1 features=[]\n\
                      ├── esp-alloc v0.10.0 features=[compat,default,esp32s3,global-allocator,internal-heap-stats]\n\
+                     ├── esp-hal v1.1.1 features=[__usb_otg,critical-section,esp32s3,exception-handler,float-save-restore,log-04,requires-unstable,rt,unstable]\n\
                      ├── esp-println v0.17.0 features=[esp32s3,log-04,no-op]\n\
+                     ├── esp-radio-rtos-driver v0.3.0 features=[esp-sync,ipc-implementations]\n\
+                     ├── esp-rtos v0.3.0 features=[alloc,embassy,esp-alloc,esp32s3,log-04]\n\
                      ├── esp-storage v0.9.0 features=[critical-section,esp32s3]\n\
+                     ├── futures-util v0.3.33 features=[]\n\
                      ├── reticulum-announce-clock v0.1.0 features=[]\n\
                      ├── reticulum-board-heltec-vision-master-e290-radio v0.1.0 features=[]\n\
                      │   ├── reticulum-board-heltec-vision-master-e290 v0.1.0 features=[]\n\
                      │   └── reticulum-radio-lora-phy v0.1.0 features=[]\n\
                      ├── reticulum-device-api v0.1.0 features=[experimental-lxmf,experimental-rns-data,experimental-rns-inbox]\n\
                      ├── reticulum-device-api-adapter v0.1.0 features=[experimental-lxmf,experimental-rns-data,experimental-rns-inbox]\n\
+                     ├── reticulum-device-api-ble v0.1.0 features=[]\n\
                      ├── reticulum-device-api-credential-store v0.1.0 features=[]\n\
                      │   └── reticulum-device-api-credentials v0.1.0 features=[]\n\
                      ├── reticulum-device-api-framing v0.1.0 features=[]\n\
@@ -9867,6 +10892,12 @@ mod tests {
                      └── static_cell v2.1.1 features=[]";
         validate_e290_node_graph_boundary(valid).unwrap();
         assert_host_appliance_packages_rejected(valid, validate_e290_node_graph_boundary);
+        let journal_reprovision = valid.replacen(
+            "features=[default]",
+            "features=[journal-schema2-dev-reprovision]",
+            1,
+        );
+        validate_e290_journal_reprovision_graph_boundary(valid, &journal_reprovision).unwrap();
         let hil = valid.replacen(
             "features=[default]",
             "features=[rns-inbox-commit-fault-hil]",
@@ -9884,6 +10915,79 @@ mod tests {
                 "features=[alloc-hooks,compat,default,esp32s3,global-allocator,internal-heap-stats]",
             );
         validate_e290_runtime_measurement_hil_graph_boundary(valid, &runtime_hil).unwrap();
+
+        let wireless_profile =
+            |feature: &str, added: &[(&str, &str)], changes: &[(&str, &str, &str)]| {
+                let mut tree = valid.to_owned();
+                for &(identity, permanent_features, profile_features) in changes {
+                    let prior = format!("{identity} features=[{permanent_features}]");
+                    let selected = format!("{identity} features=[{profile_features}]");
+                    assert!(tree.contains(&prior), "fixture is missing {prior}");
+                    tree = tree.replacen(&prior, &selected, 1);
+                }
+                assert!(tree.starts_with(&format!(
+                    "reticulum-heltec-vision-master-e290-node v0.1.0 features=[{feature}]"
+                )));
+                for &(identity, features) in added {
+                    tree.push_str(&format!("\n└── {identity} features=[{features}]"));
+                }
+                tree
+            };
+        let wifi = wireless_profile(
+            "wifi-api-proof",
+            &E290_WIFI_API_ADDED_PACKAGE_FEATURES,
+            &E290_WIFI_API_SHARED_FEATURE_CHANGES,
+        );
+        validate_e290_wifi_api_proof_graph_boundary(valid, &wifi).unwrap();
+        let ble = wireless_profile(
+            "ble-api-proof",
+            &E290_BLE_API_ADDED_PACKAGE_FEATURES,
+            &E290_BLE_API_SHARED_FEATURE_CHANGES,
+        );
+        validate_e290_ble_api_proof_graph_boundary(valid, &ble).unwrap();
+
+        for (profile, validate) in [
+            (
+                &wifi,
+                validate_e290_wifi_api_proof_graph_boundary as fn(&str, &str) -> Result<(), String>,
+            ),
+            (
+                &ble,
+                validate_e290_ble_api_proof_graph_boundary as fn(&str, &str) -> Result<(), String>,
+            ),
+        ] {
+            assert!(
+                validate(
+                    valid,
+                    &format!("{profile}\n└── unreviewed-wireless v1.0.0 features=[]")
+                )
+                .is_err()
+            );
+            assert!(
+                validate(
+                    valid,
+                    &profile.replace("docsplay v0.1.3", "missing-docsplay")
+                )
+                .is_err()
+            );
+            assert!(
+                validate(
+                    valid,
+                    &profile.replace(
+                        "esp-radio,esp32s3,log-04",
+                        "esp-radio,esp32s3,log-04,unreviewed"
+                    )
+                )
+                .is_err()
+            );
+            assert!(
+                validate(
+                    &valid.replace("futures-util v0.3.33", "missing-base"),
+                    profile
+                )
+                .is_err()
+            );
+        }
 
         for missing in E290_NODE_GRAPH_REQUIRED {
             let tree = valid.replace(missing, "missing-required-package");
@@ -9972,6 +11076,7 @@ mod tests {
             "reticulum-lxmf-model",
             "reticulum-lxmf-store",
             "reticulum-lxmf-wire",
+            "reticulum-device-api-ble",
             "reticulum-device-api-credential-store",
             "reticulum-device-api-credentials",
             "reticulum-device-api-framing",
@@ -10015,81 +11120,82 @@ mod tests {
         let baseline = e290_node_metadata_fixture(&root);
         validate_e290_node_feature_boundary(&baseline.to_string(), &root).unwrap();
 
-        for drifted_features in [
-            serde_json::json!({
-                "default": ["journal-schema2-dev-reprovision"],
-                "journal-schema2-dev-reprovision": [],
-                "rns-inbox-commit-fault-hil": [],
-                "runtime-measurement-hil": ["esp-alloc/alloc-hooks"]
-            }),
-            serde_json::json!({
-                "default": ["rns-inbox-commit-fault-hil"],
-                "journal-schema2-dev-reprovision": [],
-                "rns-inbox-commit-fault-hil": [],
-                "runtime-measurement-hil": ["esp-alloc/alloc-hooks"]
-            }),
-            serde_json::json!({
-                "default": ["runtime-measurement-hil"],
-                "journal-schema2-dev-reprovision": [],
-                "rns-inbox-commit-fault-hil": [],
-                "runtime-measurement-hil": ["esp-alloc/alloc-hooks"]
-            }),
-            serde_json::json!({
-                "default": [],
-                "journal-schema2-dev-reprovision": ["dep:unreviewed"],
-                "rns-inbox-commit-fault-hil": [],
-                "runtime-measurement-hil": ["esp-alloc/alloc-hooks"]
-            }),
-            serde_json::json!({
-                "default": [],
-                "journal-schema2-dev-reprovision": [],
-                "rns-inbox-commit-fault-hil": ["dep:unreviewed"],
-                "runtime-measurement-hil": ["esp-alloc/alloc-hooks"]
-            }),
-            serde_json::json!({
-                "default": [],
-                "journal-schema2-dev-reprovision": [],
-                "rns-inbox-commit-fault-hil": [],
-                "runtime-measurement-hil": []
-            }),
-            serde_json::json!({
-                "default": [],
-                "journal-schema2-dev-reprovision": [],
-                "rns-inbox-commit-fault-hil": [],
-                "runtime-measurement-hil": ["esp-alloc/alloc-hooks", "dep:unreviewed"]
-            }),
-            serde_json::json!({
-                "default": [],
-                "journal-schema2-dev-reprovision": [],
-                "rns-inbox-commit-fault-hil": [],
-                "runtime-measurement-hil": ["esp-alloc/alloc-hooks"],
-                "future-transport": []
-            }),
-            serde_json::json!({
-                "default": [],
-                "journal-schema2-dev-reprovision": [],
-                "rns-inbox-commit-fault-hil": []
-            }),
-            serde_json::json!({
-                "default": [],
-                "rns-inbox-commit-fault-hil": [],
-                "runtime-measurement-hil": ["esp-alloc/alloc-hooks"]
-            }),
-            serde_json::json!({
-                "default": [],
-                "journal-schema2-dev-reprovision": [],
-                "runtime-measurement-hil": ["esp-alloc/alloc-hooks"]
-            }),
-            serde_json::json!({
-                "default": [],
-                "journal-schema2-dev-reprovision": [],
-                "rns-inbox-commit-fault-hil": []
-            }),
+        for feature in [
+            "journal-schema2-dev-reprovision",
+            "rns-inbox-commit-fault-hil",
+            "runtime-measurement-hil",
+            "wifi-api-proof",
+            "ble-api-proof",
         ] {
             let mut drifted = baseline.clone();
-            drifted["packages"][0]["features"] = drifted_features;
-            assert!(validate_e290_node_feature_boundary(&drifted.to_string(), &root).is_err());
+            drifted["packages"][0]["features"]["default"] = serde_json::json!([feature]);
+            assert!(
+                validate_e290_node_feature_boundary(&drifted.to_string(), &root).is_err(),
+                "default unexpectedly enabled {feature}"
+            );
+
+            let mut missing = baseline.clone();
+            missing["packages"][0]["features"]
+                .as_object_mut()
+                .unwrap()
+                .remove(feature);
+            assert!(
+                validate_e290_node_feature_boundary(&missing.to_string(), &root).is_err(),
+                "feature map accepted missing {feature}"
+            );
         }
+
+        for (feature, drifted_value) in [
+            (
+                "journal-schema2-dev-reprovision",
+                serde_json::json!(["dep:unreviewed"]),
+            ),
+            (
+                "rns-inbox-commit-fault-hil",
+                serde_json::json!(["dep:unreviewed"]),
+            ),
+            ("runtime-measurement-hil", serde_json::json!([])),
+            (
+                "runtime-measurement-hil",
+                serde_json::json!(["esp-alloc/alloc-hooks", "dep:unreviewed"]),
+            ),
+            (
+                "wifi-api-proof",
+                serde_json::json!([
+                    "dep:edge-dhcp",
+                    "dep:edge-nal",
+                    "dep:edge-nal-embassy",
+                    "dep:embassy-net",
+                    "dep:esp-radio",
+                    "esp-radio/ble",
+                    "esp-radio/wifi",
+                    "esp-rtos/esp-radio"
+                ]),
+            ),
+            (
+                "ble-api-proof",
+                serde_json::json!([
+                    "dep:embassy-sync-07",
+                    "dep:esp-radio",
+                    "dep:trouble-host",
+                    "esp-radio/ble",
+                    "esp-radio/unstable",
+                    "esp-radio/wifi",
+                    "esp-rtos/esp-radio"
+                ]),
+            ),
+        ] {
+            let mut drifted = baseline.clone();
+            drifted["packages"][0]["features"][feature] = drifted_value;
+            assert!(
+                validate_e290_node_feature_boundary(&drifted.to_string(), &root).is_err(),
+                "feature map accepted drift on {feature}"
+            );
+        }
+
+        let mut extra = baseline;
+        extra["packages"][0]["features"]["future-transport"] = serde_json::json!([]);
+        assert!(validate_e290_node_feature_boundary(&extra.to_string(), &root).is_err());
     }
 
     #[test]
@@ -10412,6 +11518,11 @@ fn sample(layout: Layout) {
                 "reticulum-lxmf-store",
                 "crates/not-the-lxmf-store",
                 "lxmf-store",
+            ),
+            (
+                "reticulum-device-api-ble",
+                "crates/not-device-api-ble",
+                "device-api-ble",
             ),
             (
                 "reticulum-rns-inbox-store",
@@ -10781,6 +11892,103 @@ fn sample(layout: Layout) {
             root.join("firmware/not-the-heltec-vision-master-e290-node/Cargo.toml")
         );
         assert!(validate_e290_node_feature_boundary(&wrong_manifest.to_string(), &root).is_err());
+    }
+
+    #[test]
+    fn e290_wireless_profiles_lock_exact_optional_registry_edges() {
+        let root = workspace_root();
+        let baseline = e290_node_metadata_fixture(&root);
+        validate_e290_node_feature_boundary(&baseline.to_string(), &root).unwrap();
+
+        for (dependency_name, expected_rename) in [
+            ("edge-dhcp", None),
+            ("edge-nal", None),
+            ("edge-nal-embassy", None),
+            ("embassy-net", None),
+            ("embassy-sync", Some("embassy-sync-07")),
+            ("esp-radio", None),
+            ("trouble-host", None),
+        ] {
+            let select = |dependency: &serde_json::Value| {
+                dependency["name"].as_str() == Some(dependency_name)
+                    && dependency["rename"].as_str() == expected_rename
+            };
+
+            let mut missing = baseline.clone();
+            fixture_package_mut(&mut missing, "reticulum-heltec-vision-master-e290-node")
+                ["dependencies"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|dependency| !select(dependency));
+            assert!(
+                validate_e290_node_feature_boundary(&missing.to_string(), &root).is_err(),
+                "wireless profile accepted missing {dependency_name}"
+            );
+
+            let reviewed = baseline["packages"][0]["dependencies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|dependency| select(dependency))
+                .unwrap()
+                .clone();
+            let mut duplicated = baseline.clone();
+            duplicated["packages"][0]["dependencies"]
+                .as_array_mut()
+                .unwrap()
+                .push(reviewed);
+            assert!(
+                validate_e290_node_feature_boundary(&duplicated.to_string(), &root).is_err(),
+                "wireless profile accepted duplicate {dependency_name}"
+            );
+
+            for (field, value) in [
+                ("req", serde_json::json!("=0.0.0")),
+                (
+                    "source",
+                    serde_json::json!("registry+https://example.invalid/index"),
+                ),
+                (
+                    "path",
+                    serde_json::json!(root.join("vendor/lookalike-wireless")),
+                ),
+                ("kind", serde_json::json!("dev")),
+                ("optional", serde_json::json!(false)),
+                (
+                    "rename",
+                    expected_rename.map_or_else(
+                        || serde_json::json!("renamed-wireless"),
+                        |_| serde_json::Value::Null,
+                    ),
+                ),
+                ("target", serde_json::Value::Null),
+                ("uses_default_features", serde_json::json!(true)),
+                ("features", serde_json::json!(["unreviewed"])),
+            ] {
+                let mut drifted = baseline.clone();
+                let dependency = drifted["packages"][0]["dependencies"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|dependency| select(dependency))
+                    .unwrap();
+                dependency[field] = value;
+                assert!(
+                    validate_e290_node_feature_boundary(&drifted.to_string(), &root).is_err(),
+                    "wireless profile accepted {dependency_name} {field} drift"
+                );
+            }
+        }
+
+        let mut extra = baseline;
+        let mut dependency = handoff_dependency_fixture("unreviewed-wireless", "=1.0.0", None);
+        dependency["optional"] = serde_json::json!(true);
+        dependency["target"] = serde_json::json!("cfg(target_arch = \"xtensa\")");
+        extra["packages"][0]["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(dependency);
+        assert!(validate_e290_node_feature_boundary(&extra.to_string(), &root).is_err());
     }
 
     #[test]

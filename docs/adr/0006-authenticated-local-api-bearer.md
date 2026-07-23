@@ -142,16 +142,21 @@ with its committed vectors. A separate integrity-only suite 2 is now bound
 exclusively to the Wi-Fi local-API profile and reuses the same ownership
 boundary under a distinct transcript. Portable client/server and partial-stream
 tests cover that binding, but the E290 SoftAP/TCP endpoint is not yet powered
-qualified. BLE still requires its own binding/suite and connection mechanics.
-Before two bearers run
+qualified. Integrity-only suite 3 is likewise bound exclusively to BLE GATT
+and now has portable client/server, cross-bearer-rejection, and partial-stream
+coverage. Its one-link GATT carrier is implemented, and exact flash/readback on
+both E290s plus three consecutive authenticated CoreBluetooth sessions on one
+board and one independent session on the other powered-qualify the bounded
+firmware disconnect/re-advertise path. The Expo mobile lifecycle matrix,
+cross-instance central ownership, pressure, and soak remain open. Before two bearers run
 simultaneously, the product must also choose either globally unique,
 bearer-qualified connection/session epochs or strictly disjoint per-bearer
 reply channels governed by one global pairing-exclusivity coordinator. A second
 bearer must not reuse an independent epoch allocator against the current shared
 routing namespace. Source and portable tests cover this composition; the
-bounded powered USB handshake, sequential request/reply, and fresh post-re-
-enumeration session paths pass. Broader lifecycle, rate, and wireless-bearer
-qualification remains open.
+bounded powered USB handshake, sequential request/reply, fresh post-re-
+enumeration session, and direct CoreBluetooth BLE paths pass. Broader
+lifecycle, rate, Wi-Fi, and mobile BLE qualification remains open.
 
 The handoff's 512-byte limit is the authoritative
 `reticulum-device-api::MAX_MESSAGE_BYTES`, not a duplicated constant.
@@ -290,14 +295,20 @@ fail closed with no unauthenticated fallback. Directional record sequences
 start at zero and accept only the exact next value. Duplicate, gap, overflow,
 reflection, bad tag or wrong session ID terminates the session. Proof and tag
 comparison is constant-time, session key material is zeroized where practical,
-and the future bearer manager must enforce handshake timeout and attempt-rate
-policy around this core.
+and each bearer manager must enforce timeout and attempt-rate policy around this
+core. The BLE GATT proof now starts one absolute, non-refreshing 30-second
+pre-authentication deadline after indication subscription and lifecycle
+acceptance. Partial ClientHello framing, admission pressure, and stalled proof
+flights do not extend it. Reaching `Established` before the deadline disarms
+that pre-authentication policy; authenticated idle/replacement policy and
+attempt-rate limits remain separate future work.
 
-The USB and Wi-Fi qualification suites use HKDF-SHA256 plus
+The USB, Wi-Fi, and BLE GATT qualification suites use HKDF-SHA256 plus
 HMAC-SHA256 truncated to the fixed 128-bit record tag. That suite provides
 authentication and integrity, not confidentiality, and is labelled and gated
-as such. Each suite is bound to exactly one bearer; neither is enabled for BLE.
-They are not sufficient for private LXMF/configuration traffic against a
+as such. Each suite is bound to exactly one bearer: suite 1 to USB
+Serial/JTAG, suite 2 to Wi-Fi, and suite 3 to BLE GATT. They are not sufficient
+for private LXMF/configuration traffic against a
 passive observer on their respective bearer. A production client
 profile selects a reviewed AEAD suite, binds the canonical header as associated
 data and disables any downgrade to the qualification-only suite. The fixed
@@ -368,8 +379,8 @@ physical attacker and must not be described as tamper-resistant.
 - USB provides the missing local admission edge for the complete LoRa-first
   E290 path without becoming a second Reticulum interface.
 - Framing, authenticated grant, admission, and node acceptance are reused by
-  the separately transcript-bound Wi-Fi suite. BLE still needs its own
-  extension and qualification.
+  the separately transcript-bound Wi-Fi and BLE GATT suites. BLE has bounded
+  powered CoreBluetooth qualification; Wi-Fi still needs its powered exchange.
 - A future USB/Wi-Fi/BLE Reticulum packet actor still uses the separate
   interface registry and native-packet ownership contract from ADR 0003.
 - Framing and handoff are allocation-free and fixed-capacity; session and
@@ -386,10 +397,17 @@ physical attacker and must not be described as tamper-resistant.
   reset-nonce, sequence gap/duplicate/overflow, wrong-session and bad-tag
   rejection, partial hello/proof/reply acknowledgement typestate, exact
   correlation matching and old-reply/new-session epoch-alias rejection.
-- Complete in the portable session/client core: Wi-Fi suite 2 is explicitly
-  bearer-bound, rejects suite/bearer mismatch on both peers, survives
-  arbitrarily partial stream reads/writes, and advances the shared epoch across
-  reconnect. This is host evidence, not powered E290 Wi-Fi qualification.
+- Complete in the portable session/client core: Wi-Fi suite 2 and BLE GATT
+  suite 3 are explicitly bearer-bound, reject suite/bearer mismatch on both
+  peers, and survive partial stream reads/writes. Wi-Fi coverage additionally
+  advances the shared epoch across reconnect.
+- Complete in the bounded E290 BLE carrier: the exact final image was
+  identity-safely flashed and read back on both boards, then authenticated
+  through three consecutive direct CoreBluetooth sessions on Board B and one
+  independent session on Board A. This qualifies the firmware
+  disconnect/drain/drop/re-advertise sequence, not the Expo mobile lifecycle
+  matrix, cross-instance central ownership, pressure, or soak. Wi-Fi remains
+  host/build evidence without a powered authenticated exchange.
 - Complete in the portable authority: immutable fixed-capacity snapshot
   validation, stable permission vocabulary, constant-time active selection,
   zeroizing handoff to session, PSK-free revocation tombstones, grant-to-lease
@@ -426,8 +444,9 @@ physical attacker and must not be described as tamper-resistant.
   shared USB control/live decoding and exact-next sequencing, reset-generation
   gating, secret-owning handoff, node causal scheduling, and correlated durable
   Begin/Activate/Abort replies.
-- Remaining: durable revoke/rotate/reset transactions and powered successful
-  USB handshake/request/reply plus lifecycle/cut/window/rate/API tests.
+- Remaining: durable revoke/rotate/reset transactions and broader
+  lifecycle/cut/window/rate/API tests beyond the bounded powered USB and BLE
+  paths.
 - Remaining: cancellation at the concrete USB RX/TX, request-admission and
   reply-channel boundaries.
 - Remaining: concrete stale-reply channel draining and idempotent retry after
@@ -444,7 +463,7 @@ This ADR does not select the production AEAD construction, extend the minimal
 authenticated USB bearer beyond its single-handshake/single-request profile, define
 a USB OTG composite descriptor, add WebUSB/NCM, or create any non-LoRa
 Reticulum packet actor. The qualification pairing/rate policy is selected, but
-its powered successful mutation path and powered USB handshake/request/reply are
-still required before the authenticated USB-to-LoRa qualification path can run.
-Production AEAD and the later transport/interface decisions are not
-prerequisites for that explicitly integrity-only wired lab profile.
+its broader failure/lifecycle matrix remains open. The bounded authenticated
+USB-to-LoRa path and BLE CoreBluetooth carrier now pass. Production AEAD and the
+later transport/interface decisions are not prerequisites for those explicitly
+integrity-only qualification profiles.

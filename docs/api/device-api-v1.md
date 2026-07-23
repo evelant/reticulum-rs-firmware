@@ -63,8 +63,10 @@ on the same connection, and terminal fault handling until USB reset or
 re-enumeration. Replacement never displaces request/reply owners. It
 intentionally defers resumption, protocol retries, close records, encryption,
 rate limiting/attempt policy, and concurrency. Admission and node dispatch are
-transport-neutral so later BLE and Wi-Fi bearers can reach the same lane after
-their currently disabled session bindings/suites are implemented and qualified.
+transport-neutral. The separately bound Wi-Fi and BLE suites now reach the same
+lane in mutually exclusive proof profiles; Wi-Fi remains without a powered
+authenticated exchange, while the bounded BLE GATT carrier is powered-qualified
+through direct CoreBluetooth on both E290s.
 Powered E290 qualification now covers authenticated capabilities and identity
 reads plus one durable experimental submission that crossed LoRa, was decrypted
 by a second permanent node, returned a valid Reticulum proof for the exact
@@ -1018,5 +1020,7 @@ the exact sender USB-to-durable-runtime-to-LoRa-to-peer-proof path. The proof
 means that the receiver accepted/decrypted the protocol packet and produced the
 Reticulum delivery proof; it does not mean the receiver committed the plaintext
 to the API 1.2 inbox. Application persistence/peek, multi-hop routing, session
-resumption, and the deferred BLE/Wi-Fi bearers remain unqualified on powered
-hardware.
+resumption, Wi-Fi bearer exchange, and the mobile BLE lifecycle matrix remain
+unqualified on powered hardware. The later BLE proof independently qualifies
+the local GATT carrier and authenticated device-API session, not this USB-to-LoRa
+submission path.

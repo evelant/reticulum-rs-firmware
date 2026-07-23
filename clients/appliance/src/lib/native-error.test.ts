@@ -10,16 +10,16 @@ describe("native appliance errors", () => {
       tag: "TransportUnavailable",
       inner: {
         transport: 2,
-        reason: "Bluetooth Low Energy transport is reserved for a future native GATT connector",
+        reason: "Bluetooth Low Energy requires NativeAppliance.open_ble and a platform GATT link",
       },
     } as unknown as NativeApplianceError;
     const isBridgeError = (value: unknown): value is NativeApplianceError => value === bridgeError;
 
     expect(nativeApplianceErrorMessage(bridgeError)).toBe(
-      "Native appliance transport unavailable: Bluetooth Low Energy transport is reserved for a future native GATT connector",
+      "Native appliance transport unavailable: Bluetooth Low Energy requires NativeAppliance.open_ble and a platform GATT link",
     );
     const normalized = normalizeNativeError(bridgeError, isBridgeError);
-    expect(normalized.message).toContain("future native GATT connector");
+    expect(normalized.message).toContain("platform GATT link");
     expect(normalized.cause).toBe(bridgeError);
   });
 

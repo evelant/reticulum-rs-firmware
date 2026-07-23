@@ -96,13 +96,18 @@ proof unless a failing test promotes one into a release blocker.
 
 ## Client and product surface
 
-- USB Serial/JTAG is the first usable authenticated bearer. The session and
-  logical API are bearer-neutral, but BLE and Wi-Fi provisioning, stronger
-  wireless authentication policy, and full recovery UX are deferred. Managed
-  host profiles now expose secret-free initialization, pairing, Pending
-  resume/abort, and reset progress through the Expo client. The powered managed
-  first-run path, real reset, retained-profile service restart, and one
-  Expo-to-LoRa-to-peer message now pass on the E290 pair; activation-ambiguous
+- USB Serial/JTAG remains the provisioning/recovery bearer and was the first
+  physically qualified authenticated bearer. The session and logical API are
+  bearer-neutral, and the opt-in BLE profile now has bounded powered
+  qualification carrying the same ordered RDA1 stream under suite 3. The Wi-Fi
+  profile remains implemented but not powered-qualified. Wireless credential
+  provisioning, stronger
+  post-alpha wireless authentication policy, and full recovery UX remain
+  deferred: both wireless profiles require a credential established by the USB
+  profile. Managed host profiles expose secret-free initialization, pairing,
+  Pending resume/abort, and reset progress through the Expo client. The powered
+  managed first-run path, real reset, retained-profile service restart, and one
+  Expo-to-LoRa-to-peer message pass on the E290 pair; activation-ambiguous
   repair and the alternate Pending recovery paths remain to qualify.
 - With several identical attached boards, the app shows the selected USB serial
   but the physical E290 has no corresponding identify cue. Until a display or
@@ -123,29 +128,59 @@ proof unless a failing test promotes one into a release blocker.
   bundled loopback Expo web export. The shared Expo application now also
   compiles and runs as Android and iOS development builds, and its first
   callable UniFFI round trip reaches Rust. It remains a computer-side
-  companion: there is still no client served by the E290, physically qualified
-  Wi-Fi or BLE client bearer, display UI, NomadNet client, or Micron client.
-- The native Rust bridge now owns an app-private SQLite chat runtime and exposes
+  companion: there is still no E290-served web UI, physically qualified Wi-Fi
+  client bearer, display UI, NomadNet client, or Micron client.
+- The native Rust bridge owns an app-private SQLite chat runtime and exposes
   contacts, timelines, idempotent durable outbox writes, snapshots, sync, and
-  close through the shared Rust DTOs. USB Serial/JTAG, USB OTG, and BLE remain
-  deliberate nonfunctional stubs. The opt-in Wi-Fi constructor now loads a
-  fixed app-private activated credential, opens a finite-timeout raw TCP
-  stream, and authenticates with the separately bound suite-2 profile. Its
-  localhost partial-I/O handshake passes, but endpoint selection and credential
-  seeding are still development-build/manual operations, and mobile
-  secure-storage migration is absent. The exact profile image has been safely
-  flashed to one credentialed E290 with an unchanged durable control-region
-  readback, but no client has yet joined its SoftAP or completed the powered
-  suite-2 path. The development Mac's only internet uplink is Wi-Fi, so that
-  final exchange is intentionally left as a manual phone/alternate-uplink test.
+  close through generated shared Rust DTOs. USB Serial/JTAG and USB OTG remain
+  deliberate native-app connector stubs. The foreground BLE central, native
+  Rust command/ack pump, and suite-3 connector are implemented with bounded
+  queues, one serialized write-with-response, indication subscription before
+  readiness, generation-bound disconnect ownership, and a web unsupported
+  stub. A separate Rust-owned browser qualifier uses Web Bluetooth only as an
+  opaque bounded GATT-byte relay. Host protocol fakes and native platform builds
+  pass. On 2026-07-23, the final disconnect-barrier production image,
+  SHA-256 `74ce5f8a8ef5ddb1eec105a843c4fd633753585eaf81b592738f3f7b5c14b8ea`,
+  was identity-safely flashed and read back on both 16 MiB `HT-RA62-HF` E290s.
+  Board B (`AC:A7:04:E1:3F:88`) completed three consecutive direct macOS
+  CoreBluetooth suite-3 sessions in 10,907 ms, 12,351 ms, and 11,595 ms; Board A
+  (`AC:A7:04:E1:3E:88`) independently completed the same path in 12,193 ms. All
+  four runs used 20-byte fragments, write-with-response, and indications and
+  returned the board-correct device and destination identifiers. This qualifies
+  the bounded production firmware's disconnect/drain/drop/re-advertise sequence
+  plus the direct macOS qualifier path, not a powered Expo native-module
+  foreground/background/reconnect lifecycle matrix. A sole BLE central must
+  enable indications within 15 seconds, then reach its first authenticated
+  `Established` session within one absolute, non-refreshing 30-second deadline;
+  partial framing and stalled handshake flights do not extend ownership.
+  Same-link authenticated idle replacement and attempt-rate policy remain
+  deferred. Setup and teardown operations are
+  deadline-bound, and a late timed-out operation cannot tear down a replacement
+  owned by the same `ForegroundBleCentral`. The React Native driver still wraps
+  one process-global `BleManager`, however: after disposing one central, a
+  stale native promise from that instance could later disconnect a new
+  instance's connection to the same peripheral. The current app keeps one
+  exclusive foreground owner, but Fast Refresh/restoration and any overlapping
+  owner require the tracked module-wide/cross-instance ownership epoch (P2)
+  before qualification. The opt-in
+  Wi-Fi constructor loads a fixed app-private activated credential, opens a
+  finite-timeout raw TCP stream, and authenticates with the separately bound
+  suite-2 profile. Its localhost partial-I/O handshake passes, but endpoint
+  selection and credential seeding are still development-build/manual
+  operations, and mobile secure-storage migration is absent. The exact profile
+  image has been safely flashed to one credentialed E290 with an unchanged
+  durable control-region readback, but no client has yet joined its SoftAP or
+  completed the powered suite-2 path. The development Mac's only internet
+  uplink is Wi-Fi, so that final exchange is intentionally left as a manual
+  phone/alternate-uplink test.
   The host service's loopback/origin policy remains deliberately unsuitable as
   a phone transport. The mutable facade has run through Hermes and the
   generated TurboModule in an arm64 iOS simulator build: the native runtime
   opened, created a contact, durably queued an outbox message in schema-v2
   SQLite, and restored both after a forced app termination and relaunch. This
   qualifies mutable offline state across the generated boundary, not the new
-  device transport. Cancellation, Rust panic translation, full Fast Refresh and
-  background/foreground lifecycle, and BLE disconnect/resume remain
+  device transport. Cancellation, Rust panic translation, full Fast Refresh,
+  background/foreground lifecycle, and mobile BLE disconnect/resume remain
   unqualified. Native generation and application builds are not yet in CI. The
   iOS XCFramework supports arm64 device and Apple-Silicon simulator only. The
   current simulator link also warns that one object was built with a newer iOS
@@ -157,6 +192,40 @@ proof unless a failing test promotes one into a release blocker.
   [`ACCESS_LOCAL_NETWORK`](https://developer.android.com/privacy-and-security/local-network-permission);
   Android 17 otherwise blocks the connector's outgoing raw-LAN TCP traffic by
   default.
+- The application connection limit remains one, but esp-radio 0.18
+  `Config::with_max_connections` writes Espressif's total `ble_max_act`
+  controller-activity count. Espressif's official
+  [`CONFIG_BT_CTRL_BLE_MAX_ACT` reference](https://docs.espressif.com/projects/esp-idf/en/v5.5.3/esp32s3/api-reference/kconfig-reference.html#config-bt-ctrl-ble-max-act)
+  and
+  [multi-connection guide](https://docs.espressif.com/projects/esp-idf/en/release-v5.1/esp32c3/api-guides/ble/ble-multiconnection-guide.html)
+  count advertising and connections separately, so this one-link peripheral
+  needs two activities. The activity-2 diagnostic proved controller,
+  Trouble/GATT, runner, and advertising startup with the unchanged 72 KiB
+  reclaimed heap and 41,040 internal-heap bytes free after advertising. That
+  older diagnostic observed one immediate post-disconnect re-advertise
+  transiently return HCI `0x07`. That event is historical to the older
+  activity-2 artifact. Current source fails closed at that boundary: an exit
+  which did not itself consume Trouble's `Disconnected` event requests
+  disconnect and waits without a success timeout for the raw event, while an
+  already-consumed event is carried explicitly in the connection outcome. Only
+  then is the old `GattConnection` dropped, releasing the sole host-resource
+  reference before another advertiser can start. Short rechecks only emit
+  prolonged-drain diagnostics; they never authorize reuse. The final production
+  ELF/image hashes are
+  `39789a94cf060056f320765bbece079410e7352b953169e400e4bad48a712891` and
+  `74ce5f8a8ef5ddb1eec105a843c4fd633753585eaf81b592738f3f7b5c14b8ea`.
+  Exact flash/readback on both boards, three consecutive Board B sessions, and
+  one independent Board A session now powered-qualify the corrected barrier
+  with the unchanged two-activity/one-link budgets. Pressure, soak, and the
+  powered mobile Expo lifecycle matrix remain open.
+- BLE controller initialization is still not fully isolated from the autonomous
+  LoRa node. `BleConnector::new` returns a recoverable error only for
+  configuration validation; pinned esp-radio controller and esp-rtos paths can
+  still panic/assert on scheduler, strict-internal allocation, or controller
+  initialization faults. The production logger is intentionally a no-op while
+  USB is quarantined, so such a panic is silent. The powered activity-budget
+  diagnosis closes the observed startup blocker, not this general hardening
+  residual.
 - The host service has no operating-system single-instance lock, notification
   service, account migration, database encryption, activation-ambiguous repair,
   or cross-platform disconnect/host-suspend matrix. Managed profiles currently

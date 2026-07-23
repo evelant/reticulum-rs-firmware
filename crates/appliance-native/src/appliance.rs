@@ -13,22 +13,26 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::Mutex as AsyncMutex;
 
+use crate::ble::{
+    BleConnector, BleHub, NativeBleError, NativeBlePlatformCommand, PLATFORM_COMMAND_WAIT,
+};
 use crate::wifi::WifiConnector;
 
 /// Bearer selected for the native appliance session.
 ///
-/// These variants are an intentional stable vocabulary. Platform connectors
-/// are not implemented in this crate yet; selecting one keeps the durable
-/// SQLite client usable while the runtime reports a stable unavailable state.
+/// These variants are an intentional stable vocabulary. The generic
+/// [`NativeAppliance::open`] constructor retains explicit unavailable stubs;
+/// [`NativeAppliance::open_wifi`] and [`NativeAppliance::open_ble`] select the
+/// implemented proof connectors without changing that vocabulary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
 pub enum NativeTransport {
     /// USB serial/JTAG provided to a mobile application by a future adapter.
     UsbSerial,
     /// Direct USB OTG provided by a future iOS/Android adapter.
     UsbOtg,
-    /// Bluetooth Low Energy provided by a future GATT bearer.
+    /// Bluetooth Low Energy provided by a platform-owned GATT bearer.
     BluetoothLowEnergy,
-    /// Wi-Fi provided by a future local-network bearer.
+    /// Wi-Fi provided by the native raw local-network proof bearer.
     Wifi,
 }
 
@@ -49,9 +53,11 @@ impl NativeTransport {
             }
             Self::UsbOtg => "USB OTG transport is reserved for a future native platform connector",
             Self::BluetoothLowEnergy => {
-                "Bluetooth Low Energy transport is reserved for a future native GATT connector"
+                "Bluetooth Low Energy requires NativeAppliance.open_ble and a platform GATT link"
             }
-            Self::Wifi => "Wi-Fi transport is reserved for a future native network connector",
+            Self::Wifi => {
+                "Wi-Fi requires NativeAppliance.open_wifi, a proof endpoint, and an activated credential"
+            }
         }
     }
 
@@ -157,6 +163,7 @@ pub struct NativeAppliance {
     close_gate: AsyncMutex<()>,
     transport: NativeTransport,
     connector_configured: bool,
+    ble_hub: Option<Arc<BleHub>>,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -165,8 +172,8 @@ impl NativeAppliance {
     ///
     /// The selected connector is an explicit unavailable stub. This does not
     /// prevent local contacts, conversations, or durable outbox writes. Use
-    /// [`Self::open_wifi`] to configure the implemented raw-TCP Wi-Fi proof
-    /// connector.
+    /// [`Self::open_wifi`] or [`Self::open_ble`] to configure an implemented
+    /// authenticated connector.
     #[uniffi::constructor]
     pub fn open(
         database_path: String,
@@ -187,6 +194,7 @@ impl NativeAppliance {
             close_gate: AsyncMutex::new(()),
             transport,
             connector_configured: false,
+            ble_hub: None,
         }))
     }
 
@@ -235,7 +243,119 @@ impl NativeAppliance {
             close_gate: AsyncMutex::new(()),
             transport: NativeTransport::Wifi,
             connector_configured: true,
+            ble_hub: None,
         }))
+    }
+
+    /// Open one SQLite chat database with the platform-owned BLE GATT
+    /// connector.
+    ///
+    /// The credential path must be an absolute path to the activated
+    /// credential in the app sandbox. For an initial link, the caller
+    /// establishes the shared GATT service, enables TX indications, calls
+    /// [`Self::ble_link_connected`], then [`Self::ensure_connected`]. To
+    /// replace a link, it first closes and reports the old generation, calls
+    /// [`Self::reconnect`] while no replacement is claimable, registers the
+    /// replacement, then calls [`Self::ensure_connected`]. TypeScript, Swift,
+    /// or Kotlin only move opaque bytes and report write-with-response
+    /// completion; Rust retains all authenticated session and LXMF parsing.
+    #[uniffi::constructor]
+    pub fn open_ble(
+        database_path: String,
+        credential_path: String,
+    ) -> Result<Arc<Self>, NativeApplianceError> {
+        if database_path.is_empty() {
+            return Err(NativeApplianceError::InvalidArgument {
+                reason: "database path must not be empty".to_owned(),
+            });
+        }
+        let credential_path = PathBuf::from(credential_path);
+        if !credential_path.is_absolute() {
+            return Err(NativeApplianceError::InvalidArgument {
+                reason: "BLE credential path must be absolute".to_owned(),
+            });
+        }
+        let ble_hub = BleHub::new();
+        let handle = start_appliance(
+            ApplianceConfig::new(PathBuf::from(database_path)),
+            BleConnector::new(credential_path, Arc::clone(&ble_hub)),
+        )
+        .map_err(NativeApplianceError::from)?;
+        Ok(Arc::new(Self {
+            handle: Mutex::new(Some(handle)),
+            close_gate: AsyncMutex::new(()),
+            transport: NativeTransport::BluetoothLowEnergy,
+            connector_configured: true,
+            ble_hub: Some(ble_hub),
+        }))
+    }
+
+    /// Register one connected, subscribed GATT peripheral.
+    ///
+    /// A prior generation must first be reported through
+    /// [`Self::ble_disconnected`]; this prevents silently orphaning its GATT
+    /// ownership. `max_write_bytes` must be the platform-reported
+    /// write-with-response value bound, not the negotiated ATT MTU. The bridge
+    /// validates that the platform supports the GATT 1.0 20-byte value, then
+    /// caps every emitted fragment to that fixed profile bound.
+    pub fn ble_link_connected(
+        &self,
+        peripheral_id: String,
+        max_write_bytes: u32,
+    ) -> Result<u64, NativeBleError> {
+        self.ble_hub()?
+            .link_connected(peripheral_id, max_write_bytes)
+    }
+
+    /// Append bytes from one confirmed TX characteristic indication.
+    pub fn ble_ingest_indication(
+        &self,
+        generation: u64,
+        bytes: Vec<u8>,
+    ) -> Result<(), NativeBleError> {
+        self.ble_hub()?.ingest_indication(generation, bytes)
+    }
+
+    /// Await the next write-with-response or disconnect command.
+    ///
+    /// `None` is a normal long-poll timeout. A returned write is delivered only
+    /// once; the caller must report its result through
+    /// [`Self::ble_write_succeeded`] or [`Self::ble_write_failed`].
+    pub async fn ble_next_platform_command(
+        &self,
+        generation: u64,
+    ) -> Result<Option<NativeBlePlatformCommand>, NativeBleError> {
+        let hub = self.ble_hub()?;
+        tokio::task::spawn_blocking(move || {
+            hub.next_platform_command(generation, PLATFORM_COMMAND_WAIT)
+        })
+        .await
+        .map_err(|error| NativeBleError::Internal {
+            reason: format!("BLE command waiter failed: {error}"),
+        })?
+    }
+
+    /// Confirm that one GATT write-with-response completed successfully.
+    pub fn ble_write_succeeded(&self, generation: u64, token: u64) -> Result<(), NativeBleError> {
+        self.ble_hub()?.write_succeeded(generation, token)
+    }
+
+    /// Report that one GATT write-with-response failed.
+    ///
+    /// Failure closes the generation and schedules an explicit platform
+    /// disconnect command.
+    pub fn ble_write_failed(
+        &self,
+        generation: u64,
+        token: u64,
+        reason: String,
+    ) -> Result<(), NativeBleError> {
+        self.ble_hub()?.write_failed(generation, token, reason)
+    }
+
+    /// Report that the platform GATT link and subscriptions are gone.
+    pub fn ble_disconnected(&self, generation: u64, reason: String) -> Result<(), NativeBleError> {
+        self.ble_hub()?.disconnected(generation, reason)
     }
 
     /// Selected bearer, including future transports that are not available yet.
@@ -309,9 +429,9 @@ impl NativeAppliance {
 
     /// Request a fresh device connection.
     ///
-    /// Configured Wi-Fi owners schedule a fresh connection attempt. Reserved
-    /// connector stubs return typed `TransportUnavailable` instead of silently
-    /// falling back to another bearer.
+    /// Configured Wi-Fi and BLE owners schedule a fresh connection attempt.
+    /// Reserved connector stubs return typed `TransportUnavailable` instead of
+    /// silently falling back to another bearer.
     pub async fn reconnect(&self) -> Result<(), NativeApplianceError> {
         let handle = self.active_handle()?;
         if !self.connector_configured {
@@ -321,9 +441,27 @@ impl NativeAppliance {
         Ok(())
     }
 
+    /// Ask a configured connector to run now if no authenticated session is
+    /// active, without disrupting an already-ready bearer.
+    ///
+    /// Platform-owned transports call this after registering a physical link.
+    /// It is deliberately distinct from [`Self::reconnect`], which drops the
+    /// current session and transport lease.
+    pub async fn ensure_connected(&self) -> Result<(), NativeApplianceError> {
+        let handle = self.active_handle()?;
+        if !self.connector_configured {
+            return Err(self.transport.unavailable_error());
+        }
+        handle.ensure_connected().await?;
+        Ok(())
+    }
+
     /// Idempotently stop the actor and close its SQLite ownership.
     pub async fn close(&self) -> Result<(), NativeApplianceError> {
         let _close_guard = self.close_gate.lock().await;
+        if let Some(hub) = &self.ble_hub {
+            hub.request_owner_disconnect("native appliance was closed");
+        }
         let handle = self.lock_handle()?.take();
         match handle {
             Some(handle) => handle
@@ -348,6 +486,13 @@ impl NativeAppliance {
         self.lock_handle()?
             .clone()
             .ok_or(NativeApplianceError::Stopped)
+    }
+
+    fn ble_hub(&self) -> Result<Arc<BleHub>, NativeBleError> {
+        self.ble_hub
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or(NativeBleError::Unavailable)
     }
 }
 
@@ -463,7 +608,7 @@ mod tests {
         );
         assert_eq!(
             snapshot["last_error"],
-            "Bluetooth Low Energy transport is reserved for a future native GATT connector"
+            "Bluetooth Low Energy requires NativeAppliance.open_ble and a platform GATT link"
         );
 
         appliance.close().await.unwrap();
@@ -538,6 +683,34 @@ mod tests {
             ),
             Err(NativeApplianceError::InvalidArgument { .. })
         ));
+    }
+
+    #[test]
+    fn ble_constructor_requires_an_absolute_app_private_credential_path() {
+        let database = TestDatabase::new("bad-ble");
+        assert!(matches!(
+            NativeAppliance::open_ble(
+                database.path_string(),
+                "relative/credential.rdpkey".to_owned(),
+            ),
+            Err(NativeApplianceError::InvalidArgument { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn reserved_transport_owner_rejects_ble_platform_callbacks() {
+        let database = TestDatabase::new("ble-unavailable");
+        let appliance =
+            NativeAppliance::open(database.path_string(), NativeTransport::BluetoothLowEnergy)
+                .unwrap();
+
+        assert_eq!(
+            appliance
+                .ble_link_connected("peripheral".to_owned(), 20)
+                .unwrap_err(),
+            NativeBleError::Unavailable
+        );
+        appliance.close().await.unwrap();
     }
 
     #[tokio::test]

@@ -1,4 +1,8 @@
-import type { NativeApplianceLike, NativeBridgeContract } from "@reticulum/appliance-native";
+import type {
+  NativeApplianceLike,
+  NativeBleGattProfile,
+  NativeBridgeContract,
+} from "@reticulum/appliance-native";
 
 import type {
   ApplianceSnapshot,
@@ -13,13 +17,15 @@ import type {
   TimelineView,
 } from "../generated/api.ts";
 import type { ApplianceClient } from "./appliance-client.ts";
+import type { BleGattProfile } from "./ble-central-types.ts";
 import { acquireExclusiveResource, type ExclusiveResource } from "./exclusive-resource.ts";
 import { nativePathFromFileUri } from "./file-uri.ts";
+import { NativeBleTransport, type NativeBleTransportConfig } from "./native-ble-transport.ts";
 import { assertNativeBridgeContract } from "./native-contract.ts";
 import { type NativeErrorPredicate, normalizeNativeError } from "./native-error.ts";
 
 const DATABASE_FILE_NAME = "reticulum-lxmf-chat.sqlite3";
-const WIFI_CREDENTIAL_FILE_NAME = "reticulum-device-credential.rdpkey";
+const DEVICE_CREDENTIAL_FILE_NAME = "reticulum-device-credential.rdpkey";
 const NATIVE_ONBOARDING: OnboardingView = { available: false, snapshot: null };
 
 export interface NativeApplianceBridge {
@@ -30,11 +36,26 @@ export interface NativeApplianceBridge {
 }
 
 export interface NativeApplianceRuntime {
+  readonly ble?: NativeBleTransportConfig;
   readonly bridge: NativeApplianceBridge;
   readonly databasePath: string;
 }
 
 export type NativeApplianceRuntimeLoader = () => Promise<NativeApplianceRuntime>;
+
+interface OwnedNativeAppliance {
+  readonly appliance: NativeApplianceLike;
+  readonly ble: NativeBleTransport | null;
+}
+
+export function bleGattProfileFromNative(profile: NativeBleGattProfile): BleGattProfile {
+  return {
+    indicateCharacteristicUuid: profile.txUuid,
+    maximumWriteValueBytes: profile.initialAttValueBytes,
+    serviceUuid: profile.serviceUuid,
+    writeCharacteristicUuid: profile.rxUuid,
+  };
+}
 
 function parseNativeJson<T>(label: string, value: string): T {
   try {
@@ -46,7 +67,7 @@ function parseNativeJson<T>(label: string, value: string): T {
 
 function unsupportedOnboarding(): never {
   throw new Error(
-    "Pairing is not available through the native bridge yet; seed an activated credential over the qualified USB workflow before using the Wi-Fi proof connector.",
+    "Pairing is not available through the native bridge yet; seed an activated credential over the qualified USB workflow before using a BLE or Wi-Fi connector.",
   );
 }
 
@@ -56,12 +77,29 @@ async function loadNativeApplianceRuntime(): Promise<NativeApplianceRuntime> {
     import("expo-file-system"),
   ]);
   const databaseUri = new fileSystem.File(fileSystem.Paths.document, DATABASE_FILE_NAME).uri;
-  const wifiCredentialUri = new fileSystem.File(
+  const deviceCredentialUri = new fileSystem.File(
     fileSystem.Paths.document,
-    WIFI_CREDENTIAL_FILE_NAME,
+    DEVICE_CREDENTIAL_FILE_NAME,
   ).uri;
   const wifiEndpoint = process.env.EXPO_PUBLIC_APPLIANCE_WIFI_ENDPOINT?.trim() ?? "";
+  const bleCentral = wifiEndpoint === "" ? await import("./ble-central") : null;
   return {
+    ble:
+      bleCentral === null
+        ? undefined
+        : {
+            central: bleCentral.createBleCentral(),
+            decodeCommand(command) {
+              if (bindings.NativeBlePlatformCommand.Write.instanceOf(command)) {
+                return { kind: "write", ...command.inner };
+              }
+              if (bindings.NativeBlePlatformCommand.Disconnect.instanceOf(command)) {
+                return { kind: "disconnect", ...command.inner };
+              }
+              throw new Error("native Rust bridge returned an unknown BLE platform command");
+            },
+            profile: bleGattProfileFromNative(bindings.nativeBleGattProfile()),
+          },
     bridge: {
       contract: bindings.nativeBridgeContract(),
       isNativeError: bindings.NativeApplianceError.instanceOf,
@@ -73,12 +111,12 @@ async function loadNativeApplianceRuntime(): Promise<NativeApplianceRuntime> {
           return bindings.NativeAppliance.openWifi(
             databasePath,
             wifiEndpoint,
-            nativePathFromFileUri(wifiCredentialUri),
+            nativePathFromFileUri(deviceCredentialUri),
           );
         }
-        return bindings.NativeAppliance.open(
+        return bindings.NativeAppliance.openBle(
           databasePath,
-          bindings.NativeTransport.BluetoothLowEnergy,
+          nativePathFromFileUri(deviceCredentialUri),
         );
       },
     },
@@ -92,14 +130,16 @@ async function loadNativeApplianceRuntime(): Promise<NativeApplianceRuntime> {
  *
  * `EXPO_PUBLIC_APPLIANCE_WIFI_ENDPOINT` opts a native build into the raw-TCP
  * Wi-Fi proof connector and its app-private activated credential. Without that
- * build-time endpoint, BLE remains selected as an explicit future-work stub.
- * Local contacts, timelines, and durable outbox writes work in both modes.
+ * build-time endpoint, the platform foreground BLE central owns GATT while the
+ * Rust bridge owns authentication and protocol bytes. Local contacts,
+ * timelines, and durable outbox writes work immediately in both modes, even
+ * while the initial BLE scan runs in the background.
  */
 export class NativeApplianceClient implements ApplianceClient {
   readonly #loadRuntime: NativeApplianceRuntimeLoader;
   #bridge: NativeApplianceBridge | null = null;
   #opening: Promise<void> | null = null;
-  #ownership: ExclusiveResource<NativeApplianceLike> | null = null;
+  #ownership: ExclusiveResource<OwnedNativeAppliance> | null = null;
   #disposed = false;
 
   constructor(loadRuntime: NativeApplianceRuntimeLoader = loadNativeApplianceRuntime) {
@@ -173,7 +213,16 @@ export class NativeApplianceClient implements ApplianceClient {
   }
 
   async reconnect(): Promise<NoContent> {
-    await this.#call((appliance) => appliance.reconnect());
+    const { appliance, ble, bridge } = this.#active();
+    try {
+      if (ble === null) {
+        await appliance.reconnect();
+      } else {
+        await ble.reconnect();
+      }
+    } catch (error) {
+      throw normalizeNativeError(error, bridge.isNativeError);
+    }
     return undefined;
   }
 
@@ -195,18 +244,26 @@ export class NativeApplianceClient implements ApplianceClient {
     if (this.#disposed) throw new Error("native appliance client has been disposed");
     assertNativeBridgeContract(runtime.bridge.contract);
 
-    let ownership: ExclusiveResource<NativeApplianceLike>;
+    let ownership: ExclusiveResource<OwnedNativeAppliance>;
     try {
       ownership = await acquireExclusiveResource(
         () => {
           if (this.#disposed) throw new Error("native appliance client has been disposed");
-          return runtime.bridge.open(runtime.databasePath);
+          const appliance = runtime.bridge.open(runtime.databasePath);
+          const ble =
+            runtime.ble === undefined ? null : new NativeBleTransport(appliance, runtime.ble);
+          ble?.start();
+          return { appliance, ble };
         },
-        async (appliance) => {
+        async ({ appliance, ble }) => {
           try {
-            await appliance.close();
+            await ble?.dispose();
           } finally {
-            runtime.bridge.destroy(appliance);
+            try {
+              await appliance.close();
+            } finally {
+              runtime.bridge.destroy(appliance);
+            }
           }
         },
       );
@@ -224,13 +281,18 @@ export class NativeApplianceClient implements ApplianceClient {
 
   #active(): {
     readonly appliance: NativeApplianceLike;
+    readonly ble: NativeBleTransport | null;
     readonly bridge: NativeApplianceBridge;
   } {
     if (this.#disposed) throw new Error("native appliance client has been disposed");
     if (this.#ownership === null || this.#bridge === null) {
       throw new Error("native appliance client has not been bootstrapped");
     }
-    return { appliance: this.#ownership.value, bridge: this.#bridge };
+    return {
+      appliance: this.#ownership.value.appliance,
+      ble: this.#ownership.value.ble,
+      bridge: this.#bridge,
+    };
   }
 
   async #call<T>(operation: (appliance: NativeApplianceLike) => T | Promise<T>): Promise<T> {

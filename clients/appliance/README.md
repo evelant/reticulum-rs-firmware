@@ -63,9 +63,13 @@ projects are needed.
 
 The app defaults to the appliance's same-origin HTTP API on web. Native builds default to a Rust
 single-owner actor with an app-private SQLite database. This already provides durable contacts,
-timelines, and idempotent outbox writes while offline. BLE is the default selected native bearer and
-remains an explicit unavailable connector stub, as do USB OTG and USB serial/JTAG. They do not
-silently fall back or claim a device connection.
+timelines, and idempotent outbox writes while offline. BLE is the default native bearer: React
+Native owns foreground scanning, GATT connection, indications, and write-with-response, while Rust
+owns the activated credential, authenticated session, protocol framing, and LXMF state. The initial
+BLE attempt runs in the background so an absent radio never blocks the offline database; the
+Reconnect action retries discovery and the complete GATT link. BLE background restoration and
+automatic credential provisioning are not implemented yet. USB OTG and USB serial/JTAG remain
+explicit unavailable connector stubs and do not silently fall back or claim a device connection.
 
 Set `EXPO_PUBLIC_APPLIANCE_WIFI_ENDPOINT` to the E290 proof endpoint
 `192.168.4.1:29716` to opt a native development build into the first raw-TCP Wi-Fi proof connector.
@@ -78,9 +82,16 @@ integrity-protects API records but adds no application-layer confidentiality; th
 SoftAP must therefore retain WPA2 and this path must not be described as the final wireless security
 profile.
 
+The BLE connector currently uses that same app-private
+`reticulum-device-credential.rdpkey`. It scans only for the Rust-generated GATT service, subscribes
+to the generated TX indication characteristic before declaring the link ready, and caps initial
+writes to the generated characteristic value bound. A generation-aware command pump rejects stale
+callbacks and reports every platform write exactly once. Platform writes have a ten-second bound so
+an OS BLE call cannot outlive Rust's longer ambiguous-write deadline.
+
 Set `EXPO_PUBLIC_APPLIANCE_URL` to retain the interim native HTTP adapter during development, then
 open a `reticulum-appliance://connect?cap=...` link to bootstrap a session. The current Rust alpha
 server binds loopback and enforces browser-origin headers, so remote native HTTP still needs a
 deliberate server transport/authentication policy before it can connect. Both adapters implement
-the same client boundary and consume Rust-generated semantic DTOs, so adding the remaining BLE or
-USB connectors does not require changing screens or duplicating interface types.
+the same client boundary and consume Rust-generated semantic DTOs, so adding the remaining USB
+connector work does not require changing screens or duplicating interface types.

@@ -5,13 +5,23 @@ use std::{env, fs, path::PathBuf};
 mod partition_contract;
 
 const ESP_RTOS_MAIN_STACK_PATCH_ID: &str = "esp-rtos-0.3.0-cpu0-cpu1-main-stack-words-v2";
+const BLE_STARTUP_DIAGNOSTIC_PACKAGE: &str =
+    "reticulum-heltec-vision-master-e290-ble-startup-diagnostic";
 
 fn main() {
+    configure_package_cfg();
     require_development_feature_contract();
     require_esp_rtos_main_stack_patch();
     require_partition_contract();
     if env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("xtensa") {
         println!("cargo:rustc-link-arg=-Tlinkall.x");
+    }
+}
+
+fn configure_package_cfg() {
+    println!("cargo:rustc-check-cfg=cfg(reticulum_e290_ble_startup_diagnostic)");
+    if env::var("CARGO_PKG_NAME").as_deref() == Ok(BLE_STARTUP_DIAGNOSTIC_PACKAGE) {
+        println!("cargo:rustc-cfg=reticulum_e290_ble_startup_diagnostic");
     }
 }
 
@@ -27,6 +37,16 @@ fn require_development_feature_contract() {
             <= 1,
         "journal-schema2-dev-reprovision, rns-inbox-commit-fault-hil, and runtime-measurement-hil are mutually exclusive"
     );
+
+    if env::var("CARGO_PKG_NAME").as_deref() == Ok(BLE_STARTUP_DIAGNOSTIC_PACKAGE) {
+        assert!(
+            !journal_reprovision
+                && !inbox_commit_fault
+                && !runtime_measurement
+                && env::var_os("CARGO_FEATURE_WIFI_API_PROOF").is_none(),
+            "the one-shot E290 BLE startup diagnostic permits only ble-api-proof"
+        );
+    }
 }
 
 fn require_partition_contract() {

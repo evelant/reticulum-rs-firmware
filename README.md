@@ -9,11 +9,12 @@ pretending to be LoRa. None of those later Reticulum packet actors is being
 implemented in parallel with the first LoRa path. USB's first product role is
 the authenticated local client/control API. One Expo application now owns the
 shared web, iOS, and Android client surface, and its compiled UniFFI bridge has
-completed an Android/iOS immutable-contract round trip. Future Wi-Fi, BLE, and
-native device transports can join behind its bearer-neutral client boundary.
-Those bearers become Reticulum packet interfaces only through optional actors
-added after the LoRa slice. The already-qualified Heltec Wireless Tracker V2.3
-pair remains a constrained LoRa regression target.
+completed an Android/iOS immutable-contract round trip. Wi-Fi and BLE local-API
+bearers now join behind its bearer-neutral client boundary: Wi-Fi is
+build/host-qualified, while BLE has bounded direct CoreBluetooth qualification
+on both E290s. Those bearers become Reticulum packet interfaces only through
+optional actors added after the LoRa slice. The already-qualified Heltec
+Wireless Tracker V2.3 pair remains a constrained LoRa regression target.
 
 The hardware-independent
 `reticulum-board-heltec-vision-master-e290` crate is the compiled source of
@@ -852,8 +853,11 @@ are powered-qualified. An opt-in Wi-Fi SoftAP/raw-TCP bearer now reuses this
 boundary with a separately bound session suite and a host-tested native client.
 Its exact image has been safely flashed to one credentialed E290 with product
 data preserved, but association, DHCP, authenticated exchange, reconnect, and
-LoRa coexistence remain manually powered qualification. BLE remains future
-work.
+LoRa coexistence remain manually powered qualification. The mutually exclusive
+BLE profile now passes exact flash/readback on both E290s and four authenticated
+direct CoreBluetooth sessions, including three consecutive sessions on one
+board; the Expo mobile lifecycle matrix, cross-instance central ownership,
+pressure, and soak remain open.
 The
 resident credential runtime now also retains live pairing permits, proofs,
 secrets, typed store candidates, and reconciliation owners through definite
