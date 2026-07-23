@@ -18,15 +18,15 @@ mod store;
 
 pub use memory::{MEMORY_IMAGE_SCHEMA_VERSION, MemoryChatStore, MemoryImage};
 pub use model::{
-    AcceptanceIds, Contact, DestinationHash, EncodedPacketSha256, IdempotencyKey, InboundMessage,
-    InboundRecord, InvalidEncodedPacketLength, InvalidSubmissionId, InvalidTimestamp,
-    MAX_UNIX_TIMESTAMP_MILLIS, MessageId, OutboxId, OutboxMaterial, OutboxRecord, OutboxStatus,
-    PacketEvidence, ReconcileWork, SubmissionFailure, SubmissionId, SubmissionState,
+    AcceptanceIds, Contact, DEVICE_ID_LENGTH, DestinationHash, DeviceBinding, EncodedPacketSha256,
+    IdempotencyKey, InboundMessage, InboundRecord, InvalidEncodedPacketLength, InvalidSubmissionId,
+    InvalidTimestamp, MAX_UNIX_TIMESTAMP_MILLIS, MessageId, OutboxId, OutboxMaterial, OutboxRecord,
+    OutboxStatus, PacketEvidence, ReconcileWork, SubmissionFailure, SubmissionId, SubmissionState,
     TimelineDirection, TimelineEntry, TimelineSequence, UnixTimestampMillis,
 };
 #[cfg(feature = "sqlite")]
 pub use sqlite::{SQLITE_SCHEMA_VERSION, SqliteChatStore, SqliteStoreError};
 pub use store::{
-    AcceptanceOutcome, ChatStore, ChatStoreError, ContactUpsertOutcome, ImageError,
-    InboundCommitOutcome, OutboxCommitOutcome, StatusProjectionOutcome,
+    AcceptanceOutcome, ChatStore, ChatStoreError, ContactUpsertOutcome, DeviceBindingOutcome,
+    ImageError, InboundCommitOutcome, OutboxCommitOutcome, StatusProjectionOutcome,
 };

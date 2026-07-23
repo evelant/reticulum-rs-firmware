@@ -80,6 +80,13 @@ The later
 qualifies the current 128-entry image and SQLite CLI workflow in both
 directions, including repeated same-enumeration authenticated sessions,
 terminal outbox reconciliation, exact peer import, and inbox deduplication.
+The subsequent
+[host-appliance alpha proof](docs/e290-lxmf-appliance-alpha-proof.md) adds a
+single-owner background service, SQLite schema-2 authenticated database binding,
+exact-serial discovery/reconnect, and a bundled loopback SPA/API. One message
+queued through that HTTP boundary reached `Delivered` over the E290 LoRa link
+and was imported verbatim from the peer. This is a host-companion milestone;
+the SPA is not yet served by the E290 over USB or Wi-Fi.
 That POC's initial startup failure was a cumulative pre-USB mount-stack
 overflow, not a USB or board-enumeration fault; direct in-place placement of
 the upper runtime/actor chain fixed that diagnosed boundary. The initially
@@ -994,7 +1001,9 @@ second transport is required to qualify the first LoRa vertical slice.
 - [Vision Master E290 primary target](docs/heltec-vision-master-e290.md)
 - [Permanent LoRa-first E290 node](docs/e290-node.md)
 - [LXMF chat alpha CLI](crates/lxmf-chat-cli/README.md)
+- [LXMF host appliance alpha](crates/lxmf-chat-service/README.md)
 - [E290 LXMF chat-alpha powered proof](docs/e290-lxmf-chat-alpha-proof.md)
+- [E290 LXMF host-appliance alpha proof](docs/e290-lxmf-appliance-alpha-proof.md)
 - [Usable-firmware POC limits and known defects](docs/poc-known-defects.md)
 - [Phase-0 scaffold decision](docs/adr/0001-phase-0-scaffold.md)
 - [Rete provisional-foundation decision](docs/adr/0002-rete-provisional-foundation.md)

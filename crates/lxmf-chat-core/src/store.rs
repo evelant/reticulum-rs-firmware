@@ -7,6 +7,15 @@ use crate::{
     OutboxRecord, OutboxStatus, ReconcileWork, SubmissionId, SubmissionState, TimelineEntry,
 };
 
+/// Result of binding an unbound database to one authenticated device.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeviceBindingOutcome {
+    /// The database was previously unbound and now retains the supplied identity.
+    Bound,
+    /// The database already retained the exact supplied identity.
+    Unchanged,
+}
+
 /// Result of inserting or updating a contact keyed by destination hash.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContactUpsertOutcome {
@@ -152,6 +161,9 @@ pub trait ChatStore {
 
     /// Return all contacts in deterministic destination order.
     fn contacts(&self) -> Result<Vec<Contact>, Self::Error>;
+
+    /// Report whether an authenticated inbound message ID is already retained.
+    fn contains_inbound(&self, message_id: MessageId) -> Result<bool, Self::Error>;
 
     /// Commit one inbound message, deduplicating strictly by LXMF message ID.
     fn commit_inbound(

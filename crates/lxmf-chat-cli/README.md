@@ -87,9 +87,13 @@ still open independently.
 4. Know the peer's 32-hex `lxmf.delivery` destination. Do not send to its
    primary node destination.
 
-Use a separate SQLite database for each paired device identity. Schema v1 does
-not bind a database to a device ID or local LXMF destination, so sharing one
-database across boards can merge unrelated inboxes and outboxes without an
+Use a separate SQLite database for each paired device identity. The shared
+store now migrates to schema 2, which can retain an authenticated device ID,
+primary destination, and local LXMF destination. The foreground CLI does not
+yet perform that authenticated binding; only the appliance service currently
+enforces it. A migrated schema-1 database also begins unbound because its old
+rows contain no authoritative device identity. Sharing a CLI database across
+boards can therefore still merge unrelated inboxes and outboxes without an
 identity-mismatch error.
 
 The current E290 bearer permits one active authenticated session at a time. A
@@ -262,18 +266,24 @@ Run the binary with `--help` or `-h` to print the exact argument grammar.
 - The authenticated USB records provide integrity and peer authentication, not
   transcript confidentiality.
 - The Active credential and SQLite database are plaintext secrets/data at rest.
-- Database schema v1 is not identity-bound; one database per board is currently
-  an operator rule rather than an enforced invariant.
+- SQLite schema 2 supports an authenticated device binding, but this legacy
+  foreground CLI has not adopted the shared application/session adapter and
+  does not enforce that binding. One database per board remains an operator
+  rule when using this binary; the host appliance service enforces it.
 - `send` accepts title and content in process arguments, which can expose them
   through shell history or same-host process inspection.
 - The current send subset is basic opportunistic LXMF with empty fields: no
   propagated/direct/Link/Resource delivery, stamps, tickets, attachments, or
   propagation-node selection.
-- There is no automatic discovery, background receive, notification, reconnect,
-  message deletion, database migration UX, SPA, React Native app, NomadNet, or
-  Micron renderer.
-- The CLI has package tests and restart-tested SQLite semantics, but it still
-  needs a dedicated two-board powered workflow, disconnect matrix, and soak run.
+- This CLI has no automatic discovery, background receive, notification,
+  reconnect, message deletion, database migration UX, graphical UI, React
+  Native app, NomadNet, or Micron renderer. The separate
+  [`reticulum-lxmf-chat-service`](../lxmf-chat-service/README.md) now provides
+  exact-serial discovery, background reconciliation/polling, reconnect backoff,
+  and a bundled loopback SPA over the same store and device API.
+- The CLI has package tests, restart-tested SQLite semantics, and a completed
+  two-board powered workflow. Physical disconnect matrices and soak remain
+  open.
 
 The complete deferred-work list is maintained in
 [the POC known-defects record](../../docs/poc-known-defects.md).

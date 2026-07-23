@@ -6,10 +6,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use reticulum_lxmf_chat_core::{
-    AcceptanceIds, ChatStore, Contact, DestinationHash, EncodedPacketSha256, IdempotencyKey,
-    InboundCommitOutcome, InboundMessage, MessageId, OutboxMaterial, OutboxStatus, PacketEvidence,
-    ReconcileWork, SQLITE_SCHEMA_VERSION, SqliteChatStore, SqliteStoreError, SubmissionId,
-    SubmissionState, TimelineDirection, UnixTimestampMillis,
+    AcceptanceIds, ChatStore, Contact, DestinationHash, DeviceBinding, DeviceBindingOutcome,
+    EncodedPacketSha256, IdempotencyKey, InboundCommitOutcome, InboundMessage, MessageId,
+    OutboxMaterial, OutboxStatus, PacketEvidence, ReconcileWork, SQLITE_SCHEMA_VERSION,
+    SqliteChatStore, SqliteStoreError, SubmissionId, SubmissionState, TimelineDirection,
+    UnixTimestampMillis,
 };
 
 static TEST_DATABASE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -82,6 +83,65 @@ fn evidence(tag: u8) -> PacketEvidence {
         .expect("test packet evidence must be valid")
 }
 
+fn binding(tag: u8) -> DeviceBinding {
+    DeviceBinding::new(
+        [tag; 16],
+        destination(tag.wrapping_add(1)),
+        destination(tag.wrapping_add(2)),
+    )
+}
+
+#[test]
+fn database_binding_is_persistent_and_rejects_a_different_device() {
+    let database = TestDatabase::new("device-binding");
+    let expected = binding(0x31);
+    let observed = binding(0x41);
+
+    {
+        let mut store = SqliteChatStore::open(&database.path).unwrap();
+        assert_eq!(store.device_binding().unwrap(), None);
+        assert_eq!(
+            store.bind_device(expected).unwrap(),
+            DeviceBindingOutcome::Bound
+        );
+        assert_eq!(
+            store.bind_device(expected).unwrap(),
+            DeviceBindingOutcome::Unchanged
+        );
+        assert!(matches!(
+            store.bind_device(observed),
+            Err(SqliteStoreError::DeviceBindingMismatch {
+                expected: retained,
+                observed: rejected,
+            }) if retained == expected && rejected == observed
+        ));
+    }
+
+    let reopened = SqliteChatStore::open(&database.path).unwrap();
+    assert_eq!(reopened.device_binding().unwrap(), Some(expected));
+}
+
+#[test]
+fn schema_one_database_migrates_to_unbound_schema_two() {
+    let database = TestDatabase::new("schema-one-migration");
+    SqliteChatStore::open(&database.path)
+        .unwrap()
+        .close()
+        .unwrap();
+    let connection = rusqlite::Connection::open(&database.path).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE device_binding;\n\
+         PRAGMA user_version = 1;",
+        )
+        .unwrap();
+    connection.close().unwrap();
+
+    let store = SqliteChatStore::open(&database.path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), SQLITE_SCHEMA_VERSION);
+    assert_eq!(store.device_binding().unwrap(), None);
+}
+
 #[test]
 fn close_and_reopen_preserves_complete_chat_and_reconcile_state() {
     let database = TestDatabase::new("restart");
@@ -97,6 +157,7 @@ fn close_and_reopen_preserves_complete_chat_and_reconcile_state() {
         store
             .commit_inbound(inbound(0x11, 2, 1_000, b"persisted inbound"))
             .unwrap();
+        assert!(store.contains_inbound(MessageId::new([0x11; 32])).unwrap());
 
         unsubmitted = store
             .commit_outbound(outbound(0x21, 2, 2_000, b"submit after restart"))

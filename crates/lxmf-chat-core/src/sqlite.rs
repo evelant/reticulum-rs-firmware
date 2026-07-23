@@ -8,14 +8,15 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehav
 use crate::store::project_outbox_status;
 use crate::{
     AcceptanceIds, AcceptanceOutcome, ChatStore, ChatStoreError, Contact, ContactUpsertOutcome,
-    DestinationHash, EncodedPacketSha256, IdempotencyKey, InboundCommitOutcome, InboundMessage,
-    InboundRecord, MessageId, OutboxCommitOutcome, OutboxId, OutboxMaterial, OutboxRecord,
-    OutboxStatus, PacketEvidence, ReconcileWork, StatusProjectionOutcome, SubmissionFailure,
-    SubmissionId, SubmissionState, TimelineEntry, TimelineSequence, UnixTimestampMillis,
+    DestinationHash, DeviceBinding, DeviceBindingOutcome, EncodedPacketSha256, IdempotencyKey,
+    InboundCommitOutcome, InboundMessage, InboundRecord, MessageId, OutboxCommitOutcome, OutboxId,
+    OutboxMaterial, OutboxRecord, OutboxStatus, PacketEvidence, ReconcileWork,
+    StatusProjectionOutcome, SubmissionFailure, SubmissionId, SubmissionState, TimelineEntry,
+    TimelineSequence, UnixTimestampMillis,
 };
 
 /// Current SQLite `PRAGMA user_version` owned by this adapter.
-pub const SQLITE_SCHEMA_VERSION: u32 = 1;
+pub const SQLITE_SCHEMA_VERSION: u32 = 2;
 
 const OUTBOX_COLUMNS: &str = "id, sequence, destination, timestamp_unix_ms, idempotency_key, \
                              title, content, submission_id, message_id, status_kind, \
@@ -34,6 +35,13 @@ pub enum SqliteStoreError {
     ValueOutOfRange(&'static str),
     /// Shared chat-domain semantics rejected the mutation.
     Domain(ChatStoreError),
+    /// The database is already bound to a different authenticated device.
+    DeviceBindingMismatch {
+        /// Identity retained by the database.
+        expected: DeviceBinding,
+        /// Identity presented by the connected device.
+        observed: DeviceBinding,
+    },
 }
 
 impl fmt::Display for SqliteStoreError {
@@ -51,6 +59,9 @@ impl fmt::Display for SqliteStoreError {
                 write!(formatter, "chat value cannot fit SQLite INTEGER: {field}")
             }
             Self::Domain(error) => write!(formatter, "chat domain mutation failed: {error}"),
+            Self::DeviceBindingMismatch { .. } => {
+                formatter.write_str("chat database is bound to a different device")
+            }
         }
     }
 }
@@ -62,7 +73,8 @@ impl std::error::Error for SqliteStoreError {
             Self::CorruptData(_)
             | Self::UnsupportedSchemaVersion(_)
             | Self::ValueOutOfRange(_)
-            | Self::Domain(_) => None,
+            | Self::Domain(_)
+            | Self::DeviceBindingMismatch { .. } => None,
         }
     }
 }
@@ -116,6 +128,100 @@ impl SqliteChatStore {
             .connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))?;
         Ok(version)
+    }
+
+    /// Return the authenticated device identity retained by this database.
+    pub fn device_binding(&self) -> Result<Option<DeviceBinding>, SqliteStoreError> {
+        self.connection
+            .query_row(
+                "SELECT device_id, primary_destination, lxmf_delivery_destination\n\
+                 FROM device_binding WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .map(
+                |(device_id, primary, lxmf)| -> Result<DeviceBinding, SqliteStoreError> {
+                    Ok(DeviceBinding::new(
+                        array_from_blob(device_id, "device binding device_id")?,
+                        DestinationHash::new(array_from_blob(
+                            primary,
+                            "device binding primary_destination",
+                        )?),
+                        DestinationHash::new(array_from_blob(
+                            lxmf,
+                            "device binding lxmf_delivery_destination",
+                        )?),
+                    ))
+                },
+            )
+            .transpose()
+    }
+
+    /// Bind an unbound database to one authenticated device, or verify the
+    /// exact existing binding without mutation.
+    pub fn bind_device(
+        &mut self,
+        observed: DeviceBinding,
+    ) -> Result<DeviceBindingOutcome, SqliteStoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = transaction
+            .query_row(
+                "SELECT device_id, primary_destination, lxmf_delivery_destination\n\
+                 FROM device_binding WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .map(
+                |(device_id, primary, lxmf)| -> Result<DeviceBinding, SqliteStoreError> {
+                    Ok(DeviceBinding::new(
+                        array_from_blob(device_id, "device binding device_id")?,
+                        DestinationHash::new(array_from_blob(
+                            primary,
+                            "device binding primary_destination",
+                        )?),
+                        DestinationHash::new(array_from_blob(
+                            lxmf,
+                            "device binding lxmf_delivery_destination",
+                        )?),
+                    ))
+                },
+            )
+            .transpose()?;
+        if let Some(expected) = existing {
+            if expected != observed {
+                return Err(SqliteStoreError::DeviceBindingMismatch { expected, observed });
+            }
+            transaction.commit()?;
+            return Ok(DeviceBindingOutcome::Unchanged);
+        }
+        transaction.execute(
+            "INSERT INTO device_binding(\n\
+                 singleton, device_id, primary_destination, lxmf_delivery_destination\n\
+             ) VALUES (1, ?1, ?2, ?3)",
+            params![
+                observed.device_id().as_slice(),
+                observed.primary_destination().as_bytes().as_slice(),
+                observed.lxmf_delivery_destination().as_bytes().as_slice(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(DeviceBindingOutcome::Bound)
     }
 
     /// Explicitly close the connection, flushing SQLite-owned resources.
@@ -174,7 +280,24 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), SqliteStoreError
                      CHECK ((status_kind = 6 AND failure_kind IS NOT NULL) OR\n\
                             (status_kind != 6 AND failure_kind IS NULL))\n\
                  );\n\
-                 PRAGMA user_version = 1;",
+                 CREATE TABLE device_binding (\n\
+                     singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),\n\
+                     device_id BLOB UNIQUE NOT NULL CHECK (length(device_id) = 16),\n\
+                     primary_destination BLOB NOT NULL CHECK (length(primary_destination) = 16),\n\
+                     lxmf_delivery_destination BLOB NOT NULL CHECK (length(lxmf_delivery_destination) = 16)\n\
+                 );\n\
+                 PRAGMA user_version = 2;",
+            )?;
+        }
+        1 => {
+            transaction.execute_batch(
+                "CREATE TABLE device_binding (\n\
+                     singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),\n\
+                     device_id BLOB UNIQUE NOT NULL CHECK (length(device_id) = 16),\n\
+                     primary_destination BLOB NOT NULL CHECK (length(primary_destination) = 16),\n\
+                     lxmf_delivery_destination BLOB NOT NULL CHECK (length(lxmf_delivery_destination) = 16)\n\
+                 );\n\
+                 PRAGMA user_version = 2;",
             )?;
         }
         unsupported => {
@@ -518,6 +641,18 @@ impl ChatStore for SqliteChatStore {
             ));
         }
         Ok(contacts)
+    }
+
+    fn contains_inbound(&self, message_id: MessageId) -> Result<bool, Self::Error> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT 1 FROM inbound_messages WHERE message_id = ?1",
+                [message_id.as_bytes().as_slice()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
     }
 
     fn commit_inbound(

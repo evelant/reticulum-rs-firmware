@@ -23,7 +23,9 @@ members = [
     "crates/interface-router",
     "crates/lab-rx-returned-fault-hil",
     "crates/lxmf-chat-cli",
+    "crates/lxmf-chat-app",
     "crates/lxmf-chat-core",
+    "crates/lxmf-chat-service",
     "crates/lxmf-durable-ingress",
     "crates/lxmf-ingress",
     "crates/lxmf-model",
@@ -81,7 +83,9 @@ default-members = [
     "crates/interface-router",
     "crates/lab-rx-returned-fault-hil",
     "crates/lxmf-chat-cli",
+    "crates/lxmf-chat-app",
     "crates/lxmf-chat-core",
+    "crates/lxmf-chat-service",
     "crates/lxmf-durable-ingress",
     "crates/lxmf-ingress",
     "crates/lxmf-model",
@@ -120,6 +124,7 @@ publish = false
 
 [workspace.dependencies]
 allocator-api2 = { version = "=0.3.1", default-features = false }
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
 embassy-executor = { version = "=0.10.0", default-features = false }
 embassy-futures = { version = "=0.1.2", default-features = false }
 embassy-sync = { version = "=0.8.0", default-features = false }
@@ -158,6 +163,7 @@ lora-phy = { version = "=3.0.1", default-features = false }
 lora-modulation = { version = "=0.1.5", default-features = false }
 minicbor = { version = "=2.2.2", default-features = false }
 getrandom = "=0.3.4"
+futures-util = { version = "=0.3.33", default-features = false, features = ["async-await", "std"] }
 rand_core = { version = "=0.6.4", default-features = false }
 rusqlite = { version = "=0.40.1", default-features = false, features = ["bundled"] }
 hex = "=0.4.3"
@@ -169,6 +175,8 @@ serialport = { version = "=4.9.0", default-features = false }
 sha2 = { version = "=0.10.9", default-features = false }
 static_cell = "=2.1.1"
 subtle = { version = "=2.6.1", default-features = false }
+tokio = { version = "=1.53.1", default-features = false, features = ["macros", "net", "rt", "signal", "sync", "time"] }
+tower = { version = "=0.5.3", default-features = false, features = ["util"] }
 zeroize = { version = "=1.9.0", default-features = false }
 
 # Rete is not published as a coherent crates.io release. Keep every crate on

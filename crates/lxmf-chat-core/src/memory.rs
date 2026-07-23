@@ -227,6 +227,10 @@ impl ChatStore for MemoryChatStore {
         Ok(self.contacts.values().cloned().collect())
     }
 
+    fn contains_inbound(&self, message_id: MessageId) -> Result<bool, Self::Error> {
+        Ok(self.inbound.contains_key(&message_id))
+    }
+
     fn commit_inbound(
         &mut self,
         message: InboundMessage,

@@ -78,10 +78,13 @@ fn inbound_message_id_is_idempotent_only_for_exact_semantics() {
     let mut store = MemoryChatStore::new();
     let message = inbound(7, 2, 1_000, b"hello");
 
+    assert!(!store.contains_inbound(message.message_id()).unwrap());
+
     assert_eq!(
         store.commit_inbound(message.clone()).unwrap(),
         InboundCommitOutcome::Inserted
     );
+    assert!(store.contains_inbound(message.message_id()).unwrap());
     assert_eq!(
         store.commit_inbound(message).unwrap(),
         InboundCommitOutcome::Duplicate

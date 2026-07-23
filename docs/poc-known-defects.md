@@ -103,21 +103,29 @@ proof unless a failing test promotes one into a release blocker.
   transcript. The diagnostic and chat-alpha CLIs accept title/content bytes in
   process arguments, where shell history or same-host process inspection can
   expose them. Do not use these POC paths for sensitive messages.
-- The [LXMF chat alpha](../crates/lxmf-chat-cli/README.md) now provides a local
-  SQLite conversation database, contacts, a durable outbox, one-shot inbox
-  synchronization, reconciliation, and timelines over authenticated USB. It is
-  a command-line alpha, not the final user experience: there is still no
-  embedded SPA, React Native application, display UI, NomadNet client, or
-  Micron client.
-- The chat alpha has no background daemon, port discovery, automatic reconnect,
-  continuous inbox/status polling, retry backoff, notification service, account
-  migration, database encryption, or pairing UX. Each device operation is a
-  blocking foreground command. Current firmware accepts a canonical replacement
-  handshake when the old session is idle, but a busy owner is never displaced
-  and a terminal session fault still requires USB reset/re-enumeration.
-- SQLite schema v1 is not bound to a device ID or local LXMF destination. Use a
-  separate database per paired board; the alpha will not reject accidental
-  cross-device reuse.
+- The foreground [LXMF chat alpha](../crates/lxmf-chat-cli/README.md) provides a
+  local SQLite conversation database, contacts, a durable outbox, one-shot
+  inbox synchronization, reconciliation, and timelines over authenticated USB.
+  The newer
+  [host appliance service](../crates/lxmf-chat-service/README.md) adds exact USB-
+  serial discovery, a sole serial/database actor, automatic reconnect/backoff,
+  continuous one-step inbox/status work, immutable state invalidations, and a
+  bundled loopback SPA. It remains a computer-side companion: there is still no
+  SPA served by the E290, Wi-Fi or BLE client bearer, React Native application,
+  display UI, NomadNet client, or Micron client.
+- The host service has no operating-system single-instance lock, notification
+  service, account migration, database encryption, pairing/credential UX, or
+  cross-platform disconnect/host-suspend matrix. Do not run it concurrently
+  with another service or the foreground CLI against the same database/device.
+  Current firmware accepts a canonical replacement handshake when the old
+  session is idle, but a busy owner is never displaced and a terminal session
+  fault still requires USB reset/re-enumeration.
+- SQLite schema 2 can bind a database to the authenticated device ID, primary
+  destination, and local LXMF destination. The host service performs and
+  enforces that binding; the foreground CLI does not yet. A schema-1 migration
+  starts unbound because the old rows cannot prove their source, so migrate only
+  a database already known to belong to that board. One database per paired
+  board remains mandatory.
 - GNSS/location integration is intentionally a stub. Location must later be an
   optional service and must not couple core Reticulum routing to this board.
 - The current API exposes normalized LXMF bytes plus authenticated metadata.
@@ -126,8 +134,8 @@ proof unless a failing test promotes one into a release blocker.
   propagation-node selection, attachments, and human-friendly error recovery
   remain application-layer work.
 - Unlike `submit-and-wait` and the raw-inbox qualification commands, current
-  LXMF list/read/send and chat-alpha commands do not write a structured evidence
-  sidecar. The
+  LXMF list/read/send, chat-alpha, and appliance-service operations do not write
+  a structured evidence sidecar. The
   [completed powered proof](e290-api14-lxmf-poc.md) manually retained the
   authenticated stdout records, private read files, exact retry inputs, and
   independently recorded hashes; product tooling should generate that bundle

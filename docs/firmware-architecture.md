@@ -30,8 +30,9 @@ interrupt-linearized reset guard, and one exact-next decoder/sequence space for
 initialization control and all four live-pairing operations. The application
 also quarantines native USB at its earliest Rust entry before detached product
 initialization and canonical reattachment. Current source passes the 163-test
-default E290 host-library suite, the 282-test xtask suite, strict host-client
-and chat checks, the current Rete regression lane, and the default and
+default E290 host-library suite, the 282-test xtask suite, strict host-client,
+chat-application, and appliance-service checks, the current Rete regression
+lane, and the default and
 runtime-measurement-HIL target gates.
 Both powered boards returned `initialization-required` and
 `physical-presence-required`; live Begin created no host key before physical
@@ -133,7 +134,7 @@ E290 same-image ANNOUNCE/DATA/proof HIL and its pre/post image readbacks passed,
 and the permanent E290 node passed its first two-board powered boot/credential/
 ordinary-TX smoke with exact image and credential-partition readback; Tracker
 ANNOUNCE/DATA/proof and isolated storage HIL also passed<br>
-**Date:** 2026-07-20<br>
+**Date:** 2026-07-22<br>
 **Primary full-stack target:** Heltec Vision Master E290-HF, ESP32-S3R8 + HT-RA62/SX1262<br>
 **Qualified radio regression target:** Heltec Wireless Tracker V2.3, ESP32-S3FN8 + SX1262 + KCT8103L<br>
 **Product goal:** an always-on, self-contained, heterogeneous-interface Reticulum transport and LXMF store-and-forward node, with optional onboard messaging and NomadNet clients controlled over USB, BLE, or Wi-Fi
@@ -159,6 +160,15 @@ without reducing the product scope described here.
 ## Executive decision
 
 The full product is plausible, but no examined repository is a drop-in firmware and no build yet combines an embedded RNS transport, an embedded LXMF propagation router, durable storage, several simultaneous Reticulum interfaces, USB, Wi-Fi, BLE, and local clients. The Vision Master E290 is now the primary complete-appliance prototype: both supplied ESP32-S3R8 boards have passed powered qualification with 16 MiB flash and 8 MiB mapped octal PSRAM. The already-qualified Tracker V2.3 pair remains a valuable radio regression target and may later carry a constrained node profile; its lack of PSRAM no longer shapes full-product acceptance.
+
+The first turnkey-client bridge now exists on the host: a single-owner service
+uses the authenticated USB API, SQLite schema-2 identity-bound state, automatic
+inbox/outbox work, and a bundled loopback SPA. Its
+[one-message two-E290 proof](e290-lxmf-appliance-alpha-proof.md) closes the
+application boundary from HTTP enqueue through LoRa delivery and peer import.
+It deliberately does not move node identity or routing to the host, and it is
+not evidence for a device-served Wi-Fi/USB SPA, BLE, NomadNet, or an embedded
+propagation service.
 
 The broader Rust survey changes the recommended path:
 
@@ -251,6 +261,7 @@ Claims in READMEs were not treated as proof of embedded portability.
 | Focused `rete` core/transport/LXMF host suites at the reviewed upstream snapshot | 391 pass | Historical selection evidence for wire, crypto, forwarding, link/resource, and LXMF codec behavior; this is not evidence for the later lifecycle patch or a complete Python/RF conformance claim |
 | Historical `8b5d652` selected routing/receipt/keepalive/LXMF validation set | 635 pass | The four library targets were 174 transport, 136 stack, 143 LXMF and 84 daemon tests, totaling 537. That pin was also run through 97 transport integration tests (9 computed-vector, 43 forwarding, 40 Link-integration and 5 path-request) and one stack integration test, producing the selected 635-test total. It is not a count of every nested workspace test target. All-target host and portable `no_std` checks remain separate compile gates |
 | `reticulum-conformance-rete` project runner | 647 pass | The historical 235-check baseline joined 112 released-vector, adapter and direct-Link checks with 40 released-Python LRRTT MessagePack checks, 8 channel-retry lifecycle checks, 40 exact keepalive lifecycle checks and 35 deterministic three-node A--B--C checks covering learned transport routing, exact-interface LINKREQUEST/LRPROOF/LRRTT relay, pending-Link wrong-hop LRPROOF rejection before deduplication, bound endpoint output, encrypted channel DATA/proof delivery, receipt completion and separate owned/relay/reverse capacity. The current schema-2 lifecycle/candidate runner expands that coverage and passes 647 checks. This is project-side conformance, not powered or live-Python multi-hop qualification |
+| `reticulum-lxmf-chat-core`, `reticulum-lxmf-chat-app`, and `reticulum-lxmf-chat-service`, host | Pass | Schema-2 SQLite binding/restart tests, stepwise commit/reconcile/inbox tests, sole-actor reconnect/fault tests, loopback capability/cookie/origin/Host routing tests, and strict Clippy pass. The 2026-07-22 two-E290 smoke additionally carried one HTTP-enqueued message to peer import. These crates are host-client code and do not prove an embedded HTTP server, browser rendering, wireless bearer, or firmware memory cost |
 | `reticulum-lxmf-wire`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (wire/authentication foundation only) | The independently authored allocation-free `no_std` crate normalizes destination DATA, Link DATA context `NONE`, and completed Resource carriers into borrowed views with explicit byte/cardinality/value/scan/depth limits. It preserves raw exact-four hashing, admits only proven canonical first-four stamped forms, binds full RNS public keys to `lxmf.delivery` source hashes, requires public-key A and signature R to be non-identity prime-subgroup points, streams Ed25519 verification, and crosses a separate destination-bound receiver stamp-policy typestate for trusted prior tickets or streamed 3,000-round proof of work. Its first MessagePack tranche supports nil/boolean/integer/string/binary/generic-extension map keys, rejects Python-equal duplicates, and fails closed on float/container keys and timestamp extension normalization. Two unit plus eleven integration tests consume eight positive, one noncanonical inbound, and six negative pinned-Python fixtures; ten Python authority tests, strict Clippy/rustdoc, RISC-V/Xtensa checks, and an exact 15-package normal-closure policy pass. The mixed-order subgroup regression constructs its points from the dependency's basepoint and torsion constants instead of retaining third-party vector literals. This does not provide encoding, announces, durable delivery, Resource segmentation, a mailbox/router, RF interoperability, or live actor integration; proof-of-work validation remains synchronous work that must not run in the sole network actor |
 | `reticulum-lxmf-ingress`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (portable opportunistic admission; permanent-E290 composition) | The `no_std` adapter performs no admission-time allocation: it borrows an already owned ADR 0012 application event, admits only destination DATA addressed to an explicitly supplied local `lxmf.delivery` destination, resolves the source public key by value, and returns a zero-copy validated carrier plus fixed scalar evidence under caller-selected wire and stamp policies. Its normal closure deliberately includes the alloc-backed `node-core`/Rete application-event adapter; graph policy instead proves that it adds no platform, board, radio, firmware, storage, device-API, supervisor, or executor layer. Typed unrelated, deferred, rejected, and validated outcomes preserve ownership; missing identities and incomplete stamp work remain retryable state rather than invalid-message claims. Nine tests cover Python fixtures, exact-buffer borrowing, lookup/destination/context isolation, successful and failed stamp policy, unsupported carrier deferral, class-preserving failures, owner retention, and a Python-valid 391-byte carrier beyond the test-only 383-byte raw-inbox limit. Non-`NONE` Link DATA is unrelated; context-`NONE` Link DATA and Resource completion remain deferred because current events lack a Link-to-local-destination binding. The permanent E290 image mount-gates a derived `lxmf.delivery` destination, recalls source identities through the transport-neutral supervisor, and schedules only opportunistic destination DATA; local Link admission remains disabled until a bounded Link/Resource owner exists. An earlier A-to-B packet and the current bounded A-to-B plus B-to-A chat exchange power-qualify opportunistic destination-DATA admission; other carriers, sustained directional load, pressure, faults and soak remain open |
 | `reticulum-lxmf-model`, `reticulum-lxmf-store`, and `reticulum-lxmf-durable-ingress`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (portable durable owner; mount-gated E290 receive composition) | The dependency-free model holds immutable logical identity, exact scalar metadata and borrowed contiguous or two-segment normalized wire without a message-sized buffer. The `no_std` store borrows an opaque caller-backed fixed index slot slice and uses variable 4 KiB append-only extents, isolated claim/header writes, terminal commit, commit-time and mount-time integrity readback, exact physical binding, stable non-address handles and typed replay/collision/fault outcomes. Its 30 tests cover five exact released-Python basic/rich/stamped/391-byte messages, exact zero/one/multiple caller index capacities and reconstruction, multi-record and multi-extent segmented append, range/index exhaustion, duplicate handles, unknown or committed media hidden inside an incomplete span during mount or pending retry, standalone continuation and out-of-range start rejection, programmed padding, sparse torn claims/headers, every write-prefix cut, every lost-success program call, reboot/reappend and final-verification read loss. Ten model tests and thirteen durable-ingress tests prove the exact lease is acknowledged only for a new commit or a fresh retransmission recognized as `AlreadyDurable` and otherwise returned unchanged, including reset/remount replay that earns a fresh ready proof without inheriting volatile state. Real Rete `Retain`/`basic_binary` coverage proves preclassification and delayed-proof capacity precede store I/O, a new commit and a freshly received retransmission recognized as `AlreadyDurable` each queue that event's retained proof, and a lost terminal-write reply followed by exact retry queues exactly one ready proof. Strict Clippy/rustdoc, RISC-V/Xtensa checks and exact normal/dev closure policies pass. The E290 product graph directly includes the four feature-free model/store/ingress owners, allocates its 512-slot opaque index, delayed-proof backing, and retry/fault/proof-holder state in validated PSRAM, validates and mounts a dedicated 2 MiB partition in its sole flash coordinator, selects per-destination `Retain`, and drains ready packet proofs only through the ordinary transport-neutral supervisor after a new commit or a fresh retransmission recognized as `AlreadyDurable`. Sixteen internal-RAM application-event slots and sixteen external-PSRAM proof/retry slots are the current volatile-concurrency profile, not a protocol or storage ceiling. An earlier powered A-to-B trial proved one new durable opportunistic record before delayed-proof release and `Delivered`; the current image additionally passed bounded authenticated record list/chunk-read and A-to-B plus B-to-A external SQLite-client import. Resource streaming, delete/reclaim, full replay/remount, sustained directional-load balance, pressure, faults, and soak remain later owners |
@@ -1179,7 +1190,10 @@ crates/
   lxmf-propagation/               # deposit/retrieve/peer sync/culling state machine
   nomad-protocol/                 # node/path/form/file/cache state, no renderer
   micron-parser/                  # bounded safe AST/event parser
-  local-clients/                  # optional conversation/Nomad application services
+  local-clients/                  # optional embedded conversation/Nomad services
+  lxmf-chat-core/                 # host conversation/outbox/inbox persistence domain
+  lxmf-chat-app/                  # stepwise store-to-authenticated-session use cases
+  lxmf-chat-service/              # host USB actor plus bundled loopback SPA/API
   device-api/                     # request/response/event schema
   device-api-adapter/             # authenticated dispatch over storage actor
   device-api-framing/             # COBS/length framing and chunk transfer
@@ -2179,9 +2193,10 @@ Web Bluetooth is not a universal mobile answer, especially on iOS. A React Nativ
 For the turnkey local client/API:
 
 1. USB CDC-ACM CLI/test client.
-2. Wi-Fi SPA using the same schema.
-3. BLE device-API bearer and a minimal React Native shell.
-4. Optional USB NCM SPA and desktop packaging.
+2. Host companion service and loopback SPA over that USB API.
+3. Device-served Wi-Fi SPA using the same application model and API semantics.
+4. BLE device-API bearer and a minimal React Native shell.
+5. Optional USB NCM device-served SPA and desktop packaging.
 
 For Reticulum packet interfaces, fully qualify LoRa first, then use a USB
 stream actor to prove heterogeneous forwarding before selecting Wi-Fi
@@ -2767,8 +2782,10 @@ submission, sequential status, peer proof, and fresh post-re-enumeration status
 paths are powered-qualified. Remaining live-lifecycle states, application inbox
 delivery, physical-power-cut and full/sustained/default-image high-water
 qualification, multi-hop/Resource coverage, and sustained qualification remain
-open. The powered external SQLite client now imports exact peer messages;
-onboard/background inbox service and UI delivery remain open. Current source
+open. The powered external SQLite client now imports exact peer messages. A
+host-side single-owner service also performs background inbox/outbox work and
+serves a bounded loopback UI; onboard or device-served UI delivery remains
+open. Current source
 now narrows the application-
 inbox step to ADR 0011's one-entry raw-RNS durability probe plus API 1.2
 status/peek. Its host and target composition passes, and bounded powered runs
@@ -2807,10 +2824,13 @@ not a feature ceiling. Host tests, dependency policy and a linked Xtensa release
 image qualify the composition. Exact two-board HIL readbacks and one fresh
 307-byte A-to-B durable commit/proof exchange now power-qualify the first
 opportunistic path. Independently scheduled bootstrap/30-minute `lxmf.delivery` discovery is present. Responsive
-local path-request discovery, outbound/direct/Resource delivery, app-level
-receipts and retries,
-propagation, client-facing store APIs, lifecycle/reclamation and USB client
-semantics remain open.
+local path-request discovery, direct/Resource delivery, richer app-level
+receipts and cancellation,
+propagation, complete client-facing store APIs, lifecycle/reclamation and
+production USB client semantics remain open. Basic source-free opportunistic
+send, durable status, list/read, persistent host conversations, and automatic
+host reconciliation/inbox import are implemented under their bounded alpha
+contracts.
 
 The first `AdmissionDeferred` policy is intentionally incomplete: it retains an
 unknown-source event indefinitely within the fixed slot owner. This cannot grow
@@ -2842,6 +2862,16 @@ Deliverables:
 Exit: released Python LXMF nodes can deposit to, retrieve from and peer/synchronise with the device across loss and reboot, without unbounded RAM, flash or CPU use. This is the core full-node milestone.
 
 ### Phase 5 — optional local messaging client and Wi-Fi SPA
+
+Current progress: the host-appliance alpha factors persistent contacts,
+conversations, commit-before-send outbox work, status projection, and inbox
+deduplication behind a stepwise application engine. A single host actor owns
+SQLite and the authenticated serial session while a bundled loopback SPA uses a
+capability-cookie JSON/SSE API. One message crossed that HTTP boundary, the
+E290 LoRa path, and peer import. This de-risks the local-messaging model and UI
+flow but does not satisfy this phase: the host computer remains required and no
+SoftAP, device HTTP server, wireless security profile, update flow, or
+direct/propagated message UX is implemented.
 
 Deliverables:
 

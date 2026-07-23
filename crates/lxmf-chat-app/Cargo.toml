@@ -1,0 +1,16 @@
+[package]
+name = "reticulum-lxmf-chat-app"
+description = "Application services shared by Reticulum LXMF chat clients"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reticulum-device-api = { path = "../device-api", default-features = false, features = ["experimental-lxmf"] }
+reticulum-device-client = { path = "../device-client" }
+reticulum-lxmf-chat-core = { path = "../lxmf-chat-core" }
+
+[lib]
+path = "src/lib.rs"

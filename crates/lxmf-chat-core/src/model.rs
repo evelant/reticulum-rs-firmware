@@ -10,9 +10,49 @@ pub const MESSAGE_ID_LENGTH: usize = 32;
 pub const IDEMPOTENCY_KEY_LENGTH: usize = 16;
 /// Bytes in a SHA-256 digest of a complete encoded Reticulum packet.
 pub const ENCODED_PACKET_SHA256_LENGTH: usize = 32;
+/// Bytes in the authenticated public device API identifier.
+pub const DEVICE_ID_LENGTH: usize = 16;
 /// Largest positive whole-millisecond timestamp that remains injective when
 /// converted to LXMF's binary64 seconds representation.
 pub const MAX_UNIX_TIMESTAMP_MILLIS: u64 = (1_u64 << 43) * 1_000 - 1;
+
+/// Stable device and local-destination identity bound to one chat database.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeviceBinding {
+    device_id: [u8; DEVICE_ID_LENGTH],
+    primary_destination: DestinationHash,
+    lxmf_delivery_destination: DestinationHash,
+}
+
+impl DeviceBinding {
+    /// Construct one complete authenticated device binding.
+    pub const fn new(
+        device_id: [u8; DEVICE_ID_LENGTH],
+        primary_destination: DestinationHash,
+        lxmf_delivery_destination: DestinationHash,
+    ) -> Self {
+        Self {
+            device_id,
+            primary_destination,
+            lxmf_delivery_destination,
+        }
+    }
+
+    /// Stable device API identifier authenticated by the session handshake.
+    pub const fn device_id(self) -> [u8; DEVICE_ID_LENGTH] {
+        self.device_id
+    }
+
+    /// Node's public primary Reticulum destination.
+    pub const fn primary_destination(self) -> DestinationHash {
+        self.primary_destination
+    }
+
+    /// Node's registered local `lxmf.delivery` destination.
+    pub const fn lxmf_delivery_destination(self) -> DestinationHash {
+        self.lxmf_delivery_destination
+    }
+}
 
 /// Complete `lxmf.delivery` destination hash.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

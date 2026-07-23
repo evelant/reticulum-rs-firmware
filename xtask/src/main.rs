@@ -865,7 +865,7 @@ fn graph_policy() -> ExitCode {
     } else {
         println!(
             "ok: all safe, RX, HIL and all-features all-target product graphs, the RF-inert physical-storage HIL graph, the separately hazardous default-sentinel, Tracker semantic-announce/semantic-round-trip and E290 semantic-round-trip TX HIL graphs, the permanent, inbox commit-fault and runtime-measurement E290 node graphs and the Leviculum \
-             comparison graph are isolated; the returned-radio-fault, inbound-commit-fault and runtime-measurement hooks are feature-exclusive; \
+             comparison graph are isolated; every firmware and HIL graph excludes the host-only device client, chat application/service crates, SQLite/serial access and Axum/Hyper/Tokio/Tower OS runtime; the returned-radio-fault, inbound-commit-fault and runtime-measurement hooks are feature-exclusive; \
              legacy Tracker firmware direct dependencies use only the RX façade and every-feature resolution \
              excludes TX ownership and pre-integration durable crates; resolved Rete packages match reported \
              source/revision; esp-rtos and lora-phy resolve only to their reviewed local patches, \
@@ -1139,6 +1139,32 @@ fn cargo_tree_contains_package(tree: &str, package: &str) -> bool {
         .any(|line| line.split_whitespace().any(|field| field == package))
 }
 
+const HOST_APPLIANCE_GRAPH_FORBIDDEN: [&str; 12] = [
+    "axum",
+    "hyper",
+    "mio",
+    "reticulum-device-client",
+    "reticulum-lxmf-chat",
+    "reticulum-lxmf-chat-app",
+    "reticulum-lxmf-chat-core",
+    "reticulum-lxmf-chat-service",
+    "rusqlite",
+    "serialport",
+    "tokio",
+    "tower",
+];
+
+fn validate_host_appliance_graph_boundary(profile: &str, tree: &str) -> Result<(), String> {
+    for forbidden in HOST_APPLIANCE_GRAPH_FORBIDDEN {
+        if cargo_tree_contains_package(tree, forbidden) {
+            return Err(format!(
+                "{profile} graph contains host-only appliance package {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 const PRODUCT_GRAPH_FORBIDDEN: [&str; 32] = [
     "leviculum-core",
     "rete-lxmf",
@@ -1175,6 +1201,7 @@ const PRODUCT_GRAPH_FORBIDDEN: [&str; 32] = [
 ];
 
 fn validate_product_graph_boundary(label: &str, tree: &str) -> Result<(), String> {
+    validate_host_appliance_graph_boundary(&format!("product {label} all-target"), tree)?;
     for forbidden in PRODUCT_GRAPH_FORBIDDEN {
         if cargo_tree_contains_package(tree, forbidden) {
             return Err(format!(
@@ -1269,6 +1296,7 @@ const TX_HIL_GRAPH_FORBIDDEN: [&str; 32] = [
 ];
 
 fn validate_tx_hil_graph_boundary(tree: &str) -> Result<(), String> {
+    validate_host_appliance_graph_boundary("hazardous TX HIL", tree)?;
     for required in TX_HIL_GRAPH_REQUIRED {
         if !cargo_tree_contains_package(tree, required) {
             return Err(format!(
@@ -1330,6 +1358,7 @@ const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 28] = [
 ];
 
 fn validate_semantic_tx_hil_graph_boundary(tree: &str) -> Result<(), String> {
+    validate_host_appliance_graph_boundary("semantic announce TX HIL", tree)?;
     for required in SEMANTIC_TX_HIL_GRAPH_REQUIRED {
         if !cargo_tree_contains_package(tree, required) {
             return Err(format!(
@@ -1375,6 +1404,7 @@ fn validate_semantic_tx_hil_graph_boundary(tree: &str) -> Result<(), String> {
 }
 
 fn validate_semantic_roundtrip_tx_hil_graph_boundary(tree: &str) -> Result<(), String> {
+    validate_host_appliance_graph_boundary("semantic round-trip TX HIL", tree)?;
     for required in SEMANTIC_TX_HIL_GRAPH_REQUIRED {
         if !cargo_tree_contains_package(tree, required) {
             return Err(format!(
@@ -1478,6 +1508,7 @@ const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 31] = [
 ];
 
 fn validate_e290_semantic_hil_graph_boundary(tree: &str) -> Result<(), String> {
+    validate_host_appliance_graph_boundary("E290 semantic HIL", tree)?;
     for required in E290_SEMANTIC_HIL_GRAPH_REQUIRED {
         if !cargo_tree_contains_package(tree, required) {
             return Err(format!(
@@ -2231,6 +2262,7 @@ fn validate_e290_node_graph_for_root_features(
     expected_root_features: &str,
     profile: &str,
 ) -> Result<(), String> {
+    validate_host_appliance_graph_boundary(profile, tree)?;
     for required in E290_NODE_GRAPH_REQUIRED {
         if !cargo_tree_contains_package(tree, required) {
             return Err(format!("{profile} graph is missing required {required}"));
@@ -2494,6 +2526,7 @@ fn validate_e290_node_feature_boundary(
 }
 
 fn validate_storage_hil_graph_boundary(tree: &str) -> Result<(), String> {
+    validate_host_appliance_graph_boundary("physical-storage HIL all-target", tree)?;
     for forbidden in STORAGE_HIL_GRAPH_FORBIDDEN {
         if cargo_tree_contains_package(tree, forbidden) {
             return Err(format!(
@@ -5577,7 +5610,7 @@ const RADIO_TX_DISPATCH_REVIEWED_CLOSURE: [ReviewedClosurePackage; 65] = [
     closure_registry("embedded-io-async", "0.6.1", &[]),
     closure_registry("embedded-io-async", "0.7.0", &[]),
     closure_registry("fiat-crypto", "0.2.9", &[]),
-    closure_registry("futures-core", "0.3.32", &[]),
+    closure_registry("futures-core", "0.3.33", &[]),
     closure_registry("futures-sink", "0.3.32", &[]),
     closure_registry("generic-array", "0.14.7", &["more_lengths"]),
     closure_registry("hash32", "0.3.1", &[]),
@@ -8936,6 +8969,18 @@ fn first_line(text: &str) -> &str {
 mod tests {
     use super::*;
 
+    fn assert_host_appliance_packages_rejected(
+        valid_tree: &str,
+        validate: impl Fn(&str) -> Result<(), String>,
+    ) {
+        for forbidden in HOST_APPLIANCE_GRAPH_FORBIDDEN {
+            let tree = format!("{valid_tree}\n└── {forbidden} v0.1.0 features=[]");
+            let error = validate(&tree).unwrap_err();
+            assert!(error.contains("host-only appliance package"), "{error}");
+            assert!(error.contains(forbidden), "{error}");
+        }
+    }
+
     #[test]
     fn first_line_handles_empty_and_multiline_output() {
         assert_eq!(first_line(""), "");
@@ -9452,11 +9497,11 @@ mod tests {
 
     #[test]
     fn product_graph_boundary_rejects_feature_only_transitive_tx_ownership() {
-        validate_product_graph_boundary(
-            "all-features",
-            "reticulum-heltec-tracker-v2 v0.1.0\n└── optional-rx-wrapper v0.1.0",
-        )
-        .unwrap();
+        let valid = "reticulum-heltec-tracker-v2 v0.1.0\n└── optional-rx-wrapper v0.1.0";
+        validate_product_graph_boundary("all-features", valid).unwrap();
+        assert_host_appliance_packages_rejected(valid, |tree| {
+            validate_product_graph_boundary("all-features", tree)
+        });
 
         for forbidden in [
             "reticulum-board-heltec-tracker-v2-radio",
@@ -9496,10 +9541,9 @@ mod tests {
 
     #[test]
     fn storage_hil_graph_boundary_rejects_radio_protocol_and_tx_packages() {
-        validate_storage_hil_graph_boundary(
-            "reticulum-heltec-tracker-v2-storage-hil v0.1.0\n└── esp-storage v0.9.0",
-        )
-        .unwrap();
+        let valid = "reticulum-heltec-tracker-v2-storage-hil v0.1.0\n└── esp-storage v0.9.0";
+        validate_storage_hil_graph_boundary(valid).unwrap();
+        assert_host_appliance_packages_rejected(valid, validate_storage_hil_graph_boundary);
 
         for forbidden in STORAGE_HIL_GRAPH_FORBIDDEN {
             let tree =
@@ -9518,6 +9562,7 @@ mod tests {
                      ├── reticulum-radio-interface v0.1.0\n\
                      └── reticulum-semantic-roundtrip-hil v0.1.0 features=[]";
         validate_tx_hil_graph_boundary(valid).unwrap();
+        assert_host_appliance_packages_rejected(valid, validate_tx_hil_graph_boundary);
 
         for missing in TX_HIL_GRAPH_REQUIRED {
             let tree = valid.replace(missing, "missing-required-package");
@@ -9544,6 +9589,7 @@ mod tests {
                          ├── rete-stack v0.1.0 features=[alloc]\n\
                          └── rete-transport v0.1.0 features=[]";
         validate_semantic_tx_hil_graph_boundary(valid).unwrap();
+        assert_host_appliance_packages_rejected(valid, validate_semantic_tx_hil_graph_boundary);
 
         for missing in SEMANTIC_TX_HIL_GRAPH_REQUIRED {
             let tree = valid.replace(missing, "missing-required-package");
@@ -9583,6 +9629,10 @@ mod tests {
                      │   └── rete-transport v0.1.0 features=[]\n\
                      └── static_cell v2.1.1 features=[]";
         validate_semantic_roundtrip_tx_hil_graph_boundary(valid).unwrap();
+        assert_host_appliance_packages_rejected(
+            valid,
+            validate_semantic_roundtrip_tx_hil_graph_boundary,
+        );
 
         for missing in SEMANTIC_TX_HIL_GRAPH_REQUIRED {
             let tree = valid.replace(missing, "missing-required-package");
@@ -9624,6 +9674,7 @@ mod tests {
                          ├── rete-stack v0.1.0 features=[alloc]\n\
                          └── rete-transport v0.1.0 features=[]";
         validate_e290_semantic_hil_graph_boundary(valid).unwrap();
+        assert_host_appliance_packages_rejected(valid, validate_e290_semantic_hil_graph_boundary);
 
         for missing in E290_SEMANTIC_HIL_GRAPH_REQUIRED {
             let tree = valid.replace(missing, "missing-required-package");
@@ -9814,6 +9865,7 @@ mod tests {
                      ├── reticulum-tx-supervisor v0.1.0 features=[]\n\
                      └── static_cell v2.1.1 features=[]";
         validate_e290_node_graph_boundary(valid).unwrap();
+        assert_host_appliance_packages_rejected(valid, validate_e290_node_graph_boundary);
         let hil = valid.replacen(
             "features=[default]",
             "features=[rns-inbox-commit-fault-hil]",
