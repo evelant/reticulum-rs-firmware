@@ -1,10 +1,10 @@
 //! Native mobile binding surface for the Reticulum appliance client.
 //!
-//! The first exported call establishes that an installed native application
-//! and its generated TypeScript declarations agree with the Rust device API.
-//! Transport ownership, credentials, persistence, and background lifecycle are
-//! intentionally absent until this small binding can be built and executed on
-//! both mobile platforms.
+//! The immutable bridge contract establishes that an installed application and
+//! its generated TypeScript declarations agree with the Rust device API. The
+//! [`NativeAppliance`] facade additionally owns durable offline chat state while
+//! platform USB, BLE, and Wi-Fi connector implementations remain explicit
+//! unavailable stubs.
 
 #![deny(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -14,10 +14,14 @@ use reticulum_device_api::{
     MAX_LXMF_READ_CHUNK_BYTES, MAX_MESSAGE_BYTES,
 };
 
+mod appliance;
+
+pub use appliance::{NativeAppliance, NativeApplianceError, NativeTransport};
+
 /// Incompatible generation of the callable native bridge.
 pub const BRIDGE_API_MAJOR: u16 = 1;
 /// Backward-compatible revision of the callable native bridge.
-pub const BRIDGE_API_MINOR: u16 = 0;
+pub const BRIDGE_API_MINOR: u16 = 1;
 
 /// Exact protocol contract compiled into a native client binary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
@@ -72,7 +76,7 @@ mod tests {
             native_bridge_contract(),
             NativeBridgeContract {
                 bridge_api_major: 1,
-                bridge_api_minor: 0,
+                bridge_api_minor: 1,
                 device_api_major: 1,
                 device_api_minor: 4,
                 max_message_bytes: 512,

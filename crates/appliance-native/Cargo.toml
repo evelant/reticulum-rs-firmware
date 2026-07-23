@@ -9,7 +9,11 @@ publish.workspace = true
 
 [dependencies]
 reticulum-device-api = { path = "../device-api", default-features = false, features = ["experimental-lxmf"] }
-uniffi.workspace = true
+reticulum-lxmf-chat-runtime = { path = "../lxmf-chat-runtime" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+uniffi = { workspace = true, features = ["tokio"] }
 
 [lib]
 crate-type = ["lib", "staticlib"]

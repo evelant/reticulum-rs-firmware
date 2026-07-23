@@ -126,13 +126,18 @@ proof unless a failing test promotes one into a release blocker.
   companion: there is still no client served by the E290, Wi-Fi or BLE client
   bearer, native device transport, display UI, NomadNet client, or Micron
   client.
-- The native Rust bridge currently exports immutable contract metadata only.
-  Native screens still use the interim HTTP adapter, while the host service's
-  loopback/origin policy is deliberately not a phone transport. Cancellation,
-  Rust panic/error translation, module cleanup, reload idempotence,
+- The native Rust bridge now owns an app-private SQLite chat runtime and exposes
+  contacts, timelines, idempotent durable outbox writes, snapshots, sync, and
+  close through the shared Rust DTOs. Its USB Serial/JTAG, USB OTG, BLE, and
+  Wi-Fi connector variants are deliberate nonfunctional stubs, so native
+  screens can use offline state but still cannot reach a node. The host
+  service's loopback/origin policy remains deliberately unsuitable as a phone
+  transport. The mutable facade is covered on each side of the generated
+  boundary but has not yet run as a Hermes/TurboModule smoke test in a built
+  mobile app. Cancellation, Rust panic translation, full Fast Refresh and
   background/foreground lifecycle, and BLE disconnect/resume remain
-  unqualified. Native generation and application builds are not yet in CI.
-  The iOS XCFramework supports arm64 device and Apple-Silicon simulator only.
+  unqualified. Native generation and application builds are not yet in CI. The
+  iOS XCFramework supports arm64 device and Apple-Silicon simulator only.
   The Android proof used a large multi-ABI debug APK; release stripping,
   splits, startup, and memory remain unmeasured.
 - The host service has no operating-system single-instance lock, notification

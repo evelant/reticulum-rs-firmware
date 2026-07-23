@@ -27,7 +27,7 @@ import {
   MAX_LXMF_BASIC_CONTENT_BYTES,
   MAX_LXMF_BASIC_TITLE_BYTES,
 } from "../generated/api.ts";
-import { ApplianceApi } from "../lib/api.ts";
+import { ApplianceApi } from "../lib/api";
 import { type DraftIdentity, ensureDraftIdentity } from "../lib/draft.ts";
 import { LatestRequest } from "../lib/latest-request.ts";
 import { byteLimitError, utf8ByteLength } from "../lib/limits.ts";
@@ -399,6 +399,8 @@ export default function ApplianceScreen() {
       active = false;
     };
   }, []);
+
+  useEffect(() => () => api.dispose(), [api]);
 
   const refresh = useCallback(async () => {
     const refreshRequest = refreshRequests.current.begin();

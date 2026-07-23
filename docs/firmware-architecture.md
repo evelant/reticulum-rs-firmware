@@ -1197,7 +1197,8 @@ crates/
   local-clients/                  # optional embedded conversation/Nomad services
   lxmf-chat-core/                 # host conversation/outbox/inbox persistence domain
   lxmf-chat-app/                  # stepwise store-to-authenticated-session use cases
-  lxmf-chat-service/              # host USB actor plus bundled Expo web export/API
+  lxmf-chat-runtime/              # transport-neutral SQLite/session actor and client DTOs
+  lxmf-chat-service/              # host USB connector plus bundled Expo web export/API
   device-api/                     # request/response/event schema
   device-api-adapter/             # authenticated dispatch over storage actor
   device-api-framing/             # COBS/length framing and chunk transfer

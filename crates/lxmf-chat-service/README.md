@@ -1,10 +1,12 @@
 # Reticulum LXMF host appliance alpha
 
 `reticulum-lxmf-chat-service` turns one paired E290 and its authenticated USB
-API into a small always-running host application. One actor thread exclusively
-owns the serial session and SQLite connection, reconciles the durable outbox,
-polls the device inbox, and publishes immutable state snapshots. A bundled
-Expo web export is served from a loopback-only HTTP API.
+API into a small always-running host application. The shared
+`reticulum-lxmf-chat-runtime` actor exclusively owns the authenticated session
+and SQLite connection, reconciles the durable outbox, polls the device inbox,
+and publishes immutable transport-neutral snapshots. This crate supplies the
+USB Serial/JTAG connector, managed onboarding, and a loopback-only HTTP API
+serving the bundled Expo web export.
 
 This is an appliance-development bridge, not the final standalone UI. The web
 export is compiled into the **host executable** and the computer must remain
@@ -96,8 +98,11 @@ SHA-256 digest of every runtime asset. Files under `assets/` are generated; do
 not edit them directly.
 
 JSON DTOs in `../../clients/appliance/src/generated/api.ts` are generated from
-the Rust Serde types with `ts-rs`. Change the Rust wire type first and then run
-`bun run api:generate`; do not maintain a second handwritten TypeScript model.
+the shared runtime and service Serde types with `ts-rs`. Change the Rust type
+first and then run `bun run api:generate`; do not maintain a second handwritten
+TypeScript model. Runtime snapshots use generic transport metadata. The service
+keeps its existing HTTP-v1 USB field names through a generated compatibility
+projection, which the HTTP client maps back into the generic application model.
 
 The Bun version/revision and every development dependency are exact pins. To
 change the client, install from the lockfile, regenerate, and run the complete
@@ -132,8 +137,9 @@ independent of the web toolchain.
   after reconnect, a full summary scan skips already-known message IDs without
   downloading their complete wire again.
 - Missing or unusable serial sessions enter bounded exponential reconnect
-  backoff. A database/device binding mismatch is a visible fail-closed fault,
-  not a retry against another board.
+  backoff. A connector deliberately absent from a build instead settles in an
+  explicit unavailable state. A database/device binding mismatch is a visible
+  fail-closed fault, not a retry against another board.
 - The actor command queue, HTTP request body, and EventSource client count are
   bounded. Browser events are invalidations; the Expo client reloads
   authoritative snapshots and timelines rather than treating events as
@@ -199,8 +205,10 @@ and soak.
 
 ```sh
 cargo +stable test --locked -p reticulum-lxmf-chat-app
+cargo +stable test --locked -p reticulum-lxmf-chat-runtime
 cargo +stable test --locked -p reticulum-lxmf-chat-service
 cargo +stable clippy --locked -p reticulum-lxmf-chat-app --all-targets -- -D warnings
+cargo +stable clippy --locked -p reticulum-lxmf-chat-runtime --all-targets -- -D warnings
 cargo +stable clippy --locked -p reticulum-lxmf-chat-service --all-targets -- -D warnings
 
 cd clients/appliance

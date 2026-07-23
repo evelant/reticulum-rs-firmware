@@ -182,6 +182,52 @@ async function assertPlatformToolchain(platform: NativePlatform, toolchain: stri
   }
 }
 
+async function buildEnvironment(
+  platform: NativePlatform,
+  toolchain: string,
+): Promise<Record<string, string>> {
+  const environment: Record<string, string> = { RUSTUP_TOOLCHAIN: toolchain };
+  if (platform !== "ios") return environment;
+
+  // A Nix-wrapped host compiler can inject a macOS deployment target even
+  // while cc-rs is compiling bundled C dependencies for iPhoneOS. Select the
+  // Xcode toolchain explicitly for both supported iOS Rust targets so native
+  // dependencies never receive incompatible macOS and iOS target flags.
+  const clang = (
+    await commandOutput(
+      ["xcrun", "--sdk", "iphoneos", "--find", "clang"],
+      repositoryDirectory,
+      environment,
+    )
+  ).trim();
+  const clangPlusPlus = (
+    await commandOutput(
+      ["xcrun", "--sdk", "iphoneos", "--find", "clang++"],
+      repositoryDirectory,
+      environment,
+    )
+  ).trim();
+  const ar = (
+    await commandOutput(
+      ["xcrun", "--sdk", "iphoneos", "--find", "ar"],
+      repositoryDirectory,
+      environment,
+    )
+  ).trim();
+
+  return {
+    ...environment,
+    AR_aarch64_apple_ios: ar,
+    AR_aarch64_apple_ios_sim: ar,
+    CC_aarch64_apple_ios: clang,
+    CC_aarch64_apple_ios_sim: clang,
+    CXX_aarch64_apple_ios: clangPlusPlus,
+    CXX_aarch64_apple_ios_sim: clangPlusPlus,
+    CARGO_TARGET_AARCH64_APPLE_IOS_LINKER: clang,
+    CARGO_TARGET_AARCH64_APPLE_IOS_SIM_LINKER: clang,
+  };
+}
+
 async function writeAndroidCompatibilityFiles(): Promise<void> {
   const manifestPath = join(moduleDirectory, "android/src/main/AndroidManifestNew.xml");
   await mkdir(dirname(manifestPath), { recursive: true });
@@ -246,7 +292,7 @@ async function requireGeneratedPaths(paths: readonly string[]): Promise<void> {
 }
 
 async function buildPlatform(platform: NativePlatform, toolchain: string): Promise<void> {
-  const environment = { RUSTUP_TOOLCHAIN: toolchain };
+  const environment = await buildEnvironment(platform, toolchain);
   await run(
     [
       process.execPath,

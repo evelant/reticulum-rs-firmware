@@ -61,9 +61,15 @@ outputs are disposable and ignored. After the development client is installed,
 changes. `bun run prebuild` remains available when only generated native
 projects are needed.
 
-The app defaults to the appliance's same-origin HTTP API on web. Native HTTP is an interim adapter:
-set `EXPO_PUBLIC_APPLIANCE_URL` to an accessible appliance origin and open a
-`reticulum-appliance://connect?cap=...` link to bootstrap a session. The current Rust alpha server
-binds loopback and enforces browser-origin headers, so remote native HTTP needs a deliberate server
-transport/authentication policy before it can connect. The client boundary is isolated so a future
-BLE, USB, Wi-Fi, or embedded Rust native adapter can replace HTTP without changing screens or DTOs.
+The app defaults to the appliance's same-origin HTTP API on web. Native builds default to a Rust
+single-owner actor with an app-private SQLite database. This already provides durable contacts,
+timelines, and idempotent outbox writes while offline. BLE is the default selected native bearer,
+but BLE, Wi-Fi, USB OTG, and USB serial/JTAG are still explicit unavailable connector stubs; they do
+not silently fall back or claim a device connection.
+
+Set `EXPO_PUBLIC_APPLIANCE_URL` to retain the interim native HTTP adapter during development, then
+open a `reticulum-appliance://connect?cap=...` link to bootstrap a session. The current Rust alpha
+server binds loopback and enforces browser-origin headers, so remote native HTTP still needs a
+deliberate server transport/authentication policy before it can connect. Both adapters implement
+the same client boundary and consume Rust-generated semantic DTOs, so adding real BLE, Wi-Fi, or
+USB connectors does not require changing screens or duplicating interface types.

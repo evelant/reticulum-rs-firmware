@@ -1,0 +1,27 @@
+[package]
+name = "reticulum-lxmf-chat-runtime"
+description = "Transport-neutral durable LXMF chat actor and client projections"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+test-support = []
+
+[dependencies]
+hex.workspace = true
+reticulum-device-api = { path = "../device-api", default-features = false, features = ["experimental-lxmf"] }
+reticulum-device-client = { path = "../device-client" }
+reticulum-lxmf-chat-app = { path = "../lxmf-chat-app" }
+reticulum-lxmf-chat-core = { path = "../lxmf-chat-core" }
+serde.workspace = true
+tokio.workspace = true
+ts-rs.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lib]
+path = "src/lib.rs"

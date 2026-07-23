@@ -9,9 +9,10 @@ use std::time::Duration;
 use rand_core::{CryptoRng, RngCore};
 use reticulum_device_client::{ActivatedCredential, ClientConfig, DeviceClient};
 use reticulum_lxmf_chat_app::DeviceClientSession;
+use reticulum_lxmf_chat_runtime::{
+    ConnectFailure, ConnectedSession, ConnectionMetadata, Connector,
+};
 use serialport::{ClearBuffer, SerialPortInfo, SerialPortType};
-
-use crate::runtime::{ConnectedSession, Connector};
 
 const BAUD_RATE: u32 = 115_200;
 const DEFAULT_IO_SLICE: Duration = Duration::from_millis(100);
@@ -274,56 +275,63 @@ impl SerialConnectorConfig {
     }
 }
 
-pub(crate) struct SerialConnector {
+/// Authenticated host USB serial connector.
+pub struct SerialConnector {
     config: SerialConnectorConfig,
 }
 
 impl SerialConnector {
-    pub(crate) const fn new(config: SerialConnectorConfig) -> Self {
+    /// Construct a connector from stable USB discovery and credential policy.
+    pub const fn new(config: SerialConnectorConfig) -> Self {
         Self { config }
     }
 }
 
 impl Connector for SerialConnector {
-    fn connect(&mut self) -> Result<ConnectedSession, String> {
-        let connection_lease = self
-            .config
-            .connection_gate
-            .as_ref()
-            .map(SerialConnectionGate::acquire)
-            .transpose()?;
-        let selected = self.select_port()?;
-        let credential = read_credential(&self.config.credential)?;
-        let mut port = serialport::new(&selected, BAUD_RATE)
-            .timeout(self.config.io_slice)
-            .open()
-            .map_err(|error| format!("could not open {selected}: {error}"))?;
-        port.write_data_terminal_ready(true)
-            .map_err(|error| format!("could not assert DTR on {selected}: {error}"))?;
-        port.write_request_to_send(false)
-            .map_err(|error| format!("could not clear RTS on {selected}: {error}"))?;
-        thread::sleep(self.config.open_settle);
-        port.clear(ClearBuffer::Input)
-            .map_err(|error| format!("could not clear stale input on {selected}: {error}"))?;
+    fn connect(&mut self) -> Result<ConnectedSession, ConnectFailure> {
+        (|| -> Result<ConnectedSession, String> {
+            let connection_lease = self
+                .config
+                .connection_gate
+                .as_ref()
+                .map(SerialConnectionGate::acquire)
+                .transpose()?;
+            let selected = self.select_port()?;
+            let credential = read_credential(&self.config.credential)?;
+            let mut port = serialport::new(&selected, BAUD_RATE)
+                .timeout(self.config.io_slice)
+                .open()
+                .map_err(|error| format!("could not open {selected}: {error}"))?;
+            port.write_data_terminal_ready(true)
+                .map_err(|error| format!("could not assert DTR on {selected}: {error}"))?;
+            port.write_request_to_send(false)
+                .map_err(|error| format!("could not clear RTS on {selected}: {error}"))?;
+            thread::sleep(self.config.open_settle);
+            port.clear(ClearBuffer::Input)
+                .map_err(|error| format!("could not clear stale input on {selected}: {error}"))?;
 
-        let client = DeviceClient::connect(
-            port,
-            credential,
-            &mut HostRng,
-            ClientConfig::new(
-                self.config.operation_timeout,
-                self.config.operation_timeout,
-                512,
-                16 * 1024 * 1024,
-            ),
-        )
-        .map_err(|error| format!("could not authenticate {selected}: {error}"))?;
-        Ok(ConnectedSession {
-            session: Box::new(DeviceClientSession::new(client)),
-            port_name: selected,
-            usb_serial: self.config.usb_serial.clone(),
-            connection_lease,
-        })
+            let client = DeviceClient::connect(
+                port,
+                credential,
+                &mut HostRng,
+                ClientConfig::new(
+                    self.config.operation_timeout,
+                    self.config.operation_timeout,
+                    512,
+                    16 * 1024 * 1024,
+                ),
+            )
+            .map_err(|error| format!("could not authenticate {selected}: {error}"))?;
+            let connected = ConnectedSession::new(
+                DeviceClientSession::new(client),
+                ConnectionMetadata::usb_serial(selected, self.config.usb_serial.clone()),
+            );
+            Ok(match connection_lease {
+                Some(lease) => connected.with_connection_lease(lease),
+                None => connected,
+            })
+        })()
+        .map_err(ConnectFailure::retryable)
     }
 }
 

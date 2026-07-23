@@ -1,47 +1,436 @@
+//! Transport-neutral durable LXMF chat actor.
+
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use reticulum_device_api::ApiErrorCode;
+use reticulum_device_api::{
+    ApiErrorCode, MAX_LXMF_BASIC_CONTENT_BYTES, MAX_LXMF_BASIC_TITLE_BYTES,
+};
 use reticulum_device_client::ClientError;
 use reticulum_lxmf_chat_app::{
     ChatEngine, DeviceSessionError, EngineError, InboxStep, LxmfSession, ReconcileStep,
 };
 use reticulum_lxmf_chat_core::{
-    ChatStore, Contact, ContactUpsertOutcome, DestinationHash, DeviceBinding, InboundCommitOutcome,
-    OutboxCommitOutcome, OutboxId, OutboxMaterial, OutboxStatus, SqliteChatStore, SqliteStoreError,
-    SubmissionFailure, SubmissionState, TimelineDirection as CoreTimelineDirection, TimelineEntry,
+    ChatStore, Contact, ContactUpsertOutcome, DestinationHash, DeviceBinding, IdempotencyKey,
+    InboundCommitOutcome, OutboxCommitOutcome, OutboxId, OutboxMaterial, OutboxStatus,
+    SqliteChatStore, SqliteStoreError, SubmissionFailure, SubmissionState,
+    TimelineDirection as CoreTimelineDirection, TimelineEntry, UnixTimestampMillis,
 };
-use serde::Serialize;
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::sync::{oneshot, watch};
 use ts_rs::TS;
-
-use crate::bindings::{JsonSafeInteger, serialize_json_safe_u64, serialize_json_safe_usize};
-use crate::serial::{SerialConnectionLease, SerialConnector, SerialConnectorConfig};
 
 const COMMAND_CAPACITY: usize = 32;
 const COMMAND_WAIT: Duration = Duration::from_millis(50);
 
-type BoxedSession = Box<dyn LxmfSession<Error = DeviceSessionError> + Send>;
+/// Largest UTF-8 contact display name accepted by every client adapter.
+pub const MAX_CONTACT_NAME_BYTES: usize = 256;
 
-pub(crate) struct ConnectedSession {
-    pub(crate) session: BoxedSession,
-    pub(crate) port_name: String,
-    pub(crate) usb_serial: String,
-    pub(crate) connection_lease: Option<SerialConnectionLease>,
+/// Largest integer JSON clients may represent without precision loss.
+pub const MAX_JSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+/// A JSON number constrained to JavaScript's lossless integer range.
+#[derive(TS)]
+#[ts(type = "number")]
+pub struct JsonSafeInteger;
+
+/// Serialize a `u64` only when JavaScript can represent it exactly.
+pub fn serialize_json_safe_u64<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if *value > MAX_JSON_SAFE_INTEGER {
+        return Err(serde::ser::Error::custom(
+            "integer exceeds the JSON safe-integer contract",
+        ));
+    }
+    serializer.serialize_u64(*value)
 }
 
-pub(crate) trait Connector: Send + 'static {
-    fn connect(&mut self) -> Result<ConnectedSession, String>;
+/// Deserialize a `u64` only when JavaScript can represent it exactly.
+pub fn deserialize_json_safe_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = u64::deserialize(deserializer)?;
+    if value > MAX_JSON_SAFE_INTEGER {
+        return Err(D::Error::custom(
+            "integer exceeds the JSON safe-integer contract",
+        ));
+    }
+    Ok(value)
+}
+
+fn serialize_optional_json_safe_u64<S>(
+    value: &Option<u64>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(value) => serialize_json_safe_u64(value, serializer),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn serialize_json_safe_usize<S>(value: &usize, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let value = u64::try_from(*value)
+        .map_err(|_| serde::ser::Error::custom("integer exceeds the JSON u64 range"))?;
+    serialize_json_safe_u64(&value, serializer)
+}
+
+/// Invalid app-facing chat request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientRequestError {
+    /// A contact name exceeds the shared UTF-8 byte limit.
+    ContactNameTooLong,
+    /// A destination is not an exact 16-byte hexadecimal hash.
+    InvalidDestination,
+    /// An LXMF title exceeds the device API's basic-message limit.
+    TitleTooLong,
+    /// LXMF content exceeds the device API's basic-message limit.
+    ContentTooLong,
+    /// A timestamp is outside the exact LXMF/JavaScript range.
+    InvalidTimestamp,
+    /// An idempotency key is not an exact 16-byte hexadecimal value.
+    InvalidIdempotencyKey,
+}
+
+impl fmt::Display for ClientRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::ContactNameTooLong => "contact name is too long",
+            Self::InvalidDestination => {
+                "destination must contain exactly 32 hexadecimal characters"
+            }
+            Self::TitleTooLong => "message title exceeds device limit",
+            Self::ContentTooLong => "message content exceeds device limit",
+            Self::InvalidTimestamp => "timestamp is outside the LXMF client range",
+            Self::InvalidIdempotencyKey => {
+                "idempotency key must contain exactly 32 hexadecimal characters"
+            }
+        })
+    }
+}
+
+impl std::error::Error for ClientRequestError {}
+
+/// Parse one complete lowercase-or-uppercase hexadecimal LXMF destination.
+pub fn parse_destination(value: &str) -> Result<DestinationHash, ClientRequestError> {
+    parse_hex::<16>(value)
+        .map(DestinationHash::new)
+        .ok_or(ClientRequestError::InvalidDestination)
+}
+
+fn parse_hex<const N: usize>(value: &str) -> Option<[u8; N]> {
+    let mut bytes = [0_u8; N];
+    hex::decode_to_slice(value, &mut bytes).ok()?;
+    Some(bytes)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, TS)]
+#[allow(missing_docs)]
+pub struct ContactRequest {
+    name: String,
+}
+
+impl ContactRequest {
+    /// Construct one contact request.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+
+    /// Validate this request and combine it with its path destination.
+    pub fn into_contact(self, destination: &str) -> Result<Contact, ClientRequestError> {
+        if self.name.len() > MAX_CONTACT_NAME_BYTES {
+            return Err(ClientRequestError::ContactNameTooLong);
+        }
+        Ok(Contact::new(parse_destination(destination)?, self.name))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[allow(missing_docs)]
+pub enum MutationOutcome {
+    Inserted,
+    Updated,
+    Unchanged,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
+#[allow(missing_docs)]
+pub struct MutationResponse {
+    outcome: MutationOutcome,
+}
+
+impl MutationResponse {
+    /// Durable mutation result.
+    pub const fn outcome(self) -> MutationOutcome {
+        self.outcome
+    }
+}
+
+impl From<ContactUpsertOutcome> for MutationResponse {
+    fn from(outcome: ContactUpsertOutcome) -> Self {
+        Self {
+            outcome: match outcome {
+                ContactUpsertOutcome::Inserted => MutationOutcome::Inserted,
+                ContactUpsertOutcome::Updated => MutationOutcome::Updated,
+                ContactUpsertOutcome::Unchanged => MutationOutcome::Unchanged,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, TS)]
+#[allow(missing_docs)]
+pub struct SendRequest {
+    destination: String,
+    #[serde(deserialize_with = "deserialize_json_safe_u64")]
+    #[ts(as = "JsonSafeInteger")]
+    timestamp_ms: u64,
+    idempotency_key: String,
+    title: String,
+    content: String,
+}
+
+impl SendRequest {
+    /// Validate and project this request into exact retry-stable outbox data.
+    pub fn into_material(self) -> Result<OutboxMaterial, ClientRequestError> {
+        if self.title.len() > MAX_LXMF_BASIC_TITLE_BYTES {
+            return Err(ClientRequestError::TitleTooLong);
+        }
+        if self.content.len() > MAX_LXMF_BASIC_CONTENT_BYTES {
+            return Err(ClientRequestError::ContentTooLong);
+        }
+        let destination = parse_destination(&self.destination)?;
+        let timestamp = UnixTimestampMillis::new(self.timestamp_ms)
+            .map_err(|_| ClientRequestError::InvalidTimestamp)?;
+        let idempotency_key = parse_hex::<16>(&self.idempotency_key)
+            .map(IdempotencyKey::new)
+            .ok_or(ClientRequestError::InvalidIdempotencyKey)?;
+        Ok(OutboxMaterial::new(
+            destination,
+            timestamp,
+            idempotency_key,
+            self.title.into_bytes(),
+            self.content.into_bytes(),
+        ))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[allow(missing_docs)]
+pub enum SendOutcome {
+    Inserted,
+    Existing,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
+#[allow(missing_docs)]
+pub struct SendResponse {
+    #[serde(serialize_with = "serialize_json_safe_u64")]
+    #[ts(as = "JsonSafeInteger")]
+    outbox_id: u64,
+    outcome: SendOutcome,
+}
+
+impl SendResponse {
+    /// Durable local outbox identifier.
+    pub const fn outbox_id(self) -> u64 {
+        self.outbox_id
+    }
+
+    /// Whether the row was inserted or already existed.
+    pub const fn outcome(self) -> SendOutcome {
+        self.outcome
+    }
+}
+
+impl From<OutboxCommitOutcome> for SendResponse {
+    fn from(outcome: OutboxCommitOutcome) -> Self {
+        match outcome {
+            OutboxCommitOutcome::Inserted(id) => Self {
+                outbox_id: id.get(),
+                outcome: SendOutcome::Inserted,
+            },
+            OutboxCommitOutcome::Existing(id) => Self {
+                outbox_id: id.get(),
+                outcome: SendOutcome::Existing,
+            },
+        }
+    }
+}
+
+type BoxedSession = Box<dyn LxmfSession<Error = DeviceSessionError> + Send>;
+
+/// Physical or local-network bearer used for one authenticated session.
+///
+/// Only [`Self::UsbSerial`] has a connector in the host service today. The
+/// remaining variants deliberately reserve the runtime vocabulary for USB
+/// OTG, BLE, Wi-Fi, and later adapters without implying that they are already
+/// available.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionTransport {
+    /// Host-side USB serial/JTAG connection.
+    UsbSerial,
+    /// Direct USB OTG connection owned by a native client.
+    UsbOtg,
+    /// Bluetooth Low Energy connection owned by a native client.
+    BluetoothLowEnergy,
+    /// Local Wi-Fi connection owned by a native or web client.
+    Wifi,
+    /// A future bearer identified by a stable implementation label.
+    Other(String),
+}
+
+/// Transport-neutral labels published for an authenticated connection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectionMetadata {
+    transport: ConnectionTransport,
+    endpoint: String,
+    device_label: String,
+}
+
+impl ConnectionMetadata {
+    /// Describe one connection.
+    pub fn new(
+        transport: ConnectionTransport,
+        endpoint: impl Into<String>,
+        device_label: impl Into<String>,
+    ) -> Self {
+        Self {
+            transport,
+            endpoint: endpoint.into(),
+            device_label: device_label.into(),
+        }
+    }
+
+    /// Describe the currently implemented host USB serial bearer.
+    pub fn usb_serial(endpoint: impl Into<String>, usb_serial: impl Into<String>) -> Self {
+        Self::new(ConnectionTransport::UsbSerial, endpoint, usb_serial)
+    }
+
+    /// Bearer used by the connection.
+    pub const fn transport(&self) -> &ConnectionTransport {
+        &self.transport
+    }
+
+    /// Bearer-specific endpoint label.
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    /// Stable user-visible device label.
+    pub fn device_label(&self) -> &str {
+        &self.device_label
+    }
+}
+
+/// One authenticated device session returned by a transport connector.
+///
+/// The optional lease is retained for exactly as long as the authenticated
+/// session is active.
+pub struct ConnectedSession {
+    session: BoxedSession,
+    metadata: ConnectionMetadata,
+    connection_lease: Option<Box<dyn Send>>,
+}
+
+impl ConnectedSession {
+    /// Wrap an authenticated LXMF session and its connection metadata.
+    pub fn new<S>(session: S, metadata: ConnectionMetadata) -> Self
+    where
+        S: LxmfSession<Error = DeviceSessionError> + Send + 'static,
+    {
+        Self {
+            session: Box::new(session),
+            metadata,
+            connection_lease: None,
+        }
+    }
+
+    /// Retain an opaque transport ownership guard with this session.
+    pub fn with_connection_lease<L>(mut self, lease: L) -> Self
+    where
+        L: Send + 'static,
+    {
+        self.connection_lease = Some(Box::new(lease));
+        self
+    }
+}
+
+/// Classified failure to establish an authenticated transport session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConnectFailure {
+    /// A transient condition should use bounded exponential retry.
+    Retryable(String),
+    /// The selected bearer has no connector implementation in this build.
+    Unavailable {
+        /// Bearer that cannot currently be opened.
+        transport: ConnectionTransport,
+        /// Actionable implementation or platform limitation.
+        reason: String,
+    },
+    /// A local invariant or configuration error needs operator action.
+    Permanent(String),
+}
+
+impl ConnectFailure {
+    /// Construct a transient connection failure.
+    pub fn retryable(reason: impl Into<String>) -> Self {
+        Self::Retryable(reason.into())
+    }
+
+    /// Construct a build/platform availability failure.
+    pub fn unavailable(transport: ConnectionTransport, reason: impl Into<String>) -> Self {
+        Self::Unavailable {
+            transport,
+            reason: reason.into(),
+        }
+    }
+
+    /// Construct a permanent connection failure.
+    pub fn permanent(reason: impl Into<String>) -> Self {
+        Self::Permanent(reason.into())
+    }
+}
+
+impl fmt::Display for ConnectFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Retryable(reason) | Self::Permanent(reason) => formatter.write_str(reason),
+            Self::Unavailable { reason, .. } => formatter.write_str(reason),
+        }
+    }
+}
+
+impl std::error::Error for ConnectFailure {}
+
+/// Synchronous factory for authenticated LXMF sessions.
+pub trait Connector: Send + 'static {
+    /// Connect and authenticate with an explicit retryability classification.
+    fn connect(&mut self) -> Result<ConnectedSession, ConnectFailure>;
 }
 
 /// Timing and path policy for one appliance actor.
 #[derive(Clone, Debug)]
 pub struct ApplianceConfig {
     database: PathBuf,
-    serial: SerialConnectorConfig,
     reconnect_initial: Duration,
     reconnect_maximum: Duration,
     operation_gap: Duration,
@@ -52,10 +441,9 @@ pub struct ApplianceConfig {
 
 impl ApplianceConfig {
     /// Construct the default developer-alpha policy.
-    pub fn new(database: PathBuf, serial: SerialConnectorConfig) -> Self {
+    pub fn new(database: PathBuf) -> Self {
         Self {
             database,
-            serial,
             reconnect_initial: Duration::from_secs(1),
             reconnect_maximum: Duration::from_secs(30),
             operation_gap: Duration::from_millis(100),
@@ -69,29 +457,31 @@ impl ApplianceConfig {
     pub fn database(&self) -> &PathBuf {
         &self.database
     }
-
-    /// Concrete USB discovery and credential policy.
-    pub const fn serial(&self) -> &SerialConnectorConfig {
-        &self.serial
-    }
 }
 
 /// Public connection lifecycle exposed to the UI.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ConnectionState {
-    /// Actor has opened the database but has not attempted USB discovery.
+    /// Actor has opened the database but has not attempted its connector.
     Starting,
-    /// No matching USB port is currently usable.
+    /// No authenticated bearer is currently usable.
     Disconnected,
-    /// A matching USB port is being opened and authenticated.
+    /// The selected bearer is being opened and authenticated.
     Connecting,
+    /// This build has no implementation for the selected bearer.
+    Unavailable {
+        /// Bearer reserved for a future connector implementation.
+        transport: ConnectionTransport,
+    },
     /// The registered board is authenticated and background work may run.
     Ready {
-        /// Current ephemeral serial path.
-        port: String,
-        /// Configured stable USB descriptor serial.
-        usb_serial: String,
+        /// Bearer used by this authenticated session.
+        transport: ConnectionTransport,
+        /// Bearer-specific endpoint label.
+        endpoint: String,
+        /// Stable user-visible device label.
+        device_label: String,
     },
     /// A retryable failure is waiting for bounded exponential backoff.
     Backoff,
@@ -101,12 +491,72 @@ pub enum ConnectionState {
     Stopped,
 }
 
+impl ConnectionState {
+    /// Selected unavailable bearer or active ready bearer.
+    pub const fn transport(&self) -> Option<&ConnectionTransport> {
+        match self {
+            Self::Unavailable { transport } | Self::Ready { transport, .. } => Some(transport),
+            Self::Starting
+            | Self::Disconnected
+            | Self::Connecting
+            | Self::Backoff
+            | Self::Faulted
+            | Self::Stopped => None,
+        }
+    }
+
+    /// Bearer-specific endpoint label, when the actor is ready.
+    pub fn endpoint(&self) -> Option<&str> {
+        match self {
+            Self::Ready { endpoint, .. } => Some(endpoint),
+            Self::Starting
+            | Self::Disconnected
+            | Self::Connecting
+            | Self::Unavailable { .. }
+            | Self::Backoff
+            | Self::Faulted
+            | Self::Stopped => None,
+        }
+    }
+
+    /// Stable user-visible device label, when the actor is ready.
+    pub fn device_label(&self) -> Option<&str> {
+        match self {
+            Self::Ready { device_label, .. } => Some(device_label),
+            Self::Starting
+            | Self::Disconnected
+            | Self::Connecting
+            | Self::Unavailable { .. }
+            | Self::Backoff
+            | Self::Faulted
+            | Self::Stopped => None,
+        }
+    }
+}
+
 /// JSON-safe authenticated device identity.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
-pub(crate) struct DeviceView {
+pub struct DeviceView {
     device_id: String,
     primary_destination: String,
     lxmf_delivery_destination: String,
+}
+
+impl DeviceView {
+    /// Stable device identity encoded as lowercase hexadecimal.
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    /// Primary Reticulum destination encoded as lowercase hexadecimal.
+    pub fn primary_destination(&self) -> &str {
+        &self.primary_destination
+    }
+
+    /// LXMF delivery destination encoded as lowercase hexadecimal.
+    pub fn lxmf_delivery_destination(&self) -> &str {
+        &self.lxmf_delivery_destination
+    }
 }
 
 impl From<DeviceBinding> for DeviceView {
@@ -119,7 +569,7 @@ impl From<DeviceBinding> for DeviceView {
     }
 }
 
-/// Immutable authoritative service state read without touching serial or SQLite.
+/// Immutable authoritative appliance state read without touching its actor.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
 pub struct ApplianceSnapshot {
     #[serde(serialize_with = "serialize_json_safe_u64")]
@@ -157,14 +607,29 @@ impl ApplianceSnapshot {
         self.revision
     }
 
-    /// Current USB/session lifecycle.
+    /// Current connector/session lifecycle.
     pub const fn connection(&self) -> &ConnectionState {
         &self.connection
+    }
+
+    /// Authenticated device identity, when connected at least once.
+    pub const fn device(&self) -> Option<&DeviceView> {
+        self.device.as_ref()
     }
 
     /// Number of locally durable outbox rows still needing device work.
     pub const fn pending_outbox(&self) -> usize {
         self.pending_outbox
+    }
+
+    /// Number of locally stored contacts.
+    pub const fn contact_count(&self) -> usize {
+        self.contact_count
+    }
+
+    /// Inbound messages imported since this actor started.
+    pub const fn imported_this_run(&self) -> u64 {
+        self.imported_this_run
     }
 
     /// Latest actionable background failure, when present.
@@ -174,9 +639,22 @@ impl ApplianceSnapshot {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
-pub(crate) struct ContactView {
-    pub(crate) destination: String,
-    pub(crate) name: String,
+#[allow(missing_docs)]
+pub struct ContactView {
+    destination: String,
+    name: String,
+}
+
+impl ContactView {
+    /// Contact destination encoded as lowercase hexadecimal.
+    pub fn destination(&self) -> &str {
+        &self.destination
+    }
+
+    /// User-selected contact display name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 impl From<Contact> for ContactView {
@@ -190,15 +668,17 @@ impl From<Contact> for ContactView {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum BytesEncoding {
+#[allow(missing_docs)]
+pub enum BytesEncoding {
     Utf8,
     Hex,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
-pub(crate) struct BytesView {
-    pub(crate) encoding: BytesEncoding,
-    pub(crate) value: String,
+#[allow(missing_docs)]
+pub struct BytesView {
+    encoding: BytesEncoding,
+    value: String,
 }
 
 impl BytesView {
@@ -214,18 +694,30 @@ impl BytesView {
             },
         }
     }
+
+    /// Encoding used for the projected value.
+    pub const fn encoding(&self) -> BytesEncoding {
+        self.encoding
+    }
+
+    /// UTF-8 text or lowercase hexadecimal, according to [`Self::encoding`].
+    pub fn value(&self) -> &str {
+        &self.value
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum TimelineDirection {
+#[allow(missing_docs)]
+pub enum TimelineDirection {
     Inbound,
     Outbound,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum TimelineStatus {
+#[allow(missing_docs)]
+pub enum TimelineStatus {
     Committed,
     Accepted,
     Queued,
@@ -240,21 +732,64 @@ pub(crate) enum TimelineStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
-pub(crate) struct TimelineView {
+#[allow(missing_docs)]
+pub struct TimelineView {
     #[serde(serialize_with = "serialize_json_safe_u64")]
     #[ts(as = "JsonSafeInteger")]
-    pub(crate) sequence: u64,
-    pub(crate) direction: TimelineDirection,
+    sequence: u64,
+    direction: TimelineDirection,
     #[serde(serialize_with = "serialize_json_safe_u64")]
     #[ts(as = "JsonSafeInteger")]
-    pub(crate) timestamp_ms: u64,
-    pub(crate) message_id: Option<String>,
-    #[serde(serialize_with = "crate::bindings::serialize_optional_json_safe_u64")]
+    timestamp_ms: u64,
+    message_id: Option<String>,
+    #[serde(serialize_with = "serialize_optional_json_safe_u64")]
     #[ts(as = "Option<JsonSafeInteger>")]
-    pub(crate) outbox_id: Option<u64>,
-    pub(crate) status: Option<TimelineStatus>,
-    pub(crate) title: BytesView,
-    pub(crate) content: BytesView,
+    outbox_id: Option<u64>,
+    status: Option<TimelineStatus>,
+    title: BytesView,
+    content: BytesView,
+}
+
+impl TimelineView {
+    /// Stable local timeline ordering sequence.
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// Whether the message is inbound or outbound.
+    pub const fn direction(&self) -> TimelineDirection {
+        self.direction
+    }
+
+    /// LXMF timestamp in Unix milliseconds.
+    pub const fn timestamp_ms(&self) -> u64 {
+        self.timestamp_ms
+    }
+
+    /// LXMF message identifier encoded as lowercase hexadecimal.
+    pub fn message_id(&self) -> Option<&str> {
+        self.message_id.as_deref()
+    }
+
+    /// Durable local outbox identifier for outbound rows.
+    pub const fn outbox_id(&self) -> Option<u64> {
+        self.outbox_id
+    }
+
+    /// Current outbound status, or `None` for inbound rows.
+    pub const fn status(&self) -> Option<TimelineStatus> {
+        self.status
+    }
+
+    /// Projected message title.
+    pub const fn title(&self) -> &BytesView {
+        &self.title
+    }
+
+    /// Projected message content.
+    pub const fn content(&self) -> &BytesView {
+        &self.content
+    }
 }
 
 impl From<TimelineEntry> for TimelineView {
@@ -357,23 +892,24 @@ impl ApplianceHandle {
             .clone()
     }
 
-    pub(crate) fn subscribe_revisions(&self) -> watch::Receiver<u64> {
+    /// Subscribe to immutable snapshot revision changes.
+    pub fn subscribe_revisions(&self) -> watch::Receiver<u64> {
         self.revisions.clone()
     }
 
-    pub(crate) async fn contacts(&self) -> Result<Vec<ContactView>, ServiceError> {
+    /// Load the current contact projection.
+    pub async fn contacts(&self) -> Result<Vec<ContactView>, ServiceError> {
         self.request(Command::Contacts).await
     }
 
-    pub(crate) async fn timeline(
-        &self,
-        peer: DestinationHash,
-    ) -> Result<Vec<TimelineView>, ServiceError> {
+    /// Load the ordered timeline for one peer.
+    pub async fn timeline(&self, peer: DestinationHash) -> Result<Vec<TimelineView>, ServiceError> {
         self.request(|reply| Command::Timeline { peer, reply })
             .await
     }
 
-    pub(crate) async fn upsert_contact(
+    /// Insert or update one durable contact.
+    pub async fn upsert_contact(
         &self,
         contact: Contact,
     ) -> Result<ContactUpsertOutcome, ServiceError> {
@@ -381,7 +917,8 @@ impl ApplianceHandle {
             .await
     }
 
-    pub(crate) async fn enqueue_send(
+    /// Durably enqueue one outbound LXMF message.
+    pub async fn enqueue_send(
         &self,
         material: OutboxMaterial,
     ) -> Result<OutboxCommitOutcome, ServiceError> {
@@ -389,11 +926,13 @@ impl ApplianceHandle {
             .await
     }
 
-    pub(crate) async fn sync_now(&self) -> Result<(), ServiceError> {
+    /// Schedule inbox and outbox work immediately.
+    pub async fn sync_now(&self) -> Result<(), ServiceError> {
         self.request(Command::SyncNow).await
     }
 
-    pub(crate) async fn reconnect(&self) -> Result<(), ServiceError> {
+    /// Drop the current bearer and immediately retry the connector.
+    pub async fn reconnect(&self) -> Result<(), ServiceError> {
         self.request(Command::Reconnect).await
     }
 
@@ -441,8 +980,10 @@ impl ApplianceHandle {
             .map_err(ServiceError::Operation)
     }
 
-    #[cfg(test)]
-    pub(crate) fn for_web_test() -> Self {
+    /// Construct an inert handle for downstream HTTP adapter tests.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn for_web_test() -> Self {
         let snapshot = ApplianceSnapshot::starting();
         let (commands, _receiver) = mpsc::sync_channel(1);
         let revision = snapshot.revision();
@@ -464,11 +1005,17 @@ fn map_try_send(error: mpsc::TrySendError<Command>) -> ServiceError {
     }
 }
 
-/// Open the database and start its sole USB/device owner thread.
-pub fn start_appliance(config: ApplianceConfig) -> Result<ApplianceHandle, ServiceError> {
+/// Open the database and start its sole connector/device owner thread.
+pub fn start_appliance<C>(
+    config: ApplianceConfig,
+    connector: C,
+) -> Result<ApplianceHandle, ServiceError>
+where
+    C: Connector,
+{
     let store = SqliteChatStore::open(&config.database)
         .map_err(|error| ServiceError::Operation(error.to_string()))?;
-    start_with_connector(config.clone(), store, SerialConnector::new(config.serial))
+    start_with_connector(config, store, connector)
 }
 
 fn start_with_connector<C: Connector>(
@@ -516,7 +1063,7 @@ struct Actor<C> {
     revisions: watch::Sender<u64>,
     snapshot: ApplianceSnapshot,
     session: Option<BoxedSession>,
-    session_lease: Option<SerialConnectionLease>,
+    session_lease: Option<Box<dyn Send>>,
     reconnect_delay: Duration,
     next_connect: Instant,
     next_reconcile: Instant,
@@ -667,31 +1214,34 @@ impl<C: Connector> Actor<C> {
         self.snapshot.connection = ConnectionState::Connecting;
         self.snapshot.last_error = None;
         self.publish();
-        let connected = match self.connector.connect() {
+        let mut connected = match self.connector.connect() {
             Ok(connected) => connected,
-            Err(error) => {
+            Err(ConnectFailure::Retryable(error)) => {
                 self.retry_connection(error);
                 return;
             }
+            Err(ConnectFailure::Unavailable { transport, reason }) => {
+                self.unavailable_connection(transport, reason);
+                return;
+            }
+            Err(ConnectFailure::Permanent(error)) => {
+                self.permanent_fault(error);
+                return;
+            }
         };
-        let ConnectedSession {
-            mut session,
-            port_name,
-            usb_serial,
-            connection_lease,
-        } = connected;
-        let binding = match session.binding() {
+        let binding = match connected.session.binding() {
             Ok(binding) => binding,
             Err(error) => {
                 self.retry_connection(error.to_string());
                 return;
             }
         };
+        let device_label = connected.metadata.device_label().to_owned();
         match self.engine.store_mut().bind_device(binding) {
             Ok(_) => {}
             Err(SqliteStoreError::DeviceBindingMismatch { .. }) => {
                 self.permanent_fault(format!(
-                    "database/device identity mismatch for USB serial {usb_serial}"
+                    "database/device identity mismatch for device {device_label}"
                 ));
                 return;
             }
@@ -700,6 +1250,16 @@ impl<C: Connector> Actor<C> {
                 return;
             }
         }
+        let ConnectedSession {
+            connection_lease,
+            metadata,
+            session,
+        } = connected;
+        let ConnectionMetadata {
+            transport,
+            endpoint,
+            device_label,
+        } = metadata;
         self.engine.reset_session_scan();
         self.session = Some(session);
         self.session_lease = connection_lease;
@@ -707,8 +1267,9 @@ impl<C: Connector> Actor<C> {
         self.next_inbox = Instant::now();
         self.next_reconcile = Instant::now();
         self.snapshot.connection = ConnectionState::Ready {
-            port: port_name,
-            usb_serial,
+            transport,
+            endpoint,
+            device_label,
         };
         self.snapshot.device = Some(binding.into());
         self.background_error_work = None;
@@ -839,6 +1400,16 @@ impl<C: Connector> Actor<C> {
         self.publish();
     }
 
+    fn unavailable_connection(&mut self, transport: ConnectionTransport, reason: String) {
+        self.clear_session();
+        self.engine.reset_session_scan();
+        self.background_error_work = None;
+        self.permanent_fault = true;
+        self.snapshot.connection = ConnectionState::Unavailable { transport };
+        self.snapshot.last_error = Some(reason);
+        self.publish();
+    }
+
     fn clear_session(&mut self) {
         self.session = None;
         self.session_lease = None;
@@ -946,6 +1517,68 @@ mod tests {
         )
     }
 
+    #[test]
+    fn connection_bearer_is_part_of_the_transport_neutral_projection() {
+        let state = ConnectionState::Ready {
+            transport: ConnectionTransport::UsbSerial,
+            endpoint: "/dev/cu.usbmodem-test".to_owned(),
+            device_label: "001122334455".to_owned(),
+        };
+        assert!(matches!(
+            state.transport(),
+            Some(ConnectionTransport::UsbSerial)
+        ));
+        assert_eq!(state.endpoint(), Some("/dev/cu.usbmodem-test"));
+        assert_eq!(state.device_label(), Some("001122334455"));
+        assert_eq!(
+            serde_json::to_value(state).unwrap(),
+            serde_json::json!({
+                "state": "ready",
+                "transport": "usb_serial",
+                "endpoint": "/dev/cu.usbmodem-test",
+                "device_label": "001122334455",
+            })
+        );
+    }
+
+    #[test]
+    fn shared_requests_validate_and_preserve_the_existing_json_contract() {
+        let contact: ContactRequest =
+            serde_json::from_value(serde_json::json!({ "name": "Field node" })).unwrap();
+        let contact = contact.into_contact(&"ab".repeat(16)).unwrap();
+        assert_eq!(contact.destination(), destination(0xab));
+        assert_eq!(contact.display_name(), "Field node");
+        assert_eq!(
+            serde_json::to_value(MutationResponse::from(ContactUpsertOutcome::Inserted)).unwrap(),
+            serde_json::json!({ "outcome": "inserted" })
+        );
+
+        let send: SendRequest = serde_json::from_value(serde_json::json!({
+            "destination": "cd".repeat(16),
+            "timestamp_ms": 1_234,
+            "idempotency_key": "ef".repeat(16),
+            "title": "hello",
+            "content": "mesh",
+        }))
+        .unwrap();
+        let material = send.into_material().unwrap();
+        assert_eq!(material.destination(), destination(0xcd));
+        assert_eq!(material.timestamp().get(), 1_234);
+        assert_eq!(material.idempotency_key().as_bytes(), &[0xef; 16]);
+        assert_eq!(material.title(), b"hello");
+        assert_eq!(material.content(), b"mesh");
+        assert!(
+            serde_json::from_value::<SendRequest>(serde_json::json!({
+                "destination": "cd".repeat(16),
+                "timestamp_ms": MAX_JSON_SAFE_INTEGER + 1,
+                "idempotency_key": "ef".repeat(16),
+                "title": "",
+                "content": "",
+            }))
+            .is_err()
+        );
+    }
+
     struct FakeSession {
         binding: DeviceBinding,
         inbox: Vec<(InboxSummary, InboundMessage)>,
@@ -1003,30 +1636,142 @@ mod tests {
         submitted: Arc<Mutex<Vec<OutboxMaterial>>>,
     }
 
+    struct UnavailableConnector {
+        attempts: Arc<AtomicUsize>,
+    }
+
+    impl Connector for UnavailableConnector {
+        fn connect(&mut self) -> Result<ConnectedSession, ConnectFailure> {
+            self.attempts.fetch_add(1, Ordering::Relaxed);
+            Err(ConnectFailure::unavailable(
+                ConnectionTransport::BluetoothLowEnergy,
+                "BLE adapter is not implemented",
+            ))
+        }
+    }
+
+    struct CountingLease(Arc<AtomicUsize>);
+
+    impl Drop for CountingLease {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    struct LeaseConnector {
+        connected: bool,
+        lease_drops: Arc<AtomicUsize>,
+    }
+
+    impl Connector for LeaseConnector {
+        fn connect(&mut self) -> Result<ConnectedSession, ConnectFailure> {
+            if self.connected {
+                return Err(ConnectFailure::retryable("device remains disconnected"));
+            }
+            self.connected = true;
+            Ok(ConnectedSession::new(
+                FakeSession {
+                    binding: binding(0x71),
+                    inbox: Vec::new(),
+                    submitted: Arc::new(Mutex::new(Vec::new())),
+                },
+                ConnectionMetadata::usb_serial("/dev/fake", "001122334455"),
+            )
+            .with_connection_lease(CountingLease(self.lease_drops.clone())))
+        }
+    }
+
+    struct DropOrderSession {
+        order: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl Drop for DropOrderSession {
+        fn drop(&mut self) {
+            self.order.lock().unwrap().push("session");
+        }
+    }
+
+    impl LxmfSession for DropOrderSession {
+        type Error = DeviceSessionError;
+
+        fn binding(&mut self) -> Result<DeviceBinding, Self::Error> {
+            Err(DeviceSessionError::MissingLxmfDeliveryDestination)
+        }
+
+        fn submit(&mut self, _material: &OutboxMaterial) -> Result<AcceptanceIds, Self::Error> {
+            Err(DeviceSessionError::MissingLxmfDeliveryDestination)
+        }
+
+        fn submission_status(&mut self, _id: SubmissionId) -> Result<SubmissionState, Self::Error> {
+            Err(DeviceSessionError::MissingLxmfDeliveryDestination)
+        }
+
+        fn next_inbox(
+            &mut self,
+            _after: Option<InboxCursor>,
+        ) -> Result<Option<InboxSummary>, Self::Error> {
+            Err(DeviceSessionError::MissingLxmfDeliveryDestination)
+        }
+
+        fn read_inbox(&mut self, _summary: InboxSummary) -> Result<InboundMessage, Self::Error> {
+            Err(DeviceSessionError::MissingLxmfDeliveryDestination)
+        }
+
+        fn is_usable(&self) -> bool {
+            false
+        }
+    }
+
+    struct DropOrderLease(Arc<Mutex<Vec<&'static str>>>);
+
+    impl Drop for DropOrderLease {
+        fn drop(&mut self) {
+            self.0.lock().unwrap().push("lease");
+        }
+    }
+
+    struct BindingFailureConnector {
+        returned_session: bool,
+        order: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl Connector for BindingFailureConnector {
+        fn connect(&mut self) -> Result<ConnectedSession, ConnectFailure> {
+            if self.returned_session {
+                return Err(ConnectFailure::retryable("device remains disconnected"));
+            }
+            self.returned_session = true;
+            Ok(ConnectedSession::new(
+                DropOrderSession {
+                    order: self.order.clone(),
+                },
+                ConnectionMetadata::usb_serial("/dev/fake", "001122334455"),
+            )
+            .with_connection_lease(DropOrderLease(self.order.clone())))
+        }
+    }
+
     impl Connector for FakeConnector {
-        fn connect(&mut self) -> Result<ConnectedSession, String> {
+        fn connect(&mut self) -> Result<ConnectedSession, ConnectFailure> {
             self.attempts.fetch_add(1, Ordering::Relaxed);
             let (binding, inbox) = self
                 .outcomes
                 .pop_front()
-                .unwrap_or_else(|| Err("no scripted connection remains".to_owned()))?;
-            Ok(ConnectedSession {
-                session: Box::new(FakeSession {
+                .unwrap_or_else(|| Err("no scripted connection remains".to_owned()))
+                .map_err(ConnectFailure::retryable)?;
+            Ok(ConnectedSession::new(
+                FakeSession {
                     binding,
                     inbox,
                     submitted: self.submitted.clone(),
-                }),
-                port_name: "/dev/fake".to_owned(),
-                usb_serial: "001122334455".to_owned(),
-                connection_lease: None,
-            })
+                },
+                ConnectionMetadata::usb_serial("/dev/fake", "001122334455"),
+            ))
         }
     }
 
     fn config(database: &TestDatabase) -> ApplianceConfig {
-        let serial =
-            SerialConnectorConfig::new("00:11:22:33:44:55", PathBuf::from("unused")).unwrap();
-        let mut config = ApplianceConfig::new(database.0.clone(), serial);
+        let mut config = ApplianceConfig::new(database.0.clone());
         config.reconnect_initial = Duration::from_millis(5);
         config.reconnect_maximum = Duration::from_millis(20);
         config.operation_gap = Duration::from_millis(2);
@@ -1106,6 +1851,75 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert_eq!(attempts.load(Ordering::Relaxed), 1);
         assert!(handle.snapshot().last_error().unwrap().contains("mismatch"));
+        handle.shutdown_and_wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unavailable_connector_settles_without_background_retry() {
+        let database = TestDatabase::new("unavailable");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let connector = UnavailableConnector {
+            attempts: attempts.clone(),
+        };
+        let store = SqliteChatStore::open(&database.0).unwrap();
+        let handle = start_with_connector(config(&database), store, connector).unwrap();
+        wait_for(&handle, |snapshot| {
+            snapshot.connection()
+                == &ConnectionState::Unavailable {
+                    transport: ConnectionTransport::BluetoothLowEnergy,
+                }
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            handle.snapshot().last_error(),
+            Some("BLE adapter is not implemented")
+        );
+        handle.shutdown_and_wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconnect_drops_the_transport_lease_with_the_session() {
+        let database = TestDatabase::new("connection-lease");
+        let lease_drops = Arc::new(AtomicUsize::new(0));
+        let connector = LeaseConnector {
+            connected: false,
+            lease_drops: lease_drops.clone(),
+        };
+        let store = SqliteChatStore::open(&database.0).unwrap();
+        let handle = start_with_connector(config(&database), store, connector).unwrap();
+        wait_for(&handle, |snapshot| {
+            matches!(snapshot.connection(), ConnectionState::Ready { .. })
+        })
+        .await;
+        assert_eq!(lease_drops.load(Ordering::Relaxed), 0);
+
+        handle.reconnect().await.unwrap();
+        assert_eq!(lease_drops.load(Ordering::Relaxed), 1);
+        handle.shutdown_and_wait().await.unwrap();
+        assert_eq!(lease_drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn binding_failure_drops_session_before_transport_lease() {
+        let database = TestDatabase::new("binding-drop-order");
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let connector = BindingFailureConnector {
+            returned_session: false,
+            order: order.clone(),
+        };
+        let store = SqliteChatStore::open(&database.0).unwrap();
+        let mut failure_config = config(&database);
+        failure_config.reconnect_initial = Duration::from_secs(1);
+        failure_config.reconnect_maximum = Duration::from_secs(1);
+        let handle = start_with_connector(failure_config, store, connector).unwrap();
+        wait_for(&handle, |_| order.lock().unwrap().len() == 2).await;
+        assert_eq!(
+            order.lock().unwrap().as_slice(),
+            &["session", "lease"],
+            "the transport gate must remain leased until the old session/FD closes"
+        );
         handle.shutdown_and_wait().await.unwrap();
     }
 }

@@ -8,8 +8,8 @@ use std::process::ExitCode;
 
 use reticulum_lxmf_chat_service::{
     ApplianceConfig, OnboardingConfig, OnboardingHandle, ProfileRoot, SerialConnectionGate,
-    SerialConnectorConfig, WebConfig, discover_usb_serials, serve_web_with_onboarding,
-    start_appliance, start_onboarding,
+    SerialConnector, SerialConnectorConfig, WebConfig, discover_usb_serials,
+    serve_web_with_onboarding, start_appliance, start_onboarding,
 };
 
 #[derive(Debug)]
@@ -93,7 +93,7 @@ async fn run(options: Options) -> Result<(), String> {
     if let Some(gate) = connection_gate {
         serial = serial.with_connection_gate(gate);
     }
-    let appliance = start_appliance(ApplianceConfig::new(database, serial))
+    let appliance = start_appliance(ApplianceConfig::new(database), SerialConnector::new(serial))
         .map_err(|error| error.to_string())?;
     let web = serve_web_with_onboarding(
         appliance.clone(),

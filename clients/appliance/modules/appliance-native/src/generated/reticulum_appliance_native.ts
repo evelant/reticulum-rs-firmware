@@ -6,7 +6,7 @@
 import nativeModule from "./reticulum_appliance_native-ffi";
 import { type UniffiRustFutureContinuationCallback, type UniffiForeignFutureDroppedCallback, type UniffiForeignFutureDroppedCallbackStruct,
 } from "./reticulum_appliance_native-ffi";
-import { type UniffiByteArray, AbstractFfiConverterByteArray, FfiConverterUInt16, FfiConverterUInt32, RustBuffer, UniffiInternalError, UniffiRustCaller, uniffiCreateFfiConverterString, uniffiCreateRecord,
+import { type FfiConverter, type UniffiByteArray, type UniffiGcObject, type UniffiHandle, type UniffiObjectFactory, AbstractFfiConverterByteArray, FfiConverterInt32, FfiConverterObject, FfiConverterUInt16, FfiConverterUInt32, FfiConverterUInt8, RustBuffer, UniffiAbstractObject, UniffiEnum, UniffiError, UniffiInternalError, UniffiRustCaller, destructorGuardSymbol, pointerLiteralSymbol, uniffiCreateFfiConverterString, uniffiCreateRecord, uniffiRustCallAsync, uniffiTypeNameSymbol, variantOrdinalSymbol,
 } from "@ubjs/core";
 const uniffiCaller = new UniffiRustCaller(() => ({ code: 0 }));
 
@@ -184,6 +184,897 @@ const stringConverter = (() => {
 })();
 const FfiConverterString = uniffiCreateFfiConverterString(stringConverter);
 
+/**
+ * Bearer selected for the native appliance session.
+ *
+ * These variants are an intentional stable vocabulary. Platform connectors
+ * are not implemented in this crate yet; selecting one keeps the durable
+ * SQLite client usable while the runtime reports a stable unavailable state.
+ */
+export enum NativeTransport {
+    /**
+     * USB serial/JTAG provided to a mobile application by a future adapter.
+     */
+    UsbSerial,
+    /**
+     * Direct USB OTG provided by a future iOS/Android adapter.
+     */
+    UsbOtg,
+    /**
+     * Bluetooth Low Energy provided by a future GATT bearer.
+     */
+    BluetoothLowEnergy,
+    /**
+     * Wi-Fi provided by a future local-network bearer.
+     */
+    Wifi
+}
+
+const FfiConverterTypeNativeTransport = (() => {
+    const ordinalConverter = FfiConverterInt32;
+    type TypeName = NativeTransport;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            switch (ordinalConverter.read(from)) {
+                case 1: return NativeTransport.UsbSerial;
+                case 2: return NativeTransport.UsbOtg;
+                case 3: return NativeTransport.BluetoothLowEnergy;
+                case 4: return NativeTransport.Wifi;
+                default: throw new UniffiInternalError.UnexpectedEnumCase();
+            }
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            switch (value) {
+                case NativeTransport.UsbSerial: return ordinalConverter.write(1, into);
+                case NativeTransport.UsbOtg: return ordinalConverter.write(2, into);
+                case NativeTransport.BluetoothLowEnergy: return ordinalConverter.write(3, into);
+                case NativeTransport.Wifi: return ordinalConverter.write(4, into);
+            }
+        }
+        allocationSize(value: TypeName): number {
+            return ordinalConverter.allocationSize(0);
+        }
+    }
+    return new FFIConverter();
+})();
+
+
+// Error type: NativeApplianceError
+export enum NativeApplianceError_Tags {
+    InvalidArgument = "InvalidArgument",
+    Busy = "Busy",
+    Stopped = "Stopped",
+    TransportUnavailable = "TransportUnavailable",
+    Storage = "Storage",
+    Serialization = "Serialization",
+    Internal = "Internal"
+}
+/**
+ * Failure returned through the native bridge.
+ */
+export const NativeApplianceError = (() => {
+
+    type InvalidArgument__interface = {
+        tag: NativeApplianceError_Tags.InvalidArgument;
+        inner:
+Readonly<{reason: string}>
+    };
+    class InvalidArgument_ extends UniffiError implements InvalidArgument__interface {
+        /**
+         * @private
+         * This field is private and should not be used, use `tag` instead.
+         */
+        readonly [uniffiTypeNameSymbol] = "NativeApplianceError";
+        readonly tag = NativeApplianceError_Tags.InvalidArgument;
+        readonly inner:
+Readonly<{reason: string}>;
+        constructor(
+inner: {reason: string }) {
+            super("NativeApplianceError", "InvalidArgument");
+
+            this.inner = Object.freeze(inner);
+        }
+        static new(
+inner: {reason: string }): InvalidArgument_ {
+            return new InvalidArgument_(inner);
+        }
+
+        static instanceOf(obj: any): obj is InvalidArgument_ {
+            return obj.tag === NativeApplianceError_Tags.InvalidArgument;
+        }
+        static hasInner(obj: any): obj is InvalidArgument_ {
+            return InvalidArgument_.instanceOf(obj);
+        }
+
+        static getInner(obj: InvalidArgument_):
+Readonly<{reason: string}> {
+            return obj.inner;
+        }
+
+    }
+
+    type Busy__interface = {
+        tag: NativeApplianceError_Tags.Busy
+    };
+    class Busy_ extends UniffiError implements Busy__interface {
+        /**
+         * @private
+         * This field is private and should not be used, use `tag` instead.
+         */
+        readonly [uniffiTypeNameSymbol] = "NativeApplianceError";
+        readonly tag = NativeApplianceError_Tags.Busy;
+        constructor() {
+            super("NativeApplianceError", "Busy");
+        }
+
+        static new(): Busy_ {
+            return new Busy_();
+        }
+
+        static instanceOf(obj: any): obj is Busy_ {
+            return obj.tag === NativeApplianceError_Tags.Busy;
+        }
+        static hasInner(obj: any): obj is Busy_ {
+            return false;
+        }
+
+    }
+
+    type Stopped__interface = {
+        tag: NativeApplianceError_Tags.Stopped
+    };
+    class Stopped_ extends UniffiError implements Stopped__interface {
+        /**
+         * @private
+         * This field is private and should not be used, use `tag` instead.
+         */
+        readonly [uniffiTypeNameSymbol] = "NativeApplianceError";
+        readonly tag = NativeApplianceError_Tags.Stopped;
+        constructor() {
+            super("NativeApplianceError", "Stopped");
+        }
+
+        static new(): Stopped_ {
+            return new Stopped_();
+        }
+
+        static instanceOf(obj: any): obj is Stopped_ {
+            return obj.tag === NativeApplianceError_Tags.Stopped;
+        }
+        static hasInner(obj: any): obj is Stopped_ {
+            return false;
+        }
+
+    }
+
+    type TransportUnavailable__interface = {
+        tag: NativeApplianceError_Tags.TransportUnavailable;
+        inner:
+Readonly<{transport: NativeTransport; reason: string}>
+    };
+    class TransportUnavailable_ extends UniffiError implements TransportUnavailable__interface {
+        /**
+         * @private
+         * This field is private and should not be used, use `tag` instead.
+         */
+        readonly [uniffiTypeNameSymbol] = "NativeApplianceError";
+        readonly tag = NativeApplianceError_Tags.TransportUnavailable;
+        readonly inner:
+Readonly<{transport: NativeTransport; reason: string}>;
+        constructor(
+inner: {transport: NativeTransport; reason: string }) {
+            super("NativeApplianceError", "TransportUnavailable");
+
+            this.inner = Object.freeze(inner);
+        }
+        static new(
+inner: {transport: NativeTransport; reason: string }): TransportUnavailable_ {
+            return new TransportUnavailable_(inner);
+        }
+
+        static instanceOf(obj: any): obj is TransportUnavailable_ {
+            return obj.tag === NativeApplianceError_Tags.TransportUnavailable;
+        }
+        static hasInner(obj: any): obj is TransportUnavailable_ {
+            return TransportUnavailable_.instanceOf(obj);
+        }
+
+        static getInner(obj: TransportUnavailable_):
+Readonly<{transport: NativeTransport; reason: string}> {
+            return obj.inner;
+        }
+
+    }
+
+    type Storage__interface = {
+        tag: NativeApplianceError_Tags.Storage;
+        inner:
+Readonly<{reason: string}>
+    };
+    class Storage_ extends UniffiError implements Storage__interface {
+        /**
+         * @private
+         * This field is private and should not be used, use `tag` instead.
+         */
+        readonly [uniffiTypeNameSymbol] = "NativeApplianceError";
+        readonly tag = NativeApplianceError_Tags.Storage;
+        readonly inner:
+Readonly<{reason: string}>;
+        constructor(
+inner: {reason: string }) {
+            super("NativeApplianceError", "Storage");
+
+            this.inner = Object.freeze(inner);
+        }
+        static new(
+inner: {reason: string }): Storage_ {
+            return new Storage_(inner);
+        }
+
+        static instanceOf(obj: any): obj is Storage_ {
+            return obj.tag === NativeApplianceError_Tags.Storage;
+        }
+        static hasInner(obj: any): obj is Storage_ {
+            return Storage_.instanceOf(obj);
+        }
+
+        static getInner(obj: Storage_):
+Readonly<{reason: string}> {
+            return obj.inner;
+        }
+
+    }
+
+    type Serialization__interface = {
+        tag: NativeApplianceError_Tags.Serialization;
+        inner:
+Readonly<{reason: string}>
+    };
+    class Serialization_ extends UniffiError implements Serialization__interface {
+        /**
+         * @private
+         * This field is private and should not be used, use `tag` instead.
+         */
+        readonly [uniffiTypeNameSymbol] = "NativeApplianceError";
+        readonly tag = NativeApplianceError_Tags.Serialization;
+        readonly inner:
+Readonly<{reason: string}>;
+        constructor(
+inner: {reason: string }) {
+            super("NativeApplianceError", "Serialization");
+
+            this.inner = Object.freeze(inner);
+        }
+        static new(
+inner: {reason: string }): Serialization_ {
+            return new Serialization_(inner);
+        }
+
+        static instanceOf(obj: any): obj is Serialization_ {
+            return obj.tag === NativeApplianceError_Tags.Serialization;
+        }
+        static hasInner(obj: any): obj is Serialization_ {
+            return Serialization_.instanceOf(obj);
+        }
+
+        static getInner(obj: Serialization_):
+Readonly<{reason: string}> {
+            return obj.inner;
+        }
+
+    }
+
+    type Internal__interface = {
+        tag: NativeApplianceError_Tags.Internal;
+        inner:
+Readonly<{reason: string}>
+    };
+    class Internal_ extends UniffiError implements Internal__interface {
+        /**
+         * @private
+         * This field is private and should not be used, use `tag` instead.
+         */
+        readonly [uniffiTypeNameSymbol] = "NativeApplianceError";
+        readonly tag = NativeApplianceError_Tags.Internal;
+        readonly inner:
+Readonly<{reason: string}>;
+        constructor(
+inner: {reason: string }) {
+            super("NativeApplianceError", "Internal");
+
+            this.inner = Object.freeze(inner);
+        }
+        static new(
+inner: {reason: string }): Internal_ {
+            return new Internal_(inner);
+        }
+
+        static instanceOf(obj: any): obj is Internal_ {
+            return obj.tag === NativeApplianceError_Tags.Internal;
+        }
+        static hasInner(obj: any): obj is Internal_ {
+            return Internal_.instanceOf(obj);
+        }
+
+        static getInner(obj: Internal_):
+Readonly<{reason: string}> {
+            return obj.inner;
+        }
+
+    }
+
+    function instanceOf(obj: any): obj is NativeApplianceError {
+        return obj[uniffiTypeNameSymbol] === "NativeApplianceError";
+    }
+
+    return Object.freeze({
+        instanceOf,
+  InvalidArgument: InvalidArgument_,
+  Busy: Busy_,
+  Stopped: Stopped_,
+  TransportUnavailable: TransportUnavailable_,
+  Storage: Storage_,
+  Serialization: Serialization_,
+  Internal: Internal_
+    });
+
+})();
+/**
+ * Failure returned through the native bridge.
+ */
+export type NativeApplianceError = InstanceType<
+    typeof NativeApplianceError['InvalidArgument' | 'Busy' | 'Stopped' | 'TransportUnavailable' | 'Storage' | 'Serialization' | 'Internal']
+>;
+
+// FfiConverter for enum NativeApplianceError
+const FfiConverterTypeNativeApplianceError = (() => {
+    const ordinalConverter = FfiConverterInt32;
+    type TypeName = NativeApplianceError;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            switch (ordinalConverter.read(from)) {
+                case 1: return new NativeApplianceError.InvalidArgument({reason: FfiConverterString.read(from) });
+                case 2: return new NativeApplianceError.Busy();
+                case 3: return new NativeApplianceError.Stopped();
+                case 4: return new NativeApplianceError.TransportUnavailable({transport: FfiConverterTypeNativeTransport.read(from), reason: FfiConverterString.read(from) });
+                case 5: return new NativeApplianceError.Storage({reason: FfiConverterString.read(from) });
+                case 6: return new NativeApplianceError.Serialization({reason: FfiConverterString.read(from) });
+                case 7: return new NativeApplianceError.Internal({reason: FfiConverterString.read(from) });
+                default: throw new UniffiInternalError.UnexpectedEnumCase();
+            }
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            switch (value.tag) {
+                case NativeApplianceError_Tags.InvalidArgument: {
+                    ordinalConverter.write(1, into);
+                    const inner = value.inner;
+                    FfiConverterString.write(inner.reason, into);
+                    return;
+                }
+                case NativeApplianceError_Tags.Busy: {
+                    ordinalConverter.write(2, into);
+                    return;
+                }
+                case NativeApplianceError_Tags.Stopped: {
+                    ordinalConverter.write(3, into);
+                    return;
+                }
+                case NativeApplianceError_Tags.TransportUnavailable: {
+                    ordinalConverter.write(4, into);
+                    const inner = value.inner;
+                    FfiConverterTypeNativeTransport.write(inner.transport, into);
+                    FfiConverterString.write(inner.reason, into);
+                    return;
+                }
+                case NativeApplianceError_Tags.Storage: {
+                    ordinalConverter.write(5, into);
+                    const inner = value.inner;
+                    FfiConverterString.write(inner.reason, into);
+                    return;
+                }
+                case NativeApplianceError_Tags.Serialization: {
+                    ordinalConverter.write(6, into);
+                    const inner = value.inner;
+                    FfiConverterString.write(inner.reason, into);
+                    return;
+                }
+                case NativeApplianceError_Tags.Internal: {
+                    ordinalConverter.write(7, into);
+                    const inner = value.inner;
+                    FfiConverterString.write(inner.reason, into);
+                    return;
+                }
+                default:
+                    // Throwing from here means that NativeApplianceError_Tags hasn't matched an ordinal.
+                    throw new UniffiInternalError.UnexpectedEnumCase();
+            }
+        }
+        allocationSize(value: TypeName): number {
+            switch (value.tag) {
+                case NativeApplianceError_Tags.InvalidArgument: {
+                    const inner = value.inner;
+                    let size = ordinalConverter.allocationSize(1);
+                    size += FfiConverterString.allocationSize(inner.reason);
+                    return size;
+                }
+                case NativeApplianceError_Tags.Busy: {
+                    return ordinalConverter.allocationSize(2);
+                }
+                case NativeApplianceError_Tags.Stopped: {
+                    return ordinalConverter.allocationSize(3);
+                }
+                case NativeApplianceError_Tags.TransportUnavailable: {
+                    const inner = value.inner;
+                    let size = ordinalConverter.allocationSize(4);
+                    size += FfiConverterTypeNativeTransport.allocationSize(inner.transport);
+                    size += FfiConverterString.allocationSize(inner.reason);
+                    return size;
+                }
+                case NativeApplianceError_Tags.Storage: {
+                    const inner = value.inner;
+                    let size = ordinalConverter.allocationSize(5);
+                    size += FfiConverterString.allocationSize(inner.reason);
+                    return size;
+                }
+                case NativeApplianceError_Tags.Serialization: {
+                    const inner = value.inner;
+                    let size = ordinalConverter.allocationSize(6);
+                    size += FfiConverterString.allocationSize(inner.reason);
+                    return size;
+                }
+                case NativeApplianceError_Tags.Internal: {
+                    const inner = value.inner;
+                    let size = ordinalConverter.allocationSize(7);
+                    size += FfiConverterString.allocationSize(inner.reason);
+                    return size;
+                }
+                default: throw new UniffiInternalError.UnexpectedEnumCase();
+            }
+        }
+    }
+    return new FFIConverter();
+})();
+
+/**
+ * Native owner for one durable LXMF chat database and future device bearer.
+ *
+ * App-facing semantic DTOs remain defined by
+ * `reticulum-lxmf-chat-runtime`. Methods exchange canonical JSON so the Expo
+ * adapter parses the same generated types used by the HTTP client.
+ */
+export interface NativeApplianceLike {
+
+/**
+ * Idempotently stop the actor and close its SQLite ownership.
+ */
+    close(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<void>;
+/**
+ * Return durable contacts as canonical JSON.
+ */
+    contactsJson(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<string>;
+/**
+ * Request a fresh device connection.
+ *
+ * Every native connector is still a deliberate stub, so this returns the
+ * typed `TransportUnavailable` failure instead of silently falling back.
+ */
+    reconnect(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<void>;
+/**
+ * Validate and durably enqueue a message using the shared request DTO.
+ */
+    sendMessageJson(requestJson: string, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<string>;
+/**
+ * Return the authoritative appliance snapshot as canonical JSON.
+ */
+    snapshotJson() /*throws*/: string;
+/**
+ * Schedule local inbox/outbox work without requiring a ready bearer.
+ */
+    syncNow(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<void>;
+/**
+ * Return one peer's durable timeline as canonical JSON.
+ */
+    timelineJson(destination: string, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<string>;
+/**
+ * Selected bearer, including future transports that are not available yet.
+ */
+    transport(): NativeTransport;
+/**
+ * Validate and durably upsert a contact using the shared request DTO.
+ */
+    upsertContactJson(destination: string, requestJson: string, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<string>;
+}
+/**
+ * @deprecated Use `NativeApplianceLike` instead.
+ */
+export type NativeApplianceInterface = NativeApplianceLike;
+
+
+/**
+ * Native owner for one durable LXMF chat database and future device bearer.
+ *
+ * App-facing semantic DTOs remain defined by
+ * `reticulum-lxmf-chat-runtime`. Methods exchange canonical JSON so the Expo
+ * adapter parses the same generated types used by the HTTP client.
+ */
+export class NativeAppliance extends UniffiAbstractObject implements NativeApplianceLike {
+
+    readonly [uniffiTypeNameSymbol] = "NativeAppliance";
+    readonly [destructorGuardSymbol]: UniffiGcObject;
+    readonly [pointerLiteralSymbol]: UniffiHandle;
+    // No primary constructor declared for this class.
+private constructor(pointer: UniffiHandle) {
+    super();
+    this[pointerLiteralSymbol] = pointer;
+    this[destructorGuardSymbol] = uniffiTypeNativeApplianceObjectFactory.bless(pointer);
+}
+
+
+/**
+ * Open one SQLite chat database and start its single-owner actor.
+ *
+ * The selected connector is currently an explicit unavailable stub. This
+ * does not prevent local contacts, conversations, or durable outbox writes.
+ */
+    static open(databasePath: string, transport: NativeTransport): NativeApplianceLike /*throws*/ {
+    return FfiConverterTypeNativeAppliance.lift(uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError),
+            /*caller:*/ (callStatus) => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open(
+        FfiConverterString.lower(databasePath, nativeModule().rustbuffer_alloc),
+        FfiConverterTypeNativeTransport.lower(transport, nativeModule().rustbuffer_alloc),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    ));
+    }
+
+
+
+/**
+ * Idempotently stop the actor and close its SQLite ownership.
+ */
+    async close(asyncOpts_?: { signal: AbortSignal }): Promise<void> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_close(
+                    uniffiTypeNativeApplianceObjectFactory.clonePointer(this)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_void,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_void,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_void,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_void,
+            /*liftFunc:*/ (_v) => {},
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+/**
+ * Return durable contacts as canonical JSON.
+ */
+    async contactsJson(asyncOpts_?: { signal: AbortSignal }): Promise<string> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_contacts_json(
+                    uniffiTypeNativeApplianceObjectFactory.clonePointer(this)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_rust_buffer,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_rust_buffer,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_rust_buffer,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_rust_buffer,
+            // Async returns always go through the JS-side converter: the
+            // FFI symbol returns the future handle (u64), and the user-level
+            // RustBuffer comes back via the shared `rust_future_complete_*`
+            // export. The bytes the runtime hands back must be deserialized
+            // here using the per-callable return-type converter.
+            /*liftFunc:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+/**
+ * Request a fresh device connection.
+ *
+ * Every native connector is still a deliberate stub, so this returns the
+ * typed `TransportUnavailable` failure instead of silently falling back.
+ */
+    async reconnect(asyncOpts_?: { signal: AbortSignal }): Promise<void> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_reconnect(
+                    uniffiTypeNativeApplianceObjectFactory.clonePointer(this)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_void,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_void,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_void,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_void,
+            /*liftFunc:*/ (_v) => {},
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+/**
+ * Validate and durably enqueue a message using the shared request DTO.
+ */
+    async sendMessageJson(requestJson: string, asyncOpts_?: { signal: AbortSignal }): Promise<string> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_send_message_json(
+                    uniffiTypeNativeApplianceObjectFactory.clonePointer(this),FfiConverterString.lower(requestJson, nativeModule().rustbuffer_alloc)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_rust_buffer,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_rust_buffer,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_rust_buffer,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_rust_buffer,
+            // Async returns always go through the JS-side converter: the
+            // FFI symbol returns the future handle (u64), and the user-level
+            // RustBuffer comes back via the shared `rust_future_complete_*`
+            // export. The bytes the runtime hands back must be deserialized
+            // here using the per-callable return-type converter.
+            /*liftFunc:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+/**
+ * Return the authoritative appliance snapshot as canonical JSON.
+ */
+    snapshotJson(): string /*throws*/ {
+    return ((__rb: Uint8Array) => {
+        try {
+            return FfiConverterString.lift(__rb);
+        } finally {
+            nativeModule().rustbuffer_free(__rb);
+        }
+    })(uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError),
+            /*caller:*/ (callStatus) => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_snapshot_json(
+                uniffiTypeNativeApplianceObjectFactory.clonePointer(this),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    ));
+    }
+
+/**
+ * Schedule local inbox/outbox work without requiring a ready bearer.
+ */
+    async syncNow(asyncOpts_?: { signal: AbortSignal }): Promise<void> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_sync_now(
+                    uniffiTypeNativeApplianceObjectFactory.clonePointer(this)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_void,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_void,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_void,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_void,
+            /*liftFunc:*/ (_v) => {},
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+/**
+ * Return one peer's durable timeline as canonical JSON.
+ */
+    async timelineJson(destination: string, asyncOpts_?: { signal: AbortSignal }): Promise<string> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_timeline_json(
+                    uniffiTypeNativeApplianceObjectFactory.clonePointer(this),FfiConverterString.lower(destination, nativeModule().rustbuffer_alloc)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_rust_buffer,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_rust_buffer,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_rust_buffer,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_rust_buffer,
+            // Async returns always go through the JS-side converter: the
+            // FFI symbol returns the future handle (u64), and the user-level
+            // RustBuffer comes back via the shared `rust_future_complete_*`
+            // export. The bytes the runtime hands back must be deserialized
+            // here using the per-callable return-type converter.
+            /*liftFunc:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+/**
+ * Selected bearer, including future transports that are not available yet.
+ */
+    transport(): NativeTransport {
+    return ((__rb: Uint8Array) => {
+        try {
+            return FfiConverterTypeNativeTransport.lift(__rb);
+        } finally {
+            nativeModule().rustbuffer_free(__rb);
+        }
+    })(uniffiCaller.rustCall(
+            /*caller:*/ (callStatus) => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_transport(
+                uniffiTypeNativeApplianceObjectFactory.clonePointer(this),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    ));
+    }
+
+/**
+ * Validate and durably upsert a contact using the shared request DTO.
+ */
+    async upsertContactJson(destination: string, requestJson: string, asyncOpts_?: { signal: AbortSignal }): Promise<string> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_upsert_contact_json(
+                    uniffiTypeNativeApplianceObjectFactory.clonePointer(this),FfiConverterString.lower(destination, nativeModule().rustbuffer_alloc),FfiConverterString.lower(requestJson, nativeModule().rustbuffer_alloc)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_rust_buffer,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_rust_buffer,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_rust_buffer,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_rust_buffer,
+            // Async returns always go through the JS-side converter: the
+            // FFI symbol returns the future handle (u64), and the user-level
+            // RustBuffer comes back via the shared `rust_future_complete_*`
+            // export. The bytes the runtime hands back must be deserialized
+            // here using the per-callable return-type converter.
+            /*liftFunc:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+
+    uniffiDestroy(): void {
+        const ptr = (this as any)[destructorGuardSymbol];
+        if (ptr !== undefined) {
+            const pointer = uniffiTypeNativeApplianceObjectFactory.pointer(this);
+            uniffiTypeNativeApplianceObjectFactory.freePointer(pointer);
+            uniffiTypeNativeApplianceObjectFactory.unbless(ptr);
+            delete (this as any)[destructorGuardSymbol];
+        }
+    }
+
+    static instanceOf(obj_: any): obj_ is NativeAppliance {
+        return uniffiTypeNativeApplianceObjectFactory.isConcreteType(obj_);
+    }
+
+
+}
+
+const uniffiTypeNativeApplianceObjectFactory: UniffiObjectFactory<NativeApplianceLike> = (() => {
+
+    return {
+    create(pointer: UniffiHandle): NativeApplianceLike {
+        const instance = Object.create(NativeAppliance.prototype);
+        instance[pointerLiteralSymbol] = pointer;
+        instance[destructorGuardSymbol] = this.bless(pointer);
+        instance[uniffiTypeNameSymbol] = "NativeAppliance";
+        return instance;
+    },
+
+
+    bless(p: UniffiHandle): UniffiGcObject {
+        return uniffiCaller.rustCall(
+            /*caller:*/ (status) =>
+                nativeModule().ubrn_uniffi_internal_fn_method_nativeappliance_ffi__bless_pointer(p, status),
+            /*liftString:*/ FfiConverterString.lift
+        );
+    },
+
+    unbless(ptr_: UniffiGcObject) {
+        ptr_.markDestroyed();
+    },
+
+    pointer(obj_: NativeApplianceLike): UniffiHandle {
+        if ((obj_ as any)[destructorGuardSymbol] === undefined) {
+            throw new UniffiInternalError.UnexpectedNullPointer();
+        }
+        return (obj_ as any)[pointerLiteralSymbol];
+    },
+
+    clonePointer(obj_: NativeApplianceLike): UniffiHandle {
+        const pointer = this.pointer(obj_);
+        return uniffiCaller.rustCall(
+            /*caller:*/ (callStatus) => nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_clone_nativeappliance(pointer, callStatus),
+            /*liftString:*/ FfiConverterString.lift
+        );
+    },
+
+    freePointer(pointer: UniffiHandle): void {
+        uniffiCaller.rustCall(
+            /*caller:*/ (callStatus) => nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_free_nativeappliance(pointer, callStatus),
+            /*liftString:*/ FfiConverterString.lift
+        );
+    },
+
+    isConcreteType(obj_: any): obj_ is NativeApplianceLike {
+        return obj_[destructorGuardSymbol] && obj_[uniffiTypeNameSymbol] === "NativeAppliance";
+    },
+}})();
+const FfiConverterTypeNativeAppliance = new FfiConverterObject(uniffiTypeNativeApplianceObjectFactory);
+
 
 /**
  * This should be called before anything else.
@@ -206,12 +1097,45 @@ function uniffiEnsureInitialized() {
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_func_native_bridge_contract() !== 30012) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_func_native_bridge_contract");
     }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open() !== 60566) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_close() !== 5337) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_close");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_contacts_json() !== 54150) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_contacts_json");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_reconnect() !== 6729) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_reconnect");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_send_message_json() !== 18594) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_send_message_json");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_snapshot_json() !== 60158) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_snapshot_json");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_sync_now() !== 36134) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_sync_now");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_timeline_json() !== 17063) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_timeline_json");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_transport() !== 8308) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_transport");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_upsert_contact_json() !== 4061) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_upsert_contact_json");
+    }
 
     }
 
 export default Object.freeze({
   initialize: uniffiEnsureInitialized,
   converters: {
+    FfiConverterTypeNativeAppliance,
+    FfiConverterTypeNativeApplianceError,
     FfiConverterTypeNativeBridgeContract,
+    FfiConverterTypeNativeTransport,
   }
 });

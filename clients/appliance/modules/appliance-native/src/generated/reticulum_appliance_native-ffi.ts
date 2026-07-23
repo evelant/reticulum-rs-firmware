@@ -67,9 +67,32 @@ interface NativeModuleInterface {
     ubrn_ffi_reticulum_appliance_native_rust_future_cancel_void(handle: bigint): void;
     ubrn_ffi_reticulum_appliance_native_rust_future_complete_void(handle: bigint, uniffi_out_err: UniffiRustCallStatus): void;
     ubrn_ffi_reticulum_appliance_native_rust_future_free_void(handle: bigint): void;
+    ubrn_uniffi_reticulum_appliance_native_fn_clone_nativeappliance(ptr: bigint, uniffi_out_err: UniffiRustCallStatus): bigint;
+    ubrn_uniffi_reticulum_appliance_native_fn_free_nativeappliance(ptr: bigint, uniffi_out_err: UniffiRustCallStatus): void;
     ubrn_uniffi_reticulum_appliance_native_fn_func_native_bridge_contract(uniffi_out_err: UniffiRustCallStatus): Uint8Array;
+    ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open(databasePath: Uint8Array, transport: Uint8Array, uniffi_out_err: UniffiRustCallStatus): bigint;
+    ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_close(uniffiSelf: bigint): bigint;
+    ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_contacts_json(uniffiSelf: bigint): bigint;
+    ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_reconnect(uniffiSelf: bigint): bigint;
+    ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_send_message_json(uniffiSelf: bigint, requestJson: Uint8Array): bigint;
+    ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_snapshot_json(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
+    ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_sync_now(uniffiSelf: bigint): bigint;
+    ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_timeline_json(uniffiSelf: bigint, destination: Uint8Array): bigint;
+    ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_transport(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
+    ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_upsert_contact_json(uniffiSelf: bigint, destination: Uint8Array, requestJson: Uint8Array): bigint;
     ubrn_ffi_reticulum_appliance_native_uniffi_contract_version(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_func_native_bridge_contract(): number;
+    ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open(): number;
+    ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_close(): number;
+    ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_contacts_json(): number;
+    ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_reconnect(): number;
+    ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_send_message_json(): number;
+    ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_snapshot_json(): number;
+    ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_sync_now(): number;
+    ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_timeline_json(): number;
+    ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_transport(): number;
+    ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_upsert_contact_json(): number;
+    ubrn_uniffi_internal_fn_method_nativeappliance_ffi__bless_pointer(pointer: bigint, uniffi_out_err: UniffiRustCallStatus): UniffiGcObject;
     // Codegen call sites use these via `nativeModule().rustbuffer_alloc(...)`
     // and `nativeModule().rustbuffer_free(...)`. The JSI host object exposes
     // them as properties; see `props["rustbuffer_alloc"]` / `props["rustbuffer_free"]`

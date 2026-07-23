@@ -4,80 +4,26 @@ use reticulum_device_api::{
     API_VERSION_MAJOR, API_VERSION_MINOR, MAX_LXMF_BASIC_CONTENT_BYTES, MAX_LXMF_BASIC_TITLE_BYTES,
     MAX_LXMF_READ_CHUNK_BYTES, MAX_MESSAGE_BYTES,
 };
-use serde::de::Error as _;
-use serde::{Deserialize, Deserializer, Serializer};
+use reticulum_lxmf_chat_runtime::{
+    ApplianceSnapshot, BytesEncoding, BytesView, ConnectionState, ConnectionTransport,
+    ContactRequest, ContactView, DeviceView, MAX_CONTACT_NAME_BYTES, MutationOutcome,
+    MutationResponse, SendOutcome, SendRequest, SendResponse, TimelineDirection, TimelineStatus,
+    TimelineView,
+};
 use ts_rs::TS;
 
 use crate::onboarding::{OnboardingFault, OnboardingSnapshot, OnboardingStage, OnboardingState};
-use crate::runtime::{
-    ApplianceSnapshot, BytesEncoding, BytesView, ConnectionState, ContactView, DeviceView,
-    TimelineDirection, TimelineStatus, TimelineView,
-};
 use crate::web::{
-    ContactRequest, ErrorBody, MAX_CONTACT_NAME_BYTES, MutationOutcome, MutationResponse,
-    OnboardingView, RecoveryAction, RecoveryRequest, SendOutcome, SendRequest, SendResponse,
-    SessionRequest,
+    ErrorBody, HttpApplianceSnapshot, HttpConnectionState, OnboardingView, RecoveryAction,
+    RecoveryRequest, SessionRequest,
 };
 
-/// Largest integer JSON clients may represent without precision loss.
-pub const MAX_JSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
-
-/// A JSON number constrained to JavaScript's lossless integer range.
-#[derive(TS)]
-#[ts(type = "number")]
-pub struct JsonSafeInteger;
+pub(crate) use reticulum_lxmf_chat_runtime::{JsonSafeInteger, serialize_json_safe_u64};
 
 /// Marker for successful HTTP responses that deliberately contain no body.
 #[derive(TS)]
 #[ts(type = "undefined")]
 pub struct NoContent;
-
-pub(crate) fn serialize_json_safe_u64<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    if *value > MAX_JSON_SAFE_INTEGER {
-        return Err(serde::ser::Error::custom(
-            "integer exceeds the JSON safe-integer contract",
-        ));
-    }
-    serializer.serialize_u64(*value)
-}
-
-pub(crate) fn serialize_optional_json_safe_u64<S>(
-    value: &Option<u64>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    match value {
-        Some(value) => serialize_json_safe_u64(value, serializer),
-        None => serializer.serialize_none(),
-    }
-}
-
-pub(crate) fn serialize_json_safe_usize<S>(value: &usize, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    let value = u64::try_from(*value)
-        .map_err(|_| serde::ser::Error::custom("integer exceeds the JSON u64 range"))?;
-    serialize_json_safe_u64(&value, serializer)
-}
-
-pub(crate) fn deserialize_json_safe_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = u64::deserialize(deserializer)?;
-    if value > MAX_JSON_SAFE_INTEGER {
-        return Err(D::Error::custom(
-            "integer exceeds the JSON safe-integer contract",
-        ));
-    }
-    Ok(value)
-}
 
 /// Return the deterministic TypeScript module generated from the Rust wire DTOs.
 #[must_use]
@@ -103,9 +49,12 @@ pub fn render_api_bindings() -> String {
 
     append_declaration::<JsonSafeInteger>(&mut output, &config);
     append_declaration::<NoContent>(&mut output, &config);
+    append_declaration::<ConnectionTransport>(&mut output, &config);
     append_declaration::<ConnectionState>(&mut output, &config);
     append_declaration::<DeviceView>(&mut output, &config);
     append_declaration::<ApplianceSnapshot>(&mut output, &config);
+    append_declaration::<HttpConnectionState>(&mut output, &config);
+    append_declaration::<HttpApplianceSnapshot>(&mut output, &config);
     append_declaration::<OnboardingStage>(&mut output, &config);
     append_declaration::<OnboardingFault>(&mut output, &config);
     append_declaration::<OnboardingState>(&mut output, &config);
@@ -153,6 +102,7 @@ fn normalize_generated_module(output: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    use reticulum_lxmf_chat_runtime::{MAX_JSON_SAFE_INTEGER, deserialize_json_safe_u64};
     use serde::{Deserialize, Serialize};
 
     use super::*;

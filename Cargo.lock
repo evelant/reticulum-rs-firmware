@@ -35,6 +35,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "async-compat"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1ba85bc55464dcbf728b56d97e119d673f4cf9062be330a9a26f3acf504a590"
+dependencies = [
+ "futures-core",
+ "futures-io",
+ "once_cell",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1195,6 +1208,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2cd50c473c80f6d7c3670a752354b8e569b1a7cbfdc0419ec88e5edad85e0dc7"
 
 [[package]]
+name = "futures-io"
+version = "0.3.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4577ecaa3c4f96589d473f679a71b596316f6641bc350038b962a5daf0085d7a"
+
+[[package]]
 name = "futures-sink"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1907,6 +1926,10 @@ name = "reticulum-appliance-native"
 version = "0.1.0"
 dependencies = [
  "reticulum-device-api",
+ "reticulum-lxmf-chat-runtime",
+ "serde",
+ "serde_json",
+ "tokio",
  "uniffi",
 ]
 
@@ -2320,6 +2343,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "reticulum-lxmf-chat-runtime"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "reticulum-device-api",
+ "reticulum-device-client",
+ "reticulum-lxmf-chat-app",
+ "reticulum-lxmf-chat-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "ts-rs",
+]
+
+[[package]]
 name = "reticulum-lxmf-chat-service"
 version = "0.1.0"
 dependencies = [
@@ -2333,6 +2371,7 @@ dependencies = [
  "reticulum-device-pairing-client",
  "reticulum-lxmf-chat-app",
  "reticulum-lxmf-chat-core",
+ "reticulum-lxmf-chat-runtime",
  "rustix",
  "serde",
  "serde_json",
@@ -3362,6 +3401,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0ef62e69762fbb9386dcb6c87cd3dd05d525fa8a3a579a290892e60ddbda47e"
 dependencies = [
  "anyhow",
+ "async-compat",
  "bytes",
  "once_cell",
  "static_assertions",

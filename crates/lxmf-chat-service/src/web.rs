@@ -15,23 +15,20 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use futures_util::stream;
-use reticulum_device_api::{MAX_LXMF_BASIC_CONTENT_BYTES, MAX_LXMF_BASIC_TITLE_BYTES};
-use reticulum_lxmf_chat_core::{
-    Contact, ContactUpsertOutcome, DestinationHash, IdempotencyKey, OutboxCommitOutcome,
-    OutboxMaterial, UnixTimestampMillis,
-};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tokio::sync::{Semaphore, oneshot};
 use tokio::task::JoinHandle;
 use ts_rs::TS;
 
-use crate::bindings::{JsonSafeInteger, deserialize_json_safe_u64, serialize_json_safe_u64};
 use crate::onboarding::{OnboardingError, OnboardingHandle, OnboardingSnapshot};
-use crate::runtime::{ApplianceHandle, ServiceError};
+use reticulum_lxmf_chat_runtime::{
+    ApplianceHandle, ApplianceSnapshot, ClientRequestError, ConnectionState, ContactRequest,
+    DeviceView, JsonSafeInteger, MutationResponse, SendRequest, SendResponse, ServiceError,
+    parse_destination, serialize_json_safe_u64,
+};
 
 const BODY_LIMIT: usize = 16 * 1024;
-pub(crate) const MAX_CONTACT_NAME_BYTES: usize = 256;
 const MAX_SSE_CLIENTS: usize = 8;
 const SESSION_COOKIE: &str = "reticulum_lxmf_session";
 const CLIENT_HEADER: &str = "x-reticulum-client";
@@ -331,7 +328,80 @@ async fn snapshot(
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
     require_api(&state, &headers, false)?;
-    Ok(Json((*state.appliance.snapshot()).clone()).into_response())
+    let snapshot = state.appliance.snapshot();
+    Ok(Json(HttpApplianceSnapshot::from(snapshot.as_ref())).into_response())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
+#[serde(tag = "state", rename_all = "snake_case")]
+#[allow(missing_docs)]
+pub(crate) enum HttpConnectionState {
+    Starting,
+    Disconnected,
+    Connecting,
+    Ready { port: String, usb_serial: String },
+    Backoff,
+    Faulted,
+    Stopped,
+}
+
+impl From<&ConnectionState> for HttpConnectionState {
+    fn from(state: &ConnectionState) -> Self {
+        match state {
+            ConnectionState::Starting => Self::Starting,
+            ConnectionState::Disconnected | ConnectionState::Unavailable { .. } => {
+                Self::Disconnected
+            }
+            ConnectionState::Connecting => Self::Connecting,
+            ConnectionState::Ready {
+                endpoint,
+                device_label,
+                ..
+            } => Self::Ready {
+                port: endpoint.clone(),
+                usb_serial: device_label.clone(),
+            },
+            ConnectionState::Backoff => Self::Backoff,
+            ConnectionState::Faulted => Self::Faulted,
+            ConnectionState::Stopped => Self::Stopped,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
+#[allow(missing_docs)]
+pub(crate) struct HttpApplianceSnapshot {
+    #[serde(serialize_with = "serialize_json_safe_u64")]
+    #[ts(as = "JsonSafeInteger")]
+    revision: u64,
+    connection: HttpConnectionState,
+    device: Option<DeviceView>,
+    #[serde(serialize_with = "serialize_json_safe_u64")]
+    #[ts(as = "JsonSafeInteger")]
+    pending_outbox: u64,
+    #[serde(serialize_with = "serialize_json_safe_u64")]
+    #[ts(as = "JsonSafeInteger")]
+    contact_count: u64,
+    #[serde(serialize_with = "serialize_json_safe_u64")]
+    #[ts(as = "JsonSafeInteger")]
+    imported_this_run: u64,
+    last_error: Option<String>,
+}
+
+impl From<&ApplianceSnapshot> for HttpApplianceSnapshot {
+    fn from(snapshot: &ApplianceSnapshot) -> Self {
+        Self {
+            revision: snapshot.revision(),
+            connection: HttpConnectionState::from(snapshot.connection()),
+            device: snapshot.device().cloned(),
+            pending_outbox: u64::try_from(snapshot.pending_outbox())
+                .expect("outbox count must fit u64"),
+            contact_count: u64::try_from(snapshot.contact_count())
+                .expect("contact count must fit u64"),
+            imported_this_run: snapshot.imported_this_run(),
+            last_error: snapshot.last_error().map(str::to_owned),
+        }
+    }
 }
 
 async fn contacts(
@@ -347,24 +417,6 @@ async fn contacts(
     Ok(Json(contacts).into_response())
 }
 
-#[derive(Deserialize, TS)]
-pub(crate) struct ContactRequest {
-    name: String,
-}
-
-#[derive(Clone, Copy, Serialize, TS)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum MutationOutcome {
-    Inserted,
-    Updated,
-    Unchanged,
-}
-
-#[derive(Serialize, TS)]
-pub(crate) struct MutationResponse {
-    outcome: MutationOutcome,
-}
-
 async fn upsert_contact(
     State(state): State<WebState>,
     Path(destination): Path<String>,
@@ -372,21 +424,15 @@ async fn upsert_contact(
     Json(request): Json<ContactRequest>,
 ) -> Result<Response, HttpError> {
     require_api(&state, &headers, true)?;
-    if request.name.len() > MAX_CONTACT_NAME_BYTES {
-        return Err(HttpError::bad_request("contact name is too long"));
-    }
-    let destination = parse_destination(&destination)?;
+    let contact = request
+        .into_contact(&destination)
+        .map_err(HttpError::from_client_request)?;
     let outcome = state
         .appliance
-        .upsert_contact(Contact::new(destination, request.name))
+        .upsert_contact(contact)
         .await
         .map_err(HttpError::from_service)?;
-    let outcome = match outcome {
-        ContactUpsertOutcome::Inserted => MutationOutcome::Inserted,
-        ContactUpsertOutcome::Updated => MutationOutcome::Updated,
-        ContactUpsertOutcome::Unchanged => MutationOutcome::Unchanged,
-    };
-    Ok(Json(MutationResponse { outcome }).into_response())
+    Ok(Json(MutationResponse::from(outcome)).into_response())
 }
 
 async fn conversation(
@@ -395,7 +441,7 @@ async fn conversation(
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
     require_api(&state, &headers, false)?;
-    let peer = parse_destination(&destination)?;
+    let peer = parse_destination(&destination).map_err(HttpError::from_client_request)?;
     let timeline = state
         .appliance
         .timeline(peer)
@@ -404,73 +450,21 @@ async fn conversation(
     Ok(Json(timeline).into_response())
 }
 
-#[derive(Deserialize, TS)]
-pub(crate) struct SendRequest {
-    destination: String,
-    #[serde(deserialize_with = "deserialize_json_safe_u64")]
-    #[ts(as = "JsonSafeInteger")]
-    timestamp_ms: u64,
-    idempotency_key: String,
-    title: String,
-    content: String,
-}
-
-#[derive(Clone, Copy, Serialize, TS)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum SendOutcome {
-    Inserted,
-    Existing,
-}
-
-#[derive(Serialize, TS)]
-pub(crate) struct SendResponse {
-    #[serde(serialize_with = "serialize_json_safe_u64")]
-    #[ts(as = "JsonSafeInteger")]
-    outbox_id: u64,
-    outcome: SendOutcome,
-}
-
 async fn send_message(
     State(state): State<WebState>,
     headers: HeaderMap,
     Json(request): Json<SendRequest>,
 ) -> Result<Response, HttpError> {
     require_api(&state, &headers, true)?;
-    if request.title.len() > MAX_LXMF_BASIC_TITLE_BYTES {
-        return Err(HttpError::bad_request("message title exceeds device limit"));
-    }
-    if request.content.len() > MAX_LXMF_BASIC_CONTENT_BYTES {
-        return Err(HttpError::bad_request(
-            "message content exceeds device limit",
-        ));
-    }
-    let destination = parse_destination(&request.destination)?;
-    let timestamp = UnixTimestampMillis::new(request.timestamp_ms)
-        .map_err(|_| HttpError::bad_request("timestamp is outside the LXMF client range"))?;
-    let idempotency_key = IdempotencyKey::new(parse_hex::<16>(
-        &request.idempotency_key,
-        "idempotency key",
-    )?);
+    let material = request
+        .into_material()
+        .map_err(HttpError::from_client_request)?;
     let outcome = state
         .appliance
-        .enqueue_send(OutboxMaterial::new(
-            destination,
-            timestamp,
-            idempotency_key,
-            request.title.into_bytes(),
-            request.content.into_bytes(),
-        ))
+        .enqueue_send(material)
         .await
         .map_err(HttpError::from_service)?;
-    let (outbox_id, outcome) = match outcome {
-        OutboxCommitOutcome::Inserted(id) => (id.get(), SendOutcome::Inserted),
-        OutboxCommitOutcome::Existing(id) => (id.get(), SendOutcome::Existing),
-    };
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(SendResponse { outbox_id, outcome }),
-    )
-        .into_response())
+    Ok((StatusCode::ACCEPTED, Json(SendResponse::from(outcome))).into_response())
 }
 
 async fn sync_now(
@@ -590,21 +584,6 @@ fn constant_time_equal(candidate: &[u8], expected: &[u8]) -> bool {
     candidate.len() == expected.len() && bool::from(candidate.ct_eq(expected))
 }
 
-fn parse_destination(value: &str) -> Result<DestinationHash, HttpError> {
-    Ok(DestinationHash::new(parse_hex::<16>(value, "destination")?))
-}
-
-fn parse_hex<const N: usize>(value: &str, field: &'static str) -> Result<[u8; N], HttpError> {
-    let mut bytes = [0_u8; N];
-    hex::decode_to_slice(value, &mut bytes).map_err(|_| {
-        HttpError::bad_request(format!(
-            "{field} must contain exactly {} hexadecimal characters",
-            N * 2
-        ))
-    })?;
-    Ok(bytes)
-}
-
 fn generate_capability() -> Result<String, String> {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes)
@@ -680,6 +659,10 @@ impl HttpError {
         }
     }
 
+    fn from_client_request(error: ClientRequestError) -> Self {
+        Self::bad_request(error.to_string())
+    }
+
     fn from_onboarding(error: OnboardingError) -> Self {
         match error {
             OnboardingError::Busy | OnboardingError::Stopped => {
@@ -737,10 +720,35 @@ mod tests {
     }
 
     #[test]
-    fn exact_hex_fields_are_enforced() {
-        assert_eq!(parse_hex::<2>("a0ff", "value").unwrap(), [0xa0, 0xff]);
-        assert!(parse_hex::<2>("a0", "value").is_err());
-        assert!(parse_hex::<2>("zzzz", "value").is_err());
+    fn exact_destination_hex_is_enforced() {
+        assert!(parse_destination(&"a0".repeat(16)).is_ok());
+        assert!(parse_destination(&"a0".repeat(15)).is_err());
+        assert!(parse_destination(&"zz".repeat(16)).is_err());
+    }
+
+    #[test]
+    fn http_connection_projection_retains_v1_usb_fields() {
+        let ready = ConnectionState::Ready {
+            transport: reticulum_lxmf_chat_runtime::ConnectionTransport::UsbSerial,
+            endpoint: "/dev/cu.usbmodem-test".to_owned(),
+            device_label: "001122334455".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_value(HttpConnectionState::from(&ready)).unwrap(),
+            serde_json::json!({
+                "state": "ready",
+                "port": "/dev/cu.usbmodem-test",
+                "usb_serial": "001122334455",
+            })
+        );
+
+        let unavailable = ConnectionState::Unavailable {
+            transport: reticulum_lxmf_chat_runtime::ConnectionTransport::BluetoothLowEnergy,
+        };
+        assert_eq!(
+            serde_json::to_value(HttpConnectionState::from(&unavailable)).unwrap(),
+            serde_json::json!({ "state": "disconnected" })
+        );
     }
 
     #[tokio::test]

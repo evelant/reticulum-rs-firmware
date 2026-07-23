@@ -23,17 +23,35 @@ export type JsonSafeInteger = number;
 export type NoContent = undefined;
 
 /**
+ * Physical or local-network bearer used for one authenticated session.
+ *
+ * Only [`Self::UsbSerial`] has a connector in the host service today. The
+ * remaining variants deliberately reserve the runtime vocabulary for USB
+ * OTG, BLE, Wi-Fi, and later adapters without implying that they are already
+ * available.
+ */
+export type ConnectionTransport = "usb_serial" | "usb_otg" | "bluetooth_low_energy" | "wifi" | { "other": string };
+
+/**
  * Public connection lifecycle exposed to the UI.
  */
-export type ConnectionState = { "state": "starting" } | { "state": "disconnected" } | { "state": "connecting" } | { "state": "ready",
+export type ConnectionState = { "state": "starting" } | { "state": "disconnected" } | { "state": "connecting" } | { "state": "unavailable",
 /**
- * Current ephemeral serial path.
+ * Bearer reserved for a future connector implementation.
  */
-port: string,
+transport: ConnectionTransport, } | { "state": "ready",
 /**
- * Configured stable USB descriptor serial.
+ * Bearer used by this authenticated session.
  */
-usb_serial: string, } | { "state": "backoff" } | { "state": "faulted" } | { "state": "stopped" };
+transport: ConnectionTransport,
+/**
+ * Bearer-specific endpoint label.
+ */
+endpoint: string,
+/**
+ * Stable user-visible device label.
+ */
+device_label: string, } | { "state": "backoff" } | { "state": "faulted" } | { "state": "stopped" };
 
 /**
  * JSON-safe authenticated device identity.
@@ -41,9 +59,13 @@ usb_serial: string, } | { "state": "backoff" } | { "state": "faulted" } | { "sta
 export type DeviceView = { device_id: string, primary_destination: string, lxmf_delivery_destination: string, };
 
 /**
- * Immutable authoritative service state read without touching serial or SQLite.
+ * Immutable authoritative appliance state read without touching its actor.
  */
 export type ApplianceSnapshot = { revision: JsonSafeInteger, connection: ConnectionState, device: DeviceView | null, pending_outbox: JsonSafeInteger, contact_count: JsonSafeInteger, imported_this_run: JsonSafeInteger, last_error: string | null, };
+
+export type HttpConnectionState = { "state": "starting" } | { "state": "disconnected" } | { "state": "connecting" } | { "state": "ready", port: string, usb_serial: string, } | { "state": "backoff" } | { "state": "faulted" } | { "state": "stopped" };
+
+export type HttpApplianceSnapshot = { revision: JsonSafeInteger, connection: HttpConnectionState, device: DeviceView | null, pending_outbox: JsonSafeInteger, contact_count: JsonSafeInteger, imported_this_run: JsonSafeInteger, last_error: string | null, };
 
 /**
  * Secret-free progress stage shown during explicit onboarding.
