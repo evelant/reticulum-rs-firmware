@@ -2622,10 +2622,12 @@ dependencies = [
  "reticulum-device-client",
  "reticulum-lxmf-chat-app",
  "reticulum-lxmf-chat-runtime",
+ "rustix",
  "serde",
  "serde_json",
  "tokio",
  "uniffi",
+ "zeroize",
 ]
 
 [[package]]

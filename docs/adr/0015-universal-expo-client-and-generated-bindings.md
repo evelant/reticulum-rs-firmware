@@ -100,10 +100,15 @@ constants and fails closed before exposing the bridge as ready.
 
 Android development compilation now passes for all four Expo ABIs. An arm64
 iOS simulator development build also passes and renders the contract returned
-by the compiled Rust library. This qualifies the generator, packaging,
-autoloading, and basic callable round trip; it does not yet qualify a native
-device transport, cancellation, panic translation, application lifecycle, or
-BLE behavior. Direct handwritten Turbo Modules remain a fallback. Nitro
+by the compiled Rust library. The later bridge revisions add a host-tested
+raw-TCP Wi-Fi connector and a foreground BLE central/Rust command pump.
+Direct macOS CoreBluetooth sessions qualify the BLE firmware carrier on both
+E290s; generated iOS/Android builds and Expo source tests qualify the native
+composition. A create-only native credential import now gates BLE and derives
+the exact E290 advertising name without exposing PSK bytes to TypeScript.
+Physical-phone file picking, permissions, TurboModule transport calls,
+foreground/background behavior, reconnect, and authenticated LXMF remain
+unqualified. Direct handwritten Turbo Modules remain a fallback. Nitro
 Modules remain deferred until profiling shows that the control/message
 interface needs a lower-overhead JSI boundary; selecting them pre-emptively
 would add a second code generator and C++ ownership surface without a

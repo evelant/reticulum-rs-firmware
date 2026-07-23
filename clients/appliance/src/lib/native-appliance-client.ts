@@ -2,6 +2,7 @@ import type {
   NativeApplianceLike,
   NativeBleGattProfile,
   NativeBridgeContract,
+  NativeCredentialSummary,
 } from "@reticulum/appliance-native";
 
 import type {
@@ -26,12 +27,29 @@ import { type NativeErrorPredicate, normalizeNativeError } from "./native-error.
 
 const DATABASE_FILE_NAME = "reticulum-lxmf-chat.sqlite3";
 const DEVICE_CREDENTIAL_FILE_NAME = "reticulum-device-credential.rdpkey";
-const NATIVE_ONBOARDING: OnboardingView = { available: false, snapshot: null };
+
+export type NativeCredentialState =
+  | { readonly state: "missing" }
+  | { readonly state: "active"; readonly summary: NativeCredentialSummary }
+  | { readonly state: "invalid"; readonly reason: string };
+
+export interface StagedNativeCredential {
+  /**
+   * Absolute path to an app-owned temporary copy. The selected external file
+   * itself is never handed to Rust and its secret bytes never enter JS.
+   */
+  readonly stagingPath: string;
+  cleanup(): void | Promise<void>;
+}
+
+export type NativeCredentialPicker = () => Promise<StagedNativeCredential | null>;
 
 export interface NativeApplianceBridge {
   readonly contract: NativeBridgeContract;
   readonly isNativeError: NativeErrorPredicate;
+  credentialStatus(appliance: NativeApplianceLike): NativeCredentialState;
   destroy(appliance: NativeApplianceLike): void;
+  importCredential(appliance: NativeApplianceLike, stagingPath: string): NativeCredentialSummary;
   open(databasePath: string): NativeApplianceLike;
 }
 
@@ -39,6 +57,7 @@ export interface NativeApplianceRuntime {
   readonly ble?: NativeBleTransportConfig;
   readonly bridge: NativeApplianceBridge;
   readonly databasePath: string;
+  readonly pickCredential?: NativeCredentialPicker;
 }
 
 export type NativeApplianceRuntimeLoader = () => Promise<NativeApplianceRuntime>;
@@ -46,6 +65,7 @@ export type NativeApplianceRuntimeLoader = () => Promise<NativeApplianceRuntime>
 interface OwnedNativeAppliance {
   readonly appliance: NativeApplianceLike;
   readonly ble: NativeBleTransport | null;
+  readonly pickCredential?: NativeCredentialPicker;
 }
 
 export function bleGattProfileFromNative(profile: NativeBleGattProfile): BleGattProfile {
@@ -57,6 +77,21 @@ export function bleGattProfileFromNative(profile: NativeBleGattProfile): BleGatt
   };
 }
 
+export function normalizeBlePeripheralName(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized === "" ? undefined : normalized;
+}
+
+export function cleanupPickerOwnedCredential(
+  platformOs: string,
+  picked: { readonly exists: boolean; delete(): void },
+): void {
+  // Expo's iOS picker uses UIDocumentPicker's asCopy mode, so its result is
+  // another app-owned temporary secret copy. Android returns a content://
+  // provider handle instead; deleting that could delete the user's source.
+  if (platformOs === "ios" && picked.exists) picked.delete();
+}
+
 function parseNativeJson<T>(label: string, value: string): T {
   try {
     return JSON.parse(value) as T;
@@ -65,16 +100,85 @@ function parseNativeJson<T>(label: string, value: string): T {
   }
 }
 
-function unsupportedOnboarding(): never {
+function isCredentialPublicationUncertain(
+  error: unknown,
+  isNativeError: NativeErrorPredicate,
+): boolean {
+  return isNativeError(error) && error.tag === "CredentialPublicationUncertain";
+}
+
+function unsupportedOnboardingRecovery(): never {
   throw new Error(
-    "Pairing is not available through the native bridge yet; seed an activated credential over the qualified USB workflow before using a BLE or Wi-Fi connector.",
+    "Native credential import has no resumable recovery action; full in-app BLE pairing remains future work.",
   );
 }
 
+function nativeOnboardingView(
+  status: NativeCredentialState,
+  bleTargetAvailable: boolean,
+  usesBle: boolean,
+): OnboardingView {
+  if (status.state === "missing") {
+    return {
+      available: true,
+      method: "credential_import",
+      snapshot: {
+        revision: 0,
+        usb_serial: "",
+        lifecycle: { state: "needs_pairing" },
+      },
+    };
+  }
+  if (status.state === "invalid") {
+    return {
+      available: true,
+      method: "credential_import",
+      snapshot: {
+        revision: 0,
+        usb_serial: "",
+        lifecycle: { state: "faulted", reason: "invalid_credential_artifact" },
+      },
+    };
+  }
+  if (
+    status.state === "active" &&
+    usesBle &&
+    !bleTargetAvailable &&
+    status.summary.expectedBleLocalName === undefined
+  ) {
+    return {
+      available: true,
+      method: "credential_import",
+      snapshot: {
+        revision: 0,
+        usb_serial: "",
+        lifecycle: { state: "faulted", reason: "unsupported_device" },
+      },
+    };
+  }
+  return {
+    available: true,
+    method: "credential_import",
+    snapshot: {
+      // The native generation is a u64 and therefore is not necessarily a
+      // lossless JavaScript number. This projection only needs a stable local
+      // revision; the generated native summary retains the exact bigint.
+      revision: 0,
+      // The shared HTTP DTO still calls this USB-specific field `usb_serial`.
+      // Do not overload it with a BLE name; ready connection metadata carries
+      // the neutral endpoint and device label.
+      usb_serial: "",
+      lifecycle: { state: "credential_ready" },
+    },
+  };
+}
+
 async function loadNativeApplianceRuntime(): Promise<NativeApplianceRuntime> {
-  const [bindings, fileSystem] = await Promise.all([
+  const [bindings, crypto, fileSystem, reactNative] = await Promise.all([
     import("@reticulum/appliance-native"),
+    import("expo-crypto"),
     import("expo-file-system"),
+    import("react-native"),
   ]);
   const databaseUri = new fileSystem.File(fileSystem.Paths.document, DATABASE_FILE_NAME).uri;
   const deviceCredentialUri = new fileSystem.File(
@@ -82,6 +186,7 @@ async function loadNativeApplianceRuntime(): Promise<NativeApplianceRuntime> {
     DEVICE_CREDENTIAL_FILE_NAME,
   ).uri;
   const wifiEndpoint = process.env.EXPO_PUBLIC_APPLIANCE_WIFI_ENDPOINT?.trim() ?? "";
+  const blePeripheralName = normalizeBlePeripheralName(process.env.EXPO_PUBLIC_APPLIANCE_BLE_NAME);
   const bleCentral = wifiEndpoint === "" ? await import("./ble-central") : null;
   return {
     ble:
@@ -98,13 +203,30 @@ async function loadNativeApplianceRuntime(): Promise<NativeApplianceRuntime> {
               }
               throw new Error("native Rust bridge returned an unknown BLE platform command");
             },
+            peripheralName: blePeripheralName,
             profile: bleGattProfileFromNative(bindings.nativeBleGattProfile()),
           },
     bridge: {
       contract: bindings.nativeBridgeContract(),
       isNativeError: bindings.NativeApplianceError.instanceOf,
+      credentialStatus(appliance): NativeCredentialState {
+        const status = appliance.credentialStatus();
+        if (bindings.NativeCredentialStatus.Missing.instanceOf(status)) {
+          return { state: "missing" };
+        }
+        if (bindings.NativeCredentialStatus.Active.instanceOf(status)) {
+          return { state: "active", summary: status.inner.summary };
+        }
+        if (bindings.NativeCredentialStatus.Invalid.instanceOf(status)) {
+          return { state: "invalid", reason: status.inner.reason };
+        }
+        throw new Error("native Rust bridge returned an unknown credential status");
+      },
       destroy(appliance): void {
         if (bindings.NativeAppliance.instanceOf(appliance)) appliance.uniffiDestroy();
+      },
+      importCredential(appliance, stagingPath): NativeCredentialSummary {
+        return appliance.importActivatedCredential(stagingPath);
       },
       open(databasePath): NativeApplianceLike {
         if (wifiEndpoint !== "") {
@@ -121,6 +243,45 @@ async function loadNativeApplianceRuntime(): Promise<NativeApplianceRuntime> {
       },
     },
     databasePath: nativePathFromFileUri(databaseUri),
+    async pickCredential(): Promise<StagedNativeCredential | null> {
+      const picked = await fileSystem.File.pickFileAsync({
+        mimeTypes: ["application/octet-stream"],
+        multipleFiles: false,
+      });
+      if (picked.canceled) return null;
+
+      // Expo performs the copy natively. TypeScript receives only file handles,
+      // never the activated credential bytes.
+      const staging = new fileSystem.File(
+        fileSystem.Paths.cache,
+        `.reticulum-credential-import-${crypto.randomUUID()}.rdpkey`,
+      );
+      const cleanup = (): void => {
+        if (staging.exists) staging.delete();
+      };
+      try {
+        await picked.result.copy(staging, { overwrite: false });
+        const stagingPath = nativePathFromFileUri(staging.uri);
+        cleanupPickerOwnedCredential(reactNative.Platform.OS, picked.result);
+        return { stagingPath, cleanup };
+      } catch (error) {
+        const cleanupErrors: unknown[] = [];
+        try {
+          cleanup();
+        } catch (cleanupError) {
+          cleanupErrors.push(cleanupError);
+        }
+        try {
+          cleanupPickerOwnedCredential(reactNative.Platform.OS, picked.result);
+        } catch (cleanupError) {
+          cleanupErrors.push(cleanupError);
+        }
+        if (cleanupErrors.length > 0) {
+          throw new AggregateError([error, ...cleanupErrors], "Credential staging cleanup failed.");
+        }
+        throw error;
+      }
+    },
   };
 }
 
@@ -165,7 +326,12 @@ export class NativeApplianceClient implements ApplianceClient {
   }
 
   async onboarding(): Promise<OnboardingView> {
-    return NATIVE_ONBOARDING;
+    const { ble } = this.#active();
+    return nativeOnboardingView(
+      this.#credentialState(),
+      ble?.hasPeripheralName ?? false,
+      ble !== null,
+    );
   }
 
   async contacts(): Promise<ContactView[]> {
@@ -196,15 +362,111 @@ export class NativeApplianceClient implements ApplianceClient {
   }
 
   async startOnboarding(): Promise<NoContent> {
-    unsupportedOnboarding();
+    const { appliance, ble, bridge, pickCredential } = this.#active();
+    const current = this.#credentialState();
+    if (current.state === "active") {
+      if (
+        ble !== null &&
+        current.summary.expectedBleLocalName === undefined &&
+        !ble.hasPeripheralName
+      ) {
+        throw new Error(
+          "The active credential does not identify an exact BLE advertising name; refusing an untargeted scan.",
+        );
+      }
+      return undefined;
+    }
+    if (current.state === "invalid") {
+      throw new Error(
+        "The app-private credential is invalid and cannot be replaced in place; remove this app's local data before importing a new credential.",
+      );
+    }
+    if (pickCredential === undefined) {
+      throw new Error("Credential file selection is unavailable in this native build.");
+    }
+
+    const staged = await pickCredential();
+    if (staged === null) return undefined;
+
+    let summary: NativeCredentialSummary | null = null;
+    let importFailure: unknown;
+    try {
+      summary = bridge.importCredential(appliance, staged.stagingPath);
+    } catch (error) {
+      if (!isCredentialPublicationUncertain(error, bridge.isNativeError)) {
+        importFailure = normalizeNativeError(error, bridge.isNativeError);
+      } else {
+        // Publication is atomic, but removing its temporary link or syncing
+        // the directory can fail after the destination became visible. Rust
+        // exposes only that post-publication phase as reconcilable. Validation
+        // and exact-readback failures remain ordinary Storage errors and must
+        // never be converted into success merely because the changed bytes
+        // still decode as an Active credential.
+        let reconciled: NativeCredentialState | null = null;
+        try {
+          reconciled = bridge.credentialStatus(appliance);
+        } catch {
+          // Preserve the more specific publication failure below.
+        }
+        if (reconciled?.state !== "active") {
+          importFailure = normalizeNativeError(error, bridge.isNativeError);
+        } else {
+          summary = reconciled.summary;
+        }
+      }
+    }
+
+    let cleanupFailure: unknown;
+    try {
+      await staged.cleanup();
+    } catch (error) {
+      cleanupFailure = error;
+    }
+
+    if (summary === null) {
+      if (importFailure !== undefined && cleanupFailure !== undefined) {
+        throw new AggregateError(
+          [importFailure, cleanupFailure],
+          "Credential import failed and its app-private staging copy could not be removed.",
+        );
+      }
+      if (importFailure !== undefined) throw importFailure;
+      if (cleanupFailure !== undefined) throw cleanupFailure;
+      throw new Error("Credential import did not produce an activated credential.");
+    }
+
+    if (ble !== null) {
+      if (summary.expectedBleLocalName !== undefined) {
+        ble.configurePeripheralName(summary.expectedBleLocalName);
+      }
+      if (!ble.hasPeripheralName) {
+        throw new Error(
+          "The imported credential does not identify an exact BLE advertising name; refusing an untargeted scan.",
+        );
+      }
+      ble.start();
+    } else {
+      // A missing credential can leave the native Wi-Fi connector in a
+      // permanent fault. Explicit reconnect clears that terminal attempt now
+      // that authenticated material is available.
+      await this.#call((activeAppliance) => activeAppliance.reconnect());
+    }
+    if (cleanupFailure !== undefined) {
+      throw new Error(
+        "The credential was installed, but its app-private staging copy could not be removed.",
+        { cause: cleanupFailure },
+      );
+    }
+    return undefined;
   }
 
   async refreshOnboarding(): Promise<NoContent> {
-    unsupportedOnboarding();
+    this.#credentialState();
+    return undefined;
   }
 
   async recoverOnboarding(_request: RecoveryRequest): Promise<NoContent> {
-    unsupportedOnboarding();
+    unsupportedOnboardingRecovery();
   }
 
   async sync(): Promise<NoContent> {
@@ -214,10 +476,26 @@ export class NativeApplianceClient implements ApplianceClient {
 
   async reconnect(): Promise<NoContent> {
     const { appliance, ble, bridge } = this.#active();
+    const credential = this.#credentialState();
+    if (credential.state !== "active") {
+      throw new Error("Import an activated device credential before connecting.");
+    }
+    if (
+      ble !== null &&
+      credential.summary.expectedBleLocalName === undefined &&
+      !ble.hasPeripheralName
+    ) {
+      throw new Error(
+        "The active credential does not identify an exact BLE advertising name; refusing an untargeted scan.",
+      );
+    }
     try {
       if (ble === null) {
         await appliance.reconnect();
       } else {
+        if (credential.summary.expectedBleLocalName !== undefined) {
+          ble.configurePeripheralName(credential.summary.expectedBleLocalName);
+        }
         await ble.reconnect();
       }
     } catch (error) {
@@ -247,13 +525,25 @@ export class NativeApplianceClient implements ApplianceClient {
     let ownership: ExclusiveResource<OwnedNativeAppliance>;
     try {
       ownership = await acquireExclusiveResource(
-        () => {
+        async () => {
           if (this.#disposed) throw new Error("native appliance client has been disposed");
           const appliance = runtime.bridge.open(runtime.databasePath);
-          const ble =
-            runtime.ble === undefined ? null : new NativeBleTransport(appliance, runtime.ble);
-          ble?.start();
-          return { appliance, ble };
+          try {
+            const credential = runtime.bridge.credentialStatus(appliance);
+            const ble =
+              runtime.ble === undefined ? null : new NativeBleTransport(appliance, runtime.ble);
+            if (ble !== null && credential.state === "active") {
+              if (credential.summary.expectedBleLocalName !== undefined) {
+                ble.configurePeripheralName(credential.summary.expectedBleLocalName);
+              }
+              if (ble.hasPeripheralName) ble.start();
+            }
+            return { appliance, ble, pickCredential: runtime.pickCredential };
+          } catch (error) {
+            await appliance.close().catch(() => undefined);
+            runtime.bridge.destroy(appliance);
+            throw error;
+          }
         },
         async ({ appliance, ble }) => {
           try {
@@ -283,6 +573,7 @@ export class NativeApplianceClient implements ApplianceClient {
     readonly appliance: NativeApplianceLike;
     readonly ble: NativeBleTransport | null;
     readonly bridge: NativeApplianceBridge;
+    readonly pickCredential?: NativeCredentialPicker;
   } {
     if (this.#disposed) throw new Error("native appliance client has been disposed");
     if (this.#ownership === null || this.#bridge === null) {
@@ -292,7 +583,17 @@ export class NativeApplianceClient implements ApplianceClient {
       appliance: this.#ownership.value.appliance,
       ble: this.#ownership.value.ble,
       bridge: this.#bridge,
+      pickCredential: this.#ownership.value.pickCredential,
     };
+  }
+
+  #credentialState(): NativeCredentialState {
+    const { appliance, bridge } = this.#active();
+    try {
+      return bridge.credentialStatus(appliance);
+    } catch (error) {
+      throw normalizeNativeError(error, bridge.isNativeError);
+    }
   }
 
   async #call<T>(operation: (appliance: NativeApplianceLike) => T | Promise<T>): Promise<T> {

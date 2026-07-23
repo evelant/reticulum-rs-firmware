@@ -8,6 +8,21 @@ import type {
 } from "./ble-central-types.ts";
 
 export const MINIMUM_WRITE_WITH_RESPONSE_BYTES = 20;
+
+/**
+ * Prefer the name carried by this advertisement over a cached platform name.
+ *
+ * Exact credential-derived targeting is about the peripheral's current local
+ * name. iOS and Android may retain `Peripheral.name` from an earlier discovery,
+ * so allowing that cache to mask `advertising.localName` can select the wrong
+ * board when multiple E290s are nearby.
+ */
+export function advertisedPeripheralName(
+  advertisedLocalName: string | undefined,
+  platformName: string | undefined,
+): string | undefined {
+  return advertisedLocalName ?? platformName;
+}
 export const DEFAULT_BLE_SCAN_TIMEOUT_MS = 10_000;
 export const DEFAULT_BLE_OPERATION_TIMEOUT_MS = 10_000;
 export const MAX_PENDING_INDICATION_BYTES = 64 * 1024;
@@ -546,6 +561,9 @@ export class ForegroundBleCentral implements BleCentral {
       if (abort.signal.aborted) throw cancellationError(abort.signal);
       removeListeners.push(
         this.driver.onDiscovered((peripheral) => {
+          if (options.peripheralName !== undefined && peripheral.name !== options.peripheralName) {
+            return;
+          }
           if (
             options.peripheralId !== undefined &&
             !samePeripheral(peripheral.id, options.peripheralId)

@@ -12,6 +12,11 @@ export interface BleGattProfile {
 
 export interface BleConnectOptions {
   /**
+   * Selects a peripheral by its exact advertised name when more than one
+   * appliance advertises the requested service.
+   */
+  readonly peripheralName?: string;
+  /**
    * Selects a known peripheral when more than one appliance advertises the
    * requested service. The first matching advertisement is used when omitted.
    */

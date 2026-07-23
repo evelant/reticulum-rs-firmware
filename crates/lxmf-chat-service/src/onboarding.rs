@@ -87,6 +87,9 @@ pub enum OnboardingStage {
 pub enum OnboardingFault {
     /// The configured credential artifact is malformed or unsafe to open.
     InvalidCredentialArtifact,
+    /// The credential is canonical but cannot target the selected transport's
+    /// current device profile.
+    UnsupportedDevice,
     /// The exact selected USB device is not currently available.
     DeviceUnavailable,
     /// Initialization or pairing did not complete; local recovery state was

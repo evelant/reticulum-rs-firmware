@@ -16,6 +16,10 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::ble::{
     BleConnector, BleHub, NativeBleError, NativeBlePlatformCommand, PLATFORM_COMMAND_WAIT,
 };
+use crate::credential::{
+    CredentialImportError, CredentialImportPolicy, NativeCredentialStatus, NativeCredentialSummary,
+    import_credential_file, inspect_credential,
+};
 use crate::wifi::WifiConnector;
 
 /// Bearer selected for the native appliance session.
@@ -94,6 +98,9 @@ pub enum NativeApplianceError {
     Storage {
         reason: String,
     },
+    CredentialPublicationUncertain {
+        reason: String,
+    },
     Serialization {
         reason: String,
     },
@@ -118,6 +125,12 @@ impl fmt::Display for NativeApplianceError {
             Self::Storage { reason } => {
                 write!(formatter, "chat storage operation failed: {reason}")
             }
+            Self::CredentialPublicationUncertain { reason } => {
+                write!(
+                    formatter,
+                    "credential publication completed with uncertain durability: {reason}"
+                )
+            }
             Self::Serialization { reason } => {
                 write!(formatter, "chat JSON serialization failed: {reason}")
             }
@@ -134,6 +147,17 @@ impl From<ServiceError> for NativeApplianceError {
             ServiceError::Busy => Self::Busy,
             ServiceError::Stopped => Self::Stopped,
             ServiceError::Operation(reason) => Self::Storage { reason },
+        }
+    }
+}
+
+impl From<CredentialImportError> for NativeApplianceError {
+    fn from(error: CredentialImportError) -> Self {
+        match error {
+            CredentialImportError::Rejected { reason } => Self::Storage { reason },
+            CredentialImportError::PublicationUncertain { reason } => {
+                Self::CredentialPublicationUncertain { reason }
+            }
         }
     }
 }
@@ -163,6 +187,7 @@ pub struct NativeAppliance {
     close_gate: AsyncMutex<()>,
     transport: NativeTransport,
     connector_configured: bool,
+    credential_path: Option<PathBuf>,
     ble_hub: Option<Arc<BleHub>>,
 }
 
@@ -194,6 +219,7 @@ impl NativeAppliance {
             close_gate: AsyncMutex::new(()),
             transport,
             connector_configured: false,
+            credential_path: None,
             ble_hub: None,
         }))
     }
@@ -202,8 +228,8 @@ impl NativeAppliance {
     ///
     /// The endpoint must be a literal IP socket address. The current E290 proof
     /// profile listens at `192.168.4.1:29716`. The credential path must be an
-    /// absolute path to the 96-byte activated credential previously seeded into
-    /// the app sandbox.
+    /// absolute path to the 96-byte activated credential imported or paired
+    /// into the app sandbox.
     /// This suite authenticates and integrity-protects the device API but does
     /// not add application-layer confidentiality.
     #[uniffi::constructor]
@@ -235,7 +261,7 @@ impl NativeAppliance {
         }
         let handle = start_appliance(
             ApplianceConfig::new(PathBuf::from(database_path)),
-            WifiConnector::new(endpoint, credential_path),
+            WifiConnector::new(endpoint, credential_path.clone()),
         )
         .map_err(NativeApplianceError::from)?;
         Ok(Arc::new(Self {
@@ -243,6 +269,7 @@ impl NativeAppliance {
             close_gate: AsyncMutex::new(()),
             transport: NativeTransport::Wifi,
             connector_configured: true,
+            credential_path: Some(credential_path),
             ble_hub: None,
         }))
     }
@@ -278,7 +305,7 @@ impl NativeAppliance {
         let ble_hub = BleHub::new();
         let handle = start_appliance(
             ApplianceConfig::new(PathBuf::from(database_path)),
-            BleConnector::new(credential_path, Arc::clone(&ble_hub)),
+            BleConnector::new(credential_path.clone(), Arc::clone(&ble_hub)),
         )
         .map_err(NativeApplianceError::from)?;
         Ok(Arc::new(Self {
@@ -286,8 +313,61 @@ impl NativeAppliance {
             close_gate: AsyncMutex::new(()),
             transport: NativeTransport::BluetoothLowEnergy,
             connector_configured: true,
+            credential_path: Some(credential_path),
             ble_hub: Some(ble_hub),
         }))
+    }
+
+    /// Inspect the configured app-private activated credential without
+    /// returning any secret bytes.
+    ///
+    /// This reports storage and credential-format validity. Connector policy
+    /// remains separate: for example, a canonical future-board credential is
+    /// Active even when the current E290 BLE profile cannot derive its exact
+    /// advertising name.
+    pub fn credential_status(&self) -> Result<NativeCredentialStatus, NativeApplianceError> {
+        let path = self.credential_path.as_deref().ok_or_else(|| {
+            NativeApplianceError::TransportUnavailable {
+                transport: self.transport,
+                reason: "this native connector has no credential store".to_owned(),
+            }
+        })?;
+        Ok(inspect_credential(path))
+    }
+
+    /// Validate one app-private staging file and publish its canonical 96-byte
+    /// Active credential into the configured destination.
+    ///
+    /// This alpha import is create-only: it never replaces an existing path.
+    /// The current BLE connector accepts only an E290 credential from which it
+    /// can derive the exact advertising name before publication; Wi-Fi retains
+    /// generic canonical credential support.
+    /// The caller remains responsible for deleting its staging copy after this
+    /// method returns.
+    /// A later BLE pairing owner will populate the same storage boundary
+    /// without moving pairing proofs or secret generation into TypeScript.
+    pub fn import_activated_credential(
+        &self,
+        staging_path: String,
+    ) -> Result<NativeCredentialSummary, NativeApplianceError> {
+        let path = self.credential_path.as_deref().ok_or_else(|| {
+            NativeApplianceError::TransportUnavailable {
+                transport: self.transport,
+                reason: "this native connector has no credential store".to_owned(),
+            }
+        })?;
+        let staging_path = PathBuf::from(staging_path);
+        let policy = match self.transport {
+            NativeTransport::BluetoothLowEnergy => CredentialImportPolicy::E290BleTarget,
+            NativeTransport::Wifi => CredentialImportPolicy::AnyDevice,
+            NativeTransport::UsbSerial | NativeTransport::UsbOtg => {
+                return Err(NativeApplianceError::TransportUnavailable {
+                    transport: self.transport,
+                    reason: "this native connector has no credential import policy".to_owned(),
+                });
+            }
+        };
+        import_credential_file(path, &staging_path, policy).map_err(NativeApplianceError::from)
     }
 
     /// Register one connected, subscribed GATT peripheral.
@@ -548,6 +628,40 @@ mod tests {
         }
     }
 
+    fn activated_credential_bytes(
+        device_id: [u8; 16],
+    ) -> [u8; reticulum_device_client::ACTIVATED_CREDENTIAL_STATE_BYTES] {
+        let mut bytes = [0_u8; reticulum_device_client::ACTIVATED_CREDENTIAL_STATE_BYTES];
+        bytes[..8].copy_from_slice(b"RDPKEY1\0");
+        bytes[8..10].copy_from_slice(&1_u16.to_le_bytes());
+        bytes[10] = 2;
+        bytes[16..32].copy_from_slice(&device_id);
+        bytes[32..48].fill(0x42);
+        bytes[48..56].copy_from_slice(&7_u64.to_le_bytes());
+        bytes[56..88].fill(0x24);
+        bytes
+    }
+
+    #[test]
+    fn only_post_publication_import_failures_cross_the_reconciliation_boundary() {
+        assert_eq!(
+            NativeApplianceError::from(CredentialImportError::Rejected {
+                reason: "exact readback mismatch".to_owned(),
+            }),
+            NativeApplianceError::Storage {
+                reason: "exact readback mismatch".to_owned(),
+            }
+        );
+        assert_eq!(
+            NativeApplianceError::from(CredentialImportError::PublicationUncertain {
+                reason: "directory sync failed".to_owned(),
+            }),
+            NativeApplianceError::CredentialPublicationUncertain {
+                reason: "directory sync failed".to_owned(),
+            }
+        );
+    }
+
     #[tokio::test]
     async fn native_facade_owns_offline_contacts_timeline_and_outbox() {
         let database = TestDatabase::new("offline");
@@ -726,5 +840,120 @@ mod tests {
 
         appliance.reconnect().await.unwrap();
         appliance.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn configured_native_owner_imports_and_inspects_one_credential() {
+        let database = TestDatabase::new("credential-import");
+        let credential = database.0.with_extension("rdpkey");
+        let staging = database.0.with_extension("picked.rdpkey");
+        let bytes = activated_credential_bytes(*b"e290-api-1\xac\xa7\x04\xe1\x3e\x88");
+        fs::write(&staging, bytes).expect("selected credential is staged");
+
+        let appliance = NativeAppliance::open_ble(
+            database.path_string(),
+            credential.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        assert_eq!(
+            appliance.credential_status().unwrap(),
+            NativeCredentialStatus::Missing
+        );
+
+        let summary = appliance
+            .import_activated_credential(staging.to_string_lossy().into_owned())
+            .expect("native facade imports one credential");
+        assert_eq!(
+            summary.expected_ble_local_name.as_deref(),
+            Some("reticulum-e290-e13e88")
+        );
+        assert_eq!(
+            appliance.credential_status().unwrap(),
+            NativeCredentialStatus::Active {
+                summary: summary.clone()
+            }
+        );
+        assert!(
+            staging.exists(),
+            "the app retains staging cleanup ownership"
+        );
+        assert!(matches!(
+            appliance.import_activated_credential(staging.to_string_lossy().into_owned()),
+            Err(NativeApplianceError::Storage { reason })
+                if reason.contains("already exists")
+        ));
+
+        appliance.close().await.unwrap();
+        fs::remove_file(credential).expect("installed test credential is removed");
+        fs::remove_file(staging).expect("staged test credential is removed");
+    }
+
+    #[tokio::test]
+    async fn ble_import_rejects_a_non_e290_target_without_claiming_the_destination() {
+        let database = TestDatabase::new("ble-import-target");
+        let credential = database.0.with_extension("rdpkey");
+        let staging = database.0.with_extension("picked.rdpkey");
+        let bytes = activated_credential_bytes(*b"other-api-\x01\x02\x03\x04\x05\x06");
+        fs::write(&staging, bytes).expect("generic credential is staged");
+
+        let appliance = NativeAppliance::open_ble(
+            database.path_string(),
+            credential.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        assert!(matches!(
+            appliance.import_activated_credential(staging.to_string_lossy().into_owned()),
+            Err(NativeApplianceError::Storage { reason })
+                if reason.contains("current BLE import requires an E290 credential")
+        ));
+        assert!(!credential.exists());
+        assert_eq!(
+            appliance.credential_status().unwrap(),
+            NativeCredentialStatus::Missing
+        );
+
+        crate::credential::install_credential(
+            &credential,
+            &bytes,
+            CredentialImportPolicy::AnyDevice,
+        )
+        .expect("generic policy can install the same credential");
+        assert!(matches!(
+            appliance.credential_status().unwrap(),
+            NativeCredentialStatus::Active { summary }
+                if summary.expected_ble_local_name.is_none()
+        ));
+
+        appliance.close().await.unwrap();
+        fs::remove_file(credential).expect("generic test credential is removed");
+        fs::remove_file(staging).expect("staged test credential is removed");
+    }
+
+    #[tokio::test]
+    async fn wifi_import_retains_generic_future_board_credentials() {
+        let database = TestDatabase::new("wifi-import-target");
+        let credential = database.0.with_extension("rdpkey");
+        let staging = database.0.with_extension("picked.rdpkey");
+        let bytes = activated_credential_bytes(*b"other-api-\x01\x02\x03\x04\x05\x06");
+        fs::write(&staging, bytes).expect("generic credential is staged");
+
+        let appliance = NativeAppliance::open_wifi(
+            database.path_string(),
+            "127.0.0.1:9".to_owned(),
+            credential.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let summary = appliance
+            .import_activated_credential(staging.to_string_lossy().into_owned())
+            .expect("Wi-Fi accepts a canonical generic credential");
+        assert_eq!(summary.expected_ble_local_name, None);
+        assert_eq!(
+            appliance.credential_status().unwrap(),
+            NativeCredentialStatus::Active { summary }
+        );
+
+        appliance.close().await.unwrap();
+        fs::remove_file(credential).expect("generic test credential is removed");
+        fs::remove_file(staging).expect("staged test credential is removed");
     }
 }

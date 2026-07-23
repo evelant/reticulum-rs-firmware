@@ -14,8 +14,8 @@ use ts_rs::TS;
 
 use crate::onboarding::{OnboardingFault, OnboardingSnapshot, OnboardingStage, OnboardingState};
 use crate::web::{
-    ErrorBody, HttpApplianceSnapshot, HttpConnectionState, OnboardingView, RecoveryAction,
-    RecoveryRequest, SessionRequest,
+    ErrorBody, HttpApplianceSnapshot, HttpConnectionState, OnboardingMethod, OnboardingView,
+    RecoveryAction, RecoveryRequest, SessionRequest,
 };
 
 pub(crate) use reticulum_lxmf_chat_runtime::{JsonSafeInteger, serialize_json_safe_u64};
@@ -59,6 +59,7 @@ pub fn render_api_bindings() -> String {
     append_declaration::<OnboardingFault>(&mut output, &config);
     append_declaration::<OnboardingState>(&mut output, &config);
     append_declaration::<OnboardingSnapshot>(&mut output, &config);
+    append_declaration::<OnboardingMethod>(&mut output, &config);
     append_declaration::<OnboardingView>(&mut output, &config);
     append_declaration::<ContactView>(&mut output, &config);
     append_declaration::<BytesEncoding>(&mut output, &config);

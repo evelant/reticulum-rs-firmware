@@ -82,7 +82,9 @@ interface NativeModuleInterface {
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_write_succeeded(uniffiSelf: bigint, generation: bigint, token: bigint, uniffi_out_err: UniffiRustCallStatus): void;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_close(uniffiSelf: bigint): bigint;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_contacts_json(uniffiSelf: bigint): bigint;
+    ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_credential_status(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ensure_connected(uniffiSelf: bigint): bigint;
+    ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_import_activated_credential(uniffiSelf: bigint, stagingPath: Uint8Array, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_reconnect(uniffiSelf: bigint): bigint;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_send_message_json(uniffiSelf: bigint, requestJson: Uint8Array): bigint;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_snapshot_json(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
@@ -104,7 +106,9 @@ interface NativeModuleInterface {
     ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_write_succeeded(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_close(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_contacts_json(): number;
+    ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_credential_status(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ensure_connected(): number;
+    ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_import_activated_credential(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_reconnect(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_send_message_json(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_snapshot_json(): number;

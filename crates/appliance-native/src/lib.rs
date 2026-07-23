@@ -24,11 +24,12 @@ mod wifi;
 
 pub use appliance::{NativeAppliance, NativeApplianceError, NativeTransport};
 pub use ble::{NativeBleError, NativeBlePlatformCommand};
+pub use credential::{NativeCredentialStatus, NativeCredentialSummary};
 
 /// Incompatible generation of the callable native bridge.
 pub const BRIDGE_API_MAJOR: u16 = 1;
 /// Backward-compatible revision of the callable native bridge.
-pub const BRIDGE_API_MINOR: u16 = 3;
+pub const BRIDGE_API_MINOR: u16 = 4;
 
 /// Exact protocol contract compiled into a native client binary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
@@ -119,7 +120,7 @@ mod tests {
             native_bridge_contract(),
             NativeBridgeContract {
                 bridge_api_major: 1,
-                bridge_api_minor: 3,
+                bridge_api_minor: 4,
                 device_api_major: 1,
                 device_api_minor: 4,
                 max_message_bytes: 512,

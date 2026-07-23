@@ -66,28 +66,66 @@ single-owner actor with an app-private SQLite database. This already provides du
 timelines, and idempotent outbox writes while offline. BLE is the default native bearer: React
 Native owns foreground scanning, GATT connection, indications, and write-with-response, while Rust
 owns the activated credential, authenticated session, protocol framing, and LXMF state. The initial
-BLE attempt runs in the background so an absent radio never blocks the offline database; the
-Reconnect action retries discovery and the complete GATT link. BLE background restoration and
-automatic credential provisioning are not implemented yet. USB OTG and USB serial/JTAG remain
-explicit unavailable connector stubs and do not silently fall back or claim a device connection.
+BLE attempt runs in the background only after the native bridge has validated an app-private
+credential, so an absent credential or radio never blocks the offline database. The credential's
+E290 device ID selects the exact Rust-generated advertised name rather than whichever matching
+board happens to advertise first. The Reconnect action retries discovery and the complete GATT
+link. BLE background restoration and phone-native live pairing are not implemented yet. USB OTG
+and USB serial/JTAG remain explicit unavailable connector stubs and do not silently fall back or
+claim a device connection.
+
+On a fresh native install, the first-run screen offers the alpha **credential import** path. Pair
+the intended board through the qualified USB managed-profile workflow, make a temporary copy of
+its exact 96-byte Active `credential.rdpkey`, name the transfer copy with that board's normalized
+USB serial, transfer it to the phone, and choose it in the system file picker. Verify the filename:
+the current create-only alpha imports the first canonical credential immediately and has no
+secret-free board-identity confirmation screen. Selecting the other board's valid file requires
+clearing this app's local data before trying again. The Expo layer copies the selection to an
+app-owned cache path without reading its bytes, Rust validates and create-only publishes a
+mode-`0600` canonical credential, and the Expo layer removes its cache copy in a `finally` path. On
+iOS it also deletes the picker-created temporary copy after staging. Cancelled, malformed, and
+failed imports do not start BLE or replace an existing credential. The original transfer file
+remains outside the app's control and must be deleted by the user after a successful import.
+
+This import deliberately makes another usable copy of an authentication secret. The canonical
+file currently lives in the app's private Documents directory rather than Keychain/Keystore and
+may be included in platform backups. Treat the workflow as an alpha bridge for development
+devices, not the final provisioning or recovery design. Production work must pair the phone
+directly, give each client independently revocable authority, exclude secrets from backup, and add
+an identity preview/confirmation with an identity-bound atomic install plus explicit credential
+replacement/recovery.
+
+Expo SDK 57's Android file picker takes a persistable content-provider permission and exposes no
+API to release it. The app does not persist the selected URI itself, but Android can retain that
+read grant until the source is removed or the app is uninstalled. A production Android import
+needs a small native picker/release owner (or direct pairing) so successful and failed imports can
+revoke the grant deterministically.
 
 Set `EXPO_PUBLIC_APPLIANCE_WIFI_ENDPOINT` to the E290 proof endpoint
 `192.168.4.1:29716` to opt a native development build into the first raw-TCP Wi-Fi proof connector.
 The connector reloads `reticulum-device-credential.rdpkey` from the app's private Documents
 directory for every handshake and uses the separately transcript-bound Wi-Fi session suite. For the
-current proof, pair over the qualified USB workflow first and manually seed that exact 96-byte
-activated credential into the sandbox. Automatic pairing, Keychain/Keystore migration, SoftAP
-joining, and credential transfer remain follow-up work. The session authenticates and
-integrity-protects API records but adds no application-layer confidentiality; the initial appliance
-SoftAP must therefore retain WPA2 and this path must not be described as the final wireless security
-profile.
+current proof, use the same first-run credential import after pairing over the qualified USB
+workflow. Phone-native pairing, Keychain/Keystore migration, SoftAP joining, and credential
+rotation remain follow-up work. The session authenticates and integrity-protects API records but
+adds no application-layer confidentiality; the initial appliance SoftAP must therefore retain WPA2
+and this path must not be described as the final wireless security profile.
 
 The BLE connector currently uses that same app-private
 `reticulum-device-credential.rdpkey`. It scans only for the Rust-generated GATT service, subscribes
 to the generated TX indication characteristic before declaring the link ready, and caps initial
 writes to the generated characteristic value bound. A generation-aware command pump rejects stale
 callbacks and reports every platform write exactly once. Platform writes have a ten-second bound so
-an OS BLE call cannot outlive Rust's longer ambiguous-write deadline.
+an OS BLE call cannot outlive Rust's longer ambiguous-write deadline. For an E290 credential, the
+bridge derives the exact `reticulum-e290-<MAC suffix>` target from the authenticated device ID.
+`EXPO_PUBLIC_APPLIANCE_BLE_NAME` remains an explicit diagnostic fallback for a pre-existing
+canonical credential whose namespace does not provide a derivable board name. The current BLE
+file-import path rejects such a credential before publication and requires an E290-derived target.
+The advertised name and selected filename are discovery hints, not authentication: the suite-3
+handshake must still return the credential-bound device ID before Rust accepts the session. Like
+the current USB and Wi-Fi profiles, BLE authenticates and integrity-protects device-API records but
+does not add application-layer confidentiality; do not use this alpha bearer for sensitive
+content.
 
 Set `EXPO_PUBLIC_APPLIANCE_URL` to retain the interim native HTTP adapter during development, then
 open a `reticulum-appliance://connect?cap=...` link to bootstrap a session. The current Rust alpha

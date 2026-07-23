@@ -8,6 +8,7 @@ import BleManager, {
 } from "react-native-ble-manager";
 
 import {
+  advertisedPeripheralName,
   type BleCentralDriver,
   type BleDiscoveredPeripheral,
   type BleDriverDisconnectEvent,
@@ -110,7 +111,10 @@ class ReactNativeBleManagerDriver implements BleCentralDriver {
 
   onDiscovered(listener: (peripheral: BleDiscoveredPeripheral) => void): () => void {
     const subscription = BleManager.onDiscoverPeripheral((peripheral: Peripheral) => {
-      listener({ id: peripheral.id, name: peripheral.name ?? peripheral.advertising.localName });
+      listener({
+        id: peripheral.id,
+        name: advertisedPeripheralName(peripheral.advertising.localName, peripheral.name),
+      });
     });
     return () => subscription.remove();
   }

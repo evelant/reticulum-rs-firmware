@@ -2292,13 +2292,17 @@ remain. Nitro remains a measured-performance fallback.
 
 For the turnkey local client/API:
 
-1. USB CDC-ACM CLI/test client.
-2. Host companion service and the Expo static web export over that USB API.
-3. Expo iOS/Android development builds with the transport boundary in place
-   (native Rust contract foundation complete; device transport pending).
-4. Device-served Wi-Fi export and native local-network transport using the same
-   generated contracts and application model.
-5. BLE device-API bearer through the Expo native Rust module.
+1. USB CDC-ACM CLI/test client (complete for the bounded alpha).
+2. Host companion service and Expo static web export over that USB API
+   (complete for the bounded alpha).
+3. Expo iOS/Android builds, native Rust chat ownership, and generated
+   transport boundary (build- and simulator-qualified).
+4. BLE device-API bearer and create-only credential import through the Expo
+   native Rust module (implemented, host-tested, and direct-CoreBluetooth
+   firmware-qualified; physical-phone Expo qualification next).
+5. Device-served Wi-Fi export and native local-network transport using the
+   same generated contracts and application model (raw connector implemented;
+   joining and powered exchange pending).
 6. Optional USB NCM device-served export and desktop packaging.
 
 For Reticulum packet interfaces, fully qualify LoRa first, then use a USB

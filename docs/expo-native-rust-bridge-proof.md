@@ -24,6 +24,22 @@ suite-2 handshake with partial stream writes, but bridge `1.2` has not yet run
 against an E290 or through a rebuilt mobile application. Do not fold that
 host-side result into the completed bridge `1.1` runtime claim.
 
+Bridge API `1.3` subsequently added the foreground BLE central, generated GATT
+contract, and native Rust command/ack pump. Both E290s pass the unchanged
+suite-3 RDA1 session through direct macOS CoreBluetooth, and all generated
+iOS/Android native builds pass. That proves the firmware carrier and native
+source/build boundaries, not the complete Expo lifecycle on a physical phone.
+
+Bridge API `1.4` adds secret-free credential status, create-only activated-
+credential import, and credential-derived exact E290 advertisement selection.
+Rust tests cover complete 96-byte readback, no-replace publication, file
+shape/permissions, target policy, and public summary derivation. Expo tests
+cover picker staging ownership, cleanup/reconciliation failures, missing/
+invalid gating, and exact-name propagation. The native platform builds and
+generated bindings pass, but the system picker, TurboModule, BLE permissions,
+scan, reconnect, and authenticated exchange have not yet been exercised
+together on a physical iOS or Android device.
+
 ## Android
 
 Expo Continuous Native Generation discovered the local package and React
@@ -82,8 +98,8 @@ dependency target policy remains a cleanup item.
 - move native generation and platform compilation into their platform CI
   jobs;
 - qualify the mutable facade in an Android runtime;
-- complete the E290 endpoint and physically qualify the first authenticated
-  native device bearer;
+- qualify bridge `1.4` credential import and the authenticated BLE bearer on
+  physical iOS and Android devices;
 - qualify error and panic translation, cancellation, cleanup, Fast Refresh,
   background/foreground lifecycle, and reconnect;
 - measure Android release size/startup/memory and decide its ABI distribution;

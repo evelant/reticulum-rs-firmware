@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createBleCentral as createWebBleCentral } from "./ble-central.web.ts";
 import {
+  advertisedPeripheralName,
   type BleCentralDriver,
   type BleDiscoveredPeripheral,
   type BleDriverDisconnectEvent,
@@ -108,9 +109,7 @@ class FakeBleDriver implements BleCentralDriver {
     this.events.push(`scan ${serviceUuid}`);
     if (this.autoDiscover) {
       queueMicrotask(() => {
-        for (const listener of this.discoveredListeners) {
-          listener(this.discoveredPeripheral);
-        }
+        this.emitDiscovered(this.discoveredPeripheral);
       });
     }
     return Promise.resolve();
@@ -181,6 +180,10 @@ class FakeBleDriver implements BleCentralDriver {
     );
   }
 
+  emitDiscovered(peripheral: BleDiscoveredPeripheral): void {
+    for (const listener of this.discoveredListeners) listener(peripheral);
+  }
+
   emitIndication(bytes: Uint8Array, overrides: Partial<BleDriverIndicationEvent> = {}): void {
     const event: BleDriverIndicationEvent = {
       peripheralId: PERIPHERAL.id,
@@ -204,6 +207,15 @@ class FakeBleDriver implements BleCentralDriver {
     return [...this.disconnectListeners];
   }
 }
+
+describe("BLE advertisement identity", () => {
+  test("prefers the current advertised local name over a cached platform name", () => {
+    expect(advertisedPeripheralName("reticulum-e290-e13e88", "reticulum-e290-wrong")).toBe(
+      "reticulum-e290-e13e88",
+    );
+    expect(advertisedPeripheralName(undefined, "cached-fallback")).toBe("cached-fallback");
+  });
+});
 
 describe("foreground BLE central", () => {
   test("declares the connection ready only after discovery and indication subscription", async () => {
@@ -236,6 +248,40 @@ describe("foreground BLE central", () => {
       "start",
       "maximum",
     ]);
+  });
+
+  test("selects the exact advertised name when multiple appliances match the service", async () => {
+    const driver = new FakeBleDriver();
+    driver.autoDiscover = false;
+    const central = new ForegroundBleCentral(driver);
+    const target = {
+      id: "11:22:33:44:55:66",
+      name: "reticulum-e290-e13e88",
+    };
+    const pending = central.connect(PROFILE, {
+      peripheralName: target.name,
+      scanTimeoutMs: 1_000,
+    });
+    await waitFor(() => driver.events.some((event) => event.startsWith("scan ")), "BLE scan");
+
+    driver.emitDiscovered({
+      id: "00:11:22:33:44:55",
+      name: "reticulum-e290-aabbcc",
+    });
+    driver.emitDiscovered({
+      id: "22:33:44:55:66:77",
+      name: target.name.toUpperCase(),
+    });
+    await Bun.sleep(0);
+    expect(driver.events.some((event) => event.startsWith("connect "))).toBe(false);
+
+    driver.emitDiscovered(target);
+    const connection = await pending;
+
+    expect(connection.peripheralId).toBe(target.id);
+    expect(connection.name).toBe(target.name);
+    expect(driver.events).toContain(`connect ${target.id}`);
+    await central.dispose();
   });
 
   test("buffers and copies opaque indications until an observer is installed", async () => {

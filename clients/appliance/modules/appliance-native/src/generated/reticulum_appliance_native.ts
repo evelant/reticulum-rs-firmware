@@ -288,6 +288,72 @@ const FfiConverterTypeNativeBridgeContract = (() => {
 })();
 
 /**
+ * Public facts decoded from one canonical Active credential.
+ */
+export type NativeCredentialSummary = {
+    /**
+     * Expected device API identifier as lowercase hexadecimal.
+     */
+    deviceId: string,
+    /**
+     * Opaque credential identifier as lowercase hexadecimal.
+     */
+    credentialId: string,
+    /**
+     * Active device-owned credential generation.
+     */
+    generation: bigint,
+    /**
+     * Stable E290 BLE advertising name when the device ID uses that namespace.
+     */
+    expectedBleLocalName?: string
+}
+
+/**
+ * Generated factory for {@link NativeCredentialSummary} record objects.
+ */
+export const NativeCredentialSummary = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<NativeCredentialSummary, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<NativeCredentialSummary>,
+    });
+})();
+
+const FfiConverterTypeNativeCredentialSummary = (() => {
+    type TypeName = NativeCredentialSummary;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                deviceId: FfiConverterString.read(from),
+                credentialId: FfiConverterString.read(from),
+                generation: FfiConverterUInt64.read(from),
+                expectedBleLocalName: FfiConverterOptionalString.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterString.write(value.deviceId, into);
+            FfiConverterString.write(value.credentialId, into);
+            FfiConverterUInt64.write(value.generation, into);
+            FfiConverterOptionalString.write(value.expectedBleLocalName, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterString.allocationSize(value.deviceId) +
+             FfiConverterString.allocationSize(value.credentialId) +
+             FfiConverterUInt64.allocationSize(value.generation) +
+             FfiConverterOptionalString.allocationSize(value.expectedBleLocalName);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
+/**
  * Bearer selected for the native appliance session.
  *
  * These variants are an intentional stable vocabulary. The generic
@@ -350,6 +416,7 @@ export enum NativeApplianceError_Tags {
     Stopped = "Stopped",
     TransportUnavailable = "TransportUnavailable",
     Storage = "Storage",
+    CredentialPublicationUncertain = "CredentialPublicationUncertain",
     Serialization = "Serialization",
     Internal = "Internal"
 }
@@ -529,6 +596,45 @@ Readonly<{reason: string}> {
 
     }
 
+    type CredentialPublicationUncertain__interface = {
+        tag: NativeApplianceError_Tags.CredentialPublicationUncertain;
+        inner:
+Readonly<{reason: string}>
+    };
+    class CredentialPublicationUncertain_ extends UniffiError implements CredentialPublicationUncertain__interface {
+        /**
+         * @private
+         * This field is private and should not be used, use `tag` instead.
+         */
+        readonly [uniffiTypeNameSymbol] = "NativeApplianceError";
+        readonly tag = NativeApplianceError_Tags.CredentialPublicationUncertain;
+        readonly inner:
+Readonly<{reason: string}>;
+        constructor(
+inner: {reason: string }) {
+            super("NativeApplianceError", "CredentialPublicationUncertain");
+
+            this.inner = Object.freeze(inner);
+        }
+        static new(
+inner: {reason: string }): CredentialPublicationUncertain_ {
+            return new CredentialPublicationUncertain_(inner);
+        }
+
+        static instanceOf(obj: any): obj is CredentialPublicationUncertain_ {
+            return obj.tag === NativeApplianceError_Tags.CredentialPublicationUncertain;
+        }
+        static hasInner(obj: any): obj is CredentialPublicationUncertain_ {
+            return CredentialPublicationUncertain_.instanceOf(obj);
+        }
+
+        static getInner(obj: CredentialPublicationUncertain_):
+Readonly<{reason: string}> {
+            return obj.inner;
+        }
+
+    }
+
     type Serialization__interface = {
         tag: NativeApplianceError_Tags.Serialization;
         inner:
@@ -618,6 +724,7 @@ Readonly<{reason: string}> {
   Stopped: Stopped_,
   TransportUnavailable: TransportUnavailable_,
   Storage: Storage_,
+  CredentialPublicationUncertain: CredentialPublicationUncertain_,
   Serialization: Serialization_,
   Internal: Internal_
     });
@@ -627,7 +734,7 @@ Readonly<{reason: string}> {
  * Failure returned through the native bridge.
  */
 export type NativeApplianceError = InstanceType<
-    typeof NativeApplianceError['InvalidArgument' | 'Busy' | 'Stopped' | 'TransportUnavailable' | 'Storage' | 'Serialization' | 'Internal']
+    typeof NativeApplianceError['InvalidArgument' | 'Busy' | 'Stopped' | 'TransportUnavailable' | 'Storage' | 'CredentialPublicationUncertain' | 'Serialization' | 'Internal']
 >;
 
 // FfiConverter for enum NativeApplianceError
@@ -642,8 +749,9 @@ const FfiConverterTypeNativeApplianceError = (() => {
                 case 3: return new NativeApplianceError.Stopped();
                 case 4: return new NativeApplianceError.TransportUnavailable({transport: FfiConverterTypeNativeTransport.read(from), reason: FfiConverterString.read(from) });
                 case 5: return new NativeApplianceError.Storage({reason: FfiConverterString.read(from) });
-                case 6: return new NativeApplianceError.Serialization({reason: FfiConverterString.read(from) });
-                case 7: return new NativeApplianceError.Internal({reason: FfiConverterString.read(from) });
+                case 6: return new NativeApplianceError.CredentialPublicationUncertain({reason: FfiConverterString.read(from) });
+                case 7: return new NativeApplianceError.Serialization({reason: FfiConverterString.read(from) });
+                case 8: return new NativeApplianceError.Internal({reason: FfiConverterString.read(from) });
                 default: throw new UniffiInternalError.UnexpectedEnumCase();
             }
         }
@@ -676,14 +784,20 @@ const FfiConverterTypeNativeApplianceError = (() => {
                     FfiConverterString.write(inner.reason, into);
                     return;
                 }
-                case NativeApplianceError_Tags.Serialization: {
+                case NativeApplianceError_Tags.CredentialPublicationUncertain: {
                     ordinalConverter.write(6, into);
                     const inner = value.inner;
                     FfiConverterString.write(inner.reason, into);
                     return;
                 }
-                case NativeApplianceError_Tags.Internal: {
+                case NativeApplianceError_Tags.Serialization: {
                     ordinalConverter.write(7, into);
+                    const inner = value.inner;
+                    FfiConverterString.write(inner.reason, into);
+                    return;
+                }
+                case NativeApplianceError_Tags.Internal: {
+                    ordinalConverter.write(8, into);
                     const inner = value.inner;
                     FfiConverterString.write(inner.reason, into);
                     return;
@@ -720,15 +834,21 @@ const FfiConverterTypeNativeApplianceError = (() => {
                     size += FfiConverterString.allocationSize(inner.reason);
                     return size;
                 }
-                case NativeApplianceError_Tags.Serialization: {
+                case NativeApplianceError_Tags.CredentialPublicationUncertain: {
                     const inner = value.inner;
                     let size = ordinalConverter.allocationSize(6);
                     size += FfiConverterString.allocationSize(inner.reason);
                     return size;
                 }
-                case NativeApplianceError_Tags.Internal: {
+                case NativeApplianceError_Tags.Serialization: {
                     const inner = value.inner;
                     let size = ordinalConverter.allocationSize(7);
+                    size += FfiConverterString.allocationSize(inner.reason);
+                    return size;
+                }
+                case NativeApplianceError_Tags.Internal: {
+                    const inner = value.inner;
+                    let size = ordinalConverter.allocationSize(8);
                     size += FfiConverterString.allocationSize(inner.reason);
                     return size;
                 }
@@ -1375,6 +1495,192 @@ const FfiConverterTypeNativeBlePlatformCommand = (() => {
     return new FFIConverter();
 })();
 
+
+// Enum: NativeCredentialStatus
+export enum NativeCredentialStatus_Tags {
+    Missing = "Missing",
+    Active = "Active",
+    Invalid = "Invalid"
+}
+/**
+ * App-private activated-credential state without exposing secret bytes.
+ */
+export const NativeCredentialStatus = (() => {
+
+    type Missing__interface = {
+        tag: NativeCredentialStatus_Tags.Missing
+    };
+    /**
+     * The configured app-private credential path does not exist.
+     */
+    class Missing_ extends UniffiEnum implements Missing__interface {
+        /**
+         * @private
+         * This field is private and should not be used, use `tag` instead.
+         */
+        readonly [uniffiTypeNameSymbol] = "NativeCredentialStatus";
+        readonly tag = NativeCredentialStatus_Tags.Missing;
+        constructor() {
+            super("NativeCredentialStatus", "Missing");
+        }
+
+        static new(): Missing_ {
+            return new Missing_();
+        }
+
+        static instanceOf(obj: any): obj is Missing_ {
+            return obj.tag === NativeCredentialStatus_Tags.Missing;
+        }
+
+    }
+
+    type Active__interface = {
+        tag: NativeCredentialStatus_Tags.Active;
+        inner:
+Readonly<{summary: NativeCredentialSummary}>
+    };
+    /**
+     * One canonical Active credential is ready for authentication.
+     */
+    class Active_ extends UniffiEnum implements Active__interface {
+        /**
+         * @private
+         * This field is private and should not be used, use `tag` instead.
+         */
+        readonly [uniffiTypeNameSymbol] = "NativeCredentialStatus";
+        readonly tag = NativeCredentialStatus_Tags.Active;
+        readonly inner:
+Readonly<{summary: NativeCredentialSummary}>;
+        constructor(
+inner: {summary: NativeCredentialSummary }) {
+            super("NativeCredentialStatus", "Active");
+
+            this.inner = Object.freeze(inner);
+        }
+        static new(
+inner: {summary: NativeCredentialSummary }): Active_ {
+            return new Active_(inner);
+        }
+
+        static instanceOf(obj: any): obj is Active_ {
+            return obj.tag === NativeCredentialStatus_Tags.Active;
+        }
+
+    }
+
+    type Invalid__interface = {
+        tag: NativeCredentialStatus_Tags.Invalid;
+        inner:
+Readonly<{reason: string}>
+    };
+    /**
+     * A path exists but cannot be safely used as an Active credential.
+     */
+    class Invalid_ extends UniffiEnum implements Invalid__interface {
+        /**
+         * @private
+         * This field is private and should not be used, use `tag` instead.
+         */
+        readonly [uniffiTypeNameSymbol] = "NativeCredentialStatus";
+        readonly tag = NativeCredentialStatus_Tags.Invalid;
+        readonly inner:
+Readonly<{reason: string}>;
+        constructor(
+inner: {reason: string }) {
+            super("NativeCredentialStatus", "Invalid");
+
+            this.inner = Object.freeze(inner);
+        }
+        static new(
+inner: {reason: string }): Invalid_ {
+            return new Invalid_(inner);
+        }
+
+        static instanceOf(obj: any): obj is Invalid_ {
+            return obj.tag === NativeCredentialStatus_Tags.Invalid;
+        }
+
+    }
+
+    function instanceOf(obj: any): obj is NativeCredentialStatus {
+        return obj[uniffiTypeNameSymbol] === "NativeCredentialStatus";
+    }
+
+    return Object.freeze({
+        instanceOf,
+  Missing: Missing_,
+  Active: Active_,
+  Invalid: Invalid_
+    });
+
+})();
+/**
+ * App-private activated-credential state without exposing secret bytes.
+ */
+export type NativeCredentialStatus = InstanceType<
+    typeof NativeCredentialStatus['Missing' | 'Active' | 'Invalid']
+>;
+
+// FfiConverter for enum NativeCredentialStatus
+const FfiConverterTypeNativeCredentialStatus = (() => {
+    const ordinalConverter = FfiConverterInt32;
+    type TypeName = NativeCredentialStatus;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            switch (ordinalConverter.read(from)) {
+                case 1: return new NativeCredentialStatus.Missing();
+                case 2: return new NativeCredentialStatus.Active({summary: FfiConverterTypeNativeCredentialSummary.read(from) });
+                case 3: return new NativeCredentialStatus.Invalid({reason: FfiConverterString.read(from) });
+                default: throw new UniffiInternalError.UnexpectedEnumCase();
+            }
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            switch (value.tag) {
+                case NativeCredentialStatus_Tags.Missing: {
+                    ordinalConverter.write(1, into);
+                    return;
+                }
+                case NativeCredentialStatus_Tags.Active: {
+                    ordinalConverter.write(2, into);
+                    const inner = value.inner;
+                    FfiConverterTypeNativeCredentialSummary.write(inner.summary, into);
+                    return;
+                }
+                case NativeCredentialStatus_Tags.Invalid: {
+                    ordinalConverter.write(3, into);
+                    const inner = value.inner;
+                    FfiConverterString.write(inner.reason, into);
+                    return;
+                }
+                default:
+                    // Throwing from here means that NativeCredentialStatus_Tags hasn't matched an ordinal.
+                    throw new UniffiInternalError.UnexpectedEnumCase();
+            }
+        }
+        allocationSize(value: TypeName): number {
+            switch (value.tag) {
+                case NativeCredentialStatus_Tags.Missing: {
+                    return ordinalConverter.allocationSize(1);
+                }
+                case NativeCredentialStatus_Tags.Active: {
+                    const inner = value.inner;
+                    let size = ordinalConverter.allocationSize(2);
+                    size += FfiConverterTypeNativeCredentialSummary.allocationSize(inner.summary);
+                    return size;
+                }
+                case NativeCredentialStatus_Tags.Invalid: {
+                    const inner = value.inner;
+                    let size = ordinalConverter.allocationSize(3);
+                    size += FfiConverterString.allocationSize(inner.reason);
+                    return size;
+                }
+                default: throw new UniffiInternalError.UnexpectedEnumCase();
+            }
+        }
+    }
+    return new FFIConverter();
+})();
+
 /**
  * Native owner for one durable LXMF chat database and future device bearer.
  *
@@ -1431,6 +1737,16 @@ export interface NativeApplianceLike {
  */
     contactsJson(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<string>;
 /**
+ * Inspect the configured app-private activated credential without
+ * returning any secret bytes.
+ *
+ * This reports storage and credential-format validity. Connector policy
+ * remains separate: for example, a canonical future-board credential is
+ * Active even when the current E290 BLE profile cannot derive its exact
+ * advertising name.
+ */
+    credentialStatus() /*throws*/: NativeCredentialStatus;
+/**
  * Ask a configured connector to run now if no authenticated session is
  * active, without disrupting an already-ready bearer.
  *
@@ -1439,6 +1755,20 @@ export interface NativeApplianceLike {
  * current session and transport lease.
  */
     ensureConnected(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<void>;
+/**
+ * Validate one app-private staging file and publish its canonical 96-byte
+ * Active credential into the configured destination.
+ *
+ * This alpha import is create-only: it never replaces an existing path.
+ * The current BLE connector accepts only an E290 credential from which it
+ * can derive the exact advertising name before publication; Wi-Fi retains
+ * generic canonical credential support.
+ * The caller remains responsible for deleting its staging copy after this
+ * method returns.
+ * A later BLE pairing owner will populate the same storage boundary
+ * without moving pairing proofs or secret generation into TypeScript.
+ */
+    importActivatedCredential(stagingPath: string) /*throws*/: NativeCredentialSummary;
 /**
  * Request a fresh device connection.
  *
@@ -1551,8 +1881,8 @@ private constructor(pointer: UniffiHandle) {
  *
  * The endpoint must be a literal IP socket address. The current E290 proof
  * profile listens at `192.168.4.1:29716`. The credential path must be an
- * absolute path to the 96-byte activated credential previously seeded into
- * the app sandbox.
+ * absolute path to the 96-byte activated credential imported or paired
+ * into the app sandbox.
  * This suite authenticates and integrity-protects the device API but does
  * not add application-layer confidentiality.
  */
@@ -1765,6 +2095,33 @@ private constructor(pointer: UniffiHandle) {
     }
 
 /**
+ * Inspect the configured app-private activated credential without
+ * returning any secret bytes.
+ *
+ * This reports storage and credential-format validity. Connector policy
+ * remains separate: for example, a canonical future-board credential is
+ * Active even when the current E290 BLE profile cannot derive its exact
+ * advertising name.
+ */
+    credentialStatus(): NativeCredentialStatus /*throws*/ {
+    return ((__rb: Uint8Array) => {
+        try {
+            return FfiConverterTypeNativeCredentialStatus.lift(__rb);
+        } finally {
+            nativeModule().rustbuffer_free(__rb);
+        }
+    })(uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError),
+            /*caller:*/ (callStatus) => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_credential_status(
+                uniffiTypeNativeApplianceObjectFactory.clonePointer(this),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    ));
+    }
+
+/**
  * Ask a configured connector to run now if no authenticated session is
  * active, without disrupting an already-ready bearer.
  *
@@ -1797,6 +2154,38 @@ private constructor(pointer: UniffiHandle) {
         }
         throw __error;
     }
+    }
+
+/**
+ * Validate one app-private staging file and publish its canonical 96-byte
+ * Active credential into the configured destination.
+ *
+ * This alpha import is create-only: it never replaces an existing path.
+ * The current BLE connector accepts only an E290 credential from which it
+ * can derive the exact advertising name before publication; Wi-Fi retains
+ * generic canonical credential support.
+ * The caller remains responsible for deleting its staging copy after this
+ * method returns.
+ * A later BLE pairing owner will populate the same storage boundary
+ * without moving pairing proofs or secret generation into TypeScript.
+ */
+    importActivatedCredential(stagingPath: string): NativeCredentialSummary /*throws*/ {
+    return ((__rb: Uint8Array) => {
+        try {
+            return FfiConverterTypeNativeCredentialSummary.lift(__rb);
+        } finally {
+            nativeModule().rustbuffer_free(__rb);
+        }
+    })(uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError),
+            /*caller:*/ (callStatus) => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_import_activated_credential(
+                uniffiTypeNativeApplianceObjectFactory.clonePointer(this),
+        FfiConverterString.lower(stagingPath, nativeModule().rustbuffer_alloc),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    ));
     }
 
 /**
@@ -2079,6 +2468,9 @@ const uniffiTypeNativeApplianceObjectFactory: UniffiObjectFactory<NativeApplianc
 }})();
 const FfiConverterTypeNativeAppliance = new FfiConverterObject(uniffiTypeNativeApplianceObjectFactory);
 
+// FfiConverter for string | undefined
+const FfiConverterOptionalString = new FfiConverterOptional(FfiConverterString);
+
 // FfiConverter for bigint | undefined
 const FfiConverterOptionalUInt64 = new FfiConverterOptional(FfiConverterUInt64);
 
@@ -2116,7 +2508,7 @@ function uniffiEnsureInitialized() {
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_ble() !== 41354) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_ble");
     }
-    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_wifi() !== 46339) {
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_wifi() !== 50108) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_wifi");
     }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_disconnected() !== 37336) {
@@ -2143,8 +2535,14 @@ function uniffiEnsureInitialized() {
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_contacts_json() !== 54150) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_contacts_json");
     }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_credential_status() !== 22492) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_credential_status");
+    }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ensure_connected() !== 36490) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ensure_connected");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_import_activated_credential() !== 61608) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_import_activated_credential");
     }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_reconnect() !== 15037) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_reconnect");
@@ -2179,6 +2577,8 @@ export default Object.freeze({
     FfiConverterTypeNativeBleGattProfile,
     FfiConverterTypeNativeBlePlatformCommand,
     FfiConverterTypeNativeBridgeContract,
+    FfiConverterTypeNativeCredentialStatus,
+    FfiConverterTypeNativeCredentialSummary,
     FfiConverterTypeNativeTransport,
   }
 });

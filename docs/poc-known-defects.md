@@ -100,15 +100,41 @@ proof unless a failing test promotes one into a release blocker.
   physically qualified authenticated bearer. The session and logical API are
   bearer-neutral, and the opt-in BLE profile now has bounded powered
   qualification carrying the same ordered RDA1 stream under suite 3. The Wi-Fi
-  profile remains implemented but not powered-qualified. Wireless credential
-  provisioning, stronger
-  post-alpha wireless authentication policy, and full recovery UX remain
-  deferred: both wireless profiles require a credential established by the USB
-  profile. Managed host profiles expose secret-free initialization, pairing,
-  Pending resume/abort, and reset progress through the Expo client. The powered
-  managed first-run path, real reset, retained-profile service restart, and one
-  Expo-to-LoRa-to-peer message pass on the E290 pair; activation-ambiguous
-  repair and the alternate Pending recovery paths remain to qualify.
+  profile remains implemented but not powered-qualified. Both wireless
+  profiles still require a credential established by the USB profile. The
+  native client now has an alpha system-file import path: TypeScript copies an
+  operator-selected artifact into app-owned staging without decoding its
+  bytes, Rust validates and create-only publishes the canonical credential,
+  and the E290 device ID supplies the exact BLE advertised-name selector.
+  This implements and host-tests fresh-install sandbox seeding and removes
+  first-match selection from the app source, but the physical Expo path is not
+  yet qualified and the import clones transferable authentication authority.
+  Import also publishes the first canonical artifact immediately: there is no
+  Rust-owned secret-free identity preview/confirmation, so selecting the other
+  board's valid file irreversibly binds that app data until the user clears it.
+  The picker source remains for the user to delete, the app-private Documents
+  credential may be backed up, and invalid/existing credentials have no in-app
+  replacement flow.
+  The transfer filename and 24-bit-suffix BLE local name are selection hints,
+  not identity proofs; a peer can spoof either and only the credential-bound
+  suite-3 handshake authenticates the device. That session provides record
+  authentication and integrity but no application-layer confidentiality.
+  Expo SDK 57 also retains Android's content-provider read grant without
+  exposing a release operation; iOS's picker-created temporary copy is deleted
+  after app-owned staging. Phone-native pairing, per-client revocation, an
+  Android grant-release owner, identity-bound preview/install, Keychain/
+  Keystore storage, backup exclusion, stronger post-alpha wireless
+  authentication policy, and full recovery UX remain deferred. Managed host
+  profiles expose secret-free initialization, pairing, Pending resume/abort,
+  and reset progress through the Expo client. Powered evidence covers one
+  managed first run, real reset,
+  retained-profile service restart, and Expo-to-LoRa-to-peer message pass on
+  the E290 pair. Activation-ambiguous repair and the alternate Pending recovery
+  paths remain to qualify.
+- The E290 device-API namespace prefix `e290-api-1` is still repeated between
+  firmware derivation and the native import parser. Move it into one portable
+  board/device-profile contract before adding another board namespace so exact
+  target derivation cannot drift.
 - With several identical attached boards, the app shows the selected USB serial
   but the physical E290 has no corresponding identify cue. Until a display or
   LED identify action exists, an operator may have to press the middle button
@@ -166,8 +192,9 @@ proof unless a failing test promotes one into a release blocker.
   Wi-Fi constructor loads a fixed app-private activated credential, opens a
   finite-timeout raw TCP stream, and authenticates with the separately bound
   suite-2 profile. Its localhost partial-I/O handshake passes, but endpoint
-  selection and credential seeding are still development-build/manual
-  operations, and mobile secure-storage migration is absent. The exact profile
+  selection and SoftAP joining are still development-build/manual operations;
+  the alpha credential import removes manual sandbox seeding but does not
+  provide secure-storage migration. The exact profile
   image has been safely flashed to one credentialed E290 with an unchanged
   durable control-region readback, but no client has yet joined its SoftAP or
   completed the powered suite-2 path. The development Mac's only internet

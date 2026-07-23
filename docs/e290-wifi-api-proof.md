@@ -143,7 +143,9 @@ A useful first hardware pass should prove, in order:
    autonomous LoRa receive/forwarding; and
 6. stack, internal heap, PSRAM use, and Wi-Fi/LoRa coexistence remain bounded.
 
-The Expo native bridge now includes a host-tested raw-TCP connector for this
-profile, but it still requires a manually configured endpoint and manually
-seeded RDA1 credential. That host-only proof does not qualify SoftAP joining,
-mobile sandbox credential transfer, or any powered E290 exchange.
+At the time of this powered profile record, the Expo native bridge required a
+manually configured endpoint and manually seeded RDA1 credential. Current
+source now adds a host-tested, create-only system-file import into the native
+app sandbox, but that later work does not retroactively qualify this proof.
+SoftAP joining, the Android/iOS import lifecycle, and a powered Wi-Fi E290
+exchange remain unqualified.

@@ -16,6 +16,7 @@ import type {
   ApplianceSnapshot,
   BytesView,
   ConnectionState,
+  ConnectionTransport,
   ContactView,
   OnboardingView,
   RecoveryRequest,
@@ -36,10 +37,16 @@ import type { NativeCoreStatus } from "../lib/native-core-types.ts";
 import { onboardingPresentation } from "../lib/onboarding.ts";
 import { randomHex } from "../lib/random.ts";
 
-const EMPTY_ONBOARDING: OnboardingView = { available: false, snapshot: null };
+const EMPTY_ONBOARDING: OnboardingView = { available: false, method: null, snapshot: null };
 
 function connectionLabel(connection: ConnectionState | undefined): string {
   return connection?.state.replaceAll("_", " ") ?? "starting";
+}
+
+function transportLabel(transport: ConnectionTransport): string {
+  return typeof transport === "string"
+    ? transport.replaceAll("_", " ")
+    : transport.other.replaceAll("_", " ");
 }
 
 function bytesText(field: BytesView): string {
@@ -89,15 +96,21 @@ function OnboardingPanel({ busy, onboarding, onMutation }: OnboardingPanelProps)
       <Text style={styles.eyebrow}>FIRST-RUN SETUP</Text>
       <Text style={styles.onboardingTitle}>{presentation.title}</Text>
       <Text style={styles.secondaryText}>{presentation.instruction}</Text>
-      <View style={styles.serialRow}>
-        <Text style={styles.metaLabel}>USB serial</Text>
-        <Text selectable style={styles.monospace}>
-          {onboarding.snapshot?.usb_serial ?? "—"}
-        </Text>
-      </View>
+      {presentation.identifierLabel === null ? null : (
+        <View style={styles.serialRow}>
+          <Text style={styles.metaLabel}>{presentation.identifierLabel}</Text>
+          <Text selectable style={styles.monospace}>
+            {onboarding.snapshot?.usb_serial ?? "—"}
+          </Text>
+        </View>
+      )}
       <View style={styles.actionRow}>
         {presentation.canStart ? (
-          <ActionButton disabled={busy} label="Start pairing" onPress={() => onMutation("start")} />
+          <ActionButton
+            disabled={busy}
+            label={presentation.startLabel}
+            onPress={() => onMutation("start")}
+          />
         ) : null}
         {presentation.canResume ? (
           <ActionButton
@@ -150,6 +163,7 @@ function Sidebar({
   const [name, setName] = useState("");
   const [destination, setDestination] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
+  const readyConnection = snapshot?.connection.state === "ready" ? snapshot.connection : undefined;
 
   const save = async () => {
     const normalizedDestination = destination.trim().toLowerCase();
@@ -235,6 +249,13 @@ function Sidebar({
         ))}
       </ScrollView>
       <View style={styles.deviceMeta}>
+        <MetaRow label="Connection" value={connectionLabel(snapshot?.connection)} />
+        <MetaRow
+          label="Transport"
+          value={readyConnection === undefined ? "—" : transportLabel(readyConnection.transport)}
+        />
+        <MetaRow label="Endpoint" value={readyConnection?.endpoint ?? "—"} />
+        <MetaRow label="Device" value={readyConnection?.device_label ?? "—"} />
         <MetaRow label="Pending" value={String(snapshot?.pending_outbox ?? 0)} />
         <MetaRow label="Imported" value={String(snapshot?.imported_this_run ?? 0)} />
         <MetaRow label="Local LXMF" value={snapshot?.device?.lxmf_delivery_destination ?? "—"} />
@@ -388,6 +409,9 @@ export default function ApplianceScreen() {
   const timelineRequests = useRef(new LatestRequest());
 
   const ready = onboardingPresentation(onboarding).ready;
+  // Missing credentials can make the dormant connector report an expected
+  // local error. The onboarding panel owns that state until setup is ready.
+  const displayedError = error ?? (ready ? snapshot?.last_error : null);
   const selectedContact = contacts.find((contact) => contact.destination === selected);
 
   useEffect(() => {
@@ -640,9 +664,9 @@ export default function ApplianceScreen() {
           )}
         </View>
       </View>
-      {error === null ? null : (
+      {displayedError === null || displayedError === undefined ? null : (
         <View accessibilityLiveRegion="assertive" style={styles.errorBanner}>
-          <Text style={styles.errorText}>{error}</Text>
+          <Text style={styles.errorText}>{displayedError}</Text>
         </View>
       )}
       {busy ? <ActivityIndicator color="#91e6a7" style={styles.activity} /> : null}

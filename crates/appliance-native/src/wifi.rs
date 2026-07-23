@@ -193,6 +193,13 @@ mod tests {
             bytes[48..56].copy_from_slice(&GENERATION.to_le_bytes());
             bytes[56..88].copy_from_slice(&PSK);
             fs::write(&path, bytes).expect("test credential writes");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                    .expect("test credential permissions are owner-only");
+            }
             Self(path)
         }
     }

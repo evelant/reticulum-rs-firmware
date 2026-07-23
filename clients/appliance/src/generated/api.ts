@@ -75,7 +75,7 @@ export type OnboardingStage = "opening_device" | "checking_initialization" | "wa
 /**
  * Browser-safe onboarding failure category.
  */
-export type OnboardingFault = "invalid_credential_artifact" | "device_unavailable" | "protocol_or_persistence_failure" | "invalid_recovery_action";
+export type OnboardingFault = "invalid_credential_artifact" | "unsupported_device" | "device_unavailable" | "protocol_or_persistence_failure" | "invalid_recovery_action";
 
 /**
  * Browser-safe phase of one exact device's first-run lifecycle.
@@ -99,7 +99,12 @@ reason: OnboardingFault, } | { "state": "stopped" };
  */
 export type OnboardingSnapshot = { revision: JsonSafeInteger, usb_serial: string, lifecycle: OnboardingState, };
 
-export type OnboardingView = { available: boolean, snapshot: OnboardingSnapshot | null, };
+/**
+ * Frontend action owner for first-run credential setup.
+ */
+export type OnboardingMethod = "managed_pairing" | "credential_import";
+
+export type OnboardingView = { available: boolean, method: OnboardingMethod | null, snapshot: OnboardingSnapshot | null, };
 
 export type ContactView = { destination: string, name: string, };
 

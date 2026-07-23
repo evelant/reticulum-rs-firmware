@@ -821,6 +821,7 @@ fn classify_client_failure(error: ClientError) -> ConnectFailure {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc;
     use std::thread;
@@ -889,7 +890,7 @@ mod tests {
             bytes[32..48].copy_from_slice(&CREDENTIAL_BYTES);
             bytes[48..56].copy_from_slice(&CREDENTIAL_GENERATION.to_le_bytes());
             bytes[56..88].copy_from_slice(&PSK);
-            fs::write(&path, bytes).expect("test credential writes");
+            write_private_test_credential(&path, &bytes);
             Self(path)
         }
 
@@ -899,8 +900,7 @@ mod tests {
 
         fn malformed() -> Self {
             let path = Self::unique_path("malformed");
-            fs::write(&path, b"not-an-activated-credential")
-                .expect("malformed test credential writes");
+            write_private_test_credential(&path, b"not-an-activated-credential");
             Self(path)
         }
     }
@@ -908,6 +908,17 @@ mod tests {
     impl Drop for TestCredential {
         fn drop(&mut self) {
             let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    fn write_private_test_credential(path: &Path, bytes: &[u8]) {
+        fs::write(path, bytes).expect("test credential writes");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                .expect("test credential permissions are owner-only");
         }
     }
 

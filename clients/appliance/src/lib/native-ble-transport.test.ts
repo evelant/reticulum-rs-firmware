@@ -93,12 +93,14 @@ class FakeBleCentral implements BleCentral {
   readonly supported = true;
 
   connectCount = 0;
+  connectOptions: BleConnectOptions[] = [];
   disposeCount = 0;
   profiles: BleGattProfile[] = [];
   results: Array<(options?: BleConnectOptions) => Promise<BleConnection>> = [];
 
   async connect(profile: BleGattProfile, options?: BleConnectOptions): Promise<BleConnection> {
     this.connectCount += 1;
+    this.connectOptions.push(options ?? {});
     this.profiles.push(profile);
     const result = this.results.shift();
     if (result === undefined) throw new Error("fake BLE central has no connection result");
@@ -215,12 +217,14 @@ function transport(
   appliance: FakeNativeBleAppliance,
   central: FakeBleCentral,
   writeTimeoutMs = 100,
+  peripheralName?: string,
 ): NativeBleTransport {
   return new NativeBleTransport(
     appliance,
     {
       central,
       decodeCommand: (command) => command as unknown as DecodedNativeBlePlatformCommand,
+      peripheralName,
       profile: PROFILE,
     },
     writeTimeoutMs,
@@ -246,6 +250,47 @@ describe("native BLE transport orchestration", () => {
     expect(central.connectCount).toBe(2);
     expect(central.profiles).toEqual([PROFILE, PROFILE]);
     expect(appliance.events).toEqual(["reconnect", "link 1 peripheral-1 20", "ensure connected"]);
+    await owner.dispose();
+  });
+
+  test("forwards the configured advertised name on initial and explicit reconnects", async () => {
+    const appliance = new FakeNativeBleAppliance();
+    const central = new FakeBleCentral();
+    central.results.push(
+      () => Promise.resolve(new FakeBleConnection("first")),
+      () => Promise.resolve(new FakeBleConnection("second")),
+    );
+    const owner = transport(appliance, central, 100, "reticulum-e290-e13e88");
+
+    owner.start();
+    await waitFor(() => appliance.events.includes("ensure connected"), "initial actor wake");
+    await owner.reconnect();
+
+    expect(central.connectOptions.map(({ peripheralName }) => peripheralName)).toEqual([
+      "reticulum-e290-e13e88",
+      "reticulum-e290-e13e88",
+    ]);
+    expect(central.connectOptions[0]?.signal).toBeDefined();
+    expect(central.connectOptions[1]?.signal).toBeDefined();
+    expect(central.connectOptions[0]?.signal).not.toBe(central.connectOptions[1]?.signal);
+    await owner.dispose();
+  });
+
+  test("accepts a credential-derived target before start and rejects live retargeting", async () => {
+    const appliance = new FakeNativeBleAppliance();
+    const central = new FakeBleCentral();
+    central.results.push(() => Promise.resolve(new FakeBleConnection("credential-device")));
+    const owner = transport(appliance, central, 100, "environment-fallback");
+
+    owner.configurePeripheralName("reticulum-e290-e13e88");
+    owner.start();
+    await waitFor(() => appliance.events.includes("ensure connected"), "credential-targeted link");
+
+    expect(central.connectOptions[0]?.peripheralName).toBe("reticulum-e290-e13e88");
+    expect(() => owner.configurePeripheralName("reticulum-e290-e13e88")).not.toThrow();
+    expect(() => owner.configurePeripheralName("reticulum-e290-e13f88")).toThrow(
+      "must be selected before the transport starts",
+    );
     await owner.dispose();
   });
 

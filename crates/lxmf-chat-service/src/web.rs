@@ -174,9 +174,26 @@ fn router(state: WebState) -> Router {
         .with_state(state)
 }
 
+/// Frontend action owner for first-run credential setup.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OnboardingMethod {
+    /// Backend-owned initialization and live pairing over the qualified USB
+    /// bearer.
+    ManagedPairing,
+    /// Native-app import of a credential already activated by a qualified
+    /// pairing owner.
+    #[allow(
+        dead_code,
+        reason = "generated for the native-app onboarding projection"
+    )]
+    CredentialImport,
+}
+
 #[derive(Serialize, TS)]
 pub(crate) struct OnboardingView {
     available: bool,
+    method: Option<OnboardingMethod>,
     snapshot: Option<OnboardingSnapshot>,
 }
 
@@ -191,6 +208,7 @@ async fn onboarding(
         .map(|onboarding| (*onboarding.snapshot()).clone());
     Ok(Json(OnboardingView {
         available: snapshot.is_some(),
+        method: snapshot.as_ref().map(|_| OnboardingMethod::ManagedPairing),
         snapshot,
     })
     .into_response())
@@ -811,6 +829,7 @@ mod tests {
         let body = to_bytes(response.into_body(), BODY_LIMIT).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["available"], false);
+        assert_eq!(json["method"], serde_json::Value::Null);
         assert_eq!(json["snapshot"], serde_json::Value::Null);
     }
 

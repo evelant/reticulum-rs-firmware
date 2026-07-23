@@ -6,6 +6,7 @@ import { onboardingPresentation } from "./onboarding.ts";
 function view(lifecycle: OnboardingState): OnboardingView {
   return {
     available: true,
+    method: "managed_pairing",
     snapshot: { revision: 1, usb_serial: "ACA704E13E88", lifecycle },
   };
 }
@@ -48,5 +49,78 @@ describe("onboarding recovery presentation", () => {
     expect(presentation.canStart).toBeFalse();
     expect(presentation.canResume).toBeFalse();
     expect(presentation.canAbort).toBeFalse();
+  });
+});
+
+describe("native credential import presentation", () => {
+  test("labels the alpha import honestly and does not imply in-app BLE pairing", () => {
+    const presentation = onboardingPresentation({
+      available: true,
+      method: "credential_import",
+      snapshot: {
+        revision: 0,
+        usb_serial: "",
+        lifecycle: { state: "needs_pairing" },
+      },
+    });
+
+    expect(presentation.ready).toBeFalse();
+    expect(presentation.canStart).toBeTrue();
+    expect(presentation.startLabel).toBe("Choose credential");
+    expect(presentation.identifierLabel).toBeNull();
+    expect(presentation.instruction).toContain("qualified USB pairing workflow");
+    expect(presentation.instruction).toContain("selecting another board");
+    expect(presentation.instruction).toContain("clearing local app data");
+    expect(presentation.instruction).toContain("Full in-app BLE pairing remains future work");
+  });
+
+  test("marks an imported credential ready and shows its exact target node", () => {
+    const presentation = onboardingPresentation({
+      available: true,
+      method: "credential_import",
+      snapshot: {
+        revision: 0,
+        usb_serial: "reticulum-e290-e13e88",
+        lifecycle: { state: "credential_ready" },
+      },
+    });
+
+    expect(presentation.ready).toBeTrue();
+    expect(presentation.identifierLabel).toBe("Target node");
+    expect(presentation.canStart).toBeFalse();
+  });
+
+  test("does not offer overwrite for an invalid create-only credential", () => {
+    const presentation = onboardingPresentation({
+      available: true,
+      method: "credential_import",
+      snapshot: {
+        revision: 0,
+        usb_serial: "",
+        lifecycle: { state: "faulted", reason: "invalid_credential_artifact" },
+      },
+    });
+
+    expect(presentation.ready).toBeFalse();
+    expect(presentation.canStart).toBeFalse();
+    expect(presentation.canRefresh).toBeTrue();
+    expect(presentation.instruction).toContain("will not overwrite");
+  });
+
+  test("distinguishes a canonical credential with no exact BLE target from corruption", () => {
+    const presentation = onboardingPresentation({
+      available: true,
+      method: "credential_import",
+      snapshot: {
+        revision: 0,
+        usb_serial: "",
+        lifecycle: { state: "faulted", reason: "unsupported_device" },
+      },
+    });
+
+    expect(presentation.ready).toBeFalse();
+    expect(presentation.title).toContain("BLE profile");
+    expect(presentation.instruction).toContain("canonical");
+    expect(presentation.instruction).toContain("No untargeted scan");
   });
 });

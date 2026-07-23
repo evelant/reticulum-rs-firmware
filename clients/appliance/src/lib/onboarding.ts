@@ -4,6 +4,8 @@ export interface OnboardingPresentation {
   readonly ready: boolean;
   readonly title: string;
   readonly instruction: string;
+  readonly startLabel: string;
+  readonly identifierLabel: string | null;
   readonly canStart: boolean;
   readonly canResume: boolean;
   readonly canAbort: boolean;
@@ -35,9 +37,76 @@ function workingInstruction(stage: OnboardingStage): string {
   }
 }
 
-function baseOnboardingPresentation(
-  view: OnboardingView,
-): Omit<OnboardingPresentation, "canRefresh"> & { readonly canRefresh?: boolean } {
+function baseOnboardingPresentation(view: OnboardingView): Omit<
+  OnboardingPresentation,
+  "canRefresh" | "identifierLabel" | "startLabel"
+> & {
+  readonly canRefresh?: boolean;
+  readonly identifierLabel?: string | null;
+  readonly startLabel?: string;
+} {
+  if (view.method === "credential_import") {
+    const lifecycle = view.snapshot?.lifecycle;
+    if (lifecycle?.state === "credential_ready") {
+      return {
+        ready: true,
+        title: "Credential ready",
+        instruction:
+          "The activated credential is installed in app-private storage and ready for authenticated use.",
+        canStart: false,
+        canResume: false,
+        canAbort: false,
+        identifierLabel: "Target node",
+        startLabel: "Choose credential",
+      };
+    }
+    if (lifecycle?.state === "needs_pairing") {
+      return {
+        ready: false,
+        title: "Import an activated credential",
+        instruction:
+          "Choose the .rdpkey produced by the qualified USB pairing workflow. " +
+          "The app copies it into app-private storage without reading its secret bytes in TypeScript. " +
+          "Verify the transfer filename and physical board first: selecting another board's valid credential binds this create-only app install to that board, and changing it requires clearing local app data. " +
+          "Full in-app BLE pairing remains future work.",
+        canStart: true,
+        canResume: false,
+        canAbort: false,
+        identifierLabel: null,
+        startLabel: "Choose credential",
+      };
+    }
+    if (lifecycle?.state === "faulted") {
+      const unsupportedDevice = lifecycle.reason === "unsupported_device";
+      return {
+        ready: false,
+        title: unsupportedDevice
+          ? "Credential does not identify this BLE profile"
+          : "Credential needs attention",
+        instruction: unsupportedDevice
+          ? "The credential is canonical, but it does not provide an exact target for this E290 BLE connector. No untargeted scan will run."
+          : "The app-private credential is invalid. This create-only alpha flow will not overwrite it; clear this app's local data before importing again.",
+        canStart: false,
+        canResume: false,
+        canAbort: false,
+        canRefresh: true,
+        identifierLabel: null,
+        startLabel: "Choose credential",
+      };
+    }
+    return {
+      ready: false,
+      title: "Credential import unavailable",
+      instruction: "Recheck local credential state. Full in-app BLE pairing remains future work.",
+      canStart: false,
+      canResume: false,
+      canAbort: false,
+      canRefresh: true,
+      identifierLabel: null,
+      startLabel: "Choose credential",
+    };
+  }
+
   if (!view.available || view.snapshot === null) {
     return {
       ready: true,
@@ -146,5 +215,11 @@ function baseOnboardingPresentation(
 
 export function onboardingPresentation(view: OnboardingView): OnboardingPresentation {
   const presentation = baseOnboardingPresentation(view);
-  return { ...presentation, canRefresh: presentation.canRefresh ?? false };
+  return {
+    ...presentation,
+    canRefresh: presentation.canRefresh ?? false,
+    identifierLabel:
+      presentation.identifierLabel ?? (view.method === "managed_pairing" ? "USB serial" : null),
+    startLabel: presentation.startLabel ?? "Start pairing",
+  };
 }

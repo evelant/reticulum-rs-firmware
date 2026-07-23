@@ -10,7 +10,7 @@ import {
 } from "../generated/api.ts";
 
 export const NATIVE_BRIDGE_API_MAJOR = 1 as const;
-export const NATIVE_BRIDGE_API_MINOR = 3 as const;
+export const NATIVE_BRIDGE_API_MINOR = 4 as const;
 
 const EXPECTED_FIELDS = {
   bridgeApiMajor: NATIVE_BRIDGE_API_MAJOR,

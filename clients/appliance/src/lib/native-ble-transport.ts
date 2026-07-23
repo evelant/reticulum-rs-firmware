@@ -39,6 +39,7 @@ export type NativeBleCommandDecoder = (
 export interface NativeBleTransportConfig {
   readonly central: BleCentral;
   readonly decodeCommand: NativeBleCommandDecoder;
+  readonly peripheralName?: string;
   readonly profile: BleGattProfile;
 }
 
@@ -274,6 +275,7 @@ export class NativeBleTransport {
   #active: NativeBleLink | null = null;
   #connectionAbort: AbortController | null = null;
   #disposed = false;
+  #peripheralName?: string;
   #reconnecting: Promise<void> | null = null;
   #started = false;
 
@@ -285,11 +287,33 @@ export class NativeBleTransport {
     this.#appliance = appliance;
     this.#central = config.central;
     this.#decodeCommand = config.decodeCommand;
+    this.#peripheralName = config.peripheralName;
     this.#profile = config.profile;
     this.#writeTimeoutMs = writeTimeoutMs;
     if (!Number.isFinite(this.#writeTimeoutMs) || this.#writeTimeoutMs <= 0) {
       throw new Error("native BLE platform write timeout must be positive");
     }
+  }
+
+  get hasPeripheralName(): boolean {
+    return this.#peripheralName !== undefined;
+  }
+
+  /**
+   * Select the exact advertised device before the first connection attempt.
+   *
+   * Credential onboarding calls this after Rust has validated the imported
+   * credential and derived its expected E290 advertising name. Retargeting a
+   * live or connecting transport is deliberately rejected because it could
+   * bind authenticated protocol bytes to a different physical peripheral.
+   */
+  configurePeripheralName(peripheralName: string): void {
+    if (this.#disposed) throw new Error("native BLE transport has been disposed");
+    if (this.#peripheralName === peripheralName) return;
+    if (this.#started || this.#reconnecting !== null || this.#active !== null) {
+      throw new Error("native BLE peripheral must be selected before the transport starts");
+    }
+    this.#peripheralName = peripheralName;
   }
 
   start(): void {
@@ -351,6 +375,7 @@ export class NativeBleTransport {
       }
 
       const connection = await this.#central.connect(this.#profile, {
+        peripheralName: this.#peripheralName,
         signal: abort.signal,
       });
       if (this.#disposed || abort.signal.aborted) {
