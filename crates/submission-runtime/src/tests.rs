@@ -19,7 +19,7 @@ use reticulum_storage_model::{
     AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA,
     AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS, AuthorizationSnapshot,
     DestinationHash as StoredDestinationHash, ExperimentalRnsDataIntent, FinalDisposition,
-    IdempotencyKey, PrincipalId, SubmissionFailure,
+    IdempotencyKey, LxmfMessageIntent, PrincipalId, SubmissionFailure,
 };
 use std::{boxed::Box, vec, vec::Vec};
 
@@ -198,6 +198,9 @@ struct TestNode {
     hide_terminal: bool,
     destination: DestinationHash,
     prepare_calls: usize,
+    opportunistic_lxmf_prepare_calls: usize,
+    last_opportunistic_lxmf_wire_len: Option<usize>,
+    forced_opportunistic_lxmf_preparation: Option<SubmissionPreparationObservation>,
     acknowledge_calls: usize,
     forced_unknown_preparations: usize,
 }
@@ -238,6 +241,9 @@ impl TestNode {
             hide_terminal: false,
             destination,
             prepare_calls: 0,
+            opportunistic_lxmf_prepare_calls: 0,
+            last_opportunistic_lxmf_wire_len: None,
+            forced_opportunistic_lxmf_preparation: None,
             acknowledge_calls: 0,
             forced_unknown_preparations: 0,
         }
@@ -245,6 +251,13 @@ impl TestNode {
 
     fn force_unknown_preparations(&mut self, count: usize) {
         self.forced_unknown_preparations = count;
+    }
+
+    fn force_opportunistic_lxmf_preparation(
+        &mut self,
+        observation: SubmissionPreparationObservation,
+    ) {
+        self.forced_opportunistic_lxmf_preparation = Some(observation);
     }
 
     fn expose_frame_and_timeout(&mut self) -> AuthorizedFrameObservation {
@@ -374,6 +387,26 @@ impl SubmissionNodePort for TestNode {
         }
     }
 
+    fn prepare_rehydrated_opportunistic_lxmf_submission<R>(
+        &mut self,
+        request: SubmissionPrepareRequest<'_>,
+        _rng: &mut R,
+    ) -> SubmissionPreparationObservation
+    where
+        R: RngCore + CryptoRng,
+    {
+        self.opportunistic_lxmf_prepare_calls += 1;
+        assert_eq!(request.destination, self.destination);
+        assert_eq!(
+            request.plaintext.get(..16),
+            Some(request.destination.as_bytes().as_slice())
+        );
+        self.last_opportunistic_lxmf_wire_len = Some(request.plaintext.len());
+        self.forced_opportunistic_lxmf_preparation
+            .take()
+            .unwrap_or(SubmissionPreparationObservation::RetrySameBoot)
+    }
+
     fn terminal_attempts(&self) -> impl Iterator<Item = TerminalAttempt> + '_ {
         self.core
             .terminal_attempts()
@@ -421,6 +454,25 @@ fn candidate(destination: DestinationHash) -> AcceptanceCandidate {
         .unwrap(),
         AuthorizationSnapshot::new(
             [0x13; 16],
+            7,
+            9,
+            1,
+            AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA
+                | AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS,
+        )
+        .unwrap(),
+    )
+}
+
+fn lxmf_message_candidate(destination: DestinationHash, carrier_len: usize) -> AcceptanceCandidate {
+    let mut wire = vec![0x5d; 16 + carrier_len];
+    wire[..16].copy_from_slice(destination.as_bytes());
+    AcceptanceCandidate::new(
+        PrincipalId::new([0x21; 16]),
+        IdempotencyKey::new([carrier_len as u8; 16]),
+        LxmfMessageIntent::new(&wire).unwrap(),
+        AuthorizationSnapshot::new(
+            [0x23; 16],
             7,
             9,
             1,
@@ -623,6 +675,99 @@ fn durable_runtime_enforces_barrier_frame_terminal_and_ack_ordering() {
         runtime.index().get(id).unwrap().state(),
         LifecycleState::Final(FinalDisposition::Failed(SubmissionFailure::DeliveryTimeout))
     ));
+}
+
+#[test]
+fn lxmf_message_uses_the_dedicated_opportunistic_path_above_generic_data_mdu() {
+    let mut node = TestNode::new();
+    node.force_opportunistic_lxmf_preparation(SubmissionPreparationObservation::Rejected(
+        SubmitError::PayloadTooLarge {
+            actual: MAX_OPPORTUNISTIC_LXMF_CARRIER,
+            maximum: reticulum_node_core::MAX_DATA_PAYLOAD,
+        },
+    ));
+    let mut access = formatted_access();
+    let mut runtime =
+        SubmissionRuntime::<4, 2>::mount(&mut access, SubmissionId::new(45), 7).unwrap();
+    assert_eq!(
+        runtime.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Complete)
+    );
+    let id = match runtime
+        .accept(
+            &mut access,
+            lxmf_message_candidate(node.destination, MAX_OPPORTUNISTIC_LXMF_CARRIER),
+        )
+        .unwrap()
+    {
+        AcceptanceProgress::Accepted(id) => id,
+        other => panic!("fresh LXMF-message candidate did not accept: {other:?}"),
+    };
+    assert!(matches!(
+        drive(&mut runtime, &mut access, &mut node),
+        RuntimeStep::PreparationBarrier { id: observed, .. } if observed == id
+    ));
+    assert_eq!(
+        drive(&mut runtime, &mut access, &mut node),
+        RuntimeStep::Persistence(PersistenceProgress::Committed)
+    );
+    assert!(matches!(
+        drive(&mut runtime, &mut access, &mut node),
+        RuntimeStep::Preparation {
+            id: observed,
+            progress: ProjectionProgress::NoAction,
+        } if observed == id
+    ));
+    assert_eq!(node.prepare_calls, 0);
+    assert_eq!(node.opportunistic_lxmf_prepare_calls, 1);
+    assert_eq!(
+        node.last_opportunistic_lxmf_wire_len,
+        Some(16 + MAX_OPPORTUNISTIC_LXMF_CARRIER)
+    );
+    assert_eq!(
+        runtime.index().get(id).unwrap().state(),
+        LifecycleState::Preparing
+    );
+}
+
+#[test]
+fn lxmf_message_above_opportunistic_ceiling_waits_for_link_without_terminal_rejection() {
+    let mut node = TestNode::new();
+    let mut access = formatted_access();
+    let mut runtime =
+        SubmissionRuntime::<4, 2>::mount(&mut access, SubmissionId::new(46), 7).unwrap();
+    assert_eq!(
+        runtime.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Complete)
+    );
+    let id = match runtime
+        .accept(
+            &mut access,
+            lxmf_message_candidate(node.destination, MAX_OPPORTUNISTIC_LXMF_CARRIER + 1),
+        )
+        .unwrap()
+    {
+        AcceptanceProgress::Accepted(id) => id,
+        other => panic!("fresh LXMF-message candidate did not accept: {other:?}"),
+    };
+    assert!(matches!(
+        drive(&mut runtime, &mut access, &mut node),
+        RuntimeStep::PreparationBarrier { id: observed, .. } if observed == id
+    ));
+    assert_eq!(
+        drive(&mut runtime, &mut access, &mut node),
+        RuntimeStep::Persistence(PersistenceProgress::Committed)
+    );
+    assert_eq!(
+        drive(&mut runtime, &mut access, &mut node),
+        RuntimeStep::Idle
+    );
+    assert_eq!(node.prepare_calls, 0);
+    assert_eq!(node.opportunistic_lxmf_prepare_calls, 0);
+    assert_eq!(
+        runtime.index().get(id).unwrap().state(),
+        LifecycleState::Preparing
+    );
 }
 
 #[test]

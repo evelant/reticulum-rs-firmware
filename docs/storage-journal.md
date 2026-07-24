@@ -4,18 +4,20 @@
 adapter complete; host fault injection implemented; isolated RF-inert ESP32-S3
 clean-path/software-reset HIL passed on board E9:44; resident E290 operation-
 scoped coordinator and exact authorized-frame request/durable-echo handoff
-integrated with a one-entry accepted-history cap used only for composition
-qualification; a minimal authenticated USB admission lane is source-composed
-and bounded powered-qualified through peer proof and terminal status; ADR 0005's interface-local
+integrated with the 128-entry external-PSRAM accepted-history profile and
+154-acceptance physical-journal lifetime ceiling; authenticated USB and BLE
+admission lanes are source-composed, with bounded powered proofs through peer
+proof and terminal status; ADR 0005's interface-local
 active-owner fail-stop and the complete LoRa-first software composition pass
-cross-layer host tests; semantic schema 2 authorization provenance passes host
-and target checks; product-capacity policy, powered fault qualification,
-controlled power cuts, endurance/soak, and at-rest encryption remain open
+cross-layer host tests; semantic schema 3 retains authorization provenance and
+adds an exact method-neutral LXMF-message intent; long-term reclamation and
+retention policy, powered fault qualification, controlled power cuts,
+endurance/soak, and at-rest encryption remain open
 
 ## Boundary
 
-`reticulum-storage-journal` is the physical-format-1 backend for semantic-
-schema-2 durable submission records. It is a `no_std`, allocation-free crate over
+`reticulum-storage-journal` is the physical-format-2 backend for semantic-
+schema-3 durable submission records. It is a `no_std`, allocation-free crate over
 `embedded-storage` raw NOR traits. It consumes and reproduces the canonical
 records from `reticulum-storage-model`; it does not define a second semantic
 format.
@@ -30,10 +32,12 @@ and creates one short-lived checked journal view per runtime operation; future
 OTA and other stores must use that same serialization point. The E290
 coordinator implements the narrow target-safe `SubmissionPort`, and the
 separate portable authenticated adapter maps only that semantic vocabulary to
-the logical device API. Schema-2 acceptance persists the revalidated credential
+the logical device API. Schema-3 acceptance persists the revalidated credential
 ID/generation, authority revision, policy version, and exact granted permission
-mask. Its content digest is derived from the complete persisted intent instead
-of occupying a second encoded or in-RAM field; the maximum record is 508 bytes.
+mask. It also distinguishes generic destination DATA, still capped at 383
+plaintext bytes, from an exact complete signed LXMF-message intent capped at
+431 bytes without selecting its delivery method. The largest canonical record
+is 538 bytes.
 Portable immutable credential authority, framing, the qualification-session
 core, durable credential state/pairing, job handoff, and the minimal USB bearer
 compose this port into the permanent graph. The bounded powered path now covers
@@ -49,7 +53,7 @@ keyed authentication and provide no confidentiality. A party able to rewrite
 raw flash can forge a new internally consistent plaintext journal; production
 at-rest protection remains a separate provisioning and security decision.
 
-## Physical version-1 geometry
+## Physical version-2 geometry
 
 The physical format accepts exactly a 1 MiB partition with 4-byte reads,
 4-byte programs, and 4 KiB erases. Mutating operations additionally require
@@ -60,15 +64,15 @@ the start of that partition.
 | --- | ---: | ---: | --- |
 | manifest A sector | `0x00000` | 4 KiB | generation-A manifest and source handoff |
 | manifest B sector | `0x01000` | 4 KiB | generation-B manifest and source handoff |
-| bank A | `0x02000` | 508 KiB (`0x7f000`) | 812 fixed slots plus a 512-byte erased tail |
-| bank B | `0x81000` | 508 KiB (`0x7f000`) | 812 fixed slots plus a 512-byte erased tail |
+| bank A | `0x02000` | 508 KiB (`0x7f000`) | 774 fixed slots plus a 64-byte erased tail |
+| bank B | `0x81000` | 508 KiB (`0x7f000`) | 774 fixed slots plus a 64-byte erased tail |
 
-Each 640-byte slot is exactly:
+Each 672-byte slot is exactly:
 
 | Field | Size | Rule |
 | --- | ---: | --- |
 | physical header | 64 bytes | magic, physical/schema versions, bank, kind, length, generation, ordinal, and duplicated logical key |
-| canonical semantic body | 512 bytes | encoded record followed by erased padding |
+| canonical semantic body | 544 bytes | encoded record followed by erased padding |
 | integrity digest | 32 bytes | SHA-256 over the domain, header, complete padded body, and previous committed digest |
 | commit marker | 32 bytes | programmed separately and last |
 
@@ -78,10 +82,10 @@ data, a 32-byte digest, and a 32-byte commit marker. Everything else in the
 4 KiB manifest sector must remain erased. A manifest records its bank geometry,
 generation, semantic schema, copied baseline count and copied chain tail.
 
-There are 812 physical slots per generation. Semantic schema 2 reserves at most five
+There are 774 physical slots per generation. Semantic schema 3 reserves at most five
 semantic records for each accepted submission, so the hard physical acceptance
-ceiling is `floor(812 / 5) = 162` submissions. At that ceiling 810 records are
-reserved and two slots remain. The runtime's compile-time
+ceiling is `floor(774 / 5) = 154` submissions. At that ceiling 770 records are
+reserved and four slots remain. The runtime's compile-time
 `SubmissionIndex<SUBMISSIONS>` capacity can be lower; a product profile must
 choose enough RAM index entries for every acceptance it permits. Compaction
 retains all committed records, so this journal has no culling or capacity
@@ -101,16 +105,15 @@ operation never erases. `Reject` never writes. A valid nonempty journal and all
 off-trajectory data are `MediaNotProvisionable`; normal `mount()` is unchanged
 and fail-closed.
 
-The physical layout version remains 1 while the semantic schema is 2. A
-checksum-valid schema-1 manifest is classified as
-`UnsupportedSemanticVersion(1)` only after its complete manifest geometry,
-reserved fields, digest, handoff metadata, and two-bank generation trajectory
-validate. Mount, append, and compaction then perform zero writes and erases.
-Malformed older media remains corruption, and mixed current/unsupported
-authorities remain a conflict. The journal never fabricates the authorization
-facts absent from schema 1.
+The physical layout version is 2 and the semantic schema is 3. Valid
+schema-2/physical-1 media and older schema-1 media are incompatible history:
+ordinary mount performs no write or erase and never fabricates the exact
+LXMF-message intent or authorization facts absent from that history.
+Development migration erases and reprovisions only `node_journal`; malformed
+older media remains corruption, and mixed current/unsupported authorities
+remain a conflict.
 
-Every mount selects a valid manifest and scans all 812 slots in the selected
+Every mount selects a valid manifest and scans all 774 slots in the selected
 bank. It does not stop at the first erased or torn slot, so a later committed
 slot cannot be hidden behind a power-loss hole. The scan:
 
@@ -148,7 +151,7 @@ flash or RF evidence.
 
 Append performs that complete scan before writing. It preflights the requested
 record against replayed semantics and the lifetime reservation, writes the
-608-byte protected prefix, reads it back exactly, then writes the 32-byte
+640-byte protected prefix, reads it back exactly, then writes the 32-byte
 commit marker and reads back the complete slot. Retrying an already committed
 identical `(submission, revision)` returns `AlreadyEquivalent` without a
 program or erase. Different content at that key returns `LogicalConflict`
@@ -233,7 +236,7 @@ The image then requires:
 - project-owned partition-relative raw NOR access, not the sector-rewriting
   byte-storage API.
 
-On a completely erased `retlog`, the current schema-2 clean-run fixture formats generation 1,
+On a completely erased `retlog`, the current schema-3 clean-run fixture formats generation 1,
 appends one submission's complete five-record lifetime, verifies semantic
 replay, proves an exact retry causes no program/erase call, proves conflicting
 content at the same key is rejected without mutation, compacts to generation
@@ -259,11 +262,11 @@ five committed records in five consumed slots, one accepted submission at
 revision 4 `Delivered`, no pending compaction, an erased retired-A manifest,
 and an erased unused B tail.
 
-That historical run qualifies the unchanged physical append/compaction/reset
-mechanics at its recorded source. It does not qualify schema-2 acceptance
-encoding or authorization provenance. The current HIL fixture and independent
-verifier now require the exact schema-2 authorization snapshot and must be run
-again after the explicit journal-only development migration.
+That historical run qualifies the append/compaction/reset mechanics only at its
+recorded schema-1 source and physical geometry. It does not qualify schema-3
+acceptance encoding, the exact LXMF-message intent, or physical format 2. The current HIL
+fixture and independent verifier now require the exact schema-3 model and must
+be run again after the explicit journal-only development migration.
 
 This result qualifies only the isolated journal clean path and software-reset
 replay. It does not qualify the portable actor on hardware, controlled power-
@@ -275,7 +278,7 @@ each image, readback, hash set, and continuous serial log independently.
 ## Modularity and remaining product work
 
 The physical journal is deliberately narrower than the full appliance store.
-It can be linked wherever schema-2 durable submissions are enabled without
+It can be linked wherever schema-3 durable submissions are enabled without
 bringing in Rete, LXMF, a radio, an executor, networking, or a UI. A constrained
 Tracker profile may omit onboard LXMF/NomadNet clients, SPA assets, BLE, or
 propagation service while retaining this exact durability format. A PSRAM/full
@@ -287,11 +290,13 @@ messages, propagation payloads, identities, configuration, attachments, OTA,
 and telemetry need separately bounded stores and quotas. Before product use,
 the project still needs:
 
-- full powered qualification of the implemented resident E290 product coordinator
-  around the operation-scoped portable actor/runtime. Its one-entry cap, live
-  driver, exact authorized-frame handoff, and ADR 0005 fault behavior now pass
-  software composition tests, while current powered evidence adds one durable
-  authenticated DATA/peer-proof/status path; the cap is not product capacity;
+- full powered qualification of the implemented resident E290 product
+  coordinator around the operation-scoped portable actor/runtime. Its 128-entry
+  external-PSRAM accepted-history profile, 154-acceptance append-only journal
+  lifetime, live driver, exact authorized-frame handoff, and ADR 0005 fault
+  behavior pass software composition tests. Current powered evidence adds
+  bounded durable authenticated DATA/peer-proof/status paths, but not
+  capacity-pressure or journal-lifetime qualification;
 - broader powered credential lifecycle/fault qualification plus an exact node-
   owner quiescence proof and quarantine policy before
   projector-slot retirement;

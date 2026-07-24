@@ -94,6 +94,10 @@ protected:
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
+  cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_nearby_peers_json(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value
   cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_reconnect(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
@@ -324,6 +328,10 @@ protected:
       size_t count);
   jsi::Value
   cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_import_activated_credential(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value
+  cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_nearby_peers_json(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value

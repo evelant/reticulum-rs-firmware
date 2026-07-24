@@ -6,9 +6,9 @@ import { assertNativeBridgeContract } from "./native-contract.ts";
 
 const EXPECTED_CONTRACT = {
   bridgeApiMajor: 1,
-  bridgeApiMinor: 4,
+  bridgeApiMinor: 5,
   deviceApiMajor: 1,
-  deviceApiMinor: 4,
+  deviceApiMinor: 5,
   maxMessageBytes: 512,
   maxLxmfReadChunkBytes: 416,
   maxLxmfBasicTitleBytes: 295,
@@ -26,6 +26,6 @@ describe("native Rust bridge contract", () => {
         ...EXPECTED_CONTRACT,
         deviceApiMinor: EXPECTED_CONTRACT.deviceApiMinor + 1,
       }),
-    ).toThrow("deviceApiMinor: expected 4, observed 5");
+    ).toThrow("deviceApiMinor: expected 5, observed 6");
   });
 });

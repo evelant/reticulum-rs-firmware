@@ -5,7 +5,7 @@
 // 0..=Number.MAX_SAFE_INTEGER. Rust validates this contract at the wire boundary.
 
 export const DEVICE_API_VERSION_MAJOR = 1 as const;
-export const DEVICE_API_VERSION_MINOR = 4 as const;
+export const DEVICE_API_VERSION_MINOR = 5 as const;
 export const MAX_MESSAGE_BYTES = 512 as const;
 export const MAX_LXMF_READ_CHUNK_BYTES = 416 as const;
 export const MAX_CONTACT_NAME_BYTES = 256 as const;
@@ -107,6 +107,15 @@ export type OnboardingMethod = "managed_pairing" | "credential_import";
 export type OnboardingView = { available: boolean, method: OnboardingMethod | null, snapshot: OnboardingSnapshot | null, };
 
 export type ContactView = { destination: string, name: string, };
+
+/**
+ * Display-safe public facts from one authenticated LXMF delivery announce.
+ *
+ * The destination and identity hash are complete lowercase hexadecimal
+ * values. Announce application bytes, Reticulum public keys, cursors, and
+ * protocol parsing never cross the Rust/application boundary.
+ */
+export type NearbyPeerView = { destination: string, display_name: string | null, hops: number, identity_hash: string, interface_id: number, interface_name: string | null, observed_age_ms: JsonSafeInteger, rssi_dbm: number | null, snr_db: number | null, };
 
 export type BytesEncoding = "utf8" | "hex";
 

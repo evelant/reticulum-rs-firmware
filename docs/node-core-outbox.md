@@ -10,8 +10,11 @@ DATA/LXMF submission, client delivery, and full powered E290 qualification of
 the product image remain open.
 The permanent image's bounded source-`96e38aa` boot/interface/ordinary-TX smoke
 has passed, without controlled peer RX or DATA.
-**Rete pin:** `90570cafc812b3025011cb690ec74a27f287cb3f`
-(designated durable tag `firmware-pin-90570ca`)
+**Rete pin:** `2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on
+`codex/link-data-receipts`, descending from tagged predecessor
+`90570cafc812b3025011cb690ec74a27f287cb3f`
+(`firmware-pin-90570ca`). The current revision has no designated durable tag.
+It adds ordinary Link-DATA receipts and destination proof-policy parity.
 
 The preceding `14c7b4955a1ff6903e87cc40b42498f7869b6f4f` pin had host and
 portable-target LRRTT validation and a build-only E290 package. Its 776,464-byte
@@ -62,7 +65,8 @@ included 40 released-Python LRRTT MessagePack checks and a complete
 three-node A--B--C Link handshake, channel DATA and proof flow over two exact
 relay interfaces, pre-dedup wrong-hop LRPROOF rejection, 8 fresh-ciphertext
 retry/receipt-replacement checks, plus 40 exact keepalive lifecycle checks. The
-current schema-2 lifecycle/candidate runner passes 647 checks.
+recorded schema-2 lifecycle/candidate runner passed 647 checks; that historical
+count is not a current schema-3 result.
 
 Locally owned Link output has a separate authenticated binding. A responder
 binds to LINKREQUEST ingress. An initiator's learned path selects the initial

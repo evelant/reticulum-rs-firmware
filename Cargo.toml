@@ -37,6 +37,7 @@ members = [
     "crates/lxmf-wire",
     "crates/node-core",
     "crates/nor-flash-region",
+    "crates/peer-discovery",
     "crates/radio-lora-phy",
     "crates/radio-tx-dispatch",
     "crates/radio-interface",
@@ -103,6 +104,7 @@ default-members = [
     "crates/lxmf-wire",
     "crates/node-core",
     "crates/nor-flash-region",
+    "crates/peer-discovery",
     "crates/radio-lora-phy",
     "crates/radio-tx-dispatch",
     "crates/radio-interface",
@@ -205,13 +207,15 @@ zeroize = { version = "=1.9.0", default-features = false }
 # forwarding, owned HEADER_2 typed dispatch, and transactional bounded relay
 # Link/reverse admission with typed failures, authenticated Link-interface
 # binding, Python-compatible Link keepalive/liveness and pending-proof hop
-# behavior, and receipt-atomic Channel retries. Fork tag
-# firmware-pin-90570ca keeps this exact candidate reachable independently of
-# its development branch.
-rete-core = { git = "https://github.com/evelant/rete.git", rev = "90570cafc812b3025011cb690ec74a27f287cb3f", default-features = false }
-rete-lxmf-core = { git = "https://github.com/evelant/rete.git", rev = "90570cafc812b3025011cb690ec74a27f287cb3f", default-features = false }
-rete-stack = { git = "https://github.com/evelant/rete.git", rev = "90570cafc812b3025011cb690ec74a27f287cb3f", default-features = false }
-rete-transport = { git = "https://github.com/evelant/rete.git", rev = "90570cafc812b3025011cb690ec74a27f287cb3f", default-features = false }
+# behavior, and receipt-atomic Channel retries. The current exact revision is
+# on fork branch codex/link-data-receipts and descends from the tagged
+# firmware-pin-90570ca predecessor. It additionally adds ordinary Link-DATA
+# receipts and respects the receiving destination's proof policy. The
+# predecessor tag does not name the current revision.
+rete-core = { git = "https://github.com/evelant/rete.git", rev = "2d0781838aa03370b739d4003bcd1bdd5bbb0c6c", default-features = false }
+rete-lxmf-core = { git = "https://github.com/evelant/rete.git", rev = "2d0781838aa03370b739d4003bcd1bdd5bbb0c6c", default-features = false }
+rete-stack = { git = "https://github.com/evelant/rete.git", rev = "2d0781838aa03370b739d4003bcd1bdd5bbb0c6c", default-features = false }
+rete-transport = { git = "https://github.com/evelant/rete.git", rev = "2d0781838aa03370b739d4003bcd1bdd5bbb0c6c", default-features = false }
 
 [patch.crates-io]
 # Force every current and future graph consumer onto the one reviewed local

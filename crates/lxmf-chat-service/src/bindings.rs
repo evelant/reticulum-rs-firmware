@@ -7,8 +7,8 @@ use reticulum_device_api::{
 use reticulum_lxmf_chat_runtime::{
     ApplianceSnapshot, BytesEncoding, BytesView, ConnectionState, ConnectionTransport,
     ContactRequest, ContactView, DeviceView, MAX_CONTACT_NAME_BYTES, MutationOutcome,
-    MutationResponse, SendOutcome, SendRequest, SendResponse, TimelineDirection, TimelineStatus,
-    TimelineView,
+    MutationResponse, NearbyPeerView, SendOutcome, SendRequest, SendResponse, TimelineDirection,
+    TimelineStatus, TimelineView,
 };
 use ts_rs::TS;
 
@@ -62,6 +62,7 @@ pub fn render_api_bindings() -> String {
     append_declaration::<OnboardingMethod>(&mut output, &config);
     append_declaration::<OnboardingView>(&mut output, &config);
     append_declaration::<ContactView>(&mut output, &config);
+    append_declaration::<NearbyPeerView>(&mut output, &config);
     append_declaration::<BytesEncoding>(&mut output, &config);
     append_declaration::<BytesView>(&mut output, &config);
     append_declaration::<TimelineDirection>(&mut output, &config);

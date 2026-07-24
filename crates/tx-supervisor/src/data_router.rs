@@ -74,6 +74,12 @@ pub struct DataRouterPrepareRequest<'a> {
     pub deadline: TxLeaseDeadline,
 }
 
+#[derive(Clone, Copy)]
+enum DataRouterPreparationMode {
+    Generic,
+    RehydratedOpportunisticLxmf,
+}
+
 /// Scalar identity of one prepared DATA hop retained or routed by the
 /// coordinator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -656,6 +662,67 @@ impl<const PACKET_BUFFERS: usize> DataRouterCoordinator<PACKET_BUFFERS> {
         now: MonotonicMillis,
         rng: &mut R,
     ) -> DataRouterPrepareResult {
+        self.try_prepare_data_with(
+            owner,
+            router,
+            request,
+            now,
+            DataRouterPreparationMode::Generic,
+            rng,
+        )
+    }
+
+    /// Prepare one exact durable LXMF wire message through node-core's
+    /// dedicated opportunistic Header-1 path.
+    ///
+    /// `request.plaintext` is the complete signed wire message, including its
+    /// destination prefix. Owner parking and interface routing remain
+    /// identical to ordinary DATA preparation.
+    pub fn try_prepare_rehydrated_opportunistic_lxmf<
+        R: RngCore + CryptoRng,
+        M: RawMutex + 'static,
+        const PATHS: usize,
+        const ANNOUNCES: usize,
+        const DEDUPLICATION: usize,
+        const LINKS: usize,
+        const SLOTS: usize,
+        const QUEUE_DEPTH: usize,
+    >(
+        &mut self,
+        owner: &mut NodeCore<PATHS, ANNOUNCES, DEDUPLICATION, LINKS, PACKET_BUFFERS>,
+        router: &OutboundRouter<M, SLOTS, QUEUE_DEPTH>,
+        request: DataRouterPrepareRequest<'_>,
+        now: MonotonicMillis,
+        rng: &mut R,
+    ) -> DataRouterPrepareResult {
+        self.try_prepare_data_with(
+            owner,
+            router,
+            request,
+            now,
+            DataRouterPreparationMode::RehydratedOpportunisticLxmf,
+            rng,
+        )
+    }
+
+    fn try_prepare_data_with<
+        R: RngCore + CryptoRng,
+        M: RawMutex + 'static,
+        const PATHS: usize,
+        const ANNOUNCES: usize,
+        const DEDUPLICATION: usize,
+        const LINKS: usize,
+        const SLOTS: usize,
+        const QUEUE_DEPTH: usize,
+    >(
+        &mut self,
+        owner: &mut NodeCore<PATHS, ANNOUNCES, DEDUPLICATION, LINKS, PACKET_BUFFERS>,
+        router: &OutboundRouter<M, SLOTS, QUEUE_DEPTH>,
+        request: DataRouterPrepareRequest<'_>,
+        now: MonotonicMillis,
+        mode: DataRouterPreparationMode,
+        rng: &mut R,
+    ) -> DataRouterPrepareResult {
         if owner.tx_owner_scope() != self.owner_scope {
             return DataRouterPrepareResult::OwnerMismatch;
         }
@@ -716,7 +783,15 @@ impl<const PACKET_BUFFERS: usize> DataRouterCoordinator<PACKET_BUFFERS> {
             deadline: request.deadline,
             enabled_interfaces,
         };
-        match owner.prepare_data_into_slot(buffer, node_request, rng) {
+        let prepared = match mode {
+            DataRouterPreparationMode::Generic => {
+                owner.prepare_data_into_slot(buffer, node_request, rng)
+            }
+            DataRouterPreparationMode::RehydratedOpportunisticLxmf => {
+                owner.prepare_rehydrated_opportunistic_lxmf_into_slot(buffer, node_request, rng)
+            }
+        };
+        match prepared {
             Ok(job) => {
                 let hop = DataPreparedHop::from_job(&job);
                 let actual = hop.slot_id();

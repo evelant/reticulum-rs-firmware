@@ -294,10 +294,12 @@ NA915 development TX/RX and remain the regression fixture.
    ownership of `EmbeddedNode`, keep RNode microseconds separate from Rete
    seconds, and connect timed RX plus ordinary ingress/tick actions through the
    sealed interface fabric.
-2. **Complete for the bounded one-entry profile:** the resident storage actor/
-   runtime owns the product journal, and the API adapter's external lane makes a
-   send durable before Rete preparation while proof/timeout outcomes become
-   durable before terminal acknowledgement.
+2. **Historically complete for the bounded one-entry fixture:** the resident
+   storage actor/runtime owns the product journal, and the API adapter's
+   external lane makes a send durable before Rete preparation while
+   proof/timeout outcomes become durable before terminal acknowledgement.
+   Current E290 source has since expanded outbound accepted history to 128
+   external-PSRAM entries; the raw-RNS inbox separately remains one-entry.
 3. **Powered bounded end-to-end PASS:** the registered-buffer,
    supervisor/permit, regional/airtime, and sole-radio ownership path now accepts
    one authenticated durable RNS DATA submission, transmits it from the

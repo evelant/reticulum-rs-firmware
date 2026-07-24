@@ -73,9 +73,13 @@ still invokes Metro once to embed `main.jsbundle` in the signed application. Bef
 verify that the generated `Release-iphoneos/ReticulumAppliance.app/main.jsbundle` exists and is
 nonempty.
 
-The app defaults to the appliance's same-origin HTTP API on web. Native builds default to a Rust
-single-owner actor with an app-private SQLite database. This already provides durable contacts,
-timelines, and idempotent outbox writes while offline. BLE is the default native bearer: React
+The app defaults to the appliance's same-origin HTTP API on web. Native builds
+default to a Rust single-owner actor with the app-private
+`reticulum-lxmf-chat-alpha-schema3.sqlite3` database. The schema-3 filename is
+deliberately new so submission IDs from a pre-schema-3 device journal cannot
+poll or collide after the required journal-only reprovision; the separate
+credential file is retained. This already provides durable contacts, timelines,
+and idempotent outbox writes while offline. BLE is the default native bearer: React
 Native owns foreground scanning, GATT connection, indications, and write-with-response, while Rust
 owns the activated credential, authenticated session, protocol framing, and LXMF state. The initial
 BLE attempt runs in the background only after the native bridge has validated an app-private
@@ -87,6 +91,15 @@ app backgrounds and resume when it becomes active again. The Reconnect action al
 discovery and the complete GATT link explicitly. BLE background restoration and phone-native live
 pairing are not implemented yet. USB OTG and USB serial/JTAG remain explicit unavailable connector
 stubs and do not silently fall back or claim a device connection.
+
+The **Nearby** contact action reads the connected E290's bounded projection of
+authenticated `lxmf.delivery` announces through that same BLE session. It does
+not scan the other Reticulum node from the phone. Refresh returns at most the
+board profile's 32 peers, Rust bounds and decodes the boot-scoped API pages and
+announce display data, and one tap adds or opens the existing durable contact.
+Manual hexadecimal destination entry remains available. This public peer
+discovery is separate from credential import and appliance authorization;
+future QR or native-proximity contact cards cannot grant device control.
 
 On compact native layouts, the conversation workspace is keyboard-aware and scrollable. iOS uses
 padding plus interactive keyboard dismissal, Android uses height avoidance plus drag dismissal,

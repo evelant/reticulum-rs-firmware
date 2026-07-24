@@ -10,7 +10,9 @@ use embassy_time::{Duration, Instant, Timer};
 use esp_hal::rng::Trng;
 use log::{error, info, warn};
 use reticulum_announce_clock::BootEpoch;
-use reticulum_device_api::{DestinationHash as ApiDestinationHash, IdentitySummary};
+use reticulum_device_api::{
+    DestinationHash as ApiDestinationHash, IdentitySummary, LxmfPeerDiscoveryIncarnation,
+};
 use reticulum_device_api_handoff::{LocalApiReply, LocalApiRequest, NodeHandoff};
 use reticulum_device_api_pairing::{
     AbortCurrentResponse, AbortResult, ActivateFailure, ActivateResponse, BeginResponse,
@@ -70,6 +72,11 @@ use reticulum_node_core::{
 };
 #[cfg(feature = "runtime-measurement-hil")]
 use reticulum_node_core::{IngressDisposition, IngressMetadata, PacketType};
+use reticulum_peer_discovery::{
+    AuthenticatedAnnounceObservation, DestinationHash as PeerDestinationHash, DiscoveredPeers,
+    IdentityHash as PeerIdentityHash, IdentityPublicKey, MonotonicMillis as PeerObservedMillis,
+    ObservationMetadata, ObservedInterfaceId, SignalObservations,
+};
 use reticulum_rns_inbox_store::{InboxCandidate, InboxDestination};
 use reticulum_storage_actor::{DriveError, ProjectorOperationError};
 use reticulum_submission_runtime::{
@@ -84,7 +91,7 @@ use reticulum_tx_supervisor::{
 };
 
 use crate::{
-    ProductSupervisor, config,
+    LORA_INTERFACE, ProductSupervisor, config,
     platform_storage::{
         ProductCredentialInitializationPort, ProductInboundAdmission, ProductInitializationDrive,
         ProductInitializationRequest, ProductLivePairingAdmission, ProductLxmfAdmission,
@@ -141,6 +148,10 @@ pub(crate) struct LxmfVolatileState {
     retries: LxmfRetrySet<'static, { config::APPLICATION_EVENT_SLOTS }>,
     proof_holder: LxmfProofActionsHolder,
     authority_faults: LxmfAuthorityFault<'static, { config::APPLICATION_EVENT_SLOTS }>,
+    discovered_peers: DiscoveredPeers<
+        { config::LXMF_DISCOVERED_PEERS },
+        { config::LXMF_DISCOVERED_PEER_APP_DATA_BYTES },
+    >,
     pending_owner_fault_observed: bool,
     service_fault_observed: bool,
 }
@@ -152,6 +163,10 @@ impl LxmfVolatileState {
             retries: LxmfRetrySet::new(),
             proof_holder: LxmfProofActionsHolder::new(),
             authority_faults: LxmfAuthorityFault::new(),
+            discovered_peers: match DiscoveredPeers::try_new() {
+                Ok(peers) => peers,
+                Err(_) => panic!("the product peer-discovery capacity must be nonzero"),
+            },
             pending_owner_fault_observed: false,
             service_fault_observed: false,
         }
@@ -349,6 +364,7 @@ pub async fn run(
     mut delayed_proofs: DelayedProofOwner<'static>,
     lxmf_volatile: &'static mut LxmfVolatileState,
     lxmf_destination: Option<DestinationHash>,
+    peer_discovery_incarnation: LxmfPeerDiscoveryIncarnation,
     handoffs: NodeHandoffs,
     offline_descriptor: InterfaceDescriptor,
     announce_epoch: BootEpoch,
@@ -408,6 +424,7 @@ pub async fn run(
         retries: lxmf_retries,
         proof_holder: lxmf_proof_holder,
         authority_faults: lxmf_authority_fault,
+        discovered_peers,
         pending_owner_fault_observed: lxmf_pending_owner_fault_observed,
         service_fault_observed: lxmf_service_fault_observed,
     } = lxmf_volatile;
@@ -1066,6 +1083,9 @@ pub async fn run(
                     progressed |= step_authenticated_api(
                         storage,
                         supervisor,
+                        discovered_peers,
+                        peer_discovery_incarnation,
+                        now_millis(),
                         identity_summary,
                         &mut authenticated_api,
                         &mut authenticated_api_state,
@@ -1352,6 +1372,7 @@ pub async fn run(
                 lxmf_retries,
                 storage,
                 supervisor,
+                discovered_peers,
                 lxmf_destination,
                 &mut pending_inbound,
                 lxmf_authority_fault,
@@ -1477,6 +1498,10 @@ fn drive_one_application_event(
     retries: &mut LxmfRetrySet<'static, { config::APPLICATION_EVENT_SLOTS }>,
     storage: &mut ProductStorageCoordinator,
     supervisor: &ProductSupervisor,
+    discovered_peers: &mut DiscoveredPeers<
+        { config::LXMF_DISCOVERED_PEERS },
+        { config::LXMF_DISCOVERED_PEER_APP_DATA_BYTES },
+    >,
     lxmf_destination: Option<DestinationHash>,
     pending_inbound: &mut Option<InboxCandidate>,
     authority_fault: &mut LxmfAuthorityFault<'static, { config::APPLICATION_EVENT_SLOTS }>,
@@ -1652,13 +1677,26 @@ fn drive_one_application_event(
         );
     }
 
-    drive_non_lxmf_application_event(lease, storage, pending_inbound)
+    drive_non_lxmf_application_event(
+        lease,
+        storage,
+        supervisor,
+        discovered_peers,
+        pending_inbound,
+        now_ms,
+    )
 }
 
 fn drive_non_lxmf_application_event(
     lease: ApplicationEventLease<'_, 'static>,
     storage: &mut ProductStorageCoordinator,
+    supervisor: &ProductSupervisor,
+    discovered_peers: &mut DiscoveredPeers<
+        { config::LXMF_DISCOVERED_PEERS },
+        { config::LXMF_DISCOVERED_PEER_APP_DATA_BYTES },
+    >,
     pending_inbound: &mut Option<InboxCandidate>,
+    now_ms: u64,
 ) -> bool {
     let event_id = lease.id();
     let sequence = lease.sequence();
@@ -1697,6 +1735,53 @@ fn drive_non_lxmf_application_event(
                 lease.discard(ApplicationEventDiscardReason::InvalidPayload);
             }
         },
+        ApplicationEvent::AnnounceReceived {
+            destination,
+            identity,
+            hops,
+            app_data,
+        } => {
+            let destination = *destination;
+            let identity = *identity;
+            let hops = *hops;
+            let app_data_len = app_data.as_ref().map_or(0, |data| data.len());
+            let destination_hash = DestinationHash::new(destination);
+            let Some(public_key) = supervisor.recall_lxmf_delivery_identity(&destination_hash)
+            else {
+                lease.discard(ApplicationEventDiscardReason::ConsumerUnavailable);
+                return true;
+            };
+            let observation = AuthenticatedAnnounceObservation::new(
+                PeerDestinationHash::new(destination),
+                PeerIdentityHash::new(identity),
+                IdentityPublicKey::new(public_key),
+                app_data.as_deref().unwrap_or(&[]),
+                ObservationMetadata::new(
+                    hops,
+                    ObservedInterfaceId::new(LORA_INTERFACE.get()),
+                    SignalObservations::UNKNOWN,
+                    PeerObservedMillis::new(now_ms),
+                ),
+            );
+            match discovered_peers.observe(observation) {
+                Ok(outcome) => {
+                    let disposition = outcome.disposition();
+                    let generation = outcome.generation().get();
+                    let event = lease.acknowledge();
+                    drop(event);
+                    info!(
+                        "e290-node stage=peer-discovery status=OBSERVED destination={destination:02x?} identity={identity:02x?} hops={hops} interface={} app_data_len={app_data_len} generation={generation} disposition={disposition:?}",
+                        LORA_INTERFACE.get(),
+                    );
+                }
+                Err(reason) => {
+                    warn!(
+                        "e290-node stage=peer-discovery status=DROPPED destination={destination:02x?} reason={reason:?} routing=unchanged"
+                    );
+                    lease.discard(ApplicationEventDiscardReason::DownstreamCapacity);
+                }
+            }
+        }
         ApplicationEvent::Tick { .. } => {
             lease.discard(ApplicationEventDiscardReason::MaintenanceCoalesced);
         }
@@ -1714,8 +1799,7 @@ fn drive_non_lxmf_application_event(
             );
             lease.quarantine(ApplicationEventQuarantineReason::ConsumerFault);
         }
-        ApplicationEvent::AnnounceReceived { .. }
-        | ApplicationEvent::ProofReceived { .. }
+        ApplicationEvent::ProofReceived { .. }
         | ApplicationEvent::ReceiptFailed { .. }
         | ApplicationEvent::LinkEstablished { .. }
         | ApplicationEvent::LinkRttUpdated { .. }
@@ -2068,6 +2152,12 @@ fn drive_inbound_candidate(
 fn step_authenticated_api(
     storage: &mut ProductStorageCoordinator,
     supervisor: &ProductSupervisor,
+    discovered_peers: &DiscoveredPeers<
+        { config::LXMF_DISCOVERED_PEERS },
+        { config::LXMF_DISCOVERED_PEER_APP_DATA_BYTES },
+    >,
+    peer_discovery_incarnation: LxmfPeerDiscoveryIncarnation,
+    now_ms: u64,
     identity: IdentitySummary,
     handoff: &mut NodeHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
     state: &mut AuthenticatedApiNodeState,
@@ -2098,7 +2188,14 @@ fn step_authenticated_api(
         };
         #[cfg(feature = "runtime-measurement-hil")]
         let api_dispatch_started_us = now_micros();
-        let dispatch = storage.dispatch_authenticated_request(supervisor, request, identity);
+        let dispatch = storage.dispatch_authenticated_request(
+            supervisor,
+            discovered_peers,
+            peer_discovery_incarnation,
+            now_ms,
+            request,
+            identity,
+        );
         #[cfg(feature = "runtime-measurement-hil")]
         RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_operation(
             RuntimeOperationKind::ApiDispatch,

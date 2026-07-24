@@ -444,7 +444,7 @@ fn graph_policy() -> ExitCode {
             "reticulum-heltec-vision-master-e290-node",
             "--no-default-features",
             "--features",
-            "journal-schema2-dev-reprovision",
+            "journal-schema3-dev-reprovision",
             "--target",
             "all",
             "--format",
@@ -1741,10 +1741,10 @@ fn validate_e290_inbox_commit_fault_hil_sources(
     }
 
     for required in [
-        "CARGO_FEATURE_JOURNAL_SCHEMA2_DEV_REPROVISION",
+        "CARGO_FEATURE_JOURNAL_SCHEMA3_DEV_REPROVISION",
         "CARGO_FEATURE_RNS_INBOX_COMMIT_FAULT_HIL",
         "CARGO_FEATURE_RUNTIME_MEASUREMENT_HIL",
-        "journal-schema2-dev-reprovision, rns-inbox-commit-fault-hil, and runtime-measurement-hil are mutually exclusive",
+        "journal-schema3-dev-reprovision, rns-inbox-commit-fault-hil, and runtime-measurement-hil are mutually exclusive",
     ] {
         if !build.contains(required) {
             return Err(format!("the E290 build policy is missing {required:?}"));
@@ -1907,7 +1907,7 @@ fn validate_e290_runtime_measurement_hil_sources(
 
     for required in [
         "CARGO_FEATURE_RUNTIME_MEASUREMENT_HIL",
-        "journal-schema2-dev-reprovision, rns-inbox-commit-fault-hil, and runtime-measurement-hil are mutually exclusive",
+        "journal-schema3-dev-reprovision, rns-inbox-commit-fault-hil, and runtime-measurement-hil are mutually exclusive",
     ] {
         if !build.contains(required) {
             return Err(format!("the E290 build policy is missing {required:?}"));
@@ -2312,7 +2312,7 @@ fn validate_e290_journal_reprovision_graph_boundary(
     validate_e290_graph_identical_profile(
         permanent,
         reprovision,
-        "journal-schema2-dev-reprovision",
+        "journal-schema3-dev-reprovision",
         "E290 journal-reprovision profile",
     )
 }
@@ -2887,7 +2887,7 @@ fn validate_e290_node_feature_boundary(
             "esp-rtos/esp-radio"
         ],
         "default": [],
-        "journal-schema2-dev-reprovision": [],
+        "journal-schema3-dev-reprovision": [],
         "rns-inbox-commit-fault-hil": [],
         "runtime-measurement-hil": ["esp-alloc/alloc-hooks"],
         "wifi-api-proof": [
@@ -3163,7 +3163,7 @@ fn validate_e290_ble_startup_diagnostic_metadata_boundary(
             "esp-rtos/esp-radio"
         ],
         "default": ["ble-api-proof"],
-        "journal-schema2-dev-reprovision": [],
+        "journal-schema3-dev-reprovision": [],
         "rns-inbox-commit-fault-hil": [],
         "runtime-measurement-hil": ["esp-alloc/alloc-hooks"],
         "wifi-api-proof": [
@@ -6165,8 +6165,8 @@ fn forbidden_lxmf_durable_component_closure_category(
 
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 const RETE_GIT_SOURCE: &str = "git+https://github.com/evelant/rete.git?rev=\
-90570cafc812b3025011cb690ec74a27f287cb3f#\
-90570cafc812b3025011cb690ec74a27f287cb3f";
+2d0781838aa03370b739d4003bcd1bdd5bbb0c6c#\
+2d0781838aa03370b739d4003bcd1bdd5bbb0c6c";
 
 #[derive(Clone, Copy)]
 enum ReviewedClosureSource {
@@ -7243,9 +7243,9 @@ fn validate_device_api_adapter_dependency_boundary(
     let dependencies = package["dependencies"]
         .as_array()
         .ok_or_else(|| "reticulum-device-api-adapter package has no dependency array".to_owned())?;
-    if dependencies.len() != 4 {
+    if dependencies.len() != 5 {
         return Err(format!(
-            "reticulum-device-api-adapter must have exactly two reviewed normal and two reviewed test dependencies, found {} total",
+            "reticulum-device-api-adapter must have exactly two reviewed normal and three reviewed test dependencies, found {} total",
             dependencies.len()
         ));
     }
@@ -7259,13 +7259,13 @@ fn validate_device_api_adapter_dependency_boundary(
         .filter(|dependency| dependency["kind"].as_str() == Some("dev"))
         .count();
     if normal_count != 2
-        || dev_count != 2
+        || dev_count != 3
         || dependencies.iter().any(|dependency| {
             !dependency["kind"].is_null() && dependency["kind"].as_str() != Some("dev")
         })
     {
         return Err(format!(
-            "reticulum-device-api-adapter must have exactly two normal and two dev dependencies, found normal={normal_count} dev={dev_count}"
+            "reticulum-device-api-adapter must have exactly two normal and three dev dependencies, found normal={normal_count} dev={dev_count}"
         ));
     }
 
@@ -7298,6 +7298,11 @@ fn validate_device_api_adapter_dependency_boundary(
         (
             "reticulum-storage-actor",
             "crates/storage-actor",
+            Some("dev"),
+        ),
+        (
+            "reticulum-storage-journal",
+            "crates/storage-journal",
             Some("dev"),
         ),
         ("reticulum-storage-model", "crates/storage-model", None),
@@ -10579,7 +10584,7 @@ mod tests {
                         "esp-rtos/esp-radio"
                     ],
                     "default": [],
-                    "journal-schema2-dev-reprovision": [],
+                    "journal-schema3-dev-reprovision": [],
                     "rns-inbox-commit-fault-hil": [],
                     "runtime-measurement-hil": ["esp-alloc/alloc-hooks"],
                     "wifi-api-proof": [
@@ -10912,7 +10917,7 @@ mod tests {
         assert_host_appliance_packages_rejected(valid, validate_e290_node_graph_boundary);
         let journal_reprovision = valid.replacen(
             "features=[default]",
-            "features=[journal-schema2-dev-reprovision]",
+            "features=[journal-schema3-dev-reprovision]",
             1,
         );
         validate_e290_journal_reprovision_graph_boundary(valid, &journal_reprovision).unwrap();
@@ -11019,7 +11024,7 @@ mod tests {
         }
 
         for hidden in [
-            "default,journal-schema2-dev-reprovision",
+            "default,journal-schema3-dev-reprovision",
             "default,rns-inbox-commit-fault-hil",
             "default,runtime-measurement-hil",
         ] {
@@ -11032,7 +11037,7 @@ mod tests {
         }
         for hidden in [
             "default,rns-inbox-commit-fault-hil",
-            "journal-schema2-dev-reprovision,rns-inbox-commit-fault-hil",
+            "journal-schema3-dev-reprovision,rns-inbox-commit-fault-hil",
             "rns-inbox-commit-fault-hil,runtime-measurement-hil",
         ] {
             let hidden_feature = hil.replacen(
@@ -11052,7 +11057,7 @@ mod tests {
 
         for hidden in [
             "default,runtime-measurement-hil",
-            "journal-schema2-dev-reprovision,runtime-measurement-hil",
+            "journal-schema3-dev-reprovision,runtime-measurement-hil",
             "rns-inbox-commit-fault-hil,runtime-measurement-hil",
         ] {
             let hidden_feature = runtime_hil.replacen(
@@ -11139,7 +11144,7 @@ mod tests {
         validate_e290_node_feature_boundary(&baseline.to_string(), &root).unwrap();
 
         for feature in [
-            "journal-schema2-dev-reprovision",
+            "journal-schema3-dev-reprovision",
             "rns-inbox-commit-fault-hil",
             "runtime-measurement-hil",
             "wifi-api-proof",
@@ -11165,7 +11170,7 @@ mod tests {
 
         for (feature, drifted_value) in [
             (
-                "journal-schema2-dev-reprovision",
+                "journal-schema3-dev-reprovision",
                 serde_json::json!(["dep:unreviewed"]),
             ),
             (
@@ -11236,10 +11241,10 @@ pub mod inbox_admission_fault_hil;
                        }\n\
                        \n\
                            /// Count one input discarded\n";
-        let build = "CARGO_FEATURE_JOURNAL_SCHEMA2_DEV_REPROVISION\n\
+        let build = "CARGO_FEATURE_JOURNAL_SCHEMA3_DEV_REPROVISION\n\
                      CARGO_FEATURE_RNS_INBOX_COMMIT_FAULT_HIL\n\
                      CARGO_FEATURE_RUNTIME_MEASUREMENT_HIL\n\
-                     journal-schema2-dev-reprovision, rns-inbox-commit-fault-hil, and runtime-measurement-hil are mutually exclusive";
+                     journal-schema3-dev-reprovision, rns-inbox-commit-fault-hil, and runtime-measurement-hil are mutually exclusive";
         let fixture = "#[used]\n\
                        pub static RETICULUM_INBOX_ADMISSION_FAULT_HIL_EVIDENCE: Evidence = Evidence;\n\
                        pub struct SuppressThirdWrite<F>(F);";
@@ -11365,7 +11370,7 @@ fn sample(layout: Layout) {
 }
 "#;
         let build = "CARGO_FEATURE_RUNTIME_MEASUREMENT_HIL\n\
-                     journal-schema2-dev-reprovision, rns-inbox-commit-fault-hil, and runtime-measurement-hil are mutually exclusive";
+                     journal-schema3-dev-reprovision, rns-inbox-commit-fault-hil, and runtime-measurement-hil are mutually exclusive";
         (
             vec![
                 (format!("{product}/lib.rs"), library.to_owned()),
@@ -15110,7 +15115,7 @@ fn sample(layout: Layout) {
                 .is_err()
         );
 
-        for dependency_index in 0..=3 {
+        for dependency_index in 0..=4 {
             let mut default_features = portable_layers_metadata_fixture(&root);
             default_features["packages"][PACKAGE_INDEX]["dependencies"][dependency_index]["uses_default_features"] =
                 serde_json::Value::Bool(true);
@@ -15156,7 +15161,7 @@ fn sample(layout: Layout) {
             }
         }
 
-        for dependency_index in 1..=3 {
+        for dependency_index in 1..=4 {
             let mut wrong_path = portable_layers_metadata_fixture(&root);
             wrong_path["packages"][PACKAGE_INDEX]["dependencies"][dependency_index]["path"] =
                 serde_json::Value::String(root.join("elsewhere").display().to_string());
@@ -15205,7 +15210,13 @@ fn sample(layout: Layout) {
                 .is_err()
         );
 
-        for (dependency_index, kind) in [(0, None), (1, Some("dev")), (2, None), (3, Some("dev"))] {
+        for (dependency_index, kind) in [
+            (0, None),
+            (1, Some("dev")),
+            (2, None),
+            (3, None),
+            (4, Some("dev")),
+        ] {
             let mut wrong_kind = portable_layers_metadata_fixture(&root);
             wrong_kind["packages"][PACKAGE_INDEX]["dependencies"][dependency_index]["kind"] = kind
                 .map_or(serde_json::Value::Null, |kind| {
@@ -16557,6 +16568,12 @@ fn sample(layout: Layout) {
                     "reticulum-storage-actor",
                     "*",
                     &root.join("crates/storage-actor"),
+                    Some("dev"),
+                ),
+                handoff_path_dependency_fixture(
+                    "reticulum-storage-journal",
+                    "*",
+                    &root.join("crates/storage-journal"),
                     Some("dev"),
                 ),
                 handoff_path_dependency_fixture(

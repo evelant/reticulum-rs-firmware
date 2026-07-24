@@ -63,6 +63,18 @@ pub const MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE: usize = 295;
 /// DATA packet but not a Header-2 packet routed through a repeater.
 pub const MAX_OPPORTUNISTIC_LXMF_CARRIER: usize = 391;
 
+/// Largest Python LXMF `content_size` selected for one direct Link packet.
+///
+/// Direct Link DATA carries the complete LXMF wire message, so Python subtracts
+/// the complete 112-byte LXMF overhead from the 431-byte Link MDU.
+pub const MAX_DIRECT_LXMF_CONTENT_SIZE: usize = 319;
+
+/// Largest complete basic LXMF wire message carried by one Link DATA packet.
+///
+/// Messages above this boundary require the separately qualified RNS Resource
+/// path; they must not be truncated or silently sent opportunistically.
+pub const MAX_DIRECT_LXMF_WIRE: usize = rete_transport::LINK_MDU;
+
 /// Largest whole-millisecond Unix timestamp supported by basic composition.
 ///
 /// Python LXMF serialises timestamps as binary64 seconds. Restricting this API
@@ -88,6 +100,10 @@ const _: () = assert!(
         == MAX_OPPORTUNISTIC_LXMF_CARRIER
 );
 const _: () = assert!(MAX_OPPORTUNISTIC_LXMF_CARRIER > MAX_DATA_PAYLOAD);
+const _: () = assert!(
+    LXMF_WIRE_PREFIX_LENGTH + LXMF_SELECTION_OVERHEAD + MAX_DIRECT_LXMF_CONTENT_SIZE
+        == MAX_DIRECT_LXMF_WIRE
+);
 
 /// Interface identifier carried across the synchronous ingest boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -127,6 +143,8 @@ impl ReceiptId {
 pub enum ReceiptKind {
     /// Receipt for an outbound destination-DATA packet.
     Data,
+    /// Receipt for ordinary context-NONE DATA on an owned Link.
+    LinkData,
     /// Receipt for an outbound reliable channel message.
     Channel,
 }
@@ -146,6 +164,7 @@ impl ReceiptCandidate {
     fn from_native(candidate: rete_stack::ReceiptCandidate) -> Self {
         let kind = match candidate.kind {
             rete_stack::ReceiptKind::Data => ReceiptKind::Data,
+            rete_stack::ReceiptKind::LinkData => ReceiptKind::LinkData,
             rete_stack::ReceiptKind::Channel => ReceiptKind::Channel,
         };
         Self {
@@ -170,7 +189,7 @@ impl ReceiptCandidate {
 pub enum ReceiptTerminal {
     /// A valid proof covered the reserved receipt candidate.
     Delivered(ReceiptCandidate),
-    /// A destination-DATA receipt expired without a valid proof.
+    /// A receipt expired or its retained Link closed without a valid proof.
     TimedOut(ReceiptCandidate),
 }
 
@@ -245,6 +264,35 @@ impl PreparedData {
     }
 }
 
+/// Scalar metadata for ordinary Link DATA prepared into caller-owned storage.
+///
+/// The packet bytes remain in the caller's exact-size output buffer. This
+/// product-owned value exposes neither the Link's peer key nor either
+/// identity's private state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreparedLinkData {
+    packet_len: u16,
+    target: TxTarget,
+    receipt: ReceiptId,
+}
+
+impl PreparedLinkData {
+    /// Number of complete Reticulum packet bytes written to the output slot.
+    pub const fn packet_len(self) -> u16 {
+        self.packet_len
+    }
+
+    /// Exact interface retained by the authenticated Link.
+    pub const fn target(self) -> TxTarget {
+        self.target
+    }
+
+    /// Complete packet hash identifying the Link-DATA delivery receipt.
+    pub const fn receipt(self) -> ReceiptId {
+        self.receipt
+    }
+}
+
 /// Scalar result of composing one basic opportunistic LXMF carrier.
 ///
 /// The complete carrier bytes remain in the caller's output buffer. The
@@ -256,6 +304,38 @@ pub struct PreparedBasicLxmf {
     carrier_sha256: [u8; 32],
     message_id: [u8; 32],
     destination: DestHash,
+}
+
+/// Scalar result of composing one complete basic LXMF wire message for direct
+/// Link DATA.
+///
+/// The caller retains the exact bytes in its output buffer. The private digest
+/// binds a later Link-packet transaction to those bytes without exposing the
+/// node identity or signing source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreparedBasicDirectLxmf {
+    wire_len: u16,
+    wire_sha256: [u8; 32],
+    message_id: [u8; 32],
+    destination: DestHash,
+}
+
+impl PreparedBasicDirectLxmf {
+    /// Number of complete destination, source, signature, and MessagePack bytes
+    /// initialized in the caller's output buffer.
+    pub const fn wire_len(self) -> u16 {
+        self.wire_len
+    }
+
+    /// Canonical LXMF message identifier for the composed four-item payload.
+    pub const fn message_id(self) -> [u8; 32] {
+        self.message_id
+    }
+
+    /// Remote `lxmf.delivery` destination bound into the complete wire message.
+    pub const fn destination(self) -> DestHash {
+        self.destination
+    }
 }
 
 impl PreparedBasicLxmf {
@@ -273,6 +353,12 @@ impl PreparedBasicLxmf {
     pub const fn destination(self) -> DestHash {
         self.destination
     }
+}
+
+struct ComposedBasicLxmf {
+    packed: Vec<u8>,
+    payload_len: usize,
+    message_id: [u8; 32],
 }
 
 /// Owned packet emitted by the protocol core for an interface actor.
@@ -1924,6 +2010,7 @@ pub struct AdmissionCounters {
     pub outbound_protocol_token_exhausted: u64,
     pub outbound_protocol_token_assignment_failed: u64,
     pub receipt_table_full: u64,
+    pub link_data_receipt_table_full: u64,
     pub channel_receipt_table_full: u64,
     pub channel_payload_too_large: u64,
     pub data_payload_too_large: u64,
@@ -2013,6 +2100,8 @@ pub struct ReceiptTickReport {
     pub actions: NodeActions,
     /// Number of destination-DATA timeouts committed to the supplied sink.
     pub timed_out_receipts: usize,
+    /// Number of Link-DATA timeouts or Link-close failures committed to the sink.
+    pub timed_out_link_data_receipts: usize,
     /// Compact diagnostic tag from the first timed-out receipt ID.
     ///
     /// This is the first eight hash bytes interpreted little-endian. It is a
@@ -2112,8 +2201,8 @@ impl From<rete_core::Error> for DestinationRegistrationError {
     }
 }
 
-/// Failure to compose one basic, unstamped, empty-fields opportunistic LXMF
-/// carrier with the node-owned identity.
+/// Failure to compose one basic, unstamped, empty-fields LXMF message with the
+/// node-owned identity.
 ///
 /// This deliberately flattens the pinned packer's error vocabulary so the
 /// firmware-facing transaction neither exposes Rete types nor private keys.
@@ -2128,8 +2217,8 @@ pub enum PrepareBasicLxmfError {
     DeliveryDestinationUnavailable,
     /// Rete could not sign the canonical four-item LXMF payload.
     Signing,
-    /// The canonical MessagePack payload requires direct rather than
-    /// opportunistic delivery under Python LXMF 1.0.1 selection rules.
+    /// The canonical MessagePack payload exceeds the selected single-packet
+    /// carrier under Python LXMF 1.0.1 selection rules.
     PayloadTooLarge { actual: usize, maximum: usize },
     /// Caller-owned carrier storage cannot hold the prepared basic message.
     OutputTooSmall { required: usize, available: usize },
@@ -2152,7 +2241,7 @@ impl core::fmt::Display for PrepareBasicLxmfError {
             Self::PayloadTooLarge { actual, maximum } => {
                 write!(
                     f,
-                    "LXMF content size {actual} exceeds opportunistic limit {maximum}"
+                    "LXMF content size {actual} exceeds selected packet limit {maximum}"
                 )
             }
             Self::OutputTooSmall {
@@ -2160,7 +2249,7 @@ impl core::fmt::Display for PrepareBasicLxmfError {
                 available,
             } => write!(
                 f,
-                "LXMF carrier requires {required} bytes but output holds {available}"
+                "LXMF message requires {required} bytes but output holds {available}"
             ),
             Self::Invariant => f.write_str("LXMF basic-message packer invariant failed"),
         }
@@ -2173,6 +2262,9 @@ impl core::fmt::Display for PrepareBasicLxmfError {
 /// while making the LXMF-only Header-1 exception explicit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrepareOpportunisticLxmfDataError {
+    /// A rehydrated complete wire message is malformed or its signature is not
+    /// valid for this node's identity.
+    InvalidCompleteWire,
     /// The supplied carrier length differs from the composed carrier length.
     CarrierLengthMismatch { actual: usize, expected: usize },
     /// The supplied carrier bytes differ from the exact composed carrier.
@@ -2189,6 +2281,9 @@ pub enum PrepareOpportunisticLxmfDataError {
 impl core::fmt::Display for PrepareOpportunisticLxmfDataError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::InvalidCompleteWire => {
+                f.write_str("complete LXMF wire is malformed or has an invalid local signature")
+            }
             Self::CarrierLengthMismatch { actual, expected } => write!(
                 f,
                 "LXMF carrier length {actual} does not match prepared length {expected}"
@@ -2211,6 +2306,82 @@ impl core::fmt::Display for PrepareOpportunisticLxmfDataError {
 impl From<PrepareDataError> for PrepareOpportunisticLxmfDataError {
     fn from(value: PrepareDataError) -> Self {
         Self::Data(value)
+    }
+}
+
+/// Failure to transactionally wrap an exact basic LXMF wire message in Link DATA.
+///
+/// Composer-token and Link-binding failures are checked before encryption
+/// consumes entropy or native receipt state changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrepareDirectLxmfLinkDataError {
+    /// The supplied wire length differs from the composer-produced length.
+    WireLengthMismatch { actual: usize, expected: usize },
+    /// The supplied wire bytes differ from the exact composer-produced bytes.
+    WireDigestMismatch,
+    /// The wire destination prefix differs from the prepared destination.
+    WireDestinationMismatch,
+    /// The wire source is not this node's registered `lxmf.delivery` destination.
+    WireSourceMismatch,
+    /// The selected Link was established to a different destination.
+    LinkDestinationMismatch,
+    /// The selected Link is not retained.
+    LinkNotFound,
+    /// The selected Link is not active.
+    LinkNotActive,
+    /// The selected Link has no authenticated interface binding.
+    LinkInterfaceUnknown,
+    /// The complete LXMF wire exceeds this Link's negotiated plaintext MDU.
+    LinkMduExceeded { actual: usize, maximum: usize },
+    /// The bounded Link-DATA receipt table cannot retain another attempt.
+    ReceiptTableFull { limit: usize },
+    /// A still-live Link-DATA receipt already uses the generated packet hash.
+    ReceiptHashAlreadyTracked,
+    /// Link encryption failed.
+    Crypto,
+    /// Rete could not build or parse the base-MTU Link packet.
+    PacketBuild,
+    /// Rete returned an error class impossible for this operation.
+    Invariant,
+}
+
+impl core::fmt::Display for PrepareDirectLxmfLinkDataError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::WireLengthMismatch { actual, expected } => write!(
+                f,
+                "LXMF wire length {actual} does not match prepared length {expected}"
+            ),
+            Self::WireDigestMismatch => {
+                f.write_str("LXMF wire bytes do not match the prepared message")
+            }
+            Self::WireDestinationMismatch => {
+                f.write_str("LXMF wire destination does not match the prepared destination")
+            }
+            Self::WireSourceMismatch => {
+                f.write_str("LXMF wire source is not this node's lxmf.delivery destination")
+            }
+            Self::LinkDestinationMismatch => {
+                f.write_str("selected Link destination does not match the LXMF destination")
+            }
+            Self::LinkNotFound => f.write_str("selected Link is not retained"),
+            Self::LinkNotActive => f.write_str("selected Link is not active"),
+            Self::LinkInterfaceUnknown => {
+                f.write_str("selected Link has no authenticated interface binding")
+            }
+            Self::LinkMduExceeded { actual, maximum } => {
+                write!(f, "LXMF wire length {actual} exceeds Link MDU {maximum}")
+            }
+            Self::ReceiptTableFull { limit } => {
+                write!(f, "Link DATA receipt table is full (limit {limit})")
+            }
+            Self::ReceiptHashAlreadyTracked => {
+                f.write_str("Link DATA receipt hash is already tracked")
+            }
+            Self::Crypto => f.write_str("Link DATA encryption failed"),
+            Self::PacketBuild => f.write_str("Link DATA packet construction failed"),
+            Self::Invariant => f.write_str("unexpected native Link DATA failure"),
+        }
     }
 }
 
@@ -2495,6 +2666,22 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
     /// a borrow into the sole mutable RNS owner while it verifies a signature.
     pub fn recall_identity(&self, destination: &DestHash) -> Option<[u8; 64]> {
         self.core.transport.recall_identity(destination).copied()
+    }
+
+    /// Recall an announce-learned identity only for its exact `lxmf.delivery` hash.
+    ///
+    /// The destination is recomputed from the retained public key rather than
+    /// trusting application metadata or asking downstream discovery code to
+    /// duplicate Reticulum's identity/destination hash construction.
+    pub fn recall_lxmf_delivery_identity(
+        &self,
+        announced_destination: &DestHash,
+    ) -> Option<[u8; 64]> {
+        let public_key = self.recall_identity(announced_destination)?;
+        let identity_hash = rete_core::identity_hash(&public_key);
+        let expected =
+            rete_core::destination_hash(LXMF_DELIVERY_EXPANDED_NAME, Some(&identity_hash));
+        (expected == *announced_destination).then_some(public_key)
     }
 
     /// Local identity hash without allocating a formatted string.
@@ -3648,6 +3835,97 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         content: &[u8],
         output: &mut [u8],
     ) -> Result<PreparedBasicLxmf, PrepareBasicLxmfError> {
+        let composed = self.compose_basic_lxmf(destination, timestamp_unix_ms, title, content)?;
+        // Python performs signed subtraction here. Its canonical empty-title,
+        // empty-content payload is 15 bytes, producing content_size = -1 and
+        // remaining opportunistic. Compare the untranslated payload length so
+        // Rust exactly preserves that upper-bound decision without unsigned
+        // underflow or inventing a different reported size.
+        if composed.payload_len > LXMF_SELECTION_OVERHEAD + MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE {
+            let content_size = composed.payload_len - LXMF_SELECTION_OVERHEAD;
+            return Err(PrepareBasicLxmfError::PayloadTooLarge {
+                actual: content_size,
+                maximum: MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE,
+            });
+        }
+        if composed.packed.get(..LXMF_DESTINATION_HASH_LENGTH) != Some(destination.as_ref()) {
+            return Err(PrepareBasicLxmfError::Invariant);
+        }
+        let carrier = composed
+            .packed
+            .get(LXMF_DESTINATION_HASH_LENGTH..)
+            .ok_or(PrepareBasicLxmfError::Invariant)?;
+        if carrier.len() > MAX_OPPORTUNISTIC_LXMF_CARRIER {
+            return Err(PrepareBasicLxmfError::Invariant);
+        }
+        let output_len = output.len();
+        let carrier_output =
+            output
+                .get_mut(..carrier.len())
+                .ok_or(PrepareBasicLxmfError::OutputTooSmall {
+                    required: carrier.len(),
+                    available: output_len,
+                })?;
+        carrier_output.copy_from_slice(carrier);
+        Ok(PreparedBasicLxmf {
+            carrier_len: carrier.len() as u16,
+            carrier_sha256: Sha256::digest(carrier).into(),
+            message_id: composed.message_id,
+            destination: *destination,
+        })
+    }
+
+    /// Compose and sign one complete basic LXMF message for ordinary Link DATA.
+    ///
+    /// Unlike [`Self::prepare_basic_lxmf_into`], this writes the destination
+    /// prefix because a Link packet does not imply the final LXMF destination.
+    /// The exact Python 1.0.1 319-byte direct-content boundary fits in one
+    /// 431-byte Link MDU. A larger message requires an RNS Resource and is
+    /// rejected without modifying `output`.
+    pub fn prepare_basic_direct_lxmf_into(
+        &self,
+        destination: &DestHash,
+        timestamp_unix_ms: u64,
+        title: &[u8],
+        content: &[u8],
+        output: &mut [u8],
+    ) -> Result<PreparedBasicDirectLxmf, PrepareBasicLxmfError> {
+        let composed = self.compose_basic_lxmf(destination, timestamp_unix_ms, title, content)?;
+        if composed.payload_len > LXMF_SELECTION_OVERHEAD + MAX_DIRECT_LXMF_CONTENT_SIZE {
+            let content_size = composed.payload_len - LXMF_SELECTION_OVERHEAD;
+            return Err(PrepareBasicLxmfError::PayloadTooLarge {
+                actual: content_size,
+                maximum: MAX_DIRECT_LXMF_CONTENT_SIZE,
+            });
+        }
+        if composed.packed.len() > MAX_DIRECT_LXMF_WIRE
+            || composed.packed.get(..LXMF_DESTINATION_HASH_LENGTH) != Some(destination.as_ref())
+        {
+            return Err(PrepareBasicLxmfError::Invariant);
+        }
+        let output_len = output.len();
+        let wire_output = output.get_mut(..composed.packed.len()).ok_or(
+            PrepareBasicLxmfError::OutputTooSmall {
+                required: composed.packed.len(),
+                available: output_len,
+            },
+        )?;
+        wire_output.copy_from_slice(&composed.packed);
+        Ok(PreparedBasicDirectLxmf {
+            wire_len: composed.packed.len() as u16,
+            wire_sha256: Sha256::digest(&composed.packed).into(),
+            message_id: composed.message_id,
+            destination: *destination,
+        })
+    }
+
+    fn compose_basic_lxmf(
+        &self,
+        destination: &DestHash,
+        timestamp_unix_ms: u64,
+        title: &[u8],
+        content: &[u8],
+    ) -> Result<ComposedBasicLxmf, PrepareBasicLxmfError> {
         if timestamp_unix_ms == 0 {
             return Err(PrepareBasicLxmfError::InvalidTimestamp);
         }
@@ -3683,41 +3961,10 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             .len()
             .checked_sub(LXMF_WIRE_PREFIX_LENGTH)
             .ok_or(PrepareBasicLxmfError::Invariant)?;
-        // Python performs signed subtraction here. Its canonical empty-title,
-        // empty-content payload is 15 bytes, producing content_size = -1 and
-        // remaining opportunistic. Compare the untranslated payload length so
-        // Rust exactly preserves that upper-bound decision without unsigned
-        // underflow or inventing a different reported size.
-        if payload_len > LXMF_SELECTION_OVERHEAD + MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE {
-            let content_size = payload_len - LXMF_SELECTION_OVERHEAD;
-            return Err(PrepareBasicLxmfError::PayloadTooLarge {
-                actual: content_size,
-                maximum: MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE,
-            });
-        }
-        if packed.get(..LXMF_DESTINATION_HASH_LENGTH) != Some(destination.as_ref()) {
-            return Err(PrepareBasicLxmfError::Invariant);
-        }
-        let carrier = packed
-            .get(LXMF_DESTINATION_HASH_LENGTH..)
-            .ok_or(PrepareBasicLxmfError::Invariant)?;
-        if carrier.len() > MAX_OPPORTUNISTIC_LXMF_CARRIER {
-            return Err(PrepareBasicLxmfError::Invariant);
-        }
-        let output_len = output.len();
-        let carrier_output =
-            output
-                .get_mut(..carrier.len())
-                .ok_or(PrepareBasicLxmfError::OutputTooSmall {
-                    required: carrier.len(),
-                    available: output_len,
-                })?;
-        carrier_output.copy_from_slice(carrier);
-        Ok(PreparedBasicLxmf {
-            carrier_len: carrier.len() as u16,
-            carrier_sha256: Sha256::digest(carrier).into(),
+        Ok(ComposedBasicLxmf {
+            packed,
+            payload_len,
             message_id,
-            destination: *destination,
         })
     }
 
@@ -3777,6 +4024,173 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         }
         self.prepare_data_into_preflighted(&destination, carrier, now, rng, output)
             .map_err(Into::into)
+    }
+
+    /// Rehydrate one exact locally composed LXMF wire message and wrap its
+    /// destination-free carrier in opportunistic destination DATA.
+    ///
+    /// Durable product storage cannot retain the private
+    /// [`PreparedBasicLxmf`] composer token across reboot. This boundary
+    /// restores that binding only after parsing the complete wire message,
+    /// verifying its signature against this node's identity, and checking its
+    /// exact local `lxmf.delivery` source. It then delegates to the same
+    /// dedicated Header-1-aware preparation path as freshly composed
+    /// opportunistic LXMF.
+    ///
+    /// Complete messages whose carrier exceeds
+    /// [`MAX_OPPORTUNISTIC_LXMF_CARRIER`] remain direct-Link or Resource work;
+    /// they are never passed through the ordinary [`MAX_DATA_PAYLOAD`] path.
+    pub fn prepare_rehydrated_opportunistic_lxmf_data_into<R: RngCore + CryptoRng>(
+        &mut self,
+        wire: &[u8],
+        now: u64,
+        rng: &mut R,
+        output: &mut [u8; RNS_MTU],
+    ) -> Result<PreparedData, PrepareOpportunisticLxmfDataError> {
+        let carrier = wire
+            .get(LXMF_DESTINATION_HASH_LENGTH..)
+            .ok_or(PrepareOpportunisticLxmfDataError::InvalidCompleteWire)?;
+        self.check_data_payload_limit(carrier.len(), MAX_OPPORTUNISTIC_LXMF_CARRIER)?;
+
+        let message = LXMessage::unpack(wire, Some(self.core.identity()))
+            .map_err(|_| PrepareOpportunisticLxmfDataError::InvalidCompleteWire)?;
+        let source = self
+            .registered_lxmf_delivery_source()
+            .ok_or(PrepareOpportunisticLxmfDataError::CarrierSourceMismatch)?;
+        if message.source_hash != source
+            || carrier.get(..LXMF_DESTINATION_HASH_LENGTH) != Some(source.as_ref())
+        {
+            return Err(PrepareOpportunisticLxmfDataError::CarrierSourceMismatch);
+        }
+        let destination = message.destination_hash;
+        let prepared = PreparedBasicLxmf {
+            carrier_len: carrier.len() as u16,
+            carrier_sha256: Sha256::digest(carrier).into(),
+            message_id: message.message_id(),
+            destination,
+        };
+        self.prepare_opportunistic_lxmf_data_into(prepared, carrier, now, rng, output)
+    }
+
+    /// Encrypt one exact composer-produced basic LXMF message as ordinary Link DATA.
+    ///
+    /// The caller must reserve its final base-MTU packet slot before invoking
+    /// this method. The opaque [`PreparedBasicDirectLxmf`] value is re-bound to
+    /// the exact complete wire bytes, this node's registered source, the
+    /// selected destination, and an active authenticated Link before native
+    /// encryption consumes entropy or registers a receipt.
+    ///
+    /// On success the packet and Link-DATA receipt are committed together. A
+    /// caller that cannot hand off the packet must cancel the returned receipt
+    /// with [`Self::cancel_link_data_receipt`].
+    pub fn prepare_direct_lxmf_link_data_into<R: RngCore + CryptoRng>(
+        &mut self,
+        prepared: PreparedBasicDirectLxmf,
+        wire: &[u8],
+        link_id: &LinkId,
+        now: u64,
+        rng: &mut R,
+        output: &mut [u8; RNS_MTU],
+    ) -> Result<PreparedLinkData, PrepareDirectLxmfLinkDataError> {
+        let expected = usize::from(prepared.wire_len());
+        if wire.len() != expected {
+            return Err(PrepareDirectLxmfLinkDataError::WireLengthMismatch {
+                actual: wire.len(),
+                expected,
+            });
+        }
+        let wire_sha256: [u8; 32] = Sha256::digest(wire).into();
+        if wire_sha256 != prepared.wire_sha256 {
+            return Err(PrepareDirectLxmfLinkDataError::WireDigestMismatch);
+        }
+        if wire.get(..LXMF_DESTINATION_HASH_LENGTH) != Some(prepared.destination().as_ref()) {
+            return Err(PrepareDirectLxmfLinkDataError::WireDestinationMismatch);
+        }
+        let source = self
+            .registered_lxmf_delivery_source()
+            .ok_or(PrepareDirectLxmfLinkDataError::WireSourceMismatch)?;
+        if wire.get(
+            LXMF_DESTINATION_HASH_LENGTH
+                ..LXMF_DESTINATION_HASH_LENGTH + LXMF_DESTINATION_HASH_LENGTH,
+        ) != Some(source.as_ref())
+        {
+            return Err(PrepareDirectLxmfLinkDataError::WireSourceMismatch);
+        }
+
+        let (target, maximum) = {
+            let link = self
+                .core
+                .transport
+                .get_link(link_id)
+                .ok_or(PrepareDirectLxmfLinkDataError::LinkNotFound)?;
+            if link.destination_hash != prepared.destination() {
+                return Err(PrepareDirectLxmfLinkDataError::LinkDestinationMismatch);
+            }
+            if link.state != LinkState::Active {
+                return Err(PrepareDirectLxmfLinkDataError::LinkNotActive);
+            }
+            let interface = link
+                .bound_interface()
+                .ok_or(PrepareDirectLxmfLinkDataError::LinkInterfaceUnknown)?;
+            (TxTarget::Only(InterfaceId(interface)), link.mdu())
+        };
+        if wire.len() > maximum {
+            self.admission.link_payload_too_large =
+                self.admission.link_payload_too_large.saturating_add(1);
+            return Err(PrepareDirectLxmfLinkDataError::LinkMduExceeded {
+                actual: wire.len(),
+                maximum,
+            });
+        }
+        if self.core.transport.link_data_receipt_count() >= PATHS {
+            self.admission.link_data_receipt_table_full = self
+                .admission
+                .link_data_receipt_table_full
+                .saturating_add(1);
+            return Err(PrepareDirectLxmfLinkDataError::ReceiptTableFull { limit: PATHS });
+        }
+
+        let native = self
+            .core
+            .prepare_link_data_packet_into(link_id, wire, rng, now, output)
+            .map_err(|error| match error {
+                SendError::LinkNotFound => PrepareDirectLxmfLinkDataError::LinkNotFound,
+                SendError::LinkNotActive => PrepareDirectLxmfLinkDataError::LinkNotActive,
+                SendError::LinkInterfaceUnknown => {
+                    PrepareDirectLxmfLinkDataError::LinkInterfaceUnknown
+                }
+                SendError::ReceiptTableFull => {
+                    self.admission.link_data_receipt_table_full = self
+                        .admission
+                        .link_data_receipt_table_full
+                        .saturating_add(1);
+                    PrepareDirectLxmfLinkDataError::ReceiptTableFull { limit: PATHS }
+                }
+                SendError::ReceiptHashAlreadyTracked => {
+                    PrepareDirectLxmfLinkDataError::ReceiptHashAlreadyTracked
+                }
+                SendError::Crypto(_) => PrepareDirectLxmfLinkDataError::Crypto,
+                SendError::PacketBuild(_) => PrepareDirectLxmfLinkDataError::PacketBuild,
+                SendError::UnknownDestination
+                | SendError::LinkAlreadyExists
+                | SendError::LinkTableFull
+                | SendError::KeepaliveRoleMismatch
+                | SendError::WindowFull
+                | SendError::OutputAllocationFailed
+                | SendError::ProtocolTokenExhausted
+                | SendError::ProtocolTokenAssignmentFailed
+                | SendError::ResourceLimit => PrepareDirectLxmfLinkDataError::Invariant,
+            })?;
+        debug_assert!(matches!(
+            native.routing,
+            PacketRouting::BoundInterface(interface)
+                if target == TxTarget::Only(InterfaceId(interface))
+        ));
+        Ok(PreparedLinkData {
+            packet_len: native.data.len() as u16,
+            target,
+            receipt: ReceiptId(*native.receipt.packet_hash()),
+        })
     }
 
     /// Prepare encrypted destination DATA directly into caller-reserved
@@ -3866,6 +4280,16 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
     /// redundant retry superseded by a sibling proof.
     pub fn cancel_data_receipt(&mut self, receipt: ReceiptId) -> bool {
         self.core.transport.cancel_receipt(receipt.as_bytes())
+    }
+
+    /// Cancel an outstanding ordinary Link-DATA receipt by complete packet hash.
+    ///
+    /// This is required when a prepared packet never gains an interface owner,
+    /// or when a sibling attempt makes its proof correlation obsolete.
+    pub fn cancel_link_data_receipt(&mut self, receipt: ReceiptId) -> bool {
+        self.core
+            .transport
+            .cancel_link_data_receipt(receipt.as_bytes())
     }
 
     /// Build encrypted destination DATA only when its delivery receipt can be
@@ -4145,7 +4569,10 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         let native =
             self.core
                 .handle_tick_with_receipt_sink_at(now, link_now, rng, &mut native_sink);
-        debug_assert_eq!(native.failed_receipts, native_sink.committed.timed_out);
+        debug_assert_eq!(
+            native.failed_receipts + native.failed_link_data_receipts,
+            native_sink.committed.timed_out
+        );
         if native.receipt_notifications_deferred {
             self.receipt_terminals.reservation_backpressure = self
                 .receipt_terminals
@@ -4155,6 +4582,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         ReceiptTickReport {
             actions: self.finish_tick(native.outcome),
             timed_out_receipts: native.failed_receipts,
+            timed_out_link_data_receipts: native.failed_link_data_receipts,
             timed_out_receipt_tag: native_sink.committed.first_timed_out_tag,
             timed_out_receipt_tags_consistent: native_sink.committed.timed_out_tags_consistent,
             receipt_terminals_deferred: native.receipt_notifications_deferred,
@@ -4477,10 +4905,10 @@ fn bind_responder_link_proof<
         return Err(RetainedProofInvariant::LinkDataEventBinding);
     };
 
-    // Ordinary Link DATA produces no proof in the pinned core. If a future
-    // revision starts doing so, consume its action here so the wrapper still
-    // owns exactly one policy-selected immediate or retained proof; malformed
-    // or contradictory proof actions fail closed.
+    // ProveAll Link DATA produces a native proof, while ProveApp remains
+    // application-selected. Consume either shape here so the wrapper owns
+    // exactly one policy-selected immediate or retained proof; malformed or
+    // contradictory proof actions fail closed.
     let mut proof_action_count = 0_usize;
     let mut proof_action_mismatch = false;
     native.packets.retain(|outbound| {
@@ -5316,12 +5744,36 @@ mod tests {
         node
     }
 
+    fn python_lxmf_fixture_recipient_identity() -> Identity {
+        let mut private_key = [0_u8; 64];
+        private_key[..32].fill(0x07);
+        private_key[32..].fill(0x08);
+        Identity::from_private_key(&private_key).expect("fixture recipient identity imports")
+    }
+
+    fn python_lxmf_fixture_recipient_node() -> (TestNode, DestHash) {
+        let mut node = TestNode::new(
+            python_lxmf_fixture_recipient_identity(),
+            "reticulum",
+            &["embedded"],
+            EmbeddedNodeConfig::endpoint(),
+        )
+        .expect("fixture recipient node constructs");
+        let destination = node
+            .register_destination(
+                LXMF_APPLICATION_NAME,
+                &[LXMF_DELIVERY_ASPECT],
+                DestinationType::Single,
+                Direction::In,
+            )
+            .expect("fixture recipient delivery destination registers");
+        assert!(node.set_accepts_links(&destination, true));
+        (node, destination)
+    }
+
     fn python_lxmf_fixture_sender(fixture: &LxmfCorpusMessage) -> (TestNode, DestHash) {
         let mut sender = python_lxmf_fixture_node();
-        let mut destination_private_key = [0_u8; 64];
-        destination_private_key[..32].fill(0x07);
-        destination_private_key[32..].fill(0x08);
-        let recipient = Identity::from_private_key(&destination_private_key).unwrap();
+        let recipient = python_lxmf_fixture_recipient_identity();
         let destination = fixture_hash(&fixture.destination_hash_hex);
         sender
             .register_peer(
@@ -5373,6 +5825,549 @@ mod tests {
     }
 
     #[test]
+    fn basic_direct_lxmf_composition_matches_python_and_exact_link_boundary() {
+        let corpus = python_lxmf_corpus();
+        let at_limit = corpus_message(&corpus, "direct_limit_319");
+        let over_limit = corpus_message(&corpus, "direct_over_320");
+        assert_eq!(
+            at_limit.selection_content_size,
+            MAX_DIRECT_LXMF_CONTENT_SIZE as i64
+        );
+        assert_eq!(
+            over_limit.selection_content_size,
+            MAX_DIRECT_LXMF_CONTENT_SIZE as i64 + 1
+        );
+
+        let node = python_lxmf_fixture_node();
+        let destination = fixture_hash(&at_limit.destination_hash_hex);
+        let mut wire = [0xa2_u8; MAX_DIRECT_LXMF_WIRE];
+        let prepared = node
+            .prepare_basic_direct_lxmf_into(
+                &destination,
+                corpus_timestamp_ms(at_limit),
+                &hex::decode(&at_limit.decoded.title_hex).unwrap(),
+                &hex::decode(&at_limit.decoded.content_hex).unwrap(),
+                &mut wire,
+            )
+            .expect("Python's exact direct packet boundary prepares");
+        let expected_wire = hex::decode(&at_limit.full_wire_hex).unwrap();
+        assert_eq!(expected_wire.len(), MAX_DIRECT_LXMF_WIRE);
+        assert_eq!(usize::from(prepared.wire_len()), expected_wire.len());
+        assert_eq!(wire.as_slice(), expected_wire.as_slice());
+        assert_eq!(prepared.destination(), destination);
+        let expected_message_id: [u8; 32] = hex::decode(&at_limit.message_id_hex)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(prepared.message_id(), expected_message_id);
+
+        let mut untouched = [0x5c_u8; MAX_DIRECT_LXMF_WIRE];
+        assert_eq!(
+            node.prepare_basic_direct_lxmf_into(
+                &fixture_hash(&over_limit.destination_hash_hex),
+                corpus_timestamp_ms(over_limit),
+                &hex::decode(&over_limit.decoded.title_hex).unwrap(),
+                &hex::decode(&over_limit.decoded.content_hex).unwrap(),
+                &mut untouched,
+            ),
+            Err(PrepareBasicLxmfError::PayloadTooLarge {
+                actual: MAX_DIRECT_LXMF_CONTENT_SIZE + 1,
+                maximum: MAX_DIRECT_LXMF_CONTENT_SIZE,
+            })
+        );
+        assert!(untouched.iter().all(|byte| *byte == 0x5c));
+    }
+
+    #[test]
+    fn exact_python_direct_lxmf_round_trips_over_bound_link_with_typed_receipt() {
+        let corpus = python_lxmf_corpus();
+        let fixture = corpus_message(&corpus, "direct_limit_319");
+        let expected_wire = hex::decode(&fixture.full_wire_hex).unwrap();
+        let mut initiator = python_lxmf_fixture_node();
+        let (mut responder, destination) = python_lxmf_fixture_recipient_node();
+        assert_eq!(destination, fixture_hash(&fixture.destination_hash_hex));
+        initiator
+            .register_peer(
+                &python_lxmf_fixture_recipient_identity(),
+                LXMF_APPLICATION_NAME,
+                &[LXMF_DELIVERY_ASPECT],
+                99,
+            )
+            .unwrap();
+        responder
+            .set_destination_inbound_proof_policy(&destination, InboundProofPolicy::Always)
+            .unwrap();
+        let mut rng = CounterRng::default();
+
+        let (request, link_id) = initiator.initiate_link(destination, 100, &mut rng).unwrap();
+        let response = responder.ingest(request.bytes(), 100, InterfaceId(7), &mut rng);
+        let established = initiator.ingest(
+            response.actions.packets[0].bytes(),
+            101,
+            InterfaceId(3),
+            &mut rng,
+        );
+        responder.ingest(
+            established.actions.packets[0].bytes(),
+            102,
+            InterfaceId(7),
+            &mut rng,
+        );
+        assert_eq!(initiator.link_state(&link_id), Some(LinkState::Active));
+        assert_eq!(responder.link_state(&link_id), Some(LinkState::Active));
+
+        let mut wire = [0_u8; MAX_DIRECT_LXMF_WIRE];
+        let composed = initiator
+            .prepare_basic_direct_lxmf_into(
+                &destination,
+                corpus_timestamp_ms(fixture),
+                &hex::decode(&fixture.decoded.title_hex).unwrap(),
+                &hex::decode(&fixture.decoded.content_hex).unwrap(),
+                &mut wire,
+            )
+            .unwrap();
+        assert_eq!(wire.as_slice(), expected_wire.as_slice());
+
+        let mut packet = [0_u8; RNS_MTU];
+        let prepared = initiator
+            .prepare_direct_lxmf_link_data_into(
+                composed,
+                &wire,
+                &link_id,
+                110,
+                &mut rng,
+                &mut packet,
+            )
+            .expect("exact direct wire gains one Link-DATA receipt");
+        assert_eq!(prepared.target(), TxTarget::Only(InterfaceId(3)));
+        let outbound = Packet::parse(&packet[..usize::from(prepared.packet_len())]).unwrap();
+        assert_eq!(&outbound.compute_hash(), prepared.receipt().as_bytes());
+        assert_eq!(initiator.core.transport.link_data_receipt_count(), 1);
+
+        let received = responder.ingest(
+            &packet[..usize::from(prepared.packet_len())],
+            110,
+            InterfaceId(7),
+            &mut rng,
+        );
+        assert!(matches!(
+            received.actions.events.as_slice(),
+            [ApplicationEvent::LinkData {
+                binding,
+                data,
+                context: LINK_DATA_CONTEXT_NONE,
+            }] if binding.link() == link_id.as_bytes()
+                && binding.destination() == destination.as_bytes()
+                && binding.role() == ApplicationLinkRole::Responder
+                && data.as_slice() == expected_wire.as_slice()
+        ));
+        assert_eq!(received.metadata.generated_proof_actions(), 1);
+        let proof = received
+            .actions
+            .packets
+            .iter()
+            .find(|packet| {
+                Packet::parse(packet.bytes())
+                    .is_ok_and(|packet| packet.packet_type == PacketType::Proof)
+            })
+            .expect("ordinary Link DATA produces an explicit proof");
+        assert_eq!(proof.target(), TxTarget::Only(InterfaceId(7)));
+
+        let expected = ReceiptCandidate {
+            kind: ReceiptKind::LinkData,
+            receipt: prepared.receipt(),
+        };
+        let mut sink = RecordingReceiptSink::default();
+        let delivered = initiator
+            .ingest_with_receipt_sink(proof.bytes(), 111, InterfaceId(3), &mut rng, &mut sink)
+            .unwrap();
+        assert_eq!(delivered.metadata.delivered_receipt_terminals(), 1);
+        assert_eq!(sink.attempted, [expected]);
+        assert_eq!(sink.terminals, [ReceiptTerminal::Delivered(expected)]);
+        assert_eq!(initiator.core.transport.link_data_receipt_count(), 0);
+    }
+
+    #[test]
+    fn direct_lxmf_substitution_is_rejected_before_entropy_or_receipt_state() {
+        let corpus = python_lxmf_corpus();
+        let fixture = corpus_message(&corpus, "direct_limit_319");
+        let mut sender = python_lxmf_fixture_node();
+        let (mut responder, destination) = python_lxmf_fixture_recipient_node();
+        sender
+            .register_peer(
+                &python_lxmf_fixture_recipient_identity(),
+                LXMF_APPLICATION_NAME,
+                &[LXMF_DELIVERY_ASPECT],
+                99,
+            )
+            .unwrap();
+        let mut rng = CounterRng::default();
+        let (request, link_id) = sender.initiate_link(destination, 100, &mut rng).unwrap();
+        let response = responder.ingest(request.bytes(), 100, InterfaceId(7), &mut rng);
+        let established = sender.ingest(
+            response.actions.packets[0].bytes(),
+            101,
+            InterfaceId(3),
+            &mut rng,
+        );
+        responder.ingest(
+            established.actions.packets[0].bytes(),
+            102,
+            InterfaceId(7),
+            &mut rng,
+        );
+
+        let mut wire = [0_u8; MAX_DIRECT_LXMF_WIRE];
+        let composed = sender
+            .prepare_basic_direct_lxmf_into(
+                &destination,
+                corpus_timestamp_ms(fixture),
+                &hex::decode(&fixture.decoded.title_hex).unwrap(),
+                &hex::decode(&fixture.decoded.content_hex).unwrap(),
+                &mut wire,
+            )
+            .unwrap();
+        let mut output = [0xa5_u8; RNS_MTU];
+        let entropy_before = rng.0;
+
+        assert_eq!(
+            sender.prepare_direct_lxmf_link_data_into(
+                composed,
+                &wire[..wire.len() - 1],
+                &link_id,
+                110,
+                &mut rng,
+                &mut output,
+            ),
+            Err(PrepareDirectLxmfLinkDataError::WireLengthMismatch {
+                actual: MAX_DIRECT_LXMF_WIRE - 1,
+                expected: MAX_DIRECT_LXMF_WIRE,
+            })
+        );
+        assert_eq!(rng.0, entropy_before);
+        assert_eq!(sender.core.transport.link_data_receipt_count(), 0);
+        assert!(output.iter().all(|byte| *byte == 0xa5));
+
+        let mut substituted = wire;
+        *substituted.last_mut().unwrap() ^= 0x01;
+        assert_eq!(
+            sender.prepare_direct_lxmf_link_data_into(
+                composed,
+                &substituted,
+                &link_id,
+                110,
+                &mut rng,
+                &mut output,
+            ),
+            Err(PrepareDirectLxmfLinkDataError::WireDigestMismatch)
+        );
+        assert_eq!(rng.0, entropy_before);
+        assert_eq!(sender.core.transport.link_data_receipt_count(), 0);
+        assert!(output.iter().all(|byte| *byte == 0xa5));
+
+        let inconsistent_destination = PreparedBasicDirectLxmf {
+            destination: DestHash::from([0xd1; LXMF_DESTINATION_HASH_LENGTH]),
+            ..composed
+        };
+        assert_eq!(
+            sender.prepare_direct_lxmf_link_data_into(
+                inconsistent_destination,
+                &wire,
+                &link_id,
+                110,
+                &mut rng,
+                &mut output,
+            ),
+            Err(PrepareDirectLxmfLinkDataError::WireDestinationMismatch)
+        );
+        assert_eq!(rng.0, entropy_before);
+        assert_eq!(sender.core.transport.link_data_receipt_count(), 0);
+
+        let other_destination = DestHash::from([0xd2; LXMF_DESTINATION_HASH_LENGTH]);
+        let mut other_destination_wire = [0_u8; MAX_DIRECT_LXMF_WIRE];
+        let other_destination_composed = sender
+            .prepare_basic_direct_lxmf_into(
+                &other_destination,
+                corpus_timestamp_ms(fixture),
+                &hex::decode(&fixture.decoded.title_hex).unwrap(),
+                &hex::decode(&fixture.decoded.content_hex).unwrap(),
+                &mut other_destination_wire,
+            )
+            .unwrap();
+        assert_eq!(
+            sender.prepare_direct_lxmf_link_data_into(
+                other_destination_composed,
+                &other_destination_wire,
+                &link_id,
+                110,
+                &mut rng,
+                &mut output,
+            ),
+            Err(PrepareDirectLxmfLinkDataError::LinkDestinationMismatch)
+        );
+        assert_eq!(rng.0, entropy_before);
+        assert_eq!(sender.core.transport.link_data_receipt_count(), 0);
+
+        let mut other_source = node(77);
+        other_source
+            .register_destination(
+                LXMF_APPLICATION_NAME,
+                &[LXMF_DELIVERY_ASPECT],
+                DestinationType::Single,
+                Direction::In,
+            )
+            .unwrap();
+        let mut other_source_wire = [0_u8; MAX_DIRECT_LXMF_WIRE];
+        let other_source_composed = other_source
+            .prepare_basic_direct_lxmf_into(
+                &destination,
+                corpus_timestamp_ms(fixture),
+                &hex::decode(&fixture.decoded.title_hex).unwrap(),
+                &hex::decode(&fixture.decoded.content_hex).unwrap(),
+                &mut other_source_wire,
+            )
+            .unwrap();
+        assert_eq!(
+            sender.prepare_direct_lxmf_link_data_into(
+                other_source_composed,
+                &other_source_wire,
+                &link_id,
+                110,
+                &mut rng,
+                &mut output,
+            ),
+            Err(PrepareDirectLxmfLinkDataError::WireSourceMismatch)
+        );
+        assert_eq!(rng.0, entropy_before);
+        assert_eq!(sender.core.transport.link_data_receipt_count(), 0);
+        assert!(output.iter().all(|byte| *byte == 0xa5));
+    }
+
+    #[test]
+    fn direct_lxmf_link_preflight_enforces_state_mdu_capacity_cancel_and_timeout() {
+        let corpus = python_lxmf_corpus();
+        let fixture = corpus_message(&corpus, "direct_limit_319");
+        let mut sender = python_lxmf_fixture_node();
+        let (mut responder, destination) = python_lxmf_fixture_recipient_node();
+        sender
+            .register_peer(
+                &python_lxmf_fixture_recipient_identity(),
+                LXMF_APPLICATION_NAME,
+                &[LXMF_DELIVERY_ASPECT],
+                99,
+            )
+            .unwrap();
+        let mut rng = CounterRng::default();
+        let (request, link_id) = sender.initiate_link(destination, 100, &mut rng).unwrap();
+        let response = responder.ingest(request.bytes(), 100, InterfaceId(7), &mut rng);
+        let established = sender.ingest(
+            response.actions.packets[0].bytes(),
+            101,
+            InterfaceId(3),
+            &mut rng,
+        );
+        responder.ingest(
+            established.actions.packets[0].bytes(),
+            102,
+            InterfaceId(7),
+            &mut rng,
+        );
+
+        let mut wire = [0_u8; MAX_DIRECT_LXMF_WIRE];
+        let composed = sender
+            .prepare_basic_direct_lxmf_into(
+                &destination,
+                corpus_timestamp_ms(fixture),
+                &hex::decode(&fixture.decoded.title_hex).unwrap(),
+                &hex::decode(&fixture.decoded.content_hex).unwrap(),
+                &mut wire,
+            )
+            .unwrap();
+        let mut output = [0x91_u8; RNS_MTU];
+
+        let entropy_before_missing = rng.0;
+        assert_eq!(
+            sender.prepare_direct_lxmf_link_data_into(
+                composed,
+                &wire,
+                &LinkId::from([0xee; LXMF_DESTINATION_HASH_LENGTH]),
+                110,
+                &mut rng,
+                &mut output,
+            ),
+            Err(PrepareDirectLxmfLinkDataError::LinkNotFound)
+        );
+        assert_eq!(rng.0, entropy_before_missing);
+        assert_eq!(sender.core.transport.link_data_receipt_count(), 0);
+
+        let mut pending_sender = python_lxmf_fixture_node();
+        pending_sender
+            .register_peer(
+                &python_lxmf_fixture_recipient_identity(),
+                LXMF_APPLICATION_NAME,
+                &[LXMF_DELIVERY_ASPECT],
+                99,
+            )
+            .unwrap();
+        let (_, pending_link) = pending_sender
+            .initiate_link(destination, 100, &mut rng)
+            .unwrap();
+        let entropy_before_inactive = rng.0;
+        assert_eq!(
+            pending_sender.prepare_direct_lxmf_link_data_into(
+                composed,
+                &wire,
+                &pending_link,
+                110,
+                &mut rng,
+                &mut output,
+            ),
+            Err(PrepareDirectLxmfLinkDataError::LinkNotActive)
+        );
+        assert_eq!(rng.0, entropy_before_inactive);
+        assert_eq!(pending_sender.core.transport.link_data_receipt_count(), 0);
+
+        let original_signalling = sender.core.transport.get_link(&link_id).unwrap().signalling;
+        sender
+            .core
+            .transport
+            .get_link_mut(&link_id)
+            .unwrap()
+            .signalling = rete_transport::signalling_bytes(300, 1);
+        let reduced_mdu = rete_transport::compute_link_mdu(300);
+        let entropy_before_mdu = rng.0;
+        assert_eq!(
+            sender.prepare_direct_lxmf_link_data_into(
+                composed,
+                &wire,
+                &link_id,
+                110,
+                &mut rng,
+                &mut output,
+            ),
+            Err(PrepareDirectLxmfLinkDataError::LinkMduExceeded {
+                actual: MAX_DIRECT_LXMF_WIRE,
+                maximum: reduced_mdu,
+            })
+        );
+        assert_eq!(rng.0, entropy_before_mdu);
+        assert_eq!(sender.core.transport.link_data_receipt_count(), 0);
+        assert_eq!(sender.metrics().admission.link_payload_too_large, 1);
+        sender
+            .core
+            .transport
+            .get_link_mut(&link_id)
+            .unwrap()
+            .signalling = original_signalling;
+
+        let mut receipts = Vec::new();
+        for now in 110..114 {
+            let prepared = sender
+                .prepare_direct_lxmf_link_data_into(
+                    composed,
+                    &wire,
+                    &link_id,
+                    now,
+                    &mut rng,
+                    &mut output,
+                )
+                .unwrap();
+            assert_eq!(prepared.target(), TxTarget::Only(InterfaceId(3)));
+            receipts.push(prepared.receipt());
+        }
+        assert_eq!(sender.core.transport.link_data_receipt_count(), 4);
+        let entropy_before_full = rng.0;
+        assert_eq!(
+            sender.prepare_direct_lxmf_link_data_into(
+                composed,
+                &wire,
+                &link_id,
+                114,
+                &mut rng,
+                &mut output,
+            ),
+            Err(PrepareDirectLxmfLinkDataError::ReceiptTableFull { limit: 4 })
+        );
+        assert_eq!(rng.0, entropy_before_full);
+        assert_eq!(sender.core.transport.link_data_receipt_count(), 4);
+        assert_eq!(sender.metrics().admission.link_data_receipt_table_full, 1);
+
+        for receipt in receipts {
+            assert!(sender.cancel_link_data_receipt(receipt));
+            assert!(!sender.cancel_link_data_receipt(receipt));
+        }
+        assert_eq!(sender.core.transport.link_data_receipt_count(), 0);
+
+        let expiring = sender
+            .prepare_direct_lxmf_link_data_into(
+                composed,
+                &wire,
+                &link_id,
+                200,
+                &mut rng,
+                &mut output,
+            )
+            .unwrap();
+        let expected = ReceiptCandidate {
+            kind: ReceiptKind::LinkData,
+            receipt: expiring.receipt(),
+        };
+        let mut sink = RecordingReceiptSink::default();
+        let report = sender.tick_with_receipt_sink(231, &mut rng, &mut sink);
+        assert_eq!(report.timed_out_receipts, 0);
+        assert_eq!(report.timed_out_link_data_receipts, 1);
+        assert!(!report.receipt_terminals_deferred);
+        assert_eq!(sink.attempted, [expected]);
+        assert_eq!(sink.terminals, [ReceiptTerminal::TimedOut(expected)]);
+        assert_eq!(sender.core.transport.link_data_receipt_count(), 0);
+    }
+
+    #[test]
+    fn direct_lxmf_keeps_the_destination_prefix_opportunistic_data_omits() {
+        let corpus = python_lxmf_corpus();
+        let fixture = corpus_message(&corpus, "opportunistic_over_296");
+        let node = python_lxmf_fixture_node();
+        let destination = fixture_hash(&fixture.destination_hash_hex);
+        let title = hex::decode(&fixture.decoded.title_hex).unwrap();
+        let content = hex::decode(&fixture.decoded.content_hex).unwrap();
+        let expected_wire = hex::decode(&fixture.full_wire_hex).unwrap();
+        let mut direct = [0x61_u8; MAX_DIRECT_LXMF_WIRE];
+
+        let prepared = node
+            .prepare_basic_direct_lxmf_into(
+                &destination,
+                corpus_timestamp_ms(fixture),
+                &title,
+                &content,
+                &mut direct,
+            )
+            .expect("a message above the opportunistic boundary remains direct-packet sized");
+        let wire_len = usize::from(prepared.wire_len());
+        assert_eq!(&direct[..wire_len], expected_wire.as_slice());
+        assert_eq!(
+            &direct[..LXMF_DESTINATION_HASH_LENGTH],
+            destination.as_ref()
+        );
+        assert!(direct[wire_len..].iter().all(|byte| *byte == 0x61));
+
+        let mut opportunistic = [0x62_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+        assert_eq!(
+            node.prepare_basic_lxmf_into(
+                &destination,
+                corpus_timestamp_ms(fixture),
+                &title,
+                &content,
+                &mut opportunistic,
+            ),
+            Err(PrepareBasicLxmfError::PayloadTooLarge {
+                actual: MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE + 1,
+                maximum: MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE,
+            })
+        );
+        assert!(opportunistic.iter().all(|byte| *byte == 0x62));
+    }
+
+    #[test]
     fn basic_lxmf_rejections_leave_caller_output_unchanged() {
         let node = python_lxmf_fixture_node();
         let destination = fixture_hash("021e68345db8a80c29d0c2f193baa5f4");
@@ -5413,6 +6408,19 @@ mod tests {
             Err(PrepareBasicLxmfError::OutputTooSmall { available: 8, .. })
         ));
         assert!(too_small.iter().all(|byte| *byte == 0x73));
+
+        let mut direct_too_small = [0x74_u8; 8];
+        assert!(matches!(
+            node.prepare_basic_direct_lxmf_into(
+                &destination,
+                1_700_000_000_000,
+                b"title",
+                b"content",
+                &mut direct_too_small,
+            ),
+            Err(PrepareBasicLxmfError::OutputTooSmall { available: 8, .. })
+        ));
+        assert!(direct_too_small.iter().all(|byte| *byte == 0x74));
     }
 
     #[test]
@@ -5666,6 +6674,90 @@ mod tests {
     }
 
     #[test]
+    fn rehydrated_maximum_opportunistic_wire_uses_the_dedicated_data_path() {
+        let corpus = python_lxmf_corpus();
+        let fixture = corpus_message(&corpus, "opportunistic_limit_295");
+        let mut sender = python_lxmf_fixture_node();
+        let mut destination_private_key = [0_u8; 64];
+        destination_private_key[..32].fill(0x07);
+        destination_private_key[32..].fill(0x08);
+        let recipient = Identity::from_private_key(&destination_private_key).unwrap();
+        let destination = fixture_hash(&fixture.destination_hash_hex);
+        sender
+            .register_peer(
+                &recipient,
+                LXMF_APPLICATION_NAME,
+                &[LXMF_DELIVERY_ASPECT],
+                1,
+            )
+            .unwrap();
+
+        let mut carrier = [0_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+        let prepared = sender
+            .prepare_basic_lxmf_into(
+                &destination,
+                corpus_timestamp_ms(fixture),
+                &hex::decode(&fixture.decoded.title_hex).unwrap(),
+                &hex::decode(&fixture.decoded.content_hex).unwrap(),
+                &mut carrier,
+            )
+            .unwrap();
+        let mut wire =
+            Vec::with_capacity(LXMF_DESTINATION_HASH_LENGTH + MAX_OPPORTUNISTIC_LXMF_CARRIER);
+        wire.extend_from_slice(destination.as_ref());
+        wire.extend_from_slice(&carrier[..usize::from(prepared.carrier_len())]);
+
+        let mut rng = CounterRng::default();
+        let mut packet_bytes = [0_u8; RNS_MTU];
+        let prepared_data = sender
+            .prepare_rehydrated_opportunistic_lxmf_data_into(&wire, 2, &mut rng, &mut packet_bytes)
+            .expect("durable exact wire must retain the Header-1 LXMF exception");
+        let packet =
+            Packet::parse(&packet_bytes[..usize::from(prepared_data.packet_len())]).unwrap();
+        assert_eq!(packet.header_type, HeaderType::Header1);
+        assert_eq!(packet.destination_hash, destination.as_ref());
+        let mut decrypted = [0_u8; RNS_MTU];
+        let decrypted_len = recipient.decrypt(packet.payload, &mut decrypted).unwrap();
+        assert_eq!(
+            &decrypted[..decrypted_len],
+            &carrier[..usize::from(prepared.carrier_len())]
+        );
+    }
+
+    #[test]
+    fn rehydrated_opportunistic_wire_rejects_signature_mutation_before_state_change() {
+        let corpus = python_lxmf_corpus();
+        let fixture = corpus_message(&corpus, "opportunistic_limit_295");
+        let (mut sender, destination) = python_lxmf_fixture_sender(fixture);
+        let mut carrier = [0_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+        let prepared = sender
+            .prepare_basic_lxmf_into(
+                &destination,
+                corpus_timestamp_ms(fixture),
+                &hex::decode(&fixture.decoded.title_hex).unwrap(),
+                &hex::decode(&fixture.decoded.content_hex).unwrap(),
+                &mut carrier,
+            )
+            .unwrap();
+        let mut wire =
+            Vec::with_capacity(LXMF_DESTINATION_HASH_LENGTH + MAX_OPPORTUNISTIC_LXMF_CARRIER);
+        wire.extend_from_slice(destination.as_ref());
+        wire.extend_from_slice(&carrier[..usize::from(prepared.carrier_len())]);
+        wire[LXMF_DESTINATION_HASH_LENGTH * 2] ^= 0x01;
+
+        let mut rng = CounterRng::default();
+        let mut output = [0x83_u8; RNS_MTU];
+        assert_eq!(
+            sender
+                .prepare_rehydrated_opportunistic_lxmf_data_into(&wire, 2, &mut rng, &mut output,),
+            Err(PrepareOpportunisticLxmfDataError::InvalidCompleteWire)
+        );
+        assert_eq!(rng.0, 0);
+        assert!(output.iter().all(|byte| *byte == 0x83));
+        assert_eq!(sender.core.transport.receipt_count(), 0);
+    }
+
+    #[test]
     fn opportunistic_lxmf_rejects_same_length_carrier_substitution_before_mutation() {
         let corpus = python_lxmf_corpus();
         let fixture = corpus_message(&corpus, "opportunistic_limit_295");
@@ -5826,6 +6918,72 @@ mod tests {
             Some(expected_public_key)
         );
         assert_eq!(owner.recall_identity(&DestHash::from([0xee; 16])), None);
+    }
+
+    #[test]
+    fn learned_identity_is_classified_only_by_its_exact_lxmf_delivery_hash() {
+        let delivery_peer = identity(202);
+        let other_peer = identity(203);
+        let delivery_public_key = delivery_peer.public_key();
+        let other_public_key = other_peer.public_key();
+        let mut delivery_announcer = TestNode::new(
+            delivery_peer,
+            LXMF_APPLICATION_NAME,
+            &[LXMF_DELIVERY_ASPECT],
+            EmbeddedNodeConfig::endpoint(),
+        )
+        .unwrap();
+        let mut other_announcer = TestNode::new(
+            other_peer,
+            "nomadnetwork",
+            &["node"],
+            EmbeddedNodeConfig::endpoint(),
+        )
+        .unwrap();
+        let delivery_destination = delivery_announcer.destination_hash();
+        let other_destination = other_announcer.destination_hash();
+        let mut owner = node(200);
+        let mut rng = CounterRng::default();
+
+        delivery_announcer
+            .queue_announce(None, 1, &mut rng)
+            .unwrap();
+        let delivery_announce = delivery_announcer
+            .flush_announces(1, &mut rng)
+            .pop()
+            .unwrap();
+        let learned = owner.ingest(delivery_announce.bytes(), 1, InterfaceId(4), &mut rng);
+        assert!(matches!(
+            learned.actions.events.as_slice(),
+            [ApplicationEvent::AnnounceReceived { destination, .. }]
+                if destination == delivery_destination.as_bytes()
+        ));
+
+        other_announcer.queue_announce(None, 2, &mut rng).unwrap();
+        let other_announce = other_announcer.flush_announces(2, &mut rng).pop().unwrap();
+        let learned = owner.ingest(other_announce.bytes(), 2, InterfaceId(4), &mut rng);
+        assert!(matches!(
+            learned.actions.events.as_slice(),
+            [ApplicationEvent::AnnounceReceived { destination, .. }]
+                if destination == other_destination.as_bytes()
+        ));
+
+        assert_eq!(
+            owner.recall_lxmf_delivery_identity(&delivery_destination),
+            Some(delivery_public_key)
+        );
+        assert_eq!(
+            owner.recall_identity(&other_destination),
+            Some(other_public_key)
+        );
+        assert_eq!(
+            owner.recall_lxmf_delivery_identity(&other_destination),
+            None
+        );
+        assert_eq!(
+            owner.recall_lxmf_delivery_identity(&DestHash::from([0xee; 16])),
+            None
+        );
     }
 
     fn link_request(
@@ -8873,6 +10031,7 @@ mod tests {
 
         let deferred = sender.tick_with_receipt_sink(131, &mut rng, &mut sink);
         assert_eq!(deferred.timed_out_receipts, 0);
+        assert_eq!(deferred.timed_out_link_data_receipts, 0);
         assert_eq!(deferred.timed_out_receipt_tag, None);
         assert!(deferred.timed_out_receipt_tags_consistent);
         assert!(deferred.receipt_terminals_deferred);
@@ -8887,6 +10046,7 @@ mod tests {
         sink.refuse = false;
         let completed = sender.tick_with_receipt_sink(132, &mut rng, &mut sink);
         assert_eq!(completed.timed_out_receipts, 1);
+        assert_eq!(completed.timed_out_link_data_receipts, 0);
         assert_eq!(
             completed.timed_out_receipt_tag,
             Some(correlation_tag(prepared.receipt().as_bytes()))
@@ -8941,6 +10101,7 @@ mod tests {
         let completed = sender.tick_with_receipt_sink(131, &mut rng, &mut sink);
 
         assert_eq!(completed.timed_out_receipts, 2);
+        assert_eq!(completed.timed_out_link_data_receipts, 0);
         assert!(matches!(
             completed.timed_out_receipt_tag,
             Some(tag) if tag == first_tag || tag == second_tag

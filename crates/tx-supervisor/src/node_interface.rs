@@ -19,9 +19,10 @@ use reticulum_node_core::{
     DestinationHash, IngressReport, MaintenanceReport, MonotonicInstant, MonotonicMillis,
     MonotonicSeconds, NodeActions, NodeCore, OrdinaryActionCapacitySnapshot,
     OrdinaryPreparedPacket, OutboundDispatchInterval, OutboundProtocolToken, PacketInterfaceId,
-    PathRequestError, PrepareBasicLxmfError, PreparedBasicLxmf, PreparedPacket,
-    ReceiptCorrelationError, TerminalAttempt, TerminalAttempts, TxAuthorizationPolicy,
-    TxLeaseDeadline, TxMaintenanceReport, TxOwnerScope, TxRecoveryObservation,
+    PathRequestError, PrepareBasicLxmfError, PreparedBasicDirectLxmf, PreparedBasicLxmf,
+    PreparedPacket, ReceiptCorrelationError, TerminalAttempt, TerminalAttempts,
+    TxAuthorizationPolicy, TxLeaseDeadline, TxMaintenanceReport, TxOwnerScope,
+    TxRecoveryObservation,
 };
 use reticulum_tx_handoff::{
     DataPairedPermitHandoff, DispatcherPermitHandoff, OrdinaryDispatcherPermitHandoff,
@@ -152,10 +153,10 @@ mod tests {
     };
     use reticulum_node_core::{
         ApplicationEvent, ApplicationEventDiscardReason, ApplicationEventSlot, DestinationHash,
-        MAX_OPPORTUNISTIC_LXMF_CARRIER, NodeConfig, NodeIdentity, NodeInstanceId,
-        OrdinaryBufferPool, OrdinaryPacketBuffer, PermitResolution, TxAuthorizationCandidate,
-        TxCompletionCode, TxPacketBuffer, TxPermitRequirements, TxPermitReservation,
-        TxPermitResourceId, TxPolicyDecision,
+        MAX_DIRECT_LXMF_WIRE, MAX_OPPORTUNISTIC_LXMF_CARRIER, NodeConfig, NodeIdentity,
+        NodeInstanceId, OrdinaryBufferPool, OrdinaryPacketBuffer, PermitResolution,
+        TxAuthorizationCandidate, TxCompletionCode, TxPacketBuffer, TxPermitRequirements,
+        TxPermitReservation, TxPermitResourceId, TxPolicyDecision,
     };
     use reticulum_rns_rete::{IngressDisposition, PacketType};
     use reticulum_tx_handoff::{DataPermitHandoff, OrdinaryPermitHandoff};
@@ -413,6 +414,31 @@ mod tests {
         assert_eq!(&carrier[..16], source.as_bytes());
         assert_ne!(prepared.message_id(), [0; 32]);
         assert!(usize::from(prepared.carrier_len()) <= carrier.len());
+    }
+
+    #[test]
+    fn permanent_aggregate_composes_complete_direct_lxmf_wire() {
+        let (mut owner, destination) = sender(66);
+        owner
+            .register_inbound_single_destination("lxmf", &["delivery"])
+            .expect("the node-owned LXMF delivery destination registers");
+        let (supervisor, _actors, _) = build_from_node::<1, 1>(owner, destination);
+        let mut wire = [0x4d_u8; MAX_DIRECT_LXMF_WIRE];
+        let prepared = supervisor
+            .prepare_basic_direct_lxmf_into(
+                &destination,
+                1_700_000_000_000,
+                b"title",
+                b"content",
+                &mut wire,
+            )
+            .expect("the supervisor forwards complete direct composition");
+
+        let wire_len = usize::from(prepared.wire_len());
+        assert_eq!(&wire[..16], destination.as_bytes());
+        assert_ne!(prepared.message_id(), [0; 32]);
+        assert!(wire_len <= wire.len());
+        assert!(wire[wire_len..].iter().all(|byte| *byte == 0x4d));
     }
 
     fn properties(config: u32) -> InterfaceProperties {
@@ -2943,6 +2969,29 @@ where
             .prepare_basic_lxmf_into(destination, timestamp_unix_ms, title, content, output)
     }
 
+    /// Compose one complete direct-LXMF wire message with the node-owned
+    /// identity and exact registered `lxmf.delivery` source.
+    ///
+    /// This read-only operation does not establish a Link, prepare a packet,
+    /// or consume receipt capacity. The caller must durably accept the exact
+    /// initialized wire prefix before beginning the direct-Link transaction.
+    pub fn prepare_basic_direct_lxmf_into(
+        &self,
+        destination: &DestinationHash,
+        timestamp_unix_ms: u64,
+        title: &[u8],
+        content: &[u8],
+        output: &mut [u8],
+    ) -> Result<PreparedBasicDirectLxmf, PrepareBasicLxmfError> {
+        self.node.prepare_basic_direct_lxmf_into(
+            destination,
+            timestamp_unix_ms,
+            title,
+            content,
+            output,
+        )
+    }
+
     /// Copy a public key learned for one announced Reticulum destination.
     ///
     /// The permanent aggregate retains sole mutable node ownership. This
@@ -2950,6 +2999,12 @@ where
     /// source without exposing the inner node or borrowing native storage.
     pub fn recall_identity(&self, destination: &DestinationHash) -> Option<[u8; 64]> {
         self.node.recall_identity(destination)
+    }
+
+    /// Recall an announce-learned identity only for its exact
+    /// identity-derived `lxmf.delivery` destination.
+    pub fn recall_lxmf_delivery_identity(&self, destination: &DestinationHash) -> Option<[u8; 64]> {
+        self.node.recall_lxmf_delivery_identity(destination)
     }
 
     /// Register one stable interface identity offline in a vacant actor slot.
@@ -3028,6 +3083,31 @@ where
             now,
             rng,
         ))
+    }
+
+    /// Prepare one exact durable LXMF wire message through the dedicated
+    /// opportunistic Header-1 destination-DATA path.
+    pub fn try_prepare_rehydrated_opportunistic_lxmf<R>(
+        &mut self,
+        request: DataRouterPrepareRequest<'_>,
+        now: MonotonicMillis,
+        rng: &mut R,
+    ) -> NodeInterfaceDataPrepareResult
+    where
+        R: RngCore + CryptoRng,
+    {
+        if let Some(fault) = self.fault() {
+            return NodeInterfaceDataPrepareResult::Fault(fault);
+        }
+        NodeInterfaceDataPrepareResult::Coordinator(
+            self.data.try_prepare_rehydrated_opportunistic_lxmf(
+                &mut self.node,
+                &self.router,
+                request,
+                now,
+                rng,
+            ),
+        )
     }
 
     /// Offer one complete native ordinary-action envelope.

@@ -27,10 +27,14 @@ and arbitrary LXMF bytes. NomadNet is a fixture/version lane only at this
 phase.
 
 The firmware dependency is currently pinned to integration-fork commit
-`90570cafc812b3025011cb690ec74a27f287cb3f`; `firmware-pin-90570ca` is its
-designated durable tag. No issue or pull request was opened for this newer
-fork-local work; any future upstream issue or contribution still requires
-direct user approval.
+`2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on fork branch
+`codex/link-data-receipts`. It descends from
+`90570cafc812b3025011cb690ec74a27f287cb3f`, whose tag is
+`firmware-pin-90570ca`; that predecessor tag does not name the current
+revision, which has no designated durable tag. The current descendant adds
+ordinary Link-DATA receipts and enforces the receiving destination's proof
+policy. No issue or pull request was opened for this newer fork-local work; any
+future upstream issue or contribution still requires direct user approval.
 
 The preceding `14c7b4955a1ff6903e87cc40b42498f7869b6f4f` pin had host and
 portable-target LRRTT validation and a build-only E290 package. Its 776,464-byte
@@ -323,7 +327,8 @@ tests were also run for that pin to reach 635. This is not a count of every
 nested workspace test target.
 These regressions complement, but do not replace, the project's historical
 235-check conformance baseline or powered/live-Python multi-hop qualification.
-The current schema-2 lifecycle/candidate runner passes 647 checks.
+The recorded schema-2 lifecycle/candidate runner passed 647 checks. That is
+historical evidence, not an asserted current schema-3 count.
 
 ### Initial capacity audit
 
@@ -552,7 +557,7 @@ permanent graph remains open.
 
 The semantic durable model, idempotent projector, physical journal, and portable
 sole storage actor are implemented and target-checked. The actor owns the live
-replay index, sole projector, one optional pending mutation capped at 512 bytes,
+replay index, sole projector, one optional pending mutation capped at 544 bytes,
 and a fail-closed fault latch while borrowing exact operation-scoped NOR access;
 it completes mount/replay before service and can autonomously reconcile an
 ambiguous backend result. Narrow
@@ -695,9 +700,11 @@ flow. Those tests close the former implicit-interface and relay/reverse
 admission seams in the covered native H2 paths; they do not close Python
 multi-hop behavior, H1 interface-role classification, reboot path recovery, or
 a powered rerun of the E290 reverse-proof scenario captured under `f6f5fb0`.
-The current pin adds the LRRTT lifecycle/timing contract and must pass the
-schema-2 root, portable, E290 build, and powered gates before this section can
-claim it as a new validated baseline.
+The `90570ca` predecessor adds the LRRTT lifecycle/timing contract. The current
+`2d07818` descendant additionally adds ordinary Link-DATA receipts and
+destination proof-policy parity. The combined behavior must pass the current
+root, portable, E290 build, and powered gates before this section can claim it
+as a new validated baseline.
 
 ### 1. Target and dependency integrity
 

@@ -3,13 +3,13 @@
 use reticulum_announce_clock::FreshClockPolicy;
 use reticulum_device_identity_store::IdentityPreflight;
 
-/// Build-selected authority for the one-shot schema-2 development reprovision image.
+/// Build-selected authority for the one-shot schema-3 development reprovision image.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JournalReprovisionPolicy {
     /// Preserve the normal product rule: a committed identity can only mount.
     Disabled,
     /// Permit provisioning only when the complete journal partition is erased.
-    ExplicitErasedSchema2Development,
+    ExplicitErasedSchema3Development,
 }
 
 impl JournalReprovisionPolicy {
@@ -17,7 +17,7 @@ impl JournalReprovisionPolicy {
     pub const fn log_label(self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
-            Self::ExplicitErasedSchema2Development => "EXPLICIT-ERASED-JOURNAL-SCHEMA2-DEVELOPMENT",
+            Self::ExplicitErasedSchema3Development => "EXPLICIT-ERASED-JOURNAL-SCHEMA3-DEVELOPMENT",
         }
     }
 }
@@ -27,8 +27,8 @@ impl JournalReprovisionPolicy {
 /// The non-default feature is intentionally a one-shot development tool. It
 /// does not authorize an erase and does not accept a programmed journal.
 pub const BUILD_JOURNAL_REPROVISION_POLICY: JournalReprovisionPolicy =
-    if cfg!(feature = "journal-schema2-dev-reprovision") {
-        JournalReprovisionPolicy::ExplicitErasedSchema2Development
+    if cfg!(feature = "journal-schema3-dev-reprovision") {
+        JournalReprovisionPolicy::ExplicitErasedSchema3Development
     } else {
         JournalReprovisionPolicy::Disabled
     };
@@ -38,8 +38,8 @@ pub const BUILD_JOURNAL_REPROVISION_POLICY: JournalReprovisionPolicy =
 pub enum JournalBootPolicy {
     /// Establish or resume the first format while factory identity is vacant.
     ProvisionFactoryFirst,
-    /// Provision schema 2 only after proving the complete journal is erased.
-    ProvisionErasedSchema2Development,
+    /// Provision schema 3 only after proving the complete journal is erased.
+    ProvisionErasedSchema3Development,
     /// Make no provisioning mutation; the later strict runtime mount decides.
     MountExisting,
 }
@@ -62,7 +62,7 @@ pub const fn announce_clock_policy(identity: IdentityPreflight) -> FreshClockPol
 /// therefore a durable factory transaction marker across a torn first journal
 /// write. Once any identity copy is committed, boot may only mount the existing
 /// journal in an ordinary build. The explicit development policy permits a
-/// journal-only schema-2 provision after the platform proves the entire journal
+/// journal-only schema-3 provision after the platform proves the entire journal
 /// partition is erased; it never authorizes an erase or repair of programmed
 /// media.
 pub const fn journal_boot_policy(
@@ -73,8 +73,8 @@ pub const fn journal_boot_policy(
         (IdentityPreflight::Vacant, _) => JournalBootPolicy::ProvisionFactoryFirst,
         (
             IdentityPreflight::Committed { .. },
-            JournalReprovisionPolicy::ExplicitErasedSchema2Development,
-        ) => JournalBootPolicy::ProvisionErasedSchema2Development,
+            JournalReprovisionPolicy::ExplicitErasedSchema3Development,
+        ) => JournalBootPolicy::ProvisionErasedSchema3Development,
         (IdentityPreflight::Committed { .. }, JournalReprovisionPolicy::Disabled) => {
             JournalBootPolicy::MountExisting
         }
@@ -139,11 +139,11 @@ mod tests {
     }
 
     #[test]
-    fn explicit_schema2_development_policy_is_narrow_and_testable_in_every_build() {
+    fn explicit_schema3_development_policy_is_narrow_and_testable_in_every_build() {
         assert_eq!(
             journal_boot_policy(
                 IdentityPreflight::Vacant,
-                JournalReprovisionPolicy::ExplicitErasedSchema2Development,
+                JournalReprovisionPolicy::ExplicitErasedSchema3Development,
             ),
             JournalBootPolicy::ProvisionFactoryFirst
         );
@@ -154,17 +154,17 @@ mod tests {
             assert_eq!(
                 journal_boot_policy(
                     IdentityPreflight::Committed { coverage },
-                    JournalReprovisionPolicy::ExplicitErasedSchema2Development,
+                    JournalReprovisionPolicy::ExplicitErasedSchema3Development,
                 ),
-                JournalBootPolicy::ProvisionErasedSchema2Development
+                JournalBootPolicy::ProvisionErasedSchema3Development
             );
         }
     }
 
     #[test]
     fn build_selection_matches_the_non_default_cargo_feature() {
-        let expected = if cfg!(feature = "journal-schema2-dev-reprovision") {
-            JournalReprovisionPolicy::ExplicitErasedSchema2Development
+        let expected = if cfg!(feature = "journal-schema3-dev-reprovision") {
+            JournalReprovisionPolicy::ExplicitErasedSchema3Development
         } else {
             JournalReprovisionPolicy::Disabled
         };

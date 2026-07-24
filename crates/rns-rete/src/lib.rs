@@ -48,14 +48,15 @@ pub use embedded::{
     EmbeddedNode, EmbeddedNodeConfig, EmbeddedNodeMetrics, EmbeddedSendError, InboundData,
     InboundDataProjection, InboundProofPolicy, InboundProofPolicyError, IngressCounters,
     IngressDisposition, IngressDropReason, IngressMetadata, IngressReport, InterfaceId,
-    LINK_DATA_CONTEXT_NONE, MAX_CHANNEL_PAYLOAD, MAX_DATA_PAYLOAD, MAX_LXMF_TIMESTAMP_UNIX_MS,
-    MAX_OPPORTUNISTIC_LXMF_CARRIER, MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE, NodeActions, NodeRole,
-    PathRequestBuildError, PrepareBasicLxmfError, PrepareDataError,
-    PrepareOpportunisticLxmfDataError, PreparedBasicLxmf, PreparedData, RNS_MTU, ReceiptCandidate,
-    ReceiptId, ReceiptKind, ReceiptReservationUnavailable, ReceiptTerminal,
-    ReceiptTerminalCounters, ReceiptTerminalReservation, ReceiptTerminalSink, ReceiptTickReport,
-    RetainedProofInvariant, RouteSnapshot, TransportCounters, TxPacket, TxTarget,
-    project_inbound_data,
+    LINK_DATA_CONTEXT_NONE, MAX_CHANNEL_PAYLOAD, MAX_DATA_PAYLOAD, MAX_DIRECT_LXMF_CONTENT_SIZE,
+    MAX_DIRECT_LXMF_WIRE, MAX_LXMF_TIMESTAMP_UNIX_MS, MAX_OPPORTUNISTIC_LXMF_CARRIER,
+    MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE, NodeActions, NodeRole, PathRequestBuildError,
+    PrepareBasicLxmfError, PrepareDataError, PrepareDirectLxmfLinkDataError,
+    PrepareOpportunisticLxmfDataError, PreparedBasicDirectLxmf, PreparedBasicLxmf, PreparedData,
+    PreparedLinkData, RNS_MTU, ReceiptCandidate, ReceiptId, ReceiptKind,
+    ReceiptReservationUnavailable, ReceiptTerminal, ReceiptTerminalCounters,
+    ReceiptTerminalReservation, ReceiptTerminalSink, ReceiptTickReport, RetainedProofInvariant,
+    RouteSnapshot, TransportCounters, TxPacket, TxTarget, project_inbound_data,
 };
 pub use rete_core::{
     DestHash, DestType, Identity, IdentityHash, LinkId, MonotonicDuration, MonotonicInstant,
@@ -66,7 +67,7 @@ pub use rete_stack::{DestinationType, Direction};
 pub use rete_transport::{AnnounceError, AnnounceInfo, LinkState};
 
 /// Reviewed Rete integration-fork source revision.
-pub const SOURCE_REVISION: &str = "90570cafc812b3025011cb690ec74a27f287cb3f";
+pub const SOURCE_REVISION: &str = "2d0781838aa03370b739d4003bcd1bdd5bbb0c6c";
 
 /// Initial table capacities used only to obtain comparable Phase-0 numbers.
 pub mod probe_capacity {

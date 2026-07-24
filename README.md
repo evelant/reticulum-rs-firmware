@@ -22,6 +22,22 @@ bearers become Reticulum packet interfaces only through
 optional actors added after the LoRa slice. The already-qualified Heltec
 Wireless Tracker V2.3 pair remains a constrained LoRa regression target.
 
+Current source also removes typed peer endpoints from the normal Expo path.
+Each E290 projects up to 32 authenticated `lxmf.delivery` announces, retaining
+at most 256 application-data bytes per peer, and exposes them one record at a
+time through the existing authenticated BLE device session. The Expo
+**Nearby** picker refreshes that projection and adds or opens a durable contact
+with one tap; manual hexadecimal entry remains an advanced fallback. This is
+Reticulum-native discovery over the board's learned mesh paths, not a second
+phone BLE scan and not appliance authorization. QR, native proximity APIs, and
+an E290-mediated public BLE share may later carry one signed public contact
+card, but they cannot transfer device-control authority. A
+[bounded physical proof](docs/e290-reticulum-nearby-powered-proof.md) now
+qualifies existing-contact selection without endpoint entry, one short
+opportunistic LoRa message in each direction reaching `Delivered` with exact
+peer import, and app-process persistence; fresh contact creation and
+the reusable authenticated direct-Link capability remain open.
+
 The hardware-independent
 `reticulum-board-heltec-vision-master-e290` crate is the compiled source of
 truth for the supplied schematic's internal GPIO ownership, the fitted
@@ -113,9 +129,12 @@ tracked explicitly in
 Bitrate and cost are recorded but do not replace Reticulum routing. Until Rete
 paths carry an interface generation, an ID/configuration stays immutable for
 one node-owner lifetime or its learned paths must be purged before reuse.
-The current Rete pin, `90570cafc812b3025011cb690ec74a27f287cb3f`
-(designated durable tag `firmware-pin-90570ca`), carries learned path, reverse,
-and Link decisions as
+The current Rete pin,
+`2d0781838aa03370b739d4003bcd1bdd5bbb0c6c`, is the exact revision on
+fork branch `codex/link-data-receipts`. It descends from
+`90570cafc812b3025011cb690ec74a27f287cb3f` (tagged
+`firmware-pin-90570ca`; that predecessor tag does not name the current
+revision) and carries learned path, reverse, and Link decisions as
 exact interface targets instead of falling back to interface zero or generic
 broadcast. An exact target may intentionally equal the ingress slot, which is
 required to relay between peers on one shared LoRa interface. Reverse proofs
@@ -147,6 +166,12 @@ physical interface. Within this owned-Link lifecycle, only an initial
 LINKREQUEST whose path has no recorded interface may broadcast. Link DATA and
 `RESOURCE_PRF` received on another interface are rejected before deduplication,
 so a later copy on the authoritative interface is still admissible.
+Ordinary context-`NONE` Link DATA now receives a distinct `LinkData` receipt,
+providing the Rete prerequisite for its exact proof to drive product delivery
+state without conflating it with destination DATA or Channel traffic. Product
+Link orchestration and receipt-kind-safe attempt correlation remain to be
+integrated. Proof emission follows the receiving destination's `PROVE_NONE`,
+`PROVE_ALL`, or application-selected policy instead of being unconditional.
 
 The current binding is an interface-slot index, not a shared-host client
 endpoint. On Rete's Tokio `Hub`, synchronous output can retain the originating
@@ -416,7 +441,7 @@ reconcile an ambiguous backend result from actor-owned state without a caller
 reproducing the request. Every later physical operation borrows a view whose
 device, absolute range, capacity, alignment and layout version must match the
 mount binding before I/O. The actual
-optional pending cell is compile-time capped at 512 bytes. Its focused host
+optional pending cell is compile-time capped at 544 bytes. Its focused host
 tests and ESP32-S3 Xtensa checks pass.
 
 `reticulum-submission-runtime` now supplies the transport-neutral durable
@@ -435,7 +460,7 @@ stays disabled and route-only LoRa continues. The current PSRAM product profile
 retains 128 accepted-history entries and reports explicit capacity exhaustion
 for a 129th novel request. This remains a bounded non-reclaiming profile, not
 the intended long-term product capacity: the physical journal has a separate
-162-acceptance lifetime ceiling. Earlier one-entry and 16-entry proof artifacts
+154-acceptance lifetime ceiling. Earlier one-entry and 16-entry proof artifacts
 remain valid only for their named source/image and must not be read as the
 current limit or as powered qualification of the 128-entry profile. The
 source-composed minimal authenticated USB
@@ -488,7 +513,9 @@ after the submission port reports durable acceptance or exact replay. With
 state or an owned item copy; there is no persisted permission bit or mutation
 operation. With `experimental-lxmf`, authenticated clients can enumerate and
 chunk-read committed normalized messages or source-free compose a basic
-opportunistic send; `dispatch_with_lxmf` does not require the raw-inbox feature.
+method-neutral send; the appliance's automatic policy currently chooses the
+eligible opportunistic carrier. `dispatch_with_lxmf` does not require the
+raw-inbox feature.
 The resident E290 `ProductStorageCoordinator` exposes all enabled operations
 through one short-lived owner and stable mappings for availability, replay,
 conflict, capacity, ambiguity, and faults. Its current PSRAM profile retains 128
@@ -503,11 +530,13 @@ stale-reply handling. Independent Python vectors freeze the transcript and wire
 records. A separate allocation-free immutable credential authority now owns the
 shared ID/generation types, validates fixed `Pending`/`Active`/PSK-free
 `Revoked` records, selects zeroizing handshake material, and revalidates grants
-through a borrowing dispatch lease. Semantic journal schema 2 now persists the
+through a borrowing dispatch lease. Semantic journal schema 3 persists the
 exact credential ID/generation, authority revision, policy version, and granted
-permission mask with every accepted submission; the redundant serialized and
-in-RAM content digest is derived from the immutable intent, so the unchanged
-383-byte request still fits the 512-byte journal body. The canonical authority
+permission mask with every accepted submission. Its closed intent vocabulary
+keeps generic RNS DATA at 383 plaintext bytes and separately retains the exact
+complete signed LXMF message through 431 bytes in a 544-byte journal body,
+without binding that durable message to opportunistic or direct delivery.
+The canonical authority
 image, dedicated credential-partition contract, and two-sector commit/retire
 format are implemented. Lifecycle-specific authority planners construct only
 checked Add-`Pending`, Activate-`Pending`, and Abort-`Pending` successors; their
@@ -578,10 +607,12 @@ request or reply. Any session fault is terminal until USB reset or
 re-enumeration. This first profile deliberately omits resumption, protocol
 retries, close records, encryption, rate limiting/attempt policy, and concurrent
 requests. Credential selection, admission
-handoff, and node dispatch remain transport-neutral. The current qualification
-crypto suite is deliberately enabled only for USB Serial/JTAG; later BLE and
-Wi-Fi bearers can reuse the ownership boundary after adding and qualifying their
-own binding/suite, without redesigning node dispatch. Focused host, compile-fail,
+handoff, and node dispatch remain transport-neutral. USB Serial/JTAG uses the
+wired qualification suite; BLE has its separate suite-3 binding and a bounded
+powered iOS qualification. Wi-Fi has an implemented, host-qualified suite-2
+binding plus the E290 SoftAP/raw-TCP endpoint and native proof connector; its
+powered field qualification remains open. Focused
+host, compile-fail,
 and fake-NOR gates cover the credential authority, successor rules, and physical
 store. The accepted
 authentication, authority, provenance, and USB ownership contracts are
@@ -613,7 +644,7 @@ after frame exposure with an ordinary announce queued behind the DATA owner;
 LoRa lease offline, and permits no later host-radio TX or RX. This qualifies the
 software composition, not ESP32-S3 execution or RF hardware.
 The current root gates include focused host-client, portable Rete-integration,
-raw-RNS inbox-store, schema-2 lifecycle/candidate, released-vector, direct-Link,
+raw-RNS inbox-store, durable lifecycle/candidate, released-vector, direct-Link,
 LRRTT, channel-retry, keepalive, and deterministic three-node A--B--C relayed
 Link/LRPROOF/channel/proof coverage. The project adapter tests remain separate
 from the pinned Rete fork's selected validation set. This is deterministic
@@ -938,7 +969,7 @@ submission, physical LoRa peer-proof path, and bounded API 1.2 raw-RNS inbox
 commit/readback/reset/drop-newest workflow, four exact cold-mount fault states,
 one same-boot simulated commit-suppression path, and one exact opportunistic
 LXMF durable-commit/proof exchange. API 1.4 now implements authenticated
-committed-message list/read and source-free basic opportunistic send through
+committed-message list/read and source-free basic method-neutral send through
 the same transport-neutral durable submission runtime. Broader lifecycle work,
 physical-interruption qualification, additional LXMF carriers/directions, and
 a production client remain—not credential-store boot composition, the
@@ -978,7 +1009,14 @@ responder-side direct-packet Link DATA, and selects Rete's per-destination
 retained-proof policy. Both carrier classes require their exact proof; the
 primary destination accepts no inbound Links. Discovery emits a separately
 signed `lxmf.delivery` announce with canonical LXMF 1.0.1 `[nil, nil, []]`
-application data. An unmounted store or a clean fault
+application data. Valid remote announcements also feed a volatile,
+generation-ordered 32-peer application projection with at most 256
+authenticated application-data bytes per peer. An authenticated API 1.5 cursor
+read exposes destination, identity fingerprint, hop/interface hints, age, and
+optional signal observations without becoming route authority. The Rust chat
+runtime bounds and decodes this projection before the Expo **Nearby** picker
+offers one-tap durable contact creation. The current LoRa actor reports its
+interface identity but does not invent unavailable RSSI/SNR. An unmounted store or a clean fault
 that disables the LXMF service suppresses that secondary announce while the
 primary destination continues to announce. An ambiguous pending
 `StoreFaultHold` retains its exact owner but does not currently suppress the
@@ -1041,6 +1079,7 @@ second transport is required to qualify the first LoRa vertical slice.
 - [E290 LXMF host-appliance alpha proof](docs/e290-lxmf-appliance-alpha-proof.md)
 - [E290 Expo managed first-run proof](docs/e290-expo-appliance-first-run-proof.md)
 - [E290 Expo iOS BLE-to-LoRa powered proof](docs/e290-expo-ios-ble-lora-proof.md)
+- [E290 Reticulum-native Nearby powered proof](docs/e290-reticulum-nearby-powered-proof.md)
 - [Expo native Rust bridge proof](docs/expo-native-rust-bridge-proof.md)
 - [Usable-firmware POC limits and known defects](docs/poc-known-defects.md)
 - [Phase-0 scaffold decision](docs/adr/0001-phase-0-scaffold.md)

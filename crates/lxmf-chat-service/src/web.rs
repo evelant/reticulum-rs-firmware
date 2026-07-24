@@ -163,6 +163,7 @@ fn router(state: WebState) -> Router {
         .route("/api/v1/onboarding/recover", post(recover_onboarding))
         .route("/api/v1/snapshot", get(snapshot))
         .route("/api/v1/contacts", get(contacts))
+        .route("/api/v1/nearby", get(nearby_peers))
         .route("/api/v1/contacts/{destination}", put(upsert_contact))
         .route("/api/v1/conversations/{destination}", get(conversation))
         .route("/api/v1/messages", post(send_message))
@@ -433,6 +434,19 @@ async fn contacts(
         .await
         .map_err(HttpError::from_service)?;
     Ok(Json(contacts).into_response())
+}
+
+async fn nearby_peers(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
+    require_api(&state, &headers, false)?;
+    let peers = state
+        .appliance
+        .nearby_peers()
+        .await
+        .map_err(HttpError::from_service)?;
+    Ok(Json(peers).into_response())
 }
 
 async fn upsert_contact(
@@ -831,6 +845,36 @@ mod tests {
         assert_eq!(json["available"], false);
         assert_eq!(json["method"], serde_json::Value::Null);
         assert_eq!(json["snapshot"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn nearby_route_requires_the_loopback_session_and_uses_the_actor() {
+        let app = router(test_state());
+        let unauthenticated = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/api/v1/nearby")
+                    .header(HOST, "127.0.0.1:43123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let unavailable = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/api/v1/nearby")
+                    .header(HOST, "127.0.0.1:43123")
+                    .header(COOKIE, format!("{SESSION_COOKIE}={}", "ab".repeat(32)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

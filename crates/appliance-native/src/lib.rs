@@ -29,7 +29,7 @@ pub use credential::{NativeCredentialStatus, NativeCredentialSummary};
 /// Incompatible generation of the callable native bridge.
 pub const BRIDGE_API_MAJOR: u16 = 1;
 /// Backward-compatible revision of the callable native bridge.
-pub const BRIDGE_API_MINOR: u16 = 4;
+pub const BRIDGE_API_MINOR: u16 = 5;
 
 /// Exact protocol contract compiled into a native client binary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
@@ -120,9 +120,9 @@ mod tests {
             native_bridge_contract(),
             NativeBridgeContract {
                 bridge_api_major: 1,
-                bridge_api_minor: 4,
+                bridge_api_minor: 5,
                 device_api_major: 1,
-                device_api_minor: 4,
+                device_api_minor: 5,
                 max_message_bytes: 512,
                 max_lxmf_read_chunk_bytes: 416,
                 max_lxmf_basic_title_bytes: 295,

@@ -17,15 +17,19 @@ use reticulum_announce_clock::{
     BootEpochReservation, FreshClockPolicy, ReserveError, reserve_next_boot_epoch,
 };
 use reticulum_device_api::{
-    CapabilityAvailability, DestinationHash as ApiDestinationHash, IdentitySummary,
+    CapabilityAvailability, DestinationHash as ApiDestinationHash, IdentityHash as ApiIdentityHash,
+    IdentitySummary, LxmfDiscoveredPeer as ApiLxmfDiscoveredPeer,
     LxmfMessageHandle as ApiLxmfMessageHandle, LxmfMessageSummary as ApiLxmfMessageSummary,
+    LxmfPeerDiscoveryCursor as ApiLxmfPeerDiscoveryCursor, LxmfPeerDiscoveryIncarnation,
+    LxmfPeerDiscoveryPage as ApiLxmfPeerDiscoveryPage, LxmfPeerGeneration as ApiLxmfPeerGeneration,
     LxmfReadChunk as ApiLxmfReadChunk, LxmfReadLength as ApiLxmfReadLength,
     MAX_LXMF_READ_CHUNK_BYTES,
 };
 use reticulum_device_api_adapter::{
     InboundMailboxItem, InboundMailboxPort, InboundMailboxPortError, LxmfComposeAcceptance,
     LxmfComposePort, LxmfComposePortError, LxmfComposeRequest, LxmfInboxPort, LxmfInboxPortError,
-    SubmissionAcceptance, SubmissionPort, SubmissionPortError,
+    PeerDiscoveryPort, PeerDiscoveryPortError, SubmissionAcceptance, SubmissionPort,
+    SubmissionPortError,
 };
 use reticulum_device_api_credential_store::{
     BoundCredentialStore, CredentialStoreBinding, CredentialStoreRecovery, MountedCredentialStore,
@@ -91,10 +95,11 @@ use reticulum_lxmf_store::{
 };
 use reticulum_node_core::{
     ApplicationEventLease, AuthorizedFrameObservation, DelayedProofOwner,
-    DestinationHash as NodeDestinationHash, MAX_OPPORTUNISTIC_LXMF_CARRIER, MonotonicMillis,
+    DestinationHash as NodeDestinationHash, MAX_DIRECT_LXMF_WIRE, MonotonicMillis,
     MonotonicSeconds, PrepareBasicLxmfError, TxLeaseDeadline,
 };
 use reticulum_nor_flash_region::{PartitionNorFlash, RegionError};
+use reticulum_peer_discovery::{DiscoveredPeers, DiscoveryCursor};
 use reticulum_rns_inbox_store::{
     BoundInboxStore, InboxAdmissionError, InboxAdmissionOutcome, InboxCandidate, InboxItemId,
     InboxStoreBinding, InboxStoreMountError, InboxStoreState, MountedInboxStore,
@@ -108,7 +113,7 @@ use reticulum_storage_journal::{
     FirstProvisionError, FreshJournalPolicy, JournalState, provision_first,
 };
 use reticulum_storage_model::{
-    AcceptOutcome, AcceptanceCandidate, ExperimentalRnsDataIntent, LifecycleState, PrincipalId,
+    AcceptOutcome, AcceptanceCandidate, LifecycleState, LxmfMessageIntent, PrincipalId,
     SubmissionId,
 };
 use reticulum_submission_runtime::{
@@ -381,6 +386,12 @@ struct ProductAuthenticatedApiPort<'a> {
     lxmf_mutation_pending: bool,
     lxmf_compose_service_enabled: bool,
     supervisor: &'a ProductSupervisor,
+    discovered_peers: &'a DiscoveredPeers<
+        { config::LXMF_DISCOVERED_PEERS },
+        { config::LXMF_DISCOVERED_PEER_APP_DATA_BYTES },
+    >,
+    peer_discovery_incarnation: LxmfPeerDiscoveryIncarnation,
+    peer_discovery_now_ms: u64,
 }
 
 /// Product result of offering one decrypted local DATA item to durable storage.
@@ -623,7 +634,7 @@ impl ProductFlashOwner {
     /// Establish the exact empty first journal under the selected boot policy.
     ///
     /// Factory provisioning may resume its own torn first-format trajectory
-    /// while identity remains vacant. The schema-2 development path is
+    /// while identity remains vacant. The schema-3 development path is
     /// deliberately narrower: it scans the complete journal partition and
     /// accepts only erased media before entering `provision_first`. Neither
     /// path erases any bytes.
@@ -634,7 +645,7 @@ impl ProductFlashOwner {
         let erased_only = match policy {
             JournalBootPolicy::MountExisting => return Ok(None),
             JournalBootPolicy::ProvisionFactoryFirst => false,
-            JournalBootPolicy::ProvisionErasedSchema2Development => true,
+            JournalBootPolicy::ProvisionErasedSchema3Development => true,
         };
 
         let mut region =
@@ -1113,6 +1124,12 @@ impl ProductStorageCoordinator {
     pub(crate) fn dispatch_authenticated_request(
         &mut self,
         supervisor: &ProductSupervisor,
+        discovered_peers: &DiscoveredPeers<
+            { config::LXMF_DISCOVERED_PEERS },
+            { config::LXMF_DISCOVERED_PEER_APP_DATA_BYTES },
+        >,
+        peer_discovery_incarnation: LxmfPeerDiscoveryIncarnation,
+        peer_discovery_now_ms: u64,
         request: LocalApiRequest<AuthenticatedGrant>,
         identity: IdentitySummary,
     ) -> Result<LocalApiReply, AuthenticatedApiDispatchFailure> {
@@ -1146,6 +1163,9 @@ impl ProductStorageCoordinator {
             lxmf_mutation_pending,
             lxmf_compose_service_enabled: identity.lxmf_delivery_destination().is_some(),
             supervisor,
+            discovered_peers,
+            peer_discovery_incarnation,
+            peer_discovery_now_ms,
         };
         credential_runtime.dispatch_authenticated_request(request, identity, &mut port)
     }
@@ -1795,22 +1815,19 @@ impl LxmfComposePort for ProductAuthenticatedApiPort<'_> {
         }
 
         let destination = NodeDestinationHash::new(*request.destination().as_bytes());
-        let mut carrier = [0_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+        let mut wire = [0_u8; MAX_DIRECT_LXMF_WIRE];
         let prepared = self
             .supervisor
-            .prepare_basic_lxmf_into(
+            .prepare_basic_direct_lxmf_into(
                 &destination,
                 request.timestamp_unix_ms(),
                 request.title(),
                 request.content(),
-                &mut carrier,
+                &mut wire,
             )
             .map_err(map_lxmf_compose_error)?;
-        let carrier_len = usize::from(prepared.carrier_len());
-        if carrier_len > reticulum_storage_model::MAX_EXPERIMENTAL_RNS_DATA_BYTES {
-            return Err(LxmfComposePortError::InvalidRequest);
-        }
-        let intent = ExperimentalRnsDataIntent::new(request.destination(), &carrier[..carrier_len])
+        let wire_len = usize::from(prepared.wire_len());
+        let intent = LxmfMessageIntent::new(&wire[..wire_len])
             .map_err(|_| LxmfComposePortError::InvalidRequest)?;
         let candidate = AcceptanceCandidate::new(
             request.principal(),
@@ -1822,6 +1839,88 @@ impl LxmfComposePort for ProductAuthenticatedApiPort<'_> {
         Ok(LxmfComposeAcceptance::new(
             acceptance,
             prepared.message_id(),
+        ))
+    }
+}
+
+impl PeerDiscoveryPort for ProductAuthenticatedApiPort<'_> {
+    fn availability(&mut self) -> CapabilityAvailability {
+        CapabilityAvailability::Available
+    }
+
+    fn max_app_data_bytes(&mut self) -> u16 {
+        config::LXMF_DISCOVERED_PEER_APP_DATA_BYTES as u16
+    }
+
+    fn next(
+        &mut self,
+        after: Option<ApiLxmfPeerDiscoveryCursor>,
+    ) -> Result<ApiLxmfPeerDiscoveryPage, PeerDiscoveryPortError> {
+        let mut history_gap = false;
+        let cursor = match after {
+            None => DiscoveryCursor::START,
+            Some(cursor) if cursor.incarnation() == self.peer_discovery_incarnation => {
+                DiscoveryCursor::new(cursor.after_generation())
+            }
+            Some(_) => {
+                history_gap = true;
+                DiscoveryCursor::START
+            }
+        };
+
+        let page = match self.discovered_peers.page_after(cursor) {
+            Ok(page) => page,
+            Err(_) => {
+                history_gap = true;
+                self.discovered_peers
+                    .page_after(DiscoveryCursor::START)
+                    .map_err(|_| PeerDiscoveryPortError::Faulted)?
+            }
+        };
+        history_gap |= page.history_gap();
+
+        let peer = page
+            .peer()
+            .map(|peer| {
+                let signal = peer.signal();
+                let generation = ApiLxmfPeerGeneration::new(peer.generation().get())
+                    .map_err(|_| PeerDiscoveryPortError::Faulted)?;
+                ApiLxmfDiscoveredPeer::new(
+                    ApiDestinationHash(*peer.destination().as_bytes()),
+                    ApiIdentityHash::new(*peer.identity_hash().as_bytes()),
+                    peer.app_data(),
+                    peer.hops(),
+                    peer.interface().get(),
+                    signal.rssi_dbm(),
+                    signal.snr_db(),
+                    self.peer_discovery_now_ms
+                        .saturating_sub(peer.observed_at().get()),
+                    generation,
+                )
+                .map_err(|_| PeerDiscoveryPortError::Faulted)
+            })
+            .transpose()?;
+        let latest_generation = self
+            .discovered_peers
+            .latest_generation()
+            .map(|generation| ApiLxmfPeerGeneration::new(generation.get()))
+            .transpose()
+            .map_err(|_| PeerDiscoveryPortError::Faulted)?;
+        let oldest_retained_generation = page
+            .oldest_retained()
+            .map(|generation| ApiLxmfPeerGeneration::new(generation.get()))
+            .transpose()
+            .map_err(|_| PeerDiscoveryPortError::Faulted)?;
+
+        Ok(ApiLxmfPeerDiscoveryPage::new(
+            ApiLxmfPeerDiscoveryCursor::new(
+                self.peer_discovery_incarnation,
+                page.next_cursor().get(),
+            ),
+            latest_generation,
+            oldest_retained_generation,
+            history_gap,
+            peer,
         ))
     }
 }

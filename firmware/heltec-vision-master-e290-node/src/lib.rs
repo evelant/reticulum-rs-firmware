@@ -769,9 +769,9 @@ mod tests {
         assert!(node.contains("enum AuthenticatedApiNodeState"));
         assert!(node.contains("*supervisor.destination_hash().as_bytes()"));
         assert!(node.contains("progressed |= step_authenticated_api("));
-        assert!(
-            node.contains("storage.dispatch_authenticated_request(supervisor, request, identity)")
-        );
+        assert!(node.contains("storage.dispatch_authenticated_request("));
+        assert!(node.contains("peer_discovery_incarnation,"));
+        assert!(node.contains("discovered_peers,"));
         assert!(node.contains("AuthenticatedApiNodeState::PendingReply(pressure.into_inner())"));
         assert!(node.contains("AuthenticatedApiNodeState::Quarantined {"));
         assert!(node.contains("request: failure.into_request()"));
@@ -788,9 +788,11 @@ mod tests {
         assert!(storage.contains("impl InboundMailboxPort for ProductAuthenticatedApiPort<'_>"));
         assert!(storage.contains("impl LxmfInboxPort for ProductAuthenticatedApiPort<'_>"));
         assert!(storage.contains("impl LxmfComposePort for ProductAuthenticatedApiPort<'_>"));
+        assert!(storage.contains("impl PeerDiscoveryPort for ProductAuthenticatedApiPort<'_>"));
         assert!(storage.contains("request.destination()"));
         assert!(storage.contains("request.authorization()"));
-        assert!(storage.contains(".prepare_basic_lxmf_into("));
+        assert!(storage.contains(".prepare_basic_direct_lxmf_into("));
+        assert!(storage.contains("LxmfMessageIntent::new("));
 
         let usb = include_str!("usb_pairing_task.rs");
         assert!(usb.contains(

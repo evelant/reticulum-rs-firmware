@@ -12,7 +12,7 @@ use core::mem;
 use rand_core::{CryptoRng, RngCore};
 use reticulum_device_api::IdentitySummary;
 use reticulum_device_api_adapter::{
-    InboundMailboxPort, LxmfComposePort, LxmfInboxPort, SubmissionPort,
+    InboundMailboxPort, LxmfComposePort, LxmfInboxPort, PeerDiscoveryPort, SubmissionPort,
 };
 use reticulum_device_api_credential_store::{
     BoundCredentialStoreAccess, CommitPairingLifecycleSuccessorError, CredentialStoreBinding,
@@ -329,7 +329,11 @@ impl CredentialRuntime {
         port: &mut P,
     ) -> Result<LocalApiReply, AuthenticatedApiDispatchFailure>
     where
-        P: SubmissionPort + InboundMailboxPort + LxmfInboxPort + LxmfComposePort,
+        P: SubmissionPort
+            + InboundMailboxPort
+            + LxmfInboxPort
+            + LxmfComposePort
+            + PeerDiscoveryPort,
     {
         let authority = self
             .mounted

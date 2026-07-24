@@ -12,8 +12,8 @@ use reticulum_device_api::{
     decode_request, encode_response,
 };
 use reticulum_device_api_adapter::{
-    InboundMailboxPort, LxmfComposePort, LxmfInboxPort, SubmissionPort, dispatch,
-    dispatch_with_inbox, dispatch_with_inbox_and_lxmf,
+    InboundMailboxPort, LxmfComposePort, LxmfInboxPort, PeerDiscoveryPort, SubmissionPort,
+    dispatch, dispatch_with_inbox, dispatch_with_inbox_lxmf_and_peer_discovery,
 };
 use reticulum_device_api_credentials::CredentialAuthority;
 use reticulum_device_api_handoff::{
@@ -204,7 +204,7 @@ pub fn dispatch_authenticated_request_with_inbox_and_lxmf<const CREDENTIALS: usi
     port: &mut P,
 ) -> Result<LocalApiReply, AuthenticatedApiDispatchFailure>
 where
-    P: SubmissionPort + InboundMailboxPort + LxmfInboxPort + LxmfComposePort,
+    P: SubmissionPort + InboundMailboxPort + LxmfInboxPort + LxmfComposePort + PeerDiscoveryPort,
 {
     let envelope = match decode_request(request.message().encoded()) {
         Ok(envelope) => envelope,
@@ -219,7 +219,7 @@ where
     let response = match authority.and_then(|authority| request.grant().revalidate(authority).ok())
     {
         Some(lease) => lease.with_dispatch_context(|context| {
-            dispatch_with_inbox_and_lxmf(port, identity, context, envelope)
+            dispatch_with_inbox_lxmf_and_peer_discovery(port, identity, context, envelope)
         }),
         None => ResponseEnvelope {
             version: ApiVersion::CURRENT,

@@ -8,8 +8,9 @@ use embedded_storage::nor_flash::{
 };
 use reticulum_storage_model::{
     AUTHORIZATION_KNOWN_PERMISSION_BITS, Accepted, AuthorizationSnapshot, DestinationHash,
-    ExperimentalRnsDataIntent, IdempotencyKey, MAX_EXPERIMENTAL_RNS_DATA_BYTES,
-    MAX_JOURNAL_RECORD_BYTES, PrincipalId, encode_journal_entry,
+    ExperimentalRnsDataIntent, IdempotencyKey, LxmfMessageIntent, MAX_EXPERIMENTAL_RNS_DATA_BYTES,
+    MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES, MAX_JOURNAL_RECORD_BYTES, PrincipalId,
+    encode_journal_entry,
 };
 use std::vec;
 use std::vec::Vec;
@@ -229,6 +230,24 @@ fn accepted(id: u64, principal: u8, key: u8, payload: &[u8]) -> JournalEntry {
     ))
 }
 
+fn lxmf_message_accepted(id: u64, principal: u8, key: u8, wire: &[u8]) -> JournalEntry {
+    let intent = LxmfMessageIntent::new(wire).expect("test inline LXMF wire fits");
+    JournalEntry::Accepted(Accepted::new(
+        SubmissionId::new(id),
+        PrincipalId::new([principal; 16]),
+        IdempotencyKey::new([key; 16]),
+        intent,
+        AuthorizationSnapshot::new(
+            [0xa5; 16],
+            u64::MAX,
+            u64::MAX,
+            u32::MAX,
+            AUTHORIZATION_KNOWN_PERMISSION_BITS,
+        )
+        .expect("test authorization is valid"),
+    ))
+}
+
 fn formatted() -> FakeNor {
     let mut flash = FakeNor::erased();
     let state = format_erased(&mut flash).expect("erased fake NOR formats");
@@ -324,6 +343,14 @@ fn encode_manifest_for_schema(manifest: Manifest, schema: u16) -> [u8; MANIFEST_
     encoded
 }
 
+fn encode_manifest_for_physical(manifest: Manifest, physical: u16) -> [u8; MANIFEST_SIZE] {
+    let mut encoded = encode_manifest(manifest);
+    put_u16(&mut encoded, 8, physical);
+    let digest = manifest_digest(&encoded[..MANIFEST_DATA_SIZE]);
+    encoded[MANIFEST_DATA_SIZE..MANIFEST_PREFIX_SIZE].copy_from_slice(&digest);
+    encoded
+}
+
 #[test]
 fn geometry_exactly_fills_the_fixed_partition_contract() {
     assert_eq!(PARTITION_SIZE, 1024 * 1024);
@@ -334,38 +361,47 @@ fn geometry_exactly_fills_the_fixed_partition_contract() {
     assert_eq!(BANK_A_OFFSET + BANK_SIZE, BANK_B_OFFSET);
     assert_eq!(BANK_B_OFFSET + BANK_SIZE, PARTITION_SIZE);
     assert_eq!(BANK_SLOT_COUNT * SLOT_SIZE + BANK_TAIL_SIZE, BANK_SIZE);
-    assert_eq!(BANK_SLOT_COUNT, 812);
+    assert_eq!(BANK_SLOT_COUNT, 774);
     assert_eq!(
         SLOT_HEADER_SIZE + BODY_SIZE + DIGEST_SIZE + COMMIT_SIZE,
         SLOT_SIZE
     );
-    assert_eq!(MAX_ACCEPTED_SUBMISSIONS, 162);
+    assert_eq!(BANK_TAIL_SIZE, 64);
+    assert_eq!(MAX_ACCEPTED_SUBMISSIONS, 154);
 }
 
 #[test]
-fn largest_semantically_permitted_record_uses_508_body_bytes_and_round_trips() {
+fn largest_semantically_permitted_record_uses_538_body_bytes_and_round_trips() {
     assert_eq!(BODY_SIZE, MAX_JOURNAL_RECORD_BYTES);
-    let payload = [0x5a; MAX_EXPERIMENTAL_RNS_DATA_BYTES];
-    let entry = accepted(u64::MAX, 0xff, 0xee, &payload);
+    let mut wire = [0x5a; MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES];
+    wire[..16].fill(0x31);
+    let entry = lxmf_message_accepted(u64::MAX, 0xff, 0xee, &wire);
     let mut canonical = [0_u8; BODY_SIZE];
     let encoded_len = encode_journal_entry(&entry, &mut canonical)
         .expect("the semantic maximum must fit the physical body");
 
-    // Accepted is schema 2's only variable-length record. Its 383-byte
-    // semantic payload ceiling plus maximum-width identifiers and provenance
-    // produce a 508-byte canonical record, leaving 4 bytes of physical format
-    // headroom.
-    assert_eq!(encoded_len, 508);
-    assert_eq!(BODY_SIZE - encoded_len, 4);
-    // A 387-byte payload would retain the same CBOR byte-string length width
-    // and consume those 4 bytes, but the semantic constructor rejects it.
-    const EXACT_BODY_PAYLOAD_BYTES: usize = MAX_EXPERIMENTAL_RNS_DATA_BYTES + (BODY_SIZE - 508);
-    assert_eq!(EXACT_BODY_PAYLOAD_BYTES, 387);
-    let oversized_payload = [0_u8; EXACT_BODY_PAYLOAD_BYTES];
+    // Schema 3's method-neutral LXMF variant retains all 431 signed wire bytes and
+    // maximum-width identifiers and provenance in one canonical record.
+    assert_eq!(encoded_len, 538);
+    assert_eq!(BODY_SIZE - encoded_len, 6);
+
+    // Raising durable inline-LXMF capacity by one byte is rejected by the
+    // semantic constructor rather than consuming physical format headroom.
+    let oversized_wire = [0_u8; MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES + 1];
+    let semantic_error = LxmfMessageIntent::new(&oversized_wire)
+        .expect_err("wire above the inline message ceiling must be rejected");
+    assert_eq!(
+        semantic_error.actual(),
+        MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES + 1
+    );
+    assert_eq!(semantic_error.maximum(), MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES);
+
+    // Generic destination DATA remains independently constrained to 383 bytes.
+    let oversized_payload = [0_u8; MAX_EXPERIMENTAL_RNS_DATA_BYTES + 1];
     let semantic_error =
         ExperimentalRnsDataIntent::new(DestinationHash::new([0x31; 16]), &oversized_payload)
-            .expect_err("the semantic model must reject the payload needed to reach 512 bytes");
-    assert_eq!(semantic_error.actual(), EXACT_BODY_PAYLOAD_BYTES);
+            .expect_err("generic DATA must retain its protocol MDU");
+    assert_eq!(semantic_error.actual(), MAX_EXPERIMENTAL_RNS_DATA_BYTES + 1);
     assert_eq!(semantic_error.maximum(), MAX_EXPERIMENTAL_RNS_DATA_BYTES);
 
     let mut flash = formatted();
@@ -436,12 +472,78 @@ fn format_is_explicit_requires_every_byte_erased_and_never_erases() {
 }
 
 #[test]
-fn schema_one_manifest_is_typed_unsupported_and_all_mount_paths_are_read_only() {
+fn schema_two_manifest_is_typed_unsupported_and_all_mount_paths_are_read_only() {
     assert_eq!(
-        JOURNAL_SCHEMA_VERSION, 2,
-        "this regression fixture covers the explicit schema-1 to schema-2 boundary"
+        JOURNAL_SCHEMA_VERSION, 3,
+        "this regression fixture covers the explicit schema-2 to schema-3 boundary"
     );
     let old_manifest = encode_manifest_for_schema(
+        Manifest {
+            bank: Bank::A,
+            generation: 1,
+            baseline_count: 0,
+            baseline_tail: ZERO_DIGEST,
+        },
+        2,
+    );
+    let mut flash = FakeNor::erased();
+    flash.bytes[..MANIFEST_SIZE].copy_from_slice(&old_manifest);
+    let before = flash.bytes.clone();
+    let writes = flash.writes;
+    let erases = flash.erases;
+
+    assert!(matches!(
+        mount::<1, _>(&mut flash, SubmissionId::new(1)),
+        Err(JournalError::UnsupportedSemanticVersion(2))
+    ));
+    assert!(matches!(
+        append::<1, _>(
+            &mut flash,
+            SubmissionId::new(1),
+            accepted(1, 0x11, 0x22, b"must not append"),
+        ),
+        Err(JournalError::UnsupportedSemanticVersion(2))
+    ));
+    assert!(matches!(
+        compact::<1, _>(&mut flash, SubmissionId::new(1)),
+        Err(JournalError::UnsupportedSemanticVersion(2))
+    ));
+
+    assert_eq!(flash.bytes, before);
+    assert_eq!(flash.writes, writes);
+    assert_eq!(flash.erases, erases);
+}
+
+#[test]
+fn malformed_schema_two_manifest_remains_manifest_corruption() {
+    assert_eq!(JOURNAL_SCHEMA_VERSION, 3);
+    let mut old_manifest = encode_manifest_for_schema(
+        Manifest {
+            bank: Bank::A,
+            generation: 1,
+            baseline_count: 0,
+            baseline_tail: ZERO_DIGEST,
+        },
+        2,
+    );
+    old_manifest[MANIFEST_DATA_SIZE] ^= 0x01;
+    let mut flash = FakeNor::erased();
+    flash.bytes[..MANIFEST_SIZE].copy_from_slice(&old_manifest);
+    let before = flash.bytes.clone();
+
+    assert!(matches!(
+        mount::<1, _>(&mut flash, SubmissionId::new(1)),
+        Err(JournalError::ManifestCorrupt)
+    ));
+    assert_eq!(flash.bytes, before);
+    assert_eq!(flash.writes, 0);
+    assert_eq!(flash.erases, 0);
+}
+
+#[test]
+fn physical_one_manifest_is_typed_unsupported_and_all_mount_paths_are_read_only() {
+    assert_eq!(PHYSICAL_FORMAT_VERSION, 2);
+    let old_manifest = encode_manifest_for_physical(
         Manifest {
             bank: Bank::A,
             generation: 1,
@@ -458,7 +560,7 @@ fn schema_one_manifest_is_typed_unsupported_and_all_mount_paths_are_read_only() 
 
     assert!(matches!(
         mount::<1, _>(&mut flash, SubmissionId::new(1)),
-        Err(JournalError::UnsupportedSemanticVersion(1))
+        Err(JournalError::UnsupportedPhysicalVersion(1))
     ));
     assert!(matches!(
         append::<1, _>(
@@ -466,42 +568,16 @@ fn schema_one_manifest_is_typed_unsupported_and_all_mount_paths_are_read_only() 
             SubmissionId::new(1),
             accepted(1, 0x11, 0x22, b"must not append"),
         ),
-        Err(JournalError::UnsupportedSemanticVersion(1))
+        Err(JournalError::UnsupportedPhysicalVersion(1))
     ));
     assert!(matches!(
         compact::<1, _>(&mut flash, SubmissionId::new(1)),
-        Err(JournalError::UnsupportedSemanticVersion(1))
+        Err(JournalError::UnsupportedPhysicalVersion(1))
     ));
 
     assert_eq!(flash.bytes, before);
     assert_eq!(flash.writes, writes);
     assert_eq!(flash.erases, erases);
-}
-
-#[test]
-fn malformed_schema_one_manifest_remains_manifest_corruption() {
-    assert_eq!(JOURNAL_SCHEMA_VERSION, 2);
-    let mut old_manifest = encode_manifest_for_schema(
-        Manifest {
-            bank: Bank::A,
-            generation: 1,
-            baseline_count: 0,
-            baseline_tail: ZERO_DIGEST,
-        },
-        1,
-    );
-    old_manifest[MANIFEST_DATA_SIZE] ^= 0x01;
-    let mut flash = FakeNor::erased();
-    flash.bytes[..MANIFEST_SIZE].copy_from_slice(&old_manifest);
-    let before = flash.bytes.clone();
-
-    assert!(matches!(
-        mount::<1, _>(&mut flash, SubmissionId::new(1)),
-        Err(JournalError::ManifestCorrupt)
-    ));
-    assert_eq!(flash.bytes, before);
-    assert_eq!(flash.writes, 0);
-    assert_eq!(flash.erases, 0);
 }
 
 #[test]
@@ -536,7 +612,7 @@ fn unsupported_schema_manifests_preserve_two_bank_trajectory_classification() {
             baseline_count: 0,
             baseline_tail: ZERO_DIGEST,
         },
-        1,
+        2,
     );
     let mut interrupted_first_generation = FakeNor::erased();
     interrupted_first_generation.bytes[MANIFEST_A_OFFSET..MANIFEST_A_OFFSET + MANIFEST_SIZE]
@@ -551,7 +627,7 @@ fn unsupported_schema_manifests_preserve_two_bank_trajectory_classification() {
             baseline_count: 0,
             baseline_tail: ZERO_DIGEST,
         },
-        1,
+        2,
     );
     let mut interrupted_retirement = FakeNor::erased();
     interrupted_retirement.bytes[MANIFEST_A_OFFSET..MANIFEST_A_OFFSET + MANIFEST_SIZE]
@@ -559,15 +635,15 @@ fn unsupported_schema_manifests_preserve_two_bank_trajectory_classification() {
     interrupted_retirement.bytes[MANIFEST_B_OFFSET] = 0xfe;
     assert_read_only_error(
         interrupted_retirement,
-        JournalError::UnsupportedSemanticVersion(1),
+        JournalError::UnsupportedSemanticVersion(2),
     );
 
     for (a_generation, a_schema, b_generation, b_schema, expected) in [
-        (1, 1, 1, 1, JournalError::ManifestConflict),
-        (1, 1, 3, 1, JournalError::ManifestConflict),
-        (1, 1, 2, 0, JournalError::ManifestConflict),
-        (1, 1, 2, 2, JournalError::ManifestConflict),
-        (1, 1, 2, 1, JournalError::UnsupportedSemanticVersion(1)),
+        (1, 2, 1, 2, JournalError::ManifestConflict),
+        (1, 2, 3, 2, JournalError::ManifestConflict),
+        (1, 2, 2, 0, JournalError::ManifestConflict),
+        (1, 2, 2, 3, JournalError::ManifestConflict),
+        (1, 2, 2, 2, JournalError::UnsupportedSemanticVersion(2)),
     ] {
         let mut flash = FakeNor::erased();
         let a = encode_manifest_for_schema(
@@ -936,7 +1012,7 @@ fn same_logical_key_with_different_content_is_a_conflict_without_writing() {
 }
 
 #[test]
-fn acceptance_reservation_admits_162_and_rejects_163_before_flash_mutation() {
+fn acceptance_reservation_admits_154_and_rejects_155_before_flash_mutation() {
     const INDEX_CAPACITY: usize = MAX_ACCEPTED_SUBMISSIONS + 1;
     let mut flash = formatted();
 
@@ -954,7 +1030,7 @@ fn acceptance_reservation_admits_162_and_rejects_163_before_flash_mutation() {
     }
 
     let full = mount::<INDEX_CAPACITY, _>(&mut flash, SubmissionId::new(1))
-        .expect("all 162 reserved acceptances mount");
+        .expect("all 154 reserved acceptances mount");
     assert_eq!(
         full.state().accepted_submissions(),
         MAX_ACCEPTED_SUBMISSIONS

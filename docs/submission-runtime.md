@@ -6,18 +6,20 @@ The E290 image now keeps it in a resident sole-flash coordinator after strict
 mount and explicit bounded-history recovery over the checked `node_journal`
 partition. The node task gives that coordinator at most one operation-scoped
 runtime attempt per outer loop beside the `NodeInterfaceSupervisor` and now
-composes the exact radio authorized-frame request/durable-echo handoff. A
-one-entry accepted-history cap exists only for composition qualification and is
-not a product-capacity commitment. Eight focused runtime tests, two E290
-cross-layer composition tests, strict Clippy, and generic/ESP32-S3 target checks
-pass. Portable API framing, immutable credential authority and store, the
+composes the exact radio authorized-frame request/durable-echo handoff. The
+current E290 product profile retains 128 accepted-history entries in PSRAM and
+rejects a 129th novel submission without mutation; an earlier one-entry
+cross-layer fixture remains only historical composition qualification. Focused
+runtime and E290 cross-layer tests, strict Clippy, and generic/ESP32-S3 target
+checks pass. Portable API framing, immutable credential authority and store, the
 qualification-session core, and job handoff are qualified. E290 boot now mounts,
 performs bounded deterministic retire-then-cleanup recovery, and retains the
-credential store without provisioning it. The minimal authenticated USB
-session/API lane is composed and passes one bounded powered ADR 0009 credential/
+credential store without provisioning it. Authenticated USB and BLE session/API
+lanes are composed and have bounded powered ADR 0009 credential/
 API/DATA/peer-proof/status path.
-Semantic schema 2 now preserves exact authorization provenance through runtime
-acceptance, remount, and replay.
+Semantic schema 3 preserves exact authorization provenance through runtime
+acceptance, remount, and replay while distinguishing generic RNS DATA from an
+exact complete method-neutral LXMF-message intent.
 
 ## Boundary
 
@@ -38,7 +40,7 @@ quarantined owners until durable projection allows acknowledgement.
 
 ```mermaid
 flowchart LR
-    Client["local client transport (future)"] -.-> API["authenticated device API"]
+    Client["local USB, BLE, or Wi-Fi client bearer"] --> API["authenticated device API"]
     API -.-> Runtime["submission runtime"]
     Coordinator["resident sole-flash coordinator"] <--> Runtime
     Runtime <--> Store["backend-independent storage actor"]
@@ -105,12 +107,12 @@ invalid lifecycle state, and latched storage/projector faults remain errors.
 Durable state intentionally drops only the selected-interface scalar: packet
 identity and attempt correlation are stable across an interface choice, while
 the projector still cross-checks the complete length, frame digest, and attempt
-token. The product has a one-entry qualification cap. The minimal authenticated
-USB lane can reach the composed handoff from a fresh local submission in the
-powered E290 graph. One bounded run passed durable acceptance, LoRa DATA/peer
-proof, terminal projection, and a fresh status session after USB re-
-enumeration; the host composition harness drives the same semantic boundaries
-directly.
+token. The product profile owns 128 resident submissions; the one-entry harness
+below remains a deliberately narrow composition fixture. Authenticated USB and
+BLE clients can reach the composed handoff from a fresh local submission in the
+powered E290 graph. Bounded runs passed durable acceptance, LoRa DATA/proof,
+terminal projection, exact peer import, and status recovery through both host
+tools and the installed Expo client.
 
 ## E290 cross-layer software qualification
 
@@ -131,21 +133,20 @@ The fault path exposes a DATA frame, queues an ordinary announce behind its
 acknowledgement gate, then injects a permanent wrong journal binding.
 `ActiveOwnerFailStopped` retains the frame, completion, router ticket, DATA
 buffer, and queued ordinary work; it emits no durable acknowledgement and the
-host radio records no later TX or RX. This closes software composition
-qualification for the one-entry profile without making an ESP32-S3, flash-power,
-or RF claim.
+host radio records no later TX or RX. This closes historical
+software-composition qualification for that one-entry fixture without making
+an ESP32-S3, flash-power, RF, or current-capacity claim.
 
 ## Remaining product work and risks
 
 - **E290 software composition:** boot validates the exact partition, mounts and
-  recovers the runtime, permits at most one accepted historical submission for
-  composition qualification, releases the
-  temporary journal view, and transfers flash plus runtime into the resident
-  coordinator. The coordinator then lends one fresh bound view per synchronous
-  runtime call. The bounded radio request/durable-echo handoff, one-entry cap,
-  and ADR 0005 failure states now pass cross-layer host composition tests. LoRa
-  remains the first and primary interface, and no second interface is a
-  prerequisite.
+  recovers the runtime, allocates the current 128-entry submission profile in
+  PSRAM, releases the temporary journal view, and transfers flash plus runtime
+  into the resident coordinator. The coordinator then lends one fresh bound
+  view per synchronous runtime call. The bounded radio request/durable-echo
+  handoff, exact capacity rejection, and ADR 0005 failure states pass host and
+  powered qualification. LoRa remains the first and primary Reticulum
+  interface, and no second interface is a prerequisite.
 - **First format:** runtime mount still never provisions storage. Before
   identity mutation, `IdentityPreflight::Vacant` is the independent durable
   authority for `provision_first(AllowFirstProvision)`. That operation accepts
@@ -178,20 +179,19 @@ or RF claim.
   sole node owner must eventually mint an exact transport-neutral quiescence
   proof after every possible producer is terminal and drained before a slot can
   be reused.
-- **Journal retention:** semantic schema 2 permanently retains every submission record
-  and idempotency history, has a 162-submission lifetime admission limit, and
+- **Journal retention:** semantic schema 3 permanently retains every submission record
+  and idempotency history, has a 154-submission lifetime admission limit, and
   has no eviction or garbage collection. A bounded retention/export/migration
   policy is required before this becomes a long-lived message service.
 - **Client edge:** authenticated API dispatch, immutable credential authority,
-  framing, the qualification-session core, and boot-lifetime job handoff exist,
-  durable authorization provenance now reaches the journal, and the resident
-  coordinator retains the boot-mounted credential store and its admission
-  state. Explicit initialization/provisioning/pairing and the minimal
-  single-flight authenticated USB session are wired to the runtime. Its bounded
-  powered USB-to-LoRa-peer-proof/status path passes; BLE/Wi-Fi serving and
-  application-level message consumption remain open.
-  `ProductStorageCoordinator` implements the target-safe `SubmissionPort` under
-  the one-entry qualification cap.
+  framing, live pairing, and boot-lifetime job handoff exist, durable
+  authorization provenance reaches the journal, and the resident coordinator
+  retains the boot-mounted credential store and its admission state. USB and
+  BLE serving are wired to the runtime; the installed Expo client has paired,
+  submitted, imported, and persisted bidirectional LXMF over BLE-to-LoRa.
+  Wi-Fi serving is build/host qualified but awaits the disconnected field test.
+  `ProductStorageCoordinator` implements the target-safe `SubmissionPort`
+  under the current 128-entry resident profile.
 - **Powered qualification:** integrated power-cut/brownout, watchdog, flash
   contention, compaction, endurance, stack/static-layout, and radio-deadline
   tests remain product gates. The source-`96e38aa` two-board smoke established

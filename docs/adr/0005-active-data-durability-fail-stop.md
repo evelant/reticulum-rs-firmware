@@ -123,17 +123,16 @@ ordinary announce behind it, injects a wrong journal binding, and proves
 `ActiveOwnerFailStopped` emits no acknowledgement, retains all owners, takes the
 LoRa lease offline, and permits no later host-radio TX or RX.
 
-At acceptance of this ADR, the E290 library had 125 passing tests, including the policy/product,
-credential boot/runtime, live-pairing, USB/reset, causal-frontier, and two
-cross-layer composition paths. This closes software composition
-qualification for the LoRa-first one-entry profile. Portable API framing,
-immutable credential authority, the qualification-session core, and job handoff
-are qualified, and semantic schema 2 persists exact authorization provenance;
-ADR 0009's credential store is now boot-composed and explicit initialization/
-pairing is routed. The firmware API/session lane and minimal authenticated USB
-bearer now pass a bounded powered credential/API/DATA/peer-proof/status happy
-path. Source `96e38aa` supplies earlier bounded powered
+At acceptance of this ADR, the E290 library had 125 passing tests, including
+the policy/product, credential boot/runtime, live-pairing, USB/reset,
+causal-frontier, and two cross-layer composition paths. That historical
+milestone closed software composition qualification for the then-current
+LoRa-first one-entry profile. It used semantic schema 2 and the first minimal
+authenticated USB bearer. Current source has since moved to semantic schema 3,
+a 128-entry external-PSRAM accepted-history profile, and authenticated USB and
+BLE bearers; those later changes do not weaken this fail-stop decision. Source
+`96e38aa` supplies the earlier bounded powered
 permanent-graph evidence for exact image readback, erased credential/journal
-boot, LoRa/interface readiness, and ordinary TX on both boards. The current run
-exercises the successful active-DATA durability owner, but this ADR's injected
+boot, LoRa/interface readiness, and ordinary TX on both boards. That acceptance
+run exercised the successful active-DATA durability owner, but this ADR's injected
 fail-stop fault path still requires separate hardware evidence.

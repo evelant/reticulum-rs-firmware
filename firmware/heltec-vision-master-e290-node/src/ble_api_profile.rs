@@ -176,8 +176,7 @@ const _: () = assert!(DISCONNECT_DRAIN_PROLONGED_LOG_MS > DISCONNECT_DRAIN_RECHE
 #[cfg(test)]
 mod tests {
     use super::{
-        CONNECTIONS_MAX, CONTROLLER_ACTIVITY_MAX, DISCONNECT_DRAIN_PROLONGED_LOG_MS,
-        DISCONNECT_DRAIN_RECHECK_INTERVAL_MS, IndicationGate, IndicationGateError,
+        CONNECTIONS_MAX, CONTROLLER_ACTIVITY_MAX, IndicationGate, IndicationGateError,
         PRE_AUTHENTICATION_TIMEOUT_MS, PreAuthenticationDeadline, PreAuthenticationDeadlineStatus,
         static_random_address,
     };
@@ -187,12 +186,6 @@ mod tests {
     fn controller_activity_budget_keeps_one_advertiser_separate_from_one_link() {
         assert_eq!(CONNECTIONS_MAX, 1);
         assert_eq!(CONTROLLER_ACTIVITY_MAX, 2);
-    }
-
-    #[test]
-    fn disconnect_drain_logging_cannot_be_a_teardown_deadline() {
-        assert!(DISCONNECT_DRAIN_RECHECK_INTERVAL_MS > 0);
-        assert!(DISCONNECT_DRAIN_PROLONGED_LOG_MS > DISCONNECT_DRAIN_RECHECK_INTERVAL_MS);
     }
 
     #[test]

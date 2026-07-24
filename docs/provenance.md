@@ -9,7 +9,7 @@ authoritative in the lockfile.
 | Component | Source | Pin | License used here | Build role |
 | --- | --- | --- | --- | --- |
 | Project-owned crates | This repository | current tree | MIT OR Apache-2.0 | Product and shared tooling |
-| Rete integration fork | <https://github.com/evelant/rete> | `90570cafc812b3025011cb690ec74a27f287cb3f` (designated durable tag `firmware-pin-90570ca`), based on upstream `9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743` | Apache-2.0 option from retained upstream declaration | Provisional RNS foundation and firmware compile graph; includes canonical local LINKREQUEST validation, transactional owned- and relay-Link admission, endpoint announce policy, caller-owned DATA preparation, bounded receipt backpressure, allocation-atomic proof/timeout terminals, transactional channel send/retry receipt replacement, full-hash/Link-ID-bound DATA/channel terminal candidates, exact path/reverse/link forwarding, typed reverse-full/conflict admission, owned HEADER_2 local dispatch, narrow exact-path HEADER_2 DATA/LINKREQUEST relay, foreign-H2 filtering, fail-closed LRPROOF validation, authenticated owned-Link interface binding and pre-dedup wrong-interface rejection, pending-Link expected-hop enforcement, Python-compatible keepalive lifecycle, microsecond/binary64 LRRTT timing with dispatch confirmation, Handshake/Active/Stale LRRTT lifecycle updates and authenticated-malformed teardown, identities-only snapshot restoration, and LXMF attempt correlation. The first three generic changes were already offered in upstream PRs 7, 9 and 11; the newer lifecycle and routing work remains fork-local unless the user directly approves an upstream issue or PR. |
+| Rete integration fork | <https://github.com/evelant/rete> | `2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on `codex/link-data-receipts`, descending from `90570cafc812b3025011cb690ec74a27f287cb3f` (tagged predecessor `firmware-pin-90570ca`) and upstream `9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743`; the current revision has no designated durable tag | Apache-2.0 option from retained upstream declaration | Provisional RNS foundation and firmware compile graph; includes canonical local LINKREQUEST validation, transactional owned- and relay-Link admission, endpoint announce policy, caller-owned DATA preparation, bounded receipt backpressure, allocation-atomic proof/timeout terminals, transactional channel send/retry receipt replacement, full-hash/Link-ID-bound DATA/channel terminal candidates, ordinary Link-DATA receipts with destination proof-policy enforcement, exact path/reverse/link forwarding, typed reverse-full/conflict admission, owned HEADER_2 local dispatch, narrow exact-path HEADER_2 DATA/LINKREQUEST relay, foreign-H2 filtering, fail-closed LRPROOF validation, authenticated owned-Link interface binding and pre-dedup wrong-interface rejection, pending-Link expected-hop enforcement, Python-compatible keepalive lifecycle, microsecond/binary64 LRRTT timing with dispatch confirmation, Handshake/Active/Stale LRRTT lifecycle updates and authenticated-malformed teardown, identities-only snapshot restoration, and LXMF attempt correlation. The first three generic changes were already offered in upstream PRs 7, 9 and 11; the newer lifecycle, routing, and Link-DATA receipt work remains fork-local unless the user directly approves an upstream issue or PR. |
 | Leviculum | <https://codeberg.org/Lew_Palm/leviculum> | `5fb1db0e5e5a490291ee5f6b81312cf0c9de622a` | AGPL-3.0-or-later | Separate protocol oracle and fallback package |
 | esp-hal family | <https://github.com/esp-rs/esp-hal> | crates.io versions in lockfile | MIT OR Apache-2.0 | ESP32-S3 platform |
 | esp-rtos | Published crates.io 0.3.0 source vendored at `vendor/esp-rtos-0.3.0` | archive SHA-256 `551f90766e1527edaa0c91e8d559e9e2a60397b545e93357ac61fb31845e5712`; crate-recorded upstream commit `347003de8a48320bb7724f53045be3afa9204411`; exact tree and pristine/patched hashes in `VENDOR-HASHES.json` | MIT OR Apache-2.0, with canonical license texts added as project provenance files | Local CPU0 and CPU1 main-stack slice unit corrections; exact edits, mechanical integrity guard and removal condition are recorded in `PATCHES.md` |
@@ -17,9 +17,11 @@ authoritative in the lockfile.
 | embedded-hal / embedded-hal-async / embedded-hal-bus / lora-modulation | crates.io | exact versions in workspace and lockfile | MIT OR Apache-2.0 | Portable pin/SPI/profile contracts and the target-exclusive async SPI device |
 | Embassy futures/sync/time, static_cell and zeroize | crates.io | exact versions in workspace and lockfile | MIT OR Apache-2.0 | Bounded target coordination, in-place protocol ownership and temporary key cleanup |
 
-The designated durable tag for commit
-`90570cafc812b3025011cb690ec74a27f287cb3f` is
-`firmware-pin-90570ca`. The pin
+The current exact pin is
+`2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on fork branch
+`codex/link-data-receipts`; it has no designated durable tag. It descends from
+`90570cafc812b3025011cb690ec74a27f287cb3f`, whose durable tag is
+`firmware-pin-90570ca`. That predecessor
 adds exact-interface transport outcomes through the
 stack and Embassy/Tokio dispatch layers; one-shot reverse-proof interface
 validation; direction, hop, identity, signature, and canonical-header checks
@@ -27,7 +29,10 @@ for relayed Link proofs; transactional owned/relay Link and H2 reverse
 admission; typed stack rejections for owned/relay Link exhaustion and reverse
 full/conflict; owned H2 local dispatch; and identities-only snapshot restore
 until stable interface rebinding exists. Relay-Link occupancy is independently
-observable. Arbitrary remote H1 LINKREQUEST and the guarded H1 DATA
+observable. The current descendant additionally registers ordinary Link-DATA
+receipts and honors the receiving destination's `PROVE_NONE`, `PROVE_ALL`, or
+application-selected proof policy instead of proving all context-`NONE` Link
+DATA unconditionally. Arbitrary remote H1 LINKREQUEST and the guarded H1 DATA
 compatibility seam remain gated on explicit interface roles. No issue or pull
 request was opened for this newer work. Publishing it upstream still requires
 the user's direct approval.

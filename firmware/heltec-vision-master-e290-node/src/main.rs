@@ -85,6 +85,7 @@ use reticulum_board_heltec_vision_master_e290_radio::{
     E290_NA915_DEV_CONFIGURATION, E290_NA915_DEV_CONFIGURATION_FINGERPRINT, E290_NA915_DEV_PROFILE,
     E290Radio,
 };
+use reticulum_device_api::LxmfPeerDiscoveryIncarnation;
 use reticulum_device_api_handoff::DeviceApiHandoff;
 use reticulum_device_api_pairing::DeviceId;
 #[cfg(any(feature = "ble-api-proof", feature = "wifi-api-proof"))]
@@ -662,11 +663,11 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
         journal_reprovision_policy.log_label(),
         matches!(
             journal_reprovision_policy,
-            JournalReprovisionPolicy::ExplicitErasedSchema2Development
+            JournalReprovisionPolicy::ExplicitErasedSchema3Development
         ),
         matches!(
             journal_policy,
-            reticulum_heltec_vision_master_e290_node::durability_boot::JournalBootPolicy::ProvisionErasedSchema2Development
+            reticulum_heltec_vision_master_e290_node::durability_boot::JournalBootPolicy::ProvisionErasedSchema3Development
         ),
     );
     info!(
@@ -931,6 +932,11 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
         (u64::from(bootstrap_rng.next_u32()) << 32) | u64::from(bootstrap_rng.next_u32());
     let mut instance_bytes = [0_u8; 16];
     bootstrap_rng.fill_bytes(&mut instance_bytes);
+    let mut peer_discovery_incarnation_bytes = [0_u8; 8];
+    peer_discovery_incarnation_bytes.copy_from_slice(&instance_bytes[..8]);
+    let peer_discovery_incarnation =
+        LxmfPeerDiscoveryIncarnation::new(peer_discovery_incarnation_bytes);
+    peer_discovery_incarnation_bytes.fill(0);
     let instance = NodeInstanceId::new(instance_bytes);
     instance_bytes.fill(0);
 
@@ -1191,6 +1197,7 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
         delayed_proofs,
         lxmf_volatile,
         lxmf_destination,
+        peer_discovery_incarnation,
         node_task::NodeHandoffs::new(
             node_pairing_handoff,
             node_live_pairing_handoff,

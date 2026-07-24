@@ -312,7 +312,7 @@ The non-default E290 feature `rns-inbox-commit-fault-hil` is a deterministic
 target fault-injection fixture, not a product mode. It forwards the first two
 inbox NOR writes, acknowledges the third without programming the terminal
 commit marker, and forwards every later operation. It is mutually exclusive with
-`journal-schema2-dev-reprovision` and graph policy requires its dependency graph
+`journal-schema3-dev-reprovision` and graph policy requires its dependency graph
 to be identical to the normal product graph; only the product root feature may
 differ.
 

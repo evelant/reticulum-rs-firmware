@@ -1,0 +1,13 @@
+[package]
+name = "reticulum-peer-discovery"
+description = "Allocation-free bounded history of authenticated Reticulum peer announces"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lib]
+path = "src/lib.rs"

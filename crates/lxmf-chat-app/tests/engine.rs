@@ -110,6 +110,13 @@ impl LxmfSession for FakeSession {
         Ok(message)
     }
 
+    fn next_nearby_peer(
+        &mut self,
+        _after: Option<reticulum_device_api::LxmfPeerDiscoveryCursor>,
+    ) -> Result<reticulum_device_api::LxmfPeerDiscoveryPage, Self::Error> {
+        unreachable!("the chat engine does not perform nearby-peer discovery")
+    }
+
     fn is_usable(&self) -> bool {
         true
     }

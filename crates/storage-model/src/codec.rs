@@ -6,8 +6,8 @@ use crate::model::{
     Accepted, AuditEntry, AuditEvent, AuthorizationSnapshot, BootRecoveryMarker,
     BootRecoveryPolicy, DestinationHash, EncodedPacketSha256, ExperimentalRnsDataIntent,
     FinalDisposition, IdempotencyKey, InternalFailure, InterruptedState, JournalEntry,
-    LifecycleState, PreparedPacketDetails, PrincipalId, RnsAttemptToken, StateTransition,
-    SubmissionFailure, SubmissionId, TransportRecoveryReason,
+    LifecycleState, LxmfMessageIntent, PreparedPacketDetails, PrincipalId, RnsAttemptToken,
+    StateTransition, SubmissionFailure, SubmissionId, SubmissionIntent, TransportRecoveryReason,
 };
 use crate::{JOURNAL_SCHEMA_VERSION, MAX_JOURNAL_RECORD_BYTES};
 
@@ -105,7 +105,11 @@ fn encode_inner(entry: &JournalEntry, output: &mut [u8]) -> Result<usize, ()> {
 }
 
 fn encode_accepted(encoder: &mut Encoder<Cursor<&mut [u8]>>, accepted: Accepted) -> Result<(), ()> {
-    put!(encoder.map(7));
+    let intent = accepted.intent();
+    put!(encoder.map(match intent {
+        SubmissionIntent::ExperimentalRnsData(_) => 7,
+        SubmissionIntent::LxmfMessage(_) => 6,
+    }));
     put!(encoder.u8(0));
     put!(encoder.u64(accepted.id().get()));
     put!(encoder.u8(1));
@@ -115,11 +119,20 @@ fn encode_accepted(encoder: &mut Encoder<Cursor<&mut [u8]>>, accepted: Accepted)
     put!(encoder.u8(3));
     encode_authorization(encoder, accepted.authorization())?;
     put!(encoder.u8(4));
-    put!(encoder.u8(0));
-    put!(encoder.u8(5));
-    put!(encoder.bytes(accepted.intent().destination().as_bytes()));
-    put!(encoder.u8(6));
-    put!(encoder.bytes(accepted.intent().payload()));
+    match intent {
+        SubmissionIntent::ExperimentalRnsData(intent) => {
+            put!(encoder.u8(0));
+            put!(encoder.u8(5));
+            put!(encoder.bytes(intent.destination().as_bytes()));
+            put!(encoder.u8(6));
+            put!(encoder.bytes(intent.payload()));
+        }
+        SubmissionIntent::LxmfMessage(intent) => {
+            put!(encoder.u8(1));
+            put!(encoder.u8(5));
+            put!(encoder.bytes(intent.wire()));
+        }
+    }
     Ok(())
 }
 
@@ -354,7 +367,7 @@ pub fn decode_journal_entry(input: &[u8]) -> Result<JournalEntry, DecodeError> {
 }
 
 fn decode_accepted(decoder: &mut Decoder<'_>) -> Result<Accepted, DecodeError> {
-    expect_map(decoder, 7)?;
+    let entries = definite_map_len(decoder)?;
     expect_key(decoder, 0)?;
     let id = SubmissionId::new(decoder.u64().map_err(|_| DecodeError::Malformed)?);
     expect_key(decoder, 1)?;
@@ -364,15 +377,26 @@ fn decode_accepted(decoder: &mut Decoder<'_>) -> Result<Accepted, DecodeError> {
     expect_key(decoder, 3)?;
     let authorization = decode_authorization(decoder)?;
     expect_key(decoder, 4)?;
-    if decoder.u8().map_err(|_| DecodeError::Malformed)? != 0 {
-        return Err(DecodeError::InvalidValue);
-    }
-    expect_key(decoder, 5)?;
-    let destination = DestinationHash::new(decode_fixed_bytes(decoder)?);
-    expect_key(decoder, 6)?;
-    let payload = decoder.bytes().map_err(|_| DecodeError::Malformed)?;
-    let intent = ExperimentalRnsDataIntent::new(destination, payload)
-        .map_err(|_| DecodeError::InvalidByteStringLength)?;
+    let kind = decoder.u8().map_err(|_| DecodeError::Malformed)?;
+    let intent = match kind {
+        0 if entries == 7 => {
+            expect_key(decoder, 5)?;
+            let destination = DestinationHash::new(decode_fixed_bytes(decoder)?);
+            expect_key(decoder, 6)?;
+            let payload = decoder.bytes().map_err(|_| DecodeError::Malformed)?;
+            ExperimentalRnsDataIntent::new(destination, payload)
+                .map(SubmissionIntent::ExperimentalRnsData)
+                .map_err(|_| DecodeError::InvalidByteStringLength)?
+        }
+        1 if entries == 6 => {
+            expect_key(decoder, 5)?;
+            let wire = decoder.bytes().map_err(|_| DecodeError::Malformed)?;
+            LxmfMessageIntent::new(wire)
+                .map(SubmissionIntent::LxmfMessage)
+                .map_err(|_| DecodeError::InvalidByteStringLength)?
+        }
+        _ => return Err(DecodeError::InvalidValue),
+    };
     Ok(Accepted::from_parts(
         id,
         principal,

@@ -20,9 +20,9 @@ use reticulum_storage_journal::{
     SlotCorruption, append_with_replay_scratch, compact_with_replay_scratch, mount, mount_into,
 };
 use reticulum_storage_model::{
-    AcceptOutcome, AcceptanceCandidate, ApplyError, BootRecoveryDecision,
-    ExperimentalRnsDataIntent, JournalEntry, PlanOutcome, PlannedMutation, SubmissionId,
-    SubmissionIndex, SubmissionReplay,
+    AcceptOutcome, AcceptanceCandidate, ApplyError, BootRecoveryDecision, JournalEntry,
+    PlanOutcome, PlannedMutation, SubmissionId, SubmissionIndex, SubmissionIntent,
+    SubmissionReplay,
 };
 use reticulum_submission_projector::{
     AcknowledgementAction, AcknowledgementReply, PersistHandle, PersistRequest,
@@ -426,7 +426,7 @@ pub const PENDING_MUTATION_BYTES: usize = core::mem::size_of::<Option<PendingMut
 
 // One actor-owned acceptance/boot plan or one compact projector handle must
 // fit. Projector requests remain solely in the actor-owned projector.
-const _: () = assert!(PENDING_MUTATION_BYTES <= 512);
+const _: () = assert!(PENDING_MUTATION_BYTES <= 544);
 
 impl PendingMutation {
     const fn kind(self) -> PendingKind {
@@ -616,14 +616,14 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize> StorageActor<SUBMISSIONS,
         &self.projector
     }
 
-    /// Copy the durable DATA intent only when node preparation may begin.
+    /// Copy the durable transport-neutral intent only when preparation may begin.
     ///
     /// Readiness requires the `Queued -> Preparing` barrier to be durably
     /// committed, no attempt to have been bound, and no actor or projector
     /// fault or pending mutation. Returning an owned bounded intent lets a
     /// coordinator call the permanent node owner without borrowing storage
     /// across that call.
-    pub fn ready_intent(&self, id: SubmissionId) -> Option<ExperimentalRnsDataIntent> {
+    pub fn ready_intent(&self, id: SubmissionId) -> Option<SubmissionIntent> {
         if self.fault.is_some()
             || self.pending.is_some()
             || !self.projector.preparation_allowed(&self.index, id)

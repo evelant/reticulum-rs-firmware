@@ -11,7 +11,7 @@ autobins = false
 
 [features]
 default = []
-journal-schema2-dev-reprovision = []
+journal-schema3-dev-reprovision = []
 rns-inbox-commit-fault-hil = []
 runtime-measurement-hil = ["esp-alloc/alloc-hooks"]
 ble-api-proof = [
@@ -54,6 +54,7 @@ reticulum-lxmf-model = { path = "../../crates/lxmf-model", default-features = fa
 reticulum-lxmf-store = { path = "../../crates/lxmf-store", default-features = false }
 reticulum-node-core = { path = "../../crates/node-core", default-features = false }
 reticulum-nor-flash-region = { path = "../../crates/nor-flash-region", default-features = false }
+reticulum-peer-discovery = { path = "../../crates/peer-discovery", default-features = false }
 reticulum-radio-interface = { path = "../../crates/radio-interface", default-features = false }
 reticulum-radio-tx-dispatch = { path = "../../crates/radio-tx-dispatch", default-features = false }
 reticulum-rns-inbox-store = { path = "../../crates/rns-inbox-store", default-features = false }

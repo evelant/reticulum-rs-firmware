@@ -7,6 +7,7 @@ import type {
   ContactView,
   HttpApplianceSnapshot,
   MutationResponse,
+  NearbyPeerView,
   NoContent,
   OnboardingView,
   RecoveryRequest,
@@ -67,6 +68,10 @@ export class HttpApplianceClient implements ApplianceClient {
 
   contacts(): Promise<ContactView[]> {
     return this.#request("/api/v1/contacts");
+  }
+
+  nearbyPeers(): Promise<NearbyPeerView[]> {
+    return this.#request("/api/v1/nearby");
   }
 
   timeline(destination: string): Promise<TimelineView[]> {

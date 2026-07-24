@@ -23,20 +23,20 @@ use sha2::{Digest, Sha256};
 #[cfg(test)]
 mod tests;
 
-/// Exact partition size required by physical format version 1.
+/// Exact partition size required by physical format version 2.
 pub const PARTITION_SIZE: usize = 0x10_0000;
-/// Erase-sector size required by physical format version 1.
+/// Erase-sector size required by physical format version 2.
 pub const ERASE_SIZE: usize = 0x1000;
 /// Size of one physical record slot.
-pub const SLOT_SIZE: usize = 640;
+pub const SLOT_SIZE: usize = 672;
 /// Maximum canonical semantic bytes in one slot.
 pub const BODY_SIZE: usize = MAX_JOURNAL_RECORD_BYTES;
 /// Number of record slots in either bank.
-pub const BANK_SLOT_COUNT: usize = 812;
+pub const BANK_SLOT_COUNT: usize = 774;
 /// Maximum accepted submissions whose complete semantic lifetime budget fits.
 pub const MAX_ACCEPTED_SUBMISSIONS: usize = BANK_SLOT_COUNT / MAX_DURABLE_RECORDS_PER_SUBMISSION;
 /// Current physical on-flash format version.
-pub const PHYSICAL_FORMAT_VERSION: u16 = 1;
+pub const PHYSICAL_FORMAT_VERSION: u16 = 2;
 
 const MANIFEST_A_OFFSET: usize = 0x0000;
 const MANIFEST_B_OFFSET: usize = 0x1000;
@@ -79,11 +79,11 @@ const HANDOFF_COMMIT: [u8; COMMIT_SIZE] = [
 
 const ZERO_DIGEST: [u8; DIGEST_SIZE] = [0; DIGEST_SIZE];
 
-const _: () = assert!(BODY_SIZE == 512);
+const _: () = assert!(BODY_SIZE == 544);
 const _: () = assert!(SLOT_COMMIT_OFFSET + COMMIT_SIZE == SLOT_SIZE);
-const _: () = assert!(BANK_TAIL_SIZE == 512);
+const _: () = assert!(BANK_TAIL_SIZE == 64);
 const _: () = assert!(MAX_DURABLE_RECORDS_PER_SUBMISSION == 5);
-const _: () = assert!(MAX_ACCEPTED_SUBMISSIONS == 162);
+const _: () = assert!(MAX_ACCEPTED_SUBMISSIONS == 154);
 const _: () = assert!(HANDOFF_OFFSET + HANDOFF_SIZE <= ERASE_SIZE);
 
 /// One of the two physical record banks.
@@ -344,7 +344,7 @@ pub enum FreshJournalPolicy {
 pub enum FirstProvisionError<E> {
     /// Underlying NOR operation failed; completion may be ambiguous.
     Backend(E),
-    /// Capacity or read/program/erase geometry is incompatible with format version 1.
+    /// Capacity or read/program/erase geometry is incompatible with format version 2.
     IncompatibleFlash,
     /// Media is erased or on the canonical first-format trajectory, but the
     /// caller supplied [`FreshJournalPolicy::Reject`].
@@ -533,7 +533,7 @@ where
 /// The current bank is fully scanned before any write. The supplied record is
 /// replayed against that complete state, its logical key is checked for an
 /// equivalent or conflicting committed record, and acceptance reservation is
-/// enforced. The 608-byte protected prefix is programmed and read back before
+/// enforced. The 640-byte protected prefix is programmed and read back before
 /// the separate 32-byte commit marker is programmed last.
 pub fn append<const SUBMISSIONS: usize, F>(
     flash: &mut F,
@@ -1210,17 +1210,21 @@ where
     if &data[..8] != MANIFEST_MAGIC || data[13..16].iter().any(|byte| *byte != 0) {
         return Ok(ManifestStatus::CommittedInvalid);
     }
-    let physical = read_u16(data, 8);
-    if physical != PHYSICAL_FORMAT_VERSION {
+    let expected_digest = manifest_digest(data);
+    if sector[MANIFEST_DATA_SIZE..MANIFEST_PREFIX_SIZE] != expected_digest {
         return Ok(ManifestStatus::CommittedInvalid);
     }
-    let schema = read_u16(data, 10);
     let Some(bank) = Bank::from_id(data[12]) else {
         return Ok(ManifestStatus::CommittedInvalid);
     };
     if bank != expected_bank {
         return Ok(ManifestStatus::CommittedInvalid);
     }
+    let physical = read_u16(data, 8);
+    if physical != PHYSICAL_FORMAT_VERSION {
+        return Err(JournalError::UnsupportedPhysicalVersion(physical));
+    }
+    let schema = read_u16(data, 10);
     let generation = read_u64(data, 16);
     if generation == 0 {
         return Ok(ManifestStatus::CommittedInvalid);
@@ -1248,10 +1252,6 @@ where
         return Ok(ManifestStatus::CommittedInvalid);
     }
 
-    let expected_digest = manifest_digest(data);
-    if sector[MANIFEST_DATA_SIZE..MANIFEST_PREFIX_SIZE] != expected_digest {
-        return Ok(ManifestStatus::CommittedInvalid);
-    }
     if sector[HANDOFF_OFFSET + HANDOFF_SIZE..]
         .iter()
         .any(|byte| *byte != 0xff)

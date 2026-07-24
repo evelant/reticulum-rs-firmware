@@ -12,6 +12,9 @@ builds compile this crate and have executed its immutable contract query.
 Platform packaging belongs to the Expo client, while this crate remains
 independent of React Native, iOS, Android, and application UI lifecycles.
 Contacts, timelines, and idempotent outbox writes work offline immediately.
+Nearby-peer refreshes page the authenticated device's volatile discovery
+projection through the same single-owner actor. Rust handles boot-scoped
+cursors and LXMF announce metadata, then returns only semantic JSON to Expo.
 USB serial/JTAG and USB OTG remain explicit unavailable connector stubs: their
 stable variants and errors reserve the boundary without claiming that a bearer
 works or silently selecting another one.

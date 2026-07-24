@@ -127,10 +127,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          expected='journal-schema2-dev-reprovision, rns-inbox-commit-fault-hil, and runtime-measurement-hil are mutually exclusive'
+          expected='journal-schema3-dev-reprovision, rns-inbox-commit-fault-hil, and runtime-measurement-hil are mutually exclusive'
           feature_pairs=(
-            'journal-schema2-dev-reprovision,rns-inbox-commit-fault-hil'
-            'journal-schema2-dev-reprovision,runtime-measurement-hil'
+            'journal-schema3-dev-reprovision,rns-inbox-commit-fault-hil'
+            'journal-schema3-dev-reprovision,runtime-measurement-hil'
             'rns-inbox-commit-fault-hil,runtime-measurement-hil'
           )
 
@@ -308,6 +308,7 @@ jobs:
           -p reticulum-lxmf-wire
           -p reticulum-node-core
           -p reticulum-nor-flash-region
+          -p reticulum-peer-discovery
           -p reticulum-radio-tx-dispatch
           -p reticulum-radio-lora-phy
           -p reticulum-storage-journal

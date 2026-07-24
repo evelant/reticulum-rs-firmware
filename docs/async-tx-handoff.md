@@ -448,10 +448,10 @@ retained, the same LoRa lease goes offline without a generation change, and no
 fresh LoRa work runs for the rest of the boot. Dispatcher coverage proves that
 an acknowledgement-gated DATA owner excludes a queued ordinary job, RX and
 completion, while request pressure, mismatch and cancellation keep exact owners.
-The external authenticated device-API job lane and minimal USB bearer are
+The external authenticated device-API job lane and USB/BLE bearers are
 source-composed into the permanent LoRa image. Powered local submission through
-peer proof and terminal status now passes; application client delivery is still
-unimplemented.
+peer proof and terminal status passes, and the appliance client has completed
+bounded USB and installed-iOS BLE-to-LoRa message proofs.
 
 ## Remaining admission and qualification blocker
 
@@ -461,14 +461,16 @@ ordinary boundary still starts after Rete has created an allocation-backed
 `NodeActions` envelope and mutated protocol state. Its fixed owner and bounded
 router therefore provide exact downstream ownership and pressure but do not yet
 provide caller-reservable construction or upstream backpressure before that
-mutation. Product LXMF intent admission remains a separate product blocker. The
-current source has the experimental authenticated raw-RNS submission surface,
-and the powered E290 pair has qualified it through exact peer proof; it is not
-yet the durable LXMF/message API.
+mutation. The remaining upstream-backpressure gap is distinct from product LXMF
+intent admission. Current source has both the experimental authenticated
+raw-RNS surface and the durable method-neutral basic LXMF message API. The
+latter persists the exact signed LXMF wire before the current `Auto` policy
+selects opportunistic delivery when eligible; reusable direct-Link/Resource
+delivery remains under integration.
 
-The durable profile permits one accepted-history entry solely for composition
-qualification. The minimal authenticated USB lane is its first source-composed
-external admission edge; that cap is not a product-capacity commitment. At the
+The durable E290 profile retains 128 accepted-history entries in external PSRAM
+and has a separate 154-acceptance append-only journal lifetime ceiling.
+Authenticated USB and BLE are its current external admission edges. At the
 terminal radio-operation boundary, the LoRa
 actor retains the exact
 `AuthorizedFrameObservation`, completion and router ticket. The bounded,

@@ -147,6 +147,9 @@ uniffi_reticulum_appliance_native_fn_method_nativeappliance_import_activated_cre
     /*handle*/ uint64_t ptr, RustBuffer staging_path,
     RustCallStatus *uniffi_out_err);
 /*handle*/ uint64_t
+uniffi_reticulum_appliance_native_fn_method_nativeappliance_nearby_peers_json(
+    /*handle*/ uint64_t ptr);
+/*handle*/ uint64_t
 uniffi_reticulum_appliance_native_fn_method_nativeappliance_reconnect(
     /*handle*/ uint64_t ptr);
 /*handle*/ uint64_t
@@ -314,6 +317,8 @@ uint16_t
 uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ensure_connected();
 uint16_t
 uniffi_reticulum_appliance_native_checksum_method_nativeappliance_import_activated_credential();
+uint16_t
+uniffi_reticulum_appliance_native_checksum_method_nativeappliance_nearby_peers_json();
 uint16_t
 uniffi_reticulum_appliance_native_checksum_method_nativeappliance_reconnect();
 uint16_t
@@ -1900,6 +1905,18 @@ NativeReticulumApplianceNative::NativeReticulumApplianceNative(
                 rt, thisVal, args, count);
       });
   props["ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_"
+        "nearby_peers_json"] = jsi::Function::createFromHostFunction(
+      rt,
+      jsi::PropNameID::forAscii(rt, "ubrn_uniffi_reticulum_appliance_native_fn_"
+                                    "method_nativeappliance_nearby_peers_json"),
+      1,
+      [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+             const jsi::Value *args, size_t count) -> jsi::Value {
+        return this
+            ->cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_nearby_peers_json(
+                rt, thisVal, args, count);
+      });
+  props["ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_"
         "reconnect"] = jsi::Function::createFromHostFunction(
       rt,
       jsi::PropNameID::forAscii(rt, "ubrn_uniffi_reticulum_appliance_native_fn_"
@@ -2765,6 +2782,20 @@ NativeReticulumApplianceNative::NativeReticulumApplianceNative(
                     rt, thisVal, args, count);
           });
   props["ubrn_uniffi_reticulum_appliance_native_checksum_method_"
+        "nativeappliance_nearby_peers_json"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_uniffi_reticulum_appliance_native_checksum_method_"
+                  "nativeappliance_nearby_peers_json"),
+          0,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_nearby_peers_json(
+                    rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_reticulum_appliance_native_checksum_method_"
         "nativeappliance_reconnect"] = jsi::Function::createFromHostFunction(
       rt,
       jsi::PropNameID::forAscii(rt,
@@ -3373,6 +3404,18 @@ jsi::Value NativeReticulumApplianceNative::
 
   return uniffi::reticulum_appliance_native::Bridging<RustBuffer>::toJs(
       rt, callInvoker, value);
+}
+jsi::Value NativeReticulumApplianceNative::
+    cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_nearby_peers_json(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  auto value =
+      uniffi_reticulum_appliance_native_fn_method_nativeappliance_nearby_peers_json(
+          uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                            args[0]));
+
+  return uniffi_jsi::Bridging</*handle*/ uint64_t>::toJs(rt, callInvoker,
+                                                         value);
 }
 jsi::Value NativeReticulumApplianceNative::
     cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_reconnect(
@@ -4236,6 +4279,15 @@ jsi::Value NativeReticulumApplianceNative::
         size_t count) {
   auto value =
       uniffi_reticulum_appliance_native_checksum_method_nativeappliance_import_activated_credential();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeReticulumApplianceNative::
+    cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_nearby_peers_json(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  auto value =
+      uniffi_reticulum_appliance_native_checksum_method_nativeappliance_nearby_peers_json();
 
   return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
 }

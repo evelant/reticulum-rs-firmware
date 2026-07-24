@@ -7,7 +7,9 @@ a small, usable command-line workflow:
 - local contacts;
 - a SQLite conversation database;
 - commit-before-send outbound messages;
-- authenticated basic opportunistic LXMF submission over USB;
+- authenticated method-neutral basic LXMF submission over USB, with the
+  appliance's current `Auto` policy choosing opportunistic delivery when
+  eligible;
 - inbox synchronization with message-ID deduplication;
 - restart-safe outbox reconciliation and status refresh; and
 - a timestamp-ordered conversation timeline.
@@ -27,9 +29,9 @@ The current E290 source profile retains **128 accepted submissions** in its
 external-PSRAM runtime and projector. A 129th novel request is rejected with
 `CapacityExhausted` before a NOR write; exact replay of an accepted idempotency
 key remains available at capacity. The append-only physical journal has a
-separate **162-acceptance lifetime ceiling**, and finalized submissions are not
-yet reclaimed. Therefore 128 is a bounded current profile, not an
-indefinitely-running product capacity.
+separate **154-acceptance lifetime ceiling** under semantic schema 3 / physical
+format 2, and finalized submissions are not yet reclaimed. Therefore 128 is a
+bounded current profile, not an indefinitely-running product capacity.
 
 Earlier repository artifacts used one-entry and then 16-entry profiles. Those
 artifacts remain valid evidence for their exact source and image, but 16 is not
@@ -41,7 +43,7 @@ older limit until current firmware is built and flashed.
 | Boundary | What is established |
 | --- | --- |
 | Current source/host test | 128 novel acceptances, mutation-free rejection of number 129, exact replay at capacity |
-| Physical journal format | At most 162 complete accepted-submission lifetimes; no reclamation |
+| Physical journal format | 774 slots per bank and at most 154 complete five-record accepted-submission lifetimes; no reclamation |
 | Historical powered artifacts | Small bidirectional LXMF exchanges on their then-current profiles, not a capacity fill |
 | Long-running product | Retention, export, reclamation, and migration policy still open |
 
@@ -272,9 +274,11 @@ Run the binary with `--help` or `-h` to print the exact argument grammar.
   rule when using this binary; the host appliance service enforces it.
 - `send` accepts title and content in process arguments, which can expose them
   through shell history or same-host process inspection.
-- The current send subset is basic opportunistic LXMF with empty fields: no
-  propagated/direct/Link/Resource delivery, stamps, tickets, attachments, or
-  propagation-node selection.
+- The current send subset is method-neutral basic LXMF with empty fields.
+  `Auto` currently selects opportunistic delivery when eligible; reusable
+  direct-Link/Resource delivery and explicit propagated delivery remain
+  unimplemented, as do stamps, tickets, attachments, and propagation-node
+  selection.
 - This CLI has no automatic discovery, background receive, notification,
   reconnect, message deletion, database migration UX, graphical UI, React
   Native app, NomadNet, or Micron renderer. The separate

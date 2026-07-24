@@ -6,6 +6,9 @@
 - **Extends:** [ADR 0004](0004-sole-flash-coordinator.md),
   [ADR 0006](0006-authenticated-local-api-bearer.md), and
   [ADR 0007](0007-device-api-credential-authority.md)
+- **Superseded in part by:** [ADR 0018](0018-durable-lxmf-delivery-policy.md)
+  for the current semantic schema, physical format, record-body ceiling, and
+  journal geometry
 
 ## Context
 
@@ -28,6 +31,10 @@ authorization facts naively would exceed the journal's 512-byte canonical body
 ceiling. The existing serialized content SHA-256 is redundant because it is a
 deterministic function of the complete persisted intent and the physical
 journal integrity chain already protects every encoded intent byte.
+
+Those sizes describe the schema-2/physical-1 decision recorded by this ADR.
+ADR 0018 selects the current schema-3/physical-2 layout and preserves this text
+as historical design evidence.
 
 ## Decision
 

@@ -11,9 +11,9 @@
 | `announce_clock` | `0x612000..0x614000` | 8 KiB | Wired boot-epoch mirrors |
 | `api_credentials` | `0x614000..0x616000` | 8 KiB | Wired boot-mounted plaintext two-sector credential store |
 | `device_config` | `0x616000..0x630000` | 104 KiB | Reserved, not wired |
-| `node_journal` | `0x630000..0x730000` | 1 MiB | Resident operation-scoped submission runtime |
+| `node_journal` | `0x630000..0x730000` | 1 MiB | Schema-3/physical-2 resident submission runtime |
 | `message_store` | `0x730000..0x930000` | 2 MiB | Wired raw-RNS inbox qualification slot; not an LXMF store |
-| `lxmf_store` | `0x930000..0xb30000` | 2 MiB | Wired append-only LXMF store; mounted read-only at boot, admission not yet composed |
+| `lxmf_store` | `0x930000..0xb30000` | 2 MiB | Wired append-only LXMF store with mount-gated opportunistic and responder direct admission |
 | unpartitioned | `0xb30000..0x1000000` | 4.8125 MiB | OTA/layout decision |
 
 The journal and message-store offsets are unchanged. The previously unwired
@@ -27,13 +27,27 @@ identity, announce clock, and credential range use ESP-IDF's standard
 `data,undefined` subtype. No unsupported numeric subtype is used to imply
 application ownership.
 
+The journal's current physical format 2 keeps the same 1 MiB range and two
+`0x7f000`-byte banks. Each bank holds 774 672-byte slots with a 544-byte
+canonical body and a 64-byte erased tail, reserving at most 154 complete
+five-record submission lifetimes. Semantic schema 3 keeps generic RNS DATA at
+383 plaintext bytes and separately retains one exact complete signed
+LXMF wire through 431 bytes without selecting its delivery method.
+Schema-2/physical-1 media is not rewritten in place: development migration
+must erase and verify only
+`0x630000..0x730000`, then boot the explicit
+`journal-schema3-dev-reprovision` image. The native Expo app simultaneously
+moves to `reticulum-lxmf-chat-alpha-schema3.sqlite3`; its separate credential
+file remains valid.
+
 The separate `lxmf_store` range preserves every byte and meaning of
 `message_store`. Boot binds it to the same eFuse-derived physical device ID,
 mounts format 1 through the sole flash owner, and builds an exact 512-slot
-opaque index in explicitly allocated PSRAM. This stage registers no
-`lxmf.delivery` destination, consumes no application event, commits no LXMF
-candidate, and releases no delayed proof. A successful mount is storage
-composition only, not LXMF delivery admission or powered durability evidence.
+opaque index in explicitly allocated PSRAM. Current source registers the
+mount-gated `lxmf.delivery` destination, admits signed opportunistic and
+responder-side direct Link DATA, and releases retained proofs only after a new
+commit or a fresh `AlreadyDurable` replay. Powered evidence remains narrower
+than that complete source composition.
 
 The complete `message_store` range is now bound to the deliberately temporary
 [ADR 0011](../docs/adr/0011-durable-rns-inbox-qualification.md) format-1
@@ -185,7 +199,7 @@ dependency. It wraps only an inbox admission, forwards claim and body/digest
 writes, returns success without programming write three, then lets production
 readback detect the absent terminal commit and execute its normal quarantine
 path. The feature is mutually exclusive with
-`journal-schema2-dev-reprovision`; never combine them, use `--all-features`, or
+`journal-schema3-dev-reprovision`; never combine them, use `--all-features`, or
 retain this image as the ordinary firmware.
 
 Run the complete E290 build gate in
@@ -282,14 +296,15 @@ never erases; after identity is committed, only strict mount is allowed. Boot
 drives the submission runtime through complete conservative recovery and then
 retains it behind the resident operation-scoped flash coordinator. Device
 configuration remains deferred. The wired inbox is only the one-entry raw-RNS
-qualification format above; the separate LXMF store is read-only mounted at
-boot but has no destination, admission, or proof composition yet.
+qualification format above; the separate LXMF store has its own mount-gated
+destination, durable admission, and retained-proof composition.
 The product does not start protocol service unless clock reservation, journal
 mount/recovery, and redundant identity coverage all succeed. LoRa is the
 primary first transport slice.
-The bounded authenticated USB client API is wired; BLE/Wi-Fi client service,
-production-ready USB behavior, and additional Reticulum transports remain
-deferred.
+The bounded authenticated USB and BLE client API bearers are wired; Wi-Fi
+client service is implemented but not powered-qualified. These bearers do not
+become Reticulum packet interfaces implicitly, and additional Reticulum
+transports remain deferred.
 
 Raw full-flash dumps now contain a private key after provisioning. Set
 `umask 077` before creating them and retain them only with restricted

@@ -455,6 +455,17 @@ impl NativeAppliance {
         to_json(&contacts)
     }
 
+    /// Return the bounded semantic projection of authenticated nearby
+    /// `lxmf.delivery` announces as canonical JSON.
+    ///
+    /// Rust retains device-API paging, boot-incarnation handling, announce
+    /// metadata decoding, and exact destination/identity formatting. The
+    /// platform layer receives no announce bytes, cursors, or public keys.
+    pub async fn nearby_peers_json(&self) -> Result<String, NativeApplianceError> {
+        let peers = self.active_handle()?.nearby_peers().await?;
+        to_json(&peers)
+    }
+
     /// Return one peer's durable timeline as canonical JSON.
     pub async fn timeline_json(&self, destination: String) -> Result<String, NativeApplianceError> {
         let peer =
@@ -766,6 +777,19 @@ mod tests {
         assert!(matches!(
             error,
             NativeApplianceError::InvalidArgument { .. }
+        ));
+        appliance.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn nearby_read_requires_the_actor_owned_authenticated_session() {
+        let database = TestDatabase::new("nearby-offline");
+        let appliance =
+            NativeAppliance::open(database.path_string(), NativeTransport::UsbSerial).unwrap();
+        assert!(matches!(
+            appliance.nearby_peers_json().await,
+            Err(NativeApplianceError::Storage { reason })
+                if reason.contains("no authenticated appliance session")
         ));
         appliance.close().await.unwrap();
     }

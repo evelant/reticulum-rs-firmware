@@ -65,6 +65,26 @@ pub const LXMF_DELAYED_PROOF_SLOTS: usize = APPLICATION_EVENT_SLOTS;
 pub const LXMF_DELAYED_PROOF_STORAGE_BYTES: usize =
     core::mem::size_of::<[reticulum_node_core::DelayedProofSlot; LXMF_DELAYED_PROOF_SLOTS]>();
 const _: () = assert!(LXMF_DELAYED_PROOF_SLOTS == 16);
+/// Latest authenticated remote `lxmf.delivery` destinations retained for the
+/// app's nearby picker.
+///
+/// This is a product profile rather than a protocol ceiling. The table lives
+/// in external PSRAM with the other LXMF volatile owners.
+pub const LXMF_DISCOVERED_PEERS: usize = 32;
+/// Maximum authenticated announce application data retained per discovered peer.
+pub const LXMF_DISCOVERED_PEER_APP_DATA_BYTES: usize =
+    reticulum_device_api::MAX_LXMF_PEER_APP_DATA_BYTES;
+/// External PSRAM occupied by the bounded nearby-peer projection.
+pub const LXMF_DISCOVERED_PEER_STORAGE_BYTES: usize = core::mem::size_of::<
+    reticulum_peer_discovery::DiscoveredPeers<
+        LXMF_DISCOVERED_PEERS,
+        LXMF_DISCOVERED_PEER_APP_DATA_BYTES,
+    >,
+>();
+const _: () = assert!(LXMF_DISCOVERED_PEERS > 0);
+const _: () = assert!(
+    LXMF_DISCOVERED_PEER_APP_DATA_BYTES <= reticulum_device_api::MAX_LXMF_PEER_APP_DATA_BYTES
+);
 /// Caller-owned LXMF index slots retained in external PSRAM for the full boot.
 pub const LXMF_INDEX_SLOTS: usize =
     crate::partition_contract::LXMF_STORE_LEN as usize / reticulum_lxmf_store::EXTENT_SIZE;
@@ -85,7 +105,7 @@ pub const INTERFACE_QUEUE_DEPTH: usize = 2;
 /// Submission records retained by the first USB-usable PSRAM product profile.
 ///
 /// One hundred twenty-eight supports a useful multi-message client trial while
-/// remaining below the append-only journal's explicit 162-submission lifetime.
+/// remaining below the append-only journal's explicit 154-submission lifetime.
 /// This runtime is deliberately allocated in external PSRAM and is not a
 /// non-PSRAM profile. Reclamation is still required for an indefinitely running
 /// product.
@@ -103,9 +123,9 @@ pub const DURABLE_RUNTIME_BYTES: usize = core::mem::size_of::<
 // or alignment change cannot silently consume target PSRAM or host-test RAM.
 // Xtensa's 32-bit field layout is 24 bytes smaller than the 64-bit host layout.
 #[cfg(target_arch = "xtensa")]
-const REVIEWED_DURABLE_RUNTIME_BYTES: usize = 375_544;
+const REVIEWED_DURABLE_RUNTIME_BYTES: usize = 387_864;
 #[cfg(not(target_arch = "xtensa"))]
-const REVIEWED_DURABLE_RUNTIME_BYTES: usize = 375_568;
+const REVIEWED_DURABLE_RUNTIME_BYTES: usize = 387_888;
 const _: () = assert!(DURABLE_RUNTIME_BYTES == REVIEWED_DURABLE_RUNTIME_BYTES);
 /// Guard against silently growing the PSRAM-backed runtime and its independent
 /// journal-replay scratch index.
@@ -582,7 +602,7 @@ mod tests {
         assert_eq!(DURABLE_SUBMISSIONS, 128);
         assert_eq!(DURABLE_PROJECTED_SUBMISSIONS, 128);
         assert_eq!(DURABLE_ACCEPTED_SUBMISSION_LIMIT, 128);
-        assert_eq!(DURABLE_RUNTIME_BYTES, 375_568);
+        assert_eq!(DURABLE_RUNTIME_BYTES, 387_888);
         assert_eq!(MAXIMUM_DURABLE_RUNTIME_BYTES, 512 * 1024);
         const { assert!(DURABLE_ACCEPTED_SUBMISSION_LIMIT <= DURABLE_SUBMISSIONS) };
     }

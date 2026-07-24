@@ -34,6 +34,8 @@ use reticulum_rns_rete::{
     InboundProofPolicyError as RnsInboundProofPolicyError, InterfaceId as RnsInterfaceId,
     NodeRole as RnsNodeRole, PathRequestBuildError as RnsPathRequestBuildError,
     PrepareBasicLxmfError as RnsPrepareBasicLxmfError, PrepareDataError as RnsPrepareDataError,
+    PrepareOpportunisticLxmfDataError as RnsPrepareOpportunisticLxmfDataError,
+    PreparedBasicDirectLxmf as RnsPreparedBasicDirectLxmf,
     PreparedBasicLxmf as RnsPreparedBasicLxmf, PreparedData as RnsPreparedData, RNS_MTU,
     ReceiptCandidate, ReceiptKind, ReceiptReservationUnavailable, ReceiptTerminal,
     ReceiptTerminalReservation, ReceiptTerminalSink, TxTarget as RnsTxTarget,
@@ -83,6 +85,12 @@ pub const MAX_DATA_PAYLOAD: usize = reticulum_rns_rete::MAX_DATA_PAYLOAD;
 /// Largest opportunistic LXMF carrier emitted by the basic composer.
 pub const MAX_OPPORTUNISTIC_LXMF_CARRIER: usize =
     reticulum_rns_rete::MAX_OPPORTUNISTIC_LXMF_CARRIER;
+
+/// Largest complete basic LXMF message carried by one direct Link packet.
+pub const MAX_DIRECT_LXMF_WIRE: usize = reticulum_rns_rete::MAX_DIRECT_LXMF_WIRE;
+
+/// Largest Python LXMF content size carried by one direct Link packet.
+pub const MAX_DIRECT_LXMF_CONTENT_SIZE: usize = reticulum_rns_rete::MAX_DIRECT_LXMF_CONTENT_SIZE;
 
 /// Largest positive whole-millisecond timestamp accepted by basic LXMF composition.
 pub const MAX_LXMF_TIMESTAMP_UNIX_MS: u64 = reticulum_rns_rete::MAX_LXMF_TIMESTAMP_UNIX_MS;
@@ -187,7 +195,26 @@ impl PreparedBasicLxmf {
     }
 }
 
-/// Failure to compose the supported basic opportunistic LXMF subset.
+/// Scalar result of composing one complete signed basic LXMF wire message.
+///
+/// The caller retains the bytes in its supplied output buffer. The private
+/// native value preserves their binding for the later direct-Link transaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreparedBasicDirectLxmf(RnsPreparedBasicDirectLxmf);
+
+impl PreparedBasicDirectLxmf {
+    /// Exact complete-wire prefix initialized in the caller's output buffer.
+    pub const fn wire_len(self) -> u16 {
+        self.0.wire_len()
+    }
+
+    /// Python-compatible authenticated LXMF message identifier.
+    pub const fn message_id(self) -> [u8; 32] {
+        self.0.message_id()
+    }
+}
+
+/// Failure to compose the supported basic single-packet LXMF subset.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrepareBasicLxmfError {
     /// Timestamp zero is outside the firmware's useful message subset.
@@ -203,16 +230,16 @@ pub enum PrepareBasicLxmfError {
     DeliveryDestinationUnavailable,
     /// The node identity could not sign the canonical message.
     Signing,
-    /// Canonical content exceeds Python's opportunistic selection boundary.
+    /// Canonical content exceeds the selected single-packet boundary.
     PayloadTooLarge {
         /// Computed Python LXMF `content_size`.
         actual: usize,
-        /// Largest opportunistically selected content size.
+        /// Largest content size supported by the selected packet mode.
         maximum: usize,
     },
-    /// Caller-owned carrier storage is too small.
+    /// Caller-owned message storage is too small.
     OutputTooSmall {
-        /// Required carrier bytes.
+        /// Required message bytes.
         required: usize,
         /// Supplied output capacity.
         available: usize,
@@ -620,6 +647,12 @@ pub struct PrepareDataRequest<'a> {
     pub deadline: TxLeaseDeadline,
     /// Synchronous snapshot of packet interfaces eligible for this dispatch.
     pub enabled_interfaces: InterfaceSet,
+}
+
+#[derive(Clone, Copy)]
+enum DataPreparationMode {
+    Generic,
+    RehydratedOpportunisticLxmf,
 }
 
 /// Whether this node terminates only local traffic or also forwards RNS
@@ -1103,6 +1136,21 @@ impl From<RnsPrepareDataError> for SubmitError {
             RnsPrepareDataError::Crypto => Self::Cryptography,
             RnsPrepareDataError::PacketBuild => Self::PacketBuild,
             RnsPrepareDataError::Invariant => Self::Invariant,
+        }
+    }
+}
+
+impl From<RnsPrepareOpportunisticLxmfDataError> for SubmitError {
+    fn from(error: RnsPrepareOpportunisticLxmfDataError) -> Self {
+        match error {
+            RnsPrepareOpportunisticLxmfDataError::Data(error) => error.into(),
+            RnsPrepareOpportunisticLxmfDataError::Header2PayloadTooLarge { actual, maximum } => {
+                Self::PayloadTooLarge { actual, maximum }
+            }
+            RnsPrepareOpportunisticLxmfDataError::InvalidCompleteWire
+            | RnsPrepareOpportunisticLxmfDataError::CarrierLengthMismatch { .. }
+            | RnsPrepareOpportunisticLxmfDataError::CarrierDigestMismatch
+            | RnsPrepareOpportunisticLxmfDataError::CarrierSourceMismatch => Self::Invariant,
         }
     }
 }
@@ -2616,6 +2664,32 @@ impl<
             .map_err(PrepareBasicLxmfError::from)
     }
 
+    /// Compose and sign one complete basic direct-LXMF message with this node's
+    /// registered inbound Single `lxmf.delivery` source.
+    ///
+    /// This read-only operation prepares no Link or packet and consumes no
+    /// receipt state. Messages above the direct packet boundary are rejected
+    /// until the Resource path is separately enabled.
+    pub fn prepare_basic_direct_lxmf_into(
+        &self,
+        destination: &DestinationHash,
+        timestamp_unix_ms: u64,
+        title: &[u8],
+        content: &[u8],
+        output: &mut [u8],
+    ) -> Result<PreparedBasicDirectLxmf, PrepareBasicLxmfError> {
+        self.rns
+            .prepare_basic_direct_lxmf_into(
+                &RnsDestinationHash::from(*destination.as_bytes()),
+                timestamp_unix_ms,
+                title,
+                content,
+                output,
+            )
+            .map(PreparedBasicDirectLxmf)
+            .map_err(PrepareBasicLxmfError::from)
+    }
+
     /// Configure the default application data used for ordinary announces and
     /// path responses from one registered local destination.
     pub fn set_destination_announce_app_data(
@@ -2638,6 +2712,16 @@ impl<
     pub fn recall_identity(&self, destination: &DestinationHash) -> Option<[u8; 64]> {
         let destination = RnsDestinationHash::from(*destination.as_bytes());
         self.rns.recall_identity(&destination)
+    }
+
+    /// Recall an announce-learned identity only when it derives the supplied
+    /// exact `lxmf.delivery` destination.
+    ///
+    /// This preserves Reticulum's destination construction inside the protocol
+    /// adapter instead of duplicating it in application discovery code.
+    pub fn recall_lxmf_delivery_identity(&self, destination: &DestinationHash) -> Option<[u8; 64]> {
+        let destination = RnsDestinationHash::from(*destination.as_bytes());
+        self.rns.recall_lxmf_delivery_identity(&destination)
     }
 
     /// Confirm the synchronous interface-egress handoff for one token-bearing
@@ -2927,6 +3011,38 @@ impl<
         request: PrepareDataRequest<'_>,
         rng: &mut R,
     ) -> Result<RoutedTxJob<'a>, PrepareFailure<'a>> {
+        self.prepare_data_into_slot_with(buffer, request, DataPreparationMode::Generic, rng)
+    }
+
+    /// Prepare one exact durable, locally signed LXMF wire message through the
+    /// dedicated opportunistic destination-DATA path.
+    ///
+    /// `request.plaintext` is the complete LXMF wire message including its
+    /// destination prefix. The native adapter revalidates that prefix, local
+    /// source, and signature before applying the Header-1 LXMF size exception.
+    /// All packet-buffer, receipt, route, and attempt ownership is otherwise
+    /// identical to [`Self::prepare_data_into_slot`].
+    pub fn prepare_rehydrated_opportunistic_lxmf_into_slot<'a, R: RngCore + CryptoRng>(
+        &mut self,
+        buffer: &'a mut TxPacketBuffer,
+        request: PrepareDataRequest<'_>,
+        rng: &mut R,
+    ) -> Result<RoutedTxJob<'a>, PrepareFailure<'a>> {
+        self.prepare_data_into_slot_with(
+            buffer,
+            request,
+            DataPreparationMode::RehydratedOpportunisticLxmf,
+            rng,
+        )
+    }
+
+    fn prepare_data_into_slot_with<'a, R: RngCore + CryptoRng>(
+        &mut self,
+        buffer: &'a mut TxPacketBuffer,
+        request: PrepareDataRequest<'_>,
+        mode: DataPreparationMode,
+        rng: &mut R,
+    ) -> Result<RoutedTxJob<'a>, PrepareFailure<'a>> {
         if request.owner_now >= request.deadline.instant() {
             return Err(PrepareFailure {
                 reason: SubmitError::LeaseDeadlineExpired {
@@ -2947,21 +3063,44 @@ impl<
             }
         };
 
-        let result = self.rns.prepare_data_into(
-            &request.destination.into_rns(),
-            request.plaintext,
-            request.rns_now.get(),
-            rng,
-            &mut buffer.bytes,
-        );
+        let result = match mode {
+            DataPreparationMode::Generic => self
+                .rns
+                .prepare_data_into(
+                    &request.destination.into_rns(),
+                    request.plaintext,
+                    request.rns_now.get(),
+                    rng,
+                    &mut buffer.bytes,
+                )
+                .map_err(SubmitError::from),
+            DataPreparationMode::RehydratedOpportunisticLxmf => {
+                let destination_matches = request
+                    .plaintext
+                    .get(..16)
+                    .is_some_and(|prefix| prefix == request.destination.as_bytes());
+                if !destination_matches {
+                    Err(SubmitError::Invariant)
+                } else {
+                    self.rns
+                        .prepare_rehydrated_opportunistic_lxmf_data_into(
+                            request.plaintext,
+                            request.rns_now.get(),
+                            rng,
+                            &mut buffer.bytes,
+                        )
+                        .map_err(SubmitError::from)
+                }
+            }
+        };
 
         let prepared = match result {
             Ok(prepared) => prepared,
-            Err(error) => {
+            Err(reason) => {
                 self.dispatches[slot.index()].state = DispatchState::Free;
                 self.attempts[attempt.slot].state = AttemptState::Free;
                 return Err(PrepareFailure {
-                    reason: error.into(),
+                    reason,
                     owner: PrepareFailureOwner::Available(buffer),
                 });
             }
@@ -4274,6 +4413,102 @@ mod tests {
         assert!(usize::from(prepared.carrier_len()) <= MAX_OPPORTUNISTIC_LXMF_CARRIER);
         assert_eq!(&carrier[..16], source.as_bytes());
         assert_ne!(prepared.message_id(), [0; 32]);
+    }
+
+    #[test]
+    fn basic_direct_lxmf_composition_keeps_the_complete_destination_prefixed_wire() {
+        let mut owner = node_with_instance::<8, 0>(53, "embedded", 0x94);
+        let remote = DestinationHash::new([0xa8; 16]);
+        let mut wire = [0x56_u8; MAX_DIRECT_LXMF_WIRE];
+        assert_eq!(
+            owner.prepare_basic_direct_lxmf_into(
+                &remote,
+                1_700_000_000_000,
+                b"title",
+                b"content",
+                &mut wire,
+            ),
+            Err(PrepareBasicLxmfError::DeliveryDestinationUnavailable)
+        );
+        assert!(wire.iter().all(|byte| *byte == 0x56));
+
+        owner
+            .register_inbound_single_destination("lxmf", &["delivery"])
+            .unwrap();
+        let prepared = owner
+            .prepare_basic_direct_lxmf_into(
+                &remote,
+                1_700_000_000_000,
+                b"title",
+                b"content",
+                &mut wire,
+            )
+            .unwrap();
+        let wire_len = usize::from(prepared.wire_len());
+        assert!(wire_len <= MAX_DIRECT_LXMF_WIRE);
+        assert_eq!(&wire[..16], remote.as_bytes());
+        assert_ne!(prepared.message_id(), [0; 32]);
+        assert!(wire[wire_len..].iter().all(|byte| *byte == 0x56));
+    }
+
+    #[test]
+    fn rehydrated_opportunistic_lxmf_uses_the_dedicated_header1_ceiling() {
+        let mut owner = node_with_instance::<8, 1>(54, "embedded", 0x95);
+        owner
+            .register_inbound_single_destination("lxmf", &["delivery"])
+            .unwrap();
+        let recipient = NodeCore::<8, 2, 8, 2, 0>::new(
+            identity(55),
+            "lxmf",
+            &["delivery"],
+            NodeInstanceId::new([0x96; 16]),
+            NodeConfig::endpoint(),
+        )
+        .unwrap();
+        let destination = recipient.destination_hash();
+        owner
+            .register_peer(
+                &identity(55),
+                "lxmf",
+                &["delivery"],
+                MonotonicSeconds::new(1),
+            )
+            .unwrap();
+
+        let mut carrier = [0_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+        let content = [0x6d_u8; reticulum_rns_rete::MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE];
+        let composed = owner
+            .prepare_basic_lxmf_into(&destination, 1_700_000_000_000, b"", &content, &mut carrier)
+            .unwrap();
+        let carrier = &carrier[..usize::from(composed.carrier_len())];
+        assert!(carrier.len() > MAX_DATA_PAYLOAD);
+        let mut wire = Vec::with_capacity(16 + carrier.len());
+        wire.extend_from_slice(destination.as_bytes());
+        wire.extend_from_slice(carrier);
+
+        let mut buffer = TxPacketBuffer::new();
+        owner.register_packet_buffer(&mut buffer).unwrap();
+        let mut rng = CounterRng::default();
+        let job = owner
+            .prepare_rehydrated_opportunistic_lxmf_into_slot(
+                &mut buffer,
+                PrepareDataRequest {
+                    destination,
+                    plaintext: &wire,
+                    rns_now: MonotonicSeconds::new(2),
+                    owner_now: MonotonicMillis::new(2_000),
+                    deadline: TxLeaseDeadline::new(MonotonicMillis::new(3_000)),
+                    enabled_interfaces: InterfaceSet::from_bits(1 << 1),
+                },
+                &mut rng,
+            )
+            .unwrap_or_else(|failure| {
+                panic!(
+                    "dedicated LXMF preparation rejected its Header-1 carrier ceiling: {:?}",
+                    failure.reason()
+                )
+            });
+        assert!(job.prepared().packet_len() > 0);
     }
 
     const fn time(seconds: u64) -> MonotonicSeconds {

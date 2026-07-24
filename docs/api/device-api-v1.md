@@ -1,8 +1,9 @@
 # Device API v1 logical protocol
 
-Status: API 1.4 logical codec and portable authenticated dispatch implemented
+Status: API 1.5 logical codec and portable authenticated dispatch implemented
 over one operation-scoped owner exposing narrow durable-submission, raw-inbox,
-committed-LXMF-read, and source-free basic-LXMF-compose ports.
+committed-LXMF-read, source-free basic-LXMF-compose, and bounded nearby-peer
+ports.
 This document freezes the operation and field numbers exercised by
 `reticulum-device-api`; `reticulum-device-api-adapter` implements capabilities,
 the public primary-destination summary, and principal-scoped submission status
@@ -15,7 +16,7 @@ qualification session and boot-lifetime authenticated-job handoff crates now
 exist. The session core emits only a credential ID/generation grant; the
 portable authority revalidates it and derives `DispatchContext` through a
 borrowing `DispatchLease`. The context carries validated non-wire provenance,
-and semantic journal schema 2 persists its exact credential/policy snapshot on
+and semantic journal schema 3 persists its exact credential/policy snapshot on
 acceptance. The portable two-sector raw-NOR credential store is implemented,
 and E290 boot now validates its exact eFuse-derived binding, mounts it
 immediately after flash open, performs bounded deterministic recovery, and
@@ -80,7 +81,8 @@ readback, and drop-newest preservation. Bounded powered software-fault
 isolation now covers mount rejection and one same-boot commit failure as
 described below. API 1.3 adds committed LXMF enumeration/readback and the
 optional public `lxmf.delivery` destination; API 1.4 adds source-free basic
-LXMF composition and durable submission. The
+LXMF composition and durable submission; API 1.5 adds bounded authenticated
+nearby-LXMF peer discovery. The
 [2026-07-22 API 1.4 POC](../e290-api14-lxmf-poc.md) powered-qualified same-boot
 bidirectional send, Reticulum delivery proof, peer commit, enumeration, and
 digest-verified readback on the E290 pair. Its final audited image also retained
@@ -135,8 +137,9 @@ no volatile fallback. Public capabilities remain available in either condition.
 The initial version was `1.0`; version `1.1` added `identity.summary`; version
 `1.2` added optional raw-RNS inbox capability fields and feature-gated
 status/peek; version `1.3` added optional `lxmf.delivery` identity metadata and
-bounded committed-LXMF reads; and the current version is `1.4`, adding
-source-free basic LXMF submission. A decoder accepts major
+bounded committed-LXMF reads; version `1.4` added source-free basic LXMF
+submission; and the current version is `1.5`, adding bounded nearby-LXMF peer
+discovery. A decoder accepts major
 version 1 with any minor version, skips unknown numeric map fields, and rejects
 another major version.
 Encoding an envelope with another major version fails with the typed
@@ -178,6 +181,7 @@ operation body or one unknown field value to eight levels.
 | experimental LXMF read chunk | 416 bytes | request length and response construction |
 | basic LXMF title | 295 bytes | encode and decode; body and composer limits still apply |
 | basic LXMF content | 295 bytes | encode and decode; body and composer limits still apply |
+| nearby LXMF announce application data | 256 bytes | encode and decode |
 | destination hash | 16 bytes | decode |
 | idempotency key | 16 bytes | decode |
 | encoded-packet SHA-256 | 32 bytes | decode |
@@ -185,9 +189,9 @@ operation body or one unknown field value to eight levels.
 The shared 383-byte ceiling matches the generic Rete encrypted destination-DATA
 boundary used by raw submission and the raw-RNS qualification inbox. It is not
 a promise that either operation or record will become the product LXMF API or
-message-store format. The dedicated Header-1 opportunistic LXMF path can carry
-up to 391 carrier bytes; basic send's current generic durable intent does not
-yet expose that full range.
+message-store format. Basic LXMF send now uses a distinct durable intent for
+the exact complete signed wire through 431 bytes, so it does not raise or reuse
+the generic 383-byte RNS DATA ceiling.
 
 ## Common envelope
 
@@ -216,11 +220,12 @@ authorization credential.
 | `0xf004` | `experimental.lxmf.next` | feature-gated experimental | authenticated principal; no permission bit |
 | `0xf005` | `experimental.lxmf.read` | feature-gated experimental | authenticated principal; no permission bit |
 | `0xf006` | `experimental.lxmf.basic_send` | feature-gated experimental | authenticated + `EXPERIMENTAL_SUBMIT_RNS_DATA` |
+| `0xf007` | `experimental.lxmf.peer_next` | feature-gated experimental | authenticated principal; no permission bit |
 
 Numbers `0xf000..=0xffff` are experimental and can disappear or change without
 API compatibility. `0xf001` is compiled only with the target-safe
 `experimental-rns-data` Cargo feature; `0xf002` and `0xf003` are compiled only
-with `experimental-rns-inbox`; and `0xf004` through `0xf006` are compiled only
+with `experimental-rns-inbox`; and `0xf004` through `0xf007` are compiled only
 with `experimental-lxmf`. A build without the corresponding feature returns
 `UnsupportedOperation`. The adapter mirrors all three feature boundaries.
 `dispatch_with_lxmf` independently exposes LXMF reads and basic send without
@@ -255,6 +260,8 @@ Successful response body:
 | 11 | u8 | no | `experimental_lxmf_basic_send`: source-free composition/submission availability |
 | 12 | u16 | no | structural per-field basic-LXMF title limit; 295 when implemented, otherwise 0 |
 | 13 | u16 | no | structural per-field basic-LXMF content limit; 295 when implemented, otherwise 0 |
+| 14 | u8 | no | `experimental_lxmf_peer_discovery`: bounded authenticated nearby-peer reads |
+| 15 | u16 | no | maximum retained announce application data per peer; at most 256 |
 
 `CapabilitySnapshot::current()` is device-owned and cannot advertise packet
 output or direct-radio TX. Key 2 says nothing about node-owned RNS traffic: an
@@ -263,15 +270,17 @@ eligible Reticulum interface without granting a client direct radio control. A
 higher dispatcher uses `CapabilitySnapshot::for_dispatch` to restrict that
 codec-build snapshot; it can disable a capability but cannot enable one omitted
 from the codec build. API 1.2 introduced keys 7 and 8, API 1.3 introduced keys 9
-and 10, and API 1.4 introduced keys 11 through 13. All are optional on decode;
+and 10, API 1.4 introduced keys 11 through 13, and API 1.5 introduced keys 14
+and 15. All are optional on decode;
 an older response therefore maps absent capabilities to unavailable with zero
 limits. The E290 reports raw-inbox and committed-LXMF reads only after their
 exact durable stores mount, and reports basic send only when durable submission
 and the local `lxmf.delivery` source are available. Faults disable the affected
-capability rather than inventing a volatile substitute.
+capability rather than inventing a volatile substitute. Peer discovery is
+advertised only by a dispatcher with the bounded projection port.
 Keys 12 and 13 are independent codec field bounds, not a guarantee that every
-295-byte title/content combination fits the 448-byte request body, Python's
-opportunistic selection rule, or the current product carrier.
+295-byte title/content combination fits the 448-byte request body or the
+current product's 319-byte direct-content/431-byte complete-wire boundary.
 
 ### `identity.summary` (`0x0003`)
 
@@ -572,9 +581,10 @@ acknowledge, or delete a message.
 
 ### `experimental.lxmf.basic_send` (`0xf006`)
 
-This mutation is the first semantic client send path. It selects no radio or
-interface: the accepted RNS DATA intent is routed by the same transport-neutral
-node and can later use LoRa, Wi-Fi, BLE, or another eligible Reticulum link.
+This mutation is the first semantic client send path. It selects no radio,
+interface, or delivery method: its exact signed LXMF-message intent is routed
+by the same transport-neutral node and can later use LoRa, Wi-Fi, BLE, or
+another eligible Reticulum interface.
 
 Request body:
 
@@ -589,14 +599,20 @@ Request body:
 There is deliberately no source field. The device uses its registered inbound
 Single `lxmf.delivery` destination and resident private identity to construct
 and sign the Python-compatible basic message. The first subset has an empty
-fields map, no stamp, and opportunistic delivery. The codec accepts the
+fields map and no stamp. The codec accepts the
 timestamp as an unsigned integer; the E290 product composer rejects zero and
 values above `8_796_093_022_207_999`, the exact positive whole-millisecond
-binary64 subset. It also rejects title/content combinations above Python LXMF's
-opportunistic content-size boundary. Empty title and empty content together are
+binary64 subset. It also rejects title/content combinations that exceed the
+single-Link-packet direct boundary: 319 bytes of Python LXMF `content_size` or
+431 bytes of complete signed wire. Empty title and empty content together are
 valid and match the canonical Python vector. The 448-byte encoded-body limit
 also applies to the combination even though keys 2 and 3 each have a 295-byte
-structural field limit.
+structural field limit. Durable acceptance does not promise immediate delivery:
+the current runtime can send an eligible carrier through 391 bytes, or a
+407-byte complete wire, using the compatible Header-1 opportunistic path.
+Complete wires of 408--431 bytes remain pending for the unfinished direct-Link
+lifecycle, and a routed Header-2 path can impose the smaller 383-byte carrier
+ceiling.
 
 Successful response body:
 
@@ -605,30 +621,67 @@ Successful response body:
 | 0 | u64 | yes | durable submission ID, queryable through `submission.status` |
 | 1 | bytes(32) | yes | Python-compatible authenticated LXMF message ID |
 
-The product composer creates the exact signed carrier before invoking durable
-acceptance. Composition failure, unavailable local source, or a carrier that
-does not fit the current durable intent performs no acceptance write. A
-successful reply means that exact carrier and destination are durably queued;
+The product composer creates the exact complete signed wire before invoking
+durable acceptance. Composition failure, unavailable local source, or a wire
+that exceeds the current 431-byte inline LXMF-message intent performs no
+acceptance write. A
+successful reply means those exact bytes and destination are durably queued;
 it does not mean the peer has received it. `lxmf-send-and-wait` follows key 0
 through `submission.status` until delivery or a terminal failure.
 
 Idempotency uses the authenticated principal plus key 4. An exact retry must
 retain destination, timestamp, title, content, and key; it returns the original
 submission and message IDs without adding a record. Reusing the key with
-different semantic content returns `IdempotencyConflict`. The current generic
-durable intent stores at most 383 carrier bytes, so the E290 POC rejects a
-prepared carrier from 384 through Python's 391-byte opportunistic maximum.
-That is a recorded implementation gap, not the intended product feature
-ceiling.
+different semantic content returns `IdempotencyConflict`. The complete-wire
+intent closes the former 384-through-391 opportunistic carrier gap without
+raising the separate 383-byte generic-RNS DATA ceiling. Automatic delivery
+currently prefers eligible opportunistic packets; reusable direct-Link
+establishment and Link-DATA receipt projection remain product-lifecycle work;
+the current runtime can use bytes `16..` as the compatible opportunistic
+carrier without recomposing the accepted message.
 
 The current E290 PSRAM profile retains 128 accepted submissions without
 terminal reclamation. Its 129th novel request returns `CapacityExhausted`
 without a write, while an exact retry of any retained idempotency key still
 returns the original IDs at capacity. The physical journal separately reserves
-at most 162 complete submission lifetimes. This is a bounded current profile
+at most 154 complete submission lifetimes. This is a bounded current profile
 rather than an API-v1 or long-term product ceiling. Earlier one-entry and
 16-entry proof artifacts remain revision-bound; they neither set the current
 limit nor constitute powered qualification of a 128-entry fill.
+
+### `experimental.lxmf.peer_next` (`0xf007`)
+
+This authenticated read exposes one record from the firmware's volatile
+projection of validated `lxmf.delivery` announces. It is display and contact
+selection evidence, not route authority, appliance pairing, or a private-key
+export. The E290 product profile retains 32 peers; the logical API permits at
+most 256 authenticated announce application-data bytes per record.
+
+The first request body is empty. A continuation must contain both:
+
+| Key | Type | Required | Meaning |
+| ---: | --- | --- | --- |
+| 0 | bytes(8) | together | public boot/incarnation token |
+| 1 | u64 | together | exclusive observation generation; zero means before all observations |
+
+The response contains:
+
+| Key | Type | Required | Meaning |
+| ---: | --- | --- | --- |
+| 0 | bytes(8) | yes | current incarnation for the next cursor |
+| 1 | u64 | yes | exclusive generation for the next cursor |
+| 2 | nonzero u64 | no | latest generation in the response snapshot |
+| 3 | nonzero u64 | no | oldest generation represented by a retained peer |
+| 4 | bool | yes | requested history was reset, updated away, or evicted |
+| 5 | map | no | one peer record |
+
+The peer map contains destination and identity hash at keys 0 and 1,
+application data at key 2, hop count and observing-interface ID at keys 3 and
+4, optional whole-dBm RSSI and whole-dB SNR at keys 5 and 6, saturating
+observation age in milliseconds at key 7, and its nonzero generation at key 8.
+A cursor from an older boot resets to the first retained record with
+`history_gap=true`. The API never fabricates signal data or mutates Rete's path
+table.
 
 ### Powered inbox fault-isolation evidence
 
@@ -748,7 +801,7 @@ outside request CBOR; connection-level rate limits remain deferred. The pre-
 authentication bootstrap does not create a session grant or admit a logical
 request.
 
-Semantic journal schema 2 persists the principal, idempotency key,
+Semantic journal schema 3 persists the principal, idempotency key,
 operation-specific intent, credential ID/generation, complete authority
 revision, authorization-policy version, and exact granted permission mask.
 The adapter constructs that storage-owned snapshot only after authorization
@@ -758,25 +811,25 @@ returns the original ID and retains the original evidence. See
 
 ## Golden vectors
 
-The canonical API 1.4 `system.capabilities` request for request ID 42 uses minor
-byte `04` and is:
+The canonical API 1.5 `system.capabilities` request for request ID 42 uses minor
+byte `05` and is:
 
 ```text
-a4 00 a2 00 01 01 04 01 18 2a 02 01 03 a0
+a4 00 a2 00 01 01 05 01 18 2a 02 01 03 a0
 ```
 
-The canonical API 1.4 `identity.summary` request for request ID 42 is:
+The canonical API 1.5 `identity.summary` request for request ID 42 is:
 
 ```text
-a4 00 a2 00 01 01 04 01 18 2a 02 03 03 a0
+a4 00 a2 00 01 01 05 01 18 2a 02 03 03 a0
 ```
 
 The wire tests freeze these requests, both identity-response forms, all feature
-compositions of the fourteen-field API 1.4 capability response, older maps with
+compositions of the sixteen-field API 1.5 capability response, older maps with
 absent optional capability fields, typed permission/capacity/idempotency error
 responses, raw submission request/acceptance, exact `0xf002`/`0xf003` inbox
 vectors, exact `0xf004`/`0xf005` LXMF list/read vectors, and source-free
-`0xf006` request/acceptance vectors.
+`0xf006` request/acceptance plus boot-scoped `0xf007` peer-page vectors.
 They also cover every submission failure, state invariants, closed numeric
 enums, unknown fields, unknown operations, missing and duplicate known fields,
 every truncated golden prefix, trailing bytes,

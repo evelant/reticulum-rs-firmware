@@ -78,6 +78,9 @@ function offlineBleAppliance(): NativeApplianceLike {
     importActivatedCredential(): never {
       throw new Error("test bridge owns credential import");
     },
+    async nearbyPeersJson(): Promise<string> {
+      return "[]";
+    },
     async reconnect(): Promise<void> {},
     async sendMessageJson(): Promise<string> {
       return JSON.stringify({ outbox_id: 1, outcome: "inserted" });
@@ -221,6 +224,21 @@ describe("native appliance adapter loading", () => {
       importActivatedCredential(): NativeCredentialSummary {
         return E290_CREDENTIAL;
       },
+      async nearbyPeersJson(): Promise<string> {
+        return JSON.stringify([
+          {
+            destination: "bc".repeat(16),
+            display_name: "Ridge relay",
+            hops: 1,
+            identity_hash: "cd".repeat(16),
+            interface_id: 0,
+            interface_name: "LoRa",
+            observed_age_ms: 125,
+            rssi_dbm: -91,
+            snr_db: 7,
+          },
+        ]);
+      },
       async reconnect(): Promise<void> {
         throw bridgeError;
       },
@@ -267,7 +285,7 @@ describe("native appliance adapter loading", () => {
           return appliance;
         },
       },
-      databasePath: "/app/reticulum-lxmf-chat.sqlite3",
+      databasePath: "/app/reticulum-lxmf-chat-alpha-schema3.sqlite3",
     };
     const client = new NativeApplianceClient(async () => runtime);
 
@@ -277,6 +295,19 @@ describe("native appliance adapter loading", () => {
       transport: "usb_serial",
     });
     expect(await client.contacts()).toEqual([{ destination: "ab".repeat(16), name: "Field node" }]);
+    expect(await client.nearbyPeers()).toEqual([
+      {
+        destination: "bc".repeat(16),
+        display_name: "Ridge relay",
+        hops: 1,
+        identity_hash: "cd".repeat(16),
+        interface_id: 0,
+        interface_name: "LoRa",
+        observed_age_ms: 125,
+        rssi_dbm: -91,
+        snr_db: 7,
+      },
+    ]);
     expect(await client.upsertContact("ab".repeat(16), { name: "Updated field node" })).toEqual({
       outcome: "inserted",
     });
@@ -305,7 +336,11 @@ describe("native appliance adapter loading", () => {
 
     client.dispose();
     await destroyed;
-    expect(events).toEqual(["open /app/reticulum-lxmf-chat.sqlite3", "close", "destroy"]);
+    expect(events).toEqual([
+      "open /app/reticulum-lxmf-chat-alpha-schema3.sqlite3",
+      "close",
+      "destroy",
+    ]);
   });
 
   test("maps the generated native GATT profile without duplicating or swapping values", () => {
@@ -361,6 +396,9 @@ describe("native appliance adapter loading", () => {
       async ensureConnected(): Promise<void> {},
       importActivatedCredential(): NativeCredentialSummary {
         return E290_CREDENTIAL;
+      },
+      async nearbyPeersJson(): Promise<string> {
+        return "[]";
       },
       async reconnect(): Promise<void> {},
       async sendMessageJson(): Promise<string> {

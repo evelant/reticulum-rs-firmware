@@ -12,7 +12,8 @@ proof unless a failing test promotes one into a release blocker.
   novel request reports capacity exhaustion before a NOR write, while replay of
   an already accepted idempotency key remains available at capacity. The
   append-only journal and terminal projector do not reclaim finalized entries,
-  and the physical journal has a separate 162-acceptance lifetime ceiling.
+  and the schema-3/physical-2 journal has a separate 154-acceptance lifetime
+  ceiling.
   Source/host tests exercise the 128-plus-one boundary; there is not yet a
   powered 128-message fill, remount, pressure, or timing qualification.
 - The generic 128-entry E290 host fixture exceeds Rust's default test-thread
@@ -56,19 +57,24 @@ proof unless a failing test promotes one into a release blocker.
 ## Basic outbound LXMF subset
 
 - The first semantic send operation composes only Python-compatible basic LXMF:
-  binary title and content, an empty fields map, no stamp, and opportunistic
-  delivery. Direct, propagated, Link/Resource, ticket, stamp, attachment, and
-  nonempty-fields sends remain deferred. Empty title and empty content together
-  are supported and match the independent Python vector.
+  binary title and content, an empty fields map, and no stamp. It durably
+  retains one exact complete signed LXMF wire through 431 bytes without
+  selecting a delivery method; generic RNS destination DATA remains a separate
+  383-byte intent. The current automatic policy uses the destination-stripped
+  bytes as its compatible opportunistic carrier when eligible, while the
+  reusable product-owned direct-Link capability remains under integration.
+  Propagated, Resource, ticket, stamp, attachment, and nonempty-fields sends
+  remain deferred. Empty title and empty content together are supported and
+  match the independent Python vector.
 - The signing source is always the node's registered inbound Single
   `lxmf.delivery` destination. No API caller may choose a source hash or obtain
   private identity material.
-- Python LXMF's exact opportunistic selection limit can produce a 391-byte
-  carrier. The existing durable generic-RNS intent holds at most 383 bytes, so
-  the product API currently rejects otherwise-valid prepared carriers from 384
-  through 391 bytes without accepting journal work. Rete has a qualified
-  Header-1-only 391-byte path; durable intent reconstruction and routed
-  Header-2 fallback need a separate design before the full boundary is usable.
+- Python LXMF's 391-byte opportunistic carrier fits inside the distinct
+  431-byte complete-wire durable intent, so the former 384-through-391 journal
+  rejection is closed without raising the generic-RNS ceiling. The remaining
+  capability gap is lifecycle, not storage size: Link establishment, exact
+  Link-DATA receipt projection, timeout/abort cleanup, and a two-board powered
+  direct delivery trial remain open.
 - Basic composition currently uses allocation-backed Rete LXMF packing and
   signing before copying into caller storage. The E290 POC must measure heap
   high-water behavior. A bounded `encoded_len`/`pack_into` composer remains
@@ -84,6 +90,21 @@ proof unless a failing test promotes one into a release blocker.
   routing ports do not name LoRa or SX1262. USB is connected only as the local
   client bearer; BLE, Wi-Fi, USB packet transport, and simultaneous
   multi-interface routing have not yet been connected as Reticulum interfaces.
+- Current source projects only authenticated `lxmf.delivery` announces into a
+  volatile 32-peer table, with at most 256 application-data bytes per peer.
+  API 1.5 pages one boot-scoped record at a time through the already
+  authenticated appliance session, and the Expo **Nearby** picker can add or
+  open the durable contact with one tap. A bounded iOS/two-E290 powered run
+  opened an existing contact without endpoint entry and delivered one short
+  opportunistic message in each direction with exact peer import; a
+  fresh-contact **Add** and the direct-Link path remain unqualified. The table
+  expires no peers by age, and its current LoRa provenance has no RSSI/SNR
+  observation to report.
+- Nearby contact discovery is not appliance authorization. The current path
+  does not scan phone-to-phone BLE, publish a public E290 share service, or
+  implement the signed contact-card fallback reserved by ADR 0017. QR/deep
+  links, E290-mediated BLE sharing, native proximity APIs, and NFC remain
+  carrier work after the shared Rust-owned signed envelope exists.
 - Local secondary-destination path responses currently use a temporary wrapper
   in `crates/rns-rete`. A cleaner uncommitted implementation exists only in the
   reference Rete checkout and is deliberately not combined with the pinned

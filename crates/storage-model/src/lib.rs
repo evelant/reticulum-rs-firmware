@@ -23,19 +23,30 @@ pub use model::{
     Accepted, AuditEntry, AuditEvent, AuthorizationSnapshot, AuthorizationSnapshotError,
     BootRecoveryMarker, BootRecoveryPolicy, ContentSha256, DestinationHash, EncodedPacketSha256,
     ExperimentalRnsDataIntent, FinalDisposition, IdempotencyKey, IntentTooLarge, InternalFailure,
-    InterruptedState, InvalidPacketLength, JournalEntry, LifecycleState, PreparedPacketDetails,
-    PrincipalId, RnsAttemptToken, StateTransition, SubmissionFailure, SubmissionId,
-    TransitionError, TransportRecoveryReason, validate_transition,
+    InterruptedState, InvalidLxmfMessageWireLength, InvalidPacketLength, JournalEntry,
+    LifecycleState, LxmfMessageIntent, PreparedPacketDetails, PrincipalId, RnsAttemptToken,
+    StateTransition, SubmissionFailure, SubmissionId, SubmissionIntent, TransitionError,
+    TransportRecoveryReason, validate_transition,
 };
 
 /// Maximum application bytes in the initial experimental RNS DATA intent.
 pub const MAX_EXPERIMENTAL_RNS_DATA_BYTES: usize = 383;
 
+/// Minimum complete LXMF wire bytes needed to retain its destination.
+pub const MIN_LXMF_MESSAGE_WIRE_BYTES: usize = 16;
+
+/// Maximum complete LXMF wire bytes retained by the current inline intent.
+///
+/// This equals the current plain Link DATA message boundary but does not select
+/// a delivery method. Smaller messages may use opportunistic DATA, while a
+/// future larger-message intent requires Resource-backed durable storage.
+pub const MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES: usize = 431;
+
 /// Current complete encoded Reticulum packet-buffer capacity.
 pub const MAX_ENCODED_PACKET_BYTES: usize = 500;
 
 /// Maximum bytes in one canonical durable journal record.
-pub const MAX_JOURNAL_RECORD_BYTES: usize = 512;
+pub const MAX_JOURNAL_RECORD_BYTES: usize = 544;
 
 /// Maximum lifecycle-transition records for one accepted submission.
 pub const MAX_STATE_TRANSITIONS_PER_SUBMISSION: usize = 3;
@@ -44,12 +55,12 @@ pub const MAX_STATE_TRANSITIONS_PER_SUBMISSION: usize = 3;
 pub const MAX_TRANSPORT_AUDITS_PER_SUBMISSION: usize = 1;
 
 /// Maximum committed semantic records, including acceptance, for one
-/// submission under schema 2.
+/// submission under schema 3.
 pub const MAX_DURABLE_RECORDS_PER_SUBMISSION: usize =
     1 + MAX_STATE_TRANSITIONS_PER_SUBMISSION + MAX_TRANSPORT_AUDITS_PER_SUBMISSION;
 
 /// Current project-owned durable-record semantic schema.
-pub const JOURNAL_SCHEMA_VERSION: u16 = 2;
+pub const JOURNAL_SCHEMA_VERSION: u16 = 3;
 
 /// Stable persisted bit granting owned-submission status reads.
 pub const AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS: u32 = 1 << 0;
@@ -57,6 +68,6 @@ pub const AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS: u32 = 1 << 0;
 /// Stable persisted bit granting experimental outbound RNS DATA submission.
 pub const AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA: u32 = 1 << 1;
 
-/// Complete permission mask understood by durable authorization schema 2.
+/// Complete permission mask understood by durable authorization schema 3.
 pub const AUTHORIZATION_KNOWN_PERMISSION_BITS: u32 = AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS
     | AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA;

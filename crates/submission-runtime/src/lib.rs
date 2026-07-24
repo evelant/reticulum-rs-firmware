@@ -20,15 +20,17 @@ use core::mem::MaybeUninit;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use rand_core::{CryptoRng, RngCore};
 use reticulum_node_core::{
-    AcknowledgeError, AuthorizedFrameObservation, DestinationHash, MonotonicMillis,
-    MonotonicSeconds, SubmitError, TerminalAttempt, TxAuthorizationPolicy, TxLeaseDeadline,
-    TxRecoveryObservation,
+    AcknowledgeError, AuthorizedFrameObservation, DestinationHash, MAX_OPPORTUNISTIC_LXMF_CARRIER,
+    MonotonicMillis, MonotonicSeconds, SubmitError, TerminalAttempt, TxAuthorizationPolicy,
+    TxLeaseDeadline, TxRecoveryObservation,
 };
 use reticulum_storage_actor::{
     AcceptanceProgress, BootRecoveryProgress, BoundJournalAccess, DriveError, MountError,
     PendingProgress, ProjectorOperationError, StorageActor,
 };
-use reticulum_storage_model::{AcceptanceCandidate, LifecycleState, SubmissionId, SubmissionIndex};
+use reticulum_storage_model::{
+    AcceptanceCandidate, LifecycleState, SubmissionId, SubmissionIndex, SubmissionIntent,
+};
 use reticulum_submission_projector::{
     AcknowledgementAction, AcknowledgementKind, AcknowledgementReply, PersistenceProgress,
     PreparedFrameObservation, ProjectionProgress, ProjectorError, SubmissionPreparationObservation,
@@ -45,7 +47,11 @@ use reticulum_tx_supervisor::{
 pub struct SubmissionPrepareRequest<'a> {
     /// Complete destination hash for the encrypted DATA packet.
     pub destination: DestinationHash,
-    /// Plaintext to encrypt into one base-MTU DATA packet.
+    /// Method-specific exact bytes.
+    ///
+    /// Generic submission preparation receives destination-DATA plaintext.
+    /// Rehydrated opportunistic LXMF preparation receives the complete
+    /// destination-prefixed signed wire message.
     pub plaintext: &'a [u8],
     /// Current Reticulum protocol clock.
     pub rns_now: MonotonicSeconds,
@@ -65,6 +71,19 @@ pub trait SubmissionNodePort {
     /// Prepare one native destination-DATA attempt through the authoritative
     /// interface router.
     fn prepare_submission<R>(
+        &mut self,
+        request: SubmissionPrepareRequest<'_>,
+        rng: &mut R,
+    ) -> SubmissionPreparationObservation
+    where
+        R: RngCore + CryptoRng;
+
+    /// Prepare one exact durable LXMF wire message through the native
+    /// opportunistic Header-1 exception.
+    ///
+    /// `request.plaintext` contains the complete destination-prefixed signed
+    /// wire message, not generic destination-DATA plaintext.
+    fn prepare_rehydrated_opportunistic_lxmf_submission<R>(
         &mut self,
         request: SubmissionPrepareRequest<'_>,
         rng: &mut R,
@@ -126,6 +145,26 @@ where
         R: RngCore + CryptoRng,
     {
         map_preparation_result(self.try_prepare_data(
+            DataRouterPrepareRequest {
+                destination: request.destination,
+                plaintext: request.plaintext,
+                rns_now: request.rns_now,
+                deadline: request.deadline,
+            },
+            request.owner_now,
+            rng,
+        ))
+    }
+
+    fn prepare_rehydrated_opportunistic_lxmf_submission<R>(
+        &mut self,
+        request: SubmissionPrepareRequest<'_>,
+        rng: &mut R,
+    ) -> SubmissionPreparationObservation
+    where
+        R: RngCore + CryptoRng,
+    {
+        map_preparation_result(self.try_prepare_rehydrated_opportunistic_lxmf(
             DataRouterPrepareRequest {
                 destination: request.destination,
                 plaintext: request.plaintext,
@@ -748,21 +787,46 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize> SubmissionRuntime<SUBMISS
         let ready = self.storage.index().iter().find_map(|submission| {
             let id = submission.accepted().id();
             let intent = self.storage.ready_intent(id)?;
+            if intent.lxmf_message().is_some_and(|intent| {
+                intent.opportunistic_carrier().len() > MAX_OPPORTUNISTIC_LXMF_CARRIER
+            }) {
+                // The complete durable message remains eligible for the
+                // direct-Link lifecycle. It cannot fit the bounded
+                // opportunistic carrier and must not be terminally rejected
+                // by the unrelated generic DATA ceiling.
+                return None;
+            }
             let destination = DestinationHash::new(*intent.destination().as_bytes());
             self.path_discovery_due(destination, owner_now.get())
                 .then_some((id, intent, destination))
         });
         if let Some((id, intent, destination)) = ready {
-            let observation = node.prepare_submission(
-                SubmissionPrepareRequest {
-                    destination,
-                    plaintext: intent.payload(),
-                    rns_now,
-                    owner_now,
-                    deadline,
+            let request = SubmissionPrepareRequest {
+                destination,
+                plaintext: match &intent {
+                    SubmissionIntent::ExperimentalRnsData(intent) => intent.payload(),
+                    SubmissionIntent::LxmfMessage(intent) => intent.wire(),
                 },
-                rng,
-            );
+                rns_now,
+                owner_now,
+                deadline,
+            };
+            let observation = match intent {
+                SubmissionIntent::ExperimentalRnsData(_) => node.prepare_submission(request, rng),
+                SubmissionIntent::LxmfMessage(_) => {
+                    match node.prepare_rehydrated_opportunistic_lxmf_submission(request, rng) {
+                        SubmissionPreparationObservation::Rejected(
+                            SubmitError::PayloadTooLarge { .. },
+                        ) => {
+                            // A retained Header-2 route cannot carry the
+                            // opportunistic exception. Keep the exact durable
+                            // message pending for direct Link delivery.
+                            SubmissionPreparationObservation::RetrySameBoot
+                        }
+                        observation => observation,
+                    }
+                }
+            };
             let (observation, path_offer) =
                 self.classify_path_discovery(id, destination, observation, owner_now.get());
             let progress = self.storage.observe_preparation(id, observation)?;

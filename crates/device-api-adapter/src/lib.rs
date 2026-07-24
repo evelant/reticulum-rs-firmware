@@ -379,6 +379,45 @@ pub trait LxmfComposePort {
     ) -> Result<LxmfComposeAcceptance, LxmfComposePortError>;
 }
 
+/// Closed failure vocabulary for bounded nearby-LXMF peer discovery.
+#[cfg(feature = "experimental-lxmf")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PeerDiscoveryPortError {
+    /// The build or current product profile does not provide peer discovery.
+    Unavailable,
+    /// The supplied cursor cannot be served and was not safely reset.
+    InvalidRequest,
+    /// The sole discovery owner is temporarily occupied.
+    Busy,
+    /// Discovery state could not be read reliably.
+    Backend,
+    /// The discovery owner detected contradictory runtime state.
+    Faulted,
+}
+
+/// Narrow read-only port for boot-scoped nearby `lxmf.delivery` discovery.
+///
+/// A cursor from another incarnation, or one ahead of current history, must be
+/// reset to the first retained record with `history_gap` set in the returned
+/// page. Such a stale cursor is normal reconnect behavior, not an error.
+#[cfg(feature = "experimental-lxmf")]
+pub trait PeerDiscoveryPort {
+    /// Current product/runtime availability of nearby peer discovery.
+    fn availability(&mut self) -> CapabilityAvailability;
+
+    /// Maximum announce application-data bytes retained by this port.
+    ///
+    /// Values above the logical API ceiling are safely capped in capability
+    /// reporting; returned records must always satisfy the logical ceiling.
+    fn max_app_data_bytes(&mut self) -> u16;
+
+    /// Return at most one retained record after an optional boot-scoped cursor.
+    fn next(
+        &mut self,
+        after: Option<api::LxmfPeerDiscoveryCursor>,
+    ) -> Result<api::LxmfPeerDiscoveryPage, PeerDiscoveryPortError>;
+}
+
 /// Authorize and dispatch one decoded logical request against a narrow
 /// durable-submission port.
 ///
@@ -492,6 +531,40 @@ where
     }
 }
 
+/// Authorize and dispatch LXMF reads, basic send, and nearby peer discovery.
+///
+/// This leaves the raw-RNS qualification inbox out of the owner bounds while
+/// adding a read-only, boot-scoped discovery projection.
+#[cfg(feature = "experimental-lxmf")]
+pub fn dispatch_with_lxmf_and_peer_discovery<P>(
+    port: &mut P,
+    identity: api::IdentitySummary,
+    context: &DispatchContext,
+    envelope: RequestEnvelope<'_>,
+) -> ResponseEnvelope
+where
+    P: SubmissionPort + LxmfInboxPort + LxmfComposePort + PeerDiscoveryPort,
+{
+    let request_id = envelope.request_id;
+    let request = envelope.request;
+    let operation = request.operation();
+    let response = if envelope.version.major != ApiVersion::CURRENT.major {
+        api_error(ApiErrorCode::UnsupportedVersion, operation)
+    } else {
+        match authorize_request(context, &request) {
+            Ok(()) => dispatch_authorized_with_lxmf_and_peer_discovery(
+                port, identity, context, request, operation,
+            ),
+            Err(error) => authorization_error(error, operation),
+        }
+    };
+    ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id,
+        response,
+    }
+}
+
 /// Authorize and dispatch one request against a single owner implementing the
 /// submission, raw-RNS inbox, durable LXMF inbox, and basic-LXMF compose ports.
 ///
@@ -519,6 +592,37 @@ where
             Ok(()) => {
                 dispatch_authorized_with_inbox_and_lxmf(port, identity, context, request, operation)
             }
+            Err(error) => authorization_error(error, operation),
+        }
+    };
+    ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id,
+        response,
+    }
+}
+
+/// Authorize and dispatch the complete submission, inbox, LXMF, and nearby-peer surface.
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+pub fn dispatch_with_inbox_lxmf_and_peer_discovery<P>(
+    port: &mut P,
+    identity: api::IdentitySummary,
+    context: &DispatchContext,
+    envelope: RequestEnvelope<'_>,
+) -> ResponseEnvelope
+where
+    P: SubmissionPort + InboundMailboxPort + LxmfInboxPort + LxmfComposePort + PeerDiscoveryPort,
+{
+    let request_id = envelope.request_id;
+    let request = envelope.request;
+    let operation = request.operation();
+    let response = if envelope.version.major != ApiVersion::CURRENT.major {
+        api_error(ApiErrorCode::UnsupportedVersion, operation)
+    } else {
+        match authorize_request(context, &request) {
+            Ok(()) => dispatch_authorized_with_inbox_lxmf_and_peer_discovery(
+                port, identity, context, request, operation,
+            ),
             Err(error) => authorization_error(error, operation),
         }
     };
@@ -716,6 +820,51 @@ where
     }
 }
 
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+fn dispatch_authorized_with_inbox_lxmf_and_peer_discovery<P>(
+    port: &mut P,
+    identity: api::IdentitySummary,
+    context: &DispatchContext,
+    request: DeviceRequest<'_>,
+    operation: u16,
+) -> DeviceResponse
+where
+    P: SubmissionPort + InboundMailboxPort + LxmfInboxPort + LxmfComposePort + PeerDiscoveryPort,
+{
+    match request {
+        DeviceRequest::SystemCapabilities => {
+            let submit_available = cfg!(feature = "experimental-rns-data")
+                && SubmissionPort::availability(port) == CapabilityAvailability::Available;
+            let rns_inbox = InboundMailboxPort::availability(port);
+            let lxmf = LxmfInboxPort::availability(port);
+            let lxmf_basic_send = LxmfComposePort::availability(port);
+            let peers = PeerDiscoveryPort::availability(port);
+            let max_peer_app_data = PeerDiscoveryPort::max_app_data_bytes(port);
+            DeviceResponse::SystemCapabilities(
+                api::CapabilitySnapshot::for_dispatch_with_inbox_lxmf_basic_send_and_peer_discovery(
+                    submit_available,
+                    rns_inbox,
+                    lxmf,
+                    lxmf_basic_send,
+                    peers,
+                    max_peer_app_data,
+                ),
+            )
+        }
+        DeviceRequest::IdentitySummary => DeviceResponse::IdentitySummary(identity),
+        DeviceRequest::LxmfPeerNext { after } => {
+            if PeerDiscoveryPort::availability(port) != CapabilityAvailability::Available {
+                return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+            }
+            match PeerDiscoveryPort::next(port, after) {
+                Ok(page) => DeviceResponse::LxmfPeerNext(page),
+                Err(error) => peer_discovery_port_error(error, operation),
+            }
+        }
+        other => dispatch_authorized_with_inbox_and_lxmf(port, identity, context, other, operation),
+    }
+}
+
 #[cfg(feature = "experimental-lxmf")]
 fn dispatch_authorized_with_lxmf<P>(
     port: &mut P,
@@ -795,6 +944,50 @@ where
             lxmf_compose_response(port.compose_and_accept(request), operation)
         }
         other => dispatch_authorized(port, identity, context, other, operation),
+    }
+}
+
+#[cfg(feature = "experimental-lxmf")]
+fn dispatch_authorized_with_lxmf_and_peer_discovery<P>(
+    port: &mut P,
+    identity: api::IdentitySummary,
+    context: &DispatchContext,
+    request: DeviceRequest<'_>,
+    operation: u16,
+) -> DeviceResponse
+where
+    P: SubmissionPort + LxmfInboxPort + LxmfComposePort + PeerDiscoveryPort,
+{
+    match request {
+        DeviceRequest::SystemCapabilities => {
+            let submit_available = cfg!(feature = "experimental-rns-data")
+                && SubmissionPort::availability(port) == CapabilityAvailability::Available;
+            let lxmf = LxmfInboxPort::availability(port);
+            let lxmf_basic_send = LxmfComposePort::availability(port);
+            let peers = PeerDiscoveryPort::availability(port);
+            let max_peer_app_data = PeerDiscoveryPort::max_app_data_bytes(port);
+            DeviceResponse::SystemCapabilities(
+                api::CapabilitySnapshot::for_dispatch_with_inbox_lxmf_basic_send_and_peer_discovery(
+                    submit_available,
+                    CapabilityAvailability::Unavailable,
+                    lxmf,
+                    lxmf_basic_send,
+                    peers,
+                    max_peer_app_data,
+                ),
+            )
+        }
+        DeviceRequest::IdentitySummary => DeviceResponse::IdentitySummary(identity),
+        DeviceRequest::LxmfPeerNext { after } => {
+            if PeerDiscoveryPort::availability(port) != CapabilityAvailability::Available {
+                return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+            }
+            match PeerDiscoveryPort::next(port, after) {
+                Ok(page) => DeviceResponse::LxmfPeerNext(page),
+                Err(error) => peer_discovery_port_error(error, operation),
+            }
+        }
+        other => dispatch_authorized_with_lxmf(port, identity, context, other, operation),
     }
 }
 
@@ -881,6 +1074,18 @@ fn lxmf_port_error(error: LxmfInboxPortError, operation: u16) -> DeviceResponse 
         | LxmfInboxPortError::Backend
         | LxmfInboxPortError::Binding
         | LxmfInboxPortError::Faulted => ApiErrorCode::Internal,
+    };
+    api_error(code, operation)
+}
+
+#[cfg(feature = "experimental-lxmf")]
+fn peer_discovery_port_error(error: PeerDiscoveryPortError, operation: u16) -> DeviceResponse {
+    let code = match error {
+        PeerDiscoveryPortError::Unavailable => ApiErrorCode::CapabilityUnavailable,
+        PeerDiscoveryPortError::InvalidRequest => ApiErrorCode::InvalidRequest,
+        PeerDiscoveryPortError::Busy
+        | PeerDiscoveryPortError::Backend
+        | PeerDiscoveryPortError::Faulted => ApiErrorCode::Internal,
     };
     api_error(code, operation)
 }

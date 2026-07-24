@@ -7,8 +7,8 @@ authenticated Reticulum device API. It owns protocol mechanics, not product UI:
 - the authenticated USB Serial/JTAG handshake;
 - a sequential, multi-request authenticated session over any `Read + Write`
   byte stream;
-- typed identity, submission-status, LXMF enumeration, verified LXMF read, and
-  source-free basic-send operations.
+- typed identity, submission-status, LXMF enumeration, verified LXMF read,
+  nearby-peer discovery, and source-free basic-send operations.
 
 Serial discovery/configuration, pairing-state file security, pairing ceremony,
 reconnect policy, evidence files, local conversation storage, and UI remain

@@ -21,12 +21,13 @@ send outcomes. The host service separately projects ready state into its
 historical HTTP-v1 `port` and `usb_serial` names; that compatibility shape does
 not leak back into this runtime.
 
-The only complete connector today is the host USB Serial/JTAG adapter in
-`reticulum-lxmf-chat-service`. The portable session adapter still uses the
-current authenticated `DeviceClient` error vocabulary, whose qualified
-credential suite is USB Serial/JTAG. Adding BLE or Wi-Fi therefore requires a
-real bearer binding and qualification; the enum variants here do not imply
-that those transports work.
+Complete connectors now include the host USB Serial/JTAG adapter in
+`reticulum-lxmf-chat-service` and the Expo native BLE path backed by the shared
+Rust appliance/session core. The BLE suite-3 binding has a bounded installed-iOS
+powered proof; this does not yet qualify every mobile platform or lifecycle.
+The opt-in native raw-TCP Wi-Fi proof connector and separately transcript-bound
+suite-2 E290 SoftAP endpoint are implemented and host-qualified; powered field
+qualification remains open.
 
 Focused checks:
 

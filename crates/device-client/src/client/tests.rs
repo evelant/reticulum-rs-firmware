@@ -4,8 +4,10 @@ use rand_core::{CryptoRng, RngCore};
 use reticulum_device_api::{
     ApiErrorCode, ApiErrorResponse, ApiVersion, DestinationHash, DeviceRequest, DeviceResponse,
     EncodedPacketSha256, IdempotencyKey, IdentitySummary, LxmfBasicSendAccepted, LxmfMessageHandle,
-    LxmfMessageSummary, LxmfReadChunk, PreparedPacketDetails, RequestEnvelope, ResponseEnvelope,
-    SubmissionId, SubmissionState, SubmissionStatus, decode_request, encode_response,
+    LxmfMessageSummary, LxmfPeerDiscoveryCursor, LxmfPeerDiscoveryIncarnation,
+    LxmfPeerDiscoveryPage, LxmfPeerGeneration, LxmfReadChunk, PreparedPacketDetails,
+    RequestEnvelope, ResponseEnvelope, SubmissionId, SubmissionState, SubmissionStatus,
+    decode_request, encode_response,
 };
 use reticulum_device_api_framing::{DecodeEvent, StreamDecoder};
 use reticulum_device_api_handoff::{LocalApiReply, MessageLength, OwnedMessage};
@@ -75,6 +77,7 @@ struct MockPeer {
     wire: Vec<u8>,
     request_count: usize,
     last_send: Option<OwnedSend>,
+    last_peer_cursor: Option<Option<LxmfPeerDiscoveryCursor>>,
     parameters: ServerParameters,
     max_io_chunk: usize,
 }
@@ -122,6 +125,7 @@ impl MockPeer {
             wire,
             request_count: 0,
             last_send: None,
+            last_peer_cursor: None,
             parameters,
             max_io_chunk,
         }
@@ -238,6 +242,39 @@ impl MockPeer {
                 )
             }
             DeviceRequest::LxmfRead { .. } => not_found(envelope.request.operation()),
+            DeviceRequest::LxmfPeerNext { after } => {
+                self.last_peer_cursor = Some(after);
+                let incarnation = LxmfPeerDiscoveryIncarnation::new([0x88; 8]);
+                let generation = LxmfPeerGeneration::new(3).unwrap();
+                let current = LxmfPeerDiscoveryCursor::new(incarnation, generation.get());
+                let at_end = after == Some(current);
+                let stale = after.is_some() && !at_end;
+                let peer = if at_end {
+                    None
+                } else {
+                    Some(
+                        reticulum_device_api::LxmfDiscoveredPeer::new(
+                            LXMF_REMOTE,
+                            reticulum_device_api::IdentityHash::new([0x77; 16]),
+                            b"Metalbeard",
+                            1,
+                            2,
+                            Some(-92),
+                            Some(5),
+                            125,
+                            generation,
+                        )
+                        .unwrap(),
+                    )
+                };
+                DeviceResponse::LxmfPeerNext(LxmfPeerDiscoveryPage::new(
+                    current,
+                    Some(generation),
+                    Some(generation),
+                    stale,
+                    peer,
+                ))
+            }
             DeviceRequest::LxmfBasicSend {
                 destination,
                 timestamp_unix_ms,
@@ -400,6 +437,19 @@ fn real_handshake_and_multi_request_session_cover_typed_lxmf_surface() {
     assert_eq!(identity.primary_destination(), PRIMARY);
     assert_eq!(identity.lxmf_delivery_destination(), Some(LXMF_LOCAL));
 
+    let nearby = client
+        .lxmf_peer_next(None)
+        .expect("nearby peer discovery succeeds");
+    let discovered = nearby.peer().expect("first page contains the peer");
+    assert_eq!(discovered.destination(), LXMF_REMOTE);
+    assert_eq!(discovered.app_data(), b"Metalbeard");
+    assert_eq!(discovered.observed_age_ms(), 125);
+    let nearby_end = client
+        .lxmf_peer_next(Some(nearby.next_cursor()))
+        .expect("cursor continuation succeeds");
+    assert!(nearby_end.peer().is_none());
+    assert!(!nearby_end.history_gap());
+
     let summaries = client.lxmf_list().expect("LXMF list succeeds");
     assert_eq!(summaries.len(), 1);
     let message = client
@@ -431,7 +481,8 @@ fn real_handshake_and_multi_request_session_cover_typed_lxmf_surface() {
     assert!(client.is_session_available());
 
     let peer = client.into_transport();
-    assert_eq!(peer.request_count, 7);
+    assert_eq!(peer.request_count, 9);
+    assert_eq!(peer.last_peer_cursor, Some(Some(nearby.next_cursor())));
     assert_eq!(
         peer.last_send,
         Some(OwnedSend {

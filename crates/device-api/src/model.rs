@@ -7,8 +7,8 @@ use core::num::NonZeroU64;
 
 /// Device API v1 major version.
 pub const API_VERSION_MAJOR: u16 = 1;
-/// Device API v1 revision adding source-free basic LXMF submission.
-pub const API_VERSION_MINOR: u16 = 4;
+/// Device API v1 revision adding bounded nearby LXMF peer discovery.
+pub const API_VERSION_MINOR: u16 = 5;
 
 /// Maximum size of one decoded or encoded logical CBOR message.
 pub const MAX_MESSAGE_BYTES: usize = 512;
@@ -32,6 +32,8 @@ pub const MAX_LXMF_BASIC_TITLE_BYTES: usize = 295;
 /// The encoded body and product composer can impose a lower limit on a
 /// particular title/content combination.
 pub const MAX_LXMF_BASIC_CONTENT_BYTES: usize = 295;
+/// Maximum authenticated announce application data returned for one nearby LXMF peer.
+pub const MAX_LXMF_PEER_APP_DATA_BYTES: usize = 256;
 
 /// `system.capabilities` operation number.
 pub const OP_SYSTEM_CAPABILITIES: u16 = 0x0001;
@@ -59,6 +61,9 @@ pub const OP_EXPERIMENTAL_LXMF_READ: u16 = 0xf005;
 /// Compose and durably submit one basic LXMF message through the local identity.
 #[cfg(feature = "experimental-lxmf")]
 pub const OP_EXPERIMENTAL_LXMF_BASIC_SEND: u16 = 0xf006;
+/// Read one bounded nearby `lxmf.delivery` peer after an optional boot-scoped cursor.
+#[cfg(feature = "experimental-lxmf")]
+pub const OP_EXPERIMENTAL_LXMF_PEER_NEXT: u16 = 0xf007;
 
 /// Major/minor logical protocol version.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -442,6 +447,15 @@ pub enum DeviceRequest<'a> {
         /// Deduplication key scoped by the authenticated principal and composed message.
         idempotency_key: IdempotencyKey,
     },
+    /// Read one nearby `lxmf.delivery` peer from the volatile bounded projection.
+    #[cfg(feature = "experimental-lxmf")]
+    LxmfPeerNext {
+        /// Optional exclusive cursor scoped to one device boot/incarnation.
+        ///
+        /// `None` starts from the oldest retained record. The wire requires
+        /// both cursor fields together, preventing ambiguous partial cursors.
+        after: Option<LxmfPeerDiscoveryCursor>,
+    },
     /// Durably submit outbound RNS DATA without selecting a physical transport.
     #[cfg(feature = "experimental-rns-data")]
     SubmitRnsData {
@@ -475,6 +489,8 @@ impl DeviceRequest<'_> {
             Self::LxmfRead { .. } => OP_EXPERIMENTAL_LXMF_READ,
             #[cfg(feature = "experimental-lxmf")]
             Self::LxmfBasicSend { .. } => OP_EXPERIMENTAL_LXMF_BASIC_SEND,
+            #[cfg(feature = "experimental-lxmf")]
+            Self::LxmfPeerNext { .. } => OP_EXPERIMENTAL_LXMF_PEER_NEXT,
             #[cfg(feature = "experimental-rns-data")]
             Self::SubmitRnsData { .. } => OP_EXPERIMENTAL_SUBMIT_RNS_DATA,
             Self::__Borrowed(never, _) => match *never {},
@@ -490,7 +506,7 @@ impl DeviceRequest<'_> {
             #[cfg(feature = "experimental-rns-inbox")]
             Self::RnsInboxStatus | Self::RnsInboxPeek => false,
             #[cfg(feature = "experimental-lxmf")]
-            Self::LxmfNext { .. } | Self::LxmfRead { .. } => false,
+            Self::LxmfNext { .. } | Self::LxmfRead { .. } | Self::LxmfPeerNext { .. } => false,
             #[cfg(feature = "experimental-lxmf")]
             Self::LxmfBasicSend { .. } => true,
             #[cfg(feature = "experimental-rns-data")]
@@ -508,7 +524,7 @@ impl DeviceRequest<'_> {
             #[cfg(feature = "experimental-rns-inbox")]
             Self::RnsInboxStatus | Self::RnsInboxPeek => AuthorizationRequirement::Authenticated,
             #[cfg(feature = "experimental-lxmf")]
-            Self::LxmfNext { .. } | Self::LxmfRead { .. } => {
+            Self::LxmfNext { .. } | Self::LxmfRead { .. } | Self::LxmfPeerNext { .. } => {
                 AuthorizationRequirement::Authenticated
             }
             #[cfg(feature = "experimental-lxmf")]
@@ -624,6 +640,10 @@ pub struct CapabilitySnapshot {
     /// Product composition and carrier limits can reduce the accepted
     /// title/content combination.
     pub(crate) max_lxmf_basic_content_bytes: u16,
+    /// Runtime availability of bounded nearby `lxmf.delivery` peer discovery.
+    pub(crate) experimental_lxmf_peer_discovery: CapabilityAvailability,
+    /// Maximum authenticated announce application data returned with one peer.
+    pub(crate) max_lxmf_peer_app_data_bytes: u16,
 }
 
 impl CapabilitySnapshot {
@@ -676,6 +696,16 @@ impl CapabilitySnapshot {
             } else {
                 0
             },
+            experimental_lxmf_peer_discovery: if cfg!(feature = "experimental-lxmf") {
+                CapabilityAvailability::Available
+            } else {
+                CapabilityAvailability::Unavailable
+            },
+            max_lxmf_peer_app_data_bytes: if cfg!(feature = "experimental-lxmf") {
+                MAX_LXMF_PEER_APP_DATA_BYTES as u16
+            } else {
+                0
+            },
         }
     }
 
@@ -695,6 +725,8 @@ impl CapabilitySnapshot {
         snapshot.experimental_lxmf_basic_send = CapabilityAvailability::Unavailable;
         snapshot.max_lxmf_basic_title_bytes = 0;
         snapshot.max_lxmf_basic_content_bytes = 0;
+        snapshot.experimental_lxmf_peer_discovery = CapabilityAvailability::Unavailable;
+        snapshot.max_lxmf_peer_app_data_bytes = 0;
         snapshot
     }
 
@@ -722,6 +754,8 @@ impl CapabilitySnapshot {
         snapshot.experimental_lxmf_basic_send = CapabilityAvailability::Unavailable;
         snapshot.max_lxmf_basic_title_bytes = 0;
         snapshot.max_lxmf_basic_content_bytes = 0;
+        snapshot.experimental_lxmf_peer_discovery = CapabilityAvailability::Unavailable;
+        snapshot.max_lxmf_peer_app_data_bytes = 0;
         snapshot
     }
 
@@ -772,6 +806,38 @@ impl CapabilitySnapshot {
                 MAX_LXMF_BASIC_CONTENT_BYTES as u16
             } else {
                 0
+            };
+        }
+        snapshot
+    }
+
+    /// Restrict submission, inbox, LXMF, send, and peer discovery to one dispatcher.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn for_dispatch_with_inbox_lxmf_basic_send_and_peer_discovery(
+        experimental_submit_rns_data: bool,
+        experimental_rns_inbox: CapabilityAvailability,
+        experimental_lxmf: CapabilityAvailability,
+        experimental_lxmf_basic_send: CapabilityAvailability,
+        experimental_lxmf_peer_discovery: CapabilityAvailability,
+        max_lxmf_peer_app_data_bytes: u16,
+    ) -> Self {
+        let mut snapshot = Self::for_dispatch_with_inbox_lxmf_and_basic_send(
+            experimental_submit_rns_data,
+            experimental_rns_inbox,
+            experimental_lxmf,
+            experimental_lxmf_basic_send,
+        );
+        if cfg!(feature = "experimental-lxmf") {
+            snapshot.experimental_lxmf_peer_discovery = experimental_lxmf_peer_discovery;
+            snapshot.max_lxmf_peer_app_data_bytes = if matches!(
+                experimental_lxmf_peer_discovery,
+                CapabilityAvailability::Unavailable
+            ) {
+                0
+            } else if max_lxmf_peer_app_data_bytes > MAX_LXMF_PEER_APP_DATA_BYTES as u16 {
+                MAX_LXMF_PEER_APP_DATA_BYTES as u16
+            } else {
+                max_lxmf_peer_app_data_bytes
             };
         }
         snapshot
@@ -854,6 +920,16 @@ impl CapabilitySnapshot {
     /// title/content combination.
     pub const fn max_lxmf_basic_content_bytes(self) -> u16 {
         self.max_lxmf_basic_content_bytes
+    }
+
+    /// Runtime availability of bounded nearby `lxmf.delivery` peer discovery.
+    pub const fn experimental_lxmf_peer_discovery(self) -> CapabilityAvailability {
+        self.experimental_lxmf_peer_discovery
+    }
+
+    /// Maximum authenticated announce application data returned with one peer.
+    pub const fn max_lxmf_peer_app_data_bytes(self) -> u16 {
+        self.max_lxmf_peer_app_data_bytes
     }
 }
 
@@ -1024,6 +1100,301 @@ impl InvalidLxmfReadLength {
     /// Maximum accepted requested length.
     pub const fn maximum(self) -> u16 {
         MAX_LXMF_READ_CHUNK_BYTES as u16
+    }
+}
+
+/// Opaque public token identifying one volatile peer-discovery incarnation.
+///
+/// The device changes this value whenever its boot-scoped discovery table is
+/// reconstructed. It is not a credential or secret.
+#[cfg(feature = "experimental-lxmf")]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct LxmfPeerDiscoveryIncarnation([u8; 8]);
+
+#[cfg(feature = "experimental-lxmf")]
+impl LxmfPeerDiscoveryIncarnation {
+    /// Construct a token from its complete public wire bytes.
+    pub const fn new(bytes: [u8; 8]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow all public token bytes.
+    pub const fn as_bytes(&self) -> &[u8; 8] {
+        &self.0
+    }
+}
+
+/// Exclusive peer-discovery cursor scoped to one device incarnation.
+#[cfg(feature = "experimental-lxmf")]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct LxmfPeerDiscoveryCursor {
+    incarnation: LxmfPeerDiscoveryIncarnation,
+    after_generation: u64,
+}
+
+#[cfg(feature = "experimental-lxmf")]
+impl LxmfPeerDiscoveryCursor {
+    /// Construct a complete boot-scoped exclusive cursor.
+    pub const fn new(incarnation: LxmfPeerDiscoveryIncarnation, after_generation: u64) -> Self {
+        Self {
+            incarnation,
+            after_generation,
+        }
+    }
+
+    /// Incarnation in which the exclusive generation was observed.
+    pub const fn incarnation(self) -> LxmfPeerDiscoveryIncarnation {
+        self.incarnation
+    }
+
+    /// Exclusive observation generation; zero starts before all observations.
+    pub const fn after_generation(self) -> u64 {
+        self.after_generation
+    }
+}
+
+/// Nonzero generation assigned to one retained peer's latest observation.
+#[cfg(feature = "experimental-lxmf")]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct LxmfPeerGeneration(NonZeroU64);
+
+#[cfg(feature = "experimental-lxmf")]
+impl LxmfPeerGeneration {
+    /// Construct a generation, rejecting the reserved pre-history value zero.
+    pub const fn new(value: u64) -> Result<Self, InvalidLxmfPeerGeneration> {
+        match NonZeroU64::new(value) {
+            Some(value) => Ok(Self(value)),
+            None => Err(InvalidLxmfPeerGeneration),
+        }
+    }
+
+    /// Complete nonzero generation value.
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+/// Zero is reserved for the cursor before any peer observation.
+#[cfg(feature = "experimental-lxmf")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidLxmfPeerGeneration;
+
+/// Public 128-bit hash of the identity that authenticated an announce.
+#[cfg(feature = "experimental-lxmf")]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct IdentityHash([u8; 16]);
+
+#[cfg(feature = "experimental-lxmf")]
+impl IdentityHash {
+    /// Construct a public identity hash from all wire bytes.
+    pub const fn new(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow all public hash bytes.
+    pub const fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+}
+
+/// One retained, authenticated nearby `lxmf.delivery` announce observation.
+///
+/// This is display and contact-selection evidence, not routing authority.
+/// The complete 64-byte Reticulum public key intentionally remains inside the
+/// firmware's protocol owner and is not exposed by the local device API.
+#[cfg(feature = "experimental-lxmf")]
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct LxmfDiscoveredPeer {
+    destination: DestinationHash,
+    identity_hash: IdentityHash,
+    app_data_len: u16,
+    app_data: [u8; MAX_LXMF_PEER_APP_DATA_BYTES],
+    hops: u8,
+    interface_id: u8,
+    rssi_dbm: Option<i16>,
+    snr_db: Option<i16>,
+    observed_age_ms: u64,
+    generation: LxmfPeerGeneration,
+}
+
+#[cfg(feature = "experimental-lxmf")]
+impl LxmfDiscoveredPeer {
+    /// Copy one bounded, already-authenticated discovery observation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        destination: DestinationHash,
+        identity_hash: IdentityHash,
+        app_data: &[u8],
+        hops: u8,
+        interface_id: u8,
+        rssi_dbm: Option<i16>,
+        snr_db: Option<i16>,
+        observed_age_ms: u64,
+        generation: LxmfPeerGeneration,
+    ) -> Result<Self, LxmfPeerAppDataTooLarge> {
+        if app_data.len() > MAX_LXMF_PEER_APP_DATA_BYTES {
+            return Err(LxmfPeerAppDataTooLarge {
+                actual: app_data.len(),
+            });
+        }
+        let mut owned = [0_u8; MAX_LXMF_PEER_APP_DATA_BYTES];
+        owned[..app_data.len()].copy_from_slice(app_data);
+        Ok(Self {
+            destination,
+            identity_hash,
+            app_data_len: app_data.len() as u16,
+            app_data: owned,
+            hops,
+            interface_id,
+            rssi_dbm,
+            snr_db,
+            observed_age_ms,
+            generation,
+        })
+    }
+
+    /// Complete announced `lxmf.delivery` destination hash.
+    pub const fn destination(&self) -> DestinationHash {
+        self.destination
+    }
+
+    /// Public hash of the identity that authenticated the announce.
+    pub const fn identity_hash(&self) -> IdentityHash {
+        self.identity_hash
+    }
+
+    /// Exact authenticated announce application data.
+    pub fn app_data(&self) -> &[u8] {
+        &self.app_data[..self.app_data_len as usize]
+    }
+
+    /// Reticulum hop count reported for the latest observation.
+    pub const fn hops(&self) -> u8 {
+        self.hops
+    }
+
+    /// Product-owned scalar identifying the observing interface.
+    pub const fn interface_id(&self) -> u8 {
+        self.interface_id
+    }
+
+    /// Observed RSSI in whole dBm, when available.
+    pub const fn rssi_dbm(&self) -> Option<i16> {
+        self.rssi_dbm
+    }
+
+    /// Observed signal-to-noise ratio in whole dB, when available.
+    pub const fn snr_db(&self) -> Option<i16> {
+        self.snr_db
+    }
+
+    /// Saturating age in milliseconds at the response snapshot.
+    pub const fn observed_age_ms(&self) -> u64 {
+        self.observed_age_ms
+    }
+
+    /// Generation of the latest retained observation.
+    pub const fn generation(&self) -> LxmfPeerGeneration {
+        self.generation
+    }
+}
+
+#[cfg(feature = "experimental-lxmf")]
+impl core::fmt::Debug for LxmfDiscoveredPeer {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("LxmfDiscoveredPeer")
+            .field("destination", &self.destination)
+            .field("identity_hash", &self.identity_hash)
+            .field("app_data_len", &self.app_data_len)
+            .field("app_data", &"<redacted>")
+            .field("hops", &self.hops)
+            .field("interface_id", &self.interface_id)
+            .field("rssi_dbm", &self.rssi_dbm)
+            .field("snr_db", &self.snr_db)
+            .field("observed_age_ms", &self.observed_age_ms)
+            .field("generation", &self.generation)
+            .finish()
+    }
+}
+
+/// Authenticated announce application data exceeded the logical response bound.
+#[cfg(feature = "experimental-lxmf")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LxmfPeerAppDataTooLarge {
+    actual: usize,
+}
+
+#[cfg(feature = "experimental-lxmf")]
+impl LxmfPeerAppDataTooLarge {
+    /// Rejected application-data byte count.
+    pub const fn actual(self) -> usize {
+        self.actual
+    }
+
+    /// Maximum application-data byte count.
+    pub const fn maximum(self) -> usize {
+        MAX_LXMF_PEER_APP_DATA_BYTES
+    }
+}
+
+/// One-record page from the volatile nearby-LXMF peer projection.
+///
+/// A changed incarnation or an ahead-of-history cursor resets the port to its
+/// first retained record and sets `history_gap`. The returned next cursor is
+/// always scoped to the current incarnation.
+#[cfg(feature = "experimental-lxmf")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LxmfPeerDiscoveryPage {
+    next_cursor: LxmfPeerDiscoveryCursor,
+    latest_generation: Option<LxmfPeerGeneration>,
+    oldest_retained_generation: Option<LxmfPeerGeneration>,
+    history_gap: bool,
+    peer: Option<LxmfDiscoveredPeer>,
+}
+
+#[cfg(feature = "experimental-lxmf")]
+impl LxmfPeerDiscoveryPage {
+    /// Construct one bounded projection page.
+    pub const fn new(
+        next_cursor: LxmfPeerDiscoveryCursor,
+        latest_generation: Option<LxmfPeerGeneration>,
+        oldest_retained_generation: Option<LxmfPeerGeneration>,
+        history_gap: bool,
+        peer: Option<LxmfDiscoveredPeer>,
+    ) -> Self {
+        Self {
+            next_cursor,
+            latest_generation,
+            oldest_retained_generation,
+            history_gap,
+            peer,
+        }
+    }
+
+    /// Exclusive cursor for the next read, scoped to the current incarnation.
+    pub const fn next_cursor(&self) -> LxmfPeerDiscoveryCursor {
+        self.next_cursor
+    }
+
+    /// Latest accepted observation generation when this page was produced.
+    pub const fn latest_generation(&self) -> Option<LxmfPeerGeneration> {
+        self.latest_generation
+    }
+
+    /// Oldest generation represented by a currently retained peer.
+    pub const fn oldest_retained_generation(&self) -> Option<LxmfPeerGeneration> {
+        self.oldest_retained_generation
+    }
+
+    /// Whether requested history was reset, updated away, or evicted.
+    pub const fn history_gap(&self) -> bool {
+        self.history_gap
+    }
+
+    /// One retained peer after the requested cursor, if present.
+    pub const fn peer(&self) -> Option<&LxmfDiscoveredPeer> {
+        self.peer.as_ref()
     }
 }
 
@@ -1496,6 +1867,9 @@ pub enum DeviceResponse {
     /// Accepted source-free basic LXMF submission.
     #[cfg(feature = "experimental-lxmf")]
     LxmfBasicSendAccepted(LxmfBasicSendAccepted),
+    /// One bounded page from nearby `lxmf.delivery` peer discovery.
+    #[cfg(feature = "experimental-lxmf")]
+    LxmfPeerNext(LxmfPeerDiscoveryPage),
     /// Accepted experimental outbound RNS DATA submission.
     #[cfg(feature = "experimental-rns-data")]
     SubmitRnsDataAccepted(SubmissionAccepted),
@@ -1520,6 +1894,8 @@ impl DeviceResponse {
             Self::LxmfRead(_) => OP_EXPERIMENTAL_LXMF_READ,
             #[cfg(feature = "experimental-lxmf")]
             Self::LxmfBasicSendAccepted(_) => OP_EXPERIMENTAL_LXMF_BASIC_SEND,
+            #[cfg(feature = "experimental-lxmf")]
+            Self::LxmfPeerNext(_) => OP_EXPERIMENTAL_LXMF_PEER_NEXT,
             #[cfg(feature = "experimental-rns-data")]
             Self::SubmitRnsDataAccepted(_) => OP_EXPERIMENTAL_SUBMIT_RNS_DATA,
             Self::Error(_) => RESPONSE_ERROR,

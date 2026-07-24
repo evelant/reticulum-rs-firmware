@@ -74,6 +74,16 @@ pub trait LxmfSession {
     /// Download and validate the complete message for the retained summary.
     fn read_inbox(&mut self, summary: InboxSummary) -> Result<InboundMessage, Self::Error>;
 
+    /// Read one page from the authenticated device's volatile nearby-peer
+    /// projection.
+    ///
+    /// The cursor is boot-scoped. Callers must inspect the returned incarnation
+    /// and history-gap flag rather than treating its generation as durable.
+    fn next_nearby_peer(
+        &mut self,
+        after: Option<device_api::LxmfPeerDiscoveryCursor>,
+    ) -> Result<device_api::LxmfPeerDiscoveryPage, Self::Error>;
+
     /// Whether the underlying authenticated session can attempt another call.
     fn is_usable(&self) -> bool;
 }
@@ -248,6 +258,13 @@ impl<T: ClientTransport> LxmfSession for DeviceClientSession<T> {
             view.payload().title().as_bytes().to_vec(),
             view.payload().content().as_bytes().to_vec(),
         ))
+    }
+
+    fn next_nearby_peer(
+        &mut self,
+        after: Option<device_api::LxmfPeerDiscoveryCursor>,
+    ) -> Result<device_api::LxmfPeerDiscoveryPage, Self::Error> {
+        Ok(self.client.lxmf_peer_next(after)?)
     }
 
     fn is_usable(&self) -> bool {

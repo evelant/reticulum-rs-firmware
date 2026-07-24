@@ -4,11 +4,15 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     AUTHORIZATION_KNOWN_PERMISSION_BITS, AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA,
-    MAX_ENCODED_PACKET_BYTES, MAX_EXPERIMENTAL_RNS_DATA_BYTES,
+    MAX_ENCODED_PACKET_BYTES, MAX_EXPERIMENTAL_RNS_DATA_BYTES, MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES,
+    MIN_LXMF_MESSAGE_WIRE_BYTES,
 };
 
 const EXPERIMENTAL_RNS_DATA_DIGEST_DOMAIN: &[u8] =
     b"reticulum-rs-firmware/storage-model/experimental-rns-data/v1\0";
+// Retain the schema-3 digest domain even though the source vocabulary now
+// makes delivery-method selection explicitly separate from message ownership.
+const LXMF_MESSAGE_DIGEST_DOMAIN: &[u8] = b"reticulum-rs-firmware/storage-model/direct-lxmf/v1\0";
 
 /// Authenticated local-client principal owning one submission.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -61,7 +65,7 @@ impl DestinationHash {
 /// SHA-256 of canonical semantic intent content.
 ///
 /// This is neither a digest of API CBOR nor Reticulum's delivery-proof token.
-/// Semantic schema 2 does not store this redundant value in an acceptance;
+/// Semantic schema 3 does not store this redundant value in an acceptance;
 /// callers derive it from the immutable intent when needed.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ContentSha256([u8; 32]);
@@ -83,6 +87,14 @@ impl ContentSha256 {
         hasher.update(intent.destination.as_bytes());
         hasher.update(intent.payload_len.to_be_bytes());
         hasher.update(intent.payload());
+        Self(hasher.finalize().into())
+    }
+
+    fn for_lxmf_message(intent: &LxmfMessageIntent) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(LXMF_MESSAGE_DIGEST_DOMAIN);
+        hasher.update(intent.wire_len.to_be_bytes());
+        hasher.update(intent.wire());
         Self(hasher.finalize().into())
     }
 }
@@ -145,6 +157,135 @@ impl ExperimentalRnsDataIntent {
     /// Canonical semantic content digest.
     pub fn content_sha256(&self) -> ContentSha256 {
         ContentSha256::for_experimental_rns_data(self)
+    }
+}
+
+/// Invalid complete inline LXMF wire length.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidLxmfMessageWireLength {
+    actual: usize,
+}
+
+impl InvalidLxmfMessageWireLength {
+    /// Supplied complete wire length.
+    pub const fn actual(self) -> usize {
+        self.actual
+    }
+
+    /// Smallest accepted wire retaining the complete destination prefix.
+    pub const fn minimum(self) -> usize {
+        MIN_LXMF_MESSAGE_WIRE_BYTES
+    }
+
+    /// Largest complete wire retained by the current inline intent.
+    pub const fn maximum(self) -> usize {
+        MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES
+    }
+}
+
+/// Exact complete signed LXMF wire bytes accepted before delivery planning.
+///
+/// This storage-owned value preserves the producer's bytes verbatim. It does
+/// not parse, normalize, recompose, or re-sign LXMF. The producer remains
+/// responsible for canonical LXMF composition. This constructor enforces the
+/// retained destination prefix and current inline ceiling without choosing
+/// opportunistic, direct, propagated, or any future delivery method.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LxmfMessageIntent {
+    wire_len: u16,
+    wire: [u8; MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES],
+}
+
+impl LxmfMessageIntent {
+    /// Copy one complete signed wire message into bounded durable storage.
+    pub fn new(wire: &[u8]) -> Result<Self, InvalidLxmfMessageWireLength> {
+        if !(MIN_LXMF_MESSAGE_WIRE_BYTES..=MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES).contains(&wire.len())
+        {
+            return Err(InvalidLxmfMessageWireLength { actual: wire.len() });
+        }
+        let mut owned = [0_u8; MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES];
+        owned[..wire.len()].copy_from_slice(wire);
+        Ok(Self {
+            wire_len: wire.len() as u16,
+            wire: owned,
+        })
+    }
+
+    /// Complete destination hash retained as the first 16 wire bytes.
+    pub fn destination(&self) -> DestinationHash {
+        let mut destination = [0_u8; 16];
+        destination.copy_from_slice(&self.wire[..16]);
+        DestinationHash::new(destination)
+    }
+
+    /// Borrow the exact initialized complete signed wire bytes.
+    pub fn wire(&self) -> &[u8] {
+        &self.wire[..usize::from(self.wire_len)]
+    }
+
+    /// Borrow source hash, signature, and payload for opportunistic delivery.
+    pub fn opportunistic_carrier(&self) -> &[u8] {
+        &self.wire[16..usize::from(self.wire_len)]
+    }
+
+    /// Canonical semantic content digest over the exact wire bytes.
+    pub fn content_sha256(&self) -> ContentSha256 {
+        ContentSha256::for_lxmf_message(self)
+    }
+}
+
+/// Immutable durable submission content selected before transport planning.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubmissionIntent {
+    /// Generic destination-encrypted RNS DATA constrained to its protocol MDU.
+    ExperimentalRnsData(ExperimentalRnsDataIntent),
+    /// Exact complete signed LXMF wire retained before delivery planning.
+    LxmfMessage(LxmfMessageIntent),
+}
+
+impl SubmissionIntent {
+    /// Complete destination hash common to all currently modeled intents.
+    pub fn destination(&self) -> DestinationHash {
+        match self {
+            Self::ExperimentalRnsData(intent) => intent.destination(),
+            Self::LxmfMessage(intent) => intent.destination(),
+        }
+    }
+
+    /// Canonical semantic content digest with an intent-specific domain.
+    pub fn content_sha256(&self) -> ContentSha256 {
+        match self {
+            Self::ExperimentalRnsData(intent) => intent.content_sha256(),
+            Self::LxmfMessage(intent) => intent.content_sha256(),
+        }
+    }
+
+    /// Borrow generic destination-DATA content when this is that intent kind.
+    pub const fn experimental_rns_data(&self) -> Option<&ExperimentalRnsDataIntent> {
+        match self {
+            Self::ExperimentalRnsData(intent) => Some(intent),
+            Self::LxmfMessage(_) => None,
+        }
+    }
+
+    /// Borrow exact LXMF content when this is that intent kind.
+    pub const fn lxmf_message(&self) -> Option<&LxmfMessageIntent> {
+        match self {
+            Self::ExperimentalRnsData(_) => None,
+            Self::LxmfMessage(intent) => Some(intent),
+        }
+    }
+}
+
+impl From<ExperimentalRnsDataIntent> for SubmissionIntent {
+    fn from(intent: ExperimentalRnsDataIntent) -> Self {
+        Self::ExperimentalRnsData(intent)
+    }
+}
+
+impl From<LxmfMessageIntent> for SubmissionIntent {
+    fn from(intent: LxmfMessageIntent) -> Self {
+        Self::LxmfMessage(intent)
     }
 }
 
@@ -268,7 +409,7 @@ pub enum AuthorizationSnapshotError {
         /// Older complete authority revision.
         authority_revision: u64,
     },
-    /// Permission bitset contains vocabulary unknown to semantic schema 2.
+    /// Permission bitset contains vocabulary unknown to semantic schema 3.
     UnknownPermissionBits {
         /// Bits outside [`crate::AUTHORIZATION_KNOWN_PERMISSION_BITS`].
         unknown: u32,
@@ -284,24 +425,27 @@ pub struct Accepted {
     principal: PrincipalId,
     idempotency_key: IdempotencyKey,
     authorization: AuthorizationSnapshot,
-    intent: ExperimentalRnsDataIntent,
+    intent: SubmissionIntent,
 }
 
 impl Accepted {
     /// Construct a self-consistent immutable acceptance record.
-    pub fn new(
+    pub fn new<I>(
         id: SubmissionId,
         principal: PrincipalId,
         idempotency_key: IdempotencyKey,
-        intent: ExperimentalRnsDataIntent,
+        intent: I,
         authorization: AuthorizationSnapshot,
-    ) -> Self {
+    ) -> Self
+    where
+        I: Into<SubmissionIntent>,
+    {
         Self {
             id,
             principal,
             idempotency_key,
             authorization,
-            intent,
+            intent: intent.into(),
         }
     }
 
@@ -309,7 +453,7 @@ impl Accepted {
         id: SubmissionId,
         principal: PrincipalId,
         idempotency_key: IdempotencyKey,
-        intent: ExperimentalRnsDataIntent,
+        intent: SubmissionIntent,
         authorization: AuthorizationSnapshot,
     ) -> Self {
         Self::new(id, principal, idempotency_key, intent, authorization)
@@ -341,7 +485,7 @@ impl Accepted {
     }
 
     /// Complete fixed-capacity intent.
-    pub const fn intent(self) -> ExperimentalRnsDataIntent {
+    pub const fn intent(self) -> SubmissionIntent {
         self.intent
     }
 }

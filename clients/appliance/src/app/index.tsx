@@ -38,6 +38,12 @@ import { LatestRequest } from "../lib/latest-request.ts";
 import { byteLimitError, utf8ByteLength } from "../lib/limits.ts";
 import { readNativeCoreStatus } from "../lib/native-core";
 import type { NativeCoreStatus } from "../lib/native-core-types.ts";
+import {
+  type NearbyPeerView,
+  nearbyPeerFingerprint,
+  nearbyPeerRouteHint,
+  nearbyPeerSuggestedName,
+} from "../lib/nearby-peers.ts";
 import { onboardingPresentation } from "../lib/onboarding.ts";
 import { randomHex } from "../lib/random.ts";
 
@@ -146,10 +152,175 @@ function OnboardingPanel({ busy, onboarding, onMutation }: OnboardingPanelProps)
   );
 }
 
+interface NearbyPanelProps {
+  readonly busy: boolean;
+  readonly compact: boolean;
+  readonly connected: boolean;
+  readonly contacts: ContactView[];
+  readonly onRefresh: (() => Promise<NearbyPeerView[]>) | null;
+  readonly onSelect: (destination: string) => void;
+  readonly onUpsert: (destination: string, name: string) => Promise<boolean>;
+}
+
+function NearbyPanel({
+  busy,
+  compact,
+  connected,
+  contacts,
+  onRefresh,
+  onSelect,
+  onUpsert,
+}: NearbyPanelProps) {
+  const [addingDestination, setAddingDestination] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [peers, setPeers] = useState<NearbyPeerView[]>([]);
+  const loadGeneration = useRef(0);
+  const wasConnected = useRef(false);
+
+  const refreshNearby = useCallback(async () => {
+    if (onRefresh === null || !connected) return;
+    const generation = loadGeneration.current + 1;
+    loadGeneration.current = generation;
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const discovered = await onRefresh();
+      if (loadGeneration.current !== generation) return;
+      setPeers(discovered);
+      setLoaded(true);
+    } catch (nextError) {
+      if (loadGeneration.current !== generation) return;
+      setLoadError(errorText(nextError));
+      setLoaded(true);
+    } finally {
+      if (loadGeneration.current === generation) setLoading(false);
+    }
+  }, [connected, onRefresh]);
+
+  useEffect(() => {
+    const becameConnected = connected && !wasConnected.current;
+    wasConnected.current = connected;
+    if (becameConnected && onRefresh !== null) void refreshNearby();
+  }, [connected, onRefresh, refreshNearby]);
+
+  useEffect(
+    () => () => {
+      loadGeneration.current += 1;
+    },
+    [],
+  );
+
+  const choosePeer = async (peer: NearbyPeerView, alreadyAdded: boolean) => {
+    if (alreadyAdded) {
+      onSelect(peer.destination);
+      return;
+    }
+    setAddingDestination(peer.destination);
+    try {
+      await onUpsert(peer.destination, nearbyPeerSuggestedName(peer));
+    } finally {
+      setAddingDestination(null);
+    }
+  };
+
+  const peerRows = peers.map((peer) => {
+    const existing = contacts.some((contact) => contact.destination === peer.destination);
+    const adding = addingDestination === peer.destination;
+    return (
+      <Pressable
+        accessibilityHint={
+          existing ? "Opens the existing conversation" : "Adds this authenticated peer as a contact"
+        }
+        accessibilityLabel={`${existing ? "Open" : "Add"} ${nearbyPeerSuggestedName(peer)}`}
+        accessibilityRole="button"
+        disabled={busy}
+        key={peer.destination}
+        onPress={() => void choosePeer(peer, existing)}
+        style={({ pressed }) => [
+          styles.nearbyPeer,
+          existing && styles.nearbyPeerAdded,
+          busy && styles.buttonDisabled,
+          pressed && !busy && styles.contactPressed,
+        ]}
+      >
+        <View style={styles.nearbyPeerHeading}>
+          <Text numberOfLines={1} style={styles.nearbyPeerName}>
+            {nearbyPeerSuggestedName(peer)}
+          </Text>
+          <Text style={styles.nearbyPeerAction}>
+            {adding ? "Adding…" : existing ? "Open" : "Add"}
+          </Text>
+        </View>
+        <Text style={styles.nearbyStatus}>{nearbyPeerRouteHint(peer)}</Text>
+        <Text selectable style={styles.monospace}>
+          ID {nearbyPeerFingerprint(peer)}
+        </Text>
+      </Pressable>
+    );
+  });
+
+  return (
+    <View style={styles.nearbyPanel}>
+      <View style={styles.nearbyHeading}>
+        <View style={styles.nearbyTitle}>
+          <Text style={styles.contactName}>Nearby</Text>
+          <Text style={styles.nearbyCaption}>Authenticated LXMF announces</Text>
+        </View>
+        <Pressable
+          accessibilityLabel="Refresh nearby peers"
+          accessibilityRole="button"
+          disabled={busy || loading || !connected || onRefresh === null}
+          onPress={() => void refreshNearby()}
+          style={({ pressed }) => [
+            styles.smallButton,
+            (busy || loading || !connected || onRefresh === null) && styles.buttonDisabled,
+            pressed && styles.buttonPressed,
+          ]}
+        >
+          <Text style={styles.smallButtonText}>{loading ? "Scanning…" : "Refresh"}</Text>
+        </Pressable>
+      </View>
+      {onRefresh === null ? (
+        <Text accessibilityLiveRegion="polite" style={styles.nearbyStatus}>
+          Nearby discovery is not included in this app build yet.
+        </Text>
+      ) : !connected ? (
+        <Text accessibilityLiveRegion="polite" style={styles.nearbyStatus}>
+          Connect to the appliance to read peers it has heard.
+        </Text>
+      ) : loadError !== null ? (
+        <View accessibilityLiveRegion="assertive" style={styles.nearbyError}>
+          <Text style={styles.inlineError}>{loadError}</Text>
+          <Text style={styles.nearbyStatus}>Tap Refresh to try again.</Text>
+        </View>
+      ) : loaded && peers.length === 0 ? (
+        <Text accessibilityLiveRegion="polite" style={styles.nearbyStatus}>
+          No LXMF peers heard yet. Leave both nodes powered, then refresh.
+        </Text>
+      ) : compact ? (
+        <View style={styles.nearbyList}>{peerRows}</View>
+      ) : (
+        <ScrollView
+          contentContainerStyle={styles.nearbyList}
+          keyboardDismissMode={KEYBOARD_LAYOUT.dismissMode}
+          keyboardShouldPersistTaps="handled"
+          nestedScrollEnabled
+          style={styles.nearbyScroller}
+        >
+          {peerRows}
+        </ScrollView>
+      )}
+    </View>
+  );
+}
+
 interface SidebarProps {
   readonly busy: boolean;
   readonly compact: boolean;
   readonly contacts: ContactView[];
+  readonly onRefreshNearby: (() => Promise<NearbyPeerView[]>) | null;
   readonly onSelect: (destination: string) => void;
   readonly onUpsert: (destination: string, name: string) => Promise<boolean>;
   readonly selected: string | null;
@@ -160,12 +331,14 @@ function Sidebar({
   busy,
   compact,
   contacts,
+  onRefreshNearby,
   onSelect,
   onUpsert,
   selected,
   snapshot,
 }: SidebarProps) {
   const [showForm, setShowForm] = useState(false);
+  const [showNearby, setShowNearby] = useState(false);
   const [name, setName] = useState("");
   const [destination, setDestination] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
@@ -193,19 +366,66 @@ function Sidebar({
     setShowForm(false);
   };
 
-  return (
-    <View style={[styles.sidebar, compact && styles.sidebarCompact]}>
+  const contactRows = contacts.map((contact) => (
+    <Pressable
+      accessibilityRole="button"
+      key={contact.destination}
+      onPress={() => onSelect(contact.destination)}
+      style={({ pressed }) => [
+        styles.contact,
+        selected === contact.destination && styles.contactActive,
+        pressed && styles.contactPressed,
+      ]}
+    >
+      <Text numberOfLines={1} style={styles.contactName}>
+        {contact.name || "Unnamed contact"}
+      </Text>
+      <Text selectable style={styles.monospace}>
+        {contact.destination}
+      </Text>
+    </Pressable>
+  ));
+
+  const sidebarContents = (
+    <>
       <View style={styles.sectionHeading}>
         <Text style={styles.heading}>Contacts</Text>
-        <Pressable
-          accessibilityLabel="Add contact"
-          accessibilityRole="button"
-          onPress={() => setShowForm(true)}
-          style={styles.addButton}
-        >
-          <Text style={styles.addButtonText}>+</Text>
-        </Pressable>
+        <View style={styles.sectionActions}>
+          <Pressable
+            accessibilityLabel={showNearby ? "Hide nearby peers" : "Find nearby peers"}
+            accessibilityRole="button"
+            onPress={() => {
+              setShowForm(false);
+              setShowNearby((visible) => !visible);
+            }}
+            style={[styles.smallButton, showNearby && styles.smallButtonActive]}
+          >
+            <Text style={styles.smallButtonText}>Nearby</Text>
+          </Pressable>
+          <Pressable
+            accessibilityLabel="Add contact manually"
+            accessibilityRole="button"
+            onPress={() => {
+              setShowNearby(false);
+              setShowForm(true);
+            }}
+            style={styles.addButton}
+          >
+            <Text style={styles.addButtonText}>+</Text>
+          </Pressable>
+        </View>
       </View>
+      {showNearby ? (
+        <NearbyPanel
+          busy={busy}
+          compact={compact}
+          connected={readyConnection !== undefined}
+          contacts={contacts}
+          onRefresh={onRefreshNearby}
+          onSelect={onSelect}
+          onUpsert={onUpsert}
+        />
+      ) : null}
       {showForm ? (
         <View style={styles.contactForm}>
           <Text style={styles.label}>Name</Text>
@@ -235,30 +455,17 @@ function Sidebar({
           </View>
         </View>
       ) : null}
-      <ScrollView
-        contentContainerStyle={styles.contacts}
-        keyboardDismissMode={KEYBOARD_LAYOUT.dismissMode}
-        keyboardShouldPersistTaps="handled"
-        nestedScrollEnabled={compact}
-      >
-        {contacts.map((contact) => (
-          <Pressable
-            accessibilityRole="button"
-            key={contact.destination}
-            onPress={() => onSelect(contact.destination)}
-            style={({ pressed }) => [
-              styles.contact,
-              selected === contact.destination && styles.contactActive,
-              pressed && styles.contactPressed,
-            ]}
-          >
-            <Text style={styles.contactName}>{contact.name || "Unnamed contact"}</Text>
-            <Text selectable style={styles.monospace}>
-              {contact.destination}
-            </Text>
-          </Pressable>
-        ))}
-      </ScrollView>
+      {compact ? (
+        <View style={styles.contacts}>{contactRows}</View>
+      ) : (
+        <ScrollView
+          contentContainerStyle={styles.contacts}
+          keyboardDismissMode={KEYBOARD_LAYOUT.dismissMode}
+          keyboardShouldPersistTaps="handled"
+        >
+          {contactRows}
+        </ScrollView>
+      )}
       <View style={styles.deviceMeta}>
         <MetaRow label="Connection" value={connectionLabel(snapshot?.connection)} />
         <MetaRow
@@ -271,8 +478,24 @@ function Sidebar({
         <MetaRow label="Imported" value={String(snapshot?.imported_this_run ?? 0)} />
         <MetaRow label="Local LXMF" value={snapshot?.device?.lxmf_delivery_destination ?? "—"} />
       </View>
-    </View>
+    </>
   );
+
+  if (compact) {
+    return (
+      <ScrollView
+        contentContainerStyle={styles.sidebarCompactContent}
+        keyboardDismissMode={KEYBOARD_LAYOUT.dismissMode}
+        keyboardShouldPersistTaps="handled"
+        nestedScrollEnabled
+        style={styles.sidebarCompactScroller}
+      >
+        {sidebarContents}
+      </ScrollView>
+    );
+  }
+
+  return <View style={styles.sidebar}>{sidebarContents}</View>;
 }
 
 function MetaRow({ label, value }: { readonly label: string; readonly value: string }) {
@@ -449,6 +672,10 @@ export default function ApplianceScreen() {
   // local error. The onboarding panel owns that state until setup is ready.
   const displayedError = error ?? (ready ? snapshot?.last_error : null);
   const selectedContact = contacts.find((contact) => contact.destination === selected);
+  const nearbyReader = useMemo(() => {
+    const read = api.nearbyPeers;
+    return read === undefined ? null : () => read.call(api);
+  }, [api]);
 
   useEffect(() => {
     let active = true;
@@ -676,6 +903,7 @@ export default function ApplianceScreen() {
         busy={busy}
         compact={compact}
         contacts={contacts}
+        onRefreshNearby={nearbyReader}
         onSelect={chooseContact}
         onUpsert={upsertContact}
         selected={selected}
@@ -898,19 +1126,22 @@ const styles = StyleSheet.create({
     borderRightWidth: 1,
     backgroundColor: colors.panel,
   },
-  sidebarCompact: {
+  sidebarCompactScroller: {
     width: "100%",
     maxHeight: 320,
     borderRightWidth: 0,
     borderBottomColor: colors.line,
     borderBottomWidth: 1,
+    backgroundColor: colors.panel,
   },
+  sidebarCompactContent: { padding: 22 },
   sectionHeading: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
     marginBottom: 14,
   },
+  sectionActions: { flexDirection: "row", alignItems: "center", gap: 8 },
   addButton: {
     width: 34,
     height: 34,
@@ -921,6 +1152,55 @@ const styles = StyleSheet.create({
     borderRadius: 17,
   },
   addButtonText: { color: colors.text, fontSize: 22 },
+  smallButton: {
+    minHeight: 32,
+    justifyContent: "center",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderColor: colors.line,
+    borderWidth: 1,
+    borderRadius: 999,
+  },
+  smallButtonActive: { borderColor: "#356344", backgroundColor: colors.greenDark },
+  smallButtonText: { color: "#dfe8df", fontSize: 11, fontWeight: "700" },
+  nearbyPanel: {
+    gap: 10,
+    marginBottom: 16,
+    padding: 12,
+    borderColor: "#356344",
+    borderWidth: 1,
+    borderRadius: 10,
+    backgroundColor: colors.greenDark,
+  },
+  nearbyHeading: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  nearbyTitle: { flex: 1, gap: 2 },
+  nearbyCaption: { color: colors.muted, fontSize: 10 },
+  nearbyStatus: { color: colors.muted, fontSize: 11, lineHeight: 16 },
+  nearbyError: { gap: 3 },
+  nearbyScroller: { maxHeight: 230 },
+  nearbyList: { gap: 7 },
+  nearbyPeer: {
+    gap: 4,
+    padding: 10,
+    borderColor: colors.line,
+    borderWidth: 1,
+    borderRadius: 8,
+    backgroundColor: colors.panel,
+  },
+  nearbyPeerAdded: { borderColor: "#5b9c69" },
+  nearbyPeerHeading: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  nearbyPeerName: { flex: 1, color: "#dfe8df", fontWeight: "700" },
+  nearbyPeerAction: { color: colors.green, fontSize: 11, fontWeight: "700" },
   contactForm: {
     gap: 9,
     marginBottom: 18,

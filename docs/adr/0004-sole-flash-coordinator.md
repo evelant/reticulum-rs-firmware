@@ -102,18 +102,21 @@ attempt failed.
 ## Consequences
 
 - The resident coordinator and exact authorized-frame request/durable-echo
-  handoff are implemented. The E290 profile has a one-entry accepted-history cap
-  used only for composition qualification; it is not product capacity. The
+  handoff are implemented. The current E290 profile retains 128
+  accepted-history entries in external PSRAM and has a separate 154-acceptance
+  append-only journal lifetime ceiling. Earlier one-entry composition fixtures
+  remain historical evidence only. The
   software ownership path now passes cross-layer host tests. Portable API
   framing, immutable credential authority, the qualification-session core, and
-  job handoff are qualified, and schema 2 persists exact authorization
-  provenance. ADR 0009's credential partition and store are now validated,
+  job handoff are qualified, and semantic schema 3 persists exact authorization
+  provenance plus a method-neutral LXMF message intent. ADR 0009's credential
+  partition and store are now validated,
   boot-mounted/recovered immediately after flash open, and retained in this
   coordinator without automatic provisioning. Explicit initialization and live
   pairing are routed through the pre-authentication USB records. The first
-  authenticated API/session firmware lane is composed as a minimal single-
-  flight USB bearer; one bounded powered handshake/identity/submission/peer-
-  proof/status path passes. ADR 0011's bounded powered inbox work additionally
+  authenticated API/session firmware lanes are composed over single-flight USB
+  and BLE bearers; bounded powered handshake/identity/submission/peer-
+  proof/status paths pass. ADR 0011's bounded powered inbox work additionally
   passes exact commit/readback/reset/drop-newest, four fail-closed cold-mount
   cases, and one feature-only same-boot missing-commit quarantine. Each mount
   case retained a byte-identical complete partition while one direct peer DATA/
@@ -154,10 +157,11 @@ attempt failed.
 ## Staged implementation
 
 The backend-independent actor/runtime, resident E290 operation-scoped
-coordinator, exact authorized-frame request/durable-echo handoff, one-entry
-submission cap, checked raw-RNS inbox, and ADR 0005 fault behavior are
-implemented and pass cross-layer host composition tests. The minimal external
-USB API edge passes its first bounded powered live-storage proof; inbox evidence
+coordinator, exact authorized-frame request/durable-echo handoff, current
+128-entry submission profile, checked one-entry raw-RNS inbox, and ADR 0005
+fault behavior are implemented and pass cross-layer host composition tests.
+Authenticated USB and BLE API edges have bounded powered live-storage proofs;
+inbox evidence
 now also covers bounded commit/reset/drop-newest, cold-mount isolation, and one
 same-boot terminal-commit suppression. Actual powered cuts and target timing/
 memory bounds remain open.
@@ -174,8 +178,9 @@ memory bounds remain open.
    ambiguity, target timing/high-water, watchdog behavior, and broader route-
    only operation; one direct DATA/proof exchange per inbox fault does not prove
    sustained or forwarded routing.
-3. Select a product-capacity policy beyond the host-qualified one-entry
-   composition cap without weakening durability or principal isolation.
+3. Design reclamation and long-term retention beyond the current 128-entry
+   resident profile and 154-acceptance append-only journal lifetime without
+   weakening durability or principal isolation.
 4. Preserve the implemented checked `message_store` validation, exact binding,
    one-entry raw-RNS mount/admission operations, and generalized cross-store
    exclusion. Add typed configuration and final LXMF/message operations only

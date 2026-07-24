@@ -27,7 +27,7 @@ fn configure_package_cfg() {
 
 fn require_development_feature_contract() {
     let journal_reprovision =
-        env::var_os("CARGO_FEATURE_JOURNAL_SCHEMA2_DEV_REPROVISION").is_some();
+        env::var_os("CARGO_FEATURE_JOURNAL_SCHEMA3_DEV_REPROVISION").is_some();
     let inbox_commit_fault = env::var_os("CARGO_FEATURE_RNS_INBOX_COMMIT_FAULT_HIL").is_some();
     let runtime_measurement = env::var_os("CARGO_FEATURE_RUNTIME_MEASUREMENT_HIL").is_some();
     assert!(
@@ -35,7 +35,7 @@ fn require_development_feature_contract() {
             + usize::from(inbox_commit_fault)
             + usize::from(runtime_measurement)
             <= 1,
-        "journal-schema2-dev-reprovision, rns-inbox-commit-fault-hil, and runtime-measurement-hil are mutually exclusive"
+        "journal-schema3-dev-reprovision, rns-inbox-commit-fault-hil, and runtime-measurement-hil are mutually exclusive"
     );
 
     if env::var("CARGO_PKG_NAME").as_deref() == Ok(BLE_STARTUP_DIAGNOSTIC_PACKAGE) {

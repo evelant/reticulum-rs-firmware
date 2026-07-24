@@ -20,6 +20,7 @@ reticulum-storage-model = { path = "../storage-model", default-features = false 
 [dev-dependencies]
 embedded-storage.workspace = true
 reticulum-storage-actor = { path = "../storage-actor", default-features = false }
+reticulum-storage-journal = { path = "../storage-journal", default-features = false }
 
 [lib]
 path = "src/lib.rs"

@@ -8,14 +8,15 @@ ticket-aware LoRa dispatcher implemented and target-checked; the DATA router,
 both permit services, permanent `NodeInterfaceSupervisor`, and narrow
 pre-authentication USB/GPIO owner are composed in the first E290 three-task
 firmware graph; identity-authorized first journal provisioning plus a resident
-operation-scoped one-entry qualification runtime are also composed; optional
+operation-scoped 128-entry PSRAM submission runtime are also composed; optional
 journal boot failure before an active DATA owner isolates local durable service
 while route-only LoRa continues; the exact authorized-frame request/durable-
 echo handoff and interface-local active-owner fail-stop pass cross-layer host
 composition tests; portable API framing, the featureless pre-authentication
 initialization-control codec, immutable credential authority, qualification-
 session core, and boot-lifetime authenticated-job handoff are qualified;
-semantic schema 2 persists exact authorization provenance; ADR 0009 selects the
+semantic schema 3 preserves exact authorization provenance and distinguishes
+generic RNS DATA from an exact method-neutral LXMF message; ADR 0009 selects the
 dedicated E290 credential range and two-sector store, and its bounded developer/
 HIL pairing-admission policy is feature-free only in the permanent E290 graph;
 E290 boot mounts/recovers that store immediately after flash open, and the
@@ -29,10 +30,9 @@ composes USB Serial/JTAG, debounced GPIO21, boot-lifetime connection epochs, an
 interrupt-linearized reset guard, and one exact-next decoder/sequence space for
 initialization control and all four live-pairing operations. The application
 also quarantines native USB at its earliest Rust entry before detached product
-initialization and canonical reattachment. Current source passes the 176-test
-default E290 host-library suite, the 282-test xtask suite, strict host-client,
-chat-application, and appliance-service checks, the current Rete regression
-lane, and the default and
+initialization and canonical reattachment. Current source passes the default
+E290 host-library and xtask suites, strict host-client, chat-application, and
+appliance-service checks, the current Rete regression lane, and the default and
 runtime-measurement-HIL target gates.
 Both powered boards returned `initialization-required` and
 `physical-presence-required`; live Begin created no host key before physical
@@ -61,10 +61,12 @@ one active session and one request at a time, idle ClientHello replacement into
 a fresh session epoch on the same connection, and terminal fault handling until
 reset or re-enumeration. Replacement never displaces request/reply owners.
 Resumption, protocol retries, close records, encryption, rate limiting/attempt
-policy, and concurrency are intentionally deferred. Credential selection, admission
-handoff, and node dispatch remain transport-neutral. The qualification crypto
-suite is currently USB Serial/JTAG-only; later BLE/Wi-Fi bindings can reuse the
-ownership boundary after their suites are implemented and qualified. Before
+policy, and concurrency are intentionally deferred. Credential selection,
+admission handoff, and node dispatch remain transport-neutral. USB Serial/JTAG
+uses the wired qualification suite, and BLE has an implemented suite-3 binding
+with bounded powered iOS qualification. Wi-Fi has an implemented,
+host-qualified suite-2 binding, E290 SoftAP/raw-TCP endpoint, and native proof
+connector; powered field qualification remains open. Before
 several bearer actors run concurrently, they must use globally unique,
 bearer-qualified connection/session epochs or disjoint per-bearer reply lanes
 under one global pairing-exclusivity coordinator; independent allocators must
@@ -118,9 +120,10 @@ regressions cover exact reverse-interface/proof behavior, typed transactional
 reverse admission, a deterministic three-node relay flow, pending-Link
 expected-hop enforcement, keepalives, and atomic channel retry receipt
 replacement, plus pending-handshake MessagePack LRRTT validation and
-authenticated-malformed teardown. The current `90570ca` pin adds the precise
-LRRTT lifecycle/timing contract but still requires root validation, an E290
-build, and a new powered rerun.
+authenticated-malformed teardown. The `90570ca` predecessor adds the precise
+LRRTT lifecycle/timing contract. The current `2d07818` descendant additionally
+adds ordinary Link-DATA receipts and destination proof-policy parity; the
+combined behavior still requires a new powered rerun.
 These are instrumented,
 bounded-workload observations, not
 closure of sustained or production-image target bounds. After that capture,
@@ -154,7 +157,9 @@ Implementation is governed by [ADR 0001](adr/0001-phase-0-scaffold.md),
 [ADR 0013](adr/0013-bounded-lxmf-wire-boundary.md),
 [ADR 0014](adr/0014-durable-lxmf-message-ownership.md),
 [ADR 0015](adr/0015-universal-expo-client-and-generated-bindings.md),
-[ADR 0016](adr/0016-bound-link-data-lxmf-ingress.md), and the
+[ADR 0016](adr/0016-bound-link-data-lxmf-ingress.md),
+[ADR 0017](adr/0017-reticulum-peer-discovery-and-proximity-bootstrap.md),
+[ADR 0018](adr/0018-durable-lxmf-delivery-policy.md), and the
 [Phase-0 validation contract](phase-0-acceptance.md). Those documents narrow
 the first workspace and establish Rete as the provisional RNS foundation
 without reducing the product scope described here.
@@ -230,7 +235,7 @@ The product is an infrastructure node with optional local clients, not merely a 
 
 ### Local reference snapshots
 
-The local repositories were inspected at these revisions. These are moving projects, so the implementation should pin reviewed commits and repeat the compile/interoperability gates before adopting updates.
+The local repositories were inspected at these revisions. These are moving projects, so the implementation should pin reviewed commits and repeat the compile/interoperability gates before adopting updates. In particular, the `reference/rete` row is the historical inspected `90570ca` snapshot, not the current dependency pin; current source uses the descendant recorded in [provenance](provenance.md).
 
 | Reference | Snapshot | License | Useful material | Verdict |
 | --- | ---: | --- | --- | --- |
@@ -274,7 +279,7 @@ Claims in READMEs were not treated as proof of embedded portability.
 | `rete-core`, `rete-transport`, `rete-stack`, and `rete-lxmf-core`, no defaults, `thumbv6m-none-eabi` | Pass | The layers are genuinely bare-metal buildable; compilation does not cure the LXMF correctness gaps documented below |
 | Focused `rete` core/transport/LXMF host suites at the reviewed upstream snapshot | 391 pass | Historical selection evidence for wire, crypto, forwarding, link/resource, and LXMF codec behavior; this is not evidence for the later lifecycle patch or a complete Python/RF conformance claim |
 | Historical `8b5d652` selected routing/receipt/keepalive/LXMF validation set | 635 pass | The four library targets were 174 transport, 136 stack, 143 LXMF and 84 daemon tests, totaling 537. That pin was also run through 97 transport integration tests (9 computed-vector, 43 forwarding, 40 Link-integration and 5 path-request) and one stack integration test, producing the selected 635-test total. It is not a count of every nested workspace test target. All-target host and portable `no_std` checks remain separate compile gates |
-| `reticulum-conformance-rete` project runner | 647 pass | The historical 235-check baseline joined 112 released-vector, adapter and direct-Link checks with 40 released-Python LRRTT MessagePack checks, 8 channel-retry lifecycle checks, 40 exact keepalive lifecycle checks and 35 deterministic three-node A--B--C checks covering learned transport routing, exact-interface LINKREQUEST/LRPROOF/LRRTT relay, pending-Link wrong-hop LRPROOF rejection before deduplication, bound endpoint output, encrypted channel DATA/proof delivery, receipt completion and separate owned/relay/reverse capacity. The current schema-2 lifecycle/candidate runner expands that coverage and passes 647 checks. This is project-side conformance, not powered or live-Python multi-hop qualification |
+| Historical `reticulum-conformance-rete` project runner | 647 pass | The historical 235-check baseline joined 112 released-vector, adapter and direct-Link checks with 40 released-Python LRRTT MessagePack checks, 8 channel-retry lifecycle checks, 40 exact keepalive lifecycle checks and 35 deterministic three-node A--B--C checks covering learned transport routing, exact-interface LINKREQUEST/LRPROOF/LRRTT relay, pending-Link wrong-hop LRPROOF rejection before deduplication, bound endpoint output, encrypted channel DATA/proof delivery, receipt completion and separate owned/relay/reverse capacity. The recorded schema-2 lifecycle/candidate runner passed 647 checks. This is historical project-side conformance, not a current schema-3 count or powered/live-Python multi-hop qualification. |
 | `reticulum-lxmf-chat-core`, `reticulum-lxmf-chat-app`, and `reticulum-lxmf-chat-service`, host | Pass | Schema-2 SQLite binding/restart tests, stepwise commit/reconcile/inbox tests, sole-actor reconnect/fault tests, loopback capability/cookie/origin/Host routing tests, authenticated USB and macOS CoreBluetooth connector tests, and strict Clippy pass. Powered two-E290 runs carried a USB-service-enqueued message and a later Expo-enqueued message to exact peer import; the latter also passed managed credential-empty pairing, real reset, and service restart. A later pair of concurrent macOS BLE services authenticated both boards and carried one sequential message in each direction through LoRa to terminal `Delivered` and exact peer import. One effectively simultaneous pair produced one success and one durable delivery timeout, so simultaneous bidirectional scheduling remains unqualified. These crates are host-client code and do not prove an embedded HTTP server, a physically installed native mobile client, another host BLE backend, or firmware memory cost |
 | `reticulum-lxmf-wire`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (wire/authentication foundation only) | The independently authored allocation-free `no_std` crate normalizes destination DATA, Link DATA context `NONE`, and completed Resource carriers into borrowed views with explicit byte/cardinality/value/scan/depth limits. It preserves raw exact-four hashing, admits only proven canonical first-four stamped forms, binds full RNS public keys to `lxmf.delivery` source hashes, requires public-key A and signature R to be non-identity prime-subgroup points, streams Ed25519 verification, and crosses a separate destination-bound receiver stamp-policy typestate for trusted prior tickets or streamed 3,000-round proof of work. Its first MessagePack tranche supports nil/boolean/integer/string/binary/generic-extension map keys, rejects Python-equal duplicates, and fails closed on float/container keys and timestamp extension normalization. Two unit plus eleven integration tests consume eight positive, one noncanonical inbound, and six negative pinned-Python fixtures; ten Python authority tests, strict Clippy/rustdoc, RISC-V/Xtensa checks, and an exact 15-package normal-closure policy pass. The mixed-order subgroup regression constructs its points from the dependency's basepoint and torsion constants instead of retaining third-party vector literals. This does not provide encoding, announces, durable delivery, Resource segmentation, a mailbox/router, RF interoperability, or live actor integration; proof-of-work validation remains synchronous work that must not run in the sole network actor |
 | `reticulum-lxmf-ingress`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (portable opportunistic and bound direct-packet admission; permanent-E290 composition) | The `no_std` adapter performs no admission-time allocation: it borrows an ADR 0012 application event, admits destination DATA or responder-side context-`NONE` Link DATA addressed to an explicitly supplied local `lxmf.delivery` destination, resolves the source public key by value, and returns a zero-copy validated carrier plus fixed scalar evidence under caller-selected wire and stamp policies. Direct Link DATA carries ADR 0016's opaque binding derived from Rete's retained authenticated Link; both that binding and the complete LXMF wire must name the local destination. The subsequent E290 durable-admission step separately requires the event owner to carry the exact explicit Link-destined packet proof covering the received RNS packet hash before store I/O. Non-`NONE` Link DATA is unrelated, initiator/backchannel direct receive is unsupported, and Resource completion remains deferred. Thirteen integration tests cover opportunistic and direct Python fixtures through the exact 431-byte direct boundary, zero-copy payloads, lookup/destination/context isolation, stamp policies, Resource deferral, owner retention, and class-preserving failures. The permanent E290 image enables Links only on its mount-gated LXMF service. Existing powered evidence still qualifies opportunistic traffic only; responder-side direct Link receive, sustained directional load, pressure, faults, and soak remain open |
@@ -294,14 +299,14 @@ Claims in READMEs were not treated as proof of embedded portability.
 | `reticulum-tx-dispatch`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The RF-inert dispatcher, permit server, and exact-owner-bound fixed per-slot node DATA machine retain owners/control values across backpressure, synchronously prepare from parked owners, use cancellation-safe short waits, park recovered owners until exact acknowledgement, and fail closed at the permit recovery grace. The permanent E290 graph reaches these DATA machines through `NodeInterfaceSupervisor`; their legacy job/return harness remains separate and RF-inert |
 | `reticulum-radio-tx-dispatch`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The firmware-includable persistent serializer consumes the interface router's ticketed DATA/ordinary actor union and retains each ticket while keeping the two typestate families separate over one `SoleRnodeRadio`. It performs randomized initial/retry backoff and CAD, validates the actor-stamped interface configuration, maps the active radio fingerprint and aggregate airtime to node-core's opaque resource-and-units permit, revalidates before permit negotiation and after grant, exposes bytes once, and makes one logical one/two-frame RNode transmit. Every post-byte-exposure DATA completion, including cancellation and fault recovery, is gated with its router ticket and exact authorized-frame observation until an identical durable acknowledgement arrives. Request pressure and cancelled waits retain ownership; unexpected or mismatched acknowledgements fail closed while retaining both observations. `DispatchReport` is copy-only diagnosis, never ownership. RX start remains an explicit idle scheduler choice even when TX is queued, and phase-aware completion-capacity readiness never moves a retained completion. Its watchdog, final-frame metadata and fail-closed recovery retain exact owners/control values across completion pressure, partial or impossible progress, stale/lost replies, configuration drift, invalid RX metadata, radio faults, and dropped CAD/TX/RX futures. Host, strict Clippy, warning-free rustdoc, generic no-std and Xtensa gates pass. Its exact direct-dependency policy keeps Embassy Futures test-only. The first permanent E290 graph instantiates it as the sole LoRa actor dispatcher; target build/review gates and one bounded powered DATA/peer-proof path pass, while powered fault/soak/full qualification remains open |
 | `reticulum-tx-supervisor`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | `NodeInterfaceSupervisor` is the production portable aggregate: it owns the sole node-core, authoritative interface router, DATA and ordinary coordinators, one permit server per family and actor, and one shared policy. Its sealed fixed-pool ingress validates queue origin, current lease, online state and logical MTU, recycles the exact buffer, retries only a full return queue and `Busy` action pressure, and exposes every other buffer-return or action residue as an exact takeable terminal owner for quarantine. A generation-bound Ready/Offline exchange is a pre-routing gate, with router-local fairness among actor lifecycle queues; the bounded supervisor round robin then scans completions, both coordinators and all permit services. Host coverage proves two actors becoming Ready, graceful Offline followed by legitimate return of the in-flight completion, serialized continuation through the healthy actor, fresh-route exclusion, surviving ingress, crossed/stale rejection, acknowledgement pressure, and lifecycle acknowledgement after an aggregate owner mismatch. It does not prove terminal failover: E290 retains ambiguous owners, only fresh attempts exclude the failed actor, and drain/revocation of provably unstarted queued work remains future work. The E290 node graph composes this aggregate; the older async `TxSupervisor` remains only a legacy RF-inert DATA-machine test aggregate |
-| `reticulum-heltec-vision-master-e290-node`, host and ESP32-S3 Xtensa | Pass (current source/test composition plus bounded powered end-to-end proofs) | The permanent graph composes the transport-neutral node, LoRa actor, USB/BLE/Wi-Fi bearer seams, credential/session owners, durable submission runtime, raw-RNS qualification inbox, and mount-gated `lxmf.delivery` store. ADR 0016 enables local Links only on that LXMF destination and routes responder-side bound context-`NONE` Link DATA plus its exact Link packet proof through the existing fixed event/retry/store owners; the proof is withheld until durable commit or fresh `AlreadyDurable`. The primary destination and native Resource ingress remain disabled for local termination, and initiator/backchannel direct receive remains unsupported. Existing powered evidence covers opportunistic A-to-B durability/proof behavior, bounded authenticated bidirectional chat and installed Expo iOS BLE-to-LoRa operation. Direct Link receive is source-qualified but awaits a two-board powered trial. The 128-entry submission profile, 162-acceptance journal lifetime, single active local session, and current volatile Link/event/proof capacities remain explicit bounded alpha limits. Exact image measurements, digests, fault cases, and powered evidence are recorded in the E290 runbook; sustained routing, replay/remount, physical cuts, pressure/fault behavior, range, and soak remain open. |
+| `reticulum-heltec-vision-master-e290-node`, host and ESP32-S3 Xtensa | Pass (current source/test composition plus bounded powered end-to-end proofs) | The permanent graph composes the transport-neutral node, LoRa actor, USB/BLE/Wi-Fi bearer seams, credential/session owners, durable submission runtime, raw-RNS qualification inbox, and mount-gated `lxmf.delivery` store. ADR 0016 enables local Links only on that LXMF destination and routes responder-side bound context-`NONE` Link DATA plus its exact Link packet proof through the existing fixed event/retry/store owners; the proof is withheld until durable commit or fresh `AlreadyDurable`. The primary destination and native Resource ingress remain disabled for local termination, and initiator/backchannel direct receive remains unsupported. Existing powered evidence covers opportunistic A-to-B durability/proof behavior, bounded authenticated bidirectional chat and installed Expo iOS BLE-to-LoRa operation. Current source additionally projects 32 authenticated `lxmf.delivery` announce peers with at most 256 application-data bytes each through API 1.5 and the Expo Nearby picker; a bounded iOS/two-E290 run opened an existing learned peer without endpoint entry and delivered one short opportunistic message in each direction with exact peer import. Fresh-contact creation and the product-owned direct-Link transaction remain open. Direct Link receive is source-qualified but awaits a two-board powered trial. The 128-entry submission profile, 154-acceptance journal lifetime, single active local session, and current volatile Link/event/proof capacities remain explicit bounded alpha limits. Exact image measurements, digests, fault cases, and powered evidence are recorded in the E290 runbook; sustained routing, replay/remount, physical cuts, pressure/fault behavior, range, and soak remain open. |
 | `reticulum-heltec-vision-master-e290-node --features runtime-measurement-hil` | Pass (historical measurements preserved; current continuous-RX durable-LXMF confirmation; not a product mode) | Historical evidence remains revision-bound, including the 768,624-byte two-board runtime run, the 800,480-byte pre-PSRAM checkpoint, the 868,800-byte pre-LXTE placement checkpoint, and the paired-announce discovery failure. The retained 16-entry default/HIL ELFs are 13,648,888/13,821,496 bytes with SHA-256 `92e63b60a5f4b830ee55d958fcc446a6878036212904b8748519ae210ba3da58`/`7a3fad34699f910a2050468ada6461a0f33d16641ab5425a5c795a71238861ff`; their packages are 868,656/881,456 bytes with SHA-256 `c8da2af30e2d0ee24ca4b215151d1370b7e1d242991ebbeb024079a730693a3f`/`12c6f31a7fb64485ad9220edca4ac38ba0a57867ad88ce60fa1a24ffc195d379`. The pair passes 946/962 stack records, 53,680-byte maximum frames, 175,056/174,256-byte usable stacks, exact guards, RPTE, and LXTE gates; exact HIL readbacks passed on both E290s. One and only one fresh A-to-B submission carried a 206-byte LXMF carrier in an exact 307-byte RNS packet and reached `Delivered` on its first attempt. Receiver B advanced LXTE new/ready/released/ordinary-handoff by one with zero replay/order events, emitted one confirmed TX, and stored exactly one generator-matching record; its release tag matched A's delivered tag. Receiver RPTE generated-proof metadata remained zero by design because the retained proof is intercepted before ordinary ingress metadata. Baseline and terminal captures recorded no allocation, runtime, watchdog, correlation, not-confirmed-success, saturation, or ordering fault. The exact message, packet, store, and full-wire hashes are in the E290 runbook. That artifact's policy carried 57,700 painted bytes and a 4,020-byte conservative margin; it does not qualify the current 128-entry runtime. Interrupt/nesting, sustained/forwarded traffic, direction balance, replay/remount, concurrent durable work, pressure/failure cases, range, soak, and production-image bounds remain open. |
-| `reticulum-storage-model`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The allocation-free semantic journal model enforces canonical schema-2 records, exact authorization snapshots, principal-scoped idempotency across credential rotation, exact preflight/apply plans, monotonic conservative transmission uncertainty, and fail-closed complete replay; 26 integration tests plus one compile-fail doctest cover the boundary, which intentionally makes no physical-durability or flash-capacity claim |
+| `reticulum-storage-model`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The allocation-free semantic journal model enforces canonical schema-3 records, exact authorization snapshots, principal-scoped idempotency across credential rotation, distinct 383-byte generic-RNS and 431-byte exact method-neutral LXMF-message intents, exact preflight/apply plans, monotonic conservative transmission uncertainty, and fail-closed complete replay. The boundary intentionally makes no physical-durability or flash-capacity claim. |
 | `reticulum-submission-projector`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The fixed-capacity projector correlates volatile attempts with semantic records and withholds terminal/recovery acknowledgement behind exact persistence replies; 24 focused tests cover ordering, retries, native authorized-frame conversion, proof/timeout-before-frame races, faults and conservative reboot behavior. Completed slots deliberately do not retire without a future exact node-owner quiescence proof |
-| `reticulum-storage-journal`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The allocation-free backend fixes the 1 MiB/two-bank physical format 1 with semantic schema 2, full-bank replay, commit-last exact-readback append, a 162-acceptance lifetime ceiling, and source-preserving handoff compaction. Valid schema-1 manifests return typed unsupported-version with zero mutation only after the normal two-bank trajectory checks. An independently authorized first-provision API resumes every canonical A1 prefix/commit cut without erasing and rejects nonempty/off-trajectory media; 34 fake-NOR tests cover provisioning, semantic-version rejection, torn/lost append and compaction. The historical powered HIL qualifies only the unchanged physical clean path/software-reset behavior at its schema-1 source; schema-2 HIL remains to rerun |
+| `reticulum-storage-journal`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The allocation-free backend fixes the 1 MiB/two-bank physical format 2 with semantic schema 3, 544-byte bodies, 774 slots per bank, full-bank replay, commit-last exact-readback append, a 154-acceptance lifetime ceiling, and source-preserving handoff compaction. Schema-2/physical-1 and older media fail read-only; development migration erases only `node_journal`. The historical powered HIL remains evidence for its recorded earlier geometry, while a schema-3/physical-2 powered rerun remains open. |
 | `reticulum-storage-actor`, host and ESP32-S3 Xtensa | Pass | The portable sole semantic owner mounts and fully replays through an exact device/range/layout binding before service, then borrows matching journal access per mutation while the backend stays in the product coordinator. Wrong access is rejected before I/O without poisoning valid state. It owns the live index/sole projector, projects node/TX observations without mutable-projector escape, durably finalizes conservative boot recovery, publishes only after append or exact equivalence, autonomously reconciles one ambiguous mutation, and latches invariant faults closed; 23 focused tests cover binding rejection, acceptance, boot recovery, observation/acknowledgement ordering, projector identity, lost replies, compaction recovery and fault retention, with strict host and target checks passing |
-| `reticulum-submission-runtime`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The executor- and transport-neutral runtime owns boot recovery and the durability-first live scheduling order over backend-independent `StorageActor` plus `SubmissionNodePort`. Physical calls borrow exact bound access, while frame observations stay backend-free; binding is checked before recovery phase change, node preparation, or acknowledgement. It persists the no-replay preparation barrier before native DATA preparation and withholds terminal/recovery release behind committed records. Eight focused fake-NOR tests cover the full barrier/frame/terminal/ack order, lost-write reconciliation, permanent frame-persistence failure without a false durable result or acknowledgement, pre-frame terminal pressure, recovery-ack pressure, retry classification, reboot recovery, and wrong-binding rejection; strict host/generic/Xtensa gates pass. The E290 image keeps it resident, and the exact frame request/durable-echo path plus its one-entry composition cap pass cross-layer host tests. Its first authenticated external admission edge is now powered-qualified through acceptance, packet preparation, LoRa DATA/proof, durable `Delivered`, and terminal status after USB re-enumeration. |
-| `reticulum-device-api-adapter`, default/experimental/dependency-unified host and ESP32-S3 Xtensa | Pass | The allocation-free authenticated dispatcher exposes public capabilities and the copy-only primary destination, plus principal-scoped submission status; it fails closed during port ambiguity/fault and restricts advertised operations to its local build. Identity is supplied as a node-owned scalar outside `SubmissionPort`, so the read performs no port I/O. The target-safe `experimental-rns-data` path converts one authorized borrowed payload plus validated non-wire dispatch provenance into an owned schema-2 acceptance candidate through the narrow port. The separate `experimental-rns-inbox` path accepts only authenticated principals, then obtains status or an owned bounded peek response through a read-only `InboundMailboxPort`; it adds no persisted permission bit and maps empty to `NotFound`. Focused tests and strict Clippy pass across the relevant host and bare-metal profiles without giving the adapter an actor, journal, raw inbox store, or flash capability. `ProductStorageCoordinator` implements disjoint short-lived submission and inbox views in the E290 graph. The node handoff lane calls them synchronously only after current-authority revalidation; powered API 1.1 supplied sequential submission/status requests and powered API 1.2 supplied bounded inbox status/peek. |
+| `reticulum-submission-runtime`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The executor- and transport-neutral runtime owns boot recovery and the durability-first live scheduling order over backend-independent `StorageActor` plus `SubmissionNodePort`. Physical calls borrow exact bound access, while frame observations stay backend-free; binding is checked before recovery phase change, node preparation, or acknowledgement. It persists the no-replay preparation barrier before native DATA preparation and withholds terminal/recovery release behind committed records. Eight focused fake-NOR tests cover the full barrier/frame/terminal/ack order, lost-write reconciliation, permanent frame-persistence failure without a false durable result or acknowledgement, pre-frame terminal pressure, recovery-ack pressure, retry classification, reboot recovery, and wrong-binding rejection; strict host/generic/Xtensa gates pass. The E290 image keeps it resident with a 128-entry external-PSRAM accepted-history profile, and the exact frame request/durable-echo path passes cross-layer host tests. Authenticated USB and BLE admission edges have bounded powered proofs through acceptance, packet preparation, LoRa DATA/proof, durable `Delivered`, and terminal status. |
+| `reticulum-device-api-adapter`, default/experimental/dependency-unified host and ESP32-S3 Xtensa | Pass | The allocation-free authenticated dispatcher exposes public capabilities and the copy-only primary destination, plus principal-scoped submission status; it fails closed during port ambiguity/fault and restricts advertised operations to its local build. Identity is supplied as a node-owned scalar outside `SubmissionPort`, so the read performs no port I/O. The target-safe `experimental-rns-data` path converts one authorized borrowed payload plus validated non-wire dispatch provenance into an owned schema-3 acceptance candidate through the narrow port. The separate `experimental-rns-inbox` path accepts only authenticated principals, then obtains status or an owned bounded peek response through a read-only `InboundMailboxPort`; it adds no persisted permission bit and maps empty to `NotFound`. The API 1.5 peer cursor is an authenticated read-only projection and does not grant route or device-control authority. Focused tests and strict Clippy pass across the relevant host and bare-metal profiles without giving the adapter an actor, journal, raw inbox store, or flash capability. `ProductStorageCoordinator` implements disjoint short-lived submission and inbox views in the E290 graph. The node handoff lane calls them synchronously only after current-authority revalidation; powered API 1.1 supplied sequential submission/status requests and powered API 1.2 supplied bounded inbox status/peek. |
 | `reticulum-device-api-framing`, host, generic bare-metal and ESP32-S3 Xtensa | Pass | The allocation-free edge owns canonical zero-delimited COBS records with a 128-bit session ID, direction-local sequence, 512-byte opaque payload and 128-bit tag slot. Its sole dependency is feature-disabled `zeroize`: decoded records, decoder scratch, encoding scratch and partial-TX wire owners wipe on terminal/reset/drop paths. The streaming decoder ignores pre-delimiter garbage, bounds overflow and resynchronizes only at a zero; established-session policy remains the later session owner. Its explicit partial-TX cursor never advances without a backend acknowledgement. Eleven tests cover empty/maximum owners, canonical authenticated bytes, dense zero patterns, malformed/overlong recovery, shared delimiters, reset, partial writes and zeroization. It contains no USB HAL, session, credential, API-dispatch or packet-interface behavior |
 | `reticulum-device-api-pairing-control`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (portable codec; composed only in the permanent E290 bootstrap) | The featureless allocation-free bootstrap codec depends only on framing and freezes zero-session, zero-tag status/initialize request and response kinds, exact empty/one-byte payload shapes, and coarse public status/result codes. It preserves but does not interpret sequence numbers. Eight tests cover every kind/code, exact COBS round trips, malformed fields and shapes, unknown values, and framing-fault ownership. It contains no USB HAL, GPIO, clock, connection policy, credential authority, flash, task handoff, logical API, session, or radio edge. The permanent E290 firmware now composes it behind the separate USB/GPIO owner; graph policy still excludes it from legacy products and HIL images |
 | `reticulum-device-api-pairing`, host, generic bare-metal and ESP32-S3 Xtensa | Pass (portable live-pairing core; resident E290 lifecycle-composed) | The featureless allocation-free ADR 0010 core freezes zero-session/zero-tag Begin, ProofStart, Activate-continuation and identifier-free AbortCurrent records for the wired developer profile. Credential ID and Pending generation remain typed through the transcript and continuation, while proof suite 2 HMAC-binds the actual store-selected Active generation in the activation confirmation; full HMAC-SHA256 proofs use distinct client/activation domains and constant-time verification. Project-owned PSKs, challenges, proofs, confirmations, codec payload scratch, decoded records and framed wire owners zeroize on drop; secret-bearing public owners are neither copyable, cloneable nor debuggable. Upstream RustCrypto SHA-256/HMAC contexts do not implement `Zeroize`, and Rust moves may leave compiler-created copies beyond the current owner's wipe, so both remain explicit residuals for this developer profile. Fourteen Rust tests plus four compile-fail doctests and six independent standard-library Python tests cover all eight successful COBS flights, exact KATs, every transcript byte/role/length, final-generation binding, result vocabularies, malformed profiles/shapes/references, substituted continuations, secret-owner drop glue and proof rejection. The exact reviewed graph is HMAC, SHA-256, zeroize, credential authority and framing plus test-only hex; it contains no policy, entropy, store, USB, task handoff, logical API, session, firmware, Rete or radio edge. Graph policy permits it only through the permanent E290 resident credential lifecycle and still forbids it from legacy/HIL graphs |
@@ -396,8 +401,10 @@ fail, switch the adapter to Leviculum rather than carrying two active cores.
 The reviewed upstream base had a sustained outbound-DATA blocker:
 `NodeCore::build_data_packet()` could release a packet after silently failing
 to retain its receipt, and proof/timeout terminal state was not reclaimed
-through a caller-reservable boundary. The current project pin
-`90570cafc812b3025011cb690ec74a27f287cb3f` retains that generic lifecycle fix. DATA
+through a caller-reservable boundary. The current project pin,
+`2d0781838aa03370b739d4003bcd1bdd5bbb0c6c`, descends from
+`90570cafc812b3025011cb690ec74a27f287cb3f` and retains that generic lifecycle
+fix. DATA
 preparation can write into caller-owned storage, returns a full receipt token,
 and rejects bounded-table admission transactionally. Valid-proof processing
 first identifies the exact DATA or channel candidate, while destination-DATA
@@ -422,7 +429,9 @@ when the table is full, and stale tokens fail closed across teardown, sequence
 reuse, and Link-session reincarnation. Once H1 is current an H0 proof cannot
 reserve or commit a terminal; the H1 proof completes exactly once through the
 same product-owned receipt sink. Every owned-Link removal path reclaims its
-channel receipts. Adaptive channel windows can still exceed the product's `L`
+channel receipts. The current descendant additionally correlates ordinary
+Link-DATA receipts and applies the receiving destination's proof policy.
+Adaptive channel windows can still exceed the product's `L`
 receipt capacity; that is typed backpressure and a sizing/throughput decision,
 not an unmatchable-proof state.
 
@@ -707,8 +716,9 @@ connection epochs and exact-next request sequences, and reaches that drive only
 through depth-one scalar command/reply channels. The graph now hosts the exact
 authorized-frame request/durable-echo handoff between its portable dispatcher
 and resident runtime. It also hosts the target-safe adapter's disjoint
-`SubmissionPort` and `InboundMailboxPort` semantic seams under independent
-one-entry qualification caps, and the minimal
+`SubmissionPort` and `InboundMailboxPort` semantic seams. The outbound port
+uses the 128-entry external-PSRAM profile; the intentionally separate raw-RNS
+inbox remains a one-entry qualification store. The minimal
 authenticated session exposes it through one request at a time. Both powered
 boards pass status and `physical-presence-required` control; live Begin is
 routed through the same byte/sequence owner and creates no key file before a
@@ -718,7 +728,8 @@ partition readback, hard reset, and authenticated capabilities exchange. Full
 USB re-enumeration restores a new service and sequence-zero epoch. Exact
 Pending/Abort readbacks, broader host reset compatibility, suspend/resume,
 full LXMF routing/propagation and store lifecycle, an onboard or background
-production client service, and product-capacity policy remain open.
+production client service, and long-term reclamation/retention policy remain
+open.
 Authenticated raw RNS DATA submission and peer proof are qualified; bounded
 opportunistic LXMF receive, authenticated record reading, and exact external
 SQLite-client import are now powered-qualified in both directions.
@@ -809,7 +820,7 @@ do not write flash; the journal does. `reticulum-storage-actor` now translates
 acceptance and actor-owned projector requests into those operations, applies the
 live index only after durability, retains one ambiguous mutation for autonomous
 exact reconciliation, and latches invariant failures closed. Its actual
-optional pending cell is compile-time bounded to at most 512 bytes.
+optional pending cell is compile-time bounded to at most 544 bytes.
 
 `reticulum-device-api-adapter` now supplies allocation-free authenticated
 dispatch through narrow, target-safe `SubmissionPort` and read-only
@@ -826,8 +837,9 @@ Dispatcher-owned capability restriction prevents a separately unified codec
 feature from advertising an absent operation.
 
 `ProductStorageCoordinator` implements both ports through disjoint short-lived
-views under independent one-entry qualification caps, neither of which is
-product capacity. A static depth-one authenticated job/reply handoff is split
+views. Outbound submissions use the 128-entry external-PSRAM profile, while
+the raw-RNS qualification inbox independently retains exactly one entry. A
+static depth-one authenticated job/reply handoff is split
 between the USB and node tasks. The node lane revalidates each grant against the
 currently publishable authority and calls the adapter synchronously through
 credential-disjoint submission and inbox-port views. Rejection performs no port
@@ -1415,9 +1427,9 @@ node retains and re-offers the observation until projector persistence makes
 Only that echo releases completion return. An unexpected or mismatched echo
 fails closed while retaining both observations and the owning completion/ticket.
 The copy-only `DispatchReport` remains diagnostic and is not part of ownership.
-The accepted-history cap is one solely for the now-passing composition profile;
-it is not the product-capacity policy. The resident `ProductStorageCoordinator`
-now
+The accepted-history profile retains 128 entries in external PSRAM; historical
+one-entry composition fixtures are not the current product profile. The
+resident `ProductStorageCoordinator` now
 implements the target-safe device-API `SubmissionPort` and read-only
 `InboundMailboxPort`. Portable framing,
 the featureless pre-authentication initialization-control codec, immutable
@@ -1429,7 +1441,7 @@ authenticated session manager. Capabilities, identity, durable submission,
 sequential status, peer proof, and a fresh post-re-enumeration status session
 are powered-qualified; the deferred session behavior remains open.
 The portable pairing-admission policy owns its exact window/connection/
-attempt/operation state, and schema-2 acceptance persists exact authorization
+attempt/operation state, and schema-3 acceptance persists exact authorization
 provenance. The physical credential range and portable store exist, but the
 feature-free pairing policy is composed only in the permanent E290 graph. Its
 resident `CredentialRuntime` privately retains the exact boot binding, mounted
@@ -1488,7 +1500,20 @@ remains disabled before allocation or assembly. Initiator/backchannel direct
 receive is not supported by this tranche. A mounted service emits a separately
 signed `lxmf.delivery` discovery announce with canonical LXMF 1.0.1
 `[nil, nil, []]` application data unless a clean fault has disabled that
-service. The product
+service. Valid remote `lxmf.delivery` announces also enter a volatile
+application projection only after Rete authenticates the announce and recalls
+its public identity. The E290 profile retains the latest 32 destinations and at
+most 256 authenticated application-data bytes per destination in PSRAM. Its
+generation cursor is boot-scoped, reports history gaps after reset or eviction,
+and never changes Rete path state.
+
+API 1.5 exposes that table one record at a time only through an authenticated
+appliance session. The Rust chat runtime bounds pagination, parses the LXMF
+announce display name, and exports display-safe DTOs; the Expo **Nearby** picker
+then adds or opens the existing durable contact with one tap. This is mesh peer
+discovery carried through the already-authenticated BLE control connection, not
+BLE appliance pairing and not a claim that the phone directly heard the peer.
+The product
 scheduler attempts at most one destination per event: primary, LXMF eight
 seconds later, two identity-phased retry pairs, then 30-minute steady pairs. An
 ambiguous pending `StoreFaultHold` retains its exact owner but
@@ -1977,7 +2002,7 @@ Pin compatible versions after the first working lockfile rather than floating ac
 | flash | `esp-storage 0.9` | Raw, currently unencrypted flash access; storage/security supplied above it |
 | boot/OTA | `esp-bootloader-esp-idf 0.5` | A/B OTA path used by current examples |
 | radio | `lora-phy 3.0.1` | Maintained generic SX126x/SX127x async driver |
-| physical-format-1 / semantic-schema-2 submission journal | project-owned fixed-slot log over `embedded-storage` / reviewed `esp-storage` adapter | Selected two-bank NOR design; exact readback, commit-last records, durable authorization provenance and manifest-proved compaction |
+| physical-format-2 / semantic-schema-3 submission journal | project-owned fixed-slot log over `embedded-storage` / reviewed `esp-storage` adapter | Selected two-bank NOR design; exact readback, commit-last records, durable authorization provenance, exact method-neutral LXMF-message intent, and manifest-proved compaction |
 | optional filesystem | `littlefs2 0.8` | Only if file semantics are truly needed |
 | API serialization | indexed CBOR via `minicbor`, COBS/length framing | Numeric fields can be skipped for mixed-version clients; do not expose a dynamic JSON model on BLE/USB |
 | RNS/LXMF MessagePack | minimal `rmp`-based or project codec | Bound depth/length and avoid dynamic `Value` trees |
@@ -2002,8 +2027,8 @@ product storage only through separate `SubmissionPort` and
 both with operation-scoped or resident read-only access. Immediate capacity exhaustion and
 principal-scoped idempotency conflict are distinct from an accepted
 submission's later delivery timeout, and the awaiting-delivery state does not
-imply that an external packet buffer remains bound. The product cap is one only
-for the outbound submission composition profile, not product capacity. The
+imply that an external packet buffer remains bound. The outbound product
+profile retains 128 accepted submissions in external PSRAM. The
 inbound qualification slot independently has exact capacity one, retains the
 oldest item, drops newest, and exposes no consume/mutation operation. Portable framing,
 the pre-authentication initialization-control codec, immutable credential
@@ -2022,7 +2047,7 @@ live-pairing handoffs. That physical bootstrap bearer routes lifecycle mutation;
 it is not an authenticated session and cannot feed the composed logical API
 job lane.
 `DispatchLease` mints validated non-wire provenance, and the adapter
-persists its exact credential/policy/permission snapshot with schema-2
+persists its exact credential/policy/permission snapshot with schema-3
 acceptance.
 Its encoded-packet SHA-256 type is deliberately distinct from node-core's RNS
 proof-correlation token. It has no framing, dispatcher, Rete dependency,
@@ -2317,6 +2342,22 @@ automatic reconnect and keyboard UX. The full powered Expo lifecycle matrix,
 cancellation, background/restoration behavior, Android hardware, pressure, and
 soak remain. Nitro remains a measured-performance fallback.
 
+Nearby contact selection reuses that same authenticated BLE device-API session.
+The phone does not scan for remote Reticulum peers: its own E290 reports signed
+`lxmf.delivery` announces learned over LoRa or any future Reticulum interface.
+The app shows the public identity fingerprint and route-age hints, then one tap
+uses the existing SQLite contact mutation. Public peer discovery is separate
+from privileged appliance onboarding; neither an announce nor a future contact
+card grants a session credential.
+
+For peers without a current Reticulum path, ADR 0017 reserves one canonical
+signed public contact-card envelope. QR/deep links, an explicit E290-mediated
+BLE share window, Google Nearby Connections, Apple Network/Wi-Fi Aware on
+supported phones, or later NFC support may carry the same opaque envelope after
+implementation and platform review. These are fallback carriers, not alternate
+identity formats, and phone-to-phone raw BLE peripheral mode is not the first
+implementation. Current E290 hardware is not assumed to support Wi-Fi Aware.
+
 ### Recommended order
 
 For the turnkey local client/API:
@@ -2541,15 +2582,23 @@ It deliberately provides no flash-capacity estimate, reservation, compaction,
 retention, or durability claim. Those are supplied by the physical journal and
 its sole storage actor, not properties of the semantic CBOR model.
 
-The physical-format-1, semantic-schema-2 backend is now implemented as
+Schema 3 has two deliberately separate accepted intents. Generic encrypted
+destination DATA retains its existing 383-byte plaintext ceiling.
+`LxmfMessage` instead owns the exact complete signed LXMF wire selected before
+acceptance, including its 16-byte destination prefix, through 431 bytes. The
+runtime's automatic policy may use bytes `16..` as the compatible
+opportunistic carrier or the complete wire through a reusable direct Link;
+neither path may recompose or resign the accepted message.
+
+The physical-format-2, semantic-schema-3 backend is now implemented as
 `reticulum-storage-journal`; its
 complete format and recovery contract are specified in
 [Physical submission journal](storage-journal.md). The dedicated 1 MiB
 `retlog` contains two 4 KiB manifest sectors and two 127-sector record banks.
-Each bank holds 812 fixed 640-byte slots (64-byte header, maximum-512-byte
+Each bank holds 774 fixed 672-byte slots (64-byte header, maximum-544-byte
 canonical body, 32-byte SHA-256 chain value, and a separately programmed
-32-byte commit marker) plus a 512-byte erased tail. The five-record schema
-budget gives a hard lifetime ceiling of 162 accepted submissions; compaction
+32-byte commit marker) plus a 64-byte erased tail. The five-record schema
+budget gives a hard lifetime ceiling of 154 accepted submissions; compaction
 retains that history, and a profile's fixed-RAM semantic index may impose a
 lower ceiling.
 
@@ -2578,7 +2627,7 @@ to the live index only after append commit or exact readback equivalence. After
 an ambiguous backend result, public `drive_pending()` resolves the exact actor-
 owned mutation without requiring the caller to reproduce its candidate,
 request, or projector. The actual optional pending cell is compile-time capped
-at 512 bytes; this does not include the index, projector slots or task stack.
+at 544 bytes; this does not include the index, projector slots or task stack.
 Busy/fault-gated actor methods now project preparation results, authorized
 frames, terminal tombstones, recovered owners and quarantines, and report exact
 upstream acknowledgements without exposing `&mut SubmissionProjector`.
@@ -2677,9 +2726,11 @@ the sector-rewriting byte-storage path. The E290 product now retains the mounted
 runtime and sole flash backend in a permanent `ProductStorageCoordinator`, lends
 checked operation-scoped views, durably finalizes replay-unsafe interrupted
 work, gates service on mount/replay/recovery, and implements `SubmissionPort`
-plus read-only `InboundMailboxPort`.
-The accepted-history cap is one in the passing host composition, not product
-capacity. ADR 0009's status/initialize and ADR 0010's live pairing paths now
+plus read-only `InboundMailboxPort`. The current outbound accepted-history
+profile retains 128 entries in external PSRAM and has a separate
+154-acceptance append-only journal lifetime; the raw-RNS qualification inbox
+independently remains one-entry. ADR 0009's status/initialize and ADR 0010's
+live pairing paths now
 compose GPIO21, one USB Serial/JTAG byte owner, connection/sequence enforcement,
 and separate depth-one command/reply and secret-owning handoffs into the
 permanent E290 graph. A static authenticated job/reply handoff, node-side
@@ -2711,7 +2762,7 @@ A provisional 8 MB partition plan can copy the proven shape used by rsCardputer,
 | boot metadata/NVS/OTA data | 64–96 KiB | boot state, minimal manufacturing data |
 | application A | 3 MiB | firmware + compressed SPA |
 | application B | 3 MiB | OTA candidate/rollback |
-| submission `retlog` | 1 MiB | selected two-superblock/two-bank physical-format-1, semantic-schema-2 journal |
+| submission `retlog` | 1 MiB | selected two-superblock/two-bank physical-format-2, semantic-schema-3 journal |
 | other durable data/blob log | about 0.8 MiB | identities, configuration, messages, bounded resources |
 | coredump/health reserve | 64 KiB | crash triage |
 
@@ -2889,11 +2940,12 @@ identity, forwarding, multi-hop, Resource or routing gates.
 
 Current progress: the LoRa-first E290 source graph now composes the permanent
 node/router aggregate, concrete radio actor, durable identity/announce clock,
-resident operation-scoped one-entry qualification storage coordinator, exact
+resident operation-scoped storage coordinator with a 128-entry external-PSRAM
+outbound profile and separate one-entry raw-RNS inbox, exact
 authorized-frame request/durable-echo ownership gate, and a third narrow pre-
 authentication USB/GPIO task. It is an integration
 milestone inside this phase, not its exit: ADR 0005's interface-local active-
-owner fail-stop and the complete one-entry LoRa software composition pass host
+owner fail-stop and the complete LoRa software composition pass host
 qualification. Credential-store boot composition now passes host and target
 build gates and its erased-media path passed the first permanent-image powered
 smoke; the feature-free pairing policy and initialization runtime are now
@@ -2972,9 +3024,10 @@ Independently scheduled bootstrap/30-minute `lxmf.delivery`
 discovery is present. Responsive local path-request discovery, Resource delivery, richer app-level
 receipts and cancellation,
 propagation, complete client-facing store APIs, lifecycle/reclamation and
-production USB client semantics remain open. Basic source-free opportunistic
-send, durable status, list/read, persistent host conversations, and automatic
-host reconciliation/inbox import are implemented under their bounded alpha
+production USB client semantics remain open. Basic source-free method-neutral
+send with automatic opportunistic delivery when eligible, durable status,
+list/read, persistent host conversations, and automatic host
+reconciliation/inbox import are implemented under their bounded alpha
 contracts.
 
 The first `AdmissionDeferred` policy is intentionally incomplete: it retains an
@@ -3187,9 +3240,9 @@ CAD policy, formal electrical/RF, range, or regional release gates.
    immediate and post-capture readbacks. Do not infer permanent-node, storage,
    API, multi-hop, range, fault or soak behavior from that separate fixture.
    Keep the Tracker pair as the second radio regression fixture.
-3. Preserve the current 176-test default E290 host-library and 282-test xtask
-   suites, plus the focused host-client/chat, opt-in HIL, Rete integration,
-   schema-2 conformance, and inbox-store gates. Retain the historical
+3. Preserve the current default E290 host-library and xtask suites, plus the
+   focused host-client/chat, opt-in HIL, Rete integration, durable conformance,
+   and inbox-store gates. Retain the historical
    235-check baseline only as preceding evidence,
    including credential boot
    classification/order, the authenticated
@@ -3212,7 +3265,8 @@ CAD policy, formal electrical/RF, range, or regional release gates.
    Pending/Abort readbacks, mutation ambiguity/fault cuts, the host reset
    compatibility matrix, and suspend/resume qualification.
    Preserve
-   the implemented schema-2 credential/generation/authority/policy provenance,
+   the implemented credential/generation/authority/policy provenance now
+   retained by schema 3,
    static authenticated handoff, current-authority node dispatch, disjoint
    submission and inbox-port views, minimal single-flight USB session bearer, and powered
    capabilities/identity/submission/status path through the durable runtime and
@@ -3234,9 +3288,10 @@ CAD policy, formal electrical/RF, range, or regional release gates.
    admission and
    node-dispatch boundary reusable across BLE/Wi-Fi bearers. Preserve the
    bounded BLE suite-3 binding and its powered fail-closed disconnect barrier,
-   and qualify Wi-Fi with its separately selected suite. Select the real
-   capacity policy beyond this one-entry qualification
-   profile. Preserve durable acceptance before Rete preparation and durable
+   and qualify Wi-Fi with its separately selected suite. Design reclamation and
+   long-term retention beyond the current 128-entry resident profile and
+   154-acceptance journal lifetime. Preserve durable acceptance before Rete
+   preparation and durable
    terminal projection before acknowledgement.
 4. Preserve ADR 0011's completed bounded powered end-to-end results without
    rewriting the historical API 1.1 proof as persistence evidence: the maximum-

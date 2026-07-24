@@ -20,8 +20,8 @@ pub use profile::{DeviceProfile, ProfileRoot};
 pub use reticulum_lxmf_chat_runtime::{
     ApplianceConfig, ApplianceHandle, ApplianceSnapshot, BytesEncoding, BytesView,
     ConnectedSession, ConnectionMetadata, ConnectionState, ConnectionTransport, Connector,
-    ContactView, DeviceView, MAX_JSON_SAFE_INTEGER, ServiceError, TimelineDirection,
-    TimelineStatus, TimelineView, start_appliance,
+    ContactView, DeviceView, MAX_JSON_SAFE_INTEGER, NearbyPeerView, ServiceError,
+    TimelineDirection, TimelineStatus, TimelineView, start_appliance,
 };
 pub use serial::{
     SerialConnectionGate, SerialConnector, SerialConnectorConfig, discover_usb_serials,

@@ -13,9 +13,12 @@ use crate::model::{
 };
 #[cfg(feature = "experimental-lxmf")]
 use crate::model::{
-    LxmfBasicSendAccepted, LxmfMessageHandle, LxmfMessageSummary, LxmfReadChunk, LxmfReadLength,
-    MAX_LXMF_BASIC_CONTENT_BYTES, MAX_LXMF_BASIC_TITLE_BYTES, MAX_LXMF_READ_CHUNK_BYTES,
-    OP_EXPERIMENTAL_LXMF_BASIC_SEND, OP_EXPERIMENTAL_LXMF_NEXT, OP_EXPERIMENTAL_LXMF_READ,
+    IdentityHash, LxmfBasicSendAccepted, LxmfDiscoveredPeer, LxmfMessageHandle, LxmfMessageSummary,
+    LxmfPeerDiscoveryCursor, LxmfPeerDiscoveryIncarnation, LxmfPeerDiscoveryPage,
+    LxmfPeerGeneration, LxmfReadChunk, LxmfReadLength, MAX_LXMF_BASIC_CONTENT_BYTES,
+    MAX_LXMF_BASIC_TITLE_BYTES, MAX_LXMF_PEER_APP_DATA_BYTES, MAX_LXMF_READ_CHUNK_BYTES,
+    OP_EXPERIMENTAL_LXMF_BASIC_SEND, OP_EXPERIMENTAL_LXMF_NEXT, OP_EXPERIMENTAL_LXMF_PEER_NEXT,
+    OP_EXPERIMENTAL_LXMF_READ,
 };
 #[cfg(feature = "experimental-rns-inbox")]
 use crate::model::{
@@ -83,6 +86,10 @@ pub enum RequiredField {
     CapabilityMaxLxmfBasicTitleBytes,
     /// Capability maximum basic LXMF content bytes at body key 13.
     CapabilityMaxLxmfBasicContentBytes,
+    /// Capability nearby LXMF peer-discovery availability at body key 14.
+    CapabilityExperimentalLxmfPeerDiscovery,
+    /// Capability maximum nearby-peer application data at body key 15.
+    CapabilityMaxLxmfPeerAppDataBytes,
     /// Identity summary primary destination hash at body key 0.
     IdentityPrimaryDestination,
     /// Optional identity summary `lxmf.delivery` destination hash at body key 1.
@@ -141,6 +148,36 @@ pub enum RequiredField {
     LxmfBasicSendContent,
     /// Basic LXMF send idempotency key at request body key 4.
     LxmfBasicSendIdempotencyKey,
+    /// Peer-discovery cursor incarnation at request/response body key 0.
+    LxmfPeerCursorIncarnation,
+    /// Peer-discovery cursor exclusive generation at request/response body key 1.
+    LxmfPeerCursorGeneration,
+    /// Latest peer observation generation at response body key 2.
+    LxmfPeerLatestGeneration,
+    /// Oldest retained peer generation at response body key 3.
+    LxmfPeerOldestGeneration,
+    /// Peer-discovery history-gap flag at response body key 4.
+    LxmfPeerHistoryGap,
+    /// Optional peer record at response body key 5.
+    LxmfPeerRecord,
+    /// Announced `lxmf.delivery` destination at peer key 0.
+    LxmfPeerDestination,
+    /// Announce-authenticating identity hash at peer key 1.
+    LxmfPeerIdentityHash,
+    /// Authenticated announce application data at peer key 2.
+    LxmfPeerAppData,
+    /// Latest observed Reticulum hop count at peer key 3.
+    LxmfPeerHops,
+    /// Product-owned observing-interface scalar at peer key 4.
+    LxmfPeerInterfaceId,
+    /// Optional whole-dBm RSSI at peer key 5.
+    LxmfPeerRssiDbm,
+    /// Optional whole-dB SNR at peer key 6.
+    LxmfPeerSnrDb,
+    /// Saturating observation age in milliseconds at peer key 7.
+    LxmfPeerObservedAge,
+    /// Nonzero peer observation generation at peer key 8.
+    LxmfPeerGeneration,
     /// Submission state at body key 1.
     SubmissionState,
     /// State-specific prepared packet length at body key 2.
@@ -235,6 +272,13 @@ pub enum DecodeError {
     },
     /// Basic LXMF content exceeded its individual semantic limit.
     LxmfBasicContentTooLarge {
+        /// Supplied byte count.
+        actual: usize,
+        /// Accepted byte count.
+        max: usize,
+    },
+    /// Nearby LXMF announce application data exceeded its fixed response owner.
+    LxmfPeerAppDataTooLarge {
         /// Supplied byte count.
         actual: usize,
         /// Accepted byte count.
@@ -418,6 +462,16 @@ pub fn encode_request(
             put!(encoder.u8(4));
             put!(encoder.bytes(&idempotency_key.0));
         }
+        #[cfg(feature = "experimental-lxmf")]
+        DeviceRequest::LxmfPeerNext { after } => {
+            put!(encoder.map(if after.is_some() { 2 } else { 0 }));
+            if let Some(after) = after {
+                put!(encoder.u8(0));
+                put!(encoder.bytes(after.incarnation().as_bytes()));
+                put!(encoder.u8(1));
+                put!(encoder.u64(after.after_generation()));
+            }
+        }
         #[cfg(feature = "experimental-rns-data")]
         DeviceRequest::SubmitRnsData {
             destination,
@@ -536,6 +590,10 @@ pub fn encode_response(
         DeviceResponse::LxmfBasicSendAccepted(accepted) => {
             encode_lxmf_basic_send_accepted(&mut encoder, accepted)?;
         }
+        #[cfg(feature = "experimental-lxmf")]
+        DeviceResponse::LxmfPeerNext(page) => {
+            encode_lxmf_peer_discovery_page(&mut encoder, &page)?;
+        }
         #[cfg(feature = "experimental-rns-data")]
         DeviceResponse::SubmitRnsDataAccepted(accepted) => {
             encode_submission_accepted(&mut encoder, accepted)?;
@@ -606,6 +664,10 @@ pub fn decode_response(input: &[u8]) -> Result<ResponseEnvelope, DecodeError> {
         OP_EXPERIMENTAL_LXMF_BASIC_SEND => {
             DeviceResponse::LxmfBasicSendAccepted(decode_lxmf_basic_send_accepted(body)?)
         }
+        #[cfg(feature = "experimental-lxmf")]
+        OP_EXPERIMENTAL_LXMF_PEER_NEXT => {
+            DeviceResponse::LxmfPeerNext(decode_lxmf_peer_discovery_page(body)?)
+        }
         #[cfg(feature = "experimental-rns-data")]
         OP_EXPERIMENTAL_SUBMIT_RNS_DATA => {
             DeviceResponse::SubmitRnsDataAccepted(decode_submission_accepted(body)?)
@@ -669,7 +731,7 @@ fn encode_capabilities(
     encoder: &mut SliceEncoder<'_>,
     capabilities: CapabilitySnapshot,
 ) -> Result<(), EncodeError> {
-    put!(encoder.map(14));
+    put!(encoder.map(16));
     put!(encoder.u8(0));
     encode_version(encoder, capabilities.api_version)?;
     put!(encoder.u8(1));
@@ -698,6 +760,10 @@ fn encode_capabilities(
     put!(encoder.u16(capabilities.max_lxmf_basic_title_bytes));
     put!(encoder.u8(13));
     put!(encoder.u16(capabilities.max_lxmf_basic_content_bytes));
+    put!(encoder.u8(14));
+    put!(encoder.u8(capabilities.experimental_lxmf_peer_discovery.wire_code(),));
+    put!(encoder.u8(15));
+    put!(encoder.u16(capabilities.max_lxmf_peer_app_data_bytes));
     Ok(())
 }
 
@@ -805,6 +871,69 @@ fn encode_lxmf_basic_send_accepted(
     put!(encoder.u64(accepted.id.0));
     put!(encoder.u8(1));
     put!(encoder.bytes(accepted.message_id()));
+    Ok(())
+}
+
+#[cfg(feature = "experimental-lxmf")]
+fn encode_lxmf_peer_discovery_page(
+    encoder: &mut SliceEncoder<'_>,
+    page: &LxmfPeerDiscoveryPage,
+) -> Result<(), EncodeError> {
+    let entries = 3
+        + u64::from(page.latest_generation().is_some())
+        + u64::from(page.oldest_retained_generation().is_some())
+        + u64::from(page.peer().is_some());
+    put!(encoder.map(entries));
+    put!(encoder.u8(0));
+    put!(encoder.bytes(page.next_cursor().incarnation().as_bytes(),));
+    put!(encoder.u8(1));
+    put!(encoder.u64(page.next_cursor().after_generation()));
+    if let Some(latest) = page.latest_generation() {
+        put!(encoder.u8(2));
+        put!(encoder.u64(latest.get()));
+    }
+    if let Some(oldest) = page.oldest_retained_generation() {
+        put!(encoder.u8(3));
+        put!(encoder.u64(oldest.get()));
+    }
+    put!(encoder.u8(4));
+    put!(encoder.bool(page.history_gap()));
+    if let Some(peer) = page.peer() {
+        put!(encoder.u8(5));
+        encode_lxmf_discovered_peer(encoder, peer)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "experimental-lxmf")]
+fn encode_lxmf_discovered_peer(
+    encoder: &mut SliceEncoder<'_>,
+    peer: &LxmfDiscoveredPeer,
+) -> Result<(), EncodeError> {
+    let entries = 7 + u64::from(peer.rssi_dbm().is_some()) + u64::from(peer.snr_db().is_some());
+    put!(encoder.map(entries));
+    put!(encoder.u8(0));
+    put!(encoder.bytes(&peer.destination().0));
+    put!(encoder.u8(1));
+    put!(encoder.bytes(peer.identity_hash().as_bytes()));
+    put!(encoder.u8(2));
+    put!(encoder.bytes(peer.app_data()));
+    put!(encoder.u8(3));
+    put!(encoder.u8(peer.hops()));
+    put!(encoder.u8(4));
+    put!(encoder.u8(peer.interface_id()));
+    if let Some(rssi_dbm) = peer.rssi_dbm() {
+        put!(encoder.u8(5));
+        put!(encoder.i16(rssi_dbm));
+    }
+    if let Some(snr_db) = peer.snr_db() {
+        put!(encoder.u8(6));
+        put!(encoder.i16(snr_db));
+    }
+    put!(encoder.u8(7));
+    put!(encoder.u64(peer.observed_age_ms()));
+    put!(encoder.u8(8));
+    put!(encoder.u64(peer.generation().get()));
     Ok(())
 }
 
@@ -1058,6 +1187,8 @@ fn decode_request_body<'a>(
         OP_EXPERIMENTAL_LXMF_READ => decode_lxmf_read_request(body),
         #[cfg(feature = "experimental-lxmf")]
         OP_EXPERIMENTAL_LXMF_BASIC_SEND => decode_lxmf_basic_send_request(body),
+        #[cfg(feature = "experimental-lxmf")]
+        OP_EXPERIMENTAL_LXMF_PEER_NEXT => decode_lxmf_peer_next_request(body),
         other => Err(DecodeError::UnsupportedOperation(other)),
     }
 }
@@ -1229,6 +1360,55 @@ fn decode_lxmf_basic_send_request(body: &[u8]) -> Result<DeviceRequest<'_>, Deco
     })
 }
 
+#[cfg(feature = "experimental-lxmf")]
+fn decode_lxmf_peer_next_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError> {
+    let mut decoder = Decoder::new(body);
+    let entries = decode_map_len(&mut decoder)?;
+    let mut incarnation = None;
+    let mut generation = None;
+    for _ in 0..entries {
+        let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
+        match key {
+            0 => {
+                reject_duplicate(
+                    incarnation.is_some(),
+                    RequiredField::LxmfPeerCursorIncarnation,
+                )?;
+                incarnation = Some(LxmfPeerDiscoveryIncarnation::new(decode_fixed_bytes::<8>(
+                    &mut decoder,
+                    RequiredField::LxmfPeerCursorIncarnation,
+                )?));
+            }
+            1 => {
+                reject_duplicate(
+                    generation.is_some(),
+                    RequiredField::LxmfPeerCursorGeneration,
+                )?;
+                generation = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
+            }
+            _ => skip_strict(&mut decoder, 0)?,
+        }
+    }
+    finish_body(&decoder, body)?;
+    let after = match (incarnation, generation) {
+        (None, None) => None,
+        (Some(incarnation), Some(generation)) => {
+            Some(LxmfPeerDiscoveryCursor::new(incarnation, generation))
+        }
+        (None, Some(_)) => {
+            return Err(DecodeError::MissingField(
+                RequiredField::LxmfPeerCursorIncarnation,
+            ));
+        }
+        (Some(_), None) => {
+            return Err(DecodeError::MissingField(
+                RequiredField::LxmfPeerCursorGeneration,
+            ));
+        }
+    };
+    Ok(DeviceRequest::LxmfPeerNext { after })
+}
+
 fn decode_capabilities_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -1339,6 +1519,8 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
     let mut experimental_lxmf_basic_send = None;
     let mut max_lxmf_basic_title = None;
     let mut max_lxmf_basic_content = None;
+    let mut experimental_lxmf_peer_discovery = None;
+    let mut max_lxmf_peer_app_data = None;
     for _ in 0..entries {
         let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
         match key {
@@ -1447,6 +1629,24 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
                 )?;
                 max_lxmf_basic_content = Some(decoder.u16().map_err(|_| DecodeError::Malformed)?);
             }
+            14 => {
+                reject_duplicate(
+                    experimental_lxmf_peer_discovery.is_some(),
+                    RequiredField::CapabilityExperimentalLxmfPeerDiscovery,
+                )?;
+                let value = decoder.u8().map_err(|_| DecodeError::Malformed)?;
+                experimental_lxmf_peer_discovery = Some(decode_capability_availability(
+                    value,
+                    RequiredField::CapabilityExperimentalLxmfPeerDiscovery,
+                )?);
+            }
+            15 => {
+                reject_duplicate(
+                    max_lxmf_peer_app_data.is_some(),
+                    RequiredField::CapabilityMaxLxmfPeerAppDataBytes,
+                )?;
+                max_lxmf_peer_app_data = Some(decoder.u16().map_err(|_| DecodeError::Malformed)?);
+            }
             _ => skip_strict(&mut decoder, 0)?,
         }
     }
@@ -1476,6 +1676,9 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
             .unwrap_or(CapabilityAvailability::Unavailable),
         max_lxmf_basic_title_bytes: max_lxmf_basic_title.unwrap_or(0),
         max_lxmf_basic_content_bytes: max_lxmf_basic_content.unwrap_or(0),
+        experimental_lxmf_peer_discovery: experimental_lxmf_peer_discovery
+            .unwrap_or(CapabilityAvailability::Unavailable),
+        max_lxmf_peer_app_data_bytes: max_lxmf_peer_app_data.unwrap_or(0),
     })
 }
 
@@ -1824,6 +2027,206 @@ fn decode_lxmf_basic_send_accepted(body: &[u8]) -> Result<LxmfBasicSendAccepted,
         require(id, RequiredField::SubmissionId)?,
         require(message_id, RequiredField::LxmfMessageId)?,
     ))
+}
+
+#[cfg(feature = "experimental-lxmf")]
+fn decode_lxmf_peer_discovery_page(body: &[u8]) -> Result<LxmfPeerDiscoveryPage, DecodeError> {
+    let mut decoder = Decoder::new(body);
+    let entries = decode_map_len(&mut decoder)?;
+    let mut incarnation = None;
+    let mut next_generation = None;
+    let mut latest_generation = None;
+    let mut oldest_generation = None;
+    let mut history_gap = None;
+    let mut peer = None;
+    let mut peer_seen = false;
+    for _ in 0..entries {
+        let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
+        match key {
+            0 => {
+                reject_duplicate(
+                    incarnation.is_some(),
+                    RequiredField::LxmfPeerCursorIncarnation,
+                )?;
+                incarnation = Some(LxmfPeerDiscoveryIncarnation::new(decode_fixed_bytes::<8>(
+                    &mut decoder,
+                    RequiredField::LxmfPeerCursorIncarnation,
+                )?));
+            }
+            1 => {
+                reject_duplicate(
+                    next_generation.is_some(),
+                    RequiredField::LxmfPeerCursorGeneration,
+                )?;
+                next_generation = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
+            }
+            2 => {
+                reject_duplicate(
+                    latest_generation.is_some(),
+                    RequiredField::LxmfPeerLatestGeneration,
+                )?;
+                latest_generation = Some(decode_lxmf_peer_generation(
+                    &mut decoder,
+                    RequiredField::LxmfPeerLatestGeneration,
+                )?);
+            }
+            3 => {
+                reject_duplicate(
+                    oldest_generation.is_some(),
+                    RequiredField::LxmfPeerOldestGeneration,
+                )?;
+                oldest_generation = Some(decode_lxmf_peer_generation(
+                    &mut decoder,
+                    RequiredField::LxmfPeerOldestGeneration,
+                )?);
+            }
+            4 => {
+                reject_duplicate(history_gap.is_some(), RequiredField::LxmfPeerHistoryGap)?;
+                history_gap = Some(decoder.bool().map_err(|_| DecodeError::Malformed)?);
+            }
+            5 => {
+                reject_duplicate(peer_seen, RequiredField::LxmfPeerRecord)?;
+                peer_seen = true;
+                peer = Some(decode_lxmf_discovered_peer(&mut decoder)?);
+            }
+            _ => skip_strict(&mut decoder, 0)?,
+        }
+    }
+    finish_body(&decoder, body)?;
+    let next_cursor = LxmfPeerDiscoveryCursor::new(
+        require(incarnation, RequiredField::LxmfPeerCursorIncarnation)?,
+        require(next_generation, RequiredField::LxmfPeerCursorGeneration)?,
+    );
+    let history_gap = require(history_gap, RequiredField::LxmfPeerHistoryGap)?;
+    if latest_generation.is_some() != oldest_generation.is_some() {
+        return Err(DecodeError::Malformed);
+    }
+    if let (Some(oldest), Some(latest)) = (oldest_generation, latest_generation) {
+        if oldest > latest || next_cursor.after_generation() > latest.get() {
+            return Err(DecodeError::Malformed);
+        }
+        if let Some(peer) = &peer
+            && (peer.generation().get() != next_cursor.after_generation()
+                || peer.generation() < oldest
+                || peer.generation() > latest)
+        {
+            return Err(DecodeError::Malformed);
+        }
+    } else if next_cursor.after_generation() != 0 || peer.is_some() {
+        return Err(DecodeError::Malformed);
+    }
+    Ok(LxmfPeerDiscoveryPage::new(
+        next_cursor,
+        latest_generation,
+        oldest_generation,
+        history_gap,
+        peer,
+    ))
+}
+
+#[cfg(feature = "experimental-lxmf")]
+fn decode_lxmf_discovered_peer(
+    decoder: &mut Decoder<'_>,
+) -> Result<LxmfDiscoveredPeer, DecodeError> {
+    let entries = decode_map_len(decoder)?;
+    let mut destination = None;
+    let mut identity_hash = None;
+    let mut app_data = None;
+    let mut hops = None;
+    let mut interface_id = None;
+    let mut rssi_dbm = None;
+    let mut rssi_seen = false;
+    let mut snr_db = None;
+    let mut snr_seen = false;
+    let mut observed_age_ms = None;
+    let mut generation = None;
+    for _ in 0..entries {
+        let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
+        match key {
+            0 => {
+                reject_duplicate(destination.is_some(), RequiredField::LxmfPeerDestination)?;
+                destination = Some(DestinationHash(decode_fixed_bytes::<16>(
+                    decoder,
+                    RequiredField::LxmfPeerDestination,
+                )?));
+            }
+            1 => {
+                reject_duplicate(identity_hash.is_some(), RequiredField::LxmfPeerIdentityHash)?;
+                identity_hash = Some(IdentityHash::new(decode_fixed_bytes::<16>(
+                    decoder,
+                    RequiredField::LxmfPeerIdentityHash,
+                )?));
+            }
+            2 => {
+                reject_duplicate(app_data.is_some(), RequiredField::LxmfPeerAppData)?;
+                let bytes = decoder.bytes().map_err(|_| DecodeError::Malformed)?;
+                if bytes.len() > MAX_LXMF_PEER_APP_DATA_BYTES {
+                    return Err(DecodeError::LxmfPeerAppDataTooLarge {
+                        actual: bytes.len(),
+                        max: MAX_LXMF_PEER_APP_DATA_BYTES,
+                    });
+                }
+                app_data = Some(bytes);
+            }
+            3 => {
+                reject_duplicate(hops.is_some(), RequiredField::LxmfPeerHops)?;
+                hops = Some(decoder.u8().map_err(|_| DecodeError::Malformed)?);
+            }
+            4 => {
+                reject_duplicate(interface_id.is_some(), RequiredField::LxmfPeerInterfaceId)?;
+                interface_id = Some(decoder.u8().map_err(|_| DecodeError::Malformed)?);
+            }
+            5 => {
+                reject_duplicate(rssi_seen, RequiredField::LxmfPeerRssiDbm)?;
+                rssi_seen = true;
+                rssi_dbm = Some(decoder.i16().map_err(|_| DecodeError::Malformed)?);
+            }
+            6 => {
+                reject_duplicate(snr_seen, RequiredField::LxmfPeerSnrDb)?;
+                snr_seen = true;
+                snr_db = Some(decoder.i16().map_err(|_| DecodeError::Malformed)?);
+            }
+            7 => {
+                reject_duplicate(
+                    observed_age_ms.is_some(),
+                    RequiredField::LxmfPeerObservedAge,
+                )?;
+                observed_age_ms = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
+            }
+            8 => {
+                reject_duplicate(generation.is_some(), RequiredField::LxmfPeerGeneration)?;
+                generation = Some(decode_lxmf_peer_generation(
+                    decoder,
+                    RequiredField::LxmfPeerGeneration,
+                )?);
+            }
+            _ => skip_strict(decoder, 0)?,
+        }
+    }
+    LxmfDiscoveredPeer::new(
+        require(destination, RequiredField::LxmfPeerDestination)?,
+        require(identity_hash, RequiredField::LxmfPeerIdentityHash)?,
+        require(app_data, RequiredField::LxmfPeerAppData)?,
+        require(hops, RequiredField::LxmfPeerHops)?,
+        require(interface_id, RequiredField::LxmfPeerInterfaceId)?,
+        rssi_dbm,
+        snr_db,
+        require(observed_age_ms, RequiredField::LxmfPeerObservedAge)?,
+        require(generation, RequiredField::LxmfPeerGeneration)?,
+    )
+    .map_err(|too_large| DecodeError::LxmfPeerAppDataTooLarge {
+        actual: too_large.actual(),
+        max: too_large.maximum(),
+    })
+}
+
+#[cfg(feature = "experimental-lxmf")]
+fn decode_lxmf_peer_generation(
+    decoder: &mut Decoder<'_>,
+    field: RequiredField,
+) -> Result<LxmfPeerGeneration, DecodeError> {
+    let value = decoder.u64().map_err(|_| DecodeError::Malformed)?;
+    LxmfPeerGeneration::new(value).map_err(|_| DecodeError::InvalidValue { field, value })
 }
 
 fn decode_submission_status(body: &[u8]) -> Result<SubmissionStatus, DecodeError> {

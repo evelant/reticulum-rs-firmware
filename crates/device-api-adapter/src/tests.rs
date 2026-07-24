@@ -27,6 +27,7 @@ use reticulum_storage_actor::{
 };
 #[cfg(feature = "experimental-rns-data")]
 use reticulum_storage_actor::{PendingKind, PendingProgress};
+use reticulum_storage_journal::{PHYSICAL_FORMAT_VERSION, format_erased};
 use reticulum_storage_model::{
     AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA, AcceptanceCandidate,
     AuthorizationSnapshot, BootRecoveryMarker, DestinationHash, EncodedPacketSha256,
@@ -45,22 +46,6 @@ static OVERSIZED_PAYLOAD: [u8; api::MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES + 1] =
 #[cfg(feature = "experimental-rns-data")]
 static MAXIMUM_PAYLOAD: [u8; api::MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES] =
     [0x5a; api::MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES];
-
-// Canonical generation-1 bank-A manifest emitted by physical journal format 1
-// for an empty semantic-schema-2 partition. The actor independently authenticates this
-// fixture during every test mount.
-const EMPTY_MANIFEST: [u8; 160] = [
-    0x52, 0x54, 0x4a, 0x52, 0x4d, 0x41, 0x4e, 0x31, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0xf0, 0x07, 0x00,
-    0x80, 0x02, 0x00, 0x00, 0x2c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x62, 0xf5, 0xcb, 0x40, 0xb8, 0x48, 0xd3, 0x79, 0x07, 0xff, 0x11, 0xdc, 0x48, 0x3f, 0x5c, 0x39,
-    0xfc, 0x98, 0x0f, 0xb1, 0xc3, 0xde, 0xc6, 0xfc, 0x53, 0x03, 0x44, 0x71, 0xf2, 0x1b, 0xd5, 0x37,
-    0x52, 0x4a, 0x3c, 0xa5, 0x0f, 0x69, 0x96, 0xc3, 0x71, 0x1e, 0xd2, 0x4b, 0x87, 0x58, 0xb4, 0x2d,
-    0xca, 0x35, 0x6a, 0x93, 0xe1, 0x0d, 0x7c, 0x46, 0x9b, 0x24, 0xd8, 0x63, 0x15, 0xae, 0x49, 0x72,
-];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FakeError {
@@ -105,15 +90,19 @@ impl FakeNor {
         lost_write_reply_after: Option<usize>,
         dropped_write_after: Option<usize>,
     ) -> Self {
-        let mut bytes = vec![0xff; PARTITION_SIZE];
-        bytes[..EMPTY_MANIFEST.len()].copy_from_slice(&EMPTY_MANIFEST);
-        Self {
-            bytes,
-            lost_write_reply_after,
-            dropped_write_after,
+        let mut flash = Self {
+            bytes: vec![0xff; PARTITION_SIZE],
+            lost_write_reply_after: None,
+            dropped_write_after: None,
             writes: 0,
             erases: 0,
-        }
+        };
+        format_erased(&mut flash).expect("the erased test journal formats");
+        flash.lost_write_reply_after = lost_write_reply_after;
+        flash.dropped_write_after = dropped_write_after;
+        flash.writes = 0;
+        flash.erases = 0;
+        flash
     }
 
     fn program(&mut self, offset: usize, bytes: &[u8]) {
@@ -202,7 +191,7 @@ const fn test_binding() -> JournalBinding {
         TEST_DEVICE,
         0x0063_0000,
         PARTITION_SIZE,
-        1, // The canonical EMPTY_MANIFEST fixture above is physical format 1.
+        PHYSICAL_FORMAT_VERSION,
     )
 }
 
@@ -420,6 +409,10 @@ struct FakeLxmfOnlyPort {
     lxmf_availability: usize,
     lxmf_next: usize,
     compose_availability: usize,
+    peer_availability: usize,
+    peer_max_app_data: usize,
+    peer_next: usize,
+    observed_peer_cursor: Option<Option<api::LxmfPeerDiscoveryCursor>>,
 }
 
 #[cfg(feature = "experimental-lxmf")]
@@ -498,6 +491,48 @@ impl LxmfComposePort for FakeLxmfOnlyPort {
         Ok(LxmfComposeAcceptance::new(
             SubmissionAcceptance::Accepted(SubmissionId::new(41)),
             [0x67; 32],
+        ))
+    }
+}
+
+#[cfg(feature = "experimental-lxmf")]
+impl PeerDiscoveryPort for FakeLxmfOnlyPort {
+    fn availability(&mut self) -> CapabilityAvailability {
+        self.peer_availability += 1;
+        CapabilityAvailability::Available
+    }
+
+    fn max_app_data_bytes(&mut self) -> u16 {
+        self.peer_max_app_data += 1;
+        64
+    }
+
+    fn next(
+        &mut self,
+        after: Option<api::LxmfPeerDiscoveryCursor>,
+    ) -> Result<api::LxmfPeerDiscoveryPage, PeerDiscoveryPortError> {
+        self.peer_next += 1;
+        self.observed_peer_cursor = Some(after);
+        let incarnation = api::LxmfPeerDiscoveryIncarnation::new([0x88; 8]);
+        let generation = api::LxmfPeerGeneration::new(3).unwrap();
+        let peer = api::LxmfDiscoveredPeer::new(
+            ApiDestinationHash([0x31; 16]),
+            api::IdentityHash::new([0x41; 16]),
+            b"nearby",
+            2,
+            7,
+            Some(-95),
+            Some(4),
+            250,
+            generation,
+        )
+        .unwrap();
+        Ok(api::LxmfPeerDiscoveryPage::new(
+            api::LxmfPeerDiscoveryCursor::new(incarnation, generation.get()),
+            Some(generation),
+            Some(generation),
+            after.is_some_and(|cursor| cursor.incarnation() != incarnation),
+            Some(peer),
         ))
     }
 }
@@ -897,6 +932,100 @@ fn lxmf_dispatcher_does_not_require_the_raw_inbox_feature_or_port() {
         port.submission_availability,
         usize::from(cfg!(feature = "experimental-rns-data"))
     );
+}
+
+#[cfg(feature = "experimental-lxmf")]
+#[test]
+fn nearby_peer_dispatch_is_authenticated_and_only_new_entry_point_advertises_it() {
+    let request = envelope(113, DeviceRequest::LxmfPeerNext { after: None });
+
+    let mut legacy_port = FakeLxmfOnlyPort::default();
+    let legacy = super::dispatch_with_lxmf(
+        &mut legacy_port,
+        identity_summary(),
+        &authenticated(1, Permissions::NONE),
+        request,
+    );
+    assert_eq!(
+        legacy.response,
+        DeviceResponse::Error(ApiErrorResponse {
+            code: ApiErrorCode::UnsupportedOperation,
+            operation: Some(api::OP_EXPERIMENTAL_LXMF_PEER_NEXT),
+        })
+    );
+    assert_eq!(legacy_port.peer_availability, 0);
+    assert_eq!(legacy_port.peer_next, 0);
+
+    let mut unauthenticated_port = FakeLxmfOnlyPort::default();
+    let unauthenticated = super::dispatch_with_lxmf_and_peer_discovery(
+        &mut unauthenticated_port,
+        identity_summary(),
+        &DispatchContext::UNAUTHENTICATED,
+        request,
+    );
+    assert_eq!(
+        unauthenticated.response,
+        DeviceResponse::Error(ApiErrorResponse {
+            code: ApiErrorCode::AuthenticationRequired,
+            operation: Some(api::OP_EXPERIMENTAL_LXMF_PEER_NEXT),
+        })
+    );
+    assert_eq!(unauthenticated_port.peer_availability, 0);
+    assert_eq!(unauthenticated_port.peer_next, 0);
+}
+
+#[cfg(feature = "experimental-lxmf")]
+#[test]
+fn nearby_peer_dispatch_reports_port_limit_and_returns_one_reset_page() {
+    let mut capability_port = FakeLxmfOnlyPort::default();
+    let capabilities = super::dispatch_with_lxmf_and_peer_discovery(
+        &mut capability_port,
+        identity_summary(),
+        &DispatchContext::UNAUTHENTICATED,
+        envelope(114, DeviceRequest::SystemCapabilities),
+    );
+    assert_eq!(
+        capabilities.response,
+        DeviceResponse::SystemCapabilities(
+            CapabilitySnapshot::for_dispatch_with_inbox_lxmf_basic_send_and_peer_discovery(
+                cfg!(feature = "experimental-rns-data"),
+                CapabilityAvailability::Unavailable,
+                CapabilityAvailability::Available,
+                CapabilityAvailability::Available,
+                CapabilityAvailability::Available,
+                64,
+            )
+        )
+    );
+    assert_eq!(capability_port.peer_availability, 1);
+    assert_eq!(capability_port.peer_max_app_data, 1);
+    assert_eq!(capability_port.peer_next, 0);
+
+    let stale =
+        api::LxmfPeerDiscoveryCursor::new(api::LxmfPeerDiscoveryIncarnation::new([0x99; 8]), 77);
+    let mut read_port = FakeLxmfOnlyPort::default();
+    let response = super::dispatch_with_lxmf_and_peer_discovery(
+        &mut read_port,
+        identity_summary(),
+        &authenticated(1, Permissions::NONE),
+        envelope(115, DeviceRequest::LxmfPeerNext { after: Some(stale) }),
+    );
+    let DeviceResponse::LxmfPeerNext(page) = response.response else {
+        panic!("expected nearby peer page")
+    };
+    assert_eq!(read_port.observed_peer_cursor, Some(Some(stale)));
+    assert_eq!(read_port.peer_availability, 1);
+    assert_eq!(read_port.peer_next, 1);
+    assert!(page.history_gap());
+    assert_eq!(
+        page.next_cursor().incarnation(),
+        api::LxmfPeerDiscoveryIncarnation::new([0x88; 8])
+    );
+    let peer = page.peer().unwrap();
+    assert_eq!(peer.destination(), ApiDestinationHash([0x31; 16]));
+    assert_eq!(peer.identity_hash(), api::IdentityHash::new([0x41; 16]));
+    assert_eq!(peer.app_data(), b"nearby");
+    assert_eq!(peer.observed_age_ms(), 250);
 }
 
 #[cfg(feature = "experimental-rns-inbox")]
@@ -1877,7 +2006,14 @@ fn durable_accept_owns_payload_and_replay_conflict_preserve_one_submission() {
     assert_eq!(actor.state().committed_records(), 1);
     borrowed_payload.fill(b'x');
     let original = actor.index().get(SubmissionId::new(10)).unwrap().accepted();
-    assert_eq!(original.intent().payload(), b"same");
+    assert_eq!(
+        original
+            .intent()
+            .experimental_rns_data()
+            .expect("raw RNS submission retains its intent kind")
+            .payload(),
+        b"same"
+    );
     let expected_provenance = dispatch_provenance(1);
     assert_eq!(
         original.authorization().credential_id(),
@@ -1968,6 +2104,8 @@ fn maximum_advertised_payload_is_durably_accepted() {
             .unwrap()
             .accepted()
             .intent()
+            .experimental_rns_data()
+            .expect("raw RNS submission retains its intent kind")
             .payload(),
         &MAXIMUM_PAYLOAD
     );

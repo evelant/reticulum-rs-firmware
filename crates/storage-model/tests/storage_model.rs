@@ -4,13 +4,14 @@ use reticulum_storage_model::{
     ApplyError, ApplyOutcome, AuditEntry, AuditEvent, AuthorizationSnapshot,
     AuthorizationSnapshotError, BootRecoveryDecision, BootRecoveryMarker, ContentSha256,
     DestinationHash, EncodedPacketSha256, ExperimentalRnsDataIntent, FinalDisposition,
-    IdempotencyKey, InternalFailure, InterruptedState, JournalEntry, LifecycleState,
-    MAX_DURABLE_RECORDS_PER_SUBMISSION, MAX_ENCODED_PACKET_BYTES, MAX_EXPERIMENTAL_RNS_DATA_BYTES,
+    IdempotencyKey, InternalFailure, InterruptedState, JOURNAL_SCHEMA_VERSION, JournalEntry,
+    LifecycleState, LxmfMessageIntent, MAX_DURABLE_RECORDS_PER_SUBMISSION,
+    MAX_ENCODED_PACKET_BYTES, MAX_EXPERIMENTAL_RNS_DATA_BYTES, MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES,
     MAX_JOURNAL_RECORD_BYTES, MAX_STATE_TRANSITIONS_PER_SUBMISSION,
-    MAX_TRANSPORT_AUDITS_PER_SUBMISSION, PlanOutcome, PreparedPacketDetails, PrincipalId,
-    RnsAttemptToken, StateTransition, SubmissionFailure, SubmissionId, SubmissionIndex,
-    SubmissionReplay, TransitionError, TransportRecoveryReason, decode_journal_entry,
-    encode_journal_entry, validate_transition,
+    MAX_TRANSPORT_AUDITS_PER_SUBMISSION, MIN_LXMF_MESSAGE_WIRE_BYTES, PlanOutcome,
+    PreparedPacketDetails, PrincipalId, RnsAttemptToken, StateTransition, SubmissionFailure,
+    SubmissionId, SubmissionIndex, SubmissionIntent, SubmissionReplay, TransitionError,
+    TransportRecoveryReason, decode_journal_entry, encode_journal_entry, validate_transition,
 };
 
 fn principal(tag: u8) -> PrincipalId {
@@ -23,6 +24,13 @@ fn key(tag: u8) -> IdempotencyKey {
 
 fn intent(destination: u8, payload: &[u8]) -> ExperimentalRnsDataIntent {
     ExperimentalRnsDataIntent::new(DestinationHash::new([destination; 16]), payload).unwrap()
+}
+
+fn lxmf_intent(destination: u8, trailing: &[u8]) -> LxmfMessageIntent {
+    let mut wire = Vec::with_capacity(16 + trailing.len());
+    wire.extend_from_slice(&[destination; 16]);
+    wire.extend_from_slice(trailing);
+    LxmfMessageIntent::new(&wire).unwrap()
 }
 
 fn authorization(tag: u8) -> AuthorizationSnapshot {
@@ -160,6 +168,80 @@ fn maximum_intent_is_owned_hashed_and_fits_one_record() {
 }
 
 #[test]
+fn maximum_inline_lxmf_wire_is_owned_hashed_and_fits_one_record() {
+    let mut wire = [0x5a; MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES];
+    wire[..16].fill(0x44);
+    let intent = LxmfMessageIntent::new(&wire).unwrap();
+    assert_eq!(intent.destination(), DestinationHash::new([0x44; 16]));
+    assert_eq!(intent.wire(), wire);
+    assert_eq!(intent.opportunistic_carrier(), &wire[16..]);
+    assert_eq!(intent.content_sha256(), intent.content_sha256());
+
+    let maximum_authorization = AuthorizationSnapshot::new(
+        [0xff; 16],
+        u64::MAX,
+        u64::MAX,
+        u32::MAX,
+        AUTHORIZATION_KNOWN_PERMISSION_BITS,
+    )
+    .unwrap();
+    let entry = JournalEntry::Accepted(Accepted::new(
+        SubmissionId::new(u64::MAX),
+        principal(0xff),
+        key(0xee),
+        intent,
+        maximum_authorization,
+    ));
+    let bytes = encoded(entry);
+    assert_eq!(bytes.len(), 538);
+    assert_eq!(MAX_JOURNAL_RECORD_BYTES - bytes.len(), 6);
+    assert_eq!(decode_journal_entry(&bytes), Ok(entry));
+
+    let too_short = [0_u8; MIN_LXMF_MESSAGE_WIRE_BYTES - 1];
+    let error = LxmfMessageIntent::new(&too_short).unwrap_err();
+    assert_eq!(error.actual(), MIN_LXMF_MESSAGE_WIRE_BYTES - 1);
+    assert_eq!(error.minimum(), MIN_LXMF_MESSAGE_WIRE_BYTES);
+    assert_eq!(error.maximum(), MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES);
+
+    let too_large = [0_u8; MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES + 1];
+    let error = LxmfMessageIntent::new(&too_large).unwrap_err();
+    assert_eq!(error.actual(), MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES + 1);
+    assert_eq!(error.minimum(), MIN_LXMF_MESSAGE_WIRE_BYTES);
+    assert_eq!(error.maximum(), MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES);
+}
+
+#[test]
+fn lxmf_message_record_golden_and_kind_shape_are_strict() {
+    let entry = JournalEntry::Accepted(Accepted::new(
+        SubmissionId::new(7),
+        principal(0x11),
+        key(0x22),
+        lxmf_intent(0x33, &[0x44; 4]),
+        authorization(0x44),
+    ));
+    let actual = encoded(entry);
+
+    const GOLDEN: &[u8] = &[
+        0xa3, 0x00, 0x03, 0x01, 0x00, 0x02, 0xa6, 0x00, 0x07, 0x01, 0x50, 0x11, 0x11, 0x11, 0x11,
+        0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x02, 0x50, 0x22,
+        0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+        0x03, 0xa5, 0x00, 0x50, 0x45, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44,
+        0x44, 0x44, 0x44, 0x44, 0x44, 0x01, 0x18, 0x45, 0x02, 0x18, 0x4f, 0x03, 0x18, 0x45, 0x04,
+        0x03, 0x04, 0x01, 0x05, 0x54, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33,
+        0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x44, 0x44, 0x44, 0x44,
+    ];
+    assert_eq!(actual, GOLDEN);
+    assert_eq!(decode_journal_entry(GOLDEN), Ok(entry));
+
+    let mut wrong_map_shape = GOLDEN.to_vec();
+    wrong_map_shape[6] = 0xa7;
+    assert_eq!(
+        decode_journal_entry(&wrong_map_shape),
+        Err(reticulum_storage_model::DecodeError::InvalidValue)
+    );
+}
+
+#[test]
 fn accepted_record_golden_and_every_truncated_prefix_are_strict() {
     let entry = JournalEntry::Accepted(Accepted::new(
         SubmissionId::new(7),
@@ -173,7 +255,7 @@ fn accepted_record_golden_and_every_truncated_prefix_are_strict() {
     // Filled from this crate's canonical encoder and frozen against accidental
     // field-number, provenance-shape, or integer-encoding drift.
     const GOLDEN: &[u8] = &[
-        0xa3, 0x00, 0x02, 0x01, 0x00, 0x02, 0xa7, 0x00, 0x07, 0x01, 0x50, // Principal.
+        0xa3, 0x00, 0x03, 0x01, 0x00, 0x02, 0xa7, 0x00, 0x07, 0x01, 0x50, // Principal.
         0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
         0x11, // Idempotency key.
         0x02, 0x50, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
@@ -186,6 +268,12 @@ fn accepted_record_golden_and_every_truncated_prefix_are_strict() {
     ];
     assert_eq!(actual, GOLDEN);
     assert_eq!(decode_journal_entry(GOLDEN), Ok(entry));
+    let mut schema_two = GOLDEN.to_vec();
+    schema_two[2] = 0x02;
+    assert_eq!(
+        decode_journal_entry(&schema_two),
+        Err(reticulum_storage_model::DecodeError::UnsupportedSchema)
+    );
     for end in 0..GOLDEN.len() {
         assert!(
             decode_journal_entry(&GOLDEN[..end]).is_err(),
@@ -220,11 +308,11 @@ fn transition_and_audit_goldens_round_trip() {
     )
     .unwrap();
     const TRANSITION_GOLDEN: &[u8] = &[
-        0xa3, 0x00, 0x02, 0x01, 0x01, 0x02, 0xa8, 0x00, 0x07, 0x01, 0x03, 0x02, 0x04, 0x05, 0x03,
+        0xa3, 0x00, 0x03, 0x01, 0x01, 0x02, 0xa8, 0x00, 0x07, 0x01, 0x03, 0x02, 0x04, 0x05, 0x03,
         0x06, 0x01, 0x07, 0x09, 0x08, 0x01, 0x09, 0x00,
     ];
     const AUDIT_GOLDEN: &[u8] = &[
-        0xa3, 0x00, 0x02, 0x01, 0x02, 0x02, 0xa7, 0x00, 0x07, 0x01, 0x02, 0x02, 0x01, 0x03, 0x58,
+        0xa3, 0x00, 0x03, 0x01, 0x02, 0x02, 0xa7, 0x00, 0x07, 0x01, 0x02, 0x02, 0x01, 0x03, 0x58,
         0x20, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
         0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
         0x55, 0x55, 0x55, 0x04, 0xf5, 0x05, 0x01, 0x06, 0x19, 0x12, 0x34,
@@ -284,10 +372,13 @@ fn noncanonical_and_invalid_authorization_are_rejected() {
     ));
     let canonical = encoded(entry);
 
-    // Schema 2 encoded with an unnecessarily wide uint8 representation.
+    // Schema 3 encoded with an unnecessarily wide uint8 representation.
     let mut noncanonical = canonical.clone();
-    assert_eq!(&noncanonical[..3], &[0xa3, 0x00, 0x02]);
-    noncanonical.splice(2..3, [0x18, 0x02]);
+    assert_eq!(
+        &noncanonical[..3],
+        &[0xa3, 0x00, JOURNAL_SCHEMA_VERSION as u8]
+    );
+    noncanonical.splice(2..3, [0x18, JOURNAL_SCHEMA_VERSION as u8]);
     assert_eq!(
         decode_journal_entry(&noncanonical),
         Err(reticulum_storage_model::DecodeError::NonCanonical)
@@ -375,7 +466,10 @@ fn accepted_digest_is_recomputed_from_serialized_intent() {
     let JournalEntry::Accepted(decoded) = decode_journal_entry(&bytes).unwrap() else {
         panic!("acceptance kind changed")
     };
-    assert_eq!(decoded.intent(), intent(3, b"y"));
+    assert_eq!(
+        decoded.intent(),
+        SubmissionIntent::ExperimentalRnsData(intent(3, b"y"))
+    );
     assert_eq!(decoded.content_sha256(), decoded.intent().content_sha256());
     let JournalEntry::Accepted(original) = original else {
         unreachable!()
@@ -428,6 +522,49 @@ fn idempotency_is_principal_scoped_and_content_checked() {
         other => panic!("second principal was not independent: {other:?}"),
     };
     assert_eq!(second.id(), SubmissionId::new(11));
+}
+
+#[test]
+fn lxmf_message_idempotency_compares_exact_wire_and_intent_kind() {
+    let mut index = live::<1>(SubmissionId::new(40));
+    let original = lxmf_intent(0x33, b"signed-wire");
+    let candidate = AcceptanceCandidate::new(principal(1), key(7), original, authorization(1));
+    let AcceptOutcome::Accepted(planned) = index.plan_accept(candidate) else {
+        panic!("fresh LXMF message intent was not accepted")
+    };
+    assert_eq!(index.apply_planned(planned), Ok(ApplyOutcome::Applied));
+
+    assert_eq!(
+        index.plan_accept(AcceptanceCandidate::new(
+            principal(1),
+            key(7),
+            original,
+            authorization(2),
+        )),
+        AcceptOutcome::Replay(SubmissionId::new(40))
+    );
+    assert_eq!(
+        index.plan_accept(AcceptanceCandidate::new(
+            principal(1),
+            key(7),
+            lxmf_intent(0x33, b"signed-wirf"),
+            authorization(3),
+        )),
+        AcceptOutcome::IdempotencyConflict {
+            existing: SubmissionId::new(40)
+        }
+    );
+    assert_eq!(
+        index.plan_accept(AcceptanceCandidate::new(
+            principal(1),
+            key(7),
+            intent(0x33, b"signed-wire"),
+            authorization(4),
+        )),
+        AcceptOutcome::IdempotencyConflict {
+            existing: SubmissionId::new(40)
+        }
+    );
 }
 
 #[test]
@@ -930,7 +1067,7 @@ fn first_transport_audit_checks_token_and_preserves_accumulated_uncertainty() {
 }
 
 #[test]
-fn schema_two_has_an_explicit_one_transport_audit_bound() {
+fn schema_three_has_an_explicit_one_transport_audit_bound() {
     assert_eq!(MAX_STATE_TRANSITIONS_PER_SUBMISSION, 3);
     assert_eq!(MAX_TRANSPORT_AUDITS_PER_SUBMISSION, 1);
     assert_eq!(MAX_DURABLE_RECORDS_PER_SUBMISSION, 5);

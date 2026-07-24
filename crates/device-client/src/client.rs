@@ -8,8 +8,9 @@ use rand_core::{CryptoRng, RngCore};
 use reticulum_device_api::{
     ApiErrorResponse, ApiVersion, DecodeError, DestinationHash, DeviceRequest, DeviceResponse,
     EncodeError, IdempotencyKey, IdentitySummary, LxmfBasicSendAccepted, LxmfMessageHandle,
-    LxmfMessageSummary, LxmfReadLength, MAX_LXMF_READ_CHUNK_BYTES, MAX_MESSAGE_BYTES,
-    RequestEnvelope, RequestId, SubmissionId, SubmissionStatus, decode_response, encode_request,
+    LxmfMessageSummary, LxmfPeerDiscoveryCursor, LxmfPeerDiscoveryPage, LxmfReadLength,
+    MAX_LXMF_READ_CHUNK_BYTES, MAX_MESSAGE_BYTES, RequestEnvelope, RequestId, SubmissionId,
+    SubmissionStatus, decode_response, encode_request,
 };
 use reticulum_device_api_framing::{DecodeEvent, Record, StreamDecoder, TxAdvanceError};
 use reticulum_device_api_handoff::{MessageLength, OwnedMessage};
@@ -144,6 +145,8 @@ pub enum Operation {
     LxmfRead,
     /// `experimental.lxmf.basic_send`.
     LxmfBasicSend,
+    /// `experimental.lxmf.peer_next`.
+    LxmfPeerNext,
 }
 
 impl Operation {
@@ -154,6 +157,7 @@ impl Operation {
             Self::LxmfNext => "experimental.lxmf.next",
             Self::LxmfRead => "experimental.lxmf.read",
             Self::LxmfBasicSend => "experimental.lxmf.basic_send",
+            Self::LxmfPeerNext => "experimental.lxmf.peer_next",
         }
     }
 }
@@ -768,6 +772,24 @@ impl<T: ClientTransport> DeviceClient<T> {
             }),
             other => Err(ClientError::UnexpectedResponse {
                 operation: Operation::LxmfBasicSend,
+                kind: other.kind(),
+            }),
+        }
+    }
+
+    /// Read one bounded nearby `lxmf.delivery` peer after an optional boot-scoped cursor.
+    pub fn lxmf_peer_next(
+        &mut self,
+        after: Option<LxmfPeerDiscoveryCursor>,
+    ) -> Result<LxmfPeerDiscoveryPage, ClientError> {
+        match self.exchange(DeviceRequest::LxmfPeerNext { after })? {
+            DeviceResponse::LxmfPeerNext(page) => Ok(page),
+            DeviceResponse::Error(error) => Err(ClientError::Api {
+                operation: Operation::LxmfPeerNext,
+                error,
+            }),
+            other => Err(ClientError::UnexpectedResponse {
+                operation: Operation::LxmfPeerNext,
                 kind: other.kind(),
             }),
         }

@@ -12,8 +12,11 @@ API stay in this project; generic protocol and bounded-state corrections are
 the candidates for upstream review.
 
 The current firmware pin is
-`90570cafc812b3025011cb690ec74a27f287cb3f` (designated durable tag
-`firmware-pin-90570ca`). It retains
+`2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on fork branch
+`codex/link-data-receipts`. It descends from
+`90570cafc812b3025011cb690ec74a27f287cb3f`, whose tag is
+`firmware-pin-90570ca`; the current revision has no designated durable tag. It
+retains
 caller-owned DATA preparation, explicit receipt-capacity errors, fixed-capacity
 terminal sinks, exact DATA/channel terminal candidates, allocation-atomic
 proof/timeout delivery, full-hash receipt cancellation and core-aware LXMF
@@ -42,6 +45,9 @@ same pin makes initial Channel send and fresh-ciphertext retry receipt-atomic,
 preflights the authoritative Link route before entropy or retry mutation,
 replaces one envelope's sole proof target in place, rejects stale retry tokens
 and obsolete proofs, and reclaims channel receipts on every Link removal path.
+The current descendant also registers ordinary Link-DATA receipts and applies
+the receiving destination's proof policy instead of unconditionally proving
+every context-`NONE` Link DATA packet.
 The legacy LXMF event handler without mutable core access still leaves siblings
 to timeout.
 This candidate remains on the project fork; no issue or pull request was opened
@@ -550,9 +556,10 @@ Make DATA preparation one transaction:
    more than `P` operations, plus full-table rejection with unchanged path,
    receipt and entropy state.
 
-The generic fix is now retained by project pin
-`90570cafc812b3025011cb690ec74a27f287cb3f`, with designated fork tag
-`firmware-pin-90570ca`. It returns caller-owned packet metadata plus a full
+The generic fix is retained by current project pin
+`2d0781838aa03370b739d4003bcd1bdd5bbb0c6c`, which descends from
+`90570cafc812b3025011cb690ec74a27f287cb3f` (tag
+`firmware-pin-90570ca`). It returns caller-owned packet metadata plus a full
 receipt token, reports registration and output-allocation failures, and
 atomically removes validated and timed-out receipts only after reserving their
 exact kind/full-hash terminal candidate. Link-typed channel proofs are resolved
@@ -562,13 +569,15 @@ match the stored full outbound hash and destination Link ID, and relayed
 HEADER_2 proofs bypass local terminal reservation. Direct Transport ingest and
 maintenance results are `must_use`; sink-aware NodeCore paths avoid duplicate
 receipt events; and the
-hosted daemon consumes LXMF terminal output. The selected validation set passes
-635 tests: 271 transport (174 library plus 97 integration), 137 stack (136
+hosted daemon consumes LXMF terminal output. The current descendant adds
+ordinary Link-DATA receipt correlation and destination proof-policy parity. The
+recorded selected validation set for the `90570ca` predecessor passed 635 tests:
+271 transport (174 library plus 97 integration), 137 stack (136
 library plus one integration), 143 LXMF library, and 84 daemon library. The
 four library targets total 537 tests. This is not a full nested-workspace test
 count.
-The selected host suites pass on macOS, and the affected no-default transport
-and stack crates compile for `riscv32imac-unknown-none-elf`. This newer
+Those predecessor host suites passed on macOS, and the affected no-default
+transport and stack crates compile for `riscv32imac-unknown-none-elf`. This newer
 lifecycle work remains on the user's fork. No issue or pull request was opened,
 and publication elsewhere still requires the user's direct approval.
 

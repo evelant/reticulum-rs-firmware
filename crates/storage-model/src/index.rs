@@ -3,10 +3,10 @@
 use core::mem::MaybeUninit;
 
 use crate::model::{
-    Accepted, AuditEntry, AuditEvent, AuthorizationSnapshot, BootRecoveryMarker,
-    ExperimentalRnsDataIntent, FinalDisposition, IdempotencyKey, InternalFailure, InterruptedState,
-    JournalEntry, LifecycleState, PreparedPacketDetails, PrincipalId, RnsAttemptToken,
-    StateTransition, SubmissionFailure, SubmissionId, TransitionError, validate_transition,
+    Accepted, AuditEntry, AuditEvent, AuthorizationSnapshot, BootRecoveryMarker, FinalDisposition,
+    IdempotencyKey, InternalFailure, InterruptedState, JournalEntry, LifecycleState,
+    PreparedPacketDetails, PrincipalId, RnsAttemptToken, StateTransition, SubmissionFailure,
+    SubmissionId, SubmissionIntent, TransitionError, validate_transition,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -93,22 +93,25 @@ impl IndexedSubmission {
 pub struct AcceptanceCandidate {
     principal: PrincipalId,
     idempotency_key: IdempotencyKey,
-    intent: ExperimentalRnsDataIntent,
+    intent: SubmissionIntent,
     authorization: AuthorizationSnapshot,
 }
 
 impl AcceptanceCandidate {
     /// Construct one candidate after authentication and semantic validation.
-    pub const fn new(
+    pub fn new<I>(
         principal: PrincipalId,
         idempotency_key: IdempotencyKey,
-        intent: ExperimentalRnsDataIntent,
+        intent: I,
         authorization: AuthorizationSnapshot,
-    ) -> Self {
+    ) -> Self
+    where
+        I: Into<SubmissionIntent>,
+    {
         Self {
             principal,
             idempotency_key,
-            intent,
+            intent: intent.into(),
             authorization,
         }
     }
@@ -124,7 +127,7 @@ impl AcceptanceCandidate {
     }
 
     /// Complete fixed-capacity intent content.
-    pub const fn intent(self) -> ExperimentalRnsDataIntent {
+    pub const fn intent(self) -> SubmissionIntent {
         self.intent
     }
 

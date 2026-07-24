@@ -9,7 +9,8 @@ and composes the exact authorized-frame request/durable-echo handoff. That
 LoRa-first software composition and ADR 0005's interface-local active-owner
 fail-stop now pass cross-layer host tests. Portable API framing, immutable
 credential authority, the qualification-session core, and job handoff are
-qualified; durable authorization provenance is now part of semantic schema 2.
+qualified; semantic schema 3 retains that authorization provenance and adds a
+distinct exact method-neutral LXMF-message intent.
 Resident credential initialization and live-pairing mutation are composed
 through the pre-authentication USB records. The minimal authenticated USB
 session/API lane is composed and passes one bounded powered credential/API/
@@ -19,7 +20,7 @@ powered smoke also passes; integrated powered-fault qualification remains open.
 ## Ownership boundary
 
 `reticulum-storage-actor` is the only portable component allowed to combine one
-physical-format-1, semantic-schema-2 NOR journal with its live semantic state. A
+physical-format-2, semantic-schema-3 NOR journal with its live semantic state. A
 `StorageActor<SUBMISSIONS, PROJECTED>` owns:
 
 - the exact `JournalBinding` established at mount and the last completely
@@ -120,10 +121,10 @@ request copy is needed for reconciliation.
 
 The retained cell is deliberately bounded. `PENDING_MUTATION_BYTES` measures
 the actual `Option<PendingMutation>` layout in each build, and a compile-time
-assertion requires it to remain at or below 512 bytes. An acceptance retains one
-complete opaque model plan; removing the redundant in-RAM content digest while
-adding authorization provenance keeps that owner inside the existing ceiling.
-A projector mutation retains only its handle. This
+assertion requires it to remain at or below 544 bytes. An acceptance retains one
+complete opaque model plan, including either the maximum 383-byte generic RNS
+DATA payload or the maximum 431-byte exact LXMF wire. A projector
+mutation retains only its handle. This
 is a ceiling for one serialized ambiguity cell, not the complete actor, index,
 projector, task-stack, or firmware RAM budget.
 
@@ -204,13 +205,13 @@ Remaining product work includes:
   only the canonical empty A1 programming trajectory and never erases; an
   existing identity uses strict mount only;
 - broader powered fault/cut/soak qualification of the authenticated device-API
-  adapter's target-safe `SubmissionPort` path, followed later by BLE/Wi-Fi
-  serving. `ProductStorageCoordinator` implements the semantic port under a
-  host-qualified one-entry composition cap, and the active-credential USB lane
-  has completed the bounded DATA/peer-proof/status happy path;
+  adapter's target-safe `SubmissionPort` path. `ProductStorageCoordinator`
+  implements the semantic port under the current 128-entry resident profile;
+  active-credential USB and BLE lanes have completed bounded
+  DATA/LXMF/proof/status paths, while Wi-Fi awaits field qualification;
 - an exact node-owner quiescence proof before projector-slot retirement, a
   quarantine release/suppression design, and an explicit response to the
-  schema-2 journal's permanent retention, 162-submission lifetime limit, and
+  schema-3 journal's permanent retention, 154-submission lifetime limit, and
   lack of eviction/garbage collection;
 - coordination with flash cache constraints, watchdog feeding, OTA, other
   stores, journal compaction, and radio deadlines;
@@ -222,13 +223,13 @@ The two development boards are attached with antennas, physically confirmed as
 passed; the permanent graph's source-`96e38aa` smoke also passed exact image
 readback, erased credential classification, empty-journal mount, resident
 storage, and ordinary TX. The current permanent image additionally passes one
-durable DATA/peer-proof terminal path and post-re-enumeration status read. Power cuts, high-
-water, and full storage/product-graph qualification remain open.
+durable DATA/peer-proof terminal path and post-re-enumeration status read. Power
+cuts, high-water, and full storage/product-graph qualification remain open.
 The current E290 product graph has the LoRa node/radio owner plus the resident
-operation-scoped durable runtime driver. Its one-entry qualification cap is not
-product capacity. The minimal authenticated USB lane now originates accepted
-local durable work in the powered E290 graph and has completed the exact end-to-
-end proof path. The same runtime
+operation-scoped durable runtime driver and a 128-entry PSRAM submission
+profile. Authenticated USB and BLE lanes originate accepted local durable work
+in the powered E290 graph and have completed exact end-to-end proof paths. The
+same runtime
 preparation contract remains transport-
 neutral: LoRa is the first primary route, while later eligible interfaces can
 join the node fabric without changing actor or journal semantics. No speculative

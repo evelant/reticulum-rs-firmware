@@ -5,22 +5,27 @@ storage actor, transport-neutral submission runtime, native authorized-frame
 seam, and exact E290 request/durable-echo handoff implemented; portable
 authenticated device-API dispatch implemented; resident E290 operation-scoped
 flash/runtime coordinator implemented; isolated powered journal clean-path/
-software-reset HIL passed on board E9:44; at this milestone, the 125-test E290 host suite qualified
-the one-entry complete LoRa-first software composition and ADR 0005 active-owner
-fail-stop. Portable API framing, the pre-authentication initialization-control
-codec, immutable credential authority, the USB-
-qualification session core, and the boot-lifetime job handoff are qualified;
-semantic schema 2 now durably binds exact authorization provenance to every
-acceptance. E290 now validates, boot-mounts, deterministically recovers, and
+software-reset HIL passed on board E9:44. The historical 125-test E290 host
+milestone qualified the then-current one-entry LoRa-first software composition
+and ADR 0005 active-owner fail-stop. Current source uses a 128-entry
+external-PSRAM profile and authenticated USB/BLE admission. Portable API
+framing, the pre-authentication initialization-control codec, immutable
+credential authority, the qualification session core, and the boot-lifetime
+job handoff are qualified;
+semantic schema 3 now durably binds exact authorization provenance to every
+acceptance and distinguishes generic RNS DATA from an exact method-neutral
+LXMF message. E290 now
+validates, boot-mounts, deterministically recovers, and
 retains the credential store without auto-provisioning. Explicit initialization
 and live pairing are routed through the resident owner and pre-authentication
-USB records. The minimal authenticated USB session/API lane is composed and
-passes one bounded powered credential/API/DATA/peer-proof/status path. Source
+USB records. Authenticated USB and BLE session/API lanes are composed and have
+bounded powered credential/API/DATA/peer-proof/status evidence. Source
 `96e38aa` supplies earlier bounded
 powered evidence for exact image readback, erased credentials with zero
 mutation, strict empty-journal mount, resident service, and ordinary TX on both
 boards; that historical image did not exercise durable DATA or interruption
-recovery. The current API 1.1 image supplies the newer durable DATA proof.
+recovery. The later API 1.1 proof supplied durable DATA evidence; subsequent
+API 1.5 and installed-iOS BLE proofs cover the current client-facing shape.
 Controlled power-cut durability, projector
 retirement, journal retention, endurance/soak, and at-rest encryption remain
 unqualified.
@@ -87,7 +92,7 @@ evidence.
 
 ```mermaid
 flowchart LR
-    Client["authenticated local client"] --> Bearer["minimal authenticated USB bearer (bounded powered proof passed)"]
+    Client["authenticated local client"] --> Bearer["authenticated USB or BLE bearer (bounded powered proofs passed)"]
     Bearer --> Framing["portable framing (implemented)"]
     Framing --> Session["portable qualification session (composed single-flight)"]
     Session --> Handoff["portable job handoff (implemented)"]
@@ -98,7 +103,7 @@ flowchart LR
     API -->|"authenticated request; one in flight"| Runtime["resident portable submission runtime"]
     Coordinator["E290 sole-flash coordinator (resident)"] <--> Runtime
     Runtime <--> Store["portable sole storage actor (implemented)"]
-    Coordinator --> Journal["operation-scoped schema-2 bound journal"]
+    Coordinator --> Journal["operation-scoped schema-3 bound journal"]
     Journal --> Flash["validated raw NOR partition"]
     Store --> Model["actor-owned live replay index"]
     Store --> Projector["actor-owned sole projector"]
@@ -133,10 +138,12 @@ runtime through the resident sole-flash coordinator beside node ingress,
 timers, and `NodeInterfaceSupervisor`, with at most one runtime drive attempt
 per outer loop. The concrete LoRa dispatcher remains a separate actor.
 
-The current E290 profile permits one accepted-history entry solely for host
-composition qualification; that is not product capacity, and no credential-
-backed external API/session firmware lane or bearer is composed. Credential
-boot is an earlier, independent coordinator step. Journal strict-mount,
+The current E290 profile retains 128 accepted-history entries in PSRAM and
+rejects a 129th novel submission without mutation. An earlier one-entry host
+fixture remains only historical composition qualification. Credential-backed
+USB and BLE API/session lanes are composed, and BLE has a powered installed-app
+proof. Credential boot remains an earlier, independent coordinator step.
+Journal strict-mount,
 supported-history, or recovery failure during
 boot therefore occurs before a durability-gated DATA owner can exist; it leaves
 the coordinator resident without a submission runtime, keeps local durable
@@ -194,8 +201,10 @@ native receipt object, and every reference remain volatile. Persisting any of
 them would create a false promise that a reset node incarnation can rehydrate
 an old lease or Rust owner.
 
-Records use strict definite-map indexed CBOR with semantic schema version 2 and
-a 512-byte ceiling. The domain-separated content SHA-256 remains available but
+Records use strict definite-map indexed CBOR with semantic schema version 3 and
+a 544-byte ceiling. Generic destination DATA remains capped at 383 plaintext
+bytes, while the distinct LXMF-message intent retains the exact complete signed
+wire through 431 bytes without choosing a delivery method. The domain-separated content SHA-256 remains available but
 is derived from immutable intent rather than serialized or retained as a
 second copy. Transport recovery records contain a semantic reason
 discriminant; only `CompletionFault` carries a separate unrestricted `u16`
@@ -274,7 +283,7 @@ whose exact request remains in the actor-owned projector. Public
 `drive_pending()` can resume either form after an ambiguous backend result
 without receiving the original candidate, request, or another projector. The
 actual `Option<PendingMutation>` layout is exposed as `PENDING_MUTATION_BYTES`
-and compile-time constrained to at most 512 bytes. Unrelated requests receive
+and compile-time constrained to at most 544 bytes. Unrelated requests receive
 `Busy` until the retained mutation resolves, and invariant violations latch a
 fail-closed bounded fault.
 
@@ -317,9 +326,9 @@ errors and never cause an acknowledgement.
 The projector cross-checks the preparation and authorized-byte digests and
 lengths; repeated fan-out observations are idempotent only when all durable
 packet metadata is identical. The E290 composition implements this ownership
-path under a host-qualified one-entry cap. The minimal authenticated USB lane
-now surrounds the portable authority/session core in source; powered successful
-credential creation and end-to-end reachability remain open.
+path under the current 128-entry resident profile. Authenticated USB and BLE
+lanes surround the portable authority/session core; powered live pairing and
+bidirectional BLE-to-LoRa LXMF reachability have completed.
 
 Terminal outcomes map as follows:
 
@@ -398,17 +407,17 @@ radio timing still belong to the permanent product task.
    semantic index cannot see.
 3. **Real admission reservation.** Before publishing `Accepted`, reserve
    physical space for the complete worst-case lifecycle and a possible
-   transport audit. Semantic schema 2 permits at most five
+   transport audit. Semantic schema 3 permits at most five
    committed semantic records per submission: one `Accepted`, at most three
    state transitions, and at most one transport audit. The physical journal
-   contains 812 slots and admits at most 162 acceptances, reserving 810
-   lifetime records and leaving two slots. Torn holes trigger packing compaction
+   contains 774 slots and admits at most 154 acceptances, reserving 770
+   lifetime records and leaving four slots. Torn holes trigger packing compaction
    rather than consuming semantic reservation permanently.
 4. **Power-fail integrity and order.** Use a cryptographic digest (or another
    explicitly justified corruption-detection code), explicit commit markers,
    monotonically ordered record identity, and scan
    rules for erased, torn, corrupt, duplicate, and stale records.
-5. **Permanent retention and compaction.** Semantic schema 2 compaction copies every
+5. **Permanent retention and compaction.** Semantic schema 3 compaction copies every
    committed record, including principal/idempotency history, and provides no
    eviction or garbage collection. The manifest and future schema-migration
    rules must preserve that guarantee. The submission journal is not the
@@ -421,23 +430,22 @@ radio timing still belong to the permanent product task.
    must additionally order OTA/GC/watchdogs and radio timing and must not expose
    cancellation across an actor call.
 
-## Selected physical-format-1, semantic-schema-2 design
+## Selected physical-format-2, semantic-schema-3 design
 
-Semantic schema 2 uses the implemented project-owned fixed-slot, two-bank NOR journal in
+Semantic schema 3 uses the implemented project-owned fixed-slot, two-bank NOR journal in
 a dedicated 1 MiB `retlog` partition. The partition reserves two 4 KiB manifest
 sectors and divides the remaining erase-aligned space into two 127-sector
-banks. Each bank has 812 640-byte physical slots and a required 512-byte erased
-tail. A slot contains a 64-byte versioned header, maximum 512-byte canonical
+banks. Each bank has 774 672-byte physical slots and a required 64-byte erased
+tail. A slot contains a 64-byte versioned header, maximum 544-byte canonical
 semantic body, 32-byte SHA-256 chain value, and 32-byte commit marker. See
 [Physical submission journal](storage-journal.md) for exact offsets and fields.
 
-The physical version stays at 1 while the semantic schema advances. A valid,
-trajectory-consistent schema-1 authority returns typed
-`UnsupportedSemanticVersion(1)` before record replay and without a write or
-erase; its acceptance records cannot be upgraded truthfully because they never
-contained credential/policy evidence. Development migration therefore erases
-and explicitly reprovisions only `node_journal`, as specified by
-[ADR 0008](adr/0008-durable-authorization-provenance.md).
+Schema-2/physical-1 and older schema-1 history cannot be upgraded truthfully:
+they do not contain the new exact LXMF-message intent, and schema 1 also lacks
+credential/policy evidence. Ordinary schema-3/physical-2 firmware therefore
+fails read-only on incompatible media. Development migration erases and
+explicitly reprovisions only `node_journal`; see
+[ADR 0018](adr/0018-durable-lxmf-delivery-policy.md).
 
 For each append, the journal writes the header, canonical body, and integrity
 fields, reads those pre-commit bytes back exactly, and writes the commit marker
@@ -457,9 +465,9 @@ blocks append and makes the copy resumable, while a power loss during manifest
 retirement resumes that one erase without creating another generation. Once
 retired, the old bank cannot be selected as fallback, so corruption of the sole
 active manifest fails closed and a later suffix cannot disappear through
-rollback. Schema 2 retains every accepted submission and revision permanently
+rollback. Schema 3 retains every accepted submission and revision permanently
 and exposes no eviction or garbage-collection policy. Admission fails when the
-fixed index or 162-submission lifetime reservation cannot support another
+fixed index or 154-submission lifetime reservation cannot support another
 submission.
 
 The portable implementation uses raw NOR semantics through `embedded-storage`.
@@ -471,15 +479,18 @@ only accepts a completely erased partition; it never erases or reformats an
 unknown nonblank partition.
 
 `sequential-storage 8` remains useful research and differential-test material,
-but it is not an open contender for the physical-format-1 journal implementation.
+but it is not an open contender for the physical-format-2 journal implementation.
 
 ## Capacity and ESP32-S3 constraints
 
-The current intent owns up to 383 payload bytes; a maximum schema-2 `Accepted`
-record uses 508 of the 512 canonical bytes, and each in-RAM indexed submission retains that
-intent plus lifecycle metadata. Submission counts therefore need explicit
+The intent vocabulary keeps generic RNS DATA at 383 payload bytes and retains
+an exact complete signed LXMF wire of at most 431 bytes independently of its
+later delivery method. The latter
+produces the largest schema-3 `Accepted` record at 538 of 544 canonical bytes,
+and each in-RAM indexed submission retains its complete selected intent plus
+lifecycle metadata. Submission counts therefore need explicit
 static layout, stack, heap, boot-scan-time, and linked-image measurements on
-the no-PSRAM Tracker profile. The codec currently uses a 512-byte canonical
+the no-PSRAM Tracker profile. The codec currently uses a 544-byte canonical
 scratch value during strict decode, so the eventual storage task must use a
 deliberately sized stack or caller-owned static scratch rather than rely on a
 large incidental async frame.
@@ -489,7 +500,7 @@ finished Tracker RAM profile: the current ESP32-S3 layout measures about 1,288
 bytes for `SubmissionSlot` and about 640 bytes for its retained
 `PendingRecord`. The actor now serializes physical writes through one global
 pending-mutation cell rather than adding another complete plan per submission;
-its actual optional cell is compile-time capped at 512 bytes. This does not cap
+its actual optional cell is compile-time capped at 544 bytes. This does not cap
 the projector slots, live index, complete actor, or future task stack. Measure
 that full static layout and stack before selecting a Tracker capacity. Completed
 correlations also cannot be retired automatically until product integration
@@ -513,14 +524,14 @@ LXMF/NomadNet/UI services without redefining the durable protocol.
 3. Preserve the two passing E290 cross-layer host tests: the authenticated
    zero-write/one-acceptance/barrier/LoRa/durable-echo/timeout/remount path and
    the wrong-binding post-frame `ActiveOwnerFailStopped` path with queued
-   ordinary work and no later host-radio operation. The one-entry cap is a
-   qualified composition profile, not product capacity.
+   ordinary work and no later host-radio operation. Their one-entry fixture is
+   historical composition coverage, not the current 128-entry product profile.
 4. Preserve the connected explicit initialization and live Begin/Proof/
    Activate/Abort ownership plus the composed authority, framing,
-   qualification-session core, boot-lifetime job handoff, and minimal
-   authenticated USB API bearer. Complete the powered credential lifecycle and
-   one authenticated request/reply. Those are the missing proofs for live
-   authenticated admission.
+   qualification-session core, boot-lifetime job handoff, and authenticated USB
+   and BLE API bearers. Powered pairing, request/reply, and bidirectional LXMF
+   admission now pass; pressure, rotation/revocation, background mobile
+   restoration, and the full multi-client lifecycle remain open.
    Keep the local client API distinct from the node's Reticulum interface
    selection. No second interface is required; later Reticulum transports use
    the same transport-neutral runtime and router contract.
@@ -528,8 +539,8 @@ LXMF/NomadNet/UI services without redefining the durable protocol.
    completed projector slot. A final record plus terminal acknowledgement is
    insufficient because valid recovery may arrive later; permanent quarantine
    also needs an explicit release or durable suppression mechanism.
-6. Choose an explicit journal-retention/export/migration policy. Schema 2 keeps
-   every record and principal/idempotency history, admits at most 162
+6. Choose an explicit journal-retention/export/migration policy. Schema 3 keeps
+   every record and principal/idempotency history, admits at most 154
    submissions for the partition lifetime, and implements no eviction or
    garbage collection.
 7. Measure static layout, journal scan/compaction time, stack, erase endurance,

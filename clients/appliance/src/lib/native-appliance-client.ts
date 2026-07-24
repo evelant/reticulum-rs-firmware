@@ -10,6 +10,7 @@ import type {
   ContactRequest,
   ContactView,
   MutationResponse,
+  NearbyPeerView,
   NoContent,
   OnboardingView,
   RecoveryRequest,
@@ -26,7 +27,10 @@ import { assertNativeBridgeContract } from "./native-contract.ts";
 import { type NativeErrorPredicate, normalizeNativeError } from "./native-error.ts";
 import { nativePlatformOs } from "./native-platform";
 
-const DATABASE_FILE_NAME = "reticulum-lxmf-chat.sqlite3";
+// Schema-3 firmware reprovisioning restarts device-local submission identifiers.
+// Give this alpha a fresh app database while retaining the independently stored
+// device credential, so an upgrade cannot mistake old outbox rows for new ones.
+const DATABASE_FILE_NAME = "reticulum-lxmf-chat-alpha-schema3.sqlite3";
 const DEVICE_CREDENTIAL_FILE_NAME = "reticulum-device-credential.rdpkey";
 
 export type NativeCredentialState =
@@ -336,6 +340,13 @@ export class NativeApplianceClient implements ApplianceClient {
 
   async contacts(): Promise<ContactView[]> {
     return parseNativeJson("contacts", await this.#call((appliance) => appliance.contactsJson()));
+  }
+
+  async nearbyPeers(): Promise<NearbyPeerView[]> {
+    return parseNativeJson(
+      "nearby peers",
+      await this.#call((appliance) => appliance.nearbyPeersJson()),
+    );
   }
 
   async timeline(destination: string): Promise<TimelineView[]> {

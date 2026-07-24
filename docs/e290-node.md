@@ -95,9 +95,12 @@ its dedicated two-board powered proof; initiator/backchannel receive and native
 Resource ingress remain disabled.
 
 The current source composition pins Rete commit
-`90570cafc812b3025011cb690ec74a27f287cb3f`, with designated durable tag
-`firmware-pin-90570ca`. The older 2026-07-20 two-board measurements below
-predate that pin, while the later pre-PSRAM one-board checkpoint uses it. The
+`2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on fork branch
+`codex/link-data-receipts`. It descends from
+`90570cafc812b3025011cb690ec74a27f287cb3f`, whose tag is
+`firmware-pin-90570ca`; the current revision has no designated durable tag. The
+older 2026-07-20 two-board measurements below predate both revisions, while the
+later pre-PSRAM one-board checkpoint uses the `90570ca` predecessor. The
 Stage 5 PSRAM boot checkpoint is the first powered evidence for the post-offload
 Stage 5 source and placement, and is scoped only to placement, boot, and one
 authenticated API read. The pin removes implicit
@@ -105,7 +108,9 @@ interface-zero/broadcast fallbacks, adds exact path/reverse/Link routing and
 authenticated fail-closed LRPROOF handling, and makes covered H2 relay/reverse
 admission transactional with typed failures. It also adds precise
 microsecond/binary64 LRRTT timing, dispatch confirmation, Active/Stale updates,
-and authenticated-malformed teardown. Those changes do not retroactively
+and authenticated-malformed teardown. The current descendant additionally
+registers ordinary Link-DATA receipts and honors the receiving destination's
+proof policy. Those changes do not retroactively
 qualify a historical image or hardware run.
 
 The current composition also replaces `RADIO_READY`/`LORA_ONLINE`
@@ -280,7 +285,11 @@ remains disabled on the primary destination and is enabled only on the mounted
 LXMF service. Native Resource ingress remains disabled before allocation or
 assembly. A mounted service emits a separately signed
 `lxmf.delivery` discovery announce with canonical LXMF 1.0.1 `[nil, nil, []]`
-application data unless a clean fault has disabled that service. The scheduler
+application data unless a clean fault has disabled that service. Authenticated
+remote service announces now also enter a volatile PSRAM projection holding
+the latest 32 destinations and at most 256 application-data bytes per peer.
+API 1.5 exposes one boot-scoped generation at a time through the existing
+authenticated device session; it is a contact picker, not route authority. The scheduler
 attempts at most one local destination per event: primary first, LXMF eight
 seconds later, two short retry cycles, then a 30-minute steady cadence. The first
 retry is identity-phased by `13 + (u32_le(primary[0..4]) mod 23)` seconds after
@@ -291,15 +300,17 @@ native admission rejection retains the same scheduled destination and retries
 it one second later without consuming bootstrap budget. An ambiguous pending
 `StoreFaultHold` retains its exact owner but does not currently suppress
 discovery. Responder-side direct Link receive is source-qualified but not yet
-powered-qualified. Resource delivery, propagation, direct/Resource/Link
+powered-qualified. Resource delivery, propagation, reusable direct-Link
 outbound LXMF, initiator/backchannel direct receive, responsive discovery
 beyond the current local path-response wrapper, ticket/PoW requirements, and
-reclamation remain deferred. Basic opportunistic
-outbound LXMF and its USB client API are included in the separate
+reclamation remain deferred. Method-neutral basic outbound LXMF and its client
+API are included in the separate
 [API 1.4 bidirectional powered record](e290-api14-lxmf-poc.md). The historical
-record below remains the earlier HIL-only, one-way exact
-opportunistic new-commit-before-proof result. Neither result is general LXMF
-interoperability qualification.
+record below remains the earlier HIL-only, one-way exact opportunistic
+new-commit-before-proof result. The current `Auto` policy chooses opportunistic
+delivery for eligible one-shots and will reuse or establish a Link when the
+corresponding product transaction is implemented. Neither result is general
+LXMF interoperability qualification.
 
 An optional journal mount/recovery failure occurs before any
 durability-gated DATA owner can exist; it disables local durable submission
@@ -308,13 +319,17 @@ authorized-frame request/durable-echo handoff is source-composed and now passes
 cross-layer host qualification. The current USB-usable submission profile
 retains 128 accepted records in PSRAM and has no terminal reclamation; a 129th
 novel request is rejected while exact replay remains available. This is a
-bounded profile below the journal's separate 162-acceptance lifetime ceiling,
+bounded profile below the journal's separate 154-acceptance lifetime ceiling,
 not a product-capacity commitment. The earlier 16-entry profile and its proof
 artifacts remain historical and do not qualify this larger profile on hardware.
 Portable API framing, a featureless pre-authentication
 initialization-control codec, immutable credential authority, the
 qualification-session core, and the boot-lifetime job handoff are qualified;
-semantic schema 2 persists exact authorization provenance. The dedicated
+semantic schema 3 preserves exact authorization provenance and adds a distinct
+exact method-neutral LXMF-message intent. Generic RNS DATA remains capped at
+383 plaintext bytes; the LXMF intent owns the complete signed wire, including
+its destination prefix, through 431 bytes without choosing opportunistic or
+direct delivery. The dedicated
 credential-partition contract and portable store are selected in ADR 0009; its
 initial developer/HIL pairing-admission policy is now implemented as a separate
 portable crate. The store is boot-mounted, deterministically recovered, and
@@ -604,7 +619,7 @@ The target requires a 16 MiB flash image/header and uses
 | Announce clock | `0x612000` | 8 KiB | Wired, mirrored boot-epoch append logs |
 | API credentials | `0x614000` | 8 KiB | Wired boot mount/recovery; exact eFuse-derived binding; retained plaintext two-sector store; no automatic provisioning |
 | Device config | `0x616000` | 104 KiB | Reserved, not wired |
-| Node journal | `0x630000` | 1 MiB | Resident operation-scoped submission runtime; current 128-entry non-reclaiming cap in PSRAM below the 162-acceptance journal lifetime; authenticated submission and post-re-enumeration terminal status powered-qualified, but not a powered 128-entry fill |
+| Node journal | `0x630000` | 1 MiB | Schema-3/physical-2 operation-scoped submission runtime; current 128-entry non-reclaiming cap in PSRAM below the 154-acceptance journal lifetime; authenticated submission and post-re-enumeration terminal status powered-qualified, but not a powered 128-entry fill |
 | Message store | `0x730000` | 2 MiB | Wired ADR 0011 format-1 raw-RNS inbox; one 576-byte commit-last item; 383-byte maximum; not LXMF |
 | LXMF store | `0x930000` | 2 MiB | Wired ADR 0014 append-only store; 512-slot PSRAM index; mount-gated opportunistic plus responder-side direct-packet `lxmf.delivery` admission with required retained proofs; powered evidence remains opportunistic/API 1.4 only, while direct Link and `AlreadyDurable` replay qualification remain open |
 | Unallocated | `0xb30000` | 4.8125 MiB | OTA/layout decision |
@@ -616,7 +631,7 @@ must not be used for this target.
 
 The non-default `runtime-measurement-hil` feature instruments the permanent
 product graph without changing its transport or storage ownership. It is
-mutually exclusive with `journal-schema2-dev-reprovision` and
+mutually exclusive with `journal-schema3-dev-reprovision` and
 `rns-inbox-commit-fault-hil`, and its only dependency-graph addition below the
 product root is `esp-alloc/alloc-hooks`. The ordinary ELF contains neither the
 measurement evidence/stack marker nor allocator callbacks. Boot, storage,
@@ -930,7 +945,8 @@ by exactly 192 bytes to 170,352/170,288; the default pair is unchanged.
 Those historical artifacts passed build, graph, ELF, and static-stack gates but
 were not powered-qualified: both boards were absent after the preceding
 debugger-reset attempt. They do not describe an ELF built from the preceding
-`8b5d652` or `14c7b49` pins, or from the current `90570ca` pin. The immediately
+`8b5d652`, `14c7b49`, or `90570ca` pins, or from the current `2d07818` pin. The
+immediately
 preceding 777,600-byte HIL image,
 SHA-256
 `151a66cc92b83268050c61bfc983ad6d9452fac0626d260c26da877c552c800e`,
@@ -1589,7 +1605,8 @@ and no optional functionality advertised. An unmounted or clean-fault-disabled
 LXMF service is not advertised; the primary node destination continues
 independently.
 
-Two discovery limitations exist in pinned Rete `90570ca`. Its native handling
+Two discovery limitations remain in the current pinned Rete `2d07818`
+descendant of `90570ca`. Its native handling
 rebroadcasts a path request for a registered local secondary destination rather
 than returning that destination's PATH_RESPONSE. The current product wrapper
 temporarily detects and answers that request on the source interface and
@@ -1629,7 +1646,7 @@ After identity reaches redundant coverage, `SubmissionRuntime` strictly mounts
 the checked 1 MiB region and retains at most 128 accepted historical
 submissions in the current external-PSRAM profile before making any recovery
 mutation. This bounded, non-reclaiming limit remains below the physical
-journal's 162-acceptance lifetime and is not long-term product capacity. It
+journal's 154-acceptance lifetime and is not long-term product capacity. It
 drives recovery
 through `RecoveryStep::Complete`,
 then moves into `ProductStorageCoordinator` with the sole physical flash owner.
@@ -1895,7 +1912,7 @@ and ambiguity behavior, owner-only persistence, public identity and LXMF
 metadata formatting, non-overwriting payload/wire output, sequential request
 IDs, version policy, coalesced records, authenticated terminal binding, and
 submission-input non-disclosure. Portable Rete integration, inbox-store,
-released-vector, direct-Link, LRRTT, channel-retry, keepalive, schema-2
+released-vector, direct-Link, LRRTT, channel-retry, keepalive, durable
 lifecycle/candidate, and deterministic three-node A--B--C relay lanes remain
 separate gates. They are not powered or live-Python multi-hop qualification.
 The preceding
@@ -2196,8 +2213,9 @@ supports these authenticated logical operations:
 - `lxmf-read --handle <nonzero-u64> --output <absent-path>`, which streams the
   exact normalized wire into a private non-overwriting file, verifies its
   complete SHA-256, and cross-checks parsed LXMF metadata when host size permits;
-- `lxmf-send`, which source-free composes, signs, and durably accepts one basic
-  opportunistic message; and
+- `lxmf-send`, which source-free composes, signs, and durably accepts one
+  method-neutral basic message; the appliance's current `Auto` policy chooses
+  opportunistic delivery when eligible; and
 - `lxmf-send-and-wait`, which performs that same acceptance and then polls the
   returned submission ID to `Delivered` or a terminal failure;
 - `submission-status` with `--submission-id`;
@@ -2241,9 +2259,14 @@ cargo +stable run --locked -p xtask -- e290-authenticated-usb \
 Title and content are binary; empty values are valid as `--title-hex ''` and
 `--content-hex ''`. Each field is structurally limited to 295 bytes, but the
 448-byte encoded request and product composition can reject a smaller combined
-pair. The current E290 durable intent accepts a selected carrier only through
-383 bytes even though Python's dedicated opportunistic carrier can reach 391;
-an otherwise valid 384--391-byte carrier is rejected before journal acceptance.
+pair. The current E290 durable intent retains the complete signed LXMF wire
+through 431 bytes (319 bytes of Python LXMF `content_size`) independently of
+delivery method. The automatic policy sends an eligible carrier through 391
+bytes, or a 407-byte complete wire, over the dedicated Header-1 opportunistic
+path, including carrier lengths 384--391 beyond generic RNS DATA's unrelated
+383-byte ceiling. Complete wires of 408--431 bytes remain `Preparing` for the
+unfinished direct-Link capability instead of being rejected or truncated; a
+routed Header-2 path can impose the smaller 383-byte carrier ceiling.
 The timestamp must be exactly
 `1..=8_796_093_022_207_999`. If timestamp or idempotency key is omitted, the
 host samples its current millisecond clock or generates a random key once. It
@@ -2356,7 +2379,7 @@ failure text.
 Historical one-entry evidence below and the later 16-entry proof profile are
 revision-bound. Current source retains 128 accepted submissions, rejects a
 129th novel request without mutation, and preserves exact replay at capacity;
-the journal remains non-reclaiming with a 162-acceptance lifetime ceiling, and
+the journal remains non-reclaiming with a 154-acceptance lifetime ceiling, and
 this still is not the intended long-term product capacity. No historical
 16-entry artifact is evidence of a powered 128-entry fill.
 
@@ -2528,7 +2551,7 @@ suppresses write call three, and forwards any later write. The store therefore
 reads back an erased terminal commit marker after successfully programming and
 checking claim plus body/digest. The feature is empty, opt-in, absent from the
 default dependency graph below the root, and mutually exclusive with
-`journal-schema2-dev-reprovision`.
+`journal-schema3-dev-reprovision`.
 
 The module itself compiles only for feature-enabled host tests or
 feature-enabled Xtensa builds. `embedded-storage` therefore remains an Xtensa
@@ -2679,9 +2702,11 @@ preceding `f6f5fb0637d00691e09fa0105be4df902405fee4` Rete pin. The preceding
 consumption, typed transactional reverse admission, a deterministic three-node
 relayed Link/channel/proof flow, pending-Link expected-hop enforcement, and
 atomic channel retry receipt replacement, plus pending-handshake MessagePack
-LRRTT validation and authenticated-malformed teardown. The current `90570ca`
-lifecycle/timing change passes the root validation and E290 build gates; only
-a new powered run can determine whether the combined behavior
+LRRTT validation and authenticated-malformed teardown. The `90570ca`
+predecessor's lifecycle/timing change passes the root validation and E290 build
+gates. The current `2d07818` descendant adds ordinary Link-DATA receipts and
+destination proof-policy parity; only a new powered run can determine whether
+the combined behavior
 fixes this end-to-end timeout or whether another product boundary remains
 faulty. A final authenticated peek on `3f:88` likewise returned phase A's exact
 383-byte payload from destination `83a09ed807a0a7c631386deaa0448fb9`.
@@ -2877,6 +2902,46 @@ activity-2 diagnostic monitor and first authentication records are
 `board-b-ble-activity2-diagnostic.monitor.txt` and
 `board-b-ble-activity2-native-qualification.json`. These paths bind this
 development proof but are not portable repository artifacts.
+
+## Reticulum-native nearby-contact demo
+
+Current source implements the no-typing contact path. The
+[2026-07-24 bounded powered record](e290-reticulum-nearby-powered-proof.md)
+qualifies the phone-connected board learning its peer's signed
+`lxmf.delivery` announce, the iOS Release opening that existing peer
+conversation through **Nearby** without endpoint entry, one short
+opportunistic LoRa message in each direction reaching `Delivered` with exact
+peer import, and byte-identical app SQLite state after a process relaunch. It
+reuses the already-authenticated BLE connection between the Expo app and its
+own E290. The phone does not scan for the other node directly.
+
+1. Run the same ordinary schema-3 image on both antenna-equipped E290s and
+   leave both nodes powered. Each mounted LXMF service emits its signed
+   `lxmf.delivery` announce after the primary announce, initially about eight
+   seconds later, with the documented retry cadence above.
+2. Connect the Expo development client to one board through its existing
+   credential-bound BLE session. Open **Contacts → Nearby** and refresh if the
+   automatic first refresh ran before the peer board's announce arrived.
+3. Require the peer's destination, short public identity fingerprint, hop count,
+   interface hint, and observation age to appear. The current LoRa ingress does
+   not fabricate RSSI or SNR when those observations are unavailable.
+4. Tap **Add**. The Rust client projection validates and bounds the API cursor
+   and announce metadata before Expo invokes the existing durable SQLite
+   contact mutation. Tapping an already-added peer opens its conversation.
+   Manual 32-hex-character destination entry remains an advanced fallback.
+5. Send only after the contact exists. The bounded powered run correctly
+   selected the compatible short-message Header-1 opportunistic path under the
+   automatic delivery policy. Current source preserves the exact signed LXMF
+   wire independently of that choice; the reusable product-owned direct-Link
+   capability and its powered delivery proof remain a separate qualification
+   gate. The powered run also opened a pre-existing contact, so a fresh-database
+   **Add** remains separate acceptance evidence.
+
+This flow discovers a public Reticulum peer; it does not authorize appliance
+control or replace phone-to-board pairing. Future QR, E290-mediated BLE share,
+native nearby, or NFC adapters must carry the same signed public contact-card
+envelope from ADR 0017 and must never accept an appliance credential as a
+contact.
 
 ## Connected-board identity and future flash procedure
 
@@ -3081,13 +3146,14 @@ from the current callout-device name.
    power cycle is the recovery alternative when the loader USB service is no
    longer reachable.
 
-### Explicit schema-1 development-journal migration
+### Explicit schema-1 or schema-2/physical-1 development-journal migration
 
 Semantic schema 1 did not persist authorization provenance and cannot be
-truthfully upgraded. An ordinary schema-2 image therefore reports
-`UnsupportedSemanticVersion(1)`, performs no journal mutation, closes local
-submission service, and continues route-only LoRa. Development boards may use
-this explicit journal-only procedure; it preserves `node_identity`,
+truthfully upgraded. Schema 2/physical format 1 also lacks the exact
+LXMF-message intent and uses incompatible slot geometry. An ordinary
+schema-3/physical-2 image therefore rejects either history without mutation,
+closes local submission service, and continues route-only LoRa. Development
+boards may use this explicit journal-only procedure; it preserves `node_identity`,
 `announce_clock`, `api_credentials`, `device_config`, and every unrelated flash
 range.
 
@@ -3098,7 +3164,7 @@ range.
    ```sh
    cargo +esp build --locked --release \
      -p reticulum-heltec-vision-master-e290-node \
-     --features journal-schema2-dev-reprovision \
+     --features journal-schema3-dev-reprovision \
      --target xtensa-esp32s3-none-elf
    ```
 
@@ -3122,19 +3188,26 @@ range.
    schema-2 mount lines) is no longer available. Do not count this migration as
    verified without an independent exact raw-journal readback/parser or a
    separately reviewed diagnostic build/sink. The firmware still scans the
-   complete partition before provisioning and rejects any schema-1, corrupt,
-   torn, or otherwise programmed byte without a write or erase. If this one-
+   complete partition before provisioning and rejects any schema-1,
+   schema-2/physical-1, corrupt, torn, or otherwise programmed byte without a
+   write or erase. If this one-
    shot boot is interrupted during provision, repeat the all-`0xff` operation
    and verify the same journal range again; it does not repair programmed
    migration media.
 5. Reflash the ordinary image without the feature, preserving the complete
    application-data range. Prove with the same independent readback/parser or
    separately reviewed diagnostic sink that it strictly mounts the existing
-   schema-2 journal with migration disabled and zero provisioning mutation;
+   schema-3/physical-2 journal with migration disabled and zero provisioning mutation;
    the ordinary no-op-logging image emits no native USB log for this proof.
 
 No firmware path erases the journal automatically, and the feature never
 authorizes writes outside `node_journal`.
+
+The native Expo client deliberately opens a new app-private database named
+`reticulum-lxmf-chat-alpha-schema3.sqlite3` after this migration. The separate
+credential file is retained. Do not rename or copy a pre-schema-3 chat database
+onto that path: its device submission IDs refer to the erased journal and can
+otherwise poll or collide with new work.
 
 The first permanent-image write and powered smoke above verified boot, radio/
 interface readiness, and autonomous ordinary TX on both boards. It did not
@@ -3198,9 +3271,9 @@ first smoke.
   profile, 129th-request rejection, mutation-free replay at capacity, and ADR
   0005 host behavior are covered in source/host tests. Historical 16-entry
   artifacts remain bound to their older profile; powered pressure and fill of
-  the 128-entry profile are still open. A later product-capacity policy must not
-  weaken the same durability contract, and future interface actors fail-stop only their
-  affected actor.
+  the 128-entry profile are still open. Long-term reclamation and retention
+  beyond the 154-acceptance journal lifetime must not weaken the same durability
+  contract, and future interface actors fail-stop only their affected actor.
 - Extend ADR 0011's bounded single-commit timing/high-water baseline across
   live electrical power cuts, partial-body and partial-commit programming,
   backend error-after-write cases, sustained and forwarded traffic, concurrent
@@ -3223,9 +3296,11 @@ first smoke.
   Resource ingress disabled so unowned Link/Resource events cannot saturate the
   generic event queue. Add initiator/backchannel receive only after its
   per-Link ephemeral signing authority has a bounded owner.
-- Preserve implemented source-free basic opportunistic LXMF send plus committed
-  list/read. Extend send to nonempty fields, stamps/tickets, direct/Resource and
-  propagation delivery. Move the temporary one-interface local path-response
+- Preserve implemented source-free basic method-neutral LXMF send, its
+  automatic opportunistic delivery when eligible, and committed list/read.
+  Extend send to nonempty fields, stamps/tickets, reusable direct
+  Link/Resource, and propagation delivery. Move the temporary one-interface
+  local path-response
   wrapper into an owned Rete implementation with per-interface forwarding state
   before multi-transport routing. Add store delete/reclaim/migration and local
   LXMF/NomadNet client services or an external cross-platform client.

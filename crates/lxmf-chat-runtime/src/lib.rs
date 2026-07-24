@@ -27,6 +27,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::sync::{oneshot, watch};
 use ts_rs::TS;
 
+mod nearby;
+
+pub use nearby::{MAX_NEARBY_PEERS, NearbyPeerView};
+
 const COMMAND_CAPACITY: usize = 32;
 const COMMAND_WAIT: Duration = Duration::from_millis(50);
 
@@ -834,6 +838,7 @@ fn status_name(status: OutboxStatus) -> TimelineStatus {
 
 enum Command {
     Contacts(oneshot::Sender<Result<Vec<ContactView>, String>>),
+    NearbyPeers(oneshot::Sender<Result<Vec<NearbyPeerView>, String>>),
     Timeline {
         peer: DestinationHash,
         reply: oneshot::Sender<Result<Vec<TimelineView>, String>>,
@@ -901,6 +906,16 @@ impl ApplianceHandle {
     /// Load the current contact projection.
     pub async fn contacts(&self) -> Result<Vec<ContactView>, ServiceError> {
         self.request(Command::Contacts).await
+    }
+
+    /// Read the current bounded semantic nearby-peer projection.
+    ///
+    /// This operation requires a ready authenticated device session. It is
+    /// intentionally not cached in SQLite: Reticulum announces and route hints
+    /// are volatile selection evidence, while an explicitly added contact is
+    /// durable.
+    pub async fn nearby_peers(&self) -> Result<Vec<NearbyPeerView>, ServiceError> {
+        self.request(Command::NearbyPeers).await
     }
 
     /// Load the ordered timeline for one peer.
@@ -1145,6 +1160,27 @@ impl<C: Connector> Actor<C> {
                     .contacts()
                     .map(|contacts| contacts.into_iter().map(ContactView::from).collect())
                     .map_err(|error| error.to_string());
+                let _ = reply.send(result);
+            }
+            Command::NearbyPeers(reply) => {
+                let result = match self.session.as_mut() {
+                    Some(session) => nearby::read_nearby_peers(session.as_mut())
+                        .map_err(|error| error.to_string()),
+                    None => Err(
+                        "no authenticated appliance session is ready for nearby discovery"
+                            .to_owned(),
+                    ),
+                };
+                let session_consumed = self
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| !session.is_usable());
+                if session_consumed {
+                    let reason = result.as_ref().err().cloned().unwrap_or_else(|| {
+                        "nearby peer request consumed the authenticated session".to_owned()
+                    });
+                    self.retry_connection(reason);
+                }
                 let _ = reply.send(result);
             }
             Command::Timeline { peer, reply } => {
@@ -1642,6 +1678,13 @@ mod tests {
                 .clone())
         }
 
+        fn next_nearby_peer(
+            &mut self,
+            _after: Option<reticulum_device_api::LxmfPeerDiscoveryCursor>,
+        ) -> Result<reticulum_device_api::LxmfPeerDiscoveryPage, Self::Error> {
+            unreachable!("ordinary actor tests do not request nearby peers")
+        }
+
         fn is_usable(&self) -> bool {
             true
         }
@@ -1731,6 +1774,13 @@ mod tests {
         }
 
         fn read_inbox(&mut self, _summary: InboxSummary) -> Result<InboundMessage, Self::Error> {
+            Err(DeviceSessionError::MissingLxmfDeliveryDestination)
+        }
+
+        fn next_nearby_peer(
+            &mut self,
+            _after: Option<reticulum_device_api::LxmfPeerDiscoveryCursor>,
+        ) -> Result<reticulum_device_api::LxmfPeerDiscoveryPage, Self::Error> {
             Err(DeviceSessionError::MissingLxmfDeliveryDestination)
         }
 
