@@ -955,10 +955,15 @@ machine are composed. ADR 0012 now fixes the application-event owner, and ADR
 destination-bound wire/signature/stamp validation boundary. The separate
 `reticulum-lxmf-ingress` adapter now borrows an explicitly owned
 `lxmf.delivery` application event, resolves its announced source identity by
-value, and classifies opportunistic DATA without copying or consuming it.
-Non-`NONE` Link DATA remains unrelated; context-`NONE` Link DATA and Resource
-completion are explicitly deferred until the application event can bind their
-Link to the local LXMF destination. ADR 0014 adds the separate dependency-free
+value, and classifies opportunistic or bound direct Link DATA without copying
+or consuming it. Non-`NONE` Link DATA remains unrelated. Context-`NONE` Link
+DATA is admitted only on a responder-side Link bound to the mounted local
+service. It carries ADR 0016's opaque Rete-derived Link destination binding,
+and must contain the same destination in its complete LXMF wire. The subsequent
+product durable-admission step separately requires the application-event owner
+to carry the exact Link-destined packet proof covering the received RNS packet
+hash before store I/O. Initiator/backchannel direct receive remains unsupported.
+Resource completion remains explicitly deferred. ADR 0014 adds the separate dependency-free
 semantic model, variable-extent append-only NOR store, and durable-ingress
 lease adapter. Exact normalized LXMF bytes stream from the retained event into
 the store without a message-sized copy, and only a verified durable receipt can
@@ -967,9 +972,11 @@ same-ID/different-material conflicts remain distinct. The permanent E290 graph
 allocates the store's 512-slot opaque index, sixteen delayed-proof slots, and
 the retry/fault/proof-holder state in explicitly validated PSRAM, while the
 sixteen application-event slots remain static internal RAM. It mounts a
-dedicated 2 MiB `lxmf_store` partition at boot. On mount success it derives and registers
-`lxmf.delivery`, admits only signed opportunistic destination DATA, and selects
-Rete's per-destination retained-proof policy. Discovery emits a separately
+dedicated 2 MiB `lxmf_store` partition at boot. On mount success it derives and
+registers `lxmf.delivery`, admits signed opportunistic destination DATA and
+responder-side direct-packet Link DATA, and selects Rete's per-destination
+retained-proof policy. Both carrier classes require their exact proof; the
+primary destination accepts no inbound Links. Discovery emits a separately
 signed `lxmf.delivery` announce with canonical LXMF 1.0.1 `[nil, nil, []]`
 application data. An unmounted store or a clean fault
 that disables the LXMF service suppresses that secondary announce while the
@@ -990,14 +997,16 @@ half-duplex radio while the second was sent. The first independently scheduled
 replacement image had exact readbacks on both boards, but both USB devices
 disappeared before its required post-flash pre-submit checkpoint, so that
 historical attempt made no durable-LXMF claim.
-The portable durable-ingress owner reserves one of sixteen
-fixed delayed-proof slots before store I/O, returns the exact combined lease on
-failure, and makes that proof ready only after a new commit or a fresh
+The portable durable-ingress owner reserves one of sixteen fixed delayed-proof
+slots before store I/O for every admitted opportunistic or direct event, returns
+the exact combined lease on failure, and makes that proof ready only after a new
+commit or a fresh
 retransmission recognized as `AlreadyDurable`; the permanent task drains it
 only through the ordinary transport-neutral supervisor. Those sixteen
 event/proof slots are this E290
 profile's tunable volatile-concurrency bound, not a protocol or storage ceiling.
-Local Link admission remains disabled until a bounded Link/Resource owner exists.
+Native Resource admission remains disabled until a bounded segmented/streaming
+owner exists.
 The project wrapper now answers a path request for a local secondary destination
 and suppresses rebroadcast of that locally consumed request. This is a temporary
 one-interface qualification path pending an owning Rete implementation with
@@ -1005,13 +1014,16 @@ multi-interface forwarding state. Rete's sub-second retransmission jitter also c
 rounds to zero; the product's identity-phased bootstrap retries mitigate that
 collision without changing the pinned Rete behavior.
 The current composition now has the single powered remote durable-delivery
-confirmation summarized above. On the receiver, retained LXMF proof ownership
+confirmation summarized above for opportunistic DATA. On the receiver, retained
+LXMF proof ownership
 is intercepted before ordinary RNS ingress metadata, so `RPTE` generated-proof
 count/tag correctly remains zero; the evidence instead joins the `LXTE` release
 tag, one confirmed proof-TX delta, and the sender's matching delivered tag. The
 raw-RNS inbox remains separate qualification evidence rather than a product
 mailbox. Native RNS Resource ingress stays disabled until its allocation and
 streaming-storage boundary is bounded.
+Responder-side direct Link receive has the same source-level durable proof
+contract but still awaits its dedicated two-board physical trial.
 The node-side routing
 boundary remains interface-neutral so additional Reticulum links can be added
 later through adapters without rewriting the LoRa actor or protocol owner; no
@@ -1217,8 +1229,9 @@ direction-balanced source-free send, proof, peer commit, list, and exact read.
 Its final audited image additionally preserved both terminal sender records and
 both exact receiver wires across a physical CPU reset. Neither result
 substitutes for electrical power-cut persistence, sustained/multi-hop traffic,
-direct/Resource LXMF, production client-store semantics, or full-product
-qualification.
+powered responder-side direct-Link or Resource LXMF qualification,
+initiator/backchannel direct receive, production client-store semantics, or
+full-product qualification.
 
 The receive-only lab binary has no frequency or modulation defaults. A known
 host/RNode-compatible build example is:

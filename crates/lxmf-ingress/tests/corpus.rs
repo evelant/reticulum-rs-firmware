@@ -1,15 +1,20 @@
 use core::cell::Cell;
 
+use rand_core::{CryptoRng, RngCore};
 use reticulum_lxmf_ingress::{
     DeferredIngress, IngressOutcome, LocalDeliveryDestination, RejectedIngress,
     SourceIdentityResolver, UnrelatedEvent, UnsupportedCarrier, validate_application_event,
 };
 use reticulum_lxmf_wire::{
-    CarrierKind, PowBudget, RequiredStampCost, StampAdmission, StampError, StampPolicy, WireLimits,
+    CarrierKind, PowBudget, RequiredStampCost, StampAdmission, StampError, StampPolicy, WireError,
+    WireLimits,
 };
 use reticulum_node_core::{
-    APPLICATION_LINK_CONTEXT_NONE, ApplicationEvent, ApplicationEventDiscardReason,
-    ApplicationEventOwner, ApplicationEventSlot, NodeActions,
+    ApplicationEvent, ApplicationEventDiscardReason, ApplicationEventOwner, ApplicationEventSlot,
+    ApplicationLinkRole, NodeActions,
+};
+use reticulum_rns_rete::{
+    EmbeddedNode, EmbeddedNodeConfig, InterfaceId, identity_from_private_key,
 };
 use serde::Deserialize;
 
@@ -121,13 +126,161 @@ fn opportunistic_event(fixture: &MessageFixture) -> ApplicationEvent {
     }
 }
 
-fn opportunistic_event_from_complete_wire(fixture: &MessageFixture) -> ApplicationEvent {
-    let wire = decode(&fixture.ingress.payload_hex);
-    let destination = array(&fixture.destination_hash_hex);
-    assert_eq!(wire.get(..16), Some(destination.as_slice()));
-    ApplicationEvent::DataReceived {
-        destination,
-        payload: wire[16..].to_vec(),
+#[derive(Default)]
+struct CounterRng(u8);
+
+impl RngCore for CounterRng {
+    fn next_u32(&mut self) -> u32 {
+        let mut bytes = [0; 4];
+        self.fill_bytes(&mut bytes);
+        u32::from_le_bytes(bytes)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut bytes = [0; 8];
+        self.fill_bytes(&mut bytes);
+        u64::from_le_bytes(bytes)
+    }
+
+    fn fill_bytes(&mut self, destination: &mut [u8]) {
+        for byte in destination {
+            self.0 = self.0.wrapping_add(1);
+            *byte = self.0;
+        }
+    }
+
+    fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(destination);
+        Ok(())
+    }
+}
+
+impl CryptoRng for CounterRng {}
+
+type LinkNode = EmbeddedNode<4, 2, 8, 2>;
+
+fn identity(first: u8, second: u8) -> reticulum_rns_rete::Identity {
+    let mut private_key = [first; 64];
+    private_key[32..].fill(second);
+    identity_from_private_key(&private_key).expect("fixture identity key is valid")
+}
+
+fn linked_event_for_role(
+    payload: Vec<u8>,
+    receiver_first: u8,
+    receiver_second: u8,
+    role: ApplicationLinkRole,
+) -> ApplicationEvent {
+    let receiver_identity = identity(receiver_first, receiver_second);
+    let mut initiator = LinkNode::new(
+        identity(0x09, 0x0a),
+        "lxmf",
+        &["sender"],
+        EmbeddedNodeConfig::endpoint(),
+    )
+    .expect("fixture initiator node");
+    let mut receiver = LinkNode::new(
+        identity(receiver_first, receiver_second),
+        "lxmf",
+        &["delivery"],
+        EmbeddedNodeConfig::endpoint(),
+    )
+    .expect("fixture receiver node");
+    initiator
+        .register_peer(&receiver_identity, "lxmf", &["delivery"], 1)
+        .expect("fixture receiver registration");
+
+    let mut rng = CounterRng::default();
+    let (request, link_id) = initiator
+        .initiate_link(receiver.destination_hash(), 2, &mut rng)
+        .expect("fixture Link request");
+    let proof = receiver.ingest(request.bytes(), 2, InterfaceId(7), &mut rng);
+    assert!(proof.actions.events.is_empty());
+    assert_eq!(proof.actions.packets.len(), 1);
+    let lrrtt = initiator.ingest(
+        proof.actions.packets[0].bytes(),
+        3,
+        InterfaceId(3),
+        &mut rng,
+    );
+    assert_eq!(lrrtt.actions.packets.len(), 1);
+    let active = receiver.ingest(
+        lrrtt.actions.packets[0].bytes(),
+        4,
+        InterfaceId(7),
+        &mut rng,
+    );
+    assert_eq!(active.actions.events.len(), 1);
+    assert!(active.actions.packets.is_empty());
+
+    let received = match role {
+        ApplicationLinkRole::Initiator => {
+            let packet = receiver
+                .send_link_data(&link_id, &payload, 5, &mut rng)
+                .expect("fixture responder Link DATA");
+            initiator.ingest(packet.bytes(), 5, InterfaceId(3), &mut rng)
+        }
+        ApplicationLinkRole::Responder => {
+            let packet = initiator
+                .send_link_data(&link_id, &payload, 5, &mut rng)
+                .expect("fixture initiator Link DATA");
+            receiver.ingest(packet.bytes(), 5, InterfaceId(7), &mut rng)
+        }
+    };
+    assert!(received.actions.packets.is_empty());
+    assert_eq!(received.actions.events.len(), 1);
+    assert!(matches!(
+        &received.actions.events[0],
+        ApplicationEvent::LinkData { binding, .. } if binding.role() == role
+    ));
+
+    let mut slots = [ApplicationEventSlot::new()];
+    let mut owner = ApplicationEventOwner::new(&mut slots);
+    owner
+        .try_offer_actions(received.actions)
+        .expect("fixture event owner admission");
+    owner
+        .lease_next()
+        .expect("fixture Link DATA lease")
+        .acknowledge()
+        .expect("proofless Link DATA acknowledgement")
+}
+
+fn linked_event_for_receiver(
+    payload: Vec<u8>,
+    receiver_first: u8,
+    receiver_second: u8,
+) -> ApplicationEvent {
+    linked_event_for_role(
+        payload,
+        receiver_first,
+        receiver_second,
+        ApplicationLinkRole::Responder,
+    )
+}
+
+fn linked_event(fixture: &MessageFixture) -> ApplicationEvent {
+    assert_eq!(fixture.ingress.carrier_event, "link_data");
+    let event = linked_event_for_receiver(decode(&fixture.ingress.payload_hex), 0x07, 0x08);
+    let ApplicationEvent::LinkData { binding, .. } = &event else {
+        unreachable!()
+    };
+    assert_eq!(
+        binding.destination(),
+        &array::<16>(&fixture.destination_hash_hex)
+    );
+    assert_eq!(binding.role(), ApplicationLinkRole::Responder);
+    event
+}
+
+fn with_link_context(event: ApplicationEvent, context: u8) -> ApplicationEvent {
+    match event {
+        ApplicationEvent::LinkData { binding, data, .. } => ApplicationEvent::LinkData {
+            binding,
+            data,
+            context,
+        },
+        _ => panic!("fixture event must be Link DATA"),
     }
 }
 
@@ -228,9 +381,9 @@ fn python_opportunistic_ceiling_is_not_mistaken_for_the_temporary_raw_inbox_ceil
 #[test]
 fn destination_and_noncarrier_events_are_classified_without_identity_lookup() {
     let corpus = corpus();
-    let fixture = fixture(&corpus, "basic_binary");
-    let event = opportunistic_event(fixture);
-    let resolver = fixture_resolver(fixture);
+    let base_fixture = fixture(&corpus, "basic_binary");
+    let event = opportunistic_event(base_fixture);
+    let resolver = fixture_resolver(base_fixture);
     let other_local = LocalDeliveryDestination::new([0x55; 16]);
     assert!(matches!(
         validate_application_event(
@@ -243,7 +396,7 @@ fn destination_and_noncarrier_events_are_classified_without_identity_lookup() {
         IngressOutcome::Unrelated(UnrelatedEvent::OtherDestination {
             expected,
             actual,
-        }) if expected == other_local && actual == array::<16>(&fixture.destination_hash_hex)
+        }) if expected == other_local && actual == array::<16>(&base_fixture.destination_hash_hex)
     ));
     assert_eq!(resolver.calls.get(), 0);
 
@@ -263,14 +416,12 @@ fn destination_and_noncarrier_events_are_classified_without_identity_lookup() {
     ));
     assert_eq!(resolver.calls.get(), 0);
 
-    let other_context = ApplicationEvent::LinkData {
-        link: [0x66; 16],
-        data: vec![0xa5; 9],
-        context: 0x5a,
-    };
-    let ApplicationEvent::LinkData { data, .. } = &other_context else {
+    let direct_fixture = fixture(&corpus, "opportunistic_over_296");
+    let other_context = with_link_context(linked_event(direct_fixture), 0x5a);
+    let ApplicationEvent::LinkData { binding, data, .. } = &other_context else {
         unreachable!()
     };
+    let expected_link = *binding.link();
     let pointer = data.as_ptr();
     assert!(matches!(
         validate_application_event(
@@ -283,7 +434,7 @@ fn destination_and_noncarrier_events_are_classified_without_identity_lookup() {
         IngressOutcome::Unrelated(UnrelatedEvent::OtherLinkContext {
             link,
             context: 0x5a,
-        }) if link == [0x66; 16]
+        }) if link == expected_link
     ));
     let ApplicationEvent::LinkData { data, .. } = &other_context else {
         unreachable!()
@@ -293,38 +444,118 @@ fn destination_and_noncarrier_events_are_classified_without_identity_lookup() {
 }
 
 #[test]
-fn link_and_resource_carriers_are_explicitly_deferred_unchanged() {
-    let resolver = |_source: &[u8; 16]| Some([0_u8; 64]);
-    let local = LocalDeliveryDestination::new([0x11; 16]);
-    let link = ApplicationEvent::LinkData {
-        link: [0x22; 16],
-        data: vec![0xa5; 17],
-        context: APPLICATION_LINK_CONTEXT_NONE,
-    };
-    let ApplicationEvent::LinkData { data, .. } = &link else {
+fn direct_link_carriers_are_bound_validated_and_zero_copy() {
+    let corpus = corpus();
+    for name in ["opportunistic_over_296", "direct_limit_319"] {
+        let fixture = fixture(&corpus, name);
+        let event = linked_event(fixture);
+        let ApplicationEvent::LinkData { binding, data, .. } = &event else {
+            unreachable!()
+        };
+        let expected_pointer = data.as_ptr();
+        let expected_length = data.len();
+        let resolver = fixture_resolver(fixture);
+        let local = LocalDeliveryDestination::new(array(&fixture.destination_hash_hex));
+        let IngressOutcome::Validated(validated) = validate_application_event(
+            &event,
+            local,
+            limits(),
+            &resolver,
+            StampPolicy::NotRequired,
+        ) else {
+            panic!("{name} direct Link DATA must validate")
+        };
+        assert_eq!(binding.destination(), local.as_bytes());
+        assert_eq!(validated.carrier_payload().as_ptr(), expected_pointer);
+        assert_eq!(validated.carrier_payload().len(), expected_length);
+        assert_eq!(
+            validated.evidence().carrier(),
+            CarrierKind::LinkDataContextNone
+        );
+        assert_eq!(validated.evidence().normalized_wire_len(), expected_length);
+    }
+}
+
+#[test]
+fn link_destination_mismatch_is_unrelated_before_identity_lookup() {
+    let corpus = corpus();
+    let fixture = fixture(&corpus, "opportunistic_over_296");
+    let event = linked_event_for_receiver(decode(&fixture.ingress.payload_hex), 0x11, 0x12);
+    let ApplicationEvent::LinkData { binding, .. } = &event else {
         unreachable!()
     };
-    let link_pointer = data.as_ptr();
+    let actual = *binding.destination();
+    let local = LocalDeliveryDestination::new(array(&fixture.destination_hash_hex));
+    let resolver = fixture_resolver(fixture);
     assert!(matches!(
         validate_application_event(
-            &link,
+            &event,
             local,
             limits(),
             &resolver,
             StampPolicy::NotRequired,
         ),
-        IngressOutcome::Deferred(DeferredIngress::UnsupportedCarrier(
-            UnsupportedCarrier::LinkData {
-                link,
-                context: APPLICATION_LINK_CONTEXT_NONE,
-            }
-        )) if link == [0x22; 16]
+        IngressOutcome::Unrelated(UnrelatedEvent::OtherDestination {
+            expected,
+            actual: observed,
+        }) if expected == local && observed == actual
     ));
-    let ApplicationEvent::LinkData { data, .. } = &link else {
+    assert_eq!(resolver.calls.get(), 0);
+}
+
+#[test]
+fn initiator_link_data_is_unrelated_before_identity_lookup() {
+    let corpus = corpus();
+    let fixture = fixture(&corpus, "opportunistic_over_296");
+    let event = linked_event_for_role(
+        decode(&fixture.ingress.payload_hex),
+        0x07,
+        0x08,
+        ApplicationLinkRole::Initiator,
+    );
+    let ApplicationEvent::LinkData { binding, .. } = &event else {
         unreachable!()
     };
-    assert_eq!(data.as_ptr(), link_pointer);
+    let link = *binding.link();
+    let local = LocalDeliveryDestination::new(*binding.destination());
+    let resolver = fixture_resolver(fixture);
 
+    assert!(matches!(
+        validate_application_event(&event, local, limits(), &resolver, StampPolicy::NotRequired,),
+        IngressOutcome::Unrelated(UnrelatedEvent::OtherLinkRole {
+            link: observed,
+            role: ApplicationLinkRole::Initiator,
+        }) if observed == link
+    ));
+    assert_eq!(resolver.calls.get(), 0);
+}
+
+#[test]
+fn complete_wire_destination_mismatch_is_rejected_before_identity_lookup() {
+    let corpus = corpus();
+    let fixture = fixture(&corpus, "opportunistic_over_296");
+    let event = linked_event_for_receiver(decode(&fixture.ingress.payload_hex), 0x11, 0x12);
+    let ApplicationEvent::LinkData { binding, .. } = &event else {
+        unreachable!()
+    };
+    let local = LocalDeliveryDestination::new(*binding.destination());
+    assert_ne!(
+        local.as_bytes(),
+        &array::<16>(&fixture.destination_hash_hex)
+    );
+    let resolver = fixture_resolver(fixture);
+
+    assert!(matches!(
+        validate_application_event(&event, local, limits(), &resolver, StampPolicy::NotRequired,),
+        IngressOutcome::Rejected(RejectedIngress::Wire(WireError::DestinationMismatch))
+    ));
+    assert_eq!(resolver.calls.get(), 0);
+}
+
+#[test]
+fn resource_carrier_remains_explicitly_deferred_unchanged() {
+    let resolver = |_source: &[u8; 16]| Some([0_u8; 64]);
+    let local = LocalDeliveryDestination::new([0x11; 16]);
     let resource = ApplicationEvent::ResourceComplete {
         link: [0x33; 16],
         resource_hash: [0x44; 16],
@@ -446,12 +677,8 @@ fn incomplete_stamp_work_is_deferred_instead_of_conclusively_rejected() {
     let corpus = corpus();
     let fixture = fixture(&corpus, "pow_stamp_32");
     assert_eq!(fixture.ingress.carrier_event, "link_data");
-    let full_wire = decode(&fixture.ingress.payload_hex);
     let local = LocalDeliveryDestination::new(array(&fixture.destination_hash_hex));
-    let event = ApplicationEvent::DataReceived {
-        destination: *local.as_bytes(),
-        payload: full_wire[16..].to_vec(),
-    };
+    let event = linked_event(fixture);
     let resolver = fixture_resolver(fixture);
     let target_cost = RequiredStampCost::new(8).expect("fixture policy cost");
     assert!(matches!(
@@ -487,7 +714,7 @@ fn completed_ticket_and_pow_work_admit_while_invalid_pow_is_rejected() {
             .expect("trusted ticket bytes"),
     );
     let trusted_tickets = [trusted_ticket];
-    let ticket_event = opportunistic_event_from_complete_wire(ticket_fixture);
+    let ticket_event = linked_event(ticket_fixture);
     let ticket_resolver = fixture_resolver(ticket_fixture);
     let ticket_local = LocalDeliveryDestination::new(array(&ticket_fixture.destination_hash_hex));
     let IngressOutcome::Validated(ticket) = validate_application_event(
@@ -508,7 +735,7 @@ fn completed_ticket_and_pow_work_admit_while_invalid_pow_is_rejected() {
     let pow_stamp = pow_fixture.stamp.as_ref().expect("PoW stamp");
     let target_cost =
         RequiredStampCost::new(pow_stamp.target_cost.expect("PoW target cost")).unwrap();
-    let pow_event = opportunistic_event_from_complete_wire(pow_fixture);
+    let pow_event = linked_event(pow_fixture);
     let pow_resolver = fixture_resolver(pow_fixture);
     let pow_local = LocalDeliveryDestination::new(array(&pow_fixture.destination_hash_hex));
     let IngressOutcome::Validated(pow) = validate_application_event(
@@ -533,10 +760,7 @@ fn completed_ticket_and_pow_work_admit_while_invalid_pow_is_rejected() {
 
     let invalid = mutation(&corpus, "pow_stamp_bit_flip");
     let invalid_wire = decode(&invalid.full_wire_hex);
-    let invalid_event = ApplicationEvent::DataReceived {
-        destination: *pow_local.as_bytes(),
-        payload: invalid_wire[16..].to_vec(),
-    };
+    let invalid_event = linked_event_for_receiver(invalid_wire, 0x07, 0x08);
     let invalid_resolver = fixture_resolver(pow_fixture);
     assert!(matches!(
         validate_application_event(

@@ -67,7 +67,7 @@ pub enum LxmfDeliveryActivationError {
     AnnounceAppData(LocalDestinationAnnounceAppDataError),
     /// RNS rejected retained-proof policy for the newly registered destination.
     ProofPolicy(LocalDestinationProofPolicyError),
-    /// RNS could not disable unsupported inbound Links on the destination.
+    /// RNS could not enable inbound Links on the destination.
     LinkPolicy(LocalDestinationLinkPolicyError),
 }
 
@@ -268,7 +268,7 @@ pub fn activate_lxmf_delivery<
         Some(&config::LXMF_DELIVERY_ANNOUNCE_APP_DATA),
     )
     .map_err(LxmfDeliveryActivationError::AnnounceAppData)?;
-    node.set_destination_accepts_links(&destination, false)
+    node.set_destination_accepts_links(&destination, true)
         .map_err(LxmfDeliveryActivationError::LinkPolicy)?;
     node.set_destination_inbound_proof_policy(&destination, InboundProofPolicy::Retain)
         .map_err(LxmfDeliveryActivationError::ProofPolicy)?;

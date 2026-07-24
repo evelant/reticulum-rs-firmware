@@ -1009,7 +1009,7 @@ fn graph_policy() -> ExitCode {
              the bounded LXMF wire crate has only its five reviewed default-feature-disabled cryptographic \
              normal edges, the single reviewed streaming-verification feature and three host-test edges, and its generic bare-metal normal closure exactly \
              matches the reviewed registry identities without std, alloc, Rete, platform, radio or storage packages; \
-             the featureless transport-neutral LXMF ingress crate has exactly its reviewed feature-disabled node-core and LXMF-wire normal edges plus its dev-only durable inbox and host-test fixtures, while its generic bare-metal normal closure exactly matches the reviewed identities and excludes platform, board, radio, firmware, storage, device-API, supervisor and executor packages; \
+             the featureless transport-neutral LXMF ingress crate has exactly its reviewed feature-disabled node-core and LXMF-wire normal edges plus its dev-only durable inbox, retained-Rete-Link and host-test fixtures, while its generic bare-metal normal closure exactly matches the reviewed identities and excludes platform, board, radio, firmware, storage, device-API, supervisor and executor packages; \
              the dependency-free LXMF model, append-only LXMF store and durable-ingress owner retain their exact reviewed manifests and generic bare-metal closures; the store normal closure reaches only the model, embedded-storage and SHA-256 while its development surface adds only the reviewed LXMF-wire/hex/serde corpus fixtures, durable ingress reaches only its four reviewed portable owner edges plus exact host-test embedded-storage/hex/serde and Rete retained-proof fixture edges, and none of the new ownership closures can acquire the raw inbox, submission durability, board, radio, platform, firmware, device-API, supervisor or executor graphs; the full durable LXMF ingress stack is composed feature-free only by the permanent E290 node and its two graph-identical diagnostic feature builds while remaining absent from every separate product and HIL package; \
              the portable identity, announce-clock and NOR-region crates use only their exact reviewed embedded-storage, rand_core, SHA-256 and zeroize subsets; the durable inbound RNS inbox store uses only exact feature-free embedded-storage and SHA-256 pins; the durable \
              storage model uses only reviewed minicbor and SHA-256 edges; \
@@ -5586,9 +5586,9 @@ fn validate_lxmf_ingress_dependency_boundary(
     {
         return Err(format!("{PACKAGE_NAME} must not have build dependencies"));
     }
-    if dependencies.len() != 6 {
+    if dependencies.len() != 8 {
         return Err(format!(
-            "{PACKAGE_NAME} must have exactly two reviewed normal and four reviewed development dependencies, found {}",
+            "{PACKAGE_NAME} must have exactly two reviewed normal and six reviewed development dependencies, found {}",
             dependencies.len()
         ));
     }
@@ -5601,9 +5601,9 @@ fn validate_lxmf_ingress_dependency_boundary(
         .iter()
         .filter(|dependency| dependency["kind"].as_str() == Some("dev"))
         .count();
-    if normal_count != 2 || development_count != 4 {
+    if normal_count != 2 || development_count != 6 {
         return Err(format!(
-            "{PACKAGE_NAME} dependency kinds must be exactly two normal and four development edges, found {normal_count} normal and {development_count} development"
+            "{PACKAGE_NAME} dependency kinds must be exactly two normal and six development edges, found {normal_count} normal and {development_count} development"
         ));
     }
 
@@ -5626,6 +5626,24 @@ fn validate_lxmf_ingress_dependency_boundary(
         PACKAGE_NAME,
         "reticulum-rns-inbox-store",
         &workspace.join("crates/rns-inbox-store"),
+        Some("dev"),
+        false,
+        &[],
+    )?;
+    validate_exact_local_dependency_with_kind(
+        dependencies,
+        PACKAGE_NAME,
+        "reticulum-rns-rete",
+        &workspace.join("crates/rns-rete"),
+        Some("dev"),
+        false,
+        &[],
+    )?;
+    validate_exact_registry_dependency(
+        dependencies,
+        PACKAGE_NAME,
+        "rand_core",
+        "=0.6.4",
         Some("dev"),
         false,
         &[],
@@ -13643,7 +13661,9 @@ fn sample(layout: Layout) {
             ("reticulum-lxmf-wire", None, false),
             ("reticulum-node-core", None, false),
             ("reticulum-rns-inbox-store", Some("dev"), false),
+            ("reticulum-rns-rete", Some("dev"), false),
             ("hex", Some("dev"), true),
+            ("rand_core", Some("dev"), false),
             ("serde", Some("dev"), true),
             ("serde_json", Some("dev"), true),
         ] {
@@ -16037,6 +16057,13 @@ fn sample(layout: Layout) {
                     &root.join("crates/rns-inbox-store"),
                     Some("dev"),
                 ),
+                handoff_path_dependency_fixture(
+                    "reticulum-rns-rete",
+                    "*",
+                    &root.join("crates/rns-rete"),
+                    Some("dev"),
+                ),
+                handoff_dependency_fixture("rand_core", "=0.6.4", Some("dev")),
                 serde,
                 serde_json,
             ],

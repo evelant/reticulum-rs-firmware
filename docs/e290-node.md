@@ -89,6 +89,10 @@ each include only one direct DATA/proof exchange; they do not claim sustained
 forwarding,
 multi-hop routing, LXMF, or general application-level message consumption,
 session resumption, Wi-Fi bearer binding, or broader BLE lifecycle behavior.
+Current source also admits proof-required responder-side direct LXMF packets on
+the mounted `lxmf.delivery` destination. That direct path has not yet completed
+its dedicated two-board powered proof; initiator/backchannel receive and native
+Resource ingress remain disabled.
 
 The current source composition pins Rete commit
 `90570cafc812b3025011cb690ec74a27f287cb3f`, with designated durable tag
@@ -238,18 +242,24 @@ multi-hop routing.
 
 Current source separately mount-gates a derived `lxmf.delivery` destination
 backed by ADR 0014's 2 MiB append-only store and 512-slot PSRAM index. It admits
-only opportunistic destination DATA, resolves the sender through the
-transport-neutral node identity cache, and applies Rete's per-destination
-`Retain` proof policy: a proof becomes eligible for the ordinary supervisor
-only after a new commit or a fresh retransmission is recognized as
-`AlreadyDurable`. No delayed-proof state survives reboot. Signatures remain
-mandatory. The initial `StampPolicy::NotRequired` profile allows an absent stamp
-and preserves/parses a supplied stamp, but does not yet verify ticket trust or
-proof of work. Sixteen static internal-RAM application-event slots keep ingress
-admission bounded. Sixteen delayed-proof slots plus the bounded retry set,
-authority-fault set, non-cloneable packet-action holder, and fault flags are
-allocated explicitly in validated PSRAM for the boot lifetime with no internal-
-RAM fallback. These slot counts bound this E290 profile's volatile concurrency;
+opportunistic destination DATA and ADR 0016's bound context-`NONE` direct Link
+DATA, resolves the sender through the transport-neutral node identity cache,
+and applies Rete's per-destination `Retain` proof policy. Both carrier classes
+require their exact packet proof. Direct DATA must arrive on a responder-side
+Link bound to the local mounted service, its opaque Link destination and
+complete LXMF wire destination must match that service, and it must own the
+explicit Link-destined proof covering the complete received RNS packet hash.
+Each proof is released only after a new commit or a fresh retransmission is
+recognized as `AlreadyDurable`. Initiator/backchannel direct receive remains
+unsupported. No delayed-proof state survives reboot. Signatures remain
+mandatory. The initial `StampPolicy::NotRequired` profile allows an absent
+stamp and preserves/parses a supplied stamp, but does not yet verify ticket
+trust or proof of work. Sixteen static internal-RAM application-event slots
+keep ingress admission bounded. Sixteen delayed-proof slots plus the bounded
+retry set, authority-fault set, non-cloneable packet-action holder, and fault
+flags are allocated explicitly in validated PSRAM for the boot lifetime with no
+internal-RAM fallback. These slot counts bound this E290 profile's volatile
+concurrency;
 they are not a protocol, store-capacity, or full-feature ceiling and may be
 raised after measured E290 qualification.
 The first profile deliberately has no age or attempt expiry for
@@ -265,9 +275,10 @@ or capacity outcomes discard only that candidate without disabling replay. A
 clean invariant or pre-pending media fault retains the exact event and fail-stops
 only LXMF admission. A post-pending mutation fault also blocks all other flash
 mutations until reset/remount because its exact ambiguous store owner must remain
-exclusive; routing and nonmutating consumers continue. Local Link
-admission is disabled for both the primary and LXMF destinations until a bounded
-Link/Resource owner exists. A mounted service emits a separately signed
+exclusive; routing and nonmutating consumers continue. Local Link admission
+remains disabled on the primary destination and is enabled only on the mounted
+LXMF service. Native Resource ingress remains disabled before allocation or
+assembly. A mounted service emits a separately signed
 `lxmf.delivery` discovery announce with canonical LXMF 1.0.1 `[nil, nil, []]`
 application data unless a clean fault has disabled that service. The scheduler
 attempts at most one local destination per event: primary first, LXMF eight
@@ -279,9 +290,11 @@ retransmissions remain at least three seconds apart for that pair. A queue or
 native admission rejection retains the same scheduled destination and retries
 it one second later without consuming bootstrap budget. An ambiguous pending
 `StoreFaultHold` retains its exact owner but does not currently suppress
-discovery. Direct/Resource delivery, propagation, direct/Resource/Link outbound
-LXMF, responsive discovery beyond the current local path-response wrapper,
-ticket/PoW requirements, and reclamation remain deferred. Basic opportunistic
+discovery. Responder-side direct Link receive is source-qualified but not yet
+powered-qualified. Resource delivery, propagation, direct/Resource/Link
+outbound LXMF, initiator/backchannel direct receive, responsive discovery
+beyond the current local path-response wrapper, ticket/PoW requirements, and
+reclamation remain deferred. Basic opportunistic
 outbound LXMF and its USB client API are included in the separate
 [API 1.4 bidirectional powered record](e290-api14-lxmf-poc.md). The historical
 record below remains the earlier HIL-only, one-way exact
@@ -354,12 +367,13 @@ permanent fault
 with an unresolved frame enters interface-local `ActiveOwnerFailStopped`, takes
 the same LoRa lease offline without changing its generation, retains the exact
 frame/completion/ticket, and permits no fresh LoRa work for the rest of the boot.
-Device configuration, propagated/direct/Link LXMF, durable delete/reclaim and
-migration policy, local NomadNet clients, and production-ready host-facing
+Device configuration, propagated and outbound direct/Resource LXMF,
+initiator/backchannel direct receive, durable delete/reclaim and migration
+policy, local NomadNet clients, and production-ready host-facing
 USB/BLE/Wi-Fi services remain visible product work. API 1.4 and the host CLI now
 provide a basic USB LXMF send/list/read POC; they are not the final client
 surface. The one-entry raw-RNS qualification record remains separate from the
-dedicated opportunistic LXMF receive store.
+dedicated opportunistic and responder-side direct-packet LXMF receive store.
 
 ## Composition boundary
 
@@ -592,7 +606,7 @@ The target requires a 16 MiB flash image/header and uses
 | Device config | `0x616000` | 104 KiB | Reserved, not wired |
 | Node journal | `0x630000` | 1 MiB | Resident operation-scoped submission runtime; current 128-entry non-reclaiming cap in PSRAM below the 162-acceptance journal lifetime; authenticated submission and post-re-enumeration terminal status powered-qualified, but not a powered 128-entry fill |
 | Message store | `0x730000` | 2 MiB | Wired ADR 0011 format-1 raw-RNS inbox; one 576-byte commit-last item; 383-byte maximum; not LXMF |
-| LXMF store | `0x930000` | 2 MiB | Wired ADR 0014 append-only store; 512-slot PSRAM index; mount-gated opportunistic `lxmf.delivery` admission; one earlier HIL A-to-B commit-before-proof exchange plus API 1.4 bidirectional send/commit/list/read are powered-qualified; `AlreadyDurable` replay remains unqualified |
+| LXMF store | `0x930000` | 2 MiB | Wired ADR 0014 append-only store; 512-slot PSRAM index; mount-gated opportunistic plus responder-side direct-packet `lxmf.delivery` admission with required retained proofs; powered evidence remains opportunistic/API 1.4 only, while direct Link and `AlreadyDurable` replay qualification remain open |
 | Unallocated | `0xb30000` | 4.8125 MiB | OTA/layout decision |
 
 The workspace runner in `.cargo/config.toml` hardcodes an 8 MiB flash size and
@@ -1642,12 +1656,14 @@ the boot. Its pending-mutation fact participates in every credential, journal,
 and raw-inbox physical-mutation gate. The inverse LXMF gate admits its own
 pending state to the store so only the store can structurally validate an exact
 retry; credential or journal ownership still defers it. Mount success now also
-enables the derived `lxmf.delivery` destination, signed opportunistic DATA
-admission, durable-ingress call, per-destination `Retain` policy, sixteen-slot
-delayed-proof owner, and ordinary-supervisor ready-proof drain. Local Links are
-disabled until a bounded Link/Resource owner exists. The current A-to-B
-confirmation powers this exact opportunistic new-commit-before-proof path; it
-does not qualify replay, Link/Resource, propagation, or a client mailbox.
+enables the derived `lxmf.delivery` destination, signed opportunistic and
+responder-side bound direct Link DATA admission, required-proof durable ingress,
+per-destination `Retain`, the sixteen-slot delayed-proof owner, and the
+ordinary-supervisor ready-proof drain. The primary destination still rejects
+local Link termination, and native Resource ingress remains disabled. The
+current A-to-B confirmation powers only the opportunistic new-commit-before-
+proof path; it does not qualify replay, physical direct Link receive, Resource,
+propagation, or a client mailbox.
 
 Journal mount, unsupported history, or recovery failure is isolated because it
 occurs during boot before a durability-gated DATA owner can exist: the
@@ -3201,10 +3217,12 @@ first smoke.
 - Define and qualify the production key backup/recovery and at-rest protection
   policy. The current developer image deliberately requires flash encryption
   disabled and stores its mirrored private identity in plaintext.
-- Bind non-DATA LXMF events to bounded durable/client owners. Opportunistic
-  destination DATA now reaches the dedicated LXMF store, while local Link
-  admission remains disabled so unowned Link/Resource events cannot saturate
-  the generic event queue.
+- Preserve the bounded responder-side context-`NONE` direct Link DATA owner on
+  the mounted `lxmf.delivery` destination and its exact delayed Link proof.
+  Keep local Link admission disabled on the primary destination and native
+  Resource ingress disabled so unowned Link/Resource events cannot saturate the
+  generic event queue. Add initiator/backchannel receive only after its
+  per-Link ephemeral signing authority has a bounded owner.
 - Preserve implemented source-free basic opportunistic LXMF send plus committed
   list/read. Extend send to nonempty fields, stamps/tickets, direct/Resource and
   propagation delivery. Move the temporary one-interface local path-response

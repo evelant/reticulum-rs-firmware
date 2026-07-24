@@ -18,7 +18,9 @@ use reticulum_lxmf_wire::{
 pub use reticulum_lxmf_wire::{
     CarrierKind, RequiredStampCost, StampAdmission, StampPolicy, WireLimits,
 };
-use reticulum_node_core::{APPLICATION_LINK_CONTEXT_NONE, ApplicationEvent, ApplicationEventKind};
+use reticulum_node_core::{
+    APPLICATION_LINK_CONTEXT_NONE, ApplicationEvent, ApplicationEventKind, ApplicationLinkRole,
+};
 
 /// Complete hash of the one locally owned `lxmf.delivery` destination admitted
 /// by an ingress instance.
@@ -80,21 +82,22 @@ pub enum UnrelatedEvent {
         /// Non-NONE RNS Link DATA context.
         context: u8,
     },
+    /// Link DATA arrived on a locally initiated Link and therefore belongs to
+    /// the local client for that remote destination, not a local delivery
+    /// service.
+    OtherLinkRole {
+        /// Reticulum Link identifier.
+        link: [u8; 16],
+        /// Role retained by the authenticated Link.
+        role: ApplicationLinkRole,
+    },
     /// This event kind is not an LXMF complete-message carrier.
     OtherKind(ApplicationEventKind),
 }
 
-/// Complete-message carrier deliberately not admitted by this first tranche.
+/// Complete-message carrier deliberately not admitted by this tranche.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnsupportedCarrier {
-    /// Context-NONE Link DATA needs an owned Link-to-local-destination binding
-    /// which the current event does not carry.
-    LinkData {
-        /// Reticulum Link identifier.
-        link: [u8; 16],
-        /// Raw Link DATA context retained by the application event.
-        context: u8,
-    },
     /// Completed Resources need the same Link destination binding, and native
     /// Resource ingress remains disabled until bounded admission is qualified.
     ResourceComplete {
@@ -117,11 +120,10 @@ pub enum DeferredIngress {
     /// Stamp calculation could not complete under the caller's parameters or
     /// work budget. No stamp-validity decision was made.
     StampValidationUnavailable(StampError),
-    /// The wire crate supports this complete-message carrier, but the
-    /// application-event boundary lacks context needed to bind it safely.
-    /// This classification does not establish LXMF ownership: a global
-    /// dispatcher must retain or quarantine the event until a Link-to-local-
-    /// destination binding is available.
+    /// The wire crate supports this complete-message carrier, but its bounded
+    /// native ownership path is not enabled. This classification does not
+    /// establish LXMF ownership: a global dispatcher must retain or quarantine
+    /// the event until that carrier has a qualified application boundary.
     UnsupportedCarrier(UnsupportedCarrier),
 }
 
@@ -246,7 +248,7 @@ pub struct ValidatedIngress<'event> {
 }
 
 impl<'event> ValidatedIngress<'event> {
-    /// Exact opportunistic carrier payload owned by the application event.
+    /// Exact admitted carrier payload owned by the application event.
     ///
     /// The branded borrow is constructed only after complete wire, source,
     /// signature, destination, and stamp-policy validation. Reparse it through
@@ -283,7 +285,7 @@ pub enum IngressOutcome<'event> {
     Deferred(DeferredIngress),
     /// Event was conclusively rejected under the supplied validation policy.
     Rejected(RejectedIngress),
-    /// Event is a fully validated opportunistic LXMF message.
+    /// Event is a fully validated admitted LXMF complete-message carrier.
     Validated(ValidatedIngress<'event>),
 }
 
@@ -301,15 +303,16 @@ impl fmt::Debug for IngressOutcome<'_> {
 /// Borrow and validate one application event without consuming or copying its
 /// payload.
 ///
-/// Only opportunistic destination DATA addressed to `local_destination` is
-/// admitted. The source resolver is consulted only after bounded structural
-/// parsing exposes the exact source destination. Non-NONE Link DATA is
-/// unrelated. Context-NONE Link DATA and Resource completion are explicitly
-/// deferred because their current event variants do not bind the Link to the
-/// expected local LXMF destination. That deferred classification is not proof
-/// that LXMF owns the event. Proof-of-work policies execute the wire crate's
-/// synchronous protocol work; callers must schedule such policies outside the
-/// sole network actor.
+/// Opportunistic destination DATA and responder-side context-NONE Link DATA
+/// addressed to `local_destination` are admitted. Link ownership is established
+/// by the event's opaque Rete-derived Link binding before the complete LXMF wire
+/// is parsed; the wire destination must independently agree with that binding.
+/// The source resolver is consulted only after bounded structural parsing
+/// exposes the exact source destination. Non-NONE and initiator-side Link DATA
+/// are unrelated. Resource completion remains explicitly deferred because
+/// bounded native Resource ownership is not enabled. Proof-of-work policies
+/// execute the wire crate's synchronous protocol work; callers must schedule
+/// such policies outside the sole network actor.
 pub fn validate_application_event<'event, R>(
     event: &'event ApplicationEvent,
     local_destination: LocalDeliveryDestination,
@@ -320,27 +323,32 @@ pub fn validate_application_event<'event, R>(
 where
     R: SourceIdentityResolver + ?Sized,
 {
-    let (destination, payload) = match event {
+    let (destination, payload, expected_carrier) = match event {
         ApplicationEvent::DataReceived {
             destination,
             payload,
-        } => (destination, payload.as_slice()),
-        ApplicationEvent::LinkData { link, context, .. }
-            if *context != APPLICATION_LINK_CONTEXT_NONE =>
-        {
+        } => (destination, payload.as_slice(), CarrierKind::Opportunistic),
+        ApplicationEvent::LinkData {
+            binding, context, ..
+        } if *context != APPLICATION_LINK_CONTEXT_NONE => {
             return IngressOutcome::Unrelated(UnrelatedEvent::OtherLinkContext {
-                link: *link,
+                link: *binding.link(),
                 context: *context,
             });
         }
-        ApplicationEvent::LinkData { link, context, .. } => {
-            return IngressOutcome::Deferred(DeferredIngress::UnsupportedCarrier(
-                UnsupportedCarrier::LinkData {
-                    link: *link,
-                    context: *context,
-                },
-            ));
-        }
+        ApplicationEvent::LinkData { binding, data, .. } => match binding.role() {
+            ApplicationLinkRole::Initiator => {
+                return IngressOutcome::Unrelated(UnrelatedEvent::OtherLinkRole {
+                    link: *binding.link(),
+                    role: ApplicationLinkRole::Initiator,
+                });
+            }
+            ApplicationLinkRole::Responder => (
+                binding.destination(),
+                data.as_slice(),
+                CarrierKind::LinkDataContextNone,
+            ),
+        },
         ApplicationEvent::ResourceComplete {
             link,
             resource_hash,
@@ -365,13 +373,20 @@ where
         });
     }
 
-    let parsed = match reticulum_lxmf_wire::MessageView::parse_ingress(
-        CarrierIngress::Opportunistic {
+    let carrier = match expected_carrier {
+        CarrierKind::Opportunistic => CarrierIngress::Opportunistic {
             implied_destination: destination,
             payload,
         },
-        limits,
-    ) {
+        CarrierKind::LinkDataContextNone => CarrierIngress::LinkDataContextNone {
+            expected_destination: destination,
+            payload,
+        },
+        CarrierKind::Complete | CarrierKind::ResourceComplete => {
+            unreachable!("application event matching only selects admitted carriers")
+        }
+    };
+    let parsed = match reticulum_lxmf_wire::MessageView::parse_ingress(carrier, limits) {
         Ok(message) => message,
         Err(error) => return IngressOutcome::Rejected(RejectedIngress::Wire(error)),
     };
@@ -412,7 +427,7 @@ where
         fields_encoded_len: payload_view.fields().raw().len(),
         stamp_admission: message.stamp_admission(),
     };
-    debug_assert_eq!(evidence.carrier, CarrierKind::Opportunistic);
+    debug_assert_eq!(evidence.carrier, expected_carrier);
     IngressOutcome::Validated(ValidatedIngress {
         carrier_payload: payload,
         evidence,

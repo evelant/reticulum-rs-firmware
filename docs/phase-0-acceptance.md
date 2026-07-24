@@ -753,9 +753,10 @@ claim it as a new validated baseline.
 The first checked Python LXMF 1.0.1 corpus, `reticulum-lxmf-wire` tranche, and
 the separate `reticulum-lxmf-ingress` application-event adapter now cover the
 supported foundation forms below. The ingress adapter admits only explicitly
-owned opportunistic destination DATA, resolves source identities by value, and
-returns a borrowed validated view without consuming the event. The portable
-`reticulum-lxmf-model`, `reticulum-lxmf-store`, and
+owned opportunistic destination DATA or responder-side context-`NONE` Link DATA
+bound to the mounted local `lxmf.delivery` destination, resolves source
+identities by value, and returns a borrowed validated view without consuming
+the event. The portable `reticulum-lxmf-model`, `reticulum-lxmf-store`, and
 `reticulum-lxmf-durable-ingress` owner then preserve exact normalized wire in
 variable extents without a message-sized copy and acknowledge the retained
 application-event lease only after a new commit or a fresh retransmission is
@@ -767,17 +768,25 @@ retransmission recognized as `AlreadyDurable` makes that event's exact proof
 ready, while capacity or store failure returns the
 exact combined lease and releases only the empty reservation. Required mode
 rejects proofless events before I/O; Optional mode admits them but still reserves
-every proof that is present. This owner never drains or transmits ready proofs.
-The current E290 source composition now registers the mount-gated LXMF
-destination with retained-proof policy, provides the three bounded owners, and
-drains ready proofs through the ordinary router. The single powered A-to-B
-trial above confirms that one remote receipt followed an exact durable record
+every proof that is present. The E290 LXMF composition selects Required for both
+opportunistic and direct-packet carriers. This owner never drains or transmits
+ready proofs.
+The current E290 source composition registers the mount-gated LXMF destination
+with retained-proof policy, provides the three bounded owners, and drains ready
+proofs through the ordinary router. The single powered A-to-B trial above
+confirms that one remote receipt followed an exact durable opportunistic record
 and ordinary proof handoff; broader directions, replays, remounts, faults,
-pressure, and sustained qualification remain open. Non-
-`NONE` Link DATA is unrelated; context-`NONE` Link DATA and Resource completion
-remain explicitly deferred until their local-destination binding and bounded
-Resource ownership are available. Before production-accepting the RNS
-foundation, retain and extend Python-derived LXMF fixtures covering:
+pressure, and sustained qualification remain open. Non-`NONE` Link DATA is
+unrelated. ADR 0016 admits context-`NONE` Link DATA only with an opaque
+Rete-derived destination binding and an independently matching complete LXMF
+wire destination. It must also own the exact explicit Link-destined proof
+covering the complete received RNS packet hash; that proof remains withheld
+until `Committed` or a fresh `AlreadyDurable` result. Initiator/backchannel
+direct receive is unsupported, and the responder-side direct path remains
+source-qualified rather than powered-qualified. Resource completion remains
+explicitly deferred pending bounded Resource ownership. Before production-
+accepting the RNS foundation, retain and extend Python-derived LXMF fixtures
+covering:
 
 - heterogeneous MessagePack keys and values, including unknown structured
   fields; the current allocation-free parser accepts nil/boolean/integer/

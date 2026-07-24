@@ -62,11 +62,11 @@ use reticulum_lxmf_durable_ingress::DurableIngressCommitKind;
 use reticulum_lxmf_durable_ingress::{DurableIngressOutcome, DurableIngressSuccess};
 use reticulum_lxmf_ingress::LocalDeliveryDestination;
 use reticulum_node_core::{
-    ApplicationEvent, ApplicationEventDiscardReason, ApplicationEventLease,
-    ApplicationEventOfferError, ApplicationEventOwner, ApplicationEventQuarantineReason,
-    AuthorizedFrameObservation, DelayedProofOwner, DestinationHash, MonotonicInstant,
-    MonotonicMillis, MonotonicSeconds, NodeActions, OutboundDispatchInterval,
-    ReceiptCorrelationError, TxLeaseDeadline,
+    APPLICATION_LINK_CONTEXT_NONE, ApplicationEvent, ApplicationEventDiscardReason,
+    ApplicationEventLease, ApplicationEventOfferError, ApplicationEventOwner,
+    ApplicationEventQuarantineReason, ApplicationLinkRole, AuthorizedFrameObservation,
+    DelayedProofOwner, DestinationHash, MonotonicInstant, MonotonicMillis, MonotonicSeconds,
+    NodeActions, OutboundDispatchInterval, ReceiptCorrelationError, TxLeaseDeadline,
 };
 #[cfg(feature = "runtime-measurement-hil")]
 use reticulum_node_core::{IngressDisposition, IngressMetadata, PacketType};
@@ -1590,6 +1590,13 @@ fn drive_one_application_event(
     let is_lxmf = match lease.event() {
         ApplicationEvent::DataReceived { destination, .. } => {
             lxmf_destination.is_some_and(|lxmf| destination == lxmf.as_bytes())
+        }
+        ApplicationEvent::LinkData {
+            binding, context, ..
+        } => {
+            *context == APPLICATION_LINK_CONTEXT_NONE
+                && binding.role() == ApplicationLinkRole::Responder
+                && lxmf_destination.is_some_and(|lxmf| binding.destination() == lxmf.as_bytes())
         }
         _ => false,
     };

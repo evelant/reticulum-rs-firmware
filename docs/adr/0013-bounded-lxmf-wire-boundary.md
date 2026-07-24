@@ -1,6 +1,6 @@
 # ADR 0013: Bounded LXMF wire and service ownership boundary
 
-- **Status:** accepted for the first wire and application-ingress tranches
+- **Status:** accepted for wire, opportunistic ingress, and bound Link DATA ingress
 - **Date:** 2026-07-20
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0002](0002-rete-provisional-foundation.md),
@@ -166,22 +166,23 @@ stamp-validation work remain deferred; they are not evidence of an invalid
 message. The caller must retain, quarantine, durably commit, or explicitly
 discard the event before acknowledging its owner lease.
 
-This first adapter tranche admits only opportunistic destination DATA. Link
-DATA with any context other than RNS `NONE` is unrelated and remains available
-to its actual service. Context-`NONE` Link DATA and Resource-complete events do
-not prove that their Link terminates at the local LXMF destination, so only
-those possible LXMF carriers are explicitly deferred even though the wire crate
-can normalize their bytes. This avoids treating carrier shape as application
-ownership. Native Resource ingress stays disabled until its segmentation and
-streaming-storage contract is bounded.
+The first adapter tranche admitted only opportunistic destination DATA. ADR
+0016 now adds context-`NONE` Link DATA after `rns-rete` binds each event to the
+destination retained by the authenticated Link. Link DATA with any other
+context is unrelated and remains available to its actual service. The adapter
+first requires the bound destination to equal the selected local
+`lxmf.delivery` destination, then independently requires the complete wire
+destination to agree. Resource-complete events remain explicitly deferred even
+though the wire crate can normalize their bytes. Native Resource ingress stays
+disabled until its segmentation and streaming-storage contract is bounded.
 
 `node-core` exposes only a construction-time registration helper for an
 additional inbound Single destination and a read-only, by-value identity
-lookup. The permanent supervisor forwards that lookup and the E290 firmware now
-mount-gates registration and scheduling of opportunistic `lxmf.delivery` DATA.
-Local Link admission remains disabled pending a bounded Link/Resource owner.
-This later source composition does not turn the portable seams into powered
-LXMF evidence.
+lookup. The permanent supervisor forwards that lookup and the E290 firmware
+mount-gates registration and scheduling of opportunistic and direct-packet
+`lxmf.delivery` DATA. Local Link admission is enabled only on that service;
+Resource ingress remains disabled. This source composition does not become
+powered direct-LXMF evidence until the dedicated two-board trial passes.
 
 The initial product retry policy has no age or attempt expiry for
 `SourceIdentityUnavailable`; it preserves the exact event in case a later
@@ -286,8 +287,9 @@ The first wire and application-ingress tranches must prove:
    executor package.
 
 This evidence establishes the wire/validation foundation and its portable
-opportunistic application-event ingress seam. The later permanent-E290 source
-composition mount-gates that seam behind the dedicated durable store and
-retained-proof owner. It does not claim powered durable send/receive, RNS
-Resource transfer, outbound retries, propagation, NomadNet, RF interoperability,
+opportunistic plus responder-side direct-packet application-event ingress seam.
+The permanent-E290 source composition mount-gates that seam behind the dedicated
+durable store and exact retained-proof owner. The existing powered record
+qualifies only the opportunistic path; it does not claim powered direct-Link
+receive, RNS Resource transfer, outbound direct retries, propagation, NomadNet,
 or a complete LXMF service.

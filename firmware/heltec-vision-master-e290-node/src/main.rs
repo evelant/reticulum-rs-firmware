@@ -964,7 +964,7 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
     let lxmf_destination = match activate_lxmf_delivery(&mut node, lxmf_service_available) {
         Ok(LxmfDeliveryActivation::Active(destination)) => {
             info!(
-                "e290-node stage=lxmf-delivery status=ENABLED destination={:02x?} proof_policy=retain durability=required accepts_links=false data_profile=opportunistic discovery_announce=periodic interfaces=transport-neutral",
+                "e290-node stage=lxmf-delivery status=ENABLED destination={:02x?} proof_policy=retain durability=required-for-all-carriers accepts_links=true data_profile=opportunistic+responder-direct-link resource_ingress=disabled discovery_announce=periodic interfaces=transport-neutral",
                 destination.as_bytes(),
             );
             Some(destination)

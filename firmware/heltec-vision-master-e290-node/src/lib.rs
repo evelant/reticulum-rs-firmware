@@ -311,6 +311,13 @@ mod tests {
         assert!(main.contains("flash_owner.mount_lxmf(lxmf_index)"));
         assert!(main.contains("activate_lxmf_delivery(&mut node, lxmf_service_available)"));
         assert!(main.contains("lxmf_delivery_admission={lxmf_delivery_admission}"));
+        assert!(main.contains(
+            "durability=required-for-all-carriers accepts_links=true data_profile=opportunistic+responder-direct-link"
+        ));
+        assert!(main.contains("resource_ingress=disabled"));
+
+        let lxmf_delivery = include_str!("lxmf_delivery.rs");
+        assert!(lxmf_delivery.contains("node.set_destination_accepts_links(&destination, true)"));
 
         let platform_storage = include_str!("platform_storage.rs");
         let direct_mount = platform_storage
@@ -330,6 +337,10 @@ mod tests {
         assert!(node_task.contains("proof_holder: LxmfProofActionsHolder"));
         assert!(node_task.contains("authority_faults: LxmfAuthorityFault"));
         assert!(node_task.contains("lxmf_volatile: &'static mut LxmfVolatileState"));
+        assert!(node_task.contains("ApplicationEvent::LinkData {"));
+        assert!(node_task.contains("*context == APPLICATION_LINK_CONTEXT_NONE"));
+        assert!(node_task.contains("binding.role() == ApplicationLinkRole::Responder"));
+        assert!(node_task.contains("binding.destination() == lxmf.as_bytes()"));
         assert!(!node_task.contains(
             "let mut lxmf_retries = LxmfRetrySet::<{ config::APPLICATION_EVENT_SLOTS }>::new()"
         ));
@@ -337,6 +348,8 @@ mod tests {
         let storage = include_str!("platform_storage.rs");
         assert!(storage.contains("runtime: Option<&'static mut ProductSubmissionRuntime>"));
         assert!(storage.contains("lxmf: Option<MountedLxmfStore<'static>>"));
+        assert!(storage.contains("DurableIngressProofMode::Required"));
+        assert!(!storage.contains("DurableIngressProofMode::Optional"));
         let offer = storage
             .split("pub(crate) fn offer_authorized_frame(")
             .nth(1)

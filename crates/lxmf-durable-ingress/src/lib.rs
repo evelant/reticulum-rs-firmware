@@ -33,8 +33,9 @@ use reticulum_lxmf_store::{
     BoundLxmfStoreAccess, LxmfCommitError, LxmfCommitOutcome, MountedLxmfStore,
 };
 use reticulum_node_core::{
-    ApplicationEvent, ApplicationEventId, ApplicationEventKind, ApplicationEventLease,
-    DelayedProofId, DelayedProofOwner, DelayedProofTransactionError,
+    APPLICATION_LINK_CONTEXT_NONE, ApplicationEvent, ApplicationEventId, ApplicationEventKind,
+    ApplicationEventLease, ApplicationLinkRole, DelayedProofId, DelayedProofOwner,
+    DelayedProofTransactionError,
 };
 
 #[cfg(test)]
@@ -114,6 +115,20 @@ pub enum EventCarrierMismatch {
     },
     /// The event's destination differs from validated authenticated evidence.
     Destination,
+    /// Link DATA no longer carries the context admitted by validation.
+    LinkContext {
+        /// Context established by the admitted carrier.
+        expected: u8,
+        /// Context observed when reacquiring the exact event.
+        actual: u8,
+    },
+    /// Link DATA no longer carries the responder role admitted by validation.
+    LinkRole {
+        /// Role established by the admitted carrier.
+        expected: ApplicationLinkRole,
+        /// Role observed when reacquiring the exact event.
+        actual: ApplicationLinkRole,
+    },
     /// The event's physical payload length differs from validated evidence.
     PayloadLength {
         /// Validated physical carrier length.
@@ -458,6 +473,45 @@ fn rebind_candidate<'event>(
                 implied_destination: destination,
                 carrier_payload: payload,
             }
+        }
+        (
+            CarrierKind::LinkDataContextNone,
+            ApplicationEvent::LinkData {
+                binding,
+                data,
+                context,
+            },
+        ) => {
+            if binding.role() != ApplicationLinkRole::Responder {
+                return Err(DurableCandidateError::EventCarrierMismatch(
+                    EventCarrierMismatch::LinkRole {
+                        expected: ApplicationLinkRole::Responder,
+                        actual: binding.role(),
+                    },
+                ));
+            }
+            if *context != APPLICATION_LINK_CONTEXT_NONE {
+                return Err(DurableCandidateError::EventCarrierMismatch(
+                    EventCarrierMismatch::LinkContext {
+                        expected: APPLICATION_LINK_CONTEXT_NONE,
+                        actual: *context,
+                    },
+                ));
+            }
+            if binding.destination() != evidence.destination() {
+                return Err(DurableCandidateError::EventCarrierMismatch(
+                    EventCarrierMismatch::Destination,
+                ));
+            }
+            if data.len() != evidence.carrier_payload_len() {
+                return Err(DurableCandidateError::EventCarrierMismatch(
+                    EventCarrierMismatch::PayloadLength {
+                        expected: evidence.carrier_payload_len(),
+                        actual: data.len(),
+                    },
+                ));
+            }
+            NormalizedWire::Contiguous(data)
         }
         (carrier, event) => {
             return Err(DurableCandidateError::EventCarrierMismatch(

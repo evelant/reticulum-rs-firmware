@@ -45,13 +45,13 @@ pub use reticulum_rns_rete::{
     ApplicationEventOfferFailure, ApplicationEventOfferReport, ApplicationEventOwner,
     ApplicationEventOwnerCounters, ApplicationEventQuarantineReason, ApplicationEventRetryError,
     ApplicationEventRetryFailure, ApplicationEventRetryToken, ApplicationEventSequence,
-    ApplicationEventSlot, ApplicationEventSlotId, ApplicationRequestFailReason,
-    DelayedProofCapacitySnapshot, DelayedProofGeneration, DelayedProofId, DelayedProofLease,
-    DelayedProofOwner, DelayedProofOwnerCounters, DelayedProofReservationError,
-    DelayedProofSequence, DelayedProofSlot, DelayedProofSlotId, DelayedProofTransaction,
-    DelayedProofTransactionError, DelayedProofTransactionFailure, InboundData,
-    InboundDataProjection, IngressDisposition, IngressMetadata, IngressReport, MonotonicInstant,
-    NodeActions, OutboundDispatchInterval, OutboundProtocolToken, PacketType,
+    ApplicationEventSlot, ApplicationEventSlotId, ApplicationLinkBinding, ApplicationLinkRole,
+    ApplicationRequestFailReason, DelayedProofCapacitySnapshot, DelayedProofGeneration,
+    DelayedProofId, DelayedProofLease, DelayedProofOwner, DelayedProofOwnerCounters,
+    DelayedProofReservationError, DelayedProofSequence, DelayedProofSlot, DelayedProofSlotId,
+    DelayedProofTransaction, DelayedProofTransactionError, DelayedProofTransactionFailure,
+    InboundData, InboundDataProjection, IngressDisposition, IngressMetadata, IngressReport,
+    MonotonicInstant, NodeActions, OutboundDispatchInterval, OutboundProtocolToken, PacketType,
     RetainedProofCommitSuccess, project_inbound_data,
 };
 use sha2::{Digest, Sha256};
@@ -99,23 +99,28 @@ pub const APPLICATION_LINK_CONTEXT_NONE: u8 = reticulum_rns_rete::LINK_DATA_CONT
 
 /// Extract the compact correlation tag from one explicit RNS delivery proof.
 ///
-/// The packet must have the exact structural wire shape emitted by Rete for a
-/// direct delivery proof: HEADER_1, SINGLE, `PROOF`, zero hops, context `NONE`,
-/// the truncated covered hash as its destination, and the explicit 96-byte
+/// The packet must have one of the two exact structural wire shapes retained by
+/// the product:
+///
+/// - an ordinary HEADER_1/SINGLE `PROOF`, whose destination is the truncated
+///   covered hash; or
+/// - a responder HEADER_1/LINK `PROOF`, whose destination is the Link ID.
+///
+/// Both forms have zero hops, context `NONE`, and the explicit 96-byte
 /// `covered_hash[32] || signature[64]` payload. This deliberately excludes
 /// Reticulum's 64-byte implicit-proof form, whose signature bytes do not expose
 /// a covered hash. The returned value is the little-endian first eight bytes of
 /// the covered hash, matching ingress and receipt trace correlation without
 /// exposing the implementation parser to product firmware.
 pub fn delivery_proof_correlation_tag(raw: &[u8]) -> Option<u64> {
-    const RETE_DIRECT_PROOF_FLAGS: u8 = 0x03;
+    const RETE_SINGLE_PROOF_FLAGS: u8 = 0x03;
+    const RETE_LINK_PROOF_FLAGS: u8 = 0x0f;
     const COVERED_HASH_LEN: usize = 32;
     const SIGNATURE_LEN: usize = 64;
     const EXPLICIT_PROOF_PAYLOAD_LEN: usize = COVERED_HASH_LEN + SIGNATURE_LEN;
 
     let packet = reticulum_rns_rete::parse_packet(raw).ok()?;
-    if packet.flags != RETE_DIRECT_PROOF_FLAGS
-        || packet.hops != 0
+    if packet.hops != 0
         || packet.packet_type != PacketType::Proof
         || packet.context != APPLICATION_LINK_CONTEXT_NONE
         || packet.payload.len() != EXPLICIT_PROOF_PAYLOAD_LEN
@@ -123,7 +128,15 @@ pub fn delivery_proof_correlation_tag(raw: &[u8]) -> Option<u64> {
         return None;
     }
     let covered_hash = packet.payload.get(..COVERED_HASH_LEN)?;
-    if packet.destination_hash != &covered_hash[..16] {
+    let canonical_destination = match packet.flags {
+        RETE_SINGLE_PROOF_FLAGS => {
+            packet.dest_type == reticulum_rns_rete::DestType::Single
+                && packet.destination_hash == &covered_hash[..16]
+        }
+        RETE_LINK_PROOF_FLAGS => packet.dest_type == reticulum_rns_rete::DestType::Link,
+        _ => false,
+    };
+    if !canonical_destination {
         return None;
     }
     let prefix: [u8; 8] = covered_hash[..8]
@@ -4580,8 +4593,18 @@ mod tests {
         proof
     }
 
+    fn link_proof_for(receiver_tag: u8, link_id: [u8; 16], attempt: AttemptToken) -> Vec<u8> {
+        let signature = identity(receiver_tag).0.sign(attempt.as_bytes()).unwrap();
+        let mut proof = std::vec![0u8; 19 + 32 + 64];
+        proof[0] = 0x0f;
+        proof[2..18].copy_from_slice(&link_id);
+        proof[19..51].copy_from_slice(attempt.as_bytes());
+        proof[51..].copy_from_slice(&signature);
+        proof
+    }
+
     #[test]
-    fn delivery_proof_tag_requires_exact_rete_explicit_wire_shape() {
+    fn delivery_proof_tag_requires_exact_rete_explicit_single_wire_shape() {
         let mut bytes = [0_u8; 32];
         for (index, byte) in bytes.iter_mut().enumerate() {
             *byte = index as u8;
@@ -4620,6 +4643,43 @@ mod tests {
         let mut not_a_proof = proof.clone();
         not_a_proof[0] = 0;
         assert_eq!(delivery_proof_correlation_tag(&not_a_proof), None);
+    }
+
+    #[test]
+    fn delivery_proof_tag_accepts_only_exact_responder_link_wire_shape() {
+        let mut bytes = [0_u8; 32];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = (index as u8).wrapping_add(0x40);
+        }
+        let attempt = AttemptToken(bytes);
+        let link_id = [0xa5; 16];
+        let proof = link_proof_for(77, link_id, attempt);
+        assert_eq!(
+            delivery_proof_correlation_tag(&proof),
+            Some(u64::from_le_bytes([
+                0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
+            ]))
+        );
+
+        let mut wrong_packet_shape = proof.clone();
+        wrong_packet_shape[0] = 0x0b;
+        assert_eq!(delivery_proof_correlation_tag(&wrong_packet_shape), None);
+
+        let mut header_two = proof.clone();
+        header_two[0] |= 0x40;
+        assert_eq!(delivery_proof_correlation_tag(&header_two), None);
+
+        let mut forwarded = proof.clone();
+        forwarded[1] = 1;
+        assert_eq!(delivery_proof_correlation_tag(&forwarded), None);
+
+        let mut wrong_context = proof.clone();
+        wrong_context[18] = 1;
+        assert_eq!(delivery_proof_correlation_tag(&wrong_context), None);
+
+        let mut implicit = proof.clone();
+        implicit.drain(19..51);
+        assert_eq!(delivery_proof_correlation_tag(&implicit), None);
     }
 
     #[test]

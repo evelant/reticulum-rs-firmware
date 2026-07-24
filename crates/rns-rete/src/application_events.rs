@@ -18,6 +18,13 @@ use crate::delayed_proofs::{
 use crate::embedded::RetainedInboundProof;
 use crate::{ApplicationEvent, ApplicationEventKind, NodeActions};
 
+const fn event_kind_accepts_retained_proof(kind: ApplicationEventKind) -> bool {
+    matches!(
+        kind,
+        ApplicationEventKind::DataReceived | ApplicationEventKind::LinkData
+    )
+}
+
 /// Stable index of one caller-provided application-event slot.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ApplicationEventSlotId(usize);
@@ -424,7 +431,7 @@ pub enum ApplicationEventOfferError {
         /// Events present in the envelope.
         event_count: usize,
     },
-    /// A retained DATA proof names an event of another kind.
+    /// A retained application delivery proof names an event of another kind.
     RetainedProofEventKindMismatch {
         /// Zero-based index of the incompatible event.
         event_index: usize,
@@ -532,7 +539,7 @@ impl<'slots> ApplicationEventOwner<'slots> {
                 slot.owned
                     .as_ref()
                     .is_none_or(|owned| !owned.has_retained_proof()
-                        || owned.event.kind() == ApplicationEventKind::DataReceived)
+                        || event_kind_accepts_retained_proof(owned.event.kind()))
             );
             if slot.owned.is_some() {
                 maximum_sequence = Some(
@@ -618,7 +625,7 @@ impl<'slots> ApplicationEventOwner<'slots> {
                 });
             };
             let event_kind = event.kind();
-            if event_kind != ApplicationEventKind::DataReceived {
+            if !event_kind_accepts_retained_proof(event_kind) {
                 self.counters.retained_proof_kind_rejections = self
                     .counters
                     .retained_proof_kind_rejections
@@ -934,7 +941,7 @@ impl<'slots> ApplicationEventOwner<'slots> {
             .as_ref()
             .expect("a valid application-event lease retains its exact event");
         debug_assert!(
-            !owned.has_retained_proof() || owned.event.kind() == ApplicationEventKind::DataReceived
+            !owned.has_retained_proof() || event_kind_accepts_retained_proof(owned.event.kind())
         );
         slot.state = ApplicationEventSlotState::Quarantined(reason);
     }

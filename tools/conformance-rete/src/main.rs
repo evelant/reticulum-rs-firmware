@@ -3,12 +3,13 @@ use std::{collections::BTreeSet, process::ExitCode};
 use rand_core::{CryptoRng, RngCore};
 use reticulum_radio_interface::{RNODE_HW_MTU, ReceiveOutcome, RnodeRxReassembler};
 use reticulum_rns_rete::{
-    ApplicationEvent, DestHash, DestType, DestinationType, Direction, EmbeddedNodeConfig, Identity,
-    IngressDisposition, InitialEmbeddedNode, InterfaceId, LinkId, LinkState, MonotonicInstant,
-    OutboundDispatchInterval, PacketType, TxTarget, build_announce_packet,
-    decode_lrrtt_number_for_conformance, encode_lrrtt_float64_for_conformance,
-    identity_from_private_key, new_conformance_node, new_conformance_transport_node,
-    parse_announce_packet, parse_packet, select_lrrtt_for_conformance,
+    ApplicationEvent, ApplicationLinkRole, DestHash, DestType, DestinationType, Direction,
+    EmbeddedNodeConfig, Identity, IngressDisposition, InitialEmbeddedNode, InterfaceId, LinkId,
+    LinkState, MonotonicInstant, OutboundDispatchInterval, PacketType, TxTarget,
+    build_announce_packet, decode_lrrtt_number_for_conformance,
+    encode_lrrtt_float64_for_conformance, identity_from_private_key, new_conformance_node,
+    new_conformance_transport_node, parse_announce_packet, parse_packet,
+    select_lrrtt_for_conformance,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -1112,11 +1113,13 @@ fn verify_released_vectors() -> Result<usize, String> {
         matches!(
             received_link_data.actions.events.as_slice(),
             [ApplicationEvent::LinkData {
-                link: event_id,
+                binding,
                 data,
                 context,
             }]
-                if *event_id == *link_id.as_bytes()
+                if binding.link() == link_id.as_bytes()
+                    && binding.destination() == link_responder.destination_hash().as_bytes()
+                    && binding.role() == ApplicationLinkRole::Responder
                     && data == b"embedded Link payload"
                     && *context == 0
         ),

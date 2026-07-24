@@ -1,9 +1,9 @@
 # ADR 0014: Durable LXMF message ownership
 
-- **Status:** accepted for the portable store/event-owner tranche and first
-  permanent-E290 opportunistic receive composition; one bounded A-to-B LoRa
-  durable-delivery chain is power-qualified, while broader qualification remains
-  deferred
+- **Status:** accepted for the portable store/event-owner tranche and
+  permanent-E290 opportunistic plus responder-side direct-packet receive
+  composition; one bounded opportunistic A-to-B LoRa durable-delivery chain is
+  power-qualified, while direct-Link and broader qualification remain deferred
 - **Date:** 2026-07-21
 - **Powered evidence updated:** 2026-07-21
 - **Decision owners:** project maintainers
@@ -175,6 +175,11 @@ mode must form one structural delayed-proof transaction before store I/O. The
 transaction combines the exact event lease with an already selected fixed-
 capacity proof slot; scalar event IDs cannot authorize substitution.
 
+The permanent LXMF composition selects `Required` for both opportunistic
+destination DATA and responder-side direct Link DATA. `Optional` remains a
+portable owner capability for a future explicitly selected carrier; it is not
+the direct-LXMF policy.
+
 Candidate evidence and durable metadata are copied only after complete wire,
 signature, destination, and stamp validation. The candidate is fully
 constructed before proof reservation. Because reservation consumes the event
@@ -203,11 +208,15 @@ partition into 512 caller-owned index slots explicitly allocated in PSRAM. The
 sixteen delayed-proof slots and bounded retry/fault/proof-holder state are also
 caller-owned, validated boot-lifetime PSRAM allocations; sixteen application-
 event slots remain in internal static RAM. On mount success it registers the
-derived `lxmf.delivery` destination with local Links disabled, admits signed
-opportunistic DATA, selects per-destination `Retain`, and drains ready packet
-proofs only through the ordinary transport-neutral supervisor after a new
-commit or a fresh retransmission recognized as `AlreadyDurable`. Volatile proof
-state is never reconstructed from the durable record after reboot.
+derived `lxmf.delivery` destination with local Links enabled, admits signed
+opportunistic DATA plus ADR 0016's bound direct Link DATA, and selects
+per-destination `Retain`. Both carrier classes must own their exact packet proof,
+and those proofs drain only through the ordinary transport-neutral supervisor
+after a new commit or a fresh retransmission recognized as `AlreadyDurable`.
+The direct proof is the explicit Link-destined proof covering the complete
+received RNS packet hash; a Single-destination or proofless direct event fails
+closed before store I/O. Native Resource ingress remains disabled. Volatile
+proof state is never reconstructed from the durable record after reboot.
 Those event/proof counts are an E290 volatile-concurrency profile, not a protocol
 or store ceiling.
 
@@ -258,11 +267,13 @@ must not be relabelled as LXMF evidence.
   but not yet an endurance-ready mailbox.
 - Exact bytes remain available to future LXMF, NomadNet, Micron, and API layers;
   lossy UTF-8 or JSON projections cannot become the durable authority.
-- Resource reception, propagation, outgoing encode/send/retry, tickets and
-  ratchets, read/delete/tombstone state, client APIs, and broader powered target
-  qualification remain explicit later tranches. The first opportunistic target
-  destination/ingress/proof composition and one bounded powered commit/proof
-  chain are now present.
+- Resource reception, propagation, direct outgoing encode/send/retry,
+  initiator/backchannel direct receive, tickets and ratchets,
+  read/delete/tombstone state, client APIs, and broader powered target
+  qualification remain explicit later tranches. The opportunistic and
+  responder-side direct target/ingress/proof compositions are present; only the
+  opportunistic path has a bounded powered commit/proof chain. Direct Link
+  receive is source-qualified but not yet powered-qualified.
 - A pre-pending clean fault can disable only LXMF admission. Once a mutation is
   pending, an ambiguous store fault retains its exact owner and blocks all other
   flash mutations until reset/remount; routing and nonmutating consumers may

@@ -3202,9 +3202,11 @@ name = "reticulum-lxmf-ingress"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "rand_core 0.6.4",
  "reticulum-lxmf-wire",
  "reticulum-node-core",
  "reticulum-rns-inbox-store",
+ "reticulum-rns-rete",
  "serde",
  "serde_json",
 ]

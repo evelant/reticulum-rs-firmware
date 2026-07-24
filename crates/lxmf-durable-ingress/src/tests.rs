@@ -14,8 +14,8 @@ use reticulum_lxmf_store::{
 };
 use reticulum_node_core::{
     ApplicationEvent, ApplicationEventOwner, ApplicationEventQuarantineReason,
-    ApplicationEventSlot, DelayedProofOwner, DelayedProofReservationError, DelayedProofSlot,
-    DelayedProofTransactionError, NodeActions,
+    ApplicationEventSlot, ApplicationLinkRole, DelayedProofOwner, DelayedProofReservationError,
+    DelayedProofSlot, DelayedProofTransactionError, NodeActions,
 };
 use reticulum_rns_rete::{
     EmbeddedNode, EmbeddedNodeConfig, InboundProofPolicy, IngressDisposition, InterfaceId,
@@ -336,6 +336,111 @@ fn proof_bearing_actions_on(
     report.actions
 }
 
+fn link_data_actions(fixture: &MessageFixture) -> NodeActions {
+    link_data_actions_for_role(fixture, ApplicationLinkRole::Responder, false)
+}
+
+fn retained_link_data_actions(fixture: &MessageFixture) -> NodeActions {
+    link_data_actions_for_role(fixture, ApplicationLinkRole::Responder, true)
+}
+
+fn link_data_actions_for_role(
+    fixture: &MessageFixture,
+    role: ApplicationLinkRole,
+    retain_responder_proof: bool,
+) -> NodeActions {
+    assert_eq!(fixture.ingress.carrier_event, "link_data");
+    let destination_identity = fixture_identity(0x07, 0x08);
+    let mut sender = ProofNode::new(
+        fixture_identity(0x09, 0x0a),
+        "lxmf",
+        &["sender"],
+        EmbeddedNodeConfig::endpoint(),
+    )
+    .expect("fixture Link sender node is valid");
+    sender
+        .register_peer(&destination_identity, "lxmf", &["delivery"], 1)
+        .expect("fixture Link receiver is registered");
+    let mut receiver = ProofNode::new(
+        fixture_identity(0x07, 0x08),
+        "lxmf",
+        &["delivery"],
+        EmbeddedNodeConfig::endpoint(),
+    )
+    .expect("fixture Link receiver node is valid");
+    if retain_responder_proof {
+        receiver.set_inbound_proof_policy(InboundProofPolicy::Retain);
+    }
+    assert_eq!(
+        receiver.destination_hash().as_bytes(),
+        &array::<16>(&fixture.destination_hash_hex)
+    );
+
+    let mut rng = CounterRng::default();
+    let (request, link_id) = sender
+        .initiate_link(receiver.destination_hash(), 2, &mut rng)
+        .expect("fixture Link request");
+    let proof = receiver.ingest(request.bytes(), 2, InterfaceId(7), &mut rng);
+    assert!(proof.actions.events.is_empty());
+    assert_eq!(proof.actions.packets.len(), 1);
+    let lrrtt = sender.ingest(
+        proof.actions.packets[0].bytes(),
+        3,
+        InterfaceId(3),
+        &mut rng,
+    );
+    assert_eq!(lrrtt.actions.packets.len(), 1);
+    let active = receiver.ingest(
+        lrrtt.actions.packets[0].bytes(),
+        4,
+        InterfaceId(7),
+        &mut rng,
+    );
+    assert_eq!(active.actions.events.len(), 1);
+    assert!(active.actions.packets.is_empty());
+
+    let payload = decode(&fixture.ingress.payload_hex);
+    let received = match role {
+        ApplicationLinkRole::Initiator => {
+            assert!(!retain_responder_proof);
+            let packet = receiver
+                .send_link_data(&link_id, &payload, 5, &mut rng)
+                .expect("fixture initiator-side direct LXMF fits Link MDU");
+            sender.ingest(packet.bytes(), 5, InterfaceId(3), &mut rng)
+        }
+        ApplicationLinkRole::Responder => {
+            let packet = sender
+                .send_link_data(&link_id, &payload, 5, &mut rng)
+                .expect("fixture responder-side direct LXMF fits Link MDU");
+            receiver.ingest(packet.bytes(), 5, InterfaceId(7), &mut rng)
+        }
+    };
+    assert_eq!(received.disposition, IngressDisposition::Processed);
+    assert_eq!(received.actions.events.len(), 1);
+    assert!(received.actions.packets.is_empty());
+    assert_eq!(
+        received.actions.retained_proof_count(),
+        usize::from(retain_responder_proof)
+    );
+    let ApplicationEvent::LinkData {
+        binding,
+        data,
+        context,
+    } = &received.actions.events[0]
+    else {
+        panic!("fixture receiver must emit Link DATA")
+    };
+    assert_eq!(binding.link(), link_id.as_bytes());
+    assert_eq!(binding.role(), role);
+    assert_eq!(
+        binding.destination(),
+        &array::<16>(&fixture.destination_hash_hex)
+    );
+    assert_eq!(*context, reticulum_node_core::APPLICATION_LINK_CONTEXT_NONE);
+    assert_eq!(data, &payload);
+    received.actions
+}
+
 #[allow(clippy::too_many_arguments)]
 fn commit_proofless_event<'owner, 'slots, R, A>(
     lease: ApplicationEventLease<'owner, 'slots>,
@@ -410,6 +515,68 @@ fn rebind_reports_typed_event_carrier_mismatch_without_revalidating_wire() {
             }
         ))
     );
+
+    let direct_fixture = named_fixture("opportunistic_over_296");
+    let direct_local = LocalDeliveryDestination::new(array(&direct_fixture.destination_hash_hex));
+    let direct_source = array::<16>(&direct_fixture.source_hash_hex);
+    let direct_public_key = array::<64>(&direct_fixture.source_public_key_hex);
+    let direct_resolver =
+        |candidate: &[u8; 16]| (candidate == &direct_source).then_some(direct_public_key);
+    let mut direct_slots = [ApplicationEventSlot::new()];
+    let mut direct_owner = ApplicationEventOwner::new(&mut direct_slots);
+    let direct_lease = offer_actions(&mut direct_owner, link_data_actions(&direct_fixture));
+    let IngressOutcome::Validated(direct_validated) = validate_application_event(
+        direct_lease.event(),
+        direct_local,
+        limits(),
+        &direct_resolver,
+        StampPolicy::NotRequired,
+    ) else {
+        panic!("direct Python fixture must validate")
+    };
+    let direct_evidence = direct_validated.evidence();
+    let direct_metadata =
+        metadata_from_evidence(direct_evidence).expect("validated direct metadata is portable");
+    drop(direct_validated);
+    let direct_event = direct_lease
+        .acknowledge()
+        .expect("fixture Link DATA has no retained proof");
+    let ApplicationEvent::LinkData { binding, data, .. } = direct_event else {
+        unreachable!()
+    };
+    let wrong_context = ApplicationEvent::LinkData {
+        binding,
+        data,
+        context: 0x5a,
+    };
+    assert_eq!(
+        rebind_candidate(&wrong_context, direct_evidence, direct_metadata),
+        Err(DurableCandidateError::EventCarrierMismatch(
+            EventCarrierMismatch::LinkContext {
+                expected: reticulum_node_core::APPLICATION_LINK_CONTEXT_NONE,
+                actual: 0x5a,
+            }
+        ))
+    );
+
+    let mut initiator_slots = [ApplicationEventSlot::new()];
+    let mut initiator_owner = ApplicationEventOwner::new(&mut initiator_slots);
+    let initiator_lease = offer_actions(
+        &mut initiator_owner,
+        link_data_actions_for_role(&direct_fixture, ApplicationLinkRole::Initiator, false),
+    );
+    let initiator_event = initiator_lease
+        .acknowledge()
+        .expect("fixture initiator Link DATA has no retained proof");
+    assert_eq!(
+        rebind_candidate(&initiator_event, direct_evidence, direct_metadata),
+        Err(DurableCandidateError::EventCarrierMismatch(
+            EventCarrierMismatch::LinkRole {
+                expected: ApplicationLinkRole::Responder,
+                actual: ApplicationLinkRole::Initiator,
+            }
+        ))
+    );
 }
 
 #[test]
@@ -477,6 +644,81 @@ fn required_mode_returns_exact_proofless_lease_before_store_io() {
     lease.quarantine(ApplicationEventQuarantineReason::ConsumerDeferred);
     assert_eq!(store.message_count(), 0);
     assert_eq!(owner.counters().acknowledged_events, 0);
+}
+
+#[test]
+fn retained_responder_link_proof_commits_and_replays_with_bound_carrier_provenance() {
+    let fixture = named_fixture("direct_limit_319");
+    let local = LocalDeliveryDestination::new(array(&fixture.destination_hash_hex));
+    let source = array::<16>(&fixture.source_hash_hex);
+    let public_key = array::<64>(&fixture.source_public_key_hex);
+    let resolver = |candidate: &[u8; 16]| (candidate == &source).then_some(public_key);
+    let mut access = BoundLxmfStore::new(FakeNor::erased(), binding());
+    let mut index = store_index::<1>();
+    let mut store = mount(&mut access, &mut index).expect("empty store mounts");
+    let mut event_slots = [ApplicationEventSlot::new()];
+    let mut event_owner = ApplicationEventOwner::new(&mut event_slots);
+    let mut proof_slots = [DelayedProofSlot::new(), DelayedProofSlot::new()];
+    let mut delayed_proofs = DelayedProofOwner::new(&mut proof_slots);
+    let mut ready_proof_ids = Vec::new();
+
+    for expected_kind in [
+        DurableIngressCommitKind::New,
+        DurableIngressCommitKind::Replay,
+    ] {
+        let lease = offer_actions(&mut event_owner, retained_link_data_actions(&fixture));
+        assert!(lease.has_retained_proof());
+        let event_id = lease.id();
+        let payload_pointer = match lease.event() {
+            ApplicationEvent::LinkData { data, .. } => data.as_ptr(),
+            _ => unreachable!(),
+        };
+        let DurableIngressOutcome::Durable(success) = commit_application_event(
+            lease,
+            DurableIngressProofMode::Required,
+            &mut delayed_proofs,
+            local,
+            limits(),
+            &resolver,
+            StampPolicy::NotRequired,
+            &mut store,
+            &mut access,
+        ) else {
+            panic!("proof-bearing responder Link DATA must become durable")
+        };
+        assert_eq!(success.event_id(), event_id);
+        assert_eq!(success.kind(), expected_kind);
+        ready_proof_ids.push(
+            success
+                .queued_proof_id()
+                .expect("durable responder Link DATA queues its retained proof"),
+        );
+        let metadata = store
+            .metadata(success.receipt().handle())
+            .expect("committed direct message metadata");
+        assert_eq!(metadata.carrier(), CarrierProvenance::LinkDataContextNone);
+        assert_eq!(
+            metadata.lengths().carrier_payload() as usize,
+            decode(&fixture.ingress.payload_hex).len()
+        );
+        assert!(!payload_pointer.is_null());
+    }
+
+    assert_eq!(store.message_count(), 1);
+    assert_eq!(event_owner.counters().acknowledged_events, 2);
+    assert_eq!(delayed_proofs.counters().reservation_attempts, 2);
+    assert_eq!(delayed_proofs.capacities().ready, 2);
+    for expected_id in ready_proof_ids {
+        let proof = delayed_proofs
+            .lease_next()
+            .expect("each durable responder Link DATA queues one proof");
+        assert_eq!(proof.id(), expected_id);
+        let actions = proof.release_actions();
+        assert_eq!(actions.packets.len(), 1);
+        assert_eq!(actions.packets[0].target(), TxTarget::Only(InterfaceId(7)));
+        assert!(actions.events.is_empty());
+    }
+    assert!(delayed_proofs.lease_next().is_none());
 }
 
 #[test]
