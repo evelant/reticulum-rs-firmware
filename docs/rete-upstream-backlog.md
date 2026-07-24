@@ -12,8 +12,10 @@ API stay in this project; generic protocol and bounded-state corrections are
 the candidates for upstream review.
 
 The current firmware pin is
-`a443173b0829c2637ce23531a8cde15fdfec185e` on fork branch
+`354b8757bea63b9d1e27dec14f109fe6c7e03c5a` on fork branch
 `codex/responder-handshake-reclaim`. It descends from
+`338251b285a2447beb10d390d3e7f53694a1a916` and
+`a443173b0829c2637ce23531a8cde15fdfec185e`, then from
 `2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on
 `codex/link-data-receipts`, which descends from
 `90570cafc812b3025011cb690ec74a27f287cb3f`, whose tag is
@@ -49,9 +51,12 @@ replaces one envelope's sole proof target in place, rejects stale retry tokens
 and obsolete proofs, and reclaims channel receipts on every Link removal path.
 The `2d07818` descendant also registers ordinary Link-DATA receipts and applies
 the receiving destination's proof policy instead of unconditionally proving
-every context-`NONE` Link DATA packet. The current descendant additionally
-reclaims responder `Handshake` state at the
-Python-compatible establishment deadline.
+every context-`NONE` Link DATA packet. Its `a443173` descendant additionally
+reclaims responder `Handshake` state at the Python-compatible establishment
+deadline. The current descendant adds bounded canonical MessagePack request
+values, including anonymous `nil`, and separate prepared/confirmed authorities
+so request timeout registration begins only at exact first dispatch. This is
+direct single-packet request foundation, not full NomadNet or Resource support.
 The legacy LXMF event handler without mutable core access still leaves siblings
 to timeout.
 This candidate remains on the project fork; no issue or pull request was opened
@@ -475,12 +480,22 @@ product-owned.
 
 **Priority:** request interoperability and durable-node correctness
 
-`NodeCore::send_request()` supplies one `now` value both as the serialized
-request timestamp, which is wall-clock Unix time in released Python, and as the
-monotonic timeout-registration time. One integer cannot correctly represent
-both clocks on an offline device. Split the API into explicit wall and
-monotonic time types and test boot-without-wall-time behavior rather than
-silently emitting uptime as a Unix timestamp.
+The legacy `NodeCore::send_request()` convenience supplies one `now` value both
+as the serialized request timestamp, which is wall-clock Unix time in released
+Python, and as the monotonic timeout-registration time. One integer cannot
+correctly represent both clocks on an offline device. The current pin closes
+that boundary for direct single-packet requests: preparation accepts an exact
+binary64 wall-clock value and returns cancelable prepared ownership without
+starting a timeout; confirmation consumes that authority and records a
+separate monotonic dispatch time only at exact first dispatch. It also accepts
+exactly one bounded canonical MessagePack request value, including the
+anonymous NomadNet `nil`.
+
+This does not yet type the two scalar clocks, cover Resource-promoted requests,
+or constitute a complete NomadNet client. Keep firmware on the new prepared
+path, add boot-without-wall-time behavior, and extend the same transactional
+ownership boundary before enabling Resource requests rather than silently
+emitting uptime as Unix time.
 
 Transport snapshots persist `learned_at`, `last_accessed`, and cached announce
 observations without a stable interface identity, monotonic epoch, or wall-time
@@ -574,7 +589,9 @@ Make DATA preparation one transaction:
    receipt and entropy state.
 
 The generic fix is retained by current project pin
-`a443173b0829c2637ce23531a8cde15fdfec185e`, which descends through
+`354b8757bea63b9d1e27dec14f109fe6c7e03c5a`, which descends through
+`338251b285a2447beb10d390d3e7f53694a1a916` and
+`a443173b0829c2637ce23531a8cde15fdfec185e`, then
 `2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` from
 `90570cafc812b3025011cb690ec74a27f287cb3f` (tag
 `firmware-pin-90570ca`). It returns caller-owned packet metadata plus a full
@@ -588,8 +605,10 @@ HEADER_2 proofs bypass local terminal reservation. Direct Transport ingest and
 maintenance results are `must_use`; sink-aware NodeCore paths avoid duplicate
 receipt events; and the
 hosted daemon consumes LXMF terminal output. The current descendant adds
-ordinary Link-DATA receipt correlation and destination proof-policy parity. The
-recorded selected validation set for the `90570ca` predecessor passed 635 tests:
+ordinary Link-DATA receipt correlation, destination proof-policy parity,
+responder-Handshake reclamation, exact canonical request values, and
+prepared-versus-confirmed request dispatch ownership. The recorded selected
+validation set for the `90570ca` predecessor passed 635 tests:
 271 transport (174 library plus 97 integration), 137 stack (136
 library plus one integration), 143 LXMF library, and 84 daemon library. The
 four library targets total 537 tests. This is not a full nested-workspace test

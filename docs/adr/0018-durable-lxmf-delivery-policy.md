@@ -45,13 +45,16 @@ escalation unnecessarily difficult.
 The `90570ca` Rete predecessor generated a receipt for destination DATA and
 Channel traffic but not ordinary Link DATA. Its `2d07818` descendant
 implements the distinct ordinary Link-DATA receipt and respects each receiving
-destination's proof policy. The current `a443173` descendant additionally
+destination's proof policy. Its `a443173` descendant additionally
 reclaims responder `Handshake` state on Reticulum's
 `360 + 6 * max(1, post-ingress hops)` second establishment timeout. Generic
 native initiator expiry remains absent. The product wrapper closes that half
 for its outbound initiator transaction with a transport-neutral timeout and
 exact abort operation rather than coupling the lifecycle to LoRa or to the E290
-radio actor.
+radio actor. The current `354b875` descendant adds canonical request values and
+prepared-versus-confirmed request dispatch ownership; those request primitives
+do not change this LXMF delivery-policy decision or imply full NomadNet
+support.
 
 ## Decision
 

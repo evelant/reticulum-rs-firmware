@@ -36,6 +36,7 @@ members = [
     "crates/lxmf-store",
     "crates/lxmf-wire",
     "crates/node-core",
+    "crates/nomad-protocol",
     "crates/nor-flash-region",
     "crates/peer-discovery",
     "crates/radio-lora-phy",
@@ -103,6 +104,7 @@ default-members = [
     "crates/lxmf-store",
     "crates/lxmf-wire",
     "crates/node-core",
+    "crates/nomad-protocol",
     "crates/nor-flash-region",
     "crates/peer-discovery",
     "crates/radio-lora-phy",
@@ -211,12 +213,15 @@ zeroize = { version = "=1.9.0", default-features = false }
 # on fork branch codex/responder-handshake-reclaim and descends from the tagged
 # firmware-pin-90570ca predecessor. It additionally adds ordinary Link-DATA
 # receipts, respects the receiving destination's proof policy, and reclaims
-# responder Handshakes that time out before authenticated LRRTT. The predecessor
-# tag does not name the current revision.
-rete-core = { git = "https://github.com/evelant/rete.git", rev = "a443173b0829c2637ce23531a8cde15fdfec185e", default-features = false }
-rete-lxmf-core = { git = "https://github.com/evelant/rete.git", rev = "a443173b0829c2637ce23531a8cde15fdfec185e", default-features = false }
-rete-stack = { git = "https://github.com/evelant/rete.git", rev = "a443173b0829c2637ce23531a8cde15fdfec185e", default-features = false }
-rete-transport = { git = "https://github.com/evelant/rete.git", rev = "a443173b0829c2637ce23531a8cde15fdfec185e", default-features = false }
+# responder Handshakes that time out before authenticated LRRTT. It also adds
+# bounded canonical MessagePack request values, including the `nil` data value
+# used by anonymous NomadNet page requests, plus transactional request
+# preparation whose response timeout begins only at the first real dispatch.
+# The predecessor tag does not name the current revision.
+rete-core = { git = "https://github.com/evelant/rete.git", rev = "354b8757bea63b9d1e27dec14f109fe6c7e03c5a", default-features = false }
+rete-lxmf-core = { git = "https://github.com/evelant/rete.git", rev = "354b8757bea63b9d1e27dec14f109fe6c7e03c5a", default-features = false }
+rete-stack = { git = "https://github.com/evelant/rete.git", rev = "354b8757bea63b9d1e27dec14f109fe6c7e03c5a", default-features = false }
+rete-transport = { git = "https://github.com/evelant/rete.git", rev = "354b8757bea63b9d1e27dec14f109fe6c7e03c5a", default-features = false }
 
 [patch.crates-io]
 # Force every current and future graph consumer onto the one reviewed local

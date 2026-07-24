@@ -19,8 +19,10 @@ use rete_core::{
 use rete_lxmf_core::{LXMessage, LxmfMessageError};
 use rete_stack::node_core::{OutboundDispatchInterval, OutboundProtocolToken};
 use rete_stack::{
-    DestinationType, Direction, IngestOutcome, IngestRejection, LinkTableKind, NodeCore,
-    NodeEvent as NativeNodeEvent, OutboundPacket, PacketRouting, ReceiptToken,
+    ConfirmedRequestDispatch as NativeConfirmedRequestDispatch, DestinationType, Direction,
+    IngestOutcome, IngestRejection, LinkTableKind, NodeCore, NodeEvent as NativeNodeEvent,
+    OutboundPacket, PacketRouting, PreparedRequestConfirmation as NativeRequestConfirmation,
+    ReceiptToken, RequestDispatchError as NativeRequestDispatchError,
     RequestFailReason as NativeRequestFailReason,
 };
 use rete_transport::{HeaplessStorage, LinkRole, LinkState, SendError, Transport};
@@ -92,6 +94,7 @@ const LXMF_WIRE_PREFIX_LENGTH: usize = LXMF_DESTINATION_HASH_LENGTH * 2 + LXMF_S
 const LXMF_APPLICATION_NAME: &str = "lxmf";
 const LXMF_DELIVERY_ASPECT: &str = "delivery";
 const LXMF_DELIVERY_EXPANDED_NAME: &str = "lxmf.delivery";
+const SINGLE_PACKET_REQUEST_OVERHEAD: usize = 1 + 9 + 2 + TRUNCATED_HASH_LEN;
 const _: () = assert!(
     LXMF_DESTINATION_HASH_LENGTH
         + LXMF_SIGNATURE_LENGTH
@@ -480,6 +483,181 @@ impl TxPacket {
     pub fn into_parts(self) -> (Vec<u8>, TxTarget, Option<OutboundProtocolToken>) {
         (self.bytes, self.target, self.protocol_token)
     }
+}
+
+/// Stable product-owned correlation for one direct Link request.
+///
+/// The fields are private so callers cannot forge a Link/request association.
+/// The value remains copyable because queue and retry bookkeeping carry only
+/// this scalar; the owning [`EmbeddedNode`] retains Rete's move-only dispatch
+/// authorities until the request is dispatched or canceled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RequestHandle {
+    link: [u8; TRUNCATED_HASH_LEN],
+    request: [u8; TRUNCATED_HASH_LEN],
+}
+
+impl RequestHandle {
+    fn from_native(confirmation: &NativeRequestConfirmation) -> Self {
+        Self {
+            link: *confirmation.link_id().as_bytes(),
+            request: *confirmation.request_id().as_bytes(),
+        }
+    }
+
+    /// Exact Link identifier used by application-event correlation.
+    pub const fn link(&self) -> &[u8; TRUNCATED_HASH_LEN] {
+        &self.link
+    }
+
+    /// Exact request identifier used by response and failure correlation.
+    pub const fn request(&self) -> &[u8; TRUNCATED_HASH_LEN] {
+        &self.request
+    }
+}
+
+/// One direct request packet whose confirmation authority remains node-owned.
+///
+/// Splitting this value moves the sole packet owner while returning only a
+/// copyable opaque handle. If no interface accepts the packet, the handle must
+/// be returned to [`EmbeddedNode::cancel_prepared_request`].
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "a prepared request must be dispatched or canceled"]
+pub struct PreparedDirectRequest {
+    packet: TxPacket,
+    handle: RequestHandle,
+}
+
+impl PreparedDirectRequest {
+    /// Complete encrypted Reticulum packet prepared for one active Link.
+    pub const fn packet(&self) -> &TxPacket {
+        &self.packet
+    }
+
+    /// Exact product-owned correlation handle.
+    pub const fn handle(&self) -> RequestHandle {
+        self.handle
+    }
+
+    /// Consume into the packet owner and copyable correlation handle.
+    pub fn into_parts(self) -> (TxPacket, RequestHandle) {
+        (self.packet, self.handle)
+    }
+}
+
+/// Failure to prepare one direct, single-packet Link request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrepareDirectRequestError {
+    /// The selected Link is not retained.
+    LinkNotFound,
+    /// The selected Link has not reached the active state.
+    LinkNotActive,
+    /// The active Link has no authenticated interface binding.
+    LinkInterfaceUnknown,
+    /// The complete canonical request exceeds the negotiated Link MDU.
+    RequestTooLarge { actual: usize, maximum: usize },
+    /// Supplied request data is not exactly one encoded MessagePack value.
+    InvalidRequestValue,
+    /// The adapter cannot retain another dispatch authority.
+    DispatchTableFull { limit: usize },
+    /// A still-live request already uses the generated request identifier.
+    RequestAlreadyTracked,
+    /// Native bounded request storage could not be reserved.
+    AllocationFailed,
+    /// Link encryption failed.
+    Crypto,
+    /// Rete could not build or parse the base-MTU Link packet.
+    PacketBuild,
+    /// Rete returned an error or packet shape impossible for this operation.
+    Invariant,
+}
+
+impl core::fmt::Display for PrepareDirectRequestError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::LinkNotFound => formatter.write_str("selected Link is not retained"),
+            Self::LinkNotActive => formatter.write_str("selected Link is not active"),
+            Self::LinkInterfaceUnknown => {
+                formatter.write_str("selected Link has no authenticated interface binding")
+            }
+            Self::RequestTooLarge { actual, maximum } => write!(
+                formatter,
+                "canonical request length {actual} exceeds Link MDU {maximum}"
+            ),
+            Self::InvalidRequestValue => {
+                formatter.write_str("request data is not exactly one MessagePack value")
+            }
+            Self::DispatchTableFull { limit } => {
+                write!(formatter, "request dispatch table is full (limit {limit})")
+            }
+            Self::RequestAlreadyTracked => {
+                formatter.write_str("request identifier is already tracked")
+            }
+            Self::AllocationFailed => formatter.write_str("request storage allocation failed"),
+            Self::Crypto => formatter.write_str("request Link encryption failed"),
+            Self::PacketBuild => formatter.write_str("request packet construction failed"),
+            Self::Invariant => formatter.write_str("unexpected native request failure"),
+        }
+    }
+}
+
+/// Result of applying a router's first-dispatch decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a confirmed request must be marked dispatched or canceled"]
+pub enum RequestDispatchConfirmation {
+    /// This was not the packet's first interface dispatch; no state changed.
+    NotFirstDispatch,
+    /// Timeout tracking started and the exact confirmed authority is retained.
+    Confirmed,
+}
+
+/// Native request phase removed by one exact product cancellation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanceledRequestDispatch {
+    /// The packet had not reached its first interface dispatch.
+    Prepared,
+    /// Timeout tracking had started for the dispatched packet.
+    Confirmed,
+}
+
+/// Failure to transition or cancel one exact request dispatch authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestDispatchError {
+    /// No dispatch authority exists for this exact Link/request pair.
+    NotTracked,
+    /// The exact request is not awaiting first dispatch.
+    NotPrepared,
+    /// The exact request is not awaiting dispatch completion or rollback.
+    NotConfirmed,
+    /// The Link was removed after request preparation.
+    LinkNotFound,
+    /// The Link stopped being active after request preparation.
+    LinkNotActive,
+    /// Adapter and native request state no longer agree.
+    NativeStateMismatch,
+}
+
+impl core::fmt::Display for RequestDispatchError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(match self {
+            Self::NotTracked => "request dispatch authority is not tracked",
+            Self::NotPrepared => "request is not awaiting first dispatch",
+            Self::NotConfirmed => "request is not awaiting dispatch completion",
+            Self::LinkNotFound => "prepared request Link was removed",
+            Self::LinkNotActive => "prepared request Link is not active",
+            Self::NativeStateMismatch => "adapter and native request state disagree",
+        })
+    }
+}
+
+enum NativeRequestDispatchAuthority {
+    Prepared(NativeRequestConfirmation),
+    Confirmed(NativeConfirmedRequestDispatch),
+}
+
+struct RequestDispatchEntry {
+    handle: RequestHandle,
+    authority: Option<NativeRequestDispatchAuthority>,
 }
 
 /// Read-only native Link timing state exposed only to conformance tests.
@@ -2633,6 +2811,7 @@ pub struct EmbeddedNode<
     ingress: IngressCounters,
     admission: AdmissionCounters,
     receipt_terminals: ReceiptTerminalCounters,
+    request_dispatches: [Option<RequestDispatchEntry>; PATHS],
 }
 
 impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, const LINKS: usize>
@@ -2658,6 +2837,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             ingress: IngressCounters::default(),
             admission: AdmissionCounters::default(),
             receipt_terminals: ReceiptTerminalCounters::default(),
+            request_dispatches: core::array::from_fn(|_| None),
         })
     }
     /// Primary destination hash.
@@ -3432,6 +3612,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         interface: InterfaceId,
         terminal_commits: TerminalCommitCounts,
     ) -> IngressReport {
+        self.reclaim_native_request_terminals(&native.events);
         if let Some(rejection) = native.rejection.take() {
             let reason = match rejection {
                 IngestRejection::LinkTableFull {
@@ -4254,6 +4435,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                 | SendError::KeepaliveRoleMismatch
                 | SendError::WindowFull
                 | SendError::OutputAllocationFailed
+                | SendError::InvalidRequestValue
                 | SendError::ProtocolTokenExhausted
                 | SendError::ProtocolTokenAssignmentFailed
                 | SendError::ResourceLimit => PrepareDirectLxmfLinkDataError::Invariant,
@@ -4338,6 +4520,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                 | SendError::LinkInterfaceUnknown
                 | SendError::WindowFull
                 | SendError::OutputAllocationFailed
+                | SendError::InvalidRequestValue
                 | SendError::ProtocolTokenExhausted
                 | SendError::ProtocolTokenAssignmentFailed
                 | SendError::ResourceLimit => PrepareDataError::Invariant,
@@ -4483,6 +4666,391 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             .confirm_outbound_protocol(token, interface.0, interval)
     }
 
+    /// Prepare a canonical anonymous direct request on one active Link.
+    ///
+    /// This is the NomadNet page-request shape: the third request-array value
+    /// is MessagePack `nil`. The wall-clock timestamp is encoded unchanged and
+    /// does not start timeout tracking. The returned handle must be confirmed
+    /// only when the router reports its first interface dispatch.
+    pub fn prepare_anonymous_request<R: RngCore + CryptoRng>(
+        &mut self,
+        link_id: &LinkId,
+        path: &str,
+        requested_at_secs: f64,
+        rng: &mut R,
+    ) -> Result<PreparedDirectRequest, PrepareDirectRequestError> {
+        self.prepare_direct_request_value(link_id, path, None, requested_at_secs, rng)
+    }
+
+    /// Prepare one canonical, direct, single-packet request without starting
+    /// its response timeout.
+    ///
+    /// `value` is either absent for canonical MessagePack `nil`, or exactly
+    /// one already-encoded MessagePack value. Only the fixed path hash is
+    /// carried on the wire, so owned request allocation is bounded by the
+    /// negotiated Link MDU regardless of path-string length.
+    pub fn prepare_direct_request_value<R: RngCore + CryptoRng>(
+        &mut self,
+        link_id: &LinkId,
+        path: &str,
+        value: Option<&[u8]>,
+        requested_at_secs: f64,
+        rng: &mut R,
+    ) -> Result<PreparedDirectRequest, PrepareDirectRequestError> {
+        let (target, maximum) = {
+            let link = self
+                .core
+                .transport
+                .get_link(link_id)
+                .ok_or(PrepareDirectRequestError::LinkNotFound)?;
+            if link.state != LinkState::Active {
+                return Err(PrepareDirectRequestError::LinkNotActive);
+            }
+            let interface = link
+                .bound_interface()
+                .ok_or(PrepareDirectRequestError::LinkInterfaceUnknown)?;
+            (TxTarget::Only(InterfaceId(interface)), link.mdu())
+        };
+        let value_len = value.map_or(1, <[u8]>::len);
+        let actual = SINGLE_PACKET_REQUEST_OVERHEAD.saturating_add(value_len);
+        if actual > maximum {
+            return Err(PrepareDirectRequestError::RequestTooLarge { actual, maximum });
+        }
+        let dispatch_slot = self
+            .request_dispatches
+            .iter()
+            .position(Option::is_none)
+            .ok_or(PrepareDirectRequestError::DispatchTableFull { limit: PATHS })?;
+
+        let native = self
+            .core
+            .prepare_single_packet_request_value(link_id, path, value, requested_at_secs, rng)
+            .map_err(|error| match error {
+                SendError::LinkNotFound => PrepareDirectRequestError::LinkNotFound,
+                SendError::LinkNotActive => PrepareDirectRequestError::LinkNotActive,
+                SendError::LinkInterfaceUnknown => PrepareDirectRequestError::LinkInterfaceUnknown,
+                SendError::InvalidRequestValue => PrepareDirectRequestError::InvalidRequestValue,
+                SendError::ReceiptHashAlreadyTracked => {
+                    PrepareDirectRequestError::RequestAlreadyTracked
+                }
+                SendError::OutputAllocationFailed => PrepareDirectRequestError::AllocationFailed,
+                SendError::Crypto(_) => PrepareDirectRequestError::Crypto,
+                SendError::PacketBuild(rete_core::Error::PayloadTooLarge) => {
+                    PrepareDirectRequestError::RequestTooLarge { actual, maximum }
+                }
+                SendError::PacketBuild(_) => PrepareDirectRequestError::PacketBuild,
+                SendError::UnknownDestination
+                | SendError::LinkAlreadyExists
+                | SendError::LinkTableFull
+                | SendError::KeepaliveRoleMismatch
+                | SendError::WindowFull
+                | SendError::ReceiptTableFull
+                | SendError::ProtocolTokenExhausted
+                | SendError::ProtocolTokenAssignmentFailed
+                | SendError::ResourceLimit => PrepareDirectRequestError::Invariant,
+            })?;
+        let handle = RequestHandle {
+            link: *native.link_id().as_bytes(),
+            request: *native.request_id().as_bytes(),
+        };
+        let (outbound, confirmation) = native.into_parts();
+        debug_assert_eq!(handle, RequestHandle::from_native(&confirmation));
+        let packet = resolve_origin_packet(outbound);
+        let exact_packet = Packet::parse(packet.bytes()).is_ok_and(|parsed| {
+            parsed.packet_type == PacketType::Data
+                && parsed.dest_type == DestType::Link
+                && parsed.context == rete_core::CONTEXT_REQUEST
+                && parsed.destination_hash == handle.link()
+                && parsed.compute_hash()[..TRUNCATED_HASH_LEN] == handle.request()[..]
+        });
+        if packet.target() != target || packet.protocol_token().is_some() || !exact_packet {
+            let canceled = self.core.cancel_prepared_request(confirmation);
+            debug_assert!(canceled, "fresh native prepared request must roll back");
+            return Err(PrepareDirectRequestError::Invariant);
+        }
+
+        self.request_dispatches[dispatch_slot] = Some(RequestDispatchEntry {
+            handle,
+            authority: Some(NativeRequestDispatchAuthority::Prepared(confirmation)),
+        });
+        Ok(PreparedDirectRequest { packet, handle })
+    }
+
+    /// Apply the router's exact first-dispatch decision to one prepared request.
+    ///
+    /// A false `first_dispatch` is an explicit no-op, including after a prior
+    /// successful dispatch. A true value consumes the adapter-owned native
+    /// preparation authority, starts timeout tracking at `sent_at`, and keeps
+    /// the confirmed authority for exact response, failure, or cancellation
+    /// cleanup.
+    pub fn confirm_request_dispatch(
+        &mut self,
+        handle: RequestHandle,
+        sent_at: u64,
+        first_dispatch: bool,
+    ) -> Result<RequestDispatchConfirmation, RequestDispatchError> {
+        let index = self
+            .request_dispatches
+            .iter()
+            .position(|entry| entry.as_ref().is_some_and(|entry| entry.handle == handle))
+            .ok_or(RequestDispatchError::NotTracked)?;
+        if !first_dispatch {
+            return Ok(RequestDispatchConfirmation::NotFirstDispatch);
+        }
+        let authority = self.request_dispatches[index]
+            .as_mut()
+            .ok_or(RequestDispatchError::NativeStateMismatch)?
+            .authority
+            .take()
+            .ok_or(RequestDispatchError::NativeStateMismatch)?;
+        let NativeRequestDispatchAuthority::Prepared(confirmation) = authority else {
+            self.request_dispatches[index]
+                .as_mut()
+                .ok_or(RequestDispatchError::NativeStateMismatch)?
+                .authority = Some(authority);
+            return Err(RequestDispatchError::NotPrepared);
+        };
+        match self.core.confirm_prepared_request(confirmation, sent_at) {
+            Ok(confirmed) => {
+                debug_assert_eq!(confirmed.link_id().as_bytes(), handle.link());
+                debug_assert_eq!(confirmed.request_id().as_bytes(), handle.request());
+                self.request_dispatches[index]
+                    .as_mut()
+                    .ok_or(RequestDispatchError::NativeStateMismatch)?
+                    .authority = Some(NativeRequestDispatchAuthority::Confirmed(confirmed));
+                Ok(RequestDispatchConfirmation::Confirmed)
+            }
+            Err(error) => {
+                self.request_dispatches[index] = None;
+                Err(match error {
+                    NativeRequestDispatchError::LinkNotFound => RequestDispatchError::LinkNotFound,
+                    NativeRequestDispatchError::LinkNotActive => {
+                        RequestDispatchError::LinkNotActive
+                    }
+                    NativeRequestDispatchError::NotPrepared => {
+                        RequestDispatchError::NativeStateMismatch
+                    }
+                })
+            }
+        }
+    }
+
+    /// Cancel one exact request regardless of whether first dispatch occurred.
+    ///
+    /// This is the product timeout and definitive router-failure rollback.
+    pub fn cancel_request(
+        &mut self,
+        handle: RequestHandle,
+    ) -> Result<CanceledRequestDispatch, RequestDispatchError> {
+        let index = self
+            .request_dispatches
+            .iter()
+            .position(|entry| entry.as_ref().is_some_and(|entry| entry.handle == handle))
+            .ok_or(RequestDispatchError::NotTracked)?;
+        let entry = self.request_dispatches[index]
+            .take()
+            .ok_or(RequestDispatchError::NativeStateMismatch)?;
+        match entry
+            .authority
+            .ok_or(RequestDispatchError::NativeStateMismatch)?
+        {
+            NativeRequestDispatchAuthority::Prepared(confirmation) => self
+                .core
+                .cancel_prepared_request(confirmation)
+                .then_some(CanceledRequestDispatch::Prepared)
+                .ok_or(RequestDispatchError::NativeStateMismatch),
+            NativeRequestDispatchAuthority::Confirmed(confirmed) => self
+                .core
+                .cancel_confirmed_request(confirmed)
+                .then_some(CanceledRequestDispatch::Confirmed)
+                .ok_or(RequestDispatchError::NativeStateMismatch),
+        }
+    }
+
+    /// Cancel only when the exact request still awaits first dispatch.
+    pub fn cancel_prepared_request(
+        &mut self,
+        handle: RequestHandle,
+    ) -> Result<(), RequestDispatchError> {
+        let index = self
+            .request_dispatches
+            .iter()
+            .position(|entry| entry.as_ref().is_some_and(|entry| entry.handle == handle))
+            .ok_or(RequestDispatchError::NotTracked)?;
+        if !matches!(
+            self.request_dispatches[index]
+                .as_ref()
+                .and_then(|entry| entry.authority.as_ref()),
+            Some(NativeRequestDispatchAuthority::Prepared(_))
+        ) {
+            return Err(RequestDispatchError::NotPrepared);
+        }
+        let entry = self.request_dispatches[index]
+            .take()
+            .ok_or(RequestDispatchError::NativeStateMismatch)?;
+        let Some(NativeRequestDispatchAuthority::Prepared(confirmation)) = entry.authority else {
+            return Err(RequestDispatchError::NativeStateMismatch);
+        };
+        self.core
+            .cancel_prepared_request(confirmation)
+            .then_some(())
+            .ok_or(RequestDispatchError::NativeStateMismatch)
+    }
+
+    /// Cancel only when first dispatch already started timeout tracking.
+    pub fn cancel_confirmed_request(
+        &mut self,
+        handle: RequestHandle,
+    ) -> Result<(), RequestDispatchError> {
+        let index = self
+            .request_dispatches
+            .iter()
+            .position(|entry| entry.as_ref().is_some_and(|entry| entry.handle == handle))
+            .ok_or(RequestDispatchError::NotTracked)?;
+        if !matches!(
+            self.request_dispatches[index]
+                .as_ref()
+                .and_then(|entry| entry.authority.as_ref()),
+            Some(NativeRequestDispatchAuthority::Confirmed(_))
+        ) {
+            return Err(RequestDispatchError::NotConfirmed);
+        }
+        let entry = self.request_dispatches[index]
+            .take()
+            .ok_or(RequestDispatchError::NativeStateMismatch)?;
+        let Some(NativeRequestDispatchAuthority::Confirmed(confirmed)) = entry.authority else {
+            return Err(RequestDispatchError::NativeStateMismatch);
+        };
+        self.core
+            .cancel_confirmed_request(confirmed)
+            .then_some(())
+            .ok_or(RequestDispatchError::NativeStateMismatch)
+    }
+
+    #[cfg(test)]
+    fn request_dispatch_count(&self) -> usize {
+        self.request_dispatches.iter().flatten().count()
+    }
+
+    fn reclaim_terminal_request_dispatch(&mut self, handle: RequestHandle) {
+        let Some(index) = self
+            .request_dispatches
+            .iter()
+            .position(|entry| entry.as_ref().is_some_and(|entry| entry.handle == handle))
+        else {
+            return;
+        };
+        let Some(entry) = self.request_dispatches[index].take() else {
+            return;
+        };
+        match entry.authority {
+            Some(NativeRequestDispatchAuthority::Prepared(confirmation)) => {
+                // Native response handling deliberately cannot consume a
+                // Prepared request. If an exact terminal event nevertheless
+                // races product confirmation, close that state explicitly.
+                let _ = self.core.cancel_prepared_request(confirmation);
+            }
+            Some(NativeRequestDispatchAuthority::Confirmed(confirmed)) => {
+                // Response/failure processing already removed native pending
+                // state; consuming the dispatch authority records intentional
+                // completion rather than leaking a must-use owner.
+                let _ = confirmed.dispatched();
+            }
+            None => {}
+        }
+    }
+
+    fn reclaim_link_request_dispatches(&mut self, link: &[u8; TRUNCATED_HASH_LEN]) {
+        while let Some(index) = self.request_dispatches.iter().position(|entry| {
+            entry
+                .as_ref()
+                .is_some_and(|entry| entry.handle.link() == link)
+        }) {
+            let Some(entry) = self.request_dispatches[index].take() else {
+                continue;
+            };
+            match entry.authority {
+                Some(NativeRequestDispatchAuthority::Prepared(confirmation)) => {
+                    let _ = self.core.cancel_prepared_request(confirmation);
+                }
+                Some(NativeRequestDispatchAuthority::Confirmed(confirmed)) => {
+                    let _ = confirmed.dispatched();
+                }
+                None => {}
+            }
+        }
+    }
+
+    fn reclaim_native_request_terminals(&mut self, events: &[NativeNodeEvent]) {
+        for event in events {
+            let exact = match event {
+                NativeNodeEvent::ResponseReceived {
+                    link_id,
+                    request_id,
+                    ..
+                }
+                | NativeNodeEvent::RequestFailed {
+                    link_id,
+                    request_id,
+                    ..
+                } => Some(RequestHandle {
+                    link: *link_id.as_bytes(),
+                    request: *request_id.as_bytes(),
+                }),
+                _ => None,
+            };
+            if let Some(handle) = exact {
+                self.reclaim_terminal_request_dispatch(handle);
+            }
+
+            let closed_link = match event {
+                NativeNodeEvent::LinkClosed { link_id } => Some(*link_id.as_bytes()),
+                _ => None,
+            };
+            if let Some(link) = closed_link {
+                self.reclaim_link_request_dispatches(&link);
+            }
+        }
+    }
+
+    fn cancel_link_request_dispatches(&mut self, link_id: &LinkId) {
+        for entry in self
+            .request_dispatches
+            .iter()
+            .flatten()
+            .filter(|entry| entry.handle.link() == link_id.as_bytes())
+        {
+            let request_id = rete_core::RequestId::from(*entry.handle.request());
+            let expected = match entry.authority.as_ref() {
+                Some(NativeRequestDispatchAuthority::Prepared(_)) => {
+                    rete_stack::RequestStatus::Prepared
+                }
+                Some(NativeRequestDispatchAuthority::Confirmed(_)) => {
+                    rete_stack::RequestStatus::Sent
+                }
+                None => panic!("tracked request has no native dispatch authority"),
+            };
+            assert_eq!(
+                self.core.get_request_status(&request_id),
+                Some(expected),
+                "tracked request cannot be canceled before local Link removal"
+            );
+        }
+
+        while let Some(handle) = self
+            .request_dispatches
+            .iter()
+            .filter_map(Option::as_ref)
+            .find(|entry| entry.handle.link() == link_id.as_bytes())
+            .map(|entry| entry.handle)
+        {
+            assert!(
+                self.cancel_request(handle).is_ok(),
+                "tracked request cancellation failed before local Link removal"
+            );
+        }
+    }
+
     /// Send bounded best-effort data over an active Link.
     pub fn send_link_data<R: RngCore + CryptoRng>(
         &mut self,
@@ -4596,6 +5164,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         link_id: &LinkId,
         rng: &mut R,
     ) -> NodeActions {
+        self.cancel_link_request_dispatches(link_id);
         let (packet, event) = self.core.close_link(link_id, rng);
         NodeActions::without_retained_proofs(
             event.into_iter().map(project_local_close_event).collect(),
@@ -4677,6 +5246,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
     }
 
     fn finish_tick(&mut self, mut native: IngestOutcome) -> NodeActions {
+        self.reclaim_native_request_terminals(&native.events);
         let mut events = Vec::with_capacity(native.events.len());
         for event in native.events.drain(..) {
             match self.project_retained_application_event(event) {
@@ -5142,6 +5712,8 @@ fn resolve_tick_actions(native: IngestOutcome, events: Vec<ApplicationEvent>) ->
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use alloc::{format, string::String, vec};
 
     use super::*;
@@ -7119,6 +7691,295 @@ mod tests {
         assert_eq!(responder.link_state(&link_id), Some(LinkState::Active));
         assert_eq!(responder.link_rtt(&link_id), Some(2.0));
         link_id
+    }
+
+    #[test]
+    fn anonymous_request_is_canonical_exact_routed_and_times_out_only_after_dispatch() {
+        let mut initiator = node(1);
+        let mut responder = node(2);
+        let mut rng = CounterRng::default();
+        let link_id = establish_bound_link(&mut initiator, &mut responder, &mut rng);
+        let requested_at = 1_700_000_000.125_f64;
+
+        let prepared = initiator
+            .prepare_anonymous_request(&link_id, "/page/index.mu", requested_at, &mut rng)
+            .unwrap();
+        let handle = prepared.handle();
+        assert_eq!(handle.link(), link_id.as_bytes());
+        assert_eq!(prepared.packet().target(), TxTarget::Only(InterfaceId(3)));
+        assert_eq!(prepared.packet().protocol_token(), None);
+        assert_eq!(initiator.request_dispatch_count(), 1);
+
+        let packet = Packet::parse(prepared.packet().bytes()).unwrap();
+        assert_eq!(packet.context, rete_core::CONTEXT_REQUEST);
+        assert_eq!(packet.dest_type, DestType::Link);
+        assert_eq!(packet.destination_hash, link_id.as_bytes());
+        assert_eq!(
+            handle.request(),
+            &packet.compute_hash()[..TRUNCATED_HASH_LEN]
+        );
+        let mut plaintext = [0_u8; RNS_MTU];
+        let plaintext_len = responder
+            .core
+            .transport
+            .get_link(&link_id)
+            .unwrap()
+            .decrypt(packet.payload, &mut plaintext)
+            .unwrap();
+        let (wire_time, path_hash, value) =
+            rete_transport::parse_request_value(&plaintext[..plaintext_len]).unwrap();
+        assert_eq!(wire_time.to_bits(), requested_at.to_bits());
+        assert_eq!(path_hash, rete_transport::path_hash("/page/index.mu"));
+        assert_eq!(value, [0xc0]);
+
+        let before_dispatch = initiator.tick_at(10_000, MonotonicInstant::from_secs(103), &mut rng);
+        assert!(
+            !before_dispatch
+                .events
+                .as_slice()
+                .iter()
+                .any(|event| matches!(
+                    event,
+                    ApplicationEvent::RequestFailed { request, .. }
+                        if request == handle.request()
+                ))
+        );
+        assert_eq!(initiator.request_dispatch_count(), 1);
+
+        assert_eq!(
+            initiator.confirm_request_dispatch(handle, 20_000, true),
+            Ok(RequestDispatchConfirmation::Confirmed)
+        );
+        let timed_out = initiator.tick_at(u64::MAX - 1, MonotonicInstant::from_secs(103), &mut rng);
+        assert!(timed_out.events.as_slice().iter().any(|event| matches!(
+            event,
+            ApplicationEvent::RequestFailed {
+                link,
+                request,
+                reason: ApplicationRequestFailReason::Timeout,
+            } if link == handle.link() && request == handle.request()
+        )));
+        assert_eq!(initiator.request_dispatch_count(), 0);
+    }
+
+    #[test]
+    fn request_dispatch_confirmation_cancel_and_response_cleanup_are_exact() {
+        let mut initiator = node(1);
+        let mut responder = node(2);
+        let mut rng = CounterRng::default();
+        let link_id = establish_bound_link(&mut initiator, &mut responder, &mut rng);
+
+        let response_request = initiator
+            .prepare_anonymous_request(&link_id, "/page/index.mu", 100.0, &mut rng)
+            .unwrap();
+        let response_handle = response_request.handle();
+        assert_eq!(
+            initiator.confirm_request_dispatch(response_handle, 110, false),
+            Ok(RequestDispatchConfirmation::NotFirstDispatch)
+        );
+        assert_eq!(
+            initiator.cancel_confirmed_request(response_handle),
+            Err(RequestDispatchError::NotConfirmed)
+        );
+        assert_eq!(
+            initiator.confirm_request_dispatch(response_handle, 110, true),
+            Ok(RequestDispatchConfirmation::Confirmed)
+        );
+        assert_eq!(
+            initiator.confirm_request_dispatch(response_handle, 111, false),
+            Ok(RequestDispatchConfirmation::NotFirstDispatch)
+        );
+        assert_eq!(
+            initiator.confirm_request_dispatch(response_handle, 111, true),
+            Err(RequestDispatchError::NotPrepared)
+        );
+        assert_eq!(
+            initiator.cancel_prepared_request(response_handle),
+            Err(RequestDispatchError::NotPrepared)
+        );
+
+        let request_id = rete_core::RequestId::from(*response_handle.request());
+        let response = responder
+            .core
+            .send_response(&link_id, &request_id, b"hello micron", &mut rng)
+            .unwrap();
+        let response = resolve_origin_packet(response);
+        let received = initiator.ingest(response.bytes(), 112, InterfaceId(3), &mut rng);
+        assert!(
+            received
+                .actions
+                .events
+                .as_slice()
+                .iter()
+                .any(|event| matches!(
+                    event,
+                    ApplicationEvent::ResponseReceived {
+                        link,
+                        request,
+                        data,
+                    } if link == response_handle.link()
+                        && request == response_handle.request()
+                        && data == b"hello micron"
+                ))
+        );
+        assert_eq!(initiator.request_dispatch_count(), 0);
+        assert_eq!(
+            initiator.cancel_request(response_handle),
+            Err(RequestDispatchError::NotTracked)
+        );
+        assert_eq!(
+            initiator.confirm_request_dispatch(response_handle, 113, false),
+            Err(RequestDispatchError::NotTracked)
+        );
+
+        let prepared = initiator
+            .prepare_anonymous_request(&link_id, "/page/prepared.mu", 120.0, &mut rng)
+            .unwrap();
+        assert_eq!(
+            initiator.cancel_request(prepared.handle()),
+            Ok(CanceledRequestDispatch::Prepared)
+        );
+        assert_eq!(initiator.request_dispatch_count(), 0);
+
+        let confirmed = initiator
+            .prepare_anonymous_request(&link_id, "/page/confirmed.mu", 121.0, &mut rng)
+            .unwrap();
+        assert_eq!(
+            initiator.confirm_request_dispatch(confirmed.handle(), 122, true),
+            Ok(RequestDispatchConfirmation::Confirmed)
+        );
+        assert_eq!(
+            initiator.cancel_request(confirmed.handle()),
+            Ok(CanceledRequestDispatch::Confirmed)
+        );
+        assert_eq!(initiator.request_dispatch_count(), 0);
+    }
+
+    #[test]
+    fn request_preflight_bounds_storage_and_local_link_close_rolls_back() {
+        let mut initiator = node(1);
+        let mut responder = node(2);
+        let mut rng = CounterRng::default();
+        let link_id = establish_bound_link(&mut initiator, &mut responder, &mut rng);
+        let maximum = initiator.core.transport.get_link(&link_id).unwrap().mdu();
+
+        let entropy_before_invalid = rng.0;
+        assert_eq!(
+            initiator.prepare_direct_request_value(
+                &link_id,
+                "/page/form.mu",
+                Some(&[0xc0, 0xc0]),
+                100.0,
+                &mut rng,
+            ),
+            Err(PrepareDirectRequestError::InvalidRequestValue)
+        );
+        assert_eq!(rng.0, entropy_before_invalid);
+        assert_eq!(initiator.request_dispatch_count(), 0);
+
+        let oversized = vec![0xc0; maximum - SINGLE_PACKET_REQUEST_OVERHEAD + 1];
+        let entropy_before_oversized = rng.0;
+        assert_eq!(
+            initiator.prepare_direct_request_value(
+                &link_id,
+                "/page/form.mu",
+                Some(&oversized),
+                100.0,
+                &mut rng,
+            ),
+            Err(PrepareDirectRequestError::RequestTooLarge {
+                actual: maximum + 1,
+                maximum,
+            })
+        );
+        assert_eq!(rng.0, entropy_before_oversized);
+        assert_eq!(initiator.request_dispatch_count(), 0);
+
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            handles.push(
+                initiator
+                    .prepare_anonymous_request(&link_id, "/page/index.mu", 101.0, &mut rng)
+                    .unwrap()
+                    .handle(),
+            );
+        }
+        let entropy_before_full = rng.0;
+        assert_eq!(
+            initiator.prepare_anonymous_request(&link_id, "/page/index.mu", 101.0, &mut rng,),
+            Err(PrepareDirectRequestError::DispatchTableFull { limit: 4 })
+        );
+        assert_eq!(rng.0, entropy_before_full);
+        assert_eq!(initiator.request_dispatch_count(), 4);
+
+        let closing_handle = handles[0];
+        let closed = initiator.close_link(&link_id, &mut rng);
+        assert!(closed.events.as_slice().iter().any(|event| matches!(
+            event,
+            ApplicationEvent::LinkClosed { link } if link == closing_handle.link()
+        )));
+        assert_eq!(initiator.request_dispatch_count(), 0);
+        for handle in handles {
+            assert_eq!(
+                initiator.cancel_request(handle),
+                Err(RequestDispatchError::NotTracked)
+            );
+        }
+    }
+
+    #[test]
+    fn local_close_fails_before_link_removal_when_request_cannot_cancel() {
+        let mut initiator = node(1);
+        let mut responder = node(2);
+        let mut rng = CounterRng::default();
+        let link_id = establish_bound_link(&mut initiator, &mut responder, &mut rng);
+        let prepared = initiator
+            .prepare_anonymous_request(&link_id, "/page/index.mu", 100.0, &mut rng)
+            .unwrap();
+        let handle = prepared.handle();
+        assert_eq!(
+            initiator.confirm_request_dispatch(handle, 110, true),
+            Ok(RequestDispatchConfirmation::Confirmed)
+        );
+
+        // Bypass the owning adapter to simulate native state becoming terminal
+        // without its exact projected event reclaiming the retained control.
+        let request_id = rete_core::RequestId::from(*handle.request());
+        let response = responder
+            .core
+            .send_response(&link_id, &request_id, b"terminal", &mut rng)
+            .unwrap();
+        let terminal = initiator
+            .core
+            .handle_ingest(&response.data, 111, 3, &mut rng);
+        assert!(matches!(
+            terminal.events.as_slice(),
+            [NativeNodeEvent::ResponseReceived {
+                link_id: event_link,
+                request_id: event_request,
+                data,
+            }] if *event_link == link_id
+                && event_request.as_bytes() == handle.request()
+                && data == b"terminal"
+        ));
+        assert_eq!(initiator.core.get_request_status(&request_id), None);
+        assert_eq!(initiator.request_dispatch_count(), 1);
+
+        let close_panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = initiator.close_link(&link_id, &mut rng);
+        }));
+        assert!(close_panicked.is_err());
+        assert_eq!(initiator.link_state(&link_id), Some(LinkState::Active));
+        assert_eq!(initiator.request_dispatch_count(), 1);
+
+        initiator.reclaim_native_request_terminals(&terminal.events);
+        assert_eq!(initiator.request_dispatch_count(), 0);
+        let closed = initiator.close_link(&link_id, &mut rng);
+        assert!(matches!(
+            closed.events.as_slice(),
+            [ApplicationEvent::LinkClosed { link }] if link == link_id.as_bytes()
+        ));
+        assert_eq!(initiator.link_state(&link_id), None);
     }
 
     #[test]

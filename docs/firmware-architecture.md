@@ -125,8 +125,11 @@ LRRTT lifecycle/timing contract. Its `2d07818` descendant additionally adds
 ordinary Link-DATA receipts and destination proof-policy parity. A later
 bounded powered proof on `2d07818` forced ordinary Link DATA, observed the
 durable receiver commit and returned proof, and reached sender `Delivered`. The
-current `a443173` descendant adds responder-Handshake timeout reclamation; that
-new lifecycle boundary remains separate from the historical capture here.
+`a443173` descendant adds responder-Handshake timeout reclamation. The current
+`354b875` descendant additionally adds canonical MessagePack request values and
+separate prepared-versus-confirmed ownership whose timeout begins at exact
+first dispatch. Those new lifecycle boundaries remain separate from the
+historical capture here and do not claim full NomadNet or Resource support.
 These are instrumented,
 bounded-workload observations, not
 closure of sustained or production-image target bounds. After that capture,
@@ -405,7 +408,9 @@ The reviewed upstream base had a sustained outbound-DATA blocker:
 `NodeCore::build_data_packet()` could release a packet after silently failing
 to retain its receipt, and proof/timeout terminal state was not reclaimed
 through a caller-reservable boundary. The current project pin,
-`a443173b0829c2637ce23531a8cde15fdfec185e`, descends through
+`354b8757bea63b9d1e27dec14f109fe6c7e03c5a`, descends through
+`338251b285a2447beb10d390d3e7f53694a1a916` and
+`a443173b0829c2637ce23531a8cde15fdfec185e`, then
 `2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` from
 `90570cafc812b3025011cb690ec74a27f287cb3f` and retains that generic lifecycle
 fix. DATA
@@ -420,6 +425,14 @@ receipts, so even a colliding truncated DATA key cannot bind the wrong terminal
 record. A channel terminal also requires the stored full outbound hash and
 destination Link ID, while HEADER_2 proofs handled by the relay path do not
 reserve local terminal capacity.
+
+The same pin adds a direct single-packet request foundation. It embeds exactly
+one bounded canonical MessagePack value, including anonymous NomadNet `nil`,
+keeps packet preparation under cancelable prepared ownership, and moves to
+confirmed timeout ownership only when the caller reports exact first
+interface dispatch. Wall-clock request encoding is therefore separate from the
+monotonic response timer. Resource-backed requests, response resources, and a
+complete NomadNet client remain separate work.
 
 The same pin makes reliable Channel mutation receipt-atomic. Initial send
 preflights MDU, pending-window allocation, receipt capacity, and output before

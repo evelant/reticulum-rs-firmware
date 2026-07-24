@@ -10,14 +10,19 @@ DATA/LXMF submission, client delivery, and full powered E290 qualification of
 the product image remain open.
 The permanent image's bounded source-`96e38aa` boot/interface/ordinary-TX smoke
 has passed, without controlled peer RX or DATA.
-**Rete pin:** `a443173b0829c2637ce23531a8cde15fdfec185e` on
+**Rete pin:** `354b8757bea63b9d1e27dec14f109fe6c7e03c5a` on
 `codex/responder-handshake-reclaim`, descending from
+`338251b285a2447beb10d390d3e7f53694a1a916` and
+`a443173b0829c2637ce23531a8cde15fdfec185e`, then from
 `2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on
 `codex/link-data-receipts`, which descends from tagged predecessor
 `90570cafc812b3025011cb690ec74a27f287cb3f`
 (`firmware-pin-90570ca`). The current revision has no designated durable tag.
-It adds responder-Handshake timeout reclamation to ordinary Link-DATA receipts
-and destination proof-policy parity.
+It adds bounded canonical MessagePack request values, including anonymous
+`nil`, and separates prepared request ownership from confirmed-dispatch
+timeout ownership. The `a443173` predecessor adds responder-Handshake timeout
+reclamation to ordinary Link-DATA receipts and destination proof-policy parity.
+These request primitives are not full NomadNet or Resource support.
 
 The preceding `14c7b4955a1ff6903e87cc40b42498f7869b6f4f` pin had host and
 portable-target LRRTT validation and a build-only E290 package. Its 776,464-byte

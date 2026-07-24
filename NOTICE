@@ -6,8 +6,10 @@ Version 2.0, at your option.
 
 The default firmware evaluation graph uses the Rete integration fork from
 https://github.com/evelant/rete at revision
-a443173b0829c2637ce23531a8cde15fdfec185e on branch
+354b8757bea63b9d1e27dec14f109fe6c7e03c5a on branch
 codex/responder-handshake-reclaim. That revision descends from
+338251b285a2447beb10d390d3e7f53694a1a916 and
+a443173b0829c2637ce23531a8cde15fdfec185e, then from
 2d0781838aa03370b739d4003bcd1bdd5bbb0c6c on branch
 codex/link-data-receipts, which descends from
 90570cafc812b3025011cb690ec74a27f287cb3f and is based on upstream
@@ -15,7 +17,9 @@ https://github.com/s-retlaw/rete revision
 9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743. The fork retains upstream's
 MIT OR Apache-2.0 declaration in its package metadata and README. Fork tag
 firmware-pin-90570ca names the older predecessor; the current exact revision
-has no designated durable tag.
+has no designated durable tag. The two newest commits add bounded canonical
+MessagePack request values, including anonymous nil, and split prepared request
+ownership from confirmed-dispatch timeout ownership.
 
 The checked LXMF compatibility corpus is generated from Python LXMF 1.0.1 at
 revision fab12ad9bf9f997797034950f289fe41a79dcf5a and Python RNS at revision

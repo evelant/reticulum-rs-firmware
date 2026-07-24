@@ -118,13 +118,15 @@ initiator/backchannel receive, responder/backchannel reuse, and native Resource
 ingress remain disabled.
 
 The current source composition pins Rete commit
-`a443173b0829c2637ce23531a8cde15fdfec185e` on fork branch
+`354b8757bea63b9d1e27dec14f109fe6c7e03c5a` on fork branch
 `codex/responder-handshake-reclaim`. It descends from
+`338251b285a2447beb10d390d3e7f53694a1a916` and
+`a443173b0829c2637ce23531a8cde15fdfec185e`, then from
 `2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on
 `codex/link-data-receipts`, which descends from
 `90570cafc812b3025011cb690ec74a27f287cb3f`, whose tag is
 `firmware-pin-90570ca`; the current revision has no designated durable tag. The
-older 2026-07-20 two-board measurements below predate all three revisions, while
+older 2026-07-20 two-board measurements below predate this fork lineage, while
 the later pre-PSRAM one-board checkpoint uses the `90570ca` predecessor and the
 fresh direct-Link powered proof uses the `2d07818` descendant. The
 Stage 5 PSRAM boot checkpoint is the first powered evidence for the post-offload
@@ -136,8 +138,12 @@ admission transactional with typed failures. It also adds precise
 microsecond/binary64 LRRTT timing, dispatch confirmation, Active/Stale updates,
 and authenticated-malformed teardown. The `2d07818` descendant additionally
 registers ordinary Link-DATA receipts and honors the receiving destination's
-proof policy. The current descendant adds responder-Handshake timeout
-reclamation. Those changes do not retroactively
+proof policy. Its `a443173` descendant adds responder-Handshake timeout
+reclamation. The current descendant additionally adds bounded canonical
+MessagePack request values, including anonymous `nil`, and separate
+prepared-versus-confirmed ownership whose response timeout begins only at
+exact first dispatch. This is direct single-packet request foundation, not full
+NomadNet or Resource support. Those changes do not retroactively
 qualify a historical image or hardware run.
 
 The current composition also replaces `RADIO_READY`/`LORA_ONLINE`
@@ -1036,7 +1042,7 @@ Those historical artifacts passed build, graph, ELF, and static-stack gates but
 were not powered-qualified: both boards were absent after the preceding
 debugger-reset attempt. They do not describe an ELF built from the preceding
 `8b5d652`, `14c7b49`, `90570ca`, or `2d07818` pins, or from the current
-`a443173` pin. The immediately preceding 777,600-byte HIL image,
+`354b875` pin. The immediately preceding 777,600-byte HIL image,
 SHA-256
 `151a66cc92b83268050c61bfc983ad6d9452fac0626d260c26da877c552c800e`,
 did pass an identity-qualified flash and exact address-zero readback on board
@@ -1694,8 +1700,8 @@ and no optional functionality advertised. An unmounted or clean-fault-disabled
 LXMF service is not advertised; the primary node destination continues
 independently.
 
-Two discovery limitations remain in the current pinned Rete `a443173`
-descendant of `2d07818` and `90570ca`. Its native handling
+Two discovery limitations remain in the current pinned Rete `354b875`
+descendant of `338251b`, `a443173`, `2d07818`, and `90570ca`. Its native handling
 rebroadcasts a path request for a registered local secondary destination rather
 than returning that destination's PATH_RESPONSE. The current product wrapper
 temporarily detects and answers that request on the source interface and
@@ -2826,9 +2832,11 @@ proof-policy parity. The later
 remains bound to `2d07818`, forced ordinary Link DATA, observed the receiver's
 durable commit and returned proof, and reached sender `Delivered`; it therefore
 closes this earlier end-to-end timeout only for that bounded success path. The
-current `a443173` descendant adds responder-Handshake reclamation without
-changing this historical capture. A final authenticated peek on `3f:88`
-likewise returned phase A's exact 383-byte payload from destination
+`a443173` descendant adds responder-Handshake reclamation without changing
+this historical capture. The current `354b875` descendant additionally adds
+canonical request values and first-dispatch timeout ownership; neither change
+retroactively expands this powered evidence. A final authenticated peek on
+`3f:88` likewise returned phase A's exact 383-byte payload from destination
 `83a09ed807a0a7c631386deaa0448fb9`.
 
 These are instrumented-workload observations, not production-image timing

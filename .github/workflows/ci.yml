@@ -307,6 +307,7 @@ jobs:
           -p reticulum-lxmf-store
           -p reticulum-lxmf-wire
           -p reticulum-node-core
+          -p reticulum-nomad-protocol
           -p reticulum-nor-flash-region
           -p reticulum-peer-discovery
           -p reticulum-radio-tx-dispatch
@@ -477,6 +478,7 @@ jobs:
           -p reticulum-lxmf-store
           -p reticulum-lxmf-wire
           -p reticulum-node-core
+          -p reticulum-nomad-protocol
           -p reticulum-nor-flash-region
           -p reticulum-board-heltec-vision-master-e290
           -p reticulum-board-heltec-vision-master-e290-radio

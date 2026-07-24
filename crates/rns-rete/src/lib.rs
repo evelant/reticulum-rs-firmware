@@ -45,18 +45,20 @@ pub use embedded::ConformanceLinkSnapshot;
 pub use embedded::{
     AdmissionCounters, AnnounceAdmissionError, AnnounceAppDataError, ApplicationEvent,
     ApplicationEventKind, ApplicationEvents, ApplicationLinkBinding, ApplicationLinkRole,
-    ApplicationRequestFailReason, DestinationRegistrationError, DiscardedNodeActionCounts,
-    EmbeddedNode, EmbeddedNodeConfig, EmbeddedNodeMetrics, EmbeddedSendError, InboundData,
-    InboundDataProjection, InboundProofPolicy, InboundProofPolicyError, IngressCounters,
-    IngressDisposition, IngressDropReason, IngressMetadata, IngressReport, InterfaceId,
-    LINK_DATA_CONTEXT_NONE, MAX_CHANNEL_PAYLOAD, MAX_DATA_PAYLOAD, MAX_DIRECT_LXMF_CONTENT_SIZE,
-    MAX_DIRECT_LXMF_WIRE, MAX_LXMF_TIMESTAMP_UNIX_MS, MAX_OPPORTUNISTIC_LXMF_CARRIER,
+    ApplicationRequestFailReason, CanceledRequestDispatch, DestinationRegistrationError,
+    DiscardedNodeActionCounts, EmbeddedNode, EmbeddedNodeConfig, EmbeddedNodeMetrics,
+    EmbeddedSendError, InboundData, InboundDataProjection, InboundProofPolicy,
+    InboundProofPolicyError, IngressCounters, IngressDisposition, IngressDropReason,
+    IngressMetadata, IngressReport, InterfaceId, LINK_DATA_CONTEXT_NONE, MAX_CHANNEL_PAYLOAD,
+    MAX_DATA_PAYLOAD, MAX_DIRECT_LXMF_CONTENT_SIZE, MAX_DIRECT_LXMF_WIRE,
+    MAX_LXMF_TIMESTAMP_UNIX_MS, MAX_OPPORTUNISTIC_LXMF_CARRIER,
     MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE, NodeActions, NodeRole, PathRequestBuildError,
     PrepareBasicLxmfError, PrepareDataError, PrepareDirectLxmfLinkDataError,
-    PrepareOpportunisticLxmfDataError, PreparedBasicDirectLxmf, PreparedBasicLxmf, PreparedData,
-    PreparedLinkData, RNS_MTU, ReceiptCandidate, ReceiptId, ReceiptKind,
-    ReceiptReservationUnavailable, ReceiptTerminal, ReceiptTerminalCounters,
-    ReceiptTerminalReservation, ReceiptTerminalSink, ReceiptTickReport, RetainedProofInvariant,
+    PrepareDirectRequestError, PrepareOpportunisticLxmfDataError, PreparedBasicDirectLxmf,
+    PreparedBasicLxmf, PreparedData, PreparedDirectRequest, PreparedLinkData, RNS_MTU,
+    ReceiptCandidate, ReceiptId, ReceiptKind, ReceiptReservationUnavailable, ReceiptTerminal,
+    ReceiptTerminalCounters, ReceiptTerminalReservation, ReceiptTerminalSink, ReceiptTickReport,
+    RequestDispatchConfirmation, RequestDispatchError, RequestHandle, RetainedProofInvariant,
     RouteSnapshot, TransportCounters, TxPacket, TxTarget, project_inbound_data,
 };
 pub use rete_core::{
@@ -68,7 +70,7 @@ pub use rete_stack::{DestinationType, Direction};
 pub use rete_transport::{AnnounceError, AnnounceInfo, LinkState};
 
 /// Reviewed Rete integration-fork source revision.
-pub const SOURCE_REVISION: &str = "a443173b0829c2637ce23531a8cde15fdfec185e";
+pub const SOURCE_REVISION: &str = "354b8757bea63b9d1e27dec14f109fe6c7e03c5a";
 
 /// Initial table capacities used only to obtain comparable Phase-0 numbers.
 pub mod probe_capacity {

@@ -1,0 +1,16 @@
+[package]
+name = "reticulum-nomad-protocol"
+description = "Allocation-free state machine for one bounded NomadNet page fetch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+
+[lib]
+path = "src/lib.rs"
