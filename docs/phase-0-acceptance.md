@@ -805,12 +805,16 @@ covering the complete received RNS packet hash; that proof remains withheld
 until `Committed` or a fresh `AlreadyDurable` result. Initiator/backchannel
 direct receive is unsupported. The
 [later forced-direct record](e290-direct-link-powered-proof.md) powers one
-fresh outbound Link and responder-side new-commit/proof chain; direct
-`AlreadyDurable` replay, successful same-Link reuse, and the broader
-fault/pressure matrix remain open. Current source additionally retains an exact
-Link handle through direct receipt timeout, evicts it from reuse, and asks
-firmware to route normal authenticated close; the timed-out durable submission
-is not automatically retried. The
+fresh outbound Link and responder-side new-commit/proof chain. The
+[same-Link reuse and direct-replay record](e290-same-link-reuse-replay-powered-proof.md)
+then powers two direct-required deliveries with one LXMF message ID, two
+distinct packet hashes, and one receiver row. Exact same-`LinkHandle` reuse and
+the receiver's `AlreadyDurable` classification remain source-qualified because
+the frozen client API exposes neither; the broader fault/pressure matrix
+remains open. Current source additionally retains an exact Link handle through
+direct receipt timeout, evicts it from reuse, and asks firmware to route normal
+authenticated close; the timed-out durable submission is not automatically
+retried. The
 [current-image powered recovery record](e290-stale-link-recovery-powered-proof.md)
 qualifies that narrow receiver-reboot sequence: the failed message is absent
 from the peer, and the next sequential message reaches `Delivered` over a fresh

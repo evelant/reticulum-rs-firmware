@@ -4170,6 +4170,28 @@ impl<
         }
     }
 
+    /// Whether one exact Link has an outstanding or unacknowledged DATA
+    /// attempt bound to it.
+    ///
+    /// Active attempts remain outstanding through transmission and receipt
+    /// correlation. Terminal attempts remain visible until their durable
+    /// outcome has been acknowledged. Reserved slots and destination DATA,
+    /// which is not bound to a Link, do not occupy a Link.
+    pub fn link_has_unacknowledged_attempt(&self, link: LinkHandle) -> bool {
+        self.attempts.iter().any(|slot| {
+            matches!(
+                slot.state,
+                AttemptState::Active {
+                    link: Some(bound),
+                    ..
+                } | AttemptState::Terminal {
+                    link: Some(bound),
+                    ..
+                } if bound == link
+            )
+        })
+    }
+
     /// Iterate terminal attempt tombstones in stable ledger-slot order.
     pub fn terminal_attempts(&self) -> TerminalAttempts<'_> {
         TerminalAttempts {
@@ -6713,6 +6735,57 @@ mod tests {
         assert_eq!(first.capacities().dispatches_queued, 1);
         assert_eq!(reconstructed.capacities().dispatches_used, 0);
         assert!(first.rollback_queued(job, owner_time(1_100)).is_ok());
+    }
+
+    #[test]
+    fn exact_link_attempt_occupancy_covers_active_and_unacknowledged_terminal_states() {
+        let mut owner = node::<4, 0>(40, "link-attempt-occupancy");
+        let target = LinkHandle::new([0xa1; 16]);
+        let other = LinkHandle::new([0xa2; 16]);
+        let target_token = AttemptToken([0x31; 32]);
+
+        assert!(!owner.link_has_unacknowledged_attempt(target));
+
+        owner.attempts[0].state = AttemptState::Reserved { generation: 10 };
+        owner.attempts[1].state = AttemptState::Active {
+            generation: 11,
+            token: AttemptToken([0x32; 32]),
+            kind: DataReceiptKind::DestinationData,
+            link: None,
+        };
+        owner.attempts[2].state = AttemptState::Active {
+            generation: 12,
+            token: AttemptToken([0x33; 32]),
+            kind: DataReceiptKind::LinkData,
+            link: Some(other),
+        };
+        assert!(!owner.link_has_unacknowledged_attempt(target));
+        assert!(owner.link_has_unacknowledged_attempt(other));
+
+        owner.attempts[3].state = AttemptState::Active {
+            generation: 13,
+            token: target_token,
+            kind: DataReceiptKind::LinkData,
+            link: Some(target),
+        };
+        assert!(owner.link_has_unacknowledged_attempt(target));
+
+        owner.attempts[3].state = AttemptState::Terminal {
+            generation: 13,
+            token: target_token,
+            kind: DataReceiptKind::LinkData,
+            link: Some(target),
+            outcome: AttemptOutcome::Delivered,
+        };
+        assert!(owner.link_has_unacknowledged_attempt(target));
+
+        let handle = owner.handle_for(AttemptRef {
+            slot: 3,
+            generation: 13,
+        });
+        owner.acknowledge_terminal(handle).unwrap();
+        assert!(!owner.link_has_unacknowledged_attempt(target));
+        assert!(owner.link_has_unacknowledged_attempt(other));
     }
 
     #[test]

@@ -292,6 +292,10 @@ The permanent-E290 source composition mount-gates that seam behind the dedicated
 durable store and exact retained-proof owner. The original powered record
 qualified only the opportunistic path. The later
 [ADR 0018 forced-direct record](../e290-direct-link-powered-proof.md)
-qualifies one fresh outbound Link and new direct-Link receive commit, but not
-`AlreadyDurable` replay, active-Link reuse, RNS Resource transfer, outbound
-direct retries and faults, propagation, NomadNet, or a complete LXMF service.
+qualifies one fresh outbound Link and new direct-Link receive commit. The
+[same-Link/replay record](../e290-same-link-reuse-replay-powered-proof.md)
+adds the bounded two-delivery/one-message/one-row replay outcome; exact
+same-handle reuse and the receiver's `AlreadyDurable` classification remain
+source-qualified because the frozen client API exposes neither. RNS Resource
+transfer, broader outbound-direct faults and pressure, propagation, NomadNet,
+and a complete LXMF service remain open.

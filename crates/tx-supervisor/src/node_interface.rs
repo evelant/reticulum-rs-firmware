@@ -397,6 +397,101 @@ mod tests {
     }
 
     #[test]
+    fn permanent_aggregate_reports_exact_link_attempt_occupancy() {
+        let mut initiator = node(70, "aggregate-direct-query-sender");
+        initiator
+            .register_inbound_single_destination("lxmf", &["delivery"])
+            .expect("the sender LXMF delivery destination registers");
+        let mut responder = NodeCore::<8, 4, 8, 8, 0>::new(
+            identity(71),
+            "reticulum",
+            &["aggregate-direct-query-responder"],
+            NodeInstanceId::new([0xd1; 16]),
+            NodeConfig::endpoint(),
+        )
+        .expect("test responder must construct");
+        let destination = responder
+            .register_inbound_single_destination("lxmf", &["delivery"])
+            .expect("the responder LXMF delivery destination registers");
+        initiator
+            .register_peer(
+                &identity(71),
+                "lxmf",
+                &["delivery"],
+                MonotonicSeconds::new(1),
+            )
+            .expect("the responder identity must cache");
+        responder
+            .set_destination_accepts_links(&destination, true)
+            .expect("the responder delivery destination accepts Links");
+
+        let mut rng = CounterRng::default();
+        let (request, link) = initiator
+            .initiate_link(&destination, MonotonicSeconds::new(2), &mut rng)
+            .expect("the Link request must construct");
+        let response = responder
+            .ingest(
+                request.packets[0].bytes(),
+                MonotonicSeconds::new(2),
+                PacketInterfaceId::new(7),
+                &mut rng,
+            )
+            .expect("the responder accepts the Link request");
+        let established = initiator
+            .ingest(
+                response.actions.packets[0].bytes(),
+                MonotonicSeconds::new(3),
+                PacketInterfaceId::new(2),
+                &mut rng,
+            )
+            .expect("the initiator accepts the Link response");
+        responder
+            .ingest(
+                established.actions.packets[0].bytes(),
+                MonotonicSeconds::new(4),
+                PacketInterfaceId::new(7),
+                &mut rng,
+            )
+            .expect("the responder accepts the Link proof");
+        assert_eq!(initiator.link_state(link), Some(LinkState::Active));
+
+        let (mut supervisor, actors, _) = build_from_node::<1, 1>(initiator, destination);
+        register(&mut supervisor, &actors, [true]);
+        assert!(!supervisor.link_has_unacknowledged_attempt(link));
+
+        let mut wire = [0_u8; MAX_DIRECT_LXMF_WIRE];
+        let wire_len = usize::from(
+            supervisor
+                .prepare_basic_direct_lxmf_into(
+                    &destination,
+                    1_700_000_000_000,
+                    b"occupancy",
+                    b"one exact Link attempt",
+                    &mut wire,
+                )
+                .expect("direct LXMF wire must compose")
+                .wire_len(),
+        );
+        let prepared = supervisor.try_prepare_rehydrated_direct_lxmf(
+            link,
+            DataRouterPrepareRequest {
+                destination,
+                plaintext: &wire[..wire_len],
+                rns_now: MonotonicSeconds::new(5),
+                deadline: TxLeaseDeadline::new(MonotonicMillis::new(100_000)),
+            },
+            MonotonicMillis::new(5_000),
+            &mut rng,
+        );
+        assert!(matches!(
+            prepared,
+            NodeInterfaceDataPrepareResult::Coordinator(DataRouterPrepareResult::Prepared(_))
+        ));
+        assert!(supervisor.link_has_unacknowledged_attempt(link));
+        assert!(!supervisor.link_has_unacknowledged_attempt(LinkHandle::new([0xee; 16])));
+    }
+
+    #[test]
     fn permanent_aggregate_composes_basic_lxmf_with_only_the_registered_local_source() {
         let (supervisor, _actors, destination) = build::<1, 1>(62);
         let mut unavailable = [0x4c_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
@@ -3685,6 +3780,12 @@ where
         self.router
             .eligible_interfaces()
             .is_ok_and(|eligible| eligible.contains(interface))
+    }
+
+    /// Whether one exact Link has an active or terminal DATA attempt that has
+    /// not yet completed its durable acknowledgement lifecycle.
+    pub fn link_has_unacknowledged_attempt(&self, link: LinkHandle) -> bool {
+        self.node.link_has_unacknowledged_attempt(link)
     }
 
     /// Abort a Link only while native state proves it is not established.

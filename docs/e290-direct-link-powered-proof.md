@@ -171,9 +171,12 @@ This record qualifies:
 - sender proof validation and durable `Delivered`; and
 - exact terminal sender and receiver state after both board and app restart.
 
-It does not qualify active-Link reuse, responder/backchannel reuse,
-`AlreadyDurable` replay, multiple simultaneous establishments, Link-table or
-receipt pressure, timeout/fault cuts, the later responder-`Handshake`
-reclamation behavior, pre-first-dispatch multi-transport route churn, in-flight
-reset recovery, multi-hop routing, Resource transfer, electrical power cuts,
-allocation pressure, sustained traffic, or soak.
+This historical record does not itself qualify active-Link reuse,
+responder/backchannel reuse, `AlreadyDurable` replay, multiple simultaneous
+establishments, Link-table or receipt pressure, timeout/fault cuts, the later
+responder-`Handshake` reclamation behavior, pre-first-dispatch multi-transport
+route churn, in-flight reset recovery, multi-hop routing, Resource transfer,
+electrical power cuts, allocation pressure, sustained traffic, or soak. The
+[later same-Link/replay record](e290-same-link-reuse-replay-powered-proof.md)
+closes the bounded successful-reuse/replay outcome while explicitly retaining
+the client-telemetry boundary.

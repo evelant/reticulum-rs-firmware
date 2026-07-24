@@ -43,7 +43,13 @@ proof, durable sender `Delivered`, and board/app restart persistence. A
 additionally qualifies exact stale-session retirement after the receiver
 reboots: the affected submission remains terminal `DeliveryTimeout` without a
 receiver commit, while the next sequential submission establishes a fresh Link
-and reaches `Delivered`. Successful same-Link reuse remains open.
+and reaches `Delivered`. A
+[same-Link reuse and replay proof](docs/e290-same-link-reuse-replay-powered-proof.md)
+then qualifies two back-to-back direct-required submissions reaching
+`Delivered` with one LXMF message ID, two distinct Reticulum packet hashes, and
+one receiver record. Exact Link-handle reuse and the receiver's internal
+`Replay` classification are source-qualified because the frozen client API
+exposes neither value.
 
 The hardware-independent
 `reticulum-board-heltec-vision-master-e290` crate is the compiled source of
@@ -181,10 +187,11 @@ state without conflating it with destination DATA or Channel traffic. Product
 Link orchestration and receipt-kind-safe attempt correlation are integrated
 for the bounded outbound one-packet direct path. Exact stale-session retirement
 and fresh-Link recovery by a later sequential submission are source- and
-powered-qualified. Successful same-Link reuse, responder/backchannel reuse,
-Resource, and the broader fault/pressure matrix remain. Proof emission follows the receiving
-destination's `PROVE_NONE`, `PROVE_ALL`, or application-selected policy instead
-of being unconditional.
+powered-qualified. Per-Link single-flight and the bounded successful
+same-Link/direct-replay outcome are also source- and powered-qualified;
+responder/backchannel reuse, Resource, and the broader fault/pressure matrix
+remain. Proof emission follows the receiving destination's `PROVE_NONE`,
+`PROVE_ALL`, or application-selected policy instead of being unconditional.
 
 The current binding is an interface-slot index, not a shared-host client
 endpoint. On Rete's Tokio `Hub`, synchronous output can retain the originating
@@ -1085,8 +1092,12 @@ streaming-storage boundary is bounded.
 Responder-side direct Link receive has the same source-level durable proof
 contract, and the
 [forced-direct two-board record](docs/e290-direct-link-powered-proof.md)
-qualifies one fresh-Link/new-commit physical success path. `AlreadyDurable`
-direct replay and the broader fault/pressure matrix remain open. The
+qualifies one fresh-Link/new-commit physical success path. The later
+[same-Link reuse and direct-replay record](docs/e290-same-link-reuse-replay-powered-proof.md)
+adds two direct-required deliveries with one LXMF message ID, distinct packet
+hashes, and one receiver row; exact same-handle reuse and `AlreadyDurable`
+classification remain source-qualified because the client API exposes neither.
+The broader fault/pressure matrix remains open. The
 [current-image stale-Link recovery record](docs/e290-stale-link-recovery-powered-proof.md)
 separately qualifies durability-first retirement after a peer reboot and
 successful delivery of a later sequential submission over a fresh Link.
@@ -1298,15 +1309,17 @@ direction-balanced source-free send, proof, peer commit, list, and exact read.
 Its final audited image additionally preserved both terminal sender records and
 both exact receiver wires across a physical CPU reset. Neither result
 substitutes for electrical power-cut persistence, sustained/multi-hop traffic,
-successful powered same-Link reuse, `AlreadyDurable` direct replay, Resource LXMF,
-initiator/backchannel direct receive, production client-store semantics, or
-full-product qualification. The later
+Resource LXMF, initiator/backchannel direct receive, production client-store
+semantics, or full-product qualification. The later
 [forced-direct powered record](docs/e290-direct-link-powered-proof.md)
 qualifies one fresh initiator/new receiver-commit one-packet success path. The
 [current-image recovery record](docs/e290-stale-link-recovery-powered-proof.md)
 then qualifies a receiver reboot, durable sender timeout without receiver
 commit, exact stale-Link retirement, and successful fresh-Link delivery by the
-next sequential submission.
+next sequential submission. The
+[same-Link reuse and direct-replay record](docs/e290-same-link-reuse-replay-powered-proof.md)
+adds the bounded two-delivery/one-message/one-row outcome and documents which
+internal values remain source-qualified.
 
 The receive-only lab binary has no frequency or modulation defaults. A known
 host/RNode-compatible build example is:

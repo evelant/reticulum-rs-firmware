@@ -112,8 +112,12 @@ carrier.
 - The [ADR 0018 powered record](../e290-direct-link-powered-proof.md) closes one
   bounded fresh-Link/new-commit path across two permanent E290 feature
   profiles: direct LXMF commit/read, delayed proof release, sender-visible
-  `Delivered`, and post-reset exact readback. `AlreadyDurable` replay,
-  active-Link reuse, and the broader fault/pressure matrix remain open.
+  `Delivered`, and post-reset exact readback. The
+  [same-Link/replay record](../e290-same-link-reuse-replay-powered-proof.md)
+  adds the bounded two-delivery/one-message/one-row replay outcome; exact
+  Link-handle reuse and `AlreadyDurable` classification remain source-qualified
+  because the frozen client API exposes neither. The broader fault/pressure
+  matrix remains open.
 
 ## Next protocol slice
 

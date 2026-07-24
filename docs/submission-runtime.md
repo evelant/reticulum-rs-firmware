@@ -22,7 +22,11 @@ acceptance, remount, and replay while distinguishing generic RNS DATA from an
 exact complete method-neutral LXMF-message intent. Current source additionally
 composes the first outbound-initiator direct-Link packet path. Its fresh-Link,
 one-packet success path has a
-[bounded two-board powered record](e290-direct-link-powered-proof.md).
+[bounded two-board powered record](e290-direct-link-powered-proof.md), and the
+later
+[same-Link reuse and replay record](e290-same-link-reuse-replay-powered-proof.md)
+exercises two delivered submissions carrying one identical direct-only LXMF
+wire through the composed reuse/replay path.
 
 ## Boundary
 
@@ -41,13 +45,14 @@ implementation for `NodeInterfaceSupervisor` asks the authoritative router to
 choose from its eligible interfaces and exposes exact terminal, recovered, and
 quarantined owners until durable projection allows acknowledgement. The same
 port exposes only opaque Link lifecycle operations: poll one product Link,
-abort one exact unestablished Link, and prepare the complete durable LXMF wire
-over one active Link. A direct terminal observation retains that exact Link
-handle. On Link-DATA `DeliveryTimeout`, the runtime first persists the failed
-submission's final record, then evicts the matching reusable entry and returns
-a typed control step; permanent firmware closes the Link through the normal
-authenticated supervisor path and routes any resulting ordinary action. The
-runtime does not expose a LoRa radio or interface choice.
+query whether one exact Link has an active or unacknowledged terminal DATA
+attempt, abort one exact unestablished Link, and prepare the complete durable
+LXMF wire over one active Link. A direct terminal observation retains that
+exact Link handle. On Link-DATA `DeliveryTimeout`, the runtime first persists
+the failed submission's final record, then evicts the matching reusable entry
+and returns a typed control step; permanent firmware closes the Link through
+the normal authenticated supervisor path and routes any resulting ordinary
+action. The runtime does not expose a LoRa radio or interface choice.
 
 ```mermaid
 flowchart LR
@@ -99,8 +104,9 @@ The current `Auto` implementation retains the exact signed LXMF wire while it
 chooses a carrier. For each ready LXMF submission it:
 
 1. prunes closed or unknown entries and reuses a matching usable
-   product-initiated outbound Link from the fixed registry, while retaining a
-   non-selectable `Stale` entry so it can revive;
+   product-initiated outbound Link from the fixed registry only when that exact
+   Link has no active or unacknowledged terminal DATA attempt, while retaining
+   a non-selectable `Stale` entry so it can revive;
 2. otherwise tries the compatible destination-stripped opportunistic carrier
    when it fits the 391-byte Header-1 ceiling;
 3. selects direct delivery when the carrier exceeds that ceiling or the actual
@@ -124,31 +130,41 @@ At the deadline, the runtime asks the node to discard that exact pending Link
 before issuing a fresh generation for the still-durable message. Closed or
 missing registry entries are pruned. A `Stale` entry is retained, remains
 non-selectable, and continues consuming capacity while it may revive. Once a
-matching Link is usable, it wins over opportunistic delivery for later short
-messages and the complete destination-prefixed wire is prepared as
-context-`NONE` Link DATA.
+matching Link is usable and idle, it wins over opportunistic delivery for later
+short messages and the complete destination-prefixed wire is prepared as
+context-`NONE` Link DATA. A busy matching Link does not prevent an otherwise
+eligible short message from taking the opportunistic path. Direct-required or
+routed-overflow work instead produces
+`DirectLinkAttemptBackpressured { id, link }`, remains durably `Preparing`
+without spinning, and does not create a second Link to the same destination.
 
 Each direct attempt retains the exact Link handle beside its distinct
-Link-DATA receipt kind. A `DeliveryTimeout` retains its `PersistHandle` across
-both normal append and ambiguous-I/O reconciliation; only the exact committed
-final record releases the reusable-entry eviction and firmware close signal.
-That signal retires the session even if native Reticulum state still reports
-the Link as `Active`, covering a peer that restarted and lost its volatile half
-of the session. The failed durable submission remains terminal
-`Failed(DeliveryTimeout)` and is not silently retried; a later direct
-submission establishes a fresh Link.
+Link-DATA receipt kind. That Link remains occupied while the attempt is active
+and after it becomes terminal until its exact durable acknowledgement releases
+the upstream owner. A `DeliveryTimeout` retains its `PersistHandle` across both
+normal append and ambiguous-I/O reconciliation; only the exact committed final
+record releases the reusable-entry eviction and firmware close signal. That
+signal retires the session even if native Reticulum state still reports the
+Link as `Active`, covering a peer that restarted and lost its volatile half of
+the session. The failed durable submission remains terminal
+`Failed(DeliveryTimeout)` and is not silently retried; a waiting later direct
+submission stays parked through retirement and then establishes a fresh Link.
 
 This alpha intentionally owns only one serialized establishment transaction
-but retains a fixed reusable outbound-Link registry sized to the product's
-native Link table (four entries for E290). It separately preflights the shared
-native table, where inbound responder Links also consume capacity. If either
-owner is full, bounded per-submission backpressure leaves the exact message
-durably `Preparing` and the E290 retries after one second while pressure
-remains; later short opportunistic work and matching usable cached-Link work
-are not head-of-line blocked. Pressure is not a terminal submission failure.
-The alpha has no generic capacity-pressure or LRU eviction policy and does not
-assume Link maintenance will free a slot. Exact Link-DATA receipt timeout is the
-narrower implemented retirement rule.
+and separately enforces one direct attempt per exact Link, but retains a fixed
+reusable outbound-Link registry sized to the product's native Link table (four
+entries for E290). It separately preflights the shared native table, where
+inbound responder Links also consume capacity. If either owner is full, bounded
+per-submission backpressure leaves the exact message durably `Preparing` and
+the E290 retries after one second while pressure remains. Busy-Link
+backpressure uses that same bounded retry schedule. Eligible short
+opportunistic work and work on other usable cached Links are not head-of-line
+blocked. Pressure is not a terminal submission failure. The lower node retains
+its independent bounded-attempt capability; this serialization is a product
+delivery policy, not a node-core limit. The alpha has no generic
+capacity-pressure or LRU eviction policy and does not assume Link maintenance
+will free a slot. Exact Link-DATA receipt timeout is the narrower implemented
+retirement rule.
 The runtime does not yet associate an authenticated responder Link with the
 remote LXMF destination, so responder/backchannel reuse is deferred. A complete
 wire that exceeds the active Link MDU also remains durably `Preparing` without
@@ -208,6 +224,12 @@ state still appears active, injects and reconciles an ambiguous final-record
 write reply, verifies durability before exact registry eviction and
 authenticated close, and proves that the next direct submission requests a
 fresh Link.
+A second integrated regression holds a following direct-only submission while
+the first attempt is active and while its terminal remains unacknowledged,
+proves no second Link establishment is created, then prepares the follower on
+the exact same `LinkHandle` after acknowledgement and delivers both. The
+timeout variant proves that a follower remains parked until durability-first
+retirement permits a fresh establishment.
 The product profile owns 128 resident submissions; the one-entry harness below
 remains a deliberately narrow composition fixture. Authenticated USB and BLE
 clients can reach the composed handoff from a fresh local submission in the
@@ -218,6 +240,15 @@ both host tools and the installed Expo client. The separate
 408-byte complete wire whose 392-byte carrier exceeded the 391-byte
 opportunistic ceiling, then proved receiver commit, returned proof, sender
 `Delivered`, and board/app restart persistence.
+The later
+[same-Link reuse and replay run](e290-same-link-reuse-replay-powered-proof.md)
+started sender A from a fresh boot and delivered submissions `6` and `7`, which
+used different idempotency keys but the identical direct-only 408-byte LXMF
+wire and message ID beginning `9692c4`. Their 483-byte Reticulum packets had
+distinct hashes and both reached `Delivered`, while the receiver projection advanced
+by exactly one row. The source regressions qualify exact same-handle reuse and
+`AlreadyDurable`; the client API exposes neither scalar, so the powered run
+physically exercises rather than independently telemeters those properties.
 
 ## E290 cross-layer software qualification
 
@@ -300,14 +331,15 @@ an ESP32-S3, flash-power, RF, or current-capacity claim.
 - **Direct Link:** source tests cover path-first gating, exact offer/handle
   correlation, first-dispatch-started timeout and abort, active-Link reuse,
   closed/unknown pruning, non-selectable `Stale` retention, full-registry
-  `Preparing` backpressure, complete-wire Link-DATA preparation, typed receipt
-  proof/timeout, and the authorized-frame durability barrier. Feature-specific
-  BLE-sender and USB-receiver builds sharing that implementation completed one
-  bounded fresh-Link powered proof. Active-Link reuse, `AlreadyDurable` replay,
-  responder/backchannel reuse, multiple simultaneous establishment
-  transactions, Resource transfer, the broader fault/pressure matrix, durable
-  pre-frame reset recovery, and a persisted or boot-local retry budget remain
-  product work.
+  `Preparing` backpressure, exact-Link single-flight through terminal
+  acknowledgement, same-handle reuse, timeout-follower parking, complete-wire
+  Link-DATA preparation, typed receipt proof/timeout, and the authorized-frame
+  durability barrier. Powered runs cover one bounded fresh-Link success plus
+  two distinct submissions carrying an identical direct-only LXMF wire through
+  the composed reuse/replay path. Responder/backchannel reuse, multiple
+  simultaneous establishment transactions, Resource transfer, the broader
+  fault/pressure matrix, durable pre-frame reset recovery, and a persisted or
+  boot-local retry budget remain product work.
 - **Powered qualification:** integrated power-cut/brownout, watchdog, flash
   contention, compaction, endurance, stack/static-layout, and radio-deadline
   tests remain product gates. The source-`96e38aa` two-board smoke established
@@ -331,5 +363,7 @@ without false durability or acknowledgement, pre-frame terminal pressure,
 recovery-acknowledgement pressure, retry-versus-permanent error classification,
 reboot recovery, wrong-binding rejection before node work, opportunistic
 overflow escalation, path-first direct selection, exact establishment control,
-active-Link registry reuse, closed/unknown pruning, `Stale` retention,
+active-Link registry reuse, exact-Link Active/Terminal single-flight,
+same-handle reuse after acknowledgement, timeout-follower parking and fresh
+establishment after retirement, closed/unknown pruning, `Stale` retention,
 full-pressure, and deferred Resource behavior.

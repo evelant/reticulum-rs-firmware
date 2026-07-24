@@ -143,6 +143,14 @@ pub trait SubmissionNodePort {
     /// `Auto` must not select it for a new packet.
     fn link_is_usable(&self, link: LinkHandle) -> bool;
 
+    /// Whether one exact Link owns an active or unacknowledged terminal packet
+    /// attempt.
+    ///
+    /// Product orchestration uses this read-only query to serialize direct
+    /// delivery per Link without restricting the lower node's independent
+    /// bounded-attempt capability.
+    fn link_has_unacknowledged_attempt(&self, link: LinkHandle) -> bool;
+
     /// Abort one exact Link only while it remains unestablished.
     ///
     /// Returning `false` must leave active, stale, closed, or unknown Links
@@ -281,6 +289,10 @@ where
 
     fn link_is_usable(&self, link: LinkHandle) -> bool {
         NodeInterfaceSupervisor::link_is_usable(self, link)
+    }
+
+    fn link_has_unacknowledged_attempt(&self, link: LinkHandle) -> bool {
+        NodeInterfaceSupervisor::link_has_unacknowledged_attempt(self, link)
     }
 
     fn abort_unestablished_link(&mut self, link: LinkHandle) -> bool {
@@ -685,6 +697,18 @@ pub enum RuntimeStep {
         /// Configured reusable direct-Link registry capacity.
         limit: usize,
     },
+    /// A matching reusable Link still owns a packet attempt.
+    ///
+    /// The durable message stays `Preparing` until the active attempt reaches
+    /// a terminal state and its exact upstream owner is durably acknowledged.
+    /// The product should apply bounded retry backoff without creating a
+    /// second Link to the same destination.
+    DirectLinkAttemptBackpressured {
+        /// Exact durable submission waiting to use the Link.
+        id: SubmissionId,
+        /// Exact busy Link retained for this destination.
+        link: LinkHandle,
+    },
     /// A dispatched Link did not establish before its bounded deadline.
     LinkEstablishmentExpired {
         /// Exact offer whose establishment window elapsed.
@@ -737,6 +761,21 @@ enum PathDiscoveryPhase {
 struct ReusableDirectLink {
     destination: DestinationHash,
     link: LinkHandle,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReusableDirectLinkSelection {
+    Ready(LinkHandle),
+    Busy(LinkHandle),
+    Absent,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum DirectLinkWaitReason {
+    None,
+    RegistryCapacity,
+    MatchingLinkBusy,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -798,7 +837,7 @@ pub struct SubmissionRuntime<
     direct_link: Option<DirectLinkTransaction>,
     direct_link_retirement: Option<DirectLinkRetirement>,
     reusable_direct_links: [Option<ReusableDirectLink>; DIRECT_LINKS],
-    link_capacity_waiting: [bool; SUBMISSIONS],
+    direct_link_waiting: [DirectLinkWaitReason; SUBMISSIONS],
     next_link_offer_generation: u64,
     resource_waiting: [SubmissionId; SUBMISSIONS],
     resource_waiting_len: usize,
@@ -830,7 +869,7 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
             direct_link: None,
             direct_link_retirement: None,
             reusable_direct_links: [None; DIRECT_LINKS],
-            link_capacity_waiting: [false; SUBMISSIONS],
+            direct_link_waiting: [DirectLinkWaitReason::None; SUBMISSIONS],
             next_link_offer_generation: 1,
             resource_waiting: [SubmissionId::new(0); SUBMISSIONS],
             resource_waiting_len: 0,
@@ -912,10 +951,12 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
             for slot in 0..DIRECT_LINKS {
                 reusable_direct_links.add(slot).write(None);
             }
-            let link_capacity_waiting =
-                core::ptr::addr_of_mut!((*runtime).link_capacity_waiting).cast::<bool>();
+            let direct_link_waiting = core::ptr::addr_of_mut!((*runtime).direct_link_waiting)
+                .cast::<DirectLinkWaitReason>();
             for slot in 0..SUBMISSIONS {
-                link_capacity_waiting.add(slot).write(false);
+                direct_link_waiting
+                    .add(slot)
+                    .write(DirectLinkWaitReason::None);
             }
             core::ptr::addr_of_mut!((*runtime).next_link_offer_generation).write(1);
             let resource_waiting =
@@ -1331,7 +1372,10 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
                 DirectLinkPhase::AwaitingLink { offer } => {
                     if !node.can_initiate_link() {
                         self.direct_link = None;
-                        self.mark_link_capacity_waiting(offer.id);
+                        self.mark_direct_link_waiting(
+                            offer.id,
+                            DirectLinkWaitReason::RegistryCapacity,
+                        );
                         return Ok(RuntimeStep::LinkCapacityBackpressured {
                             id: offer.id,
                             limit: DIRECT_LINKS,
@@ -1440,14 +1484,14 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
             }
         }
 
-        self.refresh_link_capacity_waiting(node);
+        self.refresh_direct_link_waiting(node);
         let ready =
             self.storage
                 .index()
                 .iter()
                 .enumerate()
                 .find_map(|(submission_slot, submission)| {
-                    if self.link_capacity_waiting[submission_slot] {
+                    if self.direct_link_waiting[submission_slot] != DirectLinkWaitReason::None {
                         return None;
                     }
                     let id = submission.accepted().id();
@@ -1473,19 +1517,33 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
             let observation = match intent {
                 SubmissionIntent::ExperimentalRnsData(_) => node.prepare_submission(request, rng),
                 SubmissionIntent::LxmfMessage(_) => {
-                    let active_link = self.reusable_direct_link_for(node, destination);
-                    if let Some(link) = active_link {
-                        self.clear_path_discovery(destination);
-                        let observation =
-                            node.prepare_rehydrated_direct_lxmf_submission(link, request, rng);
-                        let observation = self.classify_direct_preparation(id, link, observation);
-                        let progress = self.storage.observe_preparation(id, observation)?;
-                        return Ok(RuntimeStep::Preparation { id, progress });
-                    }
+                    let busy_direct_link = match self.reusable_direct_link_for(node, destination) {
+                        ReusableDirectLinkSelection::Ready(link) => {
+                            self.clear_path_discovery(destination);
+                            let observation =
+                                node.prepare_rehydrated_direct_lxmf_submission(link, request, rng);
+                            let observation =
+                                self.classify_direct_preparation(id, link, observation);
+                            let progress = self.storage.observe_preparation(id, observation)?;
+                            return Ok(RuntimeStep::Preparation { id, progress });
+                        }
+                        ReusableDirectLinkSelection::Busy(link) => Some(link),
+                        ReusableDirectLinkSelection::Absent => None,
+                    };
 
                     if intent.lxmf_message().is_some_and(|intent| {
                         intent.opportunistic_carrier().len() > MAX_OPPORTUNISTIC_LXMF_CARRIER
                     }) {
+                        if let Some(link) = busy_direct_link {
+                            self.direct_link_waiting[submission_slot] =
+                                DirectLinkWaitReason::MatchingLinkBusy;
+                            let progress = self.storage.observe_preparation(
+                                id,
+                                SubmissionPreparationObservation::RetrySameBoot,
+                            )?;
+                            debug_assert_eq!(progress, ProjectionProgress::NoAction);
+                            return Ok(RuntimeStep::DirectLinkAttemptBackpressured { id, link });
+                        }
                         if !node.has_usable_path(&destination) {
                             let (observation, path_offer) = self.classify_path_discovery(
                                 id,
@@ -1502,7 +1560,8 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
                             return Ok(RuntimeStep::Preparation { id, progress });
                         }
                         if !self.direct_link_admission_available(node) {
-                            self.link_capacity_waiting[submission_slot] = true;
+                            self.direct_link_waiting[submission_slot] =
+                                DirectLinkWaitReason::RegistryCapacity;
                             let progress = self.storage.observe_preparation(
                                 id,
                                 SubmissionPreparationObservation::RetrySameBoot,
@@ -1536,6 +1595,19 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
                         SubmissionPreparationObservation::Rejected(
                             SubmitError::PayloadTooLarge { .. },
                         ) => {
+                            if let Some(link) = busy_direct_link {
+                                self.direct_link_waiting[submission_slot] =
+                                    DirectLinkWaitReason::MatchingLinkBusy;
+                                let progress = self.storage.observe_preparation(
+                                    id,
+                                    SubmissionPreparationObservation::RetrySameBoot,
+                                )?;
+                                debug_assert_eq!(progress, ProjectionProgress::NoAction);
+                                return Ok(RuntimeStep::DirectLinkAttemptBackpressured {
+                                    id,
+                                    link,
+                                });
+                            }
                             if !node.has_usable_path(&destination) {
                                 let (observation, path_offer) = self.classify_path_discovery(
                                     id,
@@ -1555,7 +1627,8 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
                                 return Ok(RuntimeStep::Preparation { id, progress });
                             }
                             if !self.direct_link_admission_available(node) {
-                                self.link_capacity_waiting[submission_slot] = true;
+                                self.direct_link_waiting[submission_slot] =
+                                    DirectLinkWaitReason::RegistryCapacity;
                                 let progress = self.storage.observe_preparation(
                                     id,
                                     SubmissionPreparationObservation::RetrySameBoot,
@@ -1615,18 +1688,39 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
         &mut self,
         node: &N,
         destination: DestinationHash,
-    ) -> Option<LinkHandle>
+    ) -> ReusableDirectLinkSelection
     where
         N: SubmissionNodePort,
     {
         self.prune_reusable_direct_links(node);
-        self.reusable_direct_links
+        self.reusable_direct_link_selection_after_prune(node, destination)
+    }
+
+    fn reusable_direct_link_selection_after_prune<N>(
+        &self,
+        node: &N,
+        destination: DestinationHash,
+    ) -> ReusableDirectLinkSelection
+    where
+        N: SubmissionNodePort,
+    {
+        let mut busy = None;
+        for candidate in self
+            .reusable_direct_links
             .iter()
             .flatten()
-            .find(|candidate| {
-                candidate.destination == destination && node.link_is_usable(candidate.link)
-            })
-            .map(|candidate| candidate.link)
+            .filter(|candidate| candidate.destination == destination)
+        {
+            if node.link_has_unacknowledged_attempt(candidate.link) {
+                busy.get_or_insert(candidate.link);
+            } else if node.link_is_usable(candidate.link) {
+                return ReusableDirectLinkSelection::Ready(candidate.link);
+            }
+        }
+        busy.map_or(
+            ReusableDirectLinkSelection::Absent,
+            ReusableDirectLinkSelection::Busy,
+        )
     }
 
     fn direct_link_admission_available<N>(&mut self, node: &N) -> bool
@@ -1637,52 +1731,61 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
         node.can_initiate_link() && self.reusable_direct_links.iter().any(Option::is_none)
     }
 
-    fn refresh_link_capacity_waiting<N>(&mut self, node: &N)
+    fn refresh_direct_link_waiting<N>(&mut self, node: &N)
     where
         N: SubmissionNodePort,
     {
         self.prune_reusable_direct_links(node);
-        if node.can_initiate_link() && self.reusable_direct_links.iter().any(Option::is_none) {
-            self.link_capacity_waiting.fill(false);
-            return;
-        }
+        let admission_available =
+            node.can_initiate_link() && self.reusable_direct_links.iter().any(Option::is_none);
 
         for submission_slot in 0..SUBMISSIONS {
-            if self.link_capacity_waiting[submission_slot]
-                && self.link_capacity_wait_should_clear(node, submission_slot)
-            {
-                self.link_capacity_waiting[submission_slot] = false;
+            let reason = self.direct_link_waiting[submission_slot];
+            if reason == DirectLinkWaitReason::None {
+                continue;
             }
+            let Some(submission) = self.storage.index().iter().nth(submission_slot) else {
+                self.direct_link_waiting[submission_slot] = DirectLinkWaitReason::None;
+                continue;
+            };
+            let Some(intent) = self.storage.ready_intent(submission.accepted().id()) else {
+                self.direct_link_waiting[submission_slot] = DirectLinkWaitReason::None;
+                continue;
+            };
+            let destination = DestinationHash::new(*intent.destination().as_bytes());
+            let selection = self.reusable_direct_link_selection_after_prune(node, destination);
+            self.direct_link_waiting[submission_slot] = match (reason, selection) {
+                (DirectLinkWaitReason::RegistryCapacity, ReusableDirectLinkSelection::Ready(_)) => {
+                    DirectLinkWaitReason::None
+                }
+                (DirectLinkWaitReason::RegistryCapacity, ReusableDirectLinkSelection::Busy(_)) => {
+                    DirectLinkWaitReason::MatchingLinkBusy
+                }
+                (DirectLinkWaitReason::RegistryCapacity, ReusableDirectLinkSelection::Absent)
+                    if admission_available =>
+                {
+                    DirectLinkWaitReason::None
+                }
+                (DirectLinkWaitReason::MatchingLinkBusy, ReusableDirectLinkSelection::Busy(_)) => {
+                    DirectLinkWaitReason::MatchingLinkBusy
+                }
+                (DirectLinkWaitReason::MatchingLinkBusy, _) => DirectLinkWaitReason::None,
+                (DirectLinkWaitReason::RegistryCapacity, _) => {
+                    DirectLinkWaitReason::RegistryCapacity
+                }
+                (DirectLinkWaitReason::None, _) => DirectLinkWaitReason::None,
+            };
         }
     }
 
-    fn link_capacity_wait_should_clear<N>(&self, node: &N, submission_slot: usize) -> bool
-    where
-        N: SubmissionNodePort,
-    {
-        let Some(submission) = self.storage.index().iter().nth(submission_slot) else {
-            return true;
-        };
-        let Some(intent) = self.storage.ready_intent(submission.accepted().id()) else {
-            return true;
-        };
-        let destination = DestinationHash::new(*intent.destination().as_bytes());
-        self.reusable_direct_links
-            .iter()
-            .flatten()
-            .any(|candidate| {
-                candidate.destination == destination && node.link_is_usable(candidate.link)
-            })
-    }
-
-    fn mark_link_capacity_waiting(&mut self, id: SubmissionId) {
+    fn mark_direct_link_waiting(&mut self, id: SubmissionId, reason: DirectLinkWaitReason) {
         if let Some(submission_slot) = self
             .storage
             .index()
             .iter()
             .position(|submission| submission.accepted().id() == id)
         {
-            self.link_capacity_waiting[submission_slot] = true;
+            self.direct_link_waiting[submission_slot] = reason;
         }
     }
 

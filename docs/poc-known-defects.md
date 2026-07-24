@@ -61,8 +61,8 @@ proof unless a failing test promotes one into a release blocker.
   retains one exact complete signed LXMF wire through 431 bytes without
   selecting a delivery method; generic RNS destination DATA remains a separate
   383-byte intent. The current automatic policy uses the destination-stripped
-  bytes as its compatible opportunistic carrier when eligible and no matching
-  cached Link exists. Current source also establishes or reuses
+  bytes as its compatible opportunistic carrier when eligible and no ready
+  matching cached Link is selected. Current source also establishes or reuses
   product-initiated outbound Links from a registry bounded to the native
   product table and prepares the exact complete wire as one Link DATA packet
   when required.
@@ -74,13 +74,16 @@ proof unless a failing test promotes one into a release blocker.
   private identity material.
 - Python LXMF's 391-byte opportunistic carrier fits inside the distinct
   431-byte complete-wire durable intent, so the former 384-through-391 journal
-  rejection is closed without raising the generic-RNS ceiling. The remaining
-  powered direct gap is successful active-Link reuse, `AlreadyDurable` replay,
-  Resource, and broader Link ownership/fault qualification. Source tests cover path-first
-  Link establishment, a snapshotted
+  rejection is closed without raising the generic-RNS ceiling. Powered direct
+  evidence now covers fresh-Link delivery plus the composed same-Link
+  reuse/receiver-replay path; Resource and broader Link ownership/fault
+  qualification remain open. Source tests cover path-first Link establishment,
+  a snapshotted
   hop/first-interface-aware deadline starting at first actual LINKREQUEST
-  dispatch, exact pending-Link abort, active-Link reuse, Link-DATA receipt
-  projection, and the authorized-frame durability barrier. The
+  dispatch, exact pending-Link abort, exact-Link single-flight from Active
+  through unacknowledged Terminal, same-handle reuse after acknowledgement,
+  timeout-follower parking, Link-DATA receipt projection, and the
+  authorized-frame durability barrier. The
   [bounded two-board powered record](e290-direct-link-powered-proof.md) forced
   a fresh Link with a 392-byte carrier that could not fit the 391-byte
   opportunistic ceiling, committed the exact 408-byte message on the receiver,
@@ -88,8 +91,15 @@ proof unless a failing test promotes one into a release blocker.
   across board and app restart. The
   [current-image recovery record](e290-stale-link-recovery-powered-proof.md)
   additionally qualifies exact retirement after receiver reboot and delivery
-  of the next sequential submission over a fresh Link; it does not qualify
-  successful same-Link reuse.
+  of the next sequential submission over a fresh Link. The
+  [same-Link reuse and replay record](e290-same-link-reuse-replay-powered-proof.md)
+  then starts sender A from a fresh boot and delivers submissions `6` and `7`
+  with different idempotency keys but one identical direct-only 408-byte LXMF
+  wire and message ID beginning `9692c4`. Their 483-byte Reticulum packets have
+  distinct hashes, while the receiver host projection advances exactly one row,
+  from 11 rows/sequence 13 to 12 rows/sequence 14. Exact same-handle reuse and
+  the receiver's `AlreadyDurable` result are source-qualified and physically
+  exercised, not independently telemetered by the client API.
 - The initial direct profile serializes one establishment transaction and
   retains at most four reusable product-initiated outbound Links, matching the
   E290 native Link table. Lookup and capacity checks prune only `Closed` or
@@ -105,13 +115,15 @@ proof unless a failing test promotes one into a release blocker.
   reusable handle and routes normal authenticated close, allowing a later
   submission to establish a fresh Link. The failed submission itself remains
   terminal and is not automatically retried.
-- Timeout retirement is session-wide, but the alpha does not yet serialize
-  direct attempts per Link. If a younger direct attempt is still awaiting its
-  proof when an older attempt times out, closing the shared Link can prevent
-  that later proof from validating and conservatively drive the younger
-  attempt to timeout too. Direct sends should remain sequential for the current
-  demo profile. The product fix is either one in-flight direct attempt per Link
-  or delayed close until every sibling receipt has drained.
+- Direct DATA is now single-flight per exact Link from Active attempt through
+  durable acknowledgement of its Terminal owner. A later direct-required or
+  routed-overflow submission for the busy destination remains durably
+  `Preparing` under typed one-second backpressure, without creating a second
+  same-destination Link. If the leader times out, its follower stays parked
+  until durability-first retirement clears the stale handle and then requests
+  a fresh Link, so session-wide close cannot invalidate a younger same-Link
+  receipt. Eligible short LXMF may still use opportunistic delivery, and work
+  on another usable Link remains schedulable.
 - The four-entry reusable outbound registry and Rete's four-entry native
   owned-Link table are distinct bounds. Inbound responder Links share the
   native table with outbound initiators, so native pressure can defer new

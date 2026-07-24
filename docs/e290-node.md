@@ -37,7 +37,15 @@ across board and app restart. The
 [current-image stale-Link recovery proof](e290-stale-link-recovery-powered-proof.md)
 additionally reboots the receiver while the sender retains that session,
 durably records the resulting `DeliveryTimeout` without a receiver commit, and
-delivers the next sequential message over a fresh Link. In the historical API
+delivers the next sequential message over a fresh Link. The
+[same-Link reuse and direct-replay proof](e290-same-link-reuse-replay-powered-proof.md)
+then accepts direct-required submissions 6 and 7 with one identical LXMF
+message ID, delivers two distinct Reticulum packet hashes, reaches durable
+`Delivered` twice, and adds only one receiver row. The frozen client API exposes
+neither opaque Link handles nor the receiver's internal commit-kind enum, so
+reuse of the exact `LinkHandle` and `Replay` classification remain
+source-qualified properties exercised by those powered outcomes rather than
+independent board telemetry. In the historical API
 1.1 image, MAC
 `ac:a7:04:e1:3e:88` retained its button-confirmed
 empty-store initialization, durable Active generation 3, and host credential;
@@ -103,8 +111,9 @@ session resumption, Wi-Fi bearer binding, or broader BLE lifecycle behavior.
 Current source also admits proof-required responder-side direct LXMF packets on
 the mounted `lxmf.delivery` destination and prepares outbound-initiator
 one-packet Link DATA over its bounded product-owned Link registry. One bounded
-two-board run now powers the combined fresh-initiator/new-responder-commit
-success path;
+two-board run powers the combined fresh-initiator/new-responder-commit success
+path, and a later bounded run powers two direct-required deliveries with one
+message ID, distinct packet hashes, two sender terminals, and one receiver row;
 initiator/backchannel receive, responder/backchannel reuse, and native Resource
 ingress remain disabled.
 
@@ -333,7 +342,14 @@ selection when eligible, and selects Link establishment for an oversize carrier
 or routed Header-2 overflow. The reusable registry is sized to the same
 four-Link native product table and prunes only `Closed` or unknown entries. A
 `Stale` Link is retained for possible revival but is not selectable and still
-occupies capacity. A full registry leaves new direct work durably `Preparing`
+occupies capacity. Direct-required or routed-overflow work is single-flight per
+exact Link from `Active` attempt through unacknowledged `Terminal`: a follower
+remains durably `Preparing` behind typed
+`DirectLinkAttemptBackpressured`, and the runtime does not create a second Link
+to that destination. Durable acknowledgement reopens the same exact
+`LinkHandle`. This per-Link gate does not prevent eligible short LXMF from using
+opportunistic DATA, and work on another reusable Link remains schedulable. A
+full registry leaves new direct work durably `Preparing`
 under bounded backpressure with a fixed one-second backoff; it is not terminal
 failure, and short eligible work for another destination can still use
 opportunistic DATA. The alpha does not proactively close or LRU-evict an active
@@ -376,8 +392,13 @@ one fresh-Link, one-packet success path. Current source also has a portable
 integrated regression for exact timed-out-Link retirement and fresh-Link
 selection by a later submission. The
 [current-image powered recovery record](e290-stale-link-recovery-powered-proof.md)
-now qualifies that narrow receiver-reboot path, but successful powered
-same-Link reuse and the broader fault/pressure matrix remain open.
+qualifies that narrow receiver-reboot path. The
+[same-Link reuse and direct-replay record](e290-same-link-reuse-replay-powered-proof.md)
+adds the bounded successful reuse/replay outcome: submissions 6 and 7 share one
+message ID, carry distinct packet hashes, both reach `Delivered`, and create one
+receiver row. Exact `LinkHandle` reuse and the receiver `Replay` enum are
+source-qualified because the frozen client API exposes neither. The broader
+fault/pressure matrix remains open.
 
 An optional journal mount/recovery failure occurs before any
 durability-gated DATA owner can exist; it disables local durable submission
@@ -449,8 +470,8 @@ permanent fault
 with an unresolved frame enters interface-local `ActiveOwnerFailStopped`, takes
 the same LoRa lease offline without changing its generation, retains the exact
 frame/completion/ticket, and permits no fresh LoRa work for the rest of the boot.
-Device configuration, successful active-Link reuse qualification, Resource and
-propagated LXMF, responder/backchannel reuse, generic capacity-driven
+Device configuration, Resource and propagated LXMF, responder/backchannel
+reuse, generic capacity-driven
 active-Link close/LRU eviction,
 initiator/backchannel direct receive, durable delete/reclaim and migration
 policy, local NomadNet clients, and production-ready host-facing USB/BLE/Wi-Fi
@@ -690,7 +711,7 @@ The target requires a 16 MiB flash image/header and uses
 | Device config | `0x616000` | 104 KiB | Reserved, not wired |
 | Node journal | `0x630000` | 1 MiB | Schema-3/physical-2 operation-scoped submission runtime; current 128-entry non-reclaiming cap in PSRAM below the 154-acceptance journal lifetime; authenticated submission and post-re-enumeration terminal status powered-qualified, but not a powered 128-entry fill |
 | Message store | `0x730000` | 2 MiB | Wired ADR 0011 format-1 raw-RNS inbox; one 576-byte commit-last item; 383-byte maximum; not LXMF |
-| LXMF store | `0x930000` | 2 MiB | Wired ADR 0014 append-only store; 512-slot PSRAM index; mount-gated opportunistic plus responder-side direct-packet `lxmf.delivery` admission with required retained proofs; four-entry outbound-initiator direct-Link registry is source-qualified; fresh-Link/new-commit delivery and exact timeout retirement followed by later fresh-Link recovery are powered-qualified, while successful same-Link reuse and `AlreadyDurable` replay remain open |
+| LXMF store | `0x930000` | 2 MiB | Wired ADR 0014 append-only store; 512-slot PSRAM index; mount-gated opportunistic plus responder-side direct-packet `lxmf.delivery` admission with required retained proofs; four-entry outbound-initiator direct-Link registry and per-Link single-flight policy; fresh-Link/new-commit delivery, exact timeout retirement followed by later fresh-Link recovery, and a bounded same-message two-packet/one-row replay outcome are powered-qualified; exact `LinkHandle` reuse and the receiver `Replay` enum remain source-qualified because the frozen client API exposes neither |
 | Unallocated | `0xb30000` | 4.8125 MiB | OTA/layout decision |
 
 The workspace runner in `.cargo/config.toml` hardcodes an 8 MiB flash size and
@@ -1752,8 +1773,14 @@ proof path. The later
 new direct Link receive and outbound Link DATA success path. The
 [stale-Link recovery record](e290-stale-link-recovery-powered-proof.md) powers
 durability-first retirement and later fresh-Link delivery after a receiver
-reboot. None of these records qualifies `AlreadyDurable` direct replay,
-successful same-Link reuse, Resource, propagation, or a client mailbox.
+reboot. The
+[same-Link reuse and direct-replay record](e290-same-link-reuse-replay-powered-proof.md)
+powers submissions 6 and 7 with one LXMF message ID, two distinct Reticulum
+packet hashes, two durable `Delivered` terminals, and one receiver row. The
+portable regressions qualify exact same-`LinkHandle` reuse and receiver
+`Replay`; the frozen client API does not independently expose either internal
+fact. Resource, propagation, responder/backchannel reuse, broader direct
+fault/pressure behavior, and a client mailbox remain open.
 
 Journal mount, unsupported history, or recovery failure is isolated because it
 occurs during boot before a durability-gated DATA owner can exist: the
@@ -2346,8 +2373,13 @@ Link; a routed Header-2 opportunistic path can impose the smaller 383-byte
 carrier ceiling and trigger that selection. Larger Link-MDU overflow remains
 durably `Preparing` for future Resource support and is never truncated. The
 [bounded direct-Link proof](e290-direct-link-powered-proof.md) qualifies one
-fresh-Link 408-byte complete wire; successful same-Link reuse and Resource
-remain open. Current source retires an exact Link after direct delivery timeout
+fresh-Link 408-byte complete wire. The
+[same-Link reuse and direct-replay proof](e290-same-link-reuse-replay-powered-proof.md)
+qualifies two powered direct-required deliveries with one message ID, distinct
+packet hashes, two `Delivered` terminals, and one receiver row; exact
+same-`LinkHandle` reuse and the receiver `Replay` enum remain source-qualified
+behind the frozen client API. Resource remains open. Current source retires an
+exact Link after direct delivery timeout
 so a later direct submission can establish a fresh session; the
 [current-image recovery proof](e290-stale-link-recovery-powered-proof.md)
 qualifies that narrow peer-reboot sequence on the two E290s.
@@ -3389,9 +3421,10 @@ first smoke.
 - Preserve implemented source-free basic method-neutral LXMF send, its
   automatic opportunistic delivery when eligible, four-entry outbound-
   initiator Link registry with exact Link-DATA receipt/durable-frame ownership,
+  per-Link single-flight from active attempt through unacknowledged terminal,
   exact timeout retirement, and committed list/read. Preserve the bounded
-  fresh-Link powered path, then qualify successful same-Link reuse,
-  `AlreadyDurable` replay, responder/backchannel reuse, generic
+  fresh-Link, stale-Link recovery, and same-Link/direct-replay powered records,
+  then qualify responder/backchannel reuse, generic
   capacity-driven active-Link close/LRU eviction, and multiple simultaneous
   establishment transactions. Extend send to nonempty fields, stamps/tickets,
   Resource, and propagation delivery. Move the temporary

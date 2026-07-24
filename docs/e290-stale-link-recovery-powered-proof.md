@@ -145,12 +145,12 @@ This record qualifies:
 It does not independently expose the opaque Link handle or a wire-level
 `LINKCLOSE` trace through the client API; those exact-correlation and ordering
 properties remain source- and regression-qualified. It also does not qualify
-multiple simultaneous direct attempts on one Link. Timeout retirement closes
-the complete session, so a younger sibling attempt awaiting a proof could
-conservatively time out when an older sibling retires their shared Link. Direct
-sends must remain sequential for the current alpha until the runtime permits
-only one in-flight direct attempt per Link or defers close until all sibling
-receipts drain.
+multiple simultaneous direct attempts on one Link; that concurrency condition
+was outside this historical run. Current source now enforces one in-flight
+direct attempt per exact Link through durable terminal acknowledgement, and a
+[later powered record](e290-same-link-reuse-replay-powered-proof.md) exercises
+the resulting bounded successful reuse/replay path. Simultaneous work on
+different Links and the broader pressure matrix remain source-regression-only.
 
 This bounded run also does not qualify responder/backchannel reuse,
 multi-destination Link-table pressure, ambiguous flash I/O on powered hardware,

@@ -1579,6 +1579,19 @@ pub async fn run(
                                 );
                             }
                             ProductSubmissionDrive::Runtime(Ok(
+                                RuntimeStep::DirectLinkAttemptBackpressured { id, link },
+                            )) => {
+                                let retry_not_before_ms =
+                                    owner_now.saturating_add(config::STORAGE_RETRY_BACKOFF_MS);
+                                durability_service =
+                                    durability_service.retry_at(retry_not_before_ms);
+                                warn!(
+                                    "e290-node stage=direct-link status=DEFERRED submission={} reason=matching-link-attempt-busy link={:02x?} retry_not_before_ms={retry_not_before_ms}",
+                                    id.get(),
+                                    link.as_bytes(),
+                                );
+                            }
+                            ProductSubmissionDrive::Runtime(Ok(
                                 RuntimeStep::LinkEstablishmentExpired {
                                     offer,
                                     link,

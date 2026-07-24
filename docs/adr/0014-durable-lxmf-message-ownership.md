@@ -273,9 +273,12 @@ must not be relabelled as LXMF evidence.
   broader powered target qualification remain explicit later tranches. Basic
   direct outgoing encode/send and same-boot retry are implemented under ADR
   0018. Its [powered record](../e290-direct-link-powered-proof.md) qualifies one
-  fresh outbound Link and new responder commit/proof chain. Direct
-  `AlreadyDurable` replay, active-Link reuse, retry budgets/ceilings, Resource,
-  and the broader fault/pressure matrix remain unqualified.
+  fresh outbound Link and new responder commit/proof chain. The
+  [same-Link/replay record](../e290-same-link-reuse-replay-powered-proof.md)
+  adds the bounded two-delivery/one-message/one-row outcome; exact Link-handle
+  reuse and the receiver's `AlreadyDurable` result remain source-qualified
+  because the frozen client API exposes neither. Retry budgets/ceilings,
+  Resource, and the broader fault/pressure matrix remain unqualified.
 - A pre-pending clean fault can disable only LXMF admission. Once a mutation is
   pending, an ambiguous store fault retains its exact owner and blocks all other
   flash mutations until reset/remount; routing and nonmutating consumers may

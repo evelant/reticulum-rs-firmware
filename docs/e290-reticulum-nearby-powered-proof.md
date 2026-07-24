@@ -150,8 +150,8 @@ contain no copied appliance credential.
 ## What remains
 
 - Repeat with a fresh contact database to qualify first-time **Add**.
-- Preserve the later bounded ADR 0018 fresh-Link success proof and qualify
-  active-Link reuse, `AlreadyDurable` replay, timeout/fault/pressure behavior,
+- Preserve the later bounded ADR 0018 fresh-Link, stale-Link recovery, and
+  same-Link/direct-replay proofs; qualify the remaining fault/pressure behavior
   and bidirectional direct delivery.
 - Qualify age-based peer expiry, Android hardware, background BLE restoration,
   multi-hop discovery, additional Reticulum interfaces, pressure, and soak.

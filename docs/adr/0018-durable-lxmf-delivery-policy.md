@@ -104,8 +104,10 @@ provisioned node. Its separate appliance credential file is retained.
 
 For the current source-free basic-send operation, `Auto` applies in this order:
 
-1. reuse a compatible active Link or backchannel when one already exists;
-2. otherwise send an eligible one-packet message opportunistically;
+1. reuse a compatible active Link or backchannel when one already exists and
+   has no active or unacknowledged terminal DATA attempt;
+2. otherwise send an eligible one-packet message opportunistically, including
+   while a matching Link is busy;
 3. select or establish a direct Link when the message cannot use the available
    opportunistic packet form, when a future bounded retry policy escalates it,
    or when an explicit future preference requires direct delivery;
@@ -130,19 +132,23 @@ never be truncated.
 The current source implements the first bounded subset of this policy. It
 reuses a compatible active product-initiated outbound Link from a registry
 sized to the native product Link table (four entries on E290) before
-considering opportunistic delivery. Closed or unknown handles are pruned during
-lookup and capacity checks. A `Stale` Link is retained because authenticated
-traffic may revive it, but it is not selectable and continues to occupy its
-registry slot. Without a compatible entry, the policy retains the existing
-opportunistic-first behavior when the carrier fits. An oversize carrier, or a
-smaller carrier that exceeds the selected routed packet MDU, takes the direct
-path. A new Link is not created until the destination has an authenticated
-identity and usable retained path; the same tagged path-discovery owner,
-dispatch acknowledgement, wait, and retry schedule therefore gates Link
-establishment. A full registry is bounded backpressure: the exact message
-remains durably `Preparing` for a later retry, not terminal failure.
-Responder/backchannel Link discovery and reuse are not part of this first
-subset.
+considering opportunistic delivery, but only when that exact Link has no active
+or unacknowledged terminal DATA attempt. Closed or unknown handles are pruned
+during lookup and capacity checks. A `Stale` Link is retained because
+authenticated traffic may revive it, but it is not selectable and continues
+to occupy its registry slot. Without a ready compatible entry, the policy
+retains the existing opportunistic-first behavior when the carrier fits. An
+oversize carrier, or a smaller carrier that exceeds the selected routed packet
+MDU, takes the direct path. If a destination-matching Link is busy, such
+direct-required work remains durably `Preparing` under typed backpressure; the
+runtime neither falls back to an incompatible carrier nor creates a second
+Link to that destination. A new Link is not created until the destination has
+an authenticated identity and usable retained path; the same tagged
+path-discovery owner, dispatch acknowledgement, wait, and retry schedule
+therefore gates Link establishment. A full registry is likewise bounded
+backpressure: the exact message remains durably `Preparing` for a later retry,
+not terminal failure. Responder/backchannel Link discovery and reuse are not
+part of this first subset.
 
 ### Implement direct Link delivery as a reusable capability
 
@@ -153,9 +159,12 @@ following transport-neutral lifecycle:
 2. revalidate the remote identity and usable native path;
 3. when absent, emit a tagged path request under the existing bounded
    discovery schedule;
-4. reuse a compatible active outbound Link or initiate one; attach its opaque
-   handle to the exact generation-tagged offer, and retain the LINKREQUEST
-   through ordinary-router pressure;
+4. reuse a compatible idle active outbound Link or initiate one; when a
+   matching active Link still owns an active or unacknowledged terminal
+   attempt, retain the exact submission under typed backpressure instead of
+   initiating a second same-destination Link; attach a newly initiated Link's
+   opaque handle to the exact generation-tagged offer, and retain the
+   LINKREQUEST through ordinary-router pressure;
 5. start one product-owned establishment deadline only after the ordinary
    router confirms the exact LINKREQUEST's first real interface dispatch; the
    offer snapshots a 30-second minimum, Reticulum's six-second first-hop and
@@ -187,19 +196,23 @@ evicts the matching reusable entry and firmware routes the authenticated
 terminal `Failed(DeliveryTimeout)`; it is not automatically replayed. A later
 direct submission may establish a fresh Link.
 
-The first implementation serializes Link establishment and direct-send work to
-one active product transaction while retaining a fixed registry of reusable
-product-initiated outbound Links. The registry capacity matches the product's
-native Link table; it is four on E290. The runtime separately checks native
-owned-Link admission because inbound responder Links share that table. Pressure
-marks only the affected direct-required submission, allowing unrelated short
-opportunistic work and usable cached-Link work to continue. It does not yet map
-an authenticated responder-side Link to its remote `lxmf.delivery`
-destination, so reverse or backchannel reuse remains deferred. This is a
-concurrency and ownership bound, not a message-size, transport, or hardware
-feature restriction. Later responder/backchannel reuse or multiple in-flight
-establishments may widen that owner without changing the durable message or
-device API.
+The first implementation serializes Link establishment to one active product
+transaction and serializes direct DATA attempts per exact Link while retaining
+a fixed registry of reusable product-initiated outbound Links. Link occupancy
+starts with the active packet attempt and extends through an unacknowledged
+terminal: only the exact durable terminal acknowledgement releases that Link
+for another direct attempt. This product policy does not narrow the lower node
+core's independent bounded-attempt capability. The registry capacity matches
+the product's native Link table; it is four on E290. The runtime separately
+checks native owned-Link admission because inbound responder Links share that
+table. Pressure marks only the affected direct-required submission, allowing
+eligible short opportunistic work and work on other usable cached Links to
+continue. It does not yet map an authenticated responder-side Link to its
+remote `lxmf.delivery` destination, so reverse or backchannel reuse remains
+deferred. This is a concurrency and ownership bound, not a message-size,
+transport, or hardware feature restriction. Later responder/backchannel reuse
+or multiple in-flight establishments may widen that owner without changing
+the durable message or device API.
 
 The establishment transaction, reusable-Link registry, path-discovery counters,
 deadline, retry history, and Resource-wait marker are boot-volatile. The exact
@@ -277,10 +290,14 @@ closed/unknown registry pruning, non-selectable `Stale` retention, full-registry
 backpressure, path-gated establishment, first-dispatch deadline start and exact
 pending-Link abort, complete-wire Link-DATA preparation, typed receipt
 ownership, the authorized-frame durability barrier, and exact reusable-Link
-retirement after a Link-DATA timeout. The integrated regression expires a real
-direct attempt while native Link state still appears active and proves that the
-next direct submission requests a fresh Link. It does not yet power-qualify the
-complete fault/pressure matrix or successful same-Link reuse.
+retirement after a Link-DATA timeout. One integrated regression holds a second
+direct-only submission while the first exact Link attempt is active and while
+its terminal remains unacknowledged, proves that no second establishment is
+created, then reuses the exact same `LinkHandle` after acknowledgement and
+delivers both submissions. The timeout regression separately proves that a
+waiting follower remains parked until the failed leader is durably finalized
+and its Link is retired, after which the follower requests a fresh Link. The
+complete fault/pressure matrix remains unqualified.
 
 The [July 24 direct-Link powered record](../e290-direct-link-powered-proof.md)
 separately closes the bounded fresh-Link success path. A 408-byte complete LXMF
@@ -298,7 +315,19 @@ separately starts with a successful direct baseline, reboots only the receiver,
 observes a durable sender `DeliveryTimeout` with no receiver commit, and then
 delivers the next sequential submission over a fresh Link. This qualifies the
 narrow timeout-retirement consequence, not automatic retry of the failed
-submission or successful same-Link reuse.
+submission.
+
+The
+[same-Link reuse and replay record](../e290-same-link-reuse-replay-powered-proof.md)
+starts sender A from a fresh boot and submits two distinct durable operations,
+IDs `6` and `7`, with different idempotency keys but an identical direct-only
+408-byte LXMF wire and message ID beginning `9692c4`. Both reach `Delivered`
+with distinct hashes for their 483-byte Reticulum packets, while the receiver host
+projection advances by exactly one row, from 11 rows/sequence 13 to 12
+rows/sequence 14. The portable regressions prove exact-handle reuse and the
+receiver's `AlreadyDurable` classification; the powered run physically
+exercises that composed path but does not independently expose either the
+opaque `LinkHandle` or replay kind through the client API.
 
 ## Consequences
 
@@ -312,11 +341,12 @@ submission or successful same-Link reuse.
   future work; exact Link-DATA timeout retirement is implemented. Maintenance
   is not otherwise assumed to free a slot. A non-selectable `Stale` entry also
   retains its slot so it can revive, until it becomes `Closed` or disappears.
-- Timeout retirement currently closes the complete Link. Until the runtime
-  serializes direct attempts per Link or waits for every sibling receipt,
-  multiple in-flight direct attempts on one session can conservatively cascade
-  to timeout when the oldest one retires it. The alpha demo therefore sequences
-  direct sends.
+- Direct DATA is single-flight per exact Link from active attempt through
+  durable terminal acknowledgement. A later direct-required submission for a
+  busy matching Link stays durably `Preparing` under the firmware's bounded
+  retry backoff, so timeout retirement has no younger same-Link sibling to
+  invalidate. This does not block eligible opportunistic delivery or direct
+  work on another usable Link.
 - This appliance's `Auto` default intentionally differs from Python LXMF's
   implicit `DIRECT` default while remaining wire-compatible with both LXMF
   delivery methods.
