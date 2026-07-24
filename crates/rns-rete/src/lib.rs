@@ -68,7 +68,7 @@ pub use rete_stack::{DestinationType, Direction};
 pub use rete_transport::{AnnounceError, AnnounceInfo, LinkState};
 
 /// Reviewed Rete integration-fork source revision.
-pub const SOURCE_REVISION: &str = "2d0781838aa03370b739d4003bcd1bdd5bbb0c6c";
+pub const SOURCE_REVISION: &str = "a443173b0829c2637ce23531a8cde15fdfec185e";
 
 /// Initial table capacities used only to obtain comparable Phase-0 numbers.
 pub mod probe_capacity {

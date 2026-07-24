@@ -75,8 +75,8 @@ proof unless a failing test promotes one into a release blocker.
 - Python LXMF's 391-byte opportunistic carrier fits inside the distinct
   431-byte complete-wire durable intent, so the former 384-through-391 journal
   rejection is closed without raising the generic-RNS ceiling. The remaining
-  direct gap is active-Link reuse, `AlreadyDurable` replay, Resource, and
-  broader Link ownership/fault qualification. Source tests cover path-first
+  powered direct gap is successful active-Link reuse, `AlreadyDurable` replay,
+  Resource, and broader Link ownership/fault qualification. Source tests cover path-first
   Link establishment, a snapshotted
   hop/first-interface-aware deadline starting at first actual LINKREQUEST
   dispatch, exact pending-Link abort, active-Link reuse, Link-DATA receipt
@@ -85,7 +85,11 @@ proof unless a failing test promotes one into a release blocker.
   a fresh Link with a 392-byte carrier that could not fit the 391-byte
   opportunistic ceiling, committed the exact 408-byte message on the receiver,
   returned its proof, reached durable `Delivered`, and retained both sides
-  across board and app restart.
+  across board and app restart. The
+  [current-image recovery record](e290-stale-link-recovery-powered-proof.md)
+  additionally qualifies exact retirement after receiver reboot and delivery
+  of the next sequential submission over a fresh Link; it does not qualify
+  successful same-Link reuse.
 - The initial direct profile serializes one establishment transaction and
   retains at most four reusable product-initiated outbound Links, matching the
   E290 native Link table. Lookup and capacity checks prune only `Closed` or
@@ -95,21 +99,37 @@ proof unless a failing test promotes one into a release blocker.
   durably `Preparing` under the firmware's one-second backoff, which repeats
   while the registry remains full; registry pressure is not terminal failure.
   A short eligible message for that destination can still use opportunistic
-  DATA. The alpha does not proactively close or LRU-evict an active Link, so
-  maintenance is not guaranteed to free a slot.
+  DATA. The alpha has no generic capacity-pressure or LRU eviction policy, so
+  maintenance is not otherwise guaranteed to free a slot. Exact direct
+  Link-DATA `DeliveryTimeout` is narrower: current source evicts that precise
+  reusable handle and routes normal authenticated close, allowing a later
+  submission to establish a fresh Link. The failed submission itself remains
+  terminal and is not automatically retried.
+- Timeout retirement is session-wide, but the alpha does not yet serialize
+  direct attempts per Link. If a younger direct attempt is still awaiting its
+  proof when an older attempt times out, closing the shared Link can prevent
+  that later proof from validating and conservatively drive the younger
+  attempt to timeout too. Direct sends should remain sequential for the current
+  demo profile. The product fix is either one in-flight direct attempt per Link
+  or delayed close until every sibling receipt has drained.
 - The four-entry reusable outbound registry and Rete's four-entry native
   owned-Link table are distinct bounds. Inbound responder Links share the
   native table with outbound initiators, so native pressure can defer new
   direct establishment even when the outbound registry has room. Runtime
   scheduling isolates that pressure to the affected submission instead of
   blocking later opportunistic work.
-- Pinned Rete does not yet reclaim responder-side `Handshake` Links: its
-  maintenance closes only `Active`/`Stale` state. A peer can therefore consume
-  all four native E290 Link slots by sending accepted LINKREQUESTs and
-  withholding LRRTT. Python Reticulum bounds the corresponding responder state
-  to 360 seconds plus six seconds per inbound hop. This native-capacity/DoS
-  defect must be fixed in Rete or the adapter before treating the direct-Link
-  path as release-ready; no upstream issue or PR has been opened.
+- Pinned Rete now closes and reclaims a responder-side `Handshake` that never
+  authenticates LRRTT, closing the former indefinite four-slot occupancy
+  defect. The Python-compatible budget is
+  `360 + 6 * max(1, post-ingress hops)` seconds from confirmed LRPROOF
+  completion, with LINKREQUEST admission as the bounded fallback. Two residuals
+  remain: the accepted `u8` hop value can stretch occupancy from 366 seconds to
+  1,890 seconds without a separate maximum-hop admission policy, and
+  maintenance exposes only aggregate `closed_links`/`links_closed`, not a
+  reason-specific establishment-timeout event. Timeout is intentionally not a
+  malformed or cryptographic `links_failed` event. Native generic initiator
+  expiry remains absent; the firmware's dispatch-relative deadline and exact
+  abort continue to own that half. No upstream issue or PR has been opened.
 - The registry cannot yet map a responder-side Link to the remote
   `lxmf.delivery` identity, so responder/backchannel reuse is deferred. Link
   transactions, registry contents, path and deadline clocks, retry history, and

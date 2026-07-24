@@ -3696,6 +3696,19 @@ where
         self.node.abort_unestablished_link(link)
     }
 
+    /// Close one exact active or stale product Link and return its ordinary
+    /// authenticated teardown actions.
+    ///
+    /// Local Link state is removed before this method returns. The caller must
+    /// retain every non-empty action envelope until ordinary-router admission
+    /// succeeds or enters the existing fail-closed recovery path.
+    pub fn close_link<R>(&mut self, link: LinkHandle, rng: &mut R) -> NodeActions
+    where
+        R: RngCore + CryptoRng,
+    {
+        self.node.close_link(link, rng)
+    }
+
     /// Atomically drain one ready non-packet action envelope into a
     /// caller-provided, transport-neutral application-event owner.
     ///

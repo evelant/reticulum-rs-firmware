@@ -42,8 +42,12 @@ choose from its eligible interfaces and exposes exact terminal, recovered, and
 quarantined owners until durable projection allows acknowledgement. The same
 port exposes only opaque Link lifecycle operations: poll one product Link,
 abort one exact unestablished Link, and prepare the complete durable LXMF wire
-over one active Link. It does not expose a LoRa radio or interface choice to
-the runtime.
+over one active Link. A direct terminal observation retains that exact Link
+handle. On Link-DATA `DeliveryTimeout`, the runtime first persists the failed
+submission's final record, then evicts the matching reusable entry and returns
+a typed control step; permanent firmware closes the Link through the normal
+authenticated supervisor path and routes any resulting ordinary action. The
+runtime does not expose a LoRa radio or interface choice.
 
 ```mermaid
 flowchart LR
@@ -75,14 +79,19 @@ in `Recovering`. Firmware must call `recover_boot_step()` until it reports
 
 1. reconcile an ambiguous actor-owned flash mutation;
 2. commit one pending projector record;
-3. attempt one acknowledgement unlocked by a durable record;
-4. observe one terminal owner, recovered owner, or new quarantine;
-5. prepare one intent whose `Preparing` barrier is already durable; or
-6. begin the durable `Queued -> Preparing` barrier for one queued intent.
+3. emit one ready post-durability Link-retirement control step, whose firmware
+   consumer must synchronously close or retain every resulting ordinary action;
+4. attempt one acknowledgement unlocked by a durable record;
+5. observe one terminal owner, recovered owner, or new quarantine;
+6. prepare one intent whose `Preparing` barrier is already durable; or
+7. begin the durable `Queued -> Preparing` barrier for one queued intent.
 
 This guarantees that packet entropy and attempt ownership are not created
 before the no-replay barrier is committed, and that terminal or recovered
-owners are not released before their disposition or audit is committed.
+owners are not released before their disposition or audit is committed. The
+E290 scheduler exposes a ready retirement only with an empty local ordinary
+action-retention lane; a retained DATA frame may bypass quiescence only for
+persistence, never for this control consequence.
 
 ## Automatic LXMF and direct-Link transaction
 
@@ -119,6 +128,16 @@ matching Link is usable, it wins over opportunistic delivery for later short
 messages and the complete destination-prefixed wire is prepared as
 context-`NONE` Link DATA.
 
+Each direct attempt retains the exact Link handle beside its distinct
+Link-DATA receipt kind. A `DeliveryTimeout` retains its `PersistHandle` across
+both normal append and ambiguous-I/O reconciliation; only the exact committed
+final record releases the reusable-entry eviction and firmware close signal.
+That signal retires the session even if native Reticulum state still reports
+the Link as `Active`, covering a peer that restarted and lost its volatile half
+of the session. The failed durable submission remains terminal
+`Failed(DeliveryTimeout)` and is not silently retried; a later direct
+submission establishes a fresh Link.
+
 This alpha intentionally owns only one serialized establishment transaction
 but retains a fixed reusable outbound-Link registry sized to the product's
 native Link table (four entries for E290). It separately preflights the shared
@@ -127,8 +146,9 @@ owner is full, bounded per-submission backpressure leaves the exact message
 durably `Preparing` and the E290 retries after one second while pressure
 remains; later short opportunistic work and matching usable cached-Link work
 are not head-of-line blocked. Pressure is not a terminal submission failure.
-The alpha does not proactively close or LRU-evict an active registry entry, and
-it does not assume Link maintenance will free one.
+The alpha has no generic capacity-pressure or LRU eviction policy and does not
+assume Link maintenance will free a slot. Exact Link-DATA receipt timeout is the
+narrower implemented retirement rule.
 The runtime does not yet associate an authenticated responder Link with the
 remote LXMF destination, so responder/backchannel reuse is deferred. A complete
 wire that exceeds the active Link MDU also remains durably `Preparing` without
@@ -179,9 +199,15 @@ Durable state intentionally drops only the selected-interface scalar: packet
 identity and attempt correlation are stable across an interface choice, while
 the projector still cross-checks the complete length, frame digest, and attempt
 token. A direct attempt additionally retains the distinct Link-DATA receipt
-kind through preparation, dispatch, proof, timeout, cancellation, and terminal
-projection. Its receiver releases the explicit Link proof only after the exact
-LXMF inbox record is durably committed (or recognized as already durable).
+kind and Link handle through preparation, dispatch, proof, timeout,
+cancellation, and terminal projection. Its receiver releases the explicit Link
+proof only after the exact LXMF inbox record is durably committed (or
+recognized as already durable). A portable integrated regression establishes a
+real Link between two node cores, expires its direct receipt while native Link
+state still appears active, injects and reconciles an ambiguous final-record
+write reply, verifies durability before exact registry eviction and
+authenticated close, and proves that the next direct submission requests a
+fresh Link.
 The product profile owns 128 resident submissions; the one-entry harness below
 remains a deliberately narrow composition fixture. Authenticated USB and BLE
 clients can reach the composed handoff from a fresh local submission in the

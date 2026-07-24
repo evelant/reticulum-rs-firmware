@@ -33,7 +33,12 @@ of reusable outbound-initiator Links and exact one-packet Link-DATA delivery.
 The [bounded direct-Link powered proof](e290-direct-link-powered-proof.md)
 separately establishes one fresh Link, commits the exact oversize message,
 returns its delayed proof, reaches durable `Delivered`, and retains both sides
-across board and app restart. In the historical API 1.1 image, MAC
+across board and app restart. The
+[current-image stale-Link recovery proof](e290-stale-link-recovery-powered-proof.md)
+additionally reboots the receiver while the sender retains that session,
+durably records the resulting `DeliveryTimeout` without a receiver commit, and
+delivers the next sequential message over a fresh Link. In the historical API
+1.1 image, MAC
 `ac:a7:04:e1:3e:88` retained its button-confirmed
 empty-store initialization, durable Active generation 3, and host credential;
 MAC `ac:a7:04:e1:3f:88` owned a separate durable node identity. Matching exact
@@ -104,12 +109,15 @@ initiator/backchannel receive, responder/backchannel reuse, and native Resource
 ingress remain disabled.
 
 The current source composition pins Rete commit
-`2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on fork branch
-`codex/link-data-receipts`. It descends from
+`a443173b0829c2637ce23531a8cde15fdfec185e` on fork branch
+`codex/responder-handshake-reclaim`. It descends from
+`2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on
+`codex/link-data-receipts`, which descends from
 `90570cafc812b3025011cb690ec74a27f287cb3f`, whose tag is
 `firmware-pin-90570ca`; the current revision has no designated durable tag. The
-older 2026-07-20 two-board measurements below predate both revisions, while the
-later pre-PSRAM one-board checkpoint uses the `90570ca` predecessor. The
+older 2026-07-20 two-board measurements below predate all three revisions, while
+the later pre-PSRAM one-board checkpoint uses the `90570ca` predecessor and the
+fresh direct-Link powered proof uses the `2d07818` descendant. The
 Stage 5 PSRAM boot checkpoint is the first powered evidence for the post-offload
 Stage 5 source and placement, and is scoped only to placement, boot, and one
 authenticated API read. The pin removes implicit
@@ -117,9 +125,10 @@ interface-zero/broadcast fallbacks, adds exact path/reverse/Link routing and
 authenticated fail-closed LRPROOF handling, and makes covered H2 relay/reverse
 admission transactional with typed failures. It also adds precise
 microsecond/binary64 LRRTT timing, dispatch confirmation, Active/Stale updates,
-and authenticated-malformed teardown. The current descendant additionally
+and authenticated-malformed teardown. The `2d07818` descendant additionally
 registers ordinary Link-DATA receipts and honors the receiving destination's
-proof policy. Those changes do not retroactively
+proof policy. The current descendant adds responder-Handshake timeout
+reclamation. Those changes do not retroactively
 qualify a historical image or hardware run.
 
 The current composition also replaces `RADIO_READY`/`LORA_ONLINE`
@@ -221,8 +230,15 @@ It uses one pre-decrypt ingress sample for one bounded synchronous handler,
 where Python takes three internal samples. The firmware adapter uses precise
 `*_at` paths and confirms at the transport-neutral ordinary router; upstream
 Tokio/Embassy runners remain coarse/unconfirmed.
-Shared-Hub endpoint/reincarnation identity and automatic timeout `LINKCLOSE`
-emission also remain open. Channel sends now preflight MDU,
+
+A responder that withholds authenticated LRRTT now loses its owned slot after
+`360 + 6 * max(1, post-ingress hops)` seconds. The origin is confirmed LRPROOF
+completion when available and request admission otherwise. Reclamation changes
+aggregate `links_closed`, not `links_failed`; the product wrapper continues to
+own the initiator deadline and exact abort.
+
+Shared-Hub endpoint/reincarnation identity and established-Link watchdog
+timeout `LINKCLOSE` emission also remain open. Channel sends now preflight MDU,
 pending-window and receipt capacity; retries preflight the exact Link route and
 atomically replace the sole live receipt with the fresh ciphertext hash before
 retry/window/timestamp state commits. Obsolete proofs fail closed, full-table
@@ -321,7 +337,11 @@ occupies capacity. A full registry leaves new direct work durably `Preparing`
 under bounded backpressure with a fixed one-second backoff; it is not terminal
 failure, and short eligible work for another destination can still use
 opportunistic DATA. The alpha does not proactively close or LRU-evict an active
-entry, and maintenance is not assumed to free one.
+entry for generic capacity pressure, and maintenance is not assumed to free
+one. A direct Link-DATA `DeliveryTimeout` is handled separately: the runtime
+evicts that exact reusable handle, the node routes normal authenticated close,
+and a later direct submission establishes a fresh Link. The timed-out
+submission remains terminal and is not automatically retried.
 Establishment completes tagged path discovery before creating a Link, retains
 the exact LINKREQUEST through ordinary-router pressure, and starts its
 snapshotted hop-aware deadline only after the request's first confirmed
@@ -352,8 +372,12 @@ delivery for eligible one-shots when no compatible cached Link exists. Those
 historical powered results are not general LXMF interoperability
 qualification. The later
 [forced-direct record](e290-direct-link-powered-proof.md) separately qualifies
-one fresh-Link, one-packet success path, but not active-Link reuse or its
-broader fault/pressure matrix.
+one fresh-Link, one-packet success path. Current source also has a portable
+integrated regression for exact timed-out-Link retirement and fresh-Link
+selection by a later submission. The
+[current-image powered recovery record](e290-stale-link-recovery-powered-proof.md)
+now qualifies that narrow receiver-reboot path, but successful powered
+same-Link reuse and the broader fault/pressure matrix remain open.
 
 An optional journal mount/recovery failure occurs before any
 durability-gated DATA owner can exist; it disables local durable submission
@@ -425,8 +449,9 @@ permanent fault
 with an unresolved frame enters interface-local `ActiveOwnerFailStopped`, takes
 the same LoRa lease offline without changing its generation, retains the exact
 frame/completion/ticket, and permits no fresh LoRa work for the rest of the boot.
-Device configuration, active-Link reuse qualification, Resource and propagated
-LXMF, responder/backchannel reuse, active-Link close/LRU eviction,
+Device configuration, successful active-Link reuse qualification, Resource and
+propagated LXMF, responder/backchannel reuse, generic capacity-driven
+active-Link close/LRU eviction,
 initiator/backchannel direct receive, durable delete/reclaim and migration
 policy, local NomadNet clients, and production-ready host-facing USB/BLE/Wi-Fi
 services remain visible product work. API 1.4 and the host CLI now provide a
@@ -665,7 +690,7 @@ The target requires a 16 MiB flash image/header and uses
 | Device config | `0x616000` | 104 KiB | Reserved, not wired |
 | Node journal | `0x630000` | 1 MiB | Schema-3/physical-2 operation-scoped submission runtime; current 128-entry non-reclaiming cap in PSRAM below the 154-acceptance journal lifetime; authenticated submission and post-re-enumeration terminal status powered-qualified, but not a powered 128-entry fill |
 | Message store | `0x730000` | 2 MiB | Wired ADR 0011 format-1 raw-RNS inbox; one 576-byte commit-last item; 383-byte maximum; not LXMF |
-| LXMF store | `0x930000` | 2 MiB | Wired ADR 0014 append-only store; 512-slot PSRAM index; mount-gated opportunistic plus responder-side direct-packet `lxmf.delivery` admission with required retained proofs; four-entry outbound-initiator direct-Link registry is source-qualified; fresh-Link/new-commit one-packet direct delivery is powered-qualified, while active-Link reuse and `AlreadyDurable` replay remain open |
+| LXMF store | `0x930000` | 2 MiB | Wired ADR 0014 append-only store; 512-slot PSRAM index; mount-gated opportunistic plus responder-side direct-packet `lxmf.delivery` admission with required retained proofs; four-entry outbound-initiator direct-Link registry is source-qualified; fresh-Link/new-commit delivery and exact timeout retirement followed by later fresh-Link recovery are powered-qualified, while successful same-Link reuse and `AlreadyDurable` replay remain open |
 | Unallocated | `0xb30000` | 4.8125 MiB | OTA/layout decision |
 
 The workspace runner in `.cargo/config.toml` hardcodes an 8 MiB flash size and
@@ -989,9 +1014,8 @@ by exactly 192 bytes to 170,352/170,288; the default pair is unchanged.
 Those historical artifacts passed build, graph, ELF, and static-stack gates but
 were not powered-qualified: both boards were absent after the preceding
 debugger-reset attempt. They do not describe an ELF built from the preceding
-`8b5d652`, `14c7b49`, or `90570ca` pins, or from the current `2d07818` pin. The
-immediately
-preceding 777,600-byte HIL image,
+`8b5d652`, `14c7b49`, `90570ca`, or `2d07818` pins, or from the current
+`a443173` pin. The immediately preceding 777,600-byte HIL image,
 SHA-256
 `151a66cc92b83268050c61bfc983ad6d9452fac0626d260c26da877c552c800e`,
 did pass an identity-qualified flash and exact address-zero readback on board
@@ -1649,8 +1673,8 @@ and no optional functionality advertised. An unmounted or clean-fault-disabled
 LXMF service is not advertised; the primary node destination continues
 independently.
 
-Two discovery limitations remain in the current pinned Rete `2d07818`
-descendant of `90570ca`. Its native handling
+Two discovery limitations remain in the current pinned Rete `a443173`
+descendant of `2d07818` and `90570ca`. Its native handling
 rebroadcasts a path request for a registered local secondary destination rather
 than returning that destination's PATH_RESPONSE. The current product wrapper
 temporarily detects and answers that request on the source interface and
@@ -1725,9 +1749,11 @@ local Link termination, and native Resource ingress remains disabled. The
 earlier A-to-B confirmation powers only the opportunistic new-commit-before-
 proof path. The later
 [forced-direct record](e290-direct-link-powered-proof.md) powers one physical
-new direct Link receive and outbound Link DATA success path. Neither record
-qualifies `AlreadyDurable` direct replay, active-Link reuse, Resource,
-propagation, or a client mailbox.
+new direct Link receive and outbound Link DATA success path. The
+[stale-Link recovery record](e290-stale-link-recovery-powered-proof.md) powers
+durability-first retirement and later fresh-Link delivery after a receiver
+reboot. None of these records qualifies `AlreadyDurable` direct replay,
+successful same-Link reuse, Resource, propagation, or a client mailbox.
 
 Journal mount, unsupported history, or recovery failure is isolated because it
 occurs during boot before a durability-gated DATA owner can exist: the
@@ -2320,7 +2346,11 @@ Link; a routed Header-2 opportunistic path can impose the smaller 383-byte
 carrier ceiling and trigger that selection. Larger Link-MDU overflow remains
 durably `Preparing` for future Resource support and is never truncated. The
 [bounded direct-Link proof](e290-direct-link-powered-proof.md) qualifies one
-fresh-Link 408-byte complete wire; active-Link reuse and Resource remain open.
+fresh-Link 408-byte complete wire; successful same-Link reuse and Resource
+remain open. Current source retires an exact Link after direct delivery timeout
+so a later direct submission can establish a fresh session; the
+[current-image recovery proof](e290-stale-link-recovery-powered-proof.md)
+qualifies that narrow peer-reboot sequence on the two E290s.
 The timestamp must be exactly
 `1..=8_796_093_022_207_999`. If timestamp or idempotency key is omitted, the
 host samples its current millisecond clock or generates a random key once. It
@@ -2758,12 +2788,16 @@ relayed Link/channel/proof flow, pending-Link expected-hop enforcement, and
 atomic channel retry receipt replacement, plus pending-handshake MessagePack
 LRRTT validation and authenticated-malformed teardown. The `90570ca`
 predecessor's lifecycle/timing change passes the root validation and E290 build
-gates. The current `2d07818` descendant adds ordinary Link-DATA receipts and
-destination proof-policy parity; only a new powered run can determine whether
-the combined behavior
-fixes this end-to-end timeout or whether another product boundary remains
-faulty. A final authenticated peek on `3f:88` likewise returned phase A's exact
-383-byte payload from destination `83a09ed807a0a7c631386deaa0448fb9`.
+gates. Its `2d07818` descendant adds ordinary Link-DATA receipts and destination
+proof-policy parity. The later
+[fresh direct-Link powered proof](e290-direct-link-powered-proof.md), which
+remains bound to `2d07818`, forced ordinary Link DATA, observed the receiver's
+durable commit and returned proof, and reached sender `Delivered`; it therefore
+closes this earlier end-to-end timeout only for that bounded success path. The
+current `a443173` descendant adds responder-Handshake reclamation without
+changing this historical capture. A final authenticated peek on `3f:88`
+likewise returned phase A's exact 383-byte payload from destination
+`83a09ed807a0a7c631386deaa0448fb9`.
 
 These are instrumented-workload observations, not production-image timing
 guarantees. The HIL enables allocator callbacks, updates atomic evidence, and
@@ -3355,9 +3389,10 @@ first smoke.
 - Preserve implemented source-free basic method-neutral LXMF send, its
   automatic opportunistic delivery when eligible, four-entry outbound-
   initiator Link registry with exact Link-DATA receipt/durable-frame ownership,
-  and committed list/read. Preserve the bounded fresh-Link powered path, then
-  qualify active-Link reuse, `AlreadyDurable` replay, responder/backchannel
-  reuse, active-Link close/LRU eviction, and multiple simultaneous
+  exact timeout retirement, and committed list/read. Preserve the bounded
+  fresh-Link powered path, then qualify successful same-Link reuse,
+  `AlreadyDurable` replay, responder/backchannel reuse, generic
+  capacity-driven active-Link close/LRU eviction, and multiple simultaneous
   establishment transactions. Extend send to nonempty fields, stamps/tickets,
   Resource, and propagation delivery. Move the temporary
   one-interface

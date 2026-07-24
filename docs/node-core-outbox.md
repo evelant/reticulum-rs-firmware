@@ -10,11 +10,14 @@ DATA/LXMF submission, client delivery, and full powered E290 qualification of
 the product image remain open.
 The permanent image's bounded source-`96e38aa` boot/interface/ordinary-TX smoke
 has passed, without controlled peer RX or DATA.
-**Rete pin:** `2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on
-`codex/link-data-receipts`, descending from tagged predecessor
+**Rete pin:** `a443173b0829c2637ce23531a8cde15fdfec185e` on
+`codex/responder-handshake-reclaim`, descending from
+`2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on
+`codex/link-data-receipts`, which descends from tagged predecessor
 `90570cafc812b3025011cb690ec74a27f287cb3f`
 (`firmware-pin-90570ca`). The current revision has no designated durable tag.
-It adds ordinary Link-DATA receipts and destination proof-policy parity.
+It adds responder-Handshake timeout reclamation to ordinary Link-DATA receipts
+and destination proof-policy parity.
 
 The preceding `14c7b4955a1ff6903e87cc40b42498f7869b6f4f` pin had host and
 portable-target LRRTT validation and a build-only E290 package. Its 776,464-byte
@@ -104,6 +107,13 @@ floors; otherwise stale grace is `4 * RTT + 5 seconds`. Rete intentionally
 authenticates before liveness mutation, so a corrupt stale LRRTT cannot revive
 the Link even though released Python performs its liveness update first.
 
+Responder `Handshake` maintenance now uses the Python-compatible
+`360 + 6 * max(1, post-ingress hops)` second deadline. It anchors at confirmed
+LRPROOF completion when available, falls back to request admission, reclaims
+the exact owned-Link slot, and changes aggregate `links_closed` rather than
+`links_failed`. The product wrapper retains responsibility for its exact
+initiator deadline and abort.
+
 The adapter passes precise `*_at` ingress/tick values and confirms at the
 transport-neutral ordinary-router handoff. Rete's upstream Tokio and Embassy
 runners remain coarse/unconfirmed. Rete also uses one pre-decrypt ingress
@@ -128,7 +138,8 @@ maintenance discovers immutable retry tokens; NodeCore preflights the bound
 route; and a fresh-ciphertext retry atomically replaces the envelope's sole
 receipt before retry/window/timestamp state commits. Obsolete proofs fail
 closed, full-table replacement succeeds in place, and Link removal reclaims
-channel receipts. Automatic timeout removal still emits no `LINKCLOSE` packet.
+channel receipts. Established-Link watchdog timeout removal still emits no
+`LINKCLOSE` packet.
 Receipt capacity below an adaptive channel window remains typed backpressure
 and a product sizing/throughput decision.
 
@@ -553,6 +564,14 @@ commit cannot allocate or fill a second queue. A proof or timeout can establish
 that tombstone before permit resolution or frame observation; the projector
 uses the preparation-bound digest and length for direct delivery and permits a
 timeout to finalize without first writing `AwaitingDelivery`.
+
+`TerminalAttempt::link()` retains the exact carrier correlation: Link DATA
+returns `Some(LinkHandle)` for both delivered and timed-out terminals, while
+destination DATA returns `None`. This lets product policy retire a timed-out
+reusable session without inferring identity from a packet hash or destination.
+`NodeCore::close_link()` is the normal authenticated close path for an active
+or stale Link: it removes the exact native entry and returns any resulting
+ordinary `LINKCLOSE` action for the caller to retain and route.
 
 Unknown DATA hashes, already-terminal hashes and channel candidates are typed
 `ReceiptCorrelationError` invariants, not retryable capacity failures. Rete

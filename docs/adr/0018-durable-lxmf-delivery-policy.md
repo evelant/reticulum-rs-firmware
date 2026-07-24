@@ -43,13 +43,15 @@ storage ownership to a later transport decision and make safe retry or
 escalation unnecessarily difficult.
 
 The `90570ca` Rete predecessor generated a receipt for destination DATA and
-Channel traffic but not ordinary Link DATA. The current `2d07818` descendant
+Channel traffic but not ordinary Link DATA. Its `2d07818` descendant
 implements the distinct ordinary Link-DATA receipt and respects each receiving
-destination's proof policy. Native Rete still retains pending Links without an
-automatic establishment deadline. The product wrapper now closes that leak
+destination's proof policy. The current `a443173` descendant additionally
+reclaims responder `Handshake` state on Reticulum's
+`360 + 6 * max(1, post-ingress hops)` second establishment timeout. Generic
+native initiator expiry remains absent. The product wrapper closes that half
 for its outbound initiator transaction with a transport-neutral timeout and
-exact abort operation rather than coupling the lifecycle to LoRa or to the
-E290 radio actor.
+exact abort operation rather than coupling the lifecycle to LoRa or to the E290
+radio actor.
 
 ## Decision
 
@@ -167,7 +169,9 @@ following transport-neutral lifecycle:
 8. durably project authorized-frame evidence before acknowledging interface
    completion; and
 9. map a valid Link proof to `Delivered`, or timeout, cancellation, Link close,
-   or recovery to the existing durable failure/retry vocabulary.
+   or recovery to the existing durable failure vocabulary; a Link-DATA
+   `DeliveryTimeout` also retires that exact reusable Link through the normal
+   authenticated close path.
 
 The Link request, establishment event, prepared Link packet, receipt, interface
 handoff, and durable submission remain correlated by bounded generation-safe
@@ -175,6 +179,13 @@ owners. A failed pre-I/O handoff cancels the exact receipt. Once any interface
 owns the packet, only its completion plus proof/timeout lifecycle can release
 the attempt. Pending Link establishment also has an explicit abort path so
 failed peers cannot consume the fixed Link table indefinitely.
+
+A direct terminal retains the exact Link handle that carried its packet. If
+that receipt times out while native state still appears `Active`, the runtime
+evicts the matching reusable entry and firmware routes the authenticated
+`LINKCLOSE` action through the ordinary owner. The timed-out submission remains
+terminal `Failed(DeliveryTimeout)`; it is not automatically replayed. A later
+direct submission may establish a fresh Link.
 
 The first implementation serializes Link establishment and direct-send work to
 one active product transaction while retaining a fixed registry of reusable
@@ -265,8 +276,11 @@ Current source/host qualification covers outbound-initiator active-Link reuse,
 closed/unknown registry pruning, non-selectable `Stale` retention, full-registry
 backpressure, path-gated establishment, first-dispatch deadline start and exact
 pending-Link abort, complete-wire Link-DATA preparation, typed receipt
-ownership, and the authorized-frame durability barrier. It does not yet
-power-qualify that complete fault/pressure matrix or active-Link reuse.
+ownership, the authorized-frame durability barrier, and exact reusable-Link
+retirement after a Link-DATA timeout. The integrated regression expires a real
+direct attempt while native Link state still appears active and proves that the
+next direct submission requests a fresh Link. It does not yet power-qualify the
+complete fault/pressure matrix or successful same-Link reuse.
 
 The [July 24 direct-Link powered record](../e290-direct-link-powered-proof.md)
 separately closes the bounded fresh-Link success path. A 408-byte complete LXMF
@@ -278,6 +292,14 @@ releasing its proof, and the sender projected `Delivered`. Normal resets of
 both boards plus a cold app-process relaunch retained the byte-identical
 receiver wire and exact terminal sender row.
 
+The
+[current-image stale-Link recovery record](../e290-stale-link-recovery-powered-proof.md)
+separately starts with a successful direct baseline, reboots only the receiver,
+observes a durable sender `DeliveryTimeout` with no receiver commit, and then
+delivers the next sequential submission over a fresh Link. This qualifies the
+narrow timeout-retirement consequence, not automatic retry of the failed
+submission or successful same-Link reuse.
+
 ## Consequences
 
 - Short one-shot LoRa messages normally avoid Link-establishment overhead.
@@ -286,10 +308,15 @@ receiver wire and exact terminal sender row.
 - The E290 alpha caches at most four active outbound Links. If all four remain
   active, a fifth direct-required destination stays durably `Preparing` under
   a repeating one-second backoff, while a short eligible message can still fall
-  back to opportunistic DATA. Proactive active-Link close or LRU eviction is
-  future work; maintenance is not assumed to free a slot. A non-selectable
-  `Stale` entry also retains its slot so it can revive, until it becomes
-  `Closed` or disappears.
+  back to opportunistic DATA. Generic capacity-driven close or LRU eviction is
+  future work; exact Link-DATA timeout retirement is implemented. Maintenance
+  is not otherwise assumed to free a slot. A non-selectable `Stale` entry also
+  retains its slot so it can revive, until it becomes `Closed` or disappears.
+- Timeout retirement currently closes the complete Link. Until the runtime
+  serializes direct attempts per Link or waits for every sibling receipt,
+  multiple in-flight direct attempts on one session can conservatively cascade
+  to timeout when the oldest one retires it. The alpha demo therefore sequences
+  direct sends.
 - This appliance's `Auto` default intentionally differs from Python LXMF's
   implicit `DIRECT` default while remaining wire-compatible with both LXMF
   delivery methods.

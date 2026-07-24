@@ -882,7 +882,7 @@ pub enum ApplicationEvent {
     Tick {
         /// Paths expired by this tick.
         expired_paths: usize,
-        /// Links closed for staleness by this tick.
+        /// Links closed by establishment or stale-session maintenance.
         closed_links: usize,
     },
 }
@@ -7930,6 +7930,84 @@ mod tests {
         assert_eq!(fresh.disposition, IngressDisposition::Processed);
         assert_eq!(fresh.actions.packets.len(), 1);
         assert_eq!(responder.metrics().capacity.links.used, 2);
+    }
+
+    #[test]
+    fn inbound_handshake_timeout_recovers_embedded_capacity_without_close_packets() {
+        let mut responder = TwoLinkNode::new(
+            identity(30),
+            "reticulum",
+            &["embedded-timeout"],
+            EmbeddedNodeConfig::endpoint(),
+        )
+        .unwrap();
+        let responder_identity = identity(30);
+        let destination = responder.destination_hash();
+        let mut rng = CounterRng::default();
+
+        for (tag, now) in [(31, 1), (32, 2)] {
+            let mut initiator = TwoLinkNode::new(
+                identity(tag),
+                "reticulum",
+                &["timeout-initiator"],
+                EmbeddedNodeConfig::endpoint(),
+            )
+            .unwrap();
+            initiator
+                .register_peer(&responder_identity, "reticulum", &["embedded-timeout"], 0)
+                .unwrap();
+            let (request, _) = initiator.initiate_link(destination, now, &mut rng).unwrap();
+            let admitted = responder.ingest(&request.bytes, now, InterfaceId(now as u8), &mut rng);
+            assert_eq!(admitted.disposition, IngressDisposition::Processed);
+            assert_eq!(admitted.actions.packets.len(), 1);
+        }
+
+        assert_eq!(responder.metrics().capacity.links.used, 2);
+        assert!(!responder.can_initiate_link());
+        let failed_before = responder.metrics().transport.links_failed;
+        let closed_before = responder.metrics().transport.links_closed;
+
+        let before_deadline = responder.tick(366, &mut rng);
+        assert!(before_deadline.packets.is_empty());
+        assert!(matches!(
+            before_deadline.events.as_slice(),
+            [ApplicationEvent::Tick {
+                closed_links: 0,
+                ..
+            }]
+        ));
+        assert_eq!(responder.metrics().capacity.links.used, 2);
+
+        // Direct ingress stores one post-ingress hop, so the first responder
+        // expires at 1 + 360 + 6 seconds while the second remains retained.
+        let first_deadline = responder.tick(367, &mut rng);
+        assert!(first_deadline.packets.is_empty());
+        assert!(matches!(
+            first_deadline.events.as_slice(),
+            [ApplicationEvent::Tick {
+                closed_links: 1,
+                ..
+            }]
+        ));
+        assert_eq!(responder.metrics().capacity.links.used, 1);
+        assert!(responder.can_initiate_link());
+
+        let second_deadline = responder.tick(368, &mut rng);
+        assert!(second_deadline.packets.is_empty());
+        assert!(matches!(
+            second_deadline.events.as_slice(),
+            [ApplicationEvent::Tick {
+                closed_links: 1,
+                ..
+            }]
+        ));
+        let final_metrics = responder.metrics();
+        assert_eq!(final_metrics.capacity.links.used, 0);
+        assert_eq!(final_metrics.transport.links_failed, failed_before);
+        assert_eq!(
+            final_metrics.transport.links_closed,
+            closed_before.saturating_add(2)
+        );
     }
 
     #[test]

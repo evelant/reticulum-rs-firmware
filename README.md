@@ -38,8 +38,12 @@ opportunistic LoRa message in each direction reaching `Delivered` with exact
 peer import, and app-process persistence. Fresh contact creation remains open.
 A [separate bounded proof](docs/e290-direct-link-powered-proof.md) now
 qualifies one fresh authenticated direct Link, exact receiver commit before
-proof, durable sender `Delivered`, and board/app restart persistence; powered
-active-Link reuse remains open.
+proof, durable sender `Delivered`, and board/app restart persistence. A
+[current-image recovery proof](docs/e290-stale-link-recovery-powered-proof.md)
+additionally qualifies exact stale-session retirement after the receiver
+reboots: the affected submission remains terminal `DeliveryTimeout` without a
+receiver commit, while the next sequential submission establishes a fresh Link
+and reaches `Delivered`. Successful same-Link reuse remains open.
 
 The hardware-independent
 `reticulum-board-heltec-vision-master-e290` crate is the compiled source of
@@ -133,8 +137,10 @@ Bitrate and cost are recorded but do not replace Reticulum routing. Until Rete
 paths carry an interface generation, an ID/configuration stays immutable for
 one node-owner lifetime or its learned paths must be purged before reuse.
 The current Rete pin,
-`2d0781838aa03370b739d4003bcd1bdd5bbb0c6c`, is the exact revision on
-fork branch `codex/link-data-receipts`. It descends from
+`a443173b0829c2637ce23531a8cde15fdfec185e`, is the exact revision on
+fork branch `codex/responder-handshake-reclaim`. It descends from
+`2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on
+`codex/link-data-receipts`, which descends from
 `90570cafc812b3025011cb690ec74a27f287cb3f` (tagged
 `firmware-pin-90570ca`; that predecessor tag does not name the current
 revision) and carries learned path, reverse, and Link decisions as
@@ -173,9 +179,10 @@ Ordinary context-`NONE` Link DATA now receives a distinct `LinkData` receipt,
 providing the Rete prerequisite for its exact proof to drive product delivery
 state without conflating it with destination DATA or Channel traffic. Product
 Link orchestration and receipt-kind-safe attempt correlation are integrated
-for the bounded outbound one-packet direct path. Active-Link reuse
-qualification, responder/backchannel reuse, Resource, and the broader
-fault/pressure matrix remain. Proof emission follows the receiving
+for the bounded outbound one-packet direct path. Exact stale-session retirement
+and fresh-Link recovery by a later sequential submission are source- and
+powered-qualified. Successful same-Link reuse, responder/backchannel reuse,
+Resource, and the broader fault/pressure matrix remain. Proof emission follows the receiving
 destination's `PROVE_NONE`, `PROVE_ALL`, or application-selected policy instead
 of being unconditional.
 
@@ -230,6 +237,15 @@ keepalive/10-second stale floor, while nonzero RTT uses the dynamic stale grace
 liveness, so corrupt stale LRRTT does not revive a Link; released Python 1.3.8
 updates liveness before decryption.
 
+The current descendant also reclaims a responder that remains in `Handshake`
+without authenticated LRRTT. Its Python-compatible budget is 360 seconds plus
+six seconds times at least one post-ingress hop, measured from confirmed
+LRPROOF dispatch completion when available and otherwise from LINKREQUEST
+admission. Expiry releases the owned-Link slot and increments aggregate
+`links_closed`, but is not a malformed or cryptographic `links_failed` event.
+Initiator establishment remains bounded by the product-owned dispatch-relative
+deadline and exact abort operation.
+
 Rete takes one pre-decrypt ingress sample for the bounded synchronous handler,
 where Python takes three internal samples. The project adapter uses the precise
 `*_at` ingress/tick paths and confirms output at the transport-neutral ordinary
@@ -242,10 +258,10 @@ released `Link.receive`: Handshake valid, Active valid repeat, Stale valid
 repeat, Stale decrypt failure, and authenticated malformed Active. The probe
 explicitly excludes `Transport` exact-replay deduplication and the full real
 teardown's external side effects; Rust tests cover those boundaries separately.
-Remaining Link work includes automatic timeout `LINKCLOSE` emission and
-shared-Hub endpoint/reincarnation identity. Adaptive channel windows can also
-exceed the product's `L` receipt capacity; that produces typed backpressure and
-remains a sizing/throughput policy decision.
+Remaining Link work includes established-Link watchdog timeout `LINKCLOSE`
+emission and shared-Hub endpoint/reincarnation identity. Adaptive channel
+windows can also exceed the product's `L` receipt capacity; that produces typed
+backpressure and remains a sizing/throughput policy decision.
 Snapshot loading currently restores identities only; saved paths and cached
 announces remain inactive until stable interface rebinding is defined.
 
@@ -1070,7 +1086,10 @@ Responder-side direct Link receive has the same source-level durable proof
 contract, and the
 [forced-direct two-board record](docs/e290-direct-link-powered-proof.md)
 qualifies one fresh-Link/new-commit physical success path. `AlreadyDurable`
-direct replay and the broader fault/pressure matrix remain open.
+direct replay and the broader fault/pressure matrix remain open. The
+[current-image stale-Link recovery record](docs/e290-stale-link-recovery-powered-proof.md)
+separately qualifies durability-first retirement after a peer reboot and
+successful delivery of a later sequential submission over a fresh Link.
 The node-side routing
 boundary remains interface-neutral so additional Reticulum links can be added
 later through adapters without rewriting the LoRa actor or protocol owner; no
@@ -1090,6 +1109,7 @@ second transport is required to qualify the first LoRa vertical slice.
 - [E290 Expo iOS BLE-to-LoRa powered proof](docs/e290-expo-ios-ble-lora-proof.md)
 - [E290 Reticulum-native Nearby powered proof](docs/e290-reticulum-nearby-powered-proof.md)
 - [E290 outbound direct-Link powered proof](docs/e290-direct-link-powered-proof.md)
+- [E290 stale-Link recovery powered proof](docs/e290-stale-link-recovery-powered-proof.md)
 - [Expo native Rust bridge proof](docs/expo-native-rust-bridge-proof.md)
 - [Usable-firmware POC limits and known defects](docs/poc-known-defects.md)
 - [Phase-0 scaffold decision](docs/adr/0001-phase-0-scaffold.md)
@@ -1278,11 +1298,15 @@ direction-balanced source-free send, proof, peer commit, list, and exact read.
 Its final audited image additionally preserved both terminal sender records and
 both exact receiver wires across a physical CPU reset. Neither result
 substitutes for electrical power-cut persistence, sustained/multi-hop traffic,
-powered active-Link reuse, `AlreadyDurable` direct replay, Resource LXMF,
+successful powered same-Link reuse, `AlreadyDurable` direct replay, Resource LXMF,
 initiator/backchannel direct receive, production client-store semantics, or
 full-product qualification. The later
 [forced-direct powered record](docs/e290-direct-link-powered-proof.md)
-qualifies one fresh initiator/new receiver-commit one-packet success path.
+qualifies one fresh initiator/new receiver-commit one-packet success path. The
+[current-image recovery record](docs/e290-stale-link-recovery-powered-proof.md)
+then qualifies a receiver reboot, durable sender timeout without receiver
+commit, exact stale-Link retirement, and successful fresh-Link delivery by the
+next sequential submission.
 
 The receive-only lab binary has no frequency or modulation defaults. A known
 host/RNode-compatible build example is:

@@ -339,6 +339,11 @@ Terminal outcomes map as follows:
 | policy denial or final definitely-unpermitted hop | `Failed(Rejected)` |
 | queue rollback, retained recovery, or invariant/control failure | `Failed(Internal)` |
 
+Retiring the exact reusable Link after a direct `DeliveryTimeout` is a
+boot-volatile transport consequence, not a durable retry transition. The
+submission remains `Failed(DeliveryTimeout)`; only later work may establish a
+fresh Link.
+
 Unknown destination or an empty eligible route maps to `NoPath`. Ledger/receipt
 pressure and a generated receipt collision remain same-boot retry conditions
 while the durable state stays `Preparing`; a reboot still terminates that

@@ -20,8 +20,8 @@ use core::mem::MaybeUninit;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use rand_core::{CryptoRng, RngCore};
 use reticulum_node_core::{
-    AcknowledgeError, AuthorizedFrameObservation, DestinationHash, LinkHandle, LinkState,
-    MAX_OPPORTUNISTIC_LXMF_CARRIER, MonotonicMillis, MonotonicSeconds, SubmitError,
+    AcknowledgeError, AttemptOutcome, AuthorizedFrameObservation, DestinationHash, LinkHandle,
+    LinkState, MAX_OPPORTUNISTIC_LXMF_CARRIER, MonotonicMillis, MonotonicSeconds, SubmitError,
     TerminalAttempt, TxAuthorizationPolicy, TxLeaseDeadline, TxRecoveryObservation,
 };
 use reticulum_storage_actor::{
@@ -32,8 +32,9 @@ use reticulum_storage_model::{
     AcceptanceCandidate, LifecycleState, SubmissionId, SubmissionIndex, SubmissionIntent,
 };
 use reticulum_submission_projector::{
-    AcknowledgementAction, AcknowledgementKind, AcknowledgementReply, PersistenceProgress,
-    PreparedFrameObservation, ProjectionProgress, ProjectorError, SubmissionPreparationObservation,
+    AcknowledgementAction, AcknowledgementKind, AcknowledgementReply, PersistHandle,
+    PersistenceProgress, PreparedFrameObservation, ProjectionProgress, ProjectorError,
+    SubmissionPreparationObservation,
 };
 use reticulum_tx_supervisor::{
     DataRecoveryAckError, DataRouterPrepareRequest, DataRouterPrepareResult,
@@ -623,6 +624,20 @@ pub enum RuntimeStep {
         /// Projector disposition.
         progress: ProjectionProgress,
     },
+    /// A direct Link-DATA timeout is durable and its reusable session was
+    /// evicted.
+    ///
+    /// The product must synchronously close this exact Link through the normal
+    /// authenticated teardown lifecycle and secure every resulting ordinary
+    /// action in an owning lane before the next runtime drive. This signal is
+    /// withheld until the failed submission's final journal record is known
+    /// durable.
+    DirectLinkDeliveryTimedOut {
+        /// Exact node terminal observation.
+        terminal: TerminalAttempt,
+        /// Exact locally retained Link that must be closed.
+        link: LinkHandle,
+    },
     /// One recovered owner was offered to durable transport audit.
     Recovered {
         /// Exact recovered-owner observation.
@@ -730,6 +745,19 @@ struct DirectLinkTransaction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DirectLinkRetirement {
+    AwaitingDurability {
+        persistence: PersistHandle,
+        terminal: TerminalAttempt,
+        link: LinkHandle,
+    },
+    Ready {
+        terminal: TerminalAttempt,
+        link: LinkHandle,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DirectLinkPhase {
     AwaitingLink {
         offer: LinkEstablishmentOffer,
@@ -768,6 +796,7 @@ pub struct SubmissionRuntime<
     phase: RuntimePhase,
     path_discoveries: [Option<PathDiscovery>; SUBMISSIONS],
     direct_link: Option<DirectLinkTransaction>,
+    direct_link_retirement: Option<DirectLinkRetirement>,
     reusable_direct_links: [Option<ReusableDirectLink>; DIRECT_LINKS],
     link_capacity_waiting: [bool; SUBMISSIONS],
     next_link_offer_generation: u64,
@@ -799,6 +828,7 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
             phase: RuntimePhase::Recovering,
             path_discoveries: [None; SUBMISSIONS],
             direct_link: None,
+            direct_link_retirement: None,
             reusable_direct_links: [None; DIRECT_LINKS],
             link_capacity_waiting: [false; SUBMISSIONS],
             next_link_offer_generation: 1,
@@ -876,6 +906,7 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
                 path_discoveries.add(slot).write(None);
             }
             core::ptr::addr_of_mut!((*runtime).direct_link).write(None);
+            core::ptr::addr_of_mut!((*runtime).direct_link_retirement).write(None);
             let reusable_direct_links = core::ptr::addr_of_mut!((*runtime).reusable_direct_links)
                 .cast::<Option<ReusableDirectLink>>();
             for slot in 0..DIRECT_LINKS {
@@ -910,6 +941,25 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
     /// Read-only access to the backend-independent mounted storage state.
     pub const fn storage(&self) -> &StorageActor<SUBMISSIONS, PROJECTED> {
         &self.storage
+    }
+
+    /// Whether the next live drive step is a post-durability Link retirement.
+    ///
+    /// Firmware must admit this control consequence only when its ordinary
+    /// action-retention lane has capacity. A newly offered frame record takes
+    /// precedence and makes this return `false` until that persistence work is
+    /// complete.
+    pub fn direct_link_retirement_is_next_step(&self) -> bool {
+        matches!(
+            self.direct_link_retirement,
+            Some(DirectLinkRetirement::Ready { .. })
+        ) && self.storage.pending_kind().is_none()
+            && self
+                .storage
+                .projector()
+                .pending_persistence()
+                .next()
+                .is_none()
     }
 
     /// Consume the runtime and recover its backend-independent storage actor.
@@ -1127,10 +1177,11 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
     /// Advance at most one useful live submission transition.
     ///
     /// Priority is deliberately durability-first: reconcile an ambiguous
-    /// physical mutation, persist one planned record, perform one unlocked
+    /// physical mutation, persist one planned record, emit one ready
+    /// post-durability Link-retirement consequence, perform one unlocked
     /// acknowledgement, drain node observations, prepare an already-barriered
     /// intent, then begin one new barrier. The supplied access is validated
-    /// before any acknowledgement or node preparation side effect.
+    /// before any control, acknowledgement, or node preparation side effect.
     pub fn drive_step<A, N, R>(
         &mut self,
         access: &mut A,
@@ -1151,20 +1202,65 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
             .map_err(|error| RuntimeError::Storage(DriveError::Binding(error)))?;
 
         if self.storage.pending_kind().is_some() {
-            return self
+            let pending_projector = self.storage.pending_projector_handle();
+            let progress = self
                 .storage
                 .drive_pending(access)
-                .map(RuntimeStep::Pending)
-                .map_err(RuntimeError::Storage);
+                .map_err(RuntimeError::Storage)?;
+            if progress == PendingProgress::ProjectorCommitted
+                && self.direct_link_retirement.is_some_and(|retirement| {
+                    matches!(
+                        retirement,
+                        DirectLinkRetirement::AwaitingDurability { persistence, .. }
+                            if Some(persistence) == pending_projector
+                    )
+                })
+            {
+                let retirement = self
+                    .direct_link_retirement
+                    .take()
+                    .expect("checked pending direct-Link retirement");
+                let DirectLinkRetirement::AwaitingDurability { terminal, link, .. } = retirement
+                else {
+                    unreachable!("checked awaiting direct-Link retirement")
+                };
+                self.direct_link_retirement = Some(DirectLinkRetirement::Ready { terminal, link });
+            }
+            return Ok(RuntimeStep::Pending(progress));
         }
 
         let pending_persistence = self.storage.projector().pending_persistence().next();
         if let Some(request) = pending_persistence {
-            return self
+            let progress = self
                 .storage
                 .persist_projector(access, request)
-                .map(RuntimeStep::Persistence)
-                .map_err(RuntimeError::Storage);
+                .map_err(RuntimeError::Storage)?;
+            if progress == PersistenceProgress::Committed
+                && self.direct_link_retirement.is_some_and(|retirement| {
+                    matches!(
+                        retirement,
+                        DirectLinkRetirement::AwaitingDurability { persistence, .. }
+                            if persistence == request.handle()
+                    )
+                })
+            {
+                let retirement = self
+                    .direct_link_retirement
+                    .take()
+                    .expect("checked pending direct-Link retirement");
+                let DirectLinkRetirement::AwaitingDurability { terminal, link, .. } = retirement
+                else {
+                    unreachable!("checked awaiting direct-Link retirement")
+                };
+                self.direct_link_retirement = Some(DirectLinkRetirement::Ready { terminal, link });
+            }
+            return Ok(RuntimeStep::Persistence(progress));
+        }
+
+        if let Some(DirectLinkRetirement::Ready { terminal, link }) = self.direct_link_retirement {
+            self.direct_link_retirement = None;
+            self.evict_reusable_direct_link(link);
+            return Ok(RuntimeStep::DirectLinkDeliveryTimedOut { terminal, link });
         }
 
         let pending_acknowledgement = self.storage.pending_acknowledgements().next();
@@ -1177,6 +1273,35 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
         let terminal = node.terminal_attempts().next();
         if let Some(terminal) = terminal {
             let progress = self.storage.observe_terminal(terminal)?;
+            if terminal.outcome() == AttemptOutcome::DeliveryTimeout
+                && let Some(link) = terminal.link()
+            {
+                match progress {
+                    ProjectionProgress::Persist(persistence) => {
+                        assert!(
+                            self.direct_link_retirement.is_none(),
+                            "a direct terminal cannot replace an owned Link retirement"
+                        );
+                        self.direct_link_retirement =
+                            Some(DirectLinkRetirement::AwaitingDurability {
+                                persistence,
+                                terminal,
+                                link,
+                            });
+                    }
+                    ProjectionProgress::AlreadyObserved => {
+                        assert!(
+                            self.direct_link_retirement.is_none(),
+                            "a durable direct terminal cannot replace an owned Link retirement"
+                        );
+                        self.direct_link_retirement =
+                            Some(DirectLinkRetirement::Ready { terminal, link });
+                    }
+                    ProjectionProgress::AttemptBound | ProjectionProgress::NoAction => {
+                        unreachable!("terminal projection cannot return nonterminal progress");
+                    }
+                }
+            }
             return Ok(RuntimeStep::Terminal { terminal, progress });
         }
 

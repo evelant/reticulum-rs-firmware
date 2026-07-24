@@ -750,6 +750,19 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize> StorageActor<SUBMISSIONS,
         }
     }
 
+    /// Exact projector handle retained across an ambiguous backend result.
+    ///
+    /// Other pending mutation kinds return `None`. This read-only correlation
+    /// lets an outer runtime attach a post-durability consequence to the exact
+    /// projector record without weakening the actor's sole mutation ownership.
+    pub const fn pending_projector_handle(&self) -> Option<PersistHandle> {
+        match self.pending {
+            Some(PendingMutation::Projector { handle }) => Some(handle),
+            Some(PendingMutation::Acceptance { .. } | PendingMutation::BootRecovery { .. })
+            | None => None,
+        }
+    }
+
     /// Durably accept one exact authenticated candidate.
     ///
     /// A backend error retains the exact plan. Retrying the same candidate

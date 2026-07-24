@@ -12,8 +12,10 @@ API stay in this project; generic protocol and bounded-state corrections are
 the candidates for upstream review.
 
 The current firmware pin is
-`2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on fork branch
-`codex/link-data-receipts`. It descends from
+`a443173b0829c2637ce23531a8cde15fdfec185e` on fork branch
+`codex/responder-handshake-reclaim`. It descends from
+`2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on
+`codex/link-data-receipts`, which descends from
 `90570cafc812b3025011cb690ec74a27f287cb3f`, whose tag is
 `firmware-pin-90570ca`; the current revision has no designated durable tag. It
 retains
@@ -45,9 +47,11 @@ same pin makes initial Channel send and fresh-ciphertext retry receipt-atomic,
 preflights the authoritative Link route before entropy or retry mutation,
 replaces one envelope's sole proof target in place, rejects stale retry tokens
 and obsolete proofs, and reclaims channel receipts on every Link removal path.
-The current descendant also registers ordinary Link-DATA receipts and applies
+The `2d07818` descendant also registers ordinary Link-DATA receipts and applies
 the receiving destination's proof policy instead of unconditionally proving
-every context-`NONE` Link DATA packet.
+every context-`NONE` Link DATA packet. The current descendant additionally
+reclaims responder `Handshake` state at the
+Python-compatible establishment deadline.
 The legacy LXMF event handler without mutable core access still leaves siblings
 to timeout.
 This candidate remains on the project fork; no issue or pull request was opened
@@ -276,11 +280,22 @@ leave native activity telemetry stale. Move outbound timestamp maintenance
 into the common successful packet builder or require `now` in the relevant
 APIs; keepalive scheduling no longer depends on this timestamp.
 
-`Transport::tick()` also never expires `Pending` or `Handshake` Links because
-`Link::check_stale()` handles only `Active` and `Stale`. An initiator that never
-receives LRPROOF, or a responder that never receives LRRTT, can therefore hold
-a bounded owned-Link slot indefinitely. Add explicit establishment deadlines,
-timeout results/counters and release-then-fresh-retry coverage.
+The current pin closes the responder half of the establishment leak.
+`Transport::tick()` reclaims a responder that remains in `Handshake` without
+authenticated LRRTT at `360 + 6 * max(1, post-ingress hops)` seconds, using
+confirmed LRPROOF completion as its origin when available and LINKREQUEST
+admission otherwise. Exact-boundary and release-then-fresh-retry tests cover
+the native four-slot table. Generic native initiators that never receive
+LRPROOF still have no automatic `Pending`/`Handshake` deadline; the firmware
+owns its initiator deadline and exact abort separately.
+
+Timeout observability remains coarse. Reclamation changes aggregate
+`closed_links`/`links_closed` and deliberately does not classify the timeout as
+a malformed or cryptographic `links_failed` event. Add a reason-specific
+maintenance result/counter if product diagnostics need to distinguish
+establishment expiry from established-Link closure. Also decide whether local
+LINKREQUEST admission should reject or cap post-ingress hop values: the current
+`u8` input permits a Python-compatible timeout from 366 through 1,890 seconds.
 
 The local adapter's old establishment suppression remains as an expected-zero
 defensive invariant. It still records the timestamp after best-effort Link data.
@@ -298,11 +313,12 @@ probe timestamp. Stale begins after two keepalive intervals and retains a
 revive it. Strict malformed, wrong-role and
 legacy encrypted forms do not refresh liveness.
 
-Automatic watchdog timeout remains a separate residual: `Transport::tick()`
-removes the expired Link but does not build and route Python's timeout
-`LINKCLOSE`. Add a bounded timeout-outbound result that preserves the retained
-interface route until packet formation, without weakening the completed
-transition-relative grace behavior.
+Established-Link watchdog timeout remains a separate residual:
+`Transport::tick()` removes the expired Active/Stale Link but does not build and
+route Python's timeout `LINKCLOSE`. Add a bounded timeout-outbound result that
+preserves the retained interface route until packet formation, without
+weakening the completed transition-relative grace behavior. Responder
+establishment timeout intentionally emits no `LINKCLOSE`.
 
 ## 5. Transactional channel receipts — completed for bounded send/retry lifecycle
 
@@ -341,9 +357,10 @@ independently or cap product window policy to the configured receipt budget.
 Released-Python parity also remains separate follow-up work: compare dynamic
 retry timeout, whether the maximum-tries count includes the initial send,
 slow-RTT initial-window selection, and per-envelope window shrink behavior.
-Automatic timeout `LINKCLOSE` remains item 4. Hosted fallible allocation and
-fully sink-backed NodeCore outputs remain item 7; do not duplicate CBC sizing
-math merely to reduce the current correctness-first retry output reservation.
+Established-Link watchdog timeout `LINKCLOSE` remains item 4. Hosted fallible
+allocation and fully sink-backed NodeCore outputs remain item 7; do not
+duplicate CBC sizing math merely to reduce the current correctness-first retry
+output reservation.
 
 ## 6. Explicit ingress dispositions
 
@@ -557,7 +574,8 @@ Make DATA preparation one transaction:
    receipt and entropy state.
 
 The generic fix is retained by current project pin
-`2d0781838aa03370b739d4003bcd1bdd5bbb0c6c`, which descends from
+`a443173b0829c2637ce23531a8cde15fdfec185e`, which descends through
+`2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` from
 `90570cafc812b3025011cb690ec74a27f287cb3f` (tag
 `firmware-pin-90570ca`). It returns caller-owned packet metadata plus a full
 receipt token, reports registration and output-allocation failures, and

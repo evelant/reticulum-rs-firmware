@@ -5,11 +5,11 @@ use embedded_storage::nor_flash::{
     check_erase, check_read, check_write,
 };
 use reticulum_node_core::{
-    AcknowledgeError, AttemptOutcome, AuthorizedFrameObservation, InterfaceSet, NodeConfig,
-    NodeCore, NodeIdentity, NodeInstanceId, PermitResolution, PrepareDataRequest, RoutedTxJob,
-    TxAuthorizationCandidate, TxAuthorizationPolicy, TxCompletionCode, TxCompletionDisposition,
-    TxPacketBuffer, TxPermitRequirements, TxPermitReservation, TxPermitResourceId,
-    TxPolicyDecision,
+    AcknowledgeError, AttemptOutcome, AuthorizedFrameObservation, InboundProofPolicy, InterfaceSet,
+    MAX_DIRECT_LXMF_WIRE, NodeConfig, NodeCore, NodeIdentity, NodeInstanceId, PacketInterfaceId,
+    PermitResolution, PrepareDataRequest, RoutedTxJob, TxAuthorizationCandidate,
+    TxAuthorizationPolicy, TxCompletionCode, TxCompletionDisposition, TxPacketBuffer,
+    TxPermitRequirements, TxPermitReservation, TxPermitResourceId, TxPolicyDecision,
 };
 use reticulum_storage_actor::{BoundJournal, DriveError, JournalBinding, StorageDeviceId};
 use reticulum_storage_journal::{
@@ -192,6 +192,7 @@ impl TxAuthorizationPolicy for AllowPolicy {
 
 struct TestNode {
     core: TestNodeCore,
+    peer: TestNodeCore,
     buffer: Option<&'static mut TxPacketBuffer>,
     job: Option<RoutedTxJob<'static>>,
     recovered: Option<TxRecoveryObservation>,
@@ -204,6 +205,7 @@ struct TestNode {
     direct_lxmf_prepare_calls: usize,
     last_direct_lxmf_wire: Option<Vec<u8>>,
     forced_direct_lxmf_preparation: Option<SubmissionPreparationObservation>,
+    integrated_direct_preparation: bool,
     has_usable_path: bool,
     retained_path_hops: Option<u8>,
     retained_path_first_hop_serialization_ms: Option<u64>,
@@ -247,6 +249,7 @@ impl TestNode {
         core.register_packet_buffer(buffer).unwrap();
         Self {
             core,
+            peer: receiver_node,
             buffer: Some(buffer),
             job: None,
             recovered: None,
@@ -259,6 +262,7 @@ impl TestNode {
             direct_lxmf_prepare_calls: 0,
             last_direct_lxmf_wire: None,
             forced_direct_lxmf_preparation: None,
+            integrated_direct_preparation: false,
             has_usable_path: true,
             retained_path_hops: Some(1),
             retained_path_first_hop_serialization_ms: Some(0),
@@ -286,6 +290,86 @@ impl TestNode {
 
     fn force_direct_lxmf_preparation(&mut self, observation: SubmissionPreparationObservation) {
         self.forced_direct_lxmf_preparation = Some(observation);
+    }
+
+    fn enable_integrated_direct_preparation(&mut self) -> (LinkHandle, Vec<u8>) {
+        self.core
+            .register_inbound_single_destination("lxmf", &["delivery"])
+            .unwrap();
+        let destination = self
+            .peer
+            .register_inbound_single_destination("lxmf", &["delivery"])
+            .unwrap();
+        self.core
+            .register_peer(
+                &identity(0x42),
+                "lxmf",
+                &["delivery"],
+                MonotonicSeconds::new(89),
+            )
+            .unwrap();
+        self.peer
+            .set_destination_accepts_links(&destination, true)
+            .unwrap();
+        self.peer
+            .set_destination_inbound_proof_policy(&destination, InboundProofPolicy::Always)
+            .unwrap();
+
+        let mut rng = CounterRng::default();
+        let (request, link) = self
+            .core
+            .initiate_link(&destination, MonotonicSeconds::new(90), &mut rng)
+            .unwrap();
+        let response = self
+            .peer
+            .ingest(
+                request.packets[0].bytes(),
+                MonotonicSeconds::new(90),
+                PacketInterfaceId::new(2),
+                &mut rng,
+            )
+            .unwrap();
+        let established = self
+            .core
+            .ingest(
+                response.actions.packets[0].bytes(),
+                MonotonicSeconds::new(91),
+                PacketInterfaceId::new(1),
+                &mut rng,
+            )
+            .unwrap();
+        self.peer
+            .ingest(
+                established.actions.packets[0].bytes(),
+                MonotonicSeconds::new(92),
+                PacketInterfaceId::new(2),
+                &mut rng,
+            )
+            .unwrap();
+        assert_eq!(self.core.link_state(link), Some(LinkState::Active));
+
+        let mut storage = [0_u8; MAX_DIRECT_LXMF_WIRE];
+        let content = [b'P'; 295];
+        let prepared = self
+            .core
+            .prepare_basic_direct_lxmf_into(
+                &destination,
+                1_700_000_000_000,
+                b"link refresh",
+                &content,
+                &mut storage,
+            )
+            .unwrap();
+        let wire = storage[..usize::from(prepared.wire_len())].to_vec();
+        assert!(
+            wire.len() - 16 > MAX_OPPORTUNISTIC_LXMF_CARRIER,
+            "the regression requires a direct-only LXMF carrier"
+        );
+
+        self.destination = destination;
+        self.retain_link(link, LinkState::Active);
+        self.integrated_direct_preparation = true;
+        (link, wire)
     }
 
     fn retain_link(&mut self, link: LinkHandle, state: LinkState) {
@@ -484,7 +568,7 @@ impl SubmissionNodePort for TestNode {
         &mut self,
         link: LinkHandle,
         request: SubmissionPrepareRequest<'_>,
-        _rng: &mut R,
+        rng: &mut R,
     ) -> SubmissionPreparationObservation
     where
         R: RngCore + CryptoRng,
@@ -501,9 +585,45 @@ impl SubmissionNodePort for TestNode {
         );
         self.last_direct_link = Some(link);
         self.last_direct_lxmf_wire = Some(request.plaintext.to_vec());
-        self.forced_direct_lxmf_preparation
+        if let Some(forced) = self.forced_direct_lxmf_preparation.take() {
+            return forced;
+        }
+        if !self.integrated_direct_preparation {
+            return SubmissionPreparationObservation::RetrySameBoot;
+        }
+
+        let buffer = self
+            .buffer
             .take()
-            .unwrap_or(SubmissionPreparationObservation::RetrySameBoot)
+            .expect("test node has one available owner");
+        match self.core.prepare_rehydrated_direct_lxmf_into_slot(
+            buffer,
+            link,
+            PrepareDataRequest {
+                destination: request.destination,
+                plaintext: request.plaintext,
+                rns_now: request.rns_now,
+                owner_now: request.owner_now,
+                deadline: request.deadline,
+                enabled_interfaces: InterfaceSet::from_bits(1 << 1),
+            },
+            rng,
+        ) {
+            Ok(job) => {
+                let prepared = job.prepared();
+                self.job = Some(job);
+                SubmissionPreparationObservation::Prepared(prepared)
+            }
+            Err(failure) => {
+                let reason = failure.reason();
+                self.buffer = Some(
+                    failure
+                        .into_buffer()
+                        .unwrap_or_else(|_| panic!("direct preparation rejection must recycle")),
+                );
+                SubmissionPreparationObservation::Rejected(reason)
+            }
+        }
     }
 
     fn has_usable_path(&self, _destination: &DestinationHash) -> bool {
@@ -613,6 +733,23 @@ fn lxmf_message_candidate(destination: DestinationHash, carrier_len: usize) -> A
         PrincipalId::new([0x21; 16]),
         IdempotencyKey::new([carrier_len as u8; 16]),
         LxmfMessageIntent::new(&wire).unwrap(),
+        AuthorizationSnapshot::new(
+            [0x23; 16],
+            7,
+            9,
+            1,
+            AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA
+                | AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS,
+        )
+        .unwrap(),
+    )
+}
+
+fn exact_lxmf_message_candidate(wire: &[u8], idempotency_tag: u8) -> AcceptanceCandidate {
+    AcceptanceCandidate::new(
+        PrincipalId::new([0x21; 16]),
+        IdempotencyKey::new([idempotency_tag; 16]),
+        LxmfMessageIntent::new(wire).unwrap(),
         AuthorizationSnapshot::new(
             [0x23; 16],
             7,
@@ -1462,6 +1599,213 @@ fn active_link_preserves_wire_is_reused_and_resource_message_stays_preparing() {
     assert_eq!(
         node.opportunistic_lxmf_prepare_calls, 1,
         "a failed exact Link revalidation must evict it before the next Auto attempt"
+    );
+}
+
+#[test]
+fn direct_delivery_timeout_is_durable_before_reusable_link_retirement() {
+    exercise_direct_delivery_timeout_retirement(false);
+}
+
+#[test]
+fn ambiguous_direct_timeout_commit_retains_exact_link_retirement() {
+    exercise_direct_delivery_timeout_retirement(true);
+}
+
+fn exercise_direct_delivery_timeout_retirement(lose_final_write_reply: bool) {
+    let mut node = TestNode::new();
+    let (link, wire) = node.enable_integrated_direct_preparation();
+    let mut access = formatted_access();
+    let mut runtime =
+        SubmissionRuntime::<4, 2, 2>::mount(&mut access, SubmissionId::new(50), 7).unwrap();
+    assert_eq!(
+        runtime.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Complete)
+    );
+
+    let first_id = match runtime
+        .accept(&mut access, exact_lxmf_message_candidate(&wire, 0x61))
+        .unwrap()
+    {
+        AcceptanceProgress::Accepted(id) => id,
+        other => panic!("fresh direct candidate did not accept: {other:?}"),
+    };
+    assert!(matches!(
+        drive(&mut runtime, &mut access, &mut node),
+        RuntimeStep::PreparationBarrier { id, .. } if id == first_id
+    ));
+    assert_eq!(
+        drive(&mut runtime, &mut access, &mut node),
+        RuntimeStep::Persistence(PersistenceProgress::Committed)
+    );
+    let RuntimeStep::LinkEstablishment { offer, .. } = drive(&mut runtime, &mut access, &mut node)
+    else {
+        panic!("direct-only candidate must request one Link")
+    };
+    runtime.attach_created_link(offer, link).unwrap();
+    runtime
+        .acknowledge_link_request_dispatched(offer, link, MonotonicMillis::new(100_000))
+        .unwrap();
+
+    assert!(matches!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 100_001).unwrap(),
+        RuntimeStep::Preparation {
+            id,
+            progress: ProjectionProgress::AttemptBound,
+        } if id == first_id
+    ));
+    assert_eq!(node.last_direct_link, Some(link));
+
+    let frame = node.expose_frame_and_timeout();
+    assert_eq!(
+        runtime.offer_authorized_frame(frame),
+        Ok(FrameOfferProgress::Retain)
+    );
+    assert_eq!(
+        drive(&mut runtime, &mut access, &mut node),
+        RuntimeStep::Persistence(PersistenceProgress::Committed)
+    );
+    assert_eq!(
+        runtime.offer_authorized_frame(frame),
+        Ok(FrameOfferProgress::Durable)
+    );
+
+    let RuntimeStep::Terminal { terminal, progress } = drive(&mut runtime, &mut access, &mut node)
+    else {
+        panic!("a direct receipt timeout must first plan its durable final record")
+    };
+    assert_eq!(terminal.outcome(), AttemptOutcome::DeliveryTimeout);
+    assert_eq!(terminal.link(), Some(link));
+    assert!(matches!(progress, ProjectionProgress::Persist(_)));
+    assert_eq!(
+        node.link_state(link),
+        Some(LinkState::Active),
+        "receipt expiry is independent of native Link state"
+    );
+    assert!(
+        runtime
+            .reusable_direct_links
+            .iter()
+            .flatten()
+            .any(|candidate| candidate.link == link),
+        "retirement must not precede the failed submission's durable final record"
+    );
+
+    if lose_final_write_reply {
+        access.backend_mut().lose_write_reply_after(1);
+        assert_eq!(
+            try_drive(&mut runtime, &mut access, &mut node),
+            Err(RuntimeError::Storage(DriveError::Backend(
+                FakeError::Injected
+            )))
+        );
+        assert_eq!(
+            runtime.storage().pending_kind(),
+            Some(reticulum_storage_actor::PendingKind::Projector)
+        );
+        assert_eq!(
+            runtime.storage().pending_projector_handle(),
+            runtime
+                .direct_link_retirement
+                .and_then(|retirement| match retirement {
+                    DirectLinkRetirement::AwaitingDurability { persistence, .. } => {
+                        Some(persistence)
+                    }
+                    DirectLinkRetirement::Ready { .. } => None,
+                })
+        );
+        assert!(
+            runtime
+                .reusable_direct_links
+                .iter()
+                .flatten()
+                .any(|candidate| candidate.link == link),
+            "ambiguous final-record I/O must retain the Link retirement"
+        );
+        assert_eq!(
+            drive(&mut runtime, &mut access, &mut node),
+            RuntimeStep::Pending(PendingProgress::ProjectorCommitted)
+        );
+    } else {
+        assert_eq!(
+            drive(&mut runtime, &mut access, &mut node),
+            RuntimeStep::Persistence(PersistenceProgress::Committed)
+        );
+    }
+    assert!(matches!(
+        runtime.direct_link_retirement,
+        Some(DirectLinkRetirement::Ready {
+            terminal: ready_terminal,
+            link: ready_link,
+        }) if ready_terminal == terminal && ready_link == link
+    ));
+    assert!(runtime.direct_link_retirement_is_next_step());
+    assert!(
+        runtime
+            .reusable_direct_links
+            .iter()
+            .flatten()
+            .any(|candidate| candidate.link == link),
+        "a durable commit and the later retirement signal are separate steps"
+    );
+
+    let RuntimeStep::DirectLinkDeliveryTimedOut {
+        terminal: durable_terminal,
+        link: retired,
+    } = drive(&mut runtime, &mut access, &mut node)
+    else {
+        panic!("durable timeout commit must release the exact Link retirement")
+    };
+    assert_eq!(durable_terminal, terminal);
+    assert_eq!(retired, link);
+    assert!(!runtime.direct_link_retirement_is_next_step());
+    assert_eq!(
+        runtime.index().get(first_id).unwrap().state(),
+        LifecycleState::Final(FinalDisposition::Failed(SubmissionFailure::DeliveryTimeout))
+    );
+    assert!(
+        runtime.reusable_direct_links.iter().all(Option::is_none),
+        "the product registry must evict the timed-out session after durability"
+    );
+
+    let close = node.core.close_link(link, &mut CounterRng::default());
+    assert_eq!(node.core.link_state(link), None);
+    assert_eq!(close.packets.len(), 1);
+
+    assert!(matches!(
+        drive(&mut runtime, &mut access, &mut node),
+        RuntimeStep::Acknowledgement {
+            reply: AcknowledgementReply::Completed,
+            ..
+        }
+    ));
+
+    let second_id = match runtime
+        .accept(&mut access, exact_lxmf_message_candidate(&wire, 0x62))
+        .unwrap()
+    {
+        AcceptanceProgress::Accepted(id) => id,
+        other => panic!("follow-up direct candidate did not accept: {other:?}"),
+    };
+    assert!(matches!(
+        drive(&mut runtime, &mut access, &mut node),
+        RuntimeStep::PreparationBarrier { id, .. } if id == second_id
+    ));
+    assert_eq!(
+        drive(&mut runtime, &mut access, &mut node),
+        RuntimeStep::Persistence(PersistenceProgress::Committed)
+    );
+    let RuntimeStep::LinkEstablishment {
+        offer: replacement, ..
+    } = drive(&mut runtime, &mut access, &mut node)
+    else {
+        panic!("follow-up work must establish a fresh Link instead of reusing the timed-out one")
+    };
+    assert_eq!(replacement.id(), second_id);
+    assert_ne!(replacement.generation(), offer.generation());
+    assert_eq!(
+        node.direct_lxmf_prepare_calls, 1,
+        "the still-native-Active stale session must not be selected again"
     );
 }
 

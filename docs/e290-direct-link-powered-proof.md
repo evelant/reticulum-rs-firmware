@@ -10,9 +10,11 @@ receiver returned the delayed Link proof, the sender durably reached
 and app-process relaunch.
 
 This is the first powered direct-delivery record for
-[ADR 0018](adr/0018-durable-lxmf-delivery-policy.md). It qualifies the current
-one-packet fresh-Link success path, not every Link lifecycle, retry, pressure,
-or Resource path.
+[ADR 0018](adr/0018-durable-lxmf-delivery-policy.md). Both firmware images used
+Rete revision `2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on
+`codex/link-data-receipts`. It qualifies that revision's one-packet fresh-Link
+success path, not every Link lifecycle, retry, pressure, or Resource path, and
+does not qualify the later responder-Handshake reclamation pin.
 
 ## Exact artifacts and roles
 
@@ -171,7 +173,7 @@ This record qualifies:
 
 It does not qualify active-Link reuse, responder/backchannel reuse,
 `AlreadyDurable` replay, multiple simultaneous establishments, Link-table or
-receipt pressure, timeout/fault cuts, the known responder-`Handshake`
-reclamation defect, pre-first-dispatch multi-transport route churn, in-flight
+receipt pressure, timeout/fault cuts, the later responder-`Handshake`
+reclamation behavior, pre-first-dispatch multi-transport route churn, in-flight
 reset recovery, multi-hop routing, Resource transfer, electrical power cuts,
 allocation pressure, sustained traffic, or soak.

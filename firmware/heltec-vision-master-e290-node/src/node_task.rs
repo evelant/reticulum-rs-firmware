@@ -1251,12 +1251,15 @@ pub async fn run(
                         && pending_submission_protocol.is_none()
                         && !supervisor.ingress_actions_pending()
                         && ordinary_router_is_idle(supervisor);
+                    let ordinary_control_step_pending =
+                        storage.direct_link_retirement_is_next_step();
                     if config::submission_storage_step_admitted(
                         storage_step_attempted,
                         durability_service.storage_step_due(owner_now),
                         retained_frame.is_some(),
                         ordinary_owners_quiescent,
                         fail_closed_draining,
+                        ordinary_control_step_pending,
                     ) {
                         storage_step_attempted = true;
                         let deadline = TxLeaseDeadline::new(MonotonicMillis::new(
@@ -1279,6 +1282,64 @@ pub async fn run(
                         match submission_step {
                             ProductSubmissionDrive::Runtime(Ok(RuntimeStep::Idle)) => {
                                 durability_service = durability_service.runtime_progress();
+                            }
+                            ProductSubmissionDrive::Runtime(Ok(
+                                RuntimeStep::DirectLinkDeliveryTimedOut { terminal, link },
+                            )) => {
+                                durability_service = durability_service.runtime_progress();
+                                let actions = supervisor.close_link(link, &mut rng);
+                                if actions.is_empty() {
+                                    warn!(
+                                        "e290-node stage=direct-link-retirement status=ALREADY-ABSENT link={:02x?} terminal={terminal:?}",
+                                        link.as_bytes(),
+                                    );
+                                } else {
+                                    let admission = config::ordinary_admission(owner_now);
+                                    match supervisor.try_offer_actions(actions, admission) {
+                                        Ok(()) => {
+                                            warn!(
+                                                "e290-node stage=direct-link-retirement status=ADMITTED reason=delivery-timeout link={:02x?} terminal={terminal:?}",
+                                                link.as_bytes(),
+                                            );
+                                        }
+                                        Err(failure) => {
+                                            match handle_action_offer_failure(
+                                                failure,
+                                                "direct-link-retirement",
+                                            ) {
+                                                ActionOfferHandling::Retry(retained) => {
+                                                    assert!(
+                                                        retry_actions_a.is_none()
+                                                            && retry_actions_b.is_none()
+                                                            && quarantined_actions.is_none(),
+                                                        "retirement control step requires an empty local ordinary-owner lane"
+                                                    );
+                                                    retry_actions_a = Some(retained);
+                                                }
+                                                ActionOfferHandling::RetainAndDrain(retained) => {
+                                                    assert!(
+                                                        retry_actions_a.is_none()
+                                                            && retry_actions_b.is_none()
+                                                            && quarantined_actions.is_none(),
+                                                        "terminal retirement control step requires an empty local ordinary-owner lane"
+                                                    );
+                                                    retry_actions_a = Some(retained);
+                                                    disable_submission_for_path_fault(
+                                                        storage,
+                                                        &mut durability_service,
+                                                        &retained_frame,
+                                                        &pending_frame_acknowledgement,
+                                                        supervisor,
+                                                        lora_descriptor,
+                                                        &mut fail_closed_draining,
+                                                        "direct-link-retirement-offer-terminal",
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                progressed = true;
                             }
                             ProductSubmissionDrive::Runtime(Ok(
                                 RuntimeStep::PathDiscoveryRequest { offer, progress },

@@ -1056,6 +1056,7 @@ pub struct TerminalAttempt {
     handle: AttemptHandle,
     token: AttemptToken,
     kind: DataReceiptKind,
+    link: Option<LinkHandle>,
     outcome: AttemptOutcome,
 }
 
@@ -1073,6 +1074,15 @@ impl TerminalAttempt {
     /// Receipt table that produced this terminal outcome.
     pub const fn receipt_kind(self) -> DataReceiptKind {
         self.kind
+    }
+
+    /// Exact Link that carried this attempt, when it used Link DATA.
+    ///
+    /// Destination DATA attempts return `None`. The handle remains available
+    /// after a receipt timeout so the product can retire a session whose peer
+    /// may have rebooted while native Link state still appears active.
+    pub const fn link(self) -> Option<LinkHandle> {
+        self.link
     }
 
     /// Delivery outcome retained by the tombstone.
@@ -2667,11 +2677,13 @@ enum AttemptState {
         generation: u64,
         token: AttemptToken,
         kind: DataReceiptKind,
+        link: Option<LinkHandle>,
     },
     Terminal {
         generation: u64,
         token: AttemptToken,
         kind: DataReceiptKind,
+        link: Option<LinkHandle>,
         outcome: AttemptOutcome,
     },
 }
@@ -2708,6 +2720,7 @@ impl Iterator for TerminalAttempts<'_> {
                 generation,
                 token,
                 kind,
+                link,
                 outcome,
             } = attempt.state
             {
@@ -2720,6 +2733,7 @@ impl Iterator for TerminalAttempts<'_> {
                     },
                     token,
                     kind,
+                    link,
                     outcome,
                 });
             }
@@ -3050,6 +3064,21 @@ impl<
     /// must use the normal Link-close lifecycle.
     pub fn abort_unestablished_link(&mut self, link: LinkHandle) -> bool {
         self.rns.abort_unestablished_link(&link.into_rns())
+    }
+
+    /// Close one retained active or stale Link through the authenticated
+    /// Reticulum teardown lifecycle.
+    ///
+    /// The Link is removed locally before the returned `LINKCLOSE` action is
+    /// dispatched. An unknown or already-removed handle returns an empty
+    /// action envelope. Callers must retain and route every non-empty action
+    /// envelope through the ordinary protocol owner.
+    pub fn close_link<R: RngCore + CryptoRng>(
+        &mut self,
+        link: LinkHandle,
+        rng: &mut R,
+    ) -> NodeActions {
+        self.rns.close_link(&link.into_rns(), rng)
     }
 
     /// Caller-supplied identity of this in-memory node-owner incarnation.
@@ -3397,6 +3426,10 @@ impl<
             }
         };
 
+        let attempt_link = match mode {
+            DataPreparationMode::RehydratedDirectLxmf(link) => Some(LinkHandle::from_rns(link)),
+            DataPreparationMode::Generic | DataPreparationMode::RehydratedOpportunisticLxmf => None,
+        };
         let result = match mode {
             DataPreparationMode::Generic => self
                 .rns
@@ -3470,6 +3503,7 @@ impl<
             generation: attempt.generation,
             token,
             kind: prepared.receipt_kind(),
+            link: attempt_link,
         };
         let scalar = PreparedPacket::from_rns(
             prepared,
@@ -3632,10 +3666,12 @@ impl<
                         job,
                     });
                 }
+                let link = self.attempt_link(attempt);
                 self.attempts[attempt.slot].state = AttemptState::Terminal {
                     generation: attempt.generation,
                     token: AttemptToken(*prepared.receipt().as_bytes()),
                     kind: prepared.receipt_kind(),
+                    link,
                     outcome: AttemptOutcome::Unsent(AttemptUnsentReason::QueueRollback),
                 };
             }
@@ -3956,10 +3992,12 @@ impl<
                 DispatchPhase::Routed | DispatchPhase::Authorized => completion_unsent_reason
                     .unwrap_or(AttemptUnsentReason::Unpermitted(TxCompletionCode::new(0))),
             };
+            let link = self.attempt_link(record.attempt);
             self.attempts[record.attempt.slot].state = AttemptState::Terminal {
                 generation: record.attempt.generation,
                 token: AttemptToken(*record.prepared.receipt().as_bytes()),
                 kind: record.prepared.receipt_kind(),
+                link,
                 outcome: AttemptOutcome::Unsent(reason),
             };
         } else if terminal.is_none() && !self.attempt_is_active(record.attempt, record.prepared) {
@@ -4154,6 +4192,7 @@ impl<
             generation,
             token,
             kind,
+            link,
             outcome,
         } = state
         else {
@@ -4187,6 +4226,7 @@ impl<
             handle,
             token,
             kind,
+            link,
             outcome,
         };
         self.attempts[attempt_ref.slot].state = AttemptState::Free;
@@ -4391,6 +4431,7 @@ impl<
                 generation,
                 token,
                 kind,
+                ..
             }
                 | AttemptState::Terminal {
                     generation,
@@ -4481,6 +4522,7 @@ impl<
                 generation,
                 token,
                 kind,
+                ..
             })
                 if generation == attempt.generation
                     && token.as_bytes() == prepared.receipt().as_bytes()
@@ -4488,11 +4530,32 @@ impl<
         )
     }
 
+    fn attempt_link(&self, attempt: AttemptRef) -> Option<LinkHandle> {
+        match self.attempts.get(attempt.slot).map(|slot| slot.state) {
+            Some(
+                AttemptState::Active {
+                    generation, link, ..
+                }
+                | AttemptState::Terminal {
+                    generation, link, ..
+                },
+            ) if generation == attempt.generation => link,
+            Some(
+                AttemptState::Free
+                | AttemptState::Reserved { .. }
+                | AttemptState::Active { .. }
+                | AttemptState::Terminal { .. },
+            )
+            | None => None,
+        }
+    }
+
     fn terminal_for(&self, attempt: AttemptRef) -> Option<TerminalAttempt> {
         let AttemptState::Terminal {
             generation,
             token,
             kind,
+            link,
             outcome,
         } = self.attempts.get(attempt.slot)?.state
         else {
@@ -4502,6 +4565,7 @@ impl<
             handle: self.handle_for(attempt),
             token,
             kind,
+            link,
             outcome,
         })
     }
@@ -4596,10 +4660,13 @@ impl<'a> AttemptReceiptSink<'a> {
             matches!(slot.state, AttemptState::Active { token: active, .. } if active == token)
         });
         if let Some(index) = active_slot {
-            let (generation, expected_kind) = match self.attempts[index].state {
+            let (generation, expected_kind, link) = match self.attempts[index].state {
                 AttemptState::Active {
-                    generation, kind, ..
-                } => (generation, kind),
+                    generation,
+                    kind,
+                    link,
+                    ..
+                } => (generation, kind, link),
                 AttemptState::Free
                 | AttemptState::Reserved { .. }
                 | AttemptState::Terminal { .. } => {
@@ -4618,6 +4685,7 @@ impl<'a> AttemptReceiptSink<'a> {
                 generation,
                 token,
                 kind: expected_kind,
+                link,
             });
         }
         let terminal_kind = self.attempts.iter().find_map(|slot| match slot.state {
@@ -4650,6 +4718,7 @@ struct AttemptTerminalReservation<'a> {
     generation: u64,
     token: AttemptToken,
     kind: DataReceiptKind,
+    link: Option<LinkHandle>,
 }
 
 impl ReceiptTerminalSink for AttemptReceiptSink<'_> {
@@ -4683,6 +4752,7 @@ impl ReceiptTerminalReservation for AttemptTerminalReservation<'_> {
             generation: self.generation,
             token: self.token,
             kind: self.kind,
+            link: self.link,
             outcome,
         };
     }
@@ -6673,6 +6743,7 @@ mod tests {
             generation: handle.generation,
             token: AttemptToken([0xa5; 32]),
             kind: DataReceiptKind::DestinationData,
+            link: None,
             outcome: AttemptOutcome::Delivered,
         };
 
@@ -7037,6 +7108,7 @@ mod tests {
             generation: handle.generation,
             token: terminal_job.attempt(),
             kind: DataReceiptKind::DestinationData,
+            link: None,
             outcome: AttemptOutcome::Delivered,
         };
         assert_eq!(
@@ -7271,6 +7343,7 @@ mod tests {
         assert_eq!(terminal.handle(), attempt_handle);
         assert_eq!(terminal.token(), attempt);
         assert_eq!(terminal.receipt_kind(), DataReceiptKind::LinkData);
+        assert_eq!(terminal.link(), Some(link));
         assert_eq!(terminal.outcome(), AttemptOutcome::Delivered);
         assert_eq!(initiator.capacities().link_data_receipts_used, 0);
         assert_eq!(
@@ -7306,7 +7379,9 @@ mod tests {
         let terminal = initiator.terminal_attempts().next().unwrap();
         assert_eq!(terminal.handle(), handle);
         assert_eq!(terminal.receipt_kind(), DataReceiptKind::LinkData);
+        assert_eq!(terminal.link(), Some(link));
         assert_eq!(terminal.outcome(), AttemptOutcome::DeliveryTimeout);
+        assert_eq!(initiator.link_state(link), Some(LinkState::Active));
 
         let disposition = initiator
             .complete_tx(
@@ -7317,6 +7392,31 @@ mod tests {
                 panic!("timed-out direct completion failed: {:?}", failure.reason())
             });
         assert!(matches!(disposition, TxCompletionDisposition::Available(_)));
+
+        let close = initiator.close_link(link, &mut rng);
+        assert_eq!(initiator.link_state(link), None);
+        assert_eq!(close.packets.len(), 1);
+        assert_eq!(
+            close.packets[0].target(),
+            RnsTxTarget::Only(RnsInterfaceId(3))
+        );
+        assert!(close.events.iter().any(
+            |event| matches!(event, ApplicationEvent::LinkClosed { link: closed } if closed == link.as_bytes())
+        ));
+        assert_eq!(initiator.terminal_attempts().next(), Some(terminal));
+
+        let remote_close = responder
+            .ingest(
+                close.packets[0].bytes(),
+                time(232),
+                PacketInterfaceId::new(7),
+                &mut rng,
+            )
+            .unwrap_or_else(|failure| panic!("authenticated Link close failed: {failure:?}"));
+        assert!(remote_close.actions.events.iter().any(
+            |event| matches!(event, ApplicationEvent::LinkClosed { link: closed } if closed == link.as_bytes())
+        ));
+        assert_eq!(responder.link_state(link), None);
         assert_eq!(initiator.acknowledge_terminal(handle).unwrap(), terminal);
     }
 
@@ -7328,6 +7428,7 @@ mod tests {
             generation: 7,
             token,
             kind: DataReceiptKind::LinkData,
+            link: None,
         };
         let mut sink = AttemptReceiptSink::new(&mut attempts);
 
@@ -7349,6 +7450,7 @@ mod tests {
                 generation: 7,
                 token: retained,
                 kind: DataReceiptKind::LinkData,
+                ..
             } if retained == token
         ));
     }
@@ -7547,11 +7649,13 @@ mod tests {
             generation: generation + 1,
             token: colliding,
             kind: DataReceiptKind::DestinationData,
+            link: None,
         };
         sender.attempts[1].state = AttemptState::Active {
             generation,
             token: original.attempt(),
             kind: DataReceiptKind::DestinationData,
+            link: None,
         };
         let DispatchState::Active(mut record) = sender.dispatches[0].state else {
             panic!("expected queued dispatch")

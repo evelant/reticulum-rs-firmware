@@ -875,6 +875,16 @@ impl ProductStorageCoordinator {
         self.submission_service_enabled && self.runtime.is_some()
     }
 
+    /// Whether the next runtime step can emit an ordinary Link-retirement
+    /// action and therefore requires a free local action-retention lane.
+    pub(crate) fn direct_link_retirement_is_next_step(&self) -> bool {
+        self.submission_service_enabled
+            && self
+                .runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.direct_link_retirement_is_next_step())
+    }
+
     /// Whether the durable inbound qualification store mounted successfully.
     pub(crate) const fn inbox_service_available(&self) -> bool {
         self.inbox_service_enabled && self.inbox.is_some()

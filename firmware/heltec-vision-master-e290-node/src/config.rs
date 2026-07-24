@@ -124,10 +124,10 @@ pub const DURABLE_RUNTIME_BYTES: usize = core::mem::size_of::<
 // or alignment change cannot silently consume target PSRAM or host-test RAM.
 // Xtensa's 32-bit field layout is 24 bytes smaller than the 64-bit host layout.
 #[cfg(target_arch = "xtensa")]
-const REVIEWED_DURABLE_RUNTIME_BYTES: usize = 389_240;
+const REVIEWED_DURABLE_RUNTIME_BYTES: usize = 389_368;
 #[cfg(not(target_arch = "xtensa"))]
-const REVIEWED_DURABLE_RUNTIME_BYTES: usize = 389_264;
-const _: () = assert!(DURABLE_RUNTIME_BYTES == REVIEWED_DURABLE_RUNTIME_BYTES);
+const REVIEWED_DURABLE_RUNTIME_BYTES: usize = 389_392;
+const _: [(); REVIEWED_DURABLE_RUNTIME_BYTES] = [(); DURABLE_RUNTIME_BYTES];
 /// Guard against silently growing the PSRAM-backed runtime and its independent
 /// journal-replay scratch index.
 ///
@@ -528,10 +528,12 @@ pub const fn submission_storage_step_admitted(
     retained_frame_pending: bool,
     ordinary_owners_quiescent: bool,
     fail_closed_draining: bool,
+    ordinary_control_step_pending: bool,
 ) -> bool {
     !storage_step_attempted
         && storage_step_due
         && (retained_frame_pending || (ordinary_owners_quiescent && !fail_closed_draining))
+        && (!ordinary_control_step_pending || (ordinary_owners_quiescent && !fail_closed_draining))
 }
 
 /// Validated RNode-compatible randomized backoff and CAD policy.
@@ -603,7 +605,7 @@ mod tests {
         assert_eq!(DURABLE_SUBMISSIONS, 128);
         assert_eq!(DURABLE_PROJECTED_SUBMISSIONS, 128);
         assert_eq!(DURABLE_ACCEPTED_SUBMISSION_LIMIT, 128);
-        assert_eq!(DURABLE_RUNTIME_BYTES, 389_264);
+        assert_eq!(DURABLE_RUNTIME_BYTES, 389_392);
         assert_eq!(MAXIMUM_DURABLE_RUNTIME_BYTES, 512 * 1024);
         const { assert!(DURABLE_ACCEPTED_SUBMISSION_LIMIT <= DURABLE_SUBMISSIONS) };
     }
@@ -732,24 +734,31 @@ mod tests {
     #[test]
     fn retained_data_frame_bypasses_ordinary_quiescence_for_durability() {
         assert!(submission_storage_step_admitted(
-            false, true, true, false, false,
+            false, true, true, false, false, false,
         ));
         assert!(
-            !submission_storage_step_admitted(false, true, false, false, false),
+            !submission_storage_step_admitted(false, true, false, false, false, false),
             "fresh scheduling still waits for ordinary owners"
         );
         assert!(
-            !submission_storage_step_admitted(false, false, true, false, false),
+            !submission_storage_step_admitted(false, false, true, false, false, false),
             "a retained frame does not bypass storage retry timing"
         );
         assert!(
-            submission_storage_step_admitted(false, true, true, false, true),
+            submission_storage_step_admitted(false, true, true, false, true, false),
             "a later unrelated fault cannot strand an active DATA completion"
         );
         assert!(
-            !submission_storage_step_admitted(false, true, false, true, true),
+            !submission_storage_step_admitted(false, true, false, true, true, false),
             "fail-closed drain still forbids fresh submission scheduling"
         );
+        assert!(
+            !submission_storage_step_admitted(false, true, true, false, false, true),
+            "a retained frame cannot bypass action-owner capacity for a ready control step"
+        );
+        assert!(submission_storage_step_admitted(
+            false, true, false, true, false, true,
+        ));
     }
 
     #[test]

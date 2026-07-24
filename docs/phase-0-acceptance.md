@@ -27,13 +27,16 @@ and arbitrary LXMF bytes. NomadNet is a fixture/version lane only at this
 phase.
 
 The firmware dependency is currently pinned to integration-fork commit
-`2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on fork branch
-`codex/link-data-receipts`. It descends from
+`a443173b0829c2637ce23531a8cde15fdfec185e` on fork branch
+`codex/responder-handshake-reclaim`. It descends from
+`2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on
+`codex/link-data-receipts`, which descends from
 `90570cafc812b3025011cb690ec74a27f287cb3f`, whose tag is
 `firmware-pin-90570ca`; that predecessor tag does not name the current
 revision, which has no designated durable tag. The current descendant adds
-ordinary Link-DATA receipts and enforces the receiving destination's proof
-policy. No issue or pull request was opened for this newer fork-local work; any
+responder-Handshake timeout reclamation to the preceding descendant's ordinary
+Link-DATA receipts and receiving-destination proof policy. No issue or pull
+request was opened for this newer fork-local work; any
 future upstream issue or contribution still requires direct user approval.
 
 The preceding `14c7b4955a1ff6903e87cc40b42498f7869b6f4f` pin had host and
@@ -407,6 +410,13 @@ for a Handshake failure. Zero RTT remains zero with 5-second keepalive and
 Rete intentionally authenticates before liveness mutation, so a corrupt stale
 LRRTT cannot revive a Link as it does under Python's pre-decrypt ordering.
 
+A responder that never authenticates LRRTT now closes and releases its owned
+slot at 360 seconds plus six seconds per post-ingress hop, with a minimum of
+one hop. Confirmed LRPROOF completion is the preferred origin and admission is
+the bounded fallback. This lifecycle closure changes aggregate `links_closed`,
+not `links_failed`; initiator expiry remains the product-owned exact-abort
+boundary.
+
 The adapter supplies precise `*_at` ingress/tick samples and confirms at the
 transport-neutral ordinary router. Upstream Tokio/Embassy runners remain
 coarse/unconfirmed. Rete uses one pre-decrypt ingress sample over its bounded
@@ -428,7 +438,8 @@ the Link. Channel sends and retries are
 transactional across MDU/window/receipt admission, entropy, route preflight,
 fresh ciphertext, sole-receipt replacement, and retry/window/timestamp state.
 An obsolete proof cannot complete after replacement; Link removal reclaims its
-channel receipts. Automatic timeout removal still emits no `LINKCLOSE`.
+channel receipts. Established-Link watchdog timeout removal still emits no
+`LINKCLOSE`.
 Receipt capacity smaller than an adaptive channel window is now typed
 backpressure and a product sizing/throughput policy rather than a
 proof-correlation defect.
@@ -700,11 +711,14 @@ flow. Those tests close the former implicit-interface and relay/reverse
 admission seams in the covered native H2 paths; they do not close Python
 multi-hop behavior, H1 interface-role classification, reboot path recovery, or
 a powered rerun of the E290 reverse-proof scenario captured under `f6f5fb0`.
-The `90570ca` predecessor adds the LRRTT lifecycle/timing contract. The current
+The `90570ca` predecessor adds the LRRTT lifecycle/timing contract. Its
 `2d07818` descendant additionally adds ordinary Link-DATA receipts and
-destination proof-policy parity. The combined behavior must pass the current
-root, portable, E290 build, and powered gates before this section can claim it
-as a new validated baseline.
+destination proof-policy parity. The current `a443173` descendant adds bounded
+responder-Handshake reclamation. Its current root, portable, strict E290
+Clippy, and release-build gates pass. A normal powered message exchange on the
+current pin does not by itself demonstrate responder-side establishment
+expiry, so that narrow lifecycle claim remains bounded by its portable
+regression rather than being overstated as powered qualification.
 
 ### 1. Target and dependency integrity
 
@@ -792,8 +806,15 @@ until `Committed` or a fresh `AlreadyDurable` result. Initiator/backchannel
 direct receive is unsupported. The
 [later forced-direct record](e290-direct-link-powered-proof.md) powers one
 fresh outbound Link and responder-side new-commit/proof chain; direct
-`AlreadyDurable` replay, active-Link reuse, and the broader fault/pressure
-matrix remain open. Resource completion remains explicitly deferred pending
+`AlreadyDurable` replay, successful same-Link reuse, and the broader
+fault/pressure matrix remain open. Current source additionally retains an exact
+Link handle through direct receipt timeout, evicts it from reuse, and asks
+firmware to route normal authenticated close; the timed-out durable submission
+is not automatically retried. The
+[current-image powered recovery record](e290-stale-link-recovery-powered-proof.md)
+qualifies that narrow receiver-reboot sequence: the failed message is absent
+from the peer, and the next sequential message reaches `Delivered` over a fresh
+Link. Resource completion remains explicitly deferred pending
 bounded Resource ownership. Before production-accepting the RNS foundation,
 retain and extend Python-derived LXMF fixtures covering:
 

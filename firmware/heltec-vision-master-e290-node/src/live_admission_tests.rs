@@ -392,7 +392,7 @@ fn retained_frame_persists_while_ordinary_work_waits_on_the_same_radio() {
         Ok(FrameOfferProgress::Retain)
     );
     assert!(config::submission_storage_step_admitted(
-        false, true, true, false, false,
+        false, true, true, false, false, false,
     ));
     assert!(matches!(
         service
