@@ -16,7 +16,8 @@ not the complete ADR acceptance record: the peer was already a durable contact,
 both short messages used the current Header-1 opportunistic carrier rather
 than an authenticated Link, and neither board was restarted after these exact
 messages. The reusable product-owned direct-Link capability in
-[ADR 0018](adr/0018-durable-lxmf-delivery-policy.md) remains open.
+[ADR 0018](adr/0018-durable-lxmf-delivery-policy.md) was
+[qualified separately](e290-direct-link-powered-proof.md) after this run.
 
 ## Exact artifacts and roles
 
@@ -149,10 +150,8 @@ contain no copied appliance credential.
 ## What remains
 
 - Repeat with a fresh contact database to qualify first-time **Add**.
-- Implement the ADR 0018 path request, authenticated Link establishment,
-  ordinary Link-DATA receipt, timeout, abort, and recovery transaction.
-- Repeat the same bidirectional message proof through that Link.
-- Restart both boards and the app after the exact Link-delivered message, then
-  verify the contact, conversation, remote inbox, and sender terminal state.
+- Preserve the later bounded ADR 0018 fresh-Link success proof and qualify
+  active-Link reuse, `AlreadyDurable` replay, timeout/fault/pressure behavior,
+  and bidirectional direct delivery.
 - Qualify age-based peer expiry, Android hardware, background BLE restoration,
   multi-hop discovery, additional Reticulum interfaces, pressure, and soak.

@@ -789,11 +789,13 @@ Rete-derived destination binding and an independently matching complete LXMF
 wire destination. It must also own the exact explicit Link-destined proof
 covering the complete received RNS packet hash; that proof remains withheld
 until `Committed` or a fresh `AlreadyDurable` result. Initiator/backchannel
-direct receive is unsupported, and the responder-side direct path remains
-source-qualified rather than powered-qualified. Resource completion remains
-explicitly deferred pending bounded Resource ownership. Before production-
-accepting the RNS foundation, retain and extend Python-derived LXMF fixtures
-covering:
+direct receive is unsupported. The
+[later forced-direct record](e290-direct-link-powered-proof.md) powers one
+fresh outbound Link and responder-side new-commit/proof chain; direct
+`AlreadyDurable` replay, active-Link reuse, and the broader fault/pressure
+matrix remain open. Resource completion remains explicitly deferred pending
+bounded Resource ownership. Before production-accepting the RNS foundation,
+retain and extend Python-derived LXMF fixtures covering:
 
 - heterogeneous MessagePack keys and values, including unknown structured
   fields; the current allocation-free parser accepts nil/boolean/integer/

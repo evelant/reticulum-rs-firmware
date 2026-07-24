@@ -1,7 +1,8 @@
 # ADR 0018: Durable LXMF delivery policy and direct-Link support
 
 - **Status:** accepted for the appliance alpha; automatic opportunistic
-  delivery is implemented and direct-Link delivery is in progress
+  delivery and the bounded fresh outbound-initiator one-packet direct-Link
+  success path are powered-qualified
 - **Date:** 2026-07-23
 - **Revised:** 2026-07-24
 - **Extends:** [ADR 0013](0013-bounded-lxmf-wire-boundary.md),
@@ -44,9 +45,11 @@ escalation unnecessarily difficult.
 The `90570ca` Rete predecessor generated a receipt for destination DATA and
 Channel traffic but not ordinary Link DATA. The current `2d07818` descendant
 implements the distinct ordinary Link-DATA receipt and respects each receiving
-destination's proof policy. Rete still retains pending Links without a
-product-owned establishment deadline. That product gap must be closed without
-coupling the lifecycle to LoRa or to the E290 radio actor.
+destination's proof policy. Native Rete still retains pending Links without an
+automatic establishment deadline. The product wrapper now closes that leak
+for its outbound initiator transaction with a transport-neutral timeout and
+exact abort operation rather than coupling the lifecycle to LoRa or to the
+E290 radio actor.
 
 ## Decision
 
@@ -102,8 +105,8 @@ For the current source-free basic-send operation, `Auto` applies in this order:
 1. reuse a compatible active Link or backchannel when one already exists;
 2. otherwise send an eligible one-packet message opportunistically;
 3. select or establish a direct Link when the message cannot use the available
-   opportunistic packet form, when a bounded retry policy escalates it, or when
-   an explicit future preference requires direct delivery;
+   opportunistic packet form, when a future bounded retry policy escalates it,
+   or when an explicit future preference requires direct delivery;
 4. use one Link DATA packet when the complete wire fits the Link MDU;
 5. use an RNS Resource over the Link for larger messages once Resource-backed
    durable storage and recovery are implemented; and
@@ -122,6 +125,23 @@ a routed Header-2 packet may impose a smaller MDU and cause `Auto` to select a
 Link instead. Messages above 431 bytes remain future Resource work and must
 never be truncated.
 
+The current source implements the first bounded subset of this policy. It
+reuses a compatible active product-initiated outbound Link from a registry
+sized to the native product Link table (four entries on E290) before
+considering opportunistic delivery. Closed or unknown handles are pruned during
+lookup and capacity checks. A `Stale` Link is retained because authenticated
+traffic may revive it, but it is not selectable and continues to occupy its
+registry slot. Without a compatible entry, the policy retains the existing
+opportunistic-first behavior when the carrier fits. An oversize carrier, or a
+smaller carrier that exceeds the selected routed packet MDU, takes the direct
+path. A new Link is not created until the destination has an authenticated
+identity and usable retained path; the same tagged path-discovery owner,
+dispatch acknowledgement, wait, and retry schedule therefore gates Link
+establishment. A full registry is bounded backpressure: the exact message
+remains durably `Preparing` for a later retry, not terminal failure.
+Responder/backchannel Link discovery and reuse are not part of this first
+subset.
+
 ### Implement direct Link delivery as a reusable capability
 
 When `Auto` or an explicit future preference selects a direct Link, use the
@@ -131,15 +151,22 @@ following transport-neutral lifecycle:
 2. revalidate the remote identity and usable native path;
 3. when absent, emit a tagged path request under the existing bounded
    discovery schedule;
-4. reuse a compatible active Link or initiate one and retain a product-owned
-   establishment deadline;
-5. after the authenticated Link becomes active, prepare ordinary context-None
+4. reuse a compatible active outbound Link or initiate one; attach its opaque
+   handle to the exact generation-tagged offer, and retain the LINKREQUEST
+   through ordinary-router pressure;
+5. start one product-owned establishment deadline only after the ordinary
+   router confirms the exact LINKREQUEST's first real interface dispatch; the
+   offer snapshots a 30-second minimum, Reticulum's six-second first-hop and
+   per-retained-hop allowances, one full-MTU serialization interval from the
+   authoritative eligible-interface bitrate, and a two-second queue-to-radio
+   guard, then abort the exact pending Link if that deadline expires;
+6. after the authenticated Link becomes active, prepare ordinary context-None
    Link DATA from the exact durable wire bytes and register a Link-DATA
    receipt before exposing packet bytes;
-6. route the packet only to the interface bound by the retained Link;
-7. durably project authorized-frame evidence before acknowledging interface
+7. route the packet only to the interface bound by the retained Link;
+8. durably project authorized-frame evidence before acknowledging interface
    completion; and
-8. map a valid Link proof to `Delivered`, or timeout, cancellation, Link close,
+9. map a valid Link proof to `Delivered`, or timeout, cancellation, Link close,
    or recovery to the existing durable failure/retry vocabulary.
 
 The Link request, establishment event, prepared Link packet, receipt, interface
@@ -149,11 +176,35 @@ owns the packet, only its completion plus proof/timeout lifecycle can release
 the attempt. Pending Link establishment also has an explicit abort path so
 failed peers cannot consume the fixed Link table indefinitely.
 
-The first implementation may serialize Link establishment and direct-send work
-to one active product transaction. This is a concurrency bound, not a
-message-size, transport, or hardware feature restriction. Later Link reuse and
-multiple in-flight transactions may widen that owner without changing the
-durable message or device API.
+The first implementation serializes Link establishment and direct-send work to
+one active product transaction while retaining a fixed registry of reusable
+product-initiated outbound Links. The registry capacity matches the product's
+native Link table; it is four on E290. The runtime separately checks native
+owned-Link admission because inbound responder Links share that table. Pressure
+marks only the affected direct-required submission, allowing unrelated short
+opportunistic work and usable cached-Link work to continue. It does not yet map
+an authenticated responder-side Link to its remote `lxmf.delivery`
+destination, so reverse or backchannel reuse remains deferred. This is a
+concurrency and ownership bound, not a message-size, transport, or hardware
+feature restriction. Later responder/backchannel reuse or multiple in-flight
+establishments may widen that owner without changing the durable message or
+device API.
+
+The establishment transaction, reusable-Link registry, path-discovery counters,
+deadline, retry history, and Resource-wait marker are boot-volatile. The exact
+LXMF wire remains in the journal, but the current storage model does **not**
+resume pre-I/O `Auto` work after reset: boot recovery conservatively finalizes
+both `Preparing` and `AwaitingDelivery` as `InterruptedByReset`. A future schema
+or durable state distinction must identify work that provably never exposed a
+frame before path/Link selection can resume safely. No Resource bytes are
+emitted until durable Resource ownership and recovery are implemented.
+
+Within one uninterrupted boot, Link-establishment expiry or loss clears the
+volatile transaction and the firmware waits one second before trying the
+submission, which is still `Preparing`, again with a fresh generation. These
+retries are currently unbounded: there is no persisted retry budget and no
+boot-local attempt ceiling. A bounded failure/escalation policy remains future
+work.
 
 ### Extend Rete with an explicit ordinary Link-DATA receipt
 
@@ -177,7 +228,11 @@ maintenance also respect that reservation rule.
 The product wrapper additionally binds a prepared direct-Link scalar to the
 exact caller-owned LXMF wire bytes before asking Rete to encrypt or register a
 receipt. This prevents same-length substitution between durable acceptance and
-Link packet preparation.
+Link packet preparation. Link DATA uses the same authorized-frame durability
+barrier as destination DATA: once bytes are exposed to an interface, the
+dispatcher retains its completion and exact receipt owner until the complete
+packet observation is durable. The remote endpoint's valid Link proof, released
+only after its inbox commit, is what permits durable `Delivered`.
 
 ## Acceptance
 
@@ -206,21 +261,46 @@ substitution, interface handoff pressure, invalid proofs, dropped-proof
 timeout, reboot before and after authorized frame ownership, and incompatible
 journal media.
 
+Current source/host qualification covers outbound-initiator active-Link reuse,
+closed/unknown registry pruning, non-selectable `Stale` retention, full-registry
+backpressure, path-gated establishment, first-dispatch deadline start and exact
+pending-Link abort, complete-wire Link-DATA preparation, typed receipt
+ownership, and the authorized-frame durability barrier. It does not yet
+power-qualify that complete fault/pressure matrix or active-Link reuse.
+
+The [July 24 direct-Link powered record](../e290-direct-link-powered-proof.md)
+separately closes the bounded fresh-Link success path. A 408-byte complete LXMF
+wire produced a 392-byte destination-stripped carrier, one byte beyond the
+391-byte Header-1 opportunistic ceiling but within the 431-byte Link MDU.
+Starting with an empty boot-volatile Link registry, the sender therefore
+established a new Link, the receiver durably committed the exact wire before
+releasing its proof, and the sender projected `Delivered`. Normal resets of
+both boards plus a cold app-process relaunch retained the byte-identical
+receiver wire and exact terminal sender row.
+
 ## Consequences
 
 - Short one-shot LoRa messages normally avoid Link-establishment overhead.
 - A Link remains the stronger reusable session and large-message mechanism,
   without becoming a prerequisite for ordinary chat.
+- The E290 alpha caches at most four active outbound Links. If all four remain
+  active, a fifth direct-required destination stays durably `Preparing` under
+  a repeating one-second backoff, while a short eligible message can still fall
+  back to opportunistic DATA. Proactive active-Link close or LRU eviction is
+  future work; maintenance is not assumed to free a slot. A non-selectable
+  `Stale` entry also retains its slot so it can revive, until it becomes
+  `Closed` or disappears.
 - This appliance's `Auto` default intentionally differs from Python LXMF's
   implicit `DIRECT` default while remaining wire-compatible with both LXMF
   delivery methods.
 - The accepted signed LXMF bytes and message identifier remain stable across
-  reboot, retry, escalation, and OTA changes.
+  reboot, retry, escalation, and OTA changes, but current reset recovery
+  finalizes in-flight work as `InterruptedByReset` instead of resuming it.
 - Generic RNS DATA remains a narrow independent operation.
 - End-to-end `Delivered` requires the remote endpoint's proof after durable
   acceptance, whether the selected carrier is opportunistic DATA or Link DATA.
 - The lifecycle can route over any retained Reticulum interface; LoRa is the
-  intended first powered direct-Link qualification path.
+  first bounded powered-qualified direct-Link path.
 - The alpha incurs one explicit development journal migration and a larger
   fixed resident intent/index footprint, which fits the E290 PSRAM profile.
 - Messages above 319 bytes of Python LXMF `content_size` still require a

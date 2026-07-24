@@ -289,7 +289,9 @@ The first wire and application-ingress tranches must prove:
 This evidence establishes the wire/validation foundation and its portable
 opportunistic plus responder-side direct-packet application-event ingress seam.
 The permanent-E290 source composition mount-gates that seam behind the dedicated
-durable store and exact retained-proof owner. The existing powered record
-qualifies only the opportunistic path; it does not claim powered direct-Link
-receive, RNS Resource transfer, outbound direct retries, propagation, NomadNet,
-or a complete LXMF service.
+durable store and exact retained-proof owner. The original powered record
+qualified only the opportunistic path. The later
+[ADR 0018 forced-direct record](../e290-direct-link-powered-proof.md)
+qualifies one fresh outbound Link and new direct-Link receive commit, but not
+`AlreadyDurable` replay, active-Link reuse, RNS Resource transfer, outbound
+direct retries and faults, propagation, NomadNet, or a complete LXMF service.

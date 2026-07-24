@@ -244,7 +244,9 @@ const fn classify_preparation_rejection(reason: SubmitError) -> PreparationRejec
     match reason {
         SubmitError::AttemptLedgerFull { .. }
         | SubmitError::ReceiptTableFull { .. }
-        | SubmitError::ReceiptHashAlreadyTracked => PreparationRejectionDecision::RetrySameBoot,
+        | SubmitError::ReceiptHashAlreadyTracked
+        | SubmitError::LinkNotFound
+        | SubmitError::LinkNotActive => PreparationRejectionDecision::RetrySameBoot,
         SubmitError::UnknownDestination | SubmitError::NoEligibleInterface { .. } => {
             PreparationRejectionDecision::Final(SubmissionFailure::NoPath)
         }
@@ -261,6 +263,8 @@ const fn classify_preparation_rejection(reason: SubmitError) -> PreparationRejec
         | SubmitError::LeaseDeadlineExpired { .. }
         | SubmitError::InterfaceOutsideProfile { .. }
         | SubmitError::RouteReceiptCancellationFailed
+        | SubmitError::LinkDestinationMismatch
+        | SubmitError::LinkInterfaceUnknown
         | SubmitError::Cryptography
         | SubmitError::PacketBuild
         | SubmitError::Invariant => PreparationRejectionDecision::Final(

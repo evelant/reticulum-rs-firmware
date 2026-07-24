@@ -95,7 +95,7 @@ use reticulum_lxmf_store::{
 };
 use reticulum_node_core::{
     ApplicationEventLease, AuthorizedFrameObservation, DelayedProofOwner,
-    DestinationHash as NodeDestinationHash, MAX_DIRECT_LXMF_WIRE, MonotonicMillis,
+    DestinationHash as NodeDestinationHash, LinkHandle, MAX_DIRECT_LXMF_WIRE, MonotonicMillis,
     MonotonicSeconds, PrepareBasicLxmfError, TxLeaseDeadline,
 };
 use reticulum_nor_flash_region::{PartitionNorFlash, RegionError};
@@ -117,8 +117,9 @@ use reticulum_storage_model::{
     SubmissionId,
 };
 use reticulum_submission_runtime::{
-    FrameOfferProgress, PathDiscoveryAcknowledgeError, PathDiscoveryOffer, RecoveryStep,
-    RuntimeControlError, RuntimeError, RuntimeStep, SubmissionNodePort, SubmissionRuntime,
+    FrameOfferProgress, LinkEstablishmentControlError, LinkEstablishmentOffer,
+    PathDiscoveryAcknowledgeError, PathDiscoveryOffer, RecoveryStep, RuntimeControlError,
+    RuntimeError, RuntimeStep, SubmissionNodePort, SubmissionRuntime,
 };
 
 use crate::{ProductSupervisor, config};
@@ -139,8 +140,11 @@ fn record_runtime_inbox_commit_finished() {
 }
 
 type ProductRegionError = RegionError<FlashStorageError>;
-pub(crate) type ProductSubmissionRuntime =
-    SubmissionRuntime<{ config::DURABLE_SUBMISSIONS }, { config::DURABLE_PROJECTED_SUBMISSIONS }>;
+pub(crate) type ProductSubmissionRuntime = SubmissionRuntime<
+    { config::DURABLE_SUBMISSIONS },
+    { config::DURABLE_PROJECTED_SUBMISSIONS },
+    { config::LINKS },
+>;
 
 /// Failure before the required durable application partitions can be accessed.
 #[derive(Debug)]
@@ -464,6 +468,16 @@ pub(crate) enum ProductPathDiscoveryAcknowledgeError {
     RuntimeUnavailable,
     /// The runtime retained a different destination or request ordinal.
     Runtime(PathDiscoveryAcknowledgeError),
+}
+
+/// Product failure to correlate one locally created or dispatched Link with
+/// the resident direct-delivery transaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProductLinkEstablishmentControlError {
+    /// Durable submission service no longer has a resident runtime.
+    RuntimeUnavailable,
+    /// The runtime retained another submission, generation, phase, or Link.
+    Runtime(LinkEstablishmentControlError),
 }
 
 /// Product result of one exact LXMF application-event ownership attempt.
@@ -1372,6 +1386,44 @@ impl ProductStorageCoordinator {
         runtime
             .acknowledge_path_request_dispatched(offer, dispatched_at)
             .map_err(ProductPathDiscoveryAcknowledgeError::Runtime)
+    }
+
+    /// Bind one exact locally created Link to the resident direct-delivery
+    /// transaction before its ordinary action leaves product ownership.
+    ///
+    /// This control step is backend-free and does not borrow physical flash.
+    pub(crate) fn attach_created_link(
+        &mut self,
+        offer: LinkEstablishmentOffer,
+        link: LinkHandle,
+    ) -> Result<(), ProductLinkEstablishmentControlError> {
+        let runtime = self
+            .runtime
+            .as_mut()
+            .ok_or(ProductLinkEstablishmentControlError::RuntimeUnavailable)?;
+        runtime
+            .attach_created_link(offer, link)
+            .map_err(ProductLinkEstablishmentControlError::Runtime)
+    }
+
+    /// Confirm the first real router dispatch of one exact LINKREQUEST.
+    ///
+    /// The runtime starts its bounded establishment deadline only at this
+    /// dispatch edge. This control step is backend-free and remains callable
+    /// while another store owns the shared NOR device.
+    pub(crate) fn acknowledge_link_request_dispatched(
+        &mut self,
+        offer: LinkEstablishmentOffer,
+        link: LinkHandle,
+        dispatched_at: MonotonicMillis,
+    ) -> Result<(), ProductLinkEstablishmentControlError> {
+        let runtime = self
+            .runtime
+            .as_mut()
+            .ok_or(ProductLinkEstablishmentControlError::RuntimeUnavailable)?;
+        runtime
+            .acknowledge_link_request_dispatched(offer, link, dispatched_at)
+            .map_err(ProductLinkEstablishmentControlError::Runtime)
     }
 }
 

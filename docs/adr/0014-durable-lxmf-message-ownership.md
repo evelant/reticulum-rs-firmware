@@ -3,9 +3,10 @@
 - **Status:** accepted for the portable store/event-owner tranche and
   permanent-E290 opportunistic plus responder-side direct-packet receive
   composition; one bounded opportunistic A-to-B LoRa durable-delivery chain is
-  power-qualified, while direct-Link and broader qualification remain deferred
+  power-qualified, and one later fresh-Link run power-qualifies a new direct
+  commit before proof; replay and broader qualification remain deferred
 - **Date:** 2026-07-21
-- **Powered evidence updated:** 2026-07-21
+- **Powered evidence updated:** 2026-07-24
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0004](0004-sole-flash-coordinator.md),
   [ADR 0011](0011-durable-rns-inbox-qualification.md),
@@ -267,13 +268,14 @@ must not be relabelled as LXMF evidence.
   but not yet an endurance-ready mailbox.
 - Exact bytes remain available to future LXMF, NomadNet, Micron, and API layers;
   lossy UTF-8 or JSON projections cannot become the durable authority.
-- Resource reception, propagation, direct outgoing encode/send/retry,
-  initiator/backchannel direct receive, tickets and ratchets,
-  read/delete/tombstone state, client APIs, and broader powered target
-  qualification remain explicit later tranches. The opportunistic and
-  responder-side direct target/ingress/proof compositions are present; only the
-  opportunistic path has a bounded powered commit/proof chain. Direct Link
-  receive is source-qualified but not yet powered-qualified.
+- Resource reception, propagation, initiator/backchannel direct receive,
+  tickets and ratchets, read/delete/tombstone state, complete client APIs, and
+  broader powered target qualification remain explicit later tranches. Basic
+  direct outgoing encode/send and same-boot retry are implemented under ADR
+  0018. Its [powered record](../e290-direct-link-powered-proof.md) qualifies one
+  fresh outbound Link and new responder commit/proof chain. Direct
+  `AlreadyDurable` replay, active-Link reuse, retry budgets/ceilings, Resource,
+  and the broader fault/pressure matrix remain unqualified.
 - A pre-pending clean fault can disable only LXMF admission. Once a mutation is
   pending, an ambiguous store fault retains its exact owner and blocks all other
   flash mutations until reset/remount; routing and nonmutating consumers may

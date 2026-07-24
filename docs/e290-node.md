@@ -28,7 +28,13 @@ B-to-A SQLite-client exchanges after fixing a retained-frame scheduler
 inversion found by the first run. Its deliberate storage, carrier, security,
 and client limits are
 tracked in [the usable-firmware POC defect list](poc-known-defects.md). In the
-historical API 1.1 image, MAC `ac:a7:04:e1:3e:88` retained its button-confirmed
+current successor source, `Auto` also composes a native-table-bounded registry
+of reusable outbound-initiator Links and exact one-packet Link-DATA delivery.
+The [bounded direct-Link powered proof](e290-direct-link-powered-proof.md)
+separately establishes one fresh Link, commits the exact oversize message,
+returns its delayed proof, reaches durable `Delivered`, and retains both sides
+across board and app restart. In the historical API 1.1 image, MAC
+`ac:a7:04:e1:3e:88` retained its button-confirmed
 empty-store initialization, durable Active generation 3, and host credential;
 MAC `ac:a7:04:e1:3f:88` owned a separate durable node identity. Matching exact
 address-zero readbacks preceded authenticated identity, durable submission,
@@ -90,9 +96,12 @@ forwarding,
 multi-hop routing, LXMF, or general application-level message consumption,
 session resumption, Wi-Fi bearer binding, or broader BLE lifecycle behavior.
 Current source also admits proof-required responder-side direct LXMF packets on
-the mounted `lxmf.delivery` destination. That direct path has not yet completed
-its dedicated two-board powered proof; initiator/backchannel receive and native
-Resource ingress remain disabled.
+the mounted `lxmf.delivery` destination and prepares outbound-initiator
+one-packet Link DATA over its bounded product-owned Link registry. One bounded
+two-board run now powers the combined fresh-initiator/new-responder-commit
+success path;
+initiator/backchannel receive, responder/backchannel reuse, and native Resource
+ingress remain disabled.
 
 The current source composition pins Rete commit
 `2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on fork branch
@@ -299,18 +308,52 @@ retransmissions remain at least three seconds apart for that pair. A queue or
 native admission rejection retains the same scheduled destination and retries
 it one second later without consuming bootstrap budget. An ambiguous pending
 `StoreFaultHold` retains its exact owner but does not currently suppress
-discovery. Responder-side direct Link receive is source-qualified but not yet
-powered-qualified. Resource delivery, propagation, reusable direct-Link
-outbound LXMF, initiator/backchannel direct receive, responsive discovery
-beyond the current local path-response wrapper, ticket/PoW requirements, and
-reclamation remain deferred. Method-neutral basic outbound LXMF and its client
-API are included in the separate
+discovery. Responder-side new-commit direct Link receive and the first fresh
+outbound-initiator direct-Link packet path have a
+[bounded powered record](e290-direct-link-powered-proof.md).
+The outbound path reuses a destination-matching active product-owned Link
+before opportunistic delivery, otherwise preserves opportunistic-first
+selection when eligible, and selects Link establishment for an oversize carrier
+or routed Header-2 overflow. The reusable registry is sized to the same
+four-Link native product table and prunes only `Closed` or unknown entries. A
+`Stale` Link is retained for possible revival but is not selectable and still
+occupies capacity. A full registry leaves new direct work durably `Preparing`
+under bounded backpressure with a fixed one-second backoff; it is not terminal
+failure, and short eligible work for another destination can still use
+opportunistic DATA. The alpha does not proactively close or LRU-evict an active
+entry, and maintenance is not assumed to free one.
+Establishment completes tagged path discovery before creating a Link, retains
+the exact LINKREQUEST through ordinary-router pressure, and starts its
+snapshotted hop-aware deadline only after the request's first confirmed
+interface dispatch. The E290 window has a 30-second minimum and otherwise uses
+Reticulum's six-second first-hop/per-hop terms, the current 732 ms
+500-byte/5,468-bps LoRa serialization allowance, and a two-second
+queue-to-radio guard. On expiry it aborts the exact pending Link so the outbound
+transaction cannot leak indefinitely. Active Link DATA uses the Link-bound
+interface, the distinct Link-DATA receipt, and the same authorized-frame
+durable barrier as opportunistic DATA.
+
+This first profile serializes one establishment transaction while caching up
+to four product-initiated outbound Links. Its transaction, registry,
+path/deadline clocks, and retry history are boot-volatile. The exact message
+bytes remain journaled, but current recovery finalizes both `Preparing` and
+`AwaitingDelivery` as `InterruptedByReset`; pre-frame path/Link work does not
+re-enter `Auto`. Establishment expiry or loss retries after a one-second
+firmware backoff for the rest of the same boot with no attempt ceiling or
+persisted retry budget. Resource delivery, propagation, durable pre-frame
+resume, responder/backchannel reuse, initiator/backchannel direct receive,
+responsive discovery beyond the current local path-response wrapper,
+ticket/PoW requirements, and reclamation remain deferred. Method-neutral basic
+outbound LXMF and its client API are included in the separate
 [API 1.4 bidirectional powered record](e290-api14-lxmf-poc.md). The historical
 record below remains the earlier HIL-only, one-way exact opportunistic
 new-commit-before-proof result. The current `Auto` policy chooses opportunistic
-delivery for eligible one-shots and will reuse or establish a Link when the
-corresponding product transaction is implemented. Neither result is general
-LXMF interoperability qualification.
+delivery for eligible one-shots when no compatible cached Link exists. Those
+historical powered results are not general LXMF interoperability
+qualification. The later
+[forced-direct record](e290-direct-link-powered-proof.md) separately qualifies
+one fresh-Link, one-packet success path, but not active-Link reuse or its
+broader fault/pressure matrix.
 
 An optional journal mount/recovery failure occurs before any
 durability-gated DATA owner can exist; it disables local durable submission
@@ -382,13 +425,14 @@ permanent fault
 with an unresolved frame enters interface-local `ActiveOwnerFailStopped`, takes
 the same LoRa lease offline without changing its generation, retains the exact
 frame/completion/ticket, and permits no fresh LoRa work for the rest of the boot.
-Device configuration, propagated and outbound direct/Resource LXMF,
+Device configuration, active-Link reuse qualification, Resource and propagated
+LXMF, responder/backchannel reuse, active-Link close/LRU eviction,
 initiator/backchannel direct receive, durable delete/reclaim and migration
-policy, local NomadNet clients, and production-ready host-facing
-USB/BLE/Wi-Fi services remain visible product work. API 1.4 and the host CLI now
-provide a basic USB LXMF send/list/read POC; they are not the final client
-surface. The one-entry raw-RNS qualification record remains separate from the
-dedicated opportunistic and responder-side direct-packet LXMF receive store.
+policy, local NomadNet clients, and production-ready host-facing USB/BLE/Wi-Fi
+services remain visible product work. API 1.4 and the host CLI now provide a
+basic USB LXMF send/list/read POC; they are not the final client surface. The
+one-entry raw-RNS qualification record remains separate from the dedicated
+opportunistic and responder-side direct-packet LXMF receive store.
 
 ## Composition boundary
 
@@ -621,7 +665,7 @@ The target requires a 16 MiB flash image/header and uses
 | Device config | `0x616000` | 104 KiB | Reserved, not wired |
 | Node journal | `0x630000` | 1 MiB | Schema-3/physical-2 operation-scoped submission runtime; current 128-entry non-reclaiming cap in PSRAM below the 154-acceptance journal lifetime; authenticated submission and post-re-enumeration terminal status powered-qualified, but not a powered 128-entry fill |
 | Message store | `0x730000` | 2 MiB | Wired ADR 0011 format-1 raw-RNS inbox; one 576-byte commit-last item; 383-byte maximum; not LXMF |
-| LXMF store | `0x930000` | 2 MiB | Wired ADR 0014 append-only store; 512-slot PSRAM index; mount-gated opportunistic plus responder-side direct-packet `lxmf.delivery` admission with required retained proofs; powered evidence remains opportunistic/API 1.4 only, while direct Link and `AlreadyDurable` replay qualification remain open |
+| LXMF store | `0x930000` | 2 MiB | Wired ADR 0014 append-only store; 512-slot PSRAM index; mount-gated opportunistic plus responder-side direct-packet `lxmf.delivery` admission with required retained proofs; four-entry outbound-initiator direct-Link registry is source-qualified; fresh-Link/new-commit one-packet direct delivery is powered-qualified, while active-Link reuse and `AlreadyDurable` replay remain open |
 | Unallocated | `0xb30000` | 4.8125 MiB | OTA/layout decision |
 
 The workspace runner in `.cargo/config.toml` hardcodes an 8 MiB flash size and
@@ -1678,8 +1722,11 @@ responder-side bound direct Link DATA admission, required-proof durable ingress,
 per-destination `Retain`, the sixteen-slot delayed-proof owner, and the
 ordinary-supervisor ready-proof drain. The primary destination still rejects
 local Link termination, and native Resource ingress remains disabled. The
-current A-to-B confirmation powers only the opportunistic new-commit-before-
-proof path; it does not qualify replay, physical direct Link receive, Resource,
+earlier A-to-B confirmation powers only the opportunistic new-commit-before-
+proof path. The later
+[forced-direct record](e290-direct-link-powered-proof.md) powers one physical
+new direct Link receive and outbound Link DATA success path. Neither record
+qualifies `AlreadyDurable` direct replay, active-Link reuse, Resource,
 propagation, or a client mailbox.
 
 Journal mount, unsupported history, or recovery failure is isolated because it
@@ -2214,8 +2261,11 @@ supports these authenticated logical operations:
   exact normalized wire into a private non-overwriting file, verifies its
   complete SHA-256, and cross-checks parsed LXMF metadata when host size permits;
 - `lxmf-send`, which source-free composes, signs, and durably accepts one
-  method-neutral basic message; the appliance's current `Auto` policy chooses
-  opportunistic delivery when eligible; and
+  method-neutral basic message; the appliance's current `Auto` policy first
+  reuses a compatible active outbound Link from its four-entry registry,
+  otherwise chooses
+  opportunistic delivery when eligible and establishes a Link when required;
+  and
 - `lxmf-send-and-wait`, which performs that same acceptance and then polls the
   returned submission ID to `Delivered` or a terminal failure;
 - `submission-status` with `--submission-id`;
@@ -2261,12 +2311,16 @@ Title and content are binary; empty values are valid as `--title-hex ''` and
 448-byte encoded request and product composition can reject a smaller combined
 pair. The current E290 durable intent retains the complete signed LXMF wire
 through 431 bytes (319 bytes of Python LXMF `content_size`) independently of
-delivery method. The automatic policy sends an eligible carrier through 391
-bytes, or a 407-byte complete wire, over the dedicated Header-1 opportunistic
-path, including carrier lengths 384--391 beyond generic RNS DATA's unrelated
-383-byte ceiling. Complete wires of 408--431 bytes remain `Preparing` for the
-unfinished direct-Link capability instead of being rejected or truncated; a
-routed Header-2 path can impose the smaller 383-byte carrier ceiling.
+delivery method. Without a compatible cached Link, the automatic policy sends
+an eligible carrier through 391 bytes, or a 407-byte complete wire, over the
+dedicated Header-1 opportunistic path, including carrier lengths 384--391
+beyond generic RNS DATA's unrelated 383-byte ceiling. A complete wire through
+431 bytes instead uses one Link DATA packet when `Auto` selects or reuses a
+Link; a routed Header-2 opportunistic path can impose the smaller 383-byte
+carrier ceiling and trigger that selection. Larger Link-MDU overflow remains
+durably `Preparing` for future Resource support and is never truncated. The
+[bounded direct-Link proof](e290-direct-link-powered-proof.md) qualifies one
+fresh-Link 408-byte complete wire; active-Link reuse and Resource remain open.
 The timestamp must be exactly
 `1..=8_796_093_022_207_999`. If timestamp or idempotency key is omitted, the
 host samples its current millisecond clock or generates a random key once. It
@@ -2932,10 +2986,12 @@ own E290. The phone does not scan for the other node directly.
 5. Send only after the contact exists. The bounded powered run correctly
    selected the compatible short-message Header-1 opportunistic path under the
    automatic delivery policy. Current source preserves the exact signed LXMF
-   wire independently of that choice; the reusable product-owned direct-Link
-   capability and its powered delivery proof remain a separate qualification
-   gate. The powered run also opened a pre-existing contact, so a fresh-database
-   **Add** remains separate acceptance evidence.
+   wire independently of that choice and now implements the bounded
+   product-owned outbound-Link registry. Its
+   [powered delivery proof](e290-direct-link-powered-proof.md) was completed
+   separately with a forced-oversize message. The Nearby run opened a
+   pre-existing contact, so a fresh-database **Add** remains separate acceptance
+   evidence.
 
 This flow discovers a public Reticulum peer; it does not authorize appliance
 control or replace phone-to-board pairing. Future QR, E290-mediated BLE share,
@@ -3297,9 +3353,14 @@ first smoke.
   generic event queue. Add initiator/backchannel receive only after its
   per-Link ephemeral signing authority has a bounded owner.
 - Preserve implemented source-free basic method-neutral LXMF send, its
-  automatic opportunistic delivery when eligible, and committed list/read.
-  Extend send to nonempty fields, stamps/tickets, reusable direct
-  Link/Resource, and propagation delivery. Move the temporary one-interface
+  automatic opportunistic delivery when eligible, four-entry outbound-
+  initiator Link registry with exact Link-DATA receipt/durable-frame ownership,
+  and committed list/read. Preserve the bounded fresh-Link powered path, then
+  qualify active-Link reuse, `AlreadyDurable` replay, responder/backchannel
+  reuse, active-Link close/LRU eviction, and multiple simultaneous
+  establishment transactions. Extend send to nonempty fields, stamps/tickets,
+  Resource, and propagation delivery. Move the temporary
+  one-interface
   local path-response
   wrapper into an owned Rete implementation with per-interface forwarding state
   before multi-transport routing. Add store delete/reclaim/migration and local

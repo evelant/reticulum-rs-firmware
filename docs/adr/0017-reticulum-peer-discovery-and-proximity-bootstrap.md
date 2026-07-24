@@ -2,7 +2,8 @@
 
 - **Status:** accepted; the peer projection and picker are implemented, and
   the bounded existing-contact powered proof completed 2026-07-24, while
-  fresh contact creation and direct-Link acceptance remain pending
+  fresh contact creation remains pending; direct-Link acceptance was completed
+  separately the same day
 - **Date:** 2026-07-23
 - **Extends:** [ADR 0010](0010-device-api-live-pairing-protocol.md),
   [ADR 0015](0015-universal-expo-client-and-generated-bindings.md), and
@@ -188,14 +189,18 @@ contact already existed, so first-time **Add** was not exercised, and the
 boards were not restarted after those exact messages. The 259- and 291-byte
 Reticulum packets correctly selected the compatible Header-1 opportunistic
 path under the automatic policy. They therefore qualify the intended
-short-message delivery method, but do not qualify the separately pending
-product-owned authenticated-Link capability.
+short-message delivery method, but do not themselves qualify the separate
+product-owned authenticated-Link capability. The later
+[ADR 0018 powered record](../e290-direct-link-powered-proof.md) separately
+qualifies one forced-oversize fresh-Link success path.
 
 ## Consequences
 
 - The impressive demo exercises the real mesh, routing, identity, BLE control,
   and intended automatic short-message LXMF path instead of a disposable
-  proximity shortcut; reusable direct-Link support remains the next tranche.
+  proximity shortcut. The later bounded direct-Link record preserves that same
+  mesh/client architecture; active-Link reuse and the broader direct
+  fault/pressure matrix remain later tranches.
 - Normal Reticulum announces become useful application events rather than log
   noise, while routing remains owned by Rete.
 - Peer discovery is naturally transport-neutral and can later include Wi-Fi,
@@ -206,8 +211,9 @@ product-owned authenticated-Link capability.
   schemas, permissions, storage, and confirmation language.
 - The bounded peer table, cursor API, Rust projection, and Expo picker are
   implemented, and the existing-contact no-typing path has a bounded
-  two-board powered record. Fresh contact creation, direct-Link capability,
-  peer-age expiry, and multi-peripheral BLE ownership remain open.
+  two-board powered record. Fresh contact creation, peer-age expiry, and
+  multi-peripheral BLE ownership remain open; fresh one-packet direct-Link
+  capability is qualified separately.
 
 ## References
 

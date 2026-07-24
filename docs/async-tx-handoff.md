@@ -465,8 +465,11 @@ mutation. The remaining upstream-backpressure gap is distinct from product LXMF
 intent admission. Current source has both the experimental authenticated
 raw-RNS surface and the durable method-neutral basic LXMF message API. The
 latter persists the exact signed LXMF wire before the current `Auto` policy
-selects opportunistic delivery when eligible; reusable direct-Link/Resource
-delivery remains under integration.
+reuses a compatible active Link, selects opportunistic delivery when eligible,
+or establishes a direct Link when the packet form cannot fit. One fresh-Link
+one-packet path is implemented and powered-qualified. Active-Link reuse,
+Resource delivery, responder/backchannel reuse, and the broader direct
+fault/pressure matrix remain under integration or qualification.
 
 The durable E290 profile retains 128 accepted-history entries in external PSRAM
 and has a separate 154-acceptance append-only journal lifetime ceiling.

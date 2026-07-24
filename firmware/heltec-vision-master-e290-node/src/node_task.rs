@@ -67,8 +67,9 @@ use reticulum_node_core::{
     APPLICATION_LINK_CONTEXT_NONE, ApplicationEvent, ApplicationEventDiscardReason,
     ApplicationEventLease, ApplicationEventOfferError, ApplicationEventOwner,
     ApplicationEventQuarantineReason, ApplicationLinkRole, AuthorizedFrameObservation,
-    DelayedProofOwner, DestinationHash, MonotonicInstant, MonotonicMillis, MonotonicSeconds,
-    NodeActions, OutboundDispatchInterval, ReceiptCorrelationError, TxLeaseDeadline,
+    DelayedProofOwner, DestinationHash, InitiateLinkError, LinkHandle, MonotonicInstant,
+    MonotonicMillis, MonotonicSeconds, NodeActions, OutboundDispatchInterval,
+    ReceiptCorrelationError, TxLeaseDeadline,
 };
 #[cfg(feature = "runtime-measurement-hil")]
 use reticulum_node_core::{IngressDisposition, IngressMetadata, PacketType};
@@ -80,14 +81,14 @@ use reticulum_peer_discovery::{
 use reticulum_rns_inbox_store::{InboxCandidate, InboxDestination};
 use reticulum_storage_actor::{DriveError, ProjectorOperationError};
 use reticulum_submission_runtime::{
-    FrameOfferProgress, PathDiscoveryOffer, RuntimeError, RuntimeStep,
+    FrameOfferProgress, LinkEstablishmentOffer, PathDiscoveryOffer, RuntimeError, RuntimeStep,
 };
 use reticulum_tx_handoff::AuthorizedFrameNodeHandoff;
 use reticulum_tx_supervisor::{
     NodeInterfaceAnnounceFlushResult, NodeInterfaceApplicationEventDrain,
     NodeInterfaceIngressActionFault, NodeInterfaceIngressRecycleFault, NodeInterfaceIngressStep,
     NodeInterfaceOrdinaryOfferFailure, NodeInterfaceSupervisorTransition, NodeInterfaceTickResult,
-    OrdinaryRouterStep,
+    OrdinaryRouterCompletionProgress, OrdinaryRouterStep,
 };
 
 use crate::{
@@ -102,7 +103,16 @@ use crate::{
 struct RetainedActions {
     actions: NodeActions,
     admission: reticulum_tx_supervisor::OrdinaryRouterAdmission,
-    path_offer: Option<PathDiscoveryOffer>,
+    submission_protocol: Option<SubmissionProtocolDispatch>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SubmissionProtocolDispatch {
+    Path(PathDiscoveryOffer),
+    Link {
+        offer: LinkEstablishmentOffer,
+        link: LinkHandle,
+    },
 }
 
 impl RetainedActions {
@@ -113,18 +123,18 @@ impl RetainedActions {
         Self {
             actions,
             admission,
-            path_offer: None,
+            submission_protocol: None,
         }
     }
 
-    fn with_path_offer(mut self, offer: PathDiscoveryOffer) -> Self {
-        debug_assert!(self.path_offer.is_none());
-        self.path_offer = Some(offer);
+    fn with_submission_protocol(mut self, protocol: SubmissionProtocolDispatch) -> Self {
+        debug_assert!(self.submission_protocol.is_none());
+        self.submission_protocol = Some(protocol);
         self
     }
 
-    fn path_offer(&self) -> Option<PathDiscoveryOffer> {
-        self.path_offer
+    fn submission_protocol(&self) -> Option<SubmissionProtocolDispatch> {
+        self.submission_protocol
     }
 
     fn into_parts(
@@ -132,9 +142,9 @@ impl RetainedActions {
     ) -> (
         NodeActions,
         reticulum_tx_supervisor::OrdinaryRouterAdmission,
-        Option<PathDiscoveryOffer>,
+        Option<SubmissionProtocolDispatch>,
     ) {
-        (self.actions, self.admission, self.path_offer)
+        (self.actions, self.admission, self.submission_protocol)
     }
 }
 type QuarantinedIngressBuffer = (NodeInterfaceIngressRecycleFault, SealedIngressPacket);
@@ -185,7 +195,7 @@ enum LxmfProofOfferHandling {
 }
 
 enum ActionRetryStep {
-    Accepted(Option<PathDiscoveryOffer>),
+    Accepted(Option<SubmissionProtocolDispatch>),
     Busy,
     Terminal,
 }
@@ -395,7 +405,7 @@ pub async fn run(
     // backpressured envelope or an exact coordinator-rejected envelope.
     let mut retry_actions_a: Option<RetainedActions> = None;
     let mut retry_actions_b: Option<RetainedActions> = None;
-    let mut pending_path_dispatch: Option<PathDiscoveryOffer> = None;
+    let mut pending_submission_protocol: Option<SubmissionProtocolDispatch> = None;
     let mut quarantined_actions: Option<RetainedActions> = None;
     let mut quarantined_ingress_buffer: Option<QuarantinedIngressBuffer> = None;
     let mut prefer_retry_b = true;
@@ -563,7 +573,7 @@ pub async fn run(
             {
                 let reason = rejected.reason();
                 let (actions, elapsed_admission) = rejected.into_parts();
-                let path_offer = pending_path_dispatch.take();
+                let submission_protocol = pending_submission_protocol.take();
                 let (retained, terminal) = match config::rejected_action_disposition(reason) {
                     config::RejectedActionDisposition::RefreshDeadline => {
                         warn!(
@@ -588,11 +598,12 @@ pub async fn run(
                         (RetainedActions::ordinary(actions, elapsed_admission), true)
                     }
                 };
-                let retained = match path_offer {
-                    Some(offer) => retained.with_path_offer(offer),
+                let retained = match submission_protocol {
+                    Some(protocol) => retained.with_submission_protocol(protocol),
                     None => retained,
                 };
-                if terminal && path_offer.is_some() {
+                if terminal && let Some(protocol) = submission_protocol {
+                    abort_unestablished_submission_link(supervisor, protocol);
                     disable_submission_for_path_fault(
                         storage,
                         &mut durability_service,
@@ -634,7 +645,7 @@ pub async fn run(
                     // RX buffer or moves an existing terminal residue.
                     if (!fail_closed_draining
                         && retry_capacity_available
-                        && pending_path_dispatch.is_none())
+                        && pending_submission_protocol.is_none())
                         || settling_ingress
                     {
                         let local_quarantine_available = quarantined_actions.is_none();
@@ -682,110 +693,247 @@ pub async fn run(
                             ),
                         }
                     }
-                    if let NodeInterfaceSupervisorTransition::Ordinary(OrdinaryRouterStep::Routed {
-                        interface,
-                        protocol_token,
-                        first_dispatch,
-                        ..
-                    }) = transition
-                        && let Some(offer) = pending_path_dispatch
-                    {
-                        if !first_dispatch || protocol_token.is_some() {
-                            error!(
-                                "e290-node stage=path-discovery status=FAIL reason=dispatch-correlation first_dispatch={first_dispatch} protocol_token_present={} interface={} action=disable-submissions",
-                                protocol_token.is_some(),
-                                interface.get(),
-                            );
-                            disable_submission_for_path_fault(
-                                storage,
-                                &mut durability_service,
-                                &retained_frame,
-                                &pending_frame_acknowledgement,
-                                supervisor,
-                                lora_descriptor,
-                                &mut fail_closed_draining,
-                                "path-request-dispatch-correlation",
-                            );
-                        } else {
-                            pending_path_dispatch = None;
-                            let dispatched_at =
-                                MonotonicMillis::new(dispatch_completed_at.as_micros() / 1_000);
-                            match storage.acknowledge_path_request_dispatched(offer, dispatched_at)
-                            {
-                                Ok(()) => info!(
-                                    "e290-node stage=path-discovery status=DISPATCHED submission={} ordinal={} interface={} dispatch_ms={} response_clock=started",
-                                    offer.id().get(),
-                                    offer.ordinal(),
-                                    interface.get(),
-                                    dispatched_at.get(),
-                                ),
-                                Err(reason) => {
-                                    error!(
-                                        "e290-node stage=path-discovery status=FAIL reason=dispatch-ack:{reason:?} submission={} ordinal={} action=disable-submissions",
-                                        offer.id().get(),
-                                        offer.ordinal(),
-                                    );
-                                    disable_submission_for_path_fault(
-                                        storage,
-                                        &mut durability_service,
-                                        &retained_frame,
-                                        &pending_frame_acknowledgement,
-                                        supervisor,
-                                        lora_descriptor,
-                                        &mut fail_closed_draining,
-                                        "path-request-dispatch-ack",
-                                    );
-                                }
-                            }
-                            progressed = true;
-                        }
-                    }
                     if let NodeInterfaceSupervisorTransition::Ordinary(
                         OrdinaryRouterStep::Routed {
                             interface,
-                            protocol_token: Some(token),
+                            protocol_token,
                             first_dispatch,
                             ..
                         },
                     ) = transition
                     {
-                        let confirmation = OutboundDispatchInterval::new(
-                            dispatch_started_at,
-                            dispatch_completed_at,
-                        )
-                        .map(|interval| {
-                            supervisor.confirm_outbound_protocol(token, interface, interval)
-                        });
-                        let disposition = confirmation.map(|confirmed| {
-                            config::protocol_dispatch_confirmation_disposition(
-                                first_dispatch,
-                                confirmed,
+                        // Native protocol state may advance only after the
+                        // authoritative router accepts the exact packet. A
+                        // LINKREQUEST additionally starts the product-owned
+                        // establishment clock only after that confirmation.
+                        let confirmation = protocol_token.and_then(|token| {
+                            OutboundDispatchInterval::new(
+                                dispatch_started_at,
+                                dispatch_completed_at,
                             )
+                            .map(|interval| {
+                                supervisor.confirm_outbound_protocol(token, interface, interval)
+                            })
                         });
-                        if disposition.is_none()
-                            || matches!(
-                                disposition,
-                                Some(
-                                    config::ProtocolDispatchConfirmationDisposition::TerminalFailClosedDrain
+                        let confirmation_disposition = protocol_token.map(|_| {
+                            confirmation
+                                .map(|confirmed| {
+                                    config::protocol_dispatch_confirmation_disposition(
+                                        first_dispatch,
+                                        confirmed,
+                                    )
+                                })
+                                .unwrap_or(
+                                    config::ProtocolDispatchConfirmationDisposition::TerminalFailClosedDrain,
                                 )
+                        });
+                        if matches!(
+                            confirmation_disposition,
+                            Some(
+                                config::ProtocolDispatchConfirmationDisposition::TerminalFailClosedDrain
                             )
-                        {
+                        ) {
                             enter_protocol_dispatch_fail_stop(
                                 supervisor,
                                 &mut fail_closed_draining,
                                 interface,
                                 first_dispatch,
-                                disposition.is_some(),
+                                confirmation.is_some(),
                             );
                             progressed = true;
                         }
+
+                        if let Some(pending) = pending_submission_protocol {
+                            let dispatched_at =
+                                MonotonicMillis::new(dispatch_completed_at.as_micros() / 1_000);
+                            match pending {
+                                SubmissionProtocolDispatch::Path(offer) => {
+                                    if !first_dispatch || protocol_token.is_some() {
+                                        error!(
+                                            "e290-node stage=path-discovery status=FAIL reason=dispatch-correlation first_dispatch={first_dispatch} protocol_token_present={} interface={} action=disable-submissions",
+                                            protocol_token.is_some(),
+                                            interface.get(),
+                                        );
+                                        disable_submission_for_path_fault(
+                                            storage,
+                                            &mut durability_service,
+                                            &retained_frame,
+                                            &pending_frame_acknowledgement,
+                                            supervisor,
+                                            lora_descriptor,
+                                            &mut fail_closed_draining,
+                                            "path-request-dispatch-correlation",
+                                        );
+                                    } else {
+                                        pending_submission_protocol = None;
+                                        match storage.acknowledge_path_request_dispatched(
+                                            offer,
+                                            dispatched_at,
+                                        ) {
+                                            Ok(()) => info!(
+                                                "e290-node stage=path-discovery status=DISPATCHED submission={} ordinal={} interface={} dispatch_ms={} response_clock=started",
+                                                offer.id().get(),
+                                                offer.ordinal(),
+                                                interface.get(),
+                                                dispatched_at.get(),
+                                            ),
+                                            Err(reason) => {
+                                                error!(
+                                                    "e290-node stage=path-discovery status=FAIL reason=dispatch-ack:{reason:?} submission={} ordinal={} action=disable-submissions",
+                                                    offer.id().get(),
+                                                    offer.ordinal(),
+                                                );
+                                                disable_submission_for_path_fault(
+                                                    storage,
+                                                    &mut durability_service,
+                                                    &retained_frame,
+                                                    &pending_frame_acknowledgement,
+                                                    supervisor,
+                                                    lora_descriptor,
+                                                    &mut fail_closed_draining,
+                                                    "path-request-dispatch-ack",
+                                                );
+                                            }
+                                        }
+                                        progressed = true;
+                                    }
+                                }
+                                SubmissionProtocolDispatch::Link { offer, link } => {
+                                    if !first_dispatch
+                                        || protocol_token.is_none()
+                                        || confirmation != Some(true)
+                                    {
+                                        let aborted = supervisor.abort_unestablished_link(link);
+                                        error!(
+                                            "e290-node stage=link-establishment status=FAIL reason=dispatch-correlation submission={} generation={} first_dispatch={first_dispatch} protocol_token_present={} protocol_confirmed={} interface={} pending_link_aborted={aborted} action=disable-submissions",
+                                            offer.id().get(),
+                                            offer.generation(),
+                                            protocol_token.is_some(),
+                                            confirmation == Some(true),
+                                            interface.get(),
+                                        );
+                                        disable_submission_for_path_fault(
+                                            storage,
+                                            &mut durability_service,
+                                            &retained_frame,
+                                            &pending_frame_acknowledgement,
+                                            supervisor,
+                                            lora_descriptor,
+                                            &mut fail_closed_draining,
+                                            "link-request-dispatch-correlation",
+                                        );
+                                    } else {
+                                        pending_submission_protocol = None;
+                                        match storage.acknowledge_link_request_dispatched(
+                                            offer,
+                                            link,
+                                            dispatched_at,
+                                        ) {
+                                            Ok(()) => info!(
+                                                "e290-node stage=link-establishment status=DISPATCHED submission={} generation={} link={:02x?} interface={} dispatch_ms={} establishment_clock=started",
+                                                offer.id().get(),
+                                                offer.generation(),
+                                                link.as_bytes(),
+                                                interface.get(),
+                                                dispatched_at.get(),
+                                            ),
+                                            Err(reason) => {
+                                                let aborted =
+                                                    supervisor.abort_unestablished_link(link);
+                                                error!(
+                                                    "e290-node stage=link-establishment status=FAIL reason=dispatch-ack:{reason:?} submission={} generation={} link={:02x?} pending_link_aborted={aborted} action=disable-submissions",
+                                                    offer.id().get(),
+                                                    offer.generation(),
+                                                    link.as_bytes(),
+                                                );
+                                                disable_submission_for_path_fault(
+                                                    storage,
+                                                    &mut durability_service,
+                                                    &retained_frame,
+                                                    &pending_frame_acknowledgement,
+                                                    supervisor,
+                                                    lora_descriptor,
+                                                    &mut fail_closed_draining,
+                                                    "link-request-dispatch-ack",
+                                                );
+                                            }
+                                        }
+                                        progressed = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let NodeInterfaceSupervisorTransition::Ordinary(
+                        OrdinaryRouterStep::RouteRejected { slot, reason },
+                    ) = transition
+                        && pending_submission_protocol.is_some()
+                    {
+                        // Rejection is scoped to one selected interface. The
+                        // ordinary router may still advance the same packet to
+                        // another eligible transport, so retain exact protocol
+                        // correlation until a successful first dispatch or a
+                        // definitive Returned completion.
+                        warn!(
+                            "e290-node stage=submission-protocol-dispatch status=HOP-REJECTED reason={reason:?} slot={} first_dispatch=false action=await-next-route-or-terminal-return",
+                            slot.get(),
+                        );
+                        progressed = true;
+                    }
+                    if let NodeInterfaceSupervisorTransition::Ordinary(
+                        OrdinaryRouterStep::Completion(
+                            OrdinaryRouterCompletionProgress::Returned { slot },
+                        ),
+                    ) = transition
+                        && let Some(protocol) = pending_submission_protocol.take()
+                    {
+                        abort_unestablished_submission_link(supervisor, protocol);
+                        error!(
+                            "e290-node stage=submission-protocol-dispatch status=DISABLED reason=all-routes-returned slot={} first_dispatch=false local_submission_admission=closed",
+                            slot.get(),
+                        );
+                        disable_submission_for_path_fault(
+                            storage,
+                            &mut durability_service,
+                            &retained_frame,
+                            &pending_frame_acknowledgement,
+                            supervisor,
+                            lora_descriptor,
+                            &mut fail_closed_draining,
+                            "submission-protocol-routes-exhausted",
+                        );
+                        progressed = true;
+                    }
+                    if let NodeInterfaceSupervisorTransition::Ordinary(
+                        OrdinaryRouterStep::PendingJobExpired { slot }
+                        | OrdinaryRouterStep::PendingJobCancelledForFault { slot },
+                    ) = transition
+                        && let Some(protocol) = pending_submission_protocol.take()
+                    {
+                        abort_unestablished_submission_link(supervisor, protocol);
+                        error!(
+                            "e290-node stage=submission-protocol-dispatch status=DISABLED reason=pre-dispatch-cancelled-or-expired slot={} first_dispatch=false local_submission_admission=closed",
+                            slot.get(),
+                        );
+                        disable_submission_for_path_fault(
+                            storage,
+                            &mut durability_service,
+                            &retained_frame,
+                            &pending_frame_acknowledgement,
+                            supervisor,
+                            lora_descriptor,
+                            &mut fail_closed_draining,
+                            "submission-protocol-pre-dispatch-terminal",
+                        );
+                        progressed = true;
                     }
                     match config::supervisor_transition_disposition(transition) {
                         config::SupervisorTransitionDisposition::Idle => {}
                         config::SupervisorTransitionDisposition::Progress => progressed = true,
                         config::SupervisorTransitionDisposition::TerminalFailClosedDrain => {
                             fail_closed_draining = true;
-                            if pending_path_dispatch.is_some() {
+                            if let Some(protocol) = pending_submission_protocol {
+                                abort_unestablished_submission_link(supervisor, protocol);
                                 disable_submission_for_path_fault(
                                     storage,
                                     &mut durability_service,
@@ -794,7 +942,7 @@ pub async fn run(
                                     supervisor,
                                     lora_descriptor,
                                     &mut fail_closed_draining,
-                                    "path-request-router-terminal",
+                                    "submission-protocol-router-terminal",
                                 );
                             }
                             let observation = terminal_transition_observation(transition);
@@ -817,25 +965,27 @@ pub async fn run(
                         ) {
                             config::ActionRetrySlot::First => {
                                 prefer_retry_b = true;
-                                let retry_was_path = retry_actions_a
+                                let retry_submission_protocol = retry_actions_a
                                     .as_ref()
-                                    .and_then(RetainedActions::path_offer)
-                                    .is_some();
+                                    .and_then(RetainedActions::submission_protocol);
                                 match retry_retained_actions(
                                     supervisor,
                                     &mut retry_actions_a,
                                     "action-retry-a",
                                 ) {
-                                    ActionRetryStep::Accepted(path_offer) => {
-                                        if let Some(offer) = path_offer {
-                                            debug_assert!(pending_path_dispatch.is_none());
-                                            pending_path_dispatch = Some(offer);
+                                    ActionRetryStep::Accepted(submission_protocol) => {
+                                        if let Some(protocol) = submission_protocol {
+                                            debug_assert!(pending_submission_protocol.is_none());
+                                            pending_submission_protocol = Some(protocol);
                                         }
                                         progressed = true;
                                     }
                                     ActionRetryStep::Busy => {}
                                     ActionRetryStep::Terminal => {
-                                        if retry_was_path {
+                                        if let Some(protocol) = retry_submission_protocol {
+                                            abort_unestablished_submission_link(
+                                                supervisor, protocol,
+                                            );
                                             disable_submission_for_path_fault(
                                                 storage,
                                                 &mut durability_service,
@@ -854,25 +1004,27 @@ pub async fn run(
                             }
                             config::ActionRetrySlot::Second => {
                                 prefer_retry_b = false;
-                                let retry_was_path = retry_actions_b
+                                let retry_submission_protocol = retry_actions_b
                                     .as_ref()
-                                    .and_then(RetainedActions::path_offer)
-                                    .is_some();
+                                    .and_then(RetainedActions::submission_protocol);
                                 match retry_retained_actions(
                                     supervisor,
                                     &mut retry_actions_b,
                                     "action-retry-b",
                                 ) {
-                                    ActionRetryStep::Accepted(path_offer) => {
-                                        if let Some(offer) = path_offer {
-                                            debug_assert!(pending_path_dispatch.is_none());
-                                            pending_path_dispatch = Some(offer);
+                                    ActionRetryStep::Accepted(submission_protocol) => {
+                                        if let Some(protocol) = submission_protocol {
+                                            debug_assert!(pending_submission_protocol.is_none());
+                                            pending_submission_protocol = Some(protocol);
                                         }
                                         progressed = true;
                                     }
                                     ActionRetryStep::Busy => {}
                                     ActionRetryStep::Terminal => {
-                                        if retry_was_path {
+                                        if let Some(protocol) = retry_submission_protocol {
+                                            abort_unestablished_submission_link(
+                                                supervisor, protocol,
+                                            );
                                             disable_submission_for_path_fault(
                                                 storage,
                                                 &mut durability_service,
@@ -891,7 +1043,7 @@ pub async fn run(
                             }
                             config::ActionRetrySlot::None => {
                                 let now = now_seconds();
-                                if pending_path_dispatch.is_none()
+                                if pending_submission_protocol.is_none()
                                     && !supervisor.ingress_actions_pending()
                                     && now >= next_tick_seconds
                                 {
@@ -980,7 +1132,7 @@ pub async fn run(
                     if retry_actions_a.is_none()
                         && retry_actions_b.is_none()
                         && quarantined_actions.is_none()
-                        && pending_path_dispatch.is_none()
+                        && pending_submission_protocol.is_none()
                         && !supervisor.ingress_actions_pending()
                         && !fail_closed_draining
                         && !announce_clock.is_exhausted()
@@ -1096,7 +1248,7 @@ pub async fn run(
                     let ordinary_owners_quiescent = retry_actions_a.is_none()
                         && retry_actions_b.is_none()
                         && quarantined_actions.is_none()
-                        && pending_path_dispatch.is_none()
+                        && pending_submission_protocol.is_none()
                         && !supervisor.ingress_actions_pending()
                         && ordinary_router_is_idle(supervisor);
                     if config::submission_storage_step_admitted(
@@ -1137,8 +1289,11 @@ pub async fn run(
                                         let admission = config::ordinary_admission(owner_now);
                                         match supervisor.try_offer_actions(actions, admission) {
                                             Ok(()) => {
-                                                debug_assert!(pending_path_dispatch.is_none());
-                                                pending_path_dispatch = Some(offer);
+                                                debug_assert!(
+                                                    pending_submission_protocol.is_none()
+                                                );
+                                                pending_submission_protocol =
+                                                    Some(SubmissionProtocolDispatch::Path(offer));
                                                 info!(
                                                     "e290-node stage=path-discovery status=ADMITTED submission={} ordinal={} progress={progress:?} response_clock=awaiting-first-dispatch",
                                                     offer.id().get(),
@@ -1159,7 +1314,9 @@ pub async fn run(
                                                         retained,
                                                     ) => (retained, true),
                                                 };
-                                                let retained = retained.with_path_offer(offer);
+                                                let retained = retained.with_submission_protocol(
+                                                    SubmissionProtocolDispatch::Path(offer),
+                                                );
                                                 if terminal {
                                                     disable_submission_for_path_fault(
                                                         storage,
@@ -1202,6 +1359,216 @@ pub async fn run(
                                         progressed = true;
                                     }
                                 }
+                            }
+                            ProductSubmissionDrive::Runtime(Ok(
+                                RuntimeStep::LinkEstablishment { offer, progress },
+                            )) => {
+                                durability_service = durability_service.runtime_progress();
+                                match supervisor.initiate_link(
+                                    &offer.destination(),
+                                    MonotonicSeconds::new(now_seconds()),
+                                    &mut rng,
+                                ) {
+                                    Ok((actions, link)) => {
+                                        match storage.attach_created_link(offer, link) {
+                                            Ok(()) => {
+                                                let protocol = SubmissionProtocolDispatch::Link {
+                                                    offer,
+                                                    link,
+                                                };
+                                                let admission =
+                                                    config::ordinary_admission(owner_now);
+                                                match supervisor
+                                                    .try_offer_actions(actions, admission)
+                                                {
+                                                    Ok(()) => {
+                                                        debug_assert!(
+                                                            pending_submission_protocol.is_none()
+                                                        );
+                                                        pending_submission_protocol =
+                                                            Some(protocol);
+                                                        info!(
+                                                            "e290-node stage=link-establishment status=ADMITTED submission={} generation={} link={:02x?} progress={progress:?} establishment_clock=awaiting-first-dispatch",
+                                                            offer.id().get(),
+                                                            offer.generation(),
+                                                            link.as_bytes(),
+                                                        );
+                                                        progressed = true;
+                                                    }
+                                                    Err(failure) => {
+                                                        let handling = handle_action_offer_failure(
+                                                            failure,
+                                                            "link-establishment",
+                                                        );
+                                                        let (retained, terminal) = match handling {
+                                                            ActionOfferHandling::Retry(
+                                                                retained,
+                                                            ) => (retained, false),
+                                                            ActionOfferHandling::RetainAndDrain(
+                                                                retained,
+                                                            ) => (retained, true),
+                                                        };
+                                                        let retained = retained
+                                                            .with_submission_protocol(protocol);
+                                                        if terminal {
+                                                            let aborted = supervisor
+                                                                .abort_unestablished_link(link);
+                                                            error!(
+                                                                "e290-node stage=link-establishment status=FAIL reason=ordinary-offer-terminal submission={} generation={} link={:02x?} pending_link_aborted={aborted} action=disable-submissions",
+                                                                offer.id().get(),
+                                                                offer.generation(),
+                                                                link.as_bytes(),
+                                                            );
+                                                            disable_submission_for_path_fault(
+                                                                storage,
+                                                                &mut durability_service,
+                                                                &retained_frame,
+                                                                &pending_frame_acknowledgement,
+                                                                supervisor,
+                                                                lora_descriptor,
+                                                                &mut fail_closed_draining,
+                                                                "link-request-offer-terminal",
+                                                            );
+                                                            fail_closed_draining = true;
+                                                        }
+                                                        if retry_actions_a.is_none() {
+                                                            retry_actions_a = Some(retained);
+                                                        } else {
+                                                            debug_assert!(
+                                                                retry_actions_b.is_none()
+                                                            );
+                                                            retry_actions_b = Some(retained);
+                                                        }
+                                                        progressed = true;
+                                                    }
+                                                }
+                                            }
+                                            Err(reason) => {
+                                                let aborted =
+                                                    supervisor.abort_unestablished_link(link);
+                                                error!(
+                                                    "e290-node stage=link-establishment status=DISABLED reason=attach-created-link:{reason:?} submission={} generation={} link={:02x?} pending_link_aborted={aborted} local_submission_admission=closed",
+                                                    offer.id().get(),
+                                                    offer.generation(),
+                                                    link.as_bytes(),
+                                                );
+                                                disable_submission_for_path_fault(
+                                                    storage,
+                                                    &mut durability_service,
+                                                    &retained_frame,
+                                                    &pending_frame_acknowledgement,
+                                                    supervisor,
+                                                    lora_descriptor,
+                                                    &mut fail_closed_draining,
+                                                    "link-request-attach-fault",
+                                                );
+                                                progressed = true;
+                                            }
+                                        }
+                                    }
+                                    Err(
+                                        reason @ (InitiateLinkError::RollbackFailed
+                                        | InitiateLinkError::LinkStateNotRetained
+                                        | InitiateLinkError::Protocol),
+                                    ) => {
+                                        error!(
+                                            "e290-node stage=link-establishment status=DISABLED submission={} generation={} reason={reason:?} native_link_creation_invariant_or_protocol_fault=true local_submission_admission=closed",
+                                            offer.id().get(),
+                                            offer.generation(),
+                                        );
+                                        disable_submission_for_path_fault(
+                                            storage,
+                                            &mut durability_service,
+                                            &retained_frame,
+                                            &pending_frame_acknowledgement,
+                                            supervisor,
+                                            lora_descriptor,
+                                            &mut fail_closed_draining,
+                                            "link-request-creation-terminal-fault",
+                                        );
+                                        progressed = true;
+                                    }
+                                    Err(
+                                        reason @ (InitiateLinkError::LinkTableFull { .. }
+                                        | InitiateLinkError::LinkIdCollision
+                                        | InitiateLinkError::ActionAllocationFailed),
+                                    ) => {
+                                        let retry_not_before_ms = owner_now
+                                            .saturating_add(config::STORAGE_RETRY_BACKOFF_MS);
+                                        durability_service =
+                                            durability_service.retry_at(retry_not_before_ms);
+                                        warn!(
+                                            "e290-node stage=link-establishment status=DEFERRED submission={} generation={} reason={reason:?} retry_not_before_ms={retry_not_before_ms}",
+                                            offer.id().get(),
+                                            offer.generation(),
+                                        );
+                                    }
+                                }
+                            }
+                            ProductSubmissionDrive::Runtime(Ok(
+                                RuntimeStep::LinkCapacityBackpressured { id, limit },
+                            )) => {
+                                let retry_not_before_ms =
+                                    owner_now.saturating_add(config::STORAGE_RETRY_BACKOFF_MS);
+                                durability_service =
+                                    durability_service.retry_at(retry_not_before_ms);
+                                warn!(
+                                    "e290-node stage=link-establishment status=DEFERRED submission={} reason=registry-or-native-link-capacity registry_limit={limit} retry_not_before_ms={retry_not_before_ms}",
+                                    id.get(),
+                                );
+                            }
+                            ProductSubmissionDrive::Runtime(Ok(
+                                RuntimeStep::LinkEstablishmentExpired {
+                                    offer,
+                                    link,
+                                    aborted,
+                                },
+                            )) => {
+                                if aborted {
+                                    let retry_not_before_ms =
+                                        owner_now.saturating_add(config::STORAGE_RETRY_BACKOFF_MS);
+                                    durability_service =
+                                        durability_service.retry_at(retry_not_before_ms);
+                                    warn!(
+                                        "e290-node stage=link-establishment status=EXPIRED submission={} generation={} link={:02x?} pending_link_aborted=true retry_not_before_ms={retry_not_before_ms}",
+                                        offer.id().get(),
+                                        offer.generation(),
+                                        link.as_bytes(),
+                                    );
+                                } else {
+                                    error!(
+                                        "e290-node stage=link-establishment status=DISABLED reason=expired-link-abort-rejected submission={} generation={} link={:02x?} local_submission_admission=closed",
+                                        offer.id().get(),
+                                        offer.generation(),
+                                        link.as_bytes(),
+                                    );
+                                    disable_submission_for_path_fault(
+                                        storage,
+                                        &mut durability_service,
+                                        &retained_frame,
+                                        &pending_frame_acknowledgement,
+                                        supervisor,
+                                        lora_descriptor,
+                                        &mut fail_closed_draining,
+                                        "link-establishment-expiry-abort-fault",
+                                    );
+                                }
+                                progressed = true;
+                            }
+                            ProductSubmissionDrive::Runtime(Ok(
+                                RuntimeStep::LinkEstablishmentLost { offer, link, state },
+                            )) => {
+                                let retry_not_before_ms =
+                                    owner_now.saturating_add(config::STORAGE_RETRY_BACKOFF_MS);
+                                durability_service =
+                                    durability_service.retry_at(retry_not_before_ms);
+                                warn!(
+                                    "e290-node stage=link-establishment status=LOST submission={} generation={} link={:02x?} state={state:?} retry_not_before_ms={retry_not_before_ms}",
+                                    offer.id().get(),
+                                    offer.generation(),
+                                    link.as_bytes(),
+                                );
+                                progressed = true;
                             }
                             ProductSubmissionDrive::Runtime(Ok(step)) => {
                                 durability_service = durability_service.runtime_progress();
@@ -1349,7 +1716,7 @@ pub async fn run(
             let ordinary_lane_available = retry_actions_a.is_none()
                 && retry_actions_b.is_none()
                 && quarantined_actions.is_none()
-                && pending_path_dispatch.is_none()
+                && pending_submission_protocol.is_none()
                 && !supervisor.ingress_actions_pending()
                 && !fail_closed_draining;
             if ordinary_lane_available {
@@ -1398,7 +1765,7 @@ pub async fn run(
                 let _ = (
                     retry_actions_a.as_ref(),
                     retry_actions_b.as_ref(),
-                    pending_path_dispatch.as_ref(),
+                    pending_submission_protocol.as_ref(),
                     quarantined_actions.as_ref(),
                     quarantined_ingress_buffer.as_ref(),
                     terminal_correlation_fault.as_ref(),
@@ -1455,8 +1822,8 @@ fn drive_one_lxmf_proof(
             .map_err(
                 |failure| match handle_action_offer_failure(failure, "lxmf-proof") {
                     ActionOfferHandling::Retry(retained) => {
-                        let (actions, admission, path_offer) = retained.into_parts();
-                        debug_assert!(path_offer.is_none());
+                        let (actions, admission, submission_protocol) = retained.into_parts();
+                        debug_assert!(submission_protocol.is_none());
                         LxmfProofSinkFailure::returned(
                             LxmfProofOfferHandling::Retry,
                             actions,
@@ -1464,8 +1831,8 @@ fn drive_one_lxmf_proof(
                         )
                     }
                     ActionOfferHandling::RetainAndDrain(retained) => {
-                        let (actions, admission, path_offer) = retained.into_parts();
-                        debug_assert!(path_offer.is_none());
+                        let (actions, admission, submission_protocol) = retained.into_parts();
+                        debug_assert!(submission_protocol.is_none());
                         LxmfProofSinkFailure::returned(
                             LxmfProofOfferHandling::RetainAndDrain,
                             actions,
@@ -2722,6 +3089,21 @@ fn authorized_frame_durability(
     }
 }
 
+fn abort_unestablished_submission_link(
+    supervisor: &mut ProductSupervisor,
+    protocol: SubmissionProtocolDispatch,
+) {
+    if let SubmissionProtocolDispatch::Link { offer, link } = protocol {
+        let aborted = supervisor.abort_unestablished_link(link);
+        warn!(
+            "e290-node stage=link-establishment status=ABORT submission={} generation={} link={:02x?} pending_link_aborted={aborted}",
+            offer.id().get(),
+            offer.generation(),
+            link.as_bytes(),
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn disable_submission_for_path_fault(
     storage: &mut ProductStorageCoordinator,
@@ -3105,7 +3487,7 @@ fn retry_retained_actions(
 ) -> ActionRetryStep {
     if retained
         .as_ref()
-        .and_then(RetainedActions::path_offer)
+        .and_then(RetainedActions::submission_protocol)
         .is_some()
         && !ordinary_router_is_idle(supervisor)
     {
@@ -3117,20 +3499,20 @@ fn retry_retained_actions(
         );
         return ActionRetryStep::Terminal;
     };
-    let (actions, admission, path_offer) = owner.into_parts();
+    let (actions, admission, submission_protocol) = owner.into_parts();
     match supervisor.try_offer_actions(actions, admission) {
-        Ok(()) => ActionRetryStep::Accepted(path_offer),
+        Ok(()) => ActionRetryStep::Accepted(submission_protocol),
         Err(failure) => match handle_action_offer_failure(failure, stage) {
             ActionOfferHandling::Retry(owner) => {
-                *retained = Some(match path_offer {
-                    Some(offer) => owner.with_path_offer(offer),
+                *retained = Some(match submission_protocol {
+                    Some(protocol) => owner.with_submission_protocol(protocol),
                     None => owner,
                 });
                 ActionRetryStep::Busy
             }
             ActionOfferHandling::RetainAndDrain(owner) => {
-                *retained = Some(match path_offer {
-                    Some(offer) => owner.with_path_offer(offer),
+                *retained = Some(match submission_protocol {
+                    Some(protocol) => owner.with_submission_protocol(protocol),
                     None => owner,
                 });
                 ActionRetryStep::Terminal

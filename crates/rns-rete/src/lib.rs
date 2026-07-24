@@ -33,6 +33,7 @@ pub use application_events::{
     ApplicationEventSlotId, DelayedProofTransaction, DelayedProofTransactionError,
     DelayedProofTransactionFailure, RetainedProofCommitSuccess,
 };
+pub use capacity::LinkAdmissionError;
 pub use delayed_proofs::{
     DelayedProofCapacitySnapshot, DelayedProofGeneration, DelayedProofId, DelayedProofLease,
     DelayedProofOwner, DelayedProofOwnerCounters, DelayedProofReservationError,

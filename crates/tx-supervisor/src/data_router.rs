@@ -10,7 +10,7 @@ use embassy_sync::blocking_mutex::raw::RawMutex;
 use rand_core::{CryptoRng, RngCore};
 use reticulum_interface_router::{EligibleInterfaceSetError, OutboundRouter, RouteError};
 use reticulum_node_core::{
-    AvailableBufferError, DestinationHash, MonotonicMillis, MonotonicSeconds, NodeCore,
+    AvailableBufferError, DestinationHash, LinkHandle, MonotonicMillis, MonotonicSeconds, NodeCore,
     PacketInterfaceId, PacketSlotId, PrepareDataRequest, PreparedPacket, RoutedTxJob, SubmitError,
     TxAuthorizationCandidate, TxAuthorizationErrorKind, TxAuthorizationFailure,
     TxAuthorizationPolicy, TxCompletion, TxCompletionCode, TxCompletionDisposition,
@@ -78,6 +78,7 @@ pub struct DataRouterPrepareRequest<'a> {
 enum DataRouterPreparationMode {
     Generic,
     RehydratedOpportunisticLxmf,
+    RehydratedDirectLxmf(LinkHandle),
 }
 
 /// Scalar identity of one prepared DATA hop retained or routed by the
@@ -705,6 +706,42 @@ impl<const PACKET_BUFFERS: usize> DataRouterCoordinator<PACKET_BUFFERS> {
         )
     }
 
+    /// Prepare one exact durable LXMF wire message as application DATA on an
+    /// already active, product-retained Link.
+    ///
+    /// `request.plaintext` is the complete signed wire message, including its
+    /// destination prefix. Node-core revalidates that prefix against the
+    /// Link-bound destination and derives the exact bound interface. The
+    /// resulting packet uses the same parked owner, authoritative interface
+    /// router, completion ledger, and recovery path as every other DATA job.
+    pub fn try_prepare_rehydrated_direct_lxmf<
+        R: RngCore + CryptoRng,
+        M: RawMutex + 'static,
+        const PATHS: usize,
+        const ANNOUNCES: usize,
+        const DEDUPLICATION: usize,
+        const LINKS: usize,
+        const SLOTS: usize,
+        const QUEUE_DEPTH: usize,
+    >(
+        &mut self,
+        owner: &mut NodeCore<PATHS, ANNOUNCES, DEDUPLICATION, LINKS, PACKET_BUFFERS>,
+        router: &OutboundRouter<M, SLOTS, QUEUE_DEPTH>,
+        link: LinkHandle,
+        request: DataRouterPrepareRequest<'_>,
+        now: MonotonicMillis,
+        rng: &mut R,
+    ) -> DataRouterPrepareResult {
+        self.try_prepare_data_with(
+            owner,
+            router,
+            request,
+            now,
+            DataRouterPreparationMode::RehydratedDirectLxmf(link),
+            rng,
+        )
+    }
+
     fn try_prepare_data_with<
         R: RngCore + CryptoRng,
         M: RawMutex + 'static,
@@ -789,6 +826,9 @@ impl<const PACKET_BUFFERS: usize> DataRouterCoordinator<PACKET_BUFFERS> {
             }
             DataRouterPreparationMode::RehydratedOpportunisticLxmf => {
                 owner.prepare_rehydrated_opportunistic_lxmf_into_slot(buffer, node_request, rng)
+            }
+            DataRouterPreparationMode::RehydratedDirectLxmf(link) => {
+                owner.prepare_rehydrated_direct_lxmf_into_slot(buffer, link, node_request, rng)
             }
         };
         match prepared {
@@ -1586,9 +1626,11 @@ mod tests {
         InterfaceFabric, InterfaceProperties, InterfaceTxJob, LogicalMtu, OutboundCompletion,
     };
     use reticulum_node_core::{
-        NodeConfig, NodeIdentity, NodeInstanceId, TxPermitDenialReason, TxPermitRequirements,
-        TxPermitResourceId, TxPolicyDecision,
+        AttemptOutcome, DataReceiptKind, InboundProofPolicy, LinkHandle, LinkState,
+        MAX_DIRECT_LXMF_WIRE, NodeConfig, NodeIdentity, NodeInstanceId, PermitResolution,
+        TxPermitDenialReason, TxPermitRequirements, TxPermitResourceId, TxPolicyDecision,
     };
+    use reticulum_rns_rete::{PacketType, parse_packet};
     use std::boxed::Box;
     use std::{pin::pin, task::Waker};
 
@@ -1751,6 +1793,87 @@ mod tests {
         }
     }
 
+    fn direct_lxmf_pair<const BUFFERS: usize>(
+        tag: u8,
+        bound_interface: PacketInterfaceId,
+        rng: &mut CounterRng,
+    ) -> (
+        TestNode<BUFFERS>,
+        TestNode<0>,
+        DestinationHash,
+        LinkHandle,
+        [u8; MAX_DIRECT_LXMF_WIRE],
+        usize,
+    ) {
+        let receiver_tag = tag.wrapping_add(1);
+        let mut responder = node::<0>(receiver_tag, "direct-lxmf-responder");
+        let destination = responder
+            .register_inbound_single_destination("lxmf", &["delivery"])
+            .expect("responder delivery destination must register");
+        responder
+            .set_destination_accepts_links(&destination, true)
+            .expect("responder delivery destination must accept Links");
+        responder
+            .set_destination_inbound_proof_policy(&destination, InboundProofPolicy::Always)
+            .expect("direct Link DATA must produce an explicit proof");
+
+        let mut sender = node::<BUFFERS>(tag, "direct-lxmf-sender");
+        sender
+            .register_inbound_single_destination("lxmf", &["delivery"])
+            .expect("sender delivery destination must register");
+        sender
+            .register_peer(
+                &identity(receiver_tag),
+                "lxmf",
+                &["delivery"],
+                MonotonicSeconds::new(99),
+            )
+            .expect("responder delivery identity must cache");
+
+        let (request, link) = sender
+            .initiate_link(&destination, MonotonicSeconds::new(100), rng)
+            .expect("Link request must construct");
+        assert_eq!(request.packets.len(), 1);
+        let response = responder
+            .ingest(
+                request.packets[0].bytes(),
+                MonotonicSeconds::new(100),
+                PacketInterfaceId::new(7),
+                rng,
+            )
+            .expect("Link request must enter the responder");
+        let established = sender
+            .ingest(
+                response.actions.packets[0].bytes(),
+                MonotonicSeconds::new(101),
+                bound_interface,
+                rng,
+            )
+            .expect("Link proof must enter the initiator");
+        assert_eq!(sender.link_state(link), Some(LinkState::Active));
+        responder
+            .ingest(
+                established.actions.packets[0].bytes(),
+                MonotonicSeconds::new(102),
+                PacketInterfaceId::new(7),
+                rng,
+            )
+            .expect("Link RTT packet must enter the responder");
+
+        let mut wire = [0_u8; MAX_DIRECT_LXMF_WIRE];
+        let prepared = sender
+            .prepare_basic_direct_lxmf_into(
+                &destination,
+                1_700_000_000_000,
+                b"supervisor",
+                b"durable direct Link DATA",
+                &mut wire,
+            )
+            .expect("complete direct LXMF wire must compose");
+        let wire_len = usize::from(prepared.wire_len());
+        (sender, responder, destination, link, wire, wire_len)
+    }
+
     fn take_data_job<const DEPTH: usize>(
         actor: &mut InterfaceActorHandoff<NoopRawMutex, DEPTH>,
     ) -> reticulum_interface_router::InterfaceDataJob {
@@ -1856,6 +1979,65 @@ mod tests {
         assert_eq!(coordinator.parked_counts().available(), 1);
         assert_eq!(coordinator.completion_correlated_count(), 0);
         assert_eq!(coordinator.fault(), None);
+    }
+
+    #[test]
+    fn rehydrated_direct_lxmf_uses_only_the_link_bound_interface() {
+        let mut rng = CounterRng::default();
+        let (mut node, _responder, destination, link, wire, wire_len) =
+            direct_lxmf_pair::<1>(12, PacketInterfaceId::new(9), &mut rng);
+        let mut coordinator = coordinator(&mut node);
+        let (mut router, mut actors, descriptors) = two_interface_router::<1>();
+
+        let prepared = match coordinator.try_prepare_rehydrated_direct_lxmf(
+            &mut node,
+            &router,
+            link,
+            DataRouterPrepareRequest {
+                destination,
+                plaintext: &wire[..wire_len],
+                rns_now: MonotonicSeconds::new(110),
+                deadline: TxLeaseDeadline::new(MonotonicMillis::new(1_000)),
+            },
+            MonotonicMillis::new(110),
+            &mut rng,
+        ) {
+            DataRouterPrepareResult::Prepared(hop) => hop,
+            other => panic!("direct LXMF DATA did not prepare: {other:?}"),
+        };
+        assert_eq!(
+            prepared.prepared().receipt_kind(),
+            DataReceiptKind::LinkData
+        );
+        assert_eq!(prepared.interface(), descriptors[1].lease().interface());
+        assert_eq!(
+            coordinator.step(&mut node, &mut router, MonotonicMillis::new(111)),
+            DataRouterStep::Routed(prepared)
+        );
+        assert!(actors[0].try_receive_job().is_none());
+
+        let (ticket, job) = take_data_job(&mut actors[1]).into_parts();
+        let completion = ticket
+            .complete(
+                job.return_unpermitted()
+                    .complete(TxCompletionCode::new(0x520)),
+            )
+            .expect("bound-interface ticket must retain the exact owner");
+        actors[1]
+            .try_send_completion(completion)
+            .expect("direct DATA completion must fit");
+        coordinator
+            .try_accept_completion(receive_data_completion(&mut router))
+            .unwrap_or_else(|failure| {
+                panic!(
+                    "direct DATA completion must correlate: {:?}",
+                    failure.reason()
+                )
+            });
+        assert_eq!(
+            coordinator.step(&mut node, &mut router, MonotonicMillis::new(112)),
+            DataRouterStep::Completion(DataRouterCompletionProgress::Available(prepared.slot_id()))
+        );
     }
 
     #[test]
@@ -2096,6 +2278,214 @@ mod tests {
             DataRouterStep::Completion(DataRouterCompletionProgress::Available(second.slot_id()))
         );
         assert_eq!(coordinator.parked_counts().available(), 2);
+    }
+
+    #[test]
+    fn direct_lxmf_backpressure_preserves_both_exact_packet_owners() {
+        let mut rng = CounterRng::default();
+        let (mut node, _responder, destination, link, wire, wire_len) =
+            direct_lxmf_pair::<2>(22, PacketInterfaceId::new(9), &mut rng);
+        let mut coordinator = coordinator(&mut node);
+        let (mut router, mut actors, _) = two_interface_router::<1>();
+        let request = |rns_now: u64| DataRouterPrepareRequest {
+            destination,
+            plaintext: &wire[..wire_len],
+            rns_now: MonotonicSeconds::new(rns_now),
+            deadline: TxLeaseDeadline::new(MonotonicMillis::new(1_000)),
+        };
+
+        let first = match coordinator.try_prepare_rehydrated_direct_lxmf(
+            &mut node,
+            &router,
+            link,
+            request(110),
+            MonotonicMillis::new(110),
+            &mut rng,
+        ) {
+            DataRouterPrepareResult::Prepared(hop) => hop,
+            other => panic!("first direct owner did not prepare: {other:?}"),
+        };
+        assert_eq!(
+            coordinator.step(&mut node, &mut router, MonotonicMillis::new(111)),
+            DataRouterStep::Routed(first)
+        );
+
+        let second = match coordinator.try_prepare_rehydrated_direct_lxmf(
+            &mut node,
+            &router,
+            link,
+            request(112),
+            MonotonicMillis::new(112),
+            &mut rng,
+        ) {
+            DataRouterPrepareResult::Prepared(hop) => hop,
+            other => panic!("second direct owner did not prepare: {other:?}"),
+        };
+        assert_ne!(first.slot_id(), second.slot_id());
+        assert_eq!(first.interface(), PacketInterfaceId::new(9));
+        assert_eq!(second.interface(), PacketInterfaceId::new(9));
+        assert_eq!(
+            coordinator.step(&mut node, &mut router, MonotonicMillis::new(113)),
+            DataRouterStep::RouteBackpressured(second)
+        );
+        assert_eq!(coordinator.pending_job_count(), 1);
+        assert_eq!(coordinator.parked_counts().available(), 0);
+        assert!(actors[0].try_receive_job().is_none());
+
+        let (first_ticket, first_job) = take_data_job(&mut actors[1]).into_parts();
+        assert_eq!(DataPreparedHop::from_job(&first_job), first);
+        assert_eq!(
+            coordinator.step(&mut node, &mut router, MonotonicMillis::new(114)),
+            DataRouterStep::Routed(second)
+        );
+        let (second_ticket, second_job) = take_data_job(&mut actors[1]).into_parts();
+        assert_eq!(DataPreparedHop::from_job(&second_job), second);
+
+        for (ticket, job, code, expected) in [
+            (first_ticket, first_job, 0x521, first),
+            (second_ticket, second_job, 0x522, second),
+        ] {
+            let completion = ticket
+                .complete(
+                    job.return_unpermitted()
+                        .complete(TxCompletionCode::new(code)),
+                )
+                .expect("direct ticket must retain its exact owner");
+            actors[1]
+                .try_send_completion(completion)
+                .expect("direct completion must fit");
+            coordinator
+                .try_accept_completion(receive_data_completion(&mut router))
+                .unwrap_or_else(|failure| {
+                    panic!("direct completion must correlate: {:?}", failure.reason())
+                });
+            assert_eq!(
+                coordinator.step(&mut node, &mut router, MonotonicMillis::new(115)),
+                DataRouterStep::Completion(DataRouterCompletionProgress::Available(
+                    expected.slot_id()
+                ))
+            );
+        }
+        assert_eq!(coordinator.parked_counts().available(), 2);
+    }
+
+    #[test]
+    fn direct_lxmf_proof_terminates_the_shared_attempt_after_owner_return() {
+        let mut rng = CounterRng::default();
+        let (mut node, mut responder, destination, link, wire, wire_len) =
+            direct_lxmf_pair::<1>(24, PacketInterfaceId::new(2), &mut rng);
+        let mut coordinator = coordinator(&mut node);
+        let (mut router, mut actor, _) = one_interface_router::<1>(true);
+
+        let prepared = match coordinator.try_prepare_rehydrated_direct_lxmf(
+            &mut node,
+            &router,
+            link,
+            DataRouterPrepareRequest {
+                destination,
+                plaintext: &wire[..wire_len],
+                rns_now: MonotonicSeconds::new(110),
+                deadline: TxLeaseDeadline::new(MonotonicMillis::new(1_000)),
+            },
+            MonotonicMillis::new(110),
+            &mut rng,
+        ) {
+            DataRouterPrepareResult::Prepared(hop) => hop,
+            other => panic!("proof-bound direct DATA did not prepare: {other:?}"),
+        };
+        let attempt = prepared.prepared().handle();
+        assert_eq!(
+            coordinator.step(&mut node, &mut router, MonotonicMillis::new(111)),
+            DataRouterStep::Routed(prepared)
+        );
+        let (ticket, job) = take_data_job(&mut actor).into_parts();
+        let requirements = TxPermitRequirements::try_new(TxPermitResourceId::new([0x52; 16]), 1)
+            .expect("test permit requirements are nonzero");
+        let (pending, permit_request) = job.begin_permit(requirements);
+        let mut policy = CountingAllow { calls: 0 };
+        let reply = coordinator
+            .authorize_tx(
+                &mut node,
+                permit_request,
+                MonotonicMillis::new(112),
+                &mut policy,
+            )
+            .unwrap_or_else(|failure| {
+                panic!("direct DATA authorization failed: {:?}", failure.reason())
+            });
+        assert_eq!(policy.calls, 1);
+        let PermitResolution::Authorized(mut authorized) = pending
+            .resolve(reply, MonotonicMillis::new(113))
+            .unwrap_or_else(|_| panic!("matching direct DATA permit reply must resolve"))
+        else {
+            panic!("allow policy must authorize direct DATA")
+        };
+
+        let received = {
+            let frame = authorized
+                .frame(MonotonicMillis::new(114))
+                .expect("authorized direct DATA frame must be exposed once");
+            assert_eq!(frame.interface(), PacketInterfaceId::new(2));
+            responder
+                .ingest(
+                    frame.bytes(),
+                    MonotonicSeconds::new(114),
+                    PacketInterfaceId::new(7),
+                    &mut rng,
+                )
+                .expect("responder must accept direct Link DATA")
+        };
+        assert_eq!(received.metadata.generated_proof_actions(), 1);
+        let proof = received
+            .actions
+            .packets
+            .iter()
+            .find(|packet| {
+                parse_packet(packet.bytes())
+                    .is_ok_and(|parsed| parsed.packet_type == PacketType::Proof)
+            })
+            .expect("direct Link DATA must produce an explicit proof");
+
+        let completion = ticket
+            .complete(authorized.complete(TxCompletionCode::new(0x523)))
+            .expect("authorized direct owner must match its actor ticket");
+        actor
+            .try_send_completion(completion)
+            .expect("authorized direct completion must fit");
+        coordinator
+            .try_accept_completion(receive_data_completion(&mut router))
+            .unwrap_or_else(|failure| {
+                panic!(
+                    "authorized direct completion must correlate: {:?}",
+                    failure.reason()
+                )
+            });
+        assert_eq!(
+            coordinator.step(&mut node, &mut router, MonotonicMillis::new(115)),
+            DataRouterStep::Completion(DataRouterCompletionProgress::Available(prepared.slot_id()))
+        );
+
+        let delivered = node
+            .ingest(
+                proof.bytes(),
+                MonotonicSeconds::new(116),
+                PacketInterfaceId::new(2),
+                &mut rng,
+            )
+            .expect("direct Link DATA proof must correlate");
+        assert_eq!(delivered.metadata.delivered_receipt_terminals(), 1);
+        let terminal = node
+            .terminal_attempts()
+            .next()
+            .expect("proof must retain one terminal attempt");
+        assert_eq!(terminal.handle(), attempt);
+        assert_eq!(terminal.receipt_kind(), DataReceiptKind::LinkData);
+        assert_eq!(terminal.outcome(), AttemptOutcome::Delivered);
+        assert_eq!(
+            node.acknowledge_terminal(attempt)
+                .expect("projected direct terminal must acknowledge"),
+            terminal
+        );
     }
 
     #[test]

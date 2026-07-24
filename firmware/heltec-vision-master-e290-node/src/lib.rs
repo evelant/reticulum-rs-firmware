@@ -908,6 +908,32 @@ mod tests {
     }
 
     #[test]
+    fn submission_protocol_hop_rejection_waits_for_definitive_route_return() {
+        let source = include_str!("node_task.rs");
+        let rejected = source
+            .split("OrdinaryRouterStep::RouteRejected { slot, reason }")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("OrdinaryRouterCompletionProgress::Returned { slot }")
+                    .next()
+            })
+            .expect("one rejected interface hop must have an explicit nonterminal policy");
+        assert!(rejected.contains("status=HOP-REJECTED"));
+        assert!(rejected.contains("await-next-route-or-terminal-return"));
+        assert!(!rejected.contains("pending_submission_protocol.take()"));
+        assert!(!rejected.contains("disable_submission_for_path_fault("));
+
+        let returned = source
+            .split("OrdinaryRouterCompletionProgress::Returned { slot }")
+            .nth(1)
+            .and_then(|tail| tail.split("OrdinaryRouterStep::PendingJobExpired").next())
+            .expect("route exhaustion must have an explicit terminal policy");
+        assert!(returned.contains("pending_submission_protocol.take()"));
+        assert!(returned.contains("submission-protocol-routes-exhausted"));
+        assert!(returned.contains("disable_submission_for_path_fault("));
+    }
+
+    #[test]
     fn active_owner_durability_failure_uses_node_owned_disable_policy() {
         let source = include_str!("node_task.rs");
         let helper = source

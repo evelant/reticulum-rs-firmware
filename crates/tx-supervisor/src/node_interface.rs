@@ -16,13 +16,13 @@ use reticulum_interface_router::{
 use reticulum_node_core::{
     AcknowledgeError, AnnounceAdmissionError, AnnounceEmissionTime, ApplicationEventOfferError,
     ApplicationEventOfferReport, ApplicationEventOwner, AttemptHandle, CapacitySnapshot,
-    DestinationHash, IngressReport, MaintenanceReport, MonotonicInstant, MonotonicMillis,
-    MonotonicSeconds, NodeActions, NodeCore, OrdinaryActionCapacitySnapshot,
-    OrdinaryPreparedPacket, OutboundDispatchInterval, OutboundProtocolToken, PacketInterfaceId,
-    PathRequestError, PrepareBasicLxmfError, PreparedBasicDirectLxmf, PreparedBasicLxmf,
-    PreparedPacket, ReceiptCorrelationError, TerminalAttempt, TerminalAttempts,
-    TxAuthorizationPolicy, TxLeaseDeadline, TxMaintenanceReport, TxOwnerScope,
-    TxRecoveryObservation,
+    DestinationHash, IngressReport, InitiateLinkError, LinkHandle, LinkState, MaintenanceReport,
+    MonotonicInstant, MonotonicMillis, MonotonicSeconds, NodeActions, NodeCore,
+    OrdinaryActionCapacitySnapshot, OrdinaryPreparedPacket, OutboundDispatchInterval,
+    OutboundProtocolToken, PacketInterfaceId, PathRequestError, PrepareBasicLxmfError,
+    PreparedBasicDirectLxmf, PreparedBasicLxmf, PreparedPacket, ReceiptCorrelationError,
+    TerminalAttempt, TerminalAttempts, TxAuthorizationPolicy, TxLeaseDeadline, TxMaintenanceReport,
+    TxOwnerScope, TxRecoveryObservation, TxRoutePlan,
 };
 use reticulum_tx_handoff::{
     DataPairedPermitHandoff, DispatcherPermitHandoff, OrdinaryDispatcherPermitHandoff,
@@ -149,7 +149,7 @@ mod tests {
 
     use embassy_sync::blocking_mutex::raw::NoopRawMutex;
     use reticulum_interface_router::{
-        InterfaceConfigId, InterfaceCost, InterfaceTxJob, LogicalMtu,
+        AdvertisedBitrate, InterfaceConfigId, InterfaceCost, InterfaceTxJob, LogicalMtu,
     };
     use reticulum_node_core::{
         ApplicationEvent, ApplicationEventDiscardReason, ApplicationEventSlot, DestinationHash,
@@ -380,6 +380,23 @@ mod tests {
     }
 
     #[test]
+    fn permanent_aggregate_retains_and_safely_aborts_an_unestablished_link() {
+        let (mut supervisor, _actors, destination) = build::<1, 1>(61);
+        let mut rng = CounterRng::default();
+        assert!(supervisor.can_initiate_link());
+        let (actions, link) = supervisor
+            .initiate_link(&destination, MonotonicSeconds::new(100), &mut rng)
+            .expect("aggregate-owned Link request must construct");
+
+        assert_eq!(actions.packets.len(), 1);
+        assert_eq!(supervisor.link_state(link), Some(LinkState::Handshake));
+        assert!(supervisor.abort_unestablished_link(link));
+        assert_eq!(supervisor.link_state(link), None);
+        assert!(supervisor.can_initiate_link());
+        assert!(!supervisor.abort_unestablished_link(link));
+    }
+
+    #[test]
     fn permanent_aggregate_composes_basic_lxmf_with_only_the_registered_local_source() {
         let (supervisor, _actors, destination) = build::<1, 1>(62);
         let mut unavailable = [0x4c_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
@@ -604,6 +621,35 @@ mod tests {
             interface.try_receive_job(),
             Some(InterfaceTxJob::Ordinary(_))
         ));
+    }
+
+    #[test]
+    fn retained_path_timeout_allowance_uses_authoritative_interface_serialization() {
+        let (mut supervisor, [actor], destination) = build::<1, 1>(39);
+        assert_eq!(
+            supervisor.retained_path_first_hop_serialization_ms(&destination),
+            None,
+            "a retained path is not usable before an interface is online"
+        );
+        supervisor
+            .router
+            .register(
+                actor.queue_id(),
+                PacketInterfaceId::new(2),
+                InterfaceProperties::new(
+                    LogicalMtu::try_new(500).unwrap(),
+                    InterfaceConfigId::new(1),
+                    Some(AdvertisedBitrate::try_new(5_468).unwrap()),
+                    InterfaceCost::new(0),
+                ),
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            supervisor.retained_path_first_hop_serialization_ms(&destination),
+            Some(732),
+            "500-byte E290 frames at 5,468 bps need a rounded-up 732 ms allowance"
+        );
     }
 
     #[test]
@@ -3110,6 +3156,36 @@ where
         )
     }
 
+    /// Prepare one exact durable LXMF wire message as application DATA on an
+    /// already active, product-retained Link.
+    ///
+    /// The node revalidates the opaque Link handle, message destination, Link
+    /// state, and bound interface. The DATA coordinator retains the resulting
+    /// exact packet owner through the same routing, completion, and recovery
+    /// lifecycle as opportunistic destination DATA.
+    pub fn try_prepare_rehydrated_direct_lxmf<R>(
+        &mut self,
+        link: LinkHandle,
+        request: DataRouterPrepareRequest<'_>,
+        now: MonotonicMillis,
+        rng: &mut R,
+    ) -> NodeInterfaceDataPrepareResult
+    where
+        R: RngCore + CryptoRng,
+    {
+        if let Some(fault) = self.fault() {
+            return NodeInterfaceDataPrepareResult::Fault(fault);
+        }
+        NodeInterfaceDataPrepareResult::Coordinator(self.data.try_prepare_rehydrated_direct_lxmf(
+            &mut self.node,
+            &self.router,
+            link,
+            request,
+            now,
+            rng,
+        ))
+    }
+
     /// Offer one complete native ordinary-action envelope.
     // The allocation-backed action envelope must remain inline on failure;
     // this portable boundary cannot box or discard its exact owner.
@@ -3487,6 +3563,137 @@ where
         R: RngCore + CryptoRng,
     {
         self.node.request_path(destination, rng)
+    }
+
+    /// Whether the native protocol owner currently retains a usable identity
+    /// and route entry for one destination.
+    ///
+    /// This read-only preflight lets delivery policy request a path before
+    /// attempting Link construction; the authoritative Link initiator still
+    /// revalidates the route when it mutates protocol state.
+    pub fn has_path(&self, destination: &DestinationHash) -> bool {
+        self.node.has_path(destination)
+    }
+
+    /// Whether one retained native path resolves against the authoritative
+    /// currently-online interface snapshot.
+    ///
+    /// A direct path without an exact ingress binding remains usable when at
+    /// least one interface is online; a path bound to an offline interface is
+    /// retained but cannot start a new Link yet.
+    pub fn has_usable_path(&self, destination: &DestinationHash) -> bool {
+        let Some(target) = self.node.retained_path_target(destination) else {
+            return false;
+        };
+        self.router
+            .eligible_interfaces()
+            .ok()
+            .and_then(|eligible| TxRoutePlan::resolve(target, eligible).ok())
+            .is_some()
+    }
+
+    /// Hop count retained with one known destination path.
+    pub fn retained_path_hops(&self, destination: &DestinationHash) -> Option<u8> {
+        self.node.retained_path_hops(destination)
+    }
+
+    /// Conservative first-hop serialization allowance for the retained route.
+    ///
+    /// Reticulum adds one full interface-MTU transmission time to its base
+    /// Link-establishment window when bitrate metadata is available. Before a
+    /// serialized fan-out has selected its first successful interface, use the
+    /// slowest advertised candidate so a rejected earlier hop cannot shorten
+    /// the deadline for a later transport. Unknown bitrate follows Reticulum's
+    /// zero-additional-time fallback.
+    pub fn retained_path_first_hop_serialization_ms(
+        &self,
+        destination: &DestinationHash,
+    ) -> Option<u64> {
+        let target = self.node.retained_path_target(destination)?;
+        let eligible = self.router.eligible_interfaces().ok()?;
+        let candidates = TxRoutePlan::resolve(target, eligible)
+            .ok()?
+            .remaining()
+            .bits();
+        let mut maximum_ms = 0_u64;
+        for index in 0_u8..64 {
+            if candidates & (1_u64 << index) == 0 {
+                continue;
+            }
+            let descriptor = self
+                .router
+                .registry()
+                .descriptor(PacketInterfaceId::new(index))?;
+            let Some(bitrate) = descriptor.advertised_bitrate() else {
+                continue;
+            };
+            let packet_bits = u64::from(descriptor.logical_mtu().get()) * 8;
+            let bits_per_second = u64::from(bitrate.get());
+            let serialization_ms = packet_bits
+                .saturating_mul(1_000)
+                .saturating_add(bits_per_second - 1)
+                / bits_per_second;
+            maximum_ms = maximum_ms.max(serialization_ms);
+        }
+        Some(maximum_ms)
+    }
+
+    /// Whether the shared native owned-Link table can currently retain one
+    /// additional locally initiated or inbound responder session.
+    ///
+    /// This is a scheduler hint only; [`Self::initiate_link`] remains the
+    /// authoritative, transactional admission boundary.
+    pub fn can_initiate_link(&self) -> bool {
+        self.node.can_initiate_link()
+    }
+
+    /// Initiate one product-owned Link and return its exact ordinary action
+    /// envelope plus an opaque handle for later state observation and DATA.
+    ///
+    /// The caller must preserve the returned action envelope until it is
+    /// durably admitted or explicitly rejected. Link state remains owned by
+    /// the aggregate and is accessible only through [`Self::link_state`].
+    pub fn initiate_link<R>(
+        &mut self,
+        destination: &DestinationHash,
+        now: MonotonicSeconds,
+        rng: &mut R,
+    ) -> Result<(NodeActions, LinkHandle), InitiateLinkError>
+    where
+        R: RngCore + CryptoRng,
+    {
+        self.node.initiate_link(destination, now, rng)
+    }
+
+    /// Observe the current state of one opaque product-retained Link.
+    pub fn link_state(&self, link: LinkHandle) -> Option<LinkState> {
+        self.node.link_state(link)
+    }
+
+    /// Whether one active Link is bound to an interface that is currently
+    /// eligible in the authoritative product registry.
+    ///
+    /// An active Link on an offline interface remains retained for possible
+    /// later reuse but is not compatible with the current `Auto` send.
+    pub fn link_is_usable(&self, link: LinkHandle) -> bool {
+        if self.node.link_state(link) != Some(LinkState::Active) {
+            return false;
+        }
+        let Some(interface) = self.node.link_interface(link) else {
+            return false;
+        };
+        self.router
+            .eligible_interfaces()
+            .is_ok_and(|eligible| eligible.contains(interface))
+    }
+
+    /// Abort a Link only while native state proves it is not established.
+    ///
+    /// Returns `false` for an unknown, active, stale, or already closed Link;
+    /// the caller cannot use this narrow recovery surface to tear down a
+    /// reusable established session.
+    pub fn abort_unestablished_link(&mut self, link: LinkHandle) -> bool {
+        self.node.abort_unestablished_link(link)
     }
 
     /// Atomically drain one ready non-packet action envelope into a

@@ -2315,6 +2315,9 @@ impl From<PrepareDataError> for PrepareOpportunisticLxmfDataError {
 /// consumes entropy or native receipt state changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrepareDirectLxmfLinkDataError {
+    /// The complete durable LXMF wire is malformed or does not verify against
+    /// this node's local signing identity.
+    InvalidCompleteWire,
     /// The supplied wire length differs from the composer-produced length.
     WireLengthMismatch { actual: usize, expected: usize },
     /// The supplied wire bytes differ from the exact composer-produced bytes.
@@ -2348,6 +2351,9 @@ pub enum PrepareDirectLxmfLinkDataError {
 impl core::fmt::Display for PrepareDirectLxmfLinkDataError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::InvalidCompleteWire => {
+                f.write_str("complete LXMF wire is malformed or has an invalid local signature")
+            }
             Self::WireLengthMismatch { actual, expected } => write!(
                 f,
                 "LXMF wire length {actual} does not match prepared length {expected}"
@@ -2810,6 +2816,11 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             })
     }
 
+    /// Whether an exact destination currently has a retained route.
+    pub fn has_path(&self, destination: &DestHash) -> bool {
+        self.core.transport.get_path(destination).is_some()
+    }
+
     /// Construct one tagged Reticulum path request for broadcast across every
     /// currently eligible interface.
     ///
@@ -2892,6 +2903,23 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
     /// Current state of one locally owned Link.
     pub fn link_state(&self, link_id: &LinkId) -> Option<LinkState> {
         self.core.transport.get_link(link_id).map(|link| link.state)
+    }
+
+    /// Authenticated interface currently bound to one retained Link.
+    ///
+    /// The binding is a read-only protocol fact. Callers must separately
+    /// check Link lifecycle and current product-interface eligibility.
+    pub fn link_interface(&self, link_id: &LinkId) -> Option<InterfaceId> {
+        self.core.transport.link_interface(link_id).map(InterfaceId)
+    }
+
+    /// Discard one retained Link that has not reached an established state.
+    ///
+    /// This is the fail-closed rollback path for an outbound LINKREQUEST that
+    /// cannot complete before its product-owned establishment deadline.
+    /// Active and stale Links are never removed by this operation.
+    pub fn abort_unestablished_link(&mut self, link_id: &LinkId) -> bool {
+        self.core.transport.discard_unestablished_link(link_id)
     }
 
     /// Current negotiated round-trip time for one locally owned Link.
@@ -4072,6 +4100,55 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         self.prepare_opportunistic_lxmf_data_into(prepared, carrier, now, rng, output)
     }
 
+    /// Rehydrate one exact durable LXMF wire message and encrypt it as
+    /// ordinary context-None Link DATA.
+    ///
+    /// Durable storage cannot retain the private
+    /// [`PreparedBasicDirectLxmf`] composer token across reboot. This method
+    /// restores that binding only after parsing the complete message,
+    /// verifying its signature against this node's identity, and checking its
+    /// exact local `lxmf.delivery` source. It then delegates to
+    /// [`Self::prepare_direct_lxmf_link_data_into`], which independently binds
+    /// the destination, active Link, negotiated MDU, output packet, and
+    /// Link-DATA receipt.
+    ///
+    /// Failure before delegation consumes no entropy and creates no receipt.
+    pub fn prepare_rehydrated_direct_lxmf_link_data_into<R: RngCore + CryptoRng>(
+        &mut self,
+        wire: &[u8],
+        link_id: &LinkId,
+        now: u64,
+        rng: &mut R,
+        output: &mut [u8; RNS_MTU],
+    ) -> Result<PreparedLinkData, PrepareDirectLxmfLinkDataError> {
+        if wire.len() > MAX_DIRECT_LXMF_WIRE {
+            return Err(PrepareDirectLxmfLinkDataError::LinkMduExceeded {
+                actual: wire.len(),
+                maximum: MAX_DIRECT_LXMF_WIRE,
+            });
+        }
+        let message = LXMessage::unpack(wire, Some(self.core.identity()))
+            .map_err(|_| PrepareDirectLxmfLinkDataError::InvalidCompleteWire)?;
+        let source = self
+            .registered_lxmf_delivery_source()
+            .ok_or(PrepareDirectLxmfLinkDataError::WireSourceMismatch)?;
+        if message.source_hash != source
+            || wire.get(
+                LXMF_DESTINATION_HASH_LENGTH
+                    ..LXMF_DESTINATION_HASH_LENGTH + LXMF_DESTINATION_HASH_LENGTH,
+            ) != Some(source.as_ref())
+        {
+            return Err(PrepareDirectLxmfLinkDataError::WireSourceMismatch);
+        }
+        let prepared = PreparedBasicDirectLxmf {
+            wire_len: wire.len() as u16,
+            wire_sha256: Sha256::digest(wire).into(),
+            message_id: message.message_id(),
+            destination: message.destination_hash,
+        };
+        self.prepare_direct_lxmf_link_data_into(prepared, wire, link_id, now, rng, output)
+    }
+
     /// Encrypt one exact composer-produced basic LXMF message as ordinary Link DATA.
     ///
     /// The caller must reserve its final base-MTU packet slot before invoking
@@ -4326,6 +4403,16 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             target,
             protocol_token: None,
         })
+    }
+
+    /// Initiate a locally owned Link only when Rete can retain its state.
+    ///
+    /// Callers that schedule multiple independent work items can use
+    /// [`Self::can_initiate_link`] to avoid allowing a full native Link table
+    /// to serialize unrelated work behind a transaction that cannot yet be
+    /// admitted. The mutable operation below remains authoritative.
+    pub fn can_initiate_link(&self) -> bool {
+        self.core.transport.link_count() < LINKS
     }
 
     /// Initiate a locally owned Link only when Rete can retain its state.
@@ -5916,23 +6003,10 @@ mod tests {
         assert_eq!(initiator.link_state(&link_id), Some(LinkState::Active));
         assert_eq!(responder.link_state(&link_id), Some(LinkState::Active));
 
-        let mut wire = [0_u8; MAX_DIRECT_LXMF_WIRE];
-        let composed = initiator
-            .prepare_basic_direct_lxmf_into(
-                &destination,
-                corpus_timestamp_ms(fixture),
-                &hex::decode(&fixture.decoded.title_hex).unwrap(),
-                &hex::decode(&fixture.decoded.content_hex).unwrap(),
-                &mut wire,
-            )
-            .unwrap();
-        assert_eq!(wire.as_slice(), expected_wire.as_slice());
-
         let mut packet = [0_u8; RNS_MTU];
         let prepared = initiator
-            .prepare_direct_lxmf_link_data_into(
-                composed,
-                &wire,
+            .prepare_rehydrated_direct_lxmf_link_data_into(
+                &expected_wire,
                 &link_id,
                 110,
                 &mut rng,
@@ -7788,6 +7862,10 @@ mod tests {
             let result = responder.ingest(&request.bytes, now, InterfaceId(now as u8), &mut rng);
             assert_eq!(result.disposition, IngressDisposition::Processed);
         }
+        assert!(
+            !responder.can_initiate_link(),
+            "inbound responder Links occupy the same owned-Link table as local initiators"
+        );
 
         let mut overflow = TwoLinkNode::new(
             identity(12),
@@ -7837,6 +7915,7 @@ mod tests {
         assert_eq!(close.events.len(), 1);
         assert_eq!(close.unroutable_packets, 0);
         assert_eq!(responder.metrics().capacity.links.used, 1);
+        assert!(responder.can_initiate_link());
 
         let replay = responder.ingest(&overflow_request.bytes, 5, InterfaceId(3), &mut rng);
         assert_eq!(replay.disposition, IngressDisposition::NativeDuplicate);
@@ -8770,6 +8849,7 @@ mod tests {
     fn outbound_link_admission_is_mandatory_on_the_owning_type() {
         let mut node = node(40);
         let mut rng = CounterRng::default();
+        assert!(node.can_initiate_link());
         for tag in [1, 2] {
             node.initiate_link(
                 DestHash::from([tag; rete_core::TRUNCATED_HASH_LEN]),
@@ -8778,6 +8858,7 @@ mod tests {
             )
             .unwrap();
         }
+        assert!(!node.can_initiate_link());
         assert_eq!(node.metrics().capacity.links.used, 2);
         let rng_before_rejection = rng.0;
         assert_eq!(

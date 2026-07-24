@@ -61,8 +61,11 @@ proof unless a failing test promotes one into a release blocker.
   retains one exact complete signed LXMF wire through 431 bytes without
   selecting a delivery method; generic RNS destination DATA remains a separate
   383-byte intent. The current automatic policy uses the destination-stripped
-  bytes as its compatible opportunistic carrier when eligible, while the
-  reusable product-owned direct-Link capability remains under integration.
+  bytes as its compatible opportunistic carrier when eligible and no matching
+  cached Link exists. Current source also establishes or reuses
+  product-initiated outbound Links from a registry bounded to the native
+  product table and prepares the exact complete wire as one Link DATA packet
+  when required.
   Propagated, Resource, ticket, stamp, attachment, and nonempty-fields sends
   remain deferred. Empty title and empty content together are supported and
   match the independent Python vector.
@@ -72,9 +75,56 @@ proof unless a failing test promotes one into a release blocker.
 - Python LXMF's 391-byte opportunistic carrier fits inside the distinct
   431-byte complete-wire durable intent, so the former 384-through-391 journal
   rejection is closed without raising the generic-RNS ceiling. The remaining
-  capability gap is lifecycle, not storage size: Link establishment, exact
-  Link-DATA receipt projection, timeout/abort cleanup, and a two-board powered
-  direct delivery trial remain open.
+  direct gap is active-Link reuse, `AlreadyDurable` replay, Resource, and
+  broader Link ownership/fault qualification. Source tests cover path-first
+  Link establishment, a snapshotted
+  hop/first-interface-aware deadline starting at first actual LINKREQUEST
+  dispatch, exact pending-Link abort, active-Link reuse, Link-DATA receipt
+  projection, and the authorized-frame durability barrier. The
+  [bounded two-board powered record](e290-direct-link-powered-proof.md) forced
+  a fresh Link with a 392-byte carrier that could not fit the 391-byte
+  opportunistic ceiling, committed the exact 408-byte message on the receiver,
+  returned its proof, reached durable `Delivered`, and retained both sides
+  across board and app restart.
+- The initial direct profile serializes one establishment transaction and
+  retains at most four reusable product-initiated outbound Links, matching the
+  E290 native Link table. Lookup and capacity checks prune only `Closed` or
+  unknown entries. A `Stale` Link is retained for possible revival, is not
+  selectable for direct DATA, and still occupies its slot. If all four entries
+  remain occupied, a direct-required message for a fifth destination stays
+  durably `Preparing` under the firmware's one-second backoff, which repeats
+  while the registry remains full; registry pressure is not terminal failure.
+  A short eligible message for that destination can still use opportunistic
+  DATA. The alpha does not proactively close or LRU-evict an active Link, so
+  maintenance is not guaranteed to free a slot.
+- The four-entry reusable outbound registry and Rete's four-entry native
+  owned-Link table are distinct bounds. Inbound responder Links share the
+  native table with outbound initiators, so native pressure can defer new
+  direct establishment even when the outbound registry has room. Runtime
+  scheduling isolates that pressure to the affected submission instead of
+  blocking later opportunistic work.
+- Pinned Rete does not yet reclaim responder-side `Handshake` Links: its
+  maintenance closes only `Active`/`Stale` state. A peer can therefore consume
+  all four native E290 Link slots by sending accepted LINKREQUESTs and
+  withholding LRRTT. Python Reticulum bounds the corresponding responder state
+  to 360 seconds plus six seconds per inbound hop. This native-capacity/DoS
+  defect must be fixed in Rete or the adapter before treating the direct-Link
+  path as release-ready; no upstream issue or PR has been opened.
+- The registry cannot yet map a responder-side Link to the remote
+  `lxmf.delivery` identity, so responder/backchannel reuse is deferred. Link
+  transactions, registry contents, path and deadline clocks, retry history, and
+  the Resource-wait marker are boot-volatile. Although the exact LXMF wire
+  remains journaled, current boot recovery conservatively finalizes
+  `Preparing` and `AwaitingDelivery` as `InterruptedByReset`; it does not resume
+  even provably pre-frame path discovery or Link establishment. Safe pre-I/O
+  resume needs a future durable state/schema distinction from work that may
+  have exposed a frame.
+- Link establishment expiry or loss clears the volatile transaction and the
+  E290 firmware retries the still-`Preparing` message after one second. This can
+  repeat indefinitely in the same boot: there is no boot-local attempt ceiling
+  and no persisted retry budget. Within that boot, Link-MDU overflow remains
+  `Preparing` until Resource has bounded durable ownership and recovery; reset
+  applies the conservative `InterruptedByReset` rule above.
 - Basic composition currently uses allocation-backed Rete LXMF packing and
   signing before copying into caller storage. The E290 POC must measure heap
   high-water behavior. A bounded `encoded_len`/`pack_into` composer remains
@@ -96,10 +146,12 @@ proof unless a failing test promotes one into a release blocker.
   authenticated appliance session, and the Expo **Nearby** picker can add or
   open the durable contact with one tap. A bounded iOS/two-E290 powered run
   opened an existing contact without endpoint entry and delivered one short
-  opportunistic message in each direction with exact peer import; a
-  fresh-contact **Add** and the direct-Link path remain unqualified. The table
-  expires no peers by age, and its current LoRa provenance has no RSSI/SNR
-  observation to report.
+  opportunistic message in each direction with exact peer import. A
+  fresh-contact **Add** remains unqualified; the direct-Link path was
+  [qualified separately](e290-direct-link-powered-proof.md) with a forced
+  oversize one-packet message.
+  The table expires no peers by age, and its current LoRa provenance has no
+  RSSI/SNR observation to report.
 - Nearby contact discovery is not appliance authorization. The current path
   does not scan phone-to-phone BLE, publish a public E290 share service, or
   implement the signed contact-card fallback reserved by ADR 0017. QR/deep
@@ -114,6 +166,15 @@ proof unless a failing test promotes one into a release blocker.
   is qualified for the current one-interface product. It does not yet retain
   Python-style per-interface pending path-request forwarding state, so it must
   be revisited before enabling simultaneous LoRa, Wi-Fi, and BLE routing.
+- A queued LINKREQUEST remains bound to the retained route selected when it was
+  created. If that route's interface becomes ineligible before first dispatch
+  while another transport remains usable, the ordinary router can wait
+  indefinitely instead of rebuilding the request for the alternate route;
+  definitive exhaustion currently closes local submission admission instead
+  of returning that transaction to path discovery. The current one-interface
+  powered proof is unaffected, but route re-resolution and a bounded
+  pre-dispatch establishment deadline are required before simultaneous
+  multi-transport Link establishment is release-ready.
 
 ## Client and product surface
 
@@ -159,6 +220,12 @@ proof unless a failing test promotes one into a release blocker.
   retained-profile service restart, and Expo-to-LoRa-to-peer message pass on
   the E290 pair. Activation-ambiguous repair and the alternate Pending recovery
   paths remain to qualify.
+- The signed iOS foreground build emits launch warnings that its delegate
+  implements background fetch and remote-notification handlers without the
+  corresponding `UIBackgroundModes`, and that its nib references a missing
+  `SplashScreen` image. They did not prevent the bounded foreground BLE proofs,
+  but the app configuration and launch artwork must be reconciled before
+  claiming polished launch or background behavior.
 - With several identical attached boards, the app shows the selected USB serial
   but the physical E290 has no corresponding identify cue. Until a display or
   LED identify action exists, an operator may have to press the middle button

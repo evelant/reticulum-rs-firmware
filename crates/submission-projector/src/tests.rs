@@ -786,6 +786,14 @@ fn synchronous_rejection_distinguishes_retry_no_path_rejected_and_internal() {
         PreparationRejectionDecision::RetrySameBoot
     );
     assert_eq!(
+        classify_preparation_rejection(SubmitError::LinkNotFound),
+        PreparationRejectionDecision::RetrySameBoot
+    );
+    assert_eq!(
+        classify_preparation_rejection(SubmitError::LinkNotActive),
+        PreparationRejectionDecision::RetrySameBoot
+    );
+    assert_eq!(
         classify_preparation_rejection(SubmitError::UnknownDestination),
         PreparationRejectionDecision::Final(SubmissionFailure::NoPath)
     );
@@ -798,6 +806,18 @@ fn synchronous_rejection_distinguishes_retry_no_path_rejected_and_internal() {
     );
     assert_eq!(
         classify_preparation_rejection(SubmitError::Cryptography),
+        PreparationRejectionDecision::Final(SubmissionFailure::Internal(
+            InternalFailure::Unspecified
+        ))
+    );
+    assert_eq!(
+        classify_preparation_rejection(SubmitError::LinkDestinationMismatch),
+        PreparationRejectionDecision::Final(SubmissionFailure::Internal(
+            InternalFailure::Unspecified
+        ))
+    );
+    assert_eq!(
+        classify_preparation_rejection(SubmitError::LinkInterfaceUnknown),
         PreparationRejectionDecision::Final(SubmissionFailure::Internal(
             InternalFailure::Unspecified
         ))

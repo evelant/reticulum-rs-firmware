@@ -610,9 +610,10 @@ also applies to the combination even though keys 2 and 3 each have a 295-byte
 structural field limit. Durable acceptance does not promise immediate delivery:
 the current runtime can send an eligible carrier through 391 bytes, or a
 407-byte complete wire, using the compatible Header-1 opportunistic path.
-Complete wires of 408--431 bytes remain pending for the unfinished direct-Link
-lifecycle, and a routed Header-2 path can impose the smaller 383-byte carrier
-ceiling.
+Complete wires of 408--431 bytes select or reuse a direct Link and fit one Link
+DATA packet; a routed Header-2 path can impose the smaller 383-byte carrier
+ceiling and trigger the same direct selection for a smaller message. Resource
+delivery above the 431-byte inline boundary remains unfinished.
 
 Successful response body:
 
@@ -635,10 +636,14 @@ submission and message IDs without adding a record. Reusing the key with
 different semantic content returns `IdempotencyConflict`. The complete-wire
 intent closes the former 384-through-391 opportunistic carrier gap without
 raising the separate 383-byte generic-RNS DATA ceiling. Automatic delivery
-currently prefers eligible opportunistic packets; reusable direct-Link
-establishment and Link-DATA receipt projection remain product-lifecycle work;
-the current runtime can use bytes `16..` as the compatible opportunistic
-carrier without recomposing the accepted message.
+currently reuses a compatible active product Link first, otherwise prefers an
+eligible opportunistic packet, and establishes a direct Link when the selected
+packet form cannot fit. The first bounded establishment and Link-DATA receipt
+projection lifecycle is implemented and powered-qualified for one fresh-Link
+success. Active-Link reuse, responder/backchannel reuse, Resource, and the
+broader fault/pressure matrix remain unqualified. The runtime uses bytes
+`16..` as the compatible opportunistic carrier without recomposing the
+accepted message.
 
 The current E290 PSRAM profile retains 128 accepted submissions without
 terminal reclamation. Its 129th novel request returns `CapacityExhausted`

@@ -59,6 +59,8 @@ pub struct HeaplessCapacitySnapshot {
     /// Pending DATA delivery-proof receipts. The pinned DATA path rejects full
     /// admission transactionally.
     pub receipts: CapacityUse,
+    /// Pending ordinary Link-DATA delivery-proof receipts.
+    pub link_data_receipts: CapacityUse,
     /// Pending channel receipts. Admission and retry replacement are
     /// transactional; a full table returns typed backpressure.
     pub channel_receipts: CapacityUse,
@@ -98,6 +100,10 @@ pub(crate) fn heapless_capacity_snapshot<
         },
         receipts: CapacityUse {
             used: node.transport.receipt_count(),
+            limit: P,
+        },
+        link_data_receipts: CapacityUse {
+            used: node.transport.link_data_receipt_count(),
             limit: P,
         },
         channel_receipts: CapacityUse {

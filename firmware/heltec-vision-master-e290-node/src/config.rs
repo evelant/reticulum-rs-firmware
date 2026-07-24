@@ -117,15 +117,16 @@ pub const DURABLE_RUNTIME_BYTES: usize = core::mem::size_of::<
     reticulum_submission_runtime::SubmissionRuntime<
         DURABLE_SUBMISSIONS,
         DURABLE_PROJECTED_SUBMISSIONS,
+        LINKS,
     >,
 >();
 // Keep both reviewed layouts explicit so an otherwise source-compatible field
 // or alignment change cannot silently consume target PSRAM or host-test RAM.
 // Xtensa's 32-bit field layout is 24 bytes smaller than the 64-bit host layout.
 #[cfg(target_arch = "xtensa")]
-const REVIEWED_DURABLE_RUNTIME_BYTES: usize = 387_864;
+const REVIEWED_DURABLE_RUNTIME_BYTES: usize = 389_240;
 #[cfg(not(target_arch = "xtensa"))]
-const REVIEWED_DURABLE_RUNTIME_BYTES: usize = 387_888;
+const REVIEWED_DURABLE_RUNTIME_BYTES: usize = 389_264;
 const _: () = assert!(DURABLE_RUNTIME_BYTES == REVIEWED_DURABLE_RUNTIME_BYTES);
 /// Guard against silently growing the PSRAM-backed runtime and its independent
 /// journal-replay scratch index.
@@ -602,7 +603,7 @@ mod tests {
         assert_eq!(DURABLE_SUBMISSIONS, 128);
         assert_eq!(DURABLE_PROJECTED_SUBMISSIONS, 128);
         assert_eq!(DURABLE_ACCEPTED_SUBMISSION_LIMIT, 128);
-        assert_eq!(DURABLE_RUNTIME_BYTES, 387_888);
+        assert_eq!(DURABLE_RUNTIME_BYTES, 389_264);
         assert_eq!(MAXIMUM_DURABLE_RUNTIME_BYTES, 512 * 1024);
         const { assert!(DURABLE_ACCEPTED_SUBMISSION_LIMIT <= DURABLE_SUBMISSIONS) };
     }

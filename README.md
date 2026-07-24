@@ -35,8 +35,11 @@ card, but they cannot transfer device-control authority. A
 [bounded physical proof](docs/e290-reticulum-nearby-powered-proof.md) now
 qualifies existing-contact selection without endpoint entry, one short
 opportunistic LoRa message in each direction reaching `Delivered` with exact
-peer import, and app-process persistence; fresh contact creation and
-the reusable authenticated direct-Link capability remain open.
+peer import, and app-process persistence. Fresh contact creation remains open.
+A [separate bounded proof](docs/e290-direct-link-powered-proof.md) now
+qualifies one fresh authenticated direct Link, exact receiver commit before
+proof, durable sender `Delivered`, and board/app restart persistence; powered
+active-Link reuse remains open.
 
 The hardware-independent
 `reticulum-board-heltec-vision-master-e290` crate is the compiled source of
@@ -169,9 +172,12 @@ so a later copy on the authoritative interface is still admissible.
 Ordinary context-`NONE` Link DATA now receives a distinct `LinkData` receipt,
 providing the Rete prerequisite for its exact proof to drive product delivery
 state without conflating it with destination DATA or Channel traffic. Product
-Link orchestration and receipt-kind-safe attempt correlation remain to be
-integrated. Proof emission follows the receiving destination's `PROVE_NONE`,
-`PROVE_ALL`, or application-selected policy instead of being unconditional.
+Link orchestration and receipt-kind-safe attempt correlation are integrated
+for the bounded outbound one-packet direct path. Active-Link reuse
+qualification, responder/backchannel reuse, Resource, and the broader
+fault/pressure matrix remain. Proof emission follows the receiving
+destination's `PROVE_NONE`, `PROVE_ALL`, or application-selected policy instead
+of being unconditional.
 
 The current binding is an interface-slot index, not a shared-host client
 endpoint. On Rete's Tokio `Hub`, synchronous output can retain the originating
@@ -1061,7 +1067,10 @@ raw-RNS inbox remains separate qualification evidence rather than a product
 mailbox. Native RNS Resource ingress stays disabled until its allocation and
 streaming-storage boundary is bounded.
 Responder-side direct Link receive has the same source-level durable proof
-contract but still awaits its dedicated two-board physical trial.
+contract, and the
+[forced-direct two-board record](docs/e290-direct-link-powered-proof.md)
+qualifies one fresh-Link/new-commit physical success path. `AlreadyDurable`
+direct replay and the broader fault/pressure matrix remain open.
 The node-side routing
 boundary remains interface-neutral so additional Reticulum links can be added
 later through adapters without rewriting the LoRa actor or protocol owner; no
@@ -1080,6 +1089,7 @@ second transport is required to qualify the first LoRa vertical slice.
 - [E290 Expo managed first-run proof](docs/e290-expo-appliance-first-run-proof.md)
 - [E290 Expo iOS BLE-to-LoRa powered proof](docs/e290-expo-ios-ble-lora-proof.md)
 - [E290 Reticulum-native Nearby powered proof](docs/e290-reticulum-nearby-powered-proof.md)
+- [E290 outbound direct-Link powered proof](docs/e290-direct-link-powered-proof.md)
 - [Expo native Rust bridge proof](docs/expo-native-rust-bridge-proof.md)
 - [Usable-firmware POC limits and known defects](docs/poc-known-defects.md)
 - [Phase-0 scaffold decision](docs/adr/0001-phase-0-scaffold.md)
@@ -1268,9 +1278,11 @@ direction-balanced source-free send, proof, peer commit, list, and exact read.
 Its final audited image additionally preserved both terminal sender records and
 both exact receiver wires across a physical CPU reset. Neither result
 substitutes for electrical power-cut persistence, sustained/multi-hop traffic,
-powered responder-side direct-Link or Resource LXMF qualification,
+powered active-Link reuse, `AlreadyDurable` direct replay, Resource LXMF,
 initiator/backchannel direct receive, production client-store semantics, or
-full-product qualification.
+full-product qualification. The later
+[forced-direct powered record](docs/e290-direct-link-powered-proof.md)
+qualifies one fresh initiator/new receiver-commit one-packet success path.
 
 The receive-only lab binary has no frequency or modulation defaults. A known
 host/RNode-compatible build example is:

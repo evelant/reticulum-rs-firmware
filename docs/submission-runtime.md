@@ -19,7 +19,10 @@ lanes are composed and have bounded powered ADR 0009 credential/
 API/DATA/peer-proof/status path.
 Semantic schema 3 preserves exact authorization provenance through runtime
 acceptance, remount, and replay while distinguishing generic RNS DATA from an
-exact complete method-neutral LXMF-message intent.
+exact complete method-neutral LXMF-message intent. Current source additionally
+composes the first outbound-initiator direct-Link packet path. Its fresh-Link,
+one-packet success path has a
+[bounded two-board powered record](e290-direct-link-powered-proof.md).
 
 ## Boundary
 
@@ -36,7 +39,11 @@ the native Reticulum destination and payload plus protocol/owner clocks and a
 lease deadline; it deliberately has no interface identifier. The production
 implementation for `NodeInterfaceSupervisor` asks the authoritative router to
 choose from its eligible interfaces and exposes exact terminal, recovered, and
-quarantined owners until durable projection allows acknowledgement.
+quarantined owners until durable projection allows acknowledgement. The same
+port exposes only opaque Link lifecycle operations: poll one product Link,
+abort one exact unestablished Link, and prepare the complete durable LXMF wire
+over one active Link. It does not expose a LoRa radio or interface choice to
+the runtime.
 
 ```mermaid
 flowchart LR
@@ -77,12 +84,76 @@ This guarantees that packet entropy and attempt ownership are not created
 before the no-replay barrier is committed, and that terminal or recovered
 owners are not released before their disposition or audit is committed.
 
+## Automatic LXMF and direct-Link transaction
+
+The current `Auto` implementation retains the exact signed LXMF wire while it
+chooses a carrier. For each ready LXMF submission it:
+
+1. prunes closed or unknown entries and reuses a matching usable
+   product-initiated outbound Link from the fixed registry, while retaining a
+   non-selectable `Stale` entry so it can revive;
+2. otherwise tries the compatible destination-stripped opportunistic carrier
+   when it fits the 391-byte Header-1 ceiling;
+3. selects direct delivery when the carrier exceeds that ceiling or the actual
+   routed opportunistic packet reports a smaller MDU;
+4. emits and completes the ordinary tagged path-discovery transaction before
+   creating a Link when no authenticated path is retained;
+5. emits one generation-tagged Link-establishment offer, attaches the exact
+   opaque Link handle returned by the node, and retains the identical
+   LINKREQUEST through ordinary-router backpressure; and
+6. starts a snapshotted hop-aware establishment deadline only after the router
+   confirms the exact LINKREQUEST's first real interface dispatch. The window
+   is the greater of 30 seconds or Reticulum's six-second first-hop plus
+   per-retained-hop allowances, with one full-MTU serialization interval
+   derived from the authoritative eligible-interface bitrate and a two-second
+   guard for queue acceptance through physical radio completion.
+
+An attached but undispatched request consumes none of the establishment
+budget. An exact duplicate attachment or dispatch acknowledgement is
+idempotent; a different offer, Link handle, or dispatch instant fails closed.
+At the deadline, the runtime asks the node to discard that exact pending Link
+before issuing a fresh generation for the still-durable message. Closed or
+missing registry entries are pruned. A `Stale` entry is retained, remains
+non-selectable, and continues consuming capacity while it may revive. Once a
+matching Link is usable, it wins over opportunistic delivery for later short
+messages and the complete destination-prefixed wire is prepared as
+context-`NONE` Link DATA.
+
+This alpha intentionally owns only one serialized establishment transaction
+but retains a fixed reusable outbound-Link registry sized to the product's
+native Link table (four entries for E290). It separately preflights the shared
+native table, where inbound responder Links also consume capacity. If either
+owner is full, bounded per-submission backpressure leaves the exact message
+durably `Preparing` and the E290 retries after one second while pressure
+remains; later short opportunistic work and matching usable cached-Link work
+are not head-of-line blocked. Pressure is not a terminal submission failure.
+The alpha does not proactively close or LRU-evict an active registry entry, and
+it does not assume Link maintenance will free one.
+The runtime does not yet associate an authenticated responder Link with the
+remote LXMF destination, so responder/backchannel reuse is deferred. A complete
+wire that exceeds the active Link MDU also remains durably `Preparing` without
+spinning; Resource transfer is deferred until it has bounded durable
+allocation, correlation, and recovery.
+
+Link transactions, cached Link handles, establishment/path clocks, retry
+generations, and Resource-wait suppression are boot-volatile. The journal
+retains the exact message bytes, but current boot recovery does not resume this
+pre-I/O state: the storage model conservatively finalizes both `Preparing` and
+`AwaitingDelivery` as `InterruptedByReset`. Durable pre-frame resume needs a
+future schema/state distinction proving that no interface could have owned the
+frame.
+
+Within one boot, establishment expiry or loss clears the transaction and the
+E290 firmware retries after its fixed one-second storage-service backoff. That
+cycle is unbounded; neither a persisted retry budget nor a boot-local attempt
+ceiling exists yet.
+
 ## Native authorized-frame seam
 
 `TxFrame::observation()` produces `AuthorizedFrameObservation` from the exact
-authorized native DATA bytes. The observation contains the attempt correlation,
-selected interface, complete packet length, and a SHA-256 recomputed from those
-bytes before any RNode/radio fragmentation.
+authorized native destination-DATA or Link-DATA bytes. The observation contains
+the attempt correlation, selected interface, complete packet length, and a
+SHA-256 recomputed from those bytes before any RNode/radio fragmentation.
 
 The portable radio dispatcher retains every post-byte-exposure DATA completion,
 its router ticket, and the exact observation. It sends a copy through a bounded
@@ -107,12 +178,20 @@ invalid lifecycle state, and latched storage/projector faults remain errors.
 Durable state intentionally drops only the selected-interface scalar: packet
 identity and attempt correlation are stable across an interface choice, while
 the projector still cross-checks the complete length, frame digest, and attempt
-token. The product profile owns 128 resident submissions; the one-entry harness
-below remains a deliberately narrow composition fixture. Authenticated USB and
-BLE clients can reach the composed handoff from a fresh local submission in the
-powered E290 graph. Bounded runs passed durable acceptance, LoRa DATA/proof,
-terminal projection, exact peer import, and status recovery through both host
-tools and the installed Expo client.
+token. A direct attempt additionally retains the distinct Link-DATA receipt
+kind through preparation, dispatch, proof, timeout, cancellation, and terminal
+projection. Its receiver releases the explicit Link proof only after the exact
+LXMF inbox record is durably committed (or recognized as already durable).
+The product profile owns 128 resident submissions; the one-entry harness below
+remains a deliberately narrow composition fixture. Authenticated USB and BLE
+clients can reach the composed handoff from a fresh local submission in the
+powered E290 graph. Bounded opportunistic runs passed durable acceptance, LoRa
+DATA/proof, terminal projection, exact peer import, and status recovery through
+both host tools and the installed Expo client. The separate
+[direct-Link run](e290-direct-link-powered-proof.md) forced a new Link with a
+408-byte complete wire whose 392-byte carrier exceeded the 391-byte
+opportunistic ceiling, then proved receiver commit, returned proof, sender
+`Delivered`, and board/app restart persistence.
 
 ## E290 cross-layer software qualification
 
@@ -192,6 +271,17 @@ an ESP32-S3, flash-power, RF, or current-capacity claim.
   Wi-Fi serving is build/host qualified but awaits the disconnected field test.
   `ProductStorageCoordinator` implements the target-safe `SubmissionPort`
   under the current 128-entry resident profile.
+- **Direct Link:** source tests cover path-first gating, exact offer/handle
+  correlation, first-dispatch-started timeout and abort, active-Link reuse,
+  closed/unknown pruning, non-selectable `Stale` retention, full-registry
+  `Preparing` backpressure, complete-wire Link-DATA preparation, typed receipt
+  proof/timeout, and the authorized-frame durability barrier. Feature-specific
+  BLE-sender and USB-receiver builds sharing that implementation completed one
+  bounded fresh-Link powered proof. Active-Link reuse, `AlreadyDurable` replay,
+  responder/backchannel reuse, multiple simultaneous establishment
+  transactions, Resource transfer, the broader fault/pressure matrix, durable
+  pre-frame reset recovery, and a persisted or boot-local retry budget remain
+  product work.
 - **Powered qualification:** integrated power-cut/brownout, watchdog, flash
   contention, compaction, endurance, stack/static-layout, and radio-deadline
   tests remain product gates. The source-`96e38aa` two-board smoke established
@@ -209,8 +299,11 @@ cargo +esp check --locked -p reticulum-submission-runtime \
   --target xtensa-esp32s3-none-elf
 ```
 
-The eight runtime tests include the complete barrier/frame/terminal/ack ordering
+The runtime tests include the complete barrier/frame/terminal/ack ordering
 path, retention across a lost write reply, permanent frame-persistence failure
 without false durability or acknowledgement, pre-frame terminal pressure,
 recovery-acknowledgement pressure, retry-versus-permanent error classification,
-reboot recovery, and wrong-binding rejection before node work.
+reboot recovery, wrong-binding rejection before node work, opportunistic
+overflow escalation, path-first direct selection, exact establishment control,
+active-Link registry reuse, closed/unknown pruning, `Stale` retention,
+full-pressure, and deferred Resource behavior.

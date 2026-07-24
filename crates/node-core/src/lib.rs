@@ -32,13 +32,16 @@ use reticulum_rns_rete::{
     EmbeddedNodeConfig as RnsNodeConfig, Identity as RnsIdentity,
     InboundProofPolicy as RnsInboundProofPolicy,
     InboundProofPolicyError as RnsInboundProofPolicyError, InterfaceId as RnsInterfaceId,
+    LinkAdmissionError as RnsLinkAdmissionError, LinkId as RnsLinkId, LinkState as RnsLinkState,
     NodeRole as RnsNodeRole, PathRequestBuildError as RnsPathRequestBuildError,
     PrepareBasicLxmfError as RnsPrepareBasicLxmfError, PrepareDataError as RnsPrepareDataError,
+    PrepareDirectLxmfLinkDataError as RnsPrepareDirectLxmfLinkDataError,
     PrepareOpportunisticLxmfDataError as RnsPrepareOpportunisticLxmfDataError,
     PreparedBasicDirectLxmf as RnsPreparedBasicDirectLxmf,
-    PreparedBasicLxmf as RnsPreparedBasicLxmf, PreparedData as RnsPreparedData, RNS_MTU,
-    ReceiptCandidate, ReceiptKind, ReceiptReservationUnavailable, ReceiptTerminal,
-    ReceiptTerminalReservation, ReceiptTerminalSink, TxTarget as RnsTxTarget,
+    PreparedBasicLxmf as RnsPreparedBasicLxmf, PreparedData as RnsPreparedData,
+    PreparedLinkData as RnsPreparedLinkData, RNS_MTU, ReceiptCandidate, ReceiptKind,
+    ReceiptReservationUnavailable, ReceiptTerminal, ReceiptTerminalReservation,
+    ReceiptTerminalSink, TxTarget as RnsTxTarget,
 };
 pub use reticulum_rns_rete::{
     ApplicationEvent, ApplicationEventAcknowledgeFailure, ApplicationEventCapacitySnapshot,
@@ -326,6 +329,93 @@ impl DestinationHash {
 impl AsRef<[u8]> for DestinationHash {
     fn as_ref(&self) -> &[u8] {
         &self.0
+    }
+}
+
+/// Opaque identifier for one Link retained by this exact protocol owner.
+///
+/// Callers normally receive handles from [`NodeCore::initiate_link`]. A handle
+/// reconstructed from an application event remains only a lookup key: every
+/// operation revalidates it against the node's retained Link table.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct LinkHandle([u8; 16]);
+
+impl LinkHandle {
+    /// Construct a lookup handle from complete application-event Link bytes.
+    pub const fn new(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    fn from_rns(link: RnsLinkId) -> Self {
+        Self::new(*link.as_bytes())
+    }
+
+    fn into_rns(self) -> RnsLinkId {
+        RnsLinkId::from(self.0)
+    }
+
+    /// Borrow the complete Link identifier for event correlation.
+    pub const fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+}
+
+/// Read-only lifecycle state of one retained Link.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LinkState {
+    /// The Link request has not yet entered the handshake.
+    Pending,
+    /// The request/proof/RTT handshake is in progress.
+    Handshake,
+    /// Authenticated Link DATA may flow.
+    Active,
+    /// The established Link has exceeded its traffic watchdog.
+    Stale,
+    /// The Link is closing or closed but has not yet been purged.
+    Closed,
+}
+
+impl From<RnsLinkState> for LinkState {
+    fn from(state: RnsLinkState) -> Self {
+        match state {
+            RnsLinkState::Pending => Self::Pending,
+            RnsLinkState::Handshake => Self::Handshake,
+            RnsLinkState::Active => Self::Active,
+            RnsLinkState::Stale => Self::Stale,
+            RnsLinkState::Closed => Self::Closed,
+        }
+    }
+}
+
+/// Failure to construct and retain one outbound Link request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InitiateLinkError {
+    /// Every configured owned-Link slot is occupied.
+    LinkTableFull {
+        /// Configured owned-Link limit.
+        limit: usize,
+    },
+    /// Fresh entropy reproduced an already-retained Link identifier.
+    LinkIdCollision,
+    /// Native initiation returned success without retaining its Link state.
+    LinkStateNotRetained,
+    /// Native protocol construction rejected the request.
+    Protocol,
+    /// The action envelope could not reserve one packet entry.
+    ActionAllocationFailed,
+    /// Action allocation failed and the unestablished Link could not be
+    /// removed, so its state remains retained for diagnosis.
+    RollbackFailed,
+}
+
+impl From<RnsLinkAdmissionError> for InitiateLinkError {
+    fn from(error: RnsLinkAdmissionError) -> Self {
+        match error {
+            RnsLinkAdmissionError::LinkTableFull { limit } => Self::LinkTableFull { limit },
+            RnsLinkAdmissionError::LinkIdCollision => Self::LinkIdCollision,
+            RnsLinkAdmissionError::LinkStateNotRetained => Self::LinkStateNotRetained,
+            RnsLinkAdmissionError::Rete(_) => Self::Protocol,
+        }
     }
 }
 
@@ -653,6 +743,7 @@ pub struct PrepareDataRequest<'a> {
 enum DataPreparationMode {
     Generic,
     RehydratedOpportunisticLxmf,
+    RehydratedDirectLxmf(RnsLinkId),
 }
 
 /// Whether this node terminates only local traffic or also forwards RNS
@@ -881,6 +972,25 @@ impl AttemptToken {
     }
 }
 
+/// Receipt table that owns one proof-correlated DATA attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DataReceiptKind {
+    /// Encrypted DATA addressed directly to an RNS destination.
+    DestinationData,
+    /// Ordinary encrypted DATA carried by an authenticated Link.
+    LinkData,
+}
+
+impl DataReceiptKind {
+    fn from_rns(kind: ReceiptKind) -> Option<Self> {
+        match kind {
+            ReceiptKind::Data => Some(Self::DestinationData),
+            ReceiptKind::LinkData => Some(Self::LinkData),
+            ReceiptKind::Channel => None,
+        }
+    }
+}
+
 /// SHA-256 digest of every byte in one complete encoded interface packet.
 ///
 /// This is deliberately distinct from [`AttemptToken`], whose bytes cover
@@ -945,6 +1055,7 @@ pub enum AttemptOutcome {
 pub struct TerminalAttempt {
     handle: AttemptHandle,
     token: AttemptToken,
+    kind: DataReceiptKind,
     outcome: AttemptOutcome,
 }
 
@@ -957,6 +1068,11 @@ impl TerminalAttempt {
     /// Complete RNS proof-correlation hash for this attempt.
     pub const fn token(self) -> AttemptToken {
         self.token
+    }
+
+    /// Receipt table that produced this terminal outcome.
+    pub const fn receipt_kind(self) -> DataReceiptKind {
+        self.kind
     }
 
     /// Delivery outcome retained by the tombstone.
@@ -980,12 +1096,49 @@ impl PacketSlotId {
     }
 }
 
+#[derive(Clone, Copy)]
+enum PreparedReceiptPacket {
+    DestinationData(RnsPreparedData),
+    LinkData(RnsPreparedLinkData),
+}
+
+impl PreparedReceiptPacket {
+    fn packet_len(self) -> u16 {
+        match self {
+            Self::DestinationData(prepared) => prepared.packet_len(),
+            Self::LinkData(prepared) => prepared.packet_len(),
+        }
+    }
+
+    fn target(self) -> RnsTxTarget {
+        match self {
+            Self::DestinationData(prepared) => prepared.target(),
+            Self::LinkData(prepared) => prepared.target(),
+        }
+    }
+
+    fn receipt(self) -> reticulum_rns_rete::ReceiptId {
+        match self {
+            Self::DestinationData(prepared) => prepared.receipt(),
+            Self::LinkData(prepared) => prepared.receipt(),
+        }
+    }
+
+    const fn receipt_kind(self) -> DataReceiptKind {
+        match self {
+            Self::DestinationData(_) => DataReceiptKind::DestinationData,
+            Self::LinkData(_) => DataReceiptKind::LinkData,
+        }
+    }
+}
+
 /// Scalar metadata for one packet committed to an external buffer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PreparedPacket {
     packet_len: u16,
     encoded_packet_sha256: EncodedPacketSha256,
     attempt: AttemptToken,
+    receipt_kind: DataReceiptKind,
     handle: AttemptHandle,
     slot: PacketSlotId,
     target: TxTarget,
@@ -1006,6 +1159,11 @@ impl PreparedPacket {
     /// Proof-correlation token for this attempt.
     pub const fn attempt(self) -> AttemptToken {
         self.attempt
+    }
+
+    /// Receipt table that owns this packet's proof correlation.
+    pub const fn receipt_kind(self) -> DataReceiptKind {
+        self.receipt_kind
     }
 
     /// Generation-scoped handle for later terminal acknowledgement.
@@ -1029,7 +1187,7 @@ impl PreparedPacket {
     }
 
     fn from_rns(
-        prepared: RnsPreparedData,
+        prepared: PreparedReceiptPacket,
         encoded_packet_sha256: EncodedPacketSha256,
         handle: AttemptHandle,
         slot: PacketSlotId,
@@ -1039,6 +1197,7 @@ impl PreparedPacket {
             packet_len: prepared.packet_len(),
             encoded_packet_sha256,
             attempt: AttemptToken(*prepared.receipt().as_bytes()),
+            receipt_kind: prepared.receipt_kind(),
             handle,
             slot,
             target: TxTarget::from_rns(prepared.target()),
@@ -1098,6 +1257,14 @@ pub enum SubmitError {
     },
     /// No cached identity exists for the destination.
     UnknownDestination,
+    /// The selected Link is no longer retained by the protocol owner.
+    LinkNotFound,
+    /// The selected Link has not completed establishment.
+    LinkNotActive,
+    /// The selected Link was established to another destination.
+    LinkDestinationMismatch,
+    /// The authenticated Link has no retained interface binding.
+    LinkInterfaceUnknown,
     /// The bounded RNS receipt table has no free entry.
     ReceiptTableFull {
         /// Configured receipt limit.
@@ -1151,6 +1318,36 @@ impl From<RnsPrepareOpportunisticLxmfDataError> for SubmitError {
             | RnsPrepareOpportunisticLxmfDataError::CarrierLengthMismatch { .. }
             | RnsPrepareOpportunisticLxmfDataError::CarrierDigestMismatch
             | RnsPrepareOpportunisticLxmfDataError::CarrierSourceMismatch => Self::Invariant,
+        }
+    }
+}
+
+impl From<RnsPrepareDirectLxmfLinkDataError> for SubmitError {
+    fn from(error: RnsPrepareDirectLxmfLinkDataError) -> Self {
+        match error {
+            RnsPrepareDirectLxmfLinkDataError::LinkMduExceeded { actual, maximum } => {
+                Self::PayloadTooLarge { actual, maximum }
+            }
+            RnsPrepareDirectLxmfLinkDataError::LinkNotFound => Self::LinkNotFound,
+            RnsPrepareDirectLxmfLinkDataError::LinkNotActive => Self::LinkNotActive,
+            RnsPrepareDirectLxmfLinkDataError::LinkDestinationMismatch => {
+                Self::LinkDestinationMismatch
+            }
+            RnsPrepareDirectLxmfLinkDataError::LinkInterfaceUnknown => Self::LinkInterfaceUnknown,
+            RnsPrepareDirectLxmfLinkDataError::ReceiptTableFull { limit } => {
+                Self::ReceiptTableFull { limit }
+            }
+            RnsPrepareDirectLxmfLinkDataError::ReceiptHashAlreadyTracked => {
+                Self::ReceiptHashAlreadyTracked
+            }
+            RnsPrepareDirectLxmfLinkDataError::Crypto => Self::Cryptography,
+            RnsPrepareDirectLxmfLinkDataError::PacketBuild => Self::PacketBuild,
+            RnsPrepareDirectLxmfLinkDataError::InvalidCompleteWire
+            | RnsPrepareDirectLxmfLinkDataError::WireLengthMismatch { .. }
+            | RnsPrepareDirectLxmfLinkDataError::WireDigestMismatch
+            | RnsPrepareDirectLxmfLinkDataError::WireDestinationMismatch
+            | RnsPrepareDirectLxmfLinkDataError::WireSourceMismatch
+            | RnsPrepareDirectLxmfLinkDataError::Invariant => Self::Invariant,
         }
     }
 }
@@ -2297,10 +2494,19 @@ pub enum AcknowledgeError {
 /// proof or timeout remains uncommitted in RNS for diagnosis.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReceiptCorrelationError {
-    /// RNS presented a channel receipt, which this DATA-only owner cannot
+    /// RNS presented a channel receipt, which this DATA-attempt owner cannot
     /// represent.
     UnsupportedChannel,
-    /// RNS presented a DATA receipt absent from the fixed ledger.
+    /// A tracked receipt hash arrived from a different native receipt table.
+    WrongKind {
+        /// Complete proof-correlation hash RNS presented.
+        attempt: AttemptToken,
+        /// Receipt table retained by the fixed attempt ledger.
+        expected: DataReceiptKind,
+        /// Receipt table presented by RNS.
+        actual: DataReceiptKind,
+    },
+    /// RNS presented a DATA or Link-DATA receipt absent from the fixed ledger.
     UnknownData {
         /// Complete proof-correlation hash RNS presented.
         attempt: AttemptToken,
@@ -2320,7 +2526,8 @@ pub enum ReceiptCorrelationError {
 pub struct MaintenanceReport {
     /// Ordinary RNS events and resolved outbound packets.
     pub actions: NodeActions,
-    /// Number of DATA timeouts committed to terminal tombstones in this pass.
+    /// Number of destination-DATA and Link-DATA timeouts committed to terminal
+    /// tombstones in this pass.
     pub timed_out_attempts: usize,
     /// Compact first-eight-byte tag of the first timed-out receipt in this
     /// maintenance pass.
@@ -2350,6 +2557,10 @@ pub struct CapacitySnapshot {
     pub receipts_used: usize,
     /// Configured destination-DATA receipt limit.
     pub receipts_limit: usize,
+    /// Outstanding Link-DATA receipts retained by RNS.
+    pub link_data_receipts_used: usize,
+    /// Configured Link-DATA receipt limit.
+    pub link_data_receipts_limit: usize,
     /// Attempts still awaiting a proof or timeout.
     pub attempts_active: usize,
     /// Terminal attempts retained until explicit acknowledgement.
@@ -2375,7 +2586,7 @@ enum DispatchPhase {
 
 #[derive(Clone, Copy)]
 struct DispatchRecord {
-    prepared: RnsPreparedData,
+    prepared: PreparedReceiptPacket,
     encoded_packet_sha256: EncodedPacketSha256,
     attempt: AttemptRef,
     generation: u64,
@@ -2455,10 +2666,12 @@ enum AttemptState {
     Active {
         generation: u64,
         token: AttemptToken,
+        kind: DataReceiptKind,
     },
     Terminal {
         generation: u64,
         token: AttemptToken,
+        kind: DataReceiptKind,
         outcome: AttemptOutcome,
     },
 }
@@ -2494,6 +2707,7 @@ impl Iterator for TerminalAttempts<'_> {
             if let AttemptState::Terminal {
                 generation,
                 token,
+                kind,
                 outcome,
             } = attempt.state
             {
@@ -2505,6 +2719,7 @@ impl Iterator for TerminalAttempts<'_> {
                         generation,
                     },
                     token,
+                    kind,
                     outcome,
                 });
             }
@@ -2724,6 +2939,44 @@ impl<
         self.rns.recall_lxmf_delivery_identity(&destination)
     }
 
+    /// Whether an exact destination currently has a retained RNS path.
+    pub fn has_path(&self, destination: &DestinationHash) -> bool {
+        self.rns.has_path(&destination.into_rns())
+    }
+
+    /// Native routing target retained with one known destination path.
+    ///
+    /// `None` means no path exists. A retained path without an exact ingress
+    /// interface uses [`TxTarget::All`], preserving Reticulum's direct
+    /// broadcast fallback while leaving current interface eligibility to the
+    /// permanent supervisor.
+    pub fn retained_path_target(&self, destination: &DestinationHash) -> Option<TxTarget> {
+        self.rns
+            .route(&destination.into_rns())
+            .map(|route| match route.received_on {
+                Some(interface) => TxTarget::Only(PacketInterfaceId::new(interface.0)),
+                None => TxTarget::All,
+            })
+    }
+
+    /// Hop count retained with one known destination path.
+    pub fn retained_path_hops(&self, destination: &DestinationHash) -> Option<u8> {
+        self.rns
+            .route(&destination.into_rns())
+            .map(|route| route.hops)
+    }
+
+    /// Whether the shared native owned-Link table can currently retain one
+    /// additional session.
+    ///
+    /// This includes locally initiated and inbound responder Links because
+    /// both occupy the same bounded Rete table. Link construction revalidates
+    /// capacity under the sole mutable owner, so this is only a scheduling
+    /// preflight.
+    pub fn can_initiate_link(&self) -> bool {
+        self.rns.can_initiate_link()
+    }
+
     /// Confirm the synchronous interface-egress handoff for one token-bearing
     /// LINKREQUEST or LRPROOF packet.
     ///
@@ -2738,6 +2991,65 @@ impl<
     ) -> bool {
         self.rns
             .confirm_outbound_protocol(token, interface.into_rns(), interval)
+    }
+
+    /// Construct and retain one outbound Link request as an ordinary action.
+    ///
+    /// The returned handle identifies the exact retained Link. Its packet
+    /// remains subject to the ordinary-action routing and protocol-token
+    /// confirmation path before establishment can complete.
+    pub fn initiate_link<R: RngCore + CryptoRng>(
+        &mut self,
+        destination: &DestinationHash,
+        now: MonotonicSeconds,
+        rng: &mut R,
+    ) -> Result<(NodeActions, LinkHandle), InitiateLinkError> {
+        let (packet, link_id) = self
+            .rns
+            .initiate_link(destination.into_rns(), now.get(), rng)
+            .map_err(InitiateLinkError::from)?;
+        let mut packets = alloc::vec::Vec::new();
+        if packets.try_reserve_exact(1).is_err() {
+            return Err(if self.rns.abort_unestablished_link(&link_id) {
+                InitiateLinkError::ActionAllocationFailed
+            } else {
+                InitiateLinkError::RollbackFailed
+            });
+        }
+        packets.push(packet);
+        Ok((
+            NodeActions::without_retained_proofs(Default::default(), packets, 0),
+            LinkHandle::from_rns(link_id),
+        ))
+    }
+
+    /// Read the current lifecycle state of one retained Link.
+    ///
+    /// `None` means the handle is unknown to this in-memory protocol owner or
+    /// its Link has already been purged.
+    pub fn link_state(&self, link: LinkHandle) -> Option<LinkState> {
+        self.rns.link_state(&link.into_rns()).map(LinkState::from)
+    }
+
+    /// Authenticated packet interface bound to one retained Link.
+    ///
+    /// This does not imply that the interface is currently online. The
+    /// permanent interface supervisor combines this scalar with its
+    /// authoritative eligible-interface snapshot.
+    pub fn link_interface(&self, link: LinkHandle) -> Option<PacketInterfaceId> {
+        self.rns
+            .link_interface(&link.into_rns())
+            .map(|interface| PacketInterfaceId::new(interface.0))
+    }
+
+    /// Remove a retained Link that is neither active nor stale without
+    /// emitting network traffic.
+    ///
+    /// This is intended for pending or handshaking outbound requests. Active
+    /// and stale Links are deliberately rejected; their authenticated teardown
+    /// must use the normal Link-close lifecycle.
+    pub fn abort_unestablished_link(&mut self, link: LinkHandle) -> bool {
+        self.rns.abort_unestablished_link(&link.into_rns())
     }
 
     /// Caller-supplied identity of this in-memory node-owner incarnation.
@@ -3036,6 +3348,28 @@ impl<
         )
     }
 
+    /// Prepare one exact durable, locally signed LXMF wire message through an
+    /// already-active authenticated Link.
+    ///
+    /// The opaque Link handle must still be retained, active, bound to an
+    /// interface, and associated with `request.destination`. All external
+    /// packet-buffer, route, permit, receipt and attempt ownership is shared
+    /// with destination DATA.
+    pub fn prepare_rehydrated_direct_lxmf_into_slot<'a, R: RngCore + CryptoRng>(
+        &mut self,
+        buffer: &'a mut TxPacketBuffer,
+        link: LinkHandle,
+        request: PrepareDataRequest<'_>,
+        rng: &mut R,
+    ) -> Result<RoutedTxJob<'a>, PrepareFailure<'a>> {
+        self.prepare_data_into_slot_with(
+            buffer,
+            request,
+            DataPreparationMode::RehydratedDirectLxmf(link.into_rns()),
+            rng,
+        )
+    }
+
     fn prepare_data_into_slot_with<'a, R: RngCore + CryptoRng>(
         &mut self,
         buffer: &'a mut TxPacketBuffer,
@@ -3073,6 +3407,7 @@ impl<
                     rng,
                     &mut buffer.bytes,
                 )
+                .map(PreparedReceiptPacket::DestinationData)
                 .map_err(SubmitError::from),
             DataPreparationMode::RehydratedOpportunisticLxmf => {
                 let destination_matches = request
@@ -3089,6 +3424,27 @@ impl<
                             rng,
                             &mut buffer.bytes,
                         )
+                        .map(PreparedReceiptPacket::DestinationData)
+                        .map_err(SubmitError::from)
+                }
+            }
+            DataPreparationMode::RehydratedDirectLxmf(link_id) => {
+                let destination_matches = request
+                    .plaintext
+                    .get(..16)
+                    .is_some_and(|prefix| prefix == request.destination.as_bytes());
+                if !destination_matches {
+                    Err(SubmitError::Invariant)
+                } else {
+                    self.rns
+                        .prepare_rehydrated_direct_lxmf_link_data_into(
+                            request.plaintext,
+                            &link_id,
+                            request.rns_now.get(),
+                            rng,
+                            &mut buffer.bytes,
+                        )
+                        .map(PreparedReceiptPacket::LinkData)
                         .map_err(SubmitError::from)
                 }
             }
@@ -3113,6 +3469,7 @@ impl<
         self.attempts[attempt.slot].state = AttemptState::Active {
             generation: attempt.generation,
             token,
+            kind: prepared.receipt_kind(),
         };
         let scalar = PreparedPacket::from_rns(
             prepared,
@@ -3124,7 +3481,7 @@ impl<
         let mut route = match TxRoutePlan::resolve(scalar.target(), request.enabled_interfaces) {
             Ok(route) => route,
             Err(route_error) => {
-                if self.rns.cancel_data_receipt(prepared.receipt()) {
+                if self.cancel_prepared_receipt(prepared) {
                     self.dispatches[slot.index()].state = DispatchState::Free;
                     self.attempts[attempt.slot].state = AttemptState::Free;
                     return Err(PrepareFailure {
@@ -3251,7 +3608,9 @@ impl<
         }
 
         match self.terminal_for(attempt) {
-            Some(terminal) if terminal.token().as_bytes() == prepared.receipt().as_bytes() => {}
+            Some(terminal)
+                if terminal.token().as_bytes() == prepared.receipt().as_bytes()
+                    && terminal.receipt_kind() == prepared.receipt_kind() => {}
             Some(_) => {
                 return Err(RollbackFailure {
                     reason: RollbackErrorKind::Invariant,
@@ -3265,7 +3624,7 @@ impl<
                         job,
                     });
                 }
-                if !self.rns.cancel_data_receipt(prepared.receipt()) {
+                if !self.cancel_prepared_receipt(prepared) {
                     return Err(RollbackFailure {
                         reason: RollbackErrorKind::ReceiptMissing {
                             attempt: AttemptToken(*prepared.receipt().as_bytes()),
@@ -3276,6 +3635,7 @@ impl<
                 self.attempts[attempt.slot].state = AttemptState::Terminal {
                     generation: attempt.generation,
                     token: AttemptToken(*prepared.receipt().as_bytes()),
+                    kind: prepared.receipt_kind(),
                     outcome: AttemptOutcome::Unsent(AttemptUnsentReason::QueueRollback),
                 };
             }
@@ -3359,7 +3719,8 @@ impl<
             }
             DispatchPhase::Routed => match self.terminal_for(record.attempt) {
                 Some(terminal)
-                    if terminal.token().as_bytes() == record.prepared.receipt().as_bytes() =>
+                    if terminal.token().as_bytes() == record.prepared.receipt().as_bytes()
+                        && terminal.receipt_kind() == record.prepared.receipt_kind() =>
                 {
                     Some(TxPermitDenialReason::AttemptTerminal(terminal.outcome()))
                 }
@@ -3458,6 +3819,7 @@ impl<
             || scalar.packet_len() != record.prepared.packet_len()
             || scalar.encoded_packet_sha256() != record.encoded_packet_sha256
             || scalar.attempt().as_bytes() != record.prepared.receipt().as_bytes()
+            || scalar.receipt_kind() != record.prepared.receipt_kind()
             || scalar.target() != TxTarget::from_rns(record.prepared.target())
             || scalar.deadline() != record.deadline
             || scalar.handle() != self.handle_for(record.attempt)
@@ -3530,6 +3892,7 @@ impl<
         let terminal = self.terminal_for(record.attempt);
         if terminal.is_some_and(|terminal| {
             terminal.token().as_bytes() != record.prepared.receipt().as_bytes()
+                || terminal.receipt_kind() != record.prepared.receipt_kind()
         }) {
             return Ok(TxCompletionDisposition::Quarantined(
                 self.quarantine_completion(completion, record, now, TxRecoveryReason::Invariant),
@@ -3572,7 +3935,7 @@ impl<
 
         if terminal.is_none() && !record.may_have_transmitted {
             if !self.attempt_is_active(record.attempt, record.prepared)
-                || !self.rns.cancel_data_receipt(record.prepared.receipt())
+                || !self.cancel_prepared_receipt(record.prepared)
             {
                 return Ok(TxCompletionDisposition::Quarantined(
                     self.quarantine_completion(
@@ -3596,6 +3959,7 @@ impl<
             self.attempts[record.attempt.slot].state = AttemptState::Terminal {
                 generation: record.attempt.generation,
                 token: AttemptToken(*record.prepared.receipt().as_bytes()),
+                kind: record.prepared.receipt_kind(),
                 outcome: AttemptOutcome::Unsent(reason),
             };
         } else if terminal.is_none() && !self.attempt_is_active(record.attempt, record.prepared) {
@@ -3755,7 +4119,9 @@ impl<
         };
         MaintenanceReport {
             actions: report.actions,
-            timed_out_attempts: report.timed_out_receipts,
+            timed_out_attempts: report
+                .timed_out_receipts
+                .saturating_add(report.timed_out_link_data_receipts),
             timed_out_attempt_tag: report.timed_out_receipt_tag,
             timed_out_attempt_tags_consistent: report.timed_out_receipt_tags_consistent,
             correlation_fault: fault.or_else(|| {
@@ -3787,6 +4153,7 @@ impl<
         let AttemptState::Terminal {
             generation,
             token,
+            kind,
             outcome,
         } = state
         else {
@@ -3819,6 +4186,7 @@ impl<
         let terminal = TerminalAttempt {
             handle,
             token,
+            kind,
             outcome,
         };
         self.attempts[attempt_ref.slot].state = AttemptState::Free;
@@ -3879,6 +4247,8 @@ impl<
             dispatches_limit: PACKET_BUFFERS,
             receipts_used: rns.capacity.receipts.used,
             receipts_limit: rns.capacity.receipts.limit,
+            link_data_receipts_used: rns.capacity.link_data_receipts.used,
+            link_data_receipts_limit: rns.capacity.link_data_receipts.limit,
             attempts_active,
             attempts_terminal,
             attempts_used,
@@ -3929,7 +4299,7 @@ impl<
         &self,
         job: &RoutedTxJob<'_>,
         allow_deadline_recovery: bool,
-    ) -> Result<(RnsPreparedData, AttemptRef), RollbackErrorKind> {
+    ) -> Result<(PreparedReceiptPacket, AttemptRef), RollbackErrorKind> {
         if job.owner.dispatch.instance != self.instance {
             return Err(RollbackErrorKind::StaleOrUnknown);
         }
@@ -3971,6 +4341,7 @@ impl<
             }) if generation == job.owner.dispatch.generation
                 && prepared.packet_len() == scalar.packet_len()
                 && prepared.receipt().as_bytes() == scalar.attempt().as_bytes()
+                && prepared.receipt_kind() == scalar.receipt_kind()
                 && encoded_packet_sha256 == scalar.encoded_packet_sha256()
                 && TxTarget::from_rns(prepared.target()) == scalar.target()
                 && deadline == scalar.deadline()
@@ -4016,10 +4387,20 @@ impl<
     fn permit_binding_matches(&self, binding: PermitBinding, record: DispatchRecord) -> bool {
         let attempt_matches = matches!(
             self.attempts.get(record.attempt.slot).map(|attempt| attempt.state),
-            Some(AttemptState::Active { generation, token }
-                | AttemptState::Terminal { generation, token, .. })
+            Some(AttemptState::Active {
+                generation,
+                token,
+                kind,
+            }
+                | AttemptState::Terminal {
+                    generation,
+                    token,
+                    kind,
+                    ..
+                })
                 if generation == record.attempt.generation
                     && token.as_bytes() == record.prepared.receipt().as_bytes()
+                    && kind == record.prepared.receipt_kind()
         );
         binding.dispatch_generation == record.generation
             && record.selected.is_some_and(|hop| {
@@ -4093,12 +4474,17 @@ impl<
         }
     }
 
-    fn attempt_is_active(&self, attempt: AttemptRef, prepared: RnsPreparedData) -> bool {
+    fn attempt_is_active(&self, attempt: AttemptRef, prepared: PreparedReceiptPacket) -> bool {
         matches!(
             self.attempts.get(attempt.slot).map(|slot| slot.state),
-            Some(AttemptState::Active { generation, token })
+            Some(AttemptState::Active {
+                generation,
+                token,
+                kind,
+            })
                 if generation == attempt.generation
                     && token.as_bytes() == prepared.receipt().as_bytes()
+                    && kind == prepared.receipt_kind()
         )
     }
 
@@ -4106,6 +4492,7 @@ impl<
         let AttemptState::Terminal {
             generation,
             token,
+            kind,
             outcome,
         } = self.attempts.get(attempt.slot)?.state
         else {
@@ -4114,8 +4501,20 @@ impl<
         (generation == attempt.generation).then_some(TerminalAttempt {
             handle: self.handle_for(attempt),
             token,
+            kind,
             outcome,
         })
+    }
+
+    fn cancel_prepared_receipt(&mut self, prepared: PreparedReceiptPacket) -> bool {
+        match prepared {
+            PreparedReceiptPacket::DestinationData(prepared) => {
+                self.rns.cancel_data_receipt(prepared.receipt())
+            }
+            PreparedReceiptPacket::LinkData(prepared) => {
+                self.rns.cancel_link_data_receipt(prepared.receipt())
+            }
+        }
     }
 
     fn handle_for(&self, attempt: AttemptRef) -> AttemptHandle {
@@ -4187,12 +4586,70 @@ impl<'a> AttemptReceiptSink<'a> {
         }
         Err(ReceiptReservationUnavailable)
     }
+
+    fn try_reserve_data(
+        &mut self,
+        actual_kind: DataReceiptKind,
+        token: AttemptToken,
+    ) -> Result<AttemptTerminalReservation<'_>, ReceiptReservationUnavailable> {
+        let active_slot = self.attempts.iter().position(|slot| {
+            matches!(slot.state, AttemptState::Active { token: active, .. } if active == token)
+        });
+        if let Some(index) = active_slot {
+            let (generation, expected_kind) = match self.attempts[index].state {
+                AttemptState::Active {
+                    generation, kind, ..
+                } => (generation, kind),
+                AttemptState::Free
+                | AttemptState::Reserved { .. }
+                | AttemptState::Terminal { .. } => {
+                    return self.reject(ReceiptCorrelationError::ReservationInvariant);
+                }
+            };
+            if expected_kind != actual_kind {
+                return self.reject(ReceiptCorrelationError::WrongKind {
+                    attempt: token,
+                    expected: expected_kind,
+                    actual: actual_kind,
+                });
+            }
+            return Ok(AttemptTerminalReservation {
+                state: &mut self.attempts[index].state,
+                generation,
+                token,
+                kind: expected_kind,
+            });
+        }
+        let terminal_kind = self.attempts.iter().find_map(|slot| match slot.state {
+            AttemptState::Terminal {
+                token: terminal_token,
+                kind,
+                ..
+            } if terminal_token == token => Some(kind),
+            AttemptState::Free
+            | AttemptState::Reserved { .. }
+            | AttemptState::Active { .. }
+            | AttemptState::Terminal { .. } => None,
+        });
+        match terminal_kind {
+            Some(expected) if expected != actual_kind => {
+                self.reject(ReceiptCorrelationError::WrongKind {
+                    attempt: token,
+                    expected,
+                    actual: actual_kind,
+                })
+            }
+            Some(_) => self.reject(ReceiptCorrelationError::AlreadyTerminal { attempt: token }),
+            None => self.reject(ReceiptCorrelationError::UnknownData { attempt: token }),
+        }
+    }
 }
 
 struct AttemptTerminalReservation<'a> {
     state: &'a mut AttemptState,
     generation: u64,
     token: AttemptToken,
+    kind: DataReceiptKind,
 }
 
 impl ReceiptTerminalSink for AttemptReceiptSink<'_> {
@@ -4205,48 +4662,18 @@ impl ReceiptTerminalSink for AttemptReceiptSink<'_> {
         &mut self,
         candidate: ReceiptCandidate,
     ) -> Result<Self::Reservation<'_>, ReceiptReservationUnavailable> {
-        if candidate.kind() == ReceiptKind::Channel {
+        let Some(actual_kind) = DataReceiptKind::from_rns(candidate.kind()) else {
             return self.reject(ReceiptCorrelationError::UnsupportedChannel);
-        }
+        };
         let token = AttemptToken(*candidate.receipt().as_bytes());
-        let active_slot = self.attempts.iter().position(|slot| {
-            matches!(slot.state, AttemptState::Active { token: active, .. } if active == token)
-        });
-        if let Some(index) = active_slot {
-            let generation = match self.attempts[index].state {
-                AttemptState::Active { generation, .. } => generation,
-                AttemptState::Free
-                | AttemptState::Reserved { .. }
-                | AttemptState::Terminal { .. } => {
-                    return self.reject(ReceiptCorrelationError::ReservationInvariant);
-                }
-            };
-            return Ok(AttemptTerminalReservation {
-                state: &mut self.attempts[index].state,
-                generation,
-                token,
-            });
-        }
-        if self.attempts.iter().any(|slot| {
-            matches!(
-                slot.state,
-                AttemptState::Terminal {
-                    token: terminal_token,
-                    ..
-                } if terminal_token == token
-            )
-        }) {
-            self.reject(ReceiptCorrelationError::AlreadyTerminal { attempt: token })
-        } else {
-            self.reject(ReceiptCorrelationError::UnknownData { attempt: token })
-        }
+        self.try_reserve_data(actual_kind, token)
     }
 }
 
 impl ReceiptTerminalReservation for AttemptTerminalReservation<'_> {
     fn commit(self, terminal: ReceiptTerminal) {
         let candidate = terminal.candidate();
-        debug_assert_eq!(candidate.kind(), ReceiptKind::Data);
+        debug_assert_eq!(DataReceiptKind::from_rns(candidate.kind()), Some(self.kind));
         debug_assert_eq!(candidate.receipt().as_bytes(), self.token.as_bytes());
         let outcome = match terminal {
             ReceiptTerminal::Delivered(_) => AttemptOutcome::Delivered,
@@ -4255,6 +4682,7 @@ impl ReceiptTerminalReservation for AttemptTerminalReservation<'_> {
         *self.state = AttemptState::Terminal {
             generation: self.generation,
             token: self.token,
+            kind: self.kind,
             outcome,
         };
     }
@@ -4363,6 +4791,8 @@ mod tests {
         .unwrap();
         let peer_destination = peer.destination_hash();
         let peer_public_key = identity(51).public_key();
+        assert!(!owner.has_path(&peer_destination));
+        assert_eq!(owner.retained_path_hops(&peer_destination), None);
         owner
             .register_peer(
                 &identity(51),
@@ -4371,6 +4801,8 @@ mod tests {
                 MonotonicSeconds::new(1),
             )
             .unwrap();
+        assert!(owner.has_path(&peer_destination));
+        assert_eq!(owner.retained_path_hops(&peer_destination), Some(1));
         assert_eq!(
             owner.recall_identity(&peer_destination),
             Some(peer_public_key)
@@ -4836,6 +5268,90 @@ mod tests {
         proof[19..51].copy_from_slice(attempt.as_bytes());
         proof[51..].copy_from_slice(&signature);
         proof
+    }
+
+    fn establish_lxmf_link<const PATHS: usize, const BUFFERS: usize>(
+        initiator: &mut TestNode<PATHS, BUFFERS>,
+        responder: &mut TestNode<PATHS, BUFFERS>,
+        responder_identity_tag: u8,
+        rng: &mut CounterRng,
+    ) -> (DestinationHash, LinkHandle) {
+        initiator
+            .register_inbound_single_destination("lxmf", &["delivery"])
+            .unwrap();
+        let destination = responder
+            .register_inbound_single_destination("lxmf", &["delivery"])
+            .unwrap();
+        initiator
+            .register_peer(
+                &identity(responder_identity_tag),
+                "lxmf",
+                &["delivery"],
+                time(99),
+            )
+            .unwrap();
+        responder
+            .set_destination_accepts_links(&destination, true)
+            .unwrap();
+        responder
+            .set_destination_inbound_proof_policy(&destination, InboundProofPolicy::Always)
+            .unwrap();
+
+        let (request, link) = initiator
+            .initiate_link(&destination, time(100), rng)
+            .expect("LINKREQUEST must be retained");
+        assert_eq!(request.packets.len(), 1);
+        assert_eq!(initiator.link_state(link), Some(LinkState::Handshake));
+        let response = responder
+            .ingest(
+                request.packets[0].bytes(),
+                time(100),
+                PacketInterfaceId::new(7),
+                rng,
+            )
+            .unwrap();
+        assert_eq!(response.actions.packets.len(), 1);
+        let established = initiator
+            .ingest(
+                response.actions.packets[0].bytes(),
+                time(101),
+                PacketInterfaceId::new(3),
+                rng,
+            )
+            .unwrap();
+        assert_eq!(established.actions.packets.len(), 1);
+        responder
+            .ingest(
+                established.actions.packets[0].bytes(),
+                time(102),
+                PacketInterfaceId::new(7),
+                rng,
+            )
+            .unwrap();
+        assert_eq!(initiator.link_state(link), Some(LinkState::Active));
+        assert_eq!(
+            responder.link_state(LinkHandle::new(*link.as_bytes())),
+            Some(LinkState::Active)
+        );
+        (destination, link)
+    }
+
+    fn direct_lxmf_wire<const PATHS: usize, const BUFFERS: usize>(
+        sender: &TestNode<PATHS, BUFFERS>,
+        destination: DestinationHash,
+        content: &[u8],
+    ) -> Vec<u8> {
+        let mut storage = [0_u8; MAX_DIRECT_LXMF_WIRE];
+        let prepared = sender
+            .prepare_basic_direct_lxmf_into(
+                &destination,
+                1_700_000_000_000,
+                b"node-core direct",
+                content,
+                &mut storage,
+            )
+            .unwrap();
+        storage[..usize::from(prepared.wire_len())].to_vec()
     }
 
     #[test]
@@ -6080,7 +6596,7 @@ mod tests {
         else {
             panic!("expected queued dispatch")
         };
-        assert!(sender.rns.cancel_data_receipt(prepared.receipt()));
+        assert!(sender.cancel_prepared_receipt(prepared));
 
         let failure = match sender.rollback_queued(job, owner_time(1_100)) {
             Ok(_) => panic!("missing receipt was hidden"),
@@ -6156,6 +6672,7 @@ mod tests {
         sender.attempts[handle.slot].state = AttemptState::Terminal {
             generation: handle.generation,
             token: AttemptToken([0xa5; 32]),
+            kind: DataReceiptKind::DestinationData,
             outcome: AttemptOutcome::Delivered,
         };
 
@@ -6519,6 +7036,7 @@ mod tests {
         terminal.attempts[handle.slot].state = AttemptState::Terminal {
             generation: handle.generation,
             token: terminal_job.attempt(),
+            kind: DataReceiptKind::DestinationData,
             outcome: AttemptOutcome::Delivered,
         };
         assert_eq!(
@@ -6641,6 +7159,308 @@ mod tests {
     }
 
     #[test]
+    fn initiated_link_handle_tracks_state_and_aborts_only_before_establishment() {
+        let mut initiator = node::<4, 0>(90, "link-handle-initiator");
+        let mut responder = node::<4, 0>(91, "link-handle-responder");
+        let destination = responder
+            .register_inbound_single_destination("lxmf", &["delivery"])
+            .unwrap();
+        initiator
+            .register_peer(&identity(91), "lxmf", &["delivery"], time(1))
+            .unwrap();
+        let mut rng = CounterRng::default();
+
+        assert!(initiator.can_initiate_link());
+        let (actions, link) = initiator
+            .initiate_link(&destination, time(2), &mut rng)
+            .unwrap();
+        assert_eq!(actions.packets.len(), 1);
+        assert!(actions.packets[0].protocol_token().is_some());
+        assert_eq!(
+            LinkHandle::new(*link.as_bytes()),
+            link,
+            "event bytes must reconstruct the same lookup handle"
+        );
+        assert_eq!(initiator.link_state(link), Some(LinkState::Handshake));
+        assert!(initiator.abort_unestablished_link(link));
+        assert_eq!(initiator.link_state(link), None);
+        assert!(initiator.can_initiate_link());
+        assert!(!initiator.abort_unestablished_link(link));
+    }
+
+    #[test]
+    fn rehydrated_direct_lxmf_link_data_completes_with_exact_link_receipt_proof() {
+        let mut initiator = node::<4, 1>(92, "direct-proof-initiator");
+        let mut responder = node::<4, 1>(93, "direct-proof-responder");
+        let mut rng = CounterRng::default();
+        let (destination, link) = establish_lxmf_link(&mut initiator, &mut responder, 93, &mut rng);
+        assert!(!initiator.abort_unestablished_link(link));
+        let wire = direct_lxmf_wire(&initiator, destination, b"proof-correlated payload");
+        let mut buffer = registered_buffer(&mut initiator);
+
+        let job = initiator
+            .prepare_rehydrated_direct_lxmf_into_slot(
+                &mut buffer,
+                link,
+                prepare_request(destination, &wire, 110, 110_000, 111_000, interfaces(&[3])),
+                &mut rng,
+            )
+            .unwrap_or_else(|failure| panic!("direct preparation failed: {:?}", failure.reason()));
+        let attempt = job.attempt();
+        let attempt_handle = job.attempt_handle();
+        assert_eq!(job.prepared().receipt_kind(), DataReceiptKind::LinkData);
+        assert_eq!(job.target(), TxTarget::Only(PacketInterfaceId::new(3)));
+        assert_eq!(initiator.capacities().receipts_used, 0);
+        assert_eq!(initiator.capacities().link_data_receipts_used, 1);
+
+        let (pending, request) = job.begin_permit(test_permit_requirements());
+        let reply = initiator
+            .authorize_tx(request, owner_time(110_100), &mut TestPolicy::allowing())
+            .unwrap_or_else(|failure| {
+                panic!("direct authorization failed: {:?}", failure.reason())
+            });
+        let mut authorized = match pending.resolve(reply, owner_time(110_101)) {
+            Ok(PermitResolution::Authorized(authorized)) => authorized,
+            Ok(PermitResolution::Expired(_) | PermitResolution::Unpermitted(_)) => {
+                panic!("matching direct-Link permit was not authorized")
+            }
+            Err(_) => panic!("matching direct-Link permit reply was rejected"),
+        };
+        let packet = authorized
+            .frame(owner_time(110_102))
+            .unwrap()
+            .bytes()
+            .to_vec();
+        let disposition = initiator
+            .complete_tx(
+                authorized.complete(TxCompletionCode::new(0)),
+                owner_time(110_103),
+            )
+            .unwrap_or_else(|failure| panic!("direct completion failed: {:?}", failure.reason()));
+        assert!(matches!(disposition, TxCompletionDisposition::Available(_)));
+
+        let received = responder
+            .ingest(&packet, time(110), PacketInterfaceId::new(7), &mut rng)
+            .unwrap_or_else(|failure| panic!("direct Link DATA ingress failed: {failure:?}"));
+        assert!(received.actions.events.iter().any(|event| {
+            matches!(
+                event,
+                ApplicationEvent::LinkData { binding, data, .. }
+                    if binding.link() == link.as_bytes() && data.as_slice() == wire.as_slice()
+            )
+        }));
+        let proof = received
+            .actions
+            .packets
+            .iter()
+            .find(|packet| {
+                reticulum_rns_rete::parse_packet(packet.bytes())
+                    .is_ok_and(|packet| packet.packet_type == PacketType::Proof)
+            })
+            .expect("direct Link DATA must generate an explicit proof");
+        initiator
+            .ingest(
+                proof.bytes(),
+                time(111),
+                PacketInterfaceId::new(3),
+                &mut rng,
+            )
+            .unwrap_or_else(|failure| panic!("direct proof ingress failed: {failure:?}"));
+
+        let terminal = initiator.terminal_attempts().next().unwrap();
+        assert_eq!(terminal.handle(), attempt_handle);
+        assert_eq!(terminal.token(), attempt);
+        assert_eq!(terminal.receipt_kind(), DataReceiptKind::LinkData);
+        assert_eq!(terminal.outcome(), AttemptOutcome::Delivered);
+        assert_eq!(initiator.capacities().link_data_receipts_used, 0);
+        assert_eq!(
+            initiator.acknowledge_terminal(attempt_handle).unwrap(),
+            terminal
+        );
+    }
+
+    #[test]
+    fn direct_lxmf_timeout_commits_a_link_receipt_terminal() {
+        let mut initiator = node::<4, 1>(94, "direct-timeout-initiator");
+        let mut responder = node::<4, 1>(95, "direct-timeout-responder");
+        let mut rng = CounterRng::default();
+        let (destination, link) = establish_lxmf_link(&mut initiator, &mut responder, 95, &mut rng);
+        let wire = direct_lxmf_wire(&initiator, destination, b"timeout payload");
+        let mut buffer = registered_buffer(&mut initiator);
+        let job = initiator
+            .prepare_rehydrated_direct_lxmf_into_slot(
+                &mut buffer,
+                link,
+                prepare_request(destination, &wire, 200, 200_000, 300_000, interfaces(&[3])),
+                &mut rng,
+            )
+            .unwrap_or_else(|failure| {
+                panic!("direct timeout preparation failed: {:?}", failure.reason())
+            });
+        let handle = job.attempt_handle();
+
+        let report = initiator.tick(time(231), &mut rng);
+        assert_eq!(report.timed_out_attempts, 1);
+        assert_eq!(report.correlation_fault, None);
+        assert_eq!(initiator.capacities().link_data_receipts_used, 0);
+        let terminal = initiator.terminal_attempts().next().unwrap();
+        assert_eq!(terminal.handle(), handle);
+        assert_eq!(terminal.receipt_kind(), DataReceiptKind::LinkData);
+        assert_eq!(terminal.outcome(), AttemptOutcome::DeliveryTimeout);
+
+        let disposition = initiator
+            .complete_tx(
+                job.return_unpermitted().complete(TxCompletionCode::new(0)),
+                owner_time(231_000),
+            )
+            .unwrap_or_else(|failure| {
+                panic!("timed-out direct completion failed: {:?}", failure.reason())
+            });
+        assert!(matches!(disposition, TxCompletionDisposition::Available(_)));
+        assert_eq!(initiator.acknowledge_terminal(handle).unwrap(), terminal);
+    }
+
+    #[test]
+    fn receipt_sink_rejects_the_right_hash_from_the_wrong_data_table() {
+        let token = AttemptToken([0x5a; 32]);
+        let mut attempts = [AttemptSlot::EMPTY; 2];
+        attempts[0].state = AttemptState::Active {
+            generation: 7,
+            token,
+            kind: DataReceiptKind::LinkData,
+        };
+        let mut sink = AttemptReceiptSink::new(&mut attempts);
+
+        assert!(
+            sink.try_reserve_data(DataReceiptKind::DestinationData, token)
+                .is_err()
+        );
+        assert_eq!(
+            sink.fault,
+            Some(ReceiptCorrelationError::WrongKind {
+                attempt: token,
+                expected: DataReceiptKind::LinkData,
+                actual: DataReceiptKind::DestinationData,
+            })
+        );
+        assert!(matches!(
+            attempts[0].state,
+            AttemptState::Active {
+                generation: 7,
+                token: retained,
+                kind: DataReceiptKind::LinkData,
+            } if retained == token
+        ));
+    }
+
+    #[test]
+    fn direct_lxmf_route_cancellation_and_attempt_backpressure_are_exact() {
+        let mut initiator = node::<2, 3>(96, "direct-pressure-initiator");
+        let mut responder = node::<2, 3>(97, "direct-pressure-responder");
+        let mut rng = CounterRng::default();
+        let (destination, link) = establish_lxmf_link(&mut initiator, &mut responder, 97, &mut rng);
+        let wire = direct_lxmf_wire(&initiator, destination, b"bounded direct payload");
+        let mut first_buffer = registered_buffer(&mut initiator);
+        let mut second_buffer = registered_buffer(&mut initiator);
+        let mut third_buffer = registered_buffer(&mut initiator);
+
+        let no_route = match initiator.prepare_rehydrated_direct_lxmf_into_slot(
+            &mut third_buffer,
+            link,
+            prepare_request(
+                destination,
+                &wire,
+                110,
+                110_000,
+                111_000,
+                InterfaceSet::empty(),
+            ),
+            &mut rng,
+        ) {
+            Ok(_) => panic!("empty direct route was accepted"),
+            Err(failure) => failure,
+        };
+        assert_eq!(
+            no_route.reason(),
+            SubmitError::NoEligibleInterface {
+                target: TxTarget::Only(PacketInterfaceId::new(3)),
+            }
+        );
+        let _ = available(no_route);
+        assert_eq!(initiator.capacities().link_data_receipts_used, 0);
+
+        let first = initiator
+            .prepare_rehydrated_direct_lxmf_into_slot(
+                &mut first_buffer,
+                link,
+                prepare_request(destination, &wire, 111, 111_000, 112_000, interfaces(&[3])),
+                &mut rng,
+            )
+            .unwrap_or_else(|failure| {
+                panic!("first direct preparation failed: {:?}", failure.reason())
+            });
+        let first_handle = first.attempt_handle();
+        let second = initiator
+            .prepare_rehydrated_direct_lxmf_into_slot(
+                &mut second_buffer,
+                link,
+                prepare_request(destination, &wire, 112, 112_000, 113_000, interfaces(&[3])),
+                &mut rng,
+            )
+            .unwrap_or_else(|failure| {
+                panic!("second direct preparation failed: {:?}", failure.reason())
+            });
+        let second_handle = second.attempt_handle();
+        let entropy_before_backpressure = rng.0;
+        let pressure = match initiator.prepare_rehydrated_direct_lxmf_into_slot(
+            &mut third_buffer,
+            link,
+            prepare_request(destination, &wire, 113, 113_000, 114_000, interfaces(&[3])),
+            &mut rng,
+        ) {
+            Ok(_) => panic!("full direct attempt ledger accepted another packet"),
+            Err(failure) => failure,
+        };
+        assert_eq!(
+            pressure.reason(),
+            SubmitError::AttemptLedgerFull { limit: 2 }
+        );
+        assert_eq!(rng.0, entropy_before_backpressure);
+        let _ = available(pressure);
+        assert_eq!(initiator.capacities().link_data_receipts_used, 2);
+
+        let first_rollback = initiator
+            .rollback_queued(first, owner_time(111_100))
+            .unwrap_or_else(|failure| panic!("first rollback failed: {:?}", failure.reason()));
+        assert!(matches!(
+            first_rollback,
+            TxCompletionDisposition::Available(_)
+        ));
+        let second_rollback = initiator
+            .rollback_queued(second, owner_time(112_100))
+            .unwrap_or_else(|failure| panic!("second rollback failed: {:?}", failure.reason()));
+        assert!(matches!(
+            second_rollback,
+            TxCompletionDisposition::Available(_)
+        ));
+        assert_eq!(initiator.capacities().link_data_receipts_used, 0);
+        assert_eq!(
+            initiator
+                .acknowledge_terminal(first_handle)
+                .unwrap()
+                .receipt_kind(),
+            DataReceiptKind::LinkData
+        );
+        assert_eq!(
+            initiator
+                .acknowledge_terminal(second_handle)
+                .unwrap()
+                .receipt_kind(),
+            DataReceiptKind::LinkData
+        );
+    }
+
+    #[test]
     fn channel_receipt_candidate_is_an_explicit_unsupported_fault() {
         let mut initiator = node::<4, 2>(38, "initiator");
         let mut responder = node::<4, 2>(39, "responder");
@@ -6726,10 +7546,12 @@ mod tests {
         sender.attempts[0].state = AttemptState::Active {
             generation: generation + 1,
             token: colliding,
+            kind: DataReceiptKind::DestinationData,
         };
         sender.attempts[1].state = AttemptState::Active {
             generation,
             token: original.attempt(),
+            kind: DataReceiptKind::DestinationData,
         };
         let DispatchState::Active(mut record) = sender.dispatches[0].state else {
             panic!("expected queued dispatch")

@@ -1,7 +1,7 @@
 # ADR 0016: Bound Link DATA ownership for direct LXMF
 
-- **Status:** accepted for responder-side source composition; powered direct
-  LoRa qualification pending
+- **Status:** accepted for responder-side composition; one bounded new-commit
+  direct LoRa chain is powered-qualified
 - **Date:** 2026-07-23
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0012](0012-application-event-and-resource-ownership.md),
@@ -109,10 +109,11 @@ carrier.
   not protocol limits.
 - LXMF messages larger than the direct packet boundary still require the
   separately qualified Resource tranche.
-- This source milestone does not claim powered interoperability until two
-  permanent E290 images complete responder-side Link establishment, direct LXMF
-  commit/read, delayed proof release, and sender-visible delivery behavior over
-  LoRa.
+- The [ADR 0018 powered record](../e290-direct-link-powered-proof.md) closes one
+  bounded fresh-Link/new-commit path across two permanent E290 feature
+  profiles: direct LXMF commit/read, delayed proof release, sender-visible
+  `Delivered`, and post-reset exact readback. `AlreadyDurable` replay,
+  active-Link reuse, and the broader fault/pressure matrix remain open.
 
 ## Next protocol slice
 

@@ -319,6 +319,7 @@ pub struct LiveSubmissionService {
     runtime: SubmissionRuntime<
         { config::DURABLE_SUBMISSIONS },
         { config::DURABLE_PROJECTED_SUBMISSIONS },
+        { config::LINKS },
     >,
     journal: BoundJournal<ScriptedNor>,
     state: DurabilityServiceState,
