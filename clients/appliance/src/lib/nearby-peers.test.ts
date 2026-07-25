@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import type { NearbyPeerView } from "./nearby-peers.ts";
 import {
+  associatedNomadDestinationForLxmf,
   nearbyPeerAge,
   nearbyPeerFingerprint,
   nearbyPeerRouteHint,
@@ -39,6 +40,28 @@ describe("nearby peer presentation", () => {
   test("rejects an overlong announced name at the existing contact boundary", () => {
     const overlong = peer({ display_name: "🛰️".repeat(100) });
     expect(nearbyPeerSuggestedName(overlong)).toBe("Peer 1234 5678 90ab");
+  });
+
+  test("cross-references an LXMF contact with its separately authenticated Nomad destination", () => {
+    expect(associatedNomadDestinationForLxmf([peer()], `  ${"AB".repeat(16)}  `)).toBe(
+      "cd".repeat(16),
+    );
+  });
+
+  test("does not mistake or derive an LXMF contact hash for a Nomad destination", () => {
+    expect(associatedNomadDestinationForLxmf([], "ab".repeat(16))).toBeNull();
+    expect(
+      associatedNomadDestinationForLxmf(
+        [peer({ associated_nomad_destination: "not-a-destination" })],
+        "ab".repeat(16),
+      ),
+    ).toBeNull();
+    expect(
+      associatedNomadDestinationForLxmf(
+        [peer({ associated_nomad_destination: "ab".repeat(16) })],
+        "ab".repeat(16),
+      ),
+    ).toBeNull();
   });
 
   test("falls back to the destination when a defensive test double lacks an identity hash", () => {

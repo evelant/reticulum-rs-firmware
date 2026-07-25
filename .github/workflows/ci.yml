@@ -575,6 +575,29 @@ jobs:
           --target xtensa-esp32s3-none-elf
           -- -D warnings
 
+      - name: Link production BLE Vision Master E290 node
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/e290-ble-target
+          RUSTFLAGS: -C link-arg=-nostartfiles -Z emit-stack-sizes
+        run: >-
+          cargo +esp build --locked --release
+          -p reticulum-heltec-vision-master-e290-node
+          --bin reticulum-heltec-vision-master-e290-node
+          --no-default-features --features ble-api-proof
+          --target xtensa-esp32s3-none-elf
+
+      - name: Strict clippy for production BLE Vision Master E290 node
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/e290-ble-target
+          RUSTFLAGS: -C link-arg=-nostartfiles -Z emit-stack-sizes
+        run: >-
+          cargo +esp clippy --locked --release
+          -p reticulum-heltec-vision-master-e290-node
+          --bin reticulum-heltec-vision-master-e290-node
+          --no-default-features --features ble-api-proof
+          --target xtensa-esp32s3-none-elf
+          -- -D warnings
+
       - name: Link E290 inbox commit-fault HIL
         run: >-
           CARGO_TARGET_DIR="$RUNNER_TEMP/e290-inbox-commit-fault-target"
@@ -655,11 +678,30 @@ jobs:
             cargo +esp build --locked --release \
             -p reticulum-heltec-vision-master-e290-node \
             --target xtensa-esp32s3-none-elf
+          CARGO_TARGET_DIR="$RUNNER_TEMP/e290-ble-target" \
+            cargo +esp build --locked --release \
+            -p reticulum-heltec-vision-master-e290-node \
+            --bin reticulum-heltec-vision-master-e290-node \
+            --no-default-features --features ble-api-proof \
+            --target xtensa-esp32s3-none-elf
           CARGO_TARGET_DIR="$RUNNER_TEMP/e290-runtime-measurement-target" \
             cargo +esp build --locked --release \
             -p reticulum-heltec-vision-master-e290-node \
             --no-default-features --features runtime-measurement-hil \
             --target xtensa-esp32s3-none-elf
+
+      - name: Enforce E290 startup constructor stack bounds
+        shell: bash
+        run: |
+          set -euo pipefail
+          for elf in \
+            "$RUNNER_TEMP/e290-default-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node" \
+            "$RUNNER_TEMP/e290-ble-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node" \
+            "$RUNNER_TEMP/e290-runtime-measurement-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node"
+          do
+            cargo run --locked -p xtask -- \
+              e290-runtime-measurement inspect-startup-elf --elf "$elf"
+          done
 
       - name: Enforce E290 compiler-frame and linked-stack bounds
         run: >-
@@ -1069,10 +1111,15 @@ jobs:
           # BSS includes the linker-reserved stack and moves inversely with
           # initialized data. The total cap is an aggregate image-growth guard,
           # not a substitute for section-level or runtime DRAM measurements.
-          # The 2026-07-18 API 1.2 E290 node baseline is
-          # 655511/3676/469152/1128339. Its caps retain about 9% text, 77%
-          # data, 1% BSS and 4% aggregate headroom while the full
-          # appliance is still expected to grow under reviewed measurements.
+          # The 2026-07-25 API 1.6 default/inbox-fault/runtime-measurement
+          # baselines are 899059/3980/468848/1371887,
+          # 899831/4020/468808/1372659, and
+          # 913907/4580/468248/1386735. Their shared caps retain at least 7%
+          # text, 1% BSS and 5% aggregate headroom while the full appliance is
+          # still expected to grow under reviewed measurements.
+          # The 2026-07-25 corrected production BLE baseline is
+          # 1090679/11472/469552/1571703. Its separate caps retain about 8%
+          # text, 42% data, 1% BSS and 5% aggregate headroom.
           release=target/xtensa-esp32s3-none-elf/release
           check_size safe-idle "$release/reticulum-heltec-tracker-v2" \
             65536 6144 475136 550000
@@ -1081,13 +1128,16 @@ jobs:
             360448 12288 475136 840000
           check_size e290-node \
             "$RUNNER_TEMP/e290-default-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node" \
-            720896 16384 475136 1180000
+            980000 16384 475136 1460000
+          check_size e290-ble \
+            "$RUNNER_TEMP/e290-ble-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node" \
+            1180000 16384 475136 1650000
           check_size e290-inbox-commit-fault-hil \
             "$RUNNER_TEMP/e290-inbox-commit-fault-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node" \
-            720896 16384 475136 1180000
+            980000 16384 475136 1460000
           check_size e290-runtime-measurement-hil \
             "$RUNNER_TEMP/e290-runtime-measurement-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node" \
-            720896 16384 475136 1180000
+            980000 16384 475136 1460000
 
       - name: Enforce lab retained-state and startup-stack link contracts
         shell: bash

@@ -97,7 +97,7 @@ and matched exact identity-bound readbacks on both E290s. Both USB devices
 disappeared before that image's required post-flash pre-submit checkpoint, so
 that historical attempt has no durable-LXMF outcome.
 
-The final current default/HIL pair contains 946/962 stack-size records, a
+The retained Stage 5 default/HIL pair contains 946/962 stack-size records, a
 53,680-byte maximum frame, and 175,056/174,256-byte usable stacks. The
 13,648,888-byte default ELF has SHA-256
 `92e63b60a5f4b830ee55d958fcc446a6878036212904b8748519ae210ba3da58`;

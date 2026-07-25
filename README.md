@@ -754,12 +754,12 @@ gates these compiler-emitted path sums:
 
 | Profile | Mount | Append | Compact |
 | --- | ---: | ---: | ---: |
-| Default | 53,072 B | 52,816 B | 52,704 B |
-| Runtime-measurement HIL | 53,248 B | 53,040 B | 52,928 B |
+| Default | 79,376 B | 54,320 B | 54,112 B |
+| Runtime-measurement HIL | 54,352 B | 54,656 B | 54,448 B |
 
 Each path also carries a 4,096-byte ROM flash-read/interrupt reserve, so the
-enforced totals are 57,168/56,544/56,432 bytes for default and
-57,344/56,768/56,656 bytes for HIL. This statically closes the diagnosed
+enforced totals are 83,472/58,416/58,208 bytes for default and
+58,448/58,752/58,544 bytes for HIL. This statically closes the diagnosed
 boot/append/compact stack-overflow boundary. The current 128-entry image has
 passed a bounded powered bidirectional chat proof; a 128-message fill and
 pressure qualification remain open.
@@ -1082,10 +1082,14 @@ MessagePack `nil` request for `/page/index.mu` and returns one static UTF-8
 Micron page of at most 400 bytes in a direct single-packet response. It has no
 Resource, form, file, or dynamic-content support. Response-allocation pressure
 discards that request, and an ambiguous terminal response fault can fail-stop
-the responder until reset. This source/test composition has not yet received a
-powered responder qualification. The permanent authenticated device API now
-composes API 1.6 Nomad fetch start/poll with the product's transport-neutral
-client runtime. It retains one principal-owned, boot-scoped fetch at a time:
+the responder until reset. The
+[bounded powered Nomad proof](docs/e290-nomad-powered-proof.md) completed one
+physical path: Board A announced its distinct `nomadnetwork.node` destination
+over LoRa, Board B exposed the authenticated association through Nearby,
+MetalbeardMobile authenticated to B over BLE, and `/page/index.mu` returned
+from A to the phone. The permanent authenticated device API composes API 1.6
+Nomad fetch start/poll with the product's transport-neutral client runtime. It
+retains one principal-owned, boot-scoped fetch at a time:
 same-principal/key retries with identical semantics replay the original ID, a
 distinct request is rejected while that fetch is active, terminal results
 remain repeatable through poll, and the next distinct start evicts the terminal
@@ -1094,10 +1098,14 @@ is limited to absolute paths of at most 128 UTF-8 bytes and complete
 single-packet pages of at most 400 UTF-8 bytes; Resource responses remain
 unsupported. The Expo client now exposes this start/poll surface over the same
 authenticated USB/BLE/HTTP session and derives each nearby LXMF peer's
-associated `nomadnetwork.node` destination in Rust for one-tap browsing. It
-shows the exact UTF-8 Micron source; independent Nomad announce-directory
-discovery and Micron rendering remain deferred. Neither the outbound API path
-nor the responder has powered qualification.
+associated `nomadnetwork.node` destination in Rust for one-tap browsing.
+Authenticated Nearby metadata is retained while connected so an already-known
+contact can expose the same Browse action; the app never substitutes or derives
+that address from the contact's distinct LXMF hash. It shows the returned UTF-8
+Micron source; independent Nomad announce-directory discovery and a general
+Micron renderer remain deferred. The powered proof is limited to the one static
+page and does not qualify Resource, pressure, reset/fault recovery,
+flash-readback, cache-disabled interaction, range, or soak.
 
 This replaces the historical back-to-back batches: in that powered run B
 processed three distinct A announces but still returned `no-path` for A's LXMF

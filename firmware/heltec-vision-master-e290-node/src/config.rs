@@ -155,18 +155,20 @@ pub const LORA_ADVERTISED_BITRATE: AdvertisedBitrate = match AdvertisedBitrate::
 
 /// Reclaimed internal SRAM assigned to a BLE-capable global allocator.
 ///
-/// Ownership machines and Embassy task state remain in internal static RAM.
-/// This region is registered before PSRAM, so ordinary global allocations use
-/// it first and spill into external RAM only when no internal hole fits. An
-/// explicit placement policy is still required before large protocol/client
-/// allocations are enabled. Seventy-two KiB is the largest whole-KiB
-/// allocation that fits the ESP32-S3's separate 73,744-byte reclaimed DRAM2
-/// segment. The final 8 KiB is available to esp-radio's 8,192-byte
-/// strict-internal controller-task stack and controller allocations without
-/// shrinking the product executor stack in ordinary DRAM. The pinned
-/// esp-radio documentation recommends more total heap (64 KiB reclaimed plus
-/// 36 KiB ordinary), so this profile still requires powered heap
-/// qualification rather than treating 72 KiB as a general BLE guarantee.
+/// Channels, packet buffers, permit stores, task pools, and IRQ/DMA-visible
+/// state remain in internal static RAM. The permanent transport-neutral
+/// supervisor and its RNS node are explicitly placed in PSRAM after
+/// construction. This region is registered before PSRAM, so other ordinary
+/// global allocations use it first and spill into external RAM only when no
+/// internal hole fits. An explicit placement policy is still required before
+/// additional large protocol/client allocations are enabled. Seventy-two KiB
+/// is the largest whole-KiB allocation that fits the ESP32-S3's separate
+/// 73,744-byte reclaimed DRAM2 segment. The final 8 KiB is available to
+/// esp-radio's 8,192-byte strict-internal controller-task stack and controller
+/// allocations without shrinking the product executor stack in ordinary
+/// DRAM. The pinned esp-radio documentation recommends more total heap (64 KiB
+/// reclaimed plus 36 KiB ordinary), so this profile still requires powered
+/// heap qualification rather than treating 72 KiB as a general BLE guarantee.
 #[cfg(feature = "ble-api-proof")]
 pub const INTERNAL_HEAP_BYTES: usize = 72 * 1024;
 /// Reclaimed internal SRAM assigned to the ordinary and Wi-Fi allocators.

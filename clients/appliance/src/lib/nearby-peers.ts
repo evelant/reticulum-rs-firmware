@@ -29,6 +29,29 @@ export function nearbyPeerSuggestedName(peer: NearbyPeerView): string {
   return `Peer ${nearbyPeerFingerprint(peer)}`;
 }
 
+/**
+ * Returns the distinct Nomad node destination authenticated alongside an LXMF
+ * announce. A contact destination alone is intentionally insufficient: the two
+ * application destinations cannot be substituted for or derived from each
+ * other without the announcing identity.
+ */
+export function associatedNomadDestinationForLxmf(
+  peers: readonly NearbyPeerView[],
+  lxmfDestination: string,
+): string | null {
+  const normalizedLxmf = lxmfDestination.trim().toLowerCase();
+  if (!/^[0-9a-f]{32}$/.test(normalizedLxmf)) return null;
+
+  for (const peer of peers) {
+    if (peer.destination.trim().toLowerCase() !== normalizedLxmf) continue;
+    const nomadDestination = peer.associated_nomad_destination.trim().toLowerCase();
+    if (/^[0-9a-f]{32}$/.test(nomadDestination) && nomadDestination !== normalizedLxmf) {
+      return nomadDestination;
+    }
+  }
+  return null;
+}
+
 export function nearbyPeerAge(ageMs: number): string {
   const safeAge = Number.isFinite(ageMs) ? Math.max(0, Math.floor(ageMs)) : 0;
   if (safeAge < 5_000) return "just now";

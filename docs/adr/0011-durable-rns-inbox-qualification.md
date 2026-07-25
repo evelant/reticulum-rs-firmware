@@ -383,13 +383,15 @@ The project-local release gate preserves the current static inputs to the stack
 calculation. CI runs Clippy and then relinks isolated default and measurement
 ELFs with compiler `.stack_sizes` evidence; the inspector accepts only final
 little-endian Xtensa executables with no remaining section relocations. The
-current default/HIL pair contains 946/962 records, has a 53,680-byte maximum
-frame, leaves 175,056/174,256 usable stack bytes, and fixes both linker guard
-offsets at 60 bytes. The later, now-historical pre-LXTE Stage 5 placement
-checkpoint measured 57,716 powered raw bytes. Current conservative policy
-deducts the independent announce scheduler's sixteen linked bytes, preserving
-57,700 carried bytes and 4,020 bytes after the current maximum frame. The
-preceding pre-PSRAM pair was 165,032/164,336 with a 12,388-byte carried margin.
+retained Stage 5 default/HIL pair contains 946/962 records, has a 53,680-byte
+maximum frame, leaves 175,056/174,256 usable stack bytes, and fixes both linker
+guard offsets at 60 bytes. The later, now-historical pre-LXTE Stage 5 placement
+checkpoint measured 57,716 powered raw bytes. That retained artifact
+calculation deducts the independent announce scheduler's sixteen linked bytes,
+preserving 57,700 carried bytes and 4,020 bytes after its maximum frame.
+Current source instead gates named cumulative storage and startup paths against
+each final linked stack. The preceding pre-PSRAM pair was 165,032/164,336 with
+a 12,388-byte carried margin.
 The painter already covers the one-shot maximum-frame constructor, so the
 carry-forward deduction is deliberately pessimistic rather than a measured
 runtime remainder. It still does not establish interrupt/nesting headroom. It
@@ -470,11 +472,11 @@ proof before ordinary RNS ingress metadata, so receiver `RPTE` generated-proof
 count/tag correctly remains zero. Its correlation joins the `LXTE` release tag,
 the confirmed-TX counter delta, and the sender's delivered tag instead.
 
-The final current default ELF is 13,648,888 bytes with SHA-256
+The retained Stage 5 default ELF is 13,648,888 bytes with SHA-256
 `92e63b60a5f4b830ee55d958fcc446a6878036212904b8748519ae210ba3da58`;
 its 868,656-byte package uses 803,120 application bytes and has SHA-256
 `c8da2af30e2d0ee24ca4b215151d1370b7e1d242991ebbeb024079a730693a3f`.
-The current runtime-measurement HIL ELF is 13,821,496 bytes with SHA-256
+The matching retained runtime-measurement HIL ELF is 13,821,496 bytes with SHA-256
 `7a3fad34699f910a2050468ada6461a0f33d16641ab5425a5c795a71238861ff`;
 its 881,456-byte package uses 815,920 application bytes and has SHA-256
 `12c6f31a7fb64485ad9220edca4ac38ba0a57867ad88ce60fa1a24ffc195d379`.

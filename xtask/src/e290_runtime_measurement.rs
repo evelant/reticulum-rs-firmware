@@ -315,9 +315,12 @@ const LXMF_SNAPSHOT_SEQ_END_WORD: usize = 23;
 // supersedes it with a lower observed 57,716-byte raw painted margin, so policy
 // must fail closed to the powered value. This still does not turn a modified-
 // word watermark into minimum-SP proof. The exact E290 pair reports a
-// 53,664-byte largest frame under the unchanged 53,680-byte ceiling, leaving a
-// deliberately pessimistic 4,036-byte policy margin. This is an E290 internal-
-// stack bound; PSRAM does not back the executor stack.
+// 53,664-byte largest frame under the historical 53,680-byte ceiling, leaving
+// a deliberately pessimistic 4,036-byte margin for that retained artifact.
+// Current-source policy gates named cumulative paths against the final linked
+// stack instead of treating that artifact-specific single-frame value as a
+// product-feature ceiling. This remains an E290 internal-stack measurement;
+// PSRAM does not back the executor stack.
 const PRIOR_QUALIFIED_RAW_STACK_MARGIN_BYTES: u64 = 72_212;
 const PROOF_TRACE_LINKED_STACK_REDUCTION_BYTES: u64 = PROOF_BYTE_SIZE as u64;
 const POST_PROOF_LINKED_STACK_REDUCTION_BYTES: u64 = 3_544;
@@ -332,14 +335,15 @@ const PRE_BOOTSTRAP_QUALIFIED_RAW_STACK_MARGIN_BYTES: u64 = 57_716;
 const BOOTSTRAP_ANNOUNCE_SCHEDULE_LINKED_STACK_REDUCTION_BYTES: u64 = 16;
 const QUALIFIED_RAW_STACK_MARGIN_BYTES: u64 = PRE_BOOTSTRAP_QUALIFIED_RAW_STACK_MARGIN_BYTES
     - BOOTSTRAP_ANNOUNCE_SCHEDULE_LINKED_STACK_REDUCTION_BYTES;
-const MAXIMUM_STACK_FRAME_BYTES: u64 = 53_680;
-const MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES: u64 =
-    QUALIFIED_RAW_STACK_MARGIN_BYTES - MAXIMUM_STACK_FRAME_BYTES;
+const HISTORICAL_QUALIFIED_MAXIMUM_STACK_FRAME_BYTES: u64 = 53_680;
+const HISTORICAL_MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES: u64 =
+    QUALIFIED_RAW_STACK_MARGIN_BYTES - HISTORICAL_QUALIFIED_MAXIMUM_STACK_FRAME_BYTES;
 // The emitted storage-path frames below start at the async task body and stop
 // at the local esp-storage wrapper. Keep explicit room for the small executor
 // poll wrapper, the ROM flash implementation, and interrupt entry that the
 // selected path or ELF's `.stack_sizes` section cannot describe.
 const STORAGE_PATH_STACK_RESERVE_BYTES: u64 = 4_096;
+const STARTUP_STACK_COMPONENT_COUNT: usize = 2;
 const PRE_USB_MOUNT_STACK_COMPONENT_COUNT: usize = 9;
 const LIVE_APPEND_STACK_COMPONENT_COUNT: usize = 9;
 const LIVE_COMPACT_STACK_COMPONENT_COUNT: usize = 10;
@@ -357,6 +361,19 @@ struct StackSymbolSelector {
     required_fragments: &'static [&'static str],
     rejected_fragments: &'static [&'static str],
 }
+
+const STARTUP_STACK_SELECTORS: [StackSymbolSelector; STARTUP_STACK_COMPONENT_COUNT] = [
+    StackSymbolSelector {
+        output_name: "product_main_poll",
+        required_fragments: &["___product_main_task_inner_function"],
+        rejected_fragments: &["UninitCell", "TaskStorage", "HEAP"],
+    },
+    StackSymbolSelector {
+        output_name: "node_core_new",
+        required_fragments: &["reticulum_node_core", "NodeCore", "3new"],
+        rejected_fragments: &[],
+    },
+];
 
 const PRE_USB_MOUNT_STACK_SELECTORS: [StackSymbolSelector; PRE_USB_MOUNT_STACK_COMPONENT_COUNT] = [
     // Rust v0 mangling retains these identifier fragments while crate hashes and
@@ -708,6 +725,7 @@ enum CommandOptions {
     DecodeLxmfTrace(Options),
     DecodeCheckpoint(Options),
     InspectElf(ElfInspectionOptions),
+    InspectStartupElf(StartupElfInspectionOptions),
     CaptureCheckpoint(CaptureCheckpointOptions),
 }
 
@@ -715,6 +733,11 @@ enum CommandOptions {
 struct ElfInspectionOptions {
     default_elf: PathBuf,
     hil_elf: PathBuf,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct StartupElfInspectionOptions {
+    elf: PathBuf,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -781,6 +804,20 @@ struct StackLayout {
     reserved_bytes: u64,
     usable_bytes: u64,
     guard_offset_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DefinedSupervisorStatic {
+    name: String,
+    address: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StartupElfInspection {
+    stack_sizes: StackSizeInventory,
+    startup_stack: LiveMutationStack<STARTUP_STACK_COMPONENT_COUNT>,
+    stack: StackLayout,
+    supervisor_statics: Vec<DefinedSupervisorStatic>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -939,6 +976,9 @@ pub(crate) fn run(args: Vec<String>) -> ExitCode {
         CommandOptions::InspectElf(options) => {
             inspect_elf_pair(&options).map(|value| value.render())
         }
+        CommandOptions::InspectStartupElf(options) => {
+            inspect_startup_elf(&options).map(|value| value.render())
+        }
         CommandOptions::CaptureCheckpoint(options) => execute_capture_checkpoint(&options),
     };
     match result {
@@ -965,6 +1005,7 @@ fn usage() {
          --input <544-byte-bin> [--json]\n  cargo run -p xtask -- \
          e290-runtime-measurement inspect-elf --default-elf <path> \
          --hil-elf <path>\n  cargo run -p xtask -- \
+         e290-runtime-measurement inspect-startup-elf --elf <final-ELF>\n  cargo run -p xtask -- \
          e290-runtime-measurement capture-checkpoint --hil-elf <final-HIL-ELF> \
          --usb-serial <UPPERCASE-E290-USB-SERIAL> --output <absent-directory> \
          [--probe-rs <program>]\n\nThe capture command performs one debugger read only; it never resets, flashes, authenticates, or opens a serial port."
@@ -985,6 +1026,9 @@ fn parse_command_options(args: &[String]) -> Result<CommandOptions, String> {
         }
         Some("inspect-elf") => {
             parse_elf_inspection_options(&args[1..]).map(CommandOptions::InspectElf)
+        }
+        Some("inspect-startup-elf") => {
+            parse_startup_elf_inspection_options(&args[1..]).map(CommandOptions::InspectStartupElf)
         }
         Some("capture-checkpoint") => {
             parse_capture_checkpoint_options(&args[1..]).map(CommandOptions::CaptureCheckpoint)
@@ -1140,6 +1184,36 @@ fn parse_elf_inspection_options(args: &[String]) -> Result<ElfInspectionOptions,
     Ok(ElfInspectionOptions {
         default_elf: default_elf.ok_or_else(|| "--default-elf is required".to_owned())?,
         hil_elf: hil_elf.ok_or_else(|| "--hil-elf is required".to_owned())?,
+    })
+}
+
+fn parse_startup_elf_inspection_options(
+    args: &[String],
+) -> Result<StartupElfInspectionOptions, String> {
+    let mut elf = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--elf" => {
+                if elf.is_some() {
+                    return Err("--elf may be supplied only once".to_owned());
+                }
+                let value = args
+                    .get(index + 1)
+                    .filter(|value| !value.starts_with('-'))
+                    .ok_or_else(|| "--elf requires a value".to_owned())?;
+                if value.is_empty() {
+                    return Err("--elf must not be empty".to_owned());
+                }
+                elf = Some(PathBuf::from(value));
+                index += 2;
+            }
+            value if value.starts_with('-') => return Err(format!("unknown option {value}")),
+            value => return Err(format!("unexpected argument {value}")),
+        }
+    }
+    Ok(StartupElfInspectionOptions {
+        elf: elf.ok_or_else(|| "--elf is required".to_owned())?,
     })
 }
 
@@ -1959,6 +2033,88 @@ fn inspect_elf_pair(options: &ElfInspectionOptions) -> Result<ElfInspection, Str
     };
     inspection.validate()?;
     Ok(inspection)
+}
+
+fn inspect_startup_elf(
+    options: &StartupElfInspectionOptions,
+) -> Result<StartupElfInspection, String> {
+    const LABEL: &str = "startup E290";
+    let bytes = fs::read(&options.elf).map_err(|error| {
+        format!(
+            "could not read {LABEL} ELF {}: {error}",
+            options.elf.display()
+        )
+    })?;
+    let object = parse_xtensa_elf(&bytes, &options.elf, LABEL)?;
+    let stack_sizes = stack_size_records(&object, &options.elf, LABEL)?;
+    let startup_stack = inspect_live_mutation_stack(
+        &object,
+        &stack_sizes.records,
+        &options.elf,
+        LABEL,
+        "startup",
+        &STARTUP_STACK_SELECTORS,
+    )?;
+    let stack_end = unique_symbol_address(&object, &options.elf, LABEL, "_stack_end_cpu0")?;
+    let stack_guard = unique_symbol_address(&object, &options.elf, LABEL, "__stack_chk_guard")?;
+    let stack_start = unique_symbol_address(&object, &options.elf, LABEL, "_stack_start_cpu0")?;
+    let inspection = StartupElfInspection {
+        stack_sizes: stack_sizes.inventory,
+        startup_stack,
+        stack: calculate_stack_layout(LABEL, stack_end, stack_guard, stack_start)?,
+        supervisor_statics: defined_internal_supervisor_statics(&object, &options.elf, LABEL)?,
+    };
+    inspection.validate()?;
+    Ok(inspection)
+}
+
+fn defined_internal_supervisor_statics(
+    object: &object::File<'_>,
+    path: &Path,
+    label: &str,
+) -> Result<Vec<DefinedSupervisorStatic>, String> {
+    let mut statics = Vec::new();
+    for symbol in object.symbols() {
+        if symbol.kind() != SymbolKind::Data || symbol.section() == SymbolSection::Undefined {
+            continue;
+        }
+        let Ok(name) = symbol.name() else {
+            continue;
+        };
+        if !name.ends_with("SUPERVISOR") {
+            continue;
+        }
+        let SymbolSection::Section(index) = symbol.section() else {
+            continue;
+        };
+        let section = object.section_by_index(index).map_err(|error| {
+            format!(
+                "could not resolve {label} ELF {} section for supervisor static {name}: {error}",
+                path.display()
+            )
+        })?;
+        if !matches!(
+            section.kind(),
+            SectionKind::Data
+                | SectionKind::UninitializedData
+                | SectionKind::Tls
+                | SectionKind::UninitializedTls
+                | SectionKind::Common
+        ) {
+            continue;
+        }
+        statics.push(DefinedSupervisorStatic {
+            name: name.to_owned(),
+            address: symbol.address(),
+        });
+    }
+    statics.sort_unstable_by(|left, right| {
+        left.address
+            .cmp(&right.address)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    statics.dedup();
+    Ok(statics)
 }
 
 fn inspect_checkpoint_capture_elf(path: &Path) -> Result<PreparedCheckpointCapture, String> {
@@ -2861,6 +3017,87 @@ fn calculate_stack_layout(
     })
 }
 
+impl StartupElfInspection {
+    fn validate(&self) -> Result<(), String> {
+        if self.stack_sizes.record_count == 0 {
+            return Err("startup E290 .stack_sizes contains no records".to_owned());
+        }
+        if self.stack.guard_offset_bytes != EXPECTED_STACK_GUARD_OFFSET_BYTES {
+            return Err(format!(
+                "startup E290 stack guard offset {} differs from the reviewed {} bytes",
+                self.stack.guard_offset_bytes, EXPECTED_STACK_GUARD_OFFSET_BYTES
+            ));
+        }
+        let selected_maximum_frame = self
+            .startup_stack
+            .frame_bytes
+            .iter()
+            .copied()
+            .max()
+            .expect("startup stack has two selected frames");
+        if self.stack_sizes.maximum_frame_bytes != selected_maximum_frame {
+            return Err(format!(
+                "startup E290 largest compiler-emitted frame {} is not the audited product_main/NodeCore::new maximum {selected_maximum_frame}",
+                self.stack_sizes.maximum_frame_bytes
+            ));
+        }
+        if !self.supervisor_statics.is_empty() {
+            let mut symbols = String::new();
+            for (index, symbol) in self.supervisor_statics.iter().enumerate() {
+                if index != 0 {
+                    symbols.push_str(", ");
+                }
+                write!(symbols, "{}@0x{:x}", symbol.name, symbol.address)
+                    .expect("writing supervisor symbol diagnostics to String cannot fail");
+            }
+            return Err(format!(
+                "startup E290 must not retain a defined internal SUPERVISOR static symbol; found {}: {symbols}",
+                self.supervisor_statics.len()
+            ));
+        }
+        let required_stack_bytes = self.startup_stack.required_stack_bytes("startup")?;
+        if required_stack_bytes > self.stack.usable_bytes {
+            return Err(format!(
+                "startup E290 product_main poll and NodeCore::new compiler-emitted frames total {} bytes plus the reviewed {STORAGE_PATH_STACK_RESERVE_BYTES}-byte ROM/interrupt reserve require {required_stack_bytes} bytes, exceeding the {}-byte usable CPU0 stack by {} bytes",
+                self.startup_stack.cumulative_frame_bytes,
+                self.stack.usable_bytes,
+                required_stack_bytes - self.stack.usable_bytes,
+            ));
+        }
+        Ok(())
+    }
+
+    fn render(&self) -> String {
+        let required_stack_bytes = self
+            .startup_stack
+            .required_stack_bytes("startup")
+            .expect("validated startup stack requirement cannot overflow");
+        let raw_headroom_bytes = self
+            .stack
+            .usable_bytes
+            .checked_sub(self.startup_stack.cumulative_frame_bytes)
+            .expect("validated startup compiler frames must fit usable stack");
+        let policy_headroom_bytes = self
+            .stack
+            .usable_bytes
+            .checked_sub(required_stack_bytes)
+            .expect("validated startup requirement must fit usable stack");
+        format!(
+            "startup.stack_size_records={}\nstartup.maximum_frame_bytes={}\nstartup.stack_reserved_bytes={}\nstartup.stack_usable_bytes={}\nstartup.stack_guard_offset_bytes={}\nstartup.supervisor_static_symbol_count={}\nstartup.product_main_poll_frame_bytes={}\nstartup.node_core_new_frame_bytes={}\nstartup.cumulative_frame_bytes={}\nstartup.reserve_bytes={}\nstartup.required_stack_bytes={required_stack_bytes}\nstartup.raw_headroom_bytes={raw_headroom_bytes}\nstartup.policy_headroom_bytes={policy_headroom_bytes}",
+            self.stack_sizes.record_count,
+            self.stack_sizes.maximum_frame_bytes,
+            self.stack.reserved_bytes,
+            self.stack.usable_bytes,
+            self.stack.guard_offset_bytes,
+            self.supervisor_statics.len(),
+            self.startup_stack.frame_bytes[0],
+            self.startup_stack.frame_bytes[1],
+            self.startup_stack.cumulative_frame_bytes,
+            STORAGE_PATH_STACK_RESERVE_BYTES,
+        )
+    }
+}
+
 impl ElfInspection {
     fn validate(&self) -> Result<(), String> {
         if self.default_proof_trace_symbol_count != 0 {
@@ -2897,12 +3134,6 @@ impl ElfInspection {
         ] {
             if inventory.record_count == 0 {
                 return Err(format!("{label} .stack_sizes contains no records"));
-            }
-            if inventory.maximum_frame_bytes > MAXIMUM_STACK_FRAME_BYTES {
-                return Err(format!(
-                    "{label} maximum compiler-emitted frame {} exceeds the reviewed {}-byte ceiling",
-                    inventory.maximum_frame_bytes, MAXIMUM_STACK_FRAME_BYTES
-                ));
             }
         }
         for (label, stack, minimum_usable, pre_usb_mount_stack) in [
@@ -2965,11 +3196,6 @@ impl ElfInspection {
     }
 
     fn render(self) -> String {
-        let worst_frame = self
-            .default_stack_sizes
-            .maximum_frame_bytes
-            .max(self.hil_stack_sizes.maximum_frame_bytes);
-        let conservative_margin = QUALIFIED_RAW_STACK_MARGIN_BYTES.saturating_sub(worst_frame);
         let mut output = format!(
             "default.stack_size_records={}\ndefault.maximum_frame_bytes={}\ndefault.stack_reserved_bytes={}\ndefault.stack_usable_bytes={}\ndefault.stack_guard_offset_bytes={}\n",
             self.default_stack_sizes.record_count,
@@ -3027,18 +3253,18 @@ impl ElfInspection {
         );
         write!(
             output,
-            "hil.proof_trace_symbol_count={}\nhil.proof_trace_symbol_size_bytes={}\nhil.lxmf_trace_symbol_count={}\nhil.lxmf_trace_symbol_size_bytes={}\npolicy.maximum_frame_bytes={}\npolicy.minimum_default_usable_stack_bytes={}\npolicy.minimum_hil_usable_stack_bytes={}\npolicy.expected_stack_guard_offset_bytes={}\npolicy.storage_path_stack_reserve_bytes={}\nqualification.raw_painted_margin_bytes={}\nqualification.conservative_margin_bytes={}",
+            "hil.proof_trace_symbol_count={}\nhil.proof_trace_symbol_size_bytes={}\nhil.lxmf_trace_symbol_count={}\nhil.lxmf_trace_symbol_size_bytes={}\npolicy.minimum_default_usable_stack_bytes={}\npolicy.minimum_hil_usable_stack_bytes={}\npolicy.expected_stack_guard_offset_bytes={}\npolicy.storage_path_stack_reserve_bytes={}\nqualification.raw_painted_margin_bytes={}\nqualification.historical_maximum_frame_bytes={}\nqualification.historical_conservative_margin_bytes={}",
             self.hil_proof_trace_symbol_count,
             self.hil_proof_trace_symbol_size_bytes,
             self.hil_lxmf_trace_symbol_count,
             self.hil_lxmf_trace_symbol_size_bytes,
-            MAXIMUM_STACK_FRAME_BYTES,
             MINIMUM_DEFAULT_USABLE_STACK_BYTES,
             MINIMUM_HIL_USABLE_STACK_BYTES,
             EXPECTED_STACK_GUARD_OFFSET_BYTES,
             STORAGE_PATH_STACK_RESERVE_BYTES,
             QUALIFIED_RAW_STACK_MARGIN_BYTES,
-            conservative_margin,
+            HISTORICAL_QUALIFIED_MAXIMUM_STACK_FRAME_BYTES,
+            HISTORICAL_MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES,
         )
         .expect("writing stack inspection to String cannot fail");
         output
@@ -4258,14 +4484,15 @@ const _: () = {
     assert!(CHECKPOINT_BYTE_SIZE == 544);
     assert!(PRE_STAGE5_CARRIED_RAW_STACK_MARGIN_BYTES == 63_436);
     assert!(QUALIFIED_RAW_STACK_MARGIN_BYTES == 57_700);
-    assert!(MAXIMUM_STACK_FRAME_BYTES == 53_680);
-    assert!(MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES == 4_020);
+    assert!(HISTORICAL_QUALIFIED_MAXIMUM_STACK_FRAME_BYTES == 53_680);
+    assert!(HISTORICAL_MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES == 4_020);
     assert!(STORAGE_PATH_STACK_RESERVE_BYTES == 4_096);
     assert!(PRE_USB_MOUNT_STACK_SELECTORS.len() == PRE_USB_MOUNT_STACK_COMPONENT_COUNT);
     assert!(LIVE_APPEND_STACK_SELECTORS.len() == LIVE_APPEND_STACK_COMPONENT_COUNT);
     assert!(LIVE_COMPACT_STACK_SELECTORS.len() == LIVE_COMPACT_STACK_COMPONENT_COUNT);
     assert!(
-        MAXIMUM_STACK_FRAME_BYTES + MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES
+        HISTORICAL_QUALIFIED_MAXIMUM_STACK_FRAME_BYTES
+            + HISTORICAL_MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES
             == QUALIFIED_RAW_STACK_MARGIN_BYTES
     );
     assert!(BYTE_SIZE == 256);
@@ -4787,6 +5014,18 @@ mod tests {
             parse_command_options(&strings(&["decode", "--input", "capture.bin"])),
             Ok(CommandOptions::Decode(_))
         ));
+        assert_eq!(
+            parse_command_options(&strings(&[
+                "inspect-startup-elf",
+                "--elf",
+                "production-ble.elf",
+            ])),
+            Ok(CommandOptions::InspectStartupElf(
+                StartupElfInspectionOptions {
+                    elf: PathBuf::from("production-ble.elf"),
+                }
+            ))
+        );
     }
 
     #[test]
@@ -4820,6 +5059,29 @@ mod tests {
             (
                 strings(&["inspect-elf", "default.elf"]),
                 "unexpected argument default.elf",
+            ),
+            (strings(&["inspect-startup-elf"]), "--elf is required"),
+            (
+                strings(&["inspect-startup-elf", "--elf"]),
+                "--elf requires a value",
+            ),
+            (
+                strings(&[
+                    "inspect-startup-elf",
+                    "--elf",
+                    "one.elf",
+                    "--elf",
+                    "two.elf",
+                ]),
+                "--elf may be supplied only once",
+            ),
+            (
+                strings(&["inspect-startup-elf", "--elf=one.elf"]),
+                "unknown option --elf=one.elf",
+            ),
+            (
+                strings(&["inspect-startup-elf", "one.elf"]),
+                "unexpected argument one.elf",
             ),
         ] {
             let error = parse_command_options(&args).expect_err("invalid CLI was accepted");
@@ -4900,8 +5162,9 @@ mod tests {
 
     #[test]
     fn storage_path_selectors_and_frame_resolution_fail_closed() {
-        for selector in PRE_USB_MOUNT_STACK_SELECTORS
+        for selector in STARTUP_STACK_SELECTORS
             .into_iter()
+            .chain(PRE_USB_MOUNT_STACK_SELECTORS)
             .chain(LIVE_APPEND_STACK_SELECTORS)
             .chain(LIVE_COMPACT_STACK_SELECTORS)
         {
@@ -5034,6 +5297,92 @@ mod tests {
     }
 
     #[test]
+    fn startup_elf_policy_gates_the_cumulative_constructor_path_and_static_owner() {
+        let reviewed = StartupElfInspection {
+            stack_sizes: StackSizeInventory {
+                record_count: 1_322,
+                maximum_frame_bytes: 64_288,
+            },
+            startup_stack: LiveMutationStack::from_frame_bytes("startup", [62_016, 64_288])
+                .unwrap(),
+            stack: StackLayout {
+                reserved_bytes: 149_320,
+                usable_bytes: 149_256,
+                guard_offset_bytes: 60,
+            },
+            supervisor_statics: Vec::new(),
+        };
+        reviewed.validate().unwrap();
+        let output = reviewed.render();
+        assert!(output.contains("startup.stack_size_records=1322\n"));
+        assert!(output.contains("startup.maximum_frame_bytes=64288\n"));
+        assert!(output.contains("startup.stack_reserved_bytes=149320\n"));
+        assert!(output.contains("startup.stack_usable_bytes=149256\n"));
+        assert!(output.contains("startup.stack_guard_offset_bytes=60\n"));
+        assert!(output.contains("startup.supervisor_static_symbol_count=0\n"));
+        assert!(output.contains("startup.product_main_poll_frame_bytes=62016\n"));
+        assert!(output.contains("startup.node_core_new_frame_bytes=64288\n"));
+        assert!(output.contains("startup.cumulative_frame_bytes=126304\n"));
+        assert!(output.contains("startup.reserve_bytes=4096\n"));
+        assert!(output.contains("startup.required_stack_bytes=130400\n"));
+        assert!(output.contains("startup.raw_headroom_bytes=22952\n"));
+        assert!(output.ends_with("startup.policy_headroom_bytes=18856"));
+
+        // This command intentionally replaces the stale individual-frame
+        // ceiling for the startup boundary with the measured cumulative path.
+        assert!(
+            reviewed.stack_sizes.maximum_frame_bytes
+                > HISTORICAL_QUALIFIED_MAXIMUM_STACK_FRAME_BYTES
+        );
+
+        let mut regressed = reviewed.clone();
+        regressed.stack_sizes.maximum_frame_bytes += 1;
+        let error = regressed.validate().unwrap_err();
+        assert!(error.contains("largest compiler-emitted frame 64289"));
+        assert!(error.contains("audited product_main/NodeCore::new maximum 64288"));
+
+        let mut regressed = reviewed.clone();
+        regressed.stack.guard_offset_bytes = 64;
+        assert!(
+            regressed
+                .validate()
+                .unwrap_err()
+                .contains("stack guard offset 64")
+        );
+
+        let mut regressed = reviewed.clone();
+        regressed.supervisor_statics = vec![DefinedSupervisorStatic {
+            name: "_RNvProduct10SUPERVISOR".to_owned(),
+            address: 0x3fc9_8188,
+        }];
+        let error = regressed.validate().unwrap_err();
+        assert!(error.contains("must not retain a defined internal SUPERVISOR static symbol"));
+        assert!(error.contains("_RNvProduct10SUPERVISOR@0x3fc98188"));
+
+        let mut regressed = reviewed.clone();
+        regressed.stack.usable_bytes = 130_399;
+        let error = regressed.validate().unwrap_err();
+        assert!(error.contains("product_main poll and NodeCore::new"));
+        assert!(error.contains("exceeding the 130399-byte usable CPU0 stack by 1 bytes"));
+
+        let mut empty = reviewed;
+        empty.stack_sizes.record_count = 0;
+        assert!(
+            empty
+                .validate()
+                .unwrap_err()
+                .contains(".stack_sizes contains no records")
+        );
+
+        let not_an_elf = TempInput::new(b"not-an-elf");
+        let error = inspect_startup_elf(&StartupElfInspectionOptions {
+            elf: not_an_elf.path().to_owned(),
+        })
+        .expect_err("non-ELF startup artifact was accepted");
+        assert!(error.contains("could not parse startup E290 ELF"));
+    }
+
+    #[test]
     fn elf_policy_accepts_reviewed_bounds_and_rejects_frame_or_stack_regressions() {
         let default_pre_usb_mount_stack = PreUsbMountStack::from_frame_bytes([
             35_984, 2_640, 80, 320, 912, 4_592, 4_368, 4_144, 32,
@@ -5070,7 +5419,7 @@ mod tests {
         let reviewed = ElfInspection {
             default_stack_sizes: StackSizeInventory {
                 record_count: 1_025,
-                maximum_frame_bytes: 53_680,
+                maximum_frame_bytes: 64_288,
             },
             default_pre_usb_mount_stack,
             default_live_append_stack,
@@ -5084,7 +5433,7 @@ mod tests {
             default_lxmf_trace_symbol_count: 0,
             hil_stack_sizes: StackSizeInventory {
                 record_count: 1_025,
-                maximum_frame_bytes: 53_680,
+                maximum_frame_bytes: 64_288,
             },
             hil_pre_usb_mount_stack,
             hil_live_append_stack,
@@ -5101,7 +5450,7 @@ mod tests {
         };
         reviewed.validate().unwrap();
         let output = reviewed.render();
-        assert!(output.contains("default.maximum_frame_bytes=53680\n"));
+        assert!(output.contains("default.maximum_frame_bytes=64288\n"));
         assert!(output.contains("default.stack_usable_bytes=162376\n"));
         assert!(
             output.contains("default.pre_usb_mount.submission_runtime_mount_into_frame_bytes=80\n")
@@ -5126,7 +5475,8 @@ mod tests {
         assert!(output.contains("hil.lxmf_trace_symbol_count=1\n"));
         assert!(output.contains("hil.lxmf_trace_symbol_size_bytes=96\n"));
         assert!(output.contains("policy.storage_path_stack_reserve_bytes=4096\n"));
-        assert!(output.ends_with("qualification.conservative_margin_bytes=4020"));
+        assert!(output.contains("qualification.historical_maximum_frame_bytes=53680\n"));
+        assert!(output.ends_with("qualification.historical_conservative_margin_bytes=4020"));
 
         let mut regressed = reviewed;
         regressed.default_proof_trace_symbol_count = 1;
@@ -5161,14 +5511,6 @@ mod tests {
         let mut regressed = reviewed;
         regressed.hil_lxmf_trace_symbol_size_bytes = 95;
         assert!(regressed.validate().unwrap_err().contains("size=95"));
-
-        let mut regressed = reviewed;
-        regressed.default_stack_sizes.maximum_frame_bytes += 1;
-        assert!(regressed.validate().unwrap_err().contains("frame 53681"));
-
-        let mut regressed = reviewed;
-        regressed.hil_stack_sizes.maximum_frame_bytes += 1;
-        assert!(regressed.validate().unwrap_err().contains("frame 53681"));
 
         let mut regressed = reviewed;
         regressed.default_pre_usb_mount_stack =

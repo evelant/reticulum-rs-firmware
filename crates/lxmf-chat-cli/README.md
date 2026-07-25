@@ -52,8 +52,8 @@ Xtensa target and 375,568 bytes in the 64-bit host fixture. That total includes
 an actor-owned replay scratch index which keeps boot, append validation, and
 compaction replay off the CPU stack while preserving the live index until a
 durable result. The final linked-path sums are mount/append/compact
-53,072/52,816/52,704 bytes for the default image and
-53,248/53,040/52,928 bytes for the runtime-measurement HIL; every path must also
+79,376/54,320/54,112 bytes for the default image and
+54,352/54,656/54,448 bytes for the runtime-measurement HIL; every path must also
 fit a 4,096-byte ROM flash-read/interrupt reserve. The initially flashed
 128-entry image failed this expanded gate and was not qualified. The corrected
 source passes the static gate and a bounded two-message powered run; a

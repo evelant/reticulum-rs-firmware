@@ -39,6 +39,7 @@ import { byteLimitError, utf8ByteLength } from "../lib/limits.ts";
 import { readNativeCoreStatus } from "../lib/native-core";
 import type { NativeCoreStatus } from "../lib/native-core-types.ts";
 import {
+  associatedNomadDestinationForLxmf,
   type NearbyPeerView,
   nearbyPeerFingerprint,
   nearbyPeerRouteHint,
@@ -213,7 +214,8 @@ function NomadPanel({
       case "input_error":
         return (
           <Text style={styles.nomadHint}>
-            Enter a Nomad node destination, or choose Browse beside an authenticated nearby peer.
+            Enter the peer&apos;s distinct Nomad node destination, or choose Browse beside an
+            authenticated nearby peer. Its LXMF/contact destination is a different address.
           </Text>
         );
       case "starting":
@@ -347,6 +349,9 @@ function NomadPanel({
         style={[styles.input, styles.monospaceInput]}
         value={destination}
       />
+      <Text style={styles.nomadHint}>
+        Use the distinct Nomad node destination. An LXMF/contact destination will not resolve here.
+      </Text>
       <Text style={styles.label}>Page path</Text>
       <TextInput
         accessibilityLabel="Nomad page path"
@@ -473,10 +478,14 @@ interface NearbyPanelProps {
   readonly compact: boolean;
   readonly connected: boolean;
   readonly contacts: ContactView[];
+  readonly loadError: string | null;
+  readonly loaded: boolean;
+  readonly loading: boolean;
   readonly onBrowseNomad: (destination: string) => void;
-  readonly onRefresh: (() => Promise<NearbyPeerView[]>) | null;
+  readonly onRefresh: (() => Promise<void>) | null;
   readonly onSelect: (destination: string) => void;
   readonly onUpsert: (destination: string, name: string) => Promise<boolean>;
+  readonly peers: readonly NearbyPeerView[];
 }
 
 function NearbyPanel({
@@ -484,51 +493,16 @@ function NearbyPanel({
   compact,
   connected,
   contacts,
+  loadError,
+  loaded,
+  loading,
   onBrowseNomad,
   onRefresh,
   onSelect,
   onUpsert,
+  peers,
 }: NearbyPanelProps) {
   const [addingDestination, setAddingDestination] = useState<string | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [loaded, setLoaded] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [peers, setPeers] = useState<NearbyPeerView[]>([]);
-  const loadGeneration = useRef(0);
-  const wasConnected = useRef(false);
-
-  const refreshNearby = useCallback(async () => {
-    if (onRefresh === null || !connected) return;
-    const generation = loadGeneration.current + 1;
-    loadGeneration.current = generation;
-    setLoading(true);
-    setLoadError(null);
-    try {
-      const discovered = await onRefresh();
-      if (loadGeneration.current !== generation) return;
-      setPeers(discovered);
-      setLoaded(true);
-    } catch (nextError) {
-      if (loadGeneration.current !== generation) return;
-      setLoadError(errorText(nextError));
-      setLoaded(true);
-    } finally {
-      if (loadGeneration.current === generation) setLoading(false);
-    }
-  }, [connected, onRefresh]);
-
-  useEffect(() => {
-    const becameConnected = connected && !wasConnected.current;
-    wasConnected.current = connected;
-    if (becameConnected && onRefresh !== null) void refreshNearby();
-  }, [connected, onRefresh, refreshNearby]);
-
-  useEffect(
-    () => () => {
-      loadGeneration.current += 1;
-    },
-    [],
-  );
 
   const choosePeer = async (peer: NearbyPeerView, alreadyAdded: boolean) => {
     if (alreadyAdded) {
@@ -613,7 +587,7 @@ function NearbyPanel({
           accessibilityLabel="Refresh nearby peers"
           accessibilityRole="button"
           disabled={busy || loading || !connected || onRefresh === null}
-          onPress={() => void refreshNearby()}
+          onPress={() => void onRefresh?.()}
           style={({ pressed }) => [
             styles.smallButton,
             (busy || loading || !connected || onRefresh === null) && styles.buttonDisabled,
@@ -630,6 +604,10 @@ function NearbyPanel({
       ) : !connected ? (
         <Text accessibilityLiveRegion="polite" style={styles.nearbyStatus}>
           Connect to the appliance to read peers it has heard.
+        </Text>
+      ) : loading && !loaded ? (
+        <Text accessibilityLiveRegion="polite" style={styles.nearbyStatus}>
+          Reading authenticated announces from the appliance…
         </Text>
       ) : loadError !== null ? (
         <View accessibilityLiveRegion="assertive" style={styles.nearbyError}>
@@ -685,7 +663,61 @@ function Sidebar({
   const [name, setName] = useState("");
   const [destination, setDestination] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
+  const [nearbyPeers, setNearbyPeers] = useState<NearbyPeerView[]>([]);
+  const [nearbyLoadError, setNearbyLoadError] = useState<string | null>(null);
+  const [nearbyLoaded, setNearbyLoaded] = useState(false);
+  const [nearbyLoading, setNearbyLoading] = useState(false);
+  const nearbyRequests = useRef(new LatestRequest());
   const readyConnection = snapshot?.connection.state === "ready" ? snapshot.connection : undefined;
+  const nearbyConnectionKey =
+    readyConnection === undefined
+      ? null
+      : [
+          snapshot?.device?.device_id ?? "",
+          transportLabel(readyConnection.transport),
+          readyConnection.endpoint,
+          readyConnection.device_label,
+        ].join("\u0000");
+  const nearbyConnectionKeyRef = useRef(nearbyConnectionKey);
+  nearbyConnectionKeyRef.current = nearbyConnectionKey;
+
+  const refreshNearby = useCallback(async () => {
+    const source = nearbyConnectionKey;
+    if (onRefreshNearby === null || source === null) return;
+
+    const request = nearbyRequests.current.begin();
+    setNearbyLoading(true);
+    setNearbyLoadError(null);
+    try {
+      const discovered = await onRefreshNearby();
+      if (!nearbyRequests.current.accepts(request) || nearbyConnectionKeyRef.current !== source) {
+        return;
+      }
+      setNearbyPeers(discovered);
+      setNearbyLoaded(true);
+    } catch (nextError) {
+      if (!nearbyRequests.current.accepts(request) || nearbyConnectionKeyRef.current !== source) {
+        return;
+      }
+      setNearbyLoadError(errorText(nextError));
+      setNearbyLoaded(true);
+    } finally {
+      if (nearbyRequests.current.accepts(request) && nearbyConnectionKeyRef.current === source) {
+        setNearbyLoading(false);
+      }
+    }
+  }, [nearbyConnectionKey, onRefreshNearby]);
+
+  useEffect(() => {
+    nearbyRequests.current.invalidate();
+    setNearbyPeers([]);
+    setNearbyLoadError(null);
+    setNearbyLoaded(false);
+    setNearbyLoading(false);
+    if (nearbyConnectionKey !== null && onRefreshNearby !== null) void refreshNearby();
+
+    return () => nearbyRequests.current.invalidate();
+  }, [nearbyConnectionKey, onRefreshNearby, refreshNearby]);
 
   const save = async () => {
     const normalizedDestination = destination.trim().toLowerCase();
@@ -709,25 +741,47 @@ function Sidebar({
     setShowForm(false);
   };
 
-  const contactRows = contacts.map((contact) => (
-    <Pressable
-      accessibilityRole="button"
-      key={contact.destination}
-      onPress={() => onSelect(contact.destination)}
-      style={({ pressed }) => [
-        styles.contact,
-        selected === contact.destination && styles.contactActive,
-        pressed && styles.contactPressed,
-      ]}
-    >
-      <Text numberOfLines={1} style={styles.contactName}>
-        {contact.name || "Unnamed contact"}
-      </Text>
-      <Text selectable style={styles.monospace}>
-        {contact.destination}
-      </Text>
-    </Pressable>
-  ));
+  const contactRows = contacts.map((contact) => {
+    const nomadDestination = associatedNomadDestinationForLxmf(nearbyPeers, contact.destination);
+    const displayName = contact.name || "Unnamed contact";
+    return (
+      <View
+        key={contact.destination}
+        style={[styles.contact, selected === contact.destination && styles.contactActive]}
+      >
+        <Pressable
+          accessibilityLabel={`Open ${displayName}`}
+          accessibilityRole="button"
+          onPress={() => onSelect(contact.destination)}
+          style={({ pressed }) => [styles.contactSelection, pressed && styles.contactPressed]}
+        >
+          <Text numberOfLines={1} style={styles.contactName}>
+            {displayName}
+          </Text>
+          <Text selectable style={styles.monospace}>
+            {contact.destination}
+          </Text>
+        </Pressable>
+        {nomadDestination === null ? null : (
+          <Pressable
+            accessibilityHint="Uses the distinct Nomad destination authenticated in this peer's nearby announce"
+            accessibilityLabel={`Browse ${displayName} on NomadNet`}
+            accessibilityRole="button"
+            disabled={busy}
+            onPress={() => onBrowseNomad(nomadDestination)}
+            style={({ pressed }) => [
+              styles.nearbyPeerButton,
+              styles.contactBrowseButton,
+              busy && styles.buttonDisabled,
+              pressed && !busy && styles.contactPressed,
+            ]}
+          >
+            <Text style={styles.nearbyPeerAction}>Browse</Text>
+          </Pressable>
+        )}
+      </View>
+    );
+  });
 
   const sidebarContents = (
     <>
@@ -764,10 +818,14 @@ function Sidebar({
           compact={compact}
           connected={readyConnection !== undefined}
           contacts={contacts}
+          loadError={nearbyLoadError}
+          loaded={nearbyLoaded}
+          loading={nearbyLoading}
           onBrowseNomad={onBrowseNomad}
-          onRefresh={onRefreshNearby}
+          onRefresh={onRefreshNearby === null ? null : refreshNearby}
           onSelect={onSelect}
           onUpsert={onUpsert}
+          peers={nearbyPeers}
         />
       ) : null}
       {showForm ? (
@@ -1657,7 +1715,16 @@ const styles = StyleSheet.create({
     fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
   },
   contacts: { gap: 6 },
-  contact: { gap: 3, padding: 11, borderColor: "transparent", borderWidth: 1, borderRadius: 8 },
+  contact: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderColor: "transparent",
+    borderWidth: 1,
+    borderRadius: 8,
+  },
+  contactSelection: { flex: 1, minWidth: 0, gap: 3, padding: 11 },
+  contactBrowseButton: { marginRight: 8 },
   contactActive: { borderColor: colors.line, backgroundColor: colors.panel2 },
   contactPressed: { opacity: 0.8 },
   contactName: { color: "#dfe8df", fontWeight: "700" },

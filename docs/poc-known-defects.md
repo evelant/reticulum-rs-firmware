@@ -178,9 +178,12 @@ proof unless a failing test promotes one into a release blocker.
   pressure discards the request. An ambiguous terminal response fault may
   fail-stop the responder until reset rather than risk losing an exact action
   owner.
-- The registration, classification, response preparation, and node-task owner
-  ordering are source/host qualified only. There is no powered responder proof
-  yet. The permanent authenticated device API now composes API 1.6 start/poll
+- The [bounded powered Nomad proof](e290-nomad-powered-proof.md) exercised one
+  complete path: Board A announced its distinct `nomadnetwork.node`
+  destination over LoRa, Board B exposed the associated destination through
+  Nearby/Browse, MetalbeardMobile authenticated to B over production BLE, and
+  the user confirmed that `/page/index.mu` was fetched from A and rendered on
+  the phone. The permanent authenticated device API composes API 1.6 start/poll
   with the product Nomad client runtime. That client has one boot-scoped slot:
   it retains one principal-owned active or terminal fetch, replays an exact
   principal/idempotency-key retry, rejects a distinct start while active, and
@@ -188,11 +191,13 @@ proof unless a failing test promotes one into a release blocker.
   complete UTF-8 page of at most 400 bytes or a closed failure; Resource
   responses are unsupported.
 - The Expo client now drives API 1.6 through its existing authenticated
-  appliance session, displays the exact raw Micron response, and derives a
-  nearby LXMF peer's associated `nomadnetwork.node` destination in Rust for
-  one-tap browsing. It does not yet maintain an independent Nomad announce
-  directory or render Micron. The outbound API path remains source/host
-  qualified rather than powered-qualified.
+  appliance session and derives a nearby LXMF peer's associated
+  `nomadnetwork.node` destination in Rust for one-tap browsing. Pasting the
+  peer's primary or `lxmf.delivery` hash correctly fails because neither names
+  the distinct Nomad destination. The powered proof covers only the bounded
+  static page; an independent Nomad announce directory and a general Micron
+  renderer remain absent, and pressure, reset, concurrent-client, flash
+  readback, cache-disabled interaction, and soak remain unqualified.
 
 ## Discovery and multiple transports
 
@@ -319,7 +324,10 @@ proof unless a failing test promotes one into a release blocker.
   with authenticated BLE and the two-E290 LoRa path. It remains an external
   companion rather than an E290-served or onboard client: there is still no
   E290-served web UI, physically qualified Wi-Fi client bearer, display UI,
-  NomadNet client, Micron client, or physical Android qualification.
+  general/Resource-backed NomadNet client, standards-complete Micron renderer,
+  or physical Android qualification. The one bounded powered Nomad fetch/render
+  is recorded separately in
+  [the Nomad proof](e290-nomad-powered-proof.md).
 - The host BLE connector currently reuses `BleTransport` through the
   E290-specific physical-qualifier package, which also owns its diagnostic CLI
   and browser bridge. This avoided duplicating the already-powered
@@ -430,8 +438,10 @@ proof unless a failing test promotes one into a release blocker.
   still panic/assert on scheduler, strict-internal allocation, or controller
   initialization faults. The production logger is intentionally a no-op while
   USB is quarantined, so such a panic is silent. The powered activity-budget
-  diagnosis closes the observed startup blocker, not this general hardening
-  residual.
+  diagnosis closed its historical controller-budget blocker, and the later
+  USB-visible stack diagnostic separately found and closed the observed
+  `NodeCore::new` construction overflow described under the hardware profile.
+  Neither bounded diagnosis closes this general hardening residual.
 - The host service has no operating-system single-instance lock, notification
   service, account migration, database encryption, activation-ambiguous repair,
   or cross-platform disconnect/host-suspend matrix. Managed profiles currently
@@ -481,24 +491,37 @@ proof unless a failing test promotes one into a release blocker.
   375,544 bytes; its 64-bit host fixture is 375,568 bytes. That includes an
   actor-owned replay scratch index which keeps boot, append validation, and
   compaction replay off the CPU stack while preserving the live index until a
-  durable outcome.
-- The final linked-path gate records default mount/append/compact sums of
-  53,072/52,816/52,704 bytes and runtime-measurement-HIL sums of
-  53,248/53,040/52,928 bytes. Each path must additionally fit a 4,096-byte
+  durable outcome. The complete permanent supervisor, including `NodeCore`, is
+  now also validated, boxed, and leaked in PSRAM before radio initialization.
+  Channels, packet buffers, permit stores, Embassy task pools, and
+  IRQ/DMA/cache-off state remain internal. The node's private identity now
+  resides in PSRAM with that owner; this is not encryption or
+  physical-extraction resistance.
+- The current final linked-path gate records default mount/append/compact sums
+  of 79,376/54,320/54,112 bytes and runtime-measurement-HIL sums of
+  54,352/54,656/54,448 bytes. Each path must additionally fit a 4,096-byte
   ROM flash-read/interrupt reserve. The initially flashed 128-entry image
   failed this expanded gate and was not qualified. A corrected historical
   image passed the gate and a two-message powered run, but still needs
   allocator, stack-watermark, fill/pressure, and timing qualification before a
   release claim.
-- The installed ESP 15.2.0 toolchain currently emits a 64,288-byte maximum
-  compiler frame for `NodeCore::new`, above the retained 53,680-byte
-  linked-ELF policy ceiling. An older BLE artifact already emitted 62,160
-  bytes, while the new Nomad adapter's largest visible frame is only 448
-  bytes, so this appears to be a pre-existing/toolchain-sensitive
-  requalification problem rather than Nomad runtime growth. Target compilation
-  and strict Clippy pass, but the linked-ELF stack gate must not be claimed
-  until the boot path is remeasured and the policy is deliberately rebaselined
-  or the frame is reduced.
+- The installed ESP 15.2.0 toolchain emits a 64,288-byte compiler frame for
+  `NodeCore::new`. In the old production BLE ELF it nested beneath the
+  62,016-byte `product_main` poll frame against only 122,808 usable CPU0 stack
+  bytes: 126,304 bytes crossed the guard by 3,496 bytes before the reviewed
+  4,096-byte reserve. A powered diagnostic captured that exact stack-guard
+  panic at `main.rs:954`. Removing the duplicate internal supervisor
+  `StaticCell` and moving the complete supervisor to `ExternalMemory` before
+  the radio await leaves the frames unchanged but raises the fixed production
+  BLE ELF to 149,320 raw/149,256 usable stack bytes. The 130,400-byte
+  frames-plus-reserve requirement therefore has 18,856 bytes of linked-policy
+  headroom. The fixed diagnostic reached advertising with 40,996 internal-heap
+  bytes free and no panic; the fixed production image independently
+  advertised, authenticated over macOS CoreBluetooth, and returned identities.
+  This closes the specific startup defect, not powered flash/readback plus
+  simultaneous BLE/LoRa/cache-disabled interaction, pressure, or soak
+  qualification. The private node identity's new PSRAM residence also needs
+  explicit security review.
 - Non-PSRAM ESP32 boards may compile reduced profiles with services disabled.
   They do not define the maximum product feature set, and fitting the complete
   stack on the Tracker V2 is not a requirement.

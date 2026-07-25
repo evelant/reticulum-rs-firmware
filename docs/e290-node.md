@@ -488,11 +488,11 @@ Device configuration, Resource and propagated LXMF, responder/backchannel
 reuse, generic capacity-driven
 active-Link close/LRU eviction,
 initiator/backchannel direct receive, durable delete/reclaim and migration
-policy, independent Nomad announce-directory discovery, Micron rendering,
-Resource-backed Nomad responses, and production-ready host-facing
-USB/BLE/Wi-Fi services remain visible product work. API 1.4 and the host CLI
-now provide a basic USB LXMF send/list/read POC; they are not the final client
-surface. The
+policy, independent Nomad announce-directory discovery, standards-complete
+Micron rendering, Resource-backed Nomad responses, and production-ready
+host-facing USB/BLE/Wi-Fi services remain visible product work. API 1.4 and the
+host CLI now provide a basic USB LXMF send/list/read POC; they are not the final
+client surface. The
 one-entry raw-RNS qualification record remains separate from the dedicated
 opportunistic and responder-side direct-packet LXMF receive store.
 
@@ -677,41 +677,48 @@ dequeue fresh ingress, tick, or announce.
 
 The image autodetects ESP32-S3 PSRAM and refuses to continue unless the mapped
 capacity is between the qualified 8 MiB floor and the board datasheet's 16 MiB
-claim. Fixed channels, task storage, permit stores, and IRQ/synchronization-
-visible state remain in internal static RAM. The LXMF backing allocations named
-below are deliberately external. The ordinary and Wi-Fi profiles retain their
-measured 64 KiB reclaimed heap. The opt-in BLE profile receives 72 KiB followed
-by the detected PSRAM. That is the largest whole-KiB allocation that fits the
-ESP32-S3 linker's separate 73,744-byte DRAM2 segment; it leaves 16 bytes rather
-than reducing the product executor stack in ordinary DRAM. The BLE-only
-additional 8 KiB is available to esp-radio's 8,192-byte strict-internal
-controller-task stack and other controller allocations. This remains below
-the pinned esp-radio 0.18 documentation's conservative 100 KiB total
-recommendation (64 KiB reclaimed plus 36 KiB ordinary). The 2026-07-23 powered
-BLE startup diagnostic nevertheless completed controller initialization,
-Trouble host/GATT construction, runner startup, and advertising under exactly
-72 KiB, with 41,040 internal-heap bytes free after advertising. No further heap
-increase is required for this startup path; sustained authenticated load and
-high-water qualification remain open. Because `esp-alloc` searches registered
-regions in order, ordinary global allocations currently consume internal heap
-first and spill into PSRAM only when no internal hole fits. That is a measured
-baseline, not the intended long-term placement policy: large protocol/client
-payloads will need explicit external allocation, while atomics, synchronization,
-DMA/IRQ-visible state and flash-critical state must remain internal. Largest
-contiguous free space is not exposed by the pinned allocator and must not be
-inferred from total free bytes.
+claim. Fixed channels, packet buffers, permit stores, Embassy task pools, and
+IRQ/DMA/cache-off or synchronization-visible state remain in internal static
+RAM. The permanent `ProductSupervisor`, including its sole `NodeCore`, is now
+deliberately placed in PSRAM before the radio-initialization await; its task
+retains only the resulting stable reference. This also places the node's
+private Reticulum identity in PSRAM. The ordinary and Wi-Fi profiles retain
+their measured 64 KiB reclaimed heap. The opt-in BLE profile receives 72 KiB
+followed by the detected PSRAM. That is the largest whole-KiB allocation that
+fits the ESP32-S3 linker's separate 73,744-byte DRAM2 segment; it leaves 16
+bytes rather than reducing the product executor stack in ordinary DRAM. The
+BLE-only additional 8 KiB is available to esp-radio's 8,192-byte
+strict-internal controller-task stack and other controller allocations. This
+remains below the pinned esp-radio 0.18 documentation's conservative 100 KiB
+total recommendation (64 KiB reclaimed plus 36 KiB ordinary). The corrected
+powered BLE startup diagnostic nevertheless completed controller
+initialization, Trouble host/GATT construction, runner startup, and advertising
+under exactly 72 KiB, with 40,996 internal-heap bytes free after advertising.
+No further heap increase is required for this startup path; sustained
+authenticated load and high-water qualification remain open. Because
+`esp-alloc` searches registered regions in order, ordinary global allocations
+currently consume internal heap first and spill into PSRAM only when no
+internal hole fits. That is a measured baseline, not the intended long-term
+placement policy: large protocol/client payloads will need explicit external
+allocation, while atomics, synchronization, DMA/IRQ-visible state and
+flash-critical state must remain internal. Largest contiguous free space is
+not exposed by the pinned allocator and must not be inferred from total free
+bytes.
 
-The explicitly external allocations are now the 128-entry submission runtime,
-LXMF store index, delayed-proof slot backing, and retry/fault/proof-holder
-state. The target submission runtime is exactly 375,544 bytes (the 64-bit host
-fixture is 375,568 bytes), including its independent actor-owned journal-replay
-scratch index. The index's 512 opaque slots
-are derived from the exact 2 MiB partition length divided by the store's 4 KiB
-extent size. Each allocation is made with `ExternalMemory` after PSRAM
+The explicitly external allocations are now the permanent supervisor/node,
+128-entry submission runtime, LXMF store index, delayed-proof slot backing,
+and retry/fault/proof-holder state. The target submission runtime is exactly
+375,544 bytes (the 64-bit host fixture is 375,568 bytes), including its
+independent actor-owned journal-replay scratch index. The index's 512 opaque
+slots are derived from the exact 2 MiB partition length divided by the store's
+4 KiB extent size. Each allocation is made with `ExternalMemory` after PSRAM
 registration, checked for its expected initialized length/bytes/alignment and
 containment in the detected PSRAM mapping, then leaked for the boot lifetime.
 Allocation or validation failure leaves the product inert; there is no internal-
 RAM fallback. The application-event slots remain in internal static RAM.
+Moving the node identity to PSRAM does not add encryption or physical-extraction
+resistance; flash, BLE/LoRa concurrency, and cache-disabled interaction still
+require dedicated powered qualification.
 
 The target requires a 16 MiB flash image/header and uses
 [`partitions/heltec-vision-master-e290-node.csv`](../partitions/heltec-vision-master-e290-node.csv):
@@ -830,25 +837,32 @@ cargo +stable run --locked -p xtask -- e290-runtime-measurement inspect-elf \
 ```
 
 It accepts only final little-endian 32-bit Xtensa `ET_EXEC` images with one
-nonempty, relocation-free `.stack_sizes` section. Both maximum frames must be
-at most 53,680 bytes, both linker guard offsets must remain 60 bytes, and the
-post-offload default/HIL usable stacks must remain at least 162,376/161,576
-bytes. Those checks constrain individual frames and total linked stack space;
-they do not by themselves constrain simultaneously live nested frames. The
-inspector therefore resolves and sums the exact compiler-emitted components of
-all three capacity-sensitive storage paths, then adds a reviewed 4,096-byte
-reserve for the lower ROM flash-read implementation and interrupt entry that
+nonempty, relocation-free `.stack_sizes` section. Both linker guard offsets
+must remain 60 bytes, and the post-offload default/HIL usable stacks must
+remain at least 162,376/161,576 bytes. The retained 53,680-byte value belongs
+to the historical powered artifact; it is reported as qualification
+provenance, not imposed as a current product-feature ceiling. The inspector
+instead resolves and sums the exact compiler-emitted components of all three
+capacity-sensitive storage paths, then adds a reviewed 4,096-byte reserve for
+the lower ROM flash-read implementation and interrupt entry that
 `.stack_sizes` cannot describe:
 
 | Profile | Mount | Append | Compact | Reserve per path |
 | --- | ---: | ---: | ---: | ---: |
-| Default | 53,072 B | 52,816 B | 52,704 B | 4,096 B |
-| Runtime-measurement HIL | 53,248 B | 53,040 B | 52,928 B | 4,096 B |
+| Default | 79,376 B | 54,320 B | 54,112 B | 4,096 B |
+| Runtime-measurement HIL | 54,352 B | 54,656 B | 54,448 B | 4,096 B |
 
-The resulting enforced totals are 57,168/56,544/56,432 bytes for the default
-mount/append/compact paths and 57,344/56,768/56,656 bytes for HIL. Missing,
+The resulting enforced totals are 83,472/58,416/58,208 bytes for the default
+mount/append/compact paths and 58,448/58,752/58,544 bytes for HIL. Missing,
 ambiguous, conflicting, or changed component topology fails closed for review
 rather than silently shortening a path.
+
+The exact current-source default/HIL ELFs inspected on 2026-07-25 contain
+1,092/1,109 stack-size records, report the known 64,288-byte `NodeCore::new`
+maximum, and retain 183,936/183,136 usable CPU0 stack bytes. Their storage-path
+requirements above leave at least 100,464/124,384 bytes of linked-policy
+headroom. These are local linked-artifact measurements, not flash-readback or
+powered high-water evidence.
 
 The original cumulative mount gate was added after the first API 1.4 default
 startup failed before USB enumeration. Every individual emitted frame passed
@@ -869,6 +883,45 @@ not a powered high-water measurement. The corrected 128-entry image has passed
 a bounded powered bidirectional chat proof; a 128-message fill and pressure
 qualification remain open.
 
+The later BLE/API 1.6 composition exposed a distinct construction path under
+the installed ESP 15.2.0 toolchain. Its old exact production ELF reserved
+122,872 CPU0 stack bytes, of which 122,808 were usable above the 60-byte guard
+offset and four-byte guard word. The emitted `product_main` poll and
+`NodeCore::new` frames were 62,016 and 64,288 bytes. Because that call is
+nested, their 126,304-byte total crossed the usable guard boundary by 3,496
+bytes even before the reviewed 4,096-byte lower-call/interrupt reserve. The
+powered USB-visible diagnostic captured the corresponding ESP stack-guard
+panic at `main.rs:954`; this was not a BLE advertisement selector or client
+permission failure.
+
+The corrected composition removes the duplicate internal
+`StaticCell<ProductSupervisor>` and boxes, validates, and leaks the complete
+supervisor in `ExternalMemory` before the radio-initialization await. This puts
+the supervisor and its `NodeCore` in PSRAM while leaving the channels, packet
+buffers, permit stores, task pools, and IRQ/DMA/cache-off owners internal. The
+exact fixed production BLE ELF retains the same 62,016- and 64,288-byte
+compiler frames but reserves 149,320 stack bytes, 149,256 usable. The nested
+frames plus the 4,096-byte reserve require 130,400 bytes and leave 18,856 bytes
+of linked-policy headroom. This exact BLE calculation supplements rather than
+rewrites the retained default/HIL limits above; it is not a powered stack
+high-water measurement.
+
+The separate startup inspector applies that same cumulative-path rule to every
+current product ELF:
+
+```sh
+cargo +stable run --locked -p xtask -- \
+  e290-runtime-measurement inspect-startup-elf \
+  --elf target/e290-default/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node
+```
+
+It requires the ELF-wide largest compiler frame to be one of the selected
+`product_main`/`NodeCore::new` frames, sums both frames with the 4,096-byte
+reserve against the final linked CPU0 stack, preserves the exact 60-byte guard
+offset, and rejects any defined internal data/BSS symbol ending in
+`SUPERVISOR`. CI runs it against freshly relinked default, production-BLE, and
+runtime-measurement HIL images.
+
 The default ELF must exclude both traces; the HIL ELF must contain
 exactly one initialized 192-byte symbol and one initialized 96-byte symbol
 whose linked bytes decode as valid empty `RPTE` and `LXTE` records. Record
@@ -887,12 +940,14 @@ pre-PSRAM pair was
 165,032/164,336. Before the post-offload image was powered, its linked-only
 interim policy carried the older raw margin forward as 63,436 bytes after
 8,584 bytes of post-proof linked internal-RAM growth, leaving 9,756 bytes under
-the 53,680-byte ceiling. The historical pre-LXTE Stage 5 placement checkpoint
-superseded that interim policy with 57,716 powered raw bytes. The independent
-announce scheduler adds sixteen linked bytes, so current policy carries forward
-57,700 bytes. Subtracting the current 53,680-byte maximum-frame ceiling leaves
-a fail-closed 4,020-byte policy margin. The pre-scheduler historical values
-remain 4,036 and 4,052 bytes respectively. The final
+the historical 53,680-byte ceiling. The historical pre-LXTE Stage 5 placement
+checkpoint superseded that interim policy with 57,716 powered raw bytes. The
+independent announce scheduler adds sixteen linked bytes, so that retained
+artifact calculation carries 57,700 bytes. Subtracting its historical
+53,680-byte maximum leaves a 4,020-byte artifact margin. Current source uses
+the named cumulative storage/startup path gates above instead of extending
+that single-frame ceiling. The pre-scheduler historical values remain 4,036
+and 4,052 bytes respectively. The final
 default-profile linked-layout delta is 2,632 bytes; the HIL
 delta is 2,640 bytes. Both remain useful provenance and neither is the size of
 the externally placed LXMF state. This floor qualifies the
@@ -1725,21 +1780,28 @@ value for `/page/index.mu`, then returns a static UTF-8 Micron page no larger
 than 400 bytes as one direct packet. It deliberately has no Resource, forms,
 files, or dynamic content. Response-allocation pressure discards the request;
 an ambiguous terminal response fault may leave the responder fail-stopped until
-reset. These are source and host-test claims only: no powered Nomad responder
-qualification has been recorded. The permanent authenticated device API now
-composes API 1.6 fetch start/poll with the transport-neutral product Nomad
-client runtime. Its boot-scoped API owner retains one principal-owned fetch:
-same-principal/key retries with identical semantics replay the original ID, a
-distinct start reports capacity while the fetch is active, terminal polls are
-repeatable, and a later distinct start evicts the terminal result. Paths are
-limited to 128
+reset. The
+[bounded powered Nomad proof](e290-nomad-powered-proof.md) closes one exact
+path: Board A announced its distinct `nomadnetwork.node` destination over LoRa;
+Board B learned the peer through Nearby; MetalbeardMobile connected and
+authenticated to B over BLE; Browse selected A's associated Nomad destination,
+fetched `/page/index.mu`, and the user confirmed that the returned page
+rendered. The permanent authenticated device API composes API 1.6 fetch
+start/poll with the transport-neutral product Nomad client runtime. Its
+boot-scoped API owner retains one principal-owned fetch: same-principal/key
+retries with identical semantics replay the original ID, a distinct start
+reports capacity while the fetch is active, terminal polls are repeatable, and
+a later distinct start evicts the terminal result. Paths are limited to 128
 UTF-8 bytes and ready pages to one complete 400-byte UTF-8 direct response;
 Resource-backed responses remain unsupported. The Expo client uses the same
-authenticated appliance session for start/poll, displays the exact raw Micron
-response, and derives an associated Nomad destination from each authenticated
-nearby LXMF announce for one-tap browsing. Independent `nomadnetwork.node`
-announce-directory discovery and Micron rendering remain deferred, and the
-outbound API path remains source/host qualified rather than powered-qualified.
+authenticated appliance session for start/poll and derives an associated Nomad
+destination from each authenticated nearby LXMF peer for one-tap browsing.
+Pasting that peer's primary or `lxmf.delivery` hash correctly fails because it
+does not name the distinct Nomad destination. Independent
+`nomadnetwork.node` announce-directory discovery and a general Micron renderer
+remain deferred. The powered proof covers only the one static page and does not
+qualify pressure, soak, a complete flash-readback campaign, or concurrent
+BLE/LoRa/cache-disabled interaction.
 
 Two discovery limitations remain in the current pinned Rete `dfcaa36`
 descendant of `ba73ee4`, `354b875`, `338251b`, `a443173`, `2d07818`, and
@@ -1957,6 +2019,20 @@ RUSTFLAGS='-C link-arg=-nostartfiles -Z emit-stack-sizes' \
 cargo +esp build --locked --release \
   -p reticulum-heltec-vision-master-e290-node \
   --target xtensa-esp32s3-none-elf
+CARGO_TARGET_DIR=target/e290-ble \
+RUSTFLAGS='-C link-arg=-nostartfiles -Z emit-stack-sizes' \
+cargo +esp clippy --locked --release \
+  -p reticulum-heltec-vision-master-e290-node \
+  --bin reticulum-heltec-vision-master-e290-node \
+  --no-default-features --features ble-api-proof \
+  --target xtensa-esp32s3-none-elf -- -D warnings
+CARGO_TARGET_DIR=target/e290-ble \
+RUSTFLAGS='-C link-arg=-nostartfiles -Z emit-stack-sizes' \
+cargo +esp build --locked --release \
+  -p reticulum-heltec-vision-master-e290-node \
+  --bin reticulum-heltec-vision-master-e290-node \
+  --no-default-features --features ble-api-proof \
+  --target xtensa-esp32s3-none-elf
 CARGO_TARGET_DIR=target/e290-inbox-commit-fault-hil \
 cargo +esp build --locked --release \
   -p reticulum-heltec-vision-master-e290-node \
@@ -1984,6 +2060,12 @@ cargo +esp build --locked --release \
 cargo +stable run --locked -p xtask -- e290-runtime-measurement inspect-elf \
   --default-elf target/e290-default/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node \
   --hil-elf target/e290-runtime-measurement-hil/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node
+cargo +stable run --locked -p xtask -- e290-runtime-measurement inspect-startup-elf \
+  --elf target/e290-default/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node
+cargo +stable run --locked -p xtask -- e290-runtime-measurement inspect-startup-elf \
+  --elf target/e290-ble/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node
+cargo +stable run --locked -p xtask -- e290-runtime-measurement inspect-startup-elf \
+  --elf target/e290-runtime-measurement-hil/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node
 ```
 
 The HIL ELF is isolated at
@@ -3044,6 +3126,24 @@ device ID `653239302d6170692d31aca704e13f88`, primary destination
 `03869ee76b74d1e2a4626f0c02ae3248`. This qualifies the production firmware's
 bounded disconnect/drain/drop/re-advertise sequence across consecutive sessions
 and independently on both hardware identities.
+
+The later API 1.6/Nomad composition introduced a separate silent startup
+failure. A USB-visible diagnostic reached the one-shot node constructor and
+captured an ESP stack-guard panic at `main.rs:954`. Exact ELF analysis found
+the 3,496-byte pre-reserve overflow described in the stack section above. After
+moving the complete supervisor/`NodeCore` owner to validated external PSRAM
+before radio initialization, the corrected diagnostic completed the BLE
+controller, Trouble host/GATT, runner, and advertising stages with 40,996
+internal-heap bytes free and no panic. The corrected production image then
+independently advertised, authenticated through macOS CoreBluetooth, and
+returned its device and Reticulum identities. This closes the observed
+construction-stack startup blocker. The subsequent
+[bounded powered Nomad proof](e290-nomad-powered-proof.md) completed the exact
+Board A announce, Board B Nearby discovery, authenticated phone-to-B BLE,
+`/page/index.mu` request over LoRa to Board A, and user-confirmed page-render
+path. That proof remains bounded; it does not qualify a complete exact-readback
+flash campaign, concurrent BLE/LoRa/cache-disabled interaction, pressure, or
+soak.
 
 The subsequent
 [physical Expo iOS BLE-to-LoRa proof](e290-expo-ios-ble-lora-proof.md)

@@ -282,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_runtime_lxmf_index_and_volatile_owners_are_external_when_composed() {
+    fn growth_oriented_protocol_owners_are_external_when_composed() {
         assert_eq!(
             config::LXMF_INDEX_SLOTS,
             partition_contract::LXMF_STORE_LEN as usize / reticulum_lxmf_store::EXTENT_SIZE
@@ -291,7 +291,7 @@ mod tests {
 
         let main = include_str!("main.rs");
         assert_eq!(main.matches("Vec::new_in(ExternalMemory)").count(), 2);
-        assert_eq!(main.matches("Box::try_new_in(").count(), 1);
+        assert_eq!(main.matches("Box::try_new_in(").count(), 2);
         assert!(main.contains("Box::<ProductSubmissionRuntime, _>::try_new_uninit_in("));
         assert_eq!(main.matches("try_new_uninit_in(").count(), 1);
         assert!(main.contains("Box::leak(runtime)"));
@@ -309,6 +309,30 @@ mod tests {
         assert!(main.contains("lxmf_index.len() != config::LXMF_INDEX_SLOTS"));
         assert!(main.contains("let lxmf_index: &'static mut [LxmfStoreIndexSlot]"));
         assert!(main.contains("flash_owner.mount_lxmf(lxmf_index)"));
+        assert!(
+            main.contains("let supervisor = match Box::try_new_in(supervisor, ExternalMemory)")
+        );
+        assert!(main.contains("let supervisor: &'static mut ProductSupervisor"));
+        assert!(!main.contains("static SUPERVISOR:"));
+        let psram_allocator = main
+            .find("esp_alloc::psram_allocator!(&psram);")
+            .expect("external allocation must follow PSRAM registration");
+        let supervisor_allocation = main
+            .find("let supervisor = match Box::try_new_in(supervisor, ExternalMemory)")
+            .expect("the permanent supervisor must be allocated externally");
+        let supervisor_leak = main
+            .find("let supervisor: &'static mut ProductSupervisor")
+            .expect("the external supervisor must retain boot-lifetime ownership");
+        let radio_initialization = main
+            .find("let radio = match E290Radio::new(")
+            .expect("the concrete LoRa actor must still be constructed");
+        let node_task_construction = main
+            .find("let node_task = match node_task::run(")
+            .expect("the sole node task must retain the supervisor");
+        assert!(psram_allocator < supervisor_allocation);
+        assert!(supervisor_allocation < supervisor_leak);
+        assert!(supervisor_leak < radio_initialization);
+        assert!(radio_initialization < node_task_construction);
         assert!(main.contains("activate_lxmf_delivery(&mut node, lxmf_service_available)"));
         assert!(main.contains("activate_nomad_responder(&mut node)"));
         assert!(main.contains("lxmf_delivery_admission={lxmf_delivery_admission}"));

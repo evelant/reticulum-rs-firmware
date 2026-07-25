@@ -186,7 +186,6 @@ static ORDINARY_PACKET_STORAGE: StaticCell<[OrdinaryPacketBuffer; config::ORDINA
 static APPLICATION_EVENT_STORAGE: StaticCell<
     [ApplicationEventSlot; config::APPLICATION_EVENT_SLOTS],
 > = StaticCell::new();
-static SUPERVISOR: StaticCell<ProductSupervisor> = StaticCell::new();
 static DISPATCHER: StaticCell<ProductDispatcher> = StaticCell::new();
 static FLASH_STORAGE: StaticCell<FlashStorage<'static>> = StaticCell::new();
 static STORAGE_COORDINATOR: StaticCell<ProductStorageCoordinator> = StaticCell::new();
@@ -1127,6 +1126,43 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
             inert_forever().await
         }
     };
+    let supervisor = match Box::try_new_in(supervisor, ExternalMemory) {
+        Ok(supervisor) => supervisor,
+        Err(_) => {
+            error!(
+                "e290-node stage=supervisor-placement status=FAIL reason=external-allocation expected_bytes={}",
+                mem::size_of::<ProductSupervisor>(),
+            );
+            inert_forever().await
+        }
+    };
+    let supervisor_bytes = mem::size_of_val(&*supervisor);
+    let supervisor_start = (&*supervisor as *const ProductSupervisor) as usize;
+    let supervisor_end = match supervisor_start.checked_add(supervisor_bytes) {
+        Some(end) => end,
+        None => {
+            error!(
+                "e290-node stage=supervisor-placement status=FAIL reason=allocation-range-overflow"
+            );
+            inert_forever().await
+        }
+    };
+    if supervisor_bytes != mem::size_of::<ProductSupervisor>()
+        || !supervisor_start.is_multiple_of(mem::align_of::<ProductSupervisor>())
+        || supervisor_start < psram_start_address
+        || supervisor_end > psram_end_address
+    {
+        error!(
+            "e290-node stage=supervisor-placement status=FAIL reason=external-address allocation_start=0x{supervisor_start:08x} allocation_end=0x{supervisor_end:08x} psram_start=0x{psram_start_address:08x} psram_end=0x{psram_end_address:08x} expected_bytes={} actual_bytes={supervisor_bytes} alignment={}",
+            mem::size_of::<ProductSupervisor>(),
+            mem::align_of::<ProductSupervisor>(),
+        );
+        inert_forever().await
+    }
+    info!(
+        "e290-node stage=supervisor-placement status=PASS ownership=boot-lifetime-external bytes={supervisor_bytes} start=0x{supervisor_start:08x} end=0x{supervisor_end:08x}"
+    );
+    let supervisor: &'static mut ProductSupervisor = Box::leak(supervisor);
 
     #[cfg(feature = "runtime-measurement-hil")]
     let radio_init_started_us = monotonic_us();
@@ -1189,7 +1225,6 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
         frame_dispatcher,
         config::dispatcher_config(),
     ));
-    let supervisor = SUPERVISOR.init(supervisor);
     let application_event_storage = APPLICATION_EVENT_STORAGE
         .init([const { ApplicationEventSlot::new() }; config::APPLICATION_EVENT_SLOTS]);
     let application_events = ApplicationEventOwner::new(application_event_storage);
