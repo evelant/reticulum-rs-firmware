@@ -753,6 +753,8 @@ pub enum ApplicationEventKind {
     ChannelMessages,
     /// A Link request arrived.
     RequestReceived,
+    /// A Link request carrying an encoded non-binary/string MessagePack value arrived.
+    RequestValueReceived,
     /// A Link response arrived.
     ResponseReceived,
     /// A locally owned Link closed.
@@ -790,6 +792,7 @@ impl ApplicationEventKind {
             Self::LinkData => "link_data",
             Self::ChannelMessages => "channel_messages",
             Self::RequestReceived => "request_received",
+            Self::RequestValueReceived => "request_value_received",
             Self::ResponseReceived => "response_received",
             Self::LinkClosed => "link_closed",
             Self::LinkIdentified => "link_identified",
@@ -816,7 +819,8 @@ impl core::fmt::Display for ApplicationEventKind {
 /// Firmware can inspect this binding but cannot construct or alter it. The
 /// owning [`EmbeddedNode`] creates bindings only from Rete's retained Link
 /// state, keeping consumer-supplied Link and destination values out of the
-/// application-event trust boundary.
+/// application-event trust boundary. For a responder Link, `destination` is
+/// the exact registered local destination at which the Link was accepted.
 ///
 /// ```compile_fail
 /// use reticulum_rns_rete::{ApplicationLinkBinding, ApplicationLinkRole};
@@ -871,6 +875,10 @@ impl ApplicationLinkBinding {
     }
 
     /// Destination to which the retained owned Link was established.
+    ///
+    /// This is an authoritative local destination when [`Self::role`] returns
+    /// [`ApplicationLinkRole::Responder`]. For an initiator Link, it names the
+    /// remote destination.
     pub const fn destination(&self) -> &[u8; rete_core::TRUNCATED_HASH_LEN] {
         &self.destination
     }
@@ -958,14 +966,39 @@ pub enum ApplicationEvent {
     },
     /// A Link request arrived.
     RequestReceived {
-        /// Stable Link identifier bytes.
-        link: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Authoritative retained Link-to-destination association.
+        ///
+        /// Server-side dispatch can authorize the exact local destination by
+        /// requiring [`ApplicationLinkRole::Responder`] and comparing
+        /// [`ApplicationLinkBinding::destination`].
+        binding: ApplicationLinkBinding,
         /// Stable request identifier bytes.
         request: [u8; rete_core::TRUNCATED_HASH_LEN],
         /// Stable request-path hash bytes.
         path: [u8; rete_core::TRUNCATED_HASH_LEN],
         /// Exact moved request body.
         data: Vec<u8>,
+    },
+    /// A Link request carrying an encoded non-binary/string MessagePack value arrived.
+    ///
+    /// Binary and string request values continue through [`Self::RequestReceived`].
+    /// This variant preserves `nil`, maps, arrays, scalars, and extension values
+    /// without conflating canonical anonymous `nil` with an empty byte string.
+    RequestValueReceived {
+        /// Authoritative retained Link-to-destination association.
+        ///
+        /// Server-side dispatch can authorize the exact local destination by
+        /// requiring [`ApplicationLinkRole::Responder`] and comparing
+        /// [`ApplicationLinkBinding::destination`].
+        binding: ApplicationLinkBinding,
+        /// Stable request identifier bytes.
+        request: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Stable request-path hash bytes.
+        path: [u8; rete_core::TRUNCATED_HASH_LEN],
+        /// Timestamp from the request wire format, in Unix seconds.
+        requested_at: f64,
+        /// Exact moved MessagePack encoding of the validated request value.
+        encoded_value: Vec<u8>,
     },
     /// A Link response arrived.
     ResponseReceived {
@@ -1081,6 +1114,7 @@ impl ApplicationEvent {
             Self::LinkData { .. } => ApplicationEventKind::LinkData,
             Self::ChannelMessages { .. } => ApplicationEventKind::ChannelMessages,
             Self::RequestReceived { .. } => ApplicationEventKind::RequestReceived,
+            Self::RequestValueReceived { .. } => ApplicationEventKind::RequestValueReceived,
             Self::ResponseReceived { .. } => ApplicationEventKind::ResponseReceived,
             Self::LinkClosed { .. } => ApplicationEventKind::LinkClosed,
             Self::LinkIdentified { .. } => ApplicationEventKind::LinkIdentified,
@@ -1159,16 +1193,30 @@ impl core::fmt::Debug for ApplicationEvent {
                 )
                 .finish(),
             Self::RequestReceived {
-                link,
+                binding,
                 request,
                 path,
                 data,
             } => formatter
                 .debug_struct("RequestReceived")
-                .field("link", link)
+                .field("binding", binding)
                 .field("request", request)
                 .field("path", path)
                 .field("data_len", &data.len())
+                .finish(),
+            Self::RequestValueReceived {
+                binding,
+                request,
+                path,
+                requested_at,
+                encoded_value,
+            } => formatter
+                .debug_struct("RequestValueReceived")
+                .field("binding", binding)
+                .field("request", request)
+                .field("path", path)
+                .field("requested_at", requested_at)
+                .field("encoded_value_len", &encoded_value.len())
                 .finish(),
             Self::ResponseReceived {
                 link,
@@ -1272,6 +1320,18 @@ impl core::fmt::Debug for ApplicationEvent {
     }
 }
 
+fn require_application_link_binding(
+    link_id: &LinkId,
+    binding: Option<ApplicationLinkBinding>,
+) -> Result<ApplicationLinkBinding, ApplicationEventProjectionError> {
+    match binding {
+        Some(binding) if binding.link() == link_id.as_bytes() => Ok(binding),
+        Some(_) | None => Err(ApplicationEventProjectionError::LinkStateNotRetained {
+            link: *link_id.as_bytes(),
+        }),
+    }
+}
+
 /// Consume one pinned native event into the exhaustive project-owned surface.
 ///
 /// This match intentionally has no wildcard so a Rete update that adds an event
@@ -1314,9 +1374,7 @@ fn project_application_event(
             data,
             context,
         } => ApplicationEvent::LinkData {
-            binding: link_binding.ok_or(ApplicationEventProjectionError::LinkStateNotRetained {
-                link: *link_id.as_bytes(),
-            })?,
+            binding: require_application_link_binding(&link_id, link_binding)?,
             data,
             context,
         },
@@ -1332,10 +1390,23 @@ fn project_application_event(
             path_hash,
             data,
         } => ApplicationEvent::RequestReceived {
-            link: *link_id.as_bytes(),
+            binding: require_application_link_binding(&link_id, link_binding)?,
             request: *request_id.as_bytes(),
             path: *path_hash.as_bytes(),
             data,
+        },
+        NativeNodeEvent::RequestValueReceived {
+            link_id,
+            request_id,
+            path_hash,
+            requested_at,
+            value,
+        } => ApplicationEvent::RequestValueReceived {
+            binding: require_application_link_binding(&link_id, link_binding)?,
+            request: *request_id.as_bytes(),
+            path: *path_hash.as_bytes(),
+            requested_at,
+            encoded_value: value,
         },
         NativeNodeEvent::ResponseReceived {
             link_id,
@@ -3595,7 +3666,9 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         event: NativeNodeEvent,
     ) -> Result<ApplicationEvent, ApplicationEventProjectionError> {
         let link_binding = match &event {
-            NativeNodeEvent::LinkData { link_id, .. } => self
+            NativeNodeEvent::LinkData { link_id, .. }
+            | NativeNodeEvent::RequestReceived { link_id, .. }
+            | NativeNodeEvent::RequestValueReceived { link_id, .. } => self
                 .core
                 .transport
                 .get_link(link_id)
@@ -3645,7 +3718,9 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         let unretained_link = native.events.iter().find_map(|event| {
             let link_id = match event {
                 NativeNodeEvent::LinkEstablished { link_id }
-                | NativeNodeEvent::LinkData { link_id, .. } => link_id,
+                | NativeNodeEvent::LinkData { link_id, .. }
+                | NativeNodeEvent::RequestReceived { link_id, .. }
+                | NativeNodeEvent::RequestValueReceived { link_id, .. } => link_id,
                 _ => return None,
             };
             self.core
@@ -5890,7 +5965,7 @@ mod tests {
     }
 
     #[test]
-    fn link_data_projection_fails_closed_without_retained_link_state() {
+    fn link_bound_event_projection_fails_closed_without_retained_link_state() {
         let missing_link = LinkId::from([0x6d; rete_core::TRUNCATED_HASH_LEN]);
         let mut node = node(0x6e);
 
@@ -5900,6 +5975,60 @@ mod tests {
                 data: vec![0xa5; 8],
                 context: LINK_DATA_CONTEXT_NONE,
             }),
+            Err(ApplicationEventProjectionError::LinkStateNotRetained { link })
+                if link == *missing_link.as_bytes()
+        ));
+        assert!(matches!(
+            node.project_retained_application_event(NativeNodeEvent::RequestReceived {
+                link_id: missing_link,
+                request_id: rete_core::RequestId::from([
+                    0x71;
+                    rete_core::TRUNCATED_HASH_LEN
+                ]),
+                path_hash: rete_core::PathHash::from([
+                    0x72;
+                    rete_core::TRUNCATED_HASH_LEN
+                ]),
+                data: vec![0xa5; 8],
+            }),
+            Err(ApplicationEventProjectionError::LinkStateNotRetained { link })
+                if link == *missing_link.as_bytes()
+        ));
+        assert!(matches!(
+            node.project_retained_application_event(NativeNodeEvent::RequestValueReceived {
+                link_id: missing_link,
+                request_id: rete_core::RequestId::from([
+                    0x73;
+                    rete_core::TRUNCATED_HASH_LEN
+                ]),
+                path_hash: rete_core::PathHash::from([
+                    0x74;
+                    rete_core::TRUNCATED_HASH_LEN
+                ]),
+                requested_at: 1_700_000_000.25,
+                value: vec![0xc0],
+            }),
+            Err(ApplicationEventProjectionError::LinkStateNotRetained { link })
+                if link == *missing_link.as_bytes()
+        ));
+        assert!(matches!(
+            project_application_event(
+                NativeNodeEvent::RequestReceived {
+                    link_id: missing_link,
+                    request_id: rete_core::RequestId::from(
+                        [0x75; rete_core::TRUNCATED_HASH_LEN]
+                    ),
+                    path_hash: rete_core::PathHash::from(
+                        [0x76; rete_core::TRUNCATED_HASH_LEN]
+                    ),
+                    data: vec![0xa5; 8],
+                },
+                Some(test_link_binding(
+                    [0x77; rete_core::TRUNCATED_HASH_LEN],
+                    [0x78; rete_core::TRUNCATED_HASH_LEN],
+                    ApplicationLinkRole::Responder,
+                )),
+            ),
             Err(ApplicationEventProjectionError::LinkStateNotRetained { link })
                 if link == *missing_link.as_bytes()
         ));
@@ -6029,6 +6158,13 @@ mod tests {
                 path_hash: path,
                 data: vec![0xf1, 0xf2],
             },
+            NativeNodeEvent::RequestValueReceived {
+                link_id: link,
+                request_id: request,
+                path_hash: path,
+                requested_at: 1_700_000_000.25,
+                value: vec![0xc0],
+            },
             NativeNodeEvent::ResponseReceived {
                 link_id: link,
                 request_id: request,
@@ -6083,7 +6219,9 @@ mod tests {
         .into_iter()
         .map(|event| {
             let binding = match &event {
-                NativeNodeEvent::LinkData { link_id, .. } => Some(test_link_binding(
+                NativeNodeEvent::LinkData { link_id, .. }
+                | NativeNodeEvent::RequestReceived { link_id, .. }
+                | NativeNodeEvent::RequestValueReceived { link_id, .. } => Some(test_link_binding(
                     *link_id.as_bytes(),
                     *destination.as_bytes(),
                     ApplicationLinkRole::Responder,
@@ -6104,6 +6242,10 @@ mod tests {
             (ApplicationEventKind::LinkData, "link_data"),
             (ApplicationEventKind::ChannelMessages, "channel_messages"),
             (ApplicationEventKind::RequestReceived, "request_received"),
+            (
+                ApplicationEventKind::RequestValueReceived,
+                "request_value_received",
+            ),
             (ApplicationEventKind::ResponseReceived, "response_received"),
             (ApplicationEventKind::LinkClosed, "link_closed"),
             (ApplicationEventKind::LinkIdentified, "link_identified"),
@@ -6183,17 +6325,34 @@ mod tests {
         assert!(matches!(
             &projected[8],
             ApplicationEvent::RequestReceived {
-                link: observed_link,
+                binding,
                 request: observed_request,
                 path: observed_path,
                 data,
-            } if *observed_link == *link.as_bytes()
+            } if binding.link() == link.as_bytes()
+                && binding.destination() == destination.as_bytes()
+                && binding.role() == ApplicationLinkRole::Responder
                 && *observed_request == *request.as_bytes()
                 && *observed_path == *path.as_bytes()
                 && data == &[0xf1, 0xf2]
         ));
         assert!(matches!(
             &projected[9],
+            ApplicationEvent::RequestValueReceived {
+                binding,
+                request: observed_request,
+                path: observed_path,
+                requested_at: 1_700_000_000.25,
+                encoded_value,
+            } if binding.link() == link.as_bytes()
+                && binding.destination() == destination.as_bytes()
+                && binding.role() == ApplicationLinkRole::Responder
+                && *observed_request == *request.as_bytes()
+                && *observed_path == *path.as_bytes()
+                && encoded_value == &[0xc0]
+        ));
+        assert!(matches!(
+            &projected[10],
             ApplicationEvent::ResponseReceived {
                 link: observed_link,
                 request: observed_request,
@@ -6203,11 +6362,11 @@ mod tests {
                 && data == &[0xf3, 0xf4]
         ));
         assert!(matches!(
-            &projected[10],
+            &projected[11],
             ApplicationEvent::LinkClosed { link: observed } if *observed == *link.as_bytes()
         ));
         assert!(matches!(
-            &projected[11],
+            &projected[12],
             ApplicationEvent::LinkIdentified {
                 link: observed_link,
                 identity: observed_identity,
@@ -6217,7 +6376,7 @@ mod tests {
                 && public_key == &[0x77; 64]
         ));
         assert!(matches!(
-            &projected[12],
+            &projected[13],
             ApplicationEvent::ResourceOffered {
                 link: observed,
                 resource_hash: observed_hash,
@@ -6225,7 +6384,7 @@ mod tests {
             } if *observed == *link.as_bytes() && observed_hash == &resource_hash
         ));
         assert!(matches!(
-            &projected[13],
+            &projected[14],
             ApplicationEvent::ResourceProgress {
                 link: observed,
                 resource_hash: observed_hash,
@@ -6234,7 +6393,7 @@ mod tests {
             } if *observed == *link.as_bytes() && observed_hash == &resource_hash
         ));
         assert!(matches!(
-            &projected[14],
+            &projected[15],
             ApplicationEvent::ResourceComplete {
                 link: observed,
                 resource_hash: observed_hash,
@@ -6244,21 +6403,21 @@ mod tests {
                 && data == &[0x81, 0x82]
         ));
         assert!(matches!(
-            &projected[15],
+            &projected[16],
             ApplicationEvent::ResourceFailed {
                 link: observed,
                 resource_hash: observed_hash,
             } if *observed == *link.as_bytes() && observed_hash == &resource_hash
         ));
         assert!(matches!(
-            &projected[16],
+            &projected[17],
             ApplicationEvent::ResourceRejected {
                 link: observed,
                 resource_hash: observed_hash,
             } if *observed == *link.as_bytes() && observed_hash == &resource_hash
         ));
         assert!(matches!(
-            &projected[17],
+            &projected[18],
             ApplicationEvent::RequestFailed {
                 link: observed_link,
                 request: observed_request,
@@ -6267,7 +6426,7 @@ mod tests {
                 && *observed_request == *request.as_bytes()
         ));
         assert!(matches!(
-            &projected[18],
+            &projected[19],
             ApplicationEvent::RequestProgress {
                 link: observed_link,
                 request: observed_request,
@@ -6277,7 +6436,7 @@ mod tests {
                 && *observed_request == *request.as_bytes()
         ));
         assert!(matches!(
-            &projected[19],
+            &projected[20],
             ApplicationEvent::Tick {
                 expired_paths: 6,
                 closed_links: 7,
@@ -6296,8 +6455,24 @@ mod tests {
         assert!(resource_debug.contains("data_len: 4"));
         assert!(!resource_debug.contains("222, 173, 190, 239"));
 
+        let request_value = ApplicationEvent::RequestValueReceived {
+            binding: test_link_binding(
+                [0x31; rete_core::TRUNCATED_HASH_LEN],
+                [0x34; rete_core::TRUNCATED_HASH_LEN],
+                ApplicationLinkRole::Responder,
+            ),
+            request: [0x32; rete_core::TRUNCATED_HASH_LEN],
+            path: [0x33; rete_core::TRUNCATED_HASH_LEN],
+            requested_at: 1_700_000_000.25,
+            encoded_value: vec![222, 173, 190, 239],
+        };
+        let request_value_debug = format!("{request_value:?}");
+        assert!(request_value_debug.contains("requested_at: 1700000000.25"));
+        assert!(request_value_debug.contains("encoded_value_len: 4"));
+        assert!(!request_value_debug.contains("222, 173, 190, 239"));
+
         let identified = ApplicationEvent::LinkIdentified {
-            link: [0x33; rete_core::TRUNCATED_HASH_LEN],
+            link: [0x41; rete_core::TRUNCATED_HASH_LEN],
             identity: [0x44; rete_core::TRUNCATED_HASH_LEN],
             public_key: [0x55; 64],
         };
@@ -8414,6 +8589,94 @@ mod tests {
                 && binding.destination() == delivery.as_bytes()
                 && binding.role() == ApplicationLinkRole::Responder
                 && data == b"secondary destination payload"
+        ));
+    }
+
+    #[test]
+    fn request_bindings_use_the_registered_secondary_destination() {
+        let mut initiator = node(1);
+        let mut responder = node(2);
+        let delivery = responder
+            .register_destination(
+                LXMF_APPLICATION_NAME,
+                &[LXMF_DELIVERY_ASPECT],
+                DestinationType::Single,
+                Direction::In,
+            )
+            .unwrap();
+        assert!(responder.set_accepts_links(&delivery, true));
+        initiator
+            .register_peer(
+                &identity(2),
+                LXMF_APPLICATION_NAME,
+                &[LXMF_DELIVERY_ASPECT],
+                0,
+            )
+            .unwrap();
+        let mut rng = CounterRng::default();
+
+        let (request, link_id) = initiator.initiate_link(delivery, 100, &mut rng).unwrap();
+        let proof = responder.ingest(request.bytes(), 100, InterfaceId(7), &mut rng);
+        let established = initiator.ingest(
+            proof.actions.packets[0].bytes(),
+            101,
+            InterfaceId(3),
+            &mut rng,
+        );
+        responder.ingest(
+            established.actions.packets[0].bytes(),
+            102,
+            InterfaceId(7),
+            &mut rng,
+        );
+        assert_eq!(responder.link_state(&link_id), Some(LinkState::Active));
+
+        let anonymous = initiator
+            .prepare_anonymous_request(&link_id, "/page/index.mu", 1_700_000_000.25, &mut rng)
+            .unwrap();
+        let anonymous_handle = anonymous.handle();
+        let received = responder.ingest(anonymous.packet().bytes(), 110, InterfaceId(7), &mut rng);
+        assert!(matches!(
+            received.actions.events.as_slice(),
+            [ApplicationEvent::RequestValueReceived {
+                binding,
+                request,
+                path,
+                requested_at: 1_700_000_000.25,
+                encoded_value,
+            }] if binding.link() == link_id.as_bytes()
+                && binding.destination() == delivery.as_bytes()
+                && binding.role() == ApplicationLinkRole::Responder
+                && request == anonymous_handle.request()
+                && path == rete_transport::path_hash("/page/index.mu").as_bytes()
+                && encoded_value == &[0xc0]
+        ));
+
+        let encoded_string = [0xa2, b'o', b'k'];
+        let string = initiator
+            .prepare_direct_request_value(
+                &link_id,
+                "/test/echo",
+                Some(&encoded_string),
+                1_700_000_001.5,
+                &mut rng,
+            )
+            .unwrap();
+        let string_handle = string.handle();
+        let received = responder.ingest(string.packet().bytes(), 111, InterfaceId(7), &mut rng);
+        assert!(matches!(
+            received.actions.events.as_slice(),
+            [ApplicationEvent::RequestReceived {
+                binding,
+                request,
+                path,
+                data,
+            }] if binding.link() == link_id.as_bytes()
+                && binding.destination() == delivery.as_bytes()
+                && binding.role() == ApplicationLinkRole::Responder
+                && request == string_handle.request()
+                && path == rete_transport::path_hash("/test/echo").as_bytes()
+                && data == b"ok"
         ));
     }
 

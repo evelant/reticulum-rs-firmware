@@ -6168,8 +6168,8 @@ fn forbidden_lxmf_durable_component_closure_category(
 
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 const RETE_GIT_SOURCE: &str = "git+https://github.com/evelant/rete.git?rev=\
-354b8757bea63b9d1e27dec14f109fe6c7e03c5a#\
-354b8757bea63b9d1e27dec14f109fe6c7e03c5a";
+ba73ee426a3211951f5abb400c5728dd359272be#\
+ba73ee426a3211951f5abb400c5728dd359272be";
 
 #[derive(Clone, Copy)]
 enum ReviewedClosureSource {

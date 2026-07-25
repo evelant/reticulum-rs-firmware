@@ -12,7 +12,7 @@ API stay in this project; generic protocol and bounded-state corrections are
 the candidates for upstream review.
 
 The current firmware pin is
-`354b8757bea63b9d1e27dec14f109fe6c7e03c5a` on fork branch
+`ba73ee426a3211951f5abb400c5728dd359272be` on fork branch
 `codex/responder-handshake-reclaim`. It descends from
 `338251b285a2447beb10d390d3e7f53694a1a916` and
 `a443173b0829c2637ce23531a8cde15fdfec185e`, then from
@@ -589,7 +589,7 @@ Make DATA preparation one transaction:
    receipt and entropy state.
 
 The generic fix is retained by current project pin
-`354b8757bea63b9d1e27dec14f109fe6c7e03c5a`, which descends through
+`ba73ee426a3211951f5abb400c5728dd359272be`, which descends through
 `338251b285a2447beb10d390d3e7f53694a1a916` and
 `a443173b0829c2637ce23531a8cde15fdfec185e`, then
 `2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` from
@@ -607,7 +607,9 @@ receipt events; and the
 hosted daemon consumes LXMF terminal output. The current descendant adds
 ordinary Link-DATA receipt correlation, destination proof-policy parity,
 responder-Handshake reclamation, exact canonical request values, and
-prepared-versus-confirmed request dispatch ownership. The recorded selected
+prepared-versus-confirmed request dispatch ownership. It also preserves
+validated inbound encoded values and their original request timestamp. The
+recorded selected
 validation set for the `90570ca` predecessor passed 635 tests:
 271 transport (174 library plus 97 integration), 137 stack (136
 library plus one integration), 143 LXMF library, and 84 daemon library. The

@@ -143,7 +143,7 @@ Bitrate and cost are recorded but do not replace Reticulum routing. Until Rete
 paths carry an interface generation, an ID/configuration stays immutable for
 one node-owner lifetime or its learned paths must be purged before reuse.
 The current Rete pin,
-`354b8757bea63b9d1e27dec14f109fe6c7e03c5a`, is the exact revision on
+`ba73ee426a3211951f5abb400c5728dd359272be`, is the exact revision on
 fork branch `codex/responder-handshake-reclaim`. It descends from
 `338251b285a2447beb10d390d3e7f53694a1a916`, which adds bounded canonical
 MessagePack request values including the anonymous `nil` value, and
@@ -154,8 +154,10 @@ MessagePack request values including the anonymous `nil` value, and
 `firmware-pin-90570ca`; that predecessor tag does not name the current
 revision). The current revision additionally keeps prepared request ownership
 separate from confirmed dispatch ownership and starts the response timeout
-only at the first real interface dispatch. This is bounded request foundation,
-not a claim of complete NomadNet or Resource support. The pin carries learned
+only at the first real interface dispatch. It also preserves validated inbound
+non-binary/string MessagePack request values, including their wire timestamp,
+as an exact application event. This is bounded request foundation, not a claim
+of complete NomadNet or Resource support. The pin carries learned
 path, reverse, and Link decisions as
 exact interface targets instead of falling back to interface zero or generic
 broadcast. An exact target may intentionally equal the ingress slot, which is

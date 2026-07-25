@@ -215,13 +215,14 @@ zeroize = { version = "=1.9.0", default-features = false }
 # receipts, respects the receiving destination's proof policy, and reclaims
 # responder Handshakes that time out before authenticated LRRTT. It also adds
 # bounded canonical MessagePack request values, including the `nil` data value
-# used by anonymous NomadNet page requests, plus transactional request
-# preparation whose response timeout begins only at the first real dispatch.
+# used by anonymous NomadNet page requests, transactional request preparation
+# whose response timeout begins only at the first real dispatch, and lossless
+# inbound encoded-value events with the original request timestamp.
 # The predecessor tag does not name the current revision.
-rete-core = { git = "https://github.com/evelant/rete.git", rev = "354b8757bea63b9d1e27dec14f109fe6c7e03c5a", default-features = false }
-rete-lxmf-core = { git = "https://github.com/evelant/rete.git", rev = "354b8757bea63b9d1e27dec14f109fe6c7e03c5a", default-features = false }
-rete-stack = { git = "https://github.com/evelant/rete.git", rev = "354b8757bea63b9d1e27dec14f109fe6c7e03c5a", default-features = false }
-rete-transport = { git = "https://github.com/evelant/rete.git", rev = "354b8757bea63b9d1e27dec14f109fe6c7e03c5a", default-features = false }
+rete-core = { git = "https://github.com/evelant/rete.git", rev = "ba73ee426a3211951f5abb400c5728dd359272be", default-features = false }
+rete-lxmf-core = { git = "https://github.com/evelant/rete.git", rev = "ba73ee426a3211951f5abb400c5728dd359272be", default-features = false }
+rete-stack = { git = "https://github.com/evelant/rete.git", rev = "ba73ee426a3211951f5abb400c5728dd359272be", default-features = false }
+rete-transport = { git = "https://github.com/evelant/rete.git", rev = "ba73ee426a3211951f5abb400c5728dd359272be", default-features = false }
 
 [patch.crates-io]
 # Force every current and future graph consumer onto the one reviewed local

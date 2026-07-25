@@ -27,7 +27,7 @@ and arbitrary LXMF bytes. NomadNet is a fixture/version lane only at this
 phase.
 
 The firmware dependency is currently pinned to integration-fork commit
-`354b8757bea63b9d1e27dec14f109fe6c7e03c5a` on fork branch
+`ba73ee426a3211951f5abb400c5728dd359272be` on fork branch
 `codex/responder-handshake-reclaim`. It descends from
 `338251b285a2447beb10d390d3e7f53694a1a916` and
 `a443173b0829c2637ce23531a8cde15fdfec185e`, then from
@@ -38,7 +38,8 @@ The firmware dependency is currently pinned to integration-fork commit
 revision, which has no designated durable tag. The current descendant adds
 bounded canonical MessagePack request values, including anonymous `nil`, and
 keeps prepared requests cancelable without starting their response timeout
-until exact first dispatch. The `a443173` predecessor adds
+until exact first dispatch. It also preserves validated inbound encoded request
+values and their original wire timestamp. The `a443173` predecessor adds
 responder-Handshake timeout reclamation to the preceding descendant's ordinary
 Link-DATA receipts and receiving-destination proof policy. These request
 primitives do not claim full NomadNet or Resource support. No issue or pull
@@ -720,10 +721,11 @@ a powered rerun of the E290 reverse-proof scenario captured under `f6f5fb0`.
 The `90570ca` predecessor adds the LRRTT lifecycle/timing contract. Its
 `2d07818` descendant additionally adds ordinary Link-DATA receipts and
 destination proof-policy parity. Its `a443173` descendant adds bounded
-responder-Handshake reclamation. The current `354b875` descendant additionally
-adds canonical exact MessagePack request values and prepared-versus-confirmed
-dispatch ownership whose timeout begins only at exact first dispatch. Its
-current root, portable, strict E290 Clippy, and release-build gates pass. A
+responder-Handshake reclamation. The current `ba73ee4` descendant additionally
+adds canonical exact MessagePack request values, prepared-versus-confirmed
+dispatch ownership whose timeout begins only at exact first dispatch, and
+lossless inbound encoded-value events. Its current root, portable, strict E290
+Clippy, and release-build gates pass. A
 normal powered message exchange on the current pin does not by itself
 demonstrate responder-side establishment expiry, request/response
 interoperability, or full NomadNet support, so those narrow claims remain

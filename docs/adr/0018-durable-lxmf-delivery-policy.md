@@ -51,10 +51,10 @@ reclaims responder `Handshake` state on Reticulum's
 native initiator expiry remains absent. The product wrapper closes that half
 for its outbound initiator transaction with a transport-neutral timeout and
 exact abort operation rather than coupling the lifecycle to LoRa or to the E290
-radio actor. The current `354b875` descendant adds canonical request values and
-prepared-versus-confirmed request dispatch ownership; those request primitives
-do not change this LXMF delivery-policy decision or imply full NomadNet
-support.
+radio actor. The current `ba73ee4` descendant adds canonical request values,
+prepared-versus-confirmed request dispatch ownership, and lossless inbound
+encoded-value events; those request primitives do not change this LXMF
+delivery-policy decision or imply full NomadNet support.
 
 ## Decision
 

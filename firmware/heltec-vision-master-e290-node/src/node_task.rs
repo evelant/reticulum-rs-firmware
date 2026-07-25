@@ -2246,7 +2246,11 @@ fn drive_non_lxmf_application_event(
         | ApplicationEvent::LinkRttUpdated { .. }
         | ApplicationEvent::LinkData { .. }
         | ApplicationEvent::ChannelMessages { .. }
+        // Inbound Link requests are the future destination-bound Nomad
+        // responder surface. Keep them explicit and unavailable until the
+        // responder owns response dispatch end to end.
         | ApplicationEvent::RequestReceived { .. }
+        | ApplicationEvent::RequestValueReceived { .. }
         | ApplicationEvent::ResponseReceived { .. }
         | ApplicationEvent::LinkClosed { .. }
         | ApplicationEvent::LinkIdentified { .. }
