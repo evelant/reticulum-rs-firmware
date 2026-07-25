@@ -23,6 +23,7 @@ pub mod inbox_admission_fault_hil;
 pub mod live_pairing_handoff;
 pub mod live_pairing_node;
 pub mod lxmf_delivery;
+pub mod nomad_coordinator;
 pub mod pairing_control_handoff;
 pub mod pairing_control_mapping;
 pub mod partition_contract;

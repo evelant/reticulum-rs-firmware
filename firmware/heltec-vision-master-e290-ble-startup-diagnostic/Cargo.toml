@@ -53,6 +53,7 @@ reticulum-lxmf-ingress = { path = "../../crates/lxmf-ingress", default-features 
 reticulum-lxmf-model = { path = "../../crates/lxmf-model", default-features = false }
 reticulum-lxmf-store = { path = "../../crates/lxmf-store", default-features = false }
 reticulum-node-core = { path = "../../crates/node-core", default-features = false }
+reticulum-nomad-protocol = { path = "../../crates/nomad-protocol", default-features = false }
 reticulum-nor-flash-region = { path = "../../crates/nor-flash-region", default-features = false }
 reticulum-peer-discovery = { path = "../../crates/peer-discovery", default-features = false }
 reticulum-radio-interface = { path = "../../crates/radio-interface", default-features = false }

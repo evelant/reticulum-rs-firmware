@@ -995,7 +995,7 @@ fn graph_policy() -> ExitCode {
              authenticated session layer has only its exact reviewed cryptographic, device-API, credentials, framing and handoff normal edges plus its exact test-only hex, semantic-adapter and storage-model fixtures; \
              the Rete integration and node-core normal closures contain no RNode, radio-interface, LoRa or board package; \
              the shared lora-phy owner and E290 radio wrapper have only their exact reviewed HAL, framing, board and test edges; the Wi-Fi and BLE API proof profiles retain the complete permanent node graph and add only their exact locked transport closures and shared feature transitions; the BLE startup diagnostic matches the production BLE profile except for its package root and exact ESP Serial/JTAG logging path, so it cannot acquire Wi-Fi or another transport closure; \
-             the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent semantic round-trip fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the permanent E290 node reaches the LoRa-first node/router/dispatcher graph, exact portable identity, credential-store authority, announce-clock, NOR-region, durable-submission and durable inbound-RNS-inbox layers, the feature-free durable LXMF ingress/model/store stack and explicit external allocator, all three target-safe experimental device-API feature sets, the featureless framed USB pre-authentication control codec, the resident live-pairing lifecycle and a minimal boot-lifetime USB authenticated-session bearer with transport-neutral admission and node-side dispatch while excluding onboard clients and foreign Tracker/HIL packages; \
+             the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent semantic round-trip fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the permanent E290 node reaches the LoRa-first node/router/dispatcher graph, exact portable identity, credential-store authority, announce-clock, NOR-region, durable-submission and durable inbound-RNS-inbox layers, the feature-free durable LXMF ingress/model/store stack, bounded feature-free Nomad protocol state and explicit external allocator, all three target-safe experimental device-API feature sets, the featureless framed USB pre-authentication control codec, the resident live-pairing lifecycle and a minimal boot-lifetime USB authenticated-session bearer with transport-neutral admission and node-side dispatch while excluding deferred full onboard client/service stacks and foreign Tracker/HIL packages; \
              the interface router has only its reviewed node-core and Embassy Sync normal edges plus test-only rand_core and RNS fixture edges; \
              the TX handoff, RF-inert dispatcher and supervisor use only their reviewed node-core, \
              interface-router ingress, handoff, dispatcher, Embassy Sync/Futures/Time, rand_core \
@@ -2238,7 +2238,7 @@ fn immediately_preceded_by_feature_cfg(source: &str, position: usize, feature: &
         .is_some_and(|line| line.trim() == format!("#[cfg(feature = \"{feature}\")]"))
 }
 
-const E290_NODE_GRAPH_REQUIRED: [&str; 46] = [
+const E290_NODE_GRAPH_REQUIRED: [&str; 47] = [
     "allocator-api2",
     "embedded-storage",
     "esp-alloc",
@@ -2265,6 +2265,7 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 46] = [
     "reticulum-lxmf-store",
     "reticulum-lxmf-wire",
     "reticulum-node-core",
+    "reticulum-nomad-protocol",
     "reticulum-nor-flash-region",
     "reticulum-radio-interface",
     "reticulum-radio-lora-phy",
@@ -2800,6 +2801,7 @@ fn validate_e290_firmware_graph_for_root_features(
         "reticulum-lxmf-model ",
         "reticulum-lxmf-store ",
         "reticulum-lxmf-wire ",
+        "reticulum-nomad-protocol ",
         "reticulum-device-api-ble ",
         "reticulum-device-api-credential-store ",
         "reticulum-device-api-credentials ",
@@ -2916,6 +2918,7 @@ fn validate_e290_node_feature_boundary(
         ("reticulum-lxmf-ingress", "crates/lxmf-ingress"),
         ("reticulum-lxmf-model", "crates/lxmf-model"),
         ("reticulum-lxmf-store", "crates/lxmf-store"),
+        ("reticulum-nomad-protocol", "crates/nomad-protocol"),
     ] {
         validate_exact_local_dependency(
             dependencies,
@@ -10629,6 +10632,12 @@ mod tests {
                         None,
                     ),
                     handoff_path_dependency_fixture(
+                        "reticulum-nomad-protocol",
+                        "*",
+                        &root.join("crates/nomad-protocol"),
+                        None,
+                    ),
+                    handoff_path_dependency_fixture(
                         "reticulum-rns-inbox-store",
                         "*",
                         &root.join("crates/rns-inbox-store"),
@@ -10900,6 +10909,7 @@ mod tests {
                      │       ├── rete-lxmf-core v0.1.0 features=[]\n\
                      │       ├── rete-stack v0.1.0 features=[alloc]\n\
                      │       └── rete-transport v0.1.0 features=[]\n\
+                     ├── reticulum-nomad-protocol v0.1.0 features=[]\n\
                      ├── reticulum-nor-flash-region v0.1.0 features=[]\n\
                      ├── reticulum-radio-interface v0.1.0 features=[]\n\
                      ├── reticulum-radio-tx-dispatch v0.1.0 features=[]\n\
@@ -11099,6 +11109,7 @@ mod tests {
             "reticulum-lxmf-model",
             "reticulum-lxmf-store",
             "reticulum-lxmf-wire",
+            "reticulum-nomad-protocol",
             "reticulum-device-api-ble",
             "reticulum-device-api-credential-store",
             "reticulum-device-api-credentials",
@@ -11516,7 +11527,7 @@ fn sample(layout: Layout) {
     }
 
     #[test]
-    fn permanent_e290_node_requires_exact_direct_lxmf_and_authentication_dependencies() {
+    fn permanent_e290_node_requires_exact_direct_lxmf_nomad_and_authentication_dependencies() {
         let root = workspace_root();
         let baseline = e290_node_metadata_fixture(&root);
         validate_e290_node_feature_boundary(&baseline.to_string(), &root).unwrap();
@@ -11541,6 +11552,11 @@ fn sample(layout: Layout) {
                 "reticulum-lxmf-store",
                 "crates/not-the-lxmf-store",
                 "lxmf-store",
+            ),
+            (
+                "reticulum-nomad-protocol",
+                "crates/not-the-nomad-protocol",
+                "nomad-protocol",
             ),
             (
                 "reticulum-device-api-ble",
