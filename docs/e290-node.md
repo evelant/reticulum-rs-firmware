@@ -335,13 +335,15 @@ application data unless a clean fault has disabled that service. Authenticated
 remote service announces now also enter a volatile PSRAM projection holding
 the latest 32 destinations and at most 256 application-data bytes per peer.
 API 1.5 exposes one boot-scoped generation at a time through the existing
-authenticated device session; it is a contact picker, not route authority. The scheduler
-attempts at most one local destination per event: primary first, LXMF eight
-seconds later, two short retry cycles, then a 30-minute steady cadence. The first
-retry is identity-phased by `13 + (u32_le(primary[0..4]) mod 23)` seconds after
-the initial pair; the known A and B identities therefore retry their primaries
-at 26 and 43 seconds from boot. Explicit events and Rete's five-second native
-retransmissions remain at least three seconds apart for that pair. A queue or
+authenticated device session; it is a contact picker, not route authority. The
+scheduler attempts at most one local destination per event: primary first,
+LXMF eight seconds later, and Nomad eight seconds after that, nominally at 0,
+8, and 16 seconds. Two short identity-phased retry cycles follow, then the
+30-minute steady delay. The known A/B pair's first retry primaries occur at 34
+and 63 seconds from boot. A 38-second delay from each first-cycle Nomad event
+places their second retry primaries at 88 and 117 seconds. Explicit events and
+Rete's five-second native retransmissions in those post-initial opportunities
+remain nominally at least three seconds apart across both boards. A queue or
 native admission rejection retains the same scheduled destination and retries
 it one second later without consuming bootstrap budget. An ambiguous pending
 `StoreFaultHold` retains its exact owner but does not currently suppress
@@ -1192,7 +1194,10 @@ python3.13 interop/python/e290_qualification_host.py erase-region \
 
 Require the exact 2 MiB readback to contain only `0xff` and have SHA-256
 `4bda3a28f4ffe603c0ec1258c0034d65a1a0d35ab7bd523a834608adabf03cc5`.
-Flash the exact current HIL package to both boards with identity-bound readback.
+This powered Stage 5 record predates the third Nomad destination. Its
+two-destination timing below is therefore preserved as historical evidence and
+must not be read as the current source schedule. Flash the exact Stage 5 HIL
+package to both boards with identity-bound readback.
 Reset both into fresh product boots and wait through both bootstrap retry pairs
 before submission. Relative to each board's boot, the expected local schedule is
 primary at 0 seconds and LXMF at 8 seconds; A then emits at 26/34 and 64/72
@@ -1687,16 +1692,20 @@ preserves the previous high-water value; retry after an ambiguous operation
 rescans and advances past any record that may have committed.
 
 The announce lane attempts at most one local destination per scheduling event.
-It starts with the primary destination, then attempts `lxmf.delivery` eight
-seconds later when the dedicated LXMF store is mounted and no clean service
-fault has disabled it. Two complete retry pairs follow: the first primary is
-delayed by `13 + (u32_le(primary[0..4]) mod 23)` seconds after the initial pair,
-and the second by another 30 seconds after that pair. Steady pairs then recur
-every 30 minutes. For the qualified A/B identities, this produces primary phases
-at 26 and 43 seconds from boot; including Rete's native retransmissions at five
-seconds, every post-initial nominal emission opportunity remains at least three
-seconds apart. A queue or native admission rejection retains the same destination
-behind a one-second retry deadline without consuming bootstrap budget. A pending
+It starts with the primary destination, attempts `lxmf.delivery` eight seconds
+later when the dedicated LXMF store is mounted and no clean service fault has
+disabled it, and attempts `nomadnetwork.node` after another eight seconds. The
+initial nominal sequence is therefore primary/LXMF/Nomad at 0/8/16 seconds.
+Two complete retry triples follow. The first retry primary is delayed by
+`13 + (u32_le(primary[0..4]) mod 43)` seconds after the initial Nomad event;
+the known A/B pair's first retry primaries occur at 34 and 63 seconds. The next
+primary follows 38 seconds after each first retry's Nomad event, placing the
+second retry primaries at 88 and 117 seconds. A 30-minute delay from each final
+Nomad event then begins the steady triple cadence. Including Rete's native
+retransmissions at five seconds, every post-initial nominal emission
+opportunity for the known pair remains at least three seconds apart. A queue or
+native admission rejection retains the same destination behind a one-second
+retry deadline without consuming bootstrap budget. A pending
 ambiguous `StoreFaultHold` does not currently
 suppress the service announce. Each successfully queued destination consumes
 its own durable-clock ordinal, and its independent ordinary-action flush moves
@@ -1705,6 +1714,19 @@ application data is MessagePack `[nil, nil, []]`: unnamed, no stamp requirement,
 and no optional functionality advertised. An unmounted or clean-fault-disabled
 LXMF service is not advertised; the primary node destination continues
 independently.
+
+Current source also registers the inbound Single `nomadnetwork.node`
+destination with raw UTF-8 `Metalbeard` announce application data, inbound Links
+enabled, and automatic DATA proofs set to Reticulum `PROVE_NONE`. Its first
+responder accepts only canonical MessagePack `nil` (`0xc0`) as the anonymous
+value for `/page/index.mu`, then returns a static UTF-8 Micron page no larger
+than 400 bytes as one direct packet. It deliberately has no Resource, forms,
+files, or dynamic content. Response-allocation pressure discards the request;
+an ambiguous terminal response fault may leave the responder fail-stopped until
+reset. These are source and host-test claims only: no powered Nomad responder
+qualification has been recorded. The portable API 1.6 start/poll contract and
+product Nomad client runtime are likewise not yet connected to the permanent
+device API or Expo app.
 
 Two discovery limitations remain in the current pinned Rete `dfcaa36`
 descendant of `ba73ee4`, `354b875`, `338251b`, `a443173`, `2d07818`, and

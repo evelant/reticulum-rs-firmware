@@ -12,6 +12,8 @@ pub enum ScheduledAnnounce {
     Primary,
     /// The optional local `lxmf.delivery` destination.
     LxmfDelivery,
+    /// The local `nomadnetwork.node` destination.
+    NomadNode,
 }
 
 /// Boot-burst and steady-state scheduling for local destinations.
@@ -21,6 +23,7 @@ pub enum ScheduledAnnounce {
 /// a peer receive the primary, begin its rebroadcast, and miss the service
 /// announce. This scheduler therefore emits at most one local destination per
 /// event and leaves a fixed quiet interval before the optional LXMF service.
+/// The Nomad node follows at the same spacing, whether or not LXMF is enabled.
 /// Two identity-phased retry cycles follow before the 30-minute cadence.
 pub struct BootAnnounceSchedule {
     next_seconds: u64,
@@ -66,11 +69,24 @@ impl BootAnnounceSchedule {
     /// Advance after the selected destination is admitted or intentionally
     /// consumed because its optional service is disabled.
     pub fn mark_attempted(&mut self, now_seconds: u64) {
-        if self.next == ScheduledAnnounce::Primary && self.lxmf_enabled {
-            self.next = ScheduledAnnounce::LxmfDelivery;
-            self.next_seconds =
-                now_seconds.saturating_add(config::ANNOUNCE_DESTINATION_SPACING_SECONDS);
-            return;
+        match self.next {
+            ScheduledAnnounce::Primary => {
+                self.next = if self.lxmf_enabled {
+                    ScheduledAnnounce::LxmfDelivery
+                } else {
+                    ScheduledAnnounce::NomadNode
+                };
+                self.next_seconds =
+                    now_seconds.saturating_add(config::ANNOUNCE_DESTINATION_SPACING_SECONDS);
+                return;
+            }
+            ScheduledAnnounce::LxmfDelivery => {
+                self.next = ScheduledAnnounce::NomadNode;
+                self.next_seconds =
+                    now_seconds.saturating_add(config::ANNOUNCE_DESTINATION_SPACING_SECONDS);
+                return;
+            }
+            ScheduledAnnounce::NomadNode => {}
         }
 
         self.next = ScheduledAnnounce::Primary;
@@ -100,8 +116,9 @@ impl BootAnnounceSchedule {
 ///
 /// The first timestamp of epoch `n + 1` is strictly greater than every value
 /// epoch `n` can emit. At the product's 30-minute cadence, a mounted LXMF node
-/// consumes two values per cadence and the 1,048,576-value per-boot space spans
-/// almost 30 years; exhaustion still suppresses further local announces
+/// with a Nomad destination consumes three values per cadence and the
+/// 1,048,576-value per-boot space spans almost 20 years; exhaustion still
+/// suppresses further local announces
 /// instead of wrapping.
 pub struct BootAnnounceClock {
     epoch: BootEpoch,
@@ -206,20 +223,29 @@ mod tests {
         assert_eq!(schedule.next(), ScheduledAnnounce::LxmfDelivery);
         assert_eq!(schedule.due(107), None);
         schedule.mark_attempted(108);
-        assert_eq!(schedule.next_seconds(), 121);
-        assert_eq!(schedule.next(), ScheduledAnnounce::Primary);
-        schedule.mark_attempted(121);
+        assert_eq!(schedule.next_seconds(), 116);
+        assert_eq!(schedule.next(), ScheduledAnnounce::NomadNode);
+        schedule.mark_attempted(116);
         assert_eq!(schedule.next_seconds(), 129);
+        assert_eq!(schedule.next(), ScheduledAnnounce::Primary);
         schedule.mark_attempted(129);
-        assert_eq!(schedule.next_seconds(), 159);
-        schedule.mark_attempted(159);
-        assert_eq!(schedule.next_seconds(), 167);
-        schedule.mark_attempted(167);
-        assert_eq!(schedule.next_seconds(), 1_967);
-        schedule.mark_attempted(1_967);
-        assert_eq!(schedule.next_seconds(), 1_975);
-        schedule.mark_attempted(1_975);
-        assert_eq!(schedule.next_seconds(), 3_775);
+        assert_eq!(schedule.next_seconds(), 137);
+        schedule.mark_attempted(137);
+        assert_eq!(schedule.next_seconds(), 145);
+        schedule.mark_attempted(145);
+        assert_eq!(schedule.next_seconds(), 183);
+        schedule.mark_attempted(183);
+        assert_eq!(schedule.next_seconds(), 191);
+        schedule.mark_attempted(191);
+        assert_eq!(schedule.next_seconds(), 199);
+        schedule.mark_attempted(199);
+        assert_eq!(schedule.next_seconds(), 1_999);
+        schedule.mark_attempted(1_999);
+        assert_eq!(schedule.next_seconds(), 2_007);
+        schedule.mark_attempted(2_007);
+        assert_eq!(schedule.next_seconds(), 2_015);
+        schedule.mark_attempted(2_015);
+        assert_eq!(schedule.next_seconds(), 3_815);
     }
 
     #[test]
@@ -239,25 +265,40 @@ mod tests {
         assert_eq!(schedule.due(110), Some(ScheduledAnnounce::LxmfDelivery));
 
         schedule.mark_attempted(110);
+        assert_eq!(schedule.next(), ScheduledAnnounce::NomadNode);
+        assert_eq!(schedule.next_seconds(), 118);
+        schedule.defer_attempt(118);
+        assert_eq!(schedule.next(), ScheduledAnnounce::NomadNode);
+        assert_eq!(schedule.due(119), Some(ScheduledAnnounce::NomadNode));
+
+        schedule.mark_attempted(119);
         assert_eq!(schedule.next(), ScheduledAnnounce::Primary);
-        assert_eq!(schedule.next_seconds(), 123);
+        assert_eq!(schedule.next_seconds(), 132);
     }
 
     #[test]
-    fn primary_only_profile_does_not_spend_time_on_a_disabled_service() {
+    fn lxmf_disabled_profile_schedules_primary_then_nomad() {
         let mut schedule = BootAnnounceSchedule::new(100, [0; 16], false);
         assert_eq!(schedule.due(100), Some(ScheduledAnnounce::Primary));
         schedule.mark_attempted(100);
-        assert_eq!(schedule.next_seconds(), 113);
+        assert_eq!(schedule.next_seconds(), 108);
+        assert_eq!(schedule.next(), ScheduledAnnounce::NomadNode);
+        schedule.mark_attempted(108);
+        assert_eq!(schedule.next_seconds(), 121);
         assert_eq!(schedule.next(), ScheduledAnnounce::Primary);
-        schedule.mark_attempted(113);
-        assert_eq!(schedule.next_seconds(), 143);
-        schedule.mark_attempted(143);
-        assert_eq!(schedule.next_seconds(), 1_943);
+        schedule.mark_attempted(121);
+        assert_eq!(schedule.next_seconds(), 129);
+        assert_eq!(schedule.next(), ScheduledAnnounce::NomadNode);
+        schedule.mark_attempted(129);
+        assert_eq!(schedule.next_seconds(), 167);
+        schedule.mark_attempted(167);
+        assert_eq!(schedule.next_seconds(), 175);
+        schedule.mark_attempted(175);
+        assert_eq!(schedule.next_seconds(), 1_975);
     }
 
     #[test]
-    fn known_e290_nodes_separate_explicit_and_native_retransmit_opportunities() {
+    fn known_e290_nodes_keep_phased_primary_cycles_and_local_destination_spacing() {
         let mut a = BootAnnounceSchedule::new(
             0,
             [
@@ -280,41 +321,47 @@ mod tests {
         assert_eq!(b.next_seconds(), 8);
         a.mark_attempted(8);
         b.mark_attempted(8);
-        assert_eq!(a.next_seconds(), 26);
-        assert_eq!(b.next_seconds(), 43);
-        assert_eq!(b.next_seconds() - a.next_seconds(), 17);
+        assert_eq!(a.next(), ScheduledAnnounce::NomadNode);
+        assert_eq!(b.next(), ScheduledAnnounce::NomadNode);
+        assert_eq!(a.next_seconds(), 16);
+        assert_eq!(b.next_seconds(), 16);
+        a.mark_attempted(16);
+        b.mark_attempted(16);
+        assert_eq!(a.next_seconds(), 63);
+        assert_eq!(b.next_seconds(), 34);
+        assert_eq!(a.next_seconds() - b.next_seconds(), 29);
 
-        a.mark_attempted(26);
-        b.mark_attempted(43);
+        a.mark_attempted(63);
+        b.mark_attempted(34);
         assert_eq!(b.next(), ScheduledAnnounce::LxmfDelivery);
         assert_eq!(a.next(), ScheduledAnnounce::LxmfDelivery);
-        assert_eq!(a.next_seconds(), 34);
-        assert_eq!(b.next_seconds(), 51);
+        assert_eq!(a.next_seconds(), 71);
+        assert_eq!(b.next_seconds(), 42);
+        a.mark_attempted(71);
+        b.mark_attempted(42);
+        assert_eq!(a.next(), ScheduledAnnounce::NomadNode);
+        assert_eq!(b.next(), ScheduledAnnounce::NomadNode);
+        assert_eq!(a.next_seconds(), 79);
+        assert_eq!(b.next_seconds(), 50);
 
         // Model the exact immediate/+5-second opportunities produced by pinned
-        // Rete for both destinations after the intentionally colliding initial
-        // pair. The minimum gap is the product's three-second guard.
-        let mut opportunities = [
-            26,
-            26 + config::ANNOUNCE_NATIVE_RETRANSMIT_SECONDS,
-            34,
-            34 + config::ANNOUNCE_NATIVE_RETRANSMIT_SECONDS,
-            43,
-            43 + config::ANNOUNCE_NATIVE_RETRANSMIT_SECONDS,
-            51,
-            51 + config::ANNOUNCE_NATIVE_RETRANSMIT_SECONDS,
-        ];
-        opportunities.sort_unstable();
-        assert_eq!(opportunities, [26, 31, 34, 39, 43, 48, 51, 56]);
-        assert!(opportunities.windows(2).all(|pair| {
+        // Rete across both nodes' first retry bursts. The selected phases leave
+        // at least the product's three-second guard globally, not only within
+        // one board.
+        let first_retry_opportunities = [34, 39, 42, 47, 50, 55, 63, 68, 71, 76, 79, 84];
+        assert!(first_retry_opportunities.windows(2).all(|pair| {
             pair[1] - pair[0] >= config::ANNOUNCE_MINIMUM_EMISSION_SEPARATION_SECONDS
         }));
 
-        a.mark_attempted(34);
-        b.mark_attempted(51);
-        assert_eq!(a.next_seconds(), 64);
-        assert_eq!(b.next_seconds(), 81);
-        assert_eq!(b.next_seconds() - a.next_seconds(), 17);
+        a.mark_attempted(79);
+        b.mark_attempted(50);
+        assert_eq!(a.next_seconds(), 117);
+        assert_eq!(b.next_seconds(), 88);
+        assert_eq!(a.next_seconds() - b.next_seconds(), 29);
+        let second_retry_opportunities = [88, 93, 96, 101, 104, 109, 117, 122, 125, 130, 133, 138];
+        assert!(second_retry_opportunities.windows(2).all(|pair| {
+            pair[1] - pair[0] >= config::ANNOUNCE_MINIMUM_EMISSION_SEPARATION_SECONDS
+        }));
     }
 
     #[test]
@@ -324,10 +371,16 @@ mod tests {
             destination[..4].copy_from_slice(&seed.to_le_bytes());
             let mut schedule = BootAnnounceSchedule::new(0, destination, false);
             schedule.mark_attempted(0);
-            assert!(schedule.next_seconds() >= config::ANNOUNCE_BOOTSTRAP_BASE_SECONDS);
+            schedule.mark_attempted(config::ANNOUNCE_DESTINATION_SPACING_SECONDS);
             assert!(
                 schedule.next_seconds()
-                    < config::ANNOUNCE_BOOTSTRAP_BASE_SECONDS
+                    >= config::ANNOUNCE_DESTINATION_SPACING_SECONDS
+                        + config::ANNOUNCE_BOOTSTRAP_BASE_SECONDS
+            );
+            assert!(
+                schedule.next_seconds()
+                    < config::ANNOUNCE_DESTINATION_SPACING_SECONDS
+                        + config::ANNOUNCE_BOOTSTRAP_BASE_SECONDS
                         + config::ANNOUNCE_BOOTSTRAP_PHASE_SLOTS
             );
         }

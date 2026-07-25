@@ -1063,14 +1063,31 @@ that disables the LXMF service suppresses that secondary announce while the
 primary destination continues to announce. An ambiguous pending
 `StoreFaultHold` retains its exact owner but does not currently suppress the
 secondary announce. Local scheduling emits at most one destination per event:
-primary first, `lxmf.delivery` eight seconds later, then two short retry cycles
-whose first primary deadline is `13 + (primary-prefix mod 23)` seconds after the
-preceding pair, followed by a 30-minute steady cadence. The known E290 identities
-therefore place their first post-pair primary retries at 26 and 43 seconds from
-boot. Those phases keep their explicit events and Rete's five-second native
-retransmissions at least three seconds apart. Protocol queue rejection retains
-the selected destination behind a one-second retry deadline instead of consuming
-one of the bootstrap attempts. This replaces the historical back-to-back batches: in that powered run B
+primary first, `lxmf.delivery` eight seconds later, and `nomadnetwork.node`
+eight seconds after that, nominally at 0, 8, and 16 seconds from boot. Two
+identity-phased retry cycles follow. Their primary events occur at 34 and 63
+seconds for the known E290 pair, with the next cycle's primary 38 seconds after
+the preceding cycle's Nomad event, producing second primary events at 88 and
+117 seconds. A 30-minute delay from the final Nomad event then begins the
+steady cadence. Across both known boards, the explicit events and Rete's
+five-second native retransmissions in the post-initial retry opportunities
+remain nominally at least three seconds apart. Protocol queue rejection retains
+the selected destination behind a
+one-second retry deadline instead of consuming one of the bootstrap attempts.
+
+The source-composed Nomad destination carries raw UTF-8 `Metalbeard` announce
+application data, accepts inbound Links, and selects Reticulum `PROVE_NONE`.
+Its deliberately bounded responder accepts only an anonymous canonical
+MessagePack `nil` request for `/page/index.mu` and returns one static UTF-8
+Micron page of at most 400 bytes in a direct single-packet response. It has no
+Resource, form, file, or dynamic-content support. Response-allocation pressure
+discards that request, and an ambiguous terminal response fault can fail-stop
+the responder until reset. This source/test composition has not yet received a
+powered responder qualification. The portable API 1.6 start/poll contract and
+product Nomad client runtime also remain unwired to the permanent device API
+and Expo app.
+
+This replaces the historical back-to-back batches: in that powered run B
 processed three distinct A announces but still returned `no-path` for A's LXMF
 destination because transport-mode relay of the first announce occupied the
 half-duplex radio while the second was sent. The first independently scheduled

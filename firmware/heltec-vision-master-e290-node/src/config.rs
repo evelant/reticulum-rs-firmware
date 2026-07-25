@@ -319,13 +319,17 @@ pub const ANNOUNCE_BOOTSTRAP_BASE_SECONDS: u64 = 13;
 /// Primary-destination-derived phase buckets for the first bootstrap retry.
 ///
 /// The prime bucket count makes the full little-endian seed participate in the
-/// modulus. The qualified E290 A/B identities occupy phases 5 and 22, leaving
-/// seventeen seconds between their corresponding retry pairs.
-pub const ANNOUNCE_BOOTSTRAP_PHASE_SLOTS: u64 = 23;
+/// modulus. The qualified E290 A/B identities occupy phases 34 and 5, leaving
+/// 29 seconds between their corresponding three-destination retry bursts.
+pub const ANNOUNCE_BOOTSTRAP_PHASE_SLOTS: u64 = 43;
 /// Bounded delay before retrying the same destination after protocol rejection.
 pub const ANNOUNCE_ADMISSION_RETRY_SECONDS: u64 = 1;
-/// Delay from the first bootstrap retry to the second.
-pub const ANNOUNCE_BOOTSTRAP_RETRY_SPACING_SECONDS: u64 = 30;
+/// Delay from the first bootstrap retry's final destination to the second.
+///
+/// Together with the 16-second three-destination burst and the qualified
+/// identities' 29-second phase separation, 38 seconds leaves at least the
+/// three-second product guard between both boards' native retransmissions.
+pub const ANNOUNCE_BOOTSTRAP_RETRY_SPACING_SECONDS: u64 = 38;
 /// Periodic local transport announce cadence after bootstrap discovery.
 pub const ANNOUNCE_INTERVAL_SECONDS: u64 = 30 * 60;
 const _: () = assert!(ANNOUNCE_BOOTSTRAP_RETRIES > 0);

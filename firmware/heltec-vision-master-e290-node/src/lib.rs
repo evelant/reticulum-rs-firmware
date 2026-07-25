@@ -24,6 +24,7 @@ pub mod live_pairing_handoff;
 pub mod live_pairing_node;
 pub mod lxmf_delivery;
 pub mod nomad_coordinator;
+pub mod nomad_responder;
 pub mod nomad_runtime;
 pub mod pairing_control_handoff;
 pub mod pairing_control_mapping;
@@ -308,6 +309,7 @@ mod tests {
         assert!(main.contains("let lxmf_index: &'static mut [LxmfStoreIndexSlot]"));
         assert!(main.contains("flash_owner.mount_lxmf(lxmf_index)"));
         assert!(main.contains("activate_lxmf_delivery(&mut node, lxmf_service_available)"));
+        assert!(main.contains("activate_nomad_responder(&mut node)"));
         assert!(main.contains("lxmf_delivery_admission={lxmf_delivery_admission}"));
         assert!(main.contains(
             "durability=required-for-all-carriers accepts_links=true data_profile=opportunistic+responder-direct-link"
@@ -345,6 +347,10 @@ mod tests {
             node_task.contains("fresh_nomad_turn_armed = config::next_fresh_nomad_turn_armed(")
         );
         assert!(node_task.contains("ApplicationEvent::RequestValueReceived { .. } =>"));
+        assert!(node_task.contains("ScheduledAnnounce::NomadNode"));
+        assert!(node_task.contains("Some(NOMAD_NODE_ANNOUNCE_APP_DATA.as_bytes())"));
+        assert!(node_task.contains("classify_nomad_responder_event(&nomad_destination"));
+        assert!(node_task.contains("supervisor.prepare_response_actions("));
         assert!(node_task.contains("ApplicationEvent::LinkData {"));
         assert!(node_task.contains("*context == APPLICATION_LINK_CONTEXT_NONE"));
         assert!(node_task.contains("binding.role() == ApplicationLinkRole::Responder"));
@@ -352,6 +358,51 @@ mod tests {
         assert!(!node_task.contains(
             "let mut lxmf_retries = LxmfRetrySet::<{ config::APPLICATION_EVENT_SLOTS }>::new()"
         ));
+
+        let non_lxmf_start = node_task
+            .find("fn drive_non_lxmf_application_event(")
+            .expect("permanent task must classify non-LXMF application events");
+        let responder_helper_start = node_task
+            .find("fn drive_prepared_nomad_response(")
+            .expect("permanent task must retain prepared Nomad responses");
+        let non_lxmf = &node_task[non_lxmf_start..responder_helper_start];
+        let retry_reservation = non_lxmf
+            .find("let response_retry_slot = if retry_actions_a.is_none()")
+            .expect("Nomad response preparation must reserve an exact retry owner");
+        let response_preparation = non_lxmf
+            .find("supervisor.prepare_response_actions(")
+            .expect("Nomad responder must use the native response wrapper");
+        assert!(
+            retry_reservation < response_preparation,
+            "a response retry owner must be selected before crypto preparation"
+        );
+
+        let lxmf_helper_start = node_task
+            .find("fn drive_lxmf_event(")
+            .expect("LXMF application-event consumer must remain composed");
+        let responder_helper = &node_task[responder_helper_start..lxmf_helper_start];
+        let response_handoff = responder_helper
+            .find("supervisor.try_offer_actions(")
+            .expect("prepared response must enter the ordinary supervisor");
+        let response_retry_retention = responder_helper
+            .find("*response_retry_slot = Some(retained);")
+            .expect("a busy supervisor must return the exact response to its reserved owner");
+        let request_acknowledgement = responder_helper
+            .find("match lease.acknowledge()")
+            .expect("request event must be acknowledged after response handoff");
+        assert!(
+            response_handoff < response_retry_retention
+                && response_retry_retention < request_acknowledgement,
+            "request acknowledgement must follow either response ownership transfer"
+        );
+        assert!(
+            !responder_helper.contains("with_protocol_dispatch"),
+            "inbound responses must not enter outbound Nomad request reconciliation"
+        );
+        assert!(
+            !responder_helper.contains(".clone()"),
+            "prepared response ownership must move exactly once"
+        );
 
         let storage = include_str!("platform_storage.rs");
         assert!(storage.contains("runtime: Option<&'static mut ProductSubmissionRuntime>"));

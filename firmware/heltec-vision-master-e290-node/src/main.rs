@@ -112,6 +112,7 @@ use reticulum_heltec_vision_master_e290_node::{
     },
     live_pairing_handoff::LivePairingHandoff,
     lxmf_delivery::{LxmfDeliveryActivation, activate_lxmf_delivery},
+    nomad_responder::activate_nomad_responder,
     pairing_control_handoff::PairingControlHandoff,
     session_admission_handoff::SessionAdmissionHandoff,
     storage_device_id_from_eui48,
@@ -1003,6 +1004,21 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
     } else {
         "disabled"
     };
+    let nomad_destination = match activate_nomad_responder(&mut node) {
+        Ok(destination) => {
+            info!(
+                "e290-node stage=nomad-responder status=ENABLED destination={:02x?} accepts_links=true proof_policy=never page=/page/index.mu response_profile=single-packet-static-micron resource_ingress=disabled discovery_announce=periodic interfaces=transport-neutral",
+                destination.as_bytes(),
+            );
+            destination
+        }
+        Err(reason) => {
+            error!(
+                "e290-node stage=nomad-responder status=FAIL reason={reason:?} action=pre-task-construction-fail-stop"
+            );
+            inert_forever().await
+        }
+    };
 
     let mut data_buffers = DATA_PACKET_STORAGE
         .init([const { TxPacketBuffer::new() }; config::DATA_BUFFERS])
@@ -1207,6 +1223,7 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
         delayed_proofs,
         application_volatile,
         lxmf_destination,
+        nomad_destination,
         peer_discovery_incarnation,
         node_task::NodeHandoffs::new(
             node_pairing_handoff,

@@ -47,6 +47,9 @@ use reticulum_heltec_vision_master_e290_node::{
         wire_limits,
     },
     nomad_coordinator::{CoordinatorCommand, CoordinatorOperation, NativeRequestPhase},
+    nomad_responder::{
+        NOMAD_NODE_ANNOUNCE_APP_DATA, NomadResponderDisposition, classify_nomad_responder_event,
+    },
     nomad_runtime::{NomadDriveStep, NomadEventObservation, ProductNomadRuntimeState},
     pairing_control_handoff::{
         ButtonObservationReply, ExclusiveAcquisitionReply, LifecycleAcknowledgement,
@@ -71,8 +74,8 @@ use reticulum_node_core::{
     ApplicationEventQuarantineReason, ApplicationLinkRole, AuthorizedFrameObservation,
     DelayedProofOwner, DestinationHash, InitiateLinkError, LinkHandle, MonotonicInstant,
     MonotonicMillis, MonotonicSeconds, NodeActions, OutboundDispatchInterval, PrepareRequestError,
-    ReceiptCorrelationError, RequestDispatchConfirmation, RequestDispatchError,
-    RequestDispatchReconciliation, RequestHandle, TxLeaseDeadline,
+    PrepareResponseError, ReceiptCorrelationError, RequestDispatchConfirmation,
+    RequestDispatchError, RequestDispatchReconciliation, RequestHandle, TxLeaseDeadline,
 };
 #[cfg(feature = "runtime-measurement-hil")]
 use reticulum_node_core::{IngressDisposition, IngressMetadata, PacketType};
@@ -425,6 +428,7 @@ pub async fn run(
     mut delayed_proofs: DelayedProofOwner<'static>,
     application_volatile: &'static mut ApplicationVolatileState,
     lxmf_destination: Option<DestinationHash>,
+    nomad_destination: DestinationHash,
     peer_discovery_incarnation: LxmfPeerDiscoveryIncarnation,
     handoffs: NodeHandoffs,
     offline_descriptor: InterfaceDescriptor,
@@ -1299,6 +1303,31 @@ pub async fn run(
                             }
                         }
 
+                        let mut nomad_emission = None;
+                        if scheduled == ScheduledAnnounce::NomadNode {
+                            let emitted_at = announce_clock
+                                .next_emission()
+                                .expect("a non-exhausted announce clock has an emission");
+                            match supervisor.queue_announce_for(
+                                &nomad_destination,
+                                Some(NOMAD_NODE_ANNOUNCE_APP_DATA.as_bytes()),
+                                emitted_at,
+                                &mut rng,
+                            ) {
+                                Ok(()) => {
+                                    announce_clock.mark_queued();
+                                    nomad_emission = Some(emitted_at.get());
+                                }
+                                Err(reason) => {
+                                    admission_deferred = true;
+                                    warn!(
+                                        "e290-node stage=announce destination=nomadnetwork.node status=DEFERRED reason={reason:?} retry_after_seconds={}",
+                                        config::ANNOUNCE_ADMISSION_RETRY_SECONDS,
+                                    );
+                                }
+                            }
+                        }
+
                         if admission_deferred {
                             announce_schedule.defer_attempt(now);
                         } else {
@@ -1308,7 +1337,10 @@ pub async fn run(
                             announce_schedule.mark_attempted(now);
                         }
 
-                        if primary_emission.is_some() || lxmf_emission.is_some() {
+                        if primary_emission.is_some()
+                            || lxmf_emission.is_some()
+                            || nomad_emission.is_some()
+                        {
                             match supervisor.flush_announces(
                                 MonotonicSeconds::new(now),
                                 config::ordinary_admission(now_millis()),
@@ -1316,7 +1348,7 @@ pub async fn run(
                             ) {
                                 NodeInterfaceAnnounceFlushResult::Accepted => {
                                     info!(
-                                        "e290-node stage=announce status=QUEUED primary_emission={primary_emission:?} lxmf_delivery_emission={lxmf_emission:?} boot_epoch={}",
+                                        "e290-node stage=announce status=QUEUED primary_emission={primary_emission:?} lxmf_delivery_emission={lxmf_emission:?} nomad_node_emission={nomad_emission:?} boot_epoch={}",
                                         announce_clock.epoch().get(),
                                     );
                                     progressed = true;
@@ -1930,22 +1962,33 @@ pub async fn run(
                 lxmf_proof_holder.is_occupied(),
                 delayed_proofs.capacities().ready,
             );
-            progressed |= drive_one_application_event(
-                &mut application_events,
-                &mut delayed_proofs,
-                lxmf_retries,
-                storage,
-                supervisor,
-                nomad,
-                discovered_peers,
-                lxmf_destination,
-                &mut pending_inbound,
-                lxmf_authority_fault,
-                *lxmf_pending_owner_fault_observed,
-                lxmf_service_fault_observed,
-                lxmf_proof_backpressured,
-                now_millis(),
-            );
+            // A responder request can produce one ordinary response envelope.
+            // Leave it in the FIFO while both generic retry slots are occupied
+            // so successful preparation can always establish an exact owner
+            // before the request event is acknowledged.
+            if retry_actions_a.is_none() || retry_actions_b.is_none() {
+                progressed |= drive_one_application_event(
+                    &mut application_events,
+                    &mut delayed_proofs,
+                    lxmf_retries,
+                    storage,
+                    supervisor,
+                    nomad,
+                    discovered_peers,
+                    lxmf_destination,
+                    nomad_destination,
+                    &mut retry_actions_a,
+                    &mut retry_actions_b,
+                    &mut fail_closed_draining,
+                    &mut pending_inbound,
+                    lxmf_authority_fault,
+                    *lxmf_pending_owner_fault_observed,
+                    lxmf_service_fault_observed,
+                    lxmf_proof_backpressured,
+                    &mut rng,
+                    now_millis(),
+                );
+            }
             if let Some(pending) = storage.lxmf_pending_message_id()
                 && !lxmf_retries.contains_pending_owner(pending)
                 && !lxmf_authority_fault.contains_message(pending)
@@ -2108,18 +2151,23 @@ fn drive_one_application_event(
     delayed_proofs: &mut DelayedProofOwner<'static>,
     retries: &mut LxmfRetrySet<'static, { config::APPLICATION_EVENT_SLOTS }>,
     storage: &mut ProductStorageCoordinator,
-    supervisor: &ProductSupervisor,
+    supervisor: &mut ProductSupervisor,
     nomad: &mut ProductNomadRuntimeState,
     discovered_peers: &mut DiscoveredPeers<
         { config::LXMF_DISCOVERED_PEERS },
         { config::LXMF_DISCOVERED_PEER_APP_DATA_BYTES },
     >,
     lxmf_destination: Option<DestinationHash>,
+    nomad_destination: DestinationHash,
+    retry_actions_a: &mut Option<RetainedActions>,
+    retry_actions_b: &mut Option<RetainedActions>,
+    fail_closed_draining: &mut bool,
     pending_inbound: &mut Option<InboxCandidate>,
     authority_fault: &mut LxmfAuthorityFault<'static, { config::APPLICATION_EVENT_SLOTS }>,
     pending_owner_fault_observed: bool,
     service_fault_observed: &mut bool,
     proof_backpressured: bool,
+    rng: &mut Trng,
     now_ms: u64,
 ) -> bool {
     let pending_message = storage.lxmf_pending_message_id();
@@ -2295,7 +2343,12 @@ fn drive_one_application_event(
         supervisor,
         nomad,
         discovered_peers,
+        nomad_destination,
+        retry_actions_a,
+        retry_actions_b,
+        fail_closed_draining,
         pending_inbound,
+        rng,
         now_ms,
     )
 }
@@ -2303,13 +2356,18 @@ fn drive_one_application_event(
 fn drive_non_lxmf_application_event(
     lease: ApplicationEventLease<'_, 'static>,
     storage: &mut ProductStorageCoordinator,
-    supervisor: &ProductSupervisor,
+    supervisor: &mut ProductSupervisor,
     nomad: &mut ProductNomadRuntimeState,
     discovered_peers: &mut DiscoveredPeers<
         { config::LXMF_DISCOVERED_PEERS },
         { config::LXMF_DISCOVERED_PEER_APP_DATA_BYTES },
     >,
+    nomad_destination: DestinationHash,
+    retry_actions_a: &mut Option<RetainedActions>,
+    retry_actions_b: &mut Option<RetainedActions>,
+    fail_closed_draining: &mut bool,
     pending_inbound: &mut Option<InboxCandidate>,
+    rng: &mut Trng,
     now_ms: u64,
 ) -> bool {
     let event_id = lease.id();
@@ -2340,6 +2398,67 @@ fn drive_non_lxmf_application_event(
             return true;
         }
         NomadEventObservation::Unrelated => {}
+    }
+
+    match classify_nomad_responder_event(&nomad_destination, lease.event()) {
+        NomadResponderDisposition::Respond(response) => {
+            if *fail_closed_draining {
+                warn!(
+                    "e290-node stage=nomad-responder status=DISCARDED kind={kind} slot={} generation={} sequence={} reason=aggregate-fail-closed",
+                    event_id.slot().get(),
+                    event_id.generation().get(),
+                    sequence.get(),
+                );
+                lease.discard(ApplicationEventDiscardReason::ConsumerUnavailable);
+                return true;
+            }
+            let response_retry_slot = if retry_actions_a.is_none() {
+                &mut *retry_actions_a
+            } else if retry_actions_b.is_none() {
+                &mut *retry_actions_b
+            } else {
+                *fail_closed_draining = true;
+                error!(
+                    "e290-node stage=nomad-responder status=QUARANTINED kind={kind} slot={} generation={} sequence={} reason=response-owner-slot-not-reserved-before-preparation action=fail-closed-drain",
+                    event_id.slot().get(),
+                    event_id.generation().get(),
+                    sequence.get(),
+                );
+                lease.quarantine(ApplicationEventQuarantineReason::ConsumerFault);
+                return true;
+            };
+            let (binding, request, page) = response.into_parts();
+            let preparation = supervisor.prepare_response_actions(
+                binding,
+                request,
+                page,
+                MonotonicSeconds::new(now_ms / 1_000),
+                rng,
+            );
+            return drive_prepared_nomad_response(
+                lease,
+                preparation,
+                supervisor,
+                response_retry_slot,
+                fail_closed_draining,
+                now_ms,
+            );
+        }
+        NomadResponderDisposition::WrongPath
+        | NomadResponderDisposition::WrongValue
+        | NomadResponderDisposition::LegacyRequestReceived => {
+            warn!(
+                "e290-node stage=nomad-responder status=DISCARDED kind={kind} slot={} generation={} sequence={} reason=invalid-or-unsupported-request",
+                event_id.slot().get(),
+                event_id.generation().get(),
+                sequence.get(),
+            );
+            lease.discard(ApplicationEventDiscardReason::InvalidPayload);
+            return true;
+        }
+        NomadResponderDisposition::Unrelated
+        | NomadResponderDisposition::WrongRole
+        | NomadResponderDisposition::WrongDestination => {}
     }
 
     match lease.event() {
@@ -2439,11 +2558,12 @@ fn drive_non_lxmf_application_event(
             );
             lease.quarantine(ApplicationEventQuarantineReason::ConsumerFault);
         }
-        // Inbound Link request values belong to the future destination-bound
-        // Nomad responder and are never outbound response completions.
+        // The Nomad responder claimed every exact supported request above.
+        // Remaining request values have a role or destination that no current
+        // application service owns; they are never outbound completions.
         ApplicationEvent::RequestValueReceived { .. } => {
             warn!(
-                "e290-node stage=application-event-consumer status=DISCARDED kind={kind} slot={} generation={} sequence={} reason=consumer-unavailable future_consumer=nomad-responder",
+                "e290-node stage=application-event-consumer status=DISCARDED kind={kind} slot={} generation={} sequence={} reason=consumer-unavailable consumer=unsupported-or-unowned-request-binding",
                 event_id.slot().get(),
                 event_id.generation().get(),
                 sequence.get(),
@@ -2456,21 +2576,144 @@ fn drive_non_lxmf_application_event(
         | ApplicationEvent::LinkRttUpdated { .. }
         | ApplicationEvent::LinkData { .. }
         | ApplicationEvent::ChannelMessages { .. }
-        // Inbound Link requests are the future destination-bound Nomad
-        // responder surface. Keep them explicit and unavailable until the
-        // responder owns response dispatch end to end.
+        // The exact Nomad request representations were handled above.
+        // Remaining Link requests target an unsupported or unowned binding.
         | ApplicationEvent::RequestReceived { .. }
         | ApplicationEvent::ResponseReceived { .. }
         | ApplicationEvent::LinkClosed { .. }
         | ApplicationEvent::LinkIdentified { .. }
         | ApplicationEvent::RequestFailed { .. } => {
             warn!(
-                "e290-node stage=application-event-consumer status=DISCARDED kind={kind} slot={} generation={} sequence={} reason=consumer-unavailable future_consumer=lxmf-or-application-service",
+                "e290-node stage=application-event-consumer status=DISCARDED kind={kind} slot={} generation={} sequence={} reason=consumer-unavailable consumer=unsupported-or-unowned-application-event",
                 event_id.slot().get(),
                 event_id.generation().get(),
                 sequence.get(),
             );
             lease.discard(ApplicationEventDiscardReason::ConsumerUnavailable);
+        }
+    }
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drive_prepared_nomad_response(
+    lease: ApplicationEventLease<'_, 'static>,
+    preparation: Result<
+        Result<NodeActions, PrepareResponseError>,
+        reticulum_tx_supervisor::NodeInterfaceSupervisorFault,
+    >,
+    supervisor: &mut ProductSupervisor,
+    response_retry_slot: &mut Option<RetainedActions>,
+    fail_closed_draining: &mut bool,
+    now_ms: u64,
+) -> bool {
+    let event_id = lease.id();
+    let sequence = lease.sequence();
+    let kind = lease.event().kind();
+    let actions = match preparation {
+        Ok(Ok(actions)) => actions,
+        Ok(Err(PrepareResponseError::LinkNotFound | PrepareResponseError::LinkNotActive)) => {
+            warn!(
+                "e290-node stage=nomad-responder status=DISCARDED kind={kind} slot={} generation={} sequence={} reason=link-unavailable",
+                event_id.slot().get(),
+                event_id.generation().get(),
+                sequence.get(),
+            );
+            lease.discard(ApplicationEventDiscardReason::ConsumerUnavailable);
+            return true;
+        }
+        Ok(Err(
+            PrepareResponseError::ResponseAllocationFailed
+            | PrepareResponseError::ActionAllocationFailed,
+        )) => {
+            warn!(
+                "e290-node stage=nomad-responder status=DISCARDED kind={kind} slot={} generation={} sequence={} reason=response-capacity",
+                event_id.slot().get(),
+                event_id.generation().get(),
+                sequence.get(),
+            );
+            lease.discard(ApplicationEventDiscardReason::DownstreamCapacity);
+            return true;
+        }
+        Ok(Err(PrepareResponseError::ResponseTooLarge { actual, maximum })) => {
+            error!(
+                "e290-node stage=nomad-responder status=DISCARDED kind={kind} slot={} generation={} sequence={} reason=response-too-large actual={actual} maximum={maximum}",
+                event_id.slot().get(),
+                event_id.generation().get(),
+                sequence.get(),
+            );
+            lease.discard(ApplicationEventDiscardReason::PolicyRejected);
+            return true;
+        }
+        Ok(Err(
+            reason @ (PrepareResponseError::LinkBindingMismatch
+            | PrepareResponseError::LinkInterfaceUnknown
+            | PrepareResponseError::Crypto
+            | PrepareResponseError::PacketBuild
+            | PrepareResponseError::Invariant),
+        )) => {
+            *fail_closed_draining = true;
+            error!(
+                "e290-node stage=nomad-responder status=QUARANTINED kind={kind} slot={} generation={} sequence={} reason={reason:?} action=fail-closed-drain",
+                event_id.slot().get(),
+                event_id.generation().get(),
+                sequence.get(),
+            );
+            lease.quarantine(ApplicationEventQuarantineReason::ConsumerFault);
+            return true;
+        }
+        Err(fault) => {
+            *fail_closed_draining = true;
+            error!(
+                "e290-node stage=nomad-responder status=QUARANTINED kind={kind} slot={} generation={} sequence={} reason=supervisor-fault fault={fault:?} action=fail-closed-drain",
+                event_id.slot().get(),
+                event_id.generation().get(),
+                sequence.get(),
+            );
+            lease.quarantine(ApplicationEventQuarantineReason::ConsumerFault);
+            return true;
+        }
+    };
+
+    let action_owner =
+        match supervisor.try_offer_actions(actions, config::ordinary_admission(now_ms)) {
+            Ok(()) => "ordinary-supervisor",
+            Err(failure) => {
+                let (retained, terminal) =
+                    match handle_action_offer_failure(failure, "nomad-responder") {
+                        ActionOfferHandling::Retry(retained) => (retained, false),
+                        ActionOfferHandling::RetainAndDrain(retained) => (retained, true),
+                    };
+                debug_assert!(response_retry_slot.is_none());
+                *response_retry_slot = Some(retained);
+                if terminal {
+                    *fail_closed_draining = true;
+                }
+                "reserved-retry-slot"
+            }
+        };
+
+    match lease.acknowledge() {
+        Ok(event) => {
+            drop(event);
+            info!(
+                "e290-node stage=nomad-responder status=ACKNOWLEDGED kind={kind} slot={} generation={} sequence={} response_owner={action_owner}",
+                event_id.slot().get(),
+                event_id.generation().get(),
+                sequence.get(),
+            );
+        }
+        Err(failure) => {
+            *fail_closed_draining = true;
+            failure
+                .into_lease()
+                .quarantine(ApplicationEventQuarantineReason::ConsumerFault);
+            error!(
+                "e290-node stage=nomad-responder status=QUARANTINED kind={kind} slot={} generation={} sequence={} response_owner={action_owner} reason=unexpected-retained-proof action=keep-single-response-owner-and-fail-closed-drain",
+                event_id.slot().get(),
+                event_id.generation().get(),
+                sequence.get(),
+            );
         }
     }
     true

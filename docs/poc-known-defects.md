@@ -166,6 +166,24 @@ proof unless a failing test promotes one into a release blocker.
   This is a deliberately narrower, JavaScript-friendly subset of Python LXMF's
   binary64 timestamp. The firmware has no trusted wall clock yet.
 
+## Static Nomad node responder
+
+- Current source registers one inbound Single `nomadnetwork.node` destination
+  with raw UTF-8 `Metalbeard` announce application data, inbound Links enabled,
+  and Reticulum `PROVE_NONE`. It accepts only the canonical anonymous
+  MessagePack `nil` (`0xc0`) value for `/page/index.mu` and returns one static
+  UTF-8 Micron page no larger than 400 bytes as a direct single-packet response.
+- This is intentionally not a general Nomad host. It has no Resource, forms,
+  files, dynamic content, or executable page support. Response-allocation
+  pressure discards the request. An ambiguous terminal response fault may
+  fail-stop the responder until reset rather than risk losing an exact action
+  owner.
+- The registration, classification, response preparation, and node-task owner
+  ordering are source/host qualified only. There is no powered responder proof
+  yet. API 1.6's portable authenticated start/poll contract and the product
+  Nomad client runtime are not yet connected to the permanent device API or
+  Expo app, so the phone cannot browse this page through the appliance API.
+
 ## Discovery and multiple transports
 
 - LoRa is the first active Reticulum transport, but submission, inbox, API, and

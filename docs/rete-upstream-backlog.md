@@ -227,12 +227,12 @@ destination. Rete transport mode immediately relays the first accepted announce,
 so B transmitted that relay while A sent the secondary and could not receive it.
 
 Current product source mitigates that composition without changing the Rete
-pin. It schedules at most one destination per event, separates primary and LXMF
-by eight seconds, runs two retry pairs with an identity-derived first phase, and
-then enters the 30-minute cadence. That does not close responsive path-request
-handling or the generic retransmission-jitter defect. Retain local regressions
-for both Rete behaviors before changing the pin. No issue or pull request has
-been opened for either item.
+pin. It schedules at most one destination per event, separates primary, LXMF,
+and Nomad destinations by eight seconds, runs two retry triples with an
+identity-derived first phase, and then enters the 30-minute cadence. That does
+not close responsive path-request handling or the generic retransmission-jitter
+defect. Retain local regressions for both Rete behaviors before changing the
+pin. No issue or pull request has been opened for either item.
 
 ## 4. Link state events and outbound activity
 
