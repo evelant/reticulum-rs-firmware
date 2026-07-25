@@ -1,5 +1,7 @@
 //! Sole ESP flash owner and exact permanent-image partition gate.
 
+#[cfg(feature = "ble-api-proof")]
+use core::num::NonZeroU64;
 use core::{
     fmt::{self, Display, Formatter},
     mem,
@@ -15,6 +17,11 @@ use esp_storage::{FlashStorage, FlashStorageError};
 use rand_core::{CryptoRng, RngCore};
 use reticulum_announce_clock::{
     BootEpochReservation, FreshClockPolicy, ReserveError, reserve_next_boot_epoch,
+};
+#[cfg(feature = "ble-api-proof")]
+use reticulum_ble_bond_store::{
+    BleBond, BondStoreCleanup, BondStoreError, BondStoreFault, MountedBondStore,
+    commit_bond as commit_ble_bond_store, mount as mount_ble_bond_store,
 };
 use reticulum_device_api::{
     CapabilityAvailability, DestinationHash as ApiDestinationHash, IdentityHash as ApiIdentityHash,
@@ -37,8 +44,8 @@ use reticulum_device_api_credential_store::{
 use reticulum_device_api_credentials::{CredentialId, SelectedCredential};
 use reticulum_device_api_handoff::{LocalApiReply, LocalApiRequest};
 use reticulum_device_api_pairing::{
-    AbortCurrentResponse, AbortResult, ActivateResponse, BeginResponse, DeviceId, PairingRequest,
-    PairingResponse, ProofStartResponse,
+    AbortCurrentResponse, AbortResult, ActivateResponse, BearerBinding, BeginResponse, DeviceId,
+    PairingRequest, PairingResponse, ProofStartResponse,
 };
 use reticulum_device_api_pairing_policy::{
     AcquirePairingExclusive, ActiveLowButton, ButtonEffect, ConnectionId, ConnectionRefusal,
@@ -70,12 +77,13 @@ use reticulum_heltec_vision_master_e290_node::cross_store_gate::{
 };
 use reticulum_heltec_vision_master_e290_node::partition_contract::{
     ANNOUNCE_CLOCK_LABEL_BYTES, ANNOUNCE_CLOCK_LEN, ANNOUNCE_CLOCK_OFFSET,
-    API_CREDENTIALS_LABEL_BYTES, API_CREDENTIALS_LEN, API_CREDENTIALS_OFFSET, DATA_PARTITION_TYPE,
-    DEVICE_CONFIG_LABEL_BYTES, DEVICE_CONFIG_LEN, DEVICE_CONFIG_OFFSET, LXMF_STORE_LABEL_BYTES,
-    LXMF_STORE_LEN, LXMF_STORE_OFFSET, MESSAGE_STORE_LABEL_BYTES, MESSAGE_STORE_LEN,
-    MESSAGE_STORE_OFFSET, NODE_IDENTITY_LABEL_BYTES, NODE_IDENTITY_LEN, NODE_IDENTITY_OFFSET,
-    NODE_JOURNAL_LABEL_BYTES, NODE_JOURNAL_LEN, NODE_JOURNAL_OFFSET, NVS_DATA_SUBTYPE,
-    REQUIRED_FLASH_BYTES, UNDEFINED_DATA_SUBTYPE,
+    API_CREDENTIALS_LABEL_BYTES, API_CREDENTIALS_LEN, API_CREDENTIALS_OFFSET, BLE_BOND_LABEL_BYTES,
+    BLE_BOND_LEN, BLE_BOND_OFFSET, DATA_PARTITION_TYPE, DEVICE_CONFIG_LABEL_BYTES,
+    DEVICE_CONFIG_LEN, DEVICE_CONFIG_OFFSET, LXMF_STORE_LABEL_BYTES, LXMF_STORE_LEN,
+    LXMF_STORE_OFFSET, MESSAGE_STORE_LABEL_BYTES, MESSAGE_STORE_LEN, MESSAGE_STORE_OFFSET,
+    NODE_IDENTITY_LABEL_BYTES, NODE_IDENTITY_LEN, NODE_IDENTITY_OFFSET, NODE_JOURNAL_LABEL_BYTES,
+    NODE_JOURNAL_LEN, NODE_JOURNAL_OFFSET, NVS_DATA_SUBTYPE, REQUIRED_FLASH_BYTES,
+    UNDEFINED_DATA_SUBTYPE,
 };
 #[cfg(feature = "runtime-measurement-hil")]
 use reticulum_heltec_vision_master_e290_node::runtime_measurement::RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE;
@@ -160,6 +168,7 @@ pub(crate) enum ProductFlashOpenError {
         identity: u8,
         announce_clock: u8,
         api_credentials: u8,
+        ble_bond: u8,
         device_config: u8,
         node_journal: u8,
         message_store: u8,
@@ -186,13 +195,14 @@ impl Display for ProductFlashOpenError {
                 identity,
                 announce_clock,
                 api_credentials,
+                ble_bond,
                 device_config,
                 node_journal,
                 message_store,
                 lxmf_store,
             } => write!(
                 formatter,
-                "partition-cardinality identity={identity} announce_clock={announce_clock} api_credentials={api_credentials} device_config={device_config} node_journal={node_journal} message_store={message_store} lxmf_store={lxmf_store}"
+                "partition-cardinality identity={identity} announce_clock={announce_clock} api_credentials={api_credentials} ble_bond={ble_bond} device_config={device_config} node_journal={node_journal} message_store={message_store} lxmf_store={lxmf_store}"
             ),
             Self::PartitionShape(name) => write!(formatter, "partition-shape name={name}"),
             Self::PartitionOverlap(name) => write!(formatter, "partition-overlap name={name}"),
@@ -320,11 +330,131 @@ impl BootCredentialStore {
     }
 }
 
+/// Failure while strictly read-only mounting the dedicated BLE bond store.
+#[cfg(feature = "ble-api-proof")]
+pub(crate) type BootBleBondMountError = BondStoreError<ProductRegionError>;
+
+/// Read-only boot mount retaining sole ownership of secret BLE bond material.
+///
+/// The type intentionally implements neither `Clone` nor `Debug`. Moving the
+/// optional bond out consumes this owner and the bond itself zeroizes on drop.
+#[must_use = "boot-loaded BLE bond ownership must be deliberately transferred or dropped"]
+#[cfg(feature = "ble-api-proof")]
+pub(crate) struct BootBleBondStore {
+    mounted: MountedBondStore,
+    raw_write_calls: u32,
+    raw_erase_calls: u32,
+}
+
+#[cfg(feature = "ble-api-proof")]
+impl BootBleBondStore {
+    /// Authoritative nonzero generation, or `None` for erased media.
+    pub(crate) const fn generation(&self) -> Option<NonZeroU64> {
+        self.mounted.generation()
+    }
+
+    /// Whether one authenticated bond was loaded.
+    pub(crate) const fn bond_present(&self) -> bool {
+        self.mounted.bond().is_some()
+    }
+
+    /// Optional non-authoritative cleanup reported by the read-only mount.
+    pub(crate) const fn cleanup(&self) -> BondStoreCleanup {
+        self.mounted.cleanup()
+    }
+
+    /// Raw NOR writes observed during boot mount; this must remain zero.
+    pub(crate) const fn raw_write_calls(&self) -> u32 {
+        self.raw_write_calls
+    }
+
+    /// Raw NOR erases observed during boot mount; this must remain zero.
+    pub(crate) const fn raw_erase_calls(&self) -> u32 {
+        self.raw_erase_calls
+    }
+
+    /// Consume this boot owner and move out the optional secret bond.
+    pub(crate) fn into_bond(self) -> Option<BleBond> {
+        self.mounted.into_bond()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(feature = "ble-api-proof")]
+struct ProductBleBondStoreState {
+    available: bool,
+    generation: Option<NonZeroU64>,
+    bond_present: bool,
+}
+
+#[cfg(feature = "ble-api-proof")]
+impl ProductBleBondStoreState {
+    const fn unavailable() -> Self {
+        Self {
+            available: false,
+            generation: None,
+            bond_present: false,
+        }
+    }
+
+    fn mounted(mounted: &MountedBondStore) -> Self {
+        Self {
+            available: true,
+            generation: mounted.generation(),
+            bond_present: mounted.bond().is_some(),
+        }
+    }
+}
+
+/// Stage at which a BLE bond persistence attempt became unavailable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(feature = "ble-api-proof")]
+pub(crate) enum ProductBleBondFailureStage {
+    /// The candidate could not complete its commit contract.
+    Commit,
+    /// The immediate fail-closed remount could not recover stable authority.
+    Reconcile,
+}
+
+/// Result of synchronously persisting one newly authenticated BLE bond.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(feature = "ble-api-proof")]
+pub(crate) enum ProductBleBondCommitOutcome {
+    /// The exact candidate committed, read back, and remounted as authority.
+    Committed {
+        /// Newly authoritative nonzero generation.
+        generation: NonZeroU64,
+        /// Optional cleanup that may erase only the inactive predecessor.
+        cleanup: BondStoreCleanup,
+    },
+    /// Commit failed but immediate remount recovered stable durable authority.
+    ///
+    /// The caller must fail closed for the just-completed volatile pairing and
+    /// reboot before trusting the controller's resident bond state.
+    ReconciledRebootRequired {
+        /// Authoritative generation recovered by remount.
+        generation: Option<NonZeroU64>,
+        /// Whether the recovered authority contains a bond.
+        bond_present: bool,
+        /// Optional cleanup reported by the recovered state.
+        cleanup: BondStoreCleanup,
+    },
+    /// No trustworthy bond-store authority remains for this boot.
+    StoreUnavailable {
+        /// Operation stage whose failure disabled the store.
+        stage: ProductBleBondFailureStage,
+        /// Stable non-secret store fault, or `None` for a backend failure.
+        fault: Option<BondStoreFault>,
+    },
+}
+
 /// Unique owner of the one `esp-storage` instance in the permanent image.
 pub(crate) struct ProductFlashOwner {
     flash: &'static mut FlashStorage<'static>,
     journal_binding: JournalBinding,
     credential_binding: CredentialStoreBinding,
+    #[cfg(feature = "ble-api-proof")]
+    ble_bond_store: ProductBleBondStoreState,
     inbox_binding: InboxStoreBinding,
     lxmf_binding: LxmfStoreBinding,
 }
@@ -340,6 +470,8 @@ pub(crate) struct ProductStorageCoordinator {
     flash: &'static mut FlashStorage<'static>,
     journal_binding: JournalBinding,
     credential_runtime: CredentialRuntime,
+    #[cfg(feature = "ble-api-proof")]
+    ble_bond_store: ProductBleBondStoreState,
     runtime: Option<&'static mut ProductSubmissionRuntime>,
     submission_service_enabled: bool,
     inbox: Option<MountedInboxStore>,
@@ -575,6 +707,8 @@ impl ProductFlashOwner {
             flash,
             journal_binding: node_journal_binding(storage_device_id),
             credential_binding: api_credentials_binding(storage_device_id),
+            #[cfg(feature = "ble-api-proof")]
+            ble_bond_store: ProductBleBondStoreState::unavailable(),
             inbox_binding: rns_inbox_binding(storage_device_id),
             lxmf_binding: lxmf_store_binding(storage_device_id),
         })
@@ -600,6 +734,23 @@ impl ProductFlashOwner {
             raw_write_calls: region.write_calls(),
             raw_erase_calls: region.erase_calls(),
         }
+    }
+
+    /// Strictly mount the dedicated BLE bond store without modifying media.
+    ///
+    /// Corrupt or torn media returns an error and remains unavailable; boot
+    /// never auto-recovers, erases, or provisions this secret-bearing range.
+    #[inline(never)]
+    #[cfg(feature = "ble-api-proof")]
+    pub(crate) fn boot_ble_bond(&mut self) -> Result<BootBleBondStore, BootBleBondMountError> {
+        let mut region = PartitionNorFlash::new(&mut *self.flash, BLE_BOND_OFFSET, BLE_BOND_LEN);
+        let mounted = mount_ble_bond_store(&mut region)?;
+        self.ble_bond_store = ProductBleBondStoreState::mounted(&mounted);
+        Ok(BootBleBondStore {
+            mounted,
+            raw_write_calls: region.write_calls(),
+            raw_erase_calls: region.erase_calls(),
+        })
     }
 
     /// Classify identity media without mutation so the clock can be reserved
@@ -810,6 +961,8 @@ impl ProductFlashOwner {
             flash: self.flash,
             journal_binding: self.journal_binding,
             credential_runtime,
+            #[cfg(feature = "ble-api-proof")]
+            ble_bond_store: self.ble_bond_store,
             runtime,
             submission_service_enabled,
             inbox,
@@ -840,6 +993,83 @@ fn node_journal_is_erased(
 }
 
 impl ProductStorageCoordinator {
+    /// Whether the dedicated BLE bond store mounted and remains trustworthy.
+    #[cfg(feature = "ble-api-proof")]
+    pub(crate) const fn ble_bond_store_available(&self) -> bool {
+        self.ble_bond_store.available
+    }
+
+    /// Whether current durable BLE bond authority contains one bond.
+    #[cfg(feature = "ble-api-proof")]
+    pub(crate) const fn ble_bond_present(&self) -> bool {
+        self.ble_bond_store.available && self.ble_bond_store.bond_present
+    }
+
+    /// Current durable BLE bond-store generation, if any.
+    #[cfg(feature = "ble-api-proof")]
+    pub(crate) const fn ble_bond_generation(&self) -> Option<NonZeroU64> {
+        self.ble_bond_store.generation
+    }
+
+    /// Commit one newly authenticated BLE bond before acknowledging pairing.
+    ///
+    /// Store success includes exact candidate readback and an exact remount.
+    /// Any failure is synchronously remounted once. A recovered durable state
+    /// still requires fail-closed pairing teardown and reboot because the
+    /// controller's volatile bond may not match that recovered authority.
+    #[inline(never)]
+    #[cfg(feature = "ble-api-proof")]
+    pub(crate) fn commit_ble_bond(&mut self, bond: BleBond) -> ProductBleBondCommitOutcome {
+        if !self.ble_bond_store.available {
+            return ProductBleBondCommitOutcome::StoreUnavailable {
+                stage: ProductBleBondFailureStage::Commit,
+                fault: None,
+            };
+        }
+
+        let (state, outcome) = {
+            let mut region =
+                PartitionNorFlash::new(&mut *self.flash, BLE_BOND_OFFSET, BLE_BOND_LEN);
+            match commit_ble_bond_store(&mut region, bond) {
+                Ok(mounted) => {
+                    let state = ProductBleBondStoreState::mounted(&mounted);
+                    let generation = mounted
+                        .generation()
+                        .expect("a successful bond commit always has a nonzero generation");
+                    (
+                        state,
+                        ProductBleBondCommitOutcome::Committed {
+                            generation,
+                            cleanup: mounted.cleanup(),
+                        },
+                    )
+                }
+                Err(_commit_error) => match mount_ble_bond_store(&mut region) {
+                    Ok(mounted) => {
+                        let state = ProductBleBondStoreState::mounted(&mounted);
+                        (
+                            state,
+                            ProductBleBondCommitOutcome::ReconciledRebootRequired {
+                                generation: mounted.generation(),
+                                bond_present: mounted.bond().is_some(),
+                                cleanup: mounted.cleanup(),
+                            },
+                        )
+                    }
+                    Err(error) => (
+                        ProductBleBondStoreState::unavailable(),
+                        ProductBleBondCommitOutcome::StoreUnavailable {
+                            stage: ProductBleBondFailureStage::Reconcile,
+                            fault: bond_store_fault(error),
+                        },
+                    ),
+                },
+            }
+        };
+        self.ble_bond_store = state;
+        outcome
+    }
+
     /// Credential boot admission retained by the sole flash coordinator.
     pub(crate) const fn credential_boot_state(&self) -> CredentialBootState {
         self.credential_runtime.credential_boot_state()
@@ -1170,6 +1400,8 @@ impl ProductStorageCoordinator {
             flash,
             journal_binding,
             credential_runtime,
+            #[cfg(feature = "ble-api-proof")]
+                ble_bond_store: _,
             runtime,
             submission_service_enabled,
             inbox,
@@ -1220,6 +1452,7 @@ impl ProductStorageCoordinator {
     pub(crate) fn request_live_pairing<R>(
         &mut self,
         at: PairingMillis,
+        bearer: BearerBinding,
         connection: ConnectionId,
         request: PairingRequest,
         rng: &mut R,
@@ -1227,6 +1460,18 @@ impl ProductStorageCoordinator {
     where
         R: RngCore + CryptoRng,
     {
+        if matches!(
+            &request,
+            PairingRequest::ProofStart(request) if request.bearer() != bearer
+        ) {
+            let sequence = request.sequence();
+            return ProductLivePairingAdmission::Immediate(PairingResponse::ProofStart(
+                ProofStartResponse::failure(
+                    sequence,
+                    reticulum_device_api_pairing::PairingFailure::Refused,
+                ),
+            ));
+        }
         let mutation_request = !matches!(&request, PairingRequest::ProofStart(_));
         if mutation_request {
             match self.credential_physical_mutation_gate() {
@@ -1245,7 +1490,7 @@ impl ProductStorageCoordinator {
                 let sequence = request.sequence();
                 match self
                     .credential_runtime
-                    .request_pairing_begin(at, connection, rng)
+                    .request_pairing_begin(bearer, at, connection, rng)
                 {
                     BeginAdmission::Accepted => {
                         ProductLivePairingAdmission::MutationAccepted(PairingMutation::AddPending)
@@ -1277,7 +1522,7 @@ impl ProductStorageCoordinator {
                 let sequence = request.sequence();
                 match self
                     .credential_runtime
-                    .request_pairing_activate(at, connection, request)
+                    .request_pairing_activate(bearer, at, connection, request)
                 {
                     ActivateAdmission::Accepted => ProductLivePairingAdmission::MutationAccepted(
                         PairingMutation::ActivatePending,
@@ -2067,6 +2312,14 @@ fn map_submission_port_runtime_error(
     }
 }
 
+#[cfg(feature = "ble-api-proof")]
+fn bond_store_fault(error: BondStoreError<ProductRegionError>) -> Option<BondStoreFault> {
+    match error {
+        BondStoreError::Backend(_) => None,
+        BondStoreError::Fault(fault) => Some(fault),
+    }
+}
+
 fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductFlashOpenError> {
     let mut bytes = [0_u8; PARTITION_TABLE_MAX_LEN];
     let table = read_partition_table(flash, &mut bytes)
@@ -2075,6 +2328,7 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
     let mut identity_count = 0_u8;
     let mut clock_count = 0_u8;
     let mut credentials_count = 0_u8;
+    let mut ble_bond_count = 0_u8;
     let mut config_count = 0_u8;
     let mut journal_count = 0_u8;
     let mut message_store_count = 0_u8;
@@ -2082,6 +2336,7 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
     let mut identity_valid = false;
     let mut clock_valid = false;
     let mut credentials_valid = false;
+    let mut ble_bond_valid = false;
     let mut config_valid = false;
     let mut journal_valid = false;
     let mut message_store_valid = false;
@@ -2092,6 +2347,7 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
         let named_identity = label == NODE_IDENTITY_LABEL_BYTES;
         let named_clock = label == ANNOUNCE_CLOCK_LABEL_BYTES;
         let named_credentials = label == API_CREDENTIALS_LABEL_BYTES;
+        let named_ble_bond = label == BLE_BOND_LABEL_BYTES;
         let named_config = label == DEVICE_CONFIG_LABEL_BYTES;
         let named_journal = label == NODE_JOURNAL_LABEL_BYTES;
         let named_message_store = label == MESSAGE_STORE_LABEL_BYTES;
@@ -2104,6 +2360,9 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
         }
         if named_credentials {
             credentials_count = credentials_count.saturating_add(1);
+        }
+        if named_ble_bond {
+            ble_bond_count = ble_bond_count.saturating_add(1);
         }
         if named_config {
             config_count = config_count.saturating_add(1);
@@ -2141,6 +2400,7 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
                 API_CREDENTIALS_LEN,
                 named_credentials,
             ),
+            ("ble_bond", BLE_BOND_OFFSET, BLE_BOND_LEN, named_ble_bond),
             (
                 "device_config",
                 DEVICE_CONFIG_OFFSET,
@@ -2194,6 +2454,13 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
                 && entry.len() == API_CREDENTIALS_LEN
                 && plain_writable;
         }
+        if named_ble_bond {
+            ble_bond_valid = entry.raw_type() == DATA_PARTITION_TYPE
+                && entry.raw_subtype() == UNDEFINED_DATA_SUBTYPE
+                && entry.offset() == BLE_BOND_OFFSET
+                && entry.len() == BLE_BOND_LEN
+                && plain_writable;
+        }
         if named_config {
             config_valid = entry.raw_type() == DATA_PARTITION_TYPE
                 && entry.raw_subtype() == NVS_DATA_SUBTYPE
@@ -2227,6 +2494,7 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
     if identity_count != 1
         || clock_count != 1
         || credentials_count != 1
+        || ble_bond_count != 1
         || config_count != 1
         || journal_count != 1
         || message_store_count != 1
@@ -2236,6 +2504,7 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
             identity: identity_count,
             announce_clock: clock_count,
             api_credentials: credentials_count,
+            ble_bond: ble_bond_count,
             device_config: config_count,
             node_journal: journal_count,
             message_store: message_store_count,
@@ -2246,6 +2515,7 @@ fn validate_partition_table(flash: &mut FlashStorage<'_>) -> Result<(), ProductF
         (identity_valid, "node_identity"),
         (clock_valid, "announce_clock"),
         (credentials_valid, "api_credentials"),
+        (ble_bond_valid, "ble_bond"),
         (config_valid, "device_config"),
         (journal_valid, "node_journal"),
         (message_store_valid, "message_store"),

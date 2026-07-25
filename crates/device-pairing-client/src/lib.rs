@@ -1,10 +1,11 @@
 //! Blocking host client for the resident Reticulum device-pairing lifecycle.
 //!
-//! [`PairingClient::initialize_and_pair`] is the turnkey path: it keeps one
-//! serial endpoint, decoder, and exact-next sequence owner alive across status,
-//! optional initialization, Begin, ProofStart, and Activate. Applications that
-//! need to project intermediate state can instead retain a [`PairingSession`]
-//! and call its individual workflows.
+//! The default `serial` feature provides the turnkey USB serial
+//! `PairingClient`. Transport integrations can disable that feature and
+//! construct a [`PairingSession`] over any blocking [`PairingStream`]. Either
+//! path keeps one stream, decoder, bearer binding, and exact-next sequence
+//! owner alive across status, optional initialization, Begin, ProofStart, and
+//! Activate.
 //!
 //! The credential path is always one exact [`CREDENTIAL_ARTIFACT_BYTES`]-byte
 //! image. It progresses from a secret-free Begin reservation to resume-safe
@@ -15,6 +16,8 @@
 //! physically confirmed AbortCurrent response.
 //!
 //! ```no_run
+//! # #[cfg(feature = "serial")]
+//! # {
 //! use std::{path::Path, time::Duration};
 //!
 //! use reticulum_device_pairing_client::PairingClient;
@@ -27,6 +30,7 @@
 //!     client.initialize_and_pair(Path::new("device-credential.bin"), &mut progress)?;
 //! println!("activated credential generation {}", activated.generation());
 //! # Ok(())
+//! # }
 //! # }
 //! ```
 
@@ -49,19 +53,23 @@ use std::os::unix::fs::OpenOptionsExt;
 
 use reticulum_device_api_framing::{DecodeEvent, FramedRecord, StreamDecoder};
 use reticulum_device_api_pairing::{
-    AbortCurrentRequest, AbortResult, ActivateRequest, ActivateResponse, BeginOffer, BeginRequest,
-    BeginResponse, ClientProof, CredentialGeneration, CredentialId, DeviceId, PairingFailure,
-    PairingPsk, PairingRequest, PairingResponse, PairingTranscript, ProofChallenge,
+    AbortCurrentRequest, AbortResult, ActivateRequest, ActivateResponse, BearerBinding, BeginOffer,
+    BeginRequest, BeginResponse, ClientProof, CredentialGeneration, CredentialId, DeviceId,
+    PairingFailure, PairingPsk, PairingRequest, PairingResponse, PairingTranscript, ProofChallenge,
     ProofStartRequest, ProofStartResponse,
 };
 use reticulum_device_api_pairing_control::{
     ControlRequest, ControlResponse, InitializationStatus, InitializeResult,
 };
+#[cfg(feature = "serial")]
 use serialport::ClearBuffer;
 use zeroize::Zeroizing;
 
+#[cfg(feature = "serial")]
 const BAUD_RATE: u32 = 115_200;
+#[cfg(feature = "serial")]
 const OPEN_SETTLE_MS: u64 = 250;
+#[cfg(feature = "serial")]
 const READ_SLICE_MS: u64 = 100;
 const PRESENCE_POLL_MS: u64 = 200;
 
@@ -82,7 +90,17 @@ static NEXT_STAGING_FILE: AtomicU64 = AtomicU64::new(0);
 /// Default deadline for one blocking control or pairing workflow.
 pub const DEFAULT_PAIRING_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Blocking byte stream used by one transport-bound pairing session.
+///
+/// Reads should report [`io::ErrorKind::TimedOut`] periodically rather than
+/// block past the session deadline. The trait is object-safe so native
+/// transports can erase their concrete stream implementation at this boundary.
+pub trait PairingStream: Read + Write + Send {}
+
+impl<T> PairingStream for T where T: Read + Write + Send {}
+
 /// Serial endpoint and initial exact-next sequence for a pre-auth connection.
+#[cfg(feature = "serial")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PairingClient {
     port: String,
@@ -90,6 +108,7 @@ pub struct PairingClient {
     timeout: Duration,
 }
 
+#[cfg(feature = "serial")]
 impl PairingClient {
     /// Construct a connector starting at sequence zero with the default timeout.
     pub fn new(port: impl Into<String>) -> Self {
@@ -165,14 +184,15 @@ impl PairingClient {
                 self.port
             ))
         })?;
-        observer.observe(PairingProgress::PortReady);
-        Ok(PairingSession {
+        let session = PairingSession::from_stream(
             port,
-            decoder: StreamDecoder::new(),
-            port_name: self.port.clone(),
-            next_sequence: Some(self.sequence),
-            timeout: self.timeout,
-        })
+            self.port.clone(),
+            BearerBinding::UsbSerialJtag,
+            self.sequence,
+            self.timeout,
+        )?;
+        observer.observe(PairingProgress::PortReady);
+        Ok(session)
     }
 
     /// Initialize an eligible device and pair it without releasing the TTY.
@@ -196,16 +216,55 @@ impl PairingClient {
     }
 }
 
-/// One open pre-auth connection with sole ownership of sequence and decoder state.
+/// One open pre-auth connection with sole ownership of its stream and protocol state.
 pub struct PairingSession {
-    port: Box<dyn serialport::SerialPort>,
+    stream: Box<dyn PairingStream>,
     decoder: StreamDecoder,
-    port_name: String,
+    endpoint_name: String,
+    bearer: BearerBinding,
     next_sequence: Option<u64>,
     timeout: Duration,
 }
 
 impl PairingSession {
+    /// Construct a pairing session over one already-open blocking byte stream.
+    ///
+    /// `endpoint_name` is public diagnostic context only. `bearer` is the
+    /// cryptographic protocol binding used for every bearer-profiled request
+    /// and response; callers must select the binding for the actual stream.
+    pub fn from_stream(
+        stream: impl PairingStream + 'static,
+        endpoint_name: impl Into<String>,
+        bearer: BearerBinding,
+        sequence: u64,
+        timeout: Duration,
+    ) -> Result<Self, PairingClientError> {
+        ensure_usable_sequence(sequence).map_err(PairingClientError::new)?;
+        if timeout.is_zero() {
+            return Err(PairingClientError::new(
+                "pairing timeout must be nonzero".to_owned(),
+            ));
+        }
+        Ok(Self {
+            stream: Box::new(stream),
+            decoder: StreamDecoder::new(),
+            endpoint_name: endpoint_name.into(),
+            bearer,
+            next_sequence: Some(sequence),
+            timeout,
+        })
+    }
+
+    /// Pairing bearer bound to this stream and its protocol transcript.
+    pub const fn bearer(&self) -> BearerBinding {
+        self.bearer
+    }
+
+    /// Diagnostic name for the selected transport endpoint.
+    pub fn endpoint_name(&self) -> &str {
+        &self.endpoint_name
+    }
+
     /// Exact next request sequence, or `None` after ambiguity/exhaustion.
     pub const fn next_sequence(&self) -> Option<u64> {
         self.next_sequence
@@ -280,7 +339,7 @@ impl PairingSession {
         self.next_sequence.ok_or_else(|| {
             format!(
                 "pre-auth request sequence is ambiguous or exhausted; {}",
-                bus_reset_guidance()
+                connection_epoch_reset_guidance()
             )
         })
     }
@@ -480,7 +539,7 @@ impl InitializationSummary {
         self.response
     }
 
-    /// Exact next sequence if this USB epoch still has usable sequence space.
+    /// Exact next sequence if this connection epoch still has usable sequence space.
     pub const fn next_sequence(self) -> Option<u64> {
         next_usable_sequence(self.sequence)
     }
@@ -533,7 +592,7 @@ impl ActivationSummary {
         self.generation
     }
 
-    /// Exact next sequence if this USB epoch still has usable sequence space.
+    /// Exact next sequence if this connection epoch still has usable sequence space.
     pub const fn next_sequence(self) -> Option<u64> {
         next_usable_sequence(self.sequence)
     }
@@ -613,7 +672,7 @@ impl AbortSummary {
         self.outcome
     }
 
-    /// Exact next sequence if this USB epoch still has usable sequence space.
+    /// Exact next sequence if this connection epoch still has usable sequence space.
     pub const fn next_sequence(&self) -> Option<u64> {
         next_usable_sequence(self.sequence)
     }
@@ -918,7 +977,7 @@ fn initialize_workflow_with(
                 sequence = next_usable_sequence(sequence).ok_or_else(|| {
                     format!(
                         "host request sequence exhausted after sequence {sequence}; {}",
-                        bus_reset_guidance()
+                        connection_epoch_reset_guidance()
                     )
                 })?;
                 status = exchange_request(ControlRequest::status(sequence))?;
@@ -930,7 +989,7 @@ fn initialize_workflow_with(
                 sequence = next_usable_sequence(sequence).ok_or_else(|| {
                     format!(
                         "host request sequence exhausted after sequence {sequence}; {}",
-                        bus_reset_guidance()
+                        connection_epoch_reset_guidance()
                     )
                 })?;
                 let response = exchange_request(ControlRequest::initialize(sequence))?;
@@ -961,7 +1020,7 @@ fn initialize_workflow_with(
                 sequence = next_usable_sequence(sequence).ok_or_else(|| {
                     format!(
                         "host request sequence exhausted after sequence {sequence}; {}",
-                        bus_reset_guidance()
+                        connection_epoch_reset_guidance()
                     )
                 })?;
                 status = exchange_request(ControlRequest::status(sequence))?;
@@ -1002,7 +1061,7 @@ fn pair_workflow(
                 Err(cleanup) => format!("; staging cleanup failed: {cleanup}"),
             };
             return Err(format!(
-                "{}; an owner-only reserved state marker remains at {} because a lost Begin offer may have committed Pending state{cleanup}; use a fresh confirmed USB epoch and physically confirmed abort-current before removing it",
+                "{}; an owner-only reserved state marker remains at {} because a lost Begin offer may have committed Pending state{cleanup}; use a fresh confirmed connection epoch and physically confirmed abort-current before removing it",
                 error.message,
                 state_path.display()
             ));
@@ -1017,7 +1076,8 @@ fn pair_workflow(
             return Err(error.message);
         }
     };
-    let (device_id, credential_id, generation, psk) = offer.into_parts();
+    let (bearer, device_id, credential_id, generation, psk) = offer.into_parts();
+    debug_assert_eq!(bearer, session.bearer);
     let state = reservation
         .commit_pending(device_id, credential_id, generation, &psk)
         .map_err(|error| {
@@ -1215,10 +1275,14 @@ fn proof_until_challenged(
         ensure_resume_headroom(sequence).map_err(|error| {
             format!("{error}; Pending state remains at {}", state_path.display())
         })?;
-        let proof_request =
-            ProofStartRequest::new(sequence, credential_id, generation, client_nonce).map_err(
-                |error| format!("could not construct canonical ProofStart request: {error:?}"),
-            )?;
+        let proof_request = ProofStartRequest::new(
+            session.bearer,
+            sequence,
+            credential_id,
+            generation,
+            client_nonce,
+        )
+        .map_err(|error| format!("could not construct canonical ProofStart request: {error:?}"))?;
         let response = exchange_pairing(
             session,
             PairingRequest::ProofStart(proof_request),
@@ -1408,18 +1472,18 @@ fn exchange_pairing(
         ExchangeError::before_send("canonical request did not fit its fixed frame owner".to_owned())
     })?;
     session.next_sequence = None;
-    session.port.write_all(frame.encoded()).map_err(|error| {
+    session.stream.write_all(frame.encoded()).map_err(|error| {
         ExchangeError::after_send(post_send_failure(
             "request write",
-            &session.port_name,
+            &session.endpoint_name,
             &error,
             sequence,
         ))
     })?;
-    session.port.flush().map_err(|error| {
+    session.stream.flush().map_err(|error| {
         ExchangeError::after_send(post_send_failure(
             "request flush",
-            &session.port_name,
+            &session.endpoint_name,
             &error,
             sequence,
         ))
@@ -1427,14 +1491,14 @@ fn exchange_pairing(
 
     let mut bytes = Zeroizing::new([0_u8; 256]);
     while Instant::now() < deadline {
-        match session.port.read(&mut bytes[..]) {
+        match session.stream.read(&mut bytes[..]) {
             Ok(0) => {}
             Ok(length) => {
                 for byte in &bytes[..length] {
                     let DecodeEvent::Record(record) = session.decoder.push(*byte) else {
                         continue;
                     };
-                    let Ok(response) = PairingResponse::from_record(record) else {
+                    let Ok(response) = PairingResponse::from_record(session.bearer, record) else {
                         continue;
                     };
                     if response.sequence() != sequence {
@@ -1453,7 +1517,7 @@ fn exchange_pairing(
             Err(error) => {
                 return Err(ExchangeError::after_send(post_send_failure(
                     "response read",
-                    &session.port_name,
+                    &session.endpoint_name,
                     &error,
                     sequence,
                 )));
@@ -1462,7 +1526,7 @@ fn exchange_pairing(
     }
     Err(ExchangeError::after_send(format!(
         "timed out waiting for sequence {sequence} on {}; {}",
-        session.port_name,
+        session.endpoint_name,
         sequence_ambiguity_guidance(sequence)
     )))
 }
@@ -1490,18 +1554,18 @@ fn exchange_control(
         ExchangeError::before_send("canonical request did not fit its fixed frame owner".to_owned())
     })?;
     session.next_sequence = None;
-    session.port.write_all(frame.encoded()).map_err(|error| {
+    session.stream.write_all(frame.encoded()).map_err(|error| {
         ExchangeError::after_send(post_send_failure(
             "request write",
-            &session.port_name,
+            &session.endpoint_name,
             &error,
             sequence,
         ))
     })?;
-    session.port.flush().map_err(|error| {
+    session.stream.flush().map_err(|error| {
         ExchangeError::after_send(post_send_failure(
             "request flush",
-            &session.port_name,
+            &session.endpoint_name,
             &error,
             sequence,
         ))
@@ -1509,7 +1573,7 @@ fn exchange_control(
 
     let mut bytes = Zeroizing::new([0_u8; 256]);
     while Instant::now() < deadline {
-        match session.port.read(&mut bytes[..]) {
+        match session.stream.read(&mut bytes[..]) {
             Ok(0) => {}
             Ok(length) => {
                 for byte in &bytes[..length] {
@@ -1535,7 +1599,7 @@ fn exchange_control(
             Err(error) => {
                 return Err(ExchangeError::after_send(post_send_failure(
                     "response read",
-                    &session.port_name,
+                    &session.endpoint_name,
                     &error,
                     sequence,
                 )));
@@ -1544,7 +1608,7 @@ fn exchange_control(
     }
     Err(ExchangeError::after_send(format!(
         "timed out waiting for sequence {sequence} on {}; {}",
-        session.port_name,
+        session.endpoint_name,
         sequence_ambiguity_guidance(sequence)
     )))
 }
@@ -2492,7 +2556,7 @@ fn ensure_pair_headroom(begin_sequence: u64) -> Result<(), String> {
         Some(activate_sequence) if activate_sequence < u64::MAX => Ok(()),
         _ => Err(format!(
             "pair requires usable sequences for Begin, ProofStart, and Activate, but Begin sequence {begin_sequence} leaves insufficient exact-next headroom; no Begin was sent at this sequence; {}",
-            bus_reset_guidance()
+            connection_epoch_reset_guidance()
         )),
     }
 }
@@ -2502,7 +2566,7 @@ fn ensure_resume_headroom(proof_sequence: u64) -> Result<(), String> {
         Some(activate_sequence) if activate_sequence < u64::MAX => Ok(()),
         _ => Err(format!(
             "resume requires usable sequences for ProofStart and Activate, but ProofStart sequence {proof_sequence} leaves insufficient exact-next headroom; no ProofStart was sent at this sequence; {}",
-            bus_reset_guidance()
+            connection_epoch_reset_guidance()
         )),
     }
 }
@@ -2523,12 +2587,12 @@ fn deadline_message(last_sequence: u64, response_received: bool, workflow: &str)
         format!(
             "{workflow} timed out after last_sent_sequence={last_sequence}; that sequence was \
              consumed because its response was received; {}",
-            bus_reset_guidance()
+            connection_epoch_reset_guidance()
         )
     } else {
         format!(
             "{workflow} timed out before sending sequence {last_sequence}; {}",
-            bus_reset_guidance()
+            connection_epoch_reset_guidance()
         )
     }
 }
@@ -2536,26 +2600,34 @@ fn deadline_message(last_sequence: u64, response_received: bool, workflow: &str)
 fn next_sequence_guidance(last_sequence: u64) -> String {
     let next = next_usable_sequence(last_sequence)
         .map_or_else(|| "exhausted".to_owned(), |value| value.to_string());
-    format!("next_sequence={next}; {}", bus_reset_guidance())
+    format!(
+        "next_sequence={next}; {}",
+        connection_epoch_reset_guidance()
+    )
 }
 
 fn sequence_ambiguity_guidance(last_sequence: u64) -> String {
     format!(
         "last_sent_sequence={last_sequence} is consumed-or-ambiguous because the device may have \
          accepted it before its response was lost; {}",
-        bus_reset_guidance()
+        connection_epoch_reset_guidance()
     )
 }
 
-fn post_send_failure(operation: &str, port_name: &str, error: &io::Error, sequence: u64) -> String {
+fn post_send_failure(
+    operation: &str,
+    endpoint_name: &str,
+    error: &io::Error,
+    sequence: u64,
+) -> String {
     format!(
-        "{operation} failed on {port_name}: {error}; {}",
+        "{operation} failed on {endpoint_name}: {error}; {}",
         sequence_ambiguity_guidance(sequence)
     )
 }
 
-const fn bus_reset_guidance() -> &'static str {
-    "opening or closing the serial port does not start a new sequence epoch; confirm a firmware/USB bus reset before restarting at sequence 0"
+const fn connection_epoch_reset_guidance() -> &'static str {
+    "opening or closing a transport stream does not start a new sequence epoch; confirm the device created a fresh accepted-connection epoch before restarting at sequence 0"
 }
 
 const fn pairing_failure_name(failure: PairingFailure) -> &'static str {
@@ -2583,7 +2655,10 @@ mod tests {
     use std::{
         collections::VecDeque,
         fs,
-        sync::atomic::{AtomicU64, Ordering},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicU64, Ordering},
+        },
     };
 
     #[cfg(unix)]
@@ -2592,6 +2667,145 @@ mod tests {
     use super::*;
 
     static NEXT_PATH: AtomicU64 = AtomicU64::new(0);
+    const USB_PROOF_REQUEST_WIRE: &str = "0007524441310126010101010101010101010101010101010102010101010101010240020101010202020139101112131415161718191a1b1c1d1e1f0807060504030201404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f0101010101010101010101010101010100";
+
+    struct InMemoryDuplex {
+        inbound: VecDeque<u8>,
+        written: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Read for InMemoryDuplex {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            if self.inbound.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "scripted inbound stream is empty",
+                ));
+            }
+            let length = output.len().min(self.inbound.len());
+            for slot in &mut output[..length] {
+                *slot = self
+                    .inbound
+                    .pop_front()
+                    .expect("length is bounded by the inbound queue");
+            }
+            Ok(length)
+        }
+    }
+
+    impl Write for InMemoryDuplex {
+        fn write(&mut self, input: &[u8]) -> io::Result<usize> {
+            self.written
+                .lock()
+                .expect("duplex write capture mutex must not be poisoned")
+                .extend_from_slice(input);
+            Ok(input.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn ascending<const N: usize>(start: u8) -> [u8; N] {
+        let mut bytes = [0_u8; N];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = start.wrapping_add(index as u8);
+        }
+        bytes
+    }
+
+    fn proof_exchange_wire(bearer: BearerBinding) -> Vec<u8> {
+        let sequence = 1;
+        let credential_id = CredentialId::new(ascending::<16>(0x10));
+        let generation = CredentialGeneration::new(0x0102_0304_0506_0708);
+        let challenge = reticulum_device_api_pairing::ProofChallenge::new(
+            bearer,
+            DeviceId::new([0x44; 16]).unwrap(),
+            reticulum_device_api_pairing::ConnectionId::new(7).unwrap(),
+            reticulum_device_api_pairing::WindowId::new(9).unwrap(),
+            credential_id,
+            generation,
+            reticulum_device_api_pairing::DeviceChallenge::new([0x55; 32]).unwrap(),
+        )
+        .unwrap();
+        let response =
+            PairingResponse::ProofStart(ProofStartResponse::challenge(sequence, challenge));
+        let response_frame = FramedRecord::encode(&response.into_record()).unwrap();
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let stream = InMemoryDuplex {
+            inbound: response_frame.encoded().iter().copied().collect(),
+            written: Arc::clone(&written),
+        };
+        let mut session = PairingSession::from_stream(
+            stream,
+            "in-memory-duplex",
+            bearer,
+            sequence,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let request = ProofStartRequest::new(
+            bearer,
+            sequence,
+            credential_id,
+            generation,
+            ascending::<32>(0x40),
+        )
+        .unwrap();
+        let response = exchange_pairing(
+            &mut session,
+            PairingRequest::ProofStart(request),
+            ExpectedResponse::ProofStart,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        assert!(matches!(
+            response,
+            PairingResponse::ProofStart(ProofStartResponse::Challenge {
+                challenge,
+                ..
+            }) if challenge.bearer() == bearer
+        ));
+        assert_eq!(session.bearer(), bearer);
+        assert_eq!(session.endpoint_name(), "in-memory-duplex");
+        assert_eq!(session.next_sequence(), Some(sequence + 1));
+        written
+            .lock()
+            .expect("duplex write capture mutex must not be poisoned")
+            .clone()
+    }
+
+    #[test]
+    fn usb_stream_session_preserves_the_independent_proof_request_vector() {
+        assert_eq!(
+            proof_exchange_wire(BearerBinding::UsbSerialJtag),
+            hex::decode(USB_PROOF_REQUEST_WIRE).unwrap()
+        );
+    }
+
+    #[test]
+    fn ble_stream_session_emits_and_accepts_bearer_code_two() {
+        let wire = proof_exchange_wire(BearerBinding::BleGatt);
+        let mut decoder = StreamDecoder::new();
+        let record = wire
+            .into_iter()
+            .find_map(|byte| match decoder.push(byte) {
+                DecodeEvent::Record(record) => Some(record),
+                DecodeEvent::Pending => None,
+                DecodeEvent::MalformedCobs | DecodeEvent::MalformedRecord(_) => {
+                    panic!("pairing session emitted a malformed BLE record")
+                }
+                DecodeEvent::Overflow => panic!("pairing session emitted an overlong BLE record"),
+            })
+            .expect("one complete BLE pairing request");
+        assert_eq!(record.payload()[6], BearerBinding::BleGatt.code());
+        assert!(matches!(
+            PairingRequest::from_record(BearerBinding::BleGatt, record),
+            Ok(PairingRequest::ProofStart(request))
+                if request.bearer() == BearerBinding::BleGatt
+        ));
+    }
 
     fn temporary_path() -> PathBuf {
         let serial = NEXT_PATH.fetch_add(1, Ordering::Relaxed);

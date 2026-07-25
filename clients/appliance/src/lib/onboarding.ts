@@ -19,19 +19,25 @@ export interface BleDiscoveryPresentation {
   readonly title: string;
 }
 
+export const BLE_SECURITY_CONTINUE_LABEL = "Continue after holding GPIO21";
+
 export function bleDiscoveryPresentation(
   view: OnboardingView,
   scannerAvailable: boolean,
 ): BleDiscoveryPresentation {
+  const lifecycle = view.snapshot?.lifecycle;
   const available =
     scannerAvailable &&
-    view.method === "credential_import" &&
-    view.snapshot?.lifecycle.state === "needs_pairing";
+    ((view.method === "credential_import" && lifecycle?.state === "needs_pairing") ||
+      (view.method === "managed_pairing" &&
+        lifecycle !== undefined &&
+        lifecycle.state !== "credential_ready" &&
+        lifecycle.state !== "stopped"));
   return {
     available,
     title: "Nearby appliances",
     instruction:
-      "Find nearby boards without connecting. Select the physical board you intend to pair; discovery does not send credentials or replace credential-derived targeting.",
+      "Find nearby boards without connecting. Discovery does not send credentials. Select the physical board you intend to pair; only the following explicit secure-pairing action opens that exact BLE link.",
   };
 }
 
@@ -60,16 +66,30 @@ export function selectedBleCandidate(
 const PRESENCE_INSTRUCTION =
   "On the selected E290, release the middle button labelled 21, between RST and BOOT, " +
   "then hold it continuously for at least 2 seconds. " +
-  "Keep holding until this screen advances; the 60-second window begins when the hold is recognized.";
+  "Keep holding until this screen advances. Once recognized, the five-minute setup window leaves " +
+  "time to enter the six digits shown on that board in the phone's Bluetooth prompt.";
 
 function workingInstruction(stage: OnboardingStage): string {
   switch (stage) {
+    case "waiting_for_ble_security":
+      return (
+        "The selected BLE link is open and no appliance data has been sent. " +
+        "First release GPIO21, then hold it continuously for at least 2 seconds; holding for " +
+        "3 seconds is fine and there is no narrow start-time requirement. For a new Bluetooth " +
+        "bond, enter the six digits shown on the board into the iOS prompt within 30 seconds, " +
+        "then return here. If this phone has paired with this board before, iOS silently reuses " +
+        "the saved bond and shows no code or prompt. After the hold (and code, when requested), " +
+        `tap ${BLE_SECURITY_CONTINUE_LABEL}. The app will keep this exact link open and wait ` +
+        "for the board instead of imposing a short confirmation timeout. Do not wait for the " +
+        "board to say PAIRED before continuing: that screen appears only after the following " +
+        "application credential exchange finishes."
+      );
     case "waiting_for_initialization_presence":
     case "waiting_for_pairing_presence":
     case "waiting_for_abort_presence":
       return PRESENCE_INSTRUCTION;
     case "opening_device":
-      return "Opening the selected device by its stable USB serial.";
+      return "Opening the selected device.";
     case "checking_initialization":
       return "Checking the device's public initialization state.";
     case "initializing":
@@ -78,7 +98,7 @@ function workingInstruction(stage: OnboardingStage): string {
     case "proving":
       return "Completing the retained pairing proof. Keep the device connected.";
     case "activating":
-      return "Activating the credential. Do not disconnect until reset is requested.";
+      return "Publishing the active credential. Keep the device nearby until the app reconnects.";
   }
 }
 
@@ -112,7 +132,7 @@ function baseOnboardingPresentation(view: OnboardingView): Omit<
         instruction:
           "Choose the .rdpkey produced by the qualified USB pairing workflow. " +
           "The app copies it into app-private storage without reading its secret bytes in TypeScript. " +
-          "Verify the transfer filename and physical board first: selecting another board's valid credential binds this create-only app install to that board, and changing it requires clearing local app data. " +
+          "Verify the transfer filename and physical board first: selecting another board's valid credential makes that board active, and this initial single-board UI does not expose profile switching yet. Clearing local app data is still required to correct a mistaken first import from this screen. " +
           "Full in-app BLE pairing remains future work.",
         canStart: true,
         canResume: false,
@@ -181,7 +201,7 @@ function baseOnboardingPresentation(view: OnboardingView): Omit<
         instruction:
           "Release the selected E290's middle button labelled 21 before starting. " +
           "After you select Start, follow the hold prompt; " +
-          "the appliance keeps credential secrets out of this app.",
+          "Rust owns credential generation and pairing state while this alpha relays only opaque, bounded BLE fragments through the app.",
         canStart: true,
         canResume: false,
         canAbort: false,

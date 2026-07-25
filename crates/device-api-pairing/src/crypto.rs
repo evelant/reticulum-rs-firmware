@@ -7,8 +7,9 @@ use zeroize::Zeroizing;
 use reticulum_device_api_credentials::{CredentialGeneration, CredentialId};
 
 use crate::protocol::{
-    InvalidField, PROOF_CHALLENGE_LENGTH, PROOF_START_REQUEST_LENGTH, ProofChallenge,
-    ProofStartRequest, RECORD_KIND_PROOF_START_REQUEST, RECORD_KIND_PROOF_START_RESPONSE,
+    BearerBinding, InvalidField, PROOF_CHALLENGE_LENGTH, PROOF_START_REQUEST_LENGTH,
+    ProofChallenge, ProofStartRequest, RECORD_KIND_PROOF_START_REQUEST,
+    RECORD_KIND_PROOF_START_RESPONSE,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -53,6 +54,7 @@ impl PairingPsk {
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct PairingTranscript {
     hash: [u8; 32],
+    bearer: BearerBinding,
     credential_id: CredentialId,
     generation: CredentialGeneration,
 }
@@ -67,7 +69,8 @@ impl PairingTranscript {
         request: &ProofStartRequest,
         challenge: &ProofChallenge,
     ) -> Result<Self, TranscriptMismatch> {
-        if request.credential_id() != challenge.credential_id()
+        if request.bearer() != challenge.bearer()
+            || request.credential_id() != challenge.credential_id()
             || request.generation() != challenge.generation()
         {
             return Err(TranscriptMismatch);
@@ -83,9 +86,15 @@ impl PairingTranscript {
                 PROOF_CHALLENGE_LENGTH as u16,
                 &challenge_payload[..],
             ),
+            bearer: request.bearer(),
             credential_id: request.credential_id(),
             generation: request.generation(),
         })
+    }
+
+    /// Pairing bearer cryptographically bound by this transcript.
+    pub const fn bearer(&self) -> BearerBinding {
+        self.bearer
     }
 
     /// Borrow the exact transcript hash.
@@ -367,6 +376,9 @@ pub(crate) fn transcript_hash_for_test(
             response_length,
             response_payload,
         ),
+        // This test-only constructor intentionally hashes arbitrary mutated
+        // profile bytes, including unsupported bearer codes.
+        bearer: BearerBinding::UsbSerialJtag,
         credential_id: CredentialId::new(credential_id),
         generation: CredentialGeneration::new(generation),
     }

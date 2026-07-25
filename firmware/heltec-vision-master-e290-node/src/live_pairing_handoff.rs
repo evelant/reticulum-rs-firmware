@@ -9,7 +9,7 @@ use embassy_sync::{
     blocking_mutex::raw::RawMutex,
     channel::{Channel, TrySendError},
 };
-use reticulum_device_api_pairing::{PairingRequest, PairingResponse};
+use reticulum_device_api_pairing::{BearerBinding, PairingRequest, PairingResponse};
 use reticulum_device_api_pairing_policy::{ConnectionId, MonotonicMillis as PairingMillis};
 
 /// Conservative internal-static RAM ceiling for both depth-one owning channels.
@@ -22,18 +22,30 @@ pub const LIVE_PAIRING_HANDOFF_RAM_CEILING: usize = 2_048;
 #[must_use = "a live-pairing command must be handled or explicitly dropped"]
 pub struct LivePairingCommand {
     at: PairingMillis,
+    bearer: BearerBinding,
     connection: ConnectionId,
     request: PairingRequest,
 }
 
 impl LivePairingCommand {
     /// Bind one decoded request to its admission time and connection epoch.
-    pub const fn new(at: PairingMillis, connection: ConnectionId, request: PairingRequest) -> Self {
+    pub const fn new(
+        at: PairingMillis,
+        bearer: BearerBinding,
+        connection: ConnectionId,
+        request: PairingRequest,
+    ) -> Self {
         Self {
             at,
+            bearer,
             connection,
             request,
         }
+    }
+
+    /// Exact transport profile that decoded and owns this request.
+    pub const fn bearer(&self) -> BearerBinding {
+        self.bearer
     }
 
     /// Monotonic request-admission time supplied by the bearer owner.
@@ -279,11 +291,13 @@ mod tests {
         let (mut usb, mut node) = handoff();
         let first = LivePairingCommand::new(
             PairingMillis::new(10),
+            reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
             connection(1),
             PairingRequest::Begin(BeginRequest::new(7)),
         );
         let second = LivePairingCommand::new(
             PairingMillis::new(11),
+            reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
             connection(1),
             PairingRequest::AbortCurrent(AbortCurrentRequest::new(8)),
         );
@@ -323,6 +337,7 @@ mod tests {
             PairingResponse::AbortCurrent(AbortCurrentResponse::new(20, AbortResult::Aborted)),
         );
         let offer = BeginOffer::after_pending_commit(
+            reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
             DeviceId::new([0x11; 16]).expect("device ID is nonzero"),
             CredentialId::new([0x22; 16]),
             CredentialGeneration::new(3),

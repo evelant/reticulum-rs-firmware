@@ -1,10 +1,10 @@
 //! Allocation-free live pairing records and possession proofs.
 //!
-//! This crate freezes the wired developer-pairing protocol above canonical
+//! This crate freezes the local bearer-bound pairing protocol above canonical
 //! device-API framing. Every record is pre-authentication traffic: its framing
 //! session ID and authentication tag are zero, while its opaque sequence is
 //! preserved for the connection owner to order and correlate. The codec owns
-//! no USB driver, physical-presence policy, entropy source, credential-store
+//! no USB, BLE, or other transport driver, physical-presence policy, entropy source, credential-store
 //! mutation, authorization policy, ordinary authenticated session, or logical
 //! device API.
 //!

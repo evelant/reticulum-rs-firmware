@@ -4,8 +4,12 @@
   display model, portable SSD1680 driver, powered display-only HIL, and opt-in
   E290 production display actor are implemented. A bounded integrated
   BLE-plus-display startup passed with esp-radio/PHY ownership established
-  before display initialization. Secure link pairing, bond durability, BLE
-  live-pairing transport, and native credential installation remain pending
+  before display initialization. The transport-neutral pairing client now has
+  a BLE bearer, and a separate native onboarding owner implements pair, resume,
+  confirmed abort, and device-keyed credential publication. Secure link
+  pairing and one-bond durability are source-integrated with host-tested
+  storage semantics; powered BLE live-pairing proof and Expo central/UI wiring
+  remain pending
 - **Date:** 2026-07-25
 - **Extends:** [ADR 0009](0009-device-api-credential-store-and-pairing.md),
   [ADR 0010](0010-device-api-live-pairing-protocol.md), and
@@ -75,11 +79,19 @@ the phone's operating system owns entry. Fresh onboarding uses this order:
    durably committed by the sole flash owner, and authenticated subscription
    before starting device authorization.
 
-TypeScript never receives the passkey, Bluetooth keys, live-pairing PSK, or
-credential artifact. Trouble's pinned SMP implementation has a fixed
-30-second inactivity timeout, so the display refresh and human entry must fit
-inside that bound. App-level setup/teardown may use a longer human-interaction
-envelope, but it cannot extend the Trouble timeout.
+The target boundary keeps the passkey, Bluetooth keys, live-pairing PSK, and
+credential artifact out of TypeScript. Trouble's pinned SMP implementation has
+a fixed 30-second inactivity timeout, so the display refresh and human entry
+must fit inside that bound. App-level setup/teardown may use a longer
+human-interaction envelope, but it cannot extend the Trouble timeout.
+
+The first native-owner implementation has one explicit alpha deviation from
+that target: the existing `react-native-ble-manager` adapter relays opaque GATT
+fragments through TypeScript. TypeScript has no secret-bearing typed field and
+must not parse, log, or persist those fragments, but a successful Begin response
+still transits JavaScript memory. Moving the byte pump directly from
+Swift/Kotlin into Rust is required before claiming a strictly secret-free
+JavaScript runtime.
 
 Trouble `0.6.0` has no public pre-SMP admission hook. It automatically handles
 an inbound Pairing Request before publishing a connection event, and
@@ -165,6 +177,23 @@ that tells the phone to forget the device before retrying. Interrupted writes,
 replacement, capacity, and explicit forget/recovery need tests. The first alpha
 may retain one bond while the format permits later bounded expansion.
 
+The permanent E290 map assigns that first store the exact plaintext raw-NOR
+range `0x616000..0x618000` (8 KiB, `data,undefined`) immediately after
+`api_credentials`. `device_config` moves to `0x618000..0x630000` and shrinks to
+96 KiB; `node_journal` and every later range remain unchanged. Boot mount is
+strictly read-only and performs no automatic recovery. Pairing-time commit
+alternates two 4 KiB sectors, verifies the exact programmed successor, and
+remounts before reporting durable success.
+
+The alpha supports exactly one durable Bluetooth bond per board. A new
+authenticated pairing admitted by the GPIO21 physical-presence ceremony
+commits the next generation and replaces that one bond; it does not create a
+second peer slot. A bond-store mount failure suppresses only BLE for that boot,
+while LoRa and other independent transports continue. A restored authenticated
+bond can reconnect without repeating SMP, then use a fresh GPIO21 hold to open
+the separate 60-second application-pairing window when it needs to initialize
+or add an appliance credential.
+
 Trouble `0.6.0` does not treat key material as a secret Rust type:
 `LongTermKey` is copyable and debuggable, `BondInformation` is debuggable, and
 neither zeroizes on drop. The firmware must keep Trouble's `log` and `defmt`
@@ -180,16 +209,17 @@ substitute for the other.
 
 ### Native Rust owns live pairing and credential publication
 
-The existing pairing client will be factored from serial-port ownership into a
-transport-neutral state machine over a bounded byte stream. A separate native
-onboarding owner—not the normal authenticated connector—will own the selected,
-secured GATT link, run initialization/Begin/ProofStart/Activate in Rust, and
-create-only publish the canonical app-private credential. Expo receives only
-bounded progress and public identity summaries.
+The existing pairing client is factored from optional serial-port ownership
+into a transport-neutral state machine over a bounded byte stream. A separate
+native onboarding owner—not the normal authenticated connector—owns the
+selected, secured GATT link, runs initialization/Begin/ProofStart/Activate in
+Rust, and create-only publishes the canonical app-private credential. Expo
+receives only bounded progress and public identity summaries.
 
 This separation prevents the missing-credential connector from racing the
-onboarding connection and keeps secret material outside JavaScript, logs,
-platform callback payloads, and generated serialized DTOs.
+onboarding connection and keeps secret material out of logs, generated
+serialized DTOs, and TypeScript protocol ownership. The alpha opaque-byte relay
+exception above remains until the direct native pump replaces it.
 
 ## Implementation order
 
@@ -202,10 +232,14 @@ platform callback payloads, and generated serialized DTOs.
 4. GPIO21 binding of the selected GATT epoch, followed by Trouble authenticated
    pairing, passkey display, nonempty-bond enforcement, and downgrade rejection
    for device authorization on only that epoch.
-5. Sole-owner atomic bond persistence and recovery.
-6. A distinct device-API BLE pairing bearer and transcript binding over the
-   secured, presence-bound epoch.
-7. Rust-native onboarding owner and app-private credential publication.
+5. **Source-integrated; powered proof pending:** sole-owner commit-last bond
+   persistence, strict read-only boot mount, and fail-closed remount after an
+   ambiguous commit.
+6. **Implemented in portable/native code; powered proof pending:** a distinct
+   device-API BLE pairing bearer and transcript binding over the secured,
+   presence-bound epoch.
+7. **Implemented natively; Expo wiring pending:** Rust-native onboarding owner
+   and app-private credential publication.
 8. Forced reconnect into the ordinary authenticated suite-3 session.
 
 ## Acceptance

@@ -24,6 +24,10 @@ use reticulum_device_api_pairing_policy::{
     MonotonicMillis as PairingMillis, PolicyEvent,
 };
 use reticulum_device_api_session::AuthenticatedGrant;
+#[cfg(feature = "ble-api-proof")]
+use reticulum_heltec_vision_master_e290_node::ble_bond_handoff::{
+    BleBondCommitCommand, BleBondCommitOutcome, BleBondCommitReply, NodeBleBondHandoff,
+};
 #[cfg(feature = "runtime-measurement-hil")]
 use reticulum_heltec_vision_master_e290_node::runtime_measurement::{
     OperationKind as RuntimeOperationKind, RETICULUM_RUNTIME_LXMF_TRACE_EVIDENCE,
@@ -102,6 +106,8 @@ use reticulum_tx_supervisor::{
     OrdinaryRouterCompletionProgress, OrdinaryRouterFaultResidueKind, OrdinaryRouterStep,
 };
 
+#[cfg(feature = "ble-api-proof")]
+use crate::platform_storage::ProductBleBondCommitOutcome;
 use crate::{
     LORA_INTERFACE, ProductSupervisor, config,
     platform_storage::{
@@ -328,6 +334,10 @@ impl LiveRequestKind {
 struct PairingNodeState {
     pending_control_command: Option<PairingControlCommand>,
     pending_control_reply: Option<PairingControlReply>,
+    #[cfg(feature = "ble-api-proof")]
+    pending_ble_bond_command: Option<BleBondCommitCommand>,
+    #[cfg(feature = "ble-api-proof")]
+    pending_ble_bond_reply: Option<BleBondCommitReply>,
     pending_session_admission_command: Option<SessionAdmissionCommand>,
     pending_session_admission_reply: Option<SessionAdmissionReply>,
     pending_exclusive: Option<(ConnectionId, AcquirePairingExclusive)>,
@@ -363,23 +373,28 @@ impl AuthenticatedApiNodeState {
 pub(crate) struct NodeHandoffs {
     control: NodePairingHandoff<CriticalSectionRawMutex>,
     live: NodeLivePairingHandoff<CriticalSectionRawMutex>,
+    #[cfg(feature = "ble-api-proof")]
+    ble_bond: NodeBleBondHandoff<CriticalSectionRawMutex>,
     session_admission: NodeSessionAdmissionHandoff<CriticalSectionRawMutex>,
     authenticated_api: NodeHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
     frame: AuthorizedFrameNodeHandoff<CriticalSectionRawMutex>,
 }
 
-type NodeHandoffParts = (
-    NodePairingHandoff<CriticalSectionRawMutex>,
-    NodeLivePairingHandoff<CriticalSectionRawMutex>,
-    NodeSessionAdmissionHandoff<CriticalSectionRawMutex>,
-    NodeHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
-    AuthorizedFrameNodeHandoff<CriticalSectionRawMutex>,
-);
+struct NodeHandoffParts {
+    control: NodePairingHandoff<CriticalSectionRawMutex>,
+    live: NodeLivePairingHandoff<CriticalSectionRawMutex>,
+    #[cfg(feature = "ble-api-proof")]
+    ble_bond: NodeBleBondHandoff<CriticalSectionRawMutex>,
+    session_admission: NodeSessionAdmissionHandoff<CriticalSectionRawMutex>,
+    authenticated_api: NodeHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
+    frame: AuthorizedFrameNodeHandoff<CriticalSectionRawMutex>,
+}
 
 impl NodeHandoffs {
     pub(crate) const fn new(
         control: NodePairingHandoff<CriticalSectionRawMutex>,
         live: NodeLivePairingHandoff<CriticalSectionRawMutex>,
+        #[cfg(feature = "ble-api-proof")] ble_bond: NodeBleBondHandoff<CriticalSectionRawMutex>,
         session_admission: NodeSessionAdmissionHandoff<CriticalSectionRawMutex>,
         authenticated_api: NodeHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
         frame: AuthorizedFrameNodeHandoff<CriticalSectionRawMutex>,
@@ -387,6 +402,8 @@ impl NodeHandoffs {
         Self {
             control,
             live,
+            #[cfg(feature = "ble-api-proof")]
+            ble_bond,
             session_admission,
             authenticated_api,
             frame,
@@ -394,13 +411,15 @@ impl NodeHandoffs {
     }
 
     fn into_parts(self) -> NodeHandoffParts {
-        (
-            self.control,
-            self.live,
-            self.session_admission,
-            self.authenticated_api,
-            self.frame,
-        )
+        NodeHandoffParts {
+            control: self.control,
+            live: self.live,
+            #[cfg(feature = "ble-api-proof")]
+            ble_bond: self.ble_bond,
+            session_admission: self.session_admission,
+            authenticated_api: self.authenticated_api,
+            frame: self.frame,
+        }
     }
 }
 
@@ -409,6 +428,10 @@ impl PairingNodeState {
         Self {
             pending_control_command: None,
             pending_control_reply: None,
+            #[cfg(feature = "ble-api-proof")]
+            pending_ble_bond_command: None,
+            #[cfg(feature = "ble-api-proof")]
+            pending_ble_bond_reply: None,
             pending_session_admission_command: None,
             pending_session_admission_reply: None,
             pending_exclusive: None,
@@ -446,13 +469,15 @@ pub async fn run(
         ),
         None => IdentitySummary::new(ApiDestinationHash(primary_destination)),
     };
-    let (
-        mut pairing_handoff,
-        mut live_pairing_handoff,
-        mut session_admission_handoff,
+    let NodeHandoffParts {
+        control: mut pairing_handoff,
+        live: mut live_pairing_handoff,
+        #[cfg(feature = "ble-api-proof")]
+            ble_bond: mut ble_bond_handoff,
+        session_admission: mut session_admission_handoff,
         mut authenticated_api,
-        mut frame_handoff,
-    ) = handoffs.into_parts();
+        frame: mut frame_handoff,
+    } = handoffs.into_parts();
     // The concrete actor now owns Ready/Offline reporting through its fixed
     // interface-fabric lifecycle capability. This descriptor remains only the
     // generation-bound product-policy authority for LoRa-specific durability
@@ -516,6 +541,8 @@ pub async fn run(
             storage,
             &mut pairing_handoff,
             &mut live_pairing_handoff,
+            #[cfg(feature = "ble-api-proof")]
+            &mut ble_bond_handoff,
             &mut session_admission_handoff,
             &mut pairing,
             &mut rng,
@@ -3146,6 +3173,9 @@ fn step_pairing_frontier(
     storage: &mut ProductStorageCoordinator,
     control_handoff: &mut NodePairingHandoff<CriticalSectionRawMutex>,
     live_handoff: &mut NodeLivePairingHandoff<CriticalSectionRawMutex>,
+    #[cfg(feature = "ble-api-proof")] ble_bond_handoff: &mut NodeBleBondHandoff<
+        CriticalSectionRawMutex,
+    >,
     session_admission_handoff: &mut NodeSessionAdmissionHandoff<CriticalSectionRawMutex>,
     state: &mut PairingNodeState,
     rng: &mut Trng,
@@ -3153,10 +3183,45 @@ fn step_pairing_frontier(
 ) -> bool {
     let mut progressed = flush_pairing_reply(control_handoff, &mut state.pending_control_reply);
     progressed |= flush_live_pairing_reply(live_handoff, &mut state.pending_live_reply);
+    #[cfg(feature = "ble-api-proof")]
+    {
+        progressed |= flush_ble_bond_reply(ble_bond_handoff, &mut state.pending_ble_bond_reply);
+    }
     progressed |= flush_session_admission_reply(
         session_admission_handoff,
         &mut state.pending_session_admission_reply,
     );
+
+    // A freshly authenticated BLE link is not reboot-safe until the sole flash
+    // owner has committed its exact bond. Keep all live-pairing and ordinary
+    // session admission behind that owner, including while its terminal reply
+    // is backpressured. This also prevents application credentials from being
+    // activated on a link whose transport authentication would disappear at
+    // the next reset.
+    #[cfg(feature = "ble-api-proof")]
+    {
+        if state.pending_ble_bond_command.is_none() && state.pending_ble_bond_reply.is_none() {
+            state.pending_ble_bond_command = ble_bond_handoff.try_receive_command();
+        }
+        if let Some(command) = state.pending_ble_bond_command.take() {
+            let (connection, bond) = command.into_parts();
+            let outcome = match storage.commit_ble_bond(bond) {
+                ProductBleBondCommitOutcome::Committed { .. } => BleBondCommitOutcome::Durable,
+                ProductBleBondCommitOutcome::ReconciledRebootRequired { .. }
+                | ProductBleBondCommitOutcome::StoreUnavailable { .. } => {
+                    BleBondCommitOutcome::Failed
+                }
+            };
+            debug_assert!(state.pending_ble_bond_reply.is_none());
+            state.pending_ble_bond_reply = Some(BleBondCommitReply::new(connection, outcome));
+            progressed = true;
+            progressed |= flush_ble_bond_reply(ble_bond_handoff, &mut state.pending_ble_bond_reply);
+            return progressed;
+        }
+        if state.pending_ble_bond_reply.is_some() {
+            return progressed;
+        }
+    }
 
     let initialization_status = storage.initialization_status();
     if matches!(
@@ -3394,6 +3459,7 @@ fn admit_live_pairing_command(
         .take()
         .expect("live admission requires one retained command");
     let at = command.at();
+    let bearer = command.bearer();
     let connection = command.connection();
     let request = command.into_request();
     let sequence = request.sequence();
@@ -3408,13 +3474,15 @@ fn admit_live_pairing_command(
     }
     state.live_retry_not_before_ms = None;
 
-    match storage.request_live_pairing(at, connection, request, rng) {
+    match storage.request_live_pairing(at, bearer, connection, request, rng) {
         ProductLivePairingAdmission::DeferredForJournalMutation(request) => {
-            state.pending_live_command = Some(LivePairingCommand::new(at, connection, request));
+            state.pending_live_command =
+                Some(LivePairingCommand::new(at, bearer, connection, request));
         }
         ProductLivePairingAdmission::DeferredForLxmfMutation(request) => {
             let retry_not_before_ms = now_millis.saturating_add(config::STORAGE_RETRY_BACKOFF_MS);
-            state.pending_live_command = Some(LivePairingCommand::new(at, connection, request));
+            state.pending_live_command =
+                Some(LivePairingCommand::new(at, bearer, connection, request));
             state.live_retry_not_before_ms = Some(retry_not_before_ms);
             info!(
                 "e290-node stage=credential-live-pairing status=DEFERRED reason=lxmf-mutation-in-flight retry_not_before_ms={retry_not_before_ms}"
@@ -3434,8 +3502,9 @@ fn admit_live_pairing_command(
         }
         ProductLivePairingAdmission::MutationAccepted(mutation) => {
             if kind.expected_mutation() == Some(mutation) {
-                state.pending_live_operation =
-                    Some(LivePairingOperation::new(connection, sequence, mutation));
+                state.pending_live_operation = Some(LivePairingOperation::new(
+                    bearer, connection, sequence, mutation,
+                ));
                 state.live_retry_not_before_ms = None;
             } else {
                 state.live_lane_faulted = true;
@@ -3572,6 +3641,23 @@ fn flush_pairing_reply(
 fn flush_live_pairing_reply(
     handoff: &mut NodeLivePairingHandoff<CriticalSectionRawMutex>,
     pending_reply: &mut Option<LivePairingReply>,
+) -> bool {
+    let Some(reply) = pending_reply.take() else {
+        return false;
+    };
+    match handoff.try_send_reply(reply) {
+        Ok(()) => true,
+        Err(pressure) => {
+            *pending_reply = Some(pressure.into_inner());
+            false
+        }
+    }
+}
+
+#[cfg(feature = "ble-api-proof")]
+fn flush_ble_bond_reply(
+    handoff: &mut NodeBleBondHandoff<CriticalSectionRawMutex>,
+    pending_reply: &mut Option<BleBondCommitReply>,
 ) -> bool {
     let Some(reply) = pending_reply.take() else {
         return false;

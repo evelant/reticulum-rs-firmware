@@ -15,11 +15,11 @@ import {
 
 const profile = {
   bridgeProtocol: BRIDGE_PROTOCOL_VERSION,
-  gattProfileMajor: 1,
+  gattProfileMajor: 2,
   gattProfileMinor: 0,
-  serviceUuid: "f3c8a0b0-5e7a-4c51-a3b9-7d2160d20a01",
-  rxUuid: "f3c8a0b1-5e7a-4c51-a3b9-7d2160d20a01",
-  txUuid: "f3c8a0b2-5e7a-4c51-a3b9-7d2160d20a01",
+  serviceUuid: "f3c8a0b0-5e7a-4c51-a3b9-7d2160d20a02",
+  rxUuid: "f3c8a0b1-5e7a-4c51-a3b9-7d2160d20a02",
+  txUuid: "f3c8a0b2-5e7a-4c51-a3b9-7d2160d20a02",
   maximumFragmentBytes: 20,
   operationTimeoutMs: 5_000,
   writeType: "with_response",

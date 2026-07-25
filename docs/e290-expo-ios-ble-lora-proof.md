@@ -80,13 +80,13 @@ summary selected the exact `reticulum-e290-e13f88` advertisement rather than
 performing a first-match scan. No credential bytes or credential digest are
 included here.
 
-The iOS foreground central opened generated GATT profile 1.0:
+The iOS foreground central opened generated GATT profile 2.0:
 
 | GATT element | Exact value |
 | --- | --- |
-| Primary service | `f3c8a0b0-5e7a-4c51-a3b9-7d2160d20a01` |
-| Phone-to-E290 characteristic | `f3c8a0b1-5e7a-4c51-a3b9-7d2160d20a01`, write with response |
-| E290-to-phone characteristic | `f3c8a0b2-5e7a-4c51-a3b9-7d2160d20a01`, indications |
+| Primary service | `f3c8a0b0-5e7a-4c51-a3b9-7d2160d20a02` |
+| Phone-to-E290 characteristic | `f3c8a0b1-5e7a-4c51-a3b9-7d2160d20a02`, write with response |
+| E290-to-phone characteristic | `f3c8a0b2-5e7a-4c51-a3b9-7d2160d20a02`, indications |
 | Initial ATT value bound | 20 bytes |
 | Authenticated stream | unchanged RDA1 byte stream, BLE-bound suite 3 |
 

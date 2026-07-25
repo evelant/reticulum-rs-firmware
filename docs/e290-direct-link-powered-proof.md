@@ -141,7 +141,7 @@ In a separate post-reset gate before the independent sender-status probe, the
 iOS app was cold-launched with `--terminate-existing`. Its native BLE trace
 recorded a new scan, connection to peripheral
 `fd94a6a6-4009-9221-0eca-3ca9bb7d8c94`, discovery of appliance service
-`f3c8a0b0-5e7a-4c51-a3b9-7d2160d20a01`, indication subscription, negotiated
+`f3c8a0b0-5e7a-4c51-a3b9-7d2160d20a02`, indication subscription, negotiated
 write length, and repeated acknowledged GATT writes. This confirms that the
 post-reset app process re-established a live BLE link rather than only opening
 its local database.

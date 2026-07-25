@@ -73,7 +73,7 @@ export type HttpApplianceSnapshot = { revision: JsonSafeInteger, connection: Htt
 /**
  * Secret-free progress stage shown during explicit onboarding.
  */
-export type OnboardingStage = "opening_device" | "checking_initialization" | "waiting_for_initialization_presence" | "initializing" | "waiting_for_pairing_presence" | "proving" | "activating" | "waiting_for_abort_presence" | "resuming";
+export type OnboardingStage = "opening_device" | "waiting_for_ble_security" | "checking_initialization" | "waiting_for_initialization_presence" | "initializing" | "waiting_for_pairing_presence" | "proving" | "activating" | "waiting_for_abort_presence" | "resuming";
 
 /**
  * Browser-safe onboarding failure category.

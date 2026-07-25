@@ -1,10 +1,13 @@
-//! Opt-in E290 BLE GATT and authenticated RDA1 device-API owner.
+//! E290 secure BLE onboarding and authenticated RDA1 device-API owner.
 //!
-//! This proof exposes one write-with-response RX characteristic and one
-//! indication-only TX characteristic. Characteristic values are fragments of
-//! the existing ordered RDA1 byte stream, not a second framing layer. The
-//! board must already own an Active credential provisioned by the ordinary USB
-//! profile; BLE pairing and credential initialization are intentionally absent.
+//! This proof exposes one write-with-response RX characteristic, one
+//! indication-only TX characteristic, and one public authenticated-read
+//! security confirmation. RX and TX characteristic values are fragments of the
+//! existing ordered RDA1 byte stream, not a second framing layer. The GPIO21
+//! physical presence opens a connection-bound DisplayOnly SMP window; only an
+//! authenticated, durable bond may then carry the BLE-bound live pairing
+//! protocol. A restored authenticated bond enters the ordinary RDA1 session
+//! path without reopening physical pairing.
 
 #![allow(
     clippy::needless_borrows_for_generic_args,
@@ -22,27 +25,51 @@ use embassy_futures::{
 // expansion bound to that exact version while the product handoffs use 0.8.
 use embassy_sync_07 as embassy_sync;
 use embassy_time::{Duration, Instant, Timer};
-use esp_hal::{peripherals::BT, rng::Trng};
+use esp_hal::{gpio::Input, peripherals::BT, rng::Trng};
 use esp_radio::ble::controller::{BleConnector, BleInitError};
 use log::{error, info, warn};
+use reticulum_appliance_display_model::{
+    DisplayCommand, DisplayLabel, DisplayViewKind, PairingPasskey, PairingSecretClearReason,
+    PairingWindowSeconds,
+};
+use reticulum_ble_bond_store::BleBond;
 use reticulum_device_api_ble as gatt_profile;
-use reticulum_device_api_framing::{DecodeEvent, StreamDecoder};
+use reticulum_device_api_framing::{DecodeEvent, FramedRecord, Record, StreamDecoder};
 use reticulum_device_api_handoff::{BearerHandoff, DeviceApiHandoff};
-use reticulum_device_api_pairing_policy::{ConnectionId, MonotonicMillis as PairingMillis};
-use reticulum_device_api_session::{AuthenticatedGrant, ServerParameters};
+use reticulum_device_api_pairing::{ActivateResult, BearerBinding, PairingResponse};
+use reticulum_device_api_pairing_control::ControlResponse;
+use reticulum_device_api_pairing_policy::{
+    ActiveLowButton, ConnectionId, MonotonicMillis as PairingMillis,
+};
+use reticulum_device_api_session::{
+    AuthenticatedGrant, RECORD_KIND_CLIENT_HELLO, ServerParameters,
+};
 #[cfg(reticulum_e290_ble_startup_diagnostic)]
 use reticulum_heltec_vision_master_e290_node::config as product_config;
 use reticulum_heltec_vision_master_e290_node::{
     ble_api_profile::{
-        self as profile, IndicationGate, PreAuthenticationDeadline, PreAuthenticationDeadlineStatus,
+        self as profile, ApplicationPairingIdleDeadline, IndicationGate, PreAuthenticationDeadline,
+        PreAuthenticationDeadlineStatus,
     },
-    live_pairing_handoff::BearerLivePairingHandoff,
+    ble_bond_handoff::{BearerBleBondHandoff, BleBondCommitCommand, BleBondCommitOutcome},
+    display_handoff::{DisplayPublisher, DisplayRenderOutcome, DisplayRequestId},
+    live_pairing_handoff::{BearerLivePairingHandoff, LivePairingCommand, LivePairingReply},
     pairing_control_handoff::{
-        LifecycleAcknowledgement, PairingControlCommand, PairingControlReplyKind, UsbPairingHandoff,
+        ButtonObservationFlight, ButtonObservationFlightProgress, ExclusiveAcquisitionReply,
+        LifecycleAcknowledgement, PairingControlCommand, PairingControlReplyKind,
+        UsbPairingHandoff,
     },
     session_admission_handoff::BearerSessionAdmissionHandoff,
     usb_authenticated_session::{
-        UsbAuthenticatedSession, UsbAuthenticatedSessionPhase, UsbSessionRxDisposition,
+        PairingExclusiveCloseDisposition, UsbAuthenticatedSession, UsbAuthenticatedSessionPhase,
+        UsbSessionRxDisposition,
+    },
+    usb_pairing_policy::{
+        ActiveLowButtonDebouncer, ExactNextSequenceGate, PhysicalPresencePublicationGuard,
+    },
+    usb_pairing_records::{
+        UsbPreAuthenticationRequest, UsbPreAuthenticationRequestKind,
+        decode_pre_authentication_request,
     },
 };
 use static_cell::StaticCell;
@@ -59,6 +86,46 @@ static BLE_LOCAL_NAME: StaticCell<[u8; gatt_profile::LOCAL_NAME_BYTES]> = Static
 static BLE_SERVER: StaticCell<Server<'static>> = StaticCell::new();
 
 const SERVICE_UUIDS: [[u8; 16]; 1] = [gatt_profile::SERVICE_UUID_LE];
+const PAIRING_DISPLAY_WINDOW_SECONDS: u16 = 30;
+
+#[cfg(reticulum_e290_ble_startup_diagnostic)]
+macro_rules! pairing_diagnostic {
+    ($($argument:tt)*) => {
+        esp_println::println!($($argument)*)
+    };
+}
+
+#[cfg(not(reticulum_e290_ble_startup_diagnostic))]
+macro_rules! pairing_diagnostic {
+    ($($argument:tt)*) => {};
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BleLinkMode {
+    AwaitingPresence,
+    SecurityRequested,
+    PairingExclusive,
+    Ordinary,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PairingDisplayState {
+    Idle,
+    Pending(DisplayRequestId),
+    Rendered,
+    Cleared,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IndicationOwner {
+    Pairing,
+    Ordinary,
+}
+
+struct PairingTransmission {
+    frame: FramedRecord,
+    activation_succeeded: bool,
+}
 
 #[cfg(reticulum_e290_ble_startup_diagnostic)]
 fn diagnostic_heap_marker(point: &'static str) {
@@ -137,17 +204,30 @@ struct Server {
 #[gatt_service(uuid = gatt_profile::SERVICE_UUID_U128)]
 struct ApiService {
     /// Ordered phone-to-device RDA1 bytes.
-    #[characteristic(uuid = gatt_profile::RX_UUID_U128, write)]
+    #[characteristic(
+        uuid = gatt_profile::RX_UUID_U128,
+        write,
+        permissions(write = authenticated)
+    )]
     rx: GattFragment,
     /// Ordered device-to-phone RDA1 bytes.
     #[characteristic(uuid = gatt_profile::TX_UUID_U128, indicate)]
     tx: GattFragment,
+    /// Public value readable only after the GATT link is authenticated.
+    #[characteristic(
+        uuid = gatt_profile::SECURITY_CONFIRMATION_UUID_U128,
+        read,
+        value = gatt_profile::SECURITY_CONFIRMATION_PENDING_VALUE,
+        permissions(read = authenticated)
+    )]
+    security_confirmation: [u8; 4],
 }
 
 /// Sole bearer-side handoffs moved into the BLE API task.
 pub(crate) struct BleHandoffs {
     pairing: UsbPairingHandoff<CriticalSectionRawMutex>,
-    _live_pairing: BearerLivePairingHandoff<CriticalSectionRawMutex>,
+    live_pairing: BearerLivePairingHandoff<CriticalSectionRawMutex>,
+    bond: BearerBleBondHandoff<CriticalSectionRawMutex>,
     admission: BearerSessionAdmissionHandoff<CriticalSectionRawMutex>,
     authenticated_api: BearerHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
 }
@@ -156,16 +236,47 @@ impl BleHandoffs {
     pub(crate) const fn new(
         pairing: UsbPairingHandoff<CriticalSectionRawMutex>,
         live_pairing: BearerLivePairingHandoff<CriticalSectionRawMutex>,
+        bond: BearerBleBondHandoff<CriticalSectionRawMutex>,
         admission: BearerSessionAdmissionHandoff<CriticalSectionRawMutex>,
         authenticated_api: BearerHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
     ) -> Self {
         Self {
             pairing,
-            _live_pairing: live_pairing,
+            live_pairing,
+            bond,
             admission,
             authenticated_api,
         }
     }
+}
+
+/// Physical resources retained by secure BLE onboarding.
+pub(crate) struct BlePhysicalOwners {
+    pairing_button: Input<'static>,
+    display_publisher: Option<DisplayPublisher<CriticalSectionRawMutex>>,
+    restored_bond: Option<BleBond>,
+    bond_store_available: bool,
+}
+
+impl BlePhysicalOwners {
+    pub(crate) fn new(
+        pairing_button: Input<'static>,
+        display_publisher: Option<DisplayPublisher<CriticalSectionRawMutex>>,
+        restored_bond: Option<BleBond>,
+        bond_store_available: bool,
+    ) -> Self {
+        Self {
+            pairing_button,
+            display_publisher,
+            restored_bond,
+            bond_store_available,
+        }
+    }
+}
+
+struct BleConnectionOwners {
+    pairing_button: Input<'static>,
+    display_publisher: Option<DisplayPublisher<CriticalSectionRawMutex>>,
 }
 
 /// Initialize the BLE controller before optional peripheral actors start.
@@ -222,6 +333,7 @@ pub async fn run(
     handoffs: BleHandoffs,
     session_parameters: ServerParameters,
     session_rng: Trng,
+    physical: BlePhysicalOwners,
     alpha_usb_serial_jtag_owner: crate::AlphaUsbSerialJtagOwner,
 ) {
     let controller: ExternalController<_, 1> = ExternalController::new(connector);
@@ -231,6 +343,7 @@ pub async fn run(
         handoffs,
         session_parameters,
         session_rng,
+        physical,
     )
     .await;
     #[allow(
@@ -246,15 +359,39 @@ async fn run_host<C>(
     base_mac: [u8; 6],
     handoffs: BleHandoffs,
     session_parameters: ServerParameters,
-    session_rng: Trng,
+    mut session_rng: Trng,
+    physical: BlePhysicalOwners,
 ) where
     C: Controller,
 {
     let resources = BLE_RESOURCES.init(HostResources::new());
     let address = Address::random(profile::static_random_address(base_mac));
+    let BlePhysicalOwners {
+        pairing_button,
+        display_publisher,
+        restored_bond,
+        bond_store_available,
+    } = physical;
+    if !bond_store_available {
+        error!("e290-node stage=ble-api status=DISABLED reason=bond-store-unavailable");
+        core::future::pending::<()>().await;
+    }
     #[cfg(reticulum_e290_ble_startup_diagnostic)]
     esp_println::println!("e290-ble-startup-diagnostic stage=trouble-host-new ENTER");
-    let stack = trouble_host::new(controller, resources).set_random_address(address);
+    let stack = trouble_host::new(controller, resources)
+        .set_random_address(address)
+        .set_random_generator_seed(&mut session_rng);
+    stack.set_io_capabilities(IoCapabilities::DisplayOnly);
+    let authoritative_bond_identity = restored_bond
+        .as_ref()
+        .map(|bond| trouble_bond(bond).identity);
+    if let Some(bond) = restored_bond.as_ref()
+        && stack.add_bond_information(trouble_bond(bond)).is_err()
+    {
+        error!("e290-node stage=ble-api status=DISABLED reason=restored-bond-rejected");
+        core::future::pending::<()>().await;
+    }
+    drop(restored_bond);
     #[cfg(reticulum_e290_ble_startup_diagnostic)]
     esp_println::println!("e290-ble-startup-diagnostic stage=trouble-host-new RETURNED OK");
     #[cfg(reticulum_e290_ble_startup_diagnostic)]
@@ -314,12 +451,18 @@ async fn run_host<C>(
     join(
         run_controller(runner),
         serve_advertising(
+            &stack,
             &mut peripheral,
             server,
             local_name.as_bytes(),
             handoffs,
             session_parameters,
             session_rng,
+            BleConnectionOwners {
+                pairing_button,
+                display_publisher,
+            },
+            authoritative_bond_identity,
         ),
     )
     .await;
@@ -350,17 +493,29 @@ async fn run_controller<C: Controller, P: PacketPool>(mut runner: Runner<'_, C, 
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the one advertiser retains each sole host, protocol, and physical owner explicitly"
+)]
 async fn serve_advertising<C: Controller>(
+    stack: &Stack<'_, C, DefaultPacketPool>,
     peripheral: &mut Peripheral<'_, C, DefaultPacketPool>,
     server: &'static Server<'static>,
     local_name: &'static [u8],
     handoffs: BleHandoffs,
     session_parameters: ServerParameters,
     mut session_rng: Trng,
+    physical: BleConnectionOwners,
+    mut authoritative_bond_identity: Option<Identity>,
 ) {
+    let BleConnectionOwners {
+        pairing_button,
+        mut display_publisher,
+    } = physical;
     let BleHandoffs {
         pairing: mut pairing_handoff,
-        _live_pairing,
+        live_pairing: mut live_pairing_handoff,
+        bond: mut bond_handoff,
         admission: mut session_admission,
         mut authenticated_api,
     } = handoffs;
@@ -413,29 +568,61 @@ async fn serve_advertising<C: Controller>(
         };
 
         let connection_outcome = serve_connection(
+            stack,
             server,
             &gatt_connection,
             connection,
             &mut pairing_handoff,
+            &mut live_pairing_handoff,
+            &mut bond_handoff,
             &mut authenticated_session,
             &mut session_admission,
             &mut authenticated_api,
             &mut session_rng,
+            &pairing_button,
+            &mut display_publisher,
+            authoritative_bond_identity,
         )
         .await;
-        // Release logical session owners before a fail-closed controller drain
-        // which intentionally has no success timeout.
+        let ServeConnectionOutcome {
+            lifecycle_started,
+            disconnected_event_observed,
+            remove_volatile_bond,
+            retain_only_bond,
+            disable_bearer_until_reboot,
+        } = connection_outcome;
+        // Release logical session owners before the bounded controller drain.
+        // The final GATT reference stays live through that drain, then Trouble
+        // itself gates slot reuse on Disconnected state plus refcount zero.
         authenticated_session.reset();
-        drain_connection(
-            &gatt_connection,
-            connection,
-            connection_outcome.disconnected_event_observed,
-        )
-        .await;
+        drain_connection(&gatt_connection, connection, disconnected_event_observed).await;
         // Trouble will not reuse the sole HostResources connection slot until
         // its state is Disconnected and the final Connection reference is gone.
         // Keep this drop visibly ahead of every path to the next advertiser.
         drop(gatt_connection);
+        if let Some(identity) = remove_volatile_bond
+            && stack.remove_bond_information(identity).is_err()
+        {
+            error!(
+                "e290-node stage=ble-api status=DISABLED reason=volatile-bond-removal-fault connection={}",
+                connection.get()
+            );
+            core::future::pending::<()>().await;
+        }
+        if let Some(identity) = retain_only_bond {
+            for candidate in stack.get_bond_information() {
+                if !candidate.identity.match_identity(&identity)
+                    && stack.remove_bond_information(candidate.identity).is_err()
+                {
+                    error!(
+                        "e290-node stage=ble-api status=DISABLED reason=stale-bond-removal-fault connection={}",
+                        connection.get()
+                    );
+                    core::future::pending::<()>().await;
+                }
+            }
+            authoritative_bond_identity = Some(identity);
+        }
         info!(
             "e290-node stage=ble-api status=LINK-RESOURCES-RELEASED connection={}",
             connection.get()
@@ -446,7 +633,7 @@ async fn serve_advertising<C: Controller>(
             connection.get()
         );
 
-        if connection_outcome.lifecycle_started {
+        if lifecycle_started {
             if !announce_lifecycle(
                 &mut pairing_handoff,
                 PairingControlCommand::Disconnected {
@@ -469,6 +656,17 @@ async fn serve_advertising<C: Controller>(
                 connection.get()
             );
         }
+        if disable_bearer_until_reboot {
+            pairing_diagnostic!(
+                "e290-ble-pairing-diagnostic event=fail-stop reason=fresh-security-not-durable connection={}",
+                connection.get()
+            );
+            error!(
+                "e290-node stage=ble-api status=DISABLED reason=fresh-security-not-durable connection={} recovery=reboot-from-authoritative-bond",
+                connection.get()
+            );
+            core::future::pending::<()>().await;
+        }
     }
 }
 
@@ -484,11 +682,10 @@ async fn drain_connection<P: PacketPool>(
     // second copy would stall forever.
     if disconnected_event_observed {
         if raw.is_connected() {
-            error!(
-                "e290-node stage=ble-api status=DISCONNECT-DRAIN-STALLED reason=observed-event-but-manager-connected connection={}",
+            warn!(
+                "e290-node stage=ble-api status=DISCONNECT-DRAIN-INCONSISTENT reason=observed-event-but-manager-connected action=release-final-reference connection={}",
                 connection_id.get()
             );
-            core::future::pending::<()>().await;
         }
         info!(
             "e290-node stage=ble-api status=DISCONNECT-DRAINED source=serve-event connection={}",
@@ -545,8 +742,8 @@ async fn drain_connection<P: PacketPool>(
             Either::First(_) => {}
             Either::Second(()) => {
                 // Trouble's public predicate collapses DisconnectRequest and
-                // Disconnected into false, so this short recheck is diagnostic
-                // only. The raw Disconnected event remains the success gate.
+                // Disconnected into false. It is diagnostic only; the exact
+                // Disconnected event remains the sole success gate.
                 let manager_reports_connected = raw.is_connected();
                 if last_prolonged_log_at.elapsed()
                     >= Duration::from_millis(profile::DISCONNECT_DRAIN_PROLONGED_LOG_MS)
@@ -633,52 +830,345 @@ async fn advertise<'stack, 'server, C: Controller>(
 struct ServeConnectionOutcome {
     lifecycle_started: bool,
     disconnected_event_observed: bool,
+    remove_volatile_bond: Option<Identity>,
+    retain_only_bond: Option<Identity>,
+    disable_bearer_until_reboot: bool,
 }
 
 #[allow(
     clippy::too_many_arguments,
     reason = "one BLE link retains each exact session and handoff owner explicitly"
 )]
-async fn serve_connection<P: PacketPool>(
+async fn serve_connection<C: Controller, P: PacketPool>(
+    stack: &Stack<'_, C, P>,
     server: &Server<'_>,
     connection: &GattConnection<'_, '_, P>,
     connection_id: ConnectionId,
     pairing_handoff: &mut UsbPairingHandoff<CriticalSectionRawMutex>,
+    live_pairing_handoff: &mut BearerLivePairingHandoff<CriticalSectionRawMutex>,
+    bond_handoff: &mut BearerBleBondHandoff<CriticalSectionRawMutex>,
     session: &mut UsbAuthenticatedSession,
     admission: &mut BearerSessionAdmissionHandoff<CriticalSectionRawMutex>,
     authenticated_api: &mut BearerHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
     session_rng: &mut Trng,
+    pairing_button: &Input<'static>,
+    display_publisher: &mut Option<DisplayPublisher<CriticalSectionRawMutex>>,
+    mut authoritative_bond_identity: Option<Identity>,
 ) -> ServeConnectionOutcome {
+    if server
+        .set(
+            &server.api.security_confirmation,
+            &gatt_profile::SECURITY_CONFIRMATION_PENDING_VALUE,
+        )
+        .is_err()
+    {
+        warn!(
+            "e290-node stage=ble-api status=LINK-RESET reason=security-confirmation-reset-fault connection={}",
+            connection_id.get()
+        );
+        return ServeConnectionOutcome {
+            lifecycle_started: false,
+            disconnected_event_observed: false,
+            remove_volatile_bond: None,
+            retain_only_bond: None,
+            disable_bearer_until_reboot: false,
+        };
+    }
+    if !announce_lifecycle(
+        pairing_handoff,
+        PairingControlCommand::Connected {
+            at: pairing_time(),
+            connection: connection_id,
+        },
+        connection_id,
+        LifecycleAcknowledgement::Connected,
+    )
+    .await
+    {
+        warn!(
+            "e290-node stage=ble-api status=LINK-RESET reason=connected-lifecycle-mismatch connection={}",
+            connection_id.get()
+        );
+        return ServeConnectionOutcome {
+            lifecycle_started: false,
+            disconnected_event_observed: false,
+            remove_volatile_bond: None,
+            retain_only_bond: None,
+            disable_bearer_until_reboot: false,
+        };
+    }
+    if !session.begin_connection(connection_id) {
+        warn!(
+            "e290-node stage=ble-api status=LINK-RESET reason=session-owner-not-disconnected connection={}",
+            connection_id.get()
+        );
+        return ServeConnectionOutcome {
+            lifecycle_started: true,
+            disconnected_event_observed: false,
+            remove_volatile_bond: None,
+            retain_only_bond: None,
+            disable_bearer_until_reboot: false,
+        };
+    }
+
     let rx = server.api.rx;
     let tx = server.api.tx;
     let tx_cccd = tx
         .cccd_handle
         .expect("the indication characteristic always owns a CCCD");
+    let raw = connection.raw();
     let mut decoder = StreamDecoder::new();
+    let mut sequence_gate = ExactNextSequenceGate::new(connection_id);
     let mut indication = IndicationGate::new();
+    let mut indication_owner: Option<IndicationOwner> = None;
+    let mut pairing_transmission: Option<PairingTransmission> = None;
     let linked_at = Instant::now();
     let mut indication_sent_at: Option<Instant> = None;
     let mut pre_authentication = PreAuthenticationDeadline::new();
     let mut pre_authentication_started_at: Option<Instant> = None;
-    let mut lifecycle_started = false;
+    let mut cccd_enabled = false;
     let mut disconnected_event_observed = false;
+    let mut remove_volatile_bond: Option<Identity> = None;
+    let mut retain_only_bond: Option<Identity> = None;
+    let mut fresh_security_pending_durability = false;
+    let mut mode = BleLinkMode::AwaitingPresence;
+    let mut pending_pairing_exclusive = false;
+    let mut security_requested_at: Option<Instant> = None;
+    let mut application_pairing_idle = ApplicationPairingIdleDeadline::new();
+    #[cfg(reticulum_e290_ble_startup_diagnostic)]
+    let mut application_rx_observed = false;
+    let mut display_state = PairingDisplayState::Idle;
+    let mut display_clear_reason: Option<PairingSecretClearReason> = None;
+    let started_at = pairing_time().get();
+    let mut debouncer =
+        ActiveLowButtonDebouncer::new(started_at, active_low_level(pairing_button.is_low()));
+    pairing_diagnostic!(
+        "e290-ble-pairing-diagnostic event=button-initial level={:?} connection={}",
+        debouncer.current(),
+        connection_id.get()
+    );
+    let mut button_publication = PhysicalPresencePublicationGuard::new();
+    let mut button_observation = ButtonObservationFlight::new();
+    let mut last_button_observation_ms =
+        started_at.saturating_sub(crate::config::PAIRING_BUTTON_OBSERVATION_INTERVAL_MS);
 
     'connection: loop {
-        let mut fault = false;
+        if poll_pairing_display(display_publisher, &mut display_state).is_err() {
+            warn!(
+                "e290-node stage=ble-api status=LINK-RESET reason=pairing-display-fault connection={}",
+                connection_id.get()
+            );
+            display_clear_reason = Some(PairingSecretClearReason::Failed);
+            break;
+        }
 
-        while let Some(reply) = admission.try_receive_reply() {
-            if session.accept_admission_reply(reply, session_rng).is_err() {
-                fault = true;
+        match button_observation.poll(pairing_handoff) {
+            Ok(progress) => {
+                if apply_button_observation_progress(
+                    progress,
+                    connection_id,
+                    &mut pending_pairing_exclusive,
+                )
+                .is_err()
+                {
+                    warn!(
+                        "e290-node stage=ble-api status=LINK-RESET reason=duplicate-pairing-exclusive-request connection={}",
+                        connection_id.get()
+                    );
+                    break;
+                }
+            }
+            Err(_) => {
+                warn!(
+                    "e290-node stage=ble-api status=LINK-RESET reason=button-reply-mismatch connection={}",
+                    connection_id.get()
+                );
                 break;
             }
         }
-        while !fault {
-            let Some(reply) = authenticated_api.replies().try_receive() else {
+        if button_observation.started_at().is_some_and(|started_at| {
+            pairing_time().get().saturating_sub(started_at.get())
+                >= profile::HANDOFF_EXCHANGE_TIMEOUT_MS
+        }) {
+            warn!(
+                "e290-node stage=ble-api status=LINK-RESET reason=button-handoff-timeout connection={}",
+                connection_id.get()
+            );
+            break;
+        }
+
+        if mode == BleLinkMode::AwaitingPresence
+            && raw
+                .security_level()
+                .is_ok_and(|security| security.authenticated())
+        {
+            if !matches_authoritative_identity(authoritative_bond_identity, raw.peer_identity()) {
+                warn!(
+                    "e290-node stage=ble-api status=LINK-RESET reason=authenticated-peer-not-authoritative connection={}",
+                    connection_id.get()
+                );
                 break;
-            };
-            if let Err(reason) = session.accept_node_reply(reply) {
-                drop(reason.into_reply());
-                fault = true;
+            }
+            mode = BleLinkMode::Ordinary;
+            pre_authentication = PreAuthenticationDeadline::new();
+            pre_authentication_started_at = Some(Instant::now());
+            info!(
+                "e290-node stage=ble-api status=BONDED-LINK-AUTHENTICATED connection={} application_session=awaiting-client-hello",
+                connection_id.get()
+            );
+        }
+
+        let mut fault = false;
+
+        if pending_pairing_exclusive {
+            match session.close_for_pairing_exclusivity(connection_id) {
+                PairingExclusiveCloseDisposition::Closed
+                | PairingExclusiveCloseDisposition::AlreadyExclusive => {
+                    pending_pairing_exclusive = false;
+                    let exclusive = exchange_pairing_control(
+                        pairing_handoff,
+                        PairingControlCommand::ExclusiveAcquired {
+                            at: pairing_time(),
+                            connection: connection_id,
+                        },
+                        connection_id,
+                    )
+                    .await;
+                    if !matches!(
+                        exclusive,
+                        Some(PairingControlReplyKind::Exclusive(
+                            ExclusiveAcquisitionReply::Opened
+                        ))
+                    ) {
+                        warn!(
+                            "e290-node stage=ble-api status=LINK-RESET reason=pairing-window-not-opened connection={}",
+                            connection_id.get()
+                        );
+                        break;
+                    }
+                    pairing_diagnostic!(
+                        "e290-ble-pairing-diagnostic event=exclusive-opened connection={}",
+                        connection_id.get()
+                    );
+                    if raw
+                        .security_level()
+                        .is_ok_and(|security| security.authenticated())
+                    {
+                        if !matches_authoritative_identity(
+                            authoritative_bond_identity,
+                            raw.peer_identity(),
+                        ) {
+                            warn!(
+                                "e290-node stage=ble-api status=LINK-RESET reason=authenticated-peer-not-authoritative connection={}",
+                                connection_id.get()
+                            );
+                            break;
+                        }
+                        pre_authentication = PreAuthenticationDeadline::new();
+                        pre_authentication_started_at = None;
+                        mode = BleLinkMode::PairingExclusive;
+                        application_pairing_idle.ensure_started(Instant::now().as_millis());
+                        if let Some(publisher) = display_publisher.as_mut()
+                            && publisher
+                                .publish_latest(DisplayCommand::ShowReady {
+                                    label: appliance_display_label(),
+                                })
+                                .is_err()
+                        {
+                            warn!(
+                                "e290-node stage=ble-api status=LINK-RESET reason=restored-pairing-display-ready-fault connection={}",
+                                connection_id.get()
+                            );
+                            break;
+                        }
+                        if server
+                            .set(
+                                &server.api.security_confirmation,
+                                &gatt_profile::SECURITY_CONFIRMATION_READY_VALUE,
+                            )
+                            .is_err()
+                        {
+                            warn!(
+                                "e290-node stage=ble-api status=LINK-RESET reason=security-confirmation-ready-fault connection={}",
+                                connection_id.get()
+                            );
+                            break;
+                        }
+                        info!(
+                            "e290-node stage=ble-api status=PAIRING-WINDOW-OPEN connection={} security=restored-authenticated-bond application_pairing=ready",
+                            connection_id.get()
+                        );
+                        continue;
+                    }
+                    if display_publisher.is_none() {
+                        warn!(
+                            "e290-node stage=ble-api status=LINK-RESET reason=pairing-display-unavailable connection={}",
+                            connection_id.get()
+                        );
+                        break;
+                    }
+                    if raw.set_bondable(true).is_err() {
+                        warn!(
+                            "e290-node stage=ble-api status=LINK-RESET reason=ble-bondable-configuration-fault connection={}",
+                            connection_id.get()
+                        );
+                        break;
+                    }
+                    pairing_diagnostic!(
+                        "e290-ble-pairing-diagnostic event=bondable-enabled connection={}",
+                        connection_id.get()
+                    );
+                    // From this point Trouble may install or replace volatile
+                    // key material. Only an exact Durable reply clears the
+                    // boot-scoped fail-stop owner.
+                    fresh_security_pending_durability = true;
+                    if raw.request_security().is_err() {
+                        warn!(
+                            "e290-node stage=ble-api status=LINK-RESET reason=ble-security-request-fault connection={}",
+                            connection_id.get()
+                        );
+                        break;
+                    }
+                    pairing_diagnostic!(
+                        "e290-ble-pairing-diagnostic event=security-requested connection={}",
+                        connection_id.get()
+                    );
+                    mode = BleLinkMode::SecurityRequested;
+                    security_requested_at = Some(Instant::now());
+                    info!(
+                        "e290-node stage=ble-api status=PAIRING-WINDOW-OPEN connection={} security=display-passkey-requested",
+                        connection_id.get()
+                    );
+                    continue;
+                }
+                PairingExclusiveCloseDisposition::DrainBeforeClose { kind } => {
+                    let _ = kind;
+                }
+                PairingExclusiveCloseDisposition::StaleConnection => {
+                    warn!(
+                        "e290-node stage=ble-api status=LINK-RESET reason=pairing-exclusive-stale-connection connection={}",
+                        connection_id.get()
+                    );
+                    break;
+                }
+            }
+        }
+
+        if mode == BleLinkMode::Ordinary && !pending_pairing_exclusive {
+            while let Some(reply) = admission.try_receive_reply() {
+                if session.accept_admission_reply(reply, session_rng).is_err() {
+                    fault = true;
+                    break;
+                }
+            }
+            while !fault {
+                let Some(reply) = authenticated_api.replies().try_receive() else {
+                    break;
+                };
+                if let Err(reason) = session.accept_node_reply(reply) {
+                    drop(reason.into_reply());
+                    fault = true;
+                }
             }
         }
         if fault {
@@ -689,6 +1179,26 @@ async fn serve_connection<P: PacketPool>(
             break;
         }
 
+        if let Some(requested_at) = security_requested_at
+            && requested_at.elapsed()
+                >= Duration::from_millis(profile::BLE_SECURITY_PAIRING_TIMEOUT_MS)
+        {
+            warn!(
+                "e290-node stage=ble-api status=LINK-RESET reason=ble-security-timeout connection={}",
+                connection_id.get()
+            );
+            display_clear_reason = Some(PairingSecretClearReason::TimedOut);
+            break;
+        }
+        if application_pairing_idle.poll(Instant::now().as_millis(), pairing_transmission.is_some())
+        {
+            warn!(
+                "e290-node stage=ble-api status=LINK-RESET reason=application-pairing-timeout connection={}",
+                connection_id.get()
+            );
+            display_clear_reason = Some(PairingSecretClearReason::TimedOut);
+            break;
+        }
         if let Some(sent_at) = indication_sent_at
             && sent_at.elapsed() >= Duration::from_millis(profile::INDICATION_CONFIRM_TIMEOUT_MS)
         {
@@ -698,7 +1208,7 @@ async fn serve_connection<P: PacketPool>(
             );
             break;
         }
-        if !lifecycle_started
+        if !cccd_enabled
             && linked_at.elapsed() >= Duration::from_millis(profile::CCCD_SUBSCRIBE_TIMEOUT_MS)
         {
             warn!(
@@ -720,49 +1230,61 @@ async fn serve_connection<P: PacketPool>(
             }
         }
 
-        let _ = session.try_send_admission_command(admission);
-        let _ = session.try_send_request(authenticated_api.requests());
-        if matches!(
-            session.phase(),
-            UsbAuthenticatedSessionPhase::TerminatedUntilReset
-        ) {
-            warn!(
-                "e290-node stage=ble-api status=LINK-RESET reason=session-terminated connection={}",
-                connection_id.get()
-            );
-            break;
+        if mode == BleLinkMode::Ordinary && !pending_pairing_exclusive {
+            let _ = session.try_send_admission_command(admission);
+            let _ = session.try_send_request(authenticated_api.requests());
+            if matches!(
+                session.phase(),
+                UsbAuthenticatedSessionPhase::TerminatedUntilReset
+            ) {
+                warn!(
+                    "e290-node stage=ble-api status=LINK-RESET reason=session-terminated connection={}",
+                    connection_id.get()
+                );
+                break;
+            }
         }
 
-        if lifecycle_started && !indication.is_pending() && session.tx_kind().is_some() {
-            let Some(chunk) = session.next_tx_chunk(gatt_profile::INITIAL_ATT_VALUE_BYTES) else {
-                warn!(
-                    "e290-node stage=ble-api status=LINK-RESET reason=missing-session-tx-owner connection={}",
-                    connection_id.get()
-                );
-                break;
+        if cccd_enabled && !indication.is_pending() {
+            let next = if let Some(transmission) = pairing_transmission.as_ref() {
+                Some((
+                    transmission
+                        .frame
+                        .next_chunk(gatt_profile::INITIAL_ATT_VALUE_BYTES),
+                    IndicationOwner::Pairing,
+                ))
+            } else if mode == BleLinkMode::Ordinary && session.tx_kind().is_some() {
+                session
+                    .next_tx_chunk(gatt_profile::INITIAL_ATT_VALUE_BYTES)
+                    .map(|chunk| (chunk, IndicationOwner::Ordinary))
+            } else {
+                None
             };
-            let Some(fragment) = GattFragment::copy_from(chunk) else {
-                warn!(
-                    "e290-node stage=ble-api status=LINK-RESET reason=invalid-session-tx-fragment connection={}",
-                    connection_id.get()
-                );
-                break;
-            };
-            if indication.arm(chunk.len()).is_err() {
-                warn!(
-                    "e290-node stage=ble-api status=LINK-RESET reason=ambiguous-indication-owner connection={}",
-                    connection_id.get()
-                );
-                break;
+            if let Some((chunk, owner)) = next {
+                let Some(fragment) = GattFragment::copy_from(chunk) else {
+                    warn!(
+                        "e290-node stage=ble-api status=LINK-RESET reason=invalid-session-tx-fragment connection={}",
+                        connection_id.get()
+                    );
+                    break;
+                };
+                if indication.arm(chunk.len()).is_err() || indication_owner.replace(owner).is_some()
+                {
+                    warn!(
+                        "e290-node stage=ble-api status=LINK-RESET reason=ambiguous-indication-owner connection={}",
+                        connection_id.get()
+                    );
+                    break;
+                }
+                if tx.indicate(connection, &fragment).await.is_err() {
+                    warn!(
+                        "e290-node stage=ble-api status=LINK-RESET reason=indication-send-fault connection={}",
+                        connection_id.get()
+                    );
+                    break;
+                }
+                indication_sent_at = Some(Instant::now());
             }
-            if tx.indicate(connection, &fragment).await.is_err() {
-                warn!(
-                    "e290-node stage=ble-api status=LINK-RESET reason=indication-send-fault connection={}",
-                    connection_id.get()
-                );
-                break;
-            }
-            indication_sent_at = Some(Instant::now());
         }
 
         match select(
@@ -771,7 +1293,46 @@ async fn serve_connection<P: PacketPool>(
         )
         .await
         {
-            Either::Second(()) => {}
+            Either::Second(()) => {
+                let now_millis = pairing_time().get();
+                let observation = match debouncer
+                    .observe(now_millis, active_low_level(pairing_button.is_low()))
+                {
+                    Ok(observation) => observation,
+                    Err(_) => {
+                        warn!(
+                            "e290-node stage=ble-api status=LINK-RESET reason=button-debounce-fault connection={}",
+                            connection_id.get()
+                        );
+                        break;
+                    }
+                };
+                button_publication.observe(observation);
+
+                if matches!(mode, BleLinkMode::AwaitingPresence | BleLinkMode::Ordinary)
+                    && !pending_pairing_exclusive
+                    && !button_observation.is_pending()
+                {
+                    let periodic_due = now_millis.saturating_sub(last_button_observation_ms)
+                        >= crate::config::PAIRING_BUTTON_OBSERVATION_INTERVAL_MS;
+                    if button_publication.publication_due(periodic_due) {
+                        let level = button_publication.policy_level(debouncer.current());
+                        if !button_observation.try_schedule(
+                            PairingMillis::new(now_millis),
+                            connection_id,
+                            level,
+                        ) {
+                            warn!(
+                                "e290-node stage=ble-api status=LINK-RESET reason=button-flight-owner-mismatch connection={}",
+                                connection_id.get()
+                            );
+                            break;
+                        }
+                        last_button_observation_ms = now_millis;
+                        button_publication.publication_queued();
+                    }
+                }
+            }
             Either::First(GattConnectionEvent::Disconnected { reason }) => {
                 disconnected_event_observed = true;
                 info!(
@@ -779,6 +1340,15 @@ async fn serve_connection<P: PacketPool>(
                     connection_id.get()
                 );
                 break;
+            }
+            Either::First(GattConnectionEvent::RequestConnectionParams(request)) => {
+                if request.accept(None, stack).await.is_err() {
+                    warn!(
+                        "e290-node stage=ble-api status=LINK-RESET reason=connection-params-response-fault connection={}",
+                        connection_id.get()
+                    );
+                    break;
+                }
             }
             Either::First(GattConnectionEvent::Gatt { event }) => match event {
                 GattEvent::Write(write) if write.handle() == tx_cccd => {
@@ -800,54 +1370,62 @@ async fn serve_connection<P: PacketPool>(
                         );
                         break;
                     }
-                    if !lifecycle_started {
-                        if !announce_lifecycle(
-                            pairing_handoff,
-                            PairingControlCommand::Connected {
-                                at: pairing_time(),
-                                connection: connection_id,
-                            },
-                            connection_id,
-                            LifecycleAcknowledgement::Connected,
-                        )
-                        .await
-                        {
-                            warn!(
-                                "e290-node stage=ble-api status=LINK-RESET reason=connected-lifecycle-mismatch connection={}",
-                                connection_id.get()
-                            );
-                            break;
-                        }
-                        lifecycle_started = true;
-                        if !session.begin_connection(connection_id) {
-                            warn!(
-                                "e290-node stage=ble-api status=LINK-RESET reason=session-owner-not-disconnected connection={}",
-                                connection_id.get()
-                            );
-                            break;
-                        }
-                        pre_authentication = PreAuthenticationDeadline::new();
-                        pre_authentication_started_at = Some(Instant::now());
-                        info!(
-                            "e290-node stage=ble-api status=SESSION-READY connection={} cccd=indicate pre_authentication_timeout_ms={}",
-                            connection_id.get(),
-                            profile::PRE_AUTHENTICATION_TIMEOUT_MS,
-                        );
-                    }
+                    cccd_enabled = true;
+                    pairing_diagnostic!(
+                        "e290-ble-pairing-diagnostic event=cccd-enabled connection={}",
+                        connection_id.get()
+                    );
+                    info!(
+                        "e290-node stage=ble-api status=LINK-READY connection={} cccd=indicate pairing=press-gpio21",
+                        connection_id.get()
+                    );
                 }
                 GattEvent::Write(write) if write.handle() == rx.handle => {
+                    if mode == BleLinkMode::AwaitingPresence
+                        && raw
+                            .security_level()
+                            .is_ok_and(|security| security.authenticated())
+                    {
+                        if !matches_authoritative_identity(
+                            authoritative_bond_identity,
+                            raw.peer_identity(),
+                        ) {
+                            warn!(
+                                "e290-node stage=ble-api status=LINK-RESET reason=authenticated-peer-not-authoritative connection={}",
+                                connection_id.get()
+                            );
+                            break;
+                        }
+                        mode = BleLinkMode::Ordinary;
+                        pre_authentication = PreAuthenticationDeadline::new();
+                        pre_authentication_started_at = Some(Instant::now());
+                    }
                     let data = write.data();
                     let mut bytes = [0_u8; gatt_profile::INITIAL_ATT_VALUE_BYTES];
-                    let valid = lifecycle_started
+                    let valid = cccd_enabled
                         && !data.is_empty()
-                        && data.len() <= gatt_profile::INITIAL_ATT_VALUE_BYTES;
+                        && data.len() <= gatt_profile::INITIAL_ATT_VALUE_BYTES
+                        && matches!(mode, BleLinkMode::PairingExclusive | BleLinkMode::Ordinary)
+                        && !pending_pairing_exclusive
+                        && pairing_transmission.is_none();
                     if valid {
                         bytes[..data.len()].copy_from_slice(data);
                     }
                     let data_len = data.len();
+                    #[cfg(reticulum_e290_ble_startup_diagnostic)]
+                    if valid && !application_rx_observed {
+                        pairing_diagnostic!(
+                            "e290-ble-pairing-diagnostic event=application-rx mode={:?} bytes={} security={:?} connection={}",
+                            mode,
+                            data_len,
+                            raw.security_level(),
+                            connection_id.get()
+                        );
+                        application_rx_observed = true;
+                    }
                     let reply = if valid {
                         write.accept()
-                    } else if lifecycle_started {
+                    } else if cccd_enabled {
                         write.reject(AttErrorCode::INVALID_ATTRIBUTE_VALUE_LENGTH)
                     } else {
                         write.reject(AttErrorCode::CCCD_IMPROPERLY_CONFIGURED)
@@ -871,38 +1449,96 @@ async fn serve_connection<P: PacketPool>(
                     }
                     for byte in &bytes[..data_len] {
                         let decode = decoder.push(*byte);
-                        if matches!(decode, DecodeEvent::Pending) {
-                            continue;
-                        }
-                        let disposition = session.accept_decode_event(decode, pairing_time());
-                        if !matches!(
-                            disposition,
-                            Ok(UsbSessionRxDisposition::Pending)
-                                | Ok(UsbSessionRxDisposition::ClientHelloAccepted)
-                                | Ok(UsbSessionRxDisposition::ClientHelloDroppedBusy)
-                                | Ok(UsbSessionRxDisposition::SessionEstablished)
-                                | Ok(UsbSessionRxDisposition::RequestAuthenticated)
-                        ) {
-                            fault = true;
-                            break;
-                        }
-                        if matches!(disposition, Ok(UsbSessionRxDisposition::SessionEstablished)) {
-                            let Some(started_at) = pre_authentication_started_at else {
-                                warn!(
-                                    "e290-node stage=ble-api status=LINK-RESET reason=missing-pre-authentication-owner connection={}",
-                                    connection_id.get()
-                                );
-                                break 'connection;
-                            };
-                            let phase = session.phase();
-                            if pre_authentication.poll(started_at.elapsed().as_millis(), phase)
-                                == PreAuthenticationDeadlineStatus::Expired
-                            {
-                                warn!(
-                                    "e290-node stage=ble-api status=LINK-RESET reason=pre-authentication-timeout phase={phase:?} connection={}",
-                                    connection_id.get()
-                                );
-                                break 'connection;
+                        match mode {
+                            BleLinkMode::PairingExclusive => match decode {
+                                DecodeEvent::Pending => {}
+                                DecodeEvent::Record(record) => {
+                                    let Some(transmission) = handle_pairing_record(
+                                        record,
+                                        connection_id,
+                                        &mut sequence_gate,
+                                        pairing_handoff,
+                                        live_pairing_handoff,
+                                    )
+                                    .await
+                                    else {
+                                        fault = true;
+                                        break;
+                                    };
+                                    pairing_transmission = Some(transmission);
+                                }
+                                DecodeEvent::MalformedCobs
+                                | DecodeEvent::MalformedRecord(_)
+                                | DecodeEvent::Overflow => {
+                                    fault = true;
+                                    break;
+                                }
+                            },
+                            BleLinkMode::Ordinary => {
+                                let disposition = match decode {
+                                    DecodeEvent::Record(record)
+                                        if session.phase()
+                                            == UsbAuthenticatedSessionPhase::AwaitingClientHello
+                                            && record.kind() != RECORD_KIND_CLIENT_HELLO =>
+                                    {
+                                        let Some(transmission) = handle_pairing_record(
+                                            record,
+                                            connection_id,
+                                            &mut sequence_gate,
+                                            pairing_handoff,
+                                            live_pairing_handoff,
+                                        )
+                                        .await
+                                        else {
+                                            fault = true;
+                                            break;
+                                        };
+                                        pre_authentication_started_at = None;
+                                        application_pairing_idle
+                                            .ensure_started(Instant::now().as_millis());
+                                        pairing_transmission = Some(transmission);
+                                        break;
+                                    }
+                                    event => session.accept_decode_event(event, pairing_time()),
+                                };
+                                if !matches!(
+                                    disposition,
+                                    Ok(UsbSessionRxDisposition::Pending)
+                                        | Ok(UsbSessionRxDisposition::ClientHelloAccepted)
+                                        | Ok(UsbSessionRxDisposition::ClientHelloDroppedBusy)
+                                        | Ok(UsbSessionRxDisposition::SessionEstablished)
+                                        | Ok(UsbSessionRxDisposition::RequestAuthenticated)
+                                ) {
+                                    fault = true;
+                                    break;
+                                }
+                                if matches!(
+                                    disposition,
+                                    Ok(UsbSessionRxDisposition::SessionEstablished)
+                                ) {
+                                    let Some(started_at) = pre_authentication_started_at else {
+                                        warn!(
+                                            "e290-node stage=ble-api status=LINK-RESET reason=missing-pre-authentication-owner connection={}",
+                                            connection_id.get()
+                                        );
+                                        break 'connection;
+                                    };
+                                    let phase = session.phase();
+                                    if pre_authentication
+                                        .poll(started_at.elapsed().as_millis(), phase)
+                                        == PreAuthenticationDeadlineStatus::Expired
+                                    {
+                                        warn!(
+                                            "e290-node stage=ble-api status=LINK-RESET reason=pre-authentication-timeout phase={phase:?} connection={}",
+                                            connection_id.get()
+                                        );
+                                        break 'connection;
+                                    }
+                                }
+                            }
+                            BleLinkMode::AwaitingPresence | BleLinkMode::SecurityRequested => {
+                                fault = true;
+                                break;
                             }
                         }
                     }
@@ -938,35 +1574,104 @@ async fn serve_connection<P: PacketPool>(
                             break;
                         };
                         indication_sent_at = None;
-                        if session.advance_tx(acknowledged).is_err() {
+                        match indication_owner.take() {
+                            Some(IndicationOwner::Ordinary) => {
+                                if session.advance_tx(acknowledged).is_err() {
+                                    warn!(
+                                        "e290-node stage=ble-api status=LINK-RESET reason=session-tx-advance-fault connection={}",
+                                        connection_id.get()
+                                    );
+                                    break;
+                                }
+                            }
+                            Some(IndicationOwner::Pairing) => {
+                                let Some(transmission) = pairing_transmission.as_mut() else {
+                                    warn!(
+                                        "e290-node stage=ble-api status=LINK-RESET reason=missing-pairing-tx-owner connection={}",
+                                        connection_id.get()
+                                    );
+                                    break;
+                                };
+                                if transmission.frame.advance(acknowledged).is_err() {
+                                    warn!(
+                                        "e290-node stage=ble-api status=LINK-RESET reason=pairing-tx-advance-fault connection={}",
+                                        connection_id.get()
+                                    );
+                                    break;
+                                }
+                                if transmission.frame.is_complete() {
+                                    let activated = transmission.activation_succeeded;
+                                    pairing_transmission = None;
+                                    if activated {
+                                        display_clear_reason =
+                                            Some(PairingSecretClearReason::Succeeded);
+                                        info!(
+                                            "e290-node stage=ble-api status=APPLICATION-PAIRING-COMPLETE connection={} action=reconnect-authenticated",
+                                            connection_id.get()
+                                        );
+                                        break 'connection;
+                                    }
+                                }
+                            }
+                            None => {
+                                warn!(
+                                    "e290-node stage=ble-api status=LINK-RESET reason=missing-indication-owner connection={}",
+                                    connection_id.get()
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+                GattEvent::Read(read) => {
+                    let security_confirmation =
+                        read.handle() == server.api.security_confirmation.handle;
+                    match read.accept() {
+                        Ok(reply) => reply.send().await,
+                        Err(reason) => {
                             warn!(
-                                "e290-node stage=ble-api status=LINK-RESET reason=session-tx-advance-fault connection={}",
+                                "e290-node stage=ble-api status=LINK-RESET reason=gatt-read-reply-{reason:?} connection={}",
+                                connection_id.get()
+                            );
+                            break;
+                        }
+                    }
+                    if security_confirmation {
+                        pairing_diagnostic!(
+                            "e290-ble-pairing-diagnostic event=security-confirmation-read mode={:?} security={:?} connection={}",
+                            mode,
+                            raw.security_level(),
+                            connection_id.get()
+                        );
+                    }
+                }
+                GattEvent::NotAllowed(not_allowed) => {
+                    pairing_diagnostic!(
+                        "e290-ble-pairing-diagnostic event=gatt-not-allowed target={} mode={:?} security={:?} connection={}",
+                        if not_allowed.handle() == rx.handle {
+                            "rx"
+                        } else if not_allowed.handle() == tx_cccd {
+                            "cccd"
+                        } else if not_allowed.handle() == server.api.security_confirmation.handle {
+                            "security-confirmation"
+                        } else {
+                            "other"
+                        },
+                        mode,
+                        raw.security_level(),
+                        connection_id.get()
+                    );
+                    match not_allowed.accept() {
+                        Ok(reply) => reply.send().await,
+                        Err(reason) => {
+                            warn!(
+                                "e290-node stage=ble-api status=LINK-RESET reason=gatt-reject-reply-{reason:?} connection={}",
                                 connection_id.get()
                             );
                             break;
                         }
                     }
                 }
-                GattEvent::Read(read) => match read.accept() {
-                    Ok(reply) => reply.send().await,
-                    Err(reason) => {
-                        warn!(
-                            "e290-node stage=ble-api status=LINK-RESET reason=gatt-read-reply-{reason:?} connection={}",
-                            connection_id.get()
-                        );
-                        break;
-                    }
-                },
-                GattEvent::NotAllowed(not_allowed) => match not_allowed.accept() {
-                    Ok(reply) => reply.send().await,
-                    Err(reason) => {
-                        warn!(
-                            "e290-node stage=ble-api status=LINK-RESET reason=gatt-reject-reply-{reason:?} connection={}",
-                            connection_id.get()
-                        );
-                        break;
-                    }
-                },
                 GattEvent::Write(write) => {
                     match write.reject(AttErrorCode::WRITE_REQUEST_REJECTED) {
                         Ok(reply) => reply.send().await,
@@ -984,15 +1689,489 @@ async fn serve_connection<P: PacketPool>(
                     break;
                 }
             },
+            Either::First(GattConnectionEvent::PassKeyDisplay(passkey)) => {
+                pairing_diagnostic!(
+                    "e290-ble-pairing-diagnostic event=passkey-display mode={:?} display={:?} connection={}",
+                    mode,
+                    display_state,
+                    connection_id.get()
+                );
+                if mode != BleLinkMode::SecurityRequested
+                    || display_state != PairingDisplayState::Idle
+                {
+                    fresh_security_pending_durability = true;
+                    warn!(
+                        "e290-node stage=ble-api status=LINK-RESET reason=unbound-passkey-display connection={}",
+                        connection_id.get()
+                    );
+                    break;
+                }
+                let Some(publisher) = display_publisher.as_mut() else {
+                    break;
+                };
+                let Ok(passkey) = PairingPasskey::from_number(passkey.value()) else {
+                    break;
+                };
+                let Ok(expires_after_seconds) =
+                    PairingWindowSeconds::new(PAIRING_DISPLAY_WINDOW_SECONDS)
+                else {
+                    break;
+                };
+                let request = publisher.publish_latest(DisplayCommand::ShowPairing {
+                    label: appliance_display_label(),
+                    passkey,
+                    expires_after_seconds,
+                });
+                let Ok(request) = request else {
+                    break;
+                };
+                display_state = PairingDisplayState::Pending(request);
+                info!(
+                    "e290-node stage=ble-api status=PAIRING-PASSKEY-QUEUED request={} connection={}",
+                    request.sequence(),
+                    connection_id.get()
+                );
+            }
+            Either::First(GattConnectionEvent::PassKeyConfirm(_))
+            | Either::First(GattConnectionEvent::PassKeyInput) => {
+                fresh_security_pending_durability = true;
+                warn!(
+                    "e290-node stage=ble-api status=LINK-RESET reason=unexpected-security-method connection={}",
+                    connection_id.get()
+                );
+                display_clear_reason = Some(PairingSecretClearReason::Failed);
+                break;
+            }
+            Either::First(GattConnectionEvent::PairingComplete {
+                security_level,
+                bond,
+            }) => {
+                pairing_diagnostic!(
+                    "e290-ble-pairing-diagnostic event=pairing-complete security={:?} bond_present={} mode={:?} display={:?} peer_match={} connection={}",
+                    security_level,
+                    bond.is_some(),
+                    mode,
+                    display_state,
+                    bond.as_ref().is_some_and(|candidate| candidate
+                        .identity
+                        .match_identity(&raw.peer_identity())),
+                    connection_id.get()
+                );
+                if mode != BleLinkMode::SecurityRequested {
+                    fresh_security_pending_durability = true;
+                    if let Some(provisional_bond) = bond {
+                        remove_volatile_bond = Some(provisional_bond.identity);
+                    }
+                    warn!(
+                        "e290-node stage=ble-api status=LINK-RESET reason=unexpected-fresh-pairing-complete security_level={security_level:?} connection={}",
+                        connection_id.get()
+                    );
+                    display_clear_reason = Some(PairingSecretClearReason::Failed);
+                    break;
+                }
+                let Some(fresh_bond) = bond else {
+                    warn!(
+                        "e290-node stage=ble-api status=LINK-RESET reason=missing-bond-on-pairing-complete connection={}",
+                        connection_id.get()
+                    );
+                    display_clear_reason = Some(PairingSecretClearReason::Failed);
+                    break;
+                };
+                if poll_pairing_display(display_publisher, &mut display_state).is_err()
+                    || !security_level.authenticated()
+                    || display_state != PairingDisplayState::Rendered
+                    || !fresh_bond.identity.match_identity(&raw.peer_identity())
+                {
+                    warn!(
+                        "e290-node stage=ble-api status=LINK-RESET reason=unauthenticated-or-unbound-pairing-complete connection={}",
+                        connection_id.get()
+                    );
+                    display_clear_reason = Some(PairingSecretClearReason::Failed);
+                    break;
+                }
+                let identity = fresh_bond.identity;
+                let Some(portable_bond) = durable_bond(security_level, &fresh_bond) else {
+                    warn!(
+                        "e290-node stage=ble-api status=LINK-RESET reason=invalid-authenticated-bond connection={}",
+                        connection_id.get()
+                    );
+                    remove_volatile_bond = Some(identity);
+                    display_clear_reason = Some(PairingSecretClearReason::Failed);
+                    break;
+                };
+                let outcome = exchange_ble_bond(
+                    bond_handoff,
+                    BleBondCommitCommand::new(connection_id, portable_bond),
+                    connection_id,
+                )
+                .await;
+                match outcome {
+                    Some(BleBondCommitOutcome::Durable) => {
+                        retain_only_bond = Some(identity);
+                        authoritative_bond_identity = Some(identity);
+                        fresh_security_pending_durability = false;
+                        pairing_diagnostic!(
+                            "e290-ble-pairing-diagnostic event=bond-durable connection={}",
+                            connection_id.get()
+                        );
+                        mode = BleLinkMode::PairingExclusive;
+                        security_requested_at = None;
+                        application_pairing_idle.ensure_started(Instant::now().as_millis());
+                        if server
+                            .set(
+                                &server.api.security_confirmation,
+                                &gatt_profile::SECURITY_CONFIRMATION_READY_VALUE,
+                            )
+                            .is_err()
+                        {
+                            warn!(
+                                "e290-node stage=ble-api status=LINK-RESET reason=security-confirmation-ready-fault connection={}",
+                                connection_id.get()
+                            );
+                            display_clear_reason = Some(PairingSecretClearReason::Failed);
+                            break;
+                        }
+                        info!(
+                            "e290-node stage=ble-api status=BLE-PAIRING-DURABLE connection={} application_pairing=ready",
+                            connection_id.get()
+                        );
+                    }
+                    Some(BleBondCommitOutcome::Failed) | None => {
+                        warn!(
+                            "e290-node stage=ble-api status=LINK-RESET reason=ble-bond-not-durable connection={}",
+                            connection_id.get()
+                        );
+                        remove_volatile_bond = Some(identity);
+                        display_clear_reason = Some(PairingSecretClearReason::Failed);
+                        break;
+                    }
+                }
+            }
+            Either::First(GattConnectionEvent::PairingFailed(_reason)) => {
+                #[cfg(reticulum_e290_ble_startup_diagnostic)]
+                match &_reason {
+                    Error::Security(reason) => pairing_diagnostic!(
+                        "e290-ble-pairing-diagnostic event=pairing-failed error_class=security reason={:?} mode={:?} display={:?} connection={}",
+                        reason,
+                        mode,
+                        display_state,
+                        connection_id.get()
+                    ),
+                    _ => pairing_diagnostic!(
+                        "e290-ble-pairing-diagnostic event=pairing-failed error_class=non-security mode={:?} display={:?} connection={}",
+                        mode,
+                        display_state,
+                        connection_id.get()
+                    ),
+                }
+                fresh_security_pending_durability = true;
+                warn!(
+                    "e290-node stage=ble-api status=LINK-RESET reason=ble-pairing-failed connection={}",
+                    connection_id.get()
+                );
+                display_clear_reason = Some(PairingSecretClearReason::Failed);
+                break;
+            }
             Either::First(_) => {}
         }
     }
 
     indication.reset();
-    ServeConnectionOutcome {
-        lifecycle_started,
-        disconnected_event_observed,
+    pairing_diagnostic!(
+        "e290-ble-pairing-diagnostic event=connection-outcome mode={:?} display={:?} fresh_security_pending={} remove_volatile_bond={} retain_only_bond={} connection={}",
+        mode,
+        display_state,
+        fresh_security_pending_durability,
+        remove_volatile_bond.is_some(),
+        retain_only_bond.is_some(),
+        connection_id.get()
+    );
+    if matches!(
+        display_state,
+        PairingDisplayState::Pending(_) | PairingDisplayState::Rendered
+    ) || display_clear_reason == Some(PairingSecretClearReason::Succeeded)
+    {
+        let reason = display_clear_reason.unwrap_or(PairingSecretClearReason::Failed);
+        if let Some(publisher) = display_publisher.as_mut()
+            && publisher
+                .publish_latest(DisplayCommand::ClearPairingSecret {
+                    label: appliance_display_label(),
+                    reason,
+                })
+                .is_ok()
+        {
+            display_state = PairingDisplayState::Cleared;
+        }
     }
+    let _ = display_state;
+    ServeConnectionOutcome {
+        lifecycle_started: true,
+        disconnected_event_observed,
+        remove_volatile_bond,
+        retain_only_bond,
+        disable_bearer_until_reboot: fresh_security_pending_durability,
+    }
+}
+
+fn active_low_level(is_low: bool) -> ActiveLowButton {
+    if is_low {
+        ActiveLowButton::Low
+    } else {
+        ActiveLowButton::High
+    }
+}
+
+fn apply_button_observation_progress(
+    progress: ButtonObservationFlightProgress,
+    connection: ConnectionId,
+    pending_pairing_exclusive: &mut bool,
+) -> Result<(), ()> {
+    if progress != ButtonObservationFlightProgress::AcquireExclusive {
+        return Ok(());
+    }
+    if *pending_pairing_exclusive {
+        return Err(());
+    }
+    pairing_diagnostic!(
+        "e290-ble-pairing-diagnostic event=acquire-exclusive connection={}",
+        connection.get()
+    );
+    // A started ordinary indication owns its exact remaining bytes. The top
+    // of the loop retries closure until that flight is confirmed, then and
+    // only then acknowledges exclusivity.
+    *pending_pairing_exclusive = true;
+    info!(
+        "e290-node stage=ble-api status=PAIRING-EXCLUSIVE-PENDING connection={} action=drain-ordinary-indication-before-ack",
+        connection.get()
+    );
+    Ok(())
+}
+
+fn trouble_bond(bond: &BleBond) -> BondInformation {
+    BondInformation::new(
+        Identity {
+            bd_addr: BdAddr::new(*bond.address()),
+            irk: bond.irk().copied().map(IdentityResolvingKey::from_le_bytes),
+        },
+        LongTermKey::from_le_bytes(*bond.ltk()),
+        SecurityLevel::EncryptedAuthenticated,
+        true,
+    )
+}
+
+fn durable_bond(event_security_level: SecurityLevel, bond: &BondInformation) -> Option<BleBond> {
+    if event_security_level != SecurityLevel::EncryptedAuthenticated
+        || bond.security_level != event_security_level
+        || !bond.is_bonded
+    {
+        return None;
+    }
+    Some(BleBond::new(
+        bond.identity.bd_addr.into_inner(),
+        bond.identity.irk.map(IdentityResolvingKey::to_le_bytes),
+        bond.ltk.to_le_bytes(),
+    ))
+}
+
+fn matches_authoritative_identity(authoritative: Option<Identity>, observed: Identity) -> bool {
+    authoritative.is_some_and(|identity| identity.match_identity(&observed))
+}
+
+fn appliance_display_label() -> DisplayLabel {
+    DisplayLabel::new("Reticulum E290").expect("the fixed product label fits")
+}
+
+fn poll_pairing_display(
+    publisher: &mut Option<DisplayPublisher<CriticalSectionRawMutex>>,
+    state: &mut PairingDisplayState,
+) -> Result<(), ()> {
+    let PairingDisplayState::Pending(expected) = *state else {
+        return Ok(());
+    };
+    let Some(publisher) = publisher.as_mut() else {
+        return Err(());
+    };
+    while let Some(completion) = publisher.try_take_completion() {
+        if completion.request_id() < expected {
+            continue;
+        }
+        if completion.request_id() != expected
+            || completion.view() != DisplayViewKind::Pairing
+            || completion.outcome() != DisplayRenderOutcome::Rendered
+        {
+            return Err(());
+        }
+        *state = PairingDisplayState::Rendered;
+        pairing_diagnostic!(
+            "e290-ble-pairing-diagnostic event=pairing-display-rendered request={}",
+            expected.sequence()
+        );
+        return Ok(());
+    }
+    Ok(())
+}
+
+async fn exchange_pairing_control(
+    handoff: &mut UsbPairingHandoff<CriticalSectionRawMutex>,
+    command: PairingControlCommand,
+    connection: ConnectionId,
+) -> Option<PairingControlReplyKind> {
+    let mut pending = Some(command);
+    let started_at = Instant::now();
+    loop {
+        if let Some(command) = pending.take()
+            && let Err(pressure) = handoff.try_send_command(command)
+        {
+            pending = Some(pressure.into_inner());
+        }
+        if pending.is_none() {
+            while let Some(reply) = handoff.try_receive_reply() {
+                if reply.connection() == connection {
+                    return Some(reply.into_kind());
+                }
+            }
+        }
+        if started_at.elapsed() >= Duration::from_millis(profile::HANDOFF_EXCHANGE_TIMEOUT_MS) {
+            return None;
+        }
+        Timer::after_millis(profile::API_POLL_INTERVAL_MS).await;
+    }
+}
+
+async fn exchange_live_pairing(
+    handoff: &mut BearerLivePairingHandoff<CriticalSectionRawMutex>,
+    command: LivePairingCommand,
+    connection: ConnectionId,
+) -> Option<LivePairingReply> {
+    let mut pending = Some(command);
+    let started_at = Instant::now();
+    loop {
+        if let Some(command) = pending.take()
+            && let Err(pressure) = handoff.try_send_command(command)
+        {
+            pending = Some(pressure.into_inner());
+        }
+        if pending.is_none() {
+            while let Some(reply) = handoff.try_receive_reply() {
+                if reply.connection() == connection {
+                    return Some(reply);
+                }
+            }
+        }
+        if started_at.elapsed() >= Duration::from_millis(profile::HANDOFF_EXCHANGE_TIMEOUT_MS) {
+            return None;
+        }
+        Timer::after_millis(profile::API_POLL_INTERVAL_MS).await;
+    }
+}
+
+async fn exchange_ble_bond(
+    handoff: &mut BearerBleBondHandoff<CriticalSectionRawMutex>,
+    command: BleBondCommitCommand,
+    connection: ConnectionId,
+) -> Option<BleBondCommitOutcome> {
+    let mut pending = Some(command);
+    let started_at = Instant::now();
+    loop {
+        if let Some(command) = pending.take()
+            && let Err(pressure) = handoff.try_send_command(command)
+        {
+            pending = Some(pressure.into_inner());
+        }
+        if pending.is_none() {
+            while let Some(reply) = handoff.try_receive_reply() {
+                if reply.connection() == connection {
+                    return Some(reply.outcome());
+                }
+            }
+        }
+        if started_at.elapsed() >= Duration::from_millis(profile::HANDOFF_EXCHANGE_TIMEOUT_MS) {
+            // If the command crossed the handoff, the node still owns the
+            // exact bond and may complete it. The caller treats this timeout as
+            // non-durable and fail-stops BLE for the remainder of the boot.
+            return None;
+        }
+        Timer::after_millis(profile::API_POLL_INTERVAL_MS).await;
+    }
+}
+
+async fn handle_pairing_record(
+    record: Record,
+    connection: ConnectionId,
+    sequence_gate: &mut ExactNextSequenceGate,
+    control_handoff: &mut UsbPairingHandoff<CriticalSectionRawMutex>,
+    live_handoff: &mut BearerLivePairingHandoff<CriticalSectionRawMutex>,
+) -> Option<PairingTransmission> {
+    let request = decode_pre_authentication_request(BearerBinding::BleGatt, record).ok()?;
+    let sequence = request.sequence();
+    let kind = request.kind();
+    sequence_gate.accept(connection, sequence).ok()?;
+
+    let (record, activation_succeeded) = match request {
+        UsbPreAuthenticationRequest::Control(request) => {
+            let reply = exchange_pairing_control(
+                control_handoff,
+                PairingControlCommand::Control {
+                    at: pairing_time(),
+                    connection,
+                    request,
+                },
+                connection,
+            )
+            .await?;
+            let PairingControlReplyKind::Control(response) = reply else {
+                return None;
+            };
+            if response.sequence() != sequence || !matches_control_response(kind, &response) {
+                return None;
+            }
+            (response.into_record(), false)
+        }
+        UsbPreAuthenticationRequest::Live(request) => {
+            let reply = exchange_live_pairing(
+                live_handoff,
+                LivePairingCommand::new(
+                    pairing_time(),
+                    BearerBinding::BleGatt,
+                    connection,
+                    request,
+                ),
+                connection,
+            )
+            .await?;
+            let response = reply.into_response();
+            if response.sequence() != sequence || !kind.matches_live_response(&response) {
+                return None;
+            }
+            let activation_succeeded = matches!(
+                &response,
+                PairingResponse::Activate(response)
+                    if response.result() == ActivateResult::Activated
+            );
+            (response.into_record(), activation_succeeded)
+        }
+    };
+    let frame = FramedRecord::encode(&record).ok()?;
+    Some(PairingTransmission {
+        frame,
+        activation_succeeded,
+    })
+}
+
+const fn matches_control_response(
+    kind: UsbPreAuthenticationRequestKind,
+    response: &ControlResponse,
+) -> bool {
+    matches!(
+        (kind, response),
+        (
+            UsbPreAuthenticationRequestKind::Status,
+            ControlResponse::Status { .. }
+        ) | (
+            UsbPreAuthenticationRequestKind::Initialize,
+            ControlResponse::Initialize { .. }
+        )
+    )
 }
 
 fn drain_stale_replies(
@@ -1018,6 +2197,7 @@ async fn announce_lifecycle(
     expected: LifecycleAcknowledgement,
 ) -> bool {
     let mut pending = Some(command);
+    let started_at = Instant::now();
     loop {
         if let Some(command) = pending.take()
             && let Err(pressure) = handoff.try_send_command(command)
@@ -1029,11 +2209,24 @@ async fn announce_lifecycle(
                 if reply.connection() != connection {
                     continue;
                 }
-                return matches!(
-                    reply.into_kind(),
-                    PairingControlReplyKind::Lifecycle(observed) if observed == expected
-                );
+                match reply.into_kind() {
+                    PairingControlReplyKind::Lifecycle(observed) => {
+                        return observed == expected;
+                    }
+                    // A link may retire after its nonblocking button command
+                    // crossed the handoff but before the reply was observed.
+                    // The following Disconnected command closes any retained
+                    // acquisition capability, so discard that now-stale
+                    // scalar reply and continue to the exact lifecycle ack.
+                    PairingControlReplyKind::Button(_) => continue,
+                    PairingControlReplyKind::Exclusive(_) | PairingControlReplyKind::Control(_) => {
+                        return false;
+                    }
+                }
             }
+        }
+        if started_at.elapsed() >= Duration::from_millis(profile::HANDOFF_EXCHANGE_TIMEOUT_MS) {
+            return false;
         }
         Timer::after_millis(profile::API_POLL_INTERVAL_MS).await;
     }

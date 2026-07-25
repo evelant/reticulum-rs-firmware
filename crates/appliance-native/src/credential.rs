@@ -80,7 +80,7 @@ pub(crate) fn read_credential(path: &Path) -> Result<ActivatedCredential, String
         .map_err(|error| format!("could not decode app-private credential: {error}"))
 }
 
-fn read_credential_bytes(
+pub(crate) fn read_credential_bytes(
     path: &Path,
 ) -> Result<Zeroizing<[u8; ACTIVATED_CREDENTIAL_STATE_BYTES]>, String> {
     let metadata = symlink_metadata(path)
@@ -177,17 +177,32 @@ pub(crate) fn import_credential_file(
     source: &Path,
     policy: CredentialImportPolicy,
 ) -> Result<NativeCredentialSummary, CredentialImportError> {
-    if !source.is_absolute() {
-        return Err("credential import staging path must be absolute"
-            .to_owned()
-            .into());
-    }
     if source == destination {
         return Err(
             "credential import staging path must differ from its destination"
                 .to_owned()
                 .into(),
         );
+    }
+    let (bytes, summary) = read_import_credential_file(source, policy)?;
+    install_credential(destination, &bytes[..], policy)?;
+    Ok(summary)
+}
+
+pub(crate) fn read_import_credential_file(
+    source: &Path,
+    policy: CredentialImportPolicy,
+) -> Result<
+    (
+        Zeroizing<[u8; ACTIVATED_CREDENTIAL_STATE_BYTES]>,
+        NativeCredentialSummary,
+    ),
+    CredentialImportError,
+> {
+    if !source.is_absolute() {
+        return Err("credential import staging path must be absolute"
+            .to_owned()
+            .into());
     }
     let source_metadata = symlink_metadata(source)
         .map_err(|error| format!("could not inspect credential import staging file: {error}"))?;
@@ -210,10 +225,20 @@ pub(crate) fn import_credential_file(
     }
     drop(file);
 
-    // The caller owns and removes this app-private staging copy in a `finally`
-    // path. Keeping deletion out of the public native method prevents an
-    // arbitrary caller-provided path from becoming a file-deletion capability.
-    install_credential(destination, &bytes[..], policy)
+    let summary = credential_summary_from_bytes(&bytes[..], policy)?;
+    Ok((bytes, summary))
+}
+
+pub(crate) fn credential_summary_from_bytes(
+    bytes: &[u8],
+    policy: CredentialImportPolicy,
+) -> Result<NativeCredentialSummary, CredentialImportError> {
+    let credential = ActivatedCredential::decode(bytes)
+        .map_err(|error| format!("could not decode imported credential: {error}"))?;
+    let summary = credential_summary(&credential);
+    drop(credential);
+    enforce_import_policy(&summary, policy)?;
+    Ok(summary)
 }
 
 struct StagingFile {

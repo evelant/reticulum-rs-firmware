@@ -84,11 +84,19 @@ fn activated_generation() -> CredentialGeneration {
 }
 
 fn proof_request() -> ProofStartRequest {
-    ProofStartRequest::new(1, credential_id(), generation(), CLIENT_NONCE).unwrap()
+    ProofStartRequest::new(
+        BearerBinding::UsbSerialJtag,
+        1,
+        credential_id(),
+        generation(),
+        CLIENT_NONCE,
+    )
+    .unwrap()
 }
 
 fn proof_challenge() -> ProofChallenge {
     ProofChallenge::new(
+        BearerBinding::UsbSerialJtag,
         device_id(),
         ConnectionId::new(CONNECTION_ID).unwrap(),
         WindowId::new(WINDOW_ID).unwrap(),
@@ -159,10 +167,12 @@ fn constants_and_complete_result_vocabularies_are_frozen() {
     assert_eq!(PROTOCOL_MINOR, 0);
     assert_eq!(PROOF_SUITE, 2);
     assert_eq!(BearerBinding::UsbSerialJtag.code(), 1);
+    assert_eq!(BearerBinding::BleGatt.code(), 2);
     assert_eq!(
         BearerBinding::from_code(1),
         Some(BearerBinding::UsbSerialJtag)
     );
+    assert_eq!(BearerBinding::from_code(2), Some(BearerBinding::BleGatt));
     assert_eq!(BearerBinding::from_code(0), None);
     assert_eq!(
         [
@@ -229,17 +239,25 @@ fn independent_record_vectors_match_every_successful_flight() {
     let begin_request = BeginRequest::new(0).into_record();
     assert_wire(&begin_request, BEGIN_REQUEST_WIRE);
     assert!(matches!(
-        PairingRequest::from_record(decode_wire(&hex::decode(BEGIN_REQUEST_WIRE).unwrap())),
+        PairingRequest::from_record(BearerBinding::UsbSerialJtag, decode_wire(&hex::decode(BEGIN_REQUEST_WIRE).unwrap())),
         Ok(PairingRequest::Begin(request)) if request.sequence() == 0
     ));
 
-    let offer = BeginOffer::after_pending_commit(device_id(), credential_id(), generation(), psk())
-        .unwrap();
+    let offer = BeginOffer::after_pending_commit(
+        BearerBinding::UsbSerialJtag,
+        device_id(),
+        credential_id(),
+        generation(),
+        psk(),
+    )
+    .unwrap();
     let begin_response = BeginResponse::offered(0, offer).into_record();
     assert_wire(&begin_response, BEGIN_RESPONSE_WIRE);
-    let decoded =
-        PairingResponse::from_record(decode_wire(&hex::decode(BEGIN_RESPONSE_WIRE).unwrap()))
-            .unwrap();
+    let decoded = PairingResponse::from_record(
+        BearerBinding::UsbSerialJtag,
+        decode_wire(&hex::decode(BEGIN_RESPONSE_WIRE).unwrap()),
+    )
+    .unwrap();
     match decoded {
         PairingResponse::Begin(response) => {
             assert_eq!(response.sequence(), 0);
@@ -255,9 +273,11 @@ fn independent_record_vectors_match_every_successful_flight() {
 
     let proof_request_record = proof_request().into_record();
     assert_wire(&proof_request_record, PROOF_REQUEST_WIRE);
-    let decoded =
-        PairingRequest::from_record(decode_wire(&hex::decode(PROOF_REQUEST_WIRE).unwrap()))
-            .unwrap();
+    let decoded = PairingRequest::from_record(
+        BearerBinding::UsbSerialJtag,
+        decode_wire(&hex::decode(PROOF_REQUEST_WIRE).unwrap()),
+    )
+    .unwrap();
     match decoded {
         PairingRequest::ProofStart(request) => {
             assert_eq!(request.sequence(), 1);
@@ -270,9 +290,11 @@ fn independent_record_vectors_match_every_successful_flight() {
 
     let proof_response = ProofStartResponse::challenge(1, proof_challenge()).into_record();
     assert_wire(&proof_response, PROOF_RESPONSE_WIRE);
-    let decoded =
-        PairingResponse::from_record(decode_wire(&hex::decode(PROOF_RESPONSE_WIRE).unwrap()))
-            .unwrap();
+    let decoded = PairingResponse::from_record(
+        BearerBinding::UsbSerialJtag,
+        decode_wire(&hex::decode(PROOF_RESPONSE_WIRE).unwrap()),
+    )
+    .unwrap();
     match decoded {
         PairingResponse::ProofStart(response) => {
             assert_eq!(response.sequence(), 1);
@@ -297,9 +319,11 @@ fn independent_record_vectors_match_every_successful_flight() {
     .unwrap()
     .into_record();
     assert_wire(&activate_request, ACTIVATE_REQUEST_WIRE);
-    let decoded =
-        PairingRequest::from_record(decode_wire(&hex::decode(ACTIVATE_REQUEST_WIRE).unwrap()))
-            .unwrap();
+    let decoded = PairingRequest::from_record(
+        BearerBinding::UsbSerialJtag,
+        decode_wire(&hex::decode(ACTIVATE_REQUEST_WIRE).unwrap()),
+    )
+    .unwrap();
     match decoded {
         PairingRequest::Activate(request) => {
             assert_eq!(request.sequence(), 2);
@@ -321,9 +345,11 @@ fn independent_record_vectors_match_every_successful_flight() {
     )
     .into_record();
     assert_wire(&activate_response, ACTIVATE_RESPONSE_WIRE);
-    let decoded =
-        PairingResponse::from_record(decode_wire(&hex::decode(ACTIVATE_RESPONSE_WIRE).unwrap()))
-            .unwrap();
+    let decoded = PairingResponse::from_record(
+        BearerBinding::UsbSerialJtag,
+        decode_wire(&hex::decode(ACTIVATE_RESPONSE_WIRE).unwrap()),
+    )
+    .unwrap();
     match decoded {
         PairingResponse::Activate(response) => {
             assert_eq!(response.sequence(), 2);
@@ -342,17 +368,96 @@ fn independent_record_vectors_match_every_successful_flight() {
     let abort_request = AbortCurrentRequest::new(3).into_record();
     assert_wire(&abort_request, ABORT_REQUEST_WIRE);
     assert!(matches!(
-        PairingRequest::from_record(decode_wire(&hex::decode(ABORT_REQUEST_WIRE).unwrap())),
+        PairingRequest::from_record(BearerBinding::UsbSerialJtag, decode_wire(&hex::decode(ABORT_REQUEST_WIRE).unwrap())),
         Ok(PairingRequest::AbortCurrent(request)) if request.sequence() == 3
     ));
 
     let abort_response = AbortCurrentResponse::new(3, AbortResult::Aborted).into_record();
     assert_wire(&abort_response, ABORT_RESPONSE_WIRE);
     assert!(matches!(
-        PairingResponse::from_record(decode_wire(&hex::decode(ABORT_RESPONSE_WIRE).unwrap())),
+        PairingResponse::from_record(BearerBinding::UsbSerialJtag, decode_wire(&hex::decode(ABORT_RESPONSE_WIRE).unwrap())),
         Ok(PairingResponse::AbortCurrent(response))
             if response.sequence() == 3 && response.result() == AbortResult::Aborted
     ));
+}
+
+#[test]
+fn ble_profile_round_trips_only_under_ble_and_changes_the_proof_transcript() {
+    let offer = BeginOffer::after_pending_commit(
+        BearerBinding::BleGatt,
+        device_id(),
+        credential_id(),
+        generation(),
+        psk(),
+    )
+    .unwrap();
+    assert_eq!(offer.bearer(), BearerBinding::BleGatt);
+    let begin = BeginResponse::offered(0, offer).into_record();
+    assert_eq!(begin.payload()[14], BearerBinding::BleGatt.code());
+    let decoded = PairingResponse::from_record(BearerBinding::BleGatt, begin).unwrap();
+    assert!(matches!(
+        decoded,
+        PairingResponse::Begin(response)
+            if response.offer().map(BeginOffer::bearer) == Some(BearerBinding::BleGatt)
+    ));
+
+    let wrong_bearer_begin = BeginResponse::offered(
+        0,
+        BeginOffer::after_pending_commit(
+            BearerBinding::BleGatt,
+            device_id(),
+            credential_id(),
+            generation(),
+            psk(),
+        )
+        .unwrap(),
+    )
+    .into_record();
+    assert_eq!(
+        PairingResponse::from_record(BearerBinding::UsbSerialJtag, wrong_bearer_begin).err(),
+        Some(DecodeError::UnsupportedBearer {
+            observed: BearerBinding::BleGatt.code()
+        })
+    );
+
+    let ble_request = ProofStartRequest::new(
+        BearerBinding::BleGatt,
+        1,
+        credential_id(),
+        generation(),
+        CLIENT_NONCE,
+    )
+    .unwrap();
+    let ble_challenge = ProofChallenge::new(
+        BearerBinding::BleGatt,
+        device_id(),
+        ConnectionId::new(CONNECTION_ID).unwrap(),
+        WindowId::new(WINDOW_ID).unwrap(),
+        credential_id(),
+        generation(),
+        DeviceChallenge::new(DEVICE_CHALLENGE).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(ble_request.bearer(), BearerBinding::BleGatt);
+    assert_eq!(ble_challenge.bearer(), BearerBinding::BleGatt);
+    assert_eq!(
+        ble_request.encode_payload()[6],
+        BearerBinding::BleGatt.code()
+    );
+    assert_eq!(
+        ble_challenge.encode_payload()[14],
+        BearerBinding::BleGatt.code()
+    );
+
+    let ble_transcript = PairingTranscript::new(&ble_request, &ble_challenge).unwrap();
+    assert_eq!(ble_transcript.bearer(), BearerBinding::BleGatt);
+    let usb_transcript = transcript();
+    assert_ne!(ble_transcript.as_bytes(), usb_transcript.as_bytes());
+    assert_ne!(
+        ClientProof::calculate(&psk(), &ble_transcript).as_bytes(),
+        ClientProof::calculate(&psk(), &usb_transcript).as_bytes()
+    );
+    assert!(PairingTranscript::new(&ble_request, &proof_challenge()).is_err());
 }
 
 #[test]
@@ -410,9 +515,10 @@ fn every_coarse_failure_round_trips_with_echoed_arbitrary_sequences() {
         let sequence = u64::MAX - index as u64;
         let begin = BeginResponse::failure(sequence, failure).into_record();
         assert_eq!(begin.payload(), &[failure.code()]);
-        match PairingResponse::from_record(decode_wire(
-            FramedRecord::encode(&begin).unwrap().encoded(),
-        ))
+        match PairingResponse::from_record(
+            BearerBinding::UsbSerialJtag,
+            decode_wire(FramedRecord::encode(&begin).unwrap().encoded()),
+        )
         .unwrap()
         {
             PairingResponse::Begin(response) => {
@@ -424,9 +530,10 @@ fn every_coarse_failure_round_trips_with_echoed_arbitrary_sequences() {
         }
 
         let proof = ProofStartResponse::failure(sequence, failure).into_record();
-        match PairingResponse::from_record(decode_wire(
-            FramedRecord::encode(&proof).unwrap().encoded(),
-        ))
+        match PairingResponse::from_record(
+            BearerBinding::UsbSerialJtag,
+            decode_wire(FramedRecord::encode(&proof).unwrap().encoded()),
+        )
         .unwrap()
         {
             PairingResponse::ProofStart(response) => {
@@ -447,9 +554,10 @@ fn every_coarse_failure_round_trips_with_echoed_arbitrary_sequences() {
     for (index, failure) in activation.into_iter().enumerate() {
         let sequence = 0x8000 + index as u64;
         let record = ActivateResponse::failure(sequence, failure).into_record();
-        match PairingResponse::from_record(decode_wire(
-            FramedRecord::encode(&record).unwrap().encoded(),
-        ))
+        match PairingResponse::from_record(
+            BearerBinding::UsbSerialJtag,
+            decode_wire(FramedRecord::encode(&record).unwrap().encoded()),
+        )
         .unwrap()
         {
             PairingResponse::Activate(response) => {
@@ -465,7 +573,7 @@ fn every_coarse_failure_round_trips_with_echoed_arbitrary_sequences() {
         let result = AbortResult::from_code(code).unwrap();
         let record = AbortCurrentResponse::new(code as u64, result).into_record();
         assert!(matches!(
-            PairingResponse::from_record(decode_wire(
+            PairingResponse::from_record(BearerBinding::UsbSerialJtag, decode_wire(
                 FramedRecord::encode(&record).unwrap().encoded()
             )),
             Ok(PairingResponse::AbortCurrent(response))
@@ -547,7 +655,10 @@ fn request_union_rejects_nonzero_pre_authentication_fields_kinds_and_lengths() {
         ),
     ];
     for (record, expected) in cases {
-        assert_eq!(PairingRequest::from_record(record).err(), Some(expected));
+        assert_eq!(
+            PairingRequest::from_record(BearerBinding::UsbSerialJtag, record).err(),
+            Some(expected)
+        );
     }
 }
 
@@ -598,7 +709,10 @@ fn response_union_rejects_nonzero_pre_authentication_fields_shapes_and_codes() {
         ),
     ];
     for (record, expected) in cases {
-        assert_eq!(PairingResponse::from_record(record).err(), Some(expected));
+        assert_eq!(
+            PairingResponse::from_record(BearerBinding::UsbSerialJtag, record).err(),
+            Some(expected)
+        );
     }
 
     for kind in [
@@ -609,7 +723,11 @@ fn response_union_rejects_nonzero_pre_authentication_fields_shapes_and_codes() {
     ] {
         for code in 5_u8..=u8::MAX {
             assert_eq!(
-                PairingResponse::from_record(record(kind, [0; 16], 0, &[code], [0; 16])).err(),
+                PairingResponse::from_record(
+                    BearerBinding::UsbSerialJtag,
+                    record(kind, [0; 16], 0, &[code], [0; 16])
+                )
+                .err(),
                 Some(DecodeError::UnknownResult { observed: code })
             );
         }
@@ -630,13 +748,16 @@ fn profile_reserved_and_every_required_nonzero_field_are_validated() {
         let old = request_payload[index];
         request_payload[index] = value;
         assert_eq!(
-            PairingRequest::from_record(record(
-                RECORD_KIND_PROOF_START_REQUEST,
-                [0; 16],
-                1,
-                &request_payload,
-                [0; 16]
-            ))
+            PairingRequest::from_record(
+                BearerBinding::UsbSerialJtag,
+                record(
+                    RECORD_KIND_PROOF_START_REQUEST,
+                    [0; 16],
+                    1,
+                    &request_payload,
+                    [0; 16]
+                )
+            )
             .err(),
             Some(expected)
         );
@@ -652,13 +773,16 @@ fn profile_reserved_and_every_required_nonzero_field_are_validated() {
         let mut payload = proof_request().encode_payload();
         payload[start..end].fill(0);
         assert_eq!(
-            PairingRequest::from_record(record(
-                RECORD_KIND_PROOF_START_REQUEST,
-                [0; 16],
-                1,
-                &payload,
-                [0; 16]
-            ))
+            PairingRequest::from_record(
+                BearerBinding::UsbSerialJtag,
+                record(
+                    RECORD_KIND_PROOF_START_REQUEST,
+                    [0; 16],
+                    1,
+                    &payload,
+                    [0; 16]
+                )
+            )
             .err(),
             Some(DecodeError::InvalidRequiredField(field))
         );
@@ -675,32 +799,31 @@ fn profile_reserved_and_every_required_nonzero_field_are_validated() {
         let mut payload = activate;
         payload[start..end].fill(0);
         assert_eq!(
-            PairingRequest::from_record(record(
-                RECORD_KIND_ACTIVATE_REQUEST,
-                [0; 16],
-                2,
-                &payload,
-                [0; 16]
-            ))
+            PairingRequest::from_record(
+                BearerBinding::UsbSerialJtag,
+                record(RECORD_KIND_ACTIVATE_REQUEST, [0; 16], 2, &payload, [0; 16])
+            )
             .err(),
             Some(DecodeError::InvalidRequiredField(field))
         );
     }
 
-    let mut begin =
-        BeginOffer::after_pending_commit(device_id(), credential_id(), generation(), psk())
-            .unwrap()
-            .encode_payload();
+    let mut begin = BeginOffer::after_pending_commit(
+        BearerBinding::UsbSerialJtag,
+        device_id(),
+        credential_id(),
+        generation(),
+        psk(),
+    )
+    .unwrap()
+    .encode_payload();
     for index in 1..8 {
         begin[index] = 1;
         assert_eq!(
-            PairingResponse::from_record(record(
-                RECORD_KIND_BEGIN_RESPONSE,
-                [0; 16],
-                0,
-                &begin[..],
-                [0; 16]
-            ))
+            PairingResponse::from_record(
+                BearerBinding::UsbSerialJtag,
+                record(RECORD_KIND_BEGIN_RESPONSE, [0; 16], 0, &begin[..], [0; 16])
+            )
             .err(),
             Some(DecodeError::ReservedBitsSet)
         );
@@ -708,13 +831,10 @@ fn profile_reserved_and_every_required_nonzero_field_are_validated() {
     }
     begin[15] = 1;
     assert_eq!(
-        PairingResponse::from_record(record(
-            RECORD_KIND_BEGIN_RESPONSE,
-            [0; 16],
-            0,
-            &begin[..],
-            [0; 16]
-        ))
+        PairingResponse::from_record(
+            BearerBinding::UsbSerialJtag,
+            record(RECORD_KIND_BEGIN_RESPONSE, [0; 16], 0, &begin[..], [0; 16])
+        )
         .err(),
         Some(DecodeError::ReservedBitsSet)
     );
@@ -725,19 +845,27 @@ fn profile_reserved_and_every_required_nonzero_field_are_validated() {
         (48, 56, InvalidField::ZeroCredentialGeneration),
         (56, 88, InvalidField::ZeroPairingPsk),
     ] {
-        let mut payload =
-            BeginOffer::after_pending_commit(device_id(), credential_id(), generation(), psk())
-                .unwrap()
-                .encode_payload();
+        let mut payload = BeginOffer::after_pending_commit(
+            BearerBinding::UsbSerialJtag,
+            device_id(),
+            credential_id(),
+            generation(),
+            psk(),
+        )
+        .unwrap()
+        .encode_payload();
         payload[start..end].fill(0);
         assert_eq!(
-            PairingResponse::from_record(record(
-                RECORD_KIND_BEGIN_RESPONSE,
-                [0; 16],
-                0,
-                &payload[..],
-                [0; 16]
-            ))
+            PairingResponse::from_record(
+                BearerBinding::UsbSerialJtag,
+                record(
+                    RECORD_KIND_BEGIN_RESPONSE,
+                    [0; 16],
+                    0,
+                    &payload[..],
+                    [0; 16]
+                )
+            )
             .err(),
             Some(DecodeError::InvalidRequiredField(field))
         );
@@ -754,13 +882,16 @@ fn profile_reserved_and_every_required_nonzero_field_are_validated() {
         let mut payload = proof_challenge().encode_payload();
         payload[start..end].fill(0);
         assert_eq!(
-            PairingResponse::from_record(record(
-                RECORD_KIND_PROOF_START_RESPONSE,
-                [0; 16],
-                1,
-                &payload[..],
-                [0; 16]
-            ))
+            PairingResponse::from_record(
+                BearerBinding::UsbSerialJtag,
+                record(
+                    RECORD_KIND_PROOF_START_RESPONSE,
+                    [0; 16],
+                    1,
+                    &payload[..],
+                    [0; 16]
+                )
+            )
             .err(),
             Some(DecodeError::InvalidRequiredField(field))
         );
@@ -950,11 +1081,18 @@ fn typed_constructors_reject_zero_values_and_transcript_reference_mismatch() {
         Some(InvalidField::ZeroPairingPsk)
     );
     assert_eq!(
-        ProofStartRequest::new(0, CredentialId::new([0; 16]), generation(), CLIENT_NONCE),
+        ProofStartRequest::new(
+            BearerBinding::UsbSerialJtag,
+            0,
+            CredentialId::new([0; 16]),
+            generation(),
+            CLIENT_NONCE
+        ),
         Err(InvalidField::ZeroCredentialId)
     );
     assert_eq!(
         ProofStartRequest::new(
+            BearerBinding::UsbSerialJtag,
             0,
             credential_id(),
             CredentialGeneration::new(0),
@@ -963,13 +1101,24 @@ fn typed_constructors_reject_zero_values_and_transcript_reference_mismatch() {
         Err(InvalidField::ZeroCredentialGeneration)
     );
     assert_eq!(
-        ProofStartRequest::new(0, credential_id(), generation(), [0; 32]),
+        ProofStartRequest::new(
+            BearerBinding::UsbSerialJtag,
+            0,
+            credential_id(),
+            generation(),
+            [0; 32]
+        ),
         Err(InvalidField::ZeroClientNonce)
     );
 
-    let other =
-        ProofStartRequest::new(1, CredentialId::new([0xaa; 16]), generation(), CLIENT_NONCE)
-            .unwrap();
+    let other = ProofStartRequest::new(
+        BearerBinding::UsbSerialJtag,
+        1,
+        CredentialId::new([0xaa; 16]),
+        generation(),
+        CLIENT_NONCE,
+    )
+    .unwrap();
     assert!(PairingTranscript::new(&other, &proof_challenge()).is_err());
 }
 
@@ -996,19 +1145,21 @@ fn every_success_response_rejects_noncanonical_profile_reference_and_shape() {
     ];
 
     for (profile_index, value, expected) in profile_cases {
-        let mut begin =
-            BeginOffer::after_pending_commit(device_id(), credential_id(), generation(), psk())
-                .unwrap()
-                .encode_payload();
+        let mut begin = BeginOffer::after_pending_commit(
+            BearerBinding::UsbSerialJtag,
+            device_id(),
+            credential_id(),
+            generation(),
+            psk(),
+        )
+        .unwrap()
+        .encode_payload();
         begin[8 + profile_index] = value;
         assert_eq!(
-            PairingResponse::from_record(record(
-                RECORD_KIND_BEGIN_RESPONSE,
-                [0; 16],
-                0,
-                &begin[..],
-                [0; 16]
-            ))
+            PairingResponse::from_record(
+                BearerBinding::UsbSerialJtag,
+                record(RECORD_KIND_BEGIN_RESPONSE, [0; 16], 0, &begin[..], [0; 16])
+            )
             .err(),
             Some(expected)
         );
@@ -1016,13 +1167,16 @@ fn every_success_response_rejects_noncanonical_profile_reference_and_shape() {
         let mut challenge = proof_challenge().encode_payload();
         challenge[8 + profile_index] = value;
         assert_eq!(
-            PairingResponse::from_record(record(
-                RECORD_KIND_PROOF_START_RESPONSE,
-                [0; 16],
-                1,
-                &challenge[..],
-                [0; 16]
-            ))
+            PairingResponse::from_record(
+                BearerBinding::UsbSerialJtag,
+                record(
+                    RECORD_KIND_PROOF_START_RESPONSE,
+                    [0; 16],
+                    1,
+                    &challenge[..],
+                    [0; 16]
+                )
+            )
             .err(),
             Some(expected)
         );
@@ -1032,13 +1186,16 @@ fn every_success_response_rejects_noncanonical_profile_reference_and_shape() {
         let mut challenge = proof_challenge().encode_payload();
         challenge[index] = 1;
         assert_eq!(
-            PairingResponse::from_record(record(
-                RECORD_KIND_PROOF_START_RESPONSE,
-                [0; 16],
-                1,
-                &challenge[..],
-                [0; 16]
-            ))
+            PairingResponse::from_record(
+                BearerBinding::UsbSerialJtag,
+                record(
+                    RECORD_KIND_PROOF_START_RESPONSE,
+                    [0; 16],
+                    1,
+                    &challenge[..],
+                    [0; 16]
+                )
+            )
             .err(),
             Some(DecodeError::ReservedBitsSet)
         );
@@ -1060,13 +1217,10 @@ fn every_success_response_rejects_noncanonical_profile_reference_and_shape() {
         let mut payload = activate;
         payload[start..end].fill(0);
         assert_eq!(
-            PairingResponse::from_record(record(
-                RECORD_KIND_ACTIVATE_RESPONSE,
-                [0; 16],
-                2,
-                &payload,
-                [0; 16]
-            ))
+            PairingResponse::from_record(
+                BearerBinding::UsbSerialJtag,
+                record(RECORD_KIND_ACTIVATE_RESPONSE, [0; 16], 2, &payload, [0; 16])
+            )
             .err(),
             Some(DecodeError::InvalidRequiredField(field))
         );
@@ -1075,29 +1229,35 @@ fn every_success_response_rejects_noncanonical_profile_reference_and_shape() {
         let mut payload = activate;
         payload[index] = 1;
         assert_eq!(
-            PairingResponse::from_record(record(
-                RECORD_KIND_ACTIVATE_RESPONSE,
-                [0; 16],
-                2,
-                &payload,
-                [0; 16]
-            ))
+            PairingResponse::from_record(
+                BearerBinding::UsbSerialJtag,
+                record(RECORD_KIND_ACTIVATE_RESPONSE, [0; 16], 2, &payload, [0; 16])
+            )
             .err(),
             Some(DecodeError::ReservedBitsSet)
         );
     }
 
-    let begin = BeginOffer::after_pending_commit(device_id(), credential_id(), generation(), psk())
-        .unwrap()
-        .encode_payload();
+    let begin = BeginOffer::after_pending_commit(
+        BearerBinding::UsbSerialJtag,
+        device_id(),
+        credential_id(),
+        generation(),
+        psk(),
+    )
+    .unwrap()
+    .encode_payload();
     assert_eq!(
-        PairingResponse::from_record(record(
-            RECORD_KIND_BEGIN_RESPONSE,
-            [0; 16],
-            0,
-            &begin[..BEGIN_OFFER_LENGTH - 1],
-            [0; 16]
-        ))
+        PairingResponse::from_record(
+            BearerBinding::UsbSerialJtag,
+            record(
+                RECORD_KIND_BEGIN_RESPONSE,
+                [0; 16],
+                0,
+                &begin[..BEGIN_OFFER_LENGTH - 1],
+                [0; 16]
+            )
+        )
         .err(),
         Some(DecodeError::WrongPayloadLength {
             expected: BEGIN_OFFER_LENGTH,
@@ -1107,13 +1267,16 @@ fn every_success_response_rejects_noncanonical_profile_reference_and_shape() {
 
     let challenge = proof_challenge().encode_payload();
     assert_eq!(
-        PairingResponse::from_record(record(
-            RECORD_KIND_PROOF_START_RESPONSE,
-            [0; 16],
-            1,
-            &challenge[..PROOF_CHALLENGE_LENGTH - 1],
-            [0; 16]
-        ))
+        PairingResponse::from_record(
+            BearerBinding::UsbSerialJtag,
+            record(
+                RECORD_KIND_PROOF_START_RESPONSE,
+                [0; 16],
+                1,
+                &challenge[..PROOF_CHALLENGE_LENGTH - 1],
+                [0; 16]
+            )
+        )
         .err(),
         Some(DecodeError::WrongPayloadLength {
             expected: PROOF_CHALLENGE_LENGTH,
@@ -1122,13 +1285,16 @@ fn every_success_response_rejects_noncanonical_profile_reference_and_shape() {
     );
 
     assert_eq!(
-        PairingResponse::from_record(record(
-            RECORD_KIND_ACTIVATE_RESPONSE,
-            [0; 16],
-            2,
-            &activate[..ACTIVATE_SUCCESS_LENGTH - 1],
-            [0; 16]
-        ))
+        PairingResponse::from_record(
+            BearerBinding::UsbSerialJtag,
+            record(
+                RECORD_KIND_ACTIVATE_RESPONSE,
+                [0; 16],
+                2,
+                &activate[..ACTIVATE_SUCCESS_LENGTH - 1],
+                [0; 16]
+            )
+        )
         .err(),
         Some(DecodeError::WrongPayloadLength {
             expected: ACTIVATE_SUCCESS_LENGTH,
@@ -1191,13 +1357,10 @@ fn activate_continuation_and_confirmation_reject_substituted_references() {
     payload.copy_from_slice(response.payload());
 
     payload[8..24].fill(0xaa);
-    let substituted_id = PairingResponse::from_record(record(
-        RECORD_KIND_ACTIVATE_RESPONSE,
-        [0; 16],
-        2,
-        &payload,
-        [0; 16],
-    ))
+    let substituted_id = PairingResponse::from_record(
+        BearerBinding::UsbSerialJtag,
+        record(RECORD_KIND_ACTIVATE_RESPONSE, [0; 16], 2, &payload, [0; 16]),
+    )
     .unwrap();
     match substituted_id {
         PairingResponse::Activate(response) => {
@@ -1208,13 +1371,10 @@ fn activate_continuation_and_confirmation_reject_substituted_references() {
 
     payload[8..24].copy_from_slice(&CREDENTIAL_ID_BYTES);
     payload[24..32].copy_from_slice(&(ACTIVATED_GENERATION + 1).to_le_bytes());
-    let substituted_generation = PairingResponse::from_record(record(
-        RECORD_KIND_ACTIVATE_RESPONSE,
-        [0; 16],
-        2,
-        &payload,
-        [0; 16],
-    ))
+    let substituted_generation = PairingResponse::from_record(
+        BearerBinding::UsbSerialJtag,
+        record(RECORD_KIND_ACTIVATE_RESPONSE, [0; 16], 2, &payload, [0; 16]),
+    )
     .unwrap();
     match substituted_generation {
         PairingResponse::Activate(response) => {

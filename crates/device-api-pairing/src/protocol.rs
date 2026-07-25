@@ -65,6 +65,8 @@ const PROFILE_LENGTH: usize = 8;
 pub enum BearerBinding {
     /// ESP32-S3 fixed USB Serial/JTAG byte stream.
     UsbSerialJtag = 1,
+    /// Authenticated Bluetooth Low Energy GATT appliance connection.
+    BleGatt = 2,
 }
 
 impl BearerBinding {
@@ -73,10 +75,11 @@ impl BearerBinding {
         self as u8
     }
 
-    /// Decode the only bearer available in pairing protocol version 1.
+    /// Decode one stable bearer assigned by pairing protocol version 1.
     pub const fn from_code(code: u8) -> Option<Self> {
         match code {
             1 => Some(Self::UsbSerialJtag),
+            2 => Some(Self::BleGatt),
             _ => None,
         }
     }
@@ -426,6 +429,7 @@ impl BeginRequest {
 /// require_debug::<BeginOffer>();
 /// ```
 pub struct BeginOffer {
+    bearer: BearerBinding,
     device_id: DeviceId,
     credential_id: CredentialId,
     generation: CredentialGeneration,
@@ -435,6 +439,7 @@ pub struct BeginOffer {
 impl BeginOffer {
     /// Construct an offer after its Pending record is durable and publishable.
     pub fn after_pending_commit(
+        bearer: BearerBinding,
         device_id: DeviceId,
         credential_id: CredentialId,
         generation: CredentialGeneration,
@@ -442,11 +447,17 @@ impl BeginOffer {
     ) -> Result<Self, InvalidField> {
         validate_credential(credential_id, generation)?;
         Ok(Self {
+            bearer,
             device_id,
             credential_id,
             generation,
             psk,
         })
+    }
+
+    /// Pairing bearer cryptographically bound by this offer.
+    pub const fn bearer(&self) -> BearerBinding {
+        self.bearer
     }
 
     /// Stable public device API identifier.
@@ -470,8 +481,17 @@ impl BeginOffer {
     }
 
     /// Consume the offer into its exact public facts and zeroizing PSK owner.
-    pub fn into_parts(self) -> (DeviceId, CredentialId, CredentialGeneration, PairingPsk) {
+    pub fn into_parts(
+        self,
+    ) -> (
+        BearerBinding,
+        DeviceId,
+        CredentialId,
+        CredentialGeneration,
+        PairingPsk,
+    ) {
         (
+            self.bearer,
             self.device_id,
             self.credential_id,
             self.generation,
@@ -482,7 +502,7 @@ impl BeginOffer {
     pub(crate) fn encode_payload(&self) -> Zeroizing<[u8; BEGIN_OFFER_LENGTH]> {
         let mut payload = Zeroizing::new([0_u8; BEGIN_OFFER_LENGTH]);
         encode_success_prefix(&mut payload);
-        encode_profile(&mut payload[RESULT_PREFIX_LENGTH..16]);
+        encode_profile(&mut payload[RESULT_PREFIX_LENGTH..16], self.bearer);
         payload[16..32].copy_from_slice(self.device_id.as_bytes());
         payload[32..48].copy_from_slice(self.credential_id.as_bytes());
         payload[48..56].copy_from_slice(&self.generation.get().to_le_bytes());
@@ -570,10 +590,11 @@ impl BeginResponse {
     }
 }
 
-/// Canonical fixed-profile ProofStart request.
+/// Canonical bearer-bound ProofStart request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProofStartRequest {
     sequence: u64,
+    bearer: BearerBinding,
     credential_id: CredentialId,
     generation: CredentialGeneration,
     client_nonce: [u8; 32],
@@ -582,6 +603,7 @@ pub struct ProofStartRequest {
 impl ProofStartRequest {
     /// Validate and construct a ProofStart request.
     pub fn new(
+        bearer: BearerBinding,
         sequence: u64,
         credential_id: CredentialId,
         generation: CredentialGeneration,
@@ -591,10 +613,16 @@ impl ProofStartRequest {
         require_nonzero(&client_nonce, InvalidField::ZeroClientNonce)?;
         Ok(Self {
             sequence,
+            bearer,
             credential_id,
             generation,
             client_nonce,
         })
+    }
+
+    /// Pairing bearer cryptographically bound by this request.
+    pub const fn bearer(&self) -> BearerBinding {
+        self.bearer
     }
 
     /// Opaque framing sequence.
@@ -628,7 +656,7 @@ impl ProofStartRequest {
 
     pub(crate) fn encode_payload(&self) -> [u8; PROOF_START_REQUEST_LENGTH] {
         let mut payload = [0_u8; PROOF_START_REQUEST_LENGTH];
-        encode_profile(&mut payload[..PROFILE_LENGTH]);
+        encode_profile(&mut payload[..PROFILE_LENGTH], self.bearer);
         payload[8..24].copy_from_slice(self.credential_id.as_bytes());
         payload[24..32].copy_from_slice(&self.generation.get().to_le_bytes());
         payload[32..64].copy_from_slice(&self.client_nonce);
@@ -640,6 +668,7 @@ impl ProofStartRequest {
 ///
 /// This owner deliberately implements neither `Copy`, `Clone`, nor `Debug`.
 pub struct ProofChallenge {
+    bearer: BearerBinding,
     device_id: DeviceId,
     connection_id: ConnectionId,
     window_id: WindowId,
@@ -651,6 +680,7 @@ pub struct ProofChallenge {
 impl ProofChallenge {
     /// Construct a canonical challenge for the exact selected Pending record.
     pub fn new(
+        bearer: BearerBinding,
         device_id: DeviceId,
         connection_id: ConnectionId,
         window_id: WindowId,
@@ -660,6 +690,7 @@ impl ProofChallenge {
     ) -> Result<Self, InvalidField> {
         validate_credential(credential_id, generation)?;
         Ok(Self {
+            bearer,
             device_id,
             connection_id,
             window_id,
@@ -667,6 +698,11 @@ impl ProofChallenge {
             generation,
             challenge,
         })
+    }
+
+    /// Pairing bearer cryptographically bound by this challenge.
+    pub const fn bearer(&self) -> BearerBinding {
+        self.bearer
     }
 
     /// Stable public device API identifier.
@@ -703,6 +739,7 @@ impl ProofChallenge {
     pub fn into_parts(
         self,
     ) -> (
+        BearerBinding,
         DeviceId,
         ConnectionId,
         WindowId,
@@ -711,6 +748,7 @@ impl ProofChallenge {
         DeviceChallenge,
     ) {
         (
+            self.bearer,
             self.device_id,
             self.connection_id,
             self.window_id,
@@ -723,7 +761,7 @@ impl ProofChallenge {
     pub(crate) fn encode_payload(&self) -> Zeroizing<[u8; PROOF_CHALLENGE_LENGTH]> {
         let mut payload = Zeroizing::new([0_u8; PROOF_CHALLENGE_LENGTH]);
         encode_success_prefix(&mut payload);
-        encode_profile(&mut payload[RESULT_PREFIX_LENGTH..16]);
+        encode_profile(&mut payload[RESULT_PREFIX_LENGTH..16], self.bearer);
         payload[16..32].copy_from_slice(self.device_id.as_bytes());
         payload[32..40].copy_from_slice(&self.connection_id.get().to_le_bytes());
         payload[40..48].copy_from_slice(&self.window_id.get().to_le_bytes());
@@ -1111,7 +1149,7 @@ impl PairingRequest {
     ///
     /// Sequence ordering, replay policy, connection binding, and operation
     /// admission remain the caller's responsibility.
-    pub fn from_record(record: Record) -> Result<Self, DecodeError> {
+    pub fn from_record(bearer: BearerBinding, record: Record) -> Result<Self, DecodeError> {
         validate_pre_authentication(&record)?;
         let sequence = record.sequence();
         let payload = record.payload();
@@ -1122,13 +1160,14 @@ impl PairingRequest {
             }
             RECORD_KIND_PROOF_START_REQUEST => {
                 require_length(payload, PROOF_START_REQUEST_LENGTH)?;
-                validate_profile(&payload[..PROFILE_LENGTH])?;
+                validate_profile(&payload[..PROFILE_LENGTH], bearer)?;
                 let credential_id = decode_credential_id(&payload[8..24])?;
                 let generation = decode_generation(&payload[24..32])?;
                 let mut nonce = [0_u8; 32];
                 nonce.copy_from_slice(&payload[32..64]);
-                let request = ProofStartRequest::new(sequence, credential_id, generation, nonce)
-                    .map_err(DecodeError::InvalidRequiredField)?;
+                let request =
+                    ProofStartRequest::new(bearer, sequence, credential_id, generation, nonce)
+                        .map_err(DecodeError::InvalidRequiredField)?;
                 Ok(Self::ProofStart(request))
             }
             RECORD_KIND_ACTIVATE_REQUEST => {
@@ -1192,14 +1231,16 @@ impl PairingResponse {
     ///
     /// Response correlation and durable-state interpretation remain the
     /// caller's responsibility.
-    pub fn from_record(record: Record) -> Result<Self, DecodeError> {
+    pub fn from_record(bearer: BearerBinding, record: Record) -> Result<Self, DecodeError> {
         validate_pre_authentication(&record)?;
         let sequence = record.sequence();
         let payload = record.payload();
         match record.kind() {
-            RECORD_KIND_BEGIN_RESPONSE => decode_begin_response(sequence, payload).map(Self::Begin),
+            RECORD_KIND_BEGIN_RESPONSE => {
+                decode_begin_response(sequence, payload, bearer).map(Self::Begin)
+            }
             RECORD_KIND_PROOF_START_RESPONSE => {
-                decode_proof_response(sequence, payload).map(Self::ProofStart)
+                decode_proof_response(sequence, payload, bearer).map(Self::ProofStart)
             }
             RECORD_KIND_ACTIVATE_RESPONSE => {
                 decode_activate_response(sequence, payload).map(Self::Activate)
@@ -1276,7 +1317,7 @@ pub enum DecodeError {
         /// Observed suite identifier.
         observed: u16,
     },
-    /// Bearer binding is unsupported by this fixed profile.
+    /// Bearer binding is unsupported or differs from the selected bearer.
     UnsupportedBearer {
         /// Observed bearer code.
         observed: u8,
@@ -1285,7 +1326,11 @@ pub enum DecodeError {
     InvalidRequiredField(InvalidField),
 }
 
-fn decode_begin_response(sequence: u64, payload: &[u8]) -> Result<BeginResponse, DecodeError> {
+fn decode_begin_response(
+    sequence: u64,
+    payload: &[u8],
+    bearer: BearerBinding,
+) -> Result<BeginResponse, DecodeError> {
     let result = first_result(payload)?;
     if result != 0 {
         require_length(payload, 1)?;
@@ -1298,19 +1343,23 @@ fn decode_begin_response(sequence: u64, payload: &[u8]) -> Result<BeginResponse,
     }
     require_length(payload, BEGIN_OFFER_LENGTH)?;
     validate_success_prefix(payload)?;
-    validate_profile(&payload[8..16])?;
+    validate_profile(&payload[8..16], bearer)?;
     let device_id = decode_device_id(&payload[16..32])?;
     let credential_id = decode_credential_id(&payload[32..48])?;
     let generation = decode_generation(&payload[48..56])?;
     let mut psk = Zeroizing::new([0_u8; 32]);
     psk.copy_from_slice(&payload[56..88]);
     let psk = PairingPsk::from_zeroizing(psk).map_err(DecodeError::InvalidRequiredField)?;
-    let offer = BeginOffer::after_pending_commit(device_id, credential_id, generation, psk)
+    let offer = BeginOffer::after_pending_commit(bearer, device_id, credential_id, generation, psk)
         .map_err(DecodeError::InvalidRequiredField)?;
     Ok(BeginResponse::offered(sequence, offer))
 }
 
-fn decode_proof_response(sequence: u64, payload: &[u8]) -> Result<ProofStartResponse, DecodeError> {
+fn decode_proof_response(
+    sequence: u64,
+    payload: &[u8],
+    bearer: BearerBinding,
+) -> Result<ProofStartResponse, DecodeError> {
     let result = first_result(payload)?;
     if result != 0 {
         require_length(payload, 1)?;
@@ -1323,7 +1372,7 @@ fn decode_proof_response(sequence: u64, payload: &[u8]) -> Result<ProofStartResp
     }
     require_length(payload, PROOF_CHALLENGE_LENGTH)?;
     validate_success_prefix(payload)?;
-    validate_profile(&payload[8..16])?;
+    validate_profile(&payload[8..16], bearer)?;
     let device_id = decode_device_id(&payload[16..32])?;
     let connection_id = decode_connection(&payload[32..40])?;
     let window_id = decode_window(&payload[40..48])?;
@@ -1334,6 +1383,7 @@ fn decode_proof_response(sequence: u64, payload: &[u8]) -> Result<ProofStartResp
     let challenge =
         DeviceChallenge::from_zeroizing(challenge).map_err(DecodeError::InvalidRequiredField)?;
     let challenge = ProofChallenge::new(
+        bearer,
         device_id,
         connection_id,
         window_id,
@@ -1398,15 +1448,15 @@ fn validate_success_prefix(payload: &[u8]) -> Result<(), DecodeError> {
     Ok(())
 }
 
-fn encode_profile(output: &mut [u8]) {
+fn encode_profile(output: &mut [u8], bearer: BearerBinding) {
     output[0..2].copy_from_slice(&PROTOCOL_MAJOR.to_le_bytes());
     output[2..4].copy_from_slice(&PROTOCOL_MINOR.to_le_bytes());
     output[4..6].copy_from_slice(&PROOF_SUITE.to_le_bytes());
-    output[6] = BearerBinding::UsbSerialJtag.code();
+    output[6] = bearer.code();
     output[7] = 0;
 }
 
-fn validate_profile(payload: &[u8]) -> Result<(), DecodeError> {
+fn validate_profile(payload: &[u8], bearer: BearerBinding) -> Result<(), DecodeError> {
     let major = u16::from_le_bytes([payload[0], payload[1]]);
     let minor = u16::from_le_bytes([payload[2], payload[3]]);
     if major != PROTOCOL_MAJOR || minor != PROTOCOL_MINOR {
@@ -1416,7 +1466,7 @@ fn validate_profile(payload: &[u8]) -> Result<(), DecodeError> {
     if suite != PROOF_SUITE {
         return Err(DecodeError::UnsupportedSuite { observed: suite });
     }
-    if BearerBinding::from_code(payload[6]) != Some(BearerBinding::UsbSerialJtag) {
+    if BearerBinding::from_code(payload[6]) != Some(bearer) {
         return Err(DecodeError::UnsupportedBearer {
             observed: payload[6],
         });

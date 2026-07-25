@@ -52,6 +52,7 @@ export interface BleDriverIndicationEvent {
 
 export interface BleGattCharacteristic {
   readonly canIndicate: boolean;
+  readonly canRead: boolean;
   readonly canWriteWithResponse: boolean;
   readonly characteristicUuid: string;
   readonly serviceUuid: string;
@@ -82,6 +83,7 @@ export interface BleCentralDriver {
     characteristicUuid: string,
   ): Promise<void>;
   maximumWriteWithResponseBytes(peripheralId: string): Promise<number>;
+  read(peripheralId: string, serviceUuid: string, characteristicUuid: string): Promise<Uint8Array>;
   writeWithResponse(
     peripheralId: string,
     serviceUuid: string,
@@ -117,6 +119,7 @@ function validateProfile(profile: BleGattProfile): void {
     ["service", profile.serviceUuid],
     ["write characteristic", profile.writeCharacteristicUuid],
     ["indicate characteristic", profile.indicateCharacteristicUuid],
+    ["security confirmation characteristic", profile.securityConfirmationCharacteristicUuid],
   ] as const;
   for (const [label, uuid] of values) {
     if (normalizeUuid(uuid).length === 0) {
@@ -130,6 +133,9 @@ function validateProfile(profile: BleGattProfile): void {
     throw new Error(
       `BLE profile write value maximum must be an integer of at least ${MINIMUM_WRITE_WITH_RESPONSE_BYTES} bytes`,
     );
+  }
+  if (profile.securityConfirmationReadyValue.byteLength === 0) {
+    throw new Error("BLE security confirmation ready value must not be empty");
   }
 }
 
@@ -157,6 +163,17 @@ function validateDiscovery(discovery: BleGattDiscovery, profile: BleGattProfile)
   if (!indicate?.canIndicate) {
     throw new Error(
       `BLE appliance characteristic ${profile.indicateCharacteristicUuid} does not support indications`,
+    );
+  }
+
+  const securityConfirmation = discovery.characteristics.find(
+    (candidate) =>
+      sameUuid(candidate.serviceUuid, profile.serviceUuid) &&
+      sameUuid(candidate.characteristicUuid, profile.securityConfirmationCharacteristicUuid),
+  );
+  if (!securityConfirmation?.canRead) {
+    throw new Error(
+      `BLE appliance characteristic ${profile.securityConfirmationCharacteristicUuid} does not support reads`,
     );
   }
 }
@@ -425,6 +442,28 @@ class ManagedBleConnection implements BleConnection {
     });
     this.writeTail = operation.catch(() => {});
     return operation;
+  }
+
+  async read(characteristicUuid: string, timeoutMs?: number): Promise<Uint8Array> {
+    if (this.closed) throw new Error("BLE connection is closed");
+    const deadlineMs =
+      timeoutMs === undefined
+        ? this.resources.operationTimeoutMs
+        : validateTimeout(timeoutMs, "BLE read timeout");
+    const bytes = await boundedDriverOperation(
+      () =>
+        this.resources.driver.read(
+          this.peripheralId,
+          this.resources.profile.serviceUuid,
+          characteristicUuid,
+        ),
+      deadlineMs,
+      `BLE characteristic read for ${this.peripheralId} timed out`,
+    );
+    if (this.closed) {
+      throw new Error("BLE disconnected before read response");
+    }
+    return new Uint8Array(bytes);
   }
 
   async close(): Promise<void> {

@@ -1,5 +1,19 @@
 export type RetryScheduler = (callback: () => void, delayMs: number) => () => void;
 
+export type ForegroundReconnectProgress =
+  | { readonly state: "attempting" }
+  | { readonly reason: string; readonly state: "waiting_retry" };
+
+export function foregroundReconnectMessage(progress: ForegroundReconnectProgress): string {
+  if (progress.state === "attempting") {
+    return "Pairing is saved. Connecting to the node.";
+  }
+  return (
+    "Pairing is saved. The node is not advertising yet; retrying automatically. " +
+    `Last attempt: ${progress.reason}`
+  );
+}
+
 const scheduleRetry: RetryScheduler = (callback, delayMs) => {
   const timer = setTimeout(callback, delayMs);
   return () => clearTimeout(timer);

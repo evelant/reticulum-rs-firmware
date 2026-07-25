@@ -746,7 +746,8 @@ The target requires a 16 MiB flash image/header and uses
 | Node identity | `0x610000` | 8 KiB | Wired, mirrored plaintext private identity |
 | Announce clock | `0x612000` | 8 KiB | Wired, mirrored boot-epoch append logs |
 | API credentials | `0x614000` | 8 KiB | Wired boot mount/recovery; exact eFuse-derived binding; retained plaintext two-sector store; no automatic provisioning |
-| Device config | `0x616000` | 104 KiB | Reserved, not wired |
+| BLE bond | `0x616000` | 8 KiB | Wired read-only boot mount and pairing-time exact commit/readback/remount; one authenticated bond |
+| Device config | `0x618000` | 96 KiB | Reserved, not wired |
 | Node journal | `0x630000` | 1 MiB | Schema-3/physical-2 operation-scoped submission runtime; current 128-entry non-reclaiming cap in PSRAM below the 154-acceptance journal lifetime; authenticated submission and post-re-enumeration terminal status powered-qualified, but not a powered 128-entry fill |
 | Message store | `0x730000` | 2 MiB | Wired ADR 0011 format-1 raw-RNS inbox; one 576-byte commit-last item; 383-byte maximum; not LXMF |
 | LXMF store | `0x930000` | 2 MiB | Wired ADR 0014 append-only store; 512-slot PSRAM index; mount-gated opportunistic plus responder-side direct-packet `lxmf.delivery` admission with required retained proofs; four-entry outbound-initiator direct-Link registry and per-Link single-flight policy; fresh-Link/new-commit delivery, exact timeout retirement followed by later fresh-Link recovery, and a bounded same-message two-packet/one-row replay outcome are powered-qualified; exact `LinkHandle` reuse and the receiver `Replay` enum remain source-qualified because the frozen client API exposes neither |
@@ -1669,13 +1670,23 @@ passes the static ELF gate; the predecessor has the one-board powered baseline
 above. That retained diagnostic image still needs exact powered readback plus
 its two-board traffic workload.
 
-`node_identity`, `announce_clock`, and `api_credentials` use ESP-IDF's standard
-`data,undefined` subtype. All three have application-owned formats; the
+`node_identity`, `announce_clock`, `api_credentials`, and `ble_bond` use
+ESP-IDF's standard `data,undefined` subtype. All four have application-owned
+formats; the
 credential range is checked, boot-mounted/recovered, and retained. Explicit
 initialization and ADR 0010 live pairing are routed through the resident owner;
 minimal single-flight authenticated USB session/API serving is powered-qualified
 through identity, durable submission, sequential status, peer proof, and a
 post-re-enumeration terminal status read.
+The BLE bond range mounts strictly read-only after credential recovery. Torn or
+corrupt bond media disables only BLE for that boot; it is never automatically
+erased or provisioned. A newly authenticated bond is acknowledged only after
+the sole flash owner commits, reads back, and remounts the exact successor. The
+alpha retains exactly one durable bond per board: the last successfully
+authenticated GPIO21-bound physical-presence pairing replaces it. A restored
+bond reconnects without repeating SMP and can use a fresh GPIO21 hold to open
+the separate 60-second application-pairing window for credential initialization
+or live pairing.
 `device_config` retains the standard NVS subtype while it is unwired; the
 application-owned journal and wired raw-RNS inbox retain `data,undefined`.
 The append-only LXMF store also retains `data,undefined`; all labels and ranges
@@ -1693,6 +1704,8 @@ mounts/recovers `api_credentials` immediately after flash open. A mechanical
 host regression requires that call to precede identity preflight, journal
 provisioning, announce-clock reservation, identity load/provision, and journal
 mount, so credential recovery is complete before any other product-store write.
+The subsequent `ble_bond` boot mount is read-only and therefore cannot overtake
+that first-mutation boundary.
 Mount is read-only and never auto-provisions erased media. Boot attempts at most
 one reported `RetirePredecessor` operation and then at most one
 `CleanupInactive` operation, retaining any mounted owner in
@@ -3438,12 +3451,12 @@ from the current callout-device name.
 
    On every **subsequent upgrade after that partition exists**, preserve a new
    secret full-flash backup but do not erase `node_identity`, `announce_clock`,
-   `api_credentials`, `node_journal`, `message_store`, `lxmf_store`, or any
-   newer product store. The unpadded merged-image write must stop at or below
-   `0x610000`. For an upgrade-layout check, read the complete application-data
-   region `0x610000..0xb30000` before the write, leave the board in the loader,
-   read it again immediately afterward and require exact equality before the
-   first upgraded boot:
+   `api_credentials`, `ble_bond`, `device_config`, `node_journal`,
+   `message_store`, `lxmf_store`, or any newer product store. The unpadded
+   merged-image write must stop at or below `0x610000`. For an upgrade-layout
+   check, read the complete application-data region `0x610000..0xb30000` before
+   the write, leave the board in the loader, read it again immediately
+   afterward and require exact equality before the first upgraded boot:
 
    ```sh
    python3.13 interop/python/e290_qualification_host.py read-region \
@@ -3511,8 +3524,8 @@ LXMF-message intent and uses incompatible slot geometry. An ordinary
 schema-3/physical-2 image therefore rejects either history without mutation,
 closes local submission service, and continues route-only LoRa. Development
 boards may use this explicit journal-only procedure; it preserves `node_identity`,
-`announce_clock`, `api_credentials`, `device_config`, and every unrelated flash
-range.
+`announce_clock`, `api_credentials`, `ble_bond`, `device_config`, and every
+unrelated flash range.
 
 1. Take and protect the full-flash backup described above, then leave the board
    in the serial loader.

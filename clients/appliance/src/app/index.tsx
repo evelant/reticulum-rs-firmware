@@ -33,7 +33,11 @@ import {
 import { ApplianceApi } from "../lib/api";
 import type { BleCandidate, BleScanOptions } from "../lib/ble-central-types.ts";
 import { type DraftIdentity, ensureDraftIdentity } from "../lib/draft.ts";
-import { ForegroundReconnect } from "../lib/foreground-reconnect.ts";
+import {
+  ForegroundReconnect,
+  foregroundReconnectMessage,
+  type ForegroundReconnectProgress,
+} from "../lib/foreground-reconnect.ts";
 import { keyboardLayoutPolicy } from "../lib/keyboard-layout.ts";
 import { LatestRequest } from "../lib/latest-request.ts";
 import { byteLimitError, utf8ByteLength } from "../lib/limits.ts";
@@ -56,6 +60,7 @@ import {
   nomadRequestProvenance,
 } from "../lib/nomad-browser.ts";
 import {
+  BLE_SECURITY_CONTINUE_LABEL,
   bleCandidateDetails,
   bleCandidateName,
   bleDiscoveryPresentation,
@@ -426,7 +431,11 @@ function NomadPanel({
 interface OnboardingPanelProps {
   readonly busy: boolean;
   readonly onboarding: OnboardingView;
-  readonly onMutation: (path: "start" | "refresh" | RecoveryRequest["action"]) => void;
+  readonly onCancel: (() => Promise<void>) | null;
+  readonly onMutation: (
+    path: "start" | "continue" | "refresh" | RecoveryRequest["action"],
+    candidate: BleCandidate | null,
+  ) => void;
   readonly onScanBleCandidates:
     | ((options?: BleScanOptions) => Promise<readonly BleCandidate[]>)
     | null;
@@ -435,6 +444,7 @@ interface OnboardingPanelProps {
 function OnboardingPanel({
   busy,
   onboarding,
+  onCancel,
   onMutation,
   onScanBleCandidates,
 }: OnboardingPanelProps) {
@@ -442,11 +452,30 @@ function OnboardingPanel({
   const [bleScanError, setBleScanError] = useState<string | null>(null);
   const [bleScanFinished, setBleScanFinished] = useState(false);
   const [bleScanning, setBleScanning] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
   const [selectedPeripheralId, setSelectedPeripheralId] = useState<string | null>(null);
   const scanAbort = useRef<AbortController | null>(null);
   const presentation = onboardingPresentation(onboarding);
   const discovery = bleDiscoveryPresentation(onboarding, onScanBleCandidates !== null);
   const selectedCandidate = selectedBleCandidate(bleCandidates, selectedPeripheralId);
+  const lifecycle = onboarding.snapshot?.lifecycle;
+  const lifecycleStage = lifecycle?.state === "working" ? lifecycle.stage : null;
+  const scrollEpoch =
+    `${lifecycle?.state ?? "unavailable"}:${lifecycleStage ?? "idle"}:` +
+    (bleScanning ? "scanning" : "settled");
+  const canRetryBle =
+    discovery.available &&
+    onboarding.method === "managed_pairing" &&
+    lifecycle?.state === "faulted" &&
+    lifecycle.reason !== "invalid_credential_artifact";
+  const canContinueBle =
+    lifecycle?.state === "working" && lifecycle.stage === "waiting_for_ble_security";
+  const canCancelBle =
+    onCancel !== null &&
+    onboarding.method === "managed_pairing" &&
+    lifecycle?.state === "working" &&
+    lifecycle.stage !== "activating";
 
   useEffect(
     () => () => {
@@ -498,13 +527,28 @@ function OnboardingPanel({
     }
   };
 
+  const cancelBleOnboarding = async () => {
+    if (onCancel === null || cancelling) return;
+    setCancelling(true);
+    setCancelError(null);
+    try {
+      await onCancel();
+    } catch (cancelError) {
+      setCancelError(errorText(cancelError));
+    } finally {
+      setCancelling(false);
+    }
+  };
+
   if (presentation.ready) return null;
   return (
     <ScrollView
-      automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
+      alwaysBounceVertical={false}
+      automaticallyAdjustContentInsets={false}
+      automaticallyAdjustKeyboardInsets={false}
+      bounces={false}
       contentContainerStyle={styles.onboardingScrollContent}
-      keyboardDismissMode={KEYBOARD_LAYOUT.dismissMode}
-      keyboardShouldPersistTaps="handled"
+      key={scrollEpoch}
       nestedScrollEnabled
       style={styles.onboardingScroller}
     >
@@ -512,7 +556,7 @@ function OnboardingPanel({
         <Text style={styles.eyebrow}>FIRST-RUN SETUP</Text>
         <Text style={styles.onboardingTitle}>{presentation.title}</Text>
         <Text style={styles.secondaryText}>{presentation.instruction}</Text>
-        {presentation.identifierLabel === null ? null : (
+        {discovery.available || presentation.identifierLabel === null ? null : (
           <View style={styles.serialRow}>
             <Text style={styles.metaLabel}>{presentation.identifierLabel}</Text>
             <Text selectable style={styles.monospace}>
@@ -526,7 +570,7 @@ function OnboardingPanel({
             <Text style={styles.secondaryText}>{discovery.instruction}</Text>
             <View style={styles.actionRow}>
               <ActionButton
-                disabled={busy || bleScanning}
+                disabled={busy || bleScanning || lifecycle?.state === "working"}
                 label={bleScanning ? "Finding nearby boards…" : "Find nearby boards"}
                 onPress={() => void scanBleCandidates()}
               />
@@ -534,6 +578,11 @@ function OnboardingPanel({
             {bleScanError === null ? null : (
               <Text accessibilityLiveRegion="assertive" style={styles.inlineError}>
                 {bleScanError}
+              </Text>
+            )}
+            {cancelError === null ? null : (
+              <Text accessibilityLiveRegion="assertive" style={styles.inlineError}>
+                {cancelError}
               </Text>
             )}
             {bleScanFinished && bleCandidates.length === 0 ? (
@@ -552,6 +601,7 @@ function OnboardingPanel({
                       accessibilityLabel={`Select ${bleCandidateName(candidate)}`}
                       accessibilityRole="button"
                       accessibilityState={{ selected }}
+                      disabled={busy || lifecycle?.state === "working"}
                       key={candidate.peripheralId}
                       onPress={() => setSelectedPeripheralId(candidate.peripheralId)}
                       style={({ pressed }) => [
@@ -578,7 +628,9 @@ function OnboardingPanel({
             )}
             {selectedCandidate === null ? null : (
               <Text accessibilityLiveRegion="polite" style={styles.bleSelectionStatus}>
-                Selected for the upcoming secure pairing step. No connection has been made.
+                {lifecycle?.state === "working"
+                  ? "Secure pairing is using this exact selected BLE peripheral."
+                  : "Selected for the upcoming secure pairing step. No connection has been made."}
               </Text>
             )}
           </View>
@@ -586,24 +638,38 @@ function OnboardingPanel({
         <View style={styles.actionRow}>
           {presentation.canStart ? (
             <ActionButton
-              disabled={busy || bleScanning}
+              disabled={busy || bleScanning || (discovery.available && selectedCandidate === null)}
               label={presentation.startLabel}
-              onPress={() => onMutation("start")}
+              onPress={() => onMutation("start", selectedCandidate)}
               secondary={discovery.available}
+            />
+          ) : null}
+          {canRetryBle ? (
+            <ActionButton
+              disabled={busy || bleScanning || selectedCandidate === null}
+              label="Retry secure pairing"
+              onPress={() => onMutation("start", selectedCandidate)}
+            />
+          ) : null}
+          {canContinueBle ? (
+            <ActionButton
+              disabled={busy}
+              label={BLE_SECURITY_CONTINUE_LABEL}
+              onPress={() => onMutation("continue", selectedCandidate)}
             />
           ) : null}
           {presentation.canResume ? (
             <ActionButton
-              disabled={busy || bleScanning}
+              disabled={busy || bleScanning || (discovery.available && selectedCandidate === null)}
               label="Resume pairing"
-              onPress={() => onMutation("resume_known_pending")}
+              onPress={() => onMutation("resume_known_pending", selectedCandidate)}
             />
           ) : null}
           {presentation.canAbort ? (
             <ActionButton
-              disabled={busy || bleScanning}
+              disabled={busy || bleScanning || (discovery.available && selectedCandidate === null)}
               label="Abort pending state"
-              onPress={() => onMutation("abort_orphan")}
+              onPress={() => onMutation("abort_orphan", selectedCandidate)}
               secondary
             />
           ) : null}
@@ -611,7 +677,15 @@ function OnboardingPanel({
             <ActionButton
               disabled={busy || bleScanning}
               label="Recheck local state"
-              onPress={() => onMutation("refresh")}
+              onPress={() => onMutation("refresh", selectedCandidate)}
+              secondary
+            />
+          ) : null}
+          {canCancelBle ? (
+            <ActionButton
+              disabled={cancelling}
+              label={cancelling ? "Cancelling…" : "Cancel secure pairing"}
+              onPress={() => void cancelBleOnboarding()}
               secondary
             />
           ) : null}
@@ -1206,6 +1280,8 @@ export default function ApplianceScreen() {
     AppState.currentState === null || AppState.currentState === "active",
   );
   const [reconnectRetry, setReconnectRetry] = useState(0);
+  const [reconnectProgress, setReconnectProgress] =
+    useState<ForegroundReconnectProgress | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [timeline, setTimeline] = useState<TimelineView[]>([]);
   const [workspace, setWorkspace] = useState<Workspace>("lxmf");
@@ -1230,7 +1306,12 @@ export default function ApplianceScreen() {
   const ready = onboardingPresentation(onboarding).ready;
   // Missing credentials can make the dormant connector report an expected
   // local error. The onboarding panel owns that state until setup is ready.
-  const displayedError = error ?? (ready ? snapshot?.last_error : null);
+  const displayedError =
+    error ??
+    (ready &&
+    (reconnectProgress === null || snapshot?.connection.state === "faulted")
+      ? snapshot?.last_error
+      : null);
   const selectedContact = contacts.find((contact) => contact.destination === selected);
   const nearbyReader = useMemo(() => {
     const read = api.nearbyPeers;
@@ -1284,7 +1365,6 @@ export default function ApplianceScreen() {
       const nextReady = onboardingPresentation(nextOnboarding).ready;
       if (!nextReady) {
         timelineRequests.current.invalidate();
-        setError(null);
         return;
       }
       const nextContacts = await api.contacts();
@@ -1367,15 +1447,31 @@ export default function ApplianceScreen() {
   useEffect(() => {
     if (!foreground || !onboarding.available || !ready || snapshot?.connection.state === "ready") {
       automaticReconnect.suspend();
+      setReconnectProgress(null);
       return;
     }
     if (!automaticReconnect.begin(reconnectRetry)) return;
 
+    let active = true;
+    setReconnectProgress({ state: "attempting" });
     void api
       .reconnect()
       .then(refresh)
-      .catch((nextError) => setError(errorText(nextError)))
+      .then(() => {
+        if (active) setReconnectProgress(null);
+      })
+      .catch((nextError) => {
+        if (active) {
+          setReconnectProgress({
+            state: "waiting_retry",
+            reason: errorText(nextError),
+          });
+        }
+      })
       .finally(() => automaticReconnect.settle());
+    return () => {
+      active = false;
+    };
   }, [
     api,
     automaticReconnect,
@@ -1411,13 +1507,29 @@ export default function ApplianceScreen() {
     }
   };
 
-  const onboardingMutation = (action: "start" | "refresh" | RecoveryRequest["action"]) => {
+  const onboardingMutation = (
+    action: "start" | "continue" | "refresh" | RecoveryRequest["action"],
+    candidate: BleCandidate | null,
+  ) => {
     void run(() => {
-      if (action === "start") return api.startOnboarding();
+      if (action === "start") return api.startOnboarding(candidate ?? undefined);
+      if (action === "continue") {
+        if (api.continueOnboarding === undefined) {
+          throw new Error("This client cannot continue a retained BLE pairing ceremony.");
+        }
+        return api.continueOnboarding();
+      }
       if (action === "refresh") return api.refreshOnboarding();
-      return api.recoverOnboarding({ action });
+      return api.recoverOnboarding({ action }, candidate ?? undefined);
     });
   };
+
+  const cancelOnboarding =
+    api.cancelOnboarding === undefined
+      ? null
+      : async (): Promise<void> => {
+          await api.cancelOnboarding?.();
+        };
 
   const upsertContact = (destination: string, name: string): Promise<boolean> =>
     run(async () => {
@@ -1589,10 +1701,18 @@ export default function ApplianceScreen() {
           <Text style={styles.errorText}>{displayedError}</Text>
         </View>
       )}
+      {reconnectProgress === null ? null : (
+        <View accessibilityLiveRegion="polite" style={styles.reconnectBanner}>
+          <Text style={styles.reconnectText}>
+            {foregroundReconnectMessage(reconnectProgress)}
+          </Text>
+        </View>
+      )}
       {busy ? <ActivityIndicator color="#91e6a7" style={styles.activity} /> : null}
       <OnboardingPanel
         busy={busy}
         onboarding={onboarding}
+        onCancel={cancelOnboarding}
         onMutation={onboardingMutation}
         onScanBleCandidates={bleCandidateScanner}
       />
@@ -1730,6 +1850,16 @@ const styles = StyleSheet.create({
     backgroundColor: "#321d1b",
   },
   errorText: { color: colors.red },
+  reconnectBanner: {
+    marginHorizontal: 28,
+    marginTop: 14,
+    padding: 12,
+    borderColor: "#356344",
+    borderWidth: 1,
+    borderRadius: 8,
+    backgroundColor: colors.greenDark,
+  },
+  reconnectText: { color: colors.muted },
   inlineError: { color: colors.red, fontSize: 12 },
   activity: { position: "absolute", top: 92, right: 16, zIndex: 2 },
   onboardingScroller: { flex: 1, minHeight: 0 },

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 
 import type { NativeApplianceLike, NativeBlePlatformCommand } from "@reticulum/appliance-native";
 
@@ -13,12 +13,15 @@ import type {
 } from "./ble-central-types.ts";
 import {
   type DecodedNativeBlePlatformCommand,
+  NativeBleOnboardingTransport,
   NativeBleTransport,
 } from "./native-ble-transport.ts";
 
 const PROFILE: BleGattProfile = {
   indicateCharacteristicUuid: "tx",
   maximumWriteValueBytes: 20,
+  securityConfirmationCharacteristicUuid: "security-confirmation",
+  securityConfirmationReadyValue: Uint8Array.of(0x52, 0x44, 0x59, 0x31),
   serviceUuid: "service",
   writeCharacteristicUuid: "rx",
 };
@@ -57,6 +60,9 @@ class FakeBleConnection implements BleConnection {
   closeCount = 0;
   closeBehaviors: Array<() => Promise<void>> = [];
   observer: BleConnectionObserver | null = null;
+  defaultReadValue = new Uint8Array(PROFILE.securityConfirmationReadyValue);
+  readBehaviors: Array<() => Promise<Uint8Array>> = [];
+  reads: string[] = [];
   writeBehaviors: Array<(chunk: Uint8Array) => Promise<void>> = [];
   writes: number[][] = [];
 
@@ -75,6 +81,11 @@ class FakeBleConnection implements BleConnection {
     this.writes.push([...chunk]);
     const behavior = this.writeBehaviors.shift();
     await behavior?.(chunk);
+  }
+
+  async read(characteristicUuid: string): Promise<Uint8Array> {
+    this.reads.push(characteristicUuid);
+    return (await this.readBehaviors.shift()?.()) ?? new Uint8Array(this.defaultReadValue);
   }
 
   async close(): Promise<void> {
@@ -245,6 +256,235 @@ function transport(
     writeTimeoutMs,
   );
 }
+
+function onboardingTransport(
+  onboarding: FakeNativeBleAppliance,
+  central: FakeBleCentral,
+): NativeBleOnboardingTransport {
+  return new NativeBleOnboardingTransport(onboarding, {
+    central,
+    decodeCommand: (command) => command as unknown as DecodedNativeBlePlatformCommand,
+    // The onboarding transport must ignore diagnostic name targeting and use
+    // only the candidate explicitly selected by platform identifier.
+    peripheralName: "must-not-be-used",
+    profile: PROFILE,
+  });
+}
+
+describe("native BLE onboarding transport orchestration", () => {
+  test("connects only the selected peripheral without waking the ordinary actor", async () => {
+    const onboarding = new FakeNativeBleAppliance();
+    const central = new FakeBleCentral();
+    const connection = new FakeBleConnection("board-b");
+    central.results.push(() => Promise.resolve(connection));
+    const owner = onboardingTransport(onboarding, central);
+
+    await owner.connectSelected("board-b");
+
+    expect(central.connectOptions).toHaveLength(1);
+    expect(central.connectOptions[0]?.peripheralId).toBe("board-b");
+    expect(central.connectOptions[0]?.peripheralName).toBeUndefined();
+    expect(onboarding.events).toEqual(["link 1 board-b 20"]);
+    expect(owner.usable).toBeTrue();
+    expect(owner.failureReason).toBeNull();
+    await owner.dispose();
+  });
+
+  test("retries authenticated readiness without emitting protocol bytes", async () => {
+    const onboarding = new FakeNativeBleAppliance();
+    const central = new FakeBleCentral();
+    const connection = new FakeBleConnection("board-b");
+    connection.readBehaviors.push(
+      () => Promise.reject(new Error("insufficient authentication")),
+      () => Promise.resolve(Uint8Array.of(0x57, 0x41, 0x49, 0x54)),
+      () => Promise.resolve(new Uint8Array(PROFILE.securityConfirmationReadyValue)),
+    );
+    central.results.push(() => Promise.resolve(connection));
+    const owner = onboardingTransport(onboarding, central);
+    await owner.connectSelected("board-b");
+
+    await owner.confirmAuthenticated(100, 1);
+
+    expect(connection.reads).toEqual([
+      PROFILE.securityConfirmationCharacteristicUuid,
+      PROFILE.securityConfirmationCharacteristicUuid,
+      PROFILE.securityConfirmationCharacteristicUuid,
+    ]);
+    expect(connection.writes).toEqual([]);
+    expect(onboarding.acknowledgements).toEqual([]);
+    await owner.dispose();
+  });
+
+  test("does not impose an app deadline while firmware still owns physical presence", async () => {
+    const onboarding = new FakeNativeBleAppliance();
+    const central = new FakeBleCentral();
+    const connection = new FakeBleConnection("board-b");
+    let simulatedNow = 1_000;
+    connection.readBehaviors.push(
+      async () => {
+        simulatedNow += 60_000;
+        return Uint8Array.of(0x57, 0x41, 0x49, 0x54);
+      },
+      () => Promise.resolve(new Uint8Array(PROFILE.securityConfirmationReadyValue)),
+    );
+    central.results.push(() => Promise.resolve(connection));
+    const owner = onboardingTransport(onboarding, central);
+    await owner.connectSelected("board-b");
+    const clock = spyOn(Date, "now").mockImplementation(() => simulatedNow);
+
+    try {
+      await owner.confirmAuthenticated(undefined, 1);
+    } finally {
+      clock.mockRestore();
+    }
+
+    expect(connection.reads).toEqual([
+      PROFILE.securityConfirmationCharacteristicUuid,
+      PROFILE.securityConfirmationCharacteristicUuid,
+    ]);
+    expect(connection.writes).toEqual([]);
+    expect(onboarding.acknowledgements).toEqual([]);
+    await owner.dispose();
+  });
+
+  test("times out a pending readiness marker without emitting or failing a protocol write", async () => {
+    const onboarding = new FakeNativeBleAppliance();
+    const central = new FakeBleCentral();
+    const connection = new FakeBleConnection("board-b");
+    connection.defaultReadValue = Uint8Array.of(0x57, 0x41, 0x49, 0x54);
+    central.results.push(() => Promise.resolve(connection));
+    const owner = onboardingTransport(onboarding, central);
+    await owner.connectSelected("board-b");
+
+    await expect(owner.confirmAuthenticated(5, 1)).rejects.toThrow(
+      "did not become application-ready",
+    );
+
+    expect(connection.reads.length).toBeGreaterThan(0);
+    expect(connection.writes).toEqual([]);
+    expect(onboarding.acknowledgements).toEqual([]);
+    await owner.dispose();
+  });
+
+  test("surfaces a disconnect during readiness without emitting protocol bytes", async () => {
+    const onboarding = new FakeNativeBleAppliance();
+    const central = new FakeBleCentral();
+    const connection = new FakeBleConnection("board-b");
+    connection.readBehaviors.push(async () => {
+      connection.emitDisconnect("board left during Bluetooth security");
+      throw new Error("read cancelled by disconnect");
+    });
+    central.results.push(() => Promise.resolve(connection));
+    const owner = onboardingTransport(onboarding, central);
+    await owner.connectSelected("board-b");
+
+    await expect(owner.confirmAuthenticated(100, 1)).rejects.toThrow(
+      "disconnected during security confirmation",
+    );
+
+    expect(connection.writes).toEqual([]);
+    expect(onboarding.acknowledgements).toEqual([]);
+    await owner.dispose();
+  });
+
+  test("relays opaque indication and write bytes without interpreting their contents", async () => {
+    const onboarding = new FakeNativeBleAppliance();
+    const central = new FakeBleCentral();
+    const connection = new FakeBleConnection("selected-board");
+    central.results.push(() => Promise.resolve(connection));
+    const owner = onboardingTransport(onboarding, central);
+    await owner.connectSelected("selected-board");
+
+    connection.emitBytes(0xa5, 0x00, 0xff);
+    onboarding.queue({
+      bytes: Uint8Array.of(0x72, 0x64, 0x61, 0x31).buffer,
+      generation: 1n,
+      kind: "write",
+      token: 8n,
+    });
+    await waitFor(() => onboarding.acknowledgements.length === 1, "onboarding write");
+
+    expect(onboarding.indications).toEqual([{ bytes: [0xa5, 0x00, 0xff], generation: 1n }]);
+    expect(connection.writes).toEqual([[0x72, 0x64, 0x61, 0x31]]);
+    expect(onboarding.acknowledgements).toEqual([
+      { generation: 1n, outcome: "succeeded", token: 8n },
+    ]);
+    await owner.dispose();
+  });
+
+  test("retains a secret-free platform reason when the onboarding write fails", async () => {
+    const onboarding = new FakeNativeBleAppliance();
+    const central = new FakeBleCentral();
+    const connection = new FakeBleConnection("selected-board");
+    connection.writeBehaviors.push(() => Promise.reject(new Error("insufficient authentication")));
+    central.results.push(() => Promise.resolve(connection));
+    const owner = onboardingTransport(onboarding, central);
+    await owner.connectSelected("selected-board");
+
+    onboarding.queue({
+      bytes: Uint8Array.of(1).buffer,
+      generation: 1n,
+      kind: "write",
+      token: 3n,
+    });
+    await waitFor(() => onboarding.acknowledgements.length === 1, "failed onboarding write");
+
+    expect(owner.failureReason).toBe("BLE GATT write failed: insufficient authentication");
+    await owner.dispose();
+  });
+
+  test("retains the platform reason when the selected link disconnects during setup", async () => {
+    const onboarding = new FakeNativeBleAppliance();
+    const central = new FakeBleCentral();
+    const connection = new FakeBleConnection("selected-board");
+    connection.observe = (observer): (() => void) => {
+      connection.observer = observer;
+      queueMicrotask(() => {
+        observer.onDisconnect({
+          peripheralId: connection.peripheralId,
+          reason: "selected board disconnected during subscription",
+        });
+      });
+      return () => {
+        if (connection.observer === observer) connection.observer = null;
+      };
+    };
+    central.results.push(() => Promise.resolve(connection));
+    const owner = onboardingTransport(onboarding, central);
+
+    await expect(owner.connectSelected("selected-board")).rejects.toThrow(
+      "disconnected during onboarding setup",
+    );
+
+    expect(owner.failureReason).toBe("selected board disconnected during subscription");
+    expect(onboarding.disconnected).toEqual([
+      { generation: 1n, reason: "selected board disconnected during subscription" },
+    ]);
+    await owner.dispose();
+  });
+
+  test("cancels a pending exact-candidate connection without registering a generation", async () => {
+    const onboarding = new FakeNativeBleAppliance();
+    const central = new FakeBleCentral();
+    central.results.push(
+      (options) =>
+        new Promise<BleConnection>((_resolve, reject) => {
+          options?.signal?.addEventListener("abort", () => reject(options.signal?.reason), {
+            once: true,
+          });
+        }),
+    );
+    const owner = onboardingTransport(onboarding, central);
+    const connecting = owner.connectSelected("board-c");
+    await waitFor(() => central.connectCount === 1, "onboarding connection");
+
+    await owner.disconnect("cancelled from setup UI");
+    await expect(connecting).rejects.toThrow("cancelled from setup UI");
+
+    expect(onboarding.events).toEqual([]);
+    await owner.dispose();
+  });
+});
 
 describe("native BLE transport orchestration", () => {
   test("forwards credential-free scans without starting a link or invoking the native actor", async () => {

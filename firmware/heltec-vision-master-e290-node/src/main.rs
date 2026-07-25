@@ -66,7 +66,7 @@ use esp_alloc::ExternalMemory;
 #[cfg(feature = "runtime-measurement-hil")]
 use esp_alloc::{EspHeap, MemoryCapability};
 use esp_backtrace as _;
-#[cfg(not(any(feature = "ble-api-proof", feature = "wifi-api-proof")))]
+#[cfg(not(feature = "wifi-api-proof"))]
 use esp_hal::gpio::Pull;
 use esp_hal::{
     Async,
@@ -104,6 +104,8 @@ use reticulum_device_api_session::{
 use reticulum_device_identity_store::IdentityMirrorCoverage;
 #[cfg(feature = "display")]
 use reticulum_eink_ssd1680::{E290FrameBuffer, Ssd1680};
+#[cfg(feature = "ble-api-proof")]
+use reticulum_heltec_vision_master_e290_node::ble_bond_handoff::BleBondHandoff;
 #[cfg(feature = "display")]
 use reticulum_heltec_vision_master_e290_node::display_handoff::{
     DisplayBootClearOutcome, DisplayCompletionGateError, DisplayHandoff,
@@ -236,6 +238,8 @@ static STORAGE_COORDINATOR: StaticCell<ProductStorageCoordinator> = StaticCell::
 static PAIRING_CONTROL: StaticCell<PairingControlHandoff<CriticalSectionRawMutex>> =
     StaticCell::new();
 static LIVE_PAIRING: StaticCell<LivePairingHandoff<CriticalSectionRawMutex>> = StaticCell::new();
+#[cfg(feature = "ble-api-proof")]
+static BLE_BOND: StaticCell<BleBondHandoff<CriticalSectionRawMutex>> = StaticCell::new();
 static SESSION_ADMISSION: StaticCell<SessionAdmissionHandoff<CriticalSectionRawMutex>> =
     StaticCell::new();
 static AUTHENTICATED_API: StaticCell<
@@ -855,6 +859,26 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
     startup_diagnostic!("flash-owner");
     let credential_boot = flash_owner.boot_credentials();
     log_credential_boot(&credential_boot);
+    #[cfg(feature = "ble-api-proof")]
+    let (restored_ble_bond, boot_ble_bond_store_available) = match flash_owner.boot_ble_bond() {
+        Ok(boot) => {
+            let generation = boot.generation();
+            let bond_present = boot.bond_present();
+            let cleanup = boot.cleanup();
+            let raw_write_calls = boot.raw_write_calls();
+            let raw_erase_calls = boot.raw_erase_calls();
+            info!(
+                "e290-node stage=ble-bond-mount status=PASS generation={generation:?} bond_present={bond_present} cleanup={cleanup:?} raw_writes={raw_write_calls} raw_erases={raw_erase_calls}"
+            );
+            (boot.into_bond(), true)
+        }
+        Err(reason) => {
+            error!(
+                "e290-node stage=ble-bond-mount status=DISABLED reason={reason:?} ble_bearer=closed lora_routing=continue"
+            );
+            (None, false)
+        }
+    };
     #[cfg(feature = "runtime-measurement-hil")]
     RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_boot_phase(
         RuntimeBootPhase::CredentialBoot,
@@ -1137,6 +1161,12 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
     let storage_service_available = storage_coordinator.submission_service_available();
     let inbox_service_available = storage_coordinator.inbox_service_available();
     let lxmf_service_available = storage_coordinator.lxmf_service_available();
+    #[cfg(feature = "ble-api-proof")]
+    let durable_ble_bond_store_available = storage_coordinator.ble_bond_store_available();
+    #[cfg(feature = "ble-api-proof")]
+    let durable_ble_bond_present = storage_coordinator.ble_bond_present();
+    #[cfg(feature = "ble-api-proof")]
+    let durable_ble_bond_generation = storage_coordinator.ble_bond_generation();
     let credential_boot_state = storage_coordinator.credential_boot_state();
     let credential_binding = storage_coordinator.credential_binding();
     let credential_revision = storage_coordinator.credential_revision();
@@ -1440,155 +1470,9 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
         frame_dispatcher,
         config::dispatcher_config(),
     ));
-    let application_event_storage = APPLICATION_EVENT_STORAGE
-        .init([const { ApplicationEventSlot::new() }; config::APPLICATION_EVENT_SLOTS]);
-    let application_events = ApplicationEventOwner::new(application_event_storage);
-    let delayed_proofs = DelayedProofOwner::new(delayed_proof_storage);
-    let (usb_pairing_handoff, node_pairing_handoff) =
-        PAIRING_CONTROL.init(PairingControlHandoff::new()).split();
-    let (usb_live_pairing_handoff, node_live_pairing_handoff) =
-        LIVE_PAIRING.init(LivePairingHandoff::new()).split();
-    let (usb_session_admission, node_session_admission) = SESSION_ADMISSION
-        .init(SessionAdmissionHandoff::new())
-        .split();
-    let (usb_authenticated_api, node_authenticated_api) =
-        AUTHENTICATED_API.init(DeviceApiHandoff::new()).split();
-    #[cfg(not(any(feature = "ble-api-proof", feature = "wifi-api-proof")))]
-    let pairing_button = Input::new(
-        peripherals.GPIO21,
-        InputConfig::default().with_pull(Pull::Up),
-    );
-
-    let radio_task = match radio_task::run(dispatcher, ingress, lifecycle, ingress_authority) {
-        Ok(task) => task,
-        Err(_) => {
-            error!("e290-node stage=spawn status=FAIL task=lora");
-            inert_forever().await
-        }
-    };
-    let node_task = match node_task::run(
-        supervisor,
-        storage_coordinator,
-        application_events,
-        delayed_proofs,
-        application_volatile,
-        lxmf_destination,
-        nomad_destination,
-        peer_discovery_incarnation,
-        node_task::NodeHandoffs::new(
-            node_pairing_handoff,
-            node_live_pairing_handoff,
-            node_session_admission,
-            node_authenticated_api,
-            frame_node,
-        ),
-        offline_descriptor,
-        announce_epoch,
-        node_rng,
-    ) {
-        Ok(task) => task,
-        Err(_) => {
-            error!("e290-node stage=spawn status=FAIL task=node");
-            inert_forever().await
-        }
-    };
-    #[cfg(not(any(feature = "ble-api-proof", feature = "wifi-api-proof")))]
-    let usb_pairing_task = match usb_pairing_task::run(
-        usb_boot_quarantine,
-        peripherals.USB_DEVICE,
-        pairing_button,
-        usb_pairing_task::UsbHandoffs::new(
-            usb_pairing_handoff,
-            usb_live_pairing_handoff,
-            usb_session_admission,
-            usb_authenticated_api,
-        ),
-        local_api_session_parameters,
-        local_api_session_rng,
-    ) {
-        Ok(task) => task,
-        Err(_) => {
-            error!("e290-node stage=spawn status=FAIL task=usb-pairing");
-            inert_forever().await
-        }
-    };
-    #[cfg(feature = "wifi-api-proof")]
-    let wifi_api_task = {
-        // Alpha wireless profiles retain native USB solely for diagnostics.
-        // The token moves into the detached bearer task so the hardware owner
-        // outlives product composition without creating a second API bearer.
-        match wifi_api_task::run(
-            spawner,
-            peripherals.WIFI,
-            base_mac_eui48,
-            wifi_network_seed,
-            wifi_api_task::WifiHandoffs::new(
-                usb_pairing_handoff,
-                usb_live_pairing_handoff,
-                usb_session_admission,
-                usb_authenticated_api,
-            ),
-            local_api_session_parameters,
-            local_api_session_rng,
-            alpha_usb_serial_jtag_owner,
-        ) {
-            Ok(task) => task,
-            Err(_) => {
-                error!("e290-node stage=spawn status=FAIL task=wifi-api");
-                inert_forever().await
-            }
-        }
-    };
-    #[cfg(feature = "ble-api-proof")]
-    let ble_api_task = {
-        // Alpha wireless profiles retain native USB solely for diagnostics.
-        // The BLE task has no USB API or pairing surface.
-        match ble_connector {
-            Some(connector) => match ble_api_task::run(
-                connector,
-                base_mac_eui48,
-                ble_api_task::BleHandoffs::new(
-                    usb_pairing_handoff,
-                    usb_live_pairing_handoff,
-                    usb_session_admission,
-                    usb_authenticated_api,
-                ),
-                local_api_session_parameters,
-                local_api_session_rng,
-                alpha_usb_serial_jtag_owner,
-            ) {
-                Ok(task) => Some(task),
-                Err(_) => {
-                    error!(
-                        "e290-node stage=spawn status=DISABLED task=ble-api lora_routing=continue"
-                    );
-                    None
-                }
-            },
-            None => {
-                error!(
-                    "e290-node stage=spawn status=DISABLED task=ble-api reason=controller-unavailable lora_routing=continue"
-                );
-                None
-            }
-        }
-    };
-    #[cfg(feature = "ble-api-proof")]
-    let ble_api_task_available = ble_api_task.is_some();
-    startup_diagnostic!("task-construction");
-    // This Embassy version reports pool exhaustion while constructing each
-    // SpawnToken above; `Spawner::spawn` is infallible and returns unit.
-    spawner.spawn(radio_task);
-    spawner.spawn(node_task);
-    #[cfg(not(any(feature = "ble-api-proof", feature = "wifi-api-proof")))]
-    spawner.spawn(usb_pairing_task);
-    #[cfg(feature = "wifi-api-proof")]
-    spawner.spawn(wifi_api_task);
-    #[cfg(feature = "ble-api-proof")]
-    if let Some(ble_api_task) = ble_api_task {
-        spawner.spawn(ble_api_task);
-    }
-    startup_diagnostic!("tasks-spawned");
+    // Finish the qualified READY render before constructing the BLE task
+    // token. Secure BLE onboarding then receives the sole verified publisher
+    // without racing this startup completion gate.
     #[cfg(feature = "display")]
     let display_publisher = match display_publisher {
         Some(mut publisher) => {
@@ -1667,6 +1551,166 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
     let display_available = display_publisher.is_some();
     #[cfg(not(feature = "display"))]
     let display_available = false;
+    let application_event_storage = APPLICATION_EVENT_STORAGE
+        .init([const { ApplicationEventSlot::new() }; config::APPLICATION_EVENT_SLOTS]);
+    let application_events = ApplicationEventOwner::new(application_event_storage);
+    let delayed_proofs = DelayedProofOwner::new(delayed_proof_storage);
+    let (usb_pairing_handoff, node_pairing_handoff) =
+        PAIRING_CONTROL.init(PairingControlHandoff::new()).split();
+    let (usb_live_pairing_handoff, node_live_pairing_handoff) =
+        LIVE_PAIRING.init(LivePairingHandoff::new()).split();
+    #[cfg(feature = "ble-api-proof")]
+    let (ble_bond_handoff, node_ble_bond_handoff) = BLE_BOND.init(BleBondHandoff::new()).split();
+    let (usb_session_admission, node_session_admission) = SESSION_ADMISSION
+        .init(SessionAdmissionHandoff::new())
+        .split();
+    let (usb_authenticated_api, node_authenticated_api) =
+        AUTHENTICATED_API.init(DeviceApiHandoff::new()).split();
+    #[cfg(not(feature = "wifi-api-proof"))]
+    let pairing_button = Input::new(
+        peripherals.GPIO21,
+        InputConfig::default().with_pull(Pull::Up),
+    );
+
+    let radio_task = match radio_task::run(dispatcher, ingress, lifecycle, ingress_authority) {
+        Ok(task) => task,
+        Err(_) => {
+            error!("e290-node stage=spawn status=FAIL task=lora");
+            inert_forever().await
+        }
+    };
+    let node_task = match node_task::run(
+        supervisor,
+        storage_coordinator,
+        application_events,
+        delayed_proofs,
+        application_volatile,
+        lxmf_destination,
+        nomad_destination,
+        peer_discovery_incarnation,
+        node_task::NodeHandoffs::new(
+            node_pairing_handoff,
+            node_live_pairing_handoff,
+            #[cfg(feature = "ble-api-proof")]
+            node_ble_bond_handoff,
+            node_session_admission,
+            node_authenticated_api,
+            frame_node,
+        ),
+        offline_descriptor,
+        announce_epoch,
+        node_rng,
+    ) {
+        Ok(task) => task,
+        Err(_) => {
+            error!("e290-node stage=spawn status=FAIL task=node");
+            inert_forever().await
+        }
+    };
+    #[cfg(not(any(feature = "ble-api-proof", feature = "wifi-api-proof")))]
+    let usb_pairing_task = match usb_pairing_task::run(
+        usb_boot_quarantine,
+        peripherals.USB_DEVICE,
+        pairing_button,
+        usb_pairing_task::UsbHandoffs::new(
+            usb_pairing_handoff,
+            usb_live_pairing_handoff,
+            usb_session_admission,
+            usb_authenticated_api,
+        ),
+        local_api_session_parameters,
+        local_api_session_rng,
+    ) {
+        Ok(task) => task,
+        Err(_) => {
+            error!("e290-node stage=spawn status=FAIL task=usb-pairing");
+            inert_forever().await
+        }
+    };
+    #[cfg(feature = "wifi-api-proof")]
+    let wifi_api_task = {
+        // Alpha wireless profiles retain native USB solely for diagnostics.
+        // The token moves into the detached bearer task so the hardware owner
+        // outlives product composition without creating a second API bearer.
+        match wifi_api_task::run(
+            spawner,
+            peripherals.WIFI,
+            base_mac_eui48,
+            wifi_network_seed,
+            wifi_api_task::WifiHandoffs::new(
+                usb_pairing_handoff,
+                usb_live_pairing_handoff,
+                usb_session_admission,
+                usb_authenticated_api,
+            ),
+            local_api_session_parameters,
+            local_api_session_rng,
+            alpha_usb_serial_jtag_owner,
+        ) {
+            Ok(task) => task,
+            Err(_) => {
+                error!("e290-node stage=spawn status=FAIL task=wifi-api");
+                inert_forever().await
+            }
+        }
+    };
+    #[cfg(feature = "ble-api-proof")]
+    let ble_api_task = {
+        // Alpha wireless profiles retain native USB solely for diagnostics.
+        // The BLE task has no USB API or pairing surface.
+        match ble_connector {
+            Some(connector) => match ble_api_task::run(
+                connector,
+                base_mac_eui48,
+                ble_api_task::BleHandoffs::new(
+                    usb_pairing_handoff,
+                    usb_live_pairing_handoff,
+                    ble_bond_handoff,
+                    usb_session_admission,
+                    usb_authenticated_api,
+                ),
+                local_api_session_parameters,
+                local_api_session_rng,
+                ble_api_task::BlePhysicalOwners::new(
+                    pairing_button,
+                    display_publisher,
+                    restored_ble_bond,
+                    boot_ble_bond_store_available,
+                ),
+                alpha_usb_serial_jtag_owner,
+            ) {
+                Ok(task) => Some(task),
+                Err(_) => {
+                    error!(
+                        "e290-node stage=spawn status=DISABLED task=ble-api lora_routing=continue"
+                    );
+                    None
+                }
+            },
+            None => {
+                error!(
+                    "e290-node stage=spawn status=DISABLED task=ble-api reason=controller-unavailable lora_routing=continue"
+                );
+                None
+            }
+        }
+    };
+    #[cfg(feature = "ble-api-proof")]
+    let ble_api_task_available = ble_api_task.is_some();
+    startup_diagnostic!("task-construction");
+    // This Embassy version reports pool exhaustion while constructing each
+    // SpawnToken above; `Spawner::spawn` is infallible and returns unit.
+    spawner.spawn(radio_task);
+    spawner.spawn(node_task);
+    #[cfg(not(any(feature = "ble-api-proof", feature = "wifi-api-proof")))]
+    spawner.spawn(usb_pairing_task);
+    #[cfg(feature = "wifi-api-proof")]
+    spawner.spawn(wifi_api_task);
+    #[cfg(feature = "ble-api-proof")]
+    if let Some(ble_api_task) = ble_api_task {
+        spawner.spawn(ble_api_task);
+    }
+    startup_diagnostic!("tasks-spawned");
     #[cfg(feature = "runtime-measurement-hil")]
     RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE
         .record_composition_ready(monotonic_us().saturating_sub(runtime_measurement_started_us));
@@ -1684,7 +1728,7 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
     );
     #[cfg(feature = "ble-api-proof")]
     info!(
-        "e290-node stage=composition status=PASS tasks={} interfaces=1 primary_transport=lora local_api_profile=ble-api-proof ble_api_task_available={ble_api_task_available} usb=alpha-diagnostics-only display_task_spawned={display_task_spawned} display_available={display_available} ble_max_centrals=1 ble_pairing=disabled ble_tx=indicate ble_rx=write-with-response authenticated_local_api=node-dispatch bearer_session=ble-authenticated-single-flight session_suite=ble-gatt-qualification node_journal=mounted resident_storage_available={storage_service_available} durable_rns_inbox_available={inbox_service_available} lxmf_store_available={lxmf_service_available} lxmf_delivery_admission={lxmf_delivery_admission} credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} runtime_patch={}",
+        "e290-node stage=composition status=PASS tasks={} interfaces=1 primary_transport=lora local_api_profile=ble-api-proof ble_api_task_available={ble_api_task_available} usb=alpha-diagnostics-only display_task_spawned={display_task_spawned} display_available={display_available} ble_max_centrals=1 ble_pairing=display-passkey-physical-presence ble_bond_capacity=1 ble_bond_store_available={durable_ble_bond_store_available} ble_bond_present={durable_ble_bond_present} ble_bond_generation={durable_ble_bond_generation:?} ble_tx=indicate ble_rx=authenticated-write-with-response authenticated_local_api=node-dispatch bearer_session=ble-authenticated-single-flight session_suite=ble-gatt-qualification node_journal=mounted resident_storage_available={storage_service_available} durable_rns_inbox_available={inbox_service_available} lxmf_store_available={lxmf_service_available} lxmf_delivery_admission={lxmf_delivery_admission} credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} runtime_patch={}",
         (if ble_api_task_available { 3 } else { 2 }) + if display_task_spawned { 1 } else { 0 },
         credential_binding.absolute_offset(),
         credential_binding.length(),

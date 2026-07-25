@@ -15,6 +15,8 @@ const PROFILE: BleGattProfile = {
   serviceUuid: "10000000-0000-0000-0000-000000000001",
   writeCharacteristicUuid: "10000000-0000-0000-0000-000000000002",
   indicateCharacteristicUuid: "10000000-0000-0000-0000-000000000003",
+  securityConfirmationCharacteristicUuid: "10000000-0000-0000-0000-000000000004",
+  securityConfirmationReadyValue: Uint8Array.of(0x52, 0x44, 0x59, 0x31),
   maximumWriteValueBytes: 20,
 };
 
@@ -63,12 +65,21 @@ class FakeBleDriver implements BleCentralDriver {
         characteristicUuid: PROFILE.writeCharacteristicUuid,
         canWriteWithResponse: true,
         canIndicate: false,
+        canRead: false,
       },
       {
         serviceUuid: PROFILE.serviceUuid,
         characteristicUuid: PROFILE.indicateCharacteristicUuid,
         canWriteWithResponse: false,
         canIndicate: true,
+        canRead: false,
+      },
+      {
+        serviceUuid: PROFILE.serviceUuid,
+        characteristicUuid: PROFILE.securityConfirmationCharacteristicUuid,
+        canWriteWithResponse: false,
+        canIndicate: false,
+        canRead: true,
       },
     ],
   };
@@ -78,6 +89,7 @@ class FakeBleDriver implements BleCentralDriver {
   disconnectGate: Promise<void> = Promise.resolve();
   maximumWriteGate: Promise<void> = Promise.resolve();
   maximumWriteBytes = 64;
+  readValue = PROFILE.securityConfirmationReadyValue;
   notificationGate: Promise<void> = Promise.resolve();
   scanAllowDuplicates: boolean[] = [];
   scanStartError: Error | null = null;
@@ -162,6 +174,15 @@ class FakeBleDriver implements BleCentralDriver {
     this.events.push(`maximum write ${peripheralId}`);
     await this.maximumWriteGate;
     return this.maximumWriteBytes;
+  }
+
+  async read(
+    peripheralId: string,
+    serviceUuid: string,
+    characteristicUuid: string,
+  ): Promise<Uint8Array> {
+    this.events.push(`read ${peripheralId} ${serviceUuid} ${characteristicUuid}`);
+    return new Uint8Array(this.readValue);
   }
 
   async writeWithResponse(
@@ -474,6 +495,18 @@ describe("foreground BLE central", () => {
       [10, 11],
       [20, 21],
     ]);
+  });
+
+  test("reads the generated security-confirmation characteristic on the retained link", async () => {
+    const driver = new FakeBleDriver();
+    const connection = await new ForegroundBleCentral(driver).connect(PROFILE);
+
+    const value = await connection.read(PROFILE.securityConfirmationCharacteristicUuid);
+
+    expect([...value]).toEqual([...PROFILE.securityConfirmationReadyValue]);
+    expect(driver.events).toContain(
+      `read ${PERIPHERAL.id} ${PROFILE.serviceUuid} ${PROFILE.securityConfirmationCharacteristicUuid}`,
+    );
   });
 
   test("rejects invalid chunks before touching the GATT driver", async () => {

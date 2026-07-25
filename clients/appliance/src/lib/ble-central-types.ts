@@ -6,6 +6,12 @@ export interface BleGattProfile {
    * metadata alongside the UUIDs.
    */
   readonly maximumWriteValueBytes: number;
+  readonly securityConfirmationCharacteristicUuid: string;
+  /**
+   * Public value returned only after firmware has consumed authenticated
+   * security completion and made its durable retained-link state ready.
+   */
+  readonly securityConfirmationReadyValue: Uint8Array;
   readonly serviceUuid: string;
   readonly writeCharacteristicUuid: string;
 }
@@ -72,6 +78,11 @@ export interface BleConnection {
    * GATT subscription and observer installation are replayed in order.
    */
   observe(observer: BleConnectionObserver): () => void;
+
+  /**
+   * Reads one GATT characteristic on this retained connection.
+   */
+  read(characteristicUuid: string, timeoutMs?: number): Promise<Uint8Array>;
 
   /**
    * Writes one opaque GATT chunk with response. Concurrent calls are serialized

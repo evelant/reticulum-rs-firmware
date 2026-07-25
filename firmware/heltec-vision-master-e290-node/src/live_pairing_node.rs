@@ -6,8 +6,8 @@
 //! executor, USB, clock, entropy, journal, or physical-flash dependency.
 
 use reticulum_device_api_pairing::{
-    AbortCurrentResponse, AbortResult, ActivateFailure, ActivateResponse, BeginResponse,
-    PairingFailure, PairingResponse,
+    AbortCurrentResponse, AbortResult, ActivateFailure, ActivateResponse, BearerBinding,
+    BeginResponse, PairingFailure, PairingResponse,
 };
 use reticulum_device_api_pairing_policy::ConnectionId;
 
@@ -20,6 +20,7 @@ use crate::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[must_use = "an admitted live-pairing mutation must retain its request correlation"]
 pub struct LivePairingOperation {
+    bearer: BearerBinding,
     connection: ConnectionId,
     sequence: u64,
     mutation: PairingMutation,
@@ -27,12 +28,23 @@ pub struct LivePairingOperation {
 
 impl LivePairingOperation {
     /// Bind one admitted mutation to the request that must receive its result.
-    pub const fn new(connection: ConnectionId, sequence: u64, mutation: PairingMutation) -> Self {
+    pub const fn new(
+        bearer: BearerBinding,
+        connection: ConnectionId,
+        sequence: u64,
+        mutation: PairingMutation,
+    ) -> Self {
         Self {
+            bearer,
             connection,
             sequence,
             mutation,
         }
+    }
+
+    /// Exact pairing profile that admitted this operation.
+    pub const fn bearer(self) -> BearerBinding {
+        self.bearer
     }
 
     /// Exact bearer connection that admitted this operation.
@@ -71,7 +83,8 @@ impl LivePairingOperation {
                 reason,
             },
             CredentialPairingDriveOutcome::BeginOffered(offer)
-                if self.mutation == PairingMutation::AddPending =>
+                if self.mutation == PairingMutation::AddPending
+                    && offer.bearer() == self.bearer =>
             {
                 LivePairingOperationStep::Reply(LivePairingReply::new(
                     self.connection,
@@ -164,6 +177,7 @@ mod tests {
 
     fn begin_offer() -> BeginOffer {
         BeginOffer::after_pending_commit(
+            reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
             DeviceId::new([0x11; 16]).expect("test device ID is nonzero"),
             CredentialId::new([0x22; 16]),
             CredentialGeneration::new(3),
@@ -174,7 +188,12 @@ mod tests {
 
     #[test]
     fn multistep_begin_keeps_exact_correlation_until_durable_offer() {
-        let operation = LivePairingOperation::new(connection(), 41, PairingMutation::AddPending);
+        let operation = LivePairingOperation::new(
+            reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
+            connection(),
+            41,
+            PairingMutation::AddPending,
+        );
         let operation = match operation.apply(CredentialPairingDriveOutcome::MutationPrepared(
             PairingMutation::AddPending,
         )) {
@@ -210,8 +229,12 @@ mod tests {
 
     #[test]
     fn mismatched_or_premature_outcome_fails_closed_with_typed_response() {
-        let activate =
-            LivePairingOperation::new(connection(), 52, PairingMutation::ActivatePending);
+        let activate = LivePairingOperation::new(
+            reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
+            connection(),
+            52,
+            PairingMutation::ActivatePending,
+        );
         let reply = match activate.apply(CredentialPairingDriveOutcome::Aborted) {
             LivePairingOperationStep::Fault(reply) => reply,
             _ => panic!("mismatched terminal result must fault"),
@@ -228,7 +251,12 @@ mod tests {
             _ => panic!("fault reply must preserve the admitted request family"),
         }
 
-        let abort = LivePairingOperation::new(connection(), 53, PairingMutation::AbortPending);
+        let abort = LivePairingOperation::new(
+            reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
+            connection(),
+            53,
+            PairingMutation::AbortPending,
+        );
         assert!(matches!(
             abort.apply(CredentialPairingDriveOutcome::Idle),
             LivePairingOperationStep::Fault(_)
@@ -242,8 +270,12 @@ mod tests {
         let confirmation =
             ActivationConfirmation::from_bytes(credential_id, generation, [0x55; 32])
                 .expect("test confirmation is nonzero and bound");
-        let activate =
-            LivePairingOperation::new(connection(), 61, PairingMutation::ActivatePending);
+        let activate = LivePairingOperation::new(
+            reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
+            connection(),
+            61,
+            PairingMutation::ActivatePending,
+        );
         let activate_reply =
             match activate.apply(CredentialPairingDriveOutcome::Activated(confirmation)) {
                 LivePairingOperationStep::Reply(reply) => reply,
@@ -262,7 +294,12 @@ mod tests {
             _ => panic!("activation changed response family"),
         }
 
-        let abort = LivePairingOperation::new(connection(), 62, PairingMutation::AbortPending);
+        let abort = LivePairingOperation::new(
+            reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
+            connection(),
+            62,
+            PairingMutation::AbortPending,
+        );
         let abort_reply = match abort.apply(CredentialPairingDriveOutcome::Aborted) {
             LivePairingOperationStep::Reply(reply) => reply,
             _ => panic!("durable tombstone must complete AbortCurrent"),

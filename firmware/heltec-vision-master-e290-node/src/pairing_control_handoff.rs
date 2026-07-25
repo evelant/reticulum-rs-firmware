@@ -111,6 +111,148 @@ pub enum ButtonObservationReply {
     AcquireExclusive,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ButtonObservationFlightState {
+    Idle,
+    Ready {
+        at: PairingMillis,
+        connection: ConnectionId,
+        level: ActiveLowButton,
+    },
+    Awaiting {
+        at: PairingMillis,
+        connection: ConnectionId,
+    },
+}
+
+/// Immediate progress from one nonblocking physical-presence publication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ButtonObservationFlightProgress {
+    /// No observation is currently owned.
+    Idle,
+    /// The exact command or its eventual reply remains owned by this flight.
+    Pending,
+    /// The node accepted the observation without changing bearer ownership.
+    Observed,
+    /// The node requested connection-bound pairing exclusivity.
+    AcquireExclusive,
+}
+
+/// A routed reply did not match the one outstanding button observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ButtonObservationReplyMismatch;
+
+/// One nonblocking button command/reply owner.
+///
+/// GPIO sampling must continue while the node actor is busy. This owner keeps
+/// the exact unsent command or expected reply without awaiting either channel,
+/// allowing the bearer task to return to its millisecond sampling loop.
+#[must_use = "an in-flight button observation must be polled until it resolves"]
+pub struct ButtonObservationFlight {
+    state: ButtonObservationFlightState,
+}
+
+impl ButtonObservationFlight {
+    /// Construct an idle observation owner.
+    pub const fn new() -> Self {
+        Self {
+            state: ButtonObservationFlightState::Idle,
+        }
+    }
+
+    /// Whether a command or its eventual reply remains owned.
+    pub const fn is_pending(&self) -> bool {
+        !matches!(self.state, ButtonObservationFlightState::Idle)
+    }
+
+    /// Sampling time of the outstanding observation, if any.
+    pub const fn started_at(&self) -> Option<PairingMillis> {
+        match self.state {
+            ButtonObservationFlightState::Idle => None,
+            ButtonObservationFlightState::Ready { at, .. }
+            | ButtonObservationFlightState::Awaiting { at, .. } => Some(at),
+        }
+    }
+
+    /// Retain one exact observation for nonblocking transfer.
+    ///
+    /// Returns `false` without changing ownership when another observation is
+    /// already in flight.
+    pub fn try_schedule(
+        &mut self,
+        at: PairingMillis,
+        connection: ConnectionId,
+        level: ActiveLowButton,
+    ) -> bool {
+        if self.is_pending() {
+            return false;
+        }
+        self.state = ButtonObservationFlightState::Ready {
+            at,
+            connection,
+            level,
+        };
+        true
+    }
+
+    /// Make one immediate command/reply transfer attempt without awaiting.
+    ///
+    /// Replies for retired connection epochs are discarded as stale. An exact
+    /// connection with a non-button reply is a protocol mismatch.
+    pub fn poll<M>(
+        &mut self,
+        handoff: &mut UsbPairingHandoff<M>,
+    ) -> Result<ButtonObservationFlightProgress, ButtonObservationReplyMismatch>
+    where
+        M: RawMutex + 'static,
+    {
+        if let ButtonObservationFlightState::Ready {
+            at,
+            connection,
+            level,
+        } = self.state
+        {
+            let command = PairingControlCommand::ObserveButton {
+                at,
+                connection,
+                level,
+            };
+            if let Err(pressure) = handoff.try_send_command(command) {
+                let retained = pressure.into_inner();
+                debug_assert_eq!(retained, command);
+                return Ok(ButtonObservationFlightProgress::Pending);
+            }
+            self.state = ButtonObservationFlightState::Awaiting { at, connection };
+        }
+
+        let ButtonObservationFlightState::Awaiting { connection, .. } = self.state else {
+            return Ok(ButtonObservationFlightProgress::Idle);
+        };
+        while let Some(reply) = handoff.try_receive_reply() {
+            if reply.connection() != connection {
+                continue;
+            }
+            self.state = ButtonObservationFlightState::Idle;
+            return match reply.into_kind() {
+                PairingControlReplyKind::Button(ButtonObservationReply::Observed) => {
+                    Ok(ButtonObservationFlightProgress::Observed)
+                }
+                PairingControlReplyKind::Button(ButtonObservationReply::AcquireExclusive) => {
+                    Ok(ButtonObservationFlightProgress::AcquireExclusive)
+                }
+                _ => Err(ButtonObservationReplyMismatch),
+            };
+        }
+        Ok(ButtonObservationFlightProgress::Pending)
+    }
+}
+
+impl Default for ButtonObservationFlight {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Result of acknowledging bearer exclusivity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExclusiveAcquisitionReply {
@@ -330,12 +472,16 @@ mod tests {
         ControlRequest, ControlResponse, InitializationStatus,
     };
     use reticulum_device_api_pairing_policy::{
-        ActiveLowButton, ConnectionId, MonotonicMillis as PairingMillis,
+        ActiveLowButton, ButtonEffect, ConnectionId, MonotonicMillis as PairingMillis,
+        PairingPolicy, PendingState,
     };
 
+    use crate::usb_pairing_policy::{ActiveLowButtonDebouncer, PhysicalPresencePublicationGuard};
+
     use super::{
-        ButtonObservationReply, ExclusiveAcquisitionReply, LifecycleAcknowledgement,
-        PairingControlCommand, PairingControlHandoff, PairingControlReply, PairingControlReplyKind,
+        ButtonObservationFlight, ButtonObservationFlightProgress, ButtonObservationReply,
+        ExclusiveAcquisitionReply, LifecycleAcknowledgement, PairingControlCommand,
+        PairingControlHandoff, PairingControlReply, PairingControlReplyKind,
     };
 
     fn connection(value: u64) -> ConnectionId {
@@ -374,6 +520,190 @@ mod tests {
         assert!(usb.try_send_command(retained).is_ok());
         assert_eq!(node.try_receive_command(), Some(second));
         assert_eq!(node.try_receive_command(), None);
+    }
+
+    #[test]
+    fn nonblocking_button_flight_retains_pressure_and_routes_exact_reply() {
+        let (mut usb, mut node) = handoff();
+        let active_connection = connection(2);
+        let occupied = PairingControlCommand::Connected {
+            at: PairingMillis::new(1),
+            connection: active_connection,
+        };
+        assert!(usb.try_send_command(occupied).is_ok());
+
+        let mut flight = ButtonObservationFlight::new();
+        assert!(flight.try_schedule(
+            PairingMillis::new(2),
+            active_connection,
+            ActiveLowButton::High
+        ));
+        assert_eq!(
+            flight.poll(&mut usb),
+            Ok(ButtonObservationFlightProgress::Pending)
+        );
+        assert_eq!(node.try_receive_command(), Some(occupied));
+        assert_eq!(
+            flight.poll(&mut usb),
+            Ok(ButtonObservationFlightProgress::Pending)
+        );
+        assert_eq!(
+            node.try_receive_command(),
+            Some(PairingControlCommand::ObserveButton {
+                at: PairingMillis::new(2),
+                connection: active_connection,
+                level: ActiveLowButton::High,
+            })
+        );
+
+        let stale = PairingControlReply::new(
+            connection(1),
+            PairingControlReplyKind::Button(ButtonObservationReply::Observed),
+        );
+        assert!(node.try_send_reply(stale).is_ok());
+        assert_eq!(
+            flight.poll(&mut usb),
+            Ok(ButtonObservationFlightProgress::Pending)
+        );
+        let exact = PairingControlReply::new(
+            active_connection,
+            PairingControlReplyKind::Button(ButtonObservationReply::AcquireExclusive),
+        );
+        assert!(node.try_send_reply(exact).is_ok());
+        assert_eq!(
+            flight.poll(&mut usb),
+            Ok(ButtonObservationFlightProgress::AcquireExclusive)
+        );
+        assert!(!flight.is_pending());
+        assert_eq!(flight.started_at(), None);
+    }
+
+    #[test]
+    fn delayed_button_replies_do_not_pause_raw_sampling_or_hide_one_hold() {
+        let (mut usb, mut node) = handoff();
+        let connection = connection(3);
+        let mut policy = PairingPolicy::new(PendingState::None);
+        assert_eq!(
+            policy.connected(PairingMillis::new(0), connection),
+            Ok(None)
+        );
+        let mut debouncer = ActiveLowButtonDebouncer::new(0, ActiveLowButton::High);
+        let mut publication = PhysicalPresencePublicationGuard::new();
+        let mut flight = ButtonObservationFlight::new();
+        let mut last_publication = 0_u64;
+        let mut acquisitions = 0_u8;
+
+        assert!(flight.try_schedule(PairingMillis::new(0), connection, ActiveLowButton::High));
+        publication.publication_queued();
+        assert_eq!(
+            flight.poll(&mut usb),
+            Ok(ButtonObservationFlightProgress::Pending)
+        );
+        let initial = node
+            .try_receive_command()
+            .expect("the initial release publication must cross the handoff");
+        let PairingControlCommand::ObserveButton {
+            at,
+            connection: routed,
+            level,
+        } = initial
+        else {
+            panic!("the flight may only publish a button command");
+        };
+        assert_eq!(routed, connection);
+        assert!(matches!(
+            policy.observe_button(at, level),
+            ButtonEffect::None
+        ));
+        let mut delayed_reply = Some((
+            650,
+            PairingControlReply::new(
+                connection,
+                PairingControlReplyKind::Button(ButtonObservationReply::Observed),
+            ),
+        ));
+
+        for now in 1_u64..=3_200 {
+            let raw = if now <= 650 {
+                ActiveLowButton::High
+            } else {
+                ActiveLowButton::Low
+            };
+            let observation = debouncer
+                .observe(now, raw)
+                .expect("the monotonic millisecond sampler remains valid");
+            assert!(
+                !observation.continuity_lost(),
+                "an outstanding node reply must not pause raw GPIO sampling"
+            );
+            publication.observe(observation);
+
+            if delayed_reply
+                .as_ref()
+                .is_some_and(|(deliver_at, _)| *deliver_at <= now)
+            {
+                let (_, reply) = delayed_reply
+                    .take()
+                    .expect("the due reply remains exactly owned");
+                assert!(node.try_send_reply(reply).is_ok());
+            }
+
+            match flight
+                .poll(&mut usb)
+                .expect("every routed reply matches the button flight")
+            {
+                ButtonObservationFlightProgress::AcquireExclusive => {
+                    acquisitions = acquisitions.saturating_add(1);
+                }
+                ButtonObservationFlightProgress::Idle
+                | ButtonObservationFlightProgress::Pending
+                | ButtonObservationFlightProgress::Observed => {}
+            }
+
+            if !flight.is_pending()
+                && acquisitions == 0
+                && (publication.publication_due(now.saturating_sub(last_publication) >= 20))
+            {
+                let level = publication.policy_level(debouncer.current());
+                assert!(flight.try_schedule(PairingMillis::new(now), connection, level));
+                publication.publication_queued();
+                last_publication = now;
+                assert_eq!(
+                    flight.poll(&mut usb),
+                    Ok(ButtonObservationFlightProgress::Pending)
+                );
+                let command = node
+                    .try_receive_command()
+                    .expect("each scheduled observation must cross immediately");
+                let PairingControlCommand::ObserveButton {
+                    at,
+                    connection: routed,
+                    level,
+                } = command
+                else {
+                    panic!("the flight may only publish a button command");
+                };
+                assert_eq!(routed, connection);
+                let reply = match policy.observe_button(at, level) {
+                    ButtonEffect::AcquirePairingExclusive(_) => {
+                        PairingControlReplyKind::Button(ButtonObservationReply::AcquireExclusive)
+                    }
+                    ButtonEffect::None | ButtonEffect::Closed(_) | ButtonEffect::Fault(_) => {
+                        PairingControlReplyKind::Button(ButtonObservationReply::Observed)
+                    }
+                };
+                assert!(delayed_reply.is_none());
+                delayed_reply = Some((
+                    now.saturating_add(50),
+                    PairingControlReply::new(connection, reply),
+                ));
+            }
+        }
+
+        assert_eq!(
+            acquisitions, 1,
+            "a fresh release and continuous two-second hold must acquire exactly once"
+        );
     }
 
     #[test]

@@ -1,4 +1,8 @@
-import type { NativeApplianceLike, NativeBlePlatformCommand } from "@reticulum/appliance-native";
+import type {
+  NativeApplianceLike,
+  NativeBleOnboardingLike,
+  NativeBlePlatformCommand,
+} from "@reticulum/appliance-native";
 
 import type {
   BleCandidate,
@@ -9,7 +13,7 @@ import type {
   BleScanOptions,
 } from "./ble-central-types.ts";
 
-type NativeBleAppliance = Pick<
+type NativeBleByteOwner = Pick<
   NativeApplianceLike,
   | "bleDisconnected"
   | "bleIngestIndication"
@@ -17,8 +21,19 @@ type NativeBleAppliance = Pick<
   | "bleNextPlatformCommand"
   | "bleWriteFailed"
   | "bleWriteSucceeded"
-  | "ensureConnected"
-  | "reconnect"
+>;
+
+type NativeBleAppliance = NativeBleByteOwner &
+  Pick<NativeApplianceLike, "ensureConnected" | "reconnect">;
+
+type NativeBleOnboarding = Pick<
+  NativeBleOnboardingLike,
+  | "bleDisconnected"
+  | "bleIngestIndication"
+  | "bleLinkConnected"
+  | "bleNextPlatformCommand"
+  | "bleWriteFailed"
+  | "bleWriteSucceeded"
 >;
 
 export type DecodedNativeBlePlatformCommand =
@@ -47,6 +62,7 @@ export interface NativeBleTransportConfig {
 
 const MAX_PLATFORM_REASON_BYTES = 480;
 export const PLATFORM_GATT_WRITE_TIMEOUT_MS = 10_000;
+export const PLATFORM_GATT_SECURITY_CONFIRMATION_RETRY_MS = 250;
 const textEncoder = new TextEncoder();
 
 function errorText(error: unknown): string {
@@ -70,6 +86,14 @@ function ownedArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   const owned = new Uint8Array(bytes.byteLength);
   owned.set(bytes);
   return owned.buffer;
+}
+
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index]);
+}
+
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function withWriteTimeout(operation: Promise<void>, timeoutMs: number): Promise<void> {
@@ -96,12 +120,13 @@ class NativeBleLink {
 
   #abort = new AbortController();
   #ending: Promise<void> | null = null;
+  #failureReason: string | null = null;
   #removeObserver: (() => void) | null = null;
   #reportedDisconnected = false;
   #usable = true;
 
   private constructor(
-    private readonly appliance: NativeBleAppliance,
+    private readonly appliance: NativeBleByteOwner,
     private readonly connection: BleConnection,
     private readonly decodeCommand: NativeBleCommandDecoder,
     private readonly writeTimeoutMs: number,
@@ -111,7 +136,7 @@ class NativeBleLink {
   }
 
   static async open(
-    appliance: NativeBleAppliance,
+    appliance: NativeBleByteOwner,
     connection: BleConnection,
     decodeCommand: NativeBleCommandDecoder,
     writeTimeoutMs: number,
@@ -140,6 +165,15 @@ class NativeBleLink {
 
   get usable(): boolean {
     return this.#usable;
+  }
+
+  get failureReason(): string | null {
+    return this.#failureReason;
+  }
+
+  read(characteristicUuid: string, timeoutMs: number): Promise<Uint8Array> {
+    if (!this.#usable) return Promise.reject(new Error("BLE connection is no longer usable"));
+    return this.connection.read(characteristicUuid, timeoutMs);
   }
 
   async close(reason: string): Promise<void> {
@@ -211,11 +245,9 @@ class NativeBleLink {
         );
       } catch (error) {
         if (!this.#usable) return;
-        this.appliance.bleWriteFailed(
-          this.generation,
-          command.token,
-          platformReason(`BLE GATT write failed: ${errorText(error)}`),
-        );
+        const reason = platformReason(`BLE GATT write failed: ${errorText(error)}`);
+        this.#failureReason ??= reason;
+        this.appliance.bleWriteFailed(this.generation, command.token, reason);
         continue;
       }
       if (!this.#usable) return;
@@ -225,7 +257,9 @@ class NativeBleLink {
 
   async #remoteDisconnected(event: BleDisconnectEvent): Promise<void> {
     if (!this.#usable) return;
-    await this.#terminate(platformReason(event.reason), true).catch(() => undefined);
+    const reason = platformReason(event.reason);
+    this.#failureReason ??= reason;
+    await this.#terminate(reason, true).catch(() => undefined);
   }
 
   #terminate(reason: string, connectionAlreadyGone: boolean): Promise<void> {
@@ -425,6 +459,210 @@ export class NativeBleTransport {
         if (this.#active === link) this.#active = null;
         await link
           .close(platformReason(`Native BLE reconnect failed: ${errorText(error)}`))
+          .catch(() => undefined);
+      }
+      throw error;
+    } finally {
+      if (this.#connectionAbort === abort) this.#connectionAbort = null;
+    }
+  }
+}
+
+/**
+ * Owns only the exact, user-selected GATT stream used by Rust onboarding.
+ *
+ * This transport cannot scan, derive a target from a credential, or wake the
+ * ordinary authenticated appliance actor. Its native owner has a distinct
+ * byte hub, so pre-authentication pairing records cannot race the normal chat
+ * connector for the same subscribed stream.
+ */
+export class NativeBleOnboardingTransport {
+  readonly #central: BleCentral;
+  readonly #decodeCommand: NativeBleCommandDecoder;
+  readonly #onboarding: NativeBleOnboarding;
+  readonly #profile: BleGattProfile;
+  readonly #writeTimeoutMs: number;
+
+  #active: NativeBleLink | null = null;
+  #connectionAbort: AbortController | null = null;
+  #connecting: Promise<void> | null = null;
+  #disposed = false;
+  #failureReason: string | null = null;
+
+  constructor(
+    onboarding: NativeBleOnboarding,
+    config: NativeBleTransportConfig,
+    writeTimeoutMs = PLATFORM_GATT_WRITE_TIMEOUT_MS,
+  ) {
+    this.#central = config.central;
+    this.#decodeCommand = config.decodeCommand;
+    this.#onboarding = onboarding;
+    this.#profile = config.profile;
+    this.#writeTimeoutMs = writeTimeoutMs;
+    if (!Number.isFinite(this.#writeTimeoutMs) || this.#writeTimeoutMs <= 0) {
+      throw new Error("native BLE platform write timeout must be positive");
+    }
+  }
+
+  get failureReason(): string | null {
+    return this.#active?.failureReason ?? this.#failureReason;
+  }
+
+  get usable(): boolean {
+    return this.#active?.usable ?? false;
+  }
+
+  /**
+   * Wait until the authenticated-read marker says firmware has consumed SMP
+   * completion and durably opened the retained application-pairing link.
+   *
+   * Expected ATT authentication failures and the public pending marker are
+   * retried without emitting native protocol bytes. With no caller-supplied
+   * timeout, the selected link remains retained until firmware becomes ready,
+   * the board disconnects, or the operator cancels. Firmware owns the bounded
+   * physical-presence and SMP windows; the app must not impose a shorter timer
+   * that tears down a valid ceremony before the button hold is observed.
+   *
+   * The caller must retain the explicit user Continue barrier before invoking
+   * this method so an authenticated read cannot initiate platform security
+   * before the operator has physically confirmed the selected board.
+   */
+  async confirmAuthenticated(
+    timeoutMs: number | null = null,
+    retryIntervalMs = PLATFORM_GATT_SECURITY_CONFIRMATION_RETRY_MS,
+  ): Promise<void> {
+    if (timeoutMs !== null && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
+      throw new Error("BLE security confirmation timeout must be positive");
+    }
+    if (!Number.isFinite(retryIntervalMs) || retryIntervalMs <= 0) {
+      throw new Error("BLE security confirmation retry interval must be positive");
+    }
+
+    const active = this.#active;
+    if (active === null || !active.usable) {
+      throw new Error("no subscribed BLE onboarding link is ready");
+    }
+
+    const deadline = timeoutMs === null ? null : Date.now() + timeoutMs;
+    let lastFailure: unknown = new Error("firmware retained-link state is not ready");
+    while (active.usable) {
+      const remaining =
+        deadline === null ? this.#writeTimeoutMs : Math.max(0, deadline - Date.now());
+      if (remaining === 0) break;
+      try {
+        const value = await active.read(
+          this.#profile.securityConfirmationCharacteristicUuid,
+          remaining,
+        );
+        if (sameBytes(value, this.#profile.securityConfirmationReadyValue)) return;
+        lastFailure = new Error("firmware retained-link state is not ready");
+      } catch (error) {
+        lastFailure = error;
+      }
+      if (!active.usable) {
+        throw new Error("BLE onboarding link disconnected during security confirmation", {
+          cause: lastFailure,
+        });
+      }
+      const retryDelay =
+        deadline === null
+          ? retryIntervalMs
+          : Math.min(retryIntervalMs, Math.max(0, deadline - Date.now()));
+      if (retryDelay > 0) await wait(retryDelay);
+    }
+
+    if (!active.usable) {
+      throw new Error("BLE onboarding link disconnected during security confirmation", {
+        cause: lastFailure,
+      });
+    }
+    throw new Error(
+      "Bluetooth security did not become application-ready before the confirmation deadline",
+      { cause: lastFailure },
+    );
+  }
+
+  /**
+   * Connect, discover, and subscribe to exactly the candidate selected by the
+   * user. The platform identifier is forwarded as selection state only; Rust
+   * still authenticates the appliance before accepting its identity.
+   */
+  async connectSelected(peripheralId: string): Promise<void> {
+    if (this.#disposed) throw new Error("native BLE onboarding transport has been disposed");
+    if (this.#active !== null) {
+      if (this.#active.usable) return;
+      throw new Error("native BLE onboarding link is no longer usable");
+    }
+    if (this.#connecting !== null) return this.#connecting;
+
+    const normalizedPeripheralId = peripheralId.trim();
+    if (normalizedPeripheralId === "") {
+      throw new Error("select a nearby BLE appliance before pairing");
+    }
+
+    const connecting = this.#connect(normalizedPeripheralId);
+    this.#connecting = connecting;
+    try {
+      await connecting;
+    } finally {
+      if (this.#connecting === connecting) this.#connecting = null;
+    }
+  }
+
+  async disconnect(reason: string): Promise<void> {
+    this.#connectionAbort?.abort(new Error(reason));
+    const active = this.#active;
+    this.#failureReason ??= active?.failureReason ?? null;
+    this.#active = null;
+    await active?.close(reason);
+    await this.#connecting?.catch(() => undefined);
+  }
+
+  async dispose(): Promise<void> {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    this.#connectionAbort?.abort(new Error("native BLE onboarding transport was disposed"));
+    const active = this.#active;
+    this.#failureReason ??= active?.failureReason ?? null;
+    this.#active = null;
+    const centralDisposal = this.#central.dispose().catch(() => undefined);
+    await active?.close("Native BLE onboarding transport was disposed").catch(() => undefined);
+    await this.#connecting?.catch(() => undefined);
+    await centralDisposal;
+  }
+
+  async #connect(peripheralId: string): Promise<void> {
+    const abort = new AbortController();
+    this.#connectionAbort = abort;
+    let link: NativeBleLink | null = null;
+    try {
+      const connection = await this.#central.connect(this.#profile, {
+        peripheralId,
+        signal: abort.signal,
+      });
+      if (this.#disposed || abort.signal.aborted) {
+        await connection.close().catch(() => undefined);
+        throw new Error("native BLE onboarding transport was disposed while connecting");
+      }
+      try {
+        link = await NativeBleLink.open(
+          this.#onboarding,
+          connection,
+          this.#decodeCommand,
+          this.#writeTimeoutMs,
+        );
+      } catch (error) {
+        await connection.close().catch(() => undefined);
+        throw error;
+      }
+      this.#active = link;
+      if (!link.usable) throw new Error("BLE peripheral disconnected during onboarding setup");
+    } catch (error) {
+      if (link !== null) {
+        this.#failureReason ??= link.failureReason;
+        if (this.#active === link) this.#active = null;
+        await link
+          .close(platformReason(`Native BLE onboarding setup failed: ${errorText(error)}`))
           .catch(() => undefined);
       }
       throw error;

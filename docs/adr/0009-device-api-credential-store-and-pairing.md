@@ -56,6 +56,12 @@ range `0x614000..0x616000` (8 KiB, ESP partition type `data`, subtype
 `device_config` moves to `0x616000..0x630000` and shrinks to 104 KiB. The
 `node_journal` at `0x630000` and every later range remain unchanged.
 
+[ADR 0019](0019-secure-ble-appliance-onboarding.md) later preserves this exact
+credential range while carving `ble_bond` from the following 8 KiB:
+`device_config` therefore moves again to `0x618000..0x630000` in the current
+product map. That later allocation does not change this ADR's credential
+format or authority.
+
 The target partition-table guard must require exactly one plaintext, writable
 `api_credentials` entry with that type, subtype, offset, and length, and must
 reject duplicate labels, overlap, or a mismatched shape before protocol

@@ -10,22 +10,28 @@
 | `node_identity` | `0x610000..0x612000` | 8 KiB | Wired immutable identity mirrors |
 | `announce_clock` | `0x612000..0x614000` | 8 KiB | Wired boot-epoch mirrors |
 | `api_credentials` | `0x614000..0x616000` | 8 KiB | Wired boot-mounted plaintext two-sector credential store |
-| `device_config` | `0x616000..0x630000` | 104 KiB | Reserved, not wired |
+| `ble_bond` | `0x616000..0x618000` | 8 KiB | Wired boot-mounted authenticated BLE bond store |
+| `device_config` | `0x618000..0x630000` | 96 KiB | Reserved, not wired |
 | `node_journal` | `0x630000..0x730000` | 1 MiB | Schema-3/physical-2 resident submission runtime |
 | `message_store` | `0x730000..0x930000` | 2 MiB | Wired raw-RNS inbox qualification slot; not an LXMF store |
 | `lxmf_store` | `0x930000..0xb30000` | 2 MiB | Wired append-only LXMF store with mount-gated opportunistic and responder direct admission |
 | unpartitioned | `0xb30000..0x1000000` | 4.8125 MiB | OTA/layout decision |
 
 The journal and message-store offsets are unchanged. The previously unwired
-`device_config` reservation is split into a dedicated 8 KiB
-`api_credentials` raw-NOR range and a 104 KiB standard-NVS configuration
-range. The credential range is validated and boot-mounted; ADR 0009
-defines its implemented two-sector plaintext developer/HIL format and pairing
-policy. Boot mounts/reconciles it immediately after flash open and never
-auto-provisions erased media. The journal, message store,
-identity, announce clock, and credential range use ESP-IDF's standard
-`data,undefined` subtype. No unsupported numeric subtype is used to imply
-application ownership.
+`device_config` reservation now yields dedicated 8 KiB raw-NOR ranges for
+`api_credentials` and one authenticated `ble_bond`, leaving a 96 KiB
+standard-NVS configuration range. Both dedicated ranges are validated and
+boot-mounted. [ADR 0009](../docs/adr/0009-device-api-credential-store-and-pairing.md)
+defines the credential store's implemented two-sector plaintext developer/HIL
+format and pairing policy;
+[ADR 0019](../docs/adr/0019-secure-ble-appliance-onboarding.md) defines the
+separate bond authority. Credential recovery remains the first boot flash
+mutation. BLE bond mount is strictly read-only and never auto-recovers or
+provisions damaged media; a pairing-time bond commit uses the dedicated
+two-sector store's commit-last exact-readback and remount contract. The journal,
+message store, identity, announce clock, credential, and BLE bond ranges use
+ESP-IDF's standard `data,undefined` subtype. No unsupported numeric subtype is
+used to imply application ownership.
 
 The journal's current physical format 2 keeps the same 1 MiB range and two
 `0x7f000`-byte banks. Each bank holds 774 672-byte slots with a 544-byte

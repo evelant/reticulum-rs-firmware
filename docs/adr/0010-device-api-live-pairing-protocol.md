@@ -3,6 +3,7 @@
 - **Status:** accepted for the USB Serial/JTAG developer/HIL profile; portable
   protocol/core, independent vectors, E290 resident durable lifecycle, bounded
   entropy, and bearer-neutral secret handoff implemented and target-verified;
+  distinct USB and BLE pairing bearer bindings are implemented and tested;
   node/USB scheduling, recoverable pairing utility, and minimal authenticated
   USB session/API bearer implemented; powered initialize/pair/reboot,
   capabilities/identity, durable submission, sequential status, peer proof, and
@@ -70,10 +71,12 @@ The fixed record kinds are:
 | AbortCurrent response | `0x2b` | device to client |
 
 Pairing protocol major/minor are `1.0`, the proof suite is `2`
-(HMAC-SHA256 with a 256-bit PSK and durable Active-generation binding), and
-bearer binding `1` means ESP32-S3 USB Serial/JTAG. Other bearer values remain
-unavailable in this profile. Pairing never accepts a client-supplied principal,
-permission set, policy version, or credential generation.
+(HMAC-SHA256 with a 256-bit PSK and durable Active-generation binding), bearer
+binding `1` means ESP32-S3 USB Serial/JTAG, and binding `2` means an
+authenticated BLE GATT appliance connection. No other bearer code is assigned.
+Every decoder is supplied the expected owning bearer and rejects a
+supported-but-different binding. Pairing never accepts a client-supplied
+principal, permission set, policy version, or credential generation.
 
 ### Begin only offers a durably recoverable Pending credential
 
@@ -97,7 +100,7 @@ A successful Begin response is exactly 88 bytes:
 | 8 | 2 | pairing major `1`, little-endian |
 | 10 | 2 | pairing minor `0`, little-endian |
 | 12 | 2 | proof suite `2`, little-endian |
-| 14 | 1 | bearer binding `1` |
+| 14 | 1 | owning bearer binding: USB `1` or BLE GATT `2` |
 | 15 | 1 | reserved, exactly zero |
 | 16 | 16 | stable public device-API ID |
 | 32 | 16 | new credential ID |
@@ -131,7 +134,7 @@ Its request payload is exactly 64 bytes:
 | 0 | 2 | pairing major `1`, little-endian |
 | 2 | 2 | pairing minor `0`, little-endian |
 | 4 | 2 | proof suite `2`, little-endian |
-| 6 | 1 | bearer binding `1` |
+| 6 | 1 | owning bearer binding: USB `1` or BLE GATT `2` |
 | 7 | 1 | reserved, exactly zero |
 | 8 | 16 | exact pending credential ID |
 | 24 | 8 | exact pending generation, little-endian |
@@ -152,7 +155,7 @@ A successful challenge response is exactly 104 bytes:
 | 8 | 2 | pairing major `1`, little-endian |
 | 10 | 2 | pairing minor `0`, little-endian |
 | 12 | 2 | proof suite `2`, little-endian |
-| 14 | 1 | bearer binding `1` |
+| 14 | 1 | owning bearer binding: USB `1` or BLE GATT `2` |
 | 15 | 1 | reserved, exactly zero |
 | 16 | 16 | stable public device-API ID |
 | 32 | 8 | nonzero boot-lifetime connection epoch, little-endian |

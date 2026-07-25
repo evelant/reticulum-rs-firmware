@@ -98,6 +98,7 @@ function peripheralInfoDiscovery(info: PeripheralInfo): BleGattDiscovery {
     characteristics: (info.characteristics ?? []).map((characteristic) => ({
       serviceUuid: characteristic.service,
       characteristicUuid: characteristic.characteristic,
+      canRead: characteristic.properties.Read === "Read",
       canWriteWithResponse: characteristic.properties.Write === "Write",
       canIndicate: characteristic.properties.Indicate === "Indicate",
     })),
@@ -200,6 +201,14 @@ class ReactNativeBleManagerDriver implements BleCentralDriver {
       // The default ATT MTU always leaves a 20-byte attribute payload.
     }
     return MINIMUM_WRITE_WITH_RESPONSE_BYTES;
+  }
+
+  async read(
+    peripheralId: string,
+    serviceUuid: string,
+    characteristicUuid: string,
+  ): Promise<Uint8Array> {
+    return Uint8Array.from(await BleManager.read(peripheralId, serviceUuid, characteristicUuid));
   }
 
   async writeWithResponse(

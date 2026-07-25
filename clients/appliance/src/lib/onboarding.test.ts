@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import type { OnboardingState, OnboardingView } from "../generated/api.ts";
 import {
+  BLE_SECURITY_CONTINUE_LABEL,
   bleCandidateDetails,
   bleCandidateName,
   bleDiscoveryPresentation,
@@ -25,6 +26,27 @@ describe("onboarding recovery presentation", () => {
     );
     expect(before.instruction).toContain("middle button labelled 21");
     expect(waiting.instruction).toContain("between RST and BOOT");
+    expect(waiting.instruction).toContain("six digits shown on that board");
+    expect(waiting.instruction).toContain("five-minute");
+  });
+
+  test("guides physical presence before one forgiving continuation barrier", () => {
+    const presentation = onboardingPresentation(
+      view({ state: "working", stage: "waiting_for_ble_security" }),
+    );
+
+    expect(presentation.instruction).toContain("no appliance data has been sent");
+    expect(presentation.instruction).toContain("release GPIO21");
+    expect(presentation.instruction).toContain("iOS prompt");
+    expect(presentation.instruction).toContain("within 30 seconds");
+    expect(presentation.instruction).toContain("paired with this board before");
+    expect(presentation.instruction).toContain("silently reuses the saved bond");
+    expect(presentation.instruction).toContain("shows no code or prompt");
+    expect(presentation.instruction).toContain("keep this exact link open and wait");
+    expect(presentation.instruction).toContain("Do not wait");
+    expect(presentation.instruction).toContain("only after");
+    expect(presentation.instruction).toContain(`tap ${BLE_SECURITY_CONTINUE_LABEL}`);
+    expect(BLE_SECURITY_CONTINUE_LABEL).toBe("Continue after holding GPIO21");
   });
 
   test("never offers an unsafe action after activation ambiguity", () => {
@@ -76,7 +98,8 @@ describe("native credential import presentation", () => {
     expect(presentation.identifierLabel).toBeNull();
     expect(presentation.instruction).toContain("qualified USB pairing workflow");
     expect(presentation.instruction).toContain("selecting another board");
-    expect(presentation.instruction).toContain("clearing local app data");
+    expect(presentation.instruction).toContain("single-board UI");
+    expect(presentation.instruction).toContain("Clearing local app data");
     expect(presentation.instruction).toContain("Full in-app BLE pairing remains future work");
   });
 
@@ -165,6 +188,27 @@ describe("credential-free BLE discovery presentation", () => {
         true,
       ).available,
     ).toBeFalse();
+  });
+
+  test("retains the selected-candidate surface through native progress and retry states", () => {
+    for (const lifecycle of [
+      { state: "working", stage: "waiting_for_ble_security" },
+      { state: "working", stage: "waiting_for_pairing_presence" },
+      { state: "faulted", reason: "protocol_or_persistence_failure" },
+      { state: "resume_available" },
+      { state: "abort_required" },
+    ] as const) {
+      expect(
+        bleDiscoveryPresentation(
+          {
+            available: true,
+            method: "managed_pairing",
+            snapshot: { lifecycle, revision: 2, usb_serial: "board-a" },
+          },
+          true,
+        ).available,
+      ).toBeTrue();
+    }
   });
 
   test("never selects a board merely because discovery returned one", () => {

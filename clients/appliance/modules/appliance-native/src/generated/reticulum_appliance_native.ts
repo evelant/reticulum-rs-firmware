@@ -6,7 +6,7 @@
 import nativeModule from "./reticulum_appliance_native-ffi";
 import { type UniffiRustFutureContinuationCallback, type UniffiForeignFutureDroppedCallback, type UniffiForeignFutureDroppedCallbackStruct,
 } from "./reticulum_appliance_native-ffi";
-import { type FfiConverter, type UniffiByteArray, type UniffiGcObject, type UniffiHandle, type UniffiObjectFactory, AbstractFfiConverterByteArray, FfiConverterArrayBuffer, FfiConverterInt32, FfiConverterObject, FfiConverterOptional, FfiConverterUInt16, FfiConverterUInt32, FfiConverterUInt64, FfiConverterUInt8, RustBuffer, UniffiAbstractObject, UniffiEnum, UniffiError, UniffiInternalError, UniffiRustCaller, destructorGuardSymbol, pointerLiteralSymbol, uniffiCreateFfiConverterString, uniffiCreateRecord, uniffiRustCallAsync, uniffiTypeNameSymbol, variantOrdinalSymbol,
+import { type FfiConverter, type UniffiByteArray, type UniffiGcObject, type UniffiHandle, type UniffiObjectFactory, AbstractFfiConverterByteArray, FfiConverterArray, FfiConverterArrayBuffer, FfiConverterInt32, FfiConverterObject, FfiConverterOptional, FfiConverterUInt16, FfiConverterUInt32, FfiConverterUInt64, FfiConverterUInt8, RustBuffer, UniffiAbstractObject, UniffiEnum, UniffiError, UniffiInternalError, UniffiRustCaller, destructorGuardSymbol, pointerLiteralSymbol, uniffiCreateFfiConverterString, uniffiCreateRecord, uniffiRustCallAsync, uniffiTypeNameSymbol, variantOrdinalSymbol,
 } from "@ubjs/core";
 const uniffiCaller = new UniffiRustCaller(() => ({ code: 0 }));
 
@@ -138,6 +138,15 @@ export type NativeBleGattProfile = {
      */
     txUuid: string,
     /**
+     * Authenticated-read confirmation characteristic UUID.
+     */
+    securityConfirmationUuid: string,
+    /**
+     * Public value proving that the retained authenticated link is ready for
+     * application protocol bytes.
+     */
+    securityConfirmationReadyValue: ArrayBuffer,
+    /**
      * Universally safe initial ATT value size.
      */
     initialAttValueBytes: number
@@ -169,6 +178,8 @@ const FfiConverterTypeNativeBleGattProfile = (() => {
                 serviceUuid: FfiConverterString.read(from),
                 rxUuid: FfiConverterString.read(from),
                 txUuid: FfiConverterString.read(from),
+                securityConfirmationUuid: FfiConverterString.read(from),
+                securityConfirmationReadyValue: FfiConverterArrayBuffer.read(from),
                 initialAttValueBytes: FfiConverterUInt32.read(from)
             };
         }
@@ -178,6 +189,8 @@ const FfiConverterTypeNativeBleGattProfile = (() => {
             FfiConverterString.write(value.serviceUuid, into);
             FfiConverterString.write(value.rxUuid, into);
             FfiConverterString.write(value.txUuid, into);
+            FfiConverterString.write(value.securityConfirmationUuid, into);
+            FfiConverterArrayBuffer.write(value.securityConfirmationReadyValue, into);
             FfiConverterUInt32.write(value.initialAttValueBytes, into);
         }
         allocationSize(value: TypeName): number {
@@ -186,7 +199,473 @@ const FfiConverterTypeNativeBleGattProfile = (() => {
              FfiConverterString.allocationSize(value.serviceUuid) +
              FfiConverterString.allocationSize(value.rxUuid) +
              FfiConverterString.allocationSize(value.txUuid) +
+             FfiConverterString.allocationSize(value.securityConfirmationUuid) +
+             FfiConverterArrayBuffer.allocationSize(value.securityConfirmationReadyValue) +
              FfiConverterUInt32.allocationSize(value.initialAttValueBytes);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
+/**
+ * Coarse, secret-free phase suitable for UI polling.
+ */
+export enum NativeBleOnboardingPhase {
+    /**
+     * No selected subscribed GATT link is registered.
+     */
+    Idle,
+    /**
+     * A selected subscribed link is ready for one operation.
+     */
+    LinkReady,
+    /**
+     * Rust is validating local recovery state and claiming the selected link.
+     */
+    Preparing,
+    /**
+     * Rust is reading the device credential-store status.
+     */
+    CheckingInitialization,
+    /**
+     * Device credential-store initialization is in progress.
+     */
+    Initializing,
+    /**
+     * The device credential store is initialized.
+     */
+    Initialized,
+    /**
+     * GPIO physical presence is required for credential-store initialization.
+     */
+    WaitingForInitializationPresence,
+    /**
+     * GPIO physical presence is required to allocate a Pending credential.
+     */
+    WaitingForBeginPresence,
+    /**
+     * The Pending credential is durably resume-safe in app-private storage.
+     */
+    PendingPersisted,
+    /**
+     * GPIO physical presence is required to authorize the proof challenge.
+     */
+    WaitingForProofPresence,
+    /**
+     * The device proof challenge was accepted.
+     */
+    ProofChallengeAccepted,
+    /**
+     * Activation ambiguity was durably recorded before sending Activate.
+     */
+    ActivationPrepared,
+    /**
+     * An Active credential is being published into its device-keyed profile.
+     */
+    PublishingProfile,
+    /**
+     * Pairing completed and the returned public profile is active.
+     */
+    Complete,
+    /**
+     * GPIO physical presence is required to abort the device Pending owner.
+     */
+    WaitingForAbortPresence,
+    /**
+     * A confirmed abort is being reconciled with app-private recovery state.
+     */
+    FinalizingAbort,
+    /**
+     * Device and app-private Pending state were definitely cleared.
+     */
+    Aborted,
+    /**
+     * The last operation failed; inspect the coarse failure category.
+     */
+    Failed
+}
+
+const FfiConverterTypeNativeBleOnboardingPhase = (() => {
+    const ordinalConverter = FfiConverterInt32;
+    type TypeName = NativeBleOnboardingPhase;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            switch (ordinalConverter.read(from)) {
+                case 1: return NativeBleOnboardingPhase.Idle;
+                case 2: return NativeBleOnboardingPhase.LinkReady;
+                case 3: return NativeBleOnboardingPhase.Preparing;
+                case 4: return NativeBleOnboardingPhase.CheckingInitialization;
+                case 5: return NativeBleOnboardingPhase.Initializing;
+                case 6: return NativeBleOnboardingPhase.Initialized;
+                case 7: return NativeBleOnboardingPhase.WaitingForInitializationPresence;
+                case 8: return NativeBleOnboardingPhase.WaitingForBeginPresence;
+                case 9: return NativeBleOnboardingPhase.PendingPersisted;
+                case 10: return NativeBleOnboardingPhase.WaitingForProofPresence;
+                case 11: return NativeBleOnboardingPhase.ProofChallengeAccepted;
+                case 12: return NativeBleOnboardingPhase.ActivationPrepared;
+                case 13: return NativeBleOnboardingPhase.PublishingProfile;
+                case 14: return NativeBleOnboardingPhase.Complete;
+                case 15: return NativeBleOnboardingPhase.WaitingForAbortPresence;
+                case 16: return NativeBleOnboardingPhase.FinalizingAbort;
+                case 17: return NativeBleOnboardingPhase.Aborted;
+                case 18: return NativeBleOnboardingPhase.Failed;
+                default: throw new UniffiInternalError.UnexpectedEnumCase();
+            }
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            switch (value) {
+                case NativeBleOnboardingPhase.Idle: return ordinalConverter.write(1, into);
+                case NativeBleOnboardingPhase.LinkReady: return ordinalConverter.write(2, into);
+                case NativeBleOnboardingPhase.Preparing: return ordinalConverter.write(3, into);
+                case NativeBleOnboardingPhase.CheckingInitialization: return ordinalConverter.write(4, into);
+                case NativeBleOnboardingPhase.Initializing: return ordinalConverter.write(5, into);
+                case NativeBleOnboardingPhase.Initialized: return ordinalConverter.write(6, into);
+                case NativeBleOnboardingPhase.WaitingForInitializationPresence: return ordinalConverter.write(7, into);
+                case NativeBleOnboardingPhase.WaitingForBeginPresence: return ordinalConverter.write(8, into);
+                case NativeBleOnboardingPhase.PendingPersisted: return ordinalConverter.write(9, into);
+                case NativeBleOnboardingPhase.WaitingForProofPresence: return ordinalConverter.write(10, into);
+                case NativeBleOnboardingPhase.ProofChallengeAccepted: return ordinalConverter.write(11, into);
+                case NativeBleOnboardingPhase.ActivationPrepared: return ordinalConverter.write(12, into);
+                case NativeBleOnboardingPhase.PublishingProfile: return ordinalConverter.write(13, into);
+                case NativeBleOnboardingPhase.Complete: return ordinalConverter.write(14, into);
+                case NativeBleOnboardingPhase.WaitingForAbortPresence: return ordinalConverter.write(15, into);
+                case NativeBleOnboardingPhase.FinalizingAbort: return ordinalConverter.write(16, into);
+                case NativeBleOnboardingPhase.Aborted: return ordinalConverter.write(17, into);
+                case NativeBleOnboardingPhase.Failed: return ordinalConverter.write(18, into);
+            }
+        }
+        allocationSize(value: TypeName): number {
+            return ordinalConverter.allocationSize(0);
+        }
+    }
+    return new FFIConverter();
+})();
+
+/**
+ * User-visible operation currently owned by the native onboarding state
+ * machine.
+ */
+export enum NativeBleOnboardingOperation {
+    /**
+     * Create and activate a new appliance credential.
+     */
+    Pair,
+    /**
+     * Resume a canonical durable Pending credential.
+     */
+    Resume,
+    /**
+     * Abort the device-selected Pending credential.
+     */
+    AbortCurrent
+}
+
+const FfiConverterTypeNativeBleOnboardingOperation = (() => {
+    const ordinalConverter = FfiConverterInt32;
+    type TypeName = NativeBleOnboardingOperation;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            switch (ordinalConverter.read(from)) {
+                case 1: return NativeBleOnboardingOperation.Pair;
+                case 2: return NativeBleOnboardingOperation.Resume;
+                case 3: return NativeBleOnboardingOperation.AbortCurrent;
+                default: throw new UniffiInternalError.UnexpectedEnumCase();
+            }
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            switch (value) {
+                case NativeBleOnboardingOperation.Pair: return ordinalConverter.write(1, into);
+                case NativeBleOnboardingOperation.Resume: return ordinalConverter.write(2, into);
+                case NativeBleOnboardingOperation.AbortCurrent: return ordinalConverter.write(3, into);
+            }
+        }
+        allocationSize(value: TypeName): number {
+            return ordinalConverter.allocationSize(0);
+        }
+    }
+    return new FFIConverter();
+})();
+
+/**
+ * Public facts decoded from one canonical Active credential.
+ */
+export type NativeCredentialSummary = {
+    /**
+     * Expected device API identifier as lowercase hexadecimal.
+     */
+    deviceId: string,
+    /**
+     * Opaque credential identifier as lowercase hexadecimal.
+     */
+    credentialId: string,
+    /**
+     * Active device-owned credential generation.
+     */
+    generation: bigint,
+    /**
+     * Stable E290 BLE advertising name when the device ID uses that namespace.
+     */
+    expectedBleLocalName?: string
+}
+
+/**
+ * Generated factory for {@link NativeCredentialSummary} record objects.
+ */
+export const NativeCredentialSummary = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<NativeCredentialSummary, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<NativeCredentialSummary>,
+    });
+})();
+
+const FfiConverterTypeNativeCredentialSummary = (() => {
+    type TypeName = NativeCredentialSummary;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                deviceId: FfiConverterString.read(from),
+                credentialId: FfiConverterString.read(from),
+                generation: FfiConverterUInt64.read(from),
+                expectedBleLocalName: FfiConverterOptionalString.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterString.write(value.deviceId, into);
+            FfiConverterString.write(value.credentialId, into);
+            FfiConverterUInt64.write(value.generation, into);
+            FfiConverterOptionalString.write(value.expectedBleLocalName, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterString.allocationSize(value.deviceId) +
+             FfiConverterString.allocationSize(value.credentialId) +
+             FfiConverterUInt64.allocationSize(value.generation) +
+             FfiConverterOptionalString.allocationSize(value.expectedBleLocalName);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
+/**
+ * Public, secret-free facts for one stored physical-device profile.
+ */
+export type NativeProfileSummary = {
+    /**
+     * Canonical lowercase hexadecimal profile key.
+     */
+    profileKey: string,
+    /**
+     * Public facts decoded from the profile's canonical Active credential.
+     */
+    credential: NativeCredentialSummary
+}
+
+/**
+ * Generated factory for {@link NativeProfileSummary} record objects.
+ */
+export const NativeProfileSummary = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<NativeProfileSummary, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<NativeProfileSummary>,
+    });
+})();
+
+const FfiConverterTypeNativeProfileSummary = (() => {
+    type TypeName = NativeProfileSummary;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                profileKey: FfiConverterString.read(from),
+                credential: FfiConverterTypeNativeCredentialSummary.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterString.write(value.profileKey, into);
+            FfiConverterTypeNativeCredentialSummary.write(value.credential, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterString.allocationSize(value.profileKey) +
+             FfiConverterTypeNativeCredentialSummary.allocationSize(value.credential);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
+/**
+ * Coarse failure category that never contains a credential, passkey, path, or
+ * protocol payload.
+ */
+export enum NativeBleOnboardingFailure {
+    /**
+     * Another onboarding operation already owns this object.
+     */
+    Busy,
+    /**
+     * No selected, subscribed GATT generation was available.
+     */
+    NoSubscribedLink,
+    /**
+     * The device did not reach a definitely initialized state.
+     */
+    InitializationIncomplete,
+    /**
+     * A resume-safe Pending artifact exists and must be resumed or aborted.
+     */
+    ResumeRequired,
+    /**
+     * An ambiguous Begin reservation requires a confirmed device abort.
+     */
+    AbortRequired,
+    /**
+     * Activation may have been sent and requires authenticated reconciliation.
+     */
+    ReconciliationRequired,
+    /**
+     * App-private recovery state is malformed or otherwise unsafe.
+     */
+    InvalidRecoveryState,
+    /**
+     * The authenticated live-pairing exchange did not complete.
+     */
+    ProtocolFailure,
+    /**
+     * The activated credential could not be durably published or selected.
+     */
+    ProfilePublicationFailure,
+    /**
+     * The native blocking task terminated unexpectedly.
+     */
+    Internal
+}
+
+const FfiConverterTypeNativeBleOnboardingFailure = (() => {
+    const ordinalConverter = FfiConverterInt32;
+    type TypeName = NativeBleOnboardingFailure;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            switch (ordinalConverter.read(from)) {
+                case 1: return NativeBleOnboardingFailure.Busy;
+                case 2: return NativeBleOnboardingFailure.NoSubscribedLink;
+                case 3: return NativeBleOnboardingFailure.InitializationIncomplete;
+                case 4: return NativeBleOnboardingFailure.ResumeRequired;
+                case 5: return NativeBleOnboardingFailure.AbortRequired;
+                case 6: return NativeBleOnboardingFailure.ReconciliationRequired;
+                case 7: return NativeBleOnboardingFailure.InvalidRecoveryState;
+                case 8: return NativeBleOnboardingFailure.ProtocolFailure;
+                case 9: return NativeBleOnboardingFailure.ProfilePublicationFailure;
+                case 10: return NativeBleOnboardingFailure.Internal;
+                default: throw new UniffiInternalError.UnexpectedEnumCase();
+            }
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            switch (value) {
+                case NativeBleOnboardingFailure.Busy: return ordinalConverter.write(1, into);
+                case NativeBleOnboardingFailure.NoSubscribedLink: return ordinalConverter.write(2, into);
+                case NativeBleOnboardingFailure.InitializationIncomplete: return ordinalConverter.write(3, into);
+                case NativeBleOnboardingFailure.ResumeRequired: return ordinalConverter.write(4, into);
+                case NativeBleOnboardingFailure.AbortRequired: return ordinalConverter.write(5, into);
+                case NativeBleOnboardingFailure.ReconciliationRequired: return ordinalConverter.write(6, into);
+                case NativeBleOnboardingFailure.InvalidRecoveryState: return ordinalConverter.write(7, into);
+                case NativeBleOnboardingFailure.ProtocolFailure: return ordinalConverter.write(8, into);
+                case NativeBleOnboardingFailure.ProfilePublicationFailure: return ordinalConverter.write(9, into);
+                case NativeBleOnboardingFailure.Internal: return ordinalConverter.write(10, into);
+            }
+        }
+        allocationSize(value: TypeName): number {
+            return ordinalConverter.allocationSize(0);
+        }
+    }
+    return new FFIConverter();
+})();
+
+/**
+ * Secret-free polling snapshot for one native BLE onboarding owner.
+ */
+export type NativeBleOnboardingSnapshot = {
+    /**
+     * Strictly increasing local transition counter.
+     */
+    revision: bigint,
+    /**
+     * Current coarse phase.
+     */
+    phase: NativeBleOnboardingPhase,
+    /**
+     * Current or most recent operation.
+     */
+    operation?: NativeBleOnboardingOperation,
+    /**
+     * Registered platform link generation, when present.
+     */
+    linkGeneration?: bigint,
+    /**
+     * Public device-keyed profile after successful publication.
+     */
+    completedProfile?: NativeProfileSummary,
+    /**
+     * Coarse failure category for the most recent failed operation.
+     */
+    failure?: NativeBleOnboardingFailure
+}
+
+/**
+ * Generated factory for {@link NativeBleOnboardingSnapshot} record objects.
+ */
+export const NativeBleOnboardingSnapshot = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<NativeBleOnboardingSnapshot, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<NativeBleOnboardingSnapshot>,
+    });
+})();
+
+const FfiConverterTypeNativeBleOnboardingSnapshot = (() => {
+    type TypeName = NativeBleOnboardingSnapshot;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                revision: FfiConverterUInt64.read(from),
+                phase: FfiConverterTypeNativeBleOnboardingPhase.read(from),
+                operation: FfiConverterOptionalTypeNativeBleOnboardingOperation.read(from),
+                linkGeneration: FfiConverterOptionalUInt64.read(from),
+                completedProfile: FfiConverterOptionalTypeNativeProfileSummary.read(from),
+                failure: FfiConverterOptionalTypeNativeBleOnboardingFailure.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterUInt64.write(value.revision, into);
+            FfiConverterTypeNativeBleOnboardingPhase.write(value.phase, into);
+            FfiConverterOptionalTypeNativeBleOnboardingOperation.write(value.operation, into);
+            FfiConverterOptionalUInt64.write(value.linkGeneration, into);
+            FfiConverterOptionalTypeNativeProfileSummary.write(value.completedProfile, into);
+            FfiConverterOptionalTypeNativeBleOnboardingFailure.write(value.failure, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterUInt64.allocationSize(value.revision) +
+             FfiConverterTypeNativeBleOnboardingPhase.allocationSize(value.phase) +
+             FfiConverterOptionalTypeNativeBleOnboardingOperation.allocationSize(value.operation) +
+             FfiConverterOptionalUInt64.allocationSize(value.linkGeneration) +
+             FfiConverterOptionalTypeNativeProfileSummary.allocationSize(value.completedProfile) +
+             FfiConverterOptionalTypeNativeBleOnboardingFailure.allocationSize(value.failure);
 
         }
     };
@@ -309,65 +788,51 @@ const FfiConverterTypeNativeBridgeContract = (() => {
 })();
 
 /**
- * Public facts decoded from one canonical Active credential.
+ * Secret-free projection of the device-keyed profile store.
  */
-export type NativeCredentialSummary = {
+export type NativeProfileStoreSnapshot = {
     /**
-     * Expected device API identifier as lowercase hexadecimal.
+     * Canonical key selected for the single active application session.
      */
-    deviceId: string,
+    activeProfileKey?: string,
     /**
-     * Opaque credential identifier as lowercase hexadecimal.
+     * All validated profiles, sorted by canonical key.
      */
-    credentialId: string,
-    /**
-     * Active device-owned credential generation.
-     */
-    generation: bigint,
-    /**
-     * Stable E290 BLE advertising name when the device ID uses that namespace.
-     */
-    expectedBleLocalName?: string
+    profiles: Array<NativeProfileSummary>
 }
 
 /**
- * Generated factory for {@link NativeCredentialSummary} record objects.
+ * Generated factory for {@link NativeProfileStoreSnapshot} record objects.
  */
-export const NativeCredentialSummary = (() => {
+export const NativeProfileStoreSnapshot = (() => {
     const defaults = () => ({
     });
     const create = (() => {
-        return uniffiCreateRecord<NativeCredentialSummary, ReturnType<typeof defaults>>(defaults);
+        return uniffiCreateRecord<NativeProfileStoreSnapshot, ReturnType<typeof defaults>>(defaults);
     })();
     return Object.freeze({
         create,
         new: create,
-        defaults: () => Object.freeze(defaults()) as Partial<NativeCredentialSummary>,
+        defaults: () => Object.freeze(defaults()) as Partial<NativeProfileStoreSnapshot>,
     });
 })();
 
-const FfiConverterTypeNativeCredentialSummary = (() => {
-    type TypeName = NativeCredentialSummary;
+const FfiConverterTypeNativeProfileStoreSnapshot = (() => {
+    type TypeName = NativeProfileStoreSnapshot;
     class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
         read(from: RustBuffer): TypeName {
             return {
-                deviceId: FfiConverterString.read(from),
-                credentialId: FfiConverterString.read(from),
-                generation: FfiConverterUInt64.read(from),
-                expectedBleLocalName: FfiConverterOptionalString.read(from)
+                activeProfileKey: FfiConverterOptionalString.read(from),
+                profiles: FfiConverterSequenceTypeNativeProfileSummary.read(from)
             };
         }
         write(value: TypeName, into: RustBuffer): void {
-            FfiConverterString.write(value.deviceId, into);
-            FfiConverterString.write(value.credentialId, into);
-            FfiConverterUInt64.write(value.generation, into);
-            FfiConverterOptionalString.write(value.expectedBleLocalName, into);
+            FfiConverterOptionalString.write(value.activeProfileKey, into);
+            FfiConverterSequenceTypeNativeProfileSummary.write(value.profiles, into);
         }
         allocationSize(value: TypeName): number {
-            return FfiConverterString.allocationSize(value.deviceId) +
-             FfiConverterString.allocationSize(value.credentialId) +
-             FfiConverterUInt64.allocationSize(value.generation) +
-             FfiConverterOptionalString.allocationSize(value.expectedBleLocalName);
+            return FfiConverterOptionalString.allocationSize(value.activeProfileKey) +
+             FfiConverterSequenceTypeNativeProfileSummary.allocationSize(value.profiles);
 
         }
     };
@@ -1355,6 +1820,457 @@ const FfiConverterTypeNativeBleError = (() => {
 })();
 
 
+// Error type: NativeBleOnboardingError
+export enum NativeBleOnboardingError_Tags {
+    Busy = "Busy",
+    NoSubscribedLink = "NoSubscribedLink",
+    InitializationIncomplete = "InitializationIncomplete",
+    ResumeRequired = "ResumeRequired",
+    AbortRequired = "AbortRequired",
+    ReconciliationRequired = "ReconciliationRequired",
+    InvalidRecoveryState = "InvalidRecoveryState",
+    ProtocolFailure = "ProtocolFailure",
+    ProfilePublicationFailure = "ProfilePublicationFailure",
+    Internal = "Internal"
+}
+/**
+ * Failure returned by a native BLE onboarding operation.
+ */
+export const NativeBleOnboardingError = (() => {
+
+    type Busy__interface = {
+        tag: NativeBleOnboardingError_Tags.Busy
+    };
+    /**
+     * Another onboarding operation already owns this object.
+     */
+    class Busy_ extends UniffiError implements Busy__interface {
+        /**
+         * @private
+         * This field is private and should not be used, use `tag` instead.
+         */
+        readonly [uniffiTypeNameSymbol] = "NativeBleOnboardingError";
+        readonly tag = NativeBleOnboardingError_Tags.Busy;
+        constructor() {
+            super("NativeBleOnboardingError", "Busy");
+        }
+
+        static new(): Busy_ {
+            return new Busy_();
+        }
+
+        static instanceOf(obj: any): obj is Busy_ {
+            return obj.tag === NativeBleOnboardingError_Tags.Busy;
+        }
+        static hasInner(obj: any): obj is Busy_ {
+            return false;
+        }
+
+    }
+
+    type NoSubscribedLink__interface = {
+        tag: NativeBleOnboardingError_Tags.NoSubscribedLink
+    };
+    /**
+     * No selected, subscribed GATT generation was available.
+     */
+    class NoSubscribedLink_ extends UniffiError implements NoSubscribedLink__interface {
+        /**
+         * @private
+         * This field is private and should not be used, use `tag` instead.
+         */
+        readonly [uniffiTypeNameSymbol] = "NativeBleOnboardingError";
+        readonly tag = NativeBleOnboardingError_Tags.NoSubscribedLink;
+        constructor() {
+            super("NativeBleOnboardingError", "NoSubscribedLink");
+        }
+
+        static new(): NoSubscribedLink_ {
+            return new NoSubscribedLink_();
+        }
+
+        static instanceOf(obj: any): obj is NoSubscribedLink_ {
+            return obj.tag === NativeBleOnboardingError_Tags.NoSubscribedLink;
+        }
+        static hasInner(obj: any): obj is NoSubscribedLink_ {
+            return false;
+        }
+
+    }
+
+    type InitializationIncomplete__interface = {
+        tag: NativeBleOnboardingError_Tags.InitializationIncomplete
+    };
+    /**
+     * The device did not reach a definitely initialized state.
+     */
+    class InitializationIncomplete_ extends UniffiError implements InitializationIncomplete__interface {
+        /**
+         * @private
+         * This field is private and should not be used, use `tag` instead.
+         */
+        readonly [uniffiTypeNameSymbol] = "NativeBleOnboardingError";
+        readonly tag = NativeBleOnboardingError_Tags.InitializationIncomplete;
+        constructor() {
+            super("NativeBleOnboardingError", "InitializationIncomplete");
+        }
+
+        static new(): InitializationIncomplete_ {
+            return new InitializationIncomplete_();
+        }
+
+        static instanceOf(obj: any): obj is InitializationIncomplete_ {
+            return obj.tag === NativeBleOnboardingError_Tags.InitializationIncomplete;
+        }
+        static hasInner(obj: any): obj is InitializationIncomplete_ {
+            return false;
+        }
+
+    }
+
+    type ResumeRequired__interface = {
+        tag: NativeBleOnboardingError_Tags.ResumeRequired
+    };
+    /**
+     * A resume-safe Pending artifact exists and must be resumed or aborted.
+     */
+    class ResumeRequired_ extends UniffiError implements ResumeRequired__interface {
+        /**
+         * @private
+         * This field is private and should not be used, use `tag` instead.
+         */
+        readonly [uniffiTypeNameSymbol] = "NativeBleOnboardingError";
+        readonly tag = NativeBleOnboardingError_Tags.ResumeRequired;
+        constructor() {
+            super("NativeBleOnboardingError", "ResumeRequired");
+        }
+
+        static new(): ResumeRequired_ {
+            return new ResumeRequired_();
+        }
+
+        static instanceOf(obj: any): obj is ResumeRequired_ {
+            return obj.tag === NativeBleOnboardingError_Tags.ResumeRequired;
+        }
+        static hasInner(obj: any): obj is ResumeRequired_ {
+            return false;
+        }
+
+    }
+
+    type AbortRequired__interface = {
+        tag: NativeBleOnboardingError_Tags.AbortRequired
+    };
+    /**
+     * An ambiguous Begin reservation requires a confirmed device abort.
+     */
+    class AbortRequired_ extends UniffiError implements AbortRequired__interface {
+        /**
+         * @private
+         * This field is private and should not be used, use `tag` instead.
+         */
+        readonly [uniffiTypeNameSymbol] = "NativeBleOnboardingError";
+        readonly tag = NativeBleOnboardingError_Tags.AbortRequired;
+        constructor() {
+            super("NativeBleOnboardingError", "AbortRequired");
+        }
+
+        static new(): AbortRequired_ {
+            return new AbortRequired_();
+        }
+
+        static instanceOf(obj: any): obj is AbortRequired_ {
+            return obj.tag === NativeBleOnboardingError_Tags.AbortRequired;
+        }
+        static hasInner(obj: any): obj is AbortRequired_ {
+            return false;
+        }
+
+    }
+
+    type ReconciliationRequired__interface = {
+        tag: NativeBleOnboardingError_Tags.ReconciliationRequired
+    };
+    /**
+     * Activation may have been sent and requires authenticated reconciliation.
+     */
+    class ReconciliationRequired_ extends UniffiError implements ReconciliationRequired__interface {
+        /**
+         * @private
+         * This field is private and should not be used, use `tag` instead.
+         */
+        readonly [uniffiTypeNameSymbol] = "NativeBleOnboardingError";
+        readonly tag = NativeBleOnboardingError_Tags.ReconciliationRequired;
+        constructor() {
+            super("NativeBleOnboardingError", "ReconciliationRequired");
+        }
+
+        static new(): ReconciliationRequired_ {
+            return new ReconciliationRequired_();
+        }
+
+        static instanceOf(obj: any): obj is ReconciliationRequired_ {
+            return obj.tag === NativeBleOnboardingError_Tags.ReconciliationRequired;
+        }
+        static hasInner(obj: any): obj is ReconciliationRequired_ {
+            return false;
+        }
+
+    }
+
+    type InvalidRecoveryState__interface = {
+        tag: NativeBleOnboardingError_Tags.InvalidRecoveryState
+    };
+    /**
+     * App-private recovery state is malformed or otherwise unsafe.
+     */
+    class InvalidRecoveryState_ extends UniffiError implements InvalidRecoveryState__interface {
+        /**
+         * @private
+         * This field is private and should not be used, use `tag` instead.
+         */
+        readonly [uniffiTypeNameSymbol] = "NativeBleOnboardingError";
+        readonly tag = NativeBleOnboardingError_Tags.InvalidRecoveryState;
+        constructor() {
+            super("NativeBleOnboardingError", "InvalidRecoveryState");
+        }
+
+        static new(): InvalidRecoveryState_ {
+            return new InvalidRecoveryState_();
+        }
+
+        static instanceOf(obj: any): obj is InvalidRecoveryState_ {
+            return obj.tag === NativeBleOnboardingError_Tags.InvalidRecoveryState;
+        }
+        static hasInner(obj: any): obj is InvalidRecoveryState_ {
+            return false;
+        }
+
+    }
+
+    type ProtocolFailure__interface = {
+        tag: NativeBleOnboardingError_Tags.ProtocolFailure
+    };
+    /**
+     * The authenticated live-pairing exchange did not complete.
+     */
+    class ProtocolFailure_ extends UniffiError implements ProtocolFailure__interface {
+        /**
+         * @private
+         * This field is private and should not be used, use `tag` instead.
+         */
+        readonly [uniffiTypeNameSymbol] = "NativeBleOnboardingError";
+        readonly tag = NativeBleOnboardingError_Tags.ProtocolFailure;
+        constructor() {
+            super("NativeBleOnboardingError", "ProtocolFailure");
+        }
+
+        static new(): ProtocolFailure_ {
+            return new ProtocolFailure_();
+        }
+
+        static instanceOf(obj: any): obj is ProtocolFailure_ {
+            return obj.tag === NativeBleOnboardingError_Tags.ProtocolFailure;
+        }
+        static hasInner(obj: any): obj is ProtocolFailure_ {
+            return false;
+        }
+
+    }
+
+    type ProfilePublicationFailure__interface = {
+        tag: NativeBleOnboardingError_Tags.ProfilePublicationFailure
+    };
+    /**
+     * The activated credential could not be durably published or selected.
+     */
+    class ProfilePublicationFailure_ extends UniffiError implements ProfilePublicationFailure__interface {
+        /**
+         * @private
+         * This field is private and should not be used, use `tag` instead.
+         */
+        readonly [uniffiTypeNameSymbol] = "NativeBleOnboardingError";
+        readonly tag = NativeBleOnboardingError_Tags.ProfilePublicationFailure;
+        constructor() {
+            super("NativeBleOnboardingError", "ProfilePublicationFailure");
+        }
+
+        static new(): ProfilePublicationFailure_ {
+            return new ProfilePublicationFailure_();
+        }
+
+        static instanceOf(obj: any): obj is ProfilePublicationFailure_ {
+            return obj.tag === NativeBleOnboardingError_Tags.ProfilePublicationFailure;
+        }
+        static hasInner(obj: any): obj is ProfilePublicationFailure_ {
+            return false;
+        }
+
+    }
+
+    type Internal__interface = {
+        tag: NativeBleOnboardingError_Tags.Internal
+    };
+    /**
+     * The native blocking task terminated unexpectedly.
+     */
+    class Internal_ extends UniffiError implements Internal__interface {
+        /**
+         * @private
+         * This field is private and should not be used, use `tag` instead.
+         */
+        readonly [uniffiTypeNameSymbol] = "NativeBleOnboardingError";
+        readonly tag = NativeBleOnboardingError_Tags.Internal;
+        constructor() {
+            super("NativeBleOnboardingError", "Internal");
+        }
+
+        static new(): Internal_ {
+            return new Internal_();
+        }
+
+        static instanceOf(obj: any): obj is Internal_ {
+            return obj.tag === NativeBleOnboardingError_Tags.Internal;
+        }
+        static hasInner(obj: any): obj is Internal_ {
+            return false;
+        }
+
+    }
+
+    function instanceOf(obj: any): obj is NativeBleOnboardingError {
+        return obj[uniffiTypeNameSymbol] === "NativeBleOnboardingError";
+    }
+
+    return Object.freeze({
+        instanceOf,
+  Busy: Busy_,
+  NoSubscribedLink: NoSubscribedLink_,
+  InitializationIncomplete: InitializationIncomplete_,
+  ResumeRequired: ResumeRequired_,
+  AbortRequired: AbortRequired_,
+  ReconciliationRequired: ReconciliationRequired_,
+  InvalidRecoveryState: InvalidRecoveryState_,
+  ProtocolFailure: ProtocolFailure_,
+  ProfilePublicationFailure: ProfilePublicationFailure_,
+  Internal: Internal_
+    });
+
+})();
+/**
+ * Failure returned by a native BLE onboarding operation.
+ */
+export type NativeBleOnboardingError = InstanceType<
+    typeof NativeBleOnboardingError['Busy' | 'NoSubscribedLink' | 'InitializationIncomplete' | 'ResumeRequired' | 'AbortRequired' | 'ReconciliationRequired' | 'InvalidRecoveryState' | 'ProtocolFailure' | 'ProfilePublicationFailure' | 'Internal']
+>;
+
+// FfiConverter for enum NativeBleOnboardingError
+const FfiConverterTypeNativeBleOnboardingError = (() => {
+    const ordinalConverter = FfiConverterInt32;
+    type TypeName = NativeBleOnboardingError;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            switch (ordinalConverter.read(from)) {
+                case 1: return new NativeBleOnboardingError.Busy();
+                case 2: return new NativeBleOnboardingError.NoSubscribedLink();
+                case 3: return new NativeBleOnboardingError.InitializationIncomplete();
+                case 4: return new NativeBleOnboardingError.ResumeRequired();
+                case 5: return new NativeBleOnboardingError.AbortRequired();
+                case 6: return new NativeBleOnboardingError.ReconciliationRequired();
+                case 7: return new NativeBleOnboardingError.InvalidRecoveryState();
+                case 8: return new NativeBleOnboardingError.ProtocolFailure();
+                case 9: return new NativeBleOnboardingError.ProfilePublicationFailure();
+                case 10: return new NativeBleOnboardingError.Internal();
+                default: throw new UniffiInternalError.UnexpectedEnumCase();
+            }
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            switch (value.tag) {
+                case NativeBleOnboardingError_Tags.Busy: {
+                    ordinalConverter.write(1, into);
+                    return;
+                }
+                case NativeBleOnboardingError_Tags.NoSubscribedLink: {
+                    ordinalConverter.write(2, into);
+                    return;
+                }
+                case NativeBleOnboardingError_Tags.InitializationIncomplete: {
+                    ordinalConverter.write(3, into);
+                    return;
+                }
+                case NativeBleOnboardingError_Tags.ResumeRequired: {
+                    ordinalConverter.write(4, into);
+                    return;
+                }
+                case NativeBleOnboardingError_Tags.AbortRequired: {
+                    ordinalConverter.write(5, into);
+                    return;
+                }
+                case NativeBleOnboardingError_Tags.ReconciliationRequired: {
+                    ordinalConverter.write(6, into);
+                    return;
+                }
+                case NativeBleOnboardingError_Tags.InvalidRecoveryState: {
+                    ordinalConverter.write(7, into);
+                    return;
+                }
+                case NativeBleOnboardingError_Tags.ProtocolFailure: {
+                    ordinalConverter.write(8, into);
+                    return;
+                }
+                case NativeBleOnboardingError_Tags.ProfilePublicationFailure: {
+                    ordinalConverter.write(9, into);
+                    return;
+                }
+                case NativeBleOnboardingError_Tags.Internal: {
+                    ordinalConverter.write(10, into);
+                    return;
+                }
+                default:
+                    // Throwing from here means that NativeBleOnboardingError_Tags hasn't matched an ordinal.
+                    throw new UniffiInternalError.UnexpectedEnumCase();
+            }
+        }
+        allocationSize(value: TypeName): number {
+            switch (value.tag) {
+                case NativeBleOnboardingError_Tags.Busy: {
+                    return ordinalConverter.allocationSize(1);
+                }
+                case NativeBleOnboardingError_Tags.NoSubscribedLink: {
+                    return ordinalConverter.allocationSize(2);
+                }
+                case NativeBleOnboardingError_Tags.InitializationIncomplete: {
+                    return ordinalConverter.allocationSize(3);
+                }
+                case NativeBleOnboardingError_Tags.ResumeRequired: {
+                    return ordinalConverter.allocationSize(4);
+                }
+                case NativeBleOnboardingError_Tags.AbortRequired: {
+                    return ordinalConverter.allocationSize(5);
+                }
+                case NativeBleOnboardingError_Tags.ReconciliationRequired: {
+                    return ordinalConverter.allocationSize(6);
+                }
+                case NativeBleOnboardingError_Tags.InvalidRecoveryState: {
+                    return ordinalConverter.allocationSize(7);
+                }
+                case NativeBleOnboardingError_Tags.ProtocolFailure: {
+                    return ordinalConverter.allocationSize(8);
+                }
+                case NativeBleOnboardingError_Tags.ProfilePublicationFailure: {
+                    return ordinalConverter.allocationSize(9);
+                }
+                case NativeBleOnboardingError_Tags.Internal: {
+                    return ordinalConverter.allocationSize(10);
+                }
+                default: throw new UniffiInternalError.UnexpectedEnumCase();
+            }
+        }
+    }
+    return new FFIConverter();
+})();
+
+
 // Enum: NativeBlePlatformCommand
 export enum NativeBlePlatformCommand_Tags {
     Write = "Write",
@@ -1915,6 +2831,25 @@ private constructor(pointer: UniffiHandle) {
     }
 
 /**
+ * Open the active device-keyed profile with the platform-owned BLE GATT
+ * connector.
+ *
+ * Rust resolves both storage paths and retains the profile store for
+ * secret-free status, import, and future board activation operations.
+ */
+    static openBleProfile(profileStore: NativeProfileStoreLike): NativeApplianceLike /*throws*/ {
+    return FfiConverterTypeNativeAppliance.lift(uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError),
+            /*caller:*/ (callStatus) => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open_ble_profile(
+        FfiConverterTypeNativeProfileStore.lower(profileStore, nativeModule().rustbuffer_alloc),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    ));
+    }
+
+/**
  * Open one SQLite chat database with the Wi-Fi raw-TCP proof connector.
  *
  * The endpoint must be a literal IP socket address. The current E290 proof
@@ -1932,6 +2867,27 @@ private constructor(pointer: UniffiHandle) {
         FfiConverterString.lower(databasePath, nativeModule().rustbuffer_alloc),
         FfiConverterString.lower(endpoint, nativeModule().rustbuffer_alloc),
         FfiConverterString.lower(credentialPath, nativeModule().rustbuffer_alloc),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    ));
+    }
+
+/**
+ * Open the active device-keyed profile with the Wi-Fi raw-TCP connector.
+ *
+ * Rust resolves the active profile's SQLite and credential paths. When no
+ * profile is active, an isolated unconfigured database remains available
+ * for the single-board onboarding UI while the connector reports a
+ * missing credential.
+ */
+    static openWifiProfile(profileStore: NativeProfileStoreLike, endpoint: string): NativeApplianceLike /*throws*/ {
+    return FfiConverterTypeNativeAppliance.lift(uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError),
+            /*caller:*/ (callStatus) => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open_wifi_profile(
+        FfiConverterTypeNativeProfileStore.lower(profileStore, nativeModule().rustbuffer_alloc),
+        FfiConverterString.lower(endpoint, nativeModule().rustbuffer_alloc),
                 callStatus);
             },
             /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
@@ -2616,11 +3572,675 @@ const uniffiTypeNativeApplianceObjectFactory: UniffiObjectFactory<NativeApplianc
 }})();
 const FfiConverterTypeNativeAppliance = new FfiConverterObject(uniffiTypeNativeApplianceObjectFactory);
 
-// FfiConverter for string | undefined
-const FfiConverterOptionalString = new FfiConverterOptional(FfiConverterString);
+/**
+ * Sole native owner for one selected BLE onboarding ceremony.
+ *
+ * This object deliberately owns a different byte hub from
+ * [`crate::NativeAppliance`], preventing an ordinary authenticated connector
+ * from racing to claim the pre-authentication stream.
+ */
+export interface NativeBleOnboardingLike {
+
+/**
+ * Ask the device to abort its sole Pending credential and, only after a
+ * definitely successful response, remove safe local recovery state.
+ */
+    abortCurrent(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<void>;
+/**
+ * Report that the platform GATT link and subscription are gone.
+ */
+    bleDisconnected(generation: bigint, reason: string) /*throws*/: void;
+/**
+ * Append opaque bytes from one confirmed TX characteristic indication.
+ *
+ * During this alpha, the platform adapter relays these bounded bytes
+ * through TypeScript without parsing, logging, or persistence. A later
+ * Swift/Kotlin-to-Rust pump will remove that transient JavaScript hop.
+ */
+    bleIngestIndication(generation: bigint, bytes: ArrayBuffer) /*throws*/: void;
+/**
+ * Register the selected, connected, and subscribed GATT generation.
+ *
+ * On iOS, CoreBluetooth does not expose whether an existing bond was
+ * silently reused. The platform owner therefore retains this link without
+ * sending protocol bytes until the user explicitly confirms that the
+ * peripheral completed its Bluetooth-security step.
+ */
+    bleLinkConnected(peripheralId: string, maxWriteBytes: number) /*throws*/: bigint;
+/**
+ * Await the next opaque write-with-response or disconnect command.
+ *
+ * The returned bytes may contain pairing protocol material. The platform
+ * adapter must forward them directly and must not inspect, log, or persist
+ * them.
+ */
+    bleNextPlatformCommand(generation: bigint, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<NativeBlePlatformCommand | undefined>;
+/**
+ * Report an opaque GATT write failure and close the generation.
+ */
+    bleWriteFailed(generation: bigint, token: bigint, reason: string) /*throws*/: void;
+/**
+ * Confirm that one opaque GATT write completed successfully.
+ */
+    bleWriteSucceeded(generation: bigint, token: bigint) /*throws*/: void;
+/**
+ * Initialize the device when needed, create a new credential, and publish
+ * its device-keyed profile.
+ */
+    pair(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<NativeProfileSummary>;
+/**
+ * Initialize the device when needed, resume one canonical Pending
+ * credential, and publish its device-keyed profile.
+ */
+    resume(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<NativeProfileSummary>;
+/**
+ * Return the latest coarse, secret-free onboarding projection.
+ */
+    snapshot() /*throws*/: NativeBleOnboardingSnapshot;
+}
+/**
+ * @deprecated Use `NativeBleOnboardingLike` instead.
+ */
+export type NativeBleOnboardingInterface = NativeBleOnboardingLike;
+
+
+/**
+ * Sole native owner for one selected BLE onboarding ceremony.
+ *
+ * This object deliberately owns a different byte hub from
+ * [`crate::NativeAppliance`], preventing an ordinary authenticated connector
+ * from racing to claim the pre-authentication stream.
+ */
+export class NativeBleOnboarding extends UniffiAbstractObject implements NativeBleOnboardingLike {
+
+    readonly [uniffiTypeNameSymbol] = "NativeBleOnboarding";
+    readonly [destructorGuardSymbol]: UniffiGcObject;
+    readonly [pointerLiteralSymbol]: UniffiHandle;
+    // No primary constructor declared for this class.
+private constructor(pointer: UniffiHandle) {
+    super();
+    this[pointerLiteralSymbol] = pointer;
+    this[destructorGuardSymbol] = uniffiTypeNativeBleOnboardingObjectFactory.bless(pointer);
+}
+
+
+/**
+ * Create a native onboarding owner sharing the app's device-keyed profile
+ * store.
+ */
+    static open(profileStore: NativeProfileStoreLike): NativeBleOnboardingLike {
+    return FfiConverterTypeNativeBleOnboarding.lift(uniffiCaller.rustCall(
+            /*caller:*/ (callStatus) => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativebleonboarding_open(
+        FfiConverterTypeNativeProfileStore.lower(profileStore, nativeModule().rustbuffer_alloc),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    ));
+    }
+
+
+
+/**
+ * Ask the device to abort its sole Pending credential and, only after a
+ * definitely successful response, remove safe local recovery state.
+ */
+    async abortCurrent(asyncOpts_?: { signal: AbortSignal }): Promise<void> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativebleonboarding_abort_current(
+                    uniffiTypeNativeBleOnboardingObjectFactory.clonePointer(this)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_void,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_void,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_void,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_void,
+            /*liftFunc:*/ (_v) => {},
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeBleOnboardingError.lift.bind(FfiConverterTypeNativeBleOnboardingError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+/**
+ * Report that the platform GATT link and subscription are gone.
+ */
+    bleDisconnected(generation: bigint, reason: string): void /*throws*/ {uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeNativeBleError.lift.bind(FfiConverterTypeNativeBleError),
+            /*caller:*/ (callStatus) => { nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativebleonboarding_ble_disconnected(
+                uniffiTypeNativeBleOnboardingObjectFactory.clonePointer(this),
+        FfiConverterUInt64.lower(generation, nativeModule().rustbuffer_alloc),
+        FfiConverterString.lower(reason, nativeModule().rustbuffer_alloc),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    );
+    }
+
+/**
+ * Append opaque bytes from one confirmed TX characteristic indication.
+ *
+ * During this alpha, the platform adapter relays these bounded bytes
+ * through TypeScript without parsing, logging, or persistence. A later
+ * Swift/Kotlin-to-Rust pump will remove that transient JavaScript hop.
+ */
+    bleIngestIndication(generation: bigint, bytes: ArrayBuffer): void /*throws*/ {uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeNativeBleError.lift.bind(FfiConverterTypeNativeBleError),
+            /*caller:*/ (callStatus) => { nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativebleonboarding_ble_ingest_indication(
+                uniffiTypeNativeBleOnboardingObjectFactory.clonePointer(this),
+        FfiConverterUInt64.lower(generation, nativeModule().rustbuffer_alloc),
+        FfiConverterArrayBuffer.lower(bytes, nativeModule().rustbuffer_alloc),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    );
+    }
+
+/**
+ * Register the selected, connected, and subscribed GATT generation.
+ *
+ * On iOS, CoreBluetooth does not expose whether an existing bond was
+ * silently reused. The platform owner therefore retains this link without
+ * sending protocol bytes until the user explicitly confirms that the
+ * peripheral completed its Bluetooth-security step.
+ */
+    bleLinkConnected(peripheralId: string, maxWriteBytes: number): bigint /*throws*/ {
+    return FfiConverterUInt64.lift(uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeNativeBleError.lift.bind(FfiConverterTypeNativeBleError),
+            /*caller:*/ (callStatus) => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativebleonboarding_ble_link_connected(
+                uniffiTypeNativeBleOnboardingObjectFactory.clonePointer(this),
+        FfiConverterString.lower(peripheralId, nativeModule().rustbuffer_alloc),
+        FfiConverterUInt32.lower(maxWriteBytes, nativeModule().rustbuffer_alloc),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    ));
+    }
+
+/**
+ * Await the next opaque write-with-response or disconnect command.
+ *
+ * The returned bytes may contain pairing protocol material. The platform
+ * adapter must forward them directly and must not inspect, log, or persist
+ * them.
+ */
+    async bleNextPlatformCommand(generation: bigint, asyncOpts_?: { signal: AbortSignal }): Promise<NativeBlePlatformCommand | undefined> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativebleonboarding_ble_next_platform_command(
+                    uniffiTypeNativeBleOnboardingObjectFactory.clonePointer(this),FfiConverterUInt64.lower(generation, nativeModule().rustbuffer_alloc)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_rust_buffer,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_rust_buffer,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_rust_buffer,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_rust_buffer,
+            // Async returns always go through the JS-side converter: the
+            // FFI symbol returns the future handle (u64), and the user-level
+            // RustBuffer comes back via the shared `rust_future_complete_*`
+            // export. The bytes the runtime hands back must be deserialized
+            // here using the per-callable return-type converter.
+            /*liftFunc:*/ FfiConverterOptionalTypeNativeBlePlatformCommand.lift.bind(FfiConverterOptionalTypeNativeBlePlatformCommand),
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeBleError.lift.bind(FfiConverterTypeNativeBleError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+/**
+ * Report an opaque GATT write failure and close the generation.
+ */
+    bleWriteFailed(generation: bigint, token: bigint, reason: string): void /*throws*/ {uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeNativeBleError.lift.bind(FfiConverterTypeNativeBleError),
+            /*caller:*/ (callStatus) => { nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativebleonboarding_ble_write_failed(
+                uniffiTypeNativeBleOnboardingObjectFactory.clonePointer(this),
+        FfiConverterUInt64.lower(generation, nativeModule().rustbuffer_alloc),
+        FfiConverterUInt64.lower(token, nativeModule().rustbuffer_alloc),
+        FfiConverterString.lower(reason, nativeModule().rustbuffer_alloc),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    );
+    }
+
+/**
+ * Confirm that one opaque GATT write completed successfully.
+ */
+    bleWriteSucceeded(generation: bigint, token: bigint): void /*throws*/ {uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeNativeBleError.lift.bind(FfiConverterTypeNativeBleError),
+            /*caller:*/ (callStatus) => { nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativebleonboarding_ble_write_succeeded(
+                uniffiTypeNativeBleOnboardingObjectFactory.clonePointer(this),
+        FfiConverterUInt64.lower(generation, nativeModule().rustbuffer_alloc),
+        FfiConverterUInt64.lower(token, nativeModule().rustbuffer_alloc),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    );
+    }
+
+/**
+ * Initialize the device when needed, create a new credential, and publish
+ * its device-keyed profile.
+ */
+    async pair(asyncOpts_?: { signal: AbortSignal }): Promise<NativeProfileSummary> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativebleonboarding_pair(
+                    uniffiTypeNativeBleOnboardingObjectFactory.clonePointer(this)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_rust_buffer,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_rust_buffer,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_rust_buffer,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_rust_buffer,
+            // Async returns always go through the JS-side converter: the
+            // FFI symbol returns the future handle (u64), and the user-level
+            // RustBuffer comes back via the shared `rust_future_complete_*`
+            // export. The bytes the runtime hands back must be deserialized
+            // here using the per-callable return-type converter.
+            /*liftFunc:*/ FfiConverterTypeNativeProfileSummary.lift.bind(FfiConverterTypeNativeProfileSummary),
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeBleOnboardingError.lift.bind(FfiConverterTypeNativeBleOnboardingError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+/**
+ * Initialize the device when needed, resume one canonical Pending
+ * credential, and publish its device-keyed profile.
+ */
+    async resume(asyncOpts_?: { signal: AbortSignal }): Promise<NativeProfileSummary> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativebleonboarding_resume(
+                    uniffiTypeNativeBleOnboardingObjectFactory.clonePointer(this)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_rust_buffer,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_rust_buffer,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_rust_buffer,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_rust_buffer,
+            // Async returns always go through the JS-side converter: the
+            // FFI symbol returns the future handle (u64), and the user-level
+            // RustBuffer comes back via the shared `rust_future_complete_*`
+            // export. The bytes the runtime hands back must be deserialized
+            // here using the per-callable return-type converter.
+            /*liftFunc:*/ FfiConverterTypeNativeProfileSummary.lift.bind(FfiConverterTypeNativeProfileSummary),
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeBleOnboardingError.lift.bind(FfiConverterTypeNativeBleOnboardingError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+/**
+ * Return the latest coarse, secret-free onboarding projection.
+ */
+    snapshot(): NativeBleOnboardingSnapshot /*throws*/ {
+    return ((__rb: Uint8Array) => {
+        try {
+            return FfiConverterTypeNativeBleOnboardingSnapshot.lift(__rb);
+        } finally {
+            nativeModule().rustbuffer_free(__rb);
+        }
+    })(uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeNativeBleOnboardingError.lift.bind(FfiConverterTypeNativeBleOnboardingError),
+            /*caller:*/ (callStatus) => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativebleonboarding_snapshot(
+                uniffiTypeNativeBleOnboardingObjectFactory.clonePointer(this),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    ));
+    }
+
+
+    uniffiDestroy(): void {
+        const ptr = (this as any)[destructorGuardSymbol];
+        if (ptr !== undefined) {
+            const pointer = uniffiTypeNativeBleOnboardingObjectFactory.pointer(this);
+            uniffiTypeNativeBleOnboardingObjectFactory.freePointer(pointer);
+            uniffiTypeNativeBleOnboardingObjectFactory.unbless(ptr);
+            delete (this as any)[destructorGuardSymbol];
+        }
+    }
+
+    static instanceOf(obj_: any): obj_ is NativeBleOnboarding {
+        return uniffiTypeNativeBleOnboardingObjectFactory.isConcreteType(obj_);
+    }
+
+
+}
+
+const uniffiTypeNativeBleOnboardingObjectFactory: UniffiObjectFactory<NativeBleOnboardingLike> = (() => {
+
+    return {
+    create(pointer: UniffiHandle): NativeBleOnboardingLike {
+        const instance = Object.create(NativeBleOnboarding.prototype);
+        instance[pointerLiteralSymbol] = pointer;
+        instance[destructorGuardSymbol] = this.bless(pointer);
+        instance[uniffiTypeNameSymbol] = "NativeBleOnboarding";
+        return instance;
+    },
+
+
+    bless(p: UniffiHandle): UniffiGcObject {
+        return uniffiCaller.rustCall(
+            /*caller:*/ (status) =>
+                nativeModule().ubrn_uniffi_internal_fn_method_nativebleonboarding_ffi__bless_pointer(p, status),
+            /*liftString:*/ FfiConverterString.lift
+        );
+    },
+
+    unbless(ptr_: UniffiGcObject) {
+        ptr_.markDestroyed();
+    },
+
+    pointer(obj_: NativeBleOnboardingLike): UniffiHandle {
+        if ((obj_ as any)[destructorGuardSymbol] === undefined) {
+            throw new UniffiInternalError.UnexpectedNullPointer();
+        }
+        return (obj_ as any)[pointerLiteralSymbol];
+    },
+
+    clonePointer(obj_: NativeBleOnboardingLike): UniffiHandle {
+        const pointer = this.pointer(obj_);
+        return uniffiCaller.rustCall(
+            /*caller:*/ (callStatus) => nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_clone_nativebleonboarding(pointer, callStatus),
+            /*liftString:*/ FfiConverterString.lift
+        );
+    },
+
+    freePointer(pointer: UniffiHandle): void {
+        uniffiCaller.rustCall(
+            /*caller:*/ (callStatus) => nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_free_nativebleonboarding(pointer, callStatus),
+            /*liftString:*/ FfiConverterString.lift
+        );
+    },
+
+    isConcreteType(obj_: any): obj_ is NativeBleOnboardingLike {
+        return obj_[destructorGuardSymbol] && obj_[uniffiTypeNameSymbol] === "NativeBleOnboarding";
+    },
+}})();
+const FfiConverterTypeNativeBleOnboarding = new FfiConverterObject(uniffiTypeNativeBleOnboardingObjectFactory);
+
+/**
+ * Native owner for device-keyed credential and SQLite profile paths.
+ *
+ * The generated mobile binding exposes only validated public identity
+ * summaries. Credential bytes remain inside Rust and app-private files.
+ */
+export interface NativeProfileStoreLike {
+
+/**
+ * Select one existing validated profile for the next native appliance.
+ *
+ * The current Expo UI remains single-profile and does not call this yet;
+ * exposing the native operation establishes the future board-switching
+ * boundary without putting credential bytes or filesystem paths in
+ * TypeScript.
+ */
+    activateProfile(deviceId: string) /*throws*/: NativeProfileSummary;
+/**
+ * Inspect the active profile's credential without returning secret bytes.
+ *
+ * An empty store is `Missing`. A malformed legacy artifact or active
+ * profile is `Invalid` so the existing onboarding recovery boundary is
+ * preserved.
+ */
+    credentialStatus() /*throws*/: NativeCredentialStatus;
+/**
+ * Return all validated profiles and the currently active profile key.
+ */
+    snapshot() /*throws*/: NativeProfileStoreSnapshot;
+}
+/**
+ * @deprecated Use `NativeProfileStoreLike` instead.
+ */
+export type NativeProfileStoreInterface = NativeProfileStoreLike;
+
+
+/**
+ * Native owner for device-keyed credential and SQLite profile paths.
+ *
+ * The generated mobile binding exposes only validated public identity
+ * summaries. Credential bytes remain inside Rust and app-private files.
+ */
+export class NativeProfileStore extends UniffiAbstractObject implements NativeProfileStoreLike {
+
+    readonly [uniffiTypeNameSymbol] = "NativeProfileStore";
+    readonly [destructorGuardSymbol]: UniffiGcObject;
+    readonly [pointerLiteralSymbol]: UniffiHandle;
+    // No primary constructor declared for this class.
+private constructor(pointer: UniffiHandle) {
+    super();
+    this[pointerLiteralSymbol] = pointer;
+    this[destructorGuardSymbol] = uniffiTypeNativeProfileStoreObjectFactory.bless(pointer);
+}
+
+
+/**
+ * Open or create an app-private profile root.
+ *
+ * The optional legacy paths identify the previous single-database and
+ * single-credential layout. When the legacy credential is canonical,
+ * both artifacts are migrated to its validated device-ID profile before
+ * the store is returned. An invalid legacy credential remains untouched
+ * and is reported through [`Self::credential_status`].
+ */
+    static open(rootDirectory: string, legacyDatabasePath: string | undefined, legacyCredentialPath: string | undefined): NativeProfileStoreLike /*throws*/ {
+    return FfiConverterTypeNativeProfileStore.lift(uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError),
+            /*caller:*/ (callStatus) => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeprofilestore_open(
+        FfiConverterString.lower(rootDirectory, nativeModule().rustbuffer_alloc),
+        FfiConverterOptionalString.lower(legacyDatabasePath, nativeModule().rustbuffer_alloc),
+        FfiConverterOptionalString.lower(legacyCredentialPath, nativeModule().rustbuffer_alloc),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    ));
+    }
+
+
+
+/**
+ * Select one existing validated profile for the next native appliance.
+ *
+ * The current Expo UI remains single-profile and does not call this yet;
+ * exposing the native operation establishes the future board-switching
+ * boundary without putting credential bytes or filesystem paths in
+ * TypeScript.
+ */
+    activateProfile(deviceId: string): NativeProfileSummary /*throws*/ {
+    return ((__rb: Uint8Array) => {
+        try {
+            return FfiConverterTypeNativeProfileSummary.lift(__rb);
+        } finally {
+            nativeModule().rustbuffer_free(__rb);
+        }
+    })(uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError),
+            /*caller:*/ (callStatus) => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_activate_profile(
+                uniffiTypeNativeProfileStoreObjectFactory.clonePointer(this),
+        FfiConverterString.lower(deviceId, nativeModule().rustbuffer_alloc),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    ));
+    }
+
+/**
+ * Inspect the active profile's credential without returning secret bytes.
+ *
+ * An empty store is `Missing`. A malformed legacy artifact or active
+ * profile is `Invalid` so the existing onboarding recovery boundary is
+ * preserved.
+ */
+    credentialStatus(): NativeCredentialStatus /*throws*/ {
+    return ((__rb: Uint8Array) => {
+        try {
+            return FfiConverterTypeNativeCredentialStatus.lift(__rb);
+        } finally {
+            nativeModule().rustbuffer_free(__rb);
+        }
+    })(uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError),
+            /*caller:*/ (callStatus) => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_credential_status(
+                uniffiTypeNativeProfileStoreObjectFactory.clonePointer(this),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    ));
+    }
+
+/**
+ * Return all validated profiles and the currently active profile key.
+ */
+    snapshot(): NativeProfileStoreSnapshot /*throws*/ {
+    return ((__rb: Uint8Array) => {
+        try {
+            return FfiConverterTypeNativeProfileStoreSnapshot.lift(__rb);
+        } finally {
+            nativeModule().rustbuffer_free(__rb);
+        }
+    })(uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError),
+            /*caller:*/ (callStatus) => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_snapshot(
+                uniffiTypeNativeProfileStoreObjectFactory.clonePointer(this),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    ));
+    }
+
+
+    uniffiDestroy(): void {
+        const ptr = (this as any)[destructorGuardSymbol];
+        if (ptr !== undefined) {
+            const pointer = uniffiTypeNativeProfileStoreObjectFactory.pointer(this);
+            uniffiTypeNativeProfileStoreObjectFactory.freePointer(pointer);
+            uniffiTypeNativeProfileStoreObjectFactory.unbless(ptr);
+            delete (this as any)[destructorGuardSymbol];
+        }
+    }
+
+    static instanceOf(obj_: any): obj_ is NativeProfileStore {
+        return uniffiTypeNativeProfileStoreObjectFactory.isConcreteType(obj_);
+    }
+
+
+}
+
+const uniffiTypeNativeProfileStoreObjectFactory: UniffiObjectFactory<NativeProfileStoreLike> = (() => {
+
+    return {
+    create(pointer: UniffiHandle): NativeProfileStoreLike {
+        const instance = Object.create(NativeProfileStore.prototype);
+        instance[pointerLiteralSymbol] = pointer;
+        instance[destructorGuardSymbol] = this.bless(pointer);
+        instance[uniffiTypeNameSymbol] = "NativeProfileStore";
+        return instance;
+    },
+
+
+    bless(p: UniffiHandle): UniffiGcObject {
+        return uniffiCaller.rustCall(
+            /*caller:*/ (status) =>
+                nativeModule().ubrn_uniffi_internal_fn_method_nativeprofilestore_ffi__bless_pointer(p, status),
+            /*liftString:*/ FfiConverterString.lift
+        );
+    },
+
+    unbless(ptr_: UniffiGcObject) {
+        ptr_.markDestroyed();
+    },
+
+    pointer(obj_: NativeProfileStoreLike): UniffiHandle {
+        if ((obj_ as any)[destructorGuardSymbol] === undefined) {
+            throw new UniffiInternalError.UnexpectedNullPointer();
+        }
+        return (obj_ as any)[pointerLiteralSymbol];
+    },
+
+    clonePointer(obj_: NativeProfileStoreLike): UniffiHandle {
+        const pointer = this.pointer(obj_);
+        return uniffiCaller.rustCall(
+            /*caller:*/ (callStatus) => nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_clone_nativeprofilestore(pointer, callStatus),
+            /*liftString:*/ FfiConverterString.lift
+        );
+    },
+
+    freePointer(pointer: UniffiHandle): void {
+        uniffiCaller.rustCall(
+            /*caller:*/ (callStatus) => nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_free_nativeprofilestore(pointer, callStatus),
+            /*liftString:*/ FfiConverterString.lift
+        );
+    },
+
+    isConcreteType(obj_: any): obj_ is NativeProfileStoreLike {
+        return obj_[destructorGuardSymbol] && obj_[uniffiTypeNameSymbol] === "NativeProfileStore";
+    },
+}})();
+const FfiConverterTypeNativeProfileStore = new FfiConverterObject(uniffiTypeNativeProfileStoreObjectFactory);
+
+// FfiConverter for NativeBleOnboardingOperation | undefined
+const FfiConverterOptionalTypeNativeBleOnboardingOperation = new FfiConverterOptional(FfiConverterTypeNativeBleOnboardingOperation);
 
 // FfiConverter for bigint | undefined
 const FfiConverterOptionalUInt64 = new FfiConverterOptional(FfiConverterUInt64);
+
+// FfiConverter for string | undefined
+const FfiConverterOptionalString = new FfiConverterOptional(FfiConverterString);
+
+// FfiConverter for NativeProfileSummary | undefined
+const FfiConverterOptionalTypeNativeProfileSummary = new FfiConverterOptional(FfiConverterTypeNativeProfileSummary);
+
+// FfiConverter for NativeBleOnboardingFailure | undefined
+const FfiConverterOptionalTypeNativeBleOnboardingFailure = new FfiConverterOptional(FfiConverterTypeNativeBleOnboardingFailure);
+
+// FfiConverter for Array<NativeProfileSummary>
+const FfiConverterSequenceTypeNativeProfileSummary = new FfiConverterArray(FfiConverterTypeNativeProfileSummary);
 
 // FfiConverter for NativeBlePlatformCommand | undefined
 const FfiConverterOptionalTypeNativeBlePlatformCommand = new FfiConverterOptional(FfiConverterTypeNativeBlePlatformCommand);
@@ -2656,8 +4276,14 @@ function uniffiEnsureInitialized() {
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_ble() !== 41354) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_ble");
     }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_ble_profile() !== 27425) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_ble_profile");
+    }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_wifi() !== 50108) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_wifi");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_wifi_profile() !== 3729) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_wifi_profile");
     }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_disconnected() !== 37336) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_disconnected");
@@ -2722,6 +4348,51 @@ function uniffiEnsureInitialized() {
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_upsert_contact_json() !== 4061) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_upsert_contact_json");
     }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativebleonboarding_open() !== 41506) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_constructor_nativebleonboarding_open");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_abort_current() !== 50267) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_abort_current");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_ble_disconnected() !== 29836) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_ble_disconnected");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_ble_ingest_indication() !== 7674) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_ble_ingest_indication");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_ble_link_connected() !== 58778) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_ble_link_connected");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_ble_next_platform_command() !== 51257) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_ble_next_platform_command");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_ble_write_failed() !== 23553) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_ble_write_failed");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_ble_write_succeeded() !== 29261) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_ble_write_succeeded");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_pair() !== 20175) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_pair");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_resume() !== 32396) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_resume");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_snapshot() !== 22941) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_snapshot");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeprofilestore_open() !== 47732) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_constructor_nativeprofilestore_open");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_activate_profile() !== 60459) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_activate_profile");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_credential_status() !== 48667) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_credential_status");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_snapshot() !== 10974) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_snapshot");
+    }
 
     }
 
@@ -2732,10 +4403,19 @@ export default Object.freeze({
     FfiConverterTypeNativeApplianceError,
     FfiConverterTypeNativeBleError,
     FfiConverterTypeNativeBleGattProfile,
+    FfiConverterTypeNativeBleOnboarding,
+    FfiConverterTypeNativeBleOnboardingError,
+    FfiConverterTypeNativeBleOnboardingFailure,
+    FfiConverterTypeNativeBleOnboardingOperation,
+    FfiConverterTypeNativeBleOnboardingPhase,
+    FfiConverterTypeNativeBleOnboardingSnapshot,
     FfiConverterTypeNativeBlePlatformCommand,
     FfiConverterTypeNativeBridgeContract,
     FfiConverterTypeNativeCredentialStatus,
     FfiConverterTypeNativeCredentialSummary,
+    FfiConverterTypeNativeProfileStore,
+    FfiConverterTypeNativeProfileStoreSnapshot,
+    FfiConverterTypeNativeProfileSummary,
     FfiConverterTypeNativeTransport,
   }
 });

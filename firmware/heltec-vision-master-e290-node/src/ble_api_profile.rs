@@ -18,6 +18,12 @@ pub const CCCD_SUBSCRIBE_TIMEOUT_MS: u64 = 15_000;
 /// pressure, and handshake progress do not extend it. Once authentication
 /// succeeds, authenticated idle/session policy is a separate concern.
 pub const PRE_AUTHENTICATION_TIMEOUT_MS: u64 = 30_000;
+/// Milliseconds allowed for the one-time OS Bluetooth pairing ceremony.
+///
+/// Trouble 0.6 applies Bluetooth's fixed 30-second SMP inactivity timer. Keep
+/// the product deadline explicit and aligned with it; the retained pre-SMP
+/// link and the application-pairing window have separate, longer ownership.
+pub const BLE_SECURITY_PAIRING_TIMEOUT_MS: u64 = 30_000;
 /// Milliseconds between idle authenticated-session progress turns.
 pub const API_POLL_INTERVAL_MS: u64 = 1;
 /// Milliseconds between fail-closed BLE disconnect-drain observations.
@@ -25,8 +31,19 @@ pub const DISCONNECT_DRAIN_RECHECK_INTERVAL_MS: u64 = 25;
 /// Milliseconds before, and between, warnings for a stalled disconnect drain.
 ///
 /// This is a logging interval, not a teardown deadline. A warning never permits
-/// the next advertiser to start.
+/// the next advertiser to start. Releasing the last Trouble connection owner
+/// before its exact `Disconnected` event can race controller teardown with the
+/// next advertiser.
 pub const DISCONNECT_DRAIN_PROLONGED_LOG_MS: u64 = 5_000;
+/// Maximum time the bearer waits for one node-side control, live-pairing, or
+/// bond-commit exchange.
+///
+/// A moved command remains owned by the bounded handoff or node actor. A bond
+/// timeout additionally fail-stops BLE for the boot, so a late durable outcome
+/// can never authorize Trouble's provisional bond in that incarnation.
+pub const HANDOFF_EXCHANGE_TIMEOUT_MS: u64 = 10_000;
+/// Milliseconds of application-pairing idle time admitted per connection.
+pub const APPLICATION_PAIRING_IDLE_TIMEOUT_MS: u64 = 300_000;
 /// Number of BLE links admitted by this proof.
 pub const CONNECTIONS_MAX: usize = reticulum_device_api_ble::MAX_CONNECTIONS;
 /// Controller activity slots reserved for one advertiser and one ACL link.
@@ -117,6 +134,59 @@ impl Default for PreAuthenticationDeadline {
     }
 }
 
+/// Deadline which counts application-pairing idle time but not response flight.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ApplicationPairingIdleDeadline {
+    last_observed_millis: Option<u64>,
+    idle_millis: u64,
+}
+
+impl ApplicationPairingIdleDeadline {
+    /// Construct a stopped deadline.
+    pub const fn new() -> Self {
+        Self {
+            last_observed_millis: None,
+            idle_millis: 0,
+        }
+    }
+
+    /// Start the deadline once, preserving an existing owner's elapsed time.
+    pub fn ensure_started(&mut self, now_millis: u64) {
+        if self.last_observed_millis.is_none() {
+            self.last_observed_millis = Some(now_millis);
+        }
+    }
+
+    /// Advance time and report whether the idle budget has expired.
+    ///
+    /// Time observed while `response_flight_owned` is true is deliberately not
+    /// charged. The next idle interval begins at this observation rather than
+    /// immediately expiring on time accumulated during indication backpressure.
+    pub fn poll(&mut self, now_millis: u64, response_flight_owned: bool) -> bool {
+        let Some(last) = self.last_observed_millis else {
+            return false;
+        };
+        self.last_observed_millis = Some(now_millis);
+        if !response_flight_owned {
+            self.idle_millis = self
+                .idle_millis
+                .saturating_add(now_millis.saturating_sub(last));
+        }
+        self.idle_millis >= APPLICATION_PAIRING_IDLE_TIMEOUT_MS
+    }
+
+    /// Whether application pairing has started.
+    pub const fn is_started(self) -> bool {
+        self.last_observed_millis.is_some()
+    }
+}
+
+impl Default for ApplicationPairingIdleDeadline {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Exact one-fragment owner retained until an ATT confirmation arrives.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct IndicationGate {
@@ -170,15 +240,19 @@ const _: () = assert!(L2CAP_CHANNELS_MAX == 2);
 const _: () = assert!(INDICATION_CONFIRM_TIMEOUT_MS > 0);
 const _: () = assert!(CCCD_SUBSCRIBE_TIMEOUT_MS > INDICATION_CONFIRM_TIMEOUT_MS);
 const _: () = assert!(PRE_AUTHENTICATION_TIMEOUT_MS > CCCD_SUBSCRIBE_TIMEOUT_MS);
+const _: () = assert!(BLE_SECURITY_PAIRING_TIMEOUT_MS >= PRE_AUTHENTICATION_TIMEOUT_MS);
 const _: () = assert!(DISCONNECT_DRAIN_RECHECK_INTERVAL_MS > 0);
 const _: () = assert!(DISCONNECT_DRAIN_PROLONGED_LOG_MS > DISCONNECT_DRAIN_RECHECK_INTERVAL_MS);
+const _: () = assert!(HANDOFF_EXCHANGE_TIMEOUT_MS > API_POLL_INTERVAL_MS);
+const _: () = assert!(APPLICATION_PAIRING_IDLE_TIMEOUT_MS > HANDOFF_EXCHANGE_TIMEOUT_MS);
 
 #[cfg(test)]
 mod tests {
     use super::{
-        CONNECTIONS_MAX, CONTROLLER_ACTIVITY_MAX, IndicationGate, IndicationGateError,
-        PRE_AUTHENTICATION_TIMEOUT_MS, PreAuthenticationDeadline, PreAuthenticationDeadlineStatus,
-        static_random_address,
+        APPLICATION_PAIRING_IDLE_TIMEOUT_MS, ApplicationPairingIdleDeadline,
+        BLE_SECURITY_PAIRING_TIMEOUT_MS, CONNECTIONS_MAX, CONTROLLER_ACTIVITY_MAX, IndicationGate,
+        IndicationGateError, PRE_AUTHENTICATION_TIMEOUT_MS, PreAuthenticationDeadline,
+        PreAuthenticationDeadlineStatus, static_random_address,
     };
     use crate::usb_authenticated_session::UsbAuthenticatedSessionPhase;
 
@@ -186,6 +260,13 @@ mod tests {
     fn controller_activity_budget_keeps_one_advertiser_separate_from_one_link() {
         assert_eq!(CONNECTIONS_MAX, 1);
         assert_eq!(CONTROLLER_ACTIVITY_MAX, 2);
+    }
+
+    #[test]
+    fn human_pairing_deadlines_are_forgiving_without_extending_ordinary_authentication() {
+        assert_eq!(PRE_AUTHENTICATION_TIMEOUT_MS, 30_000);
+        assert_eq!(BLE_SECURITY_PAIRING_TIMEOUT_MS, 30_000);
+        assert_eq!(APPLICATION_PAIRING_IDLE_TIMEOUT_MS, 300_000);
     }
 
     #[test]
@@ -221,6 +302,20 @@ mod tests {
             gate.confirm(),
             Err(IndicationGateError::UnexpectedConfirmation)
         );
+    }
+
+    #[test]
+    fn application_pairing_idle_deadline_suspends_complete_response_flight() {
+        let mut deadline = ApplicationPairingIdleDeadline::new();
+        assert!(!deadline.is_started());
+        deadline.ensure_started(10);
+        assert!(deadline.is_started());
+
+        assert!(!deadline.poll(1_010, false));
+        assert!(!deadline.poll(81_010, true));
+        let just_before_expiry = 81_010 + APPLICATION_PAIRING_IDLE_TIMEOUT_MS - 1_001;
+        assert!(!deadline.poll(just_before_expiry, false));
+        assert!(deadline.poll(just_before_expiry + 1, false));
     }
 
     #[test]

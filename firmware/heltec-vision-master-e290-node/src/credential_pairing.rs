@@ -11,7 +11,7 @@ use reticulum_device_api_credentials::{
     E290_CREDENTIAL_RECORD_CAPACITY, PairingLifecycleStoreCandidate,
 };
 use reticulum_device_api_pairing::{
-    ActivateFailure, ActivationConfirmation, BeginOffer, PairingFailure, PairingPsk,
+    ActivateFailure, ActivationConfirmation, BearerBinding, BeginOffer, PairingFailure, PairingPsk,
     PairingTranscript, ProofChallenge, VerifiedClientProof,
 };
 use reticulum_device_api_pairing_policy::{
@@ -143,6 +143,7 @@ pub(crate) struct ProofOwnership {
 pub(crate) enum MutationCompletion {
     Begin {
         permit: BeginAttemptPermit,
+        bearer: BearerBinding,
         device_id: reticulum_device_api_pairing::DeviceId,
         pending: PendingRef,
     },

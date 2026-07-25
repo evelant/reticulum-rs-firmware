@@ -408,7 +408,9 @@ impl BleHub {
         }
     }
 
-    fn claim_link(self: &Arc<Self>) -> Result<(BleStream, BleLinkLease, String), ConnectFailure> {
+    pub(crate) fn claim_link(
+        self: &Arc<Self>,
+    ) -> Result<(BleStream, BleLinkLease, String), ConnectFailure> {
         let mut state = self
             .state
             .lock()
@@ -561,7 +563,7 @@ fn mark_closing(link: &mut LinkState, reason: String) {
     }
 }
 
-struct BleStream {
+pub(crate) struct BleStream {
     hub: Arc<BleHub>,
     generation: u64,
 }
@@ -746,7 +748,7 @@ fn lock_io_error<T>(_: T) -> io::Error {
     io::Error::other("BLE bridge lock is poisoned")
 }
 
-struct BleLinkLease {
+pub(crate) struct BleLinkLease {
     hub: Arc<BleHub>,
     generation: u64,
 }

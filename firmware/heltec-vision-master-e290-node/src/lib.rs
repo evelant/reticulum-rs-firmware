@@ -7,6 +7,8 @@
 pub mod announce_time;
 pub mod authenticated_api_node;
 pub mod ble_api_profile;
+#[cfg(feature = "ble-api-proof")]
+pub mod ble_bond_handoff;
 pub mod causal_pairing_frontier;
 pub mod config;
 pub mod credential_boot;
@@ -136,6 +138,8 @@ const _: () = assert!(
     partition_contract::API_CREDENTIALS_LEN as usize
         == reticulum_device_api_credential_store::PARTITION_SIZE
 );
+const _: () =
+    assert!(partition_contract::BLE_BOND_LEN as usize == reticulum_ble_bond_store::PARTITION_SIZE);
 const _: () = assert!(
     partition_contract::MESSAGE_STORE_LEN as usize == reticulum_rns_inbox_store::PARTITION_SIZE
 );
@@ -158,8 +162,10 @@ mod tests {
     fn permanent_partition_contract_preserves_exact_store_boundaries() {
         assert_eq!(partition_contract::API_CREDENTIALS_OFFSET, 0x0061_4000);
         assert_eq!(partition_contract::API_CREDENTIALS_LEN, 0x0000_2000);
-        assert_eq!(partition_contract::DEVICE_CONFIG_OFFSET, 0x0061_6000);
-        assert_eq!(partition_contract::DEVICE_CONFIG_LEN, 0x0001_a000);
+        assert_eq!(partition_contract::BLE_BOND_OFFSET, 0x0061_6000);
+        assert_eq!(partition_contract::BLE_BOND_LEN, 0x0000_2000);
+        assert_eq!(partition_contract::DEVICE_CONFIG_OFFSET, 0x0061_8000);
+        assert_eq!(partition_contract::DEVICE_CONFIG_LEN, 0x0001_8000);
         assert_eq!(partition_contract::NODE_JOURNAL_OFFSET, 0x0063_0000);
         assert_eq!(partition_contract::NODE_JOURNAL_LEN, 0x0010_0000);
         assert_eq!(partition_contract::MESSAGE_STORE_OFFSET, 0x0073_0000);
@@ -176,6 +182,10 @@ mod tests {
         );
         assert_eq!(
             partition_contract::API_CREDENTIALS_OFFSET + partition_contract::API_CREDENTIALS_LEN,
+            partition_contract::BLE_BOND_OFFSET
+        );
+        assert_eq!(
+            partition_contract::BLE_BOND_OFFSET + partition_contract::BLE_BOND_LEN,
             partition_contract::DEVICE_CONFIG_OFFSET
         );
         assert_eq!(
@@ -197,6 +207,10 @@ mod tests {
         assert_eq!(
             partition_contract::API_CREDENTIALS_LABEL_BYTES,
             *b"api_credentials\0"
+        );
+        assert_eq!(
+            partition_contract::BLE_BOND_LABEL_BYTES,
+            *b"ble_bond\0\0\0\0\0\0\0\0"
         );
         assert_eq!(
             partition_contract::DEVICE_CONFIG_LABEL_BYTES,
@@ -264,6 +278,13 @@ mod tests {
             .find("let credential_boot = flash_owner.boot_credentials();")
             .expect("main must mount and recover credentials");
         assert!(flash_open < credential_boot);
+        let ble_bond_boot = source
+            .find("flash_owner.boot_ble_bond()")
+            .expect("main must read-only mount BLE bond authority");
+        assert!(
+            credential_boot < ble_bond_boot,
+            "credential recovery must precede BLE bond boot mount"
+        );
 
         for later_operation in [
             "flash_owner.inspect_identity()",
@@ -281,7 +302,46 @@ mod tests {
                 credential_boot < later,
                 "credential boot must precede {later_operation}"
             );
+            assert!(
+                ble_bond_boot < later,
+                "read-only BLE bond mount must precede {later_operation}"
+            );
         }
+    }
+
+    #[test]
+    fn ble_bond_boot_is_read_only_and_commit_failures_remount_fail_closed() {
+        let storage = include_str!("platform_storage.rs");
+        let boot_start = storage
+            .find("pub(crate) fn boot_ble_bond")
+            .expect("the sole flash owner must expose BLE bond boot mount");
+        let boot_end = storage[boot_start..]
+            .find("pub(crate) fn inspect_identity")
+            .map(|offset| boot_start + offset)
+            .expect("identity preflight must follow the bond boot method");
+        let boot = &storage[boot_start..boot_end];
+        assert!(boot.contains("mount_ble_bond_store(&mut region)?"));
+        assert!(!boot.contains("commit_ble_bond_store"));
+        assert!(!boot.contains("recover_empty"));
+        assert!(!boot.contains("cleanup("));
+
+        let commit_start = storage
+            .find("pub(crate) fn commit_ble_bond")
+            .expect("the coordinator must expose owning BLE bond commit");
+        let commit_end = storage[commit_start..]
+            .find("pub(crate) const fn credential_boot_state")
+            .map(|offset| commit_start + offset)
+            .expect("credential accessors must follow bond commit");
+        let commit = &storage[commit_start..commit_end];
+        let write = commit
+            .find("commit_ble_bond_store(&mut region, bond)")
+            .expect("commit must use the portable exact-verification operation");
+        let reconcile = commit
+            .find("mount_ble_bond_store(&mut region)")
+            .expect("every failed commit must immediately remount");
+        assert!(write < reconcile);
+        assert!(commit.contains("ReconciledRebootRequired"));
+        assert!(commit.contains("ProductBleBondStoreState::unavailable()"));
     }
 
     #[test]
@@ -778,7 +838,7 @@ mod tests {
         assert!(ble.contains("static BLE_RESOURCES: StaticCell<"));
         assert!(ble.contains("HostResources<DefaultPacketPool"));
         assert!(ble.contains("#[gatt_service(uuid = gatt_profile::SERVICE_UUID_U128)]"));
-        assert!(ble.contains("#[characteristic(uuid = gatt_profile::RX_UUID_U128, write)]"));
+        assert!(ble.contains("permissions(write = authenticated)"));
         assert!(ble.contains("#[characteristic(uuid = gatt_profile::TX_UUID_U128, indicate)]"));
         assert!(!ble.contains("write_without_response"));
         assert!(ble.contains("StreamDecoder::new()"));
@@ -793,7 +853,8 @@ mod tests {
         assert!(ble.contains(".with_scan(false)"));
         assert!(ble.contains("CCCD_SUBSCRIBE_TIMEOUT_MS"));
         assert!(ble.contains("PreAuthenticationDeadline::new()"));
-        assert!(ble.contains("PRE_AUTHENTICATION_TIMEOUT_MS"));
+        assert!(ble_profile.contains("PRE_AUTHENTICATION_TIMEOUT_MS"));
+        assert!(ble.contains("BLE_SECURITY_PAIRING_TIMEOUT_MS"));
         assert!(ble.contains("reason=pre-authentication-timeout"));
         assert!(ble.contains("struct ServeConnectionOutcome"));
         assert!(ble.contains("disconnected_event_observed = true;"));
@@ -802,10 +863,68 @@ mod tests {
         assert!(ble.contains("raw.disconnect();"));
         assert!(ble.contains("raw.next()"));
         assert!(ble.contains("DISCONNECT_DRAIN_RECHECK_INTERVAL_MS"));
+        assert!(ble.contains("DISCONNECT_DRAIN_PROLONGED_LOG_MS"));
         assert!(ble.contains("completion=awaiting-disconnected-event"));
+        assert!(!ble.contains("DISCONNECT-DRAIN-DEADLINE"));
+        assert!(ble.contains("authoritative_bond_identity"));
+        assert!(ble.contains("matches_authoritative_identity("));
+        assert!(ble.contains("fresh_security_pending_durability = true;"));
+        assert!(ble.contains("fresh_security_pending_durability = false;"));
+        assert!(ble.contains("reason=unexpected-fresh-pairing-complete"));
+        assert!(ble.contains("disable_bearer_until_reboot: fresh_security_pending_durability"));
+        assert!(ble.contains("status=PAIRING-EXCLUSIVE-PENDING"));
+        assert!(ble.contains("PairingExclusiveCloseDisposition::DrainBeforeClose"));
+        assert!(ble.contains("request.accept(None, stack).await"));
+        assert!(ble.contains("HANDOFF_EXCHANGE_TIMEOUT_MS"));
+        assert!(ble.contains("pairing_transmission.is_some()"));
+        assert!(ble.contains("ButtonObservationFlight::new()"));
+        assert!(ble.contains("button_observation.poll(pairing_handoff)"));
+        assert!(ble.contains("button_observation.try_schedule("));
+        assert!(
+            !ble.contains("PairingControlCommand::ObserveButton"),
+            "BLE GPIO sampling must not await a pairing-control round trip"
+        );
+
+        let restored_start = ble
+            .find("security=restored-authenticated-bond")
+            .and_then(|log| ble[..log].rfind("if raw"))
+            .expect("restored authenticated bonds must own an explicit pairing-exclusive path");
+        let restored_end = ble[restored_start..]
+            .find("continue;")
+            .map(|offset| restored_start + offset)
+            .expect("restored authenticated pairing entry must end before fresh SMP");
+        let restored = &ble[restored_start..restored_end];
+        let ready_display = restored
+            .find("DisplayCommand::ShowReady")
+            .expect("restored pairing must replace any stale terminal display");
+        let ready_confirmation = restored
+            .find("gatt_profile::SECURITY_CONFIRMATION_READY_VALUE")
+            .expect("restored pairing must publish authenticated readiness");
+        assert!(
+            ready_display < ready_confirmation,
+            "the stale display must be replaced before the client observes RDY1"
+        );
+        assert!(restored.contains("restored-pairing-display-ready-fault"));
+
+        let terminal_start = ble
+            .rfind("if matches!(\n        display_state,")
+            .expect("connection cleanup must own the terminal display transition");
+        let terminal_end = ble[terminal_start..]
+            .find("let _ = display_state;")
+            .map(|offset| terminal_start + offset)
+            .expect("terminal display transition must precede outcome construction");
+        let terminal = &ble[terminal_start..terminal_end];
+        assert!(
+            terminal.contains("display_clear_reason == Some(PairingSecretClearReason::Succeeded)"),
+            "successful resumed pairing must enter terminal display cleanup without a passkey"
+        );
+        assert!(
+            terminal.contains("DisplayCommand::ClearPairingSecret"),
+            "successful resumed pairing must render the paired state"
+        );
 
         let drain = ble
-            .find("drain_connection(\n            &gatt_connection")
+            .find("drain_connection(&gatt_connection")
             .expect("the old link must be drained before another advertiser");
         let release = ble
             .find("drop(gatt_connection);")
@@ -823,7 +942,7 @@ mod tests {
         let begin = ble
             .find("session.begin_connection(connection_id)")
             .expect("the bearer must explicitly begin one authenticated connection");
-        assert!(cccd < begin);
+        assert!(begin < cccd);
         let arm = ble
             .find("indication.arm(chunk.len())")
             .expect("the bearer must retain a fragment before sending");

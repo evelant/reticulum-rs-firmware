@@ -15,6 +15,7 @@ journal-schema3-dev-reprovision = []
 rns-inbox-commit-fault-hil = []
 runtime-measurement-hil = ["esp-alloc/alloc-hooks"]
 ble-api-proof = [
+    "display",
     "dep:embassy-sync-07",
     "dep:esp-radio",
     "dep:trouble-host",
@@ -40,6 +41,7 @@ display = [
 [dependencies]
 reticulum-announce-clock = { path = "../../crates/announce-clock", default-features = false }
 reticulum-appliance-display-model = { path = "../../crates/appliance-display-model", default-features = false }
+reticulum-ble-bond-store = { path = "../../crates/ble-bond-store", default-features = false }
 reticulum-board-heltec-vision-master-e290 = { path = "../../crates/board-heltec-vision-master-e290", default-features = false, optional = true }
 reticulum-board-heltec-vision-master-e290-radio = { path = "../../crates/board-heltec-vision-master-e290-radio" }
 reticulum-device-api = { path = "../../crates/device-api", default-features = false, features = ["experimental-rns-data", "experimental-rns-inbox", "experimental-lxmf", "experimental-nomad"] }
@@ -134,10 +136,12 @@ esp-storage = { workspace = true, features = ["esp32s3", "critical-section"] }
 log.workspace = true
 static_cell.workspace = true
 trouble-host = { version = "=0.6.0", default-features = false, features = [
+    "connection-event-queue-size-4",
     "default-packet-pool-mtu-255",
     "derive",
     "gatt",
     "peripheral",
+    "security",
 ], optional = true }
 
 [dev-dependencies]

@@ -1376,7 +1376,7 @@ class BoundActionTests(unittest.TestCase):
             self.assertEqual(
                 info.partition_table_sha256,
                 # Anchored to espflash 4.5.0 output from the checked-in CSV.
-                "740600b71569fa4c2297d2603cd8dbcaa50b039e527e4837733d5c86317da074",
+                "9f183d86eda1be9898f27b6d283a02a5ed730df27151733b965096cbd714aa3a",
             )
 
     def test_host_guard_matches_checked_in_e290_partition_csv(self) -> None:

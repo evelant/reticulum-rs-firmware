@@ -21,7 +21,11 @@ use reticulum_device_api_credentials::{CredentialGeneration, CredentialId};
 /// Required continuous active-low observation before exclusivity is requested.
 pub const BUTTON_HOLD_MILLIS: u64 = 2_000;
 /// Lifetime of one pairing window, measured from the hold threshold.
-pub const PAIRING_WINDOW_MILLIS: u64 = 60_000;
+///
+/// Five minutes leaves ample time to move between the appliance display, the
+/// operating-system Bluetooth prompt, and the client without weakening the
+/// connection binding or the independent request-attempt budget.
+pub const PAIRING_WINDOW_MILLIS: u64 = 300_000;
 /// Shared admission budget for classified Begin and Proof requests.
 pub const MAX_BEGIN_PROOF_ATTEMPTS: u8 = 3;
 /// Conservative fixed-RAM ceiling for the initial policy owner.

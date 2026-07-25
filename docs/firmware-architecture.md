@@ -747,7 +747,11 @@ partitions through operation-scoped views. That owner validates the exact
 `api_credentials` range at `0x614000..0x616000`, binds it to the exact eFuse-
 derived device ID, and immediately mounts plus performs the bounded reported
 retire-then-cleanup sequence before any other product-store write. It never
-auto-provisions credential media. A resident `CredentialRuntime` in the
+auto-provisions credential media. The same checked owner then read-only mounts
+the exact `ble_bond` range at `0x616000..0x618000`. Invalid bond media disables
+BLE without blocking LoRa, and fresh authenticated bond persistence uses the
+portable store's commit-last exact-readback and remount result before bearer
+success. A resident `CredentialRuntime` in the
 coordinator retains the exact boot binding, mounted authority, feature-free
 pairing policy, and initialization permits; it accepts only forward progress
 from the erased/interrupted boot trajectory. The coordinator also compiles the

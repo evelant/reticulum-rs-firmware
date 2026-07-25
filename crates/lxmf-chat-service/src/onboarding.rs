@@ -63,6 +63,9 @@ pub enum OnboardingState {
 pub enum OnboardingStage {
     /// Resolving and opening the selected USB interface.
     OpeningDevice,
+    /// The selected BLE link is subscribed but intentionally idle while the
+    /// user completes GPIO21-authorized operating-system pairing.
+    WaitingForBleSecurity,
     /// Reading the public initialization state.
     CheckingInitialization,
     /// Waiting for the user to release, then hold GPIO21 for two seconds.

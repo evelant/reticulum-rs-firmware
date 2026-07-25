@@ -30,8 +30,8 @@ use reticulum_device_api_credentials::{
 };
 use reticulum_device_api_handoff::{LocalApiReply, LocalApiRequest};
 use reticulum_device_api_pairing::{
-    ActivateFailure, ActivateRequest, DeviceChallenge, DeviceId, PairingFailure, PairingPsk,
-    PairingTranscript, ProofChallenge, ProofStartRequest,
+    ActivateFailure, ActivateRequest, BearerBinding, DeviceChallenge, DeviceId, PairingFailure,
+    PairingPsk, PairingTranscript, ProofChallenge, ProofStartRequest,
 };
 use reticulum_device_api_pairing_policy::{
     AbortOutcome, AcquirePairingExclusive, ActivationOutcome, ActiveLowButton, AttemptDecision,
@@ -538,6 +538,7 @@ impl CredentialRuntime {
     /// [`Self::drive_live_pairing`].
     pub fn request_pairing_begin<R>(
         &mut self,
+        bearer: BearerBinding,
         now: MonotonicMillis,
         connection: ConnectionId,
         rng: &mut R,
@@ -609,6 +610,7 @@ impl CredentialRuntime {
         self.live_pairing = LivePairingOwnership::Prepared {
             completion: MutationCompletion::Begin {
                 permit,
+                bearer,
                 device_id: self.device_id,
                 pending,
             },
@@ -689,6 +691,7 @@ impl CredentialRuntime {
             return ProofStartAdmission::Refused(PairingFailure::Blocked);
         };
         let challenge = match ProofChallenge::new(
+            request.bearer(),
             self.device_id,
             protocol_connection,
             protocol_window,
@@ -723,6 +726,7 @@ impl CredentialRuntime {
     /// policy ownership is released and every retained secret is dropped.
     pub fn request_pairing_activate(
         &mut self,
+        bearer: BearerBinding,
         now: MonotonicMillis,
         connection: ConnectionId,
         request: ActivateRequest,
@@ -740,6 +744,18 @@ impl CredentialRuntime {
             drop(request);
             return ActivateAdmission::Refused(ActivateFailure::ProofRejected);
         };
+        if proof.transcript.bearer() != bearer {
+            drop(request);
+            self.live_pairing = match self
+                .pairing
+                .as_mut()
+                .and_then(|policy| policy.proof_rejected(proof.permit).ok())
+            {
+                Some(()) => LivePairingOwnership::Idle,
+                None => LivePairingOwnership::Blocked,
+            };
+            return ActivateAdmission::Refused(ActivateFailure::ProofRejected);
+        }
         let continuation_is_current = self.pairing.as_mut().is_some_and(|policy| {
             policy.proof_continuation_is_current(now, connection, &proof.permit)
         });
@@ -1019,6 +1035,7 @@ impl CredentialRuntime {
         match completion {
             MutationCompletion::Begin {
                 permit,
+                bearer,
                 device_id,
                 pending,
             } => {
@@ -1055,6 +1072,7 @@ impl CredentialRuntime {
                     return CredentialPairingDriveOutcome::Blocked(Some(mutation));
                 };
                 match reticulum_device_api_pairing::BeginOffer::after_pending_commit(
+                    bearer,
                     device_id,
                     pending.id(),
                     pending.generation(),
@@ -1973,7 +1991,12 @@ mod tests {
         rng: &mut TestRng,
     ) -> BeginOffer {
         assert_eq!(
-            runtime.request_pairing_begin(time(REQUEST_MILLIS + 1), connection(), rng,),
+            runtime.request_pairing_begin(
+                reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
+                time(REQUEST_MILLIS + 1),
+                connection(),
+                rng,
+            ),
             BeginAdmission::Accepted
         );
         assert_eq!(
@@ -1991,9 +2014,14 @@ mod tests {
         rng: &mut TestRng,
         offer: &BeginOffer,
     ) -> (ProofStartRequest, ProofChallenge) {
-        let request =
-            ProofStartRequest::new(2, offer.credential_id(), offer.generation(), [0x5a; 32])
-                .expect("test ProofStart is valid");
+        let request = ProofStartRequest::new(
+            reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
+            2,
+            offer.credential_id(),
+            offer.generation(),
+            [0x5a; 32],
+        )
+        .expect("test ProofStart is valid");
         let challenge = match runtime.request_pairing_proof_start(
             time(REQUEST_MILLIS + 2),
             connection(),
@@ -2021,7 +2049,12 @@ mod tests {
         let activate = ActivateRequest::new(3, offer.credential_id(), offer.generation(), proof)
             .expect("test Activate is valid");
         assert_eq!(
-            runtime.request_pairing_activate(time(REQUEST_MILLIS + 3), connection(), activate,),
+            runtime.request_pairing_activate(
+                reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
+                time(REQUEST_MILLIS + 3),
+                connection(),
+                activate,
+            ),
             ActivateAdmission::Accepted
         );
         (transcript, verification_proof)
@@ -2057,7 +2090,12 @@ mod tests {
             CredentialPairingDriveOutcome::CleanupCompleted
         ));
         assert_eq!(
-            runtime.request_pairing_begin(time(REQUEST_MILLIS + 2), connection(), &mut rng,),
+            runtime.request_pairing_begin(
+                reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
+                time(REQUEST_MILLIS + 2),
+                connection(),
+                &mut rng,
+            ),
             BeginAdmission::Refused(PairingFailure::Refused)
         );
         let _ = start_proof(runtime, &mut rng, &offer);
@@ -2499,6 +2537,7 @@ mod tests {
         let mut runtime = CredentialRuntime::from_boot(boot, store_binding, device_id);
         open_pairing_window(&mut runtime);
         let offer = BeginOffer::after_pending_commit(
+            reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
             device_id,
             pending_id,
             CredentialGeneration::new(2),
@@ -2588,13 +2627,24 @@ mod tests {
 
         let mut rng = TestRng::patterned(0x27);
         assert_eq!(
-            runtime.request_pairing_begin(time(REQUEST_MILLIS + 1), connection(), &mut rng),
+            runtime.request_pairing_begin(
+                reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
+                time(REQUEST_MILLIS + 1),
+                connection(),
+                &mut rng
+            ),
             BeginAdmission::Refused(PairingFailure::Unavailable)
         );
         assert_eq!(rng.fills, 0);
 
-        let proof_start = ProofStartRequest::new(2, credential_id, generation, [0x5a; 32])
-            .expect("test ProofStart is valid");
+        let proof_start = ProofStartRequest::new(
+            reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
+            2,
+            credential_id,
+            generation,
+            [0x5a; 32],
+        )
+        .expect("test ProofStart is valid");
         assert!(matches!(
             runtime.request_pairing_proof_start(
                 time(REQUEST_MILLIS + 2),
@@ -2614,7 +2664,12 @@ mod tests {
         )
         .expect("test Activate is valid");
         assert_eq!(
-            runtime.request_pairing_activate(time(REQUEST_MILLIS + 3), connection(), activate,),
+            runtime.request_pairing_activate(
+                reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
+                time(REQUEST_MILLIS + 3),
+                connection(),
+                activate,
+            ),
             ActivateAdmission::Refused(ActivateFailure::Unavailable)
         );
         assert_eq!(
@@ -2728,7 +2783,12 @@ mod tests {
                 Fault::BadProof | Fault::WrongConnection => time(REQUEST_MILLIS + 3),
             };
             assert_eq!(
-                runtime.request_pairing_activate(now, request_connection, activate),
+                runtime.request_pairing_activate(
+                    reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
+                    now,
+                    request_connection,
+                    activate
+                ),
                 ActivateAdmission::Refused(ActivateFailure::ProofRejected)
             );
             assert_eq!(
@@ -2757,11 +2817,21 @@ mod tests {
             .expect("test Activate is valid");
 
         assert_eq!(
-            runtime.request_pairing_begin(time(1), connection(), &mut rng),
+            runtime.request_pairing_begin(
+                reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
+                time(1),
+                connection(),
+                &mut rng
+            ),
             BeginAdmission::Refused(PairingFailure::Blocked)
         );
         assert_eq!(
-            runtime.request_pairing_activate(time(REQUEST_MILLIS + 3), connection(), activate,),
+            runtime.request_pairing_activate(
+                reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
+                time(REQUEST_MILLIS + 3),
+                connection(),
+                activate,
+            ),
             ActivateAdmission::Refused(ActivateFailure::ProofRejected)
         );
         assert_eq!(
@@ -2808,7 +2878,12 @@ mod tests {
         let (mut runtime, _) = ready_pairing_runtime();
         let mut rng = TestRng::zero();
         assert_eq!(
-            runtime.request_pairing_begin(time(REQUEST_MILLIS + 1), connection(), &mut rng,),
+            runtime.request_pairing_begin(
+                reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
+                time(REQUEST_MILLIS + 1),
+                connection(),
+                &mut rng,
+            ),
             BeginAdmission::Refused(PairingFailure::Blocked)
         );
         assert_eq!(rng.fills, usize::from(MAX_PAIRING_ENTROPY_ATTEMPTS) * 3);
@@ -2823,9 +2898,14 @@ mod tests {
         let (mut runtime, mut access) = ready_pairing_runtime();
         let mut begin_rng = TestRng::patterned(0x72);
         let offer = commit_begin(&mut runtime, &mut access, &mut begin_rng);
-        let request =
-            ProofStartRequest::new(2, offer.credential_id(), offer.generation(), [0x5a; 32])
-                .expect("test ProofStart is valid");
+        let request = ProofStartRequest::new(
+            reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
+            2,
+            offer.credential_id(),
+            offer.generation(),
+            [0x5a; 32],
+        )
+        .expect("test ProofStart is valid");
         let mut challenge_rng = TestRng::zero();
         assert!(matches!(
             runtime.request_pairing_proof_start(
@@ -2861,7 +2941,12 @@ mod tests {
             let (mut runtime, mut access) = ready_pairing_runtime();
             let mut rng = TestRng::patterned(seed);
             assert_eq!(
-                runtime.request_pairing_begin(time(REQUEST_MILLIS + 1), connection(), &mut rng,),
+                runtime.request_pairing_begin(
+                    reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
+                    time(REQUEST_MILLIS + 1),
+                    connection(),
+                    &mut rng,
+                ),
                 BeginAdmission::Accepted
             );
             access.backend_mut().fail_next_write = Some(fault);

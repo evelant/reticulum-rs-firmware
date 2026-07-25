@@ -463,7 +463,10 @@ uninitialized-erased, initialization-interrupted, blocked, corrupt, or backend-
 failed, and transfers the exact boot binding and any mounted owner into the
 resident `CredentialRuntime` inside `ProductStorageCoordinator`. These developer
 partitions are deliberately plaintext, so a provisioned full flash dump is
-secret material.
+secret material. The adjacent `ble_bond` raw-NOR partition at
+`0x616000..0x618000` retains one authenticated BLE bond. Its boot mount is
+strictly read-only and a fault disables only BLE; pairing-time success follows
+only an exact commit, readback, and remount through the same flash coordinator.
 
 Current source also validates and read-only mounts the exact 2 MiB
 `message_store` through the same sole flash owner. ADR 0011 format 1 admits one

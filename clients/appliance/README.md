@@ -74,12 +74,17 @@ verify that the generated `Release-iphoneos/ReticulumAppliance.app/main.jsbundle
 nonempty.
 
 The app defaults to the appliance's same-origin HTTP API on web. Native builds
-default to a Rust single-owner actor with the app-private
-`reticulum-lxmf-chat-alpha-schema3.sqlite3` database. The schema-3 filename is
-deliberately new so submission IDs from a pre-schema-3 device journal cannot
-poll or collide after the required journal-only reprovision; the separate
-credential file is retained. This already provides durable contacts, timelines,
-and idempotent outbox writes while offline. BLE is the default native bearer: React
+default to a Rust-owned app-private profile store. Each canonical credential is
+keyed by its validated device ID and has its own identity-bound SQLite
+database; atomic metadata selects the one profile opened by the current
+single-board UI. On first launch after this change, Rust migrates the prior
+`reticulum-device-credential.rdpkey` and
+`reticulum-lxmf-chat-alpha-schema3.sqlite3` files into that credential's
+profile. Invalid legacy state remains available to the existing explicit
+recovery boundary. Generated TypeScript receives public profile summaries, not
+credential bytes or profile filesystem paths. This already provides durable
+contacts, timelines, and idempotent outbox writes while offline. BLE is the
+default native bearer: React
 Native owns foreground scanning, GATT connection, indications, and write-with-response, while Rust
 owns the activated credential, authenticated session, protocol framing, and LXMF state. The initial
 BLE attempt runs in the background only after the native bridge has validated an app-private
@@ -121,10 +126,12 @@ board through the qualified USB managed-profile workflow, make a temporary copy 
 96-byte Active `credential.rdpkey`, name the transfer copy with that board's normalized USB serial,
 transfer it to the phone, and choose it in the system file picker. Verify the filename: the current
 create-only alpha imports the first canonical credential immediately and has no secret-free
-board-identity confirmation screen. Selecting the other board's valid file requires clearing this
-app's local data before trying again. The Expo layer copies the selection to an app-owned cache
+board-identity confirmation screen. The native store can retain multiple device-keyed profiles,
+but the current UI intentionally opens only the active profile and does not yet expose adding or
+switching boards after setup. The Expo layer copies the selection to an app-owned cache
 path without reading its bytes, Rust validates and create-only publishes a mode-`0600` canonical
-credential, and the Expo layer removes its cache copy in a `finally` path. On iOS it also deletes
+credential into that device's profile, reopens the matching SQLite owner, and the Expo layer
+removes its cache copy in a `finally` path. On iOS it also deletes
 the picker-created temporary copy after staging. Cancelled, malformed, and failed imports do not
 start BLE or replace an existing credential. The original transfer file remains outside the app's
 control and must be deleted by the user after a successful import.
@@ -145,16 +152,16 @@ revoke the grant deterministically.
 
 Set `EXPO_PUBLIC_APPLIANCE_WIFI_ENDPOINT` to the E290 proof endpoint
 `192.168.4.1:29716` to opt a native development build into the first raw-TCP Wi-Fi proof connector.
-The connector reloads `reticulum-device-credential.rdpkey` from the app's private Documents
-directory for every handshake and uses the separately transcript-bound Wi-Fi session suite. For the
+The connector reloads the active profile's app-private credential for every
+handshake and uses the separately transcript-bound Wi-Fi session suite. For the
 current proof, use the same first-run credential import after pairing over the qualified USB
 workflow. Phone-native pairing, Keychain/Keystore migration, SoftAP joining, and credential
 rotation remain follow-up work. The session authenticates and integrity-protects API records but
 adds no application-layer confidentiality; the initial appliance SoftAP must therefore retain WPA2
 and this path must not be described as the final wireless security profile.
 
-The BLE connector currently uses that same app-private
-`reticulum-device-credential.rdpkey`. It scans only for the Rust-generated GATT service, subscribes
+The BLE connector currently uses that same active profile's app-private
+credential. It scans only for the Rust-generated GATT service, subscribes
 to the generated TX indication characteristic before declaring the link ready, and caps initial
 writes to the generated characteristic value bound. A generation-aware command pump rejects stale
 callbacks and reports every platform write exactly once. Platform writes have a ten-second bound so

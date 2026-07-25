@@ -14,8 +14,10 @@ rand_core.workspace = true
 reticulum-device-client = { path = "../device-client" }
 reticulum-device-api = { path = "../device-api", default-features = false, features = ["experimental-lxmf", "experimental-nomad"] }
 reticulum-device-api-ble = { path = "../device-api-ble" }
+reticulum-device-api-pairing = { path = "../device-api-pairing", default-features = false }
 reticulum-lxmf-chat-app = { path = "../lxmf-chat-app" }
 reticulum-lxmf-chat-runtime = { path = "../lxmf-chat-runtime" }
+reticulum-device-pairing-client = { path = "../device-pairing-client", default-features = false }
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true

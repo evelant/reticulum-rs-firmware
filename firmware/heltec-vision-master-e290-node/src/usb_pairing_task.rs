@@ -1024,6 +1024,7 @@ fn handle_pre_authentication_record(
             *context.pending_live_command = Some(PendingLiveCommand {
                 command: LivePairingCommand::new(
                     pairing_time(context.now_millis),
+                    reticulum_device_api_pairing::BearerBinding::UsbSerialJtag,
                     context.connection,
                     request,
                 ),

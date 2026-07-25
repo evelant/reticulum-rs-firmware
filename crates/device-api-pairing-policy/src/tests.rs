@@ -33,6 +33,10 @@ fn begin_ready() -> BeginFacts {
     BeginFacts::new(true, true, true)
 }
 
+fn open_deadline(start: u64) -> u64 {
+    start + 10 + BUTTON_HOLD_MILLIS + PAIRING_WINDOW_MILLIS
+}
+
 fn open(policy: &mut PairingPolicy, connection_id: ConnectionId, start: u64) {
     assert_eq!(policy.connected(time(start), connection_id), Ok(None));
     assert!(matches!(
@@ -51,10 +55,7 @@ fn open(policy: &mut PairingPolicy, connection_id: ConnectionId, start: u64) {
     match policy.exclusive_acquired(time(start + 10 + BUTTON_HOLD_MILLIS), effect) {
         ExclusiveAcquireOutcome::Opened(opened) => {
             assert_eq!(opened.connection(), connection_id);
-            assert_eq!(
-                opened.deadline(),
-                time(start + 10 + BUTTON_HOLD_MILLIS + PAIRING_WINDOW_MILLIS)
-            );
+            assert_eq!(opened.deadline(), time(open_deadline(start)));
         }
         _ => panic!("exclusive acquisition did not open the window"),
     }
@@ -63,7 +64,7 @@ fn open(policy: &mut PairingPolicy, connection_id: ConnectionId, start: u64) {
 #[test]
 fn constants_ids_pending_validation_and_ram_are_bounded() {
     assert_eq!(BUTTON_HOLD_MILLIS, 2_000);
-    assert_eq!(PAIRING_WINDOW_MILLIS, 60_000);
+    assert_eq!(PAIRING_WINDOW_MILLIS, 300_000);
     assert_eq!(MAX_BEGIN_PROOF_ATTEMPTS, 3);
     assert!(ConnectionId::new(0).is_none());
     assert!(PendingRef::new(CredentialId::new([0; 16]), CredentialGeneration::new(1)).is_err());
@@ -141,13 +142,14 @@ fn connection_epochs_are_strict_and_replacement_clears_hold_and_window() {
 fn exact_deadline_wins_and_held_low_does_not_reopen() {
     let mut policy = PairingPolicy::new(PendingState::None);
     open(&mut policy, connection(1), 0);
+    let deadline = open_deadline(0);
     assert!(
         policy
-            .ordinary_session(time(62_009), connection(1))
+            .ordinary_session(time(deadline - 1), connection(1))
             .is_err()
     );
     assert_eq!(
-        policy.poll_timeout(time(62_010)),
+        policy.poll_timeout(time(deadline)),
         PolicyEvent::Closed(crate::WindowClosed {
             reason: CloseReason::Timeout,
             window: crate::WindowId(core::num::NonZeroU64::new(1).unwrap()),
@@ -155,10 +157,14 @@ fn exact_deadline_wins_and_held_low_does_not_reopen() {
         })
     );
     assert!(matches!(
-        policy.observe_button(time(64_100), ActiveLowButton::Low),
+        policy.observe_button(time(deadline + 2_090), ActiveLowButton::Low),
         ButtonEffect::None
     ));
-    assert!(policy.ordinary_session(time(64_101), connection(1)).is_ok());
+    assert!(
+        policy
+            .ordinary_session(time(deadline + 2_091), connection(1))
+            .is_ok()
+    );
 }
 
 #[test]
@@ -422,7 +428,7 @@ fn begin_reserves_one_pending_and_exact_proof_activation_clears_it() {
         AttemptDecision::Admitted { permit, .. } => {
             assert_eq!(permit.connection(), connection(1));
             assert_eq!(permit.window().get(), 1);
-            assert_eq!(permit.deadline(), time(62_010));
+            assert_eq!(permit.deadline(), time(open_deadline(0)));
             assert_eq!(permit.pending(), enrolled);
             permit
         }
@@ -697,15 +703,20 @@ fn timeout_closes_new_work_but_not_an_owned_begin_outcome() {
         AttemptDecision::Admitted { permit, .. } => permit,
         _ => panic!("eligible Begin rejected"),
     };
+    let deadline = open_deadline(0);
     assert!(matches!(
-        policy.poll_timeout(time(62_010)),
+        policy.poll_timeout(time(deadline)),
         PolicyEvent::Closed(closed) if closed.reason() == CloseReason::Timeout
     ));
     policy
         .finish_begin(permit, BeginOutcome::PendingCommitted(enrolled))
         .unwrap_or_else(|error| panic!("late durable outcome was lost: {error:?}"));
     assert_eq!(policy.pending(), Some(enrolled));
-    assert!(policy.ordinary_session(time(62_011), connection(1)).is_ok());
+    assert!(
+        policy
+            .ordinary_session(time(deadline + 1), connection(1))
+            .is_ok()
+    );
 }
 
 #[test]

@@ -21,6 +21,7 @@ use crate::credential::{
     CredentialImportError, CredentialImportPolicy, NativeCredentialStatus, NativeCredentialSummary,
     import_credential_file, inspect_credential,
 };
+use crate::profile::NativeProfileStore;
 use crate::wifi::WifiConnector;
 
 /// Bearer selected for the native appliance session.
@@ -189,6 +190,7 @@ pub struct NativeAppliance {
     transport: NativeTransport,
     connector_configured: bool,
     credential_path: Option<PathBuf>,
+    profile_store: Option<Arc<NativeProfileStore>>,
     ble_hub: Option<Arc<BleHub>>,
 }
 
@@ -221,6 +223,7 @@ impl NativeAppliance {
             transport,
             connector_configured: false,
             credential_path: None,
+            profile_store: None,
             ble_hub: None,
         }))
     }
@@ -271,6 +274,7 @@ impl NativeAppliance {
             transport: NativeTransport::Wifi,
             connector_configured: true,
             credential_path: Some(credential_path),
+            profile_store: None,
             ble_hub: None,
         }))
     }
@@ -315,6 +319,72 @@ impl NativeAppliance {
             transport: NativeTransport::BluetoothLowEnergy,
             connector_configured: true,
             credential_path: Some(credential_path),
+            profile_store: None,
+            ble_hub: Some(ble_hub),
+        }))
+    }
+
+    /// Open the active device-keyed profile with the Wi-Fi raw-TCP connector.
+    ///
+    /// Rust resolves the active profile's SQLite and credential paths. When no
+    /// profile is active, an isolated unconfigured database remains available
+    /// for the single-board onboarding UI while the connector reports a
+    /// missing credential.
+    #[uniffi::constructor]
+    pub fn open_wifi_profile(
+        profile_store: Arc<NativeProfileStore>,
+        endpoint: String,
+    ) -> Result<Arc<Self>, NativeApplianceError> {
+        let endpoint = endpoint.parse::<SocketAddr>().map_err(|error| {
+            NativeApplianceError::InvalidArgument {
+                reason: format!("Wi-Fi endpoint must be a literal IP socket address: {error}"),
+            }
+        })?;
+        if endpoint.port() == 0 {
+            return Err(NativeApplianceError::InvalidArgument {
+                reason: "Wi-Fi endpoint port must not be zero".to_owned(),
+            });
+        }
+        let paths = profile_store.runtime_paths()?;
+        let handle = start_appliance(
+            ApplianceConfig::new(paths.database),
+            WifiConnector::new(endpoint, paths.credential.clone()),
+        )
+        .map_err(NativeApplianceError::from)?;
+        Ok(Arc::new(Self {
+            handle: Mutex::new(Some(handle)),
+            close_gate: AsyncMutex::new(()),
+            transport: NativeTransport::Wifi,
+            connector_configured: true,
+            credential_path: None,
+            profile_store: Some(profile_store),
+            ble_hub: None,
+        }))
+    }
+
+    /// Open the active device-keyed profile with the platform-owned BLE GATT
+    /// connector.
+    ///
+    /// Rust resolves both storage paths and retains the profile store for
+    /// secret-free status, import, and future board activation operations.
+    #[uniffi::constructor]
+    pub fn open_ble_profile(
+        profile_store: Arc<NativeProfileStore>,
+    ) -> Result<Arc<Self>, NativeApplianceError> {
+        let paths = profile_store.runtime_paths()?;
+        let ble_hub = BleHub::new();
+        let handle = start_appliance(
+            ApplianceConfig::new(paths.database),
+            BleConnector::new(paths.credential.clone(), Arc::clone(&ble_hub)),
+        )
+        .map_err(NativeApplianceError::from)?;
+        Ok(Arc::new(Self {
+            handle: Mutex::new(Some(handle)),
+            close_gate: AsyncMutex::new(()),
+            transport: NativeTransport::BluetoothLowEnergy,
+            connector_configured: true,
+            credential_path: None,
+            profile_store: Some(profile_store),
             ble_hub: Some(ble_hub),
         }))
     }
@@ -327,6 +397,9 @@ impl NativeAppliance {
     /// Active even when the current E290 BLE profile cannot derive its exact
     /// advertising name.
     pub fn credential_status(&self) -> Result<NativeCredentialStatus, NativeApplianceError> {
+        if let Some(profile_store) = &self.profile_store {
+            return profile_store.credential_status();
+        }
         let path = self.credential_path.as_deref().ok_or_else(|| {
             NativeApplianceError::TransportUnavailable {
                 transport: self.transport,
@@ -351,12 +424,6 @@ impl NativeAppliance {
         &self,
         staging_path: String,
     ) -> Result<NativeCredentialSummary, NativeApplianceError> {
-        let path = self.credential_path.as_deref().ok_or_else(|| {
-            NativeApplianceError::TransportUnavailable {
-                transport: self.transport,
-                reason: "this native connector has no credential store".to_owned(),
-            }
-        })?;
         let staging_path = PathBuf::from(staging_path);
         let policy = match self.transport {
             NativeTransport::BluetoothLowEnergy => CredentialImportPolicy::E290BleTarget,
@@ -368,6 +435,17 @@ impl NativeAppliance {
                 });
             }
         };
+        if let Some(profile_store) = &self.profile_store {
+            return profile_store
+                .import_activated_credential(&staging_path, policy)
+                .map_err(NativeApplianceError::from);
+        }
+        let path = self.credential_path.as_deref().ok_or_else(|| {
+            NativeApplianceError::TransportUnavailable {
+                transport: self.transport,
+                reason: "this native connector has no credential store".to_owned(),
+            }
+        })?;
         import_credential_file(path, &staging_path, policy).map_err(NativeApplianceError::from)
     }
 

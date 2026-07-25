@@ -7,7 +7,7 @@
 
 use reticulum_device_api_framing::Record;
 use reticulum_device_api_pairing::{
-    PairingRequest, PairingResponse, RECORD_KIND_ABORT_CURRENT_REQUEST,
+    BearerBinding, PairingRequest, PairingResponse, RECORD_KIND_ABORT_CURRENT_REQUEST,
     RECORD_KIND_ACTIVATE_REQUEST, RECORD_KIND_BEGIN_REQUEST, RECORD_KIND_PROOF_START_REQUEST,
 };
 use reticulum_device_api_pairing_control::{
@@ -111,6 +111,19 @@ pub enum UsbPreAuthenticationDecodeError {
 pub fn decode_usb_pre_authentication_request(
     record: Record,
 ) -> Result<UsbPreAuthenticationRequest, UsbPreAuthenticationDecodeError> {
+    decode_pre_authentication_request(BearerBinding::UsbSerialJtag, record)
+}
+
+/// Decode the six shared pre-authentication request kinds under one exact
+/// transport profile.
+///
+/// Initialization-control records are bearer independent. Secret-bearing live
+/// pairing records authenticate the supplied bearer code as part of their
+/// canonical wire profile and transcript.
+pub fn decode_pre_authentication_request(
+    bearer: BearerBinding,
+    record: Record,
+) -> Result<UsbPreAuthenticationRequest, UsbPreAuthenticationDecodeError> {
     let kind = record.kind();
     match kind {
         RECORD_KIND_STATUS_REQUEST | RECORD_KIND_INITIALIZE_REQUEST => {
@@ -121,7 +134,7 @@ pub fn decode_usb_pre_authentication_request(
         RECORD_KIND_BEGIN_REQUEST
         | RECORD_KIND_PROOF_START_REQUEST
         | RECORD_KIND_ACTIVATE_REQUEST
-        | RECORD_KIND_ABORT_CURRENT_REQUEST => PairingRequest::from_record(record)
+        | RECORD_KIND_ABORT_CURRENT_REQUEST => PairingRequest::from_record(bearer, record)
             .map(UsbPreAuthenticationRequest::Live)
             .map_err(|_| UsbPreAuthenticationDecodeError::InvalidLivePairing),
         _ => Err(UsbPreAuthenticationDecodeError::UnsupportedKind(kind)),
@@ -136,7 +149,8 @@ mod tests {
         AUTH_TAG_LENGTH, PAYLOAD_CAPACITY, PayloadLength, Record, SESSION_ID_LENGTH,
     };
     use reticulum_device_api_pairing::{
-        ActivateRequest, BeginRequest, ClientProof, PairingRequest, RECORD_KIND_BEGIN_RESPONSE,
+        ActivateRequest, BearerBinding, BeginRequest, ClientProof, PairingRequest,
+        ProofStartRequest, RECORD_KIND_BEGIN_RESPONSE,
     };
     use reticulum_device_api_pairing_control::{
         ControlRequest, ControlResponse, InitializationStatus,
@@ -145,7 +159,8 @@ mod tests {
 
     use super::{
         UsbPreAuthenticationDecodeError, UsbPreAuthenticationRequest,
-        UsbPreAuthenticationRequestKind, decode_usb_pre_authentication_request,
+        UsbPreAuthenticationRequestKind, decode_pre_authentication_request,
+        decode_usb_pre_authentication_request,
     };
     use crate::usb_pairing_policy::{ExactNextSequenceGate, SequenceRefusal};
 
@@ -272,5 +287,39 @@ mod tests {
             }
             _ => panic!("activate owner changed family during demultiplexing"),
         }
+    }
+
+    #[test]
+    fn ble_live_requests_are_decoded_only_under_the_ble_profile() {
+        let request = ProofStartRequest::new(
+            BearerBinding::BleGatt,
+            0,
+            reticulum_device_api_credentials::CredentialId::new([0x33; 16]),
+            reticulum_device_api_credentials::CredentialGeneration::new(5),
+            [0x44; 32],
+        )
+        .expect("test proof-start request is valid")
+        .into_record();
+
+        assert!(matches!(
+            decode_pre_authentication_request(BearerBinding::BleGatt, request),
+            Ok(UsbPreAuthenticationRequest::Live(
+                PairingRequest::ProofStart(_)
+            ))
+        ));
+
+        let wrong_bearer = ProofStartRequest::new(
+            BearerBinding::BleGatt,
+            0,
+            reticulum_device_api_credentials::CredentialId::new([0x33; 16]),
+            reticulum_device_api_credentials::CredentialGeneration::new(5),
+            [0x44; 32],
+        )
+        .expect("test proof-start request is valid")
+        .into_record();
+        assert_eq!(
+            decode_pre_authentication_request(BearerBinding::UsbSerialJtag, wrong_bearer).err(),
+            Some(UsbPreAuthenticationDecodeError::InvalidLivePairing)
+        );
     }
 }

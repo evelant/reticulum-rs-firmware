@@ -15,22 +15,30 @@ use reticulum_device_api::{
     MAX_NOMAD_REQUEST_TIMESTAMP_UNIX_MS,
 };
 use reticulum_device_api_ble::{
-    GATT_PROFILE_MAJOR, GATT_PROFILE_MINOR, INITIAL_ATT_VALUE_BYTES, RX_UUID, SERVICE_UUID, TX_UUID,
+    GATT_PROFILE_MAJOR, GATT_PROFILE_MINOR, INITIAL_ATT_VALUE_BYTES, RX_UUID,
+    SECURITY_CONFIRMATION_READY_VALUE, SECURITY_CONFIRMATION_UUID, SERVICE_UUID, TX_UUID,
 };
 
 mod appliance;
 mod ble;
 mod credential;
+mod onboarding;
+mod profile;
 mod wifi;
 
 pub use appliance::{NativeAppliance, NativeApplianceError, NativeTransport};
 pub use ble::{NativeBleError, NativeBlePlatformCommand};
 pub use credential::{NativeCredentialStatus, NativeCredentialSummary};
+pub use onboarding::{
+    NativeBleOnboarding, NativeBleOnboardingError, NativeBleOnboardingFailure,
+    NativeBleOnboardingOperation, NativeBleOnboardingPhase, NativeBleOnboardingSnapshot,
+};
+pub use profile::{NativeProfileStore, NativeProfileStoreSnapshot, NativeProfileSummary};
 
 /// Incompatible generation of the callable native bridge.
 pub const BRIDGE_API_MAJOR: u16 = 1;
 /// Backward-compatible revision of the callable native bridge.
-pub const BRIDGE_API_MINOR: u16 = 6;
+pub const BRIDGE_API_MINOR: u16 = 9;
 
 /// Exact protocol contract compiled into a native client binary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
@@ -75,6 +83,11 @@ pub struct NativeBleGattProfile {
     pub rx_uuid: String,
     /// Device-to-phone indication characteristic UUID.
     pub tx_uuid: String,
+    /// Authenticated-read confirmation characteristic UUID.
+    pub security_confirmation_uuid: String,
+    /// Public value proving that the retained authenticated link is ready for
+    /// application protocol bytes.
+    pub security_confirmation_ready_value: Vec<u8>,
     /// Universally safe initial ATT value size.
     pub initial_att_value_bytes: u32,
 }
@@ -115,6 +128,8 @@ pub fn native_ble_gatt_profile() -> NativeBleGattProfile {
         service_uuid: SERVICE_UUID.to_owned(),
         rx_uuid: RX_UUID.to_owned(),
         tx_uuid: TX_UUID.to_owned(),
+        security_confirmation_uuid: SECURITY_CONFIRMATION_UUID.to_owned(),
+        security_confirmation_ready_value: SECURITY_CONFIRMATION_READY_VALUE.to_vec(),
         initial_att_value_bytes: u32::try_from(INITIAL_ATT_VALUE_BYTES)
             .expect("ATT value bound must fit u32"),
     }
@@ -132,7 +147,7 @@ mod tests {
             native_bridge_contract(),
             NativeBridgeContract {
                 bridge_api_major: 1,
-                bridge_api_minor: 6,
+                bridge_api_minor: 9,
                 device_api_major: 1,
                 device_api_minor: 6,
                 max_message_bytes: 512,
@@ -151,11 +166,13 @@ mod tests {
         assert_eq!(
             native_ble_gatt_profile(),
             NativeBleGattProfile {
-                major: 1,
+                major: 2,
                 minor: 0,
-                service_uuid: "f3c8a0b0-5e7a-4c51-a3b9-7d2160d20a01".to_owned(),
-                rx_uuid: "f3c8a0b1-5e7a-4c51-a3b9-7d2160d20a01".to_owned(),
-                tx_uuid: "f3c8a0b2-5e7a-4c51-a3b9-7d2160d20a01".to_owned(),
+                service_uuid: "f3c8a0b0-5e7a-4c51-a3b9-7d2160d20a02".to_owned(),
+                rx_uuid: "f3c8a0b1-5e7a-4c51-a3b9-7d2160d20a02".to_owned(),
+                tx_uuid: "f3c8a0b2-5e7a-4c51-a3b9-7d2160d20a02".to_owned(),
+                security_confirmation_uuid: "f3c8a0b3-5e7a-4c51-a3b9-7d2160d20a02".to_owned(),
+                security_confirmation_ready_value: b"RDY1".to_vec(),
                 initial_att_value_bytes: 20,
             }
         );

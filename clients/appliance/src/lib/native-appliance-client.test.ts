@@ -4,8 +4,11 @@ import type {
   NativeApplianceError,
   NativeApplianceLike,
   NativeBleGattProfile,
+  NativeBleOnboardingLike,
   NativeBridgeContract,
   NativeCredentialSummary,
+  NativeProfileStoreLike,
+  NativeProfileSummary,
   NativeTransport,
 } from "@reticulum/appliance-native";
 
@@ -23,6 +26,8 @@ import {
 import type {
   BleCandidate,
   BleCentral,
+  BleConnection,
+  BleConnectionObserver,
   BleConnectOptions,
   BleScanOptions,
 } from "./ble-central-types.ts";
@@ -57,6 +62,7 @@ const E290_CREDENTIAL: NativeCredentialSummary = {
   expectedBleLocalName: "reticulum-e290-e13e88",
   generation: 1n,
 };
+const PROFILE_STORE = {} as NativeProfileStoreLike;
 
 async function waitFor(predicate: () => boolean, label: string): Promise<void> {
   const deadline = performance.now() + 1_000;
@@ -140,7 +146,7 @@ function credentialRuntime(options: {
 }): NativeApplianceRuntime {
   const appliance = offlineBleAppliance();
   return {
-    ble: {
+    createBle: () => ({
       central: options.central,
       decodeCommand: () => {
         throw new Error("no command expected");
@@ -155,13 +161,16 @@ function credentialRuntime(options: {
         serviceUuid: "generated-service",
         writeCharacteristicUuid: "generated-rx",
         indicateCharacteristicUuid: "generated-tx",
+        securityConfirmationCharacteristicUuid: "generated-security-confirmation",
+        securityConfirmationReadyValue: Uint8Array.of(0x52, 0x44, 0x59, 0x31),
         maximumWriteValueBytes: 20,
       },
-    },
+    }),
     bridge: {
       contract: CONTRACT,
       credentialStatus: options.status,
       destroy(): void {},
+      destroyProfileStore(): void {},
       isNativeError: options.isNativeError ?? ((_value): _value is NativeApplianceError => false),
       importCredential(_appliance, stagingPath): NativeCredentialSummary {
         return options.importCredential(stagingPath);
@@ -170,8 +179,8 @@ function credentialRuntime(options: {
         return appliance;
       },
     },
-    databasePath: "/app/credential-onboarding.sqlite3",
     pickCredential: options.pickCredential,
+    profileStore: PROFILE_STORE,
   };
 }
 
@@ -311,14 +320,18 @@ describe("native appliance adapter loading", () => {
           events.push("destroy");
           finishDestroy();
         },
+        destroyProfileStore(value): void {
+          expect(value).toBe(PROFILE_STORE);
+        },
         isNativeError: (value): value is NativeApplianceError => value === bridgeError,
         importCredential: () => E290_CREDENTIAL,
-        open(databasePath): NativeApplianceLike {
-          events.push(`open ${databasePath}`);
+        open(profileStore): NativeApplianceLike {
+          expect(profileStore).toBe(PROFILE_STORE);
+          events.push("open profile");
           return appliance;
         },
       },
-      databasePath: "/app/reticulum-lxmf-chat-alpha-schema3.sqlite3",
+      profileStore: PROFILE_STORE,
     };
     const client = new NativeApplianceClient(async () => runtime);
 
@@ -390,11 +403,7 @@ describe("native appliance adapter loading", () => {
 
     client.dispose();
     await destroyed;
-    expect(events).toEqual([
-      "open /app/reticulum-lxmf-chat-alpha-schema3.sqlite3",
-      "close",
-      "destroy",
-    ]);
+    expect(events).toEqual(["open profile", "close", "destroy"]);
   });
 
   test("maps the generated native GATT profile without duplicating or swapping values", () => {
@@ -404,6 +413,8 @@ describe("native appliance adapter loading", () => {
       serviceUuid: "generated-service",
       rxUuid: "generated-rx",
       txUuid: "generated-tx",
+      securityConfirmationUuid: "generated-security-confirmation",
+      securityConfirmationReadyValue: Uint8Array.of(0x52, 0x44, 0x59, 0x31).buffer,
       initialAttValueBytes: 41,
     };
 
@@ -412,6 +423,8 @@ describe("native appliance adapter loading", () => {
       writeCharacteristicUuid: "generated-rx",
       indicateCharacteristicUuid: "generated-tx",
       maximumWriteValueBytes: 41,
+      securityConfirmationCharacteristicUuid: "generated-security-confirmation",
+      securityConfirmationReadyValue: Uint8Array.of(0x52, 0x44, 0x59, 0x31),
     });
   });
 
@@ -488,7 +501,7 @@ describe("native appliance adapter loading", () => {
       },
     };
     const runtime: NativeApplianceRuntime = {
-      ble: {
+      createBle: () => ({
         central,
         decodeCommand: () => {
           throw new Error("no command expected");
@@ -497,22 +510,25 @@ describe("native appliance adapter loading", () => {
           serviceUuid: "generated-service",
           writeCharacteristicUuid: "generated-rx",
           indicateCharacteristicUuid: "generated-tx",
+          securityConfirmationCharacteristicUuid: "generated-security-confirmation",
+          securityConfirmationReadyValue: Uint8Array.of(0x52, 0x44, 0x59, 0x31),
           maximumWriteValueBytes: 20,
         },
-      },
+      }),
       bridge: {
         contract: CONTRACT,
         credentialStatus: () => ({ state: "active", summary: E290_CREDENTIAL }),
         destroy(): void {
           destroyed = true;
         },
+        destroyProfileStore(): void {},
         isNativeError: (_value): _value is NativeApplianceError => false,
         importCredential: () => E290_CREDENTIAL,
         open(): NativeApplianceLike {
           return appliance;
         },
       },
-      databasePath: "/app/offline.sqlite3",
+      profileStore: PROFILE_STORE,
     };
     const client = new NativeApplianceClient(async () => runtime);
 
@@ -527,6 +543,283 @@ describe("native appliance adapter loading", () => {
     client.dispose();
     await waitFor(() => destroyed, "native BLE cleanup");
     expect(disposeCount).toBe(1);
+  });
+});
+
+describe("fileless native BLE onboarding", () => {
+  test("continues explicitly when a retained iOS bond produces no passkey callback", async () => {
+    const selectedConnections: BleConnectOptions[] = [];
+    let credentialState: NativeCredentialState = { state: "missing" };
+    let connectionCloses = 0;
+    let nativeDestroys = 0;
+    let ordinaryConnectAttempts = 0;
+    let ordinaryBleRegistrations = 0;
+    let onboardingBleRegistrations = 0;
+    let pairCalls = 0;
+    let pickerCalls = 0;
+    let securityConfirmationReads = 0;
+    let writes = 0;
+    let phase: "idle" | "link_ready" | "waiting_for_begin_presence" | "complete" = "idle";
+    let finishPair = () => {};
+    const pairBarrier = new Promise<void>((resolve) => {
+      finishPair = resolve;
+    });
+    let observer: BleConnectionObserver | null = null;
+    const connection: BleConnection = {
+      maxWriteWithResponseBytes: 20,
+      peripheralId: "board-b",
+      observe(nextObserver): () => void {
+        observer = nextObserver;
+        return () => {
+          if (observer === nextObserver) observer = null;
+        };
+      },
+      async write(): Promise<void> {
+        writes += 1;
+      },
+      async read(): Promise<Uint8Array> {
+        expect(pairCalls).toBe(0);
+        securityConfirmationReads += 1;
+        return Uint8Array.of(0x52, 0x44, 0x59, 0x31);
+      },
+      async close(): Promise<void> {
+        connectionCloses += 1;
+        if (connectionCloses === 1) throw new Error("simulated GATT close failure");
+      },
+    };
+    const ordinaryConnection: BleConnection = {
+      maxWriteWithResponseBytes: 20,
+      name: E290_CREDENTIAL.expectedBleLocalName,
+      peripheralId: "board-b",
+      observe(): () => void {
+        return () => {};
+      },
+      async write(): Promise<void> {},
+      async read(): Promise<Uint8Array> {
+        return Uint8Array.of(0x52, 0x44, 0x59, 0x31);
+      },
+      async close(): Promise<void> {},
+    };
+    const central: BleCentral = {
+      supported: true,
+      scan: emptyBleScan,
+      async connect(_profile, options): Promise<BleConnection> {
+        selectedConnections.push(options ?? {});
+        if (options?.peripheralId === "board-b") return connection;
+        ordinaryConnectAttempts += 1;
+        if (ordinaryConnectAttempts === 1) {
+          throw new Error("board has not resumed advertising yet");
+        }
+        return ordinaryConnection;
+      },
+      async dispose(): Promise<void> {},
+    };
+    const appliance: NativeApplianceLike = {
+      ...offlineBleAppliance(),
+      bleLinkConnected(): bigint {
+        ordinaryBleRegistrations += 1;
+        return 99n;
+      },
+      async bleNextPlatformCommand(_generation, asyncOptions): Promise<undefined> {
+        await new Promise<void>((_resolve, reject) => {
+          asyncOptions?.signal.addEventListener("abort", () => reject(asyncOptions.signal.reason), {
+            once: true,
+          });
+        });
+        return undefined;
+      },
+    };
+    const completedProfile: NativeProfileSummary = {
+      credential: E290_CREDENTIAL,
+      profileKey: E290_CREDENTIAL.deviceId,
+    };
+    const onboarding: NativeBleOnboardingLike = {
+      async abortCurrent(): Promise<void> {},
+      bleDisconnected(): void {},
+      bleIngestIndication(): void {},
+      bleLinkConnected(peripheralId): bigint {
+        expect(peripheralId).toBe("board-b");
+        onboardingBleRegistrations += 1;
+        phase = "link_ready";
+        return 7n;
+      },
+      async bleNextPlatformCommand(_generation, asyncOptions): Promise<undefined> {
+        await new Promise<void>((_resolve, reject) => {
+          asyncOptions?.signal.addEventListener("abort", () => reject(asyncOptions.signal.reason), {
+            once: true,
+          });
+        });
+        return undefined;
+      },
+      bleWriteFailed(): void {},
+      bleWriteSucceeded(): void {},
+      async pair(): Promise<NativeProfileSummary> {
+        pairCalls += 1;
+        phase = "waiting_for_begin_presence";
+        await pairBarrier;
+        credentialState = { state: "active", summary: E290_CREDENTIAL };
+        phase = "complete";
+        return completedProfile;
+      },
+      async resume(): Promise<NativeProfileSummary> {
+        throw new Error("resume not expected");
+      },
+      snapshot() {
+        throw new Error("test bridge owns the coarse snapshot projection");
+      },
+    };
+    const runtime: NativeApplianceRuntime = {
+      bleOnboarding: {
+        destroy(): void {
+          nativeDestroys += 1;
+        },
+        open(profileStore): NativeBleOnboardingLike {
+          expect(profileStore).toBe(PROFILE_STORE);
+          return onboarding;
+        },
+        snapshot() {
+          return {
+            completedProfile: phase === "complete" ? completedProfile : undefined,
+            phase,
+            revision: phase === "idle" ? 0n : phase === "complete" ? 3n : 2n,
+          };
+        },
+      },
+      bridge: {
+        contract: CONTRACT,
+        credentialStatus: () => credentialState,
+        destroy(): void {},
+        destroyProfileStore(): void {},
+        isNativeError: (_value): _value is NativeApplianceError => false,
+        importCredential(): NativeCredentialSummary {
+          throw new Error("file import must not run during BLE onboarding");
+        },
+        open(): NativeApplianceLike {
+          return appliance;
+        },
+      },
+      createBle: () => ({
+        central,
+        decodeCommand: () => {
+          throw new Error("no platform command expected");
+        },
+        peripheralName: "diagnostic-name-must-not-select-onboarding",
+        profile: {
+          indicateCharacteristicUuid: "generated-tx",
+          maximumWriteValueBytes: 20,
+          securityConfirmationCharacteristicUuid: "generated-security-confirmation",
+          securityConfirmationReadyValue: Uint8Array.of(0x52, 0x44, 0x59, 0x31),
+          serviceUuid: "generated-service",
+          writeCharacteristicUuid: "generated-rx",
+        },
+      }),
+      async pickCredential() {
+        pickerCalls += 1;
+        return null;
+      },
+      profileStore: PROFILE_STORE,
+    };
+    const client = new NativeApplianceClient(async () => runtime);
+    await client.bootstrapSession();
+
+    expect(await client.onboarding()).toMatchObject({
+      method: "managed_pairing",
+      snapshot: { lifecycle: { state: "needs_pairing" } },
+    });
+    await client.startOnboarding({
+      peripheralId: "board-b",
+      peripheralName: "Reticulum B",
+      rssi: -42,
+    });
+
+    expect(await client.onboarding()).toMatchObject({
+      method: "managed_pairing",
+      snapshot: {
+        lifecycle: { state: "working", stage: "waiting_for_ble_security" },
+        usb_serial: "board-b",
+      },
+    });
+    expect(await client.onboarding()).toMatchObject({
+      snapshot: { lifecycle: { state: "working", stage: "waiting_for_ble_security" } },
+    });
+    expect(selectedConnections[0]?.peripheralId).toBe("board-b");
+    expect(selectedConnections[0]?.peripheralName).toBeUndefined();
+    expect(onboardingBleRegistrations).toBe(1);
+    expect(ordinaryBleRegistrations).toBe(0);
+    expect(pairCalls).toBe(0);
+    expect(pickerCalls).toBe(0);
+    expect(writes).toBe(0);
+    expect(connectionCloses).toBe(0);
+    expect(nativeDestroys).toBe(0);
+
+    await expect(
+      client.startOnboarding({
+        peripheralId: "board-a",
+        peripheralName: "Reticulum A",
+      }),
+    ).rejects.toThrow("another BLE onboarding operation is already active");
+
+    await expect(client.cancelOnboarding()).rejects.toThrow("simulated GATT close failure");
+    expect(nativeDestroys).toBe(1);
+    expect(await client.onboarding()).toMatchObject({
+      snapshot: { lifecycle: { state: "needs_pairing" } },
+    });
+
+    await client.startOnboarding({
+      peripheralId: "board-b",
+      peripheralName: "Reticulum B",
+    });
+    (observer as BleConnectionObserver | null)?.onDisconnect({
+      peripheralId: "board-b",
+      reason: "radio link disappeared before the Bluetooth code",
+    });
+    expect(await client.onboarding()).toMatchObject({
+      snapshot: {
+        lifecycle: { state: "faulted", reason: "device_unavailable" },
+      },
+    });
+    await expect(client.continueOnboarding()).rejects.toThrow(
+      "open a selected BLE appliance before continuing secure pairing",
+    );
+    expect(pairCalls).toBe(0);
+    expect(connectionCloses).toBe(1);
+    expect(nativeDestroys).toBe(2);
+
+    await client.startOnboarding({
+      peripheralId: "board-b",
+      peripheralName: "Reticulum B",
+    });
+    // This fixture deliberately has no platform passkey or bond event. iOS can
+    // silently reuse a retained bond, so the explicit UI action is the only
+    // portable continuation signal available to the native pairing owner.
+    const pairing = client.continueOnboarding();
+    await waitFor(
+      () => phase === "waiting_for_begin_presence",
+      "native physical-presence progress",
+    );
+    await expect(client.continueOnboarding()).rejects.toThrow(
+      "retained BLE onboarding operation has already started",
+    );
+    expect(pairCalls).toBe(1);
+    expect(securityConfirmationReads).toBe(1);
+    expect(selectedConnections).toHaveLength(3);
+    expect(onboardingBleRegistrations).toBe(3);
+
+    finishPair();
+    await pairing;
+    expect(connectionCloses).toBe(2);
+    expect(nativeDestroys).toBe(3);
+    expect(await client.onboarding()).toMatchObject({
+      snapshot: { lifecycle: { state: "credential_ready" } },
+    });
+    await waitFor(() => ordinaryConnectAttempts === 1, "first post-pair ordinary BLE scan");
+    await Bun.sleep(0);
+    await expect(client.reconnect()).resolves.toBeUndefined();
+    expect(ordinaryConnectAttempts).toBe(2);
+    expect(ordinaryBleRegistrations).toBe(1);
+    expect(selectedConnections.at(-1)?.peripheralName).toBe(E290_CREDENTIAL.expectedBleLocalName);
+    expect(pairCalls).toBe(1);
+    client.dispose();
   });
 });
 
@@ -770,6 +1063,65 @@ describe("native credential import onboarding", () => {
     client.dispose();
   });
 
+  test("closes the unconfigured owner before opening the imported device profile", async () => {
+    const events: string[] = [];
+    let active = false;
+    let opened = 0;
+    const appliances = [offlineBleAppliance(), offlineBleAppliance()].map((base, index) => ({
+      ...base,
+      async close(): Promise<void> {
+        events.push(`close ${index + 1}`);
+      },
+    }));
+    const runtime: NativeApplianceRuntime = {
+      bridge: {
+        contract: CONTRACT,
+        credentialStatus: () =>
+          active ? { state: "active", summary: E290_CREDENTIAL } : { state: "missing" },
+        destroy(appliance): void {
+          events.push(`destroy ${appliance === appliances[0] ? 1 : 2}`);
+        },
+        destroyProfileStore(): void {
+          events.push("destroy profile store");
+        },
+        isNativeError: (_value): _value is NativeApplianceError => false,
+        importCredential(): NativeCredentialSummary {
+          events.push("import");
+          active = true;
+          return E290_CREDENTIAL;
+        },
+        open(profileStore): NativeApplianceLike {
+          expect(profileStore).toBe(PROFILE_STORE);
+          events.push(`open ${opened + 1}`);
+          return appliances[opened++] as NativeApplianceLike;
+        },
+      },
+      pickCredential: async () => ({
+        stagingPath: "/app/cache/profile-import.rdpkey",
+        cleanup(): void {
+          events.push("cleanup staging");
+        },
+      }),
+      profileStore: PROFILE_STORE,
+    };
+    const client = new NativeApplianceClient(async () => runtime);
+
+    await client.bootstrapSession();
+    await client.startOnboarding();
+
+    expect(events).toEqual([
+      "open 1",
+      "import",
+      "cleanup staging",
+      "close 1",
+      "destroy 1",
+      "open 2",
+    ]);
+    client.dispose();
+    await waitFor(() => events.includes("destroy profile store"), "profile store cleanup");
+    expect(events.slice(-3)).toEqual(["close 2", "destroy 2", "destroy profile store"]);
+  });
+
   test("removes staging and leaves BLE stopped when native validation rejects the import", async () => {
     let cleaned = 0;
     let connectCalls = 0;
@@ -934,13 +1286,14 @@ describe("native credential import onboarding", () => {
     client.dispose();
   });
 
-  test("accepts a generic Wi-Fi credential and reconnects its dormant native owner", async () => {
+  test("accepts a generic Wi-Fi credential and reopens its active device profile", async () => {
     const genericCredential: NativeCredentialSummary = {
       ...E290_CREDENTIAL,
       deviceId: "ab".repeat(16),
       expectedBleLocalName: undefined,
     };
     let state: NativeCredentialState = { state: "missing" };
+    let opens = 0;
     let reconnects = 0;
     let cleaned = 0;
     const appliance: NativeApplianceLike = {
@@ -954,6 +1307,7 @@ describe("native credential import onboarding", () => {
         contract: CONTRACT,
         credentialStatus: () => state,
         destroy(): void {},
+        destroyProfileStore(): void {},
         isNativeError: (_value): _value is NativeApplianceError => false,
         importCredential(_appliance, stagingPath): NativeCredentialSummary {
           expect(stagingPath).toBe("/app/cache/wifi.rdpkey");
@@ -961,16 +1315,17 @@ describe("native credential import onboarding", () => {
           return genericCredential;
         },
         open(): NativeApplianceLike {
+          opens += 1;
           return appliance;
         },
       },
-      databasePath: "/app/wifi-onboarding.sqlite3",
       pickCredential: async () => ({
         stagingPath: "/app/cache/wifi.rdpkey",
         cleanup(): void {
           cleaned += 1;
         },
       }),
+      profileStore: PROFILE_STORE,
     };
     const client = new NativeApplianceClient(async () => runtime);
 
@@ -979,7 +1334,8 @@ describe("native credential import onboarding", () => {
     expect(client.supportsBleCandidateDiscovery()).toBeFalse();
     await client.startOnboarding();
 
-    expect(reconnects).toBe(1);
+    expect(opens).toBe(2);
+    expect(reconnects).toBe(0);
     expect(cleaned).toBe(1);
     expect(await client.onboarding()).toMatchObject({
       snapshot: { lifecycle: { state: "credential_ready" } },
